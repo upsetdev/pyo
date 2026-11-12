@@ -1,0 +1,3844 @@
+{
+  "schema": 1,
+  "count": 42,
+  "templates": [
+    {
+      "schema": 1,
+      "id": "prometheus",
+      "name": "Prometheus",
+      "description": "Metrics collection and alerting with local time-series storage.",
+      "category": "monitoring",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://prometheus.io",
+      "version": "1.0.0",
+      "appVersion": "3.1.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "quay.io/prometheus/prometheus",
+        "versions": [
+          {
+            "tag": "v3.1.0",
+            "digest": "sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 1024,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 20,
+        "mountPath": "/prometheus"
+      },
+      "ports": [
+        {
+          "name": "web",
+          "port": 9090,
+          "protocol": "HTTP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/-/healthy",
+        "port": 9090,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [
+        {
+          "key": "retention",
+          "label": "Retention",
+          "type": "select",
+          "default": "15d",
+          "options": [
+            "7d",
+            "15d",
+            "30d",
+            "90d"
+          ],
+          "required": true
+        },
+        {
+          "key": "scrapeInterval",
+          "label": "Scrape interval",
+          "type": "select",
+          "default": "30s",
+          "options": [
+            "15s",
+            "30s",
+            "60s"
+          ],
+          "required": true
+        }
+      ],
+      "hints": [
+        "Size the volume for retention × ingest rate.",
+        "Has no authentication; keep it internal or put it behind an authenticating proxy."
+      ],
+      "logo": "logos/prometheus.svg",
+      "featured": true
+    },
+    {
+      "schema": 1,
+      "id": "wordpress",
+      "name": "WordPress",
+      "description": "The WordPress site builder and blog, on a MySQL database Pyo runs.",
+      "category": "web",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://wordpress.org",
+      "version": "1.0.0",
+      "appVersion": "7.1.4",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/library/wordpress",
+        "versions": [
+          {
+            "tag": "7.1.4-php8.3-apache",
+            "digest": "sha256:9001ea7dafd2bc3f05d068e6413b0edd2a116eeed4dfe9e08b6bd718dee4960a"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 256,
+        "memoryLimit": 512
+      },
+      "args": [
+        "apache2-foreground",
+        "-c",
+        "php_value upload_max_filesize 64M",
+        "-c",
+        "php_value post_max_size 64M"
+      ],
+      "storage": {
+        "required": true,
+        "sizeGi": 10,
+        "mountPath": "/var/www/html/wp-content"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 80,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "tcp",
+        "port": 80,
+        "initialDelaySeconds": 20,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "WORDPRESS_AUTH_KEY",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "WORDPRESS_SECURE_AUTH_KEY",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "WORDPRESS_LOGGED_IN_KEY",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "WORDPRESS_NONCE_KEY",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "WORDPRESS_AUTH_SALT",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "WORDPRESS_SECURE_AUTH_SALT",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "WORDPRESS_LOGGED_IN_SALT",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "WORDPRESS_NONCE_SALT",
+          "secret": true,
+          "generate": true
+        }
+      ],
+      "databases": [
+        {
+          "engine": "mysql",
+          "env": {
+            "WORDPRESS_DB_HOST": "MYSQL_HOST:MYSQL_PORT",
+            "WORDPRESS_DB_USER": "MYSQL_USER",
+            "WORDPRESS_DB_PASSWORD": "MYSQL_PASSWORD",
+            "WORDPRESS_DB_NAME": "MYSQL_DATABASE"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Add a domain, then finish the setup at its address.",
+        "Themes, plugins and uploads (up to 64 MB) stay on its volume.",
+        "Turn on the WAF in its Firewall tab to block common attacks."
+      ],
+      "logo": "logos/wordpress.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "mongodb",
+      "name": "MongoDB",
+      "description": "Document database, single replica, with authentication enabled.",
+      "category": "databases",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://www.mongodb.com",
+      "version": "1.0.0",
+      "appVersion": "8.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/library/mongo",
+        "versions": [
+          {
+            "tag": "8.0",
+            "digest": "sha256:b9924c330a8bbc5800fe9c69f04a84e221eca7b28fd049a0354147d9908fa142"
+          },
+          {
+            "tag": "7.0",
+            "digest": "sha256:8bb4442761a63a8dda452744082cdac9644b429807eb977b42324a63cef59ca4"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 512,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 10,
+        "mountPath": "/data/db"
+      },
+      "ports": [
+        {
+          "name": "mongodb",
+          "port": 27017,
+          "protocol": "TCP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "tcp",
+        "port": 27017,
+        "initialDelaySeconds": 20,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "MONGO_INITDB_ROOT_USERNAME",
+          "value": "root"
+        },
+        {
+          "key": "MONGO_INITDB_ROOT_PASSWORD",
+          "secret": true,
+          "generate": true
+        }
+      ],
+      "fields": [
+        {
+          "key": "user",
+          "label": "Root user",
+          "type": "text",
+          "default": "root",
+          "required": true,
+          "envKey": "MONGO_INITDB_ROOT_USERNAME"
+        },
+        {
+          "key": "password",
+          "label": "Root password",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "MONGO_INITDB_ROOT_PASSWORD",
+          "help": "Leave empty to generate one."
+        }
+      ],
+      "hints": [
+        "Single-server deployment; replica sets are not configured.",
+        "Back up with mongodump or volume snapshots."
+      ],
+      "logo": "logos/mongodb.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "ghost",
+      "name": "Ghost",
+      "description": "Publishing platform for blogs and newsletters, on a MySQL database Pyo runs.",
+      "category": "web",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://ghost.org",
+      "version": "1.0.0",
+      "appVersion": "5.130.6",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/library/ghost",
+        "versions": [
+          {
+            "tag": "5.130.6",
+            "digest": "sha256:3ffcb8f2f1f808806e7a0f694a2b130cd78652a26b4337b33fe7e249ce58665a"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 256,
+        "memoryLimit": 1024
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 5,
+        "mountPath": "/var/lib/ghost/content"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 2368,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "tcp",
+        "port": 2368,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "NODE_ENV",
+          "value": "production"
+        },
+        {
+          "key": "database__client",
+          "value": "mysql"
+        },
+        {
+          "key": "url",
+          "value": "${{self.PUBLIC_URL}}"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "mysql",
+          "env": {
+            "database__connection__host": "MYSQL_HOST",
+            "database__connection__port": "MYSQL_PORT",
+            "database__connection__user": "MYSQL_USER",
+            "database__connection__password": "MYSQL_PASSWORD",
+            "database__connection__database": "MYSQL_DATABASE"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Needs a domain: it's the site's address. Create the admin account at /ghost.",
+        "For newsletters and sign-ups, add mail__transport=SMTP and mail__options__* variables."
+      ],
+      "logo": "logos/ghost.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "n8n",
+      "name": "n8n",
+      "description": "Workflow automation: connect APIs and apps with a visual editor.",
+      "category": "developer-tools",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://n8n.io",
+      "version": "1.0.0",
+      "appVersion": "1.72.1",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/n8nio/n8n",
+        "versions": [
+          {
+            "tag": "1.72.1",
+            "digest": "sha256:d4821fb27106870a987145aa1914bdfc9f253251a751a29a76c0f8d5c2af6e24"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 512,
+        "memoryLimit": 1024
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 5,
+        "mountPath": "/home/node/.n8n"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 5678,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/healthz",
+        "port": 5678,
+        "initialDelaySeconds": 20,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "N8N_ENCRYPTION_KEY",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "GENERIC_TIMEZONE",
+          "value": "UTC"
+        }
+      ],
+      "fields": [
+        {
+          "key": "timezone",
+          "label": "Timezone",
+          "type": "text",
+          "default": "UTC",
+          "required": true,
+          "envKey": "GENERIC_TIMEZONE",
+          "help": "Used by schedule triggers, e.g. Europe/Berlin."
+        }
+      ],
+      "hints": [
+        "Add an HTTPS domain so webhooks and OAuth callbacks reach it.",
+        "The encryption key protects saved credentials; keep it if you redeploy."
+      ],
+      "logo": "logos/n8n.svg",
+      "featured": true
+    },
+    {
+      "schema": 1,
+      "id": "ollama",
+      "name": "Ollama",
+      "description": "Run open models like Llama, Qwen and Gemma behind a local HTTP API.",
+      "category": "ai",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://ollama.com",
+      "version": "1.0.0",
+      "appVersion": "0.40.14",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/ollama/ollama",
+        "versions": [
+          {
+            "tag": "0.40.14",
+            "digest": "sha256:ebaef4f4c5d93660e1f25f8ad085a112f51ccfb0e8458073e71793959dba91c9"
+          },
+          {
+            "tag": "0.5.4",
+            "digest": "sha256:18bfb1d605604fd53dcad20d0556df4c781e560ebebcd923454d627c994a0e37"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 1000,
+        "cpuLimit": 4000,
+        "memoryRequest": 2048,
+        "memoryLimit": 8192
+      },
+      "gpu": {
+        "use": "optional",
+        "count": 1
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 30,
+        "mountPath": "/root/.ollama"
+      },
+      "ports": [
+        {
+          "name": "api",
+          "port": 11434,
+          "protocol": "HTTP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/",
+        "port": 11434,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [],
+      "hints": [
+        "Uses an NVIDIA GPU when its cluster has one, and runs on CPU otherwise.",
+        "Pull a model with POST /api/pull before the first request. Models are kept on the volume.",
+        "Models are large: size the volume, memory and GPU memory for the ones you use."
+      ],
+      "logo": "logos/ollama.svg",
+      "featured": true
+    },
+    {
+      "schema": 1,
+      "id": "open-webui",
+      "name": "Open WebUI",
+      "description": "A chat interface for your own models, served by Ollama or any OpenAI-compatible API such as vLLM.",
+      "category": "ai",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://openwebui.com",
+      "version": "1.0.0",
+      "appVersion": "0.13.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "ghcr.io/open-webui/open-webui",
+        "versions": [
+          {
+            "tag": "v0.13.0",
+            "digest": "sha256:2272b0fb7c8783a016bcc179abb467cfa34590c99c5e6560fe0e9155b4820a09"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 2000,
+        "memoryRequest": 512,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 5,
+        "mountPath": "/app/backend/data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8080,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/health",
+        "port": 8080,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 15
+      },
+      "env": [
+        {
+          "key": "OLLAMA_BASE_URL",
+          "value": "http://ollama:11434"
+        },
+        {
+          "key": "OPENAI_API_BASE_URL",
+          "value": ""
+        },
+        {
+          "key": "WEBUI_SECRET_KEY",
+          "secret": true,
+          "generate": true
+        }
+      ],
+      "fields": [
+        {
+          "key": "ollama-url",
+          "label": "Ollama address",
+          "type": "text",
+          "default": "http://ollama:11434",
+          "required": false,
+          "envKey": "OLLAMA_BASE_URL",
+          "help": "Your Ollama service, by its name in this project."
+        },
+        {
+          "key": "openai-url",
+          "label": "OpenAI-compatible API",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "envKey": "OPENAI_API_BASE_URL",
+          "help": "e.g. http://vllm:8000/v1 for a vLLM service."
+        }
+      ],
+      "hints": [
+        "The first account to sign up becomes its admin: sign up right after deploying.",
+        "It runs on CPU; the models it talks to can use GPUs."
+      ],
+      "logo": null,
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "vllm",
+      "name": "vLLM",
+      "description": "Serve an open model from Hugging Face with an OpenAI-compatible API, on NVIDIA GPUs.",
+      "category": "ai",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://docs.vllm.ai",
+      "version": "1.0.0",
+      "appVersion": "0.33.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/vllm/vllm-openai",
+        "versions": [
+          {
+            "tag": "v0.33.0",
+            "digest": "sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 2000,
+        "cpuLimit": 8000,
+        "memoryRequest": 8192,
+        "memoryLimit": 32768
+      },
+      "gpu": {
+        "use": "required",
+        "count": 1
+      },
+      "args": [
+        "{{model}}",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--download-dir",
+        "/models"
+      ],
+      "storage": {
+        "required": true,
+        "sizeGi": 100,
+        "mountPath": "/models"
+      },
+      "ports": [
+        {
+          "name": "api",
+          "port": 8000,
+          "protocol": "HTTP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/health",
+        "port": 8000,
+        "initialDelaySeconds": 600,
+        "periodSeconds": 15
+      },
+      "env": [
+        {
+          "key": "HF_HOME",
+          "value": "/models/huggingface"
+        },
+        {
+          "key": "HF_TOKEN",
+          "secret": true
+        }
+      ],
+      "fields": [
+        {
+          "key": "model",
+          "label": "Model",
+          "type": "text",
+          "default": "Qwen/Qwen3-0.6B",
+          "required": true,
+          "help": "A Hugging Face model id. It has to fit in the GPU's memory."
+        },
+        {
+          "key": "hf-token",
+          "label": "Hugging Face token",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "HF_TOKEN",
+          "help": "Only for gated models (e.g. Llama)."
+        }
+      ],
+      "hints": [
+        "Needs an NVIDIA GPU server in the cluster.",
+        "The first start downloads the model to the volume: it can take many minutes.",
+        "Talk to it at http://<service>:8000/v1, like the OpenAI API."
+      ],
+      "logo": null,
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "adguard-home",
+      "name": "AdGuard Home",
+      "description": "Network-wide DNS filtering with a web admin interface.",
+      "category": "networking",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://adguard.com/adguard-home/overview.html",
+      "version": "1.0.0",
+      "appVersion": "0.107.55",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/adguard/adguardhome",
+        "versions": [
+          {
+            "tag": "v0.107.55",
+            "digest": "sha256:2979cc78a28aceb77f90980a5440578dbb7bc406dffe261e9ae402750193bde0"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "Deployment",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 100,
+        "cpuLimit": 500,
+        "memoryRequest": 128,
+        "memoryLimit": 256
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 1,
+        "mountPath": "/opt/adguardhome/work"
+      },
+      "ports": [
+        {
+          "name": "dns-udp",
+          "port": 53,
+          "protocol": "UDP",
+          "exposure": "internal"
+        },
+        {
+          "name": "dns-tcp",
+          "port": 53,
+          "protocol": "TCP",
+          "exposure": "internal"
+        },
+        {
+          "name": "admin",
+          "port": 3000,
+          "protocol": "HTTP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/",
+        "port": 3000,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [
+        {
+          "key": "upstream",
+          "label": "Upstream DNS",
+          "type": "select",
+          "default": "https://dns.quad9.net/dns-query",
+          "options": [
+            "https://dns.quad9.net/dns-query",
+            "https://cloudflare-dns.com/dns-query",
+            "tls://dns.google"
+          ],
+          "required": true
+        }
+      ],
+      "hints": [
+        "DNS answers inside the cluster. Port 53 can't be a public port: the servers use it for their own lookups.",
+        "An HTTP domain can't carry DNS traffic; use the admin page's DNS-over-HTTPS address through a domain instead."
+      ],
+      "logo": "logos/adguard-home.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "uptime-kuma",
+      "name": "Uptime Kuma",
+      "description": "Self-hosted uptime monitoring with status pages and notifications.",
+      "category": "monitoring",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://uptime.kuma.pet",
+      "version": "1.0.0",
+      "appVersion": "1.23.16",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/louislam/uptime-kuma",
+        "versions": [
+          {
+            "tag": "1.23.16",
+            "digest": "sha256:431fee3be822b04861cf0e35daf4beef6b7cb37391c5f26c3ad6e12ce280fe18"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 100,
+        "cpuLimit": 500,
+        "memoryRequest": 128,
+        "memoryLimit": 512
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 2,
+        "mountPath": "/app/data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 3001,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/",
+        "port": 3001,
+        "initialDelaySeconds": 20,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [],
+      "hints": [
+        "Create the admin account on first visit; add a domain before you open it.",
+        "Uses SQLite, so keep it at one replica."
+      ],
+      "logo": "logos/uptime-kuma.svg",
+      "featured": true
+    },
+    {
+      "schema": 1,
+      "id": "mosquitto",
+      "name": "Mosquitto",
+      "description": "Lightweight MQTT broker for IoT and event messaging.",
+      "category": "messaging",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://mosquitto.org",
+      "version": "1.0.0",
+      "appVersion": "2.0.20",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/library/eclipse-mosquitto",
+        "versions": [
+          {
+            "tag": "2.0.20",
+            "digest": "sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 50,
+        "cpuLimit": 250,
+        "memoryRequest": 64,
+        "memoryLimit": 128
+      },
+      "storage": {
+        "required": false,
+        "sizeGi": 1,
+        "mountPath": "/mosquitto/data"
+      },
+      "ports": [
+        {
+          "name": "mqtt",
+          "port": 1883,
+          "protocol": "TCP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "tcp",
+        "port": 1883,
+        "initialDelaySeconds": 5,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [
+        {
+          "key": "anonymous",
+          "label": "Allow anonymous clients",
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        {
+          "key": "persistence",
+          "label": "Persist retained messages",
+          "type": "boolean",
+          "default": true,
+          "required": false
+        }
+      ],
+      "hints": [
+        "MQTT is plain TCP. Expose it through a NodePort or LoadBalancer, not an HTTP domain."
+      ],
+      "logo": "logos/mosquitto.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "mariadb",
+      "name": "MariaDB",
+      "description": "MySQL-compatible relational database with a persistent data volume.",
+      "category": "databases",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://mariadb.org",
+      "version": "1.0.0",
+      "appVersion": "11.4",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/library/mariadb",
+        "versions": [
+          {
+            "tag": "11.4",
+            "digest": "sha256:d1891ede5a559f1086f55053bb8cc1569b0298338c4d72d71725a7f74f6ba620"
+          },
+          {
+            "tag": "10.11",
+            "digest": "sha256:d769e37960821dfdcf096954f6e7ac89f747e116c1bba98e48edd265dfc7deae"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 512,
+        "memoryLimit": 1024
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 10,
+        "mountPath": "/var/lib/mysql"
+      },
+      "ports": [
+        {
+          "name": "mariadb",
+          "port": 3306,
+          "protocol": "TCP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "tcp",
+        "port": 3306,
+        "initialDelaySeconds": 20,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "MARIADB_ROOT_PASSWORD",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "MARIADB_DATABASE",
+          "value": "app"
+        },
+        {
+          "key": "MARIADB_USER",
+          "value": "app"
+        },
+        {
+          "key": "MARIADB_PASSWORD",
+          "secret": true,
+          "generate": true
+        }
+      ],
+      "fields": [
+        {
+          "key": "database",
+          "label": "Initial database",
+          "type": "text",
+          "default": "app",
+          "required": true,
+          "envKey": "MARIADB_DATABASE"
+        },
+        {
+          "key": "user",
+          "label": "User",
+          "type": "text",
+          "default": "app",
+          "required": true,
+          "envKey": "MARIADB_USER"
+        },
+        {
+          "key": "password",
+          "label": "User password",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "MARIADB_PASSWORD",
+          "help": "Leave empty to generate one. The root password is always generated."
+        }
+      ],
+      "hints": [
+        "Runs as a single replica; replication isn't set up.",
+        "Services in the same cluster reach it via its internal hostname."
+      ],
+      "logo": "logos/mariadb.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "grafana",
+      "name": "Grafana",
+      "description": "Dashboards for Prometheus and other data sources.",
+      "category": "monitoring",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://grafana.com/oss/grafana/",
+      "version": "1.0.0",
+      "appVersion": "11.4.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/grafana/grafana",
+        "versions": [
+          {
+            "tag": "11.4.0",
+            "digest": "sha256:d8ea37798ccc41061a62ab080f2676dda6bf7815558499f901bdb0f533a456fb"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "Deployment",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 100,
+        "cpuLimit": 500,
+        "memoryRequest": 256,
+        "memoryLimit": 512
+      },
+      "storage": {
+        "required": false,
+        "sizeGi": 2,
+        "mountPath": "/var/lib/grafana"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 3000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/api/health",
+        "port": 3000,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "GF_SECURITY_ADMIN_USER",
+          "value": "admin"
+        },
+        {
+          "key": "GF_SECURITY_ADMIN_PASSWORD",
+          "secret": true,
+          "generate": true
+        }
+      ],
+      "fields": [
+        {
+          "key": "adminUser",
+          "label": "Admin user",
+          "type": "text",
+          "default": "admin",
+          "required": true,
+          "envKey": "GF_SECURITY_ADMIN_USER"
+        },
+        {
+          "key": "password",
+          "label": "Admin password",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "GF_SECURITY_ADMIN_PASSWORD",
+          "help": "Leave empty to generate one."
+        }
+      ],
+      "hints": [
+        "Add Prometheus as a data source using its internal hostname."
+      ],
+      "logo": "logos/grafana.svg",
+      "featured": true
+    },
+    {
+      "schema": 1,
+      "id": "rabbitmq",
+      "name": "RabbitMQ",
+      "description": "Message broker for queues and pub/sub, with the management web UI.",
+      "category": "messaging",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://www.rabbitmq.com",
+      "version": "1.0.0",
+      "appVersion": "4.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/library/rabbitmq",
+        "versions": [
+          {
+            "tag": "4.0-management",
+            "digest": "sha256:f8196862986b771ddf0369c45b0801ee0c0ff09150891dc72826b8b4375fdd8b"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 512,
+        "memoryLimit": 1024
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 5,
+        "mountPath": "/var/lib/rabbitmq"
+      },
+      "ports": [
+        {
+          "name": "amqp",
+          "port": 5672,
+          "protocol": "TCP",
+          "exposure": "internal"
+        },
+        {
+          "name": "management",
+          "port": 15672,
+          "protocol": "HTTP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "tcp",
+        "port": 5672,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "RABBITMQ_DEFAULT_USER",
+          "value": "app"
+        },
+        {
+          "key": "RABBITMQ_DEFAULT_PASS",
+          "secret": true,
+          "generate": true
+        }
+      ],
+      "fields": [
+        {
+          "key": "user",
+          "label": "User",
+          "type": "text",
+          "default": "app",
+          "required": true,
+          "envKey": "RABBITMQ_DEFAULT_USER"
+        },
+        {
+          "key": "password",
+          "label": "Password",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "RABBITMQ_DEFAULT_PASS",
+          "help": "Leave empty to generate one."
+        }
+      ],
+      "hints": [
+        "AMQP clients connect on 5672; the management UI is on 15672."
+      ],
+      "logo": "logos/rabbitmq.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "coredns",
+      "name": "CoreDNS",
+      "description": "Authoritative or forwarding DNS server configured with a Corefile.",
+      "category": "networking",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://coredns.io",
+      "version": "1.0.0",
+      "appVersion": "1.12.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/coredns/coredns",
+        "versions": [
+          {
+            "tag": "1.12.0",
+            "digest": "sha256:40384aa1f5ea6bfdc77997d243aec73da05f27aed0c5e9d65bfa98933c519d97"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 2,
+      "resources": {
+        "cpuRequest": 50,
+        "cpuLimit": 200,
+        "memoryRequest": 64,
+        "memoryLimit": 128
+      },
+      "ports": [
+        {
+          "name": "dns-udp",
+          "port": 53,
+          "protocol": "UDP",
+          "exposure": "internal"
+        },
+        {
+          "name": "dns-tcp",
+          "port": 53,
+          "protocol": "TCP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/health",
+        "port": 8080,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [
+        {
+          "key": "zone",
+          "label": "Zone",
+          "type": "text",
+          "default": "home.arpa",
+          "required": true,
+          "help": "Zone served from the Corefile."
+        },
+        {
+          "key": "forward",
+          "label": "Forward to",
+          "type": "text",
+          "default": "1.1.1.1 9.9.9.9",
+          "required": true
+        }
+      ],
+      "hints": [
+        "This is separate from the cluster's own CoreDNS in kube-system."
+      ],
+      "logo": null,
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "meilisearch",
+      "name": "Meilisearch",
+      "description": "Typo-tolerant search engine with a simple REST API, protected by a master key.",
+      "category": "databases",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://www.meilisearch.com",
+      "version": "1.0.0",
+      "appVersion": "1.12",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/getmeili/meilisearch",
+        "versions": [
+          {
+            "tag": "v1.12",
+            "digest": "sha256:c9fac23131cca4db95173d41cc50fd5639121ee381795528fdd7522d7978a7b8"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 512,
+        "memoryLimit": 1024
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 10,
+        "mountPath": "/meili_data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 7700,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/health",
+        "port": 7700,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "MEILI_MASTER_KEY",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "MEILI_ENV",
+          "value": "production"
+        },
+        {
+          "key": "MEILI_NO_ANALYTICS",
+          "value": "true"
+        }
+      ],
+      "fields": [
+        {
+          "key": "masterKey",
+          "label": "Master key",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "MEILI_MASTER_KEY",
+          "help": "At least 16 characters. Leave empty to generate one."
+        }
+      ],
+      "hints": [
+        "Create search and admin API keys with the master key; don't ship the master key to browsers."
+      ],
+      "logo": "logos/meilisearch.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "gitea",
+      "name": "Gitea",
+      "description": "Lightweight Git hosting with pull requests, issues and a package registry.",
+      "category": "developer-tools",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://about.gitea.com",
+      "version": "1.0.0",
+      "appVersion": "1.22.6",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/gitea/gitea",
+        "versions": [
+          {
+            "tag": "1.22.6",
+            "digest": "sha256:538658de667c5d098a274f2f63aa6ec891d88f670cdd5282cf27221ba747dda4"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 100,
+        "cpuLimit": 1000,
+        "memoryRequest": 256,
+        "memoryLimit": 512
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 10,
+        "mountPath": "/data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 3000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        },
+        {
+          "name": "ssh",
+          "port": 22,
+          "protocol": "TCP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/api/healthz",
+        "port": 3000,
+        "initialDelaySeconds": 20,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "USER_UID",
+          "value": "1000"
+        },
+        {
+          "key": "USER_GID",
+          "value": "1000"
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Finish setup in the web installer on first visit; SQLite works out of the box.",
+        "Git over SSH needs a NodePort or LoadBalancer on the ssh port."
+      ],
+      "logo": "logos/gitea.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "vaultwarden",
+      "name": "Vaultwarden",
+      "description": "Bitwarden-compatible password manager server, light enough for any server.",
+      "category": "other",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://github.com/dani-garcia/vaultwarden",
+      "version": "1.0.0",
+      "appVersion": "1.32.7",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/vaultwarden/server",
+        "versions": [
+          {
+            "tag": "1.32.7",
+            "digest": "sha256:7a0aa23c0947be3582898deb5170ea4359493ed9a76af2badf60a7eb45ac36af"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 50,
+        "cpuLimit": 500,
+        "memoryRequest": 64,
+        "memoryLimit": 256
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 1,
+        "mountPath": "/data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 80,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/alive",
+        "port": 80,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "SIGNUPS_ALLOWED",
+          "value": "true"
+        }
+      ],
+      "fields": [
+        {
+          "key": "signups",
+          "label": "Allow new sign-ups",
+          "type": "boolean",
+          "default": true,
+          "required": false,
+          "envKey": "SIGNUPS_ALLOWED",
+          "help": "Turn off once your accounts exist."
+        }
+      ],
+      "hints": [
+        "Bitwarden clients need HTTPS: add a domain before you sign up."
+      ],
+      "logo": "logos/vaultwarden.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "clickhouse",
+      "name": "ClickHouse",
+      "description": "Column-oriented database for fast analytics over large event tables.",
+      "category": "databases",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://clickhouse.com",
+      "version": "1.0.0",
+      "appVersion": "24.8",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/clickhouse/clickhouse-server",
+        "versions": [
+          {
+            "tag": "24.8",
+            "digest": "sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 500,
+        "cpuLimit": 2000,
+        "memoryRequest": 1024,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 20,
+        "mountPath": "/var/lib/clickhouse"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8123,
+          "protocol": "HTTP",
+          "exposure": "internal"
+        },
+        {
+          "name": "native",
+          "port": 9000,
+          "protocol": "TCP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/ping",
+        "port": 8123,
+        "initialDelaySeconds": 15,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "CLICKHOUSE_USER",
+          "value": "app"
+        },
+        {
+          "key": "CLICKHOUSE_PASSWORD",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "CLICKHOUSE_DB",
+          "value": "app"
+        },
+        {
+          "key": "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT",
+          "value": "1"
+        }
+      ],
+      "fields": [
+        {
+          "key": "user",
+          "label": "User",
+          "type": "text",
+          "default": "app",
+          "required": true,
+          "envKey": "CLICKHOUSE_USER"
+        },
+        {
+          "key": "database",
+          "label": "Initial database",
+          "type": "text",
+          "default": "app",
+          "required": true,
+          "envKey": "CLICKHOUSE_DB"
+        },
+        {
+          "key": "password",
+          "label": "Password",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "CLICKHOUSE_PASSWORD",
+          "help": "Leave empty to generate one."
+        }
+      ],
+      "hints": [
+        "Query over HTTP on 8123, or with clickhouse-client on 9000.",
+        "Give it memory: large queries fail when they hit the limit."
+      ],
+      "logo": "logos/clickhouse.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "nats",
+      "name": "NATS",
+      "description": "Lightweight, high-throughput messaging for services and edge devices.",
+      "category": "messaging",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://nats.io",
+      "version": "1.0.0",
+      "appVersion": "2.10",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/library/nats",
+        "versions": [
+          {
+            "tag": "2.10",
+            "digest": "sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 50,
+        "cpuLimit": 500,
+        "memoryRequest": 64,
+        "memoryLimit": 256
+      },
+      "ports": [
+        {
+          "name": "client",
+          "port": 4222,
+          "protocol": "TCP",
+          "exposure": "internal"
+        },
+        {
+          "name": "monitor",
+          "port": 8222,
+          "protocol": "HTTP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/healthz",
+        "port": 8222,
+        "initialDelaySeconds": 5,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [],
+      "hints": [
+        "Core NATS keeps messages in memory; JetStream persistence isn't enabled."
+      ],
+      "logo": "logos/nats.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "metabase",
+      "name": "Metabase",
+      "description": "Ask questions of your databases and share dashboards, no SQL required.",
+      "category": "monitoring",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://www.metabase.com",
+      "version": "1.0.0",
+      "appVersion": "0.52.4",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/metabase/metabase",
+        "versions": [
+          {
+            "tag": "v0.52.4",
+            "digest": "sha256:ea0229a63116ea625ef09085a84ee0d2618311fd34a6e72cc527ae2eb003a5f9"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 500,
+        "cpuLimit": 2000,
+        "memoryRequest": 1024,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 2,
+        "mountPath": "/metabase-data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 3000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/api/health",
+        "port": 3000,
+        "initialDelaySeconds": 60,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "MB_DB_FILE",
+          "value": "/metabase-data/metabase.db"
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Its own settings live in an embedded H2 file on the volume.",
+        "Takes a minute or two to start the first time."
+      ],
+      "logo": "logos/metabase.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "nginx",
+      "name": "Nginx",
+      "description": "Fast web server for static files, a starting point for your own image.",
+      "category": "web",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://nginx.org",
+      "version": "1.0.0",
+      "appVersion": "1.27",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/library/nginx",
+        "versions": [
+          {
+            "tag": "1.27",
+            "digest": "sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 2,
+      "resources": {
+        "cpuRequest": 50,
+        "cpuLimit": 250,
+        "memoryRequest": 32,
+        "memoryLimit": 128
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 80,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/",
+        "port": 80,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [],
+      "hints": [
+        "Serves the default welcome page. Build an image FROM nginx with your files to serve your site."
+      ],
+      "logo": "logos/nginx.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "nextcloud",
+      "name": "Nextcloud",
+      "description": "Files, calendars, contacts and office documents in your own cloud, on Postgres with KV caching.",
+      "category": "storage",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://nextcloud.com",
+      "version": "1.0.0",
+      "appVersion": "35.0.2",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/library/nextcloud",
+        "versions": [
+          {
+            "tag": "35.0.2-apache",
+            "digest": "sha256:786c102155d2717ba0f53a62b3fdd7a1354edc48e800b94dbe32294d9a5752a2"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 2000,
+        "memoryRequest": 512,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 20,
+        "mountPath": "/var/www/html"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 80,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "tcp",
+        "port": 80,
+        "initialDelaySeconds": 180,
+        "periodSeconds": 15
+      },
+      "env": [
+        {
+          "key": "NEXTCLOUD_ADMIN_USER",
+          "value": "admin"
+        },
+        {
+          "key": "NEXTCLOUD_ADMIN_PASSWORD",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "NEXTCLOUD_TRUSTED_DOMAINS",
+          "value": "${{self.PUBLIC_DOMAIN}}"
+        },
+        {
+          "key": "OVERWRITEPROTOCOL",
+          "value": "https"
+        },
+        {
+          "key": "OVERWRITECLIURL",
+          "value": "${{self.PUBLIC_URL}}"
+        },
+        {
+          "key": "TRUSTED_PROXIES",
+          "value": "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+        },
+        {
+          "key": "PHP_MEMORY_LIMIT",
+          "value": "512M"
+        },
+        {
+          "key": "PHP_UPLOAD_LIMIT",
+          "value": "1G"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "env": {
+            "POSTGRES_HOST": "POSTGRES_HOST:POSTGRES_PORT",
+            "POSTGRES_DB": "POSTGRES_DATABASE",
+            "POSTGRES_USER": "POSTGRES_USER",
+            "POSTGRES_PASSWORD": "POSTGRES_PASSWORD"
+          }
+        },
+        {
+          "engine": "kv",
+          "env": {
+            "REDIS_HOST": "REDIS_HOST",
+            "REDIS_HOST_PORT": "REDIS_PORT",
+            "REDIS_HOST_PASSWORD": "REDIS_PASSWORD"
+          }
+        }
+      ],
+      "fields": [
+        {
+          "key": "admin",
+          "label": "Admin user",
+          "type": "text",
+          "default": "admin",
+          "required": true,
+          "envKey": "NEXTCLOUD_ADMIN_USER"
+        },
+        {
+          "key": "password",
+          "label": "Admin password",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "NEXTCLOUD_ADMIN_PASSWORD",
+          "help": "Leave empty to generate one."
+        }
+      ],
+      "hints": [
+        "Needs a domain: add it before the first start, then sign in as the admin user with NEXTCLOUD_ADMIN_PASSWORD.",
+        "The first start installs Nextcloud and takes a few minutes.",
+        "Files are kept on its volume; size it for what you'll store."
+      ],
+      "logo": "logos/nextcloud.svg",
+      "featured": true
+    },
+    {
+      "schema": 1,
+      "id": "plausible",
+      "name": "Plausible",
+      "description": "Lightweight, cookie-free website analytics (Community Edition), on Postgres with ClickHouse for events.",
+      "category": "monitoring",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://plausible.io/self-hosted-web-analytics",
+      "version": "1.0.0",
+      "appVersion": "3.2.1",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "ghcr.io/plausible/community-edition",
+        "versions": [
+          {
+            "tag": "v3.2.1",
+            "digest": "sha256:33e60bfb40f2df5da00f8753b76fad04f67dba3abe6d73eb516e440e3fb62985"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 512,
+        "memoryLimit": 1024
+      },
+      "args": [
+        "sh",
+        "-c",
+        "/entrypoint.sh db migrate && /entrypoint.sh run"
+      ],
+      "storage": {
+        "required": true,
+        "sizeGi": 1,
+        "mountPath": "/var/lib/plausible"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/api/system/health/live",
+        "port": 8000,
+        "initialDelaySeconds": 60,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "BASE_URL",
+          "value": "${{self.PUBLIC_URL}}"
+        },
+        {
+          "key": "SECRET_KEY_BASE",
+          "secret": true,
+          "generate": true,
+          "format": "long"
+        },
+        {
+          "key": "TOTP_VAULT_KEY",
+          "secret": true,
+          "generate": true,
+          "format": "base64-32"
+        },
+        {
+          "key": "TMPDIR",
+          "value": "/var/lib/plausible/tmp"
+        },
+        {
+          "key": "HTTP_PORT",
+          "value": "8000"
+        },
+        {
+          "key": "CLICKHOUSE_DATABASE_URL",
+          "value": "http://${{plausible-events.HOST}}:8123/plausible_events_db"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "extensions": [
+            "citext"
+          ],
+          "env": {
+            "DATABASE_URL": "DATABASE_URL_DIRECT"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Needs a domain: it's BASE_URL. Register the first account there; it becomes the owner.",
+        "For password resets and reports, set MAILER_EMAIL and SMTP_HOST_ADDR, SMTP_HOST_PORT, SMTP_USER_NAME and SMTP_USER_PWD.",
+        "Events are kept by its own ClickHouse service, deployed with it."
+      ],
+      "companions": [
+        {
+          "name": "plausible-events",
+          "image": "docker.io/clickhouse/clickhouse-server",
+          "version": {
+            "tag": "24.12-alpine",
+            "digest": "sha256:cd450891db46cc6ffe313ca2b0fb7dbfb897a6873ca74a724cbe050a2cf62621"
+          },
+          "workload": "StatefulSet",
+          "stateful": true,
+          "replicas": 1,
+          "resources": {
+            "cpuRequest": 250,
+            "cpuLimit": 1000,
+            "memoryRequest": 512,
+            "memoryLimit": 2048
+          },
+          "entrypoint": [
+            "sh",
+            "-c",
+            "cat > /etc/clickhouse-server/config.d/plausible.xml <<'XML'\n<clickhouse>\n  <listen_host>0.0.0.0</listen_host>\n  <mark_cache_size>524288000</mark_cache_size>\n  <logger><level>warning</level><console>true</console></logger>\n  <query_log replace=\"1\">\n    <database>system</database>\n    <table>query_log</table>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n    <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_time) TTL event_date + interval 30 day SETTINGS ttl_only_drop_parts=1</engine>\n  </query_log>\n  <metric_log remove=\"remove\" />\n  <asynchronous_metric_log remove=\"remove\" />\n  <query_thread_log remove=\"remove\" />\n  <text_log remove=\"remove\" />\n  <trace_log remove=\"remove\" />\n  <session_log remove=\"remove\" />\n  <part_log remove=\"remove\" />\n</clickhouse>\nXML\ncat > /etc/clickhouse-server/users.d/plausible.xml <<'XML'\n<clickhouse>\n  <profiles>\n    <default>\n      <max_threads>1</max_threads>\n      <max_block_size>8192</max_block_size>\n      <max_download_threads>1</max_download_threads>\n      <input_format_parallel_parsing>0</input_format_parallel_parsing>\n      <output_format_parallel_formatting>0</output_format_parallel_formatting>\n    </default>\n  </profiles>\n</clickhouse>\nXML\nexec /entrypoint.sh\n"
+          ],
+          "storage": {
+            "required": true,
+            "sizeGi": 10,
+            "mountPath": "/var/lib/clickhouse"
+          },
+          "ports": [
+            {
+              "name": "http",
+              "port": 8123,
+              "protocol": "HTTP",
+              "exposure": "internal"
+            }
+          ],
+          "healthCheck": {
+            "type": "http",
+            "path": "/ping",
+            "port": 8123,
+            "initialDelaySeconds": 30,
+            "periodSeconds": 10
+          },
+          "env": [
+            {
+              "key": "CLICKHOUSE_SKIP_USER_SETUP",
+              "value": "1"
+            },
+            {
+              "key": "CLICKHOUSE_DB",
+              "value": "plausible_events_db"
+            }
+          ]
+        }
+      ],
+      "logo": "logos/plausible.svg",
+      "featured": true
+    },
+    {
+      "schema": 1,
+      "id": "umami",
+      "name": "Umami",
+      "description": "Simple, privacy-focused website analytics without cookies, on a Postgres database Pyo runs.",
+      "category": "monitoring",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://umami.is",
+      "version": "1.0.0",
+      "appVersion": "3.4.1",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "ghcr.io/umami-software/umami",
+        "versions": [
+          {
+            "tag": "3.4.1",
+            "digest": "sha256:e69d1a7932e9dab0fc523edc7be1f3a53f3c261f57856fc2167ae74a8fc022e8"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 256,
+        "memoryLimit": 1024
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 3000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/api/heartbeat",
+        "port": 3000,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "APP_SECRET",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "TWO_FACTOR_ENCRYPTION_KEY",
+          "secret": true,
+          "generate": true,
+          "format": "hex-32"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "extensions": [
+            "pgcrypto"
+          ],
+          "env": {
+            "DATABASE_URL": "DATABASE_URL_DIRECT"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Sign in as admin with the password umami, then change it right away under Settings › Profile.",
+        "Add a domain, then add your sites and their tracking script."
+      ],
+      "logo": "logos/umami.svg",
+      "featured": true
+    },
+    {
+      "schema": 1,
+      "id": "directus",
+      "name": "Directus",
+      "description": "Instant REST and GraphQL APIs and a no-code admin app for a Postgres database.",
+      "category": "developer-tools",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://directus.io",
+      "version": "1.0.0",
+      "appVersion": "12.6.1",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/directus/directus",
+        "versions": [
+          {
+            "tag": "12.6.1",
+            "digest": "sha256:e1561b5e526e8e7a2ac19b7bb6eab63611dd84a862a8c45b864118768a2baff4"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 256,
+        "memoryLimit": 1024
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 5,
+        "mountPath": "/directus/uploads"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8055,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "tcp",
+        "port": 8055,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "SECRET",
+          "secret": true,
+          "generate": true,
+          "format": "long"
+        },
+        {
+          "key": "ADMIN_EMAIL",
+          "value": "admin@example.com"
+        },
+        {
+          "key": "ADMIN_PASSWORD",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "PUBLIC_URL",
+          "value": "${{self.PUBLIC_URL}}"
+        },
+        {
+          "key": "DB_CLIENT",
+          "value": "pg"
+        },
+        {
+          "key": "CACHE_ENABLED",
+          "value": "true"
+        },
+        {
+          "key": "CACHE_STORE",
+          "value": "redis"
+        },
+        {
+          "key": "CACHE_AUTO_PURGE",
+          "value": "true"
+        },
+        {
+          "key": "TELEMETRY",
+          "value": "false"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "env": {
+            "DB_CONNECTION_STRING": "DATABASE_URL_DIRECT"
+          }
+        },
+        {
+          "engine": "kv",
+          "env": {
+            "REDIS": "REDIS_URL"
+          }
+        }
+      ],
+      "fields": [
+        {
+          "key": "email",
+          "label": "Admin email",
+          "type": "text",
+          "default": "admin@example.com",
+          "required": true,
+          "envKey": "ADMIN_EMAIL"
+        },
+        {
+          "key": "password",
+          "label": "Admin password",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "ADMIN_PASSWORD",
+          "help": "Leave empty to generate one."
+        }
+      ],
+      "hints": [
+        "Add a domain, then sign in with the admin email and ADMIN_PASSWORD from its variables.",
+        "Uploads are kept on its volume."
+      ],
+      "logo": "logos/directus.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "keycloak",
+      "name": "Keycloak",
+      "description": "Identity and access management with single sign-on, OpenID Connect and SAML.",
+      "category": "other",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://www.keycloak.org",
+      "version": "1.0.0",
+      "appVersion": "26.8.2",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "quay.io/keycloak/keycloak",
+        "versions": [
+          {
+            "tag": "26.8.2",
+            "digest": "sha256:723b1d6e254c0fc96d5cffec860c7e0744d6a3277822b865bb538cf891575e41"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 500,
+        "cpuLimit": 2000,
+        "memoryRequest": 768,
+        "memoryLimit": 2048
+      },
+      "args": [
+        "start"
+      ],
+      "ports": [
+        {
+          "name": "http",
+          "port": 8080,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/health/ready",
+        "port": 9000,
+        "initialDelaySeconds": 90,
+        "periodSeconds": 15
+      },
+      "env": [
+        {
+          "key": "KC_DB",
+          "value": "postgres"
+        },
+        {
+          "key": "KC_HOSTNAME",
+          "value": "${{self.PUBLIC_URL}}"
+        },
+        {
+          "key": "KC_HTTP_ENABLED",
+          "value": "true"
+        },
+        {
+          "key": "KC_PROXY_HEADERS",
+          "value": "xforwarded"
+        },
+        {
+          "key": "KC_HEALTH_ENABLED",
+          "value": "true"
+        },
+        {
+          "key": "KC_BOOTSTRAP_ADMIN_USERNAME",
+          "value": "admin"
+        },
+        {
+          "key": "KC_BOOTSTRAP_ADMIN_PASSWORD",
+          "secret": true,
+          "generate": true
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "env": {
+            "KC_DB_URL_HOST": "POSTGRES_HOST",
+            "KC_DB_URL_PORT": "POSTGRES_PORT",
+            "KC_DB_URL_DATABASE": "POSTGRES_DATABASE",
+            "KC_DB_USERNAME": "POSTGRES_USER",
+            "KC_DB_PASSWORD": "POSTGRES_PASSWORD"
+          }
+        }
+      ],
+      "fields": [
+        {
+          "key": "admin",
+          "label": "Admin user",
+          "type": "text",
+          "default": "admin",
+          "required": true,
+          "envKey": "KC_BOOTSTRAP_ADMIN_USERNAME"
+        }
+      ],
+      "hints": [
+        "Needs a domain: it's the hostname Keycloak issues tokens for.",
+        "Sign in to the admin console with the admin user and KC_BOOTSTRAP_ADMIN_PASSWORD, then create a permanent admin; the bootstrap one is temporary."
+      ],
+      "logo": "logos/keycloak.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "mattermost",
+      "name": "Mattermost",
+      "description": "Team chat with channels, threads, calls and integrations (Team Edition), on Postgres.",
+      "category": "messaging",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://mattermost.com",
+      "version": "1.0.0",
+      "appVersion": "12.1.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/mattermost/mattermost-team-edition",
+        "versions": [
+          {
+            "tag": "12.1.0",
+            "digest": "sha256:35927b9c535a9eb74f0e45385d3fe5d8308b16e0464031f157a834da8af3ee73"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 500,
+        "cpuLimit": 2000,
+        "memoryRequest": 512,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 10,
+        "mountPath": "/mattermost/data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8065,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/api/v4/system/ping",
+        "port": 8065,
+        "initialDelaySeconds": 60,
+        "periodSeconds": 15
+      },
+      "env": [
+        {
+          "key": "MM_SQLSETTINGS_DRIVERNAME",
+          "value": "postgres"
+        },
+        {
+          "key": "MM_SERVICESETTINGS_SITEURL",
+          "value": "${{self.PUBLIC_URL}}"
+        },
+        {
+          "key": "MM_BLEVESETTINGS_INDEXDIR",
+          "value": "/mattermost/data/bleve-indexes"
+        },
+        {
+          "key": "TZ",
+          "value": "UTC"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "env": {
+            "MM_SQLSETTINGS_DATASOURCE": "DATABASE_URL_DIRECT"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Needs a domain: it's the site URL. Create the first account there; it becomes the system admin.",
+        "Uploads and search indexes are kept on its volume; plugins installed later are added again on restart."
+      ],
+      "logo": "logos/mattermost.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "paperless-ngx",
+      "name": "Paperless-ngx",
+      "description": "Scan, OCR, index and archive your paper documents, searchable from the browser.",
+      "category": "storage",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://docs.paperless-ngx.com",
+      "version": "1.0.0",
+      "appVersion": "2.20.4",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "ghcr.io/paperless-ngx/paperless-ngx",
+        "versions": [
+          {
+            "tag": "2.20.4",
+            "digest": "sha256:06ca6a6c2a21cfebcc7c5f2e0d38f892dba4bcb090b8781a55d003c63cce386a"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 500,
+        "cpuLimit": 2000,
+        "memoryRequest": 1024,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 20,
+        "mountPath": "/usr/src/paperless/data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/",
+        "port": 8000,
+        "initialDelaySeconds": 90,
+        "periodSeconds": 15
+      },
+      "env": [
+        {
+          "key": "PAPERLESS_SECRET_KEY",
+          "secret": true,
+          "generate": true,
+          "format": "long"
+        },
+        {
+          "key": "PAPERLESS_URL",
+          "value": "${{self.PUBLIC_URL}}"
+        },
+        {
+          "key": "PAPERLESS_ADMIN_USER",
+          "value": "admin"
+        },
+        {
+          "key": "PAPERLESS_ADMIN_PASSWORD",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "PAPERLESS_DATA_DIR",
+          "value": "/usr/src/paperless/data"
+        },
+        {
+          "key": "PAPERLESS_MEDIA_ROOT",
+          "value": "/usr/src/paperless/data/media"
+        },
+        {
+          "key": "PAPERLESS_CONSUMPTION_DIR",
+          "value": "/usr/src/paperless/data/consume"
+        },
+        {
+          "key": "PAPERLESS_TIME_ZONE",
+          "value": "UTC"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "env": {
+            "PAPERLESS_DBHOST": "POSTGRES_HOST",
+            "PAPERLESS_DBPORT": "POSTGRES_PORT",
+            "PAPERLESS_DBUSER": "POSTGRES_USER",
+            "PAPERLESS_DBPASS": "POSTGRES_PASSWORD",
+            "PAPERLESS_DBNAME": "POSTGRES_DATABASE"
+          }
+        },
+        {
+          "engine": "kv",
+          "env": {
+            "PAPERLESS_REDIS": "REDIS_URL"
+          }
+        }
+      ],
+      "fields": [
+        {
+          "key": "admin",
+          "label": "Admin user",
+          "type": "text",
+          "default": "admin",
+          "required": true,
+          "envKey": "PAPERLESS_ADMIN_USER"
+        }
+      ],
+      "hints": [
+        "Add a domain, then sign in as the admin user with PAPERLESS_ADMIN_PASSWORD from its variables.",
+        "Documents, thumbnails and the search index are kept on its volume.",
+        "Office files and e-mail need Gotenberg and Tika: deploy them as images and set PAPERLESS_TIKA_ENABLED, PAPERLESS_TIKA_ENDPOINT and PAPERLESS_TIKA_GOTENBERG_ENDPOINT."
+      ],
+      "logo": "logos/paperless-ngx.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "forgejo",
+      "name": "Forgejo",
+      "description": "Lightweight, community-run Git hosting with pull requests, issues, packages and Actions.",
+      "category": "developer-tools",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://forgejo.org",
+      "version": "1.0.0",
+      "appVersion": "13.0.2",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "data.forgejo.org/forgejo/forgejo",
+        "versions": [
+          {
+            "tag": "13.0.2",
+            "digest": "sha256:fe7a6d15d0ee210042550feb5e35c44fc3c718621648d80d07aa8498ce243448"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 100,
+        "cpuLimit": 1000,
+        "memoryRequest": 256,
+        "memoryLimit": 1024
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 10,
+        "mountPath": "/data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 3000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        },
+        {
+          "name": "ssh",
+          "port": 22,
+          "protocol": "TCP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/api/healthz",
+        "port": 3000,
+        "initialDelaySeconds": 20,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "USER_UID",
+          "value": "1000"
+        },
+        {
+          "key": "USER_GID",
+          "value": "1000"
+        },
+        {
+          "key": "FORGEJO__database__DB_TYPE",
+          "value": "postgres"
+        },
+        {
+          "key": "FORGEJO__server__ROOT_URL",
+          "value": "${{self.PUBLIC_URL}}/"
+        },
+        {
+          "key": "FORGEJO__server__DOMAIN",
+          "value": "${{self.PUBLIC_DOMAIN}}"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "env": {
+            "FORGEJO__database__HOST": "POSTGRES_HOST:POSTGRES_PORT",
+            "FORGEJO__database__NAME": "POSTGRES_DATABASE",
+            "FORGEJO__database__USER": "POSTGRES_USER",
+            "FORGEJO__database__PASSWD": "POSTGRES_PASSWORD"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Add a domain, then finish the installer there; its database is already filled in. The first account becomes the admin.",
+        "Git over SSH needs a public port for ssh (22)."
+      ],
+      "logo": "logos/forgejo.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "listmonk",
+      "name": "listmonk",
+      "description": "Newsletter and mailing list manager with campaigns, templates and analytics, on Postgres.",
+      "category": "messaging",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://listmonk.app",
+      "version": "1.0.0",
+      "appVersion": "6.2.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/listmonk/listmonk",
+        "versions": [
+          {
+            "tag": "v6.2.0",
+            "digest": "sha256:f535d59e14991337a9f2d570273685378ae86b0d7698c3e00da444e3bc205286"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 100,
+        "cpuLimit": 1000,
+        "memoryRequest": 128,
+        "memoryLimit": 512
+      },
+      "args": [
+        "sh",
+        "-c",
+        "./listmonk --install --idempotent --yes --config '' && ./listmonk --upgrade --yes --config '' && ./listmonk --config ''"
+      ],
+      "storage": {
+        "required": true,
+        "sizeGi": 2,
+        "mountPath": "/listmonk/uploads"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 9000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "tcp",
+        "port": 9000,
+        "initialDelaySeconds": 20,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "LISTMONK_app__address",
+          "value": "0.0.0.0:9000"
+        },
+        {
+          "key": "LISTMONK_db__ssl_mode",
+          "value": "disable"
+        },
+        {
+          "key": "LISTMONK_ADMIN_USER",
+          "value": "admin"
+        },
+        {
+          "key": "LISTMONK_ADMIN_PASSWORD",
+          "secret": true,
+          "generate": true
+        },
+        {
+          "key": "TZ",
+          "value": "Etc/UTC"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "extensions": [
+            "pgcrypto"
+          ],
+          "env": {
+            "LISTMONK_db__host": "POSTGRES_HOST",
+            "LISTMONK_db__port": "POSTGRES_PORT",
+            "LISTMONK_db__user": "POSTGRES_USER",
+            "LISTMONK_db__password": "POSTGRES_PASSWORD",
+            "LISTMONK_db__database": "POSTGRES_DATABASE"
+          }
+        }
+      ],
+      "fields": [
+        {
+          "key": "admin",
+          "label": "Admin user",
+          "type": "text",
+          "default": "admin",
+          "required": true,
+          "envKey": "LISTMONK_ADMIN_USER"
+        }
+      ],
+      "hints": [
+        "Add a domain, then sign in as the admin user with LISTMONK_ADMIN_PASSWORD from its variables.",
+        "Set the root URL and an SMTP server under Settings before sending."
+      ],
+      "logo": "logos/listmonk.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "nocodb",
+      "name": "NocoDB",
+      "description": "Turn a Postgres database into a smart spreadsheet, with forms, views and a REST API.",
+      "category": "developer-tools",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://nocodb.com",
+      "version": "1.0.0",
+      "appVersion": "2026.10.1",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/nocodb/nocodb",
+        "versions": [
+          {
+            "tag": "2026.10.1",
+            "digest": "sha256:8c2dd06896d95e750d55010e529972c22c1ee73b22dce321b1d2de2e7d5cd6ae"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 1000,
+        "memoryRequest": 256,
+        "memoryLimit": 1024
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 5,
+        "mountPath": "/usr/app/data"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8080,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/api/v1/health",
+        "port": 8080,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "NC_AUTH_JWT_SECRET",
+          "secret": true,
+          "generate": true,
+          "format": "long"
+        },
+        {
+          "key": "NC_PUBLIC_URL",
+          "value": "${{self.PUBLIC_URL}}"
+        },
+        {
+          "key": "NC_DISABLE_TELE",
+          "value": "true"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "env": {
+            "DATABASE_URL": "DATABASE_URL_DIRECT"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Add a domain, then sign up there; the first account becomes the super admin.",
+        "Attachments are kept on its volume."
+      ],
+      "logo": null,
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "wiki-js",
+      "name": "Wiki.js",
+      "description": "Modern wiki with a visual and Markdown editor, page history and Git sync, on Postgres.",
+      "category": "web",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://js.wiki",
+      "version": "1.0.0",
+      "appVersion": "2.5.314",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "ghcr.io/requarks/wiki",
+        "versions": [
+          {
+            "tag": "2.5.314",
+            "digest": "sha256:68f0d1848261ae76492ba358e30a96a76fed5d97a3fff381656082bf90f70d7e"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 100,
+        "cpuLimit": 1000,
+        "memoryRequest": 256,
+        "memoryLimit": 1024
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 3000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/healthz",
+        "port": 3000,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "DB_TYPE",
+          "value": "postgres"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "extensions": [
+            "pg_trgm"
+          ],
+          "env": {
+            "DB_HOST": "POSTGRES_HOST",
+            "DB_PORT": "POSTGRES_PORT",
+            "DB_USER": "POSTGRES_USER",
+            "DB_PASS": "POSTGRES_PASSWORD",
+            "DB_NAME": "POSTGRES_DATABASE"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Add a domain, then create the admin account in the setup there.",
+        "Pages live in the database."
+      ],
+      "logo": "logos/wiki-js.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "bookstack",
+      "name": "BookStack",
+      "description": "Organize documentation into shelves, books and pages with a simple WYSIWYG editor, on MySQL.",
+      "category": "web",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://www.bookstackapp.com",
+      "version": "1.0.0",
+      "appVersion": "26.09.2",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/linuxserver/bookstack",
+        "versions": [
+          {
+            "tag": "v26.09.2-ls296",
+            "digest": "sha256:2ece67eeffcc8601f2c3d44c77d787ce49b1e0becfcb2c4bd8ce9b69fa8393ed"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 100,
+        "cpuLimit": 1000,
+        "memoryRequest": 256,
+        "memoryLimit": 512
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 5,
+        "mountPath": "/config"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 80,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/status",
+        "port": 80,
+        "initialDelaySeconds": 60,
+        "periodSeconds": 15
+      },
+      "env": [
+        {
+          "key": "APP_URL",
+          "value": "${{self.PUBLIC_URL}}"
+        },
+        {
+          "key": "APP_KEY",
+          "secret": true,
+          "generate": true,
+          "format": "base64-32",
+          "prefix": "base64:"
+        },
+        {
+          "key": "PUID",
+          "value": "1000"
+        },
+        {
+          "key": "PGID",
+          "value": "1000"
+        },
+        {
+          "key": "TZ",
+          "value": "Etc/UTC"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "mysql",
+          "env": {
+            "DB_HOST": "MYSQL_HOST",
+            "DB_PORT": "MYSQL_PORT",
+            "DB_USERNAME": "MYSQL_USER",
+            "DB_PASSWORD": "MYSQL_PASSWORD",
+            "DB_DATABASE": "MYSQL_DATABASE"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Needs a domain: it's APP_URL. Sign in as admin@admin.com with the password password, then change both right away.",
+        "Uploads and settings are kept on its volume."
+      ],
+      "logo": "logos/bookstack.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "litellm",
+      "name": "LiteLLM",
+      "description": "One OpenAI-compatible gateway to 100+ model providers, with keys, budgets and usage tracking.",
+      "category": "ai",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://docs.litellm.ai",
+      "version": "1.0.0",
+      "appVersion": "1.83.14",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "ghcr.io/berriai/litellm",
+        "versions": [
+          {
+            "tag": "v1.83.14-stable",
+            "digest": "sha256:c81eb79cd4333c6cfe374c0ec929110fd23f0ee5f7fd198855a6fbddc77b83ba"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 2000,
+        "memoryRequest": 512,
+        "memoryLimit": 2048
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 4000,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/health/liveliness",
+        "port": 4000,
+        "initialDelaySeconds": 60,
+        "periodSeconds": 15
+      },
+      "env": [
+        {
+          "key": "LITELLM_MASTER_KEY",
+          "secret": true,
+          "generate": true,
+          "format": "long",
+          "prefix": "sk-"
+        },
+        {
+          "key": "LITELLM_SALT_KEY",
+          "secret": true,
+          "generate": true,
+          "format": "long",
+          "prefix": "sk-"
+        },
+        {
+          "key": "STORE_MODEL_IN_DB",
+          "value": "True"
+        }
+      ],
+      "databases": [
+        {
+          "engine": "postgres",
+          "env": {
+            "DATABASE_URL": "DATABASE_URL_DIRECT"
+          }
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Sign in to the admin UI at /ui with the user admin and LITELLM_MASTER_KEY as the password; add models and keys there.",
+        "Keep LITELLM_SALT_KEY as it is; it encrypts the provider keys you save.",
+        "Other services call it at http://<service>:4000, like the OpenAI API."
+      ],
+      "logo": null,
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "code-server",
+      "name": "code-server",
+      "description": "VS Code in the browser, on your own server, with your files on a volume.",
+      "category": "developer-tools",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://coder.com/docs/code-server",
+      "version": "1.0.0",
+      "appVersion": "4.145.2",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/codercom/code-server",
+        "versions": [
+          {
+            "tag": "4.145.2",
+            "digest": "sha256:09565f9e07f5624554e295e8bab0e2fec4a7c533eb3cff459ed6596a4d3d7c1c"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 2000,
+        "memoryRequest": 512,
+        "memoryLimit": 4096
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 10,
+        "mountPath": "/home/coder"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8080,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/healthz",
+        "port": 8080,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "PASSWORD",
+          "secret": true,
+          "generate": true
+        }
+      ],
+      "fields": [
+        {
+          "key": "password",
+          "label": "Password",
+          "type": "password",
+          "required": false,
+          "sensitive": true,
+          "envKey": "PASSWORD",
+          "help": "Leave empty to generate one; it's in the service's variables."
+        }
+      ],
+      "hints": [
+        "Add a domain, then sign in with PASSWORD from its variables.",
+        "Your projects and settings are kept in /home/coder on its volume."
+      ],
+      "logo": null,
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "stirling-pdf",
+      "name": "Stirling-PDF",
+      "description": "Merge, split, convert, compress and sign PDFs in your browser, processed on your own server.",
+      "category": "other",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://www.stirlingpdf.com",
+      "version": "1.0.0",
+      "appVersion": "3.3.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/stirlingtools/stirling-pdf",
+        "versions": [
+          {
+            "tag": "3.3.0",
+            "digest": "sha256:ed7b1775c6706b5e5ea24fa6155f078eff1027bd35a17d21834e4407036025e6"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 2000,
+        "memoryRequest": 512,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 1,
+        "mountPath": "/configs"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8080,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/api/v1/info/status",
+        "port": 8080,
+        "initialDelaySeconds": 60,
+        "periodSeconds": 15
+      },
+      "env": [
+        {
+          "key": "SECURITY_ENABLELOGIN",
+          "value": "false"
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Add a domain to open it. Files are processed and then removed; nothing is kept.",
+        "Large files and OCR need memory; raise the limit if jobs fail."
+      ],
+      "logo": null,
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "it-tools",
+      "name": "IT-Tools",
+      "description": "Handy tools for developers in the browser, from hashes and UUIDs to JWT and cron decoders.",
+      "category": "developer-tools",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://it-tools.tech",
+      "version": "1.0.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/corentinth/it-tools",
+        "versions": [
+          {
+            "tag": "2024.10.22-7ca5933",
+            "digest": "sha256:8b8128748339583ca951af03dfe02a9a4d7363f61a216226fc28030731a5a61f"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 50,
+        "cpuLimit": 250,
+        "memoryRequest": 32,
+        "memoryLimit": 128
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 80,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/",
+        "port": 80,
+        "initialDelaySeconds": 5,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [],
+      "hints": [
+        "Add a domain to open it; everything runs in the browser and nothing is stored."
+      ],
+      "logo": null,
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "excalidraw",
+      "name": "Excalidraw",
+      "description": "Virtual whiteboard for sketching hand-drawn-style diagrams, in the browser.",
+      "category": "web",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://excalidraw.com",
+      "version": "1.0.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/excalidraw/excalidraw",
+        "versions": [
+          {
+            "tag": "sha-4bfc5bb",
+            "digest": "sha256:3d243e15afde6c6511be36b14cef3d095b9d91bcd35ba98aca3b546f4b477df9"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 50,
+        "cpuLimit": 250,
+        "memoryRequest": 32,
+        "memoryLimit": 128
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 80,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/",
+        "port": 80,
+        "initialDelaySeconds": 5,
+        "periodSeconds": 10
+      },
+      "env": [],
+      "fields": [],
+      "hints": [
+        "Drawings stay in each browser; export or save them to keep them.",
+        "Live collaboration needs Excalidraw's separate room server, which isn't included."
+      ],
+      "logo": "logos/excalidraw.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "ntfy",
+      "name": "ntfy",
+      "description": "Send push notifications to your phone or desktop with a simple HTTP request.",
+      "category": "messaging",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://ntfy.sh",
+      "version": "1.0.0",
+      "appVersion": "2.37.2",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/binwiederhier/ntfy",
+        "versions": [
+          {
+            "tag": "v2.37.2",
+            "digest": "sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 50,
+        "cpuLimit": 500,
+        "memoryRequest": 64,
+        "memoryLimit": 256
+      },
+      "args": [
+        "serve"
+      ],
+      "storage": {
+        "required": true,
+        "sizeGi": 2,
+        "mountPath": "/var/lib/ntfy"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 80,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/v1/health",
+        "port": 80,
+        "initialDelaySeconds": 5,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "NTFY_BASE_URL",
+          "value": "${{self.PUBLIC_URL}}"
+        },
+        {
+          "key": "NTFY_BEHIND_PROXY",
+          "value": "true"
+        },
+        {
+          "key": "NTFY_CACHE_FILE",
+          "value": "/var/lib/ntfy/cache.db"
+        },
+        {
+          "key": "NTFY_AUTH_FILE",
+          "value": "/var/lib/ntfy/auth.db"
+        },
+        {
+          "key": "NTFY_ATTACHMENT_CACHE_DIR",
+          "value": "/var/lib/ntfy/attachments"
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Needs a domain: the apps subscribe at its address. Publish with curl -d \"hi\" https://<domain>/<topic>.",
+        "Anyone can use any topic; set up users with the ntfy user command in its terminal to restrict them."
+      ],
+      "logo": "logos/ntfy.svg",
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "qdrant",
+      "name": "Qdrant",
+      "description": "Vector database and similarity search engine for embeddings, with REST and gRPC APIs.",
+      "category": "databases",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://qdrant.tech",
+      "version": "1.0.0",
+      "appVersion": "1.20.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/qdrant/qdrant",
+        "versions": [
+          {
+            "tag": "v1.20.0",
+            "digest": "sha256:9bfc89f9914fc14876a88c05270685921a55b8877b254a98bcc1cc2f0a424cd2"
+          }
+        ]
+      },
+      "kind": "service",
+      "workload": "StatefulSet",
+      "stateful": true,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 250,
+        "cpuLimit": 2000,
+        "memoryRequest": 512,
+        "memoryLimit": 2048
+      },
+      "storage": {
+        "required": true,
+        "sizeGi": 10,
+        "mountPath": "/qdrant/storage"
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 6333,
+          "protocol": "HTTP",
+          "exposure": "internal"
+        },
+        {
+          "name": "grpc",
+          "port": 6334,
+          "protocol": "TCP",
+          "exposure": "internal"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/healthz",
+        "port": 6333,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "QDRANT__SERVICE__API_KEY",
+          "secret": true,
+          "generate": true,
+          "format": "long"
+        },
+        {
+          "key": "QDRANT__TELEMETRY_DISABLED",
+          "value": "true"
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Other services reach it at http://<service>:6333 (gRPC on 6334), with the api-key header set to QDRANT__SERVICE__API_KEY.",
+        "The web UI is at /dashboard on port 6333."
+      ],
+      "logo": null,
+      "featured": false
+    },
+    {
+      "schema": 1,
+      "id": "searxng",
+      "name": "SearXNG",
+      "description": "Privacy-respecting metasearch engine that queries many search engines without tracking you.",
+      "category": "web",
+      "tier": "official",
+      "author": "upsetdev",
+      "homepage": "https://docs.searxng.org",
+      "version": "1.0.0",
+      "minPyoVersion": "0.1.0",
+      "source": {
+        "type": "image",
+        "image": "docker.io/searxng/searxng",
+        "versions": [
+          {
+            "tag": "2026.11.9-57ff753ad",
+            "digest": "sha256:287af61f1a13e86d02974fcde91a3413a9945788de38b61ffbc491d81a19bcc2"
+          }
+        ]
+      },
+      "kind": "application",
+      "workload": "Deployment",
+      "stateful": false,
+      "replicas": 1,
+      "resources": {
+        "cpuRequest": 100,
+        "cpuLimit": 1000,
+        "memoryRequest": 128,
+        "memoryLimit": 512
+      },
+      "ports": [
+        {
+          "name": "http",
+          "port": 8080,
+          "protocol": "HTTP",
+          "exposure": "http"
+        }
+      ],
+      "healthCheck": {
+        "type": "http",
+        "path": "/healthz",
+        "port": 8080,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10
+      },
+      "env": [
+        {
+          "key": "SEARXNG_SECRET",
+          "secret": true,
+          "generate": true,
+          "format": "long"
+        },
+        {
+          "key": "SEARXNG_BASE_URL",
+          "value": "${{self.PUBLIC_URL}}/"
+        }
+      ],
+      "fields": [],
+      "hints": [
+        "Add a domain to open it.",
+        "Its bot limiter is off; it needs a KV database (SEARXNG_VALKEY_URL) and a settings.yml change to turn on."
+      ],
+      "logo": "logos/searxng.svg",
+      "featured": false
+    }
+  ],
+  "logos": {
+    "prometheus": {
+      "hex": "E6522C",
+      "path": "M12 0C5.373 0 0 5.372 0 12c0 6.627 5.373 12 12 12s12-5.373 12-12c0-6.628-5.373-12-12-12zm0 22.46c-1.885 0-3.414-1.26-3.414-2.814h6.828c0 1.553-1.528 2.813-3.414 2.813zm5.64-3.745H6.36v-2.046h11.28v2.046zm-.04-3.098H6.391c-.037-.043-.075-.086-.111-.13-1.155-1.401-1.427-2.133-1.69-2.879-.005-.025 1.4.287 2.395.511 0 0 .513.119 1.262.255-.72-.843-1.147-1.915-1.147-3.01 0-2.406 1.845-4.508 1.18-6.207.648.053 1.34 1.367 1.387 3.422.689-.951.977-2.69.977-3.755 0-1.103.727-2.385 1.454-2.429-.648 1.069.168 1.984.894 4.256.272.854.237 2.29.447 3.201.07-1.892.395-4.652 1.595-5.605-.529 1.2.079 2.702.494 3.424.671 1.164 1.078 2.047 1.078 3.716a4.642 4.642 0 01-1.11 2.996c.792-.149 1.34-.283 1.34-.283l2.573-.502s-.374 1.538-1.81 3.019z"
+    },
+    "wordpress": {
+      "hex": "21759B",
+      "path": "M21.469 6.825c.84 1.537 1.318 3.3 1.318 5.175 0 3.979-2.156 7.456-5.363 9.325l3.295-9.527c.615-1.54.82-2.771.82-3.864 0-.405-.026-.78-.07-1.11m-7.981.105c.647-.03 1.232-.105 1.232-.105.582-.075.514-.93-.067-.899 0 0-1.755.135-2.88.135-1.064 0-2.85-.15-2.85-.15-.585-.03-.661.855-.075.885 0 0 .54.061 1.125.09l1.68 4.605-2.37 7.08L5.354 6.9c.649-.03 1.234-.1 1.234-.1.585-.075.516-.93-.065-.896 0 0-1.746.138-2.874.138-.2 0-.438-.008-.69-.015C4.911 3.15 8.235 1.215 12 1.215c2.809 0 5.365 1.072 7.286 2.833-.046-.003-.091-.009-.141-.009-1.06 0-1.812.923-1.812 1.914 0 .89.513 1.643 1.06 2.531.411.72.89 1.643.89 2.977 0 .915-.354 1.994-.821 3.479l-1.075 3.585-3.9-11.61.001.014zM12 22.784c-1.059 0-2.081-.153-3.048-.437l3.237-9.406 3.315 9.087c.024.053.05.101.078.149-1.12.393-2.325.609-3.582.609M1.211 12c0-1.564.336-3.05.935-4.39L7.29 21.709C3.694 19.96 1.212 16.271 1.211 12M12 0C5.385 0 0 5.385 0 12s5.385 12 12 12 12-5.385 12-12S18.615 0 12 0"
+    },
+    "mongodb": {
+      "hex": "47A248",
+      "path": "M17.193 9.555c-1.264-5.58-4.252-7.414-4.573-8.115-.28-.394-.53-.954-.735-1.44-.036.495-.055.685-.523 1.184-.723.566-4.438 3.682-4.74 10.02-.282 5.912 4.27 9.435 4.888 9.884l.07.05A73.49 73.49 0 0111.91 24h.481c.114-1.032.284-2.056.51-3.07.417-.296.604-.463.85-.693a11.342 11.342 0 003.639-8.464c.01-.814-.103-1.662-.197-2.218zm-5.336 8.195s0-8.291.275-8.29c.213 0 .49 10.695.49 10.695-.381-.045-.765-1.76-.765-2.405z"
+    },
+    "ghost": {
+      "hex": "15171A",
+      "path": "M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm.256 2.313c2.47.005 5.116 2.008 5.898 2.962l.244.3c1.64 1.994 3.569 4.34 3.569 6.966 0 3.719-2.98 5.808-6.158 7.508-1.433.766-2.98 1.508-4.748 1.508-4.543 0-8.366-3.569-8.366-8.112 0-.706.17-1.425.342-2.15.122-.515.244-1.033.307-1.549.548-4.539 2.967-6.795 8.422-7.408a4.29 4.29 0 01.49-.026Z"
+    },
+    "n8n": {
+      "hex": "EA4B71",
+      "path": "M21.4737 5.6842c-1.1772 0-2.1663.8051-2.4468 1.8947h-2.8955c-1.235 0-2.289.893-2.492 2.111l-.1038.623a1.263 1.263 0 0 1-1.246 1.0555H11.289c-.2805-1.0896-1.2696-1.8947-2.4468-1.8947s-2.1663.8051-2.4467 1.8947H4.973c-.2805-1.0896-1.2696-1.8947-2.4468-1.8947C1.1311 9.4737 0 10.6047 0 12s1.131 2.5263 2.5263 2.5263c1.1772 0 2.1663-.8051 2.4468-1.8947h1.4223c.2804 1.0896 1.2696 1.8947 2.4467 1.8947 1.1772 0 2.1663-.8051 2.4468-1.8947h1.0008a1.263 1.263 0 0 1 1.2459 1.0555l.1038.623c.203 1.218 1.257 2.111 2.492 2.111h.3692c.2804 1.0895 1.2696 1.8947 2.4468 1.8947 1.3952 0 2.5263-1.131 2.5263-2.5263s-1.131-2.5263-2.5263-2.5263c-1.1772 0-2.1664.805-2.4468 1.8947h-.3692a1.263 1.263 0 0 1-1.246-1.0555l-.1037-.623A2.52 2.52 0 0 0 13.9607 12a2.52 2.52 0 0 0 .821-1.4794l.1038-.623a1.263 1.263 0 0 1 1.2459-1.0555h2.8955c.2805 1.0896 1.2696 1.8947 2.4468 1.8947 1.3952 0 2.5263-1.131 2.5263-2.5263s-1.131-2.5263-2.5263-2.5263m0 1.2632a1.263 1.263 0 0 1 1.2631 1.2631 1.263 1.263 0 0 1-1.2631 1.2632 1.263 1.263 0 0 1-1.2632-1.2632 1.263 1.263 0 0 1 1.2632-1.2631M2.5263 10.7368A1.263 1.263 0 0 1 3.7895 12a1.263 1.263 0 0 1-1.2632 1.2632A1.263 1.263 0 0 1 1.2632 12a1.263 1.263 0 0 1 1.2631-1.2632m6.3158 0A1.263 1.263 0 0 1 10.1053 12a1.263 1.263 0 0 1-1.2632 1.2632A1.263 1.263 0 0 1 7.579 12a1.263 1.263 0 0 1 1.2632-1.2632m10.1053 3.7895a1.263 1.263 0 0 1 1.2631 1.2632 1.263 1.263 0 0 1-1.2631 1.2631 1.263 1.263 0 0 1-1.2632-1.2631 1.263 1.263 0 0 1 1.2632-1.2632"
+    },
+    "ollama": {
+      "hex": "000000",
+      "path": "M16.361 10.26a.894.894 0 0 0-.558.47l-.072.148.001.207c0 .193.004.217.059.353.076.193.152.312.291.448.24.238.51.3.872.205a.86.86 0 0 0 .517-.436.752.752 0 0 0 .08-.498c-.064-.453-.33-.782-.724-.897a1.06 1.06 0 0 0-.466 0zm-9.203.005c-.305.096-.533.32-.65.639a1.187 1.187 0 0 0-.06.52c.057.309.31.59.598.667.362.095.632.033.872-.205.14-.136.215-.255.291-.448.055-.136.059-.16.059-.353l.001-.207-.072-.148a.894.894 0 0 0-.565-.472 1.02 1.02 0 0 0-.474.007Zm4.184 2c-.131.071-.223.25-.195.383.031.143.157.288.353.407.105.063.112.072.117.136.004.038-.01.146-.029.243-.02.094-.036.194-.036.222.002.074.07.195.143.253.064.052.076.054.255.059.164.005.198.001.264-.03.169-.082.212-.234.15-.525-.052-.243-.042-.28.087-.355.137-.08.281-.219.324-.314a.365.365 0 0 0-.175-.48.394.394 0 0 0-.181-.033c-.126 0-.207.03-.355.124l-.085.053-.053-.032c-.219-.13-.259-.145-.391-.143a.396.396 0 0 0-.193.032zm.39-2.195c-.373.036-.475.05-.654.086-.291.06-.68.195-.951.328-.94.46-1.589 1.226-1.787 2.114-.04.176-.045.234-.045.53 0 .294.005.357.043.524.264 1.16 1.332 2.017 2.714 2.173.3.033 1.596.033 1.896 0 1.11-.125 2.064-.727 2.493-1.571.114-.226.169-.372.22-.602.039-.167.044-.23.044-.523 0-.297-.005-.355-.045-.531-.288-1.29-1.539-2.304-3.072-2.497a6.873 6.873 0 0 0-.855-.031zm.645.937a3.283 3.283 0 0 1 1.44.514c.223.148.537.458.671.662.166.251.26.508.303.82.02.143.01.251-.043.482-.08.345-.332.705-.672.957a3.115 3.115 0 0 1-.689.348c-.382.122-.632.144-1.525.138-.582-.006-.686-.01-.853-.042-.57-.107-1.022-.334-1.35-.68-.264-.28-.385-.535-.45-.946-.03-.192.025-.509.137-.776.136-.326.488-.73.836-.963.403-.269.934-.46 1.422-.512.187-.02.586-.02.773-.002zm-5.503-11a1.653 1.653 0 0 0-.683.298C5.617.74 5.173 1.666 4.985 2.819c-.07.436-.119 1.04-.119 1.503 0 .544.064 1.24.155 1.721.02.107.031.202.023.208a8.12 8.12 0 0 1-.187.152 5.324 5.324 0 0 0-.949 1.02 5.49 5.49 0 0 0-.94 2.339 6.625 6.625 0 0 0-.023 1.357c.091.78.325 1.438.727 2.04l.13.195-.037.064c-.269.452-.498 1.105-.605 1.732-.084.496-.095.629-.095 1.294 0 .67.009.803.088 1.266.095.555.288 1.143.503 1.534.071.128.243.393.264.407.007.003-.014.067-.046.141a7.405 7.405 0 0 0-.548 1.873c-.062.417-.071.552-.071.991 0 .56.031.832.148 1.279L3.42 24h1.478l-.05-.091c-.297-.552-.325-1.575-.068-2.597.117-.472.25-.819.498-1.296l.148-.29v-.177c0-.165-.003-.184-.057-.293a.915.915 0 0 0-.194-.25 1.74 1.74 0 0 1-.385-.543c-.424-.92-.506-2.286-.208-3.451.124-.486.329-.918.544-1.154a.787.787 0 0 0 .223-.531c0-.195-.07-.355-.224-.522a3.136 3.136 0 0 1-.817-1.729c-.14-.96.114-2.005.69-2.834.563-.814 1.353-1.336 2.237-1.475.199-.033.57-.028.776.01.226.04.367.028.512-.041.179-.085.268-.19.374-.431.093-.215.165-.333.36-.576.234-.29.46-.489.822-.729.413-.27.884-.467 1.352-.561.17-.035.25-.04.569-.04.319 0 .398.005.569.04a4.07 4.07 0 0 1 1.914.997c.117.109.398.457.488.602.034.057.095.177.132.267.105.241.195.346.374.43.14.068.286.082.503.045.343-.058.607-.053.943.016 1.144.23 2.14 1.173 2.581 2.437.385 1.108.276 2.267-.296 3.153-.097.15-.193.27-.333.419-.301.322-.301.722-.001 1.053.493.539.801 1.866.708 3.036-.062.772-.26 1.463-.533 1.854a2.096 2.096 0 0 1-.224.258.916.916 0 0 0-.194.25c-.054.109-.057.128-.057.293v.178l.148.29c.248.476.38.823.498 1.295.253 1.008.231 2.01-.059 2.581a.845.845 0 0 0-.044.098c0 .006.329.009.732.009h.73l.02-.074.036-.134c.019-.076.057-.3.088-.516.029-.217.029-1.016 0-1.258-.11-.875-.295-1.57-.597-2.226-.032-.074-.053-.138-.046-.141.008-.005.057-.074.108-.152.376-.569.607-1.284.724-2.228.031-.26.031-1.378 0-1.628-.083-.645-.182-1.082-.348-1.525a6.083 6.083 0 0 0-.329-.7l-.038-.064.131-.194c.402-.604.636-1.262.727-2.04a6.625 6.625 0 0 0-.024-1.358 5.512 5.512 0 0 0-.939-2.339 5.325 5.325 0 0 0-.95-1.02 8.097 8.097 0 0 1-.186-.152.692.692 0 0 1 .023-.208c.208-1.087.201-2.443-.017-3.503-.19-.924-.535-1.658-.98-2.082-.354-.338-.716-.482-1.15-.455-.996.059-1.8 1.205-2.116 3.01a6.805 6.805 0 0 0-.097.726c0 .036-.007.066-.015.066a.96.96 0 0 1-.149-.078A4.857 4.857 0 0 0 12 3.03c-.832 0-1.687.243-2.456.698a.958.958 0 0 1-.148.078c-.008 0-.015-.03-.015-.066a6.71 6.71 0 0 0-.097-.725C8.997 1.392 8.337.319 7.46.048a2.096 2.096 0 0 0-.585-.041Zm.293 1.402c.248.197.523.759.682 1.388.03.113.06.244.069.292.007.047.026.152.041.233.067.365.098.76.102 1.24l.002.475-.12.175-.118.178h-.278c-.324 0-.646.041-.954.124l-.238.06c-.033.007-.038-.003-.057-.144a8.438 8.438 0 0 1 .016-2.323c.124-.788.413-1.501.696-1.711.067-.05.079-.049.157.013zm9.825-.012c.17.126.358.46.498.888.28.854.36 2.028.212 3.145-.019.14-.024.151-.057.144l-.238-.06a3.693 3.693 0 0 0-.954-.124h-.278l-.119-.178-.119-.175.002-.474c.004-.669.066-1.19.214-1.772.157-.623.434-1.185.68-1.382.078-.062.09-.063.159-.012z"
+    },
+    "adguard-home": {
+      "hex": "68BC71",
+      "path": "M12 0C8.249 0 3.725.861 0 2.755 0 6.845-.051 17.037 12 24 24.051 17.037 24 6.845 24 2.755 20.275.861 15.751 0 12 0zm-.106 15.429L6.857 9.612c.331-.239 1.75-1.143 2.794.042l2.187 2.588c.009-.001 5.801-5.948 5.815-5.938.246-.22.694-.503 1.204-.101l-6.963 9.226z"
+    },
+    "uptime-kuma": {
+      "hex": "5CDD8B",
+      "path": "M11.759.955c-4.071 0-7.93 2.265-10.06 5.774l-.16.263-.116.284c-1.81 4.44-2.188 9.118.621 12.459 2.67 3.174 6.221 3.328 9.477 3.308 3.256-.02 6.323-.482 8.995-2.032C22.75 19.714 24 16.917 24 14.53c0-2.388-.724-4.698-1.882-7.343l-.112-.257-.148-.238C19.683 3.2 15.83.955 11.758.955Zm0 3.868c2.919 0 5.19 1.305 6.816 3.914 2.076 4.747 2.076 7.724 0 8.929-3.116 1.808-11.234 2.359-13.57-.42-1.558-1.853-1.558-4.69 0-8.51 1.584-2.608 3.835-3.913 6.754-3.913z"
+    },
+    "mosquitto": {
+      "hex": "3C5280",
+      "path": "M1.353 11.424c0 2.637.964 5.105 2.636 7.013l-1.007.903A11.968 11.968 0 010 11.424C0 8.065 1.38 5.029 3.604 2.85l.05.045L6.637 5.57a7.942 7.942 0 00-1.433 9.963l1.03-.923a6.59 6.59 0 011.416-8.132l1.02.915.909.814.941.844a2.778 2.778 0 00-1.311 2.367c0 1.23.795 2.273 1.899 2.646l.095 1.297a4.024 4.024 0 01-2.483-6.27l-.9-.809-.004-.003a5.233 5.233 0 00.205 6.546l-3.023 2.71a9.291 9.291 0 01-.21-11.97L3.777 4.66a10.599 10.599 0 00-2.407 6.14l-.006.008.005.004c-.011.203-.017.406-.017.612zm11.54 2.639a2.793 2.793 0 00.588-5.013l.941-.844.908-.814 1.021-.915a6.59 6.59 0 011.417 8.132l1.029.923a7.942 7.942 0 00-1.433-9.963l2.981-2.673.05-.045A11.964 11.964 0 0124 11.424c0 2.98-1.095 5.769-2.982 7.916l-1.007-.903a10.61 10.61 0 002.619-7.625l.005-.004-.006-.007a10.598 10.598 0 00-2.407-6.141l-1.008.904a9.291 9.291 0 01-.211 11.97l-3.023-2.71a5.233 5.233 0 00.205-6.546l-.004.003-.9.808a4.024 4.024 0 01-2.482 6.27zM12 21.149l.335-4.571.271-3.712a1.56 1.56 0 10-1.212 0l.271 3.712Z"
+    },
+    "mariadb": {
+      "hex": "003545",
+      "path": "M23.157 4.412c-.676.284-.79.31-1.673.372-.65.045-.757.057-1.212.209-.75.246-1.395.75-2.02 1.59-.296.398-1.249 1.913-1.249 1.988 0 .057-.65.998-.915 1.32-.574.713-1.08 1.079-2.14 1.59-.77.36-1.224.524-4.102 1.477-1.073.353-2.133.738-2.367.864-.852.449-1.515 1.036-2.203 1.938-1.003 1.32-.972 1.313-3.042.947a12.264 12.264 0 00-.675-.063c-.644-.05-1.023.044-1.332.334L0 17.193l.177.088c.094.05.353.234.561.398.215.17.461.347.55.391.088.044.17.088.183.101.012.013-.089.17-.228.353-.435.581-.593.871-.574 1.048.019.164.032.17.43.17.517-.006.826-.056 1.261-.208.65-.233 2.058-.94 2.784-1.4.776-.5 1.717-.998 1.956-1.042.082-.02.354-.07.594-.114.58-.107 1.464-.095 2.587.05.108.013.373.045.6.064.227.025.43.057.454.076.026.012.474.037.998.056.934.026 1.104.007 1.3-.189.126-.133.385-.631.498-.985.209-.643.417-.921.366-.492-.113.966-.322 1.692-.713 2.411-.259.499-.663 1.092-.934 1.395-.322.347-.315.36.088.315.619-.063 1.471-.397 2.096-.82.827-.562 1.647-1.691 2.19-3.03.107-.27.22-.22.183.083-.013.094-.038.315-.057.498l-.031.328.353-.202c.833-.48 1.414-1.262 2.127-2.884.227-.518.877-2.922 1.073-3.976a9.64 9.64 0 01.271-1.042c.127-.429.196-.555.48-.858.183-.19.625-.555.978-.808.72-.505.953-.75 1.187-1.205.208-.417.284-1.13.132-1.357-.132-.202-.284-.196-.763.006Z"
+    },
+    "grafana": {
+      "hex": "F46800",
+      "path": "M23.02 10.59a8.578 8.578 0 0 0-.862-3.034 8.911 8.911 0 0 0-1.789-2.445c.337-1.342-.413-2.505-.413-2.505-1.292-.08-2.113.4-2.416.62-.052-.02-.102-.044-.154-.064-.22-.089-.446-.172-.677-.247-.231-.073-.47-.14-.711-.197a9.867 9.867 0 0 0-.875-.161C14.557.753 12.94 0 12.94 0c-1.804 1.145-2.147 2.744-2.147 2.744l-.018.093c-.098.029-.2.057-.298.088-.138.042-.275.094-.413.143-.138.055-.275.107-.41.166a8.869 8.869 0 0 0-1.557.87l-.063-.029c-2.497-.955-4.716.195-4.716.195-.203 2.658.996 4.33 1.235 4.636a11.608 11.608 0 0 0-.607 2.635C1.636 12.677.953 15.014.953 15.014c1.926 2.214 4.171 2.351 4.171 2.351.003-.002.006-.002.006-.005.285.509.615.994.986 1.446.156.19.32.371.488.548-.704 2.009.099 3.68.099 3.68 2.144.08 3.553-.937 3.849-1.173a9.784 9.784 0 0 0 3.164.501h.08l.055-.003.107-.002.103-.005.003.002c1.01 1.44 2.788 1.646 2.788 1.646 1.264-1.332 1.337-2.653 1.337-2.94v-.058c0-.02-.003-.039-.003-.06.265-.187.52-.387.758-.6a7.875 7.875 0 0 0 1.415-1.7c1.43.083 2.437-.885 2.437-.885-.236-1.49-1.085-2.216-1.264-2.354l-.018-.013-.016-.013a.217.217 0 0 1-.031-.02c.008-.092.016-.18.02-.27.011-.162.016-.323.016-.48v-.253l-.005-.098-.008-.135a1.891 1.891 0 0 0-.01-.13c-.003-.042-.008-.083-.013-.125l-.016-.124-.018-.122a6.215 6.215 0 0 0-2.032-3.73 6.015 6.015 0 0 0-3.222-1.46 6.292 6.292 0 0 0-.85-.048l-.107.002h-.063l-.044.003-.104.008a4.777 4.777 0 0 0-3.335 1.695c-.332.4-.592.84-.768 1.297a4.594 4.594 0 0 0-.312 1.817l.003.091c.005.055.007.11.013.164a3.615 3.615 0 0 0 .698 1.82 3.53 3.53 0 0 0 1.827 1.282c.33.098.66.14.971.137.039 0 .078 0 .114-.002l.063-.003c.02 0 .041-.003.062-.003.034-.002.065-.007.099-.01.007 0 .018-.003.028-.003l.031-.005.06-.008a1.18 1.18 0 0 0 .112-.02c.036-.008.072-.013.109-.024a2.634 2.634 0 0 0 .914-.415c.028-.02.056-.041.085-.065a.248.248 0 0 0 .039-.35.244.244 0 0 0-.309-.06l-.078.042c-.09.044-.184.083-.283.116a2.476 2.476 0 0 1-.475.096c-.028.003-.054.006-.083.006l-.083.002c-.026 0-.054 0-.08-.002l-.102-.006h-.012l-.024.006c-.016-.003-.031-.003-.044-.006-.031-.002-.06-.007-.091-.01a2.59 2.59 0 0 1-.724-.213 2.557 2.557 0 0 1-.667-.438 2.52 2.52 0 0 1-.805-1.475 2.306 2.306 0 0 1-.029-.444l.006-.122v-.023l.002-.031c.003-.021.003-.04.005-.06a3.163 3.163 0 0 1 1.352-2.29 3.12 3.12 0 0 1 .937-.43 2.946 2.946 0 0 1 .776-.101h.06l.07.002.045.003h.026l.07.005a4.041 4.041 0 0 1 1.635.49 3.94 3.94 0 0 1 1.602 1.662 3.77 3.77 0 0 1 .397 1.414l.005.076.003.075c.002.026.002.05.002.075 0 .024.003.052 0 .07v.065l-.002.073-.008.174a6.195 6.195 0 0 1-.08.639 5.1 5.1 0 0 1-.267.927 5.31 5.31 0 0 1-.624 1.13 5.052 5.052 0 0 1-3.237 2.014 4.82 4.82 0 0 1-.649.066l-.039.003h-.287a6.607 6.607 0 0 1-1.716-.265 6.776 6.776 0 0 1-3.4-2.274 6.75 6.75 0 0 1-.746-1.15 6.616 6.616 0 0 1-.714-2.596l-.005-.083-.002-.02v-.056l-.003-.073v-.096l-.003-.104v-.07l.003-.163c.008-.22.026-.45.054-.678a8.707 8.707 0 0 1 .28-1.355c.128-.444.286-.872.473-1.277a7.04 7.04 0 0 1 1.456-2.1 5.925 5.925 0 0 1 .953-.763c.169-.111.343-.213.524-.306.089-.05.182-.091.273-.135.047-.02.093-.042.138-.062a7.177 7.177 0 0 1 .714-.267l.145-.045c.049-.015.098-.026.148-.041.098-.029.197-.052.296-.076.049-.013.1-.02.15-.033l.15-.032.151-.028.076-.013.075-.01.153-.024c.057-.01.114-.013.171-.023l.169-.021c.036-.003.073-.008.106-.01l.073-.008.036-.003.042-.002c.057-.003.114-.008.171-.01l.086-.006h.023l.037-.003.145-.007a7.999 7.999 0 0 1 1.708.125 7.917 7.917 0 0 1 2.048.68 8.253 8.253 0 0 1 1.672 1.09l.09.077.089.078c.06.052.114.107.171.159.057.052.112.106.166.16.052.055.107.107.159.164a8.671 8.671 0 0 1 1.41 1.978c.012.026.028.052.04.078l.04.078.075.156c.023.051.05.1.07.153l.065.15a8.848 8.848 0 0 1 .45 1.34.19.19 0 0 0 .201.142.186.186 0 0 0 .172-.184c.01-.246.002-.532-.024-.856z"
+    },
+    "rabbitmq": {
+      "hex": "FF6600",
+      "path": "M23.035 9.601h-7.677a.956.956 0 01-.962-.962V.962a.956.956 0 00-.962-.956H10.56a.956.956 0 00-.962.956V8.64a.956.956 0 01-.962.962H5.762a.956.956 0 01-.961-.962V.962A.956.956 0 003.839 0H.959a.956.956 0 00-.956.962v22.076A.956.956 0 00.965 24h22.07a.956.956 0 00.962-.962V10.58a.956.956 0 00-.962-.98zm-3.86 8.152a1.437 1.437 0 01-1.437 1.443h-1.924a1.437 1.437 0 01-1.436-1.443v-1.917a1.437 1.437 0 011.436-1.443h1.924a1.437 1.437 0 011.437 1.443z"
+    },
+    "meilisearch": {
+      "hex": "FF5CAA",
+      "path": "m6.505 18.998 4.434-11.345a4.168 4.168 0 0 1 3.882-2.651h2.674l-4.434 11.345a4.169 4.169 0 0 1-3.883 2.651H6.505Zm6.505 0 4.434-11.345a4.169 4.169 0 0 1 3.883-2.651H24l-4.434 11.345a4.168 4.168 0 0 1-3.882 2.651H13.01Zm-13.01 0L4.434 7.653a4.168 4.168 0 0 1 3.882-2.651h2.674L6.556 16.347a4.169 4.169 0 0 1-3.883 2.651H0Z"
+    },
+    "gitea": {
+      "hex": "609926",
+      "path": "M4.209 4.603c-.247 0-.525.02-.84.088-.333.07-1.28.283-2.054 1.027C-.403 7.25.035 9.685.089 10.052c.065.446.263 1.687 1.21 2.768 1.749 2.141 5.513 2.092 5.513 2.092s.462 1.103 1.168 2.119c.955 1.263 1.936 2.248 2.89 2.367 2.406 0 7.212-.004 7.212-.004s.458.004 1.08-.394c.535-.324 1.013-.893 1.013-.893s.492-.527 1.18-1.73c.21-.37.385-.729.538-1.068 0 0 2.107-4.471 2.107-8.823-.042-1.318-.367-1.55-.443-1.627-.156-.156-.366-.153-.366-.153s-4.475.252-6.792.306c-.508.011-1.012.023-1.512.027v4.474l-.634-.301c0-1.39-.004-4.17-.004-4.17-1.107.016-3.405-.084-3.405-.084s-5.399-.27-5.987-.324c-.187-.011-.401-.032-.648-.032zm.354 1.832h.111s.271 2.269.6 3.597C5.549 11.147 6.22 13 6.22 13s-.996-.119-1.641-.348c-.99-.324-1.409-.714-1.409-.714s-.73-.511-1.096-1.52C1.444 8.73 2.021 7.7 2.021 7.7s.32-.859 1.47-1.145c.395-.106.863-.12 1.072-.12zm8.33 2.554c.26.003.509.127.509.127l.868.422-.529 1.075a.686.686 0 0 0-.614.359.685.685 0 0 0 .072.756l-.939 1.924a.69.69 0 0 0-.66.527.687.687 0 0 0 .347.763.686.686 0 0 0 .867-.206.688.688 0 0 0-.069-.882l.916-1.874a.667.667 0 0 0 .237-.02.657.657 0 0 0 .271-.137 8.826 8.826 0 0 1 1.016.512.761.761 0 0 1 .286.282c.073.21-.073.569-.073.569-.087.29-.702 1.55-.702 1.55a.692.692 0 0 0-.676.477.681.681 0 1 0 1.157-.252c.073-.141.141-.282.214-.431.19-.397.515-1.16.515-1.16.035-.066.218-.394.103-.814-.095-.435-.48-.638-.48-.638-.467-.301-1.116-.58-1.116-.58s0-.156-.042-.27a.688.688 0 0 0-.148-.241l.516-1.062 2.89 1.401s.48.218.583.619c.073.282-.019.534-.069.657-.24.587-2.1 4.317-2.1 4.317s-.232.554-.748.588a1.065 1.065 0 0 1-.393-.045l-.202-.08-4.31-2.1s-.417-.218-.49-.596c-.083-.31.104-.691.104-.691l2.073-4.272s.183-.37.466-.497a.855.855 0 0 1 .35-.077z"
+    },
+    "vaultwarden": {
+      "hex": "000000",
+      "path": "M11.5405.4477c-.143.2381-.3334.5239-.4382.6286-.1715.181-.181.1715-.7334-.3715-.6667-.6666-.7715-.6476-1.086.2096-.1332.3524-.295.6-.4285.6762-.1905.0953-.2856.0667-.7619-.2761-.8001-.562-.9429-.4763-1.0954.619-.038.2763-.1143.4763-.2095.5144-.0762.0286-.4-.0667-.7049-.219-.781-.3716-.8953-.2858-.9048.619 0 .3715-.0476.7238-.0952.7715-.0667.0667-.3144.0476-.781-.0666-.9144-.2191-.9716-.162-.7525.7524.1142.4667.1333.7144.0666.781-.0476.0477-.4.0953-.7715.0953-.9143.0095-.9906.1238-.6095.9049.3714.781.2762 1.0096-.4477 1.1049-1.0669.1523-1.1335.2857-.543 1.0762.4763.6286.4477.724-.3429 1.0096-.8476.324-.8667.4286-.2 1.0954.543.5524.5525.562.3715.7334-.1047.1048-.3905.2953-.6286.4382-.5906.3428-.5906.5714 0 .9143.2381.143.5239.3333.6286.4381.181.1715.1715.181-.3715.7335-.6667.6667-.6476.7715.2096 1.0859.3525.1332.6.2951.6762.4285.0953.1905.0667.2857-.2761.762-.562.8-.4763.9428.6191 1.0953.2762.038.4762.1143.5143.2095.0286.0763-.0666.4-.219.705-.3716.7809-.2858.8953.619.9048.3715 0 .724.0476.7715.0951.0667.0667.0476.3144-.0666.7812-.219.9143-.162.9715.7524.7524.4667-.1143.7144-.1334.7811-.0667.0476.0476.0952.4.0952.7715.0095.9144.1239.9906.9049.6096.781-.3715 1.0096-.2762 1.1049.4476.1524 1.067.2857 1.1335 1.0762.543.6286-.4763.724-.4477 1.0097.343.3238.8476.419.8667 1.1049.1903.6666-.6476.6095-.6571 1.1619.2763.343.581.5715.581.9145 0 .5523-.9334.4952-.924 1.1619-.2763.6859.6764.781.6573 1.0954-.2.1333-.3523.2952-.6.4286-.6762.1905-.0953.2858-.0667.762.2762.8.562.943.4762 1.0953-.619.0381-.2763.1143-.4763.2096-.5144.0762-.0286.4.0666.7048.219.781.3715.8954.2857.905-.619 0-.3715.0474-.724.0951-.7716.0667-.0667.3143-.0476.781.0667.9145.219.9716.162.7525-.7524-.1143-.4668-.1333-.7145-.0667-.7812.0477-.0475.4-.0951.7715-.0951.9144-.0095.9906-.1238.6097-.905-.3715-.7809-.2763-1.0096.4476-1.1048 1.0667-.1523 1.1334-.2857.543-1.0762-.4763-.6287-.4478-.724.3428-1.0097.8477-.3238.8668-.419.1905-1.105-.6477-.6666-.6572-.6095.2762-1.1618.2953-.181.4382-.324.4382-.4573 0-.1334-.143-.2763-.4382-.4571-.9334-.5525-.924-.4954-.2762-1.1621.6763-.6858.6572-.781-.2-1.0953-.3524-.1334-.6001-.2953-.6763-.4287-.0952-.1905-.0667-.2857.2763-.7619.562-.8001.4761-.9429-.6192-1.0954-.2762-.038-.4762-.1143-.5143-.2096-.0286-.0762.0667-.4.219-.7048.3715-.781.2858-.8953-.619-.905-.3715 0-.7239-.0474-.7716-.0951-.0666-.0666-.0476-.3143.0667-.781.219-.9143.162-.9715-.7524-.7524-.4668.1142-.7144.1333-.781.0666-.0478-.0477-.0953-.4-.0953-.7715-.0095-.9144-.1238-.9906-.905-.6096-.7809.3714-1.0095.2763-1.1047-.4477-.1524-1.0667-.2858-1.1334-1.0763-.543-.6287.4764-.724.4478-1.0096-.3428-.324-.8476-.4287-.8667-1.0954-.2-.5525.543-.562.5525-.7335.3715-.1047-.1048-.2952-.3905-.438-.6286C12.2739.1429 12.1309 0 11.9976 0c-.1333 0-.2761.1429-.4571.4477zm.9334 1.9335c.1048.1048.1905.3143.1905.4762 0 .162-.0857.3715-.1905.4763-.4096.4095-1.143.1048-1.143-.4763 0-.362.3048-.6667.6667-.6667.162 0 .3715.0857.4763.1905zM11.007 4.0004c.924.8953 1.0573.8953 1.9812 0l.6858-.6667.6667.1905c.762.2095 1.9431.7143 1.9431.8382 0 .038-.8953 2.6287-1.9907 5.7434-1.0953 3.1146-2.0478 5.8386-2.105 6.0577-.0666.2286-.1524.4096-.1905.4096-.038 0-.1143-.162-.162-.3524-.057-.2-1-2.9432-2.1049-6.1054-1.1143-3.1622-2.0192-5.772-2.0192-5.791 0-.1143 2.1145-.9334 2.5622-.9811.0285-.0095.3524.2857.7333.6572zm-3.3432 9.601c1.3526 3.7908 2.4288 6.9054 2.4003 6.934-.0667.0762-1.0763-.219-1.5048-.4477-.343-.1715-.3525-.1905-.4763-1-.0763-.524-.1906-.905-.3049-1.0573-.1904-.2381-.219-.2381-.8667-.1715-1.4287.162-1.3715.181-1.9335-.5714-.6096-.8096-1.181-1.9431-1.4573-2.9051-.162-.5334-.219-1.0668-.2571-2.0954l-.0477-1.3812.8572-.4571c1.1525-.6 1.181-.7049.5905-1.8764-.4285-.8477-.4285-.8.124-1.6002.1523-.2286.3142-.381.3523-.3334.038.0381 1.1716 3.1717 2.524 6.9627Zm11.8203-6.2101.2382.4-.3906.7715c-.5905 1.181-.562 1.2858.581 1.8859l.8478.4476v1.0763c0 1.2478-.1715 2.2193-.581 3.2575-.3144.7905-.943 1.8383-1.448 2.4288l-.3237.381-.7524-.1143c-.4096-.0666-.8668-.1142-1.0096-.1142-.4 0-.6002.3523-.7335 1.2858l-.1238.8286-.5048.219c-.581.2573-1.2859.4668-1.3526.3906-.038-.038 4.01-11.5249 4.8482-13.7728l.0952-.2381.1905.2381c.1048.1238.2953.4096.419.6287zM3.7586 8.715c.4478.4382.181 1.0954-.4475 1.0954-.4 0-.6478-.2381-.6478-.6286 0-.6286.6573-.9144 1.0954-.4668zm17.221-.1332c.2761.1523.3523.2666.3523.5999 0 .381-.2477.6287-.6381.6287-.6382 0-.9144-.6477-.4573-1.0954.2572-.2666.4287-.2952.743-.1332zM7.2352 19.1543c.3429.8191-.8287 1.3239-1.2097.5144-.1429-.2953-.1429-.343.0095-.5716.3239-.4952.9906-.4666 1.2.0572zm10.563-.2572c.238.1905.3047.524.1523.8192-.3905.7619-1.524.219-1.1905-.562.1713-.4286.6667-.5524 1.0382-.2572z"
+    },
+    "clickhouse": {
+      "hex": "FFCC01",
+      "path": "M21.333 10H24v4h-2.667ZM16 1.335h2.667v21.33H16Zm-5.333 0h2.666v21.33h-2.666ZM0 22.665V1.335h2.667v21.33zm5.333-21.33H8v21.33H5.333Z"
+    },
+    "nats": {
+      "hex": "27AAE1",
+      "path": "M12.004 0H.404v18.807h9.938l1.714 1.602v-.026L15.966 24v-5.193h7.63V0H12.003zm7.578 14.45H15.38L6.898 6.519v7.93H4.116V4.376h4.349l8.344 7.784V4.375h2.773V14.45z"
+    },
+    "metabase": {
+      "hex": "509EE3",
+      "path": "M5.385 6.136c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.654 1.438 1.461zm-1.438 2.63c-.794 0-1.438.654-1.438 1.461s.644 1.461 1.438 1.461 1.438-.654 1.438-1.461-.644-1.461-1.438-1.461zm5.465-2.63c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.654 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.499-1.088 1.111.488 1.111 1.088 1.111 1.088-.498 1.088-1.111zm-1.088 5.592c.794 0 1.438-.654 1.438-1.461s-.644-1.461-1.438-1.461-1.438.654-1.438 1.461.643 1.461 1.438 1.461zm5.464-5.592c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.654 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.498-1.088 1.111S11.4 7.247 12 7.247s1.088-.498 1.088-1.111zm.35-4.675c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461S11.206 0 12 0s1.438.654 1.438 1.461zm-.35 0C13.088.848 12.6.35 12 .35s-1.088.498-1.088 1.111S11.4 2.572 12 2.572s1.088-.498 1.088-1.111zm.35 8.806c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.654 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.498-1.088 1.111.488 1.111 1.088 1.111 1.088-.499 1.088-1.111zm4.376-4.131c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.654 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.498-1.088 1.111.488 1.111 1.088 1.111 1.088-.498 1.088-1.111zm2.939 1.461c.794 0 1.438-.654 1.438-1.461s-.644-1.461-1.438-1.461-1.438.654-1.438 1.461.644 1.461 1.438 1.461zm-4.027 1.209c-.794 0-1.438.654-1.438 1.461s.644 1.461 1.438 1.461 1.438-.654 1.438-1.461-.643-1.461-1.438-1.461zm4.027 0c-.794 0-1.438.654-1.438 1.461s.644 1.461 1.438 1.461 1.438-.654 1.438-1.461-.644-1.461-1.438-1.461zM3.947 12.857a1.45 1.45 0 0 0-1.438 1.461c0 .807.644 1.461 1.438 1.461s1.438-.654 1.438-1.461a1.45 1.45 0 0 0-1.438-1.461zm5.465 1.5c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.655 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.498-1.088 1.111.488 1.111 1.088 1.111 1.088-.498 1.088-1.111zM12 12.896c-.794 0-1.438.654-1.438 1.461s.644 1.461 1.438 1.461 1.438-.654 1.438-1.461-.644-1.461-1.438-1.461zm5.464 1.461c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.655 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.498-1.088 1.111.488 1.111 1.088 1.111 1.088-.498 1.088-1.111zm2.939-1.461c-.794 0-1.438.654-1.438 1.461s.644 1.461 1.438 1.461 1.438-.654 1.438-1.461-.644-1.461-1.438-1.461zM3.947 16.948c-.794 0-1.438.654-1.438 1.461s.644 1.461 1.438 1.461 1.438-.654 1.438-1.461-.644-1.461-1.438-1.461zm5.465 1.5c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.654 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.498-1.088 1.111.488 1.111 1.088 1.111 1.088-.498 1.088-1.111zm4.376 0c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.654 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.498-1.088 1.111.488 1.111 1.088 1.111 1.088-.498 1.088-1.111zm.35 4.091c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.654 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.498-1.088 1.111S11.4 23.65 12 23.65s1.088-.498 1.088-1.111zm4.376-4.091c0 .807-.644 1.461-1.438 1.461s-1.438-.654-1.438-1.461.644-1.461 1.438-1.461 1.438.654 1.438 1.461zm-.35 0c0-.613-.488-1.111-1.088-1.111s-1.088.498-1.088 1.111.488 1.111 1.088 1.111 1.088-.498 1.088-1.111zm2.939-1.461c-.794 0-1.438.654-1.438 1.461s.644 1.461 1.438 1.461 1.438-.654 1.438-1.461-.644-1.461-1.438-1.461z"
+    },
+    "nginx": {
+      "hex": "009639",
+      "path": "M12 0L1.605 6v12L12 24l10.395-6V6L12 0zm6 16.59c0 .705-.646 1.29-1.529 1.29-.631 0-1.351-.255-1.801-.81l-6-7.141v6.66c0 .721-.57 1.29-1.274 1.29H7.32c-.721 0-1.29-.6-1.29-1.29V7.41c0-.705.63-1.29 1.5-1.29.646 0 1.38.255 1.83.81l5.97 7.141V7.41c0-.721.6-1.29 1.29-1.29h.075c.72 0 1.29.6 1.29 1.29v9.18H18z"
+    },
+    "nextcloud": {
+      "hex": "0082C9",
+      "path": "M12.018 6.537c-2.5 0-4.6 1.712-5.241 4.015-.56-1.232-1.793-2.105-3.225-2.105A3.569 3.569 0 0 0 0 12a3.569 3.569 0 0 0 3.552 3.553c1.432 0 2.664-.874 3.224-2.106.641 2.304 2.742 4.016 5.242 4.016 2.487 0 4.576-1.693 5.231-3.977.569 1.21 1.783 2.067 3.198 2.067A3.568 3.568 0 0 0 24 12a3.569 3.569 0 0 0-3.553-3.553c-1.416 0-2.63.858-3.199 2.067-.654-2.284-2.743-3.978-5.23-3.977zm0 2.085c1.878 0 3.378 1.5 3.378 3.378 0 1.878-1.5 3.378-3.378 3.378A3.362 3.362 0 0 1 8.641 12c0-1.878 1.5-3.378 3.377-3.378zm-8.466 1.91c.822 0 1.467.645 1.467 1.468s-.644 1.467-1.467 1.468A1.452 1.452 0 0 1 2.085 12c0-.823.644-1.467 1.467-1.467zm16.895 0c.823 0 1.468.645 1.468 1.468s-.645 1.468-1.468 1.468A1.452 1.452 0 0 1 18.98 12c0-.823.644-1.467 1.467-1.467z"
+    },
+    "plausible": {
+      "hex": "5850EC",
+      "path": "M12.1835.0017c-.6378-.0097-1.2884.022-1.7246.0996C8.601.424 7.035 1.2116 5.7384 2.4782 4.406 3.7806 3.582 5.299 3.1818 7.1929l-.1387.6445c-.0118 5.3872-.0233 10.7744-.035 16.1617.2914.0081.591-.0392.8416-.0606 2.348-.2868 4.3442-1.7083 5.4315-3.8651.2749-.5497.472-1.182.6094-1.9707.1135-.6691.1195-.8915.1016-4.3807l-.0176-3.6737.1425-.3574c.1972-.49.7425-1.0352 1.2324-1.2324l.3574-.1426 3.3457-.0058c1.8401 0 3.4545-.025 3.58-.0489.5854-.1135 1.2118-.6027 1.4628-1.1464.0717-.1494.1671-.4415.209-.6387.0657-.3286.0604-.4186-.0352-.789-.2987-1.0993-1.3503-2.6234-2.4257-3.5136C16.6247 1.1638 15.2798.4887 13.828.1482c-.3824-.0866-1.0067-.1368-1.6445-.1465zm8.5369 6.8006c-.0506.1798-.098.3662-.172.5215-.3358.7278-1.0382 1.2776-1.8221 1.4296-3.6737.0566-2.5392.0561-3.6737.0566l-3.248.0059-.2695.1074c-.3135.1262-.827.6397-.9531.9531l-.1074.2676.0175 3.576c.0149 2.8888.007 3.5821-.0605 4.125a8.9918 8.9918 0 0 0 1.5683.1386c4.9662.0001 8.992-4.0258 8.992-8.992a8.9918 8.9918 0 0 0-.2715-2.1893Z"
+    },
+    "umami": {
+      "hex": "000000",
+      "path": "M2.203 8.611H.857a.845.845 0 0 0-.841.841v.858a13.31 13.31 0 0 0-.016.6c0 6.627 5.373 12 12 12 6.527 0 11.837-5.212 11.996-11.701 0-.025.004-.05.004-.075V9.452a.845.845 0 0 0-.841-.841h-1.346c-1.159-4.329-5.112-7.521-9.805-7.521-4.692 0-8.645 3.192-9.805 7.521Zm18.444 0H3.37c1.127-3.702 4.57-6.399 8.638-6.399 4.069 0 7.512 2.697 8.639 6.399Z"
+    },
+    "directus": {
+      "hex": "263238",
+      "path": "M19.187 13.909a1.74 1.74 0 0 1-.286-.092.657.657 0 0 1-.203-.139c.056-.488 0-.912.047-1.392.184-1.862 1.355-1.272 2.406-1.577.655-.184 1.31-.562 1.475-1.336a13.528 13.528 0 0 0-2.397-2.204c-2.85-2.028-6.574-2.84-9.958-2.277a5.113 5.113 0 0 0 2.238 2.074s-.917 0-1.703-.587c-.23.092-.692.274-.913.384a5.094 5.094 0 0 0 6.63.37c-.01.017-.185.285-.397 1.4-.47 2.38-1.826 2.195-3.504 1.596-3.485-1.264-5.403-.093-7.145-2.49-.507.286-.82.82-.82 1.402 0 .599.331 1.106.81 1.383.262-.348.38-.446.836-.446-.706.4-.79.75-1.094 1.718-.368 1.171-.212 2.37-1.936 2.683-.913.046-.894.664-1.226 1.586-.415 1.199-.968 1.678-2.047 2.812.443.535.904.6 1.374.406.968-.406 1.715-1.66 2.415-2.471.784-.904 2.665-.517 4.085-1.402.977-.599 1.457-1.41.811-2.784a2.72 2.72 0 0 1 .701 1.66c1.641-.213 3.836 1.788 5.836 2.12a3.574 3.574 0 0 1-.488-.82c-.23-.554-.304-1.06-.258-1.503.184 1.097 1.29 2.507 3.07 2.637.452.036.95-.019 1.466-.176.618-.184 1.19-.424 1.872-.295.507.093.977.35 1.272.784.443.645 1.41.784 1.844-.009-.977-2.554-3.67-2.72-4.813-3.015z"
+    },
+    "keycloak": {
+      "hex": "4D4D4D",
+      "path": "m18.742 1.182-12.493.002C4.155 4.784 2.079 8.393 0 12.002c2.071 3.612 4.162 7.214 6.252 10.816l12.49-.004 3.089-5.404h2.158v-.002H24L23.996 6.59h-2.168zM8.327 4.792h2.081l1.04 1.8-3.12 5.413 3.117 5.403-1.035 1.81H8.327a2047.566 2047.566 0 0 0-4.168-7.204C5.547 9.606 6.937 7.2 8.327 4.792Zm6.241 0 2.086.003c1.393 2.405 2.78 4.813 4.166 7.222l-4.167 7.2h-2.08c-.382-.562-1.038-1.808-1.038-1.808l3.123-5.405-3.124-5.413z"
+    },
+    "mattermost": {
+      "hex": "0058CC",
+      "path": "M12.081 0C7.048-.034 2.339 3.125.637 8.153c-2.125 6.276 1.24 13.086 7.516 15.21 6.276 2.125 13.086-1.24 15.21-7.516 1.727-5.1-.172-10.552-4.311-13.557l.126 2.547c2.065 2.282 2.88 5.512 1.852 8.549-1.534 4.532-6.594 6.915-11.3 5.321-4.708-1.593-7.28-6.559-5.745-11.092 1.031-3.046 3.655-5.121 6.694-5.67l1.642-1.94A4.87 4.87 0 0 0 12.08 0zm3.528 1.094a.284.284 0 0 0-.123.024l-.004.001a.33.33 0 0 0-.109.071c-.145.142-.657.828-.657.828L13.6 3.4l-1.3 1.585-2.232 2.776s-1.024 1.278-.798 2.851c.226 1.574 1.396 2.34 2.304 2.648.907.307 2.302.408 3.438-.704 1.135-1.112 1.098-2.75 1.098-2.75l-.087-3.56-.07-2.05-.047-1.775s.01-.856-.02-1.057a.33.33 0 0 0-.035-.107l-.006-.012-.007-.011a.277.277 0 0 0-.229-.14z"
+    },
+    "paperless-ngx": {
+      "hex": "17541F",
+      "path": "M6.338 23.028c-.117-.56-.353-1.678-.382-1.678-4.977-2.975-4.388-8.128-2.739-11.073.353 3.71 6.92 6.273 3.092 10.808-.03.059.177.765.353 1.413.766-1.296 1.915-2.856 1.856-3.004C3.806 8.01 18.53 7.126 21.592 0c1.385 6.89-.706 17.55-12.544 20.26-.06.03-2.15 3.71-2.238 3.74 0-.059-.884-.03-.766-.324.059-.177.177-.412.294-.648zm-.147-2.768c1.502-1.737-.265-4.712-1.325-5.683 1.796 3.092 1.679 4.888 1.325 5.683z"
+    },
+    "forgejo": {
+      "hex": "FB923C",
+      "path": "M16.7773 0c1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.1175a7.0759 7.0759 0 0 1 4.148-1.4205l.1176-.001 1.3385.0002c.4973-.8827 1.4434-1.4788 2.5288-1.4788 1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.319c.8827.4973 1.4788 1.4434 1.4788 2.5287 0 1.602-1.2986 2.9005-2.9005 2.9005-1.6018 0-2.9004-1.2986-2.9004-2.9005 0-1.0853.596-2.0314 1.4788-2.5287l-.0002-9.9831c0-3.887 3.1195-7.0453 6.9915-7.108l.1176-.001h1.3385C14.7458.5962 15.692 0 16.7773 0ZM7.2227 19.9052c-.6596 0-1.1943.5347-1.1943 1.1943s.5347 1.1943 1.1943 1.1943 1.1944-.5347 1.1944-1.1943-.5348-1.1943-1.1944-1.1943Zm9.5546-10.4644c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Zm0-7.7346c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Z"
+    },
+    "listmonk": {
+      "hex": "0055D4",
+      "path": "M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0m0 5.1953A6.8047 6.8047 0 0 1 18.8047 12 6.8047 6.8047 0 0 1 12 18.8047 6.8047 6.8047 0 0 1 5.1953 12 6.8047 6.8047 0 0 1 12 5.1953"
+    },
+    "wiki-js": {
+      "hex": "1976D2",
+      "path": "M17.801 13.557c.148.098.288.202.417.313 1.854 1.6 3.127 4.656 2.582 7.311-1.091-.255-5.747-1.055-7.638-3.383-.91-1.12-1.366-2.081-1.569-2.885a5.65 5.65 0 0 0 .034-.219c.089.198.197.35.313.466.24.24.521.335.766.372.304.046.594-.006.806-.068l.001.001c.05-.015.433-.116.86-.342.325-.173 2.008-.931 3.428-1.566Zm-7.384 1.435C9.156 16.597 6.6 18.939.614 18.417c.219-1.492 1.31-3.019 2.51-4.11.379-.345.906-.692 1.506-1.009.286.168.598.332.939.486 2.689 1.221 3.903 1.001 4.89.573a1.3 1.3 0 0 0 .054-.025 6.156 6.156 0 0 0-.096.66Zm4.152-.462c.38-.341.877-.916 1.383-1.559-.389-.15-.866-.371-1.319-.591-.598-.29-1.305-.283-2.073-.315a4.685 4.685 0 0 1-.804-.103c.014-.123.027-.246.038-.369.062.104.673.057.871.057.354 0 1.621.034 3.074-.574 1.452-.608 2.55-1.706 3.022-3.225.474-1.52.22-3.091-.168-3.952-.169.709-1.453 2.381-1.926 2.871-.473.489-2.381 2.296-2.972 2.921-.7.74-.688.793-1.332 1.302-.202.19-.499.402-.563.53.027-.338.039-.675.027-.997a7.653 7.653 0 0 0-.032-.523c.322-.059.567-.522.567-.861 0-.224-.106-.247-.271-.229.075-.894.382-3.923 1.254-4.281.218.109.831.068.649-.295-.182-.364-.825-.074-1.081.266-.28.374-.956 2.046-.92 4.324-.113.014-.174.033-.322.033-.171 0-.321-.04-.433-.05.034-2.275-.714-3.772-.84-4.169-.12-.375-.491-.596-.781-.596-.146 0-.272.056-.333.179-.182.363.459.417.677.308.706.321 1.156 3.519 1.254 4.277-.125-.006-.199.035-.199.233 0 .311.17.756.452.843a.442.442 0 0 0-.007.03s-.287.99-.413 2.189a4.665 4.665 0 0 1-.718-.225c-.714-.286-1.355-.583-2.019-.566-.664.018-1.366.023-1.804-.036-.438-.058-.649-.15-.649-.15s-.234.365.257 1.075c.42.607 1.055 1.047 1.644 1.18.589.134 1.972.18 2.785-.377.16-.109.317-.228.459-.34a8.717 8.717 0 0 0-.013.626c-.289.753-.571 1.993-.268 3.338 0-.001.701-.842.787-2.958.006-.144.009-.271.01-.383.052-.248.103-.518.148-.799.072.135.151.277.234.413.511.842 1.791 1.37 2.383 1.49.091.019.187.032.285.038Zm-1.12.745c-.188.055-.445.1-.713.059-.21-.031-.45-.11-.655-.316-.169-.168-.312-.419-.401-.789a9.837 9.837 0 0 0 .039-.82l.049-.243c.563.855 1.865 1.398 2.476 1.522.036.008.072.014.109.02l-.013.009c-.579.415-.76.503-.891.558Zm6.333-2.818c-.257.114-4.111 1.822-5.246 2.363.98-.775 3.017-3.59 3.699-4.774 1.062.661 1.468 1.109 1.623 1.441.101.217.09.38.096.515a.57.57 0 0 1-.172.455Zm-9.213 1.62a1.606 1.606 0 0 1-.19.096c-.954.414-2.126.61-4.728-.571-2.023-.918-3.024-2.157-3.371-2.666.476.161 1.471.473 2.157.524.282.021.703.068 1.167.125.021.209.109.486.345.829l.001.001c.451.651 1.134 1.119 1.765 1.262.622.141 2.083.182 2.942-.407a3.12 3.12 0 0 0 .132-.093l.001.179a6.052 6.052 0 0 0-.221.721Zm5.512-1.271a17.49 17.49 0 0 1-1.326-.589c.437.042 1.054.083 1.692.108-.121.162-.244.323-.366.481Zm.932-1.26c-.12.17-.245.343-.373.517-.241.018-.478.03-.709.038a29.05 29.05 0 0 1-.741-.048c.608-.065 1.228-.252 1.823-.507Zm.22-.315c-.809.382-1.679.648-2.507.648-.472 0-.833.018-1.139.039v.001c-.324-.031-.665-.039-1.019-.054a3.555 3.555 0 0 1-.152-.009c.102-.002.192-.006.249-.006.363 0 1.662.034 3.151-.589 1.508-.632 2.645-1.773 3.136-3.351.37-1.186.31-2.402.086-3.312.458-.336.86-.651 1.147-.91.501-.451.743-.733.848-.869.199.206.714.864.685 2.138-.036 1.611-.606 3.187-1.501 4.154a9.099 9.099 0 0 1-1.321 1.132 11.978 11.978 0 0 0-.644-.422l-.089-.055-.051.091c-.184.332-.5.825-.879 1.374ZM4.763 5.817c-.157 1.144.113 2.323.652 3.099.539.776 2.088 2.29 3.614 2.505.991.14 2.055.134 2.055.134s-.593-.576-1.114-1.66c-.521-1.085-.948-2.104-1.734-2.786-.785-.681-1.601-1.416-2.045-1.945-.444-.53-.59-.86-.59-.86s-.656.175-.838 1.513Zm14.301 4.549a9.162 9.162 0 0 0 1.3-1.12c.326-.352.611-.782.845-1.265 1.315.145 2.399.371 2.791.434 0 0-.679 1.971-3.945 3.022l-.016-.035c-.121-.26-.385-.594-.975-1.036Zm-11.634.859a8.537 8.537 0 0 1-.598-.224c-1.657-.693-2.91-1.944-3.449-3.678-.498-1.601-.292-3.251.091-4.269.225.544.758 1.34 1.262 2.01a3.58 3.58 0 0 0-.172.726c-.163 1.197.123 2.428.687 3.24.416.599 1.417 1.62 2.555 2.193-.128.002-.253.003-.376.002Zm-1.758-.077c-.958-.341-1.901-.787-2.697-1.368C-.07 7.559 0 6.827 0 6.827s1.558-.005 3.088.179c.03.126.065.251.104.377.557 1.791 1.851 3.086 3.562 3.803l.047.019a4.254 4.254 0 0 1-.267-.026h-.001c-.401-.053-.595-.135-.595-.135l-.157-.069-.092.144-.017.029Zm6.807-1.59c.086.017.136.058.136.145 0 .197-.242.5-.597.597l-.01-.161a.887.887 0 0 0 .283-.243c.078-.099.142-.217.188-.338Zm-1.591.006c.033.1.076.197.129.282.061.097.134.18.217.24l-.021.083c-.276-.093-.424-.293-.424-.466 0-.078.035-.119.099-.139Zm-.025-.664c-.275-.816-.795-2.022-1.505-2.179-.296.072-.938.096-.691-.145.246-.24 1.085-.048 1.283.217.145.194.744.806 1.011 1.737l.032.227a.324.324 0 0 0-.13.143Zm1.454-.266c.251-.99.889-1.639 1.039-1.841.197-.265 1.036-.457 1.283-.217.247.241-.395.217-.691.145-.69.152-1.2 1.296-1.481 2.109a.364.364 0 0 0-.067-.059.37.37 0 0 0-.092-.043l.009-.094Zm4.802-2.708a9.875 9.875 0 0 1-.596.705c-.304.315-1.203 1.176-1.963 1.916.647-.955 1.303-1.806 2.184-2.376.123-.08.249-.161.375-.245Z"
+    },
+    "bookstack": {
+      "hex": "0288D1",
+      "path": "M.3013 17.6146c-.1299-.3387-.5228-1.5119-.1337-2.4314l9.8273 5.6738a.329.329 0 0 0 .3299 0L24 12.9616v2.3542l-13.8401 7.9906-9.8586-5.6918zM.1911 8.9628c-.2882.8769.0149 2.0581.1236 2.4261l9.8452 5.6841L24 9.0823V6.7275L10.3248 14.623a.329.329 0 0 1-.3299 0L.1911 8.9628zm13.1698-1.9361c-.1819.1113-.4394.0015-.4852-.2064l-.2805-1.1336-2.1254-.1752a.33.33 0 0 1-.1378-.6145l5.5782-3.2207-1.7021-.9826L.6979 8.4935l9.462 5.463 13.5104-7.8004-4.401-2.5407-5.9084 3.4113zm-.1821-1.7286.2321.938 5.1984-3.0014-2.0395-1.1775-4.994 2.8834 1.3099.108a.3302.3302 0 0 1 .2931.2495zM24 9.845l-13.6752 7.8954a.329.329 0 0 1-.3299 0L.1678 12.0667c-.3891.919.003 2.0914.1332 2.4311l9.8589 5.692L24 12.1993V9.845z"
+    },
+    "excalidraw": {
+      "hex": "6965DB",
+      "path": "M23.9428 19.8058a.1962.1962 0 0 0-.1679-.0337c-1.26-1.8552-2.8727-3.6104-4.4186-5.3152l-.2521-.284c-.0016-.0732-.0667-.1207-.1342-.1504-.0284-.0277-.0562-.0558-.0843-.0837-.0505-.1005-.1685-.1673-.2858-.1005-.4706.2347-.9068.5855-1.3274.9195-.5536.4345-1.1085.8695-1.6296 1.354a5.0577 5.0577 0 0 0-.5879.6185c-.0842.1168-.0168.2172.0843.2672-.3701.3677-.7402.736-1.109 1.1198a.1896.1896 0 0 0-.0506.1342c0 .05.0337.1.0668.1168l.6559.5012v.0169c.9237.9194 2.5538 2.1729 4.2844 3.5268.2515.201.5205.4014.7727.6017.1173.1342.2346.2847.3357.4182.0506.0662.1685.0837.2353.0331.0337.0337.0843.0668.118.1005a.2395.2395 0 0 0 .1004.0337.1534.1534 0 0 0 .1348-.0668.2371.2371 0 0 0 .0331-.1004c.0175 0 .0169.0168.0337.0168a.1915.1915 0 0 0 .1348-.0505l3.058-3.3265c.1198-.1159.0135-.2668-.0005-.2672zm-7.6277-.1336-1.5459-1.1704-.151-.0998c-.0337-.0169-.0674-.0506-.1011-.0668l-.1174-.1005c.6597-.659 1.3297-1.3074 1.9996-1.9557-.4874.4844-1.4622 1.9057-1.2606 2.3733.0023 0 .0186.0419.0674.0842.3704.311.7398.6232 1.109.9357zm4.0997 3.1261-1.277-.97a26.9056 26.9056 0 0 0-1.5795-1.5044c.689.5181 1.2769.9694 1.3611 1.053.6722.585.6379.485 1.0922.8696l.5542.4008c-.0735.103-.151.1477-.151.151zm.3357.2503-.0337-.0168c.0506-.0331.1011-.0668.1517-.1168zM.5885 3.4751c.0331.2172.0843.4344.1174.6354.2015 1.103.4031 2.1061.7726 2.8583l.1516.568c.0506.2173.1342.485.2185.5519.8568.7521 2.1674 1.8714 3.5785 2.9419a.1775.1775 0 0 0 .2185 0s0 .0162.0168.0162a.1528.1528 0 0 0 .118.0506.1912.1912 0 0 0 .1341-.0506c1.798-1.9887 3.1418-3.6267 4.0997-4.9974.0674-.0668.0843-.1673.0843-.251.0668-.0668.1173-.1504.1847-.2004.0668-.0668.0668-.184 0-.2346l-.0168-.0163c0-.033-.0169-.0836-.0506-.1005-.42-.4007-.722-.6848-1.0416-.9856A93.5546 93.5546 0 0 1 6.822 1.9876c-.0169-.0169-.0337-.0337-.0674-.0337-.3358-.1168-1.0248-.2341-1.8817-.3845C3.596 1.3527 1.865 1.0519.3027.583c0 0-.1011 0-.118.0169L.1348.6505C.0498.7139.0222.7058 0 .7167.017.8172.017.884.0506 1.0013c0 .0331.0673.3009.0673.334zm7.1909 4.7802-.0337.0337a.0362.0362 0 0 1 .0337-.0337zM6.553 2.238c.101.1005.5211.5019.6216.5855-.4369-.201-1.5284-.7022-2.0333-.8695.5043.1005 1.1933.201 1.4117.284ZM.7901 1.4027c.2521.4344.4537 1.9388.6553 3.4095-.118-.4682-.2016-.9357-.3027-1.3708C.9917 2.673.84 1.9876.6385 1.3858c.1232 0 .1516.0212.1516.0169zm-.2858-.3683c0-.0162 0-.033-.0169-.033.0843 0 .1342.0168.2016.0499.0006.0057-.1448-.0169-.1847-.0169zM23.6738.8172c.0169-.0662-.3358-.367-.2184-.3845.2527-.0163.2527-.4008 0-.4008-.3358.0169-.6884.0999-1.008.1504-.5878.1168-1.1926.2341-1.781.3671-1.327.2846-2.6375.5855-3.9481.937-.4032.1167-.857.2003-1.2432.4007-.1348.0668-.118.2004-.0506.284-.0337.0169-.0505.0169-.0842.0337-.1174.0169-.2185.0337-.3358.05-.1011.0168-.1516.1004-.1348.201 0 .0162.0169.0499.0169.0661-.7059.9363-1.4954 1.9226-2.3523 2.9757-.84.9694-1.7306 1.9893-2.6212 3.0424-2.8396 3.3096-6.0487 7.0705-9.5936 10.38a.1613.1613 0 0 0 0 .2341c.0169.0163.0337.0331.0506.0331-.0506.0506-.1011.0843-.1517.1336-.0337.0337-.0505.0668-.0505.1005a.364.364 0 0 0-.0668.0837c-.0674.0667-.0674.1835.0169.234.0667.0662.1847.0662.2346-.0168.0175-.0169.0175-.0337.0337-.0337a.2648.2648 0 0 1 .3701 0c.2016.2178.4032.435.588.6186l-.4201-.3508c-.0674-.0668-.1847-.05-.2347.0168-.068.0662-.0511.1835.0163.234l4.4691 3.7273c.0337.0337.0674.0337.118.0337.0505 0 .0842-.0169.1173-.0506l.101-.0999c.017.0163.05.0163.0669.0163.0505 0 .0842-.0163.118-.05 6.0486-6.0505 10.9216-10.6141 16.4997-14.6927.05-.0331.0668-.1.0668-.1505.0674 0 .118-.05.151-.1167 1.0254-3.1255 1.227-5.9007 1.2938-7.2709 0-.0579.0169-.0371.0169-.0668.0168-.0337.0168-.0505.0168-.0505a.9784.9784 0 0 0-.0668-.6186zm-10.82 4.9144c.2684-.3008.5374-.6186.8064-.9026-1.7306 2.2734-4.6033 5.7665-8.67 9.9288C7.7626 11.699 10.5517 8.54 12.854 5.7316ZM5.1414 23.4662c-.0162-.0168-.0162-.0168 0-.0168zm2.5033-2.156c.1348-.1505.2695-.284.4206-.4345 0 0 0 .0163.0168.0163-.2236.1978-.4334.4182-.4374.4182zm.6896-.6686c.0994-.0993.14-.1724.2852-.3177.9917-1.0193 2.0164-2.0393 3.058-3.0755l.0169-.0168c.2521-.2004.5542-.4177.8232-.6186a228.0627 228.0627 0 0 0-4.1833 4.0286zm6.5187-16.732c-.5543.719-1.1759 1.6716-1.697 2.4238-1.6463 2.3733-6.9393 8.1735-7.0566 8.274A1189.6473 1189.6473 0 0 1 1.26 19.204l-.1005.1005c-.0843-.1005-.0843-.251.0168-.3346 7.476-7.0037 12.0132-12.837 13.845-15.3944-.0506.1167-.0843.2166-.1685.334zm2.9064 3.4269c-.6716-.3851-.9905-.9869-.8064-1.5712l.0506-.201a.7753.7753 0 0 1 .0842-.1666c.1848-.301.4538-.5518.7564-.7023.0163 0 .0331 0 .05-.0168-.0169-.0337-.0169-.0837-.0169-.1336.0169-.1005.0843-.1673.2016-.1673.2016 0 .8238.1841 1.059.3845.0669.05.1343.1168.2017.1836.0842.1004.2184.2677.2852.4013.0337.0169.0674.1841.118.2678.0336.1336.0667.284.0505.4176-.0169.0169 0 .1167-.0169.1167a1.6055 1.6055 0 0 1-.2184.6186c-.0307.0307.0064.0119-.0505.0668-.0843.1342-.2016.251-.319.3346-.3869.2672-.8238.3508-1.2606.234-.1105-.0473-.1672-.0667-.1685-.0667zm4.3692 1.4039c0 .0168-.0168.0499 0 .0667-.0337 0-.0505.0169-.0842.0337-1.3274.9689-2.6212 1.9888-3.915 3.0256 1.109-.9868 2.218-1.9894 3.3776-2.9756.3358-.3009.5711-.6854.6379-1.1199l.1685-1.003v-.0332c.0842-.201.4032-.1173.3526.1-.0042-.0012-.1731.795-.5374 1.9057z"
+    },
+    "ntfy": {
+      "hex": "317F6F",
+      "path": "M12.597 13.693v2.156h6.205v-2.156ZM5.183 6.549v2.363l3.591 1.901.023.01-.023.009-3.591 1.901v2.35l.386-.211 5.456-2.969V9.729ZM3.659 2.037C1.915 2.037.42 3.41.42 5.154v.002L.438 18.73 0 21.963l5.956-1.583h14.806c1.744 0 3.238-1.374 3.238-3.118V5.154c0-1.744-1.493-3.116-3.237-3.117h-.001zm0 2.2h17.104c.613.001 1.037.447 1.037.917v12.108c0 .47-.424.916-1.038.916H5.633l-3.026.915.031-.179-.017-13.76c0-.47.424-.917 1.038-.917z"
+    },
+    "searxng": {
+      "hex": "3050FF",
+      "path": "m13.716 17.261 6.873 6.582L24 20.282l-6.824-6.536a9.11 9.11 0 0 0 1.143-4.43c0-5.055-4.105-9.159-9.16-9.159S0 4.261 0 9.316c0 5.055 4.104 9.159 9.159 9.159a9.11 9.11 0 0 0 4.557-1.214ZM9.159 2.773a6.546 6.546 0 0 1 6.543 6.543 6.545 6.545 0 0 1-6.543 6.542 6.545 6.545 0 0 1-6.542-6.542 6.545 6.545 0 0 1 6.542-6.543ZM7.26 5.713a4.065 4.065 0 0 1 4.744.747 4.064 4.064 0 0 1 .707 4.749l1.157.611a5.376 5.376 0 0 0-.935-6.282 5.377 5.377 0 0 0-6.274-.987l.601 1.162Z"
+    }
+  }
+}

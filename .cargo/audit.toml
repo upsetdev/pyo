@@ -1,0 +1,18 @@
+# cargo audit: advisories checked and found not to apply to Pyo.
+[advisories]
+ignore = [
+    # rsa (Marvin attack: timing of RSA decryption and signing with a
+    # private key). Only reached through webauthn-rs (crypto-glue), which
+    # uses RSA public keys to verify passkey and attestation signatures.
+    # Pyo never holds an RSA private key there and never decrypts with
+    # one, so there's no oracle to time. The fixed rsa 0.10.0 dropped the
+    # sha2 feature crypto-glue 0.2.2 (its latest) asks for, so it can't be
+    # used until crypto-glue moves to it.
+    "RUSTSEC-2023-0071",
+    # libsqlite3-sys (SQLite CVE): listed in Cargo.lock only because
+    # sqlx-sqlite is a weak optional dependency of sqlx. Pyo uses sqlx's
+    # Postgres driver alone; neither crate is built (`cargo tree -i
+    # libsqlite3-sys --target all` prints nothing). sqlx 0.9.0 caps it
+    # below the fixed 0.39.
+    "RUSTSEC-2026-0459",
+]

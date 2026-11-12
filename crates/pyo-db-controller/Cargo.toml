@@ -1,0 +1,25 @@
+[package]
+name = "pyo-db-controller"
+description = "Runs Pyo's built-in databases: Postgres through CloudNativePG, Valkey with Sentinel and MySQL through MOCO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+futures.workspace = true
+k8s-openapi = { version = "0.28.0", features = ["latest"] }
+kube = { version = "4.2.0", default-features = false, features = ["runtime", "client", "derive", "rustls-tls", "unstable-runtime"] }
+mysql_async = { version = "0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "aws-lc-rs", "tls12"] }
+pyo-proto = { path = "../pyo-proto" }
+pyo-resp.workspace = true
+rand = "0.9.5"
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }

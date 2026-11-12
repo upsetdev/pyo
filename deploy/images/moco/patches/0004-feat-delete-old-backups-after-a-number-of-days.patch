@@ -1,0 +1,436 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pyo <pyo@localhost>
+Date: Tue, 10 Nov 2026 16:19:56 +0700
+Subject: [PATCH 4/4] feat: delete old backups after a number of days
+
+Backups are never deleted, so the bucket grows forever unless a
+lifecycle rule removes old objects, which can also remove a backup a
+restore still needs.  Add BackupPolicy spec.retentionDays (moco-backup
+backup --retention-days).  After each successful backup, the backups
+that no restore to a time within that many days needs are deleted:
+those older than the newest backup taken at or before the cutoff.
+0, the default, keeps every backup, as before.
+
+A failure to delete is logged and does not fail the backup Job.
+Bucket gets a Delete method for this.
+---
+ api/v1beta2/backuppolicy_types.go             |  7 ++
+ backup/mock_test.go                           |  5 ++
+ backup/retention.go                           | 77 +++++++++++++++++++
+ backup/retention_test.go                      | 49 ++++++++++++
+ .../templates/generated/crds/moco_crds.yaml   |  5 ++
+ cmd/moco-backup/cmd/backup.go                 | 17 +++-
+ .../bases/moco.cybozu.com_backuppolicies.yaml |  5 ++
+ ...nition_backuppolicies.moco.cybozu.com.yaml |  5 ++
+ controllers/mysqlcluster_controller.go        |  3 +
+ docs/backup.md                                |  9 ++-
+ docs/crd_backuppolicy_v1beta2.md              |  1 +
+ docs/moco-backup.md                           |  4 +-
+ docs/usage.md                                 |  6 +-
+ pkg/bucket/azure.go                           |  5 ++
+ pkg/bucket/gcs.go                             |  4 +
+ pkg/bucket/interface.go                       |  3 +
+ pkg/bucket/s3.go                              |  8 ++
+ 17 files changed, 206 insertions(+), 7 deletions(-)
+ create mode 100644 backup/retention.go
+ create mode 100644 backup/retention_test.go
+
+diff --git a/api/v1beta2/backuppolicy_types.go b/api/v1beta2/backuppolicy_types.go
+index daedd43..ab275a8 100644
+--- a/api/v1beta2/backuppolicy_types.go
++++ b/api/v1beta2/backuppolicy_types.go
+@@ -91,6 +91,13 @@ type BackupPolicySpec struct {
+ 	// +nullable
+ 	// +optional
+ 	FailedJobsHistoryLimit *int32 `json:"failedJobsHistoryLimit,omitempty"`
++
++	// The number of days backups are kept for.  After each successful
++	// backup, the backups that no restore to a time within this many days
++	// needs are deleted from the bucket.  0, the default, keeps every backup.
++	// +kubebuilder:validation:Minimum=0
++	// +optional
++	RetentionDays int32 `json:"retentionDays,omitempty"`
+ }
+ 
+ //nolint:unparam
+diff --git a/backup/mock_test.go b/backup/mock_test.go
+index e88dfd2..195a57a 100644
+--- a/backup/mock_test.go
++++ b/backup/mock_test.go
+@@ -153,6 +153,11 @@ func (b *mockBucket) Get(ctx context.Context, key string) (io.ReadCloser, error)
+ 	return io.NopCloser(bytes.NewReader(data)), nil
+ }
+ 
++func (b *mockBucket) Delete(ctx context.Context, key string) error {
++	delete(b.contents, key)
++	return nil
++}
++
+ func (b *mockBucket) List(ctx context.Context, prefix string) ([]string, error) {
+ 	keys := make([]string, 0, len(b.contents))
+ 	for k := range b.contents {
+diff --git a/backup/retention.go b/backup/retention.go
+new file mode 100644
+index 0000000..5dbf213
+--- /dev/null
++++ b/backup/retention.go
+@@ -0,0 +1,77 @@
++package backup
++
++import (
++	"context"
++	"fmt"
++	"sort"
++	"strings"
++	"time"
++
++	"github.com/cybozu-go/moco/pkg/constants"
++)
++
++// expiredKeys returns the keys under dir ("<prefix>/<namespace>/<name>/")
++// that no restore to a time after cutoff needs.
++//
++// Each backup is a directory "<dir><YYYYMMDD-hhmmss>/" with the full dump
++// taken at that time and the binary logs from then until the next backup.
++// A restore to a time T uses the newest backup taken at or before T, so
++// restoring to any time after cutoff needs the newest backup taken at or
++// before cutoff and every later one.  The older backups are expired.
++// Keys that are not in a backup directory are never expired.
++func expiredKeys(keys []string, dir string, cutoff time.Time) []string {
++	byTime := make(map[time.Time][]string)
++	for _, k := range keys {
++		rest, ok := strings.CutPrefix(k, dir)
++		if !ok {
++			continue
++		}
++		name, _, ok := strings.Cut(rest, "/")
++		if !ok {
++			continue
++		}
++		t, err := time.Parse(constants.BackupTimeFormat, name)
++		if err != nil {
++			continue
++		}
++		byTime[t] = append(byTime[t], k)
++	}
++
++	var keep time.Time
++	for t := range byTime {
++		if !t.After(cutoff) && t.After(keep) {
++			keep = t
++		}
++	}
++
++	var expired []string
++	for t, ks := range byTime {
++		if t.Before(keep) {
++			expired = append(expired, ks...)
++		}
++	}
++	sort.Strings(expired)
++	return expired
++}
++
++// DeleteExpired deletes the backups of the cluster that no restore to a
++// time within `retention` of the last backup needs.
++func (bm *BackupManager) DeleteExpired(ctx context.Context, retention time.Duration) error {
++	dir := calcPrefix(bm.keyPrefix, bm.cluster.Namespace, bm.cluster.Name)
++	keys, err := bm.bucket.List(ctx, dir)
++	if err != nil {
++		return fmt.Errorf("failed to list object keys: %w", err)
++	}
++
++	now := bm.startTime
++	if now.IsZero() {
++		now = time.Now().UTC()
++	}
++	for _, key := range expiredKeys(keys, dir, now.Add(-retention)) {
++		if err := bm.bucket.Delete(ctx, key); err != nil {
++			return fmt.Errorf("failed to delete %s: %w", key, err)
++		}
++		bm.log.Info("deleted an expired backup", "key", key)
++	}
++	return nil
++}
+diff --git a/backup/retention_test.go b/backup/retention_test.go
+new file mode 100644
+index 0000000..f4ca704
+--- /dev/null
++++ b/backup/retention_test.go
+@@ -0,0 +1,49 @@
++package backup
++
++import (
++	"slices"
++	"testing"
++	"time"
++)
++
++func TestExpiredKeys(t *testing.T) {
++	dir := "teams/t1/databases/ns/db/"
++	keys := []string{
++		dir + "20261101-030000/dump.tar",
++		dir + "20261101-030000/binlog.tar.zst",
++		dir + "20261102-030000/dump.tar",
++		dir + "20261102-030000/binlog.tar.zst",
++		dir + "20261103-030000/dump.tar",
++		dir + "20261103-030000/binlog.tar.zst",
++		dir + "20261104-030000/dump.tar",
++		dir + "not-a-backup/file",
++		dir + "file",
++		"teams/t1/databases/ns/db2/20261101-030000/dump.tar",
++	}
++
++	// Restoring to any time after Nov 2 12:00 needs the backup of Nov 2 03:00.
++	cutoff := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
++	got := expiredKeys(keys, dir, cutoff)
++	want := []string{dir + "20261101-030000/binlog.tar.zst", dir + "20261101-030000/dump.tar"}
++	if !slices.Equal(got, want) {
++		t.Errorf("expiredKeys() = %v, want %v", got, want)
++	}
++
++	// A backup taken exactly at the cutoff is the one kept.
++	cutoff = time.Date(2026, 11, 3, 3, 0, 0, 0, time.UTC)
++	got = expiredKeys(keys, dir, cutoff)
++	if len(got) != 4 || slices.Contains(got, dir+"20261103-030000/dump.tar") {
++		t.Errorf("expiredKeys() = %v", got)
++	}
++
++	// Nothing taken before the cutoff: nothing expires.
++	if got := expiredKeys(keys, dir, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)); len(got) != 0 {
++		t.Errorf("expiredKeys() = %v, want none", got)
++	}
++
++	// The newest backup is never expired.
++	got = expiredKeys(keys, dir, time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
++	if slices.Contains(got, dir+"20261104-030000/dump.tar") || len(got) != 6 {
++		t.Errorf("expiredKeys() = %v", got)
++	}
++}
+diff --git a/charts/moco/templates/generated/crds/moco_crds.yaml b/charts/moco/templates/generated/crds/moco_crds.yaml
+index d0dcde2..8c8abd8 100644
+--- a/charts/moco/templates/generated/crds/moco_crds.yaml
++++ b/charts/moco/templates/generated/crds/moco_crds.yaml
+@@ -2742,6 +2742,11 @@ spec:
+                     - serviceAccountName
+                     - workVolume
+                   type: object
++                retentionDays:
++                  description: The number of days backups are kept for.
++                  format: int32
++                  minimum: 0
++                  type: integer
+                 schedule:
+                   description: The schedule in Cron format for periodic backups.
+                   type: string
+diff --git a/cmd/moco-backup/cmd/backup.go b/cmd/moco-backup/cmd/backup.go
+index 352429a..469e86e 100644
+--- a/cmd/moco-backup/cmd/backup.go
++++ b/cmd/moco-backup/cmd/backup.go
+@@ -2,12 +2,16 @@ package cmd
+ 
+ import (
+ 	"fmt"
++	"os"
++	"time"
+ 
+ 	"github.com/cybozu-go/moco/backup"
+ 	"github.com/spf13/cobra"
+ 	ctrl "sigs.k8s.io/controller-runtime"
+ )
+ 
++var retentionDays int
++
+ var backupCmd = &cobra.Command{
+ 	Use:   "backup BUCKET NAMESPACE NAME",
+ 	Short: "backup a MySQLCluster's data to an object storage bucket",
+@@ -36,10 +40,21 @@ NAME:      The name of the MySQLCluster.`,
+ 		if err != nil {
+ 			return fmt.Errorf("failed to create a backup manager: %w", err)
+ 		}
+-		return bm.Backup(cmd.Context())
++		if err := bm.Backup(cmd.Context()); err != nil {
++			return err
++		}
++
++		if retentionDays > 0 {
++			// The backup has succeeded, so a failure here does not fail the Job.
++			if err := bm.DeleteExpired(cmd.Context(), time.Duration(retentionDays)*24*time.Hour); err != nil {
++				fmt.Fprintf(os.Stderr, "failed to delete expired backups: %v\n", err)
++			}
++		}
++		return nil
+ 	},
+ }
+ 
+ func init() {
++	backupCmd.Flags().IntVar(&retentionDays, "retention-days", 0, "After the backup, delete the backups that no restore within this many days needs (0 keeps every backup)")
+ 	rootCmd.AddCommand(backupCmd)
+ }
+diff --git a/config/crd/bases/moco.cybozu.com_backuppolicies.yaml b/config/crd/bases/moco.cybozu.com_backuppolicies.yaml
+index 8330c82..687d2aa 100644
+--- a/config/crd/bases/moco.cybozu.com_backuppolicies.yaml
++++ b/config/crd/bases/moco.cybozu.com_backuppolicies.yaml
+@@ -3172,6 +3172,11 @@ spec:
+                 - serviceAccountName
+                 - workVolume
+                 type: object
++              retentionDays:
++                description: The number of days backups are kept for.
++                format: int32
++                minimum: 0
++                type: integer
+               schedule:
+                 description: The schedule in Cron format for periodic backups.
+                 type: string
+diff --git a/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_backuppolicies.moco.cybozu.com.yaml b/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_backuppolicies.moco.cybozu.com.yaml
+index 82a81a3..34b9594 100644
+--- a/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_backuppolicies.moco.cybozu.com.yaml
++++ b/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_backuppolicies.moco.cybozu.com.yaml
+@@ -3171,6 +3171,11 @@ spec:
+                 - serviceAccountName
+                 - workVolume
+                 type: object
++              retentionDays:
++                description: The number of days backups are kept for.
++                format: int32
++                minimum: 0
++                type: integer
+               schedule:
+                 description: The schedule in Cron format for periodic backups.
+                 type: string
+diff --git a/controllers/mysqlcluster_controller.go b/controllers/mysqlcluster_controller.go
+index 75bc058..91903f9 100644
+--- a/controllers/mysqlcluster_controller.go
++++ b/controllers/mysqlcluster_controller.go
+@@ -1168,6 +1168,9 @@ func (r *MySQLClusterReconciler) reconcileV1BackupJob(ctx context.Context, clust
+ 	jc := &bp.Spec.JobConfig
+ 
+ 	args := []string{constants.BackupSubcommand, fmt.Sprintf("--threads=%d", jc.Threads)}
++	if bp.Spec.RetentionDays > 0 {
++		args = append(args, fmt.Sprintf("--retention-days=%d", bp.Spec.RetentionDays))
++	}
+ 	args = append(args, bucketArgs(jc.BucketConfig)...)
+ 	args = append(args, cluster.Namespace, cluster.Name)
+ 
+diff --git a/docs/backup.md b/docs/backup.md
+index 7e888e3..12b1503 100644
+--- a/docs/backup.md
++++ b/docs/backup.md
+@@ -222,10 +222,13 @@ Users can safely delete a successful Job.
+ 
+ ### Caveats
+ 
+-- No automatic deletion of backup files
++- Deletion of backup files
+ 
+-    MOCO does not delete old backup files from object storage.
+-    Users should configure [a bucket lifecycle policy][lifecycle] to delete old backups automatically.
++    By default, MOCO does not delete old backup files from object storage.
++    With `retentionDays` in the BackupPolicy, each successful backup Job deletes the backups that
++    no restore to a time within that many days needs: every backup older than the newest one
++    taken at or before that many days ago.
++    Users can also configure [a bucket lifecycle policy][lifecycle] to delete old backups automatically.
+ 
+ - Duplicated backup Jobs
+ 
+diff --git a/docs/crd_backuppolicy_v1beta2.md b/docs/crd_backuppolicy_v1beta2.md
+index 9e1db45..8aee7fb 100644
+--- a/docs/crd_backuppolicy_v1beta2.md
++++ b/docs/crd_backuppolicy_v1beta2.md
+@@ -47,6 +47,7 @@ BackupPolicySpec defines the configuration items for MySQLCluster backup.\n\nThe
+ | backoffLimit | Specifies the number of retries before marking this job failed. Defaults to 6 | *int32 | false |
+ | successfulJobsHistoryLimit | The number of successful finished jobs to retain. This is a pointer to distinguish between explicit zero and not specified. Defaults to 3. | *int32 | false |
+ | failedJobsHistoryLimit | The number of failed finished jobs to retain. This is a pointer to distinguish between explicit zero and not specified. Defaults to 1. | *int32 | false |
++| retentionDays | The number of days backups are kept for.  After each successful backup, the backups that no restore to a time within this many days needs are deleted from the bucket.  0, the default, keeps every backup. | int32 | false |
+ 
+ [Back to Custom Resources](#custom-resources)
+ 
+diff --git a/docs/moco-backup.md b/docs/moco-backup.md
+index 10c2266..4fa13a1 100644
+--- a/docs/moco-backup.md
++++ b/docs/moco-backup.md
+@@ -27,7 +27,9 @@ Global Flags:
+ 
+ ### `backup` subcommand
+ 
+-Usage: `moco-backup backup BUCKET NAMESPACE NAME`
++Usage: `moco-backup backup [--retention-days N] BUCKET NAMESPACE NAME`
++
++- `--retention-days`: After the backup, delete the backups that no restore within this many days needs (0, the default, keeps every backup).
+ 
+ - `BUCKET`: The bucket name.
+ - `NAMESPACE`: The namespace of the MySQLCluster.
+diff --git a/docs/usage.md b/docs/usage.md
+index 05923bc..dab533f 100644
+--- a/docs/usage.md
++++ b/docs/usage.md
+@@ -398,8 +398,10 @@ You can restore data from a backup to a new MySQL cluster.
+ 
+ Bucket is a management unit of objects in S3.  MOCO stores backups in a specified bucket.
+ 
+-MOCO does not remove backups.
+-To remove old backups automatically, you can set a lifecycle configuration to the bucket.
++By default, MOCO does not remove backups.
++Set `retentionDays` in the BackupPolicy to have each backup Job delete the backups older than that,
++keeping what a restore to any time within those days needs.
++Alternatively, you can set a lifecycle configuration to the bucket.
+ 
+ ref: [Setting lifecycle configuration on a bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/how-to-set-lifecycle-configuration-intro.html)
+ 
+diff --git a/pkg/bucket/azure.go b/pkg/bucket/azure.go
+index e020cad..57201c2 100644
+--- a/pkg/bucket/azure.go
++++ b/pkg/bucket/azure.go
+@@ -125,3 +125,8 @@ func (b *azureBucket) List(ctx context.Context, prefix string) ([]string, error)
+ 
+ 	return keys, nil
+ }
++
++func (b *azureBucket) Delete(ctx context.Context, key string) error {
++	_, err := b.client.DeleteBlob(ctx, b.name, key, nil)
++	return err
++}
+diff --git a/pkg/bucket/gcs.go b/pkg/bucket/gcs.go
+index 6493db6..c827a82 100644
+--- a/pkg/bucket/gcs.go
++++ b/pkg/bucket/gcs.go
+@@ -72,3 +72,7 @@ func (b *gcsBucket) List(ctx context.Context, prefix string) ([]string, error) {
+ 	}
+ 	return keys, nil
+ }
++
++func (b *gcsBucket) Delete(ctx context.Context, key string) error {
++	return b.client.Bucket(b.name).Object(key).Delete(ctx)
++}
+diff --git a/pkg/bucket/interface.go b/pkg/bucket/interface.go
+index 1f1c9b4..8caaa31 100644
+--- a/pkg/bucket/interface.go
++++ b/pkg/bucket/interface.go
+@@ -17,4 +17,7 @@ type Bucket interface {
+ 	// The prefix argument should end with /. (e.g. "foo/bar/").
+ 	// If / is not at the end, both ojbects xx-1/bar and xx-11/bar are taken.
+ 	List(ctx context.Context, prefix string) ([]string, error)
++
++	// Delete deletes the object with `key`.
++	Delete(ctx context.Context, key string) error
+ }
+diff --git a/pkg/bucket/s3.go b/pkg/bucket/s3.go
+index d839eee..067e617 100644
+--- a/pkg/bucket/s3.go
++++ b/pkg/bucket/s3.go
+@@ -134,6 +134,14 @@ func (b s3Bucket) List(ctx context.Context, prefix string) ([]string, error) {
+ 	return keys, nil
+ }
+ 
++func (b s3Bucket) Delete(ctx context.Context, key string) error {
++	_, err := b.client.DeleteObject(ctx, &s3.DeleteObjectInput{
++		Bucket: &b.name,
++		Key:    &key,
++	})
++	return err
++}
++
+ func decidePartSize(objectSize int64) int64 {
+ 	var partSize int64
+ 	partSize = (objectSize + UploadParts - 1) / UploadParts                  // Round up the result of dividing objectSize by uploadPart.

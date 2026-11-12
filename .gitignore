@@ -1,0 +1,28 @@
+node_modules
+dist
+.output
+.tanstack
+.nitro
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+.DS_Store
+.vite
+coverage
+*.log
+
+# Rust
+/target
+# Local data
+/.data
+
+.claude/settings.local.json
+.claude/worktrees
+
+# The WAF (waf/): Go build output and caches
+/waf/bin
+/waf/.cache
+
+# Local planning notes
+PLAN.md

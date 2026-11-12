@@ -1,0 +1,383 @@
+{
+  "_comment": "Postgres extensions Pyo's databases offer (the Extensions tab). 'managed': turned on and off by Pyo, as superuser through CloudNativePG (preload: libraries in shared_preload_libraries, a restart; parameters: {database} and {owner} filled in; library: the one CloudNativePG preloads for the parameters; create: CREATE EXTENSION; requires: created with it; schemaOwner: that schema's owner becomes the database owner; fdw: the owner may use its foreign-data wrapper; edition: shown beside its name). TimescaleDB is the Apache 2 build: its background jobs (and so every policy) need the Timescale license, so its workers are off; otherwise its built-in job history job fails on every run.. 'additional': the database owner (the default role) creates these itself. Only what Pyo's Postgres image has (deploy/images/postgres.Dockerfile), checked against pg_available_extensions and its trusted and superuser flags. hidden: obsolete (Postgres says so), listed only while a database has it on.",
+  "extensions": [
+    {
+      "name": "auto_explain",
+      "section": "managed",
+      "description": "Logs the plan of every query that takes over a second.",
+      "docs": "https://www.postgresql.org/docs/current/auto-explain.html",
+      "restart": true,
+      "parameters": {
+        "auto_explain.log_min_duration": "1s"
+      },
+      "create": false,
+      "library": "auto_explain"
+    },
+    {
+      "name": "pg_cron",
+      "section": "managed",
+      "description": "Runs SQL on a schedule, with cron syntax, inside the database.",
+      "docs": "https://github.com/citusdata/pg_cron",
+      "restart": true,
+      "preload": [
+        "pg_cron"
+      ],
+      "parameters": {
+        "cron.database_name": "{database}",
+        "cron.use_background_workers": "on"
+      },
+      "create": true,
+      "schemaOwner": "cron"
+    },
+    {
+      "name": "pg_hint_plan",
+      "section": "managed",
+      "description": "Steers the query planner with hints in SQL comments.",
+      "docs": "https://github.com/ossc-db/pg_hint_plan",
+      "restart": true,
+      "preload": [
+        "pg_hint_plan"
+      ],
+      "create": true
+    },
+    {
+      "name": "pg_partman_bgw",
+      "section": "managed",
+      "description": "Runs pg_partman's partition maintenance every hour. Add pg_partman itself with the default role.",
+      "docs": "https://github.com/pgpartman/pg_partman",
+      "restart": true,
+      "preload": [
+        "pg_partman_bgw"
+      ],
+      "parameters": {
+        "pg_partman_bgw.dbname": "{database}",
+        "pg_partman_bgw.role": "{owner}",
+        "pg_partman_bgw.interval": "3600"
+      },
+      "create": false
+    },
+    {
+      "name": "pg_stat_statements",
+      "section": "managed",
+      "description": "Tracks planning and execution statistics of every query.",
+      "docs": "https://www.postgresql.org/docs/current/pgstatstatements.html",
+      "restart": true,
+      "parameters": {
+        "pg_stat_statements.track": "top"
+      },
+      "create": false,
+      "library": "pg_stat_statements"
+    },
+    {
+      "name": "pgaudit",
+      "section": "managed",
+      "description": "Writes an audit trail of schema and role changes to the logs.",
+      "docs": "https://github.com/pgaudit/pgaudit",
+      "restart": true,
+      "parameters": {
+        "pgaudit.log": "ddl, role"
+      },
+      "create": false,
+      "library": "pgaudit"
+    },
+    {
+      "name": "timescaledb",
+      "section": "managed",
+      "description": "Hypertables and time functions for time series, without compression, continuous aggregates or scheduled jobs.",
+      "edition": "Apache 2 Edition",
+      "docs": "https://github.com/timescale/timescaledb",
+      "restart": true,
+      "preload": [
+        "timescaledb"
+      ],
+      "parameters": {
+        "timescaledb.license": "apache",
+        "timescaledb.telemetry_level": "off",
+        "timescaledb.max_background_workers": "0"
+      },
+      "create": true
+    },
+    {
+      "name": "vector",
+      "section": "managed",
+      "description": "Vector similarity search: embeddings and nearest neighbours (pgvector).",
+      "docs": "https://github.com/pgvector/pgvector",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "autoinc",
+      "section": "managed",
+      "description": "Trigger function that fills a field from a sequence.",
+      "docs": "https://www.postgresql.org/docs/current/contrib-spi.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "bloom",
+      "section": "managed",
+      "description": "Index type based on Bloom filters, for many columns at once.",
+      "docs": "https://www.postgresql.org/docs/current/bloom.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "dblink",
+      "section": "managed",
+      "description": "Runs queries on other Postgres databases from inside this one.",
+      "docs": "https://www.postgresql.org/docs/current/dblink.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "dict_xsyn",
+      "section": "managed",
+      "description": "Text search dictionary that adds synonyms to words.",
+      "docs": "https://www.postgresql.org/docs/current/dict-xsyn.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "earthdistance",
+      "section": "managed",
+      "description": "Great-circle distances between points on the Earth.",
+      "docs": "https://www.postgresql.org/docs/current/earthdistance.html",
+      "restart": false,
+      "create": true,
+      "requires": [
+        "cube"
+      ]
+    },
+    {
+      "name": "insert_username",
+      "section": "managed",
+      "description": "Trigger function that records who changed a row.",
+      "docs": "https://www.postgresql.org/docs/current/contrib-spi.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "intagg",
+      "section": "managed",
+      "description": "Integer aggregator and enumerator (obsolete).",
+      "docs": "https://www.postgresql.org/docs/current/intagg.html",
+      "restart": false,
+      "create": true,
+      "hidden": true
+    },
+    {
+      "name": "moddatetime",
+      "section": "managed",
+      "description": "Trigger function that records when a row changed.",
+      "docs": "https://www.postgresql.org/docs/current/contrib-spi.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "pg_prewarm",
+      "section": "managed",
+      "description": "Loads tables into memory, so the first queries after a restart are fast.",
+      "docs": "https://www.postgresql.org/docs/current/pgprewarm.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "pgrowlocks",
+      "section": "managed",
+      "description": "Shows which rows of a table are locked, and by whom.",
+      "docs": "https://www.postgresql.org/docs/current/pgrowlocks.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "postgres_fdw",
+      "section": "managed",
+      "description": "Queries tables on other Postgres servers as if they were local.",
+      "docs": "https://www.postgresql.org/docs/current/postgres-fdw.html",
+      "restart": false,
+      "create": true,
+      "fdw": true
+    },
+    {
+      "name": "refint",
+      "section": "managed",
+      "description": "Trigger functions for referential integrity (obsolete).",
+      "docs": "https://www.postgresql.org/docs/current/contrib-spi.html",
+      "restart": false,
+      "create": true,
+      "hidden": true
+    },
+    {
+      "name": "sslinfo",
+      "section": "managed",
+      "description": "Details of the client's SSL certificate.",
+      "docs": "https://www.postgresql.org/docs/current/sslinfo.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "xml2",
+      "section": "managed",
+      "description": "XPath queries and XSLT on XML.",
+      "docs": "https://www.postgresql.org/docs/current/xml2.html",
+      "restart": false,
+      "create": true
+    },
+    {
+      "name": "btree_gin",
+      "section": "additional",
+      "description": "GIN index support for common data types.",
+      "docs": "https://www.postgresql.org/docs/current/btree-gin.html"
+    },
+    {
+      "name": "btree_gist",
+      "section": "additional",
+      "description": "GiST index support for common data types.",
+      "docs": "https://www.postgresql.org/docs/current/btree-gist.html"
+    },
+    {
+      "name": "citext",
+      "section": "additional",
+      "description": "Case-insensitive text type.",
+      "docs": "https://www.postgresql.org/docs/current/citext.html"
+    },
+    {
+      "name": "cube",
+      "section": "additional",
+      "description": "Type for multidimensional cubes.",
+      "docs": "https://www.postgresql.org/docs/current/cube.html"
+    },
+    {
+      "name": "dict_int",
+      "section": "additional",
+      "description": "Text search dictionary for integers.",
+      "docs": "https://www.postgresql.org/docs/current/dict-int.html"
+    },
+    {
+      "name": "fuzzystrmatch",
+      "section": "additional",
+      "description": "Similarity and distance between strings: Soundex, Levenshtein, Metaphone.",
+      "docs": "https://www.postgresql.org/docs/current/fuzzystrmatch.html"
+    },
+    {
+      "name": "hstore",
+      "section": "additional",
+      "description": "Type for sets of key and value pairs.",
+      "docs": "https://www.postgresql.org/docs/current/hstore.html"
+    },
+    {
+      "name": "intarray",
+      "section": "additional",
+      "description": "Functions, operators and indexes for arrays of integers.",
+      "docs": "https://www.postgresql.org/docs/current/intarray.html"
+    },
+    {
+      "name": "isn",
+      "section": "additional",
+      "description": "Types for product numbers: ISBN, ISMN, ISSN, EAN13, UPC.",
+      "docs": "https://www.postgresql.org/docs/current/isn.html"
+    },
+    {
+      "name": "lo",
+      "section": "additional",
+      "description": "Managing large objects.",
+      "docs": "https://www.postgresql.org/docs/current/lo.html"
+    },
+    {
+      "name": "ltree",
+      "section": "additional",
+      "description": "Type for tree-like labels, such as categories.",
+      "docs": "https://www.postgresql.org/docs/current/ltree.html"
+    },
+    {
+      "name": "pg_partman",
+      "section": "additional",
+      "description": "Creates and maintains partitions of tables by time or ID.",
+      "docs": "https://github.com/pgpartman/pg_partman"
+    },
+    {
+      "name": "pg_trgm",
+      "section": "additional",
+      "description": "Text similarity and fast LIKE and ILIKE searches with trigrams.",
+      "docs": "https://www.postgresql.org/docs/current/pgtrgm.html"
+    },
+    {
+      "name": "pgcrypto",
+      "section": "additional",
+      "description": "Hashing and encryption functions.",
+      "docs": "https://www.postgresql.org/docs/current/pgcrypto.html"
+    },
+    {
+      "name": "seg",
+      "section": "additional",
+      "description": "Type for line segments and floating-point intervals.",
+      "docs": "https://www.postgresql.org/docs/current/seg.html"
+    },
+    {
+      "name": "tablefunc",
+      "section": "additional",
+      "description": "Functions that return tables, such as crosstab.",
+      "docs": "https://www.postgresql.org/docs/current/tablefunc.html"
+    },
+    {
+      "name": "tcn",
+      "section": "additional",
+      "description": "Trigger function that sends notifications of table changes.",
+      "docs": "https://www.postgresql.org/docs/current/tcn.html"
+    },
+    {
+      "name": "tsm_system_rows",
+      "section": "additional",
+      "description": "TABLESAMPLE method that takes a number of rows.",
+      "docs": "https://www.postgresql.org/docs/current/tsm-system-rows.html"
+    },
+    {
+      "name": "tsm_system_time",
+      "section": "additional",
+      "description": "TABLESAMPLE method that takes a time limit.",
+      "docs": "https://www.postgresql.org/docs/current/tsm-system-time.html"
+    },
+    {
+      "name": "unaccent",
+      "section": "additional",
+      "description": "Text search dictionary that removes accents.",
+      "docs": "https://www.postgresql.org/docs/current/unaccent.html"
+    },
+    {
+      "name": "uuid-ossp",
+      "section": "additional",
+      "description": "Functions that generate UUIDs.",
+      "docs": "https://www.postgresql.org/docs/current/uuid-ossp.html"
+    }
+  ],
+  "_kvComment": "KV (Valkey) modules Pyo's KV databases offer, all from the valkey-bundle image (PYO_DB_VALKEY_BUNDLE_IMAGE, Valkey 8.1): module is the file loaded with loadmodule on every instance (in this order), loaded the name MODULE LIST reports, dataInfo the INFO field counting what it holds (data): Valkey can't start without a module whose data it has, so one stays loaded until that's deleted. Turning one on or off restarts the database (replicas first, then the primary hands over). All BSD-3-Clause.",
+  "kv": [
+    {
+      "name": "valkey-json",
+      "description": "Stores JSON documents and reads or changes them by path (JSON.SET, JSON.GET).",
+      "docs": "https://github.com/valkey-io/valkey-json",
+      "module": "/usr/lib/valkey/libjson.so",
+      "loaded": "json",
+      "dataInfo": "json_num_documents",
+      "data": "JSON documents"
+    },
+    {
+      "name": "valkey-bloom",
+      "description": "Bloom filters: whether an item was seen before, in little memory (BF.ADD, BF.EXISTS).",
+      "docs": "https://github.com/valkey-io/valkey-bloom",
+      "module": "/usr/lib/valkey/libvalkey_bloom.so",
+      "loaded": "bf",
+      "dataInfo": "bf_bloom_num_objects",
+      "data": "Bloom filters"
+    },
+    {
+      "name": "valkey-search",
+      "description": "Vector similarity search over hashes and JSON documents (FT.CREATE, FT.SEARCH).",
+      "docs": "https://github.com/valkey-io/valkey-search",
+      "module": "/usr/lib/valkey/libsearch.so",
+      "loaded": "search",
+      "dataInfo": "search_number_of_indexes",
+      "data": "Search indexes"
+    }
+  ]
+}

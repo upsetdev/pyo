@@ -1,0 +1,259 @@
+# ── Pyo: API + dashboard on :8000 (role "web", two replicas, rolling
+# updates without a gap), plus "worker" replicas for background loops and
+# jobs. Inside the cluster only: platform.yaml's pyo-host puts :8000 on this
+# machine's localhost and tailnet IP, never its public addresses; other
+# devices use HTTPS through the gateway (:8443). ──
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyo
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo, app.kubernetes.io/part-of: pyo }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: pyo }
+  ports:
+    - { name: http, port: 8000, targetPort: http }
+---
+# The registry's door (registrydoor.rs): every request with a login (a
+# team's registry token, a cluster's pull token or a builder's token).
+# Users reach it over HTTPS through the gateway (:5443); other machines'
+# containerd and builders on this machine's tailnet IP, :5005 (pyo-host in
+# platform.yaml); this cluster's builders here, in the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyo-registry-door
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo, app.kubernetes.io/part-of: pyo }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: pyo }
+  ports:
+    - { name: registry-door, port: 5006, targetPort: registry-door }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyo
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo, app.kubernetes.io/part-of: pyo }
+spec:
+  replicas: 2
+  # A new replica must be ready before an old one stops: no gap on upgrades.
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pyo, app.kubernetes.io/part-of: pyo }
+    spec:
+      # Time to drain: readiness turns off on SIGTERM, long-polls return,
+      # requests in flight finish.
+      terminationGracePeriodSeconds: 45
+      # Spread replicas across servers, so losing one keeps the dashboard up.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: { matchLabels: { app.kubernetes.io/name: pyo } }
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: pyo
+          image: __IMAGES__/pyo:__TAG__
+          ports:
+            - { name: http, containerPort: 8000 }
+            # The registry's door for teams' own images (registrydoor.rs).
+            - { name: registry-door, containerPort: 5006 }
+          env:
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: pyo-postgres, key: url } }
+            - { name: PYO_AGENT_API_URL, value: "http://pyo.pyo-system.svc:8000" }
+            - { name: PYO_AGENT_IMAGE, value: "__IMAGES__/agent:__TAG__" }
+            - { name: PYO_AGENT_SELF_UPDATE, value: "true" }
+            - { name: PYO_ALLOW_PRIVATE_NETWORKS, value: "true" }
+            - { name: PYO_FLOWS_IMAGE, value: "__IMAGES__/flows:__TAG__" }
+            - { name: PYO_WAF_IMAGE, value: "__IMAGES__/waf:__TAG__" }
+            - { name: PYO_GEOIP_IMAGE, value: "__IMAGES__/geoip:__TAG__" }
+            - { name: PYO_DB_CONTROLLER_IMAGE, value: "__IMAGES__/db-controller:__TAG__" }
+            - { name: PYO_KV_IMAGE, value: "__IMAGES__/kv:__TAG__" }
+            - { name: PYO_POSTGRES_IMAGE_16, value: "__IMAGES__/postgres:16-__TAG__" }
+            - { name: PYO_POSTGRES_IMAGE_17, value: "__IMAGES__/postgres:17-__TAG__" }
+            - { name: PYO_POSTGRES_IMAGE_18, value: "__IMAGES__/postgres:18-__TAG__" }
+            - { name: PYO_MYSQL_OPERATOR_IMAGE, value: "__IMAGES__/mysql-operator:__TAG__" }
+            - { name: PYO_MYSQL_BACKUP_IMAGE, value: "__IMAGES__/mysql-backup:__TAG__" }
+            - { name: RUST_LOG, value: "pyo_api=info,tower_http=warn" }
+            - { name: PYO_ROLE, value: web }
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - { name: CLICKHOUSE_URL, value: "http://pyo-clickhouse.pyo-system.svc:8123" }
+            - { name: CLICKHOUSE_USER, value: pyo }
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: pyo-clickhouse, key: password } }
+            - { name: PYO_GEOIP_DB, value: /geoip/GeoLite2-City.mmdb }
+            # GeoLite2's license key (pyo-up.sh saves it from MAXMIND_LICENSE_KEY).
+            - name: MAXMIND_LICENSE_KEY
+              valueFrom: { secretKeyRef: { name: pyo-geoip, key: maxmind-license-key, optional: true } }
+            # Builders: image; the registry door on the tailnet (for servers
+            # and builders on other machines; empty without a tailnet); the
+            # name every node pulls by; the registry itself (in the cluster
+            # only); and this API on the tailnet for servers that join over it.
+            - { name: PYO_BUILDER_IMAGE, value: "__IMAGES__/builder:__TAG__" }
+            - { name: PYO_REGISTRY_PUSH, value: "__REGISTRY_PUSH__" }
+            - { name: PYO_REGISTRY_PULL, value: "127.0.0.1:5005" }
+            - { name: PYO_REGISTRY, value: "pyo-registry.pyo-system.svc.cluster.local:5000" }
+            - { name: PYO_TAILNET_API_URL, value: "__TAILNET_API__" }
+            # This machine's tailnet name, when its tailnet has MagicDNS and
+            # HTTPS certificates: Pyo is then https://<name>:8443 and its
+            # registry <name>:5443 (the gateway, tailnet only). Empty: Pyo is
+            # only on this machine (http://localhost:8000).
+            - { name: PYO_TAILNET_NAME, value: "__TAILNET_NAME__" }
+            # The key this machine's setup connects it as a cluster with.
+            - name: PYO_BOOTSTRAP_KEY
+              valueFrom: { secretKeyRef: { name: pyo-bootstrap, key: key, optional: true } }
+            - name: PYO_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: pyo-secrets, key: secret-key } }
+            # The first sign-in, printed by the installer; replaced on first use.
+            - name: PYO_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: pyo-admin, key: password, optional: true } }
+            # The backup store on this cluster (platform.yaml): the default destination.
+            - { name: PYO_BACKUP_STORE_URL, value: "http://pyo-backup-store.pyo-system.svc.cluster.local:3900" }
+            # Its admin API: setting it up, teams' buckets and keys (backupstore.rs).
+            - { name: PYO_BACKUP_STORE_ADMIN_URL, value: "http://pyo-backup-store.pyo-system.svc.cluster.local:3903" }
+            - name: PYO_BACKUP_STORE_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: pyo-backup-store, key: admin-token, optional: true } }
+            - name: PYO_BACKUP_STORE_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: pyo-backup-store, key: access-key, optional: true } }
+            - name: PYO_BACKUP_STORE_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: pyo-backup-store, key: secret-key, optional: true } }
+          # Ready only with the database reachable, and not while stopping.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 3
+            failureThreshold: 1
+          # Let the load balancer drop this pod before it stops listening.
+          lifecycle:
+            preStop: { sleep: { seconds: 5 } }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: geoip, mountPath: /geoip }
+          resources:
+            requests: { cpu: 20m, memory: 128Mi }
+            limits: { memory: 768Mi }
+      volumes:
+        # Each replica keeps its own GeoLite2 copy (geoip.rs): the image's
+        # bundled one, or a weekly download when a license key is set.
+        - name: geoip
+          emptyDir: { sizeLimit: 256Mi }
+---
+# Keep at least one web replica up through node drains and maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pyo
+  namespace: pyo-system
+  labels: { app.kubernetes.io/part-of: pyo }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo }
+---
+# ── Workers: periodic loops (each on one worker at a time, by Postgres
+# advisory lock) and durable jobs (on any). Same image, PYO_ROLE=worker;
+# no traffic, only probes. ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyo-worker
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-worker, app.kubernetes.io/part-of: pyo }
+spec:
+  replicas: 2
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo-worker }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-worker, app.kubernetes.io/part-of: pyo }
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: worker
+          image: __IMAGES__/pyo:__TAG__
+          ports:
+            - { name: http, containerPort: 8000 }
+          env:
+            - { name: PYO_ROLE, value: worker }
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: pyo-postgres, key: url } }
+            # Each periodic loop keeps a connection for its leader lock while
+            # it runs, and its queries need more: leave plenty of room.
+            - { name: DATABASE_POOL_MAX, value: "15" }
+            - { name: PYO_AGENT_API_URL, value: "http://pyo.pyo-system.svc:8000" }
+            - { name: PYO_AGENT_IMAGE, value: "__IMAGES__/agent:__TAG__" }
+            - { name: PYO_AGENT_SELF_UPDATE, value: "true" }
+            - { name: PYO_ALLOW_PRIVATE_NETWORKS, value: "true" }
+            - { name: PYO_FLOWS_IMAGE, value: "__IMAGES__/flows:__TAG__" }
+            - { name: PYO_WAF_IMAGE, value: "__IMAGES__/waf:__TAG__" }
+            - { name: PYO_GEOIP_IMAGE, value: "__IMAGES__/geoip:__TAG__" }
+            - { name: PYO_DB_CONTROLLER_IMAGE, value: "__IMAGES__/db-controller:__TAG__" }
+            - { name: PYO_KV_IMAGE, value: "__IMAGES__/kv:__TAG__" }
+            - { name: PYO_POSTGRES_IMAGE_16, value: "__IMAGES__/postgres:16-__TAG__" }
+            - { name: PYO_POSTGRES_IMAGE_17, value: "__IMAGES__/postgres:17-__TAG__" }
+            - { name: PYO_POSTGRES_IMAGE_18, value: "__IMAGES__/postgres:18-__TAG__" }
+            - { name: PYO_MYSQL_OPERATOR_IMAGE, value: "__IMAGES__/mysql-operator:__TAG__" }
+            - { name: PYO_MYSQL_BACKUP_IMAGE, value: "__IMAGES__/mysql-backup:__TAG__" }
+            - { name: RUST_LOG, value: "pyo_api=info" }
+            - { name: CLICKHOUSE_URL, value: "http://pyo-clickhouse.pyo-system.svc:8123" }
+            - { name: CLICKHOUSE_USER, value: pyo }
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: pyo-clickhouse, key: password } }
+            - { name: PYO_BUILDER_IMAGE, value: "__IMAGES__/builder:__TAG__" }
+            - { name: PYO_REGISTRY_PUSH, value: "__REGISTRY_PUSH__" }
+            - { name: PYO_REGISTRY_PULL, value: "127.0.0.1:5005" }
+            - { name: PYO_REGISTRY, value: "pyo-registry.pyo-system.svc.cluster.local:5000" }
+            - { name: PYO_TAILNET_API_URL, value: "__TAILNET_API__" }
+            # This machine's tailnet name, when its tailnet has MagicDNS and
+            # HTTPS certificates: Pyo is then https://<name>:8443 and its
+            # registry <name>:5443 (the gateway, tailnet only). Empty: Pyo is
+            # only on this machine (http://localhost:8000).
+            - { name: PYO_TAILNET_NAME, value: "__TAILNET_NAME__" }
+            # The key this machine's setup connects it as a cluster with.
+            - name: PYO_BOOTSTRAP_KEY
+              valueFrom: { secretKeyRef: { name: pyo-bootstrap, key: key, optional: true } }
+            - name: PYO_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: pyo-secrets, key: secret-key } }
+            # The backup store on this cluster (platform.yaml): the default destination.
+            - { name: PYO_BACKUP_STORE_URL, value: "http://pyo-backup-store.pyo-system.svc.cluster.local:3900" }
+            # Its admin API: setting it up, teams' buckets and keys (backupstore.rs).
+            - { name: PYO_BACKUP_STORE_ADMIN_URL, value: "http://pyo-backup-store.pyo-system.svc.cluster.local:3903" }
+            - name: PYO_BACKUP_STORE_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: pyo-backup-store, key: admin-token, optional: true } }
+            - name: PYO_BACKUP_STORE_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: pyo-backup-store, key: access-key, optional: true } }
+            - name: PYO_BACKUP_STORE_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: pyo-backup-store, key: secret-key, optional: true } }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 512Mi }

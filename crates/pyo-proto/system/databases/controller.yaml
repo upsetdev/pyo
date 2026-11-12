@@ -1,0 +1,160 @@
+# pyo-db-controller and its roles (crates/pyo-db-controller).
+# - No Namespace: the installer makes pyo-databases (bundles.rs's
+#   `databases_bundle`), without the pyo.dev/managed label.
+# - Its image and pyo-kv's are this installation's, filled in for the
+#   __DB_CONTROLLER_IMAGE__ and __KV_IMAGE__ placeholders, and so are Pyo's
+#   Postgres images, one per version (__POSTGRES_IMAGE_<major>__,
+#   deploy/images/postgres.Dockerfile). The Valkey and MySQL images are set
+#   explicitly (MySQL's pinned).
+# pyo-db-controller-namespace is bound in each project namespace by the
+# agent (the bundle's `managedNamespaceBindings`), not here.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: pyo-db-controller, namespace: pyo-databases}
+---
+# Cluster-wide, the controller only watches: Databases (and writes their
+# status) and the StatefulSets and Deployments it made. Everything it
+# creates or reads inside a namespace, Secrets included, comes from
+# pyo-db-controller-namespace, which Pyo's agent binds in each namespace Pyo
+# manages. In any other namespace a Database fails with "forbidden" and
+# nothing is made.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: pyo-db-controller}
+rules:
+  - apiGroups: [pyo.dev]
+    resources: [databases]
+    verbs: [get, list, watch]
+  - apiGroups: [pyo.dev]
+    resources: [databases/status]
+    verbs: [get, update, patch]
+  - apiGroups: [apps]
+    resources: [statefulsets, deployments]
+    verbs: [list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: pyo-db-controller}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: pyo-db-controller}
+subjects: [{kind: ServiceAccount, name: pyo-db-controller, namespace: pyo-databases}]
+---
+# Bound per namespace (RoleBinding "pyo-db-controller") by the Pyo agent.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: pyo-db-controller-namespace}
+rules:
+  # databases: the declarative Database through which it makes the
+  # extensions a database turns on (as superuser).
+  - apiGroups: [postgresql.cnpg.io]
+    resources: [clusters, poolers, scheduledbackups, databases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Base backups CloudNativePG runs, for their start and end events.
+  - apiGroups: [postgresql.cnpg.io]
+    resources: [backups]
+    verbs: [get, list]
+  # MySQL: MOCO's clusters and backup policies.
+  - apiGroups: [moco.cybozu.com]
+    resources: [mysqlclusters, backuppolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # MOCO's backup and restore Jobs: their start and end events, and the
+  # first backup right away (a Job from MOCO's CronJob).
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    verbs: [get]
+  # Imports run as a Job of its own (import.rs).
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, create]
+  - apiGroups: [apps]
+    resources: [statefulsets, deployments]
+    verbs: [get, create, update, patch, delete]
+  # serviceaccounts: the one MOCO's backup and restore Jobs run as.
+  - apiGroups: [""]
+    resources: [services, configmaps, serviceaccounts]
+    verbs: [get, list, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create]
+  # delete: an errant MySQL replica is started over (its pod and claim).
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, patch, delete]
+  # An import's progress and why it failed, from its Job's output.
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  # list: a failed import's Cluster made again waits for its disks to go.
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  # Keeps one pyo-kv (a cache's Redis address) up through drains.
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, create, update, patch, delete]
+  # Events on Databases: failovers, scaling, read replicas, backups, restores.
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+# Its lease: one replica reconciles, the other takes over within ~10s.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: pyo-db-controller-lease, namespace: pyo-databases}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: pyo-db-controller-lease, namespace: pyo-databases}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: pyo-db-controller-lease}
+subjects: [{kind: ServiceAccount, name: pyo-db-controller, namespace: pyo-databases}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: pyo-db-controller, namespace: pyo-databases}
+spec:
+  # Two on different servers: losing one server never leaves databases
+  # without a controller to point their addresses at a new primary.
+  replicas: 2
+  selector: {matchLabels: {app: pyo-db-controller}}
+  template:
+    metadata: {labels: {app: pyo-db-controller}}
+    spec:
+      serviceAccountName: pyo-db-controller
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm: {topologyKey: kubernetes.io/hostname, labelSelector: {matchLabels: {app: pyo-db-controller}}}
+      # Move off a lost server after 10s instead of the default 5 minutes.
+      tolerations:
+        - {key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 10}
+        - {key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 10}
+      containers:
+        - name: controller
+          image: __DB_CONTROLLER_IMAGE__
+          env:
+            - {name: PYO_DB_PYO_KV_IMAGE, value: __KV_IMAGE__}
+            - {name: PYO_DB_POSTGRES_IMAGE, value: ghcr.io/cloudnative-pg/postgresql}
+            - {name: PYO_DB_POSTGRES_IMAGE_16, value: __POSTGRES_IMAGE_16__}
+            - {name: PYO_DB_POSTGRES_IMAGE_17, value: __POSTGRES_IMAGE_17__}
+            - {name: PYO_DB_POSTGRES_IMAGE_18, value: __POSTGRES_IMAGE_18__}
+            - {name: PYO_DB_VALKEY_IMAGE, value: docker.io/valkey/valkey}
+            # Valkey 8.1 with its modules (valkey-json, valkey-bloom, valkey-search), run while a KV database loads any.
+            - {name: PYO_DB_VALKEY_BUNDLE_IMAGE, value: "docker.io/valkey/valkey-bundle:8.1.11@sha256:3f57cc71a102e0e66991ae203b069038d8c3f6214ca887ff32f9a381091af8de"}
+            - {name: PYO_DB_MYSQL_IMAGE, value: "ghcr.io/cybozu-go/moco/mysql:8.4.10.1@sha256:51dffb347697795e1680b9930fea1e1055a71387a0e769cc61ab4efc539c149b"}
+            - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+            - {name: POD_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
+          ports: [{name: probes, containerPort: 8081}]
+          readinessProbe: {httpGet: {path: /readyz, port: 8081}}
+          livenessProbe: {httpGet: {path: /healthz, port: 8081}, initialDelaySeconds: 10}
+          resources:
+            requests: {cpu: 20m, memory: 48Mi}
+            limits: {memory: 256Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}

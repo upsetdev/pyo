@@ -1,0 +1,58 @@
+# Made for Pyo's tests: one of nearly everything the import handles or warns about.
+x-common: &common
+  restart: unless-stopped
+  logging: { driver: json-file }
+
+services:
+  api:
+    <<: *common
+    image: ghcr.io/acme/api:${API_TAG:-1.4}
+    entrypoint: /bin/app
+    command: ["serve", "--port", "8000"]
+    user: "1000:1000"
+    working_dir: /srv
+    ports: ["8000:8000"]
+    volumes:
+      - uploads:/srv/uploads
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/srv/config
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      start_period: 20s
+    deploy:
+      replicas: 3
+      resources:
+        limits: { cpus: "1.5", memory: 1g }
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+          devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+    privileged: true
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/fuse:/dev/fuse"]
+    secrets: [db_password]
+    extends: { service: base }
+  worker:
+    image: ghcr.io/acme/api:1.4
+    command: worker
+    user: app
+    environment:
+      API_URL: http://api:8000
+    volumes: [uploads:/data]
+    healthcheck: { disable: true }
+    depends_on: { api: { condition: service_healthy } }
+    network_mode: host
+    pid: host
+  dns:
+    image: coredns/coredns:1.12.0
+    ports: ["53:53/udp", "53:53/tcp"]
+  debug:
+    image: busybox
+    profiles: [debug]
+
+volumes:
+  uploads:
+
+secrets:
+  db_password: { file: ./db_password.txt }

@@ -1,0 +1,12 @@
+[package]
+name = "pyo-resp"
+description = "A small async RESP2 client for Valkey that keeps each reply's exact type"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+socket2 = { version = "0.6", features = ["all"] }
+futures.workspace = true
+tokio.workspace = true

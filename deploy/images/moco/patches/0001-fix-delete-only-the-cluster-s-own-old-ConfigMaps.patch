@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pyo <pyo@localhost>
+Date: Tue, 10 Nov 2026 16:15:06 +0700
+Subject: [PATCH 1/4] fix: delete only the cluster's own old ConfigMaps
+
+The old my.cnf and slow query log agent ConfigMaps were found by name
+prefix alone, so a cluster could delete another cluster's ConfigMaps
+when that cluster's name starts with its name (e.g. "moco-slow-log-
+agent-config-a" also matches cluster "ab"). List only ConfigMaps
+with the cluster's labels.
+---
+ controllers/mysqlcluster_controller.go | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/controllers/mysqlcluster_controller.go b/controllers/mysqlcluster_controller.go
+index e2c0c78..d7af6a5 100644
+--- a/controllers/mysqlcluster_controller.go
++++ b/controllers/mysqlcluster_controller.go
+@@ -566,8 +566,9 @@ func (r *MySQLClusterReconciler) reconcileV1FluentBitConfigMap(ctx context.Conte
+ 		log.Info("reconciled ConfigMap for slow logs", "configMapName", cmName)
+ 		return cm, nil
+ 	} else {
++		// Only this cluster's: another cluster's names may start with the same prefix.
+ 		cms := &corev1.ConfigMapList{}
+-		if err := r.List(ctx, cms, client.InNamespace(cluster.Namespace)); err != nil {
++		if err := r.List(ctx, cms, client.InNamespace(cluster.Namespace), client.MatchingLabels(labelSet(cluster, false))); err != nil {
+ 			return nil, err
+ 		}
+ 		for _, old := range cms.Items {
+@@ -585,8 +586,9 @@ func (r *MySQLClusterReconciler) reconcileV1FluentBitConfigMap(ctx context.Conte
+ func (r *MySQLClusterReconciler) cleanupOldConfigMaps(ctx context.Context, cluster *mocov1beta2.MySQLCluster, namePrefix, currentName string) error {
+ 	log := crlog.FromContext(ctx)
+ 
++	// Only this cluster's: another cluster's names may start with the same prefix.
+ 	cms := &corev1.ConfigMapList{}
+-	if err := r.List(ctx, cms, client.InNamespace(cluster.Namespace)); err != nil {
++	if err := r.List(ctx, cms, client.InNamespace(cluster.Namespace), client.MatchingLabels(labelSet(cluster, false))); err != nil {
+ 		return err
+ 	}
+ 

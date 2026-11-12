@@ -1,0 +1,752 @@
+[
+ {
+  "name": "path starts with",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "startsWith",
+     "values": [
+      "/wp-admin"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/wp-admin/x.php",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "path is decoded",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "equals",
+     "values": [
+      "/wp-admin"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/%77p-admin",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "path is case-sensitive",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "startsWith",
+     "values": [
+      "/wp-admin"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/WP-Admin",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": false
+ },
+ {
+  "name": "path leaves out the query",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "equals",
+     "values": [
+      "/a"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/a?x=/b",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "regex with (?i)",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "regex",
+     "values": [
+      "(?i)^/wp-admin"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/WP-ADMIN/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "regex is unanchored",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "userAgent",
+     "op": "regex",
+     "values": [
+      "sqlmap|nikto"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {
+    "user-agent": "Mozilla nikto/2"
+   },
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "query contains",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "query",
+     "op": "contains",
+     "values": [
+      "id=1"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/p?a=2&id=1#frag",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "query without one",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "query",
+     "op": "equals",
+     "values": [
+      ""
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/p",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "method in",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "method",
+     "op": "in",
+     "values": [
+      "POST",
+      "PUT"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "post",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "method equals",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "method",
+     "op": "equals",
+     "values": [
+      "GET"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "POST",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": false
+ },
+ {
+  "name": "host ends with",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "host",
+     "op": "endsWith",
+     "values": [
+      ".test"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "header by name",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "header",
+     "op": "equals",
+     "values": [
+      "k1"
+     ],
+     "name": "x-api-key"
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {
+    "x-api-key": "k1"
+   },
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "a missing header is empty",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "header",
+     "op": "equals",
+     "values": [
+      ""
+     ],
+     "name": "x-missing"
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "cookie by name",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "cookie",
+     "op": "equals",
+     "values": [
+      "dark"
+     ],
+     "name": "theme"
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {
+    "cookie": "session=abc; theme=dark"
+   },
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "cookie missing",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "cookie",
+     "op": "equals",
+     "values": [
+      "x"
+     ],
+     "name": "nope"
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {
+    "cookie": "a=b"
+   },
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": false
+ },
+ {
+  "name": "body contains",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "body",
+     "op": "contains",
+     "values": [
+      "drop table"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "{\"q\":\"drop table\"}",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "ip in a range",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ip",
+     "op": "in",
+     "values": [
+      "203.0.113.0/24"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "ip not in the list",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ip",
+     "op": "in",
+     "values": [
+      "198.51.100.1/32",
+      "2001:db8::/32"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": false
+ },
+ {
+  "name": "ipv6 in a range",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ip",
+     "op": "in",
+     "values": [
+      "2001:db8::/32"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "2001:db8::5",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "ip negated",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ip",
+     "op": "in",
+     "values": [
+      "198.51.100.0/24"
+     ],
+     "negate": true
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "country in",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "country",
+     "op": "in",
+     "values": [
+      "DE",
+      "FR"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": "DE"
+  },
+  "matches": true
+ },
+ {
+  "name": "unknown country matches no country test",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "country",
+     "op": "in",
+     "values": [
+      "DE"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": false
+ },
+ {
+  "name": "unknown country is not in the list",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "country",
+     "op": "in",
+     "values": [
+      "DE"
+     ],
+     "negate": true
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "negated contains",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "contains",
+     "values": [
+      "admin"
+     ],
+     "negate": true
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/shop",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "and: one fails",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "equals",
+     "values": [
+      "/admin"
+     ]
+    },
+    {
+     "field": "userAgent",
+     "op": "equals",
+     "values": [
+      "browser"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/admin",
+   "headers": {
+    "user-agent": "bot"
+   },
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": false
+ },
+ {
+  "name": "and: both hold",
+  "rule": {
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "equals",
+     "values": [
+      "/admin"
+     ]
+    },
+    {
+     "field": "method",
+     "op": "equals",
+     "values": [
+      "POST"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "POST",
+   "host": "shop.test",
+   "uri": "/admin",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "or: one holds",
+  "rule": {
+   "match": "any",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "equals",
+     "values": [
+      "/admin"
+     ]
+    },
+    {
+     "field": "userAgent",
+     "op": "equals",
+     "values": [
+      "browser"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/admin",
+   "headers": {
+    "user-agent": "bot"
+   },
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": true
+ },
+ {
+  "name": "or: none holds",
+  "rule": {
+   "match": "any",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "equals",
+     "values": [
+      "/x"
+     ]
+    },
+    {
+     "field": "userAgent",
+     "op": "equals",
+     "values": [
+      "browser"
+     ]
+    }
+   ]
+  },
+  "request": {
+   "method": "GET",
+   "host": "shop.test",
+   "uri": "/admin",
+   "headers": {},
+   "body": "",
+   "client": "203.0.113.7",
+   "country": ""
+  },
+  "matches": false
+ }
+]

@@ -1,0 +1,20 @@
+[package]
+name = "pyo-kv"
+description = "The REST API in front of a Pyo KV database (Valkey)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum = "0.8.9"
+base64.workspace = true
+percent-encoding = "2.3"
+pyo-resp.workspace = true
+serde_json.workspace = true
+subtle = "2.6"
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures.workspace = true

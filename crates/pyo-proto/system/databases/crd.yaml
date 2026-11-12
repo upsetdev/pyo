@@ -1,0 +1,243 @@
+# pyo-db-controller's CRD (crates/pyo-db-controller: `pyo-db-controller
+# print-crd` gives the schema of its Rust types; this adds the validation
+# rules). Never deleted: that would delete every database.
+# Database: a built-in Postgres or MySQL database or Valkey cache. Pyo's agent
+# writes the spec; pyo-db-controller runs it and fills in the status.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: databases.pyo.dev
+spec:
+  group: pyo.dev
+  scope: Namespaced
+  names: {kind: Database, listKind: DatabaseList, plural: databases, singular: database, shortNames: [pyodb]}
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      additionalPrinterColumns:
+        - {name: Engine, type: string, jsonPath: .spec.engine}
+        - {name: Instances, type: integer, jsonPath: .spec.instances}
+        - {name: Ready, type: integer, jsonPath: .status.readyInstances}
+        - {name: Primary, type: string, jsonPath: .status.primary}
+        - {name: Read, type: integer, jsonPath: .status.readReplicas.ready, priority: 1}
+        - {name: Phase, type: string, jsonPath: .status.phase}
+        - {name: Age, type: date, jsonPath: .metadata.creationTimestamp}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [engine, instances, storage]
+              x-kubernetes-validations:
+                - {rule: "self.engine == oldSelf.engine", message: "engine can't change"}
+                - {rule: "!has(self.rest) || !self.rest || self.engine == 'valkey'", message: "the REST API is for valkey only"}
+                - {rule: "!has(self.backup) || self.engine != 'valkey'", message: "backups are for postgres and mysql"}
+                - {rule: "!has(self.restore) || self.engine != 'valkey'", message: "restoring is for postgres and mysql"}
+                - {rule: "!has(self.valkey) || self.engine == 'valkey'", message: "valkey modules are for valkey only"}
+                - {rule: "!has(self.import) || self.engine != 'valkey'", message: "importing is for postgres and mysql"}
+                - {rule: "!has(self.import) || !has(self.restore)", message: "a database is either restored from backups or imported into"}
+                - {rule: "has(self.restore) == has(oldSelf.restore) && (!has(self.restore) || self.restore == oldSelf.restore)", message: "restore is set only when a database is made"}
+                - {rule: "self.engine != 'valkey' || !has(self.readReplicas) || !has(self.readReplicas.instances) || self.readReplicas.instances <= 4", message: "valkey has at most 4 read replicas"}
+                # MySQL (MOCO): 1, 3 or 5 instances, growing only; 8.4; at
+                # least 1Gi of memory; no read replicas, pooler or REST API.
+                - {rule: "self.engine != 'mysql' || self.instances in [1, 3, 5]", message: "mysql runs 1, 3 or 5 instances"}
+                - {rule: "self.engine != 'mysql' || self.instances >= oldSelf.instances", message: "mysql instances can only grow (1 to 3 or 5, 3 to 5)"}
+                - {rule: "self.engine != 'mysql' || !has(self.version) || self.version in ['', '8.4']", message: "the mysql version is 8.4"}
+                - {rule: "self.engine != 'mysql' || (has(self.memory) && isQuantity(self.memory) && quantity(self.memory).compareTo(quantity('1Gi')) >= 0)", message: "mysql needs memory of at least 1Gi"}
+                - {rule: "self.engine != 'mysql' || !has(self.readReplicas) || !has(self.readReplicas.instances) || self.readReplicas.instances == 0", message: "mysql has no read replicas (its replicas serve reads: endpoints.replicas)"}
+                - {rule: "self.engine != 'mysql' || !has(self.postgres) || !has(self.postgres.pooler) || !self.postgres.pooler", message: "mysql has no pooler"}
+              properties:
+                engine: {type: string, enum: [postgres, valkey, mysql]}
+                version: {type: string, maxLength: 20, pattern: '^[0-9][0-9.]*$'}
+                instances: {type: integer, minimum: 1, maximum: 9}
+                storage: {type: string, pattern: '^[0-9]+(Mi|Gi|Ti)$'}
+                storageClass: {type: string}
+                cpu: {type: string}
+                # MySQL: at least 1Gi; its buffers are sized from it.
+                memory: {type: string, maxLength: 20}
+                credentialsSecret: {type: string}
+                rest: {type: boolean}
+                # Instances that only serve reads and are never promoted, apart
+                # from the replicas in instances; same size and storage. Missing
+                # or 0: none (turning them off removes them).
+                readReplicas:
+                  type: object
+                  properties:
+                    # Postgres 1 to 5, Valkey 1 to 4.
+                    instances: {type: integer, minimum: 0, maximum: 5}
+                postgres:
+                  type: object
+                  properties:
+                    database: {type: string, pattern: '^[a-z_][a-z0-9_]{0,62}$'}
+                    owner: {type: string, pattern: '^[a-z_][a-z0-9_]{0,62}$'}
+                    pooler: {type: boolean}
+                    parameters: {type: object, additionalProperties: {type: string}}
+                    # Extensions Pyo turns on (pyo-db-controller's
+                    # extensions.json, the "managed" ones).
+                    extensions:
+                      type: array
+                      maxItems: 50
+                      items: {type: string, pattern: '^[a-z0-9_-]{1,63}$'}
+                valkey:
+                  type: object
+                  properties:
+                    # Modules loaded on every instance (pyo-db-controller's
+                    # extensions.json, the "kv" ones). Changing them restarts
+                    # the instances, replicas first.
+                    modules:
+                      type: array
+                      maxItems: 10
+                      items: {type: string, pattern: '^[a-z0-9_-]{1,63}$'}
+                # Backups to S3-compatible storage, under
+                # <path>/<namespace>/<name>/ in the bucket, kept retentionDays.
+                # Postgres: continuous WAL archiving and base backups. MySQL:
+                # a full dump and the binlogs since the last one on the
+                # schedule (an empty path is moco/ there).
+                backup:
+                  type: object
+                  required: [destination]
+                  properties:
+                    enabled: {type: boolean}
+                    destination:
+                      type: object
+                      required: [endpointURL, bucket, credentialsSecret]
+                      properties:
+                        endpointURL: {type: string, pattern: '^https?://'}
+                        bucket: {type: string, minLength: 3, maxLength: 63}
+                        path: {type: string, maxLength: 200}
+                        region: {type: string, pattern: '^[a-z0-9-]*$', maxLength: 40}
+                        # Keys accessKeyId and secretAccessKey.
+                        credentialsSecret: {type: string, minLength: 1}
+                    retentionDays: {type: integer, minimum: 1, maximum: 90, default: 7}
+                    # Six fields, seconds first.
+                    baseBackupSchedule: {type: string, default: "0 0 3 * * *", pattern: '^\S+( \S+){5}$'}
+                # A new database from another's backups; set only at creation.
+                restore:
+                  type: object
+                  required: [fromBackup]
+                  properties:
+                    fromBackup:
+                      type: object
+                      required: [endpointURL, bucket, credentialsSecret, sourceName]
+                      properties:
+                        endpointURL: {type: string, pattern: '^https?://'}
+                        bucket: {type: string, minLength: 3, maxLength: 63}
+                        path: {type: string, maxLength: 200}
+                        region: {type: string, pattern: '^[a-z0-9-]*$', maxLength: 40}
+                        credentialsSecret: {type: string, minLength: 1}
+                        sourceName: {type: string, minLength: 1}
+                        sourceNamespace: {type: string}
+                    # Empty: everything archived (MySQL: up to when the
+                    # Database was made).
+                    targetTime: {type: string, format: date-time}
+                # Data copied in from another database (source url) or a dump
+                # file Pyo keeps (source file); a new id runs it (again).
+                # bootstrap: Postgres from a URL as the database is made
+                # (CloudNativePG's import); otherwise a Job once it's ready.
+                import:
+                  type: object
+                  required: [id, source, secret]
+                  x-kubernetes-validations:
+                    - {rule: "self.source != 'url' || has(self.connection)", message: "an import from a url needs its connection"}
+                    - {rule: "self.source != 'file' || (has(self.format) && self.format in ['sql', 'sql.gz', 'dump'])", message: "a file to import is sql, sql.gz or dump"}
+                    - {rule: "!has(self.bootstrap) || !self.bootstrap || self.source == 'url'", message: "only an import from a url is done as the database is made"}
+                  properties:
+                    id: {type: string, minLength: 1, maxLength: 63}
+                    source: {type: string, enum: [url, file]}
+                    bootstrap: {type: boolean}
+                    # url: password; file: url and token.
+                    secret: {type: string, minLength: 1}
+                    connection:
+                      type: object
+                      required: [host, port, user, database]
+                      properties:
+                        host: {type: string, minLength: 1, maxLength: 253}
+                        port: {type: integer, minimum: 1, maximum: 65535}
+                        user: {type: string, maxLength: 200}
+                        database: {type: string, minLength: 1, maxLength: 200}
+                        tls: {type: string, enum: ['', disable, prefer, require, verify-ca, verify-full]}
+                    format: {type: string}
+                    size: {type: integer, format: int64, minimum: 0}
+            status:
+              type: object
+              properties:
+                phase: {type: string}
+                message: {type: string}
+                observedGeneration: {type: integer, format: int64}
+                instances: {type: integer}
+                readyInstances: {type: integer}
+                primary: {type: string}
+                credentialsSecret: {type: string}
+                failovers: {type: integer}
+                backup:
+                  type: object
+                  properties:
+                    firstRecoverabilityPoint: {type: string}
+                    lastSuccessfulBackup: {type: string}
+                    lastArchivedWal: {type: string}
+                    lastFailedBackup: {type: string}
+                    message: {type: string}
+                members:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, role, ready, node]
+                    properties:
+                      name: {type: string}
+                      role: {type: string, enum: [primary, replica]}
+                      ready: {type: boolean}
+                      node: {type: string}
+                      # Seconds a replica is behind (MySQL); missing for the
+                      # primary and while it isn't replicating.
+                      lagSeconds: {type: number}
+                endpoints:
+                  type: object
+                  properties:
+                    primary: {type: string}
+                    replicas: {type: string}
+                    pooler: {type: string}
+                    sentinel: {type: string}
+                    rest: {type: string}
+                    # The read replicas (Postgres: through PgBouncer).
+                    read: {type: string}
+                readReplicas:
+                  type: object
+                  properties:
+                    ready: {type: integer}
+                    members:
+                      type: array
+                      items:
+                        type: object
+                        required: [name, node, ready]
+                        properties:
+                          name: {type: string}
+                          node: {type: string}
+                          ready: {type: boolean}
+                          # Seconds behind the primary; missing while it isn't replicating.
+                          lagSeconds: {type: number}
+                # Each extension (Postgres) or module (Valkey) that's on or
+                # being turned on or off: "enabled", "pending", "restarting",
+                # "disabling" or "failed", and why.
+                extensions:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, state]
+                    properties:
+                      name: {type: string}
+                      state: {type: string}
+                      message: {type: string}
+                # The last import: Pending, Running, Succeeded or Failed.
+                import:
+                  type: object
+                  required: [id, phase]
+                  properties:
+                    id: {type: string}
+                    phase: {type: string}
+                    message: {type: string}
+                    startedAt: {type: string}
+                    finishedAt: {type: string}

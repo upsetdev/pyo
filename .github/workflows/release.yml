@@ -1,0 +1,191 @@
+name: Release
+
+# Pushing a tag like v0.1.0 publishes that version: signed images at
+# ghcr.io/upsetdev/pyo, and a GitHub release with the CLI and release.json
+# (what the dashboard's updates apply). See RELEASING.md.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGES: ghcr.io/upsetdev/pyo
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag matches Cargo.toml
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.1
+      - run: cargo test --locked --workspace
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      # The WAF's processor (waf/).
+      - name: WAF tests
+        run: docker run --rm -v "$PWD/waf:/src" -w /src -e CGO_ENABLED=0 golang:1.26 sh -c 'go vet ./... && go test ./...'
+
+  # The Rust binaries of every Rust image, built once (pyo.Dockerfile's
+  # `rust` stage) into this run's build cache; each Rust image's job below
+  # takes that stage from the cache instead of compiling it again. Only a
+  # cache: if a job can't read it, it compiles the stage itself, from the
+  # same source, with the same result.
+  binaries:
+    name: Rust binaries
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/images/pyo.Dockerfile
+          target: bins
+          platforms: linux/amd64
+          outputs: type=cacheonly
+          cache-to: type=gha,mode=max,scope=rust-${{ github.run_id }}
+
+  images:
+    name: Publish ${{ matrix.image }}
+    needs: [verify, binaries]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # Signing: proves the image came from this workflow.
+    strategy:
+      fail-fast: true
+      matrix:
+        image: [pyo, agent, builder, flows, waf, geoip, db-controller, kv]
+        # Pyo's Postgres, one image per version, from one Dockerfile.
+        # One repository, tagged <version>-<release>: CloudNativePG reads
+        # the version from the tag.
+        include:
+          # The Rust images: one Dockerfile with a target each.
+          - { image: pyo, file: pyo, target: pyo, rust: true }
+          - { image: agent, file: pyo, target: agent, rust: true }
+          - { image: builder, file: pyo, target: builder, rust: true }
+          - { image: flows, file: pyo, target: flows, rust: true }
+          - { image: db-controller, file: pyo, target: db-controller, rust: true }
+          - { image: kv, file: pyo, target: kv, rust: true }
+          - { image: postgres-16, repo: postgres, tag: "16-", file: postgres, context: deploy/images, args: PG_MAJOR=16 }
+          - { image: postgres-17, repo: postgres, tag: "17-", file: postgres, context: deploy/images, args: PG_MAJOR=17 }
+          - { image: postgres-18, repo: postgres, tag: "18-", file: postgres, context: deploy/images, args: PG_MAJOR=18 }
+          # MySQL's operator and backup image: MOCO, patched
+          # (deploy/images/moco), one Dockerfile with a target each.
+          - { image: mysql-operator, file: moco/moco, context: deploy/images/moco, target: operator }
+          - { image: mysql-backup, file: moco/moco, context: deploy/images/moco, target: backup }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context || '.' }}
+          file: deploy/images/${{ matrix.file || matrix.image }}.Dockerfile
+          build-args: ${{ matrix.args }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          cache-from: ${{ matrix.rust && format('type=gha,scope=rust-{0}', github.run_id) || '' }}
+          push: true
+          tags: ${{ env.IMAGES }}/${{ matrix.repo || matrix.image }}:${{ matrix.tag }}${{ needs.verify.outputs.version }}
+          provenance: mode=max
+          sbom: true
+      - name: Sign
+        env:
+          IMAGE: ${{ env.IMAGES }}/${{ matrix.repo || matrix.image }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
+
+  release:
+    name: GitHub release
+    needs: [verify, images]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: read
+      # Signing release.json keyless (Sigstore, this workflow's identity).
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # What Pyo needs to update itself from the dashboard: the images
+      # pinned by the digests that were just signed, and the manifests.
+      - name: Write release.json
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          digest() { docker buildx imagetools inspect "$IMAGES/$1:$VERSION" --format '{{json .Manifest}}' | jq -r .digest; }
+          tagged() { docker buildx imagetools inspect "$IMAGES/$1:$2$VERSION" --format '{{json .Manifest}}' | jq -r .digest; }
+          bun run scripts/release-manifest.ts --version "$VERSION" --images "$IMAGES" \
+            --pyo "$(digest pyo)" --agent "$(digest agent)" --builder "$(digest builder)" --flows "$(digest flows)" --waf "$(digest waf)" --geoip "$(digest geoip)" \
+            --db-controller "$(digest db-controller)" --kv "$(digest kv)" \
+            --mysql-operator "$(digest mysql-operator)" --mysql-backup "$(digest mysql-backup)" \
+            --postgres-16 "$(tagged postgres 16-)" --postgres-17 "$(tagged postgres 17-)" --postgres-18 "$(tagged postgres 18-)" > release.json
+          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, migrations: (.migrations | length)}' release.json
+      # release.json is signed like the images: keyless, as this workflow
+      # at this tag. install.sh, pyo-up.sh --release and the dashboard's
+      # updates (pyo-api sigstore.rs) check it before using anything in it.
+      # The signing config pins Sigstore's public instance with Rekor v1,
+      # whose signed entry timestamp is what Pyo's own check reads.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
+      - name: Sign release.json
+        run: cosign sign-blob --yes --signing-config .github/release-signing-config.json --bundle release.json.sigstore.json release.json
+      - name: Take the CLI from the signed image
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          id=$(docker create "$IMAGES/pyo:$VERSION")
+          docker cp "$id:/app/bin/pyo" pyo-linux-x86_64
+          docker rm "$id"
+          sha256sum pyo-linux-x86_64 > pyo-linux-x86_64.sha256
+      # install.sh goes out as an asset named exactly that: pyo.dev/install.sh
+      # fetches releases/latest/download/install.sh (stable releases only).
+      # connect.sh beside it: install.sh --uninstall runs its own release's.
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          generate_release_notes: true
+          files: |
+            pyo-linux-x86_64
+            pyo-linux-x86_64.sha256
+            release.json
+            release.json.sigstore.json
+            deploy/install.sh
+            crates/pyo-api/assets/connect.sh

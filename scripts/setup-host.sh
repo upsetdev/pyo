@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# One-time host setup for developing Pyo on this machine (installing it is
+# deploy/install.sh). Everything Pyo runs (Postgres, the API, the dashboard,
+# the agent, BuildKit and the image registry) runs inside k3s; the host only
+# needs k3s itself, plus build tools for `cargo test`. Needs root:
+#
+#   sudo bash scripts/setup-host.sh
+#
+# Host ports once Pyo is running:
+#   80 / 443  Pyo Gateway (services' HTTP and HTTPS)
+#   8443      Pyo dashboard over HTTPS (the gateway; tailnet sources only)
+#   5443      Pyo registry for teams' own images (HTTPS; tailnet only)
+#   8000      Pyo dashboard and API, plain HTTP: localhost and the tailnet
+#   6443      k3s API server
+#   5005      Pyo image registry: 127.0.0.1 for this server; on the tailnet IP
+#             only its door, which wants a login
+#
+# Undo: /usr/local/bin/k3s-uninstall.sh
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Run with sudo: sudo bash $0" >&2
+  exit 1
+fi
+
+# Pyo Gateway needs 80 and 443, the dashboard 8000 and the registry 5005.
+# Stop here rather than install k3s with them unable to bind.
+# (A k3s that's already running holds 80 and 443 itself.)
+BUSY=""
+command -v k3s >/dev/null || BUSY=$(ss -ltnH '( sport = :80 or sport = :443 or sport = :8000 or sport = :5005 )' || true)
+if [ -n "$BUSY" ]; then
+  echo "These ports are in use:" >&2
+  echo "$BUSY" >&2
+  docker ps --format '  {{.Names}}  {{.Ports}}' 2>/dev/null | grep -E ':(80|443|8000|5005)->' >&2 || true
+  echo "Stop whatever holds them, then run this script again." >&2
+  exit 1
+fi
+
+# ── 1. Build tools for developing Pyo on this machine ────────────────────
+# Lets `cargo check` and `cargo test` run locally. Images are still built by
+# BuildKit inside k3s.
+apt-get update
+apt-get install -y build-essential pkg-config
+
+# ── 2. k3s ─────────────────────────────────────────────────────────────────
+# >>> pyo:k3s (the same in deploy/install.sh, connect.sh, join.sh, scripts/setup-host.sh and scripts/join-node.sh)
+# k3s, checked before anything is installed: k3s's own installer at the
+# tag of the pinned version (PYO_K3S_VERSION) against its SHA-256, and the
+# binary against the pinned SHA-256 for this architecture, or, for another
+# version (a cluster that runs one), against that GitHub release's checksum
+# list. k3s_fetch DIR VERSION downloads and checks; k3s_install DIR ARGS...
+# puts the binary in /usr/local/bin and runs the installer with ARGS
+# (INSTALL_K3S_EXEC, K3S_URL and K3S_TOKEN pass through).
+k3s_fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+k3s_get() { curl -fsSL --proto '=https' --retry 3 --max-time 600 -o "$2" "$1" || k3s_fail "Couldn't download $1."; }
+k3s_sha_ok() { [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ]; }
+k3s_fetch() {
+  local dir=$1 version=$2 arch bin want rel
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=amd64 bin=k3s want=${PYO_K3S_SHA256_AMD64:-} ;;
+    aarch64 | arm64) arch=arm64 bin=k3s-arm64 want=${PYO_K3S_SHA256_ARM64:-} ;;
+    *) k3s_fail "There's no k3s for $(uname -m)." ;;
+  esac
+  [[ ${PYO_K3S_VERSION:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$ ]] && [[ ${PYO_K3S_INSTALLER_SHA256:-} =~ ^[0-9a-f]{64}$ ]] ||
+    k3s_fail "This script doesn't say which k3s to install."
+  [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$ ]] || k3s_fail "\"$version\" isn't a k3s version, like $PYO_K3S_VERSION."
+  rel="https://github.com/k3s-io/k3s/releases/download/${version//+/%2B}"
+  mkdir -p "$dir"
+  echo "Downloading k3s $version and checking it…"
+  k3s_get "https://raw.githubusercontent.com/k3s-io/k3s/${PYO_K3S_VERSION//+/%2B}/install.sh" "$dir/install.sh"
+  k3s_sha_ok "$dir/install.sh" "$PYO_K3S_INSTALLER_SHA256" ||
+    k3s_fail "The downloaded k3s installer doesn't match the expected checksum, so it won't run."
+  if [ "$version" != "$PYO_K3S_VERSION" ]; then
+    k3s_get "$rel/sha256sum-$arch.txt" "$dir/sha256sum.txt"
+    want=$(awk -v f="$bin" '$2 == f { print $1 }' "$dir/sha256sum.txt")
+  fi
+  [[ $want =~ ^[0-9a-f]{64}$ ]] || k3s_fail "There's no checksum for k3s $version ($bin)."
+  k3s_get "$rel/$bin" "$dir/k3s"
+  k3s_sha_ok "$dir/k3s" "$want" ||
+    k3s_fail "The downloaded k3s binary doesn't match the expected checksum, so it won't be installed."
+  chmod 755 "$dir/k3s"
+}
+k3s_install() {
+  local dir=$1
+  shift
+  [ -x "$dir/k3s" ] && [ -f "$dir/install.sh" ] || k3s_fail "k3s wasn't downloaded."
+  install -m 755 "$dir/k3s" /usr/local/bin/.k3s.new
+  mv -f /usr/local/bin/.k3s.new /usr/local/bin/k3s
+  INSTALL_K3S_SKIP_DOWNLOAD=binary INSTALL_K3S_BIN_DIR=/usr/local/bin sh "$dir/install.sh" "$@"
+}
+# <<< pyo:k3s
+# The k3s Pyo pins (deploy/k3s.env), downloaded and checked first.
+K3S_DIR=$(mktemp -d)
+trap 'rm -rf "$K3S_DIR"' EXIT
+if ! command -v k3s >/dev/null; then
+  # shellcheck source=deploy/k3s.env
+  . "$(dirname "${BASH_SOURCE[0]}")/../deploy/k3s.env"
+  k3s_fetch "$K3S_DIR" "$PYO_K3S_VERSION"
+fi
+mkdir -p /etc/rancher/k3s
+cat > /etc/rancher/k3s/config.yaml <<'CONFIG'
+# Lets the dev user read /etc/rancher/k3s/k3s.yaml without sudo.
+write-kubeconfig-mode: "0644"
+# Secrets are encrypted in the datastore with secretbox. On a k3s that was
+# already running, also run: k3s secrets-encrypt reencrypt
+secrets-encryption: true
+secrets-encryption-provider: secretbox
+CONFIG
+# The Kubernetes API's certificate also names this machine's MagicDNS name,
+# when it's on a tailnet with MagicDNS.
+TS_NAME=$(tailscale status --json 2>/dev/null | sed -n '/"Self"/,/}/s/^ *"DNSName": *"\([^"]*\)",*$/\1/p' | head -n1 || true)
+TS_NAME=${TS_NAME%.}
+[ -z "$TS_NAME" ] || printf 'tls-san:\n  - "%s"\n' "$TS_NAME" >> /etc/rancher/k3s/config.yaml
+# Pyo's registry runs in the cluster on 127.0.0.1:5005 over plain HTTP.
+# Images built by Pyo are pushed there and pulled by containerd from there.
+cat > /etc/rancher/k3s/registries.yaml <<'REGISTRIES'
+mirrors:
+  "127.0.0.1:5005":
+    endpoint:
+      - "http://127.0.0.1:5005"
+REGISTRIES
+if ! command -v k3s >/dev/null; then
+  # Pyo Gateway takes 80/443, not k3s's Traefik.
+  k3s_install "$K3S_DIR" server --disable traefik
+  # So install.sh --uninstall removes the k3s it installed, as for an install.
+  install -d -m 700 /etc/pyo
+  echo "k3s was installed by Pyo's scripts/setup-host.sh on $(date -u +%F)." > /etc/pyo/k3s-installed
+else
+  systemctl restart k3s
+fi
+
+echo
+echo "Done. Try: kubectl get nodes"

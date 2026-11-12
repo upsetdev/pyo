@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in Pyo doesn't work as it should.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Pyo version
+      description: Shown under Settings → Updates, in the Version panel.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - Install script (pyo.dev/install.sh)
+        - From source (scripts/pyo-up.sh)
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      description: Number of servers, regions, OS and k3s version (`k3s --version`).
+      placeholder: 2 servers in one region, Ubuntu 24.04, k3s v1.33.1+k3s1
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >-
+        Errors from Activity in the dashboard, or Pyo's own logs on the server:
+        `sudo k3s kubectl -n pyo-system logs deployment/pyo --tail=200`.
+        Remove secrets and domains you don't want public.
+      render: shell
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched existing issues.
+          required: true

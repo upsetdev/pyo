@@ -1,0 +1,14 @@
+node_modules
+dash/node_modules
+target
+dash/dist
+.data
+dash/.tanstack
+dash/.output
+.git
+.env
+.env.*
+*.tsbuildinfo
+dash/*.tsbuildinfo
+waf/bin
+waf/.cache

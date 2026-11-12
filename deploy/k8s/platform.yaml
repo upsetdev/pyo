@@ -1,0 +1,537 @@
+# What Pyo runs on: its namespace, image registry, BuildKit and Postgres.
+# Pyo itself is in pyo.yaml. Apply both with scripts/pyo-up.sh, which
+# also creates the Postgres secret and fills in the image tag.
+#
+# Multi-node notes:
+#   - the image registry answers inside the cluster only (pyo-registry, for
+#     Pyo itself); this node's containerd and BuildKit reach it on
+#     127.0.0.1:5005 through pyo-host. Other machines (servers, builders)
+#     reach it only through Pyo's registry door, which wants a login: on
+#     this node's Tailscale IP, __TAILNET_IP__:5005 (filled in by
+#     pyo-up.sh), with a registries.yaml mirror (connect.sh, join.sh);
+#   - volumes use local-path, so their data stays on the node that made them.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pyo-system
+  labels:
+    app.kubernetes.io/part-of: pyo
+---
+# ── Who reaches what in pyo-system: nothing, unless allowed below. Pods
+# on the host network (pyo-host, BuildKit) and the node itself (the
+# kubelet's probes; pyo-host's forwards to the registry beside it) aren't
+# held by these. ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: pyo-system
+  labels: { app.kubernetes.io/part-of: pyo }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# The dashboard, API and registry door: Pyo's front, with its own logins.
+# The gateway, agents, builders and pyo-host reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pyo
+  namespace: pyo-system
+  labels: { app.kubernetes.io/part-of: pyo }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: pyo }
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { port: 8000 }
+        - { port: 5006 }
+---
+# Postgres and ClickHouse: Pyo's web and worker replicas only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pyo-databases
+  namespace: pyo-system
+  labels: { app.kubernetes.io/part-of: pyo }
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/name, operator: In, values: [pyo-postgres, pyo-clickhouse] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: [pyo, pyo-worker] }
+      ports:
+        - { port: 5432 }
+        - { port: 8123 }
+---
+# The backup store: its S3 API from anywhere (backup jobs in projects'
+# namespaces, the databases' own backups in pyo-db-*; not by namespace, as
+# a job's pod would race the policy's address list when it starts), each
+# with its team's key; its admin API (buckets and keys) from Pyo only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pyo-backup-store
+  namespace: pyo-system
+  labels: { app.kubernetes.io/part-of: pyo }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: pyo-backup-store }
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { port: 3900 }
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: [pyo, pyo-worker] }
+      ports:
+        - { port: 3903 }
+---
+# The registry: Pyo only (its door, image sizes and clean-up). The node's
+# containerd and BuildKit come through pyo-host on the same node.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: registry
+  namespace: pyo-system
+  labels: { app.kubernetes.io/part-of: pyo }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: registry }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: [pyo, pyo-worker] }
+      ports:
+        - { port: 5000 }
+---
+# ── Image registry: in the cluster only (pyo-registry:5000), for Pyo's
+# door and its own clean-up; on the node as 127.0.0.1:5005 through pyo-host
+# (k3s pulls from it over HTTP, see /etc/rancher/k3s/registries.yaml). ──
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-data
+  namespace: pyo-system
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyo-registry
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: registry, app.kubernetes.io/part-of: pyo }
+spec:
+  selector: { app.kubernetes.io/name: registry }
+  ports:
+    - { name: registry, port: 5000, targetPort: registry }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: registry, app.kubernetes.io/part-of: pyo }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: registry }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: registry, app.kubernetes.io/part-of: pyo }
+    spec:
+      containers:
+        - name: registry
+          image: registry:3.1.2
+          env:
+            - { name: REGISTRY_HTTP_ADDR, value: "0.0.0.0:5000" }
+            - { name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true" }
+            - { name: OTEL_TRACES_EXPORTER, value: "none" }
+          ports:
+            - { name: registry, containerPort: 5000 }
+          readinessProbe:
+            httpGet: { path: /v2/, port: registry }
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/registry }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 512Mi }
+        # Frees the layers of images Pyo deleted (deployments past the
+        # team's retention). Daily; untagged manifests of live services are kept
+        # because Pyo deletes by digest, never by tag.
+        - name: gc
+          image: registry:3.1.2
+          command: ["sh", "-c", "while sleep 86400; do registry garbage-collect /etc/distribution/config.yml; done"]
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/registry }
+          resources:
+            requests: { cpu: 5m, memory: 16Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: registry-data }
+---
+# ── Pyo on this machine, beside the registry: the dashboard and API
+# (:8000) on localhost and the Tailscale IP only, never public addresses;
+# the registry on localhost:5005, for this node's containerd and BuildKit;
+# and the registry door (logins only) on the Tailscale IP's :5005, for
+# other machines' containerd and builders. The plain registry is never on
+# the tailnet. Teams' own pushes use HTTPS through the gateway (:5443,
+# tailnet only). ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyo-host
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo-host }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # On the registry's node: its connections from this node's own
+      # address are the ones the registry's network policy lets through.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app.kubernetes.io/name: registry } }
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: forward
+          image: alpine/socat:1.8.1.3
+          command: ["sh", "-c"]
+          args:
+            - |
+              IP="__TAILNET_IP__"
+              to=TCP:pyo.pyo-system.svc.cluster.local:8000
+              socat TCP-LISTEN:8000,bind=127.0.0.1,fork,reuseaddr $to &
+              socat TCP-LISTEN:5005,bind=127.0.0.1,fork,reuseaddr TCP:pyo-registry.pyo-system.svc.cluster.local:5000 &
+              if [ -n "$IP" ]; then
+                socat TCP-LISTEN:8000,bind="$IP",fork,reuseaddr $to &
+                socat TCP-LISTEN:5005,bind="$IP",fork,reuseaddr TCP:pyo-registry-door.pyo-system.svc.cluster.local:5006 &
+              fi
+              wait
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 64Mi }
+---
+# ── BuildKit: builds Pyo's images (and later, services from Git). Listens on
+# 127.0.0.1:1234 on the node, without TLS: reachable only from this host. ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buildkitd
+  namespace: pyo-system
+data:
+  buildkitd.toml: |
+    [registry."127.0.0.1:5005"]
+      http = true
+      insecure = true
+    [worker.oci]
+      gc = true
+      gckeepstorage = "20GB"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: buildkit-cache
+  namespace: pyo-system
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkitd
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: buildkitd, app.kubernetes.io/part-of: pyo }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: buildkitd }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: buildkitd, app.kubernetes.io/part-of: pyo }
+    spec:
+      hostNetwork: true
+      containers:
+        - name: buildkitd
+          image: moby/buildkit:v0.34.1
+          args:
+            - --addr=tcp://127.0.0.1:1234
+            - --addr=unix:///run/buildkit/buildkitd.sock
+            - --config=/etc/buildkit/buildkitd.toml
+          securityContext:
+            privileged: true
+          readinessProbe:
+            exec: { command: [buildctl, debug, workers] }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - { name: config, mountPath: /etc/buildkit }
+            - { name: cache, mountPath: /var/lib/buildkit }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+      volumes:
+        - name: config
+          configMap: { name: buildkitd }
+        - name: cache
+          persistentVolumeClaim: { claimName: buildkit-cache }
+---
+# ── Postgres: the control plane's source of truth. The password lives in
+# the pyo-postgres secret (created by scripts/pyo-up.sh). ──
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyo-postgres
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-postgres, app.kubernetes.io/part-of: pyo }
+spec:
+  selector: { app.kubernetes.io/name: pyo-postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pyo-postgres
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-postgres, app.kubernetes.io/part-of: pyo }
+spec:
+  serviceName: pyo-postgres
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo-postgres }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-postgres, app.kubernetes.io/part-of: pyo }
+    spec:
+      # Start as the image's postgres user (uid 70, which owns the data): the
+      # entrypoint then starts Postgres directly, without switching users.
+      securityContext:
+        runAsUser: 70
+        runAsGroup: 70
+        runAsNonRoot: true
+      containers:
+        - name: postgres
+          image: postgres:18.6-alpine
+          env:
+            - { name: POSTGRES_DB, value: pyo }
+            - { name: POSTGRES_USER, value: pyo }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: pyo-postgres, key: password } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          readinessProbe:
+            exec: { command: [pg_isready, -U, pyo, -d, pyo] }
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 1Gi }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# ── ClickHouse: observability data (web analytics and server metrics).
+# Rows expire after 180 days. Password in the pyo-clickhouse secret. ──
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyo-clickhouse
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-clickhouse, app.kubernetes.io/part-of: pyo }
+spec:
+  selector: { app.kubernetes.io/name: pyo-clickhouse }
+  ports:
+    - { name: http, port: 8123, targetPort: http }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pyo-clickhouse
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-clickhouse, app.kubernetes.io/part-of: pyo }
+spec:
+  serviceName: pyo-clickhouse
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo-clickhouse }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-clickhouse, app.kubernetes.io/part-of: pyo }
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:26.8.36.3
+          env:
+            - { name: CLICKHOUSE_DB, value: pyo_observability }
+            - { name: CLICKHOUSE_USER, value: pyo }
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: pyo-clickhouse, key: password } }
+          ports:
+            - { name: http, containerPort: 8123 }
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/clickhouse }
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 2Gi }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# ── Backup store: S3-compatible storage on this cluster (Garage, the
+# official image, unmodified), the default destination of backups ("This
+# server"), Pyo's own and teams'. Off-site copies need an external bucket:
+# this one lives on the same disks.
+#
+# Its S3 API (:3900, region "garage", path-style) answers signed requests
+# from anywhere; its admin API (:3903, buckets and keys) only Pyo, with the
+# admin token; RPC (:3901) stays on the pod's localhost. Pyo sets it up at
+# start over the admin API (backupstore.rs): the node in the layout, Pyo's
+# key (pyo-backup-store secret, never leaves Pyo) and bucket pyo-backups.
+# Each team gets a bucket and a key that reaches only it. ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pyo-backup-store
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-backup-store, app.kubernetes.io/part-of: pyo }
+data:
+  # rpc_secret and admin_token come from the pyo-backup-store secret
+  # (GARAGE_RPC_SECRET, GARAGE_ADMIN_TOKEN). No compression: restic and
+  # Barman data arrives compressed and encrypted already. Blocks waiting to
+  # be written may hold 64 MiB of memory at most.
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    db_engine = "lmdb"
+    replication_factor = 1
+    compression_level = "none"
+    block_ram_buffer_max = "64MiB"
+    rpc_bind_addr = "127.0.0.1:3901"
+    rpc_public_addr = "127.0.0.1:3901"
+
+    [s3_api]
+    s3_region = "garage"
+    api_bind_addr = "0.0.0.0:3900"
+
+    [admin]
+    api_bind_addr = "0.0.0.0:3903"
+    metrics_require_token = true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyo-backup-store
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-backup-store, app.kubernetes.io/part-of: pyo }
+spec:
+  selector: { app.kubernetes.io/name: pyo-backup-store }
+  ports:
+    - { name: s3, port: 3900, targetPort: s3 }
+    - { name: admin, port: 3903, targetPort: admin }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pyo-backup-store
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-backup-store, app.kubernetes.io/part-of: pyo }
+spec:
+  serviceName: pyo-backup-store
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo-backup-store }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-backup-store, app.kubernetes.io/part-of: pyo }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: garage
+          # v2.5.0
+          image: dxflrs/garage@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5
+          command: [/garage, -c, /etc/garage/garage.toml, server]
+          env:
+            - name: GARAGE_RPC_SECRET
+              valueFrom: { secretKeyRef: { name: pyo-backup-store, key: rpc-secret } }
+            - name: GARAGE_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: pyo-backup-store, key: admin-token } }
+          ports:
+            - { name: s3, containerPort: 3900 }
+            - { name: admin, containerPort: 3903 }
+          # Ready once it listens: the layout is Pyo's to set up, over the
+          # admin API, which wants the pod ready first.
+          readinessProbe:
+            tcpSocket: { port: s3 }
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/garage, readOnly: true }
+            - { name: data, mountPath: /var/lib/garage }
+          # Idle it holds ~6 MiB; a big restic or Barman upload stays under
+          # 200 MiB (block buffers are capped at 64 MiB above). The limit
+          # leaves room for several uploads at once and LMDB's page cache.
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: config
+          configMap: { name: pyo-backup-store }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 50Gi

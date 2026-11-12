@@ -1,0 +1,496 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pyo <pyo@localhost>
+Date: Tue, 10 Nov 2026 16:17:19 +0700
+Subject: [PATCH 3/4] feat: make the object key prefix of backups configurable
+
+Backups are stored under "moco/<namespace>/<name>/" in the bucket.
+Add bucketConfig.prefix (moco-backup --prefix) to store them under
+"<prefix>/<namespace>/<name>/" instead, e.g. to keep several tenants'
+backups apart in one bucket.  It defaults to "moco", so nothing
+changes unless it is set.  A restore reads the backups from the same
+place, using its own jobConfig.bucketConfig.prefix.
+---
+ api/v1beta2/job_types.go                      |  6 +++++
+ backup/backup.go                              | 10 +++++---
+ backup/integration_test.go                    | 20 ++++++++--------
+ backup/key.go                                 | 22 +++++++++++++----
+ backup/key_test.go                            | 24 +++++++++++++++++++
+ backup/restore.go                             |  6 +++--
+ .../templates/generated/crds/moco_crds.yaml   |  6 +++++
+ cmd/moco-backup/cmd/backup.go                 |  2 +-
+ cmd/moco-backup/cmd/restore.go                |  2 +-
+ cmd/moco-backup/cmd/root.go                   |  3 +++
+ .../bases/moco.cybozu.com_backuppolicies.yaml |  3 +++
+ .../bases/moco.cybozu.com_mysqlclusters.yaml  |  3 +++
+ ...nition_backuppolicies.moco.cybozu.com.yaml |  3 +++
+ ...inition_mysqlclusters.moco.cybozu.com.yaml |  3 +++
+ controllers/mysqlcluster_controller.go        |  3 +++
+ docs/backup.md                                |  4 ++++
+ docs/crd_backuppolicy_v1beta2.md              |  1 +
+ docs/crd_mysqlcluster_v1beta2.md              |  1 +
+ docs/moco-backup.md                           |  1 +
+ docs/usage.md                                 |  2 +-
+ 20 files changed, 102 insertions(+), 23 deletions(-)
+ create mode 100644 backup/key_test.go
+
+diff --git a/api/v1beta2/job_types.go b/api/v1beta2/job_types.go
+index 88cf2ba..cda553d 100644
+--- a/api/v1beta2/job_types.go
++++ b/api/v1beta2/job_types.go
+@@ -212,6 +212,12 @@ type BucketConfig struct {
+ 	// Path to SSL CA certificate file used in addition to system default.
+ 	// +optional
+ 	CaCert string `json:"caCert,omitempty"`
++
++	// The first part of the object keys.  Backups are stored under
++	// `<prefix>/<namespace>/<name>/`, and a restore reads them from there.
++	// Leading and trailing slashes are ignored.  Defaults to `moco`.
++	// +optional
++	Prefix string `json:"prefix,omitempty"`
+ }
+ 
+ // AffinityApplyConfiguration is the type defined to implement the DeepCopy method.
+diff --git a/backup/backup.go b/backup/backup.go
+index d582857..9dc15fd 100644
+--- a/backup/backup.go
++++ b/backup/backup.go
+@@ -40,6 +40,7 @@ type BackupManager struct {
+ 	mysqlPassword string
+ 	workDir       string
+ 	bucket        bucket.Bucket
++	keyPrefix     string
+ 	threads       int
+ 
+ 	// status fields
+@@ -54,7 +55,9 @@ type BackupManager struct {
+ 	warnings     []string
+ }
+ 
+-func NewBackupManager(cfg *rest.Config, bc bucket.Bucket, dir, ns, name, password string, threads int) (*BackupManager, error) {
++// NewBackupManager returns a BackupManager.  The backups are stored under
++// "<keyPrefix>/<ns>/<name>/" in the bucket; an empty keyPrefix is DefaultKeyPrefix.
++func NewBackupManager(cfg *rest.Config, bc bucket.Bucket, keyPrefix, dir, ns, name, password string, threads int) (*BackupManager, error) {
+ 	log := crlog.Log.WithName("backup")
+ 	scheme := runtime.NewScheme()
+ 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+@@ -87,6 +90,7 @@ func NewBackupManager(cfg *rest.Config, bc bucket.Bucket, dir, ns, name, passwor
+ 		mysqlPassword: password,
+ 		workDir:       dir,
+ 		bucket:        bc,
++		keyPrefix:     keyPrefix,
+ 		threads:       threads,
+ 	}, nil
+ }
+@@ -344,7 +348,7 @@ func (bm *BackupManager) backupFull(ctx context.Context, op bkop.Operator) error
+ 	pw = nil
+ 
+ 	bw := &ByteCountWriter{}
+-	key := calcKey(bm.cluster.Namespace, bm.cluster.Name, constants.DumpFilename, bm.startTime)
++	key := calcKey(bm.keyPrefix, bm.cluster.Namespace, bm.cluster.Name, constants.DumpFilename, bm.startTime)
+ 	if err := bm.bucket.Put(ctx, key, io.TeeReader(pr, bw), usage); err != nil {
+ 		return fmt.Errorf("failed to put dump.tar: %w", err)
+ 	}
+@@ -437,7 +441,7 @@ func (bm *BackupManager) backupBinlog(ctx context.Context, op bkop.Operator) err
+ 	pw2 = nil
+ 
+ 	bw := &ByteCountWriter{}
+-	key := calcKey(bm.cluster.Namespace, bm.cluster.Name, constants.BinlogFilename, lastBackup.Time.Time)
++	key := calcKey(bm.keyPrefix, bm.cluster.Namespace, bm.cluster.Name, constants.BinlogFilename, lastBackup.Time.Time)
+ 	if err := bm.bucket.Put(ctx, key, io.TeeReader(pr2, bw), usage); err != nil {
+ 		return fmt.Errorf("failed to put binlog.tar.zst: %w", err)
+ 	}
+diff --git a/backup/integration_test.go b/backup/integration_test.go
+index 7b4c14c..305d211 100644
+--- a/backup/integration_test.go
++++ b/backup/integration_test.go
+@@ -121,7 +121,7 @@ var _ = Describe("Backup/Restore", func() {
+ 			return op, nil
+ 		}
+ 
+-		bm, err := NewBackupManager(cfg, bc, workDir, "test", "single", "", 3)
++		bm, err := NewBackupManager(cfg, bc, "", workDir, "test", "single", "", 3)
+ 		Expect(err).NotTo(HaveOccurred())
+ 
+ 		err = bm.Backup(ctx)
+@@ -151,7 +151,7 @@ var _ = Describe("Backup/Restore", func() {
+ 		Expect(bs.WorkDirUsage).To(BeNumerically(">", 0))
+ 		Expect(bs.Warnings).To(BeEmpty())
+ 
+-		rm, err := NewRestoreManager(cfg, bc, workDir2, "test", "single", "restore", "target", "", 3, bs.Time.Time, "", "")
++		rm, err := NewRestoreManager(cfg, bc, "", workDir2, "test", "single", "restore", "target", "", 3, bs.Time.Time, "", "")
+ 		Expect(err).NotTo(HaveOccurred())
+ 
+ 		ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
+@@ -193,7 +193,7 @@ var _ = Describe("Backup/Restore", func() {
+ 			return op, nil
+ 		}
+ 
+-		bm, err := NewBackupManager(cfg, bc, workDir, "test", "single", "", 3)
++		bm, err := NewBackupManager(cfg, bc, "", workDir, "test", "single", "", 3)
+ 		Expect(err).NotTo(HaveOccurred())
+ 
+ 		err = bm.Backup(ctx)
+@@ -218,7 +218,7 @@ var _ = Describe("Backup/Restore", func() {
+ 		// second shot
+ 		err = os.RemoveAll(filepath.Join(workDir, "dump"))
+ 		Expect(err).NotTo(HaveOccurred())
+-		bm, err = NewBackupManager(cfg, bc, workDir, "test", "single", "", 3)
++		bm, err = NewBackupManager(cfg, bc, "", workDir, "test", "single", "", 3)
+ 		Expect(err).NotTo(HaveOccurred())
+ 		err = bm.Backup(ctx)
+ 		Expect(err).NotTo(HaveOccurred())
+@@ -240,7 +240,7 @@ var _ = Describe("Backup/Restore", func() {
+ 		Expect(bs.WorkDirUsage).To(BeNumerically(">", 0))
+ 		Expect(bs.Warnings).To(BeEmpty())
+ 
+-		rm, err := NewRestoreManager(cfg, bc, workDir2, "test", "single", "restore", "target", "", 3, restorePoint, "", "")
++		rm, err := NewRestoreManager(cfg, bc, "", workDir2, "test", "single", "restore", "target", "", 3, restorePoint, "", "")
+ 		Expect(err).NotTo(HaveOccurred())
+ 
+ 		err = rm.Restore(ctx)
+@@ -258,7 +258,7 @@ var _ = Describe("Backup/Restore", func() {
+ 			return op, nil
+ 		}
+ 
+-		bm, err := NewBackupManager(cfg, bc, workDir, "test", "single", "", 3)
++		bm, err := NewBackupManager(cfg, bc, "", workDir, "test", "single", "", 3)
+ 		Expect(err).NotTo(HaveOccurred())
+ 
+ 		err = bm.Backup(ctx)
+@@ -286,13 +286,13 @@ var _ = Describe("Backup/Restore", func() {
+ 		// second shot
+ 		err = os.RemoveAll(filepath.Join(workDir, "dump"))
+ 		Expect(err).NotTo(HaveOccurred())
+-		bm, err = NewBackupManager(cfg, bc, workDir, "test", "single", "", 3)
++		bm, err = NewBackupManager(cfg, bc, "", workDir, "test", "single", "", 3)
+ 		Expect(err).NotTo(HaveOccurred())
+ 		err = bm.Backup(ctx)
+ 		Expect(err).NotTo(HaveOccurred())
+ 		Expect(bc.contents).To(HaveLen(3))
+ 
+-		rm, err := NewRestoreManager(cfg, bc, workDir2, "test", "single", "restore", "target", "", 3, bt, "", "")
++		rm, err := NewRestoreManager(cfg, bc, "", workDir2, "test", "single", "restore", "target", "", 3, bt, "", "")
+ 		Expect(err).NotTo(HaveOccurred())
+ 
+ 		err = rm.Restore(ctx)
+@@ -310,7 +310,7 @@ var _ = Describe("Backup/Restore", func() {
+ 			return op, nil
+ 		}
+ 
+-		bm, err := NewBackupManager(cfg, bc, workDir, "test", "single", "", 3)
++		bm, err := NewBackupManager(cfg, bc, "", workDir, "test", "single", "", 3)
+ 		Expect(err).NotTo(HaveOccurred())
+ 
+ 		err = bm.Backup(ctx)
+@@ -332,7 +332,7 @@ var _ = Describe("Backup/Restore", func() {
+ 		// second shot
+ 		err = os.RemoveAll(filepath.Join(workDir, "dump"))
+ 		Expect(err).NotTo(HaveOccurred())
+-		bm, err = NewBackupManager(cfg, bc, workDir, "test", "single", "", 3)
++		bm, err = NewBackupManager(cfg, bc, "", workDir, "test", "single", "", 3)
+ 		Expect(err).NotTo(HaveOccurred())
+ 		err = bm.Backup(ctx)
+ 		Expect(err).NotTo(HaveOccurred())
+diff --git a/backup/key.go b/backup/key.go
+index 0483731..9833ddc 100644
+--- a/backup/key.go
++++ b/backup/key.go
+@@ -2,17 +2,29 @@ package backup
+ 
+ import (
+ 	"path"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/cybozu-go/moco/pkg/constants"
+ )
+ 
+-const prefix = "moco"
++// DefaultKeyPrefix is the first part of the object keys of backups when
++// no other is given.
++const DefaultKeyPrefix = "moco"
+ 
+-func calcKey(clusterNS, clusterName, filename string, dt time.Time) string {
+-	return path.Join(prefix, clusterNS, clusterName, dt.UTC().Format(constants.BackupTimeFormat), filename)
++// keyRoot returns prefix without leading and trailing slashes, or
++// DefaultKeyPrefix when it is empty.
++func keyRoot(prefix string) string {
++	if p := strings.Trim(prefix, "/"); p != "" {
++		return p
++	}
++	return DefaultKeyPrefix
+ }
+ 
+-func calcPrefix(clusterNS, clusterName string) string {
+-	return path.Join(prefix, clusterNS, clusterName) + "/"
++func calcKey(prefix, clusterNS, clusterName, filename string, dt time.Time) string {
++	return path.Join(keyRoot(prefix), clusterNS, clusterName, dt.UTC().Format(constants.BackupTimeFormat), filename)
++}
++
++func calcPrefix(prefix, clusterNS, clusterName string) string {
++	return path.Join(keyRoot(prefix), clusterNS, clusterName) + "/"
+ }
+diff --git a/backup/key_test.go b/backup/key_test.go
+new file mode 100644
+index 0000000..85c04ac
+--- /dev/null
++++ b/backup/key_test.go
+@@ -0,0 +1,24 @@
++package backup
++
++import (
++	"testing"
++	"time"
++)
++
++func TestKeys(t *testing.T) {
++	dt := time.Date(2026, 11, 10, 3, 4, 5, 0, time.UTC)
++	cases := []struct{ prefix, key, dir string }{
++		{"", "moco/ns/db/20261110-030405/dump.tar", "moco/ns/db/"},
++		{"moco", "moco/ns/db/20261110-030405/dump.tar", "moco/ns/db/"},
++		{"teams/t1/databases", "teams/t1/databases/ns/db/20261110-030405/dump.tar", "teams/t1/databases/ns/db/"},
++		{"/backups/", "backups/ns/db/20261110-030405/dump.tar", "backups/ns/db/"},
++	}
++	for _, c := range cases {
++		if got := calcKey(c.prefix, "ns", "db", "dump.tar", dt); got != c.key {
++			t.Errorf("calcKey(%q) = %q, want %q", c.prefix, got, c.key)
++		}
++		if got := calcPrefix(c.prefix, "ns", "db"); got != c.dir {
++			t.Errorf("calcPrefix(%q) = %q, want %q", c.prefix, got, c.dir)
++		}
++	}
++}
+diff --git a/backup/restore.go b/backup/restore.go
+index 7a02f25..f3a2c1f 100644
+--- a/backup/restore.go
++++ b/backup/restore.go
+@@ -47,7 +47,9 @@ type RestoreManager struct {
+ 
+ var ErrBadConnection = errors.New("the connection hasn't reflected the latest user's privileges")
+ 
+-func NewRestoreManager(cfg *rest.Config, bc bucket.Bucket, dir, srcNS, srcName, ns, name, password string, threads int, restorePoint time.Time, schema, users string) (*RestoreManager, error) {
++// NewRestoreManager returns a RestoreManager.  The backups are read from
++// "<keyPrefix>/<srcNS>/<srcName>/" in the bucket; an empty keyPrefix is DefaultKeyPrefix.
++func NewRestoreManager(cfg *rest.Config, bc bucket.Bucket, keyPrefix, dir, srcNS, srcName, ns, name, password string, threads int, restorePoint time.Time, schema, users string) (*RestoreManager, error) {
+ 	log := crlog.Log.WithName("restore")
+ 	scheme := runtime.NewScheme()
+ 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+@@ -62,7 +64,7 @@ func NewRestoreManager(cfg *rest.Config, bc bucket.Bucket, dir, srcNS, srcName,
+ 		return nil, fmt.Errorf("failed to create controller-runtime client: %w", err)
+ 	}
+ 
+-	prefix := calcPrefix(srcNS, srcName)
++	prefix := calcPrefix(keyPrefix, srcNS, srcName)
+ 	return &RestoreManager{
+ 		log:          log,
+ 		client:       k8sClient,
+diff --git a/charts/moco/templates/generated/crds/moco_crds.yaml b/charts/moco/templates/generated/crds/moco_crds.yaml
+index cb06b43..d0dcde2 100644
+--- a/charts/moco/templates/generated/crds/moco_crds.yaml
++++ b/charts/moco/templates/generated/crds/moco_crds.yaml
+@@ -532,6 +532,9 @@ spec:
+                           description: The API endpoint URL.
+                           pattern: ^https?://.*
+                           type: string
++                        prefix:
++                          description: The first part of the object keys.
++                          type: string
+                         region:
+                           description: The region of the bucket.
+                           type: string
+@@ -8101,6 +8104,9 @@ spec:
+                               description: The API endpoint URL.
+                               pattern: ^https?://.*
+                               type: string
++                            prefix:
++                              description: The first part of the object keys.
++                              type: string
+                             region:
+                               description: The region of the bucket.
+                               type: string
+diff --git a/cmd/moco-backup/cmd/backup.go b/cmd/moco-backup/cmd/backup.go
+index dfd5550..352429a 100644
+--- a/cmd/moco-backup/cmd/backup.go
++++ b/cmd/moco-backup/cmd/backup.go
+@@ -32,7 +32,7 @@ NAME:      The name of the MySQLCluster.`,
+ 			return fmt.Errorf("failed to get config for Kubernetes: %w", err)
+ 		}
+ 
+-		bm, err := backup.NewBackupManager(cfg, b, commonArgs.workDir, namespace, name, mysqlPassword, commonArgs.threads)
++		bm, err := backup.NewBackupManager(cfg, b, commonArgs.keyPrefix, commonArgs.workDir, namespace, name, mysqlPassword, commonArgs.threads)
+ 		if err != nil {
+ 			return fmt.Errorf("failed to create a backup manager: %w", err)
+ 		}
+diff --git a/cmd/moco-backup/cmd/restore.go b/cmd/moco-backup/cmd/restore.go
+index 5d305c5..bf391b4 100644
+--- a/cmd/moco-backup/cmd/restore.go
++++ b/cmd/moco-backup/cmd/restore.go
+@@ -75,7 +75,7 @@ func runRestore(cmd *cobra.Command, args []string) (e error) {
+ 		return fmt.Errorf("failed to get config for Kubernetes: %w", err)
+ 	}
+ 
+-	rm, err := backup.NewRestoreManager(cfg, b, commonArgs.workDir,
++	rm, err := backup.NewRestoreManager(cfg, b, commonArgs.keyPrefix, commonArgs.workDir,
+ 		srcNamespace, srcName,
+ 		namespace, name,
+ 		mysqlPassword,
+diff --git a/cmd/moco-backup/cmd/root.go b/cmd/moco-backup/cmd/root.go
+index b0eafa1..d9c5be1 100644
+--- a/cmd/moco-backup/cmd/root.go
++++ b/cmd/moco-backup/cmd/root.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+ 	"github.com/aws/aws-sdk-go-v2/service/s3"
+ 	"github.com/cybozu-go/moco"
++	"github.com/cybozu-go/moco/backup"
+ 	"github.com/cybozu-go/moco/pkg/bucket"
+ 	"github.com/cybozu-go/moco/pkg/constants"
+ 	mocolog "github.com/cybozu-go/moco/pkg/log"
+@@ -29,6 +30,7 @@ var commonArgs struct {
+ 	usePathStyle   bool
+ 	backendType    string
+ 	caCertFilePath string
++	keyPrefix      string
+ }
+ 
+ func makeBucket(bucketName string) (bucket.Bucket, error) {
+@@ -156,4 +158,5 @@ func init() {
+ 	pf.BoolVar(&commonArgs.usePathStyle, "use-path-style", false, "Use path-style S3 API")
+ 	pf.StringVar(&commonArgs.backendType, "backend-type", "s3", "The identifier for the object storage to be used.")
+ 	pf.StringVar(&commonArgs.caCertFilePath, "ca-cert", "", "Path to SSL CA certificate file used in addition to system default")
++	pf.StringVar(&commonArgs.keyPrefix, "prefix", backup.DefaultKeyPrefix, "The first part of the object keys: backups are stored under <prefix>/<namespace>/<name>/")
+ }
+diff --git a/config/crd/bases/moco.cybozu.com_backuppolicies.yaml b/config/crd/bases/moco.cybozu.com_backuppolicies.yaml
+index cf86590..8330c82 100644
+--- a/config/crd/bases/moco.cybozu.com_backuppolicies.yaml
++++ b/config/crd/bases/moco.cybozu.com_backuppolicies.yaml
+@@ -617,6 +617,9 @@ spec:
+                         description: The API endpoint URL.
+                         pattern: ^https?://.*
+                         type: string
++                      prefix:
++                        description: The first part of the object keys.
++                        type: string
+                       region:
+                         description: The region of the bucket.
+                         type: string
+diff --git a/config/crd/bases/moco.cybozu.com_mysqlclusters.yaml b/config/crd/bases/moco.cybozu.com_mysqlclusters.yaml
+index 06f8eaf..62cf8a6 100644
+--- a/config/crd/bases/moco.cybozu.com_mysqlclusters.yaml
++++ b/config/crd/bases/moco.cybozu.com_mysqlclusters.yaml
+@@ -6319,6 +6319,9 @@ spec:
+                             description: The API endpoint URL.
+                             pattern: ^https?://.*
+                             type: string
++                          prefix:
++                            description: The first part of the object keys.
++                            type: string
+                           region:
+                             description: The region of the bucket.
+                             type: string
+diff --git a/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_backuppolicies.moco.cybozu.com.yaml b/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_backuppolicies.moco.cybozu.com.yaml
+index 88803db..82a81a3 100644
+--- a/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_backuppolicies.moco.cybozu.com.yaml
++++ b/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_backuppolicies.moco.cybozu.com.yaml
+@@ -616,6 +616,9 @@ spec:
+                         description: The API endpoint URL.
+                         pattern: ^https?://.*
+                         type: string
++                      prefix:
++                        description: The first part of the object keys.
++                        type: string
+                       region:
+                         description: The region of the bucket.
+                         type: string
+diff --git a/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_mysqlclusters.moco.cybozu.com.yaml b/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_mysqlclusters.moco.cybozu.com.yaml
+index 9fcd622..70a72ad 100644
+--- a/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_mysqlclusters.moco.cybozu.com.yaml
++++ b/config/crd/tests/apiextensions.k8s.io_v1_customresourcedefinition_mysqlclusters.moco.cybozu.com.yaml
+@@ -6319,6 +6319,9 @@ spec:
+                             description: The API endpoint URL.
+                             pattern: ^https?://.*
+                             type: string
++                          prefix:
++                            description: The first part of the object keys.
++                            type: string
+                           region:
+                             description: The region of the bucket.
+                             type: string
+diff --git a/controllers/mysqlcluster_controller.go b/controllers/mysqlcluster_controller.go
+index d7af6a5..75bc058 100644
+--- a/controllers/mysqlcluster_controller.go
++++ b/controllers/mysqlcluster_controller.go
+@@ -1112,6 +1112,9 @@ func bucketArgs(bc mocov1beta2.BucketConfig) []string {
+ 	if bc.CaCert != "" {
+ 		args = append(args, "--ca-cert="+bc.CaCert)
+ 	}
++	if bc.Prefix != "" {
++		args = append(args, "--prefix="+bc.Prefix)
++	}
+ 
+ 	return append(args, bc.BucketName)
+ }
+diff --git a/docs/backup.md b/docs/backup.md
+index 84ae951..7e888e3 100644
+--- a/docs/backup.md
++++ b/docs/backup.md
+@@ -81,6 +81,10 @@ Example: `moco/foo/bar/20210515-230003/dump.tar`
+ 
+ This allows multiple MySQLClusters to share the same bucket.
+ 
++`moco` is the default.  With `jobConfig.bucketConfig.prefix`, the keys start with that prefix instead,
++e.g. `backups/foo/bar/20210515-230003/dump.tar` with `prefix: backups`.
++A restore reads the backups under the prefix in its own `jobConfig.bucketConfig`.
++
+ ### Timestamps
+ 
+ Internally, the time for PiTR is formatted in UTC timezone.
+diff --git a/docs/crd_backuppolicy_v1beta2.md b/docs/crd_backuppolicy_v1beta2.md
+index 67fe340..9e1db45 100644
+--- a/docs/crd_backuppolicy_v1beta2.md
++++ b/docs/crd_backuppolicy_v1beta2.md
+@@ -62,6 +62,7 @@ BucketConfig is a set of parameter to access an object storage bucket.
+ | usePathStyle | Allows you to enable the client to use path-style addressing, i.e., https?://ENDPOINT/BUCKET/KEY. By default, a virtual-host addressing is used (https?://BUCKET.ENDPOINT/KEY). | bool | false |
+ | backendType | BackendType is an identifier for the object storage to be used. | string | false |
+ | caCert | Path to SSL CA certificate file used in addition to system default. | string | false |
++| prefix | The first part of the object keys.  Backups are stored under `<prefix>/<namespace>/<name>/`, and a restore reads them from there. Leading and trailing slashes are ignored.  Defaults to `moco`. | string | false |
+ 
+ [Back to Custom Resources](#custom-resources)
+ 
+diff --git a/docs/crd_mysqlcluster_v1beta2.md b/docs/crd_mysqlcluster_v1beta2.md
+index aa577d8..780bed8 100644
+--- a/docs/crd_mysqlcluster_v1beta2.md
++++ b/docs/crd_mysqlcluster_v1beta2.md
+@@ -206,6 +206,7 @@ BucketConfig is a set of parameter to access an object storage bucket.
+ | usePathStyle | Allows you to enable the client to use path-style addressing, i.e., https?://ENDPOINT/BUCKET/KEY. By default, a virtual-host addressing is used (https?://BUCKET.ENDPOINT/KEY). | bool | false |
+ | backendType | BackendType is an identifier for the object storage to be used. | string | false |
+ | caCert | Path to SSL CA certificate file used in addition to system default. | string | false |
++| prefix | The first part of the object keys.  Backups are stored under `<prefix>/<namespace>/<name>/`, and a restore reads them from there. Leading and trailing slashes are ignored.  Defaults to `moco`. | string | false |
+ 
+ [Back to Custom Resources](#custom-resources)
+ 
+diff --git a/docs/moco-backup.md b/docs/moco-backup.md
+index b56dafd..10c2266 100644
+--- a/docs/moco-backup.md
++++ b/docs/moco-backup.md
+@@ -20,6 +20,7 @@ Global Flags:
+       --use-path-style    Use path-style S3 API
+       --work-dir string   The writable working directory (default "/work")
+       --ca-cert string    Path to SSL CA certificate file used in addition to system default
++      --prefix string     The first part of the object keys: backups are stored under <prefix>/<namespace>/<name>/ (default "moco")
+ ```
+ 
+ ## Subcommands
+diff --git a/docs/usage.md b/docs/usage.md
+index b5c6963..05923bc 100644
+--- a/docs/usage.md
++++ b/docs/usage.md
+@@ -404,7 +404,7 @@ To remove old backups automatically, you can set a lifecycle configuration to th
+ ref: [Setting lifecycle configuration on a bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/how-to-set-lifecycle-configuration-intro.html)
+ 
+ A bucket can be shared safely across multiple MySQLClusters.
+-Object keys are prefixed with `moco/`.
++Object keys are prefixed with `moco/`, or with `bucketConfig.prefix` when it is set.
+ 
+ ### BackupPolicy
+ 

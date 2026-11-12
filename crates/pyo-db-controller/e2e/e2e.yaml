@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Namespace
+metadata: {name: app, labels: {pyo.dev/managed: "true"}}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: other}
+---
+# What the Pyo agent will create in each Pyo namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: pyo-db-controller, namespace: app}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: pyo-db-controller-namespace}
+subjects: [{kind: ServiceAccount, name: pyo-db-controller, namespace: pyo-databases}]
+---
+apiVersion: pyo.dev/v1alpha1
+kind: Database
+metadata: {name: pg, namespace: app}
+spec: {engine: postgres, instances: 3, storage: 1Gi, memory: 256Mi, postgres: {pooler: true}, readReplicas: {instances: 2}}
+---
+apiVersion: pyo.dev/v1alpha1
+kind: Database
+metadata: {name: cache, namespace: app}
+spec: {engine: valkey, instances: 3, storage: 1Gi, memory: 128Mi, rest: true, readReplicas: {instances: 2}}
+---
+apiVersion: pyo.dev/v1alpha1
+kind: Database
+metadata: {name: sneaky, namespace: other}
+spec: {engine: valkey, instances: 1, storage: 1Gi}
+---
+apiVersion: pyo.dev/v1alpha1
+kind: Database
+metadata: {name: bad, namespace: app}
+spec: {engine: valkey, instances: 5, storage: 1Gi, postgres: {pooler: true}}
+---
+apiVersion: pyo.dev/v1alpha1
+kind: Database
+metadata: {name: my, namespace: app}
+spec: {engine: mysql, version: "8.4", instances: 3, storage: 2Gi, memory: 1Gi}
