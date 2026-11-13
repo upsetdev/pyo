@@ -1792,6 +1792,28 @@ mod auto_health_tests {
 }
 
 #[cfg(test)]
+mod build_job_tests {
+    use serde_json::json;
+
+    #[test]
+    fn build_arguments_go_to_the_builder() {
+        let source = json!({
+            "type": "git", "repoUrl": "https://github.com/acme/site", "branch": "main",
+            "buildArgs": [{ "key": "RAILPACK_SPA_OUTPUT_DIR", "value": "build" }, { "key": "", "value": "dropped" }],
+        });
+        let job = super::build_job("bld_1", "dpl_1", "svc_1", &source);
+        assert_eq!(job.build_args.len(), 1);
+        assert_eq!(
+            (
+                job.build_args[0].key.as_str(),
+                job.build_args[0].value.as_str()
+            ),
+            ("RAILPACK_SPA_OUTPUT_DIR", "build")
+        );
+    }
+}
+
+#[cfg(test)]
 mod retention_tests {
     use super::{built_image, retention};
     use std::collections::HashSet;

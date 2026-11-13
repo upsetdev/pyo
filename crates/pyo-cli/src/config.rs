@@ -99,6 +99,11 @@ pub struct Build {
     pub branch: Option<String>,
     pub dockerfile: Option<String>,
     pub context: Option<String>,
+    /// Build arguments, used by the next build: Dockerfile ARGs, or
+    /// Railpack settings like RAILPACK_BUILD_CMD. They can end up in the
+    /// image, so no secrets.
+    #[serde(default)]
+    pub args: toml::Table,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -168,7 +173,7 @@ pub fn write_service(path: Option<&Path>, id: &str, label: &str) -> Result<PathB
             out.join("\n") + "\n"
         }
         Err(_) => format!(
-            "{line}\n\n# Settings here win on `pyo deploy`. Anything left out stays as\n# the dashboard has it. Secrets: `pyo env set --secret KEY=value`.\n\n# [deploy]\n# replicas = 1\n# port = 8080\n# health = \"/healthz\"  # or \"tcp\" or \"none\"\n\n# [resources]\n# cpu = \"500m\"\n# memory = \"512Mi\"\n\n# [env]\n# LOG_LEVEL = \"info\"\n"
+            "{line}\n\n# Settings here win on `pyo deploy`. Anything left out stays as\n# the dashboard has it. Secrets: `pyo env set --secret KEY=value`.\n\n# [deploy]\n# replicas = 1\n# port = 8080\n# health = \"/healthz\"  # or \"tcp\" or \"none\"\n\n# [build.args]\n# RAILPACK_SPA_OUTPUT_DIR = \"dist\"\n\n# [resources]\n# cpu = \"500m\"\n# memory = \"512Mi\"\n\n# [env]\n# LOG_LEVEL = \"info\"\n"
         ),
     };
     fs::write(&path, text)?;
@@ -227,6 +232,8 @@ mod tests {
             service = "svc_abc"
             [build]
             dockerfile = "Dockerfile"
+            [build.args]
+            RAILPACK_BUILD_CMD = "npm run build"
             [deploy]
             replicas = 2
             port = 8080
@@ -243,6 +250,10 @@ mod tests {
         assert_eq!(f.service.as_deref(), Some("svc_abc"));
         assert_eq!(f.deploy.replicas, Some(2));
         assert_eq!(f.env.len(), 2);
+        assert_eq!(
+            f.build.args["RAILPACK_BUILD_CMD"].as_str(),
+            Some("npm run build")
+        );
         assert!(toml::from_str::<ServiceFile>("replicas = 2").is_err());
     }
 }

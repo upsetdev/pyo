@@ -1132,6 +1132,23 @@ fn check_health(h: &Value) -> ApiResult<()> {
     }
 }
 
+/// Build arguments reach the builder as KEY=value: a name can't hold `=`.
+fn check_build_args(args: &Value) -> ApiResult<()> {
+    for a in args.as_array().into_iter().flatten() {
+        let key = a["key"].as_str().unwrap_or("");
+        if !key.is_empty()
+            && !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            return Err(ApiError::bad_request(format!(
+                "Build argument {key}: use letters, digits and underscores."
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_service_spec(spec: &Value) -> ApiResult<()> {
     if spec["workloadKind"] == json!("CronJob") {
         check_schedule(spec["schedule"].as_str().unwrap_or(""))?;
@@ -1164,6 +1181,7 @@ fn validate_service_spec(spec: &Value) -> ApiResult<()> {
     deploy::image_ref(&spec["source"])?;
     crate::template_source::check(&spec["source"])?;
     check_health(&spec["healthCheck"])?;
+    check_build_args(&spec["source"]["buildArgs"])?;
     if spec["resources"]["gpu"]
         .as_u64()
         .is_some_and(|g| g > MAX_GPUS)
@@ -1870,6 +1888,7 @@ pub(crate) enum Op {
         /// Its ports: `name`, `containerPort`, `protocol` ("HTTP", "TCP" or "UDP"), `exposure` ("internal", "http" for a website, "nodeport", or "loadbalancer" for a public TCP or UDP port) and `publicPort`.
         /// A public TCP or UDP port goes through the gateway unless `proxy` is false. Then, for TCP only, it can have `ipFilter` (`{"mode": "allow" or "deny", "cidrs": [...]}`), `connectionLimit` (open connections on the port, from everyone together), `sendProxyProtocol` ("V1" or "V2", to the service) and `acceptProxyProtocol` (read the visitor's address from a header sent by a load balancer in front, while connections without one still work). Ports 22, 53, 80, 443 and a few others can't be public. Each public port belongs to one service on its cluster.
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
+        /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
         #[schema(value_type = Object)]
         service: Value,
         /// A new id you choose for its first deployment: `dpl_` then 4 to 40 lowercase letters, digits, dashes or underscores.
@@ -1893,6 +1912,7 @@ pub(crate) enum Op {
         /// Its ports: `name`, `containerPort`, `protocol` ("HTTP", "TCP" or "UDP"), `exposure` ("internal", "http" for a website, "nodeport", or "loadbalancer" for a public TCP or UDP port) and `publicPort`.
         /// A public TCP or UDP port goes through the gateway unless `proxy` is false. Then, for TCP only, it can have `ipFilter` (`{"mode": "allow" or "deny", "cidrs": [...]}`), `connectionLimit` (open connections on the port, from everyone together), `sendProxyProtocol` ("V1" or "V2", to the service) and `acceptProxyProtocol` (read the visitor's address from a header sent by a load balancer in front, while connections without one still work). Ports 22, 53, 80, 443 and a few others can't be public. Each public port belongs to one service on its cluster.
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
+        /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
         #[schema(value_type = Object)]
         service: Value,
         deployment_id: Option<String>,
@@ -7486,6 +7506,13 @@ mod service_spec_tests {
         assert!(check_health(&json!({ "type": "grpc" })).is_err());
         assert!(check_health(&json!({ "type": "http", "path": "healthz" })).is_err());
         assert!(check_health(&json!({ "type": "tcp", "auto": true })).is_err());
+    }
+
+    #[test]
+    fn build_arguments_are_names() {
+        assert!(check_build_args(&json!([{ "key": "RAILPACK_SPA_OUTPUT_DIR", "value": "dist" }, { "key": "", "value": "" }])).is_ok());
+        assert!(check_build_args(&Value::Null).is_ok());
+        assert!(check_build_args(&json!([{ "key": "A=B", "value": "x" }])).is_err());
     }
 }
 
