@@ -235,8 +235,11 @@ spec:
             requests: { cpu: 5m, memory: 8Mi }
             limits: { memory: 64Mi }
 ---
-# ── BuildKit: builds Pyo's images (and later, services from Git). Listens on
-# 127.0.0.1:1234 on the node, without TLS: reachable only from this host. ──
+# ── BuildKit for building Pyo's own images from a repository copy
+# (scripts/pyo-up.sh). Listens on 127.0.0.1:1234 on the node, without TLS:
+# reachable only from this host. Stopped (0 replicas) except while pyo-up.sh
+# builds; its cache volume stays. Services from Git build on builders
+# (the agent's builder.rs), not here. ──
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -269,7 +272,7 @@ metadata:
   namespace: pyo-system
   labels: { app.kubernetes.io/name: buildkitd, app.kubernetes.io/part-of: pyo }
 spec:
-  replicas: 1
+  replicas: 0
   strategy: { type: Recreate }
   selector:
     matchLabels: { app.kubernetes.io/name: buildkitd }
@@ -339,6 +342,27 @@ spec:
       containers:
         - name: postgres
           image: postgres:18.6-alpine
+          # Sized for a small server: Pyo's database is small and mostly
+          # cached by the OS. Connections: up to 2 web and 2 worker pods
+          # while they roll (pools of 10 and 15, each with its listeners),
+          # backups and migrations, with room to spare.
+          args:
+            - -c
+            - shared_buffers=32MB
+            - -c
+            - effective_cache_size=256MB
+            - -c
+            - work_mem=2MB
+            - -c
+            - maintenance_work_mem=32MB
+            - -c
+            - wal_buffers=1MB
+            - -c
+            - max_connections=80
+            - -c
+            - autovacuum_max_workers=2
+            - -c
+            - jit=off
           env:
             - { name: POSTGRES_DB, value: pyo }
             - { name: POSTGRES_USER, value: pyo }
@@ -353,8 +377,8 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql/data }
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits: { memory: 1Gi }
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 512Mi }
   volumeClaimTemplates:
     - metadata:
         name: data

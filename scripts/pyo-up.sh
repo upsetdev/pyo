@@ -113,8 +113,12 @@ fi
 # A wait shows what it's waiting for and for how long: a spinner on a
 # terminal, a line every 15 s otherwise. Nothing is drawn while sudo might
 # ask for a password: steps that need root run after `sudo -v`.
-CLEANUP=() BG_PID="" SPINNING=""
+CLEANUP=() BG_PID="" SPINNING="" BUILDKIT_UP=""
 on_exit() {
+  # BuildKit only runs while this builds (platform.yaml has it at 0).
+  if [ -n "$BUILDKIT_UP" ]; then
+    kubectl -n pyo-system scale deployment/buildkitd --replicas=0 >/dev/null 2>&1 || true
+  fi
   if [ -n "$BG_PID" ]; then
     pkill -P "$BG_PID" 2>/dev/null || true
     kill "$BG_PID" 2>/dev/null || true
@@ -564,7 +568,12 @@ log "Waiting for registry, BuildKit, Postgres and ClickHouse"
 wait_rollout deployment/registry 300s
 # The registry on this machine's 127.0.0.1:5005, where the builds below push.
 wait_rollout deployment/pyo-host 300s
-wait_rollout deployment/buildkitd 300s
+if [ -z "$NO_BUILD_TAG" ]; then
+  # Stopped between builds; its cache volume keeps warm builds fast.
+  BUILDKIT_UP=1
+  kubectl -n "$NS" scale deployment/buildkitd --replicas=1 >/dev/null
+  wait_rollout deployment/buildkitd 300s
+fi
 wait_rollout statefulset/pyo-postgres 300s
 wait_rollout statefulset/pyo-clickhouse 300s
 wait_rollout statefulset/pyo-backup-store 300s
@@ -581,6 +590,8 @@ if [ -n "$NO_BUILD_TAG" ]; then
 else
   BUILDCTL="$BUILDCTL" PYO_IMAGES="$IMAGES" PYO_BUILDKIT_ADDR=tcp://127.0.0.1:1234 \
     scripts/build-images.sh --tag "$(date +%Y%m%d%H%M%S)" --out "$TAGS" "${BUILD_ARGS[@]}" "${VERBOSE[@]}"
+  kubectl -n "$NS" scale deployment/buildkitd --replicas=0 >/dev/null
+  BUILDKIT_UP=""
 fi
 declare -A TAG_OF=()
 while read -r image tag; do TAG_OF[$image]=$tag; done <"$TAGS"
