@@ -10,6 +10,7 @@ mod db;
 mod domain;
 mod dotenv;
 mod exec;
+mod import;
 mod login;
 mod registry;
 mod service;
@@ -167,6 +168,31 @@ enum Command {
         command: DomainCommand,
         #[command(flatten)]
         which: Which,
+    },
+    /// Bring services over from Coolify or Dokploy: see what they become,
+    /// then import them. Owners and admins.
+    Import {
+        /// The platform: coolify or dokploy.
+        #[arg(value_parser = ["coolify", "dokploy"])]
+        platform: String,
+        /// Its address, e.g. https://coolify.example.com.
+        #[arg(long)]
+        from: String,
+        /// Its API token (Coolify's with read and read:sensitive). Used for this import only.
+        #[arg(long, env = "PYO_IMPORT_TOKEN", hide_env_values = true)]
+        source_token: String,
+        /// The team to import into (slug or id). Defaults to your first team.
+        #[arg(long)]
+        team: Option<String>,
+        /// The cluster to run it on (name or id). Defaults to the team's default cluster.
+        #[arg(long)]
+        cluster: Option<String>,
+        /// Deploy the services once they're made.
+        #[arg(long)]
+        deploy: bool,
+        /// Import without asking.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Backups of volumes and databases.
     Backup {
@@ -425,6 +451,29 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 team.as_deref(),
                 cluster.as_deref(),
                 yes,
+            )
+            .await
+        }
+        Command::Import {
+            platform,
+            from,
+            source_token,
+            team,
+            cluster,
+            deploy,
+            yes,
+        } => {
+            import::run(
+                &config::client(url, token)?,
+                import::Args {
+                    platform: &platform,
+                    from: &from,
+                    token: &source_token,
+                    team: team.as_deref(),
+                    cluster: cluster.as_deref(),
+                    deploy,
+                    yes,
+                },
             )
             .await
         }
