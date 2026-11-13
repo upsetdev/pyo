@@ -120,6 +120,12 @@ async fn main() -> anyhow::Result<()> {
         println!("{AGENT_VERSION}");
         return Ok(());
     }
+    // `pyo-agent access-hash`: the roles this agent's install sets up, as
+    // release.json's `agentAccess` (the release workflow writes it).
+    if args.get(1).map(String::as_str) == Some("access-hash") {
+        println!("{}", pyo_proto::rbac::access_hash());
+        return Ok(());
+    }
     // `pyo-agent check-release <release.json>`: what the upgrader would
     // refuse in a release (the release workflow runs it before publishing).
     if args.get(1).map(String::as_str) == Some("check-release") {

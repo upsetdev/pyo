@@ -57,6 +57,26 @@ fn newer(a: &str, b: &str) -> bool {
     matches!((parse_version(a), parse_version(b)), (Some(a), Some(b)) if a > b)
 }
 
+/// Said before an update whose agent has other roles than this Pyo's: no
+/// agent can change its own roles, so each cluster's connect command does.
+pub const RECONNECT_NOTICE: &str =
+    "After updating, run the connect command shown in each cluster's settings.";
+
+/// What to know before updating to `r`: its notices, and [`RECONNECT_NOTICE`]
+/// when its agent's roles aren't this Pyo's (a release that doesn't say
+/// isn't assumed to change them).
+pub fn before_you_update(r: &Release) -> Vec<String> {
+    let mut out = r.before_you_update.clone();
+    let reconnect = r
+        .agent_access
+        .as_deref()
+        .is_some_and(|h| h != pyo_proto::rbac::access_hash());
+    if reconnect && !out.iter().any(|n| n == RECONNECT_NOTICE) {
+        out.push(RECONNECT_NOTICE.into());
+    }
+    out
+}
+
 // ── Settings ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -548,7 +568,7 @@ pub async fn snapshot(db: &PgPool) -> ApiResult<Value> {
         "url": found.url,
         "publishedAt": found.published_at,
         "notes": found.notes,
-        "beforeYouUpdate": r.before_you_update,
+        "beforeYouUpdate": if pyo_needed { before_you_update(r) } else { r.before_you_update.clone() },
         "manualOnly": r.manual_only,
         "minFrom": r.min_from,
     });
@@ -1343,6 +1363,34 @@ mod tests {
             online,
             scope: None,
         }
+    }
+
+    /// An update whose agent has other roles says, before it starts, that
+    /// each cluster needs its connect command; one with the same roles, or
+    /// a release that doesn't say, doesn't.
+    #[test]
+    fn other_agent_roles_ask_for_the_connect_command() {
+        let with = |access: Option<String>, notices: &[&str]| Release {
+            version: "99.0.0".into(),
+            agent_access: access,
+            before_you_update: notices.iter().map(|n| n.to_string()).collect(),
+            ..Default::default()
+        };
+        let ours = pyo_proto::rbac::access_hash();
+        assert!(before_you_update(&with(Some(ours.clone()), &[])).is_empty());
+        assert!(before_you_update(&with(None, &[])).is_empty());
+        assert_eq!(
+            before_you_update(&with(
+                Some("0000000000000000".into()),
+                &["Postgres restarts."]
+            )),
+            ["Postgres restarts.", RECONNECT_NOTICE]
+        );
+        // Written by hand as well: once.
+        assert_eq!(
+            before_you_update(&with(Some("0000000000000000".into()), &[RECONNECT_NOTICE])),
+            [RECONNECT_NOTICE]
+        );
     }
 
     #[test]

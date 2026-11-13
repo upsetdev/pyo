@@ -7,14 +7,18 @@
 //     --images ghcr.io/upsetdev/pyo \
 //     --pyo sha256:… --agent sha256:… --builder sha256:… --flows sha256:… --waf sha256:… --geoip sha256:… \
 //     --db-controller sha256:… --kv sha256:… --mysql-operator sha256:… --mysql-backup sha256:… \
-//     --postgres-16 sha256:… --postgres-17 sha256:… --postgres-18 sha256:… > release.json
+//     --postgres-16 sha256:… --postgres-17 sha256:… --postgres-18 sha256:… \
+//     --agent-access "$(pyo-agent access-hash)" > release.json
 //
 // Images are pinned by digest. deploy/k8s/{platform,pyo}.yaml become JSON
 // objects; the values only an installation knows (__TAILNET_IP__,
 // __REGISTRY_PUSH__, __TAILNET_API__, __TAILNET_NAME__) stay as they are, and the upgrader
 // fills them in from what's running. Notices for this release come from
 // deploy/release-notices.json when its "version" is this one; the k3s a
-// fresh install gets, from deploy/k3s.env.
+// fresh install gets, from deploy/k3s.env. `agentAccess` is the hash of the
+// roles the release's agent is installed with (`pyo-agent access-hash`):
+// installations on other roles tell their admin, before updating, to run
+// each cluster's connect command afterwards.
 
 import { readdirSync, readFileSync } from "node:fs";
 
@@ -29,6 +33,8 @@ const fail = (msg: string): never => {
 const need = (k: string) => args.get(k) || fail(`--${k} is required`);
 
 const version = need("version").replace(/^v/, "");
+const agentAccess = need("agent-access");
+if (!/^[0-9a-f]{16}$/.test(agentAccess)) fail(`--agent-access isn't 16 hex digits: ${agentAccess}`);
 const images = need("images").replace(/\/$/, "");
 const cargo = readFileSync("Cargo.toml", "utf8").match(/^version = "(.+)"$/m)?.[1];
 if (cargo !== version && !args.has("allow-version-mismatch")) {
@@ -132,6 +138,7 @@ const release = {
   minFrom: forThis ? (notices.minFrom ?? null) : null,
   manualOnly: forThis ? !!notices.manualOnly : false,
   beforeYouUpdate: forThis ? (notices.beforeYouUpdate ?? []) : [],
+  agentAccess,
 };
 // Pretty-printed, two spaces: deploy/install.sh reads it with sed.
 console.log(JSON.stringify(release, null, 2));

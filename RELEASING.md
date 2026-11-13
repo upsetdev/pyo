@@ -72,6 +72,8 @@ release carries it as an asset. Installations find it in **Settings › Updates*
 - `migrations`: the migration files, so an installation can say how many it
   hasn't run yet
 - the notices from `deploy/release-notices.json`
+- `agentAccess`: a hash of the roles the release's agent is installed with
+  (see [Notices](#notices))
 - `k3s`: the k3s a fresh install gets, from `deploy/k3s.env` (see
   [Bump k3s](#bump-k3s)).
 
@@ -82,7 +84,8 @@ bun run scripts/release-manifest.ts --version 0.1.0 --images ghcr.io/upsetdev/py
   --pyo sha256:<64 hex> --agent sha256:<64 hex> --builder sha256:<64 hex> --flows sha256:<64 hex> \
   --waf sha256:<64 hex> --geoip sha256:<64 hex> --db-controller sha256:<64 hex> --kv sha256:<64 hex> \
   --mysql-operator sha256:<64 hex> --mysql-backup sha256:<64 hex> \
-  --postgres-16 sha256:<64 hex> --postgres-17 sha256:<64 hex> --postgres-18 sha256:<64 hex>
+  --postgres-16 sha256:<64 hex> --postgres-17 sha256:<64 hex> --postgres-18 sha256:<64 hex> \
+  --agent-access "$(cargo run -q -p pyo-agent -- access-hash)"
 ```
 
 ### Notices
@@ -108,6 +111,14 @@ release's (old notices never carry over):
 - `minFrom`: the oldest version that can update straight to this one, when an
   intermediate release has to run first (e.g. a migration in two steps).
   Older installations are told to update to `minFrom` first.
+
+A change to the agent's roles needs no notice: `release.json` carries the
+release agent's `agentAccess` (`pyo-agent access-hash`, which
+`check-release` verifies), and an installation whose agent has other roles
+adds "After updating, run the connect command shown in each cluster's
+settings." to the update dialog by itself. An agent brings its admission
+policy and image pins up to date on its own (with the self-update role), but
+never its roles.
 
 ### How an installation updates
 

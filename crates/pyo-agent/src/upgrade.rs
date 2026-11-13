@@ -461,7 +461,8 @@ pub async fn switch(client: &Client, image: &str) -> anyhow::Result<()> {
 /// would refuse in it.
 pub fn check_release(path: &str) -> anyhow::Result<()> {
     let release: Release = serde_json::from_slice(&std::fs::read(path)?)?;
-    let problems = release.problems();
+    let mut problems = release.problems();
+    problems.extend(access_problem(&release));
     if !problems.is_empty() {
         anyhow::bail!(
             "Pyo {} can't be applied: {}",
@@ -471,6 +472,22 @@ pub fn check_release(path: &str) -> anyhow::Result<()> {
     }
     println!("Pyo {} can be applied.", release.version);
     Ok(())
+}
+
+/// A release must say which roles its agent has (this agent's: it's the
+/// release's own), so installations on other roles are told to run the
+/// connect command after updating.
+fn access_problem(release: &Release) -> Option<String> {
+    let ours = pyo_proto::rbac::access_hash();
+    match release.agent_access.as_deref() {
+        Some(h) if h == ours => None,
+        Some(h) => Some(format!(
+            "agentAccess is {h}, but this release's agent has {ours} (pyo-agent access-hash)."
+        )),
+        None => Some(format!(
+            "It doesn't say which roles its agent has: agentAccess {ours} (pyo-agent access-hash)."
+        )),
+    }
 }
 
 /// `pyo-agent upgrade <release.json>`. Ends its output with one JSON line
@@ -954,6 +971,26 @@ async fn restore(client: &Client, saved: &[(String, String, Value)]) -> anyhow::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The release workflow can't publish a release.json that doesn't say
+    /// (rightly) which roles its agent has.
+    #[test]
+    fn a_release_says_which_roles_its_agent_has() {
+        let with = |h: Option<String>| Release {
+            agent_access: h,
+            ..Default::default()
+        };
+        assert_eq!(
+            access_problem(&with(Some(pyo_proto::rbac::access_hash()))),
+            None
+        );
+        assert!(access_problem(&with(None)).unwrap().contains("doesn't say"));
+        assert!(
+            access_problem(&with(Some("0000000000000000".into())))
+                .unwrap()
+                .contains("agentAccess is 0000000000000000")
+        );
+    }
 
     #[test]
     fn job_names_are_dns_labels() {
