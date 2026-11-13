@@ -68,11 +68,34 @@ async fn apply(client: &Client, o: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether an error is the admission policy refusing a namespace that isn't
+/// labelled managed. Right after the label is set the policy can still see
+/// the namespace without it, for a moment.
+fn unlabelled_refusal(e: &anyhow::Error) -> bool {
+    let m = format!("{e:#}");
+    m.contains("ValidatingAdmissionPolicy")
+        && m.contains("pyo.dev/managed=true")
+        && m.contains("isn't one")
+}
+
 /// A namespace the agent writes in: labelled, with the write role bound.
 /// A new binding takes a moment to apply; this waits until it does.
 pub async fn ensure_managed(client: &Client, ns: &str) -> anyhow::Result<()> {
     apply(client, &rbac::managed_namespace(ns)).await?;
-    apply(client, &rbac::write_binding(ns)).await?;
+    // The policy reads namespaces from a cache that can lag the label.
+    let binding = rbac::write_binding(ns);
+    let mut wait = std::time::Duration::from_millis(100);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match apply(client, &binding).await {
+            Ok(()) => break,
+            Err(e) if unlabelled_refusal(&e) && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(std::time::Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
     // Installed bundles' bindings (the databases controller's, say).
     if let Err(e) = crate::bundles::bind_in(client, ns).await {
         tracing::warn!(namespace = ns, error = %format!("{e:#}"), "couldn't bind system bundles in a namespace");
@@ -320,6 +343,21 @@ pub fn refusal(policy: &Policy, command: &Command) -> Option<&'static str> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unlabelled_refusals_are_retried() {
+        let denied = anyhow::anyhow!(
+            "RoleBinding pyo-agent: ApiError: admission webhook: ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request: Pyo's agent only changes namespaces labelled pyo.dev/managed=true; scale-test isn't one. (Invalid)"
+        );
+        assert!(unlabelled_refusal(&denied));
+        let system = anyhow::anyhow!(
+            "RoleBinding x: ValidatingAdmissionPolicy 'pyo-agent' denied request: In kube-system, Pyo's agent only writes its own objects, with exactly the content this release defines."
+        );
+        assert!(!unlabelled_refusal(&system));
+        assert!(!unlabelled_refusal(&anyhow::anyhow!(
+            "RoleBinding x: connection refused"
+        )));
+    }
 
     #[test]
     fn policy_refusals() {
