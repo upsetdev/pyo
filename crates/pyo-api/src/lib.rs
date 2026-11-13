@@ -27,6 +27,7 @@ mod databases;
 mod deploy;
 pub mod error;
 mod firewall;
+mod freedomain;
 mod geoip;
 mod github;
 mod hooks;

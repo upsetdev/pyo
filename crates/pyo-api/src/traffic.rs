@@ -79,9 +79,10 @@ pub fn entry_server(cluster_public: bool, report: &Value) -> bool {
 }
 
 /// A server's public address of each family, from what its node reports:
-/// the ones the agent found first, then the cluster's own addresses.
+/// its ExternalIP (set on purpose), then the ones the agent found, then the
+/// cluster's own addresses.
 pub fn public_families(r: &Value) -> (Option<String>, Option<String>) {
-    let mut all: Vec<&str> = ["publicIpv4", "publicIpv6", "externalIP"]
+    let mut all: Vec<&str> = ["externalIP", "publicIpv4", "publicIpv6"]
         .iter()
         .filter_map(|k| r[*k].as_str())
         .collect();
@@ -364,13 +365,7 @@ pub async fn get(
     for h in &hosts {
         domains.push((h.clone(), resolve(h).await));
     }
-    let lb_ips: Vec<String> = caps["loadBalancerIps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.as_str())
-        .map(str::to_owned)
-        .collect();
+    let lb_ips = crate::freedomain::ips(&caps, "loadBalancerIps");
     let warnings = warnings(&cluster, &domains, &servers, &replicas, &lb_ips, &mode);
 
     // Requests per region, from the server that answered each one.

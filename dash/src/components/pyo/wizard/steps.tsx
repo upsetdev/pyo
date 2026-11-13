@@ -29,7 +29,12 @@ import { Tags } from "~/components/ui/TagInput";
 import { useState, type ReactNode } from "react";
 import { locationLabel, parseLocation, placesOf } from "~/lib/pyo/location";
 import { Flag } from "~/components/ui/Flag";
-import { freeHostname, ingressIp, isFreeDomain } from "~/lib/pyo/freeDomain";
+import {
+  freeHostname,
+  isFreeDomain,
+  noFreeDomain,
+  freeDomainIp,
+} from "~/lib/pyo/freeDomain";
 import { BrandMark, GITHUB_LOGO } from "~/components/pyo/common";
 import { SearchInput } from "~/components/ui/Table";
 import { fetchGithubRepos } from "~/lib/pyo/backend";
@@ -1069,7 +1074,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
   const cluster = s.clusters.find((c) => c.id === d.clusterId);
   const httpPorts = d.ports.filter((p) => p.protocol === "HTTP");
   const project = draftProject(s, d);
-  const ip = d.clusterId ? ingressIp(s, d.clusterId) : undefined;
+  const ip = d.clusterId ? freeDomainIp(s, d.clusterId) : undefined;
   const free = ip
     ? freeHostname({ name: d.name || "app" }, project?.namespace ?? "app", ip)
     : "";
@@ -1187,7 +1192,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                       (freeOne ? (
                         "No DNS record needed."
                       ) : dm.hostname ? (
-                        `Point its DNS to ${ip ?? "the cluster's address"}.`
+                        `Point its DNS to ${cluster?.publicIp ?? "the cluster's public address"}.`
                       ) : free &&
                         !d.domains.some((x) => isFreeDomain(x.hostname)) ? (
                         <button
@@ -1237,6 +1242,10 @@ export function DomainsStep({ d, set, errors }: StepProps) {
         <p className="text-[11.5px] text-muted-foreground">
           Free domain, ready instantly:{" "}
           <span className="font-mono text-foreground/85">{free}</span>
+        </p>
+      ) : !free && d.clusterId ? (
+        <p className="text-[11.5px] text-muted-foreground">
+          {noFreeDomain(s, d.clusterId)}
         </p>
       ) : null}
     </div>

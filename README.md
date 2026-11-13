@@ -89,8 +89,7 @@ server. It needs:
 - **Ports:** 80, 443 and 8000 reachable, with 5005 and 6443 free.
 
 Let's Encrypt certificates need a machine that's reachable from the internet.
-On a private network, like most laptops, free domains get a self-signed
-certificate instead.
+Free domains on a Tailscale address get a self-signed certificate instead.
 
 ## Getting started
 

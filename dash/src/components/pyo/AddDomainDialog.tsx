@@ -9,7 +9,12 @@ import { Button } from "~/components/ui/Button";
 import { Dialog } from "~/components/ui/Dialog";
 import { Field, Input, Select, Switch } from "~/components/ui/Field";
 import { HOSTNAME } from "~/lib/pyo/format";
-import { freeHostname, ingressIp, isFreeDomain } from "~/lib/pyo/freeDomain";
+import {
+  freeHostname,
+  isFreeDomain,
+  noFreeDomain,
+  freeDomainIp,
+} from "~/lib/pyo/freeDomain";
 import { api, servicesIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Application, TlsMode } from "~/lib/pyo/types";
@@ -59,7 +64,7 @@ export function AddDomainDialog({
       (!hostname || covers(c, hostname)),
   );
   const cert = matching.find((c) => c.id === certificateId) ?? matching[0];
-  const freeIp = app ? ingressIp(s, app.clusterId) : undefined;
+  const freeIp = app ? freeDomainIp(s, app.clusterId) : undefined;
   const namespace =
     s.projects.find((p) => p.id === app?.projectId)?.namespace ?? "app";
   const taken = s.services.some((a) =>
@@ -134,6 +139,10 @@ export function AddDomainDialog({
                 >
                   Use free domain
                 </button>
+              ) : app ? (
+                <span className="ml-auto text-[12px] font-normal text-muted-foreground">
+                  {noFreeDomain(s, app.clusterId)}
+                </span>
               ) : null}
             </>
           }
@@ -141,7 +150,7 @@ export function AddDomainDialog({
           hint={
             isFreeDomain(hostname) &&
             freeIp &&
-            hostname.includes(freeIp.replaceAll(".", "-"))
+            hostname.endsWith(`.${freeIp}.nip.io`)
               ? `Points at ${freeIp}. No DNS needed.`
               : undefined
           }

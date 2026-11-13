@@ -356,6 +356,16 @@ export type Cluster = {
   webProxyProtocol?: boolean;
   /** The gateway answers public traffic on its servers (all but build-only ones); on by default. */
   publicTraffic?: boolean;
+  /** Its public IPv4 address, for DNS records (never a private one); null without one. */
+  publicIp?: string | null;
+  /** Its Tailscale IPv4 address that answers websites; null without one. */
+  tailnetIp?: string | null;
+  /** Where its free domains point, as chosen or by default. */
+  freeDomainAddress?: FreeDomainAddress;
+  /** As chosen in its settings; null: the default. */
+  freeDomainAddressSet?: FreeDomainAddress | null;
+  /** The address its free domains point at now; null: no free domains. */
+  freeDomainIp?: string | null;
   originPull?: {
     /** What it was last asked to require. */
     certificateIds?: ID[];
@@ -696,6 +706,9 @@ export type PortMapping = {
   /** Read the visitor's address from a PROXY protocol header when one is sent. */
   acceptProxyProtocol?: boolean;
 };
+
+/** Where a cluster's free domains point: its public IP or its Tailscale IP. */
+export type FreeDomainAddress = "public" | "tailscale";
 
 export type DomainStatus = "pending_dns" | "verifying" | "active" | "error";
 export type TlsStatus = "pending" | "issued" | "failed" | "disabled";
@@ -1467,6 +1480,7 @@ export type ActivityType =
   | "domain.added"
   | "domain.removed"
   | "domain.verified"
+  | "domain.moved"
   | "network.updated"
   | "cluster.registered"
   | "cluster.disconnected"
