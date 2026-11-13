@@ -43,6 +43,7 @@ pub mod openapi;
 pub mod ops;
 mod outbound;
 mod passkeys;
+mod platform_import;
 mod ratelimit;
 mod refs;
 mod registry;
@@ -384,7 +385,8 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                     .merge(cli::routes())
                     .layer(CompressionLayer::new())
                     .merge(terminal::routes())
-                    .merge(database_imports::routes()),
+                    .merge(database_imports::routes())
+                    .merge(platform_import::routes()),
             )
             .nest("/api/cli", cli::public_routes())
             .nest("/api/github", github::routes())

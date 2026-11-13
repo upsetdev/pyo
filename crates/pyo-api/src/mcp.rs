@@ -597,6 +597,12 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "previewCompose" => {
             json_of(crate::compose::preview(st(), me(), Json(args_as(args)?)).await)
         }
+        "previewPlatformImport" => {
+            json_of(crate::platform_import::preview(st(), me(), Json(args_as(args)?)).await)
+        }
+        "startPlatformImport" => {
+            json_of(crate::platform_import::apply(st(), me(), Json(args_as(args)?)).await)
+        }
         "getServiceConnections" => {
             json_of(ops::connections(st(), me(), path_id()?, Query(args_as(args)?)).await)
         }
