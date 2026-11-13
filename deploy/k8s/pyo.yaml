@@ -1,6 +1,6 @@
-# ── Pyo: API + dashboard on :8000 (role "web", two replicas, rolling
-# updates without a gap), plus "worker" replicas for background loops and
-# jobs. Inside the cluster only: platform.yaml's pyo-host puts :8000 on this
+# ── Pyo: API + dashboard on :8000 (role "web", one replica, rolling
+# updates without a gap), plus a "worker" replica for background loops and
+# jobs. One of each keeps Pyo small enough for a 2 GB server. Inside the cluster only: platform.yaml's pyo-host puts :8000 on this
 # machine's localhost and tailnet IP, never its public addresses; other
 # devices use HTTPS through the gateway (:8443). ──
 apiVersion: v1
@@ -39,8 +39,8 @@ metadata:
   namespace: pyo-system
   labels: { app.kubernetes.io/name: pyo, app.kubernetes.io/part-of: pyo }
 spec:
-  replicas: 2
-  # A new replica must be ready before an old one stops: no gap on upgrades.
+  replicas: 1
+  # The new pod must be ready before the old one stops: no gap on upgrades.
   strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
   selector:
     matchLabels: { app.kubernetes.io/name: pyo }
@@ -51,7 +51,7 @@ spec:
       # Time to drain: readiness turns off on SIGTERM, long-polls return,
       # requests in flight finish.
       terminationGracePeriodSeconds: 45
-      # Spread replicas across servers, so losing one keeps the dashboard up.
+      # Spread replicas across servers (when there's more than one).
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -147,15 +147,17 @@ spec:
           volumeMounts:
             - { name: geoip, mountPath: /geoip }
           resources:
-            requests: { cpu: 20m, memory: 128Mi }
-            limits: { memory: 768Mi }
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 256Mi }
       volumes:
         # Each replica keeps its own GeoLite2 copy (geoip.rs): the image's
         # bundled one, or a weekly download when a license key is set.
         - name: geoip
           emptyDir: { sizeLimit: 256Mi }
 ---
-# Keep at least one web replica up through node drains and maintenance.
+# At most one web replica down at a time through server drains. With a
+# single replica that lets a drain move it (a short gap) instead of
+# holding the drain up.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -163,7 +165,7 @@ metadata:
   namespace: pyo-system
   labels: { app.kubernetes.io/part-of: pyo }
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels: { app.kubernetes.io/name: pyo }
 ---
@@ -177,7 +179,7 @@ metadata:
   namespace: pyo-system
   labels: { app.kubernetes.io/name: pyo-worker, app.kubernetes.io/part-of: pyo }
 spec:
-  replicas: 2
+  replicas: 1
   strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
   selector:
     matchLabels: { app.kubernetes.io/name: pyo-worker }
@@ -255,5 +257,5 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
           resources:
-            requests: { cpu: 10m, memory: 64Mi }
+            requests: { cpu: 10m, memory: 48Mi }
             limits: { memory: 512Mi }
