@@ -94,17 +94,24 @@ k3s_install() {
 # <<< pyo:k3s
 # >>> pyo:small-machine (the same in deploy/install.sh, connect.sh and scripts/setup-host.sh)
 # On a small machine (under 4 GB of memory), run before k3s is installed:
-# k3s gets a soft memory limit, GOMEMLIMIT (a fifth of the memory, at least
-# 320 MiB), so its Go runtime collects garbage sooner instead of growing.
+# k3s gets a soft memory limit, GOMEMLIMIT (k3s_memory_limit), so its Go
+# runtime collects garbage sooner instead of growing.
 # Under 3 GB, also compressed swap in memory (zram, half the memory,
 # pyo-zram.service) for what runs outside containers, k3s itself above all
 # (containers don't swap), unless the machine already has swap.
+# The limit in MiB for $1 MiB of memory: 40% of it, at least 768 MiB.
+# k3s's live heap is 300-400 MiB; a limit near it makes Go collect garbage
+# all the time (most of 2 cores at idle).
+k3s_memory_limit() {
+  local limit=$(($1 * 2 / 5))
+  [ "$limit" -ge 768 ] || limit=768
+  echo "$limit"
+}
 small_machine() {
   local mem limit
   mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || true)
   [ -n "$mem" ] && [ "$mem" -lt 3584 ] || return 0
-  limit=$((mem / 5))
-  [ "$limit" -ge 320 ] || limit=320
+  limit=$(k3s_memory_limit "$mem")
   mkdir -p /etc/systemd/system/k3s.service.d
   printf '# Managed by Pyo: k3s on a small machine.\n[Service]\nEnvironment=GOMEMLIMIT=%sMiB\n' "$limit" \
     > /etc/systemd/system/k3s.service.d/pyo-memory.conf

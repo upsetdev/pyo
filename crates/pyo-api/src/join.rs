@@ -658,4 +658,40 @@ mod tests {
             );
         }
     }
+
+    /// The part of a script between `# >>> pyo:<name> ` and `# <<< pyo:<name>`.
+    fn script_block(name: &str, script: &str) -> String {
+        let start = script
+            .find(&format!("# >>> pyo:{name} "))
+            .unwrap_or_else(|| panic!("no pyo:{name} block"));
+        let end = script[start..]
+            .find(&format!("# <<< pyo:{name}\n"))
+            .unwrap_or_else(|| panic!("pyo:{name} has no end"));
+        script[start..start + end].to_owned()
+    }
+
+    /// Runs `script` with bash: (exit code, stdout, stderr).
+    fn bash(script: &str) -> (i32, String, String) {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("bash runs");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    #[test]
+    fn k3s_gets_room_above_its_live_heap() {
+        let block = script_block("small-machine", CONNECT_SCRIPT);
+        for (mem, want) in [(960, 768), (1973, 789), (2048, 819), (3583, 1433)] {
+            let (code, out, err) = bash(&format!(
+                "set -euo pipefail\n{block}\nk3s_memory_limit {mem}\n"
+            ));
+            assert_eq!((code, out.trim()), (0, want.to_string().as_str()), "{mem}: {err}");
+        }
+    }
 }
