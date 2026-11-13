@@ -15,8 +15,12 @@
 //!   public traffic (`tailnetWebIps`, pyo-proto's system.rs
 //!   `TAILNET_WEB_SERVICE`).
 //!
-//! Unset, a cluster uses its public IP when it takes public traffic and one
-//! is known, else Tailscale. Without an address there's no free domain.
+//! Unset, a cluster uses its public IP when it takes public traffic and
+//! the server has that address itself (on a network card, or as its
+//! ExternalIP) or a load balancer gives it one. When the public IP is only
+//! what the internet sees (behind NAT: a home router, some providers),
+//! ports 80 and 443 may not reach the server, so Tailscale. Without an
+//! address there's no free domain.
 //!
 //! Free domains Pyo made on another of the cluster's addresses (a private
 //! one, the other mode's, one a server no longer has) or in the older
@@ -102,6 +106,21 @@ fn entry(servers: &[Value]) -> impl Iterator<Item = &Value> {
         .chain(entry().filter(|r| r["status"] != json!("ready")))
 }
 
+/// A public IPv4 address the server has itself: its ExternalIP, a node
+/// address, or one on a network card (what the agent found, locate.rs).
+fn direct_v4(r: &Value) -> Option<Ipv4Addr> {
+    ["externalIP", "internalIP"]
+        .iter()
+        .filter_map(|k| r[*k].as_str())
+        .chain(
+            ["addresses", "nicPublicIps"]
+                .iter()
+                .flat_map(|k| r[*k].as_array().into_iter().flatten())
+                .filter_map(Value::as_str),
+        )
+        .find_map(public_v4)
+}
+
 /// A server's Tailscale IPv4 address: what the agent found on it, else a
 /// node address on the tailnet.
 fn server_tailnet(r: &Value) -> Option<Ipv4Addr> {
@@ -126,6 +145,26 @@ impl Cluster {
         })
     }
 
+    /// Its public IPv4 address when the internet reaches it directly: a
+    /// public load balancer address, or one a server that takes public
+    /// traffic has itself (on a network card, or as its ExternalIP). Not
+    /// one only the outbound lookup found (behind NAT).
+    pub fn direct_public_ip(&self) -> Option<Ipv4Addr> {
+        if !self.public_traffic {
+            return None;
+        }
+        self.lb_ips
+            .iter()
+            .find_map(|i| public_v4(i))
+            .or_else(|| entry(&self.servers).find_map(direct_v4))
+    }
+
+    /// Its public IP is known only from what the internet sees: the server
+    /// is behind NAT, so ports 80 and 443 reach it only if forwarded.
+    pub fn behind_nat(&self) -> bool {
+        self.public_ip().is_some() && self.direct_public_ip().is_none()
+    }
+
     /// Its Tailscale IPv4 address that answers websites: where the agent
     /// published them, else (not yet) a server's that runs a proxy.
     pub fn tailnet_ip(&self) -> Option<Ipv4Addr> {
@@ -136,12 +175,13 @@ impl Cluster {
     }
 
     /// The mode in use: the one chosen, else public when it takes public
-    /// traffic and has a public address, else Tailscale.
+    /// traffic and the internet reaches its public IP directly, else
+    /// Tailscale.
     pub fn mode(&self) -> Mode {
         self.set
             .as_deref()
             .and_then(Mode::parse)
-            .unwrap_or(if self.public_ip().is_some() {
+            .unwrap_or(if self.direct_public_ip().is_some() {
                 Mode::Public
             } else {
                 Mode::Tailscale
@@ -169,7 +209,8 @@ impl Cluster {
     }
 
     /// For the dashboard: the addresses and the mode, as the cluster's
-    /// `publicIp`, `tailnetIp`, `freeDomainAddress` and `freeDomainIp`.
+    /// `publicIp`, `tailnetIp`, `freeDomainAddress`, `freeDomainIp` and
+    /// `behindNat`.
     pub fn shown(&self) -> Value {
         let s = |ip: Option<Ipv4Addr>| json!(ip.map(|i| i.to_string()));
         json!({
@@ -177,6 +218,7 @@ impl Cluster {
             "tailnetIp": s(self.tailnet_ip()),
             "freeDomainAddress": self.mode().as_str(),
             "freeDomainIp": s(self.address()),
+            "behindNat": self.behind_nat(),
         })
     }
 }
@@ -238,10 +280,9 @@ fn addresses(r: &Value) -> impl Iterator<Item = IpAddr> + '_ {
     .iter()
     .filter_map(|k| r[*k].as_str())
     .chain(
-        r["addresses"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        ["addresses", "nicPublicIps"]
+            .iter()
+            .flat_map(|k| r[*k].as_array().into_iter().flatten())
             .filter_map(Value::as_str),
     )
     .filter_map(|ip| ip.parse().ok())
@@ -469,9 +510,15 @@ mod tests {
         }
     }
 
+    /// A server with its public address on its network card (a VPS).
+    fn direct_server() -> Value {
+        json!({ "name": "vps", "status": "ready", "internalIP": "10.0.0.5", "addresses": ["10.0.0.5"],
+                "publicIpv4": "203.0.113.7", "nicPublicIps": ["203.0.113.7"], "tailnetIp": "100.64.0.9" })
+    }
+
     #[test]
     fn public_mode_uses_the_public_address_never_a_private_one() {
-        let c = cluster(true, None, vec![nat_server()]);
+        let c = cluster(true, Some("public"), vec![nat_server()]);
         assert_eq!(c.mode(), Mode::Public);
         assert_eq!(c.address(), Some(v4("129.226.158.31")));
         // No public address known: none, never the private one.
@@ -529,29 +576,57 @@ mod tests {
         assert_eq!(cluster(true, Some("tailscale"), vec![lan]).address(), None);
     }
 
+    /// Public by default only where the internet reaches the public IP
+    /// directly: on the server's network card, its ExternalIP, or a load
+    /// balancer's. Behind NAT (the address only the lookup found), Tailscale.
     #[test]
-    fn default_is_public_when_known_else_tailscale() {
-        assert_eq!(cluster(true, None, vec![nat_server()]).mode(), Mode::Public);
-        // Public traffic off.
+    fn default_is_public_only_when_reached_directly() {
+        let c = cluster(true, None, vec![direct_server()]);
         assert_eq!(
-            cluster(false, None, vec![nat_server()]).mode(),
-            Mode::Tailscale
+            (c.mode(), c.address(), c.behind_nat()),
+            (Mode::Public, Some(v4("203.0.113.7")), false)
         );
+        // A public node address (k3s on a server with its public IP).
+        let node = json!({ "name": "a", "status": "ready", "internalIP": "203.0.113.8", "publicIpv4": "203.0.113.8" });
+        assert_eq!(cluster(true, None, vec![node]).mode(), Mode::Public);
+        // ExternalIP.
+        let ext = json!({ "name": "a", "status": "ready", "internalIP": "10.0.0.5", "externalIP": "203.0.113.9", "publicIpv4": "198.51.100.1" });
+        assert_eq!(cluster(true, None, vec![ext]).mode(), Mode::Public);
+        // A public load balancer address.
+        let mut c = cluster(true, None, vec![nat_server()]);
+        c.lb_ips = vec!["203.0.113.50".into()];
+        assert_eq!((c.mode(), c.behind_nat()), (Mode::Public, false));
+        // Behind NAT (this VPS, a home router): Tailscale, and the hint.
+        let c = cluster(true, None, vec![nat_server()]);
+        assert_eq!(
+            (c.mode(), c.address(), c.behind_nat()),
+            (Mode::Tailscale, Some(v4("100.101.67.2")), true)
+        );
+        assert_eq!(
+            c.shown(),
+            json!({ "publicIp": "129.226.158.31", "tailnetIp": "100.101.67.2", "freeDomainAddress": "tailscale",
+                    "freeDomainIp": "100.101.67.2", "behindNat": true })
+        );
+        // Public can still be chosen there.
+        let c = cluster(true, Some("public"), vec![nat_server()]);
+        assert_eq!(
+            (c.mode(), c.address()),
+            (Mode::Public, Some(v4("129.226.158.31")))
+        );
+        // Public traffic off.
+        let c = cluster(false, None, vec![direct_server()]);
+        assert_eq!((c.mode(), c.behind_nat()), (Mode::Tailscale, false));
         // No public address known (yet).
         let tailnet_only = json!({ "name": "a", "status": "ready", "internalIP": "10.3.8.13", "tailnetIp": "100.101.67.2" });
         let c = cluster(true, None, vec![tailnet_only]);
         assert_eq!(
-            (c.mode(), c.address()),
-            (Mode::Tailscale, Some(v4("100.101.67.2")))
+            (c.mode(), c.address(), c.behind_nat()),
+            (Mode::Tailscale, Some(v4("100.101.67.2")), false)
         );
         // A choice stays, whatever is known.
         assert_eq!(
-            cluster(true, Some("tailscale"), vec![nat_server()]).mode(),
+            cluster(true, Some("tailscale"), vec![direct_server()]).mode(),
             Mode::Tailscale
-        );
-        assert_eq!(
-            cluster(true, None, vec![nat_server()]).shown(),
-            json!({ "publicIp": "129.226.158.31", "tailnetIp": "100.101.67.2", "freeDomainAddress": "public", "freeDomainIp": "129.226.158.31" })
         );
     }
 
@@ -560,7 +635,7 @@ mod tests {
         let builder = json!({ "name": "a-builder", "status": "ready", "builder": true, "publicIpv4": "198.51.100.1" });
         let down = json!({ "name": "b", "status": "not_ready", "publicIpv4": "198.51.100.2" });
         let up = json!({ "name": "c", "status": "ready", "publicIpv4": "198.51.100.3" });
-        let c = |s: Vec<Value>| cluster(true, None, s).address();
+        let c = |s: Vec<Value>| cluster(true, Some("public"), s).address();
         assert_eq!(
             c(vec![builder.clone(), down.clone(), up]),
             Some(v4("198.51.100.3"))

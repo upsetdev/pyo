@@ -6,11 +6,11 @@
 //! one-off pod on it (host network) that asks Cloudflare's trace endpoint
 //! for the server's public IP and country, once over IPv4 and once over
 //! IPv6 (a server can have one of each), and lists the server's own IPv4
-//! addresses (its Tailscale one among them), and keeps the answers as node
-//! annotations. The heartbeat reports them; the API looks the IP up (GeoIP)
-//! for the city, and points the cluster's free domains at the public or
-//! the Tailscale address (a server behind its provider's NAT has only a
-//! private address on its network card).
+//! addresses (its Tailscale one, and any public one on a network card,
+//! among them), and keeps the answers as node annotations. The heartbeat
+//! reports them; the API looks the IP up (GeoIP) for the city, and points
+//! the cluster's free domains at the public or the Tailscale address (a
+//! server behind NAT has only a private address on its network card).
 //!
 //! Cloudflare's trace answers over HTTPS from a nearby anycast address, on
 //! both families (cloudflare.com has A and AAAA records), with the country
@@ -27,8 +27,9 @@ use kube::{
     api::{DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams},
 };
 use pyo_proto::{
-    LOCATED_AT_ANNOTATION, PUBLIC_COUNTRY_ANNOTATION, PUBLIC_IP_ANNOTATION, PUBLIC_IPV4_ANNOTATION,
-    PUBLIC_IPV6_ANNOTATION, TAILNET_IPV4_ANNOTATION, now_ms,
+    LOCATED_AT_ANNOTATION, NIC_PUBLIC_IPV4_ANNOTATION, PUBLIC_COUNTRY_ANNOTATION,
+    PUBLIC_IP_ANNOTATION, PUBLIC_IPV4_ANNOTATION, PUBLIC_IPV6_ANNOTATION, TAILNET_IPV4_ANNOTATION,
+    now_ms,
 };
 use serde_json::json;
 
@@ -88,8 +89,10 @@ async fn locate_all(client: &Client, url: Option<&str>) -> anyhow::Result<()> {
             .get(LOCATED_AT_ANNOTATION)
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
-        // Never looked for its Tailscale address: now (an agent that didn't yet).
-        let tailnet_known = n.annotations().contains_key(TAILNET_IPV4_ANNOTATION);
+        // Never looked for its Tailscale address or its network cards' public
+        // ones: now (an agent that didn't yet).
+        let tailnet_known = n.annotations().contains_key(TAILNET_IPV4_ANNOTATION)
+            && n.annotations().contains_key(NIC_PUBLIC_IPV4_ANNOTATION);
         if !ready || (tailnet_known && now_ms() - checked < EVERY.as_millis() as i64) {
             continue;
         }
@@ -108,6 +111,7 @@ async fn locate_all(client: &Client, url: Option<&str>) -> anyhow::Result<()> {
                 // lookup, what an earlier one found stays.
                 let mut annotations = json!({
                     TAILNET_IPV4_ANNOTATION: tailnet, LOCATED_AT_ANNOTATION: now_ms().to_string(),
+                    NIC_PUBLIC_IPV4_ANNOTATION: found.nic_public.join(","),
                 });
                 if url.is_some() {
                     annotations[PUBLIC_IP_ANNOTATION] = json!(ip);
@@ -135,6 +139,8 @@ struct Found {
     v6: Option<String>,
     country: String,
     tailnet: Option<String>,
+    /// Public IPv4 addresses on its own network cards.
+    nic_public: Vec<String>,
 }
 
 /// Public IPs, country code and Tailscale address of one server.
@@ -240,7 +246,8 @@ fn parse_trace(out: &str) -> Option<Found> {
     };
     let (v4, v6) = (ip("v4", false), ip("v6", true));
     let tailnet = tailnet_of(out);
-    if v4.is_none() && v6.is_none() && tailnet.is_none() {
+    let nic_public = nic_public_of(out);
+    if v4.is_none() && v6.is_none() && tailnet.is_none() && nic_public.is_empty() {
         return None;
     }
     let country = field("v4", "loc")
@@ -252,14 +259,14 @@ fn parse_trace(out: &str) -> Option<Found> {
         v6,
         country,
         tailnet,
+        nic_public,
     })
 }
 
-/// The Tailscale address among the server's own ("a " lines of `ip -4 -o
-/// addr`): on its tailscale interface first, else any in Tailscale's range.
-fn tailnet_of(out: &str) -> Option<String> {
-    let addrs: Vec<(&str, String)> = out
-        .lines()
+/// The server's own IPv4 addresses ("a " lines of `ip -4 -o addr`), each
+/// with its line.
+fn own_addresses(out: &str) -> impl Iterator<Item = (&str, String)> {
+    out.lines()
         .filter_map(|l| l.strip_prefix("a "))
         .filter_map(|l| {
             let mut words = l.split_whitespace();
@@ -267,6 +274,34 @@ fn tailnet_of(out: &str) -> Option<String> {
             let ip = words.next()?.split('/').next()?.to_owned();
             Some((l, ip))
         })
+}
+
+/// The public IPv4 addresses among the server's own: not private,
+/// tailnet/CGNAT, loopback, link-local or unspecified.
+fn nic_public_of(out: &str) -> Vec<String> {
+    let mut ips: Vec<String> = own_addresses(out)
+        .map(|(_, ip)| ip)
+        .filter(|ip| {
+            ip.parse::<std::net::Ipv4Addr>().is_ok_and(|a| {
+                let [x, y, ..] = a.octets();
+                !(a.is_private()
+                    || a.is_loopback()
+                    || a.is_link_local()
+                    || a.is_unspecified()
+                    || a.is_broadcast()
+                    || a.is_multicast()
+                    || (x == 100 && (64..=127).contains(&y)))
+            })
+        })
+        .collect();
+    ips.dedup();
+    ips
+}
+
+/// The Tailscale address among the server's own: on its tailscale
+/// interface first, else any in Tailscale's range.
+fn tailnet_of(out: &str) -> Option<String> {
+    let addrs: Vec<(&str, String)> = own_addresses(out)
         .filter(|(_, ip)| tailnet_v4(ip))
         .collect();
     addrs
@@ -289,7 +324,8 @@ mod tests {
                 v4: Some("203.0.113.7".into()),
                 v6: Some("2001:db8::7".into()),
                 country: "DE".into(),
-                tailnet: None
+                tailnet: None,
+                nic_public: vec![]
             })
         );
         let v6_only = "v6 ip=2001:db8::7\nv6 loc=SG\n";
@@ -299,7 +335,8 @@ mod tests {
                 v4: None,
                 v6: Some("2001:db8::7".into()),
                 country: "SG".into(),
-                tailnet: None
+                tailnet: None,
+                nic_public: vec![]
             })
         );
         assert_eq!(parse_trace("nope"), None);
@@ -310,7 +347,8 @@ mod tests {
                 v4: Some("129.226.158.31".into()),
                 v6: None,
                 country: "SG".into(),
-                tailnet: None
+                tailnet: None,
+                nic_public: vec![]
             })
         );
         // A lookup answering with just the address.
@@ -320,7 +358,8 @@ mod tests {
                 v4: Some("129.226.158.31".into()),
                 v6: None,
                 country: String::new(),
-                tailnet: None
+                tailnet: None,
+                nic_public: vec![]
             })
         );
         // An IPv4 answer over IPv6 (no IPv6 route, a proxy) isn't an IPv6 address.
@@ -341,7 +380,8 @@ mod tests {
                 v4: Some("129.226.158.31".into()),
                 v6: None,
                 country: "SG".into(),
-                tailnet: Some("100.101.67.2".into())
+                tailnet: Some("100.101.67.2".into()),
+                nic_public: vec![]
             })
         );
         // No internet (or the lookup off): the Tailscale address alone.
@@ -349,6 +389,20 @@ mod tests {
         assert_eq!(
             parse_trace(tailnet_only).unwrap().tailnet.as_deref(),
             Some("100.101.67.2")
+        );
+        // A server with its public address on its own network card.
+        let direct = "a 1: lo    inet 127.0.0.1/8 scope host lo\n\
+                      a 2: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0\n\
+                      a 3: eth1    inet 10.0.0.4/24 scope global eth1\n\
+                      a 4: tailscale0    inet 100.64.0.9/32 scope global tailscale0\n\
+                      v4 ip=203.0.113.7\nv4 loc=DE\n";
+        assert_eq!(parse_trace(direct).unwrap().nic_public, ["203.0.113.7"]);
+        // Even with the lookup off.
+        assert_eq!(
+            parse_trace("a 2: eth0    inet 203.0.113.7/24 scope global eth0\n")
+                .unwrap()
+                .nic_public,
+            ["203.0.113.7"]
         );
         // Not on a tailnet, no internet: nothing found.
         assert_eq!(

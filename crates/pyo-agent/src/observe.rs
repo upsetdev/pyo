@@ -466,6 +466,17 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
                     .annotations()
                     .get(pyo_proto::PUBLIC_COUNTRY_ANNOTATION)
                     .cloned(),
+                nic_public_ips: n
+                    .annotations()
+                    .get(pyo_proto::NIC_PUBLIC_IPV4_ANNOTATION)
+                    .map(|v| {
+                        v.split(',')
+                            .map(str::trim)
+                            .filter(|ip| !ip.is_empty())
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 // What the server's own interfaces have (locate.rs), else a
                 // node address on the tailnet (a server joined over it).
                 tailnet_ip: n

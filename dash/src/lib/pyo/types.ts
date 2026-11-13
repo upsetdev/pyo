@@ -366,6 +366,8 @@ export type Cluster = {
   freeDomainAddressSet?: FreeDomainAddress | null;
   /** The address its free domains point at now; null: no free domains. */
   freeDomainIp?: string | null;
+  /** Its public IP is only what the internet sees (no server has it): ports may not be forwarded. */
+  behindNat?: boolean;
   originPull?: {
     /** What it was last asked to require. */
     certificateIds?: ID[];

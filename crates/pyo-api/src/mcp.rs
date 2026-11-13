@@ -940,7 +940,7 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
                     "cluster": c["name"], "status": c["status"],
                     "publicIp": c["publicIp"], "tailnetIp": c["tailnetIp"],
                     // Where free domains point: "public" or "tailscale" (set_cluster_free_domain_address).
-                    "freeDomainAddress": c["freeDomainAddress"], "freeDomainIp": c["freeDomainIp"],
+                    "freeDomainAddress": c["freeDomainAddress"], "freeDomainIp": c["freeDomainIp"], "behindNat": c["behindNat"],
                     "servers": servers.iter().filter(|n| n["clusterId"] == c["id"]).map(|n| json!({
                         "name": n["name"], "status": n["status"], "ip": n["internalIP"],
                         "cpu": { "cores": n["capacity"]["cpu"], "used": n["usage"]["cpu"] },

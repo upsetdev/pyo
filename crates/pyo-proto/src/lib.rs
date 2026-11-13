@@ -425,6 +425,10 @@ pub struct ServerReport {
     /// Its Tailscale IPv4 address (100.x), when it's on a tailnet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tailnet_ip: Option<String>,
+    /// Public IPv4 addresses on its own network cards: the internet reaches
+    /// it there directly (not behind NAT).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nic_public_ips: Vec<String>,
     /// NVIDIA GPUs Kubernetes can hand out here (allocatable nvidia.com/gpu).
     #[serde(default)]
     pub gpus: u32,
@@ -518,6 +522,8 @@ pub const PUBLIC_COUNTRY_ANNOTATION: &str = "pyo/public-country";
 pub const LOCATED_AT_ANNOTATION: &str = "pyo/located-at";
 /// Its Tailscale IPv4 address ("" when it has none).
 pub const TAILNET_IPV4_ANNOTATION: &str = "pyo/tailnet-ipv4";
+/// Public IPv4 addresses on its own network cards, comma-separated ("" for none).
+pub const NIC_PUBLIC_IPV4_ANNOTATION: &str = "pyo/nic-public-ipv4";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

@@ -132,6 +132,11 @@ export function ClusterPublicTraffic({ cluster: c }: { cluster: Cluster }) {
             "Public traffic is off."
           )}
         </p>
+        {c.behindNat && (
+          <p className="mt-1 text-[12px] text-muted-foreground">
+            Behind NAT. Choose Public IP if ports 80 and 443 are forwarded to this server.
+          </p>
+        )}
       </div>
     </Panel>
   );
