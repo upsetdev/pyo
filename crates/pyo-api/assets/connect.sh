@@ -459,7 +459,7 @@ small_machine() {
   printf '%s\n' '[Unit]' 'Description=Pyo: compressed swap in memory (zram) on a small machine' 'Before=k3s.service' \
     '[Service]' 'Type=oneshot' 'RemainAfterExit=yes' \
     "ExecStart=/bin/sh -c 'modprobe zram && d=\$\$(zramctl --find --size $((mem / 2))MiB) && mkswap \"\$\$d\" >/dev/null && swapon -p 100 \"\$\$d\" && echo \"\$\$d\" > /run/pyo-zram'" \
-    "ExecStop=/bin/sh -c 'd=\$\$(cat /run/pyo-zram) && swapoff \"\$\$d\" && zramctl --reset \"\$\$d\"'" \
+    "ExecStop=/bin/sh -c 'd=\$\$(cat /run/pyo-zram) && swapoff \"\$\$d\" && for i in 1 2 3 4 5; do zramctl --reset \"\$\$d\" 2>/dev/null && exit 0; sleep 1; done; zramctl --reset \"\$\$d\"'" \
     '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/pyo-zram.service
   systemctl daemon-reload
   systemctl enable --now pyo-zram.service >/dev/null 2>&1 &&
