@@ -89,7 +89,8 @@ enum Command {
         /// The cluster to run it on (name or id). Defaults to the team's default cluster.
         #[arg(long)]
         cluster: Option<String>,
-        /// Import without asking.
+        /// Don't ask: import the Compose file, or go ahead with a very
+        /// large replica change from pyo.toml.
         #[arg(long, short = 'y')]
         yes: bool,
     },
@@ -428,11 +429,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             )
             .await
         }
-        Command::Deploy { which, detach, .. } => {
+        Command::Deploy {
+            which, detach, yes, ..
+        } => {
             service::deploy(
                 &config::client(url, token)?,
                 which.service.as_deref(),
                 detach,
+                yes,
             )
             .await
         }

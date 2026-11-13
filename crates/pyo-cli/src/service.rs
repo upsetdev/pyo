@@ -104,7 +104,12 @@ pub async fn link(api: &Api, service: Option<String>) -> Result<()> {
 
 // ── deploy ─────────────────────────────────────────────────────────────
 
-pub async fn deploy(api: &Api, service: Option<&str>, detach: bool) -> Result<()> {
+/// A yes to a [y/N] question.
+fn confirmed(answer: &str) -> bool {
+    matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+pub async fn deploy(api: &Api, service: Option<&str>, detach: bool, yes: bool) -> Result<()> {
     let t = target(api, service).await?;
     let mut service = t.service().clone();
     let changes = match &t.file {
@@ -122,11 +127,22 @@ pub async fn deploy(api: &Api, service: Option<&str>, detach: bool) -> Result<()
         for c in &changes {
             println!("{} {c}", ui::dim("·"));
         }
-        api.op(
-            "saveService",
-            json!({ "service": service, "deploymentId": dep, "trigger": "manual" }),
-        )
-        .await?
+        let save = |confirm: bool| {
+            api.op(
+                "saveService",
+                json!({ "service": service, "deploymentId": dep, "trigger": "manual", "confirm": confirm }),
+            )
+        };
+        match save(yes).await {
+            Err(e) if e.downcast_ref::<crate::api::NeedsConfirm>().is_some() => {
+                // A very large replica change: asked here, or -y.
+                if !confirmed(&ui::ask(&format!("{e} [y/N] "))?) {
+                    bail!("Not deployed.");
+                }
+                save(true).await?
+            }
+            r => r?,
+        }
     };
     // Replicas that don't fit on the servers wait for room.
     if let Some(w) = done["warning"].as_str() {
@@ -977,6 +993,16 @@ mod tests {
         assert_eq!(a["env"][0]["value"], json!(""));
         assert_eq!(a["env"][1]["key"], json!("LOG"));
         assert_eq!(c.len(), 5);
+    }
+
+    #[test]
+    fn only_a_yes_confirms() {
+        for y in ["y", "Y", "yes", " YES "] {
+            assert!(confirmed(y), "{y}");
+        }
+        for n in ["", "n", "no", "maybe"] {
+            assert!(!confirmed(n), "{n}");
+        }
     }
 
     #[test]

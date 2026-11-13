@@ -5,7 +5,7 @@
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 
 /// What the warning is about.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -128,15 +128,62 @@ pub fn warning(
     })
 }
 
+/// How many replicas of `cpu_m` millicores and `memory_mi` MiB each fit:
+/// the `running` ones plus what `free` holds. None when they ask for
+/// nothing.
+pub fn fitting(cpu_m: i64, memory_mi: i64, running: i64, free: (f64, f64)) -> Option<i64> {
+    let (each_cpu, each_mem) = (
+        cpu_m.max(0) as f64 / 1000.0,
+        memory_mi.max(0) as f64 / 1024.0,
+    );
+    let per = |free: f64, each: f64| (each > 0.0).then(|| (free / each + 1e-6).floor() as i64);
+    let more = match (per(free.0, each_cpu), per(free.1, each_mem)) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => return None,
+    };
+    Some(running.max(0) + more)
+}
+
+/// Fewer than this never asks.
+pub const CONFIRM_FROM: i64 = 20;
+
+/// A change worth asking about first: going to at least [`CONFIRM_FROM`]
+/// replicas, and more than twice what fits or ten times what it had.
+pub fn needs_confirm(replicas: i64, before: i64, fits: Option<i64>) -> bool {
+    replicas >= CONFIRM_FROM
+        && replicas > before
+        && (replicas > 10 * before.max(1) || fits.is_some_and(|f| replicas > 2 * f))
+}
+
+/// The question a very large change asks.
+pub fn confirm_message(ask: Ask, replicas: i64, before: i64, warning: Option<&str>) -> String {
+    let q = match ask {
+        Ask::Run => format!("Scale to {replicas} replicas?"),
+        Ask::UpTo => format!("Autoscale up to {replicas} replicas?"),
+    };
+    match warning {
+        Some(w) => format!("{q} {w}"),
+        None if before > 0 => format!("{q} That's more than 10 times the {before} it has now."),
+        None => q,
+    }
+}
+
 /// The warning for running `replicas` of a service as it's set up now
 /// (its requests and where it may run), or None when they fit or its
 /// servers haven't said what they have. No `replicas`: as many as a deploy
 /// of it starts.
+///
+/// `before`: what it had, for a change that asks first when it's very
+/// large ([`needs_confirm`]); unless `confirm`, that's a 409 with
+/// `needsConfirm`.
 pub async fn check(
     tx: &mut Transaction<'_, Postgres>,
     service_id: &str,
     ask: Ask,
     replicas: Option<i64>,
+    before: Option<i64>,
+    confirm: bool,
 ) -> ApiResult<Option<String>> {
     let Some((cluster_id, spec, runtime)): Option<(String, Value, Value)> =
         sqlx::query_as("SELECT cluster_id, spec, runtime FROM pyo.services WHERE id = $1")
@@ -157,18 +204,38 @@ pub async fn check(
     .bind(&cluster_id)
     .fetch_all(&mut **tx)
     .await?;
-    let Some(free) = free_for(&spec, &servers) else {
-        return Ok(None);
-    };
     let r = &spec["resources"];
-    Ok(warning(
-        ask,
-        replicas.unwrap_or_else(|| deployed_replicas(&spec)),
+    let (cpu_m, memory_mi) = (
         r["cpuRequest"].as_i64().unwrap_or(100),
         r["memoryRequest"].as_i64().unwrap_or(128),
-        runtime["readyReplicas"].as_i64().unwrap_or(0),
-        free,
-    ))
+    );
+    let running = runtime["readyReplicas"].as_i64().unwrap_or(0);
+    let replicas = replicas.unwrap_or_else(|| deployed_replicas(&spec));
+    let free = free_for(&spec, &servers);
+    let warning = free.and_then(|f| warning(ask, replicas, cpu_m, memory_mi, running, f));
+    let fits = free.and_then(|f| fitting(cpu_m, memory_mi, running, f));
+    if let Some(before) = before {
+        gate(ask, replicas, before, fits, warning.as_deref(), confirm)?;
+    }
+    Ok(warning)
+}
+
+/// Holds back a very large change until it's confirmed: a 409 with
+/// `needsConfirm` and the question to ask.
+pub fn gate(
+    ask: Ask,
+    replicas: i64,
+    before: i64,
+    fits: Option<i64>,
+    warning: Option<&str>,
+    confirm: bool,
+) -> ApiResult<()> {
+    if !confirm && needs_confirm(replicas, before, fits) {
+        return Err(ApiError::needs_confirm(confirm_message(
+            ask, replicas, before, warning,
+        )));
+    }
+    Ok(())
 }
 
 /// The replicas a deploy of the service starts: autoscaling's minimum, or
@@ -219,6 +286,86 @@ mod tests {
             Some((3.0, 6.0))
         );
         assert_eq!(free_for(&json!({}), &[]), None, "nothing reported");
+    }
+
+    #[test]
+    fn what_fits() {
+        // 0.5 CPU and 1 GiB each: 4.2 CPU holds 8, 6 GB holds 6.
+        assert_eq!(fitting(500, 1024, 2, (4.2, 6.0)), Some(8));
+        assert_eq!(fitting(500, 0, 0, (4.0, 0.0)), Some(8));
+        assert_eq!(fitting(0, 0, 3, (4.0, 4.0)), None);
+    }
+
+    #[test]
+    fn only_very_large_changes_ask_first() {
+        // Small numbers never ask, whatever the ratio.
+        assert!(!needs_confirm(3, 1, Some(0)));
+        assert!(!needs_confirm(19, 1, Some(0)));
+        // Ten times what it had.
+        assert!(needs_confirm(20, 1, None));
+        assert!(needs_confirm(51, 5, None));
+        assert!(!needs_confirm(50, 5, None));
+        // Twice what fits.
+        assert!(needs_confirm(41, 30, Some(20)));
+        assert!(!needs_confirm(40, 30, Some(20)));
+        // Going down, or staying, never asks.
+        assert!(!needs_confirm(100, 1000, Some(1)));
+        assert!(!needs_confirm(100, 100, Some(1)));
+        // A new service counts from one.
+        assert!(needs_confirm(20, 0, None));
+    }
+
+    #[test]
+    fn a_very_large_change_is_refused_until_confirmed() {
+        let e = gate(Ask::Run, 1000, 3, Some(64), Some("These 1000 replicas need about 250 CPU. Your servers have 16 free, so some will wait until there's room."), false).unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::CONFLICT);
+        assert!(e.needs_confirm);
+        assert!(e.message.starts_with("Scale to 1000 replicas? These 1000"));
+        assert!(gate(Ask::Run, 1000, 3, Some(64), None, true).is_ok());
+        assert!(gate(Ask::Run, 6, 3, Some(64), None, false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_refusal_says_needs_confirm() {
+        use axum::response::IntoResponse;
+        let r = ApiError::needs_confirm("Scale to 1000 replicas?").into_response();
+        assert_eq!(r.status(), axum::http::StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v,
+            json!({ "error": "Scale to 1000 replicas?", "needsConfirm": true })
+        );
+        // Other errors don't carry it.
+        let r = ApiError::conflict("x").into_response();
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({ "error": "x" })
+        );
+    }
+
+    #[test]
+    fn the_question_says_why() {
+        assert_eq!(
+            confirm_message(
+                Ask::Run,
+                1000,
+                3,
+                Some(
+                    "These 1000 replicas need about 250 CPU. Your servers have 16 free, so some will wait until there's room."
+                )
+            ),
+            "Scale to 1000 replicas? These 1000 replicas need about 250 CPU. Your servers have 16 free, so some will wait until there's room."
+        );
+        assert_eq!(
+            confirm_message(Ask::UpTo, 100, 5, None),
+            "Autoscale up to 100 replicas? That's more than 10 times the 5 it has now."
+        );
+        assert_eq!(
+            confirm_message(Ask::Run, 30, 0, None),
+            "Scale to 30 replicas?"
+        );
     }
 
     #[test]

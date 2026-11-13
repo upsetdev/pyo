@@ -10,9 +10,10 @@ import {
 import { RoomNote } from "~/components/pyo/RoomNote";
 import { VolumeTable } from "~/components/pyo/tables";
 import { Button } from "~/components/ui/Button";
+import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Stepper } from "~/components/ui/Field";
 import { Meter, Panel } from "~/components/ui/Panel";
-import { MAX_REPLICAS, serviceRoomWarning } from "~/lib/pyo/capacity";
+import { bigChange, MAX_REPLICAS, serviceRoomWarning } from "~/lib/pyo/capacity";
 import { cpu, mem } from "~/lib/pyo/format";
 import { api, desiredReplicas, usePyo, serviceIdOf } from "~/lib/pyo/store";
 import { getTemplate } from "~/lib/pyo/templates";
@@ -69,6 +70,22 @@ function Resources({ app }: { app: Application }) {
   const roomNote = app.autoscale
     ? null
     : serviceRoomWarning(s.servers, app, replicas, "run", resources);
+  // A very large change asks first (the API holds it back otherwise).
+  const big = app.autoscale
+    ? null
+    : bigChange(s.servers, app, replicas, app.replicas, "run", resources);
+  const [asking, setAsking] = useState(false);
+  const save = (confirm: boolean) => {
+    api.updateService(
+      app.id,
+      { resources, replicas },
+      { requiresRedeploy: true, label: "resources", confirm },
+    );
+    toast({
+      title: "Resources saved",
+      description: "Redeploy to apply.",
+    });
+  };
 
   return (
     <div className="space-y-4">
@@ -111,17 +128,7 @@ function Resources({ app }: { app: Application }) {
           <Button
             size="xs"
             disabled={!dirty || Object.keys(errors).length > 0}
-            onClick={() => {
-              api.updateService(
-                app.id,
-                { resources, replicas },
-                { requiresRedeploy: true, label: "resources" },
-              );
-              toast({
-                title: "Resources saved",
-                description: "Redeploy to apply.",
-              });
-            }}
+            onClick={() => (big ? setAsking(true) : save(false))}
           >
             Save changes
           </Button>
@@ -157,6 +164,18 @@ function Resources({ app }: { app: Application }) {
             )}
           </Field>
           <RoomNote text={roomNote} />
+          <ConfirmDialog
+            open={asking && !!big}
+            onClose={() => setAsking(false)}
+            tone="primary"
+            title={big?.title ?? ""}
+            description={big?.body ?? ""}
+            confirmLabel="Scale"
+            onConfirm={() => {
+              setAsking(false);
+              save(true);
+            }}
+          />
         </div>
       </Panel>
       {app.workloadKind === "CronJob" ? null : <HealthCheck app={app} />}

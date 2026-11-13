@@ -111,3 +111,71 @@ export function serviceRoomWarning(
   });
   return roomWarning(ask, replicas, resources, app.runtime.readyReplicas, free);
 }
+
+/** How many replicas fit: the running ones plus what `free` holds. Null when they ask for nothing. */
+export function fitting(
+  resources: Pick<Resources, "cpuRequest" | "memoryRequest">,
+  running: number,
+  free: Room,
+): number | null {
+  const eachCpu = Math.max(0, resources.cpuRequest) / 1000;
+  const eachMem = Math.max(0, resources.memoryRequest) / 1024;
+  const per = (f: number, each: number) =>
+    each > 0 ? Math.floor(f / each + 1e-6) : null;
+  const a = per(free.cpu, eachCpu);
+  const b = per(free.memoryGi, eachMem);
+  if (a === null && b === null) return null;
+  return Math.max(0, running) + Math.min(a ?? Infinity, b ?? Infinity);
+}
+
+/** Fewer than this never asks. */
+export const CONFIRM_FROM = 20;
+
+/** A change worth asking about first: to at least 20 replicas, and over 10 times what it had or twice what fits. */
+export function needsConfirm(replicas: number, before: number, fits: number | null) {
+  return (
+    replicas >= CONFIRM_FROM &&
+    replicas > before &&
+    (replicas > 10 * Math.max(1, before) || (fits !== null && replicas > 2 * fits))
+  );
+}
+
+/**
+ * The question to ask before a very large change (the API holds it back
+ * without `confirm`), or null when it needs none.
+ */
+export function bigChange(
+  servers: ClusterServer[],
+  app: {
+    clusterId: string;
+    servers?: string[];
+    serverTags?: string[];
+    resources: Resources;
+    workloadKind?: string;
+    runtime: { readyReplicas: number };
+  },
+  replicas: number,
+  before: number,
+  ask: "run" | "upTo" = "run",
+  resources: Resources = app.resources,
+): { title: string; body: string } | null {
+  if (app.workloadKind === "CronJob") return null;
+  const free = freeRoom(servers, app.clusterId, {
+    servers: app.servers,
+    serverTags: app.serverTags,
+    gpu: resources.gpu,
+  });
+  const running = app.runtime.readyReplicas;
+  const fits = free ? fitting(resources, running, free) : null;
+  if (!needsConfirm(replicas, before, fits)) return null;
+  const warning = roomWarning(ask, replicas, resources, running, free);
+  return {
+    title:
+      ask === "upTo"
+        ? `Autoscale up to ${replicas} replicas?`
+        : `Scale to ${replicas} replicas?`,
+    body:
+      warning ??
+      (before > 0 ? `That's more than 10 times the ${before} it has now.` : ""),
+  };
+}

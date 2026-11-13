@@ -894,6 +894,7 @@ export function desiredReplicas(a: Application) {
 function saveService(
   serviceId: string,
   deploy?: { deploymentId: string; trigger: DeploymentTrigger },
+  confirm = false,
 ) {
   const app = get().services.find((a) => a.id === serviceId);
   if (!app) return Promise.resolve(null);
@@ -901,6 +902,8 @@ function saveService(
     service: app,
     deploymentId: deploy?.deploymentId,
     trigger: deploy?.trigger,
+    // A very large replica change the user said yes to.
+    ...(confirm ? { confirm } : {}),
   });
 }
 
@@ -1514,7 +1517,11 @@ export const api = {
    */
   createService(
     draft: DeployDraft,
-    opts: { databases?: { id: string; env?: Record<string, string> }[] } = {},
+    opts: {
+      databases?: { id: string; env?: Record<string, string> }[];
+      /** A very large replica count the user said yes to. */
+      confirm?: boolean;
+    } = {},
   ): {
     serviceId: string;
     deploymentId: string;
@@ -1711,6 +1718,7 @@ export const api = {
         deploymentId,
         volumes,
         ...(opts.databases?.length ? { databases: opts.databases } : {}),
+        ...(opts.confirm ? { confirm: true } : {}),
       }));
     })();
     return { serviceId, deploymentId, done };
@@ -1734,14 +1742,14 @@ export const api = {
         | "command"
       >
     >,
-    opts: { requiresRedeploy?: boolean; label?: string } = {},
+    opts: { requiresRedeploy?: boolean; label?: string; confirm?: boolean } = {},
   ) {
     update((s) => {
       const a = findService(s, id);
       Object.assign(a, patch, { updatedAt: Date.now() });
       if (opts.requiresRedeploy) a.pendingChanges = true;
     });
-    return saveService(id);
+    return saveService(id, undefined, opts.confirm);
   },
   setEnv(id: string, env: EnvironmentVariable[], _changed: string[]) {
     update((s) => {
@@ -1927,20 +1935,20 @@ export const api = {
     return send("deleteVolume", clusterId ? { id, clusterId } : { id });
   },
   /** Resize in place: no new rollout, pods keep running. */
-  scaleService(id: string, replicas: number) {
+  scaleService(id: string, replicas: number, confirm = false) {
     update((s) => {
       findService(s, id).replicas = replicas;
     });
-    return send("scaleService", { id, replicas });
+    return send("scaleService", { id, replicas, ...(confirm ? { confirm } : {}) });
   },
   /** Null turns autoscaling off, keeping the replicas it had reached. */
-  setAutoscale(id: string, autoscale: Autoscale | null) {
+  setAutoscale(id: string, autoscale: Autoscale | null, confirm = false) {
     update((s) => {
       const a = findService(s, id);
       a.autoscale = autoscale ?? undefined;
       if (autoscale) a.replicas = autoscale.min;
     });
-    return send("setAutoscale", { id, autoscale });
+    return send("setAutoscale", { id, autoscale, ...(confirm ? { confirm } : {}) });
   },
   stopService(id: string) {
     update((s) => {

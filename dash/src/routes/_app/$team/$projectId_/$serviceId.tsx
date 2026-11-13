@@ -17,7 +17,7 @@ import {
 } from "@phosphor-icons/react";
 import { ReplicaPicker } from "~/components/pyo/ReplicaPicker";
 import { RoomNote } from "~/components/pyo/RoomNote";
-import { MAX_REPLICAS, serviceRoomWarning } from "~/lib/pyo/capacity";
+import { bigChange, MAX_REPLICAS, serviceRoomWarning } from "~/lib/pyo/capacity";
 import { copyIdItem } from "~/components/pyo/copyId";
 import {
   createFileRoute,
@@ -350,30 +350,51 @@ function ScaleDialog({
       ? null
       : serviceRoomWarning(s.servers, app, n);
   const perPod = `${cpu(app.resources.cpuLimit)} and ${mem(app.resources.memoryLimit)}`;
+  // A very large change asks first (the API holds it back otherwise).
+  const big = autoscaling
+    ? invalid
+      ? null
+      : bigChange(s.servers, app, max, app.autoscale?.max ?? (stopped ? 0 : live), "upTo")
+    : turningOff
+      ? null
+      : bigChange(s.servers, app, n, stopped ? 0 : app.replicas);
+  const [asking, setAsking] = useState<{ title: string; body: string } | null>(null);
   return (
     <Dialog
       open={open}
       onClose={onClose}
-      title={`Scale ${app.name}`}
+      title={asking ? asking.title : `Scale ${app.name}`}
       description={
-        stopped
-          ? "It's stopped. Pick how many replicas to start."
-          : "Running replicas keep serving."
+        asking
+          ? asking.body
+          : stopped
+            ? "It's stopped. Pick how many replicas to start."
+            : "Running replicas keep serving."
       }
       onSubmit={async () => {
         if (blocked) return;
+        if (big && !asking) {
+          setAsking(big);
+          return;
+        }
+        const confirm = !!asking;
         setSaving(true);
         const ok = autoscaling
-          ? await api.setAutoscale(app.id, {
-              min,
-              max,
-              targetCpu,
-              ...(byMemory ? { targetMemory } : {}),
-            })
+          ? await api.setAutoscale(
+              app.id,
+              {
+                min,
+                max,
+                targetCpu,
+                ...(byMemory ? { targetMemory } : {}),
+              },
+              confirm,
+            )
           : turningOff
             ? await api.setAutoscale(app.id, null)
-            : await api.scaleService(app.id, n);
+            : await api.scaleService(app.id, n, confirm);
         setSaving(false);
+        setAsking(null);
         if (!ok) return;
         const warning = typeof ok.warning === "string" ? ok.warning : undefined;
         toast({
@@ -388,13 +409,21 @@ function ScaleDialog({
       }}
       footer={
         <>
-          <Button variant="ghost" size="sm" onClick={onClose}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={asking ? () => setAsking(null) : onClose}
+          >
             Cancel
           </Button>
           <Button type="submit" size="sm" disabled={blocked}>
             {saving
               ? "Saving…"
-              : autoscaling
+              : asking
+                ? autoscaling
+                  ? "Autoscale"
+                  : "Scale"
+                : autoscaling
                 ? "Save autoscaling"
                 : turningOff
                   ? "Turn off autoscaling"
@@ -405,7 +434,7 @@ function ScaleDialog({
         </>
       }
     >
-      <div className="space-y-5">
+      <div className="space-y-5" hidden={!!asking}>
         {stopped ? null : (
           <Switch
             checked={auto}

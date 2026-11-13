@@ -371,11 +371,30 @@ fn with_warning(mut ok: Value, warning: Option<String>) -> Value {
 }
 
 /// When the replicas a service is set to run don't fit on its servers.
+/// `before`: what it was set to, for a change that asks first when it's
+/// very large.
 async fn deploy_warning(
     tx: &mut Transaction<'_, Postgres>,
     service_id: &str,
+    before: Option<i64>,
+    confirm: bool,
 ) -> ApiResult<Option<String>> {
-    crate::capacity::check(tx, service_id, crate::capacity::Ask::Run, None).await
+    crate::capacity::check(
+        tx,
+        service_id,
+        crate::capacity::Ask::Run,
+        None,
+        before,
+        confirm,
+    )
+    .await
+}
+
+/// The replicas a service's spec runs: autoscaling's minimum, or its setting.
+fn set_replicas(spec: &Value) -> i64 {
+    spec["autoscale"]["min"]
+        .as_i64()
+        .unwrap_or_else(|| spec["replicas"].as_i64().unwrap_or(1))
 }
 
 fn check_autoscale(a: &pyo_proto::Autoscale) -> ApiResult<()> {
@@ -1826,6 +1845,9 @@ pub(crate) enum Op {
         #[serde(default)]
         #[schema(value_type = Vec<Object>)]
         databases: Vec<ServiceDatabase>,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
     },
     /// Save a service's configuration. With `deploymentId`, roll it out too. Changes to its `domains` go live without a deploy once it has been deployed.
     #[serde(rename = "saveService")]
@@ -1837,6 +1859,9 @@ pub(crate) enum Op {
         service: Value,
         deployment_id: Option<String>,
         trigger: Option<String>,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
     },
     /// Delete a service and stop it everywhere. Its volumes are kept, detached, unless `deleteVolumes`.
     #[serde(rename = "deleteService")]
@@ -1868,7 +1893,13 @@ pub(crate) enum Op {
     StopService { id: String },
     /// Change a service's number of replicas without a new deployment: 1 or more, with no maximum. Replicas that don't fit on the servers wait until there's room, and the response's `warning` says so.
     #[serde(rename = "scaleService")]
-    ScaleService { id: String, replicas: i32 },
+    ScaleService {
+        id: String,
+        replicas: i32,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
+    },
     /// Add a cron job to a service, or change one (by id).
     SaveCronJob {
         service_id: String,
@@ -1888,6 +1919,9 @@ pub(crate) enum Op {
     SetAutoscale {
         id: String,
         autoscale: Option<pyo_proto::Autoscale>,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
     },
     /// Add a persistent volume to a service, mounted at `mountPath` from its next deploy.
     AddVolume {
@@ -4246,15 +4280,20 @@ async fn apply(
             deployment_id,
             volumes,
             databases,
+            confirm,
         } => {
             let id = service["id"].as_str().unwrap_or("").to_owned();
             create_service(tx, user, service, &deployment_id, volumes, databases, wake).await?;
-            Ok(with_warning(ok, deploy_warning(tx, &id).await?))
+            Ok(with_warning(
+                ok,
+                deploy_warning(tx, &id, Some(0), confirm).await?,
+            ))
         }
         Op::SaveService {
             service,
             deployment_id,
             trigger,
+            confirm,
         } => {
             let id = service["id"].as_str().unwrap_or("").to_owned();
             let team_id = team_of(tx, "services", &id).await?;
@@ -4408,7 +4447,10 @@ async fn apply(
                 .await?;
                 wake.push(c);
             }
-            Ok(with_warning(ok, deploy_warning(tx, &id).await?))
+            Ok(with_warning(
+                ok,
+                deploy_warning(tx, &id, Some(set_replicas(&old_spec)), confirm).await?,
+            ))
         }
         Op::DeleteService { id, delete_volumes } => {
             let team_id = team_of(tx, "services", &id).await?;
@@ -4491,7 +4533,10 @@ async fn apply(
             )
             .await?;
             wake.push(c);
-            Ok(with_warning(ok, deploy_warning(tx, &service_id).await?))
+            Ok(with_warning(
+                ok,
+                deploy_warning(tx, &service_id, None, false).await?,
+            ))
         }
         Op::Cancel { deployment_id } => {
             let team_id = team_of(tx, "deployments", &deployment_id).await?;
@@ -4642,7 +4687,11 @@ async fn apply(
         Op::DeleteVolume { id, cluster_id } => {
             crate::volumes::delete(tx, user, &id, cluster_id.as_deref(), wake).await
         }
-        Op::ScaleService { id, replicas } => {
+        Op::ScaleService {
+            id,
+            replicas,
+            confirm,
+        } => {
             let team_id = team_of(tx, "services", &id).await?;
             require_role(tx, user, &team_id, Role::Developer).await?;
             if replicas < 1 {
@@ -4703,9 +4752,20 @@ async fn apply(
             )
             .await?;
             wake.push(cluster_id);
-            let warning =
-                crate::capacity::check(tx, &id, crate::capacity::Ask::Run, Some(replicas.into()))
-                    .await?;
+            let before = if status == "stopped" {
+                0
+            } else {
+                spec["replicas"].as_i64().unwrap_or(1)
+            };
+            let warning = crate::capacity::check(
+                tx,
+                &id,
+                crate::capacity::Ask::Run,
+                Some(replicas.into()),
+                Some(before),
+                confirm,
+            )
+            .await?;
             Ok(with_warning(ok, warning))
         }
         Op::SaveCronJob {
@@ -4800,7 +4860,11 @@ async fn apply(
             wake.push(cluster_id);
             Ok(ok)
         }
-        Op::SetAutoscale { id, autoscale } => {
+        Op::SetAutoscale {
+            id,
+            autoscale,
+            confirm,
+        } => {
             let team_id = team_of(tx, "services", &id).await?;
             require_role(tx, user, &team_id, Role::Developer).await?;
             let (cluster_id, current, name, project_id, status, spec, runtime): (String, Option<String>, String, String, String, Value, Value) =
@@ -4865,6 +4929,11 @@ async fn apply(
                 .execute(&mut **tx)
                 .await?;
             let up_to = autoscale.as_ref().map(|a| a.max);
+            let before = spec["autoscale"]["max"].as_i64().unwrap_or(if stopped {
+                0
+            } else {
+                reached.into()
+            });
             let title = match &autoscale {
                 Some(a) => format!(
                     "Autoscaling {name} between {} and {} replicas",
@@ -4896,8 +4965,15 @@ async fn apply(
             wake.push(cluster_id);
             let warning = match up_to {
                 Some(max) => {
-                    crate::capacity::check(tx, &id, crate::capacity::Ask::UpTo, Some(max.into()))
-                        .await?
+                    crate::capacity::check(
+                        tx,
+                        &id,
+                        crate::capacity::Ask::UpTo,
+                        Some(max.into()),
+                        Some(before),
+                        confirm,
+                    )
+                    .await?
                 }
                 None => None,
             };
@@ -7204,6 +7280,23 @@ mod replica_tests {
             panic!("3 billion replicas went through");
         };
         assert!(e.to_string().contains("expected i32"), "{e}");
+    }
+
+    #[test]
+    fn confirm_is_off_unless_sent() {
+        let op = |v| serde_json::from_value::<Op>(v).unwrap();
+        assert!(matches!(
+            op(json!({ "op": "scaleService", "id": "svc_a", "replicas": 3 })),
+            Op::ScaleService { confirm: false, .. }
+        ));
+        assert!(matches!(
+            op(json!({ "op": "scaleService", "id": "svc_a", "replicas": 3, "confirm": true })),
+            Op::ScaleService { confirm: true, .. }
+        ));
+        assert!(matches!(
+            op(json!({ "op": "setAutoscale", "id": "svc_a", "autoscale": null })),
+            Op::SetAutoscale { confirm: false, .. }
+        ));
     }
 
     #[test]

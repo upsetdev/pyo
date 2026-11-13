@@ -11,6 +11,9 @@ pub struct ApiError {
     pub message: String,
     /// Seconds, sent as Retry-After (429s from ratelimit.rs).
     pub retry_after: Option<u64>,
+    /// Asks the caller to confirm and send the operation again with
+    /// `confirm: true` (a very large replica change).
+    pub needs_confirm: bool,
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
@@ -19,6 +22,10 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct ErrorBody {
     pub error: String,
+    /// The change wasn't made: confirm it with the user, then send it again
+    /// with `confirm: true`.
+    #[serde(rename = "needsConfirm", skip_serializing_if = "std::ops::Not::not")]
+    pub needs_confirm: bool,
 }
 
 impl ApiError {
@@ -27,6 +34,7 @@ impl ApiError {
             status,
             message: message.into(),
             retry_after: None,
+            needs_confirm: false,
         }
     }
     pub fn with_retry_after(self, secs: u64) -> Self {
@@ -50,6 +58,13 @@ impl ApiError {
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, message)
     }
+    /// A 409 that goes through once the caller confirms it.
+    pub fn needs_confirm(message: impl Into<String>) -> Self {
+        Self {
+            needs_confirm: true,
+            ..Self::conflict(message)
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -58,6 +73,7 @@ impl IntoResponse for ApiError {
             self.status,
             Json(ErrorBody {
                 error: self.message,
+                needs_confirm: self.needs_confirm,
             }),
         )
             .into_response();

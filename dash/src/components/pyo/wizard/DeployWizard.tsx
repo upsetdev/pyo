@@ -29,6 +29,8 @@ import {
   type ReactNode,
 } from "react";
 import { Button } from "~/components/ui/Button";
+import { ConfirmDialog } from "~/components/ui/Dialog";
+import { freeRoom, fitting, needsConfirm, roomWarning } from "~/lib/pyo/capacity";
 import { Input, Select, Segmented } from "~/components/ui/Field";
 import { Page } from "~/components/ui/Panel";
 import { ENGINE_LABEL } from "~/components/pyo/Databases";
@@ -573,7 +575,21 @@ function Configure({
   const [creating, setCreating] = useState(false);
   const clusterName = s.clusters.find((c) => c.id === d.clusterId)?.name ?? "the cluster";
 
-  const deploy = async () => {
+  // A very large replica count asks first (the API holds it back otherwise).
+  const free = d.cron
+    ? null
+    : freeRoom(s.servers, d.clusterId, {
+        servers: d.placement === "servers" ? d.serverNames : [],
+        serverTags: d.placement === "tags" ? d.serverTags : [],
+        gpu: d.resources.gpu,
+      });
+  const big =
+    !d.cron && needsConfirm(d.replicas, 0, free ? fitting(d.resources, 0, free) : null)
+      ? (roomWarning("run", d.replicas, d.resources, 0, free) ?? "")
+      : null;
+  const [asking, setAsking] = useState(false);
+
+  const deploy = async (confirm = false) => {
     setAttempted(true);
     if (count || dbProblems.some(Boolean)) {
       // Bring the first problem into view.
@@ -582,6 +598,10 @@ function Configure({
           ?.querySelector<HTMLElement>("[aria-invalid=true], [data-error=true]")
           ?.scrollIntoView({ behavior: "smooth", block: "center" }),
       );
+      return;
+    }
+    if (big !== null && !confirm) {
+      setAsking(true);
       return;
     }
     const databases: { id: string; env: Record<string, string> }[] = [];
@@ -641,7 +661,7 @@ function Configure({
       }
       setCreating(false);
     }
-    const { deploymentId } = api.createService(target, { databases });
+    const { deploymentId } = api.createService(target, { databases, confirm });
     toast({ tone: "info", title: `Deploying ${d.name}` });
     void navigate({
       to: "/$team/deployments/$deploymentId",
@@ -786,10 +806,24 @@ function Configure({
             d={d}
             sections={sections}
             action={
+              <>
+              <ConfirmDialog
+                open={asking}
+                onClose={() => setAsking(false)}
+                tone="primary"
+                title={`Start ${d.replicas} replicas?`}
+                description={big ?? ""}
+                confirmLabel="Deploy"
+                onConfirm={() => {
+                  setAsking(false);
+                  void deploy(true);
+                }}
+              />
               <Button size="lg" className="h-12 w-full text-[15px]" disabled={creating} onClick={() => void deploy()}>
                 <RocketLaunchIcon size={17} weight="fill" /> {creating ? "Creating…" : "Deploy"}
                 {d.name && !creating ? ` ${d.name}` : ""}
               </Button>
+              </>
             }
             note={
               attempted && (count || dbProblems.some(Boolean)) ? (
