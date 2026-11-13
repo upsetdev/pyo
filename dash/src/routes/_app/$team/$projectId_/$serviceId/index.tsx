@@ -886,6 +886,13 @@ function Attention({
       title: "Not deployed yet",
       body: "Deploy it to start it on your cluster.",
     };
+  else if (app.status === "degraded" && (app.runtime.waiting ?? 0) > 0)
+    note = {
+      tone: "warning",
+      icon: <WarningIcon size={15} />,
+      title: "Waiting for room",
+      body: `${ready} of ${desiredReplicas(app)} replicas are running. The rest start when your servers have room.`,
+    };
   else if (app.status === "degraded")
     note = {
       tone: "warning",

@@ -1354,7 +1354,7 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
             .and_then(Value::as_i64)
             .or_else(|| svc.get("scale").and_then(Value::as_i64))
             .unwrap_or(1)
-            .clamp(0, 50) as i32;
+            .clamp(0, i32::MAX as i64) as i32;
         let limits = deploy
             .and_then(|d| d.get("resources"))
             .and_then(|r| r.get("limits"));

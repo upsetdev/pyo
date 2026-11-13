@@ -112,12 +112,12 @@ pub async fn deploy(api: &Api, service: Option<&str>, detach: bool) -> Result<()
         None => vec![],
     };
     let dep = new_id("dpl");
-    if changes.is_empty() {
+    let done = if changes.is_empty() {
         api.op(
             "deploy",
             json!({ "serviceId": t.id, "deploymentId": dep, "trigger": "manual" }),
         )
-        .await?;
+        .await?
     } else {
         for c in &changes {
             println!("{} {c}", ui::dim("·"));
@@ -126,7 +126,11 @@ pub async fn deploy(api: &Api, service: Option<&str>, detach: bool) -> Result<()
             "saveService",
             json!({ "service": service, "deploymentId": dep, "trigger": "manual" }),
         )
-        .await?;
+        .await?
+    };
+    // Replicas that don't fit on the servers wait for room.
+    if let Some(w) = done["warning"].as_str() {
+        println!("{}", ui::yellow(w));
     }
     let url = t.state.deployment_url(&api.base, &service, &dep);
     println!(
@@ -291,8 +295,13 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
 
     let d = &f.deploy;
     if let Some(n) = d.replicas {
-        if !(0..=50).contains(&n) {
-            bail!("pyo.toml: replicas is 0 to 50.");
+        if n < 0 {
+            bail!("pyo.toml: replicas can't be below 0.");
+        }
+        if n > i64::from(i32::MAX) {
+            bail!(
+                "pyo.toml: that's more replicas than Kubernetes can count. The most is 2147483647."
+            );
         }
         set(
             &mut changes,
@@ -968,6 +977,18 @@ mod tests {
         assert_eq!(a["env"][0]["value"], json!(""));
         assert_eq!(a["env"][1]["key"], json!("LOG"));
         assert_eq!(c.len(), 5);
+    }
+
+    #[test]
+    fn replicas_have_no_cap_but_kubernetes_limit() {
+        let mut a = service();
+        let f: ServiceFile = toml::from_str("[deploy]\nreplicas = 500\n").unwrap();
+        apply(&mut a, &f).unwrap();
+        assert_eq!(a["replicas"], json!(500));
+        let f: ServiceFile = toml::from_str("[deploy]\nreplicas = -1\n").unwrap();
+        assert!(apply(&mut a, &f).is_err());
+        let f: ServiceFile = toml::from_str("[deploy]\nreplicas = 3000000000\n").unwrap();
+        assert!(apply(&mut a, &f).is_err());
     }
 
     #[test]

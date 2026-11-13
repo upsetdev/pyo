@@ -301,8 +301,12 @@ export function collectIssues(
       out.push({
         id: `service-${a.id}`,
         severity: "warning",
-        title: `${a.name} is degraded`,
-        detail: `${a.runtime.readyReplicas}/${a.replicas} ready`,
+        title: (a.runtime.waiting ?? 0) > 0
+          ? `${a.name} is waiting for room`
+          : `${a.name} is degraded`,
+        detail: (a.runtime.waiting ?? 0) > 0
+          ? `${a.runtime.readyReplicas}/${a.replicas} ready, ${a.runtime.waiting} waiting for room`
+          : `${a.runtime.readyReplicas}/${a.replicas} ready`,
         href: servicePath(a.id),
       });
     for (const d of a.domains)

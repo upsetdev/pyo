@@ -2,6 +2,7 @@ import { needsOwnDomain, refProblem, SELF, type Provider } from "./refs";
 import type { BuildMethod } from "./detect";
 import { RESERVED_SERVICE_NAMES } from "./paths";
 import { DNS_LABEL, ENV_KEY, HOSTNAME, slugify } from "./format";
+import { MAX_REPLICAS } from "./capacity";
 import { companionRecord, companionService, getTemplate } from "./templates";
 import type {
   Cluster,
@@ -547,8 +548,8 @@ function check(step: Section, d: DeployDraft, ctx: ValidationContext): Issues {
     if (r.memoryRequest <= 0) e.memoryRequest = "Must be greater than 0.";
     if (r.memoryLimit < r.memoryRequest)
       e.memoryLimit = "Limit must be at least the request.";
-    if (d.replicas < 0 || d.replicas > 20 || !Number.isInteger(d.replicas))
-      e.replicas = "Between 0 and 20.";
+    if (d.replicas < 0 || d.replicas > MAX_REPLICAS || !Number.isInteger(d.replicas))
+      e.replicas = "0 or more.";
     if (t?.stateful && d.replicas > 1)
       e.replicas = `${t.name} runs as one replica. This template doesn't set up replication.`;
     const gpu = gpuError(

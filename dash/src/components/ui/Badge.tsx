@@ -110,7 +110,22 @@ export const serviceLabel: Record<ServiceStatus, string> = {
   restoring: "Restoring",
 };
 
-export function ServiceStatusBadge({ status }: { status: ServiceStatus }) {
+/** Degraded only because some replicas have no room on the servers yet. */
+export const waitingForRoom = (a: {
+  status: ServiceStatus;
+  runtime?: { waiting?: number };
+}) => a.status === "degraded" && (a.runtime?.waiting ?? 0) > 0;
+
+export function ServiceStatusBadge({
+  status,
+  waiting,
+}: {
+  status: ServiceStatus;
+  /** Replicas waiting for room on the servers. */
+  waiting?: number;
+}) {
+  if (status === "degraded" && (waiting ?? 0) > 0)
+    return <Status tone="warning" label="Waiting for room" />;
   return <Status tone={serviceTone[status]} label={serviceLabel[status]} />;
 }
 

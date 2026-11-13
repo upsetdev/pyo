@@ -14,6 +14,7 @@ mod backupstore;
 mod bg;
 mod builders;
 mod bundles;
+mod capacity;
 mod certs;
 mod cli;
 pub mod compose;

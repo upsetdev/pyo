@@ -434,6 +434,9 @@ export type ClusterServer = {
   internalIP: string;
   externalIP?: string;
   capacity: { cpu: number; memoryGi: number; pods: number };
+  /** What pods can be handed here, and what the ones placed here ask for. */
+  allocatable?: { cpu: number; memoryGi: number };
+  requested?: { cpu: number; memoryGi: number };
   usage: {
     cpu: number;
     memoryGi: number;
@@ -1057,10 +1060,14 @@ export type Application = {
       server: string;
       ready: boolean;
       startedAt?: Timestamp | null;
+      /** No server has room for it yet. */
+      waiting?: boolean;
       ephemeralMi?: number | null;
       netRxBps?: number | null;
       netTxBps?: number | null;
     }[];
+    /** Replicas no server has room for yet: they start when there is. */
+    waiting?: number;
     /** Ephemeral storage plus volumes in use, in MiB; null/absent when unknown. */
     storageMi?: number | null;
     /** Network bytes per second, across its replicas. */

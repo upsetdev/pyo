@@ -7,10 +7,12 @@ import {
   HealthCheckFields,
   ResourceFields,
 } from "~/components/pyo/editors";
+import { RoomNote } from "~/components/pyo/RoomNote";
 import { VolumeTable } from "~/components/pyo/tables";
 import { Button } from "~/components/ui/Button";
 import { Field, Stepper } from "~/components/ui/Field";
 import { Meter, Panel } from "~/components/ui/Panel";
+import { MAX_REPLICAS, serviceRoomWarning } from "~/lib/pyo/capacity";
 import { cpu, mem } from "~/lib/pyo/format";
 import { api, desiredReplicas, usePyo, serviceIdOf } from "~/lib/pyo/store";
 import { getTemplate } from "~/lib/pyo/templates";
@@ -47,7 +49,8 @@ function Resources({ app }: { app: Application }) {
     errors.cpuLimit = "Limit must be at least the request.";
   if (resources.memoryLimit < resources.memoryRequest)
     errors.memoryLimit = "Limit must be at least the request.";
-  if (!(replicas >= 0 && replicas <= 20)) errors.replicas = "Between 0 and 20.";
+  if (!(Number.isInteger(replicas) && replicas >= 0 && replicas <= MAX_REPLICAS))
+    errors.replicas = "0 or more.";
   // A template no longer in the catalog: its workload says if it was stateful.
   const single = t
     ? t.stateful
@@ -62,6 +65,10 @@ function Resources({ app }: { app: Application }) {
       : undefined;
   if (gpuErr) errors.gpu = gpuErr;
   const n = Math.max(1, app.status === "stopped" ? 0 : desiredReplicas(app));
+  // Saved either way: replicas that don't fit wait for room.
+  const roomNote = app.autoscale
+    ? null
+    : serviceRoomWarning(s.servers, app, replicas, "run", resources);
 
   return (
     <div className="space-y-4">
@@ -141,7 +148,7 @@ function Resources({ app }: { app: Application }) {
               <Stepper
                 {...p}
                 min={0}
-                max={20}
+                max={MAX_REPLICAS}
                 disabled={!!app.autoscale}
                 value={app.autoscale ? desiredReplicas(app) : replicas}
                 onChange={setReplicas}
@@ -149,6 +156,7 @@ function Resources({ app }: { app: Application }) {
               />
             )}
           </Field>
+          <RoomNote text={roomNote} />
         </div>
       </Panel>
       {app.workloadKind === "CronJob" ? null : <HealthCheck app={app} />}

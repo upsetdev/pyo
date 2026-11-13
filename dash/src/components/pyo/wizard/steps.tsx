@@ -23,6 +23,8 @@ import {
 } from "~/components/pyo/ProjectCard";
 import { AppLink } from "~/components/ui/AppLink";
 import { ReplicaPicker } from "~/components/pyo/ReplicaPicker";
+import { RoomNote } from "~/components/pyo/RoomNote";
+import { MAX_REPLICAS, freeRoom, roomWarning } from "~/lib/pyo/capacity";
 import { Tags } from "~/components/ui/TagInput";
 import { useState, type ReactNode } from "react";
 import { locationLabel, parseLocation, placesOf } from "~/lib/pyo/location";
@@ -821,6 +823,20 @@ export function ResourcesStep({ d, set, errors }: StepProps) {
   // null: open only for a custom size; a click decides after that.
   const [showAdvanced, setShowAdvanced] = useState<boolean | null>(null);
   const hasAdvancedError = Object.keys(errors).some((k) => k !== "replicas");
+  // Accepted either way: replicas that don't fit wait for room.
+  const roomNote = d.cron
+    ? null
+    : roomWarning(
+        "run",
+        d.replicas,
+        d.resources,
+        0,
+        freeRoom(s.servers, d.clusterId, {
+          servers: d.placement === "servers" ? d.serverNames : [],
+          serverTags: d.placement === "tags" ? d.serverTags : [],
+          gpu: d.resources.gpu,
+        }),
+      );
   return (
     <div className="space-y-6">
       <section className="space-y-3">
@@ -854,7 +870,7 @@ export function ResourcesStep({ d, set, errors }: StepProps) {
         <ReplicaPicker
           value={d.replicas}
           onChange={(replicas) => set({ replicas })}
-          max={t?.stateful ? 1 : 50}
+          max={t?.stateful ? 1 : MAX_REPLICAS}
           align="start"
         />
         <p className="text-[12px] text-muted-foreground">
@@ -864,6 +880,7 @@ export function ResourcesStep({ d, set, errors }: StepProps) {
               ? "Spread across servers, sharing the traffic."
               : "More replicas survive outages."}
         </p>
+        <RoomNote text={roomNote} />
         {err(errors, "replicas") ? (
           <p className="text-[11.5px] text-destructive" data-error>
             {err(errors, "replicas")}

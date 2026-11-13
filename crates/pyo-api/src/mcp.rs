@@ -133,7 +133,7 @@ fn curated() -> Vec<Value> {
         json!({ "name": "list_servers", "title": "List servers", "description": "Clusters and servers of a team, with CPU and memory.", "inputSchema": schema(json!({ "team": team }), &[]), "annotations": read }),
         json!({ "name": "deploy_service", "title": "Deploy service", "description": "Deploy the service with its current settings (Git services build their branch head), or retry a failed deployment. Returns the deployment id.", "inputSchema": schema(json!({ "service_id": service, "retry_of": { "type": "string", "description": "A failed deployment to try again" } }), &["service_id"]), "annotations": write }),
         json!({ "name": "rollback_service", "title": "Roll back service", "description": "Go back to an earlier successful deployment (the previous one when omitted).", "inputSchema": schema(json!({ "service_id": service, "to_deployment_id": { "type": "string" } }), &["service_id"]), "annotations": write }),
-        json!({ "name": "scale_service", "title": "Scale service", "description": "Set how many replicas run (1-50), without redeploying.", "inputSchema": schema(json!({ "service_id": service, "replicas": { "type": "integer", "minimum": 1, "maximum": 50 } }), &["service_id", "replicas"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
+        json!({ "name": "scale_service", "title": "Scale service", "description": "Set how many replicas run (1 or more), without redeploying. Replicas that don't fit on the servers wait until there's room, and the result has a warning saying so.", "inputSchema": schema(json!({ "service_id": service, "replicas": { "type": "integer", "minimum": 1 } }), &["service_id", "replicas"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "restart_service", "title": "Restart service", "description": "Restart the service's replicas one at a time.", "inputSchema": schema(json!({ "service_id": service }), &["service_id"]), "annotations": write }),
         json!({ "name": "create_project", "title": "Create project", "description": "A new, empty project (a group of services). Returns its id.", "inputSchema": schema(json!({ "team": team, "name": { "type": "string" }, "description": { "type": "string" }, "namespace": { "type": "string", "description": "Its slug (lowercase letters, digits and dashes), used in service addresses. Made from the name when omitted" } }), &["name"]), "annotations": write }),
         json!({ "name": "create_service", "title": "Create service", "description": "Create a service from a container image and deploy it. The project is found by name or id, or created when it doesn't exist. Returns the service id, deployment id and URL.", "inputSchema": schema(json!({
@@ -142,7 +142,7 @@ fn curated() -> Vec<Value> {
             "name": { "type": "string", "description": "Service name: lowercase letters, digits and dashes" },
             "image": { "type": "string", "description": "Container image, e.g. nginx:latest or ghcr.io/owner/app:1.2" },
             "port": { "type": "integer", "description": "Port the container listens on (default 80)" },
-            "replicas": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "replicas": { "type": "integer", "minimum": 1 },
             "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment variables" },
             "free_domain": { "type": "boolean", "description": "Give it a free nip.io domain (no DNS needed)" },
             "domain": { "type": "string", "description": "A custom hostname to serve it on" },
@@ -939,10 +939,12 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
             find_service(id)?;
             let dep = new_id("dpl");
             let retry = args["retry_of"].as_str().filter(|r| !r.is_empty());
-            op(json!({ "op": "deploy", "serviceId": id, "deploymentId": dep, "trigger": if retry.is_some() { "retry" } else { "redeploy" }, "retryOf": retry })).await?;
-            Ok(
-                json!({ "deploymentId": dep, "status": "queued", "next": "Check progress with get_deployment." }),
-            )
+            let r = op(json!({ "op": "deploy", "serviceId": id, "deploymentId": dep, "trigger": if retry.is_some() { "retry" } else { "redeploy" }, "retryOf": retry })).await?;
+            let mut out = json!({ "deploymentId": dep, "status": "queued", "next": "Check progress with get_deployment." });
+            if let Some(w) = r.get("warning") {
+                out["warning"] = w.clone();
+            }
+            Ok(out)
         }
         "rollback_service" => {
             let id = service_id(args)?;
@@ -981,8 +983,12 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
         "scale_service" => {
             let id = service_id(args)?;
             let n = args["replicas"].as_i64().ok_or("replicas is required")?;
-            op(json!({ "op": "scaleService", "id": id, "replicas": n })).await?;
-            Ok(json!({ "ok": true, "replicas": n }))
+            let r = op(json!({ "op": "scaleService", "id": id, "replicas": n })).await?;
+            let mut out = json!({ "ok": true, "replicas": n });
+            if let Some(w) = r.get("warning") {
+                out["warning"] = w.clone();
+            }
+            Ok(out)
         }
         "restart_service" => {
             op(json!({ "op": "restartService", "id": service_id(args)? })).await?;
@@ -1029,7 +1035,7 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
             };
             let (image, reference) = split_image(arg(args, "image")?);
             let port = args["port"].as_i64().unwrap_or(80);
-            let replicas = args["replicas"].as_i64().unwrap_or(1).clamp(1, 50);
+            let replicas = args["replicas"].as_i64().unwrap_or(1).max(1);
             let now = now_ms();
             let env: Vec<Value> = args["env"]
                 .as_object()
@@ -1063,12 +1069,17 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
                 "replicas": replicas,
                 "healthCheck": { "type": "tcp", "port": port, "path": "", "command": "", "periodSeconds": 10, "initialDelaySeconds": 5 },
             });
-            op(json!({ "op": "createService", "service": service, "deploymentId": dep })).await?;
-            Ok(json!({
+            let r = op(json!({ "op": "createService", "service": service, "deploymentId": dep }))
+                .await?;
+            let mut out = json!({
                 "serviceId": service_id, "deploymentId": dep, "project": project["name"],
                 "url": host.map(|h| format!("{}://{h}", if crate::deploy::private_host(&h) { "http" } else { "https" })),
                 "next": "Check progress with get_deployment.",
-            }))
+            });
+            if let Some(w) = r.get("warning") {
+                out["warning"] = w.clone();
+            }
+            Ok(out)
         }
         "add_domain" => {
             let id = service_id(args)?;

@@ -657,14 +657,66 @@ fn distribution_for(mode: &str, major: &str, minor: &str) -> Option<&'static str
 /// How a Deployment rolls. A new pod normally starts before an old one
 /// stops; a ReadWriteOnce volume can't be mounted by both, and a GPU service
 /// would need a spare GPU, so those stop one old pod first.
-fn deployment_strategy(single_writer: bool, gpu: u32) -> Value {
+///
+/// `waiting`: the live Deployment's replicas that aren't available, usually
+/// ones with no room on the servers. Those don't count, and one running pod
+/// more may stop first: with the servers full a new pod would otherwise
+/// wait for room forever.
+fn deployment_strategy(single_writer: bool, gpu: u32, waiting: i32) -> Value {
+    let waiting = waiting.max(0);
     if single_writer {
         json!({ "type": "Recreate", "rollingUpdate": null })
     } else if gpu > 0 {
-        json!({ "type": "RollingUpdate", "rollingUpdate": { "maxUnavailable": 1, "maxSurge": 0 } })
+        json!({ "type": "RollingUpdate", "rollingUpdate": { "maxUnavailable": 1 + waiting, "maxSurge": 0 } })
+    } else if waiting > 0 {
+        json!({ "type": "RollingUpdate", "rollingUpdate": { "maxUnavailable": 1 + waiting, "maxSurge": 1 } })
     } else {
         json!({ "type": "RollingUpdate", "rollingUpdate": { "maxUnavailable": 0, "maxSurge": 1 } })
     }
+}
+
+/// Replicas of a live Deployment that aren't available.
+fn unavailable(d: &Deployment) -> i32 {
+    let want = d.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+    let have = d
+        .status
+        .as_ref()
+        .and_then(|s| s.available_replicas)
+        .unwrap_or(0);
+    (want - have).max(0)
+}
+
+/// The deploy log's note on replicas the servers have no room for yet.
+fn waiting_note(n: usize) -> String {
+    if n == 1 {
+        "1 replica is waiting for room on the servers. It starts when there's room.".into()
+    } else {
+        format!("{n} replicas are waiting for room on the servers. They start when there's room.")
+    }
+}
+
+/// A pod no server has room for (too little free CPU, memory or GPU).
+fn no_room(p: &Pod) -> bool {
+    p.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .is_some_and(|cs| {
+            cs.iter().any(|c| {
+                c.type_ == "PodScheduled"
+                    && c.status == "False"
+                    && c.reason.as_deref() == Some("Unschedulable")
+                    && c.message
+                        .as_deref()
+                        .is_some_and(|m| m.contains("Insufficient"))
+            })
+        })
+}
+
+fn pod_ready(p: &Pod) -> bool {
+    p.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
 }
 
 fn pod_template(spec: &DeploySpec, secret_name: &str) -> Value {
@@ -1182,17 +1234,15 @@ async fn apply_objects(
         }))
         .await?;
     } else {
-        let strategy = deployment_strategy(single_writer, spec.resources.gpu);
         let deployments = Api::<Deployment>::namespaced(client.clone(), ns);
+        let live = deployments.get_opt(name).await?;
+        let strategy = deployment_strategy(
+            single_writer,
+            spec.resources.gpu,
+            live.as_ref().map(unavailable).unwrap_or(0),
+        );
         let replicas = match &spec.autoscale {
-            Some(a) => autoscaled_replicas(
-                deployments
-                    .get_opt(name)
-                    .await?
-                    .and_then(|d| d.spec)
-                    .and_then(|s| s.replicas),
-                a,
-            ),
+            Some(a) => autoscaled_replicas(live.and_then(|d| d.spec).and_then(|s| s.replicas), a),
             None => spec.replicas,
         };
         apply(&deployments, name, &json!({
@@ -1506,6 +1556,7 @@ async fn watch_rollout(
                 }
             }
             // Unschedulable for a while: not enough CPU or memory, or a volume can't bind.
+            // Once one new replica runs, the rest wait for room instead.
             let unschedulable = st.conditions.iter().flatten().find(|c| {
                 c.type_ == "PodScheduled"
                     && c.status == "False"
@@ -1513,6 +1564,7 @@ async fn watch_rollout(
             });
             if let Some(c) = unschedulable
                 && started.elapsed() > Duration::from_secs(90)
+                && !pods.iter().any(pod_ready)
             {
                 if let Some(raw) = &c.message {
                     tracing::info!(deployment = %spec.deployment_id, message = %raw, "unschedulable");
@@ -1550,9 +1602,20 @@ async fn watch_rollout(
         let letting_go = older
             .iter()
             .any(|p| p.metadata.deletion_timestamp.is_some() && mounts_a_claim(p));
-        if rollout_complete(agent, spec).await?
+        // More replicas than the servers have room for: done once the old
+        // ones are gone and every new one runs or waits for room.
+        let waiting = pods.iter().filter(|p| no_room(p)).count();
+        let settled_short = started.elapsed() > Duration::from_secs(90)
+            && waiting > 0
+            && older.is_empty()
+            && pods.iter().any(pod_ready)
+            && pods.iter().all(|p| pod_ready(p) || no_room(p));
+        if (settled_short || rollout_complete(agent, spec).await?)
             && (!letting_go || tokio::time::Instant::now() > deadline)
         {
+            if settled_short {
+                r.log("warn", &waiting_note(waiting)).await;
+            }
             let revision = pods
                 .iter()
                 .find_map(|p| {
@@ -2148,7 +2211,7 @@ mod gpu_tests {
             json!({ "pyo/tag-fast": "true", "pyo/gpu": "nvidia" })
         );
         // And it's a valid Deployment.
-        let d: Deployment = serde_json::from_value(json!({ "metadata": { "name": "x" }, "spec": { "selector": {}, "template": t, "strategy": deployment_strategy(false, 2) } })).unwrap();
+        let d: Deployment = serde_json::from_value(json!({ "metadata": { "name": "x" }, "spec": { "selector": {}, "template": t, "strategy": deployment_strategy(false, 2, 0) } })).unwrap();
         let st = d.spec.unwrap().strategy.unwrap().rolling_update.unwrap();
         assert_eq!(
             st.max_surge,
@@ -2243,10 +2306,28 @@ mod gpu_tests {
         );
         assert_eq!(pod["nodeSelector"], json!({ "pyo/tag-fast": "true" }));
         assert_eq!(
-            deployment_strategy(false, 0)["rollingUpdate"]["maxSurge"],
+            deployment_strategy(false, 0, 0)["rollingUpdate"]["maxSurge"],
             1
         );
-        assert_eq!(deployment_strategy(true, 1)["type"], "Recreate");
+        assert_eq!(deployment_strategy(true, 1, 0)["type"], "Recreate");
+        // Servers full: what's waiting doesn't count, and one more may stop
+        // so a new replica gets room.
+        assert_eq!(
+            deployment_strategy(false, 0, 3)["rollingUpdate"],
+            json!({ "maxUnavailable": 4, "maxSurge": 1 })
+        );
+        assert_eq!(
+            deployment_strategy(false, 1, 2)["rollingUpdate"],
+            json!({ "maxUnavailable": 3, "maxSurge": 0 })
+        );
+        assert_eq!(
+            waiting_note(1),
+            "1 replica is waiting for room on the servers. It starts when there's room."
+        );
+        assert_eq!(
+            waiting_note(4),
+            "4 replicas are waiting for room on the servers. They start when there's room."
+        );
     }
 
     /// The GPU Deployment as the API server takes it (no kubelet needed):
@@ -2267,7 +2348,7 @@ mod gpu_tests {
         let s = spec(1);
         let body = json!({
             "apiVersion": "apps/v1", "kind": "Deployment", "metadata": { "name": "ollama", "namespace": "default" },
-            "spec": { "replicas": 1, "strategy": deployment_strategy(false, 1), "selector": { "matchLabels": labels(&s) }, "template": pod_template(&s, "env") },
+            "spec": { "replicas": 1, "strategy": deployment_strategy(false, 1, 0), "selector": { "matchLabels": labels(&s) }, "template": pod_template(&s, "env") },
         });
         let api = Api::<Deployment>::namespaced(client.clone(), "default");
         let d = api
@@ -2438,7 +2519,7 @@ mod gpu_tests {
         template["spec"]["affinity"] = json!({ "nodeAffinity": { "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": [
             { "matchExpressions": [{ "key": "kubernetes.io/hostname", "operator": "In", "values": servers.map(|(n, _)| n) }] }] } } });
         let deploy = json!({ "apiVersion": "apps/v1", "kind": "Deployment", "metadata": { "name": name, "namespace": ns },
-            "spec": { "replicas": 4, "selector": { "matchLabels": labels(&s) }, "template": template, "strategy": deployment_strategy(false, 0) } });
+            "spec": { "replicas": 4, "selector": { "matchLabels": labels(&s) }, "template": template, "strategy": deployment_strategy(false, 0, 0) } });
         deployments
             .patch(
                 &name,
