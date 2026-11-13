@@ -1613,7 +1613,7 @@ pub(crate) enum Op {
     SaveObservabilitySettings {
         ip_mode: crate::observability::IpMode,
     },
-    /// Turn observability (analytics, request logs, firewall and WAF history, usage history) on or off for the whole installation. The installation's admin. Off stops storing and showing history and frees its memory; what was stored is kept for when it's back on. Live logs, current usage, deploys and the firewall keep working.
+    /// Turn observability (analytics, request logs, firewall and WAF history, usage history) on or off for the whole installation. Only the installation's admin can do this. Off stops storing and showing history and frees its memory. What was stored is kept for when it's back on. Live logs, current usage, deploys and the firewall keep working.
     SetObservability { enabled: bool },
     /// How Pyo updates itself: "manual" or "auto" in a weekly window (UTC).
     SaveUpdateSettings {
