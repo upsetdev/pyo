@@ -107,7 +107,8 @@ pub struct Deploy {
     pub replicas: Option<i64>,
     /// The port the service listens on for HTTP.
     pub port: Option<i64>,
-    /// An HTTP path checked before traffic moves over, e.g. "/healthz".
+    /// When a replica is ready: an HTTP path ("/healthz"), "tcp" for its
+    /// port accepting connections, or "none" to not wait.
     pub health: Option<String>,
     pub auto_rollback: Option<bool>,
 }
@@ -167,7 +168,7 @@ pub fn write_service(path: Option<&Path>, id: &str, label: &str) -> Result<PathB
             out.join("\n") + "\n"
         }
         Err(_) => format!(
-            "{line}\n\n# Settings here win on `pyo deploy`. Anything left out stays as\n# the dashboard has it. Secrets: `pyo env set --secret KEY=value`.\n\n# [deploy]\n# replicas = 1\n# port = 8080\n# health = \"/healthz\"\n\n# [resources]\n# cpu = \"500m\"\n# memory = \"512Mi\"\n\n# [env]\n# LOG_LEVEL = \"info\"\n"
+            "{line}\n\n# Settings here win on `pyo deploy`. Anything left out stays as\n# the dashboard has it. Secrets: `pyo env set --secret KEY=value`.\n\n# [deploy]\n# replicas = 1\n# port = 8080\n# health = \"/healthz\"  # or \"tcp\" or \"none\"\n\n# [resources]\n# cpu = \"500m\"\n# memory = \"512Mi\"\n\n# [env]\n# LOG_LEVEL = \"info\"\n"
         ),
     };
     fs::write(&path, text)?;

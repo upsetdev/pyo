@@ -1103,6 +1103,35 @@ fn check_schedule(schedule: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// A service's health check: one of the kinds the agent knows.
+fn check_health(h: &Value) -> ApiResult<()> {
+    if h.is_null() {
+        return Ok(());
+    }
+    match h["type"].as_str().unwrap_or("") {
+        "" | "none" | "tcp" | "exec" => {}
+        "http" => {
+            if !h["path"].as_str().unwrap_or("/").starts_with('/') {
+                return Err(ApiError::bad_request(
+                    "A health check's path starts with /, like /healthz.",
+                ));
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "A health check's type is http, tcp, exec or none.",
+            ));
+        }
+    }
+    match &h["auto"] {
+        Value::Null => Ok(()),
+        a if a == "default" || a == "static" => Ok(()),
+        _ => Err(ApiError::bad_request(
+            "A health check's auto is \"default\" or \"static\", or left out.",
+        )),
+    }
+}
+
 fn validate_service_spec(spec: &Value) -> ApiResult<()> {
     if spec["workloadKind"] == json!("CronJob") {
         check_schedule(spec["schedule"].as_str().unwrap_or(""))?;
@@ -1134,6 +1163,7 @@ fn validate_service_spec(spec: &Value) -> ApiResult<()> {
     }
     deploy::image_ref(&spec["source"])?;
     crate::template_source::check(&spec["source"])?;
+    check_health(&spec["healthCheck"])?;
     if spec["resources"]["gpu"]
         .as_u64()
         .is_some_and(|g| g > MAX_GPUS)
@@ -1839,6 +1869,7 @@ pub(crate) enum Op {
         /// A template's service records where it came from in `source`: `templateVersion`, `appVersion`, `images` (each Compose service's image, `repository:tag@digest`, by name) and `fields` (the deploy form's values, with a secret one only as `{"secret": true, "set": …, "env": …}`). Saves keep them. Responses add `customized` when its image is no longer the template's.
         /// Its ports: `name`, `containerPort`, `protocol` ("HTTP", "TCP" or "UDP"), `exposure` ("internal", "http" for a website, "nodeport", or "loadbalancer" for a public TCP or UDP port) and `publicPort`.
         /// A public TCP or UDP port goes through the gateway unless `proxy` is false. Then, for TCP only, it can have `ipFilter` (`{"mode": "allow" or "deny", "cidrs": [...]}`), `connectionLimit` (open connections on the port, from everyone together), `sendProxyProtocol` ("V1" or "V2", to the service) and `acceptProxyProtocol` (read the visitor's address from a header sent by a load balancer in front, while connections without one still work). Ports 22, 53, 80, 443 and a few others can't be public. Each public port belongs to one service on its cluster.
+        /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         #[schema(value_type = Object)]
         service: Value,
         /// A new id you choose for its first deployment: `dpl_` then 4 to 40 lowercase letters, digits, dashes or underscores.
@@ -1861,6 +1892,7 @@ pub(crate) enum Op {
         /// The whole service, as in the snapshot.
         /// Its ports: `name`, `containerPort`, `protocol` ("HTTP", "TCP" or "UDP"), `exposure` ("internal", "http" for a website, "nodeport", or "loadbalancer" for a public TCP or UDP port) and `publicPort`.
         /// A public TCP or UDP port goes through the gateway unless `proxy` is false. Then, for TCP only, it can have `ipFilter` (`{"mode": "allow" or "deny", "cidrs": [...]}`), `connectionLimit` (open connections on the port, from everyone together), `sendProxyProtocol` ("V1" or "V2", to the service) and `acceptProxyProtocol` (read the visitor's address from a header sent by a load balancer in front, while connections without one still work). Ports 22, 53, 80, 443 and a few others can't be public. Each public port belongs to one service on its cluster.
+        /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         #[schema(value_type = Object)]
         service: Value,
         deployment_id: Option<String>,
@@ -7432,6 +7464,28 @@ mod replica_tests {
             with_warning(json!({ "ok": true }), Some("x".into())),
             json!({ "ok": true, "warning": "x" })
         );
+    }
+}
+
+#[cfg(test)]
+mod service_spec_tests {
+    use super::*;
+
+    #[test]
+    fn health_checks_of_each_kind() {
+        for h in [
+            Value::Null,
+            json!({ "type": "none" }),
+            json!({ "type": "tcp", "port": 8080 }),
+            json!({ "type": "http", "path": "/", "port": 8080, "auto": "static" }),
+            json!({ "type": "tcp", "port": 8080, "auto": "default" }),
+            json!({ "type": "exec", "command": "pg_isready" }),
+        ] {
+            assert!(check_health(&h).is_ok(), "{h}");
+        }
+        assert!(check_health(&json!({ "type": "grpc" })).is_err());
+        assert!(check_health(&json!({ "type": "http", "path": "healthz" })).is_err());
+        assert!(check_health(&json!({ "type": "tcp", "auto": true })).is_err());
     }
 }
 

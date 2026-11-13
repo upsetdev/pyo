@@ -772,6 +772,11 @@ export type HealthCheck = {
   command: string;
   initialDelaySeconds: number;
   periodSeconds: number;
+  /**
+   * Pyo picks it from what each build finds: "static" once it found a static
+   * site (HTTP check of /). Absent when the user chose it.
+   */
+  auto?: "default" | "static";
 };
 
 export type Resources = {

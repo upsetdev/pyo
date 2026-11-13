@@ -1080,7 +1080,9 @@ export function HealthCheckFields({
   errors?: Record<string, string>;
   label?: string;
 }) {
-  const set = (patch: Partial<HealthCheck>) => onChange({ ...value, ...patch });
+  // Chosen here, so Pyo no longer picks it.
+  const set = (patch: Partial<HealthCheck>) =>
+    onChange({ ...value, ...patch, auto: undefined });
   return (
     <div className="grid gap-4 sm:grid-cols-4">
       <Field label={label} className="sm:col-span-1">
@@ -1092,8 +1094,8 @@ export function HealthCheckFields({
               set({ type: e.target.value as HealthCheck["type"] })
             }
           >
-            <option value="http">Web request</option>
-            <option value="tcp">Port is open</option>
+            <option value="http">HTTP path</option>
+            <option value="tcp">TCP</option>
             <option value="exec">Command</option>
             <option value="none">None</option>
           </Select>
@@ -1147,7 +1149,7 @@ export function HealthCheckFields({
       ) : null}
       {value.type === "none" ? (
         <p className="self-end pb-2 text-[12px] text-muted-foreground sm:col-span-3">
-          Healthy as soon as it starts.
+          Deploys won&apos;t wait for it to be ready.
         </p>
       ) : null}
       {value.type !== "none" ? (

@@ -401,6 +401,7 @@ impl Builder {
             .arg("--local")
             .arg(format!("context={}", app_dir.display()));
         let detected: String;
+        let mut static_site = false;
         if let Some(dockerfile) = build_file {
             // The repository says how to build it.
             let name = dockerfile
@@ -524,6 +525,7 @@ impl Builder {
                 );
             }
             detected = source::label(&info_json, &app_dir).unwrap_or_else(|| "Railpack".into());
+            static_site = source::is_static(&info_json);
             self.progress(&job.id, BuildProgress { logs: vec![line("info", "builder", &format!("No Dockerfile or Containerfile. Building it as {detected} with Railpack"))], ..Default::default() }).await;
             let cache_key = job
                 .push_repository
@@ -691,6 +693,7 @@ impl Builder {
             message: None,
             exposed_ports,
             detected: Some(detected),
+            static_site,
         })
     }
 }

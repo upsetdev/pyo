@@ -226,7 +226,12 @@ function HealthCheck({ app }: { app: Application }) {
         </Button>
       }
     >
-      <div className="p-4">
+      <div className="space-y-3 p-4">
+        {health.auto === "static" ? (
+          <p className="text-[12px] text-muted-foreground">
+            Automatic (static site)
+          </p>
+        ) : null}
         <HealthCheckFields label="Type" value={health} onChange={setHealth} />
       </div>
     </Panel>

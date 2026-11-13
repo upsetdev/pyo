@@ -1618,6 +1618,32 @@ pub async fn finish_build(
                         .await?;
                 }
             }
+            // A health check Pyo chose follows what the build found.
+            let service_spec: Value =
+                sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+                    .bind(&service_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if let Some(h) = auto_health_check(&service_spec, r.static_site) {
+                sqlx::query("UPDATE pyo.services SET spec = jsonb_set(spec, '{healthCheck}', $2) WHERE id = $1")
+                    .bind(&service_id)
+                    .bind(&h)
+                    .execute(&mut *tx)
+                    .await?;
+                for k in ["type", "path", "port", "command"] {
+                    spec["healthCheck"][k] = h[k].clone();
+                }
+                let how = if r.static_site {
+                    "Checking that / answers, as it's a static site."
+                } else {
+                    "Checking that its port is open, as it's no longer a static site."
+                };
+                sqlx::query("INSERT INTO pyo.deployment_logs (deployment_id, at, level, source, message) VALUES ($1, now(), 'info', 'pyo', $2)")
+                    .bind(&deployment_id)
+                    .bind(how)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             spec["image"] = json!(image);
             data["revision"] = json!(r.commit);
             data["revisionLabel"] = json!(r.commit.chars().take(7).collect::<String>());
@@ -1672,6 +1698,96 @@ pub async fn finish_build(
             apply_progress(state, &cluster_id, &deployment_id, p).await?;
             Ok(None)
         }
+    }
+}
+
+/// The health check for a service whose check Pyo picks (`auto`), once a
+/// build shows what it is. A static site's web server answers `/` (2xx and
+/// 3xx count as ready), and one that stops being static gets a check that
+/// its port is open. None: it stays as it is, always so for a check the
+/// user chose.
+pub fn auto_health_check(service: &Value, static_site: bool) -> Option<Value> {
+    let h = &service["healthCheck"];
+    let auto = h["auto"].as_str()?;
+    // The port the service's PORT variable says (build_spec).
+    let port = service["ports"][0]["containerPort"]
+        .as_i64()
+        .or_else(|| h["port"].as_i64())
+        .unwrap_or(8080);
+    let (kind, path, auto) = match (static_site, auto) {
+        (true, _) => ("http", "/", "static"),
+        (false, "static") => ("tcp", "", "default"),
+        _ => return None,
+    };
+    let mut new = h.clone();
+    new["type"] = json!(kind);
+    new["path"] = json!(path);
+    new["port"] = json!(port);
+    new["command"] = json!("");
+    new["auto"] = json!(auto);
+    (new != *h).then_some(new)
+}
+
+#[cfg(test)]
+mod auto_health_tests {
+    use super::auto_health_check;
+    use serde_json::{Value, json};
+
+    fn service(h: Value) -> Value {
+        json!({ "ports": [{ "name": "http", "containerPort": 8080, "protocol": "HTTP" }], "healthCheck": h })
+    }
+
+    #[test]
+    fn a_static_site_gets_a_check_of_its_root() {
+        let s = service(
+            json!({ "type": "http", "path": "/healthz", "port": 8080, "command": "", "initialDelaySeconds": 10, "periodSeconds": 10, "auto": "default" }),
+        );
+        let h = auto_health_check(&s, true).unwrap();
+        assert_eq!(
+            h,
+            json!({ "type": "http", "path": "/", "port": 8080, "command": "", "initialDelaySeconds": 10, "periodSeconds": 10, "auto": "static" })
+        );
+        // Already so: nothing to change.
+        assert_eq!(auto_health_check(&service(h), true), None);
+        // The import's TCP check too.
+        let tcp = service(json!({ "type": "tcp", "path": "", "port": 8080, "auto": "default" }));
+        assert_eq!(auto_health_check(&tcp, true).unwrap()["path"], "/");
+    }
+
+    #[test]
+    fn other_services_keep_the_default() {
+        let s =
+            service(json!({ "type": "http", "path": "/healthz", "port": 8080, "auto": "default" }));
+        assert_eq!(auto_health_check(&s, false), None);
+        let tcp = service(json!({ "type": "tcp", "path": "", "port": 8080, "auto": "default" }));
+        assert_eq!(auto_health_check(&tcp, false), None);
+    }
+
+    #[test]
+    fn no_longer_static_goes_back_to_an_open_port() {
+        let s = service(json!({ "type": "http", "path": "/", "port": 8080, "auto": "static" }));
+        let h = auto_health_check(&s, false).unwrap();
+        assert_eq!((&h["type"], &h["auto"]), (&json!("tcp"), &json!("default")));
+    }
+
+    #[test]
+    fn a_check_the_user_chose_is_kept() {
+        for h in [
+            json!({ "type": "http", "path": "/healthz", "port": 8080 }),
+            json!({ "type": "none", "path": "", "port": 0 }),
+            json!({ "type": "tcp", "path": "", "port": 8080 }),
+        ] {
+            assert_eq!(auto_health_check(&service(h.clone()), true), None, "{h}");
+            assert_eq!(auto_health_check(&service(h.clone()), false), None, "{h}");
+        }
+        // A service without one at all.
+        assert_eq!(auto_health_check(&json!({}), true), None);
+    }
+
+    #[test]
+    fn uses_the_services_port() {
+        let s = json!({ "ports": [{ "containerPort": 3000 }], "healthCheck": { "type": "tcp", "port": 8080, "auto": "default" } });
+        assert_eq!(auto_health_check(&s, true).unwrap()["port"], 3000);
     }
 }
 

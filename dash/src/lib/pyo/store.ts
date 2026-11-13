@@ -1682,9 +1682,12 @@ export const api = {
         domains: d.cron ? [] : domains,
         resources: { ...d.resources },
         replicas: d.replicas,
+        // Only a build can pick the check (auto).
         healthCheck: d.cron
-          ? { ...d.healthCheck, type: "none" }
-          : { ...d.healthCheck },
+          ? { ...d.healthCheck, type: "none", auto: undefined }
+          : d.sourceType === "git"
+            ? { ...d.healthCheck }
+            : { ...d.healthCheck, auto: undefined },
         runtime: { readyReplicas: 0, cpuMillis: 0, memoryMi: 0, restarts: 0 },
         pendingChanges: false,
         createdAt: now,

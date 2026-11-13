@@ -283,6 +283,14 @@ pub fn build_file(app_dir: &Path, path: &str) -> anyhow::Result<Option<PathBuf>>
     Ok(f.is_file().then_some(f))
 }
 
+/// Whether Railpack's image only serves files: its static file provider, or
+/// a Node app it builds as a single-page app. Both run a web server that
+/// answers `/` and has no /healthz.
+pub fn is_static(info: &Value) -> bool {
+    info["detectedProviders"].get(0).and_then(Value::as_str) == Some("staticfile")
+        || info["metadata"]["nodeIsSPA"].as_str() == Some("true")
+}
+
 /// What Railpack found, as people name it: "Next.js", "Go", "Python", …
 pub fn label(info: &Value, app_dir: &Path) -> Option<String> {
     let provider = info["detectedProviders"]
@@ -475,5 +483,22 @@ mod tests {
         );
         assert_eq!(label(&serde_json::json!({}), &dir), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn static_sites_and_spas_are_static() {
+        use serde_json::json;
+        assert!(is_static(&json!({ "detectedProviders": ["staticfile"] })));
+        assert!(is_static(&json!({
+            "detectedProviders": ["node"],
+            "metadata": { "nodeIsSPA": "true", "nodeRuntime": "vite" }
+        })));
+        // A Node server, and Railpack leaves out a false flag.
+        assert!(!is_static(&json!({
+            "detectedProviders": ["node"],
+            "metadata": { "nodeRuntime": "node" }
+        })));
+        assert!(!is_static(&json!({ "detectedProviders": ["golang"] })));
+        assert!(!is_static(&json!({})));
     }
 }

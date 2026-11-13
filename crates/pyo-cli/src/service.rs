@@ -347,9 +347,11 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
         }
     }
     if let Some(path) = &d.health {
-        if !path.starts_with('/') {
-            bail!("pyo.toml: health is a path, like \"/healthz\".");
-        }
+        let kind = match path.as_str() {
+            "tcp" | "none" => path.as_str(),
+            p if p.starts_with('/') => "http",
+            _ => bail!("pyo.toml: health is a path like \"/healthz\", or \"tcp\" or \"none\"."),
+        };
         let port = d
             .port
             .or_else(|| {
@@ -361,8 +363,9 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
             })
             .unwrap_or(80);
         let h = &mut service["healthCheck"];
+        // Set here, so Pyo no longer picks it (no `auto`).
         let new = json!({
-            "type": "http", "path": path, "port": port, "command": h["command"].as_str().unwrap_or(""),
+            "type": kind, "path": if kind == "http" { path.as_str() } else { "" }, "port": port, "command": h["command"].as_str().unwrap_or(""),
             "initialDelaySeconds": h["initialDelaySeconds"].as_i64().unwrap_or(5), "periodSeconds": h["periodSeconds"].as_i64().unwrap_or(10),
         });
         set(&mut changes, h, new, format!("health check {path}"));
@@ -993,6 +996,22 @@ mod tests {
         assert_eq!(a["env"][0]["value"], json!(""));
         assert_eq!(a["env"][1]["key"], json!("LOG"));
         assert_eq!(c.len(), 5);
+    }
+
+    #[test]
+    fn health_can_be_tcp_or_none() {
+        let mut a = service();
+        a["healthCheck"]["auto"] = json!("static");
+        let f: ServiceFile = toml::from_str("[deploy]\nhealth = \"tcp\"\n").unwrap();
+        apply(&mut a, &f).unwrap();
+        assert_eq!(a["healthCheck"]["type"], json!("tcp"));
+        assert_eq!(a["healthCheck"]["port"], json!(3000));
+        assert!(a["healthCheck"].get("auto").is_none());
+        let f: ServiceFile = toml::from_str("[deploy]\nhealth = \"none\"\n").unwrap();
+        apply(&mut a, &f).unwrap();
+        assert_eq!(a["healthCheck"]["type"], json!("none"));
+        let f: ServiceFile = toml::from_str("[deploy]\nhealth = \"healthz\"\n").unwrap();
+        assert!(apply(&mut a, &f).is_err());
     }
 
     #[test]

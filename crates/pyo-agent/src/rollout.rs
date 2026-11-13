@@ -2060,6 +2060,60 @@ mod autoscale_tests {
 }
 
 #[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use pyo_proto::DeploySpec;
+
+    fn spec(health: Value) -> DeploySpec {
+        serde_json::from_value(json!({
+            "deploymentId": "dpl_1", "image": "site:1", "replicas": 1, "env": [], "domains": [], "volumes": [],
+            "ports": [{ "name": "http", "containerPort": 8080, "protocol": "HTTP", "exposure": "http" }],
+            "service": { "serviceId": "svc_site", "name": "site", "namespace": "default", "workloadKind": "Deployment" },
+            "projectId": "prj_1", "timeoutSeconds": 60,
+            "resources": { "cpuRequest": 100, "cpuLimit": 500, "memoryRequest": 64, "memoryLimit": 128 },
+            "healthCheck": health,
+        }))
+        .unwrap()
+    }
+
+    fn container(health: Value) -> Value {
+        pod_template(&spec(health), "env")["spec"]["containers"][0].clone()
+    }
+
+    #[test]
+    fn a_static_sites_check_asks_for_its_root() {
+        // Kubernetes counts 200 to 399 as ready: a redirect from / is fine.
+        let c = container(
+            json!({ "type": "http", "path": "/", "port": 8080, "command": "", "initialDelaySeconds": 10, "periodSeconds": 10 }),
+        );
+        assert_eq!(
+            c["readinessProbe"],
+            json!({ "httpGet": { "path": "/", "port": 8080 }, "initialDelaySeconds": 10, "periodSeconds": 10, "failureThreshold": 3 })
+        );
+        assert_eq!(c["livenessProbe"]["httpGet"]["path"], "/");
+        assert_eq!(c["livenessProbe"]["initialDelaySeconds"], 40);
+    }
+
+    #[test]
+    fn a_tcp_check_waits_for_the_port() {
+        let c = container(
+            json!({ "type": "tcp", "path": "", "port": 8080, "command": "", "initialDelaySeconds": 5, "periodSeconds": 10 }),
+        );
+        assert_eq!(c["readinessProbe"]["tcpSocket"], json!({ "port": 8080 }));
+        assert!(c["readinessProbe"].get("httpGet").is_none());
+        assert_eq!(c["livenessProbe"]["tcpSocket"], json!({ "port": 8080 }));
+    }
+
+    #[test]
+    fn none_has_no_probes() {
+        let c = container(
+            json!({ "type": "none", "path": "", "port": 8080, "command": "", "initialDelaySeconds": 5, "periodSeconds": 10 }),
+        );
+        assert!(c.get("readinessProbe").is_none() && c.get("livenessProbe").is_none());
+    }
+}
+
+#[cfg(test)]
 mod cron_tests {
     use super::*;
     use k8s_openapi::api::batch::v1::Job;
