@@ -889,23 +889,18 @@ async fn capabilities(
     }
 }
 
-/// The host's Tailscale addresses that take websites' connections (ports
-/// 80 and 443) whatever the cluster's public traffic: `TAILNET_SERVICE`'s,
-/// once the host's timer writes those ports into it.
+/// The Tailscale addresses that take websites' connections (ports 80 and
+/// 443) whatever the cluster's public traffic: where the agent published
+/// them (gateway.rs `set_tailnet_web`).
 async fn tailnet_web_ips(client: &Client) -> Vec<String> {
     let Ok(svc) = Api::<Service>::namespaced(client.clone(), pyo_proto::system::GATEWAY_NS)
-        .get_opt(pyo_proto::system::TAILNET_SERVICE)
+        .get_opt(pyo_proto::system::TAILNET_WEB_SERVICE)
         .await
     else {
         return vec![];
     };
-    let Some(spec) = svc.and_then(|s| s.spec) else {
-        return vec![];
-    };
-    if !spec.ports.iter().flatten().any(|p| p.port == 80) {
-        return vec![];
-    }
-    spec.external_ips
+    svc.and_then(|s| s.spec)
+        .and_then(|s| s.external_ips)
         .unwrap_or_default()
         .into_iter()
         .filter(|ip| crate::locate::tailnet_v4(ip))

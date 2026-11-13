@@ -1391,6 +1391,114 @@ pub async fn set_public_traffic(client: &Client, on: bool) {
     }
 }
 
+/// The Tailscale addresses the websites are published on: every server's
+/// that runs a proxy (all but build-only ones), from what locate.rs found,
+/// else a node address on the tailnet. Sorted, once each.
+pub fn tailnet_web_ips(nodes: &[k8s_openapi::api::core::v1::Node]) -> Vec<String> {
+    let mut ips: Vec<String> = nodes
+        .iter()
+        .filter(|n| {
+            n.labels()
+                .get(pyo_proto::BUILDER_NODE_LABEL)
+                .map(String::as_str)
+                != Some("true")
+        })
+        .filter_map(|n| {
+            n.annotations()
+                .get(pyo_proto::TAILNET_IPV4_ANNOTATION)
+                .filter(|ip| crate::locate::tailnet_v4(ip))
+                .cloned()
+                .or_else(|| {
+                    n.status
+                        .as_ref()?
+                        .addresses
+                        .iter()
+                        .flatten()
+                        .map(|a| a.address.as_str())
+                        .find(|a| crate::locate::tailnet_v4(a))
+                        .map(str::to_owned)
+                })
+        })
+        .collect();
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
+/// What to do about the websites' Service on the Tailscale addresses:
+/// None when it's as it should be, Some(None) to remove it, Some(Some(ips))
+/// to write it on those addresses. `current`: its addresses and ports now.
+pub fn tailnet_web_change(
+    on: bool,
+    wanted: Vec<String>,
+    current: Option<(Vec<String>, Value)>,
+) -> Option<Option<Vec<String>>> {
+    match (on && !wanted.is_empty(), current) {
+        (false, None) => None,
+        (false, Some(_)) => Some(None),
+        (true, Some((ips, ports))) if ips == wanted && ports == system::tailnet_web_ports() => None,
+        (true, _) => Some(Some(wanted)),
+    }
+}
+
+/// Websites on the servers' Tailscale addresses (system.rs), while the
+/// cluster's free domains point at its Tailscale IP (from each heartbeat's
+/// reply): the Service written or removed when that differs.
+pub async fn set_tailnet_web(client: &Client, on: bool) {
+    let services: Api<k8s_openapi::api::core::v1::Service> =
+        Api::namespaced(client.clone(), GATEWAY_NS);
+    let wanted = if on {
+        match Api::<k8s_openapi::api::core::v1::Node>::all(client.clone())
+            .list(&ListParams::default())
+            .await
+        {
+            Ok(l) => tailnet_web_ips(&l.items),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't list servers for the tailnet websites");
+                return;
+            }
+        }
+    } else {
+        vec![]
+    };
+    let current = match services.get_opt(system::TAILNET_WEB_SERVICE).await {
+        Ok(s) => s.map(|s| {
+            let spec = s.spec.unwrap_or_default();
+            let mut ips = spec.external_ips.unwrap_or_default();
+            ips.sort();
+            let ports = serde_json::to_value(spec.ports.unwrap_or_default()).unwrap_or_default();
+            (ips, ports)
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't read the tailnet websites' Service");
+            return;
+        }
+    };
+    match tailnet_web_change(on, wanted, current) {
+        None => {}
+        Some(None) => match services
+            .delete(system::TAILNET_WEB_SERVICE, &DeleteParams::default())
+            .await
+        {
+            Ok(_) => tracing::info!("websites off the Tailscale addresses"),
+            Err(e) => tracing::warn!(error = %e, "couldn't remove the tailnet websites' Service"),
+        },
+        Some(Some(ips)) => match services
+            .patch(
+                system::TAILNET_WEB_SERVICE,
+                &pp(),
+                &Patch::Apply(system::tailnet_web_service(&ips)),
+            )
+            .await
+        {
+            Ok(_) => tracing::info!(?ips, "websites on the Tailscale addresses"),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't publish websites on the Tailscale addresses")
+            }
+        },
+    }
+}
+
 async fn ensure_once(client: &Client) -> anyhow::Result<()> {
     let proxies = envoy_proxies(client);
     let current = proxies
@@ -1567,6 +1675,103 @@ pub async fn set_origin_pull(client: &Client, ca_pem: &str) -> anyhow::Result<St
 mod tests {
     use super::*;
     use pyo_proto::{PortSpec, ServiceRef};
+
+    /// Websites on the Tailscale addresses: every server's that runs a
+    /// proxy (not build-only ones), what locate.rs found first, else a node
+    /// address on the tailnet; written only when it differs, removed when
+    /// the free domains don't point there (or no server has one).
+    #[test]
+    fn tailnet_websites_follow_the_servers_and_the_mode() {
+        let node = |name: &str, labels: Value, annotations: Value, addresses: Value| {
+            serde_json::from_value::<k8s_openapi::api::core::v1::Node>(json!({
+                "metadata": { "name": name, "labels": labels, "annotations": annotations },
+                "status": { "addresses": addresses },
+            }))
+            .unwrap()
+        };
+        let nodes = [
+            node(
+                "a",
+                json!({}),
+                json!({ "pyo/tailnet-ipv4": "100.101.67.2" }),
+                json!([{ "type": "InternalIP", "address": "10.3.8.13" }]),
+            ),
+            // Joined over Tailscale, not located yet.
+            node(
+                "b",
+                json!({}),
+                json!({}),
+                json!([{ "type": "InternalIP", "address": "100.64.0.7" }]),
+            ),
+            // Build-only: no proxy there.
+            node(
+                "c",
+                json!({ "pyo/builder": "true" }),
+                json!({ "pyo/tailnet-ipv4": "100.64.0.8" }),
+                json!([]),
+            ),
+            // Not on a tailnet; an annotation that isn't a tailnet address.
+            node(
+                "d",
+                json!({}),
+                json!({ "pyo/tailnet-ipv4": "" }),
+                json!([{ "type": "InternalIP", "address": "192.168.1.4" }]),
+            ),
+            node(
+                "e",
+                json!({}),
+                json!({ "pyo/tailnet-ipv4": "8.8.8.8" }),
+                json!([]),
+            ),
+            node(
+                "f",
+                json!({}),
+                json!({ "pyo/tailnet-ipv4": "100.101.67.2" }),
+                json!([]),
+            ),
+        ];
+        let ips = tailnet_web_ips(&nodes);
+        assert_eq!(ips, ["100.101.67.2", "100.64.0.7"]);
+        let current = |ips: &[&str]| {
+            Some((
+                ips.iter().map(|s| s.to_string()).collect(),
+                system::tailnet_web_ports(),
+            ))
+        };
+        // Tailscale: written, then left alone.
+        assert_eq!(
+            tailnet_web_change(true, ips.clone(), None),
+            Some(Some(ips.clone()))
+        );
+        assert_eq!(
+            tailnet_web_change(true, ips.clone(), current(&["100.101.67.2", "100.64.0.7"])),
+            None
+        );
+        // A server more, or its ports changed by hand: written again.
+        assert_eq!(
+            tailnet_web_change(true, ips.clone(), current(&["100.101.67.2"])),
+            Some(Some(ips.clone()))
+        );
+        assert_eq!(
+            tailnet_web_change(
+                true,
+                ips.clone(),
+                Some((ips.clone(), json!([{ "port": 80 }])))
+            ),
+            Some(Some(ips.clone()))
+        );
+        // Public IP, or no Tailscale address at all: removed (if there).
+        assert_eq!(
+            tailnet_web_change(false, vec![], current(&["100.101.67.2"])),
+            Some(None)
+        );
+        assert_eq!(
+            tailnet_web_change(true, vec![], current(&["100.101.67.2"])),
+            Some(None)
+        );
+        assert_eq!(tailnet_web_change(false, vec![], None), None);
+        assert_eq!(tailnet_web_change(true, vec![], None), None);
+    }
 
     #[test]
     fn a_failed_chart_points_at_its_log() {

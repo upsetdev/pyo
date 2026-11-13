@@ -260,6 +260,9 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
                 // The firewall for UDP ports: a network policy on the proxy's pods.
                 { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["create"] },
                 { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::FIREWALL_POLICY] },
+                // Websites on the servers' Tailscale addresses: its own Service.
+                { "apiGroups": [""], "resources": ["services"], "verbs": ["create"] },
+                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE] },
             ]),
         ),
         role_binding(system::GATEWAY_NS, "pyo-agent", "Role", "pyo-agent"),
@@ -534,6 +537,9 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
                 (has(object.spec.authorization) && has(object.spec.authorization.rules) && size(object.spec.authorization.rules) == 2 && object.spec == {tailnet_policy_servers} && \
                     size({servers}) >= 1 && size({servers}) <= 512 && {servers}.all(c, c.matches({server_v4}) || c.matches({server_v6}))))) || \
             {tailnet_routes} || \
+            (request.resource.resource == 'services' && variables.objName == '{tw_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {tw_keys}) && \
+                object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && object.spec.ports == {tw_ports} && \
+                size(object.spec.externalIPs) >= 1 && size(object.spec.externalIPs) <= 512 && object.spec.externalIPs.all(ip, ip.matches({tw_v4}) || ip.matches({tw_v6}))))) || \
             (request.resource.resource == 'gateways' && variables.objName != '{tailnet_gw}' && (request.operation == 'DELETE' ? variables.objName != '{http_gw}' : (variables.objName == '{http_gw}' ? object.spec == {http_spec} : \
                 (object.metadata.labels[?'{label}'].orValue('') == 'https' && object.spec.gatewayClassName == 'pyo' && object.spec.listeners.all(l, l.port == 443 && l.protocol == 'HTTPS' && has(l.hostname) && l.tls.mode == 'Terminate' && l.tls.certificateRefs.all(c, c.name.startsWith('{tls}') && (!has(c.namespace) || c.namespace == '{gw}') && c.kind == 'Secret') && has(l.allowedRoutes) && l.allowedRoutes.namespaces.from == 'Same')) || \
                 (object.metadata.labels[?'{label}'].orValue('') == '{ports_label}' && variables.objName.endsWith('-ports') && object.spec.gatewayClassName == 'pyo' && object.spec.listeners.all(l, l.all(k, k in ['name', 'port', 'protocol', 'allowedRoutes']) && \
@@ -566,6 +572,15 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
                  (request.resource.resource == 'httproutes' && variables.objName == '{name}' && (request.operation == 'DELETE' || (size(object.spec.parentRefs) == 1 && object.spec.parentRefs[0].name == '{gw}' && object.spec.parentRefs[0].sectionName == '{section}' && (!has(object.spec.parentRefs[0].namespace) || object.spec.parentRefs[0].namespace == '{ns}') && \
                     size(object.spec.rules) == 1 && object.spec.rules.all(r, !has(r.filters) && size(r.backendRefs) == 1 && r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && b.name == '{name}' && (!has(b.namespace) || b.namespace == '{ns}'))))))",
                 spec = cel_literal(&system::tailnet_backend_spec(host, *port)), gw = system::TAILNET_GATEWAY, ns = system::GATEWAY_NS)).collect::<Vec<_>>().join(" || "),
+            // Websites on the servers' Tailscale addresses (system.rs): this
+            // Service only, onto the proxies, the websites' ports, and
+            // Tailscale's addresses alone.
+            tw_svc = system::TAILNET_WEB_SERVICE,
+            tw_keys = cel_literal(&json!(["type", "externalIPs", "externalTrafficPolicy", "selector", "ports"].iter().chain(system::TAILNET_WEB_DEFAULTED.iter()).collect::<Vec<_>>())),
+            tw_selector = cel_literal(&system::proxy_pods()["matchLabels"]),
+            tw_ports = cel_literal(&system::tailnet_web_ports()),
+            tw_v4 = cel_literal(&json!(system::TAILNET_IPV4_RE)),
+            tw_v6 = cel_literal(&json!(system::TAILNET_IPV6_RE)),
             label = system::GATEWAY_LABEL,
             tls = system::TLS_SECRET_PREFIX,
             pull = system::ORIGIN_PULL_SECRET,
@@ -1164,6 +1179,85 @@ mod tests {
             eep.contains("annotations[?'pyo.dev/waf'].orValue('') != ''"),
             "{eep}"
         );
+    }
+
+    /// Websites on the servers' Tailscale addresses: the agent writes one
+    /// Service in pyo-gateway, by name, pinned to the proxies, the
+    /// websites' ports and Tailscale's addresses; no other Service anywhere
+    /// outside managed namespaces.
+    #[test]
+    fn the_tailnet_websites_service_is_pinned() {
+        let objects = objects(false);
+        let gw = objects
+            .iter()
+            .find(|o| o["kind"] == "Role" && o["metadata"]["namespace"] == system::GATEWAY_NS)
+            .unwrap();
+        let svc: Vec<&Value> = gw["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["resources"] == json!(["services"]))
+            .collect();
+        assert_eq!(
+            svc,
+            [
+                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["create"] }),
+                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE] }),
+            ]
+        );
+        let policy = admission("w", "g");
+        let all = policy[0]["spec"]["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "gatewayAllowed")
+            .unwrap()["expression"]
+            .as_str()
+            .unwrap();
+        // Services appear in no other variable or validation.
+        assert!(
+            !policy[0]["spec"]["validations"]
+                .to_string()
+                .contains("'services'")
+        );
+        let start = all
+            .find("(request.resource.resource == 'services'")
+            .expect("the Service's clause");
+        let clause = &all[start..start + all[start..].find(")))) || ").unwrap()];
+        // Only in the gateway's namespace, and only this name.
+        assert!(all.starts_with("variables.ns == 'pyo-gateway' && ("));
+        for part in [
+            "variables.objName == 'pyo-tailnet-web' && variables.sub == ''".to_owned(),
+            "object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local'"
+                .to_owned(),
+            format!(
+                "object.spec.selector == {}",
+                cel_literal(&system::proxy_pods()["matchLabels"])
+            ),
+            format!(
+                "object.spec.ports == {}",
+                cel_literal(&system::tailnet_web_ports())
+            ),
+            "size(object.spec.externalIPs) >= 1".to_owned(),
+            format!(
+                "ip.matches({}) || ip.matches({})",
+                cel_literal(&json!(system::TAILNET_IPV4_RE)),
+                cel_literal(&json!(system::TAILNET_IPV6_RE))
+            ),
+        ] {
+            assert!(clause.contains(&part), "{part}\n{clause}");
+        }
+        // Fields beyond these (load balancer, node ports, session settings) are refused.
+        assert!(clause.contains("object.spec.all(k, k in [dyn('type'), dyn('externalIPs'), dyn('externalTrafficPolicy'), dyn('selector'), dyn('ports'), dyn('clusterIP')"));
+        for k in [
+            "loadBalancer",
+            "nodePort",
+            "sessionAffinityConfig",
+            "healthCheckNodePort",
+            "allocateLoadBalancerNodePorts",
+        ] {
+            assert!(!clause.contains(k), "{k}");
+        }
     }
 
     #[test]

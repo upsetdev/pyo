@@ -95,7 +95,9 @@ export function ClusterPublicTraffic({ cluster: c }: { cluster: Cluster }) {
             <>
               {on
                 ? "On every server except build-only servers."
-                : "Services are reachable only inside the cluster."}{" "}
+                : mode === "tailscale"
+                  ? "Services are reachable only from your tailnet."
+                  : "Services are reachable only inside the cluster."}{" "}
               <LearnMore page="gateway" />
             </>
           }

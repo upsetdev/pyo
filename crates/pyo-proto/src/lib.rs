@@ -324,8 +324,8 @@ pub struct Capabilities {
     #[serde(default)]
     pub traffic_local: bool,
     /// Tailscale addresses where websites (ports 80 and 443) are answered
-    /// whether or not the cluster takes public traffic: the host's
-    /// `TAILNET_SERVICE`, once it carries those ports.
+    /// whether or not the cluster takes public traffic: the servers' the
+    /// agent publishes them on (system.rs `TAILNET_WEB_SERVICE`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tailnet_web_ips: Vec<String>,
     /// Services (by id) whose WAF policy the gateway refused: their sites
@@ -2121,6 +2121,12 @@ pub struct HeartbeatReply {
     /// on, on the tailnet). None (a reply without it): left as it is.
     #[serde(default)]
     pub public_traffic: Option<bool>,
+    /// Where the cluster's free domains point: "public" or "tailscale".
+    /// With "tailscale" the websites are published on every server's
+    /// Tailscale address too (system.rs `TAILNET_WEB_SERVICE`), whatever
+    /// the public traffic. None (a reply without it): left as it is.
+    #[serde(default)]
+    pub free_domain_address: Option<String>,
     /// Observability (an installation-wide setting): on, Vector ships the
     /// gateway's access logs and the servers' figures, and on the cluster
     /// Pyo runs on ClickHouse runs. Off: Vector is removed and ClickHouse

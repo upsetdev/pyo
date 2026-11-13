@@ -1685,7 +1685,7 @@ pub(crate) enum Op {
     /// server but build-only ones (ports 80 and 443, and public TCP and UDP
     /// ports through it). Off: services are only reachable inside the cluster.
     SetClusterPublicTraffic { cluster_id: String, on: bool },
-    /// Where the cluster's free domains (`<name>.<ip>.nip.io`) point: "public" (its public IP, for everyone) or "tailscale" (its Tailscale IP, only from the tailnet). Free domains on it move to the new address in place. By default: public when the cluster takes public traffic and its public IP is known, else Tailscale.
+    /// Where the cluster's free domains (`<name>.<ip>.nip.io`) point: "public" (its public IP, for everyone) or "tailscale" (its Tailscale IP, only from the tailnet). With "tailscale", services are reachable from your tailnet on ports 80 and 443 whether or not the cluster takes public traffic. Free domains on it move to the new address in place. By default: public when the cluster takes public traffic and its public IP is known, else Tailscale.
     SetClusterFreeDomainAddress { cluster_id: String, address: String },
     /// Add an access rule to the end of a service's firewall. Allow and block rules are checked in order, and the first match decides. With no match, the client gets in. Rate limit rules then apply to websites, and each matching one counts the request, per client address and per server.
     AddFirewallRule {

@@ -402,6 +402,11 @@ async fn heartbeat(
     // Free domains on another of its addresses (a private one, one it no
     // longer has, the other mode's) follow its free-domain address, live.
     let rehomed = crate::freedomain::rehome(&mut tx, &cluster.id).await?;
+    // Where they point: on "tailscale" the agent publishes the websites on
+    // the servers' Tailscale addresses.
+    let free_domain_address = crate::freedomain::load(&mut tx, &cluster.id)
+        .await?
+        .map(|(_, c)| c.mode().as_str());
     tx.commit().await?;
     if refresh_sent || builder_added || rehomed {
         s.wake(&cluster.id).await;
@@ -464,7 +469,7 @@ async fn heartbeat(
     // Vector (and on Pyo's own cluster, ClickHouse) runs while it's on.
     let observability = s.observability.enabled().await;
     Ok(Json(
-        json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "projectTeams": project_teams, "observability": observability }),
+        json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability }),
     ))
 }
 

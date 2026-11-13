@@ -10,10 +10,10 @@
 //!   server behind its provider's NAT only has a private address on its
 //!   network card. None while the cluster takes no public traffic.
 //! - Tailscale: a server's Tailscale IPv4 address (100.x), reachable only
-//!   from the tailnet: the host's, where its timer publishes the websites'
-//!   ports on it whatever the public traffic (`tailnetWebIps`), else, while
-//!   the cluster takes public traffic, a server that takes it (ServiceLB
-//!   publishes the gateway on every address of the server).
+//!   from the tailnet. In this mode the agent publishes the websites' ports
+//!   on every server's Tailscale address that runs a proxy, whatever the
+//!   public traffic (`tailnetWebIps`, pyo-proto's system.rs
+//!   `TAILNET_WEB_SERVICE`).
 //!
 //! Unset, a cluster uses its public IP when it takes public traffic and one
 //! is known, else Tailscale. Without an address there's no free domain.
@@ -126,16 +126,13 @@ impl Cluster {
         })
     }
 
-    /// Its Tailscale IPv4 address that answers websites.
+    /// Its Tailscale IPv4 address that answers websites: where the agent
+    /// published them, else (not yet) a server's that runs a proxy.
     pub fn tailnet_ip(&self) -> Option<Ipv4Addr> {
         self.tailnet_web
             .iter()
             .find_map(|i| tailnet_v4(i))
-            .or_else(|| {
-                self.public_traffic
-                    .then(|| entry(&self.servers).find_map(server_tailnet))
-                    .flatten()
-            })
+            .or_else(|| entry(&self.servers).find_map(server_tailnet))
     }
 
     /// The mode in use: the one chosen, else public when it takes public
@@ -508,17 +505,24 @@ mod tests {
             cluster(true, Some("tailscale"), vec![joined.clone()]).address(),
             Some(v4("100.64.0.7"))
         );
-        // Public traffic off: only where the host publishes the websites on
-        // its Tailscale address.
+        // Public traffic off: the agent publishes the websites there all the same.
         assert_eq!(
             cluster(false, Some("tailscale"), vec![nat_server()]).address(),
-            None
+            Some(v4("100.101.67.2"))
         );
-        let mut c = cluster(false, None, vec![nat_server(), joined]);
+        // Where the agent published them comes first.
+        let mut c = cluster(false, None, vec![joined, nat_server()]);
         c.tailnet_web = vec!["100.101.67.2".into()];
         assert_eq!(
             (c.mode(), c.address()),
             (Mode::Tailscale, Some(v4("100.101.67.2")))
+        );
+        // Not on a server that runs a proxy (build-only).
+        let builder =
+            json!({ "name": "a", "status": "ready", "builder": true, "tailnetIp": "100.64.0.8" });
+        assert_eq!(
+            cluster(true, Some("tailscale"), vec![builder]).address(),
+            None
         );
         // Not on a tailnet at all.
         let lan = json!({ "name": "a", "status": "ready", "internalIP": "192.168.1.48" });

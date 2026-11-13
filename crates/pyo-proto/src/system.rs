@@ -664,14 +664,9 @@ pub fn http_gateway() -> Value {
 // (`TAILNET_SERVICE`, externalIPs, externalTrafficPolicy Local: kube-proxy
 // takes a connection straight to the proxy, which sees the device's own
 // address), written by the host's tailnet-cert timer (deploy/install.sh,
-// scripts/pyo-up.sh) with the certificate: not by the agent, which never
-// sets externalIPs. The SecurityPolicy still refuses everyone but tailnet
-// addresses and the servers, whatever Host or SNI they send.
-//
-// That Service carries the websites' ports (80 and 443) too, so free
-// domains on the host's Tailscale address ("<name>.100.x.y.z.nip.io") are
-// answered whether or not the cluster takes public traffic; the agent
-// reports where (`Capabilities::tailnet_web_ips`).
+// scripts/pyo-up.sh) with the certificate: not by the agent. The
+// SecurityPolicy still refuses everyone but tailnet addresses and the
+// servers, whatever Host or SNI they send.
 
 /// The Gateway of Pyo's own HTTPS listeners.
 pub const TAILNET_GATEWAY: &str = "pyo-tailnet";
@@ -834,6 +829,64 @@ pub fn tailnet_objects(servers: &[String]) -> Vec<Value> {
     }
     out
 }
+
+// ── Websites on the servers' Tailscale addresses ────────────────────────────
+//
+// When a cluster's free domains point at its Tailscale IP
+// ("<name>.100.x.y.z.nip.io"), the agent publishes the websites' ports (80
+// and 443; 10080 and 10443 in the proxy) on every server's Tailscale
+// address that runs a proxy, whether or not the cluster takes public
+// traffic: a Service of its own, `TAILNET_WEB_SERVICE` (the host's
+// `TAILNET_SERVICE` stays the host's, with only the listeners' ports). Like
+// that one: externalIPs, externalTrafficPolicy Local, so kube-proxy takes a
+// connection straight to the proxy on that server and the proxy sees the
+// visitor's own tailnet address: a service's access rules and WAF apply as
+// on the internet. The admission policy pins it: this name, these ports,
+// the proxies' pods, and Tailscale's addresses only.
+
+/// The agent's Service for websites on the servers' Tailscale addresses.
+pub const TAILNET_WEB_SERVICE: &str = "pyo-tailnet-web";
+/// Its ports: the websites' (port, the proxy's port).
+pub const TAILNET_WEB_PORTS: [(&str, i32, i32); 2] = [("http", 80, 10080), ("https", 443, 10443)];
+/// A Tailscale IPv4 address (100.64.0.0/10), as the admission policy checks it.
+pub const TAILNET_IPV4_RE: &str = r"^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$";
+/// A Tailscale IPv6 address (fd7a:115c:a1e0::/48).
+pub const TAILNET_IPV6_RE: &str = r"^fd7a:115c:a1e0:[0-9a-f:]*$";
+
+/// Its ports, as the API server keeps them (protocol filled in).
+pub fn tailnet_web_ports() -> Value {
+    Value::Array(
+        TAILNET_WEB_PORTS
+            .iter()
+            .map(|(name, port, target)| json!({ "name": name, "port": port, "targetPort": target, "protocol": "TCP" }))
+            .collect(),
+    )
+}
+
+/// The Service, on these Tailscale addresses (`ips`, at least one).
+pub fn tailnet_web_service(ips: &[String]) -> Value {
+    json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": TAILNET_WEB_SERVICE, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
+        "spec": {
+            "type": "ClusterIP",
+            "externalIPs": ips,
+            "externalTrafficPolicy": "Local",
+            "selector": proxy_pods()["matchLabels"],
+            "ports": tailnet_web_ports(),
+        },
+    })
+}
+
+/// Spec fields the API server may fill in on it, besides those it sets.
+pub const TAILNET_WEB_DEFAULTED: [&str; 6] = [
+    "clusterIP",
+    "clusterIPs",
+    "ipFamilies",
+    "ipFamilyPolicy",
+    "sessionAffinity",
+    "internalTrafficPolicy",
+];
 
 fn client_ip_detection() -> Value {
     json!({ "xForwardedFor": { "trustedCIDRs": TRUSTED_PROXY_CIDRS } })
@@ -1239,8 +1292,7 @@ mod tests {
     }
 
     /// The host's timer writes the Service that brings tailnet connections
-    /// to the proxies with their own address: the listeners' ports and the
-    /// websites' (in the proxy, 10000 higher), onto
+    /// to the proxies with their own address: the listeners' ports, onto
     /// the proxies' pods, Local, on the Tailscale address only. Both copies
     /// of the timer's script (the install's and the dev setup's) agree.
     #[test]
@@ -1276,16 +1328,69 @@ mod tests {
                 ports,
                 [
                     (DASHBOARD_PORT as i64, DASHBOARD_PORT as i64),
-                    (REGISTRY_PORT as i64, REGISTRY_PORT as i64),
-                    // The websites', for free domains on the Tailscale address.
-                    (80, 10080),
-                    (443, 10443)
+                    (REGISTRY_PORT as i64, REGISTRY_PORT as i64)
                 ]
             );
             assert!(
                 script[..start].contains("ip4=$(tailscale ip -4"),
                 "the Tailscale address"
             );
+        }
+    }
+
+    /// The agent's Service for websites on the servers' Tailscale
+    /// addresses: the websites' ports onto the proxies' (10000 higher), on
+    /// those addresses only, Local (the proxy sees the visitor's address).
+    /// The host's Service keeps only the listeners' ports.
+    #[test]
+    fn websites_on_the_tailnet_are_the_agents_own_service() {
+        let ips = vec!["100.64.0.1".to_owned(), "100.101.67.2".to_owned()];
+        let svc = tailnet_web_service(&ips);
+        assert_eq!(svc["metadata"]["name"], TAILNET_WEB_SERVICE);
+        assert_ne!(TAILNET_WEB_SERVICE, TAILNET_SERVICE);
+        assert_eq!(svc["metadata"]["namespace"], GATEWAY_NS);
+        assert_eq!(
+            svc["spec"],
+            json!({
+                "type": "ClusterIP", "externalIPs": ips, "externalTrafficPolicy": "Local",
+                "selector": proxy_pods()["matchLabels"],
+                "ports": [
+                    { "name": "http", "port": 80, "targetPort": 10080, "protocol": "TCP" },
+                    { "name": "https", "port": 443, "targetPort": 10443, "protocol": "TCP" },
+                ],
+            })
+        );
+        let v4 = regex::Regex::new(TAILNET_IPV4_RE).unwrap();
+        let v6 = regex::Regex::new(TAILNET_IPV6_RE).unwrap();
+        for ip in [
+            "100.64.0.0",
+            "100.101.67.2",
+            "100.127.255.255",
+            "100.99.0.9",
+        ] {
+            assert!(v4.is_match(ip), "{ip}");
+        }
+        for ip in [
+            "100.63.255.255",
+            "100.128.0.1",
+            "10.0.0.1",
+            "129.226.158.31",
+            "100.64.0.256",
+            "100.64.0.01",
+            "100.64.0",
+            " 100.64.0.1",
+        ] {
+            assert!(!v4.is_match(ip), "{ip}");
+        }
+        assert!(v6.is_match("fd7a:115c:a1e0::6930:4303"));
+        assert!(!v6.is_match("fd7a:115c:a1e1::1") && !v6.is_match("2001:db8::1"));
+        // The host's Service: still only the listeners' ports.
+        for script in [
+            include_str!("../../../deploy/install.sh"),
+            include_str!("../../../scripts/pyo-up.sh"),
+        ] {
+            assert!(!script.contains("targetPort: 10080") && !script.contains("targetPort: 10443"));
+            assert!(!script.contains(TAILNET_WEB_SERVICE));
         }
     }
 
