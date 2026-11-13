@@ -177,18 +177,21 @@ enum Command {
         #[command(flatten)]
         which: Which,
     },
-    /// Bring services over from Coolify or Dokploy: see what they become,
-    /// then import them. Owners and admins.
+    /// Bring services over from Coolify, Dokploy, Railway or Vercel: see
+    /// what they become, then import them. Owners and admins.
     Import {
-        /// The platform: coolify or dokploy.
-        #[arg(value_parser = ["coolify", "dokploy"])]
+        /// The platform: coolify, dokploy, railway or vercel.
+        #[arg(value_parser = ["coolify", "dokploy", "railway", "vercel"])]
         platform: String,
-        /// Its address, e.g. https://coolify.example.com.
-        #[arg(long)]
-        from: String,
-        /// Its API token (Coolify's with read and read:sensitive). Used for this import only.
+        /// Its address, e.g. https://coolify.example.com. Not for Railway or Vercel.
+        #[arg(long, required_if_eq_any = [("platform", "coolify"), ("platform", "dokploy")])]
+        from: Option<String>,
+        /// Its API token (Coolify's with read and read:sensitive, a Railway account, workspace or project token, a Vercel token). Used for this import only.
         #[arg(long, env = "PYO_IMPORT_TOKEN", hide_env_values = true)]
         source_token: String,
+        /// Vercel only: the team to read (its slug or id). The token's own scope by default.
+        #[arg(long)]
+        source_team: Option<String>,
         /// The team to import into (slug or id). Defaults to your first team.
         #[arg(long)]
         team: Option<String>,
@@ -488,6 +491,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             platform,
             from,
             source_token,
+            source_team,
             team,
             cluster,
             deploy,
@@ -497,8 +501,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 &config::client(url, token)?,
                 import::Args {
                     platform: &platform,
-                    from: &from,
+                    from: from.as_deref().unwrap_or(""),
                     token: &source_token,
+                    source_team: source_team.as_deref(),
                     team: team.as_deref(),
                     cluster: cluster.as_deref(),
                     deploy,

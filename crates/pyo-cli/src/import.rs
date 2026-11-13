@@ -1,5 +1,5 @@
-//! `pyo import coolify|dokploy`: bring a team's services over from another
-//! platform. Pyo reads it with the token given (and never keeps it), shows
+//! `pyo import coolify|dokploy|railway|vercel`: bring a team's services
+//! over from another platform. Pyo reads it with the token given (and never keeps it), shows
 //! what each thing becomes and what doesn't carry over, then imports
 //! what's importable once you say yes.
 
@@ -12,6 +12,8 @@ pub struct Args<'a> {
     pub platform: &'a str,
     pub from: &'a str,
     pub token: &'a str,
+    /// Vercel's team.
+    pub source_team: Option<&'a str>,
     pub team: Option<&'a str>,
     pub cluster: Option<&'a str>,
     pub deploy: bool,
@@ -20,8 +22,14 @@ pub struct Args<'a> {
 
 pub async fn run(api: &Api, a: Args<'_>) -> Result<()> {
     let (team_id, cluster_id) = team_and_cluster(api, a.team, a.cluster).await?;
-    let source =
+    if a.source_team.is_some() && a.platform != "vercel" {
+        bail!("--source-team is for Vercel only.");
+    }
+    let mut source =
         json!({ "teamId": team_id, "platform": a.platform, "url": a.from, "token": a.token });
+    if let Some(t) = a.source_team {
+        source["team"] = json!(t);
+    }
     let plan = api
         .post("/api/v1/platform-imports/preview", &source)
         .await?;
