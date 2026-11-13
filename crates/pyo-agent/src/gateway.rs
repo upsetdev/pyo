@@ -1441,6 +1441,10 @@ pub fn tailnet_web_change(
     }
 }
 
+/// The tailnet websites' Service was refused (said once).
+static TAILNET_WEB_REFUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Websites on the servers' Tailscale addresses (system.rs), while the
 /// cluster's free domains point at its Tailscale IP (from each heartbeat's
 /// reply): the Service written or removed when that differs.
@@ -1491,7 +1495,17 @@ pub async fn set_tailnet_web(client: &Client, on: bool) {
             )
             .await
         {
-            Ok(_) => tracing::info!(?ips, "websites on the Tailscale addresses"),
+            Ok(_) => {
+                TAILNET_WEB_REFUSED.store(false, Ordering::Relaxed);
+                tracing::info!(?ips, "websites on the Tailscale addresses")
+            }
+            // Refused (an install from before this Service: its connect
+            // command brings it up to date): said once, not every heartbeat.
+            Err(kube::Error::Api(e)) if e.code == 403 => {
+                if !TAILNET_WEB_REFUSED.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(error = %e, "couldn't publish websites on the Tailscale addresses (run the cluster's connect command)");
+                }
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't publish websites on the Tailscale addresses")
             }
