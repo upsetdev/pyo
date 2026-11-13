@@ -580,7 +580,7 @@ fn tcp_port(p: u16) -> bool {
     )
 }
 
-fn secret_key(k: &str) -> bool {
+pub fn secret_key(k: &str) -> bool {
     let k = k.to_uppercase();
     [
         "PASSWORD",
