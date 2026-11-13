@@ -1,4 +1,4 @@
-import { DatabaseIcon, LightningIcon, PlusIcon } from "@phosphor-icons/react";
+import { DatabaseIcon, PlusIcon } from "@phosphor-icons/react";
 import { useMemo, useState, type ReactNode } from "react";
 import { TimeAgo } from "~/components/pyo/common";
 import {
@@ -10,7 +10,6 @@ import {
   sizeSpec,
 } from "~/components/pyo/Databases";
 import { CARD_HOVER } from "~/components/pyo/ProjectCard";
-import { PostgresLogo } from "~/components/ui/EngineLogo";
 import { AppLink } from "~/components/ui/AppLink";
 import { Badge, Dot } from "~/components/ui/Badge";
 import { ButtonLink } from "~/components/ui/Button";
@@ -96,7 +95,7 @@ function DatabaseList({ engine }: { engine: Database["engine"] }) {
       ) : (
         <Panel>
           <EmptyState
-            icon={engine === "valkey" ? LightningIcon : engine === "postgres" ? PostgresLogo : DatabaseIcon}
+            icon={DatabaseIcon}
             title={`No ${title} databases yet`}
             description={
               engine === "valkey"
