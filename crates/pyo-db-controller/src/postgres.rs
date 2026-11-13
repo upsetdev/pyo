@@ -391,7 +391,7 @@ impl Kube<'_> {
             "inheritedMetadata": { "labels": { LABEL_DATABASE: self.name(), LABEL_COMPONENT: INSTANCE } },
             "monitoring": { "customQueriesConfigMap": [{ "name": monitoring(&self.name()), "key": "queries" }] },
         });
-        if let Some(r) = resources(&s.cpu, &s.memory) {
+        if let Some(r) = resources(&s.cpu, &s.memory, &s.memory_request) {
             spec["resources"] = r;
         }
         if let Some(pg) = self.pg_config(ext) {
@@ -586,7 +586,7 @@ impl Kube<'_> {
             // Its pods are pyo.dev/component=read.
             "inheritedMetadata": { "labels": { LABEL_DATABASE: name, LABEL_COMPONENT: READ } },
         });
-        if let Some(r) = resources(&s.cpu, &s.memory) {
+        if let Some(r) = resources(&s.cpu, &s.memory, &s.memory_request) {
             spec["resources"] = r;
         }
         if let Some(pg) = self.pg_config(ext) {

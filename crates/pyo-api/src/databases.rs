@@ -40,6 +40,11 @@ pub const SIZES: [(&str, &str, &str, i32); 4] = [
     ("large", "1", "2Gi", 20),
     ("xlarge", "2", "4Gi", 50),
 ];
+/// What a preset sets aside per instance (its memory request) when that's
+/// less than the memory above, which stays its limit: an idle small
+/// Postgres holds 60 to 100 MiB, so asking for all 512 would leave a small
+/// server's room unused. The others set aside all of it.
+pub const MEMORY_REQUESTS: [(&str, &str); 1] = [("small", "128Mi")];
 pub const POSTGRES_VERSIONS: [&str; 3] = ["16", "17", "18"];
 pub const VALKEY_VERSIONS: [&str; 2] = ["8.0", "8.1"];
 pub const MYSQL_VERSIONS: [&str; 1] = ["8.4"];
@@ -232,6 +237,15 @@ fn resources_of(db: &Db) -> (String, String) {
     }
     let (_, cpu, memory, _) = size_of(&db.size).unwrap_or(SIZES[0]);
     (cpu.to_owned(), memory.to_owned())
+}
+
+/// The memory set aside per instance when less than its memory (a
+/// preset's [`MEMORY_REQUESTS`]); None: all of it.
+fn memory_request_of(db: &Db) -> Option<&'static str> {
+    MEMORY_REQUESTS
+        .iter()
+        .find(|(size, _)| *size == db.size)
+        .map(|(_, r)| *r)
 }
 
 fn versions(engine: &str) -> &'static [&'static str] {
@@ -439,6 +453,9 @@ async fn spec(
             "credentialsSecret": secret_name,
         },
     });
+    if let Some(r) = memory_request_of(db) {
+        database["spec"]["memoryRequest"] = json!(r);
+    }
     if db.read_replicas > 0 {
         database["spec"]["readReplicas"] = json!({ "instances": db.read_replicas });
     }
@@ -2413,6 +2430,22 @@ mod tests {
             cpu_millis: None,
             memory_mi: None,
             extensions: json!([]),
+        }
+    }
+
+    #[test]
+    fn a_small_database_sets_aside_less_than_its_limit() {
+        let mut d = db("postgres", false, false);
+        assert_eq!(resources_of(&d), ("250m".into(), "512Mi".into()));
+        assert_eq!(memory_request_of(&d), Some("128Mi"));
+        for size in ["medium", "large", "xlarge", "custom"] {
+            d.size = size.into();
+            assert_eq!(memory_request_of(&d), None, "{size}");
+        }
+        // Every request is a preset's, and below its memory.
+        for (size, req) in MEMORY_REQUESTS {
+            let (_, _, mem, _) = size_of(size).unwrap();
+            assert!(parse_mi(req) < parse_mi(mem), "{size}");
         }
     }
 

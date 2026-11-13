@@ -362,7 +362,7 @@ impl Kube<'_> {
     pub fn mysql_cluster(&self) -> Value {
         let s = &self.db.spec;
         let mut mysqld = json!({ "name": "mysqld", "image": self.ctx.images.mysql_84 });
-        if let Some(r) = resources(&s.cpu, &s.memory) {
+        if let Some(r) = resources(&s.cpu, &s.memory, &s.memory_request) {
             mysqld["resources"] = r;
         }
         let mut claim = json!({ "accessModes": ["ReadWriteOnce"], "resources": { "requests": { "storage": s.storage } } });

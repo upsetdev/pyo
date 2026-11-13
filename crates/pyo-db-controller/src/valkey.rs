@@ -235,7 +235,7 @@ impl Kube<'_> {
             "securityContext": container_security(),
             "volumeMounts": [{ "name": "data", "mountPath": "/data" }, { "name": "scripts", "mountPath": "/scripts" }],
         });
-        if let Some(r) = resources(&s.cpu, &s.memory) {
+        if let Some(r) = resources(&s.cpu, &s.memory, &s.memory_request) {
             c["resources"] = r;
         }
         let mut pvc = json!({ "accessModes": ["ReadWriteOnce"], "resources": { "requests": { "storage": s.storage } } });

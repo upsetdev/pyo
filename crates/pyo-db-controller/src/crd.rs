@@ -37,6 +37,11 @@ pub struct DatabaseSpec {
     pub cpu: String,
     #[serde(default)]
     pub memory: String,
+    /// The memory set aside for each instance (its request), when less than
+    /// `memory`, e.g. "128Mi" for a small database that holds far less than
+    /// it may use. Empty: `memory`.
+    #[serde(default)]
+    pub memory_request: String,
     /// Holds username, password and (Valkey) token and readonly-token. Pyo
     /// writes it so it can seal them; when it doesn't exist the controller
     /// makes one. Default "<name>-credentials".
