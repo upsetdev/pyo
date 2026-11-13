@@ -1245,7 +1245,7 @@ mod tests {
         ));
         assert!(allowed.contains("size(variables.spec.containers) == 1"));
         assert!(!allowed.contains("helmcharts"));
-        // Its lease Role and binding, as written; two replicas, spread.
+        // Its lease Role and binding, as written; spread across servers.
         assert!(allowed.contains("request.resource.resource == 'roles' && variables.ns == 'pyo-databases' && variables.objName == 'pyo-db-controller-lease'"));
         assert!(allowed.contains("request.resource.resource == 'rolebindings' && variables.ns == 'pyo-databases' && variables.objName == 'pyo-db-controller-lease'"));
         assert!(allowed.contains("variables.spec.tolerations[0].tolerationSeconds == 10"));

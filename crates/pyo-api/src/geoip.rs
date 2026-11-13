@@ -170,7 +170,7 @@ fn tar_file(tar: &[u8], suffix: &str) -> Option<Vec<u8>> {
 
 /// Check the file opens, then swap it in with its meta.
 fn install(bytes: &[u8]) -> Result<()> {
-    maxminddb::Reader::from_source(bytes.to_vec())
+    maxminddb::Reader::from_source(bytes)
         .map_err(|e| anyhow!("The downloaded database doesn't open: {e}"))?;
     let d = dir();
     std::fs::create_dir_all(&d).with_context(|| format!("Can't write to {}", d.display()))?;

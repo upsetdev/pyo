@@ -25,8 +25,8 @@ use crate::{
 
 /// Bump when the cluster builder's pod spec changes (the agent builds it from
 /// EnsureBuilder); builders on an older one get it re-sent. 2: unprivileged,
-/// read-only pyo-builder.
-pub const CLUSTER_BUILDER_SPEC: i32 = 2;
+/// read-only pyo-builder. 3: BuildKit started on demand.
+pub const CLUSTER_BUILDER_SPEC: i32 = 3;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

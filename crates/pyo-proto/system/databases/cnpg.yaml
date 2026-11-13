@@ -20999,7 +20999,7 @@ metadata:
   name: cnpg-controller-manager
   namespace: pyo-databases
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: cloudnative-pg

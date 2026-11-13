@@ -6,6 +6,11 @@
 //! builds it (with the repository's Dockerfile or Containerfile, or
 //! zero-config with Railpack), pushes to Pyo's registry, and streams the build output back
 //! as the deployment's logs.
+//!
+//! With `PYO_BUILDKIT_WAKE` (a directory shared with BuildKit's container,
+//! see the agent's builder.rs), BuildKit runs only while there are builds:
+//! a build wakes it (a `wanted` file there; BuildKit's side marks it `up`)
+//! and after `PYO_BUILDKIT_IDLE_SECS` (600) without one it's let go again.
 
 mod git;
 mod source;
@@ -34,6 +39,10 @@ struct Builder {
     buildkit: String,
     buildctl: String,
     busy: Mutex<Option<String>>,
+    /// Starting BuildKit on demand: where, and when it was last used.
+    wake: Option<std::path::PathBuf>,
+    last_used: Mutex<tokio::time::Instant>,
+    idle: Duration,
 }
 
 #[tokio::main]
@@ -61,10 +70,23 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "unix:///run/buildkit/buildkitd.sock".into()),
         buildctl: std::env::var("BUILDCTL").unwrap_or_else(|_| "buildctl".into()),
         busy: Mutex::new(None),
+        wake: std::env::var_os("PYO_BUILDKIT_WAKE")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from),
+        last_used: Mutex::new(tokio::time::Instant::now()),
+        idle: Duration::from_secs(
+            std::env::var("PYO_BUILDKIT_IDLE_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(600),
+        ),
     });
-    tracing::info!(version = VERSION, api = %url, "pyo builder starting");
+    tracing::info!(version = VERSION, api = %url, on_demand = builder.wake.is_some(), "pyo builder starting");
 
     tokio::spawn(heartbeat_loop(builder.clone()));
+    if builder.wake.is_some() {
+        tokio::spawn(idle_loop(builder.clone()));
+    }
     let mut backoff = Duration::from_secs(1);
     // Shutting down (a new version is replacing this pod, or the VM stops):
     // take no new jobs. BuildKit beside us is stopping too.
@@ -85,8 +107,9 @@ async fn main() -> anyhow::Result<()> {
         if stopping.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
-        // Only take a job when BuildKit answers (it can start after us).
-        if !builder.buildkit_ready().await {
+        // Only take a job when BuildKit answers (it can start after us),
+        // or is asleep until a build wakes it.
+        if !builder.buildkit_ok().await {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
@@ -121,7 +144,7 @@ async fn heartbeat_loop(b: std::sync::Arc<Builder>) {
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     loop {
         tick.tick().await;
-        let buildkit = b.buildkit_ready().await;
+        let buildkit = b.buildkit_ok().await;
         let hb = BuilderHeartbeat {
             version: VERSION.into(),
             buildkit,
@@ -138,6 +161,31 @@ async fn heartbeat_loop(b: std::sync::Arc<Builder>) {
         if let Err(e) = b.post("/heartbeat", &hb).await {
             tracing::warn!(error = %e, "heartbeat not accepted");
         }
+    }
+}
+
+/// Lets BuildKit go after a while without builds. Under the busy lock, so
+/// a build can't start in between; held a little longer, so BuildKit's
+/// side has seen it (and taken `up` away) before the next build wakes it.
+async fn idle_loop(b: std::sync::Arc<Builder>) {
+    let Some(dir) = b.wake.clone() else { return };
+    let mut tick = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        tick.tick().await;
+        let busy = b.busy.lock().await;
+        if busy.is_none()
+            && dir.join("wanted").exists()
+            && b.last_used.lock().await.elapsed() >= b.idle
+        {
+            match std::fs::remove_file(dir.join("wanted")) {
+                Ok(()) => {
+                    tracing::info!(idle = ?b.idle, "no builds for a while: stopping BuildKit");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                Err(e) => tracing::warn!(error = %e, "couldn't stop BuildKit"),
+            }
+        }
+        drop(busy);
     }
 }
 
@@ -175,6 +223,47 @@ impl Builder {
         matches!(tokio::time::timeout(Duration::from_secs(10), check).await, Ok(Ok(st)) if st.success())
     }
 
+    /// Fine to take builds: BuildKit answers, or it's started on demand and
+    /// isn't wanted right now (asleep), or a build is waking it.
+    async fn buildkit_ok(&self) -> bool {
+        if let Some(dir) = &self.wake
+            && (!dir.join("wanted").exists() || self.busy.lock().await.is_some())
+        {
+            return true;
+        }
+        self.buildkit_ready().await
+    }
+
+    /// Wake BuildKit for a build. True if it was asleep (it's starting).
+    async fn wake_buildkit(&self) -> anyhow::Result<bool> {
+        let Some(dir) = &self.wake else {
+            return Ok(false);
+        };
+        *self.last_used.lock().await = tokio::time::Instant::now();
+        let wanted = dir.join("wanted");
+        let asleep = !wanted.exists() || !dir.join("up").exists();
+        if !wanted.exists() {
+            std::fs::write(&wanted, b"")
+                .with_context(|| format!("couldn't start BuildKit ({})", wanted.display()))?;
+        }
+        Ok(asleep)
+    }
+
+    /// Wait for BuildKit to answer: started (`up`) and ready, for up to 2 minutes.
+    async fn wait_buildkit(&self) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let up = self.wake.as_ref().is_none_or(|d| d.join("up").exists());
+            if up && self.buildkit_ready().await {
+                return true;
+            }
+            if tokio::time::Instant::now() > deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     async fn post<T: serde::Serialize + ?Sized>(&self, path: &str, body: &T) -> anyhow::Result<()> {
         let res = self
             .http
@@ -210,6 +299,24 @@ impl Builder {
 
     async fn build(&self, job: &BuildJob) -> anyhow::Result<BuildResult> {
         tracing::info!(job = %job.id, repo = %job.repo_url, branch = %job.branch, "build");
+        // BuildKit starts while the code is checked out.
+        if self.wake_buildkit().await? {
+            self.progress(
+                &job.id,
+                BuildProgress {
+                    stage: "building".into(),
+                    logs: vec![line("info", "builder", "Starting the builder…")],
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+        let result = self.build_inner(job).await;
+        *self.last_used.lock().await = tokio::time::Instant::now();
+        result
+    }
+
+    async fn build_inner(&self, job: &BuildJob) -> anyhow::Result<BuildResult> {
         let commit = if job.commit.is_empty() {
             match git::resolve(&job.repo_url, &job.branch).await {
                 Ok(c) => c,
@@ -281,6 +388,12 @@ impl Builder {
         };
         let default_dockerfile = source::default_path(&job.dockerfile_path);
 
+        if !self.wait_buildkit().await {
+            return fail(
+                &commit,
+                "The builder's BuildKit didn't start within 2 minutes. Try the build again.".into(),
+            );
+        }
         let tag = format!("{}:{short}", job.push_repository);
         let meta = ws.root.join("metadata.json");
         let mut cmd = Command::new(&self.buildctl);

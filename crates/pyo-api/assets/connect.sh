@@ -436,6 +436,37 @@ k3s_install() {
   INSTALL_K3S_SKIP_DOWNLOAD=binary INSTALL_K3S_BIN_DIR=/usr/local/bin sh "$dir/install.sh" "$@"
 }
 # <<< pyo:k3s
+# >>> pyo:small-machine (the same in deploy/install.sh, connect.sh and scripts/setup-host.sh)
+# On a small machine (under 4 GB of memory), run before k3s is installed:
+# k3s gets a soft memory limit, GOMEMLIMIT (a fifth of the memory, at least
+# 320 MiB), so its Go runtime collects garbage sooner instead of growing.
+# Under 3 GB, also compressed swap in memory (zram, half the memory,
+# pyo-zram.service) for what runs outside containers, k3s itself above all
+# (containers don't swap), unless the machine already has swap.
+small_machine() {
+  local mem limit
+  mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || true)
+  [ -n "$mem" ] && [ "$mem" -lt 3584 ] || return 0
+  limit=$((mem / 5))
+  [ "$limit" -ge 320 ] || limit=320
+  mkdir -p /etc/systemd/system/k3s.service.d
+  printf '# Managed by Pyo: k3s on a small machine.\n[Service]\nEnvironment=GOMEMLIMIT=%sMiB\n' "$limit" \
+    > /etc/systemd/system/k3s.service.d/pyo-memory.conf
+  echo "This machine has $mem MiB of memory: k3s gets GOMEMLIMIT=${limit}MiB."
+  [ "$mem" -lt 2816 ] || return 0
+  [ -z "$(swapon --show=NAME --noheadings 2>/dev/null)" ] || return 0
+  command -v zramctl >/dev/null && modprobe zram 2>/dev/null || return 0
+  printf '%s\n' '[Unit]' 'Description=Pyo: compressed swap in memory (zram) on a small machine' 'Before=k3s.service' \
+    '[Service]' 'Type=oneshot' 'RemainAfterExit=yes' \
+    "ExecStart=/bin/sh -c 'modprobe zram && d=\$\$(zramctl --find --size $((mem / 2))MiB) && mkswap \"\$\$d\" >/dev/null && swapon -p 100 \"\$\$d\" && echo \"\$\$d\" > /run/pyo-zram'" \
+    "ExecStop=/bin/sh -c 'd=\$\$(cat /run/pyo-zram) && swapoff \"\$\$d\" && zramctl --reset \"\$\$d\"'" \
+    '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/pyo-zram.service
+  systemctl daemon-reload
+  systemctl enable --now pyo-zram.service >/dev/null 2>&1 &&
+    echo "Turned on $((mem / 2)) MiB of compressed swap in memory (zram)." ||
+    echo "Couldn't turn on compressed swap (zram); going on without it." >&2
+}
+# <<< pyo:small-machine
 
 # >>> pyo:repos (the same in connect.sh, join.sh and scripts/join-node.sh)
 # Packages come from their vendors' repositories, whose signing keys are
@@ -788,6 +819,7 @@ CFG
     # The Kubernetes API's certificate also names the machine's MagicDNS name.
     [ -z "$TS_NAME" ] || echo "  - \"$TS_NAME\"" >> /etc/rancher/k3s/config.yaml
   fi
+  small_machine
   k3s_install "$K3S_DIR" server
 else
   # k3s finds a newly installed NVIDIA toolkit only when it starts.

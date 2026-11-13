@@ -509,8 +509,9 @@ pub struct LogFilter {
 
 pub struct Observability {
     ch: Option<ClickHouse>,
-    /// Swapped in place when geoip.rs downloads a newer database.
-    geo: std::sync::RwLock<Option<Arc<Reader<Vec<u8>>>>>,
+    /// Swapped in place when geoip.rs downloads a newer database. Mapped,
+    /// not read: a lookup touches a few pages of its ~50 MB.
+    geo: std::sync::RwLock<Option<Arc<Reader<maxminddb::Mmap>>>>,
     db: PgPool,
     hosts: RwLock<(Instant, HashMap<String, Owner>)>,
     /// (cluster, proxied port's route, or "<protocol>/<listen port>") ->
@@ -792,7 +793,7 @@ impl Observability {
             password: env("CLICKHOUSE_PASSWORD").unwrap_or_default(),
         });
         // geoip.rs loads the database once it has one.
-        let geo: Option<Reader<Vec<u8>>> = None;
+        let geo: Option<Reader<maxminddb::Mmap>> = None;
         if ch.is_none() {
             tracing::warn!("CLICKHOUSE_URL isn't set; observability is off");
         }
@@ -1637,7 +1638,9 @@ impl Observability {
 
     /// Use the database at `path` from now on.
     pub fn load_geoip(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let r = Reader::open_readfile(path)?;
+        // SAFETY: the file is never changed in place: geoip.rs writes a new
+        // one and renames it over, so this mapping keeps the old inode.
+        let r = unsafe { Reader::open_mmap(path) }?;
         *self
             .geo
             .write()
