@@ -1,6 +1,6 @@
 {
-  "version": "0.1.3",
+  "version": "0.2.0",
   "minFrom": null,
-  "manualOnly": false,
-  "beforeYouUpdate": []
+  "manualOnly": true,
+  "beforeYouUpdate": ["Pyo's own database restarts once and is down for about a minute."]
 }
