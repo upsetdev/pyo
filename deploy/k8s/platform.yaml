@@ -401,6 +401,136 @@ spec:
   ports:
     - { name: http, port: 8123, targetPort: http }
 ---
+# ClickHouse's settings for a small machine, on top of the image's own:
+# no system log tables (Pyo reads none), small caches and thread pools,
+# a memory ceiling below the pod's limit, so a heavy Analytics query
+# spills to disk or fails instead of the pod, and a few queries at once.
+# Pyo's user has the default profile: 2 threads and 200 MiB a query.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pyo-clickhouse
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-clickhouse, app.kubernetes.io/part-of: pyo }
+data:
+  config.xml: |
+    <clickhouse>
+        <!-- Warnings and errors only, and little of them on disk. -->
+        <logger>
+            <level>warning</level>
+            <size>50M</size>
+            <count>2</count>
+        </logger>
+
+        <!-- System log tables Pyo never reads: each would keep a table, a
+             flush thread and its buffers. -->
+        <query_log remove="1"/>
+        <query_thread_log remove="1"/>
+        <query_views_log remove="1"/>
+        <query_metric_log remove="1"/>
+        <trace_log remove="1"/>
+        <instrumentation_trace_log remove="1"/>
+        <metric_log remove="1"/>
+        <asynchronous_metric_log remove="1"/>
+        <part_log remove="1"/>
+        <text_log remove="1"/>
+        <error_log remove="1"/>
+        <crash_log remove="1"/>
+        <session_log remove="1"/>
+        <processors_profile_log remove="1"/>
+        <opentelemetry_span_log remove="1"/>
+        <asynchronous_insert_log remove="1"/>
+        <background_schedule_pool_log remove="1"/>
+        <backup_log remove="1"/>
+        <blob_storage_log remove="1"/>
+        <iceberg_metadata_log remove="1"/>
+        <delta_lake_metadata_log remove="1"/>
+        <zookeeper_log remove="1"/>
+        <zookeeper_connection_log remove="1"/>
+        <aggregated_zookeeper_log remove="1"/>
+
+        <!-- Memory: what ClickHouse allocates stays under 70% of the pod's
+             limit (it reads the limit as the machine's memory); the rest is
+             its code. Past it a query fails rather than the pod. -->
+        <max_server_memory_usage>0</max_server_memory_usage>
+        <max_server_memory_usage_to_ram_ratio>0.7</max_server_memory_usage_to_ram_ratio>
+        <!-- A few queries at once (an Analytics page sends 14): the rest wait
+             their turn (queue_max_wait_ms in the profile) rather than all
+             sharing the memory above and some failing. -->
+        <max_concurrent_queries>6</max_concurrent_queries>
+        <merges_mutations_memory_usage_soft_limit>134217728</merges_mutations_memory_usage_soft_limit>
+        <mark_cache_size>16777216</mark_cache_size>
+        <uncompressed_cache_size>0</uncompressed_cache_size>
+        <index_mark_cache_size>0</index_mark_cache_size>
+        <index_uncompressed_cache_size>0</index_uncompressed_cache_size>
+        <primary_index_cache_size>16777216</primary_index_cache_size>
+        <mmap_cache_size>64</mmap_cache_size>
+        <compiled_expression_cache_size>8388608</compiled_expression_cache_size>
+        <compiled_expression_cache_elements_size>1000</compiled_expression_cache_elements_size>
+        <query_condition_cache_size>8388608</query_condition_cache_size>
+        <query_cache>
+            <max_size_in_bytes>0</max_size_in_bytes>
+            <max_entries>0</max_entries>
+        </query_cache>
+
+        <!-- Threads -->
+        <max_thread_pool_size>500</max_thread_pool_size>
+        <max_thread_pool_free_size>10</max_thread_pool_free_size>
+        <thread_pool_queue_size>500</thread_pool_queue_size>
+        <max_io_thread_pool_size>16</max_io_thread_pool_size>
+        <max_active_parts_loading_thread_pool_size>2</max_active_parts_loading_thread_pool_size>
+        <max_outdated_parts_loading_thread_pool_size>2</max_outdated_parts_loading_thread_pool_size>
+        <max_unexpected_parts_loading_thread_pool_size>2</max_unexpected_parts_loading_thread_pool_size>
+        <max_parts_cleaning_thread_pool_size>2</max_parts_cleaning_thread_pool_size>
+        <max_prefixes_deserialization_thread_pool_size>2</max_prefixes_deserialization_thread_pool_size>
+        <max_format_parsing_thread_pool_size>2</max_format_parsing_thread_pool_size>
+        <max_backups_io_thread_pool_size>2</max_backups_io_thread_pool_size>
+        <max_fetch_partition_thread_pool_size>1</max_fetch_partition_thread_pool_size>
+        <max_build_vector_similarity_index_thread_pool_size>1</max_build_vector_similarity_index_thread_pool_size>
+        <async_insert_threads>1</async_insert_threads>
+        <tables_loader_foreground_pool_size>2</tables_loader_foreground_pool_size>
+        <tables_loader_background_pool_size>2</tables_loader_background_pool_size>
+        <background_pool_size>2</background_pool_size>
+        <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+        <background_schedule_pool_size>16</background_schedule_pool_size>
+        <background_common_pool_size>2</background_common_pool_size>
+        <background_move_pool_size>1</background_move_pool_size>
+        <background_fetches_pool_size>1</background_fetches_pool_size>
+        <background_buffer_flush_schedule_pool_size>1</background_buffer_flush_schedule_pool_size>
+        <background_message_broker_schedule_pool_size>1</background_message_broker_schedule_pool_size>
+        <background_distributed_schedule_pool_size>1</background_distributed_schedule_pool_size>
+        <background_streaming_schedule_pool_size>1</background_streaming_schedule_pool_size>
+        <parts_killer_pool_size>1</parts_killer_pool_size>
+        <prefetch_threadpool_pool_size>2</prefetch_threadpool_pool_size>
+        <load_marks_threadpool_pool_size>2</load_marks_threadpool_pool_size>
+        <threadpool_writer_pool_size>2</threadpool_writer_pool_size>
+        <threadpool_local_fs_reader_pool_size>2</threadpool_local_fs_reader_pool_size>
+
+        <merge_tree>
+            <!-- The pool above has 4 slots: don't hold merges small while
+                 it's busy, and let mutations run. -->
+            <number_of_free_entries_in_pool_to_lower_max_size_of_merge>0</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+            <number_of_free_entries_in_pool_to_execute_mutation>0</number_of_free_entries_in_pool_to_execute_mutation>
+            <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>0</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+        </merge_tree>
+    </clickhouse>
+  users.xml: |
+    <clickhouse>
+        <profiles>
+            <default>
+                <max_threads>2</max_threads>
+                <max_memory_usage>209715200</max_memory_usage>
+                <max_bytes_before_external_group_by>33554432</max_bytes_before_external_group_by>
+                <max_bytes_ratio_before_external_group_by>0.2</max_bytes_ratio_before_external_group_by>
+                <max_bytes_before_external_sort>33554432</max_bytes_before_external_sort>
+                <max_bytes_ratio_before_external_sort>0.2</max_bytes_ratio_before_external_sort>
+                <max_execution_time>30</max_execution_time>
+                <queue_max_wait_ms>20000</queue_max_wait_ms>
+                <log_queries>0</log_queries>
+            </default>
+        </profiles>
+    </clickhouse>
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -415,6 +545,9 @@ spec:
   template:
     metadata:
       labels: { app.kubernetes.io/name: pyo-clickhouse, app.kubernetes.io/part-of: pyo }
+      # Raise with any change to the pyo-clickhouse ConfigMap: ClickHouse
+      # reads it at start, so the pod restarts to pick it up.
+      annotations: { pyo.dev/config: "1" }
     spec:
       containers:
         - name: clickhouse
@@ -429,11 +562,21 @@ spec:
           readinessProbe:
             httpGet: { path: /ping, port: http }
             periodSeconds: 5
+          # One file each, not the directories: the image's entrypoint writes
+          # Pyo's user into users.d.
           volumeMounts:
             - { name: data, mountPath: /var/lib/clickhouse }
+            - { name: config, mountPath: /etc/clickhouse-server/config.d/pyo.xml, subPath: config.xml, readOnly: true }
+            - { name: config, mountPath: /etc/clickhouse-server/users.d/pyo.xml, subPath: users.xml, readOnly: true }
+          # With this config: ~80 MiB idle, ~105 MiB holding a month of a
+          # busy site, ~200-250 MiB at the peak of Analytics pages (measured).
+          # ClickHouse stops at 70% of the limit; the rest is its code.
           resources:
-            requests: { cpu: 50m, memory: 256Mi }
-            limits: { memory: 2Gi }
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: config
+          configMap: { name: pyo-clickhouse }
   volumeClaimTemplates:
     - metadata:
         name: data

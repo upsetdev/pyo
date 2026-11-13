@@ -1174,6 +1174,35 @@ mod tests {
             s3["from"].is_null() && s3["ports"] == json!([{ "port": 3900 }]),
             "only S3 from anywhere"
         );
+        // ClickHouse runs small: its settings file and Pyo's profile are
+        // mounted one file each (the image writes Pyo's user into users.d),
+        // and what it may allocate is a share of the pod's limit, which it
+        // reads as the machine's memory.
+        let ch_config = find("ConfigMap", "pyo-clickhouse")["data"].clone();
+        let server = ch_config["config.xml"].as_str().unwrap();
+        assert!(server.contains("<query_log remove=\"1\"/>"));
+        assert!(
+            server.contains("<max_server_memory_usage>0</max_server_memory_usage>")
+                && server.contains("<max_server_memory_usage_to_ram_ratio>0.7<")
+        );
+        assert!(
+            ch_config["users.xml"]
+                .as_str()
+                .unwrap()
+                .contains("<max_memory_usage>")
+        );
+        let ch = find("StatefulSet", "pyo-clickhouse");
+        let ch_pod = &ch["spec"]["template"]["spec"];
+        let mounts = ch_pod["containers"][0]["volumeMounts"].to_string();
+        assert!(
+            mounts.contains("/etc/clickhouse-server/config.d/pyo.xml")
+                && mounts.contains("/etc/clickhouse-server/users.d/pyo.xml")
+        );
+        assert_eq!(ch_pod["volumes"][0]["configMap"]["name"], "pyo-clickhouse");
+        assert!(
+            ch_pod["containers"][0]["resources"]["limits"]["memory"].is_string(),
+            "the ratio needs a limit"
+        );
         // Every object is one the upgrader applies (agent upgrade.rs KINDS).
         for d in &docs {
             let k = d["kind"].as_str().unwrap();
