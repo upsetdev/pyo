@@ -143,7 +143,7 @@ pub async fn run(agent: &Agent, spec: DeploySpec) -> CommandResult {
 
     let (status, failure, mut logs) = match result {
         Ok(Outcome::Ready { revision }) => {
-            remove_old_env(agent, &spec).await;
+            remove_old_env(agent, &spec);
             let msg = match &spec.autoscale {
                 _ if spec.service.workload_kind == "CronJob" => {
                     format!("{} is scheduled: {} UTC", spec.service.name, spec.schedule)
@@ -235,7 +235,7 @@ async fn roll_back(agent: &Agent, prev: &DeploySpec, r: &mut Reporter<'_>) -> bo
     };
     match outcome {
         Ok(Outcome::Ready { .. }) => {
-            remove_old_env(agent, prev).await;
+            remove_old_env(agent, prev);
             r.log(
                 "info",
                 &format!(
@@ -282,25 +282,80 @@ fn env_secret(spec: &DeploySpec) -> String {
 }
 
 /// After a rollout settles, only the live deployment's Secret is needed
-/// (older ones come back with their deployment's spec on a rollback).
-async fn remove_old_env(agent: &Agent, spec: &DeploySpec) {
-    let secrets = Api::<Secret>::namespaced(agent.kube.clone(), &spec.service.namespace);
+/// (older ones come back with their deployment's spec on a rollback). One a
+/// pod still reads (an old replica that's still stopping, a cron run) stays
+/// until that pod is gone, so no pod finds its Secret missing: watched in
+/// the background for up to 10 minutes, or until the service deploys again
+/// (that rollout removes what's left).
+fn remove_old_env(agent: &Agent, spec: &DeploySpec) {
+    let client = agent.kube.clone();
+    let deploying = agent.deploying.clone();
+    let ns = spec.service.namespace.clone();
+    let service_id = spec.service.service_id.clone();
     let keep = env_secret(spec);
     let prefix = format!("{}-env-", spec.service.name);
-    let Ok(list) = secrets
-        .list(
-            &ListParams::default().labels(&format!("{SERVICE_LABEL}={}", spec.service.service_id)),
-        )
-        .await
-    else {
-        return;
-    };
-    for s in list.items {
-        let name = s.name_any();
-        if name != keep && name.starts_with(&prefix) {
-            let _ = delete_if_exists(&secrets, &name).await;
+    tokio::spawn(async move {
+        let secrets = Api::<Secret>::namespaced(client.clone(), &ns);
+        let pods = Api::<Pod>::namespaced(client, &ns);
+        let lp = ListParams::default().labels(&format!("{SERVICE_LABEL}={service_id}"));
+        // Only the ones there now: a later rollout's are its own.
+        let Ok(list) = secrets.list(&lp).await else {
+            return;
+        };
+        let mut old: Vec<String> = list
+            .items
+            .iter()
+            .map(|s| s.name_any())
+            .filter(|n| *n != keep && n.starts_with(&prefix))
+            .collect();
+        let until = tokio::time::Instant::now() + Duration::from_secs(600);
+        for round in 0.. {
+            if old.is_empty()
+                || tokio::time::Instant::now() > until
+                || (round > 0 && deploying.contains(&service_id))
+            {
+                return;
+            }
+            let Ok(running) = pods.list(&lp).await else {
+                return;
+            };
+            let used = secrets_used(&running.items);
+            for name in old.iter().filter(|n| !used.contains(*n)) {
+                let _ = delete_if_exists(&secrets, name).await;
+            }
+            old.retain(|n| used.contains(n));
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+}
+
+/// The Secrets the pods (not yet gone) read their environment from.
+fn secrets_used(pods: &[Pod]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for p in pods {
+        let Some(spec) = &p.spec else { continue };
+        for c in spec
+            .containers
+            .iter()
+            .chain(spec.init_containers.iter().flatten())
+        {
+            for f in c.env_from.iter().flatten() {
+                if let Some(r) = &f.secret_ref {
+                    out.insert(r.name.clone());
+                }
+            }
+            for e in c.env.iter().flatten() {
+                if let Some(r) = e
+                    .value_from
+                    .as_ref()
+                    .and_then(|v| v.secret_key_ref.as_ref())
+                {
+                    out.insert(r.name.clone());
+                }
+            }
         }
     }
+    out
 }
 
 fn labels(spec: &DeploySpec) -> Value {
@@ -1884,6 +1939,29 @@ fn scheduling_reason(what: &str) -> String {
         None => what
             .replace("node(s)", "server(s)")
             .replace("Pod's node", "Pod's server"),
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    #[test]
+    fn a_stopping_pods_secret_is_still_in_use() {
+        let pod: Pod = serde_json::from_value(json!({
+            "metadata": { "name": "web-1", "deletionTimestamp": "2026-11-13T00:00:00Z" },
+            "spec": {
+                "containers": [{ "name": "app", "envFrom": [{ "secretRef": { "name": "web-env-dpl-old" } }],
+                    "env": [{ "name": "K", "valueFrom": { "secretKeyRef": { "name": "web-keys", "key": "k" } } }] }],
+                "initContainers": [{ "name": "init", "envFrom": [{ "secretRef": { "name": "web-env-dpl-init" } }] }],
+            },
+        }))
+        .unwrap();
+        let used = secrets_used(&[pod]);
+        for name in ["web-env-dpl-old", "web-keys", "web-env-dpl-init"] {
+            assert!(used.contains(name), "{name}");
+        }
+        assert!(!used.contains("web-env-dpl-new"));
     }
 }
 
