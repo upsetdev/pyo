@@ -144,35 +144,43 @@ pub async fn refresh(client: &Client, p: &InstallParts) -> anyhow::Result<()> {
     let mut replaced: Vec<(Api<DynamicObject>, DynamicObject)> = vec![];
     for o in &p.admission {
         let (api, name) = api_for(client, o);
-        let Some(old) = api.get_opt(&name).await? else {
-            anyhow::bail!("this cluster has no admission policy for the agent; {RERUN}")
-        };
-        let stamp = |d: &DynamicObject| d.annotations().get(rbac::INSTALL_ANNOTATION).cloned();
-        let old_value = serde_json::to_value(&old)?;
-        if same(o, &old_value)
-            && stamp(&old).as_deref()
-                == o["metadata"]["annotations"][rbac::INSTALL_ANNOTATION].as_str()
-        {
-            continue;
-        }
-        let mut new: DynamicObject = serde_json::from_value(o.clone())?;
-        new.metadata.resource_version = old.resource_version();
-        // Other labels and annotations stay (kubectl's own, say).
-        let mut labels = old.labels().clone();
-        labels.extend(new.labels().clone());
-        new.metadata.labels = Some(labels);
-        let mut annotations = old.annotations().clone();
-        annotations.extend(new.annotations().clone());
-        new.metadata.annotations = Some(annotations);
-        api.replace(&name, &PostParams::default(), &new)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
+        // Changed under it (another process of this agent, on its way out,
+        // making the same refresh): read it again.
+        for attempt in 1.. {
+            let Some(old) = api.get_opt(&name).await? else {
+                anyhow::bail!("this cluster has no admission policy for the agent; {RERUN}")
+            };
+            let stamp = |d: &DynamicObject| d.annotations().get(rbac::INSTALL_ANNOTATION).cloned();
+            let old_value = serde_json::to_value(&old)?;
+            if same(o, &old_value)
+                && stamp(&old).as_deref()
+                    == o["metadata"]["annotations"][rbac::INSTALL_ANNOTATION].as_str()
+            {
+                break;
+            }
+            let mut new: DynamicObject = serde_json::from_value(o.clone())?;
+            new.metadata.resource_version = old.resource_version();
+            // Other labels and annotations stay (kubectl's own, say).
+            let mut labels = old.labels().clone();
+            labels.extend(new.labels().clone());
+            new.metadata.labels = Some(labels);
+            let mut annotations = old.annotations().clone();
+            annotations.extend(new.annotations().clone());
+            new.metadata.annotations = Some(annotations);
+            match api.replace(&name, &PostParams::default(), &new).await {
+                Ok(_) => {
+                    replaced.push((api, old));
+                    break;
+                }
+                Err(kube::Error::Api(e)) if e.code == 409 && attempt < 3 => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => anyhow::bail!(
                     "couldn't update {} {name}: {e}",
                     o["kind"].as_str().unwrap_or("")
-                )
-            })?;
-        replaced.push((api, old));
+                ),
+            }
+        }
     }
     if !replaced.is_empty() {
         // The API server takes a moment to enforce it.
