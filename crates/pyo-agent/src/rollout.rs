@@ -1592,17 +1592,25 @@ async fn watch_rollout(
                             "InvalidImageName" => {
                                 format!("{} isn't a valid image reference.", spec.image)
                             }
-                            "CrashLoopBackOff" => format!(
-                                "The container keeps exiting (restarted {} times). See its last output below.",
-                                cs.restart_count
-                            ),
+                            "CrashLoopBackOff" => match crate::room::out_of_memory(p) {
+                                Some(oom) => oom,
+                                None => format!(
+                                    "The container keeps exiting (restarted {} times). See its last output below.",
+                                    cs.restart_count
+                                ),
+                            },
                             _ => w.message.clone().unwrap_or_else(|| reason.clone()),
+                        };
+                        let reason = if crashing && crate::room::out_of_memory(p).is_some() {
+                            "OOMKilled".to_owned()
+                        } else {
+                            reason
                         };
                         r.stage(stage, "").await;
                         return Ok(Outcome::Failed {
                             failure: Failure {
                                 stage: stage.into(),
-                                reason: reason.clone(),
+                                reason,
                                 message,
                             },
                             logs,
@@ -1624,12 +1632,25 @@ async fn watch_rollout(
                 if let Some(raw) = &c.message {
                     tracing::info!(deployment = %spec.deployment_id, message = %raw, "unschedulable");
                 }
-                let message = c
+                let scheduler = c
                     .message
                     .as_deref()
                     .map(scheduling_message)
                     .unwrap_or_else(|| "No server has room to run it.".into());
-                let logs = vec![line("error", &message)];
+                // Short of memory or CPU: in figures, what it needs, what's
+                // free and what takes the room.
+                let figures = match &c.message {
+                    Some(raw) => crate::room::no_room(&agent.kube, p, raw).await,
+                    None => None,
+                };
+                let mut logs = vec![line("error", &scheduler)];
+                let message = match figures {
+                    Some(f) => {
+                        logs.push(line("error", &f));
+                        f
+                    }
+                    None => scheduler,
+                };
                 return Ok(Outcome::Failed {
                     failure: Failure {
                         stage: "scheduling".into(),
@@ -1708,6 +1729,17 @@ async fn watch_rollout(
             let message = format!(
                 "The container runs, but its health check ({what}) keeps failing. Check the service's port and health check settings."
             );
+            // Restarted for running out of memory: that's why.
+            if let Some(oom) = pods.iter().find_map(crate::room::out_of_memory) {
+                return Ok(Outcome::Failed {
+                    failure: Failure {
+                        stage: "waiting_ready".into(),
+                        reason: "OOMKilled".into(),
+                        message: oom,
+                    },
+                    logs: vec![line("error", msg)],
+                });
+            }
             return Ok(Outcome::Failed {
                 failure: Failure {
                     stage: "waiting_ready".into(),
@@ -1724,6 +1756,16 @@ async fn watch_rollout(
                 spec.timeout_seconds
             );
             let logs = vec![line("error", &message)];
+            if let Some(oom) = pods.iter().find_map(crate::room::out_of_memory) {
+                return Ok(Outcome::Failed {
+                    failure: Failure {
+                        stage: r.stage.clone(),
+                        reason: "OOMKilled".into(),
+                        message: oom,
+                    },
+                    logs,
+                });
+            }
             return Ok(Outcome::Failed {
                 failure: Failure {
                     stage: r.stage.clone(),
