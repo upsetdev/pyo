@@ -63,6 +63,8 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::github::repos,
         crate::github::build_file,
         crate::compose::preview,
+        crate::platform_import::preview,
+        crate::platform_import::apply,
     ),
     components(schemas(ErrorBody, Op)),
     modifiers(&ApiKey),

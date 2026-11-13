@@ -1,0 +1,206 @@
+{
+  "/projects": [
+    { "id": 1, "uuid": "p1shop", "name": "Shop", "description": "The web shop" }
+  ],
+  "/projects/p1shop/environments": [
+    { "id": 1, "name": "production", "uuid": "e1prod" },
+    { "id": 2, "name": "staging", "uuid": "e2stage" }
+  ],
+  "/projects/p1shop/e1prod": {
+    "id": 1,
+    "name": "production",
+    "project_id": 1,
+    "description": null,
+    "created_at": "2026-01-02T10:00:00.000000Z",
+    "updated_at": "2026-01-02T10:00:00.000000Z",
+    "applications": [
+      {
+        "uuid": "a1web",
+        "name": "web",
+        "description": null,
+        "build_pack": "nixpacks",
+        "git_repository": "acme/shop",
+        "git_branch": "main",
+        "base_directory": "/",
+        "dockerfile_location": null,
+        "dockerfile": null,
+        "docker_registry_image_name": null,
+        "docker_registry_image_tag": null,
+        "ports_exposes": "3000",
+        "ports_mappings": null,
+        "fqdn": "https://shop.example.com,https://www.shop.example.com,http://a1web.203.0.113.7.sslip.io",
+        "health_check_enabled": true,
+        "health_check_path": "/health",
+        "health_check_port": null,
+        "limits_memory": "1g",
+        "limits_cpus": "0",
+        "install_command": null,
+        "build_command": null,
+        "start_command": null,
+        "environment_id": 1,
+        "status": "running:healthy"
+      },
+      {
+        "uuid": "a2api",
+        "name": "api",
+        "description": null,
+        "build_pack": "dockerfile",
+        "git_repository": "https://gitlab.com/acme/api.git",
+        "git_branch": "release",
+        "base_directory": "/backend",
+        "dockerfile_location": "/Dockerfile.prod",
+        "dockerfile": null,
+        "ports_exposes": "8080,9090",
+        "ports_mappings": "5000:5000,22:2222",
+        "fqdn": "https://api.example.com:8080/v1",
+        "health_check_enabled": false,
+        "health_check_path": "/",
+        "health_check_port": null,
+        "limits_memory": "0",
+        "limits_cpus": "1.5",
+        "start_command": "node server.js",
+        "environment_id": 1,
+        "status": "running:healthy"
+      },
+      {
+        "uuid": "a3img",
+        "name": "Admin Panel",
+        "build_pack": "dockerimage",
+        "git_repository": "coollabsio/coolify",
+        "git_branch": "v4.x",
+        "docker_registry_image_name": "ghcr.io/acme/admin",
+        "docker_registry_image_tag": "1.4.2",
+        "ports_exposes": "80",
+        "fqdn": "https://admin.example.com",
+        "health_check_enabled": false,
+        "environment_id": 1,
+        "status": "exited:unhealthy"
+      },
+      {
+        "uuid": "a4paste",
+        "name": "pasted",
+        "build_pack": "dockerfile",
+        "git_repository": "coollabsio/coolify",
+        "git_branch": "v4.x",
+        "dockerfile": "FROM nginx:alpine\n",
+        "ports_exposes": "80",
+        "fqdn": null,
+        "environment_id": 1,
+        "status": "running:healthy"
+      }
+    ],
+    "services": [
+      {
+        "uuid": "s1umami",
+        "name": "umami",
+        "description": null,
+        "service_type": "umami",
+        "docker_compose_raw": "services:\n  umami:\n    image: ghcr.io/umami-software/umami:postgresql-latest\n    environment:\n      - SERVICE_FQDN_UMAMI_3000\n      - DATABASE_URL=postgres://${SERVICE_USER_POSTGRES}:${SERVICE_PASSWORD_POSTGRES}@postgresql:5432/umami\n      - APP_SECRET=${SERVICE_PASSWORD_64_UMAMI}\n    depends_on:\n      - postgresql\n  postgresql:\n    image: postgres:16-alpine\n    volumes:\n      - umami-postgresql-data:/var/lib/postgresql/data\n    environment:\n      - POSTGRES_USER=${SERVICE_USER_POSTGRES}\n      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}\n      - POSTGRES_DB=umami\n",
+        "environment_id": 1
+      }
+    ],
+    "postgresqls": [
+      {
+        "uuid": "d1pg",
+        "name": "shop-db",
+        "image": "postgres:17-alpine",
+        "is_public": true,
+        "public_port": 5433,
+        "internal_db_url": "postgres://postgres:s3cret@d1pg:5432/postgres",
+        "external_db_url": "postgres://postgres:s3cret@203.0.113.7:5433/postgres",
+        "environment_id": 1
+      }
+    ],
+    "mysqls": [
+      {
+        "uuid": "d2my",
+        "name": "legacy",
+        "image": "mysql:8",
+        "is_public": false,
+        "public_port": null,
+        "internal_db_url": "mysql://mysql:pw@d2my:3306/default",
+        "external_db_url": null,
+        "environment_id": 1
+      }
+    ],
+    "mariadbs": [],
+    "mongodbs": [
+      { "uuid": "d3mongo", "name": "events", "image": "mongo:7", "is_public": false, "environment_id": 1 }
+    ],
+    "redis": [
+      { "uuid": "d4redis", "name": "cache", "image": "redis:7.2", "is_public": false, "environment_id": 1 }
+    ]
+  },
+  "/projects/p1shop/e2stage": {
+    "id": 2,
+    "name": "staging",
+    "project_id": 1,
+    "applications": [
+      {
+        "uuid": "a5stage",
+        "name": "web",
+        "build_pack": "railpack",
+        "git_repository": "git@github.com:acme/shop.git",
+        "git_branch": "staging",
+        "base_directory": "",
+        "ports_exposes": "3000",
+        "fqdn": "https://shop.example.com,https://staging.shop.example.com",
+        "health_check_enabled": false,
+        "private_key_id": 3,
+        "environment_id": 2
+      }
+    ],
+    "services": [],
+    "postgresqls": [],
+    "mysqls": [],
+    "mariadbs": [],
+    "mongodbs": [],
+    "redis": []
+  },
+  "/applications/a1web/envs": [
+    { "uuid": "v1", "key": "NODE_ENV", "value": "production", "real_value": "production", "is_preview": false, "is_runtime": true, "is_buildtime": true, "is_shown_once": false, "is_literal": false, "is_multiline": false, "is_shared": false },
+    { "uuid": "v2", "key": "DATABASE_URL", "value": "postgres://postgres:s3cret@d1pg:5432/postgres", "real_value": "postgres://postgres:s3cret@d1pg:5432/postgres", "is_preview": false, "is_runtime": true, "is_buildtime": false, "is_shown_once": false },
+    { "uuid": "v3", "key": "STRIPE_KEY", "is_preview": false, "is_runtime": true, "is_buildtime": false, "is_shown_once": true },
+    { "uuid": "v4", "key": "NEXT_PUBLIC_SITE", "value": "{{project.SITE}}", "real_value": "https://shop.example.com", "is_preview": false, "is_runtime": false, "is_buildtime": true, "is_shown_once": false },
+    { "uuid": "v5", "key": "NODE_ENV", "value": "development", "real_value": "development", "is_preview": true, "is_runtime": true, "is_buildtime": true, "is_shown_once": false }
+  ],
+  "/applications/a1web/storages": {
+    "persistent_storages": [
+      { "id": 1, "name": "a1web-uploads", "mount_path": "/app/uploads", "host_path": null },
+      { "id": 2, "name": "a1web-host", "mount_path": "/data", "host_path": "/srv/shop/data" }
+    ],
+    "file_storages": [
+      { "id": 3, "fs_path": "/data/coolify/applications/a1web/robots.txt", "mount_path": "/app/public/robots.txt", "is_directory": false }
+    ]
+  },
+  "/applications/a2api/envs": [
+    { "uuid": "v6", "key": "API_TOKEN", "value": "t0k", "real_value": "t0k", "is_preview": false, "is_runtime": true, "is_buildtime": false, "is_shown_once": false },
+    { "uuid": "v7", "key": "LOG_LEVEL", "value": "info", "real_value": "info", "is_preview": false, "is_runtime": true, "is_buildtime": false, "is_shown_once": false }
+  ],
+  "/applications/a2api/storages": { "persistent_storages": [], "file_storages": [] },
+  "/applications/a3img/envs": [],
+  "/applications/a3img/storages": { "persistent_storages": [], "file_storages": [] },
+  "/applications/a4paste/envs": [],
+  "/applications/a4paste/storages": { "persistent_storages": [], "file_storages": [] },
+  "/applications/a5stage/envs": [
+    { "uuid": "v8", "key": "SESSION_SECRET", "is_preview": false, "is_runtime": true, "is_buildtime": false, "is_shown_once": false }
+  ],
+  "/applications/a5stage/storages": { "persistent_storages": [], "file_storages": [] },
+  "/services/s1umami/envs": [
+    { "uuid": "v9", "key": "SERVICE_USER_POSTGRES", "value": "umami", "real_value": "umami", "is_preview": false, "is_runtime": true, "is_buildtime": false, "is_shown_once": false },
+    { "uuid": "v10", "key": "SERVICE_PASSWORD_POSTGRES", "value": "pgpass", "real_value": "pgpass", "is_preview": false, "is_runtime": true, "is_buildtime": false, "is_shown_once": false },
+    { "uuid": "v11", "key": "SERVICE_PASSWORD_64_UMAMI", "value": "appsecret", "real_value": "appsecret", "is_preview": false, "is_runtime": true, "is_buildtime": false, "is_shown_once": false },
+    { "uuid": "v12", "key": "SERVICE_FQDN_UMAMI_3000", "value": "https://stats.example.com:3000", "real_value": "https://stats.example.com:3000", "is_preview": false, "is_runtime": true, "is_buildtime": false, "is_shown_once": false }
+  ],
+  "/services/s1umami/applications": [
+    { "uuid": "sa1", "name": "umami", "human_name": null, "fqdn": "https://stats.example.com:3000", "image": "ghcr.io/umami-software/umami:postgresql-latest", "status": "running:healthy" }
+  ],
+  "/databases": [
+    { "uuid": "d1pg", "name": "shop-db", "database_type": "standalone-postgresql", "environment_id": 1 },
+    { "uuid": "d2my", "name": "legacy", "database_type": "standalone-mysql", "environment_id": 1 },
+    { "uuid": "d3mongo", "name": "events", "database_type": "standalone-mongodb", "environment_id": 1 },
+    { "uuid": "d4redis", "name": "cache", "database_type": "standalone-redis", "environment_id": 1 },
+    { "uuid": "d5kdb", "name": "queue", "database_type": "standalone-keydb", "image": "eqalpha/keydb:latest", "is_public": false, "environment_id": 2 },
+    { "uuid": "d6ch", "name": "analytics", "database_type": "standalone-clickhouse", "environment_id": 99 }
+  ]
+}

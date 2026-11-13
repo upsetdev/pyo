@@ -28,35 +28,7 @@ pub async fn deploy(
         .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_default();
 
-    let state = api.state().await?;
-    let teams = state.teams();
-    let team = match team {
-        Some(t) => teams
-            .iter()
-            .find(|x| x["slug"] == json!(t) || x["id"] == json!(t))
-            .with_context(|| format!("No team {t} among yours"))?,
-        None => teams.first().context("You aren't in any team")?,
-    };
-    let team_id = team["id"].as_str().unwrap_or("").to_owned();
-    let clusters: Vec<&Value> = state.0["clusters"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|c| c["teamId"] == json!(team_id))
-        .collect();
-    let cluster_id = match cluster {
-        Some(c) => clusters
-            .iter()
-            .find(|x| x["name"] == json!(c) || x["id"] == json!(c))
-            .and_then(|x| x["id"].as_str())
-            .with_context(|| format!("No cluster {c} in this team"))?
-            .to_owned(),
-        None => team["defaultClusterId"]
-            .as_str()
-            .or_else(|| clusters.first().and_then(|c| c["id"].as_str()))
-            .context("This team has no cluster to deploy to. Add a server first.")?
-            .to_owned(),
-    };
+    let (team_id, cluster_id) = team_and_cluster(api, team, cluster).await?;
 
     let plan = api
         .post("/api/v1/compose/preview", &json!({ "teamId": team_id, "file": text, "env": env, "clusterId": cluster_id, "name": name }))
@@ -97,6 +69,45 @@ pub async fn deploy(
         api.base
     ));
     Ok(())
+}
+
+/// The team (slug or id, else the first) and its cluster (name or id, else
+/// the team's default) an import goes to.
+pub async fn team_and_cluster(
+    api: &Api,
+    team: Option<&str>,
+    cluster: Option<&str>,
+) -> Result<(String, String)> {
+    let state = api.state().await?;
+    let teams = state.teams();
+    let team = match team {
+        Some(t) => teams
+            .iter()
+            .find(|x| x["slug"] == json!(t) || x["id"] == json!(t))
+            .with_context(|| format!("No team {t} among yours"))?,
+        None => teams.first().context("You aren't in any team")?,
+    };
+    let team_id = team["id"].as_str().unwrap_or("").to_owned();
+    let clusters: Vec<&Value> = state.0["clusters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["teamId"] == json!(team_id))
+        .collect();
+    let cluster_id = match cluster {
+        Some(c) => clusters
+            .iter()
+            .find(|x| x["name"] == json!(c) || x["id"] == json!(c))
+            .and_then(|x| x["id"].as_str())
+            .with_context(|| format!("No cluster {c} in this team"))?
+            .to_owned(),
+        None => team["defaultClusterId"]
+            .as_str()
+            .or_else(|| clusters.first().and_then(|c| c["id"].as_str()))
+            .context("This team has no cluster to deploy to. Add a server first.")?
+            .to_owned(),
+    };
+    Ok((team_id, cluster_id))
 }
 
 fn print_plan(plan: &Value) {

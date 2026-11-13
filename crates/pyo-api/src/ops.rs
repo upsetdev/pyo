@@ -935,7 +935,7 @@ async fn github_source_ok(
 
 /// Project namespaces and service names that would shadow a dashboard page in
 /// /<project>/<service> URLs (kept in step with dash/src/lib/pyo/paths.ts).
-const RESERVED_PROJECT_SLUGS: &[&str] = &[
+pub(crate) const RESERVED_PROJECT_SLUGS: &[&str] = &[
     "activity",
     "analytics",
     "api-keys",
@@ -950,6 +950,7 @@ const RESERVED_PROJECT_SLUGS: &[&str] = &[
     "deployments",
     "domains",
     "images",
+    "import",
     "integrations",
     "kv",
     "mcp",
@@ -1148,7 +1149,7 @@ fn validate_service_spec(spec: &Value) -> ApiResult<()> {
 /// A public TCP or UDP port's settings: its number, and what the gateway
 /// does for it (nothing of that for a port that bypasses the gateway, and
 /// only the gateway itself for UDP).
-fn validate_public_port(p: &Value) -> ApiResult<()> {
+pub(crate) fn validate_public_port(p: &Value) -> ApiResult<()> {
     let Some(port) = deploy::port_spec(p) else {
         return Ok(());
     };
@@ -3964,20 +3965,7 @@ async fn apply(
                         },
                         40,
                     );
-                    let mut namespace = base.clone();
-                    let mut n = 2;
-                    loop {
-                        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pyo.projects WHERE team_id = $1 AND namespace = $2)").bind(&team_id).bind(&namespace).fetch_one(&mut **tx).await?;
-                        let reserved = namespace.starts_with("kube-")
-                            || namespace == "default"
-                            || namespace == "pyo-system"
-                            || RESERVED_PROJECT_SLUGS.contains(&namespace.as_str());
-                        if !taken && !reserved {
-                            break;
-                        }
-                        namespace = format!("{base}-{n}");
-                        n += 1;
-                    }
+                    let namespace = free_namespace(tx, &team_id, &base).await?;
                     let id = new_id("prj");
                     let name = if plan.project.name.trim().is_empty() {
                         namespace.clone()
@@ -4013,7 +4001,16 @@ async fn apply(
                     &new_id,
                 );
                 let volumes = crate::compose::volume_specs(svc, &new_id);
-                create_service(tx, user, service, &deployment_id, volumes, vec![], wake).await?;
+                create_service(
+                    tx,
+                    user,
+                    service,
+                    Some(&deployment_id),
+                    volumes,
+                    vec![],
+                    wake,
+                )
+                .await?;
                 made.push(json!({ "name": svc.name, "id": id, "deploymentId": deployment_id }));
             }
             Ok(json!({ "ok": true, "projectId": project_id, "services": made }))
@@ -4202,7 +4199,16 @@ async fn apply(
             volumes,
             databases,
         } => {
-            create_service(tx, user, service, &deployment_id, volumes, databases, wake).await?;
+            create_service(
+                tx,
+                user,
+                service,
+                Some(&deployment_id),
+                volumes,
+                databases,
+                wake,
+            )
+            .await?;
             Ok(ok)
         }
         Op::SaveService {
@@ -6897,7 +6903,7 @@ pub(crate) async fn firewall_me(
 }
 
 /// A new project (createProject, and a Compose import's project).
-async fn create_project(
+pub(crate) async fn create_project(
     tx: &mut Transaction<'_, Postgres>,
     user: &User,
     id: &str,
@@ -6941,13 +6947,43 @@ async fn create_project(
     Ok(())
 }
 
+/// A project slug nobody in the team has, from `base`: `base`, else
+/// `base-2`, `base-3`… (Compose and platform imports).
+pub(crate) async fn free_namespace(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    base: &str,
+) -> ApiResult<String> {
+    let mut namespace = base.to_owned();
+    let mut n = 2;
+    loop {
+        let taken: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pyo.projects WHERE team_id = $1 AND namespace = $2)",
+        )
+        .bind(team_id)
+        .bind(&namespace)
+        .fetch_one(&mut **tx)
+        .await?;
+        let reserved = namespace.starts_with("kube-")
+            || namespace == "default"
+            || namespace == "pyo-system"
+            || RESERVED_PROJECT_SLUGS.contains(&namespace.as_str());
+        if !taken && !reserved {
+            return Ok(namespace);
+        }
+        namespace = format!("{base}-{n}");
+        n += 1;
+    }
+}
+
 /// A new service and its first deployment (createService, and each of a
-/// Compose import's services).
-async fn create_service(
+/// Compose import's services). Without a deployment id it's only saved,
+/// stopped, until it's deployed (a platform import that doesn't deploy).
+pub(crate) async fn create_service(
     tx: &mut Transaction<'_, Postgres>,
     user: &User,
     service: Value,
-    deployment_id: &str,
+    deployment_id: Option<&str>,
     volumes: Vec<Value>,
     databases: Vec<ServiceDatabase>,
     wake: &mut Vec<String>,
@@ -6956,7 +6992,9 @@ async fn create_service(
     if !crate::ids::valid_client_id(&id, "svc") {
         return Err(ApiError::bad_request("Invalid service id."));
     }
-    client_id(deployment_id, "dpl")?;
+    if let Some(d) = deployment_id {
+        client_id(d, "dpl")?;
+    }
     let project_id = service["projectId"].as_str().unwrap_or("").to_owned();
     let cluster_id = service["clusterId"].as_str().unwrap_or("").to_owned();
     let team_id = team_of(tx, "projects", &project_id).await?;
@@ -6991,13 +7029,14 @@ async fn create_service(
         return Err(ApiError::conflict(name_taken_message(&name, deleting)));
     }
     crate::vault::get().seal_env(&team_id, &mut spec).await?;
-    sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, $5, $6)")
+    sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, $5, $6, $7)")
         .bind(&id)
         .bind(&team_id)
         .bind(&project_id)
         .bind(&cluster_id)
         .bind(&name)
         .bind(&spec)
+        .bind(if deployment_id.is_some() { "deploying" } else { "stopped" })
         .execute(&mut **tx)
         .await?;
 
@@ -7051,6 +7090,9 @@ async fn create_service(
     for db in databases {
         crate::databases::connect(tx, user, &db.id, &id, db.env).await?;
     }
+    let Some(deployment_id) = deployment_id else {
+        return Ok(());
+    };
     let c = deploy::create(
         tx,
         DeployRequest {

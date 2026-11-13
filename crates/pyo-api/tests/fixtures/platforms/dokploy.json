@@ -1,0 +1,196 @@
+{
+  "/project.all": [
+    {
+      "projectId": "prjBlog01",
+      "name": "Blog",
+      "description": "",
+      "createdAt": "2026-03-01T09:00:00.000Z",
+      "organizationId": "org1",
+      "env": "SITE_URL=https://blog.example.com\nSHARED_TOKEN=abc123",
+      "environments": [
+        {
+          "environmentId": "envProd01",
+          "name": "production",
+          "isDefault": true,
+          "applications": [
+            { "applicationId": "appGh01", "name": "frontend", "applicationStatus": "done" },
+            { "applicationId": "appImg01", "name": "worker", "applicationStatus": "done" },
+            { "applicationId": "appDrop01", "name": "legacy", "applicationStatus": "idle" }
+          ],
+          "compose": [
+            { "composeId": "cmpRaw01", "name": "ghost", "composeStatus": "done" },
+            { "composeId": "cmpGit01", "name": "monitoring", "composeStatus": "done" }
+          ],
+          "postgres": [ { "postgresId": "pgMain01", "name": "blog-db" } ],
+          "mysql": [ { "mysqlId": "myOld01", "name": "wp-db" } ],
+          "mariadb": [ { "mariadbId": "maria01", "name": "forum-db" } ],
+          "mongo": [],
+          "redis": [ { "redisId": "redis01", "name": "sessions" } ],
+          "libsql": []
+        }
+      ],
+      "projectTags": []
+    }
+  ],
+  "/environment.one?environmentId=envProd01": {
+    "environmentId": "envProd01",
+    "name": "production",
+    "description": null,
+    "env": "API_BASE=https://api.blog.example.com",
+    "isDefault": true,
+    "projectId": "prjBlog01"
+  },
+  "/application.one?applicationId=appGh01": {
+    "applicationId": "appGh01",
+    "name": "frontend",
+    "appName": "blog-frontend-x1y2z3",
+    "description": null,
+    "env": "SITE_URL=${{project.SITE_URL}}\nAPI_BASE=${{environment.API_BASE}}\nNEXTAUTH_SECRET=s3cr3t\nDATABASE_URL=postgres://blog:pw@blog-db-a1b2c3:5432/blog\nMISSING=${{project.NOPE}}",
+    "buildArgs": "NEXT_PUBLIC_SITE=${{project.SITE_URL}}",
+    "buildSecrets": null,
+    "sourceType": "github",
+    "repository": "blog-web",
+    "owner": "acme",
+    "branch": "main",
+    "buildPath": "/apps/web",
+    "buildType": "nixpacks",
+    "dockerfile": "Dockerfile",
+    "dockerContextPath": null,
+    "dockerImage": null,
+    "registryUrl": null,
+    "username": null,
+    "command": null,
+    "replicas": 2,
+    "customGitSSHKeyId": null,
+    "environmentId": "envProd01",
+    "domains": [
+      { "domainId": "d1", "host": "blog.example.com", "https": true, "port": 3000, "path": "/", "serviceName": null, "domainType": "application", "certificateType": "letsencrypt", "enabled": true },
+      { "domainId": "d2", "host": "blog-frontend-x1y2z3-1-2-3-4.traefik.me", "https": false, "port": 3000, "path": "/", "domainType": "application", "certificateType": "none", "enabled": true },
+      { "domainId": "d3", "host": "pr-12.blog.example.com", "https": true, "port": 3000, "path": "/", "domainType": "preview", "certificateType": "none", "enabled": true }
+    ],
+    "mounts": [
+      { "mountId": "m1", "type": "volume", "volumeName": "blog-media", "hostPath": null, "filePath": null, "content": null, "mountPath": "/app/media", "serviceType": "application" },
+      { "mountId": "m2", "type": "file", "volumeName": null, "hostPath": null, "filePath": "config.json", "content": "{}", "mountPath": "/app/config.json", "serviceType": "application" }
+    ],
+    "ports": [],
+    "gitlab": null,
+    "gitea": null,
+    "server": null
+  },
+  "/application.one?applicationId=appImg01": {
+    "applicationId": "appImg01",
+    "name": "worker",
+    "appName": "blog-worker-q9w8e7",
+    "env": "QUEUE=default",
+    "buildArgs": null,
+    "sourceType": "docker",
+    "dockerImage": "registry.example.com/acme/worker:2.1",
+    "registryUrl": "registry.example.com",
+    "username": "robot",
+    "buildType": "nixpacks",
+    "replicas": 1,
+    "environmentId": "envProd01",
+    "domains": [],
+    "mounts": [
+      { "mountId": "m3", "type": "bind", "hostPath": "/srv/worker", "volumeName": null, "mountPath": "/var/lib/worker", "serviceType": "application" }
+    ],
+    "ports": [
+      { "portId": "pt1", "publishedPort": 2525, "targetPort": 25, "protocol": "tcp", "publishMode": "host" }
+    ],
+    "server": null
+  },
+  "/application.one?applicationId=appDrop01": {
+    "applicationId": "appDrop01",
+    "name": "legacy",
+    "appName": "blog-legacy-0o9i8u",
+    "env": null,
+    "sourceType": "drop",
+    "buildType": "dockerfile",
+    "dockerfile": "Dockerfile",
+    "replicas": 1,
+    "environmentId": "envProd01",
+    "domains": [],
+    "mounts": [],
+    "ports": [],
+    "server": null
+  },
+  "/compose.one?composeId=cmpRaw01": {
+    "composeId": "cmpRaw01",
+    "name": "ghost",
+    "appName": "blog-ghost-p0o9i8",
+    "env": "GHOST_DB_PASSWORD=ghostpw\nGHOST_URL=${{project.SITE_URL}}",
+    "composeFile": "services:\n  ghost:\n    image: ghost:5-alpine\n    environment:\n      url: ${GHOST_URL}\n      database__connection__password: ${GHOST_DB_PASSWORD}\n    ports:\n      - 2368\n  db:\n    image: mysql:8\n    environment:\n      MYSQL_ROOT_PASSWORD: ${GHOST_DB_PASSWORD}\n    volumes:\n      - ghost-db:/var/lib/mysql\nvolumes:\n  ghost-db: {}\n",
+    "sourceType": "raw",
+    "composeType": "docker-compose",
+    "composePath": "./docker-compose.yml",
+    "environmentId": "envProd01",
+    "domains": [
+      { "domainId": "d4", "host": "ghost.example.com", "https": true, "port": 2368, "path": "/", "serviceName": "ghost", "domainType": "compose", "enabled": true },
+      { "domainId": "d5", "host": "old.example.com", "https": true, "port": 80, "path": "/", "serviceName": "nginx", "domainType": "compose", "enabled": true }
+    ],
+    "mounts": []
+  },
+  "/compose.one?composeId=cmpGit01": {
+    "composeId": "cmpGit01",
+    "name": "monitoring",
+    "env": "",
+    "composeFile": "",
+    "sourceType": "github",
+    "owner": "acme",
+    "repository": "ops",
+    "branch": "main",
+    "composeType": "docker-compose",
+    "composePath": "./monitoring/docker-compose.yml",
+    "environmentId": "envProd01",
+    "domains": [],
+    "mounts": []
+  },
+  "/postgres.one?postgresId=pgMain01": {
+    "postgresId": "pgMain01",
+    "name": "blog-db",
+    "appName": "blog-db-a1b2c3",
+    "databaseName": "blog",
+    "databaseUser": "blog",
+    "databasePassword": "p@ss/word",
+    "dockerImage": "postgres:16",
+    "externalPort": 5432,
+    "environmentId": "envProd01",
+    "mounts": [],
+    "server": null
+  },
+  "/mysql.one?mysqlId=myOld01": {
+    "mysqlId": "myOld01",
+    "name": "wp-db",
+    "appName": "blog-wpdb-z9x8c7",
+    "databaseName": "wordpress",
+    "databaseUser": "wp",
+    "databasePassword": "wppw",
+    "databaseRootPassword": "rootpw",
+    "dockerImage": "mysql:8",
+    "externalPort": null,
+    "environmentId": "envProd01",
+    "server": { "serverId": "srv1", "name": "box", "ipAddress": "198.51.100.20" }
+  },
+  "/mariadb.one?mariadbId=maria01": {
+    "mariadbId": "maria01",
+    "name": "forum-db",
+    "appName": "blog-forum-m1n2b3",
+    "databaseName": "forum",
+    "databaseUser": "forum",
+    "databasePassword": "fpw",
+    "dockerImage": "mariadb:11",
+    "externalPort": 3307,
+    "environmentId": "envProd01",
+    "server": null
+  },
+  "/redis.one?redisId=redis01": {
+    "redisId": "redis01",
+    "name": "sessions",
+    "appName": "blog-sessions-r4t5y6",
+    "databasePassword": "rpw",
+    "dockerImage": "redis:7",
+    "externalPort": null,
+    "environmentId": "envProd01",
+    "server": null
+  }
+}

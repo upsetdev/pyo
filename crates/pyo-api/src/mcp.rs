@@ -183,6 +183,9 @@ const NOT_TOOLS: &[&str] = &[
     "getDatabaseLogs",
     "createDatabaseDumpUpload",
     "uploadDatabaseDump",
+    // They take another platform's API token: kept out of assistants.
+    "previewPlatformImport",
+    "startPlatformImport",
 ];
 
 /// Tools whose generated name would clash or say too little.
@@ -1621,6 +1624,13 @@ mod tests {
             by("start_database_import").def["inputSchema"]["properties"]
                 .get("url")
                 .is_some()
+        );
+        // Another platform's API token never passes through an assistant.
+        assert!(
+            !catalog()
+                .iter()
+                .any(|t| t.name() == "preview_platform_import"
+                    || t.name() == "start_platform_import")
         );
         // A dump's file is sent as a request body: not a tool.
         assert!(!catalog().iter().any(

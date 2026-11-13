@@ -5,6 +5,7 @@ import {
   TreeStructureIcon,
   BellIcon,
   DesktopIcon,
+  ArrowSquareInIcon,
   DownloadSimpleIcon,
   GearSixIcon,
   GlobeIcon,
@@ -781,6 +782,11 @@ function NewMenu() {
                   label: "Import database",
                   icon: <DownloadSimpleIcon size={14} />,
                   href: importDatabase,
+                },
+                {
+                  label: "Import from a platform",
+                  icon: <ArrowSquareInIcon size={14} />,
+                  href: "/import/platform",
                 },
               ]
             : []),
