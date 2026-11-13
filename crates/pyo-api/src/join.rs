@@ -693,4 +693,129 @@ mod tests {
             );
         }
     }
+
+    /// The part of a script between `# >>> pyo:<name> ` and `# <<< pyo:<name>`.
+    fn script_block(name: &str, script: &str) -> String {
+        let start = script
+            .find(&format!("# >>> pyo:{name} "))
+            .unwrap_or_else(|| panic!("no pyo:{name} block"));
+        let end = script[start..]
+            .find(&format!("# <<< pyo:{name}\n"))
+            .unwrap_or_else(|| panic!("pyo:{name} has no end"));
+        script[start..start + end].to_owned()
+    }
+
+    /// Runs `script` with bash: (exit code, stdout, stderr).
+    fn bash(script: &str) -> (i32, String, String) {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("bash runs");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// `kubectl version -o json` with these client and server minors.
+    fn version_json(client: &str, server: &str) -> String {
+        format!(
+            "{{\n  \"clientVersion\": {{\n    \"major\": \"1\",\n    \"minor\": \"{client}\",\n    \"gitVersion\": \"v1.{client}.2+k3s1\"\n  }},\n  \"kustomizeVersion\": \"v5.7.1\",\n  \"serverVersion\": {{\n    \"major\": \"1\",\n    \"minor\": \"{server}\",\n    \"gitVersion\": \"v1.{server}.0\"\n  }}\n}}\n"
+        )
+    }
+
+    /// connect.sh's apply_agent with a stub k3s: `version` is what
+    /// `kubectl version -o json` prints (empty: it fails), and `apply`
+    /// fails the first `fails` times. Sleeping only moves the clock.
+    fn apply_agent(version: &str, fails: u32) -> (i32, String, String) {
+        let block = script_block("agent-apply", CONNECT_SCRIPT);
+        bash(&format!(
+            r#"set -euo pipefail
+MANIFEST=/dev/null FAILS={fails} applies=0
+VERSION=$(cat <<'JSON'
+{version}
+JSON
+)
+k3s() {{
+  case "$2" in
+    version) [ -n "$VERSION" ] && printf '%s' "$VERSION" ;;
+    get) return 0 ;;
+    apply) applies=$((applies + 1)); [ "$applies" -gt "$FAILS" ] || {{ echo 'context deadline exceeded' >&2; return 1; }} ;;
+  esac
+}}
+sleep() {{ SECONDS=$((SECONDS + $1)); }}
+{block}
+if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"; fi
+"#
+        ))
+    }
+
+    #[test]
+    fn the_server_version_is_read_from_its_own_field() {
+        let block = script_block("agent-apply", CONNECT_SCRIPT);
+        for (client, server, want) in [("37", "37", "37"), ("37", "29", "29"), ("29", "31+", "31")]
+        {
+            let json = version_json(client, server);
+            let (code, out, _) = bash(&format!(
+                "set -euo pipefail\nk3s() {{ cat <<'JSON'\n{json}JSON\n}}\n{block}\nserver_minor\n"
+            ));
+            assert_eq!((code, out.trim()), (0, want), "{client}/{server}");
+        }
+        // No answer: nothing, and no failure under set -e.
+        let (code, out, _) = bash(&format!(
+            "set -euo pipefail\nk3s() {{ return 1; }}\n{block}\nm=$(server_minor)\necho \"[$m]\"\n"
+        ));
+        assert_eq!((code, out.trim()), (0, "[]"));
+    }
+
+    #[test]
+    fn the_agent_is_applied_again_until_kubernetes_takes_it() {
+        let (code, out, err) = apply_agent(&version_json("37", "37"), 3);
+        assert_eq!((code, out.trim()), (0, "ok after 4"), "{err}");
+        assert!(err.contains("Trying again"));
+    }
+
+    #[test]
+    fn without_its_admission_policy_the_agent_isnt_installed() {
+        // 1.30 or later, or a version that can't be read: about 3 minutes
+        // of tries, then a failure, never "older than 1.30".
+        for version in [version_json("37", "37"), String::new()] {
+            let (code, out, err) = apply_agent(&version, u32::MAX);
+            assert_eq!(code, 0, "{err}");
+            assert!(out.starts_with("failed after "), "{out}");
+            let tries: u32 = out.trim()["failed after ".len()..].parse().unwrap();
+            assert!((5..=12).contains(&tries), "{tries} tries");
+            assert!(!out.contains("older than") && !err.contains("older than"));
+        }
+        // Only a server that says it's older goes on without the policy.
+        let (code, out, _) = apply_agent(&version_json("37", "29"), u32::MAX);
+        assert_eq!(code, 0);
+        assert!(out.contains("1.29, older than 1.30"), "{out}");
+        assert!(out.trim().ends_with("ok after 1"), "{out}");
+    }
+
+    #[test]
+    fn k3s_gets_room_above_its_live_heap() {
+        let block = script_block("small-machine", CONNECT_SCRIPT);
+        let helper = block
+            .split("<<'MEMORY'\n")
+            .nth(1)
+            .and_then(|r| r.split("\nMEMORY\n").next())
+            .expect("the small-machine block has the memory helper");
+        let dir = std::env::temp_dir().join(format!("pyo-heap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (mem, want) in [(960, 768), (1973, 789), (2048, 819), (3583, 1433)] {
+            let meminfo = dir.join(format!("meminfo-{mem}"));
+            std::fs::write(&meminfo, format!("MemTotal: {} kB\n", mem * 1024)).unwrap();
+            let out = std::process::Command::new("sh")
+                .args(["-c", &format!("{helper}\ngomemlimit"), "pyo-memory.sh"])
+                .env("PYO_MEMINFO", &meminfo)
+                .output()
+                .unwrap();
+            let out = String::from_utf8(out.stdout).unwrap();
+            assert_eq!(out.trim(), want.to_string(), "{mem}");
+        }
+    }
 }

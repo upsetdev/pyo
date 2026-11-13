@@ -365,7 +365,7 @@ function Security() {
                   ) : sc.admission === "unsupported" ? (
                     <span>This cluster can't hold it to its limits.</span>
                   ) : sc.admission === "missing" ? (
-                    <span>Its limits aren't enforced on this cluster.</span>
+                    <span>Its limits aren't enforced. Run the update command in its settings.</span>
                   ) : null}
                   {on.length ? <span>Your policy: {on.join(", ")}.</span> : null}
                 </>
