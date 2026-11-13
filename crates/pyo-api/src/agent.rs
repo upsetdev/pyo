@@ -211,6 +211,8 @@ async fn heartbeat(
         "regions": caps.regions,
         "trafficModes": caps.traffic_modes,
         "trafficLocal": caps.traffic_local,
+        // Where the host publishes websites on its Tailscale address (freedomain.rs).
+        "tailnetWebIps": caps.tailnet_web_ips,
         // Services whose WAF policy the gateway refused (bundles.rs `waf_shown`).
         "wafRejected": caps.waf_rejected,
         // And those whose WAF policy it accepted (bundles.rs `waf_shown`).
@@ -397,8 +399,16 @@ async fn heartbeat(
     }
     // Volumes: their state, deletions confirmed, claims Pyo has no volume for.
     crate::volumes::reported(&mut tx, &cluster.id, &hb.volumes).await?;
+    // Free domains on another of its addresses (a private one, one it no
+    // longer has, the other mode's) follow its free-domain address, live.
+    let rehomed = crate::freedomain::rehome(&mut tx, &cluster.id).await?;
+    // Where they point: on "tailscale" the agent publishes the websites on
+    // the servers' Tailscale addresses.
+    let free_domain_address = crate::freedomain::load(&mut tx, &cluster.id)
+        .await?
+        .map(|(_, c)| c.mode().as_str());
     tx.commit().await?;
-    if refresh_sent || builder_added {
+    if refresh_sent || builder_added || rehomed {
         s.wake(&cluster.id).await;
     }
     let (observability, team, id) = (
@@ -459,7 +469,7 @@ async fn heartbeat(
     // Vector (and on Pyo's own cluster, ClickHouse) runs while it's on.
     let observability = s.observability.enabled().await;
     Ok(Json(
-        json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "projectTeams": project_teams, "observability": observability }),
+        json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability }),
     ))
 }
 

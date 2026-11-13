@@ -298,20 +298,8 @@ pub fn private_host(host: &str) -> bool {
     {
         return true;
     }
-    let Some(rest) = h
-        .strip_suffix(".nip.io")
-        .or_else(|| h.strip_suffix(".sslip.io"))
-    else {
-        return false;
-    };
-    let ip = rest.rsplit('.').next().unwrap_or("").replace('-', ".");
-    let octets: Vec<u8> = ip.split('.').filter_map(|o| o.parse().ok()).collect();
-    match octets[..] {
-        [10, ..] | [127, ..] | [192, 168, ..] => true,
-        [172, b, ..] => (16..=31).contains(&b),
-        [100, b, ..] => (64..=127).contains(&b),
-        _ => false,
-    }
+    // "app.100.101.67.2.nip.io", or the dashed "app.100-101-67-2.nip.io".
+    crate::freedomain::ip_in(&h).is_some_and(|ip| !crate::freedomain::public(&ip.into()))
 }
 
 /// `service_id` is the label id its Kubernetes objects carry.
@@ -2022,6 +2010,14 @@ mod tls_tests {
         assert_eq!(tls_issuer("", "app.203-0-113-10.nip.io"), "letsencrypt");
         assert_eq!(tls_issuer("auto", "app.100-95-104-0.nip.io"), "selfsigned");
         assert_eq!(tls_issuer("auto", "app.192-168-1-48.nip.io"), "selfsigned");
+        // Free domains in the dotted form.
+        assert_eq!(
+            tls_issuer("auto", "app.129.226.158.31.nip.io"),
+            "letsencrypt"
+        );
+        assert_eq!(tls_issuer("auto", "app.100.101.67.2.nip.io"), "selfsigned");
+        assert_eq!(tls_issuer("auto", "app.10.3.8.13.nip.io"), "selfsigned");
+        assert_eq!(tls_issuer("auto", "app.169.254.1.1.sslip.io"), "selfsigned");
         assert_eq!(tls_issuer("auto", "hello.home.localhost"), "selfsigned");
         assert_eq!(tls_issuer("off", "shop.example.com"), "");
         assert_eq!(tls_issuer("selfsigned", "shop.example.com"), "selfsigned");

@@ -53,7 +53,7 @@ pub struct Input<'a> {
     pub repo: Option<RepoRef>,
     /// The project's name when the file has none.
     pub name_hint: &'a str,
-    /// Suggested domains go under this ("1-2-3-4.nip.io"); none without it.
+    /// Suggested domains go under this ("1.2.3.4.nip.io"); none without it.
     pub domain_base: Option<String>,
 }
 
@@ -1008,10 +1008,14 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
                         p.public = false;
                         w.add(sn, "ports", format!("Port {container} is a second web port: it's kept internal. Make it public if it needs its own domain."));
                     } else {
-                        p.domain = input
-                            .domain_base
-                            .as_ref()
-                            .map(|b| format!("{name}-{}.{b}", project.namespace));
+                        p.domain = input.domain_base.as_ref().map(|b| {
+                            // One DNS label: 63 characters at most.
+                            let label: String = format!("{name}-{}", project.namespace)
+                                .chars()
+                                .take(63)
+                                .collect();
+                            format!("{}.{b}", label.trim_end_matches('-'))
+                        });
                     }
                 } else if let Some(why) =
                     published.and_then(|pp| pyo_proto::reserved_public_port(proto, pp as i32))
@@ -1654,29 +1658,24 @@ pub async fn preview(
     use crate::error::ApiError;
     let mut tx = s.db.begin().await?;
     crate::ops::require_role(&mut tx, &user, &b.team_id, crate::ops::Role::Viewer).await?;
-    // Free domains go on the cluster's public address.
-    let cluster: Option<Value> = match &b.cluster_id {
-        Some(id) => Some(
-            sqlx::query_scalar(
-                "SELECT capabilities FROM pyo.clusters WHERE id = $1 AND team_id = $2",
+    // Free domains go on the cluster's public address (none without one).
+    let domain_base = match &b.cluster_id {
+        Some(id) => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT id FROM pyo.clusters WHERE id = $1 AND team_id = $2",
             )
             .bind(id)
             .bind(&b.team_id)
             .fetch_optional(&mut *tx)
             .await?
-            .ok_or_else(|| ApiError::not_found("Cluster"))?,
-        ),
+            .ok_or_else(|| ApiError::not_found("Cluster"))?;
+            crate::freedomain::for_cluster(&mut tx, id)
+                .await?
+                .map(|ip| format!("{ip}.nip.io"))
+        }
         None => None,
     };
     tx.commit().await?;
-    let domain_base = cluster.and_then(|c| {
-        c["loadBalancerIps"]
-            .as_array()?
-            .iter()
-            .filter_map(Value::as_str)
-            .find(|i| i.split('.').count() == 4 && i.split('.').all(|p| p.parse::<u8>().is_ok()))
-            .map(|ip| format!("{}.nip.io", ip.replace('.', "-")))
-    });
 
     let mut files = BTreeMap::new();
     let (text, repo, hint) = match (&b.file, &b.repo) {
@@ -1794,7 +1793,7 @@ mod tests {
             file: &fixture(file),
             files,
             name_hint: "imported",
-            domain_base: Some("1-2-3-4.nip.io".into()),
+            domain_base: Some("1.2.3.4.nip.io".into()),
             ..Default::default()
         })
         .unwrap()
@@ -1966,7 +1965,7 @@ mod tests {
         assert!(web.public && web.protocol == "HTTP" && web.container_port == 2283);
         assert_eq!(
             web.domain.as_deref(),
-            Some("immich-server-immich.1-2-3-4.nip.io")
+            Some("immich-server-immich.1.2.3.4.nip.io")
         );
         assert!(
             server

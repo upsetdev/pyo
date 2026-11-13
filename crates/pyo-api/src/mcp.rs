@@ -938,6 +938,9 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
                 .iter()
                 .map(|c| json!({
                     "cluster": c["name"], "status": c["status"],
+                    "publicIp": c["publicIp"], "tailnetIp": c["tailnetIp"],
+                    // Where free domains point: "public" or "tailscale" (set_cluster_free_domain_address).
+                    "freeDomainAddress": c["freeDomainAddress"], "freeDomainIp": c["freeDomainIp"], "behindNat": c["behindNat"],
                     "servers": servers.iter().filter(|n| n["clusterId"] == c["id"]).map(|n| json!({
                         "name": n["name"], "status": n["status"], "ip": n["internalIP"],
                         "cpu": { "cores": n["capacity"]["cpu"], "used": n["usage"]["cpu"] },
@@ -1296,18 +1299,18 @@ fn cluster_at(snap: &Value, team: &str, place: &str) -> Result<(Value, String), 
     ))
 }
 
-/// "nginx-web.100-64-0-10.nip.io": resolves to the cluster's ingress IP.
+/// "nginx-web.203.0.113.7.nip.io": resolves to the cluster's free-domain
+/// address (its public or Tailscale IP, as its settings say).
 fn free_hostname(cluster: &Value, service: &str, namespace: &str) -> Result<String, String> {
-    let ip = cluster["capabilities"]["loadBalancerIPs"]
-        .as_array()
-        .and_then(|ips| ips.iter().filter_map(|i| i.as_str()).find(|i| i.split('.').count() == 4 && i.split('.').all(|p| p.parse::<u8>().is_ok())))
-        .ok_or("The cluster has no ingress IP yet, so there's no free domain for it. Use a custom hostname.")?;
-    let label: String = format!("{service}-{namespace}").chars().take(63).collect();
-    Ok(format!(
-        "{}.{}.nip.io",
-        label.trim_end_matches('-'),
-        ip.replace('.', "-")
-    ))
+    let ip = cluster["freeDomainIp"]
+        .as_str()
+        .and_then(|ip| ip.parse().ok())
+        .ok_or(if cluster["freeDomainAddress"] == json!("tailscale") {
+            "The cluster has no Tailscale address for free domains, so there's no free domain for it. Use a custom hostname."
+        } else {
+            "The cluster has no public IP address (or takes no public traffic), so there's no free domain for it. Use a custom hostname."
+        })?;
+    Ok(crate::freedomain::hostname(service, namespace, ip))
 }
 
 /// A new domain on the service's "http" port; HTTPS unless only a private network reaches it.
@@ -1729,10 +1732,28 @@ mod tests {
         let snap = json!({ "clusters": [{ "id": "c1", "teamId": "t", "name": "mix", "location": "Yogyakarta, ID" }],
                            "servers": [{ "clusterId": "c1", "location": "Yogyakarta, ID" }, { "clusterId": "c1", "location": "Frankfurt, DE" }] });
         assert_eq!(cluster_at(&snap, "t", "DE").unwrap().1, "Frankfurt, DE");
-        let c = json!({ "capabilities": { "loadBalancerIPs": ["fd00::1", "100.64.0.10"] } });
+        // The cluster's free-domain address, never its load balancer's private one.
+        let c = json!({ "freeDomainAddress": "public", "freeDomainIp": "129.226.158.31", "capabilities": { "loadBalancerIPs": ["10.3.8.13"] } });
         assert_eq!(
             free_hostname(&c, "nginx", "web").unwrap(),
-            "nginx-web.100-64-0-10.nip.io"
+            "nginx-web.129.226.158.31.nip.io"
+        );
+        let c = json!({ "freeDomainAddress": "tailscale", "freeDomainIp": "100.101.67.2" });
+        assert_eq!(
+            free_hostname(&c, "nginx", "web").unwrap(),
+            "nginx-web.100.101.67.2.nip.io"
+        );
+        let c = json!({ "freeDomainAddress": "public", "freeDomainIp": null, "capabilities": { "loadBalancerIPs": ["10.3.8.13"] } });
+        assert!(
+            free_hostname(&c, "nginx", "web")
+                .unwrap_err()
+                .contains("no public IP")
+        );
+        let c = json!({ "freeDomainAddress": "tailscale", "freeDomainIp": null });
+        assert!(
+            free_hostname(&c, "nginx", "web")
+                .unwrap_err()
+                .contains("no Tailscale")
         );
     }
 }

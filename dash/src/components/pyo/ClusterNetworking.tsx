@@ -40,12 +40,12 @@ export function ClusterNetworking({
                 ),
               ],
               [
-                "Public IPs",
+                "Public IP",
                 c.publicTraffic === false
                   ? "Public traffic is off"
                   : lb === "none"
                   ? "None"
-                  : `${lb === "servicelb" ? "k3s ServiceLB" : "MetalLB"} · ${c.capabilities.loadBalancerIPs.join(", ") || "no IPs"}`,
+                  : `${c.publicIp ?? "None found"} · ${lb === "servicelb" ? "k3s ServiceLB" : "MetalLB"}`,
               ],
               [
                 "TLS",

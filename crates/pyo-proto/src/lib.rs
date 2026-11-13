@@ -323,6 +323,11 @@ pub struct Capabilities {
     /// The agent knows the "local" mode ([`TRAFFIC_LOCAL`]).
     #[serde(default)]
     pub traffic_local: bool,
+    /// Tailscale addresses where websites (ports 80 and 443) are answered
+    /// whether or not the cluster takes public traffic: the servers' the
+    /// agent publishes them on (system.rs `TAILNET_WEB_SERVICE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tailnet_web_ips: Vec<String>,
     /// Services (by id) whose WAF policy the gateway refused: their sites
     /// go unfiltered (the policy isn't in effect at all, whatever the
     /// service's mode), so the WAF isn't active there.
@@ -417,6 +422,13 @@ pub struct ServerReport {
     pub addresses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_country: Option<String>,
+    /// Its Tailscale IPv4 address (100.x), when it's on a tailnet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailnet_ip: Option<String>,
+    /// Public IPv4 addresses on its own network cards: the internet reaches
+    /// it there directly (not behind NAT).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nic_public_ips: Vec<String>,
     /// NVIDIA GPUs Kubernetes can hand out here (allocatable nvidia.com/gpu).
     #[serde(default)]
     pub gpus: u32,
@@ -508,6 +520,10 @@ pub const PUBLIC_IPV4_ANNOTATION: &str = "pyo/public-ipv4";
 pub const PUBLIC_IPV6_ANNOTATION: &str = "pyo/public-ipv6";
 pub const PUBLIC_COUNTRY_ANNOTATION: &str = "pyo/public-country";
 pub const LOCATED_AT_ANNOTATION: &str = "pyo/located-at";
+/// Its Tailscale IPv4 address ("" when it has none).
+pub const TAILNET_IPV4_ANNOTATION: &str = "pyo/tailnet-ipv4";
+/// Public IPv4 addresses on its own network cards, comma-separated ("" for none).
+pub const NIC_PUBLIC_IPV4_ANNOTATION: &str = "pyo/nic-public-ipv4";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -2111,6 +2127,12 @@ pub struct HeartbeatReply {
     /// on, on the tailnet). None (a reply without it): left as it is.
     #[serde(default)]
     pub public_traffic: Option<bool>,
+    /// Where the cluster's free domains point: "public" or "tailscale".
+    /// With "tailscale" the websites are published on every server's
+    /// Tailscale address too (system.rs `TAILNET_WEB_SERVICE`), whatever
+    /// the public traffic. None (a reply without it): left as it is.
+    #[serde(default)]
+    pub free_domain_address: Option<String>,
     /// Observability (an installation-wide setting): on, Vector ships the
     /// gateway's access logs and the servers' figures, and on the cluster
     /// Pyo runs on ClickHouse runs. Off: Vector is removed and ClickHouse

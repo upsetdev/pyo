@@ -37,14 +37,22 @@ fn private_host(host: &str) -> bool {
     else {
         return false;
     };
-    let ip = rest.rsplit('.').next().unwrap_or("").replace('-', ".");
-    let octets: Vec<u8> = ip.split('.').filter_map(|o| o.parse().ok()).collect();
-    match octets[..] {
-        [10, ..] | [127, ..] | [192, 168, ..] => true,
-        [172, b, ..] => (16..=31).contains(&b),
-        [100, b, ..] => (64..=127).contains(&b),
-        _ => false,
-    }
+    // "app.100.101.67.2", or the dashed "app.100-101-67-2".
+    let labels: Vec<&str> = rest.rsplit('.').take(4).collect();
+    let ip = if labels.len() == 4 && labels.iter().all(|l| l.parse::<u8>().is_ok()) {
+        format!("{}.{}.{}.{}", labels[3], labels[2], labels[1], labels[0])
+    } else {
+        labels.first().copied().unwrap_or("").replace('-', ".")
+    };
+    let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let [a, b, ..] = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || (a == 100 && (64..=127).contains(&b))
 }
 
 fn is_free(host: &str) -> bool {
@@ -70,27 +78,13 @@ fn valid_hostname(h: &str) -> bool {
         && tld.chars().all(|c| c.is_ascii_lowercase())
 }
 
-/// The cluster's ingress address, for the free domain and the DNS record.
-fn ingress(t: &Target) -> Option<String> {
-    let c = t
-        .state
-        .cluster(t.service()["clusterId"].as_str().unwrap_or(""))?;
-    c["capabilities"]["loadBalancerIPs"]
-        .as_array()?
-        .first()?
+/// A cluster address the API picked (never a private one where it means
+/// public): `key` "publicIp" (for DNS records) or "freeDomainIp" (where
+/// its free domains point: its public or Tailscale IP).
+fn cluster_ip(t: &Target, key: &str) -> Option<String> {
+    t.state
+        .cluster(t.service()["clusterId"].as_str().unwrap_or(""))?[key]
         .as_str()
-        .map(str::to_owned)
-}
-
-fn ingress_v4(t: &Target) -> Option<String> {
-    let c = t
-        .state
-        .cluster(t.service()["clusterId"].as_str().unwrap_or(""))?;
-    c["capabilities"]["loadBalancerIPs"]
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .find(|i| i.split('.').count() == 4 && i.split('.').all(|p| p.parse::<u8>().is_ok()))
         .map(str::to_owned)
 }
 
@@ -255,21 +249,18 @@ pub async fn add(
             h
         }
         None if free => {
-            let ip = ingress_v4(&t).context("The cluster has no ingress IP yet, so there's no free domain for it. Use your own hostname.")?;
+            let ip = cluster_ip(&t, "freeDomainIp").context("The cluster has no address for free domains (its public or Tailscale IP, as its settings say), so there's no free domain for it. Use your own hostname.")?;
             let ns = t
                 .state
                 .project(s["projectId"].as_str().unwrap_or(""))
                 .and_then(|p| p["namespace"].as_str())
                 .unwrap_or("app");
+            // One DNS label: 63 characters at most.
             let label: String = format!("{}-{ns}", s["name"].as_str().unwrap_or(""))
                 .chars()
                 .take(63)
                 .collect();
-            format!(
-                "{}.{}.nip.io",
-                label.trim_end_matches('-'),
-                ip.replace('.', "-")
-            )
+            format!("{}.{ip}.nip.io", label.trim_end_matches('-'))
         }
         None => bail!("Give a hostname, or --free for a free domain."),
     };
@@ -338,14 +329,14 @@ pub async fn add(
     }
     if !is_free(&host) {
         println!("Create this DNS record at your DNS provider:");
-        match ingress(&t) {
+        match cluster_ip(&t, "publicIp") {
             Some(ip) => println!(
                 "  {}  {host}  {ip}",
                 if ip.contains(':') { "AAAA" } else { "A" }
             ),
             None => println!(
                 "  CNAME  {host}  {}",
-                ui::dim("(the cluster's ingress address)")
+                ui::dim("(the cluster's public address)")
             ),
         }
     }
@@ -494,6 +485,10 @@ mod tests {
         assert!(private_host("app-ns.100-64-0-10.nip.io"));
         assert!(private_host("app-ns.192-168-1-2.nip.io"));
         assert!(!private_host("app-ns.95-216-1-2.nip.io"));
+        assert!(private_host("app-ns.100.101.67.2.nip.io"));
+        assert!(private_host("app-ns.10.3.8.13.nip.io"));
+        assert!(!private_host("app-ns.129.226.158.31.nip.io"));
+        assert!(valid_hostname("app-ns.129.226.158.31.nip.io"));
         assert!(!private_host("app.example.com"));
     }
 

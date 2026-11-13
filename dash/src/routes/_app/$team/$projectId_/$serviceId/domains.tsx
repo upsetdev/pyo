@@ -55,7 +55,7 @@ function Domains({ app }: { app: Application }) {
       ? s.certificates.find((c) => c.id === d.certificateId)
       : undefined;
   const cluster = s.clusters.find((c) => c.id === app.clusterId);
-  const target = cluster?.capabilities.loadBalancerIPs[0];
+  const target = cluster?.publicIp ?? undefined;
   const httpPorts = app.ports.filter((p) => p.protocol === "HTTP");
 
   return (
@@ -249,7 +249,7 @@ function Domains({ app }: { app: Application }) {
                         <span>{target ? "A" : "CNAME"}</span>
                         <span>{d.hostname}</span>
                         <span className="inline-flex items-center gap-1">
-                          {target ?? "ingress address of the cluster"}
+                          {target ?? "public address of the cluster"}
                           {target ? (
                             <CopyButton
                               value={target}

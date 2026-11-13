@@ -1,9 +1,9 @@
 import { LearnMore } from "~/components/ui/LearnMore";
-import { optionClass, Switch } from "~/components/ui/Field";
+import { optionClass, Segmented, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
 import { api } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import type { Cluster, TrafficMode } from "~/lib/pyo/types";
+import type { Cluster, FreeDomainAddress, TrafficMode } from "~/lib/pyo/types";
 
 // How a cluster routes requests. Replicas are placed the same way in every
 // mode (evenly across regions, then servers); this only changes where each
@@ -76,6 +76,7 @@ export function ClusterTrafficMode({ cluster: c }: { cluster: Cluster }) {
 /** Whether the gateway answers public traffic on the cluster's servers. */
 export function ClusterPublicTraffic({ cluster: c }: { cluster: Cluster }) {
   const on = c.publicTraffic !== false;
+  const mode = c.freeDomainAddress ?? "public";
   return (
     <Panel title="Public traffic">
       <div className="p-4">
@@ -94,11 +95,48 @@ export function ClusterPublicTraffic({ cluster: c }: { cluster: Cluster }) {
             <>
               {on
                 ? "On every server except build-only servers."
-                : "Services are reachable only inside the cluster."}{" "}
+                : mode === "tailscale"
+                  ? "Services are reachable only from your tailnet."
+                  : "Services are reachable only inside the cluster."}{" "}
               <LearnMore page="gateway" />
             </>
           }
         />
+      </div>
+      <div className="border-t border-border p-4">
+        <p className="mb-2 text-[13px] font-medium">Free domains</p>
+        <Segmented<FreeDomainAddress>
+          label="Free domains point at"
+          value={mode}
+          options={[
+            { value: "public", label: "Public IP" },
+            { value: "tailscale", label: "Tailscale" },
+          ]}
+          onChange={async (v) => {
+            const res = await api.setClusterFreeDomainAddress(c.id, v);
+            if (res?.ok)
+              toast({
+                title: v === "public" ? "Free domains on the public IP" : "Free domains on Tailscale",
+                description: c.name,
+              });
+          }}
+        />
+        <p className="mt-2 text-[12px] text-muted-foreground">
+          {c.freeDomainIp ? (
+            <span className="font-mono text-foreground/85">{c.freeDomainIp}</span>
+          ) : mode === "tailscale" ? (
+            "No Tailscale IP found."
+          ) : on ? (
+            "No public IP found yet."
+          ) : (
+            "Public traffic is off."
+          )}
+        </p>
+        {c.behindNat && (
+          <p className="mt-1 text-[12px] text-muted-foreground">
+            Behind NAT. Choose Public IP if ports 80 and 443 are forwarded to this server.
+          </p>
+        )}
       </div>
     </Panel>
   );

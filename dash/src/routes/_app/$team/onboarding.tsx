@@ -29,7 +29,7 @@ import {
   type DeployDraft,
   type Issues,
 } from "~/lib/pyo/draft";
-import { freeHostname, ingressIp } from "~/lib/pyo/freeDomain";
+import { freeHostname, freeDomainIp } from "~/lib/pyo/freeDomain";
 import { DNS_LABEL } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import {
@@ -465,7 +465,7 @@ function DeployStep({
 
   // Without a domain only the cluster can reach it, and the point of a first
   // deploy is a URL to open: use the free one, which needs no DNS.
-  const ip = ingressIp(s, cluster.id);
+  const ip = freeDomainIp(s, cluster.id);
   const port = base.ports.find((p) => p.protocol === "HTTP");
   const host =
     ip && port

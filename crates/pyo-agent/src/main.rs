@@ -200,6 +200,9 @@ async fn heartbeat_loop(agent: Agent) {
                                 tracing::warn!(error = %format!("{e:#}"), "couldn't change public ports");
                             }
                         }
+                        if let Some(address) = &reply.free_domain_address {
+                            gateway::set_tailnet_web(&agent.kube, address == "tailscale").await;
+                        }
                         databases::label_teams(&agent.kube, &reply.project_teams).await;
                         if let Some(on) = reply.observability
                             && observability_applied != Some(on)

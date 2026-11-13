@@ -87,6 +87,9 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'trafficMode', coalesce(traffic_mode, 'region'),
             'webProxyProtocol', web_proxy_protocol,
             'publicTraffic', public_traffic,
+            -- 'public' or 'tailscale' as chosen; freeDomainAddress below
+            -- is the one in use (freedomain.rs).
+            'freeDomainAddressSet', free_domain_address,
             -- Volumes on it that Pyo has no record of (volumes.rs).
             'strayVolumes', stray_volumes,
             'podCidr', coalesce(capabilities->>'podCidr', ''),
@@ -139,6 +142,23 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         &team_ids,
     )
     .await?;
+    // Its public and Tailscale addresses, and where its free domains point.
+    for c in &mut clusters {
+        let f = crate::freedomain::Cluster {
+            public_traffic: c["publicTraffic"] != json!(false),
+            set: c["freeDomainAddressSet"].as_str().map(str::to_owned),
+            lb_ips: crate::freedomain::ips(&c["capabilities"], "loadBalancerIPs"),
+            tailnet_web: crate::freedomain::ips(&c["capabilities"], "tailnetWebIps"),
+            servers: servers
+                .iter()
+                .filter(|n| n["clusterId"] == c["id"])
+                .cloned()
+                .collect(),
+        };
+        if let (Some(o), Value::Object(shown)) = (c.as_object_mut(), f.shown()) {
+            o.extend(shown);
+        }
+    }
 
     // Workloads come from each cluster's last heartbeat.
     let workloads = values(
@@ -433,6 +453,7 @@ fn capabilities(stored: &Value) -> Value {
         "gpu": or("gpu", Value::Null),
         "trafficModes": or("trafficModes", json!(false)),
         "trafficLocal": or("trafficLocal", json!(false)),
+        "tailnetWebIps": or("tailnetWebIps", json!([])),
         "agentScope": or("agentScope", Value::Null),
         // Whether the agent can update Pyo and itself (updates.rs).
         "updates": or("updates", json!(0)),

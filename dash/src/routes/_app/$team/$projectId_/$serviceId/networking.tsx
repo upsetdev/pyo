@@ -120,12 +120,12 @@ function Networking({ app }: { app: Application }) {
               ),
             ],
             [
-              "Public IPs",
+              "Public IP",
               off
                 ? "Public traffic is off for this cluster."
                 : cluster?.capabilities.loadBalancer === "none"
                 ? "Not available"
-                : `${cluster?.capabilities.loadBalancer} · ${cluster?.capabilities.loadBalancerIPs.join(", ") || "no IPs"}`,
+                : cluster?.publicIp ?? "None found",
             ],
           ]}
         />

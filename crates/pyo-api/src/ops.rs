@@ -1685,6 +1685,8 @@ pub(crate) enum Op {
     /// server but build-only ones (ports 80 and 443, and public TCP and UDP
     /// ports through it). Off: services are only reachable inside the cluster.
     SetClusterPublicTraffic { cluster_id: String, on: bool },
+    /// Where the cluster's free domains (`<name>.<ip>.nip.io`) point: "public" (its public IP, for everyone) or "tailscale" (its Tailscale IP, only from the tailnet). With "tailscale", services are reachable from your tailnet on ports 80 and 443 whether or not the cluster takes public traffic. Free domains on it move to the new address in place. By default: public when the cluster takes public traffic and a server has its public IP itself (on a network card or as its ExternalIP) or a load balancer gives it one; behind NAT, Tailscale.
+    SetClusterFreeDomainAddress { cluster_id: String, address: String },
     /// Add an access rule to the end of a service's firewall. Allow and block rules are checked in order, and the first match decides. With no match, the client gets in. Rate limit rules then apply to websites, and each matching one counts the request, per client address and per server.
     AddFirewallRule {
         /// A new id you choose: `fwr_` then 4 to 40 lowercase letters, digits, dashes or underscores.
@@ -2303,7 +2305,8 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::RemoveCluster { .. }
         | Op::SetClusterTrafficMode { .. }
         | Op::SetClusterWebProxyProtocol { .. }
-        | Op::SetClusterPublicTraffic { .. } => ("Clusters", "cl"),
+        | Op::SetClusterPublicTraffic { .. }
+        | Op::SetClusterFreeDomainAddress { .. } => ("Clusters", "cl"),
         Op::AddFirewallRule { .. }
         | Op::UpdateFirewallRule { .. }
         | Op::ReorderFirewallRules { .. }
@@ -3349,6 +3352,47 @@ async fn apply(
                 format!("{name} takes public traffic")
             } else {
                 format!("{name} no longer takes public traffic")
+            };
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "cluster.updated",
+                "info",
+                &title,
+                json!({ "kind": "cluster", "id": cluster_id, "label": name }),
+                json!({ "clusterId": cluster_id }),
+            )
+            .await?;
+            Ok(ok)
+        }
+        Op::SetClusterFreeDomainAddress {
+            cluster_id,
+            address,
+        } => {
+            let team_id = team_of(tx, "clusters", &cluster_id).await?;
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            let mode = crate::freedomain::Mode::parse(&address).ok_or_else(|| {
+                ApiError::bad_request("The address is \"public\" or \"tailscale\".")
+            })?;
+            let name: String = sqlx::query_scalar(
+                "UPDATE pyo.clusters SET free_domain_address = $2 WHERE id = $1 RETURNING name",
+            )
+            .bind(&cluster_id)
+            .bind(mode.as_str())
+            .fetch_one(&mut **tx)
+            .await?;
+            // Its free domains move to the new address now.
+            if crate::freedomain::rehome(tx, &cluster_id).await? {
+                wake.push(cluster_id.clone());
+            }
+            let title = match mode {
+                crate::freedomain::Mode::Public => {
+                    format!("Free domains on {name} use its public IP")
+                }
+                crate::freedomain::Mode::Tailscale => {
+                    format!("Free domains on {name} use its Tailscale IP")
+                }
             };
             log_activity(
                 tx,

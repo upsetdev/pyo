@@ -216,7 +216,7 @@ export function EndpointTable({
       <tbody>
         {rows.map(({ a, p, ns, domains }) => {
           const cluster = s.clusters.find((c) => c.id === a.clusterId);
-          const ip = cluster?.capabilities.loadBalancerIPs[0];
+          const ip = cluster?.publicIp ?? undefined;
           return (
             <Tr key={p.id}>
               <Td>
