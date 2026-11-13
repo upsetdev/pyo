@@ -13,6 +13,7 @@ pub mod database_names;
 pub mod dbimport;
 pub mod firewall;
 pub mod flows;
+pub mod memory;
 pub mod rbac;
 pub mod system;
 
