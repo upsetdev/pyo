@@ -12,7 +12,7 @@ axum = { version = "0.8.9", features = ["ws"] }
 axum-extra = { version = "0.12.6", features = ["cookie", "typed-header"] }
 base64 = "0.23.1"
 cookie = "0.18"
-pyo-proto = { version = "0.2.1", path = "../pyo-proto", features = ["openapi"] }
+pyo-proto = { version = "0.2.2", path = "../pyo-proto", features = ["openapi"] }
 hex = "0.4.3"
 hmac = "0.13.0"
 jiff = "0.2.38"
