@@ -258,11 +258,23 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         // schema once it exists. Pyo's own SQL is always schema-qualified.
         .options([("search_path", "public")])
         .log_statements(tracing::log::LevelFilter::Debug);
+    let role = bg::Role::from_env()?;
+    let pool = match std::env::var("PYO_DB_POOL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        Some(n) => n,
+        None => bg::pool_size(role, max_connections(&connect).await?),
+    };
     let db = PgPoolOptions::new()
-        .max_connections(env("DATABASE_POOL_MAX", "10").parse().unwrap_or(10))
+        .max_connections(pool)
         .acquire_timeout(Duration::from_secs(10))
+        // Connections a burst opened close after a minute idle: each one
+        // is a Postgres process holding memory.
+        .idle_timeout(Duration::from_secs(60))
         .connect_with(connect)
         .await?;
+    tracing::info!(pool, "database pool");
     // Safe with several processes starting at once: sqlx holds a lock while
     // migrating (migrate.rs). Migrations must keep the previous release working
     // (add now, remove in a later release) so rolling updates never break.
@@ -273,7 +285,6 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         m.run(&db).await?;
     }
     vault::init(vault::Vault::new(db.clone(), vault::Provider::from_env()));
-    let role = bg::Role::from_env()?;
     if role.web() {
         auth::ensure_first_admin(&db).await?;
     }
@@ -463,4 +474,16 @@ async fn readyz(
             "database unavailable",
         ),
     }
+}
+
+/// Postgres's max_connections, which pyo-postgres sets by the server's
+/// memory when it starts (platform.yaml): the pools follow it.
+async fn max_connections(connect: &PgConnectOptions) -> anyhow::Result<u32> {
+    use sqlx::Connection;
+    let mut c = sqlx::PgConnection::connect_with(connect).await?;
+    let max: String = sqlx::query_scalar("SHOW max_connections")
+        .fetch_one(&mut c)
+        .await?;
+    let _ = c.close().await;
+    Ok(max.parse()?)
 }
