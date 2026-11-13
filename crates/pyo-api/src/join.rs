@@ -282,12 +282,17 @@ pub async fn serve_connect() -> impl axum::response::IntoResponse {
 mod tests {
     use super::*;
 
-    /// connect.sh and join.sh carry the AppArmor workaround's profile: it must
-    /// be the asset's, character for character.
+    /// connect.sh, join.sh and install.sh carry the AppArmor workaround's
+    /// profile: it must be the asset's, character for character.
     #[test]
     fn scripts_carry_the_apparmor_profile() {
         let profile = include_str!("../assets/cri-containerd.apparmor.d").trim_end();
-        for (name, script) in [("connect.sh", CONNECT_SCRIPT), ("join.sh", SCRIPT)] {
+        let install = include_str!("../../../deploy/install.sh");
+        for (name, script) in [
+            ("connect.sh", CONNECT_SCRIPT),
+            ("join.sh", SCRIPT),
+            ("deploy/install.sh", install),
+        ] {
             let body = script
                 .split("<<'PYO_APPARMOR_PROFILE'\n")
                 .nth(1)
