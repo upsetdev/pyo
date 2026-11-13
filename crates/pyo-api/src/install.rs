@@ -235,7 +235,7 @@ spec:
             # The WAF's, the proxies' GeoIP database's and the databases
             # system's images: the ones this manifest's admission policy allows.
 {pins}          resources:
-            requests: {{ cpu: 20m, memory: 32Mi }}
+            requests: {{ cpu: 20m, memory: 48Mi }}
             limits: {{ cpu: 500m, memory: 256Mi }}
           securityContext:
             runAsNonRoot: true

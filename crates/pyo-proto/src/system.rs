@@ -525,7 +525,7 @@ deployment:
   envoyGateway:
     resources:
       limits: { memory: 512Mi }
-      requests: { cpu: 50m, memory: 96Mi }
+      requests: { cpu: 50m, memory: 64Mi }
 "#;
 
 /// The HelmChart that installs Envoy Gateway in `pyo-gateway`.
@@ -575,11 +575,16 @@ pub fn envoy_proxy(geoip_image: &str, public: bool) -> Value {
                             "volumes": [{ "name": "geoip", "image": { "reference": geoip_image, "pullPolicy": "IfNotPresent" } }],
                         },
                         "container": {
-                            "resources": { "requests": { "cpu": "50m", "memory": "64Mi" }, "limits": { "memory": "512Mi" } },
+                            // ~30 MiB at rest (measured); traffic and routes add to it.
+                            "resources": { "requests": { "cpu": "50m", "memory": "48Mi" }, "limits": { "memory": "512Mi" } },
                             "volumeMounts": [{ "name": "geoip", "mountPath": "/geoip", "readOnly": true }],
                         },
                         // No cluster credentials in the pods that face the internet.
-                        "patch": { "type": "StrategicMerge", "value": { "spec": { "template": { "spec": { "automountServiceAccountToken": false } } } } },
+                        // Envoy Gateway's shutdown manager asks for 32 MiB and holds a few.
+                        "patch": { "type": "StrategicMerge", "value": { "spec": { "template": { "spec": {
+                            "automountServiceAccountToken": false,
+                            "containers": [{ "name": "shutdown-manager", "resources": { "requests": { "cpu": "10m", "memory": "16Mi" } } }],
+                        } } } } },
                     },
                     "envoyService": envoy_service(public),
                 },
