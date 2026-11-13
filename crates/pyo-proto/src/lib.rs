@@ -323,6 +323,11 @@ pub struct Capabilities {
     /// The agent knows the "local" mode ([`TRAFFIC_LOCAL`]).
     #[serde(default)]
     pub traffic_local: bool,
+    /// Tailscale addresses where websites (ports 80 and 443) are answered
+    /// whether or not the cluster takes public traffic: the host's
+    /// `TAILNET_SERVICE`, once it carries those ports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tailnet_web_ips: Vec<String>,
     /// Services (by id) whose WAF policy the gateway refused: their sites
     /// go unfiltered (the policy isn't in effect at all, whatever the
     /// service's mode), so the WAF isn't active there.
@@ -417,6 +422,9 @@ pub struct ServerReport {
     pub addresses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_country: Option<String>,
+    /// Its Tailscale IPv4 address (100.x), when it's on a tailnet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailnet_ip: Option<String>,
     /// NVIDIA GPUs Kubernetes can hand out here (allocatable nvidia.com/gpu).
     #[serde(default)]
     pub gpus: u32,
@@ -508,6 +516,8 @@ pub const PUBLIC_IPV4_ANNOTATION: &str = "pyo/public-ipv4";
 pub const PUBLIC_IPV6_ANNOTATION: &str = "pyo/public-ipv6";
 pub const PUBLIC_COUNTRY_ANNOTATION: &str = "pyo/public-country";
 pub const LOCATED_AT_ANNOTATION: &str = "pyo/located-at";
+/// Its Tailscale IPv4 address ("" when it has none).
+pub const TAILNET_IPV4_ANNOTATION: &str = "pyo/tailnet-ipv4";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

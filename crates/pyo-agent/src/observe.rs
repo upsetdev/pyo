@@ -466,6 +466,22 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
                     .annotations()
                     .get(pyo_proto::PUBLIC_COUNTRY_ANNOTATION)
                     .cloned(),
+                // What the server's own interfaces have (locate.rs), else a
+                // node address on the tailnet (a server joined over it).
+                tailnet_ip: n
+                    .annotations()
+                    .get(pyo_proto::TAILNET_IPV4_ANNOTATION)
+                    .filter(|ip| !ip.is_empty())
+                    .cloned()
+                    .or_else(|| {
+                        status
+                            .addresses
+                            .iter()
+                            .flatten()
+                            .map(|a| a.address.as_str())
+                            .find(|a| crate::locate::tailnet_v4(a))
+                            .map(str::to_owned)
+                    }),
                 name,
             }
         })
@@ -869,7 +885,31 @@ async fn capabilities(
         traffic_local: true,
         waf_rejected,
         waf_active,
+        tailnet_web_ips: tailnet_web_ips(client).await,
     }
+}
+
+/// The host's Tailscale addresses that take websites' connections (ports
+/// 80 and 443) whatever the cluster's public traffic: `TAILNET_SERVICE`'s,
+/// once the host's timer writes those ports into it.
+async fn tailnet_web_ips(client: &Client) -> Vec<String> {
+    let Ok(svc) = Api::<Service>::namespaced(client.clone(), pyo_proto::system::GATEWAY_NS)
+        .get_opt(pyo_proto::system::TAILNET_SERVICE)
+        .await
+    else {
+        return vec![];
+    };
+    let Some(spec) = svc.and_then(|s| s.spec) else {
+        return vec![];
+    };
+    if !spec.ports.iter().flatten().any(|p| p.port == 80) {
+        return vec![];
+    }
+    spec.external_ips
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|ip| crate::locate::tailnet_v4(ip))
+        .collect()
 }
 
 /// Services (by id) with a WAF policy the gateway refused (Accepted
