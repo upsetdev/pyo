@@ -504,6 +504,21 @@ fn decide_gpu_policies(rows: &[(String, Value, Option<bool>)]) -> Vec<pyo_proto:
         .collect()
 }
 
+/// Commands sent to an earlier process of the agent ($2 is the polling
+/// one's instance) that it can't have finished, back to pending: a
+/// rollout still under way, and the cluster's latest install refresh (it
+/// changes nothing that's done already; an older one would put back an
+/// older install).
+const REQUEUE_ORPHANED: &str = "UPDATE pyo.commands c SET status = 'pending', sent_to = NULL
+  WHERE c.cluster_id = $1 AND c.status = 'sent' AND c.sent_to IS DISTINCT FROM $2
+    AND ((c.command->>'kind' = 'deploy'
+          AND EXISTS (SELECT 1 FROM pyo.deployments d
+                       WHERE d.id = c.command->>'deploymentId' AND d.status NOT IN ('succeeded', 'failed', 'cancelled')))
+      OR (c.command->>'kind' = 'refresh_install'
+          AND NOT EXISTS (SELECT 1 FROM pyo.commands n
+                           WHERE n.cluster_id = c.cluster_id AND n.command->>'kind' = 'refresh_install'
+                             AND n.created_at > c.created_at)))";
+
 #[derive(Deserialize)]
 struct PollQuery {
     /// Seconds to hold the request open when there's nothing to do.
@@ -524,20 +539,14 @@ async fn poll(
         .chars()
         .take(64)
         .collect::<String>();
-    // A rollout handed to an earlier process of this agent that is still
-    // running here was orphaned by a restart: hand it out again.
+    // Commands handed to an earlier process of this agent were lost with
+    // it when it restarted: hand them out again.
     if !instance.is_empty() {
-        sqlx::query(
-            "UPDATE pyo.commands c SET status = 'pending', sent_to = NULL
-              WHERE c.cluster_id = $1 AND c.status = 'sent' AND c.sent_to IS DISTINCT FROM $2
-                AND c.command->>'kind' = 'deploy'
-                AND EXISTS (SELECT 1 FROM pyo.deployments d
-                             WHERE d.id = c.command->>'deploymentId' AND d.status NOT IN ('succeeded', 'failed', 'cancelled'))",
-        )
-        .bind(&cluster.id)
-        .bind(&instance)
-        .execute(&s.db)
-        .await?;
+        sqlx::query(REQUEUE_ORPHANED)
+            .bind(&cluster.id)
+            .bind(&instance)
+            .execute(&s.db)
+            .await?;
     }
     let deadline = tokio::time::Instant::now() + wait;
     let waker = s.waker(&cluster.id).await;
@@ -1033,6 +1042,94 @@ mod name_tests {
             ),
             "a weak key doesn't count"
         );
+    }
+
+    /// Against a real Postgres (DATABASE_URL, a throwaway one): when the
+    /// agent restarted, the install refresh its old process got is handed
+    /// out again (the latest only), and so is a rollout under way; other
+    /// commands, and those the polling process has, stay.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn commands_lost_with_a_restarted_agent_are_sent_again() {
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&pool).await.unwrap();
+        let run = crate::ids::new_id("t");
+        let (team, cluster) = (format!("team_{run}"), format!("cl_{run}"));
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)").bind(&cluster).bind(&team).execute(&pool).await.unwrap();
+        let mut ids = vec![];
+        for (i, (command, sent_to)) in [
+            (json!({ "kind": "refresh_install", "hash": "old" }), "gone"),
+            (json!({ "kind": "refresh_install", "hash": "new" }), "gone"),
+            (json!({ "kind": "update_agent", "image": "a" }), "gone"),
+            (
+                json!({ "kind": "deploy", "deploymentId": format!("dep_{run}") }),
+                "gone",
+            ),
+            (json!({ "kind": "refresh_install", "hash": "new" }), "me"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("cmd_{run}_{i}");
+            sqlx::query("INSERT INTO pyo.commands (id, cluster_id, command, status, sent_at, sent_to, created_at) VALUES ($1, $2, $3, 'sent', now(), $4, now() + make_interval(secs => $5))")
+                .bind(&id)
+                .bind(&cluster)
+                .bind(command)
+                .bind(sent_to)
+                .bind(i as f64)
+                .execute(&pool)
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        let statuses = || {
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM pyo.commands WHERE cluster_id = $1 ORDER BY created_at",
+            )
+            .bind(&cluster)
+            .fetch_all(&pool)
+        };
+        let requeue = || {
+            sqlx::query(super::REQUEUE_ORPHANED)
+                .bind(&cluster)
+                .bind("me")
+                .execute(&pool)
+        };
+        // The newest refresh is this process's: none of the old one's goes again.
+        requeue().await.unwrap();
+        assert_eq!(statuses().await.unwrap(), ["sent"; 5]);
+        // Without it, the newest the old process got does (the rollout
+        // has no deployment under way here).
+        sqlx::query("DELETE FROM pyo.commands WHERE id = $1")
+            .bind(&ids[4])
+            .execute(&pool)
+            .await
+            .unwrap();
+        requeue().await.unwrap();
+        assert_eq!(
+            statuses().await.unwrap(),
+            ["sent", "pending", "sent", "sent"]
+        );
+        // Handed out to the new process: left with it.
+        sqlx::query("UPDATE pyo.commands SET status = 'sent', sent_to = 'me' WHERE id = $1")
+            .bind(&ids[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+        requeue().await.unwrap();
+        assert_eq!(statuses().await.unwrap(), ["sent"; 4]);
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     /// Against a real Postgres (DATABASE_URL, a throwaway one): a service

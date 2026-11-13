@@ -266,10 +266,16 @@ pub struct LastRefresh {
     pub status: String,
     pub message: String,
     pub age_secs: i64,
+    /// How many refreshes of this install Pyo has sent the cluster.
+    pub attempts: i64,
 }
 
-/// A refresh in flight this long without the install turning current is sent again.
-const REFRESH_PATIENCE_SECS: i64 = 10 * 60;
+/// A refresh sent (or done) this long without the install turning current
+/// is sent again: after a minute, then twice as long each time, up to
+/// [`REFRESH_PATIENCE_MAX_SECS`]. A refresh lost with an agent that
+/// restarted is handed out again as soon as the new one polls (agent.rs).
+const REFRESH_PATIENCE_SECS: i64 = 60;
+const REFRESH_PATIENCE_MAX_SECS: i64 = 10 * 60;
 /// One that failed is tried again after this long.
 const REFRESH_RETRY_SECS: i64 = 30 * 60;
 
@@ -302,12 +308,60 @@ pub fn install_state(
                 ("updating", String::new(), true)
             }
         }
+        // Still queued: the agent gets it when it next polls.
+        Some(l) if l.status == "pending" => ("updating", String::new(), false),
         Some(l) => (
             "updating",
             String::new(),
-            l.age_secs >= REFRESH_PATIENCE_SECS,
+            l.age_secs >= refresh_patience(l.attempts),
         ),
     }
+}
+
+/// How long the `attempts`th refresh of an install has before another is sent.
+fn refresh_patience(attempts: i64) -> i64 {
+    let doublings = attempts.clamp(1, 11) - 1;
+    (REFRESH_PATIENCE_SECS << doublings).min(REFRESH_PATIENCE_MAX_SECS)
+}
+
+/// The latest refresh of `hash` sent to the cluster, if any.
+async fn last_refresh(
+    db: impl sqlx::PgExecutor<'_>,
+    cluster_id: &str,
+    hash: &str,
+) -> ApiResult<Option<LastRefresh>> {
+    let last: Option<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT status, coalesce(result->>'message', ''), extract(epoch FROM now() - created_at)::bigint,
+                count(*) OVER () FROM pyo.commands
+          WHERE cluster_id = $1 AND command->>'kind' = 'refresh_install' AND command->>'hash' = $2 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(cluster_id)
+    .bind(hash)
+    .fetch_optional(db)
+    .await?;
+    Ok(
+        last.map(|(status, message, age_secs, attempts)| LastRefresh {
+            status,
+            message,
+            age_secs,
+            attempts,
+        }),
+    )
+}
+
+/// Whether the agent is bringing the cluster's install up to this Pyo's
+/// (`scope` as it last reported it): its image is moved only after that
+/// (updates.rs), so the new agent starts under the admission policy it's
+/// made for.
+pub async fn refreshing(
+    db: &sqlx::PgPool,
+    cluster_id: &str,
+    scope: &pyo_proto::rbac::AgentScope,
+    same_cluster: bool,
+) -> ApiResult<bool> {
+    let hash = &parts(same_cluster).hash;
+    let last = last_refresh(db, cluster_id, hash).await?;
+    Ok(install_state(scope, hash, last.as_ref()).0 == "updating")
 }
 
 /// From a heartbeat: where the cluster's install stands against this Pyo's,
@@ -326,19 +380,7 @@ pub async fn sync(
         return Ok((json!({ "state": "current" }), false));
     };
     let parts = parts(same_cluster);
-    let last: Option<(String, String, i64)> = sqlx::query_as(
-        "SELECT status, coalesce(result->>'message', ''), extract(epoch FROM now() - created_at)::bigint FROM pyo.commands
-          WHERE cluster_id = $1 AND command->>'kind' = 'refresh_install' AND command->>'hash' = $2 ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(cluster_id)
-    .bind(&parts.hash)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let last = last.map(|(status, message, age_secs)| LastRefresh {
-        status,
-        message,
-        age_secs,
-    });
+    let last = last_refresh(&mut **tx, cluster_id, &parts.hash).await?;
     let (state, message, send) = install_state(scope, &parts.hash, last.as_ref());
     if send {
         crate::deploy::enqueue(
@@ -387,6 +429,7 @@ mod tests {
             status: status.into(),
             message: "no".into(),
             age_secs,
+            attempts: 1,
         }
     }
 
@@ -438,7 +481,11 @@ mod tests {
             ("updating", String::new(), false)
         );
         assert!(!install_state(&s, "h1", Some(&last("done", 30))).2);
-        assert!(install_state(&s, "h1", Some(&last("pending", REFRESH_PATIENCE_SECS))).2);
+        // Unanswered (lost with an agent that restarted, say): again after a minute.
+        assert!(install_state(&s, "h1", Some(&last("sent", REFRESH_PATIENCE_SECS))).2);
+        assert!(install_state(&s, "h1", Some(&last("done", REFRESH_PATIENCE_SECS))).2);
+        // Still queued: it's delivered when the agent polls.
+        assert!(!install_state(&s, "h1", Some(&last("pending", REFRESH_PATIENCE_MAX_SECS))).2);
         assert_eq!(
             install_state(&s, "h1", Some(&last("failed", 60))),
             ("outdated", "no".to_owned(), false)
@@ -446,6 +493,30 @@ mod tests {
         assert_eq!(
             install_state(&s, "h1", Some(&last("failed", REFRESH_RETRY_SECS))),
             ("updating", String::new(), true)
+        );
+    }
+
+    #[test]
+    fn unanswered_refreshes_are_sent_again_sooner_then_less_often() {
+        assert_eq!(REFRESH_PATIENCE_SECS, 60);
+        let waits: Vec<i64> = (0..8).map(refresh_patience).collect();
+        assert_eq!(waits, [60, 60, 120, 240, 480, 600, 600, 600]);
+        let s = scope("h0", true);
+        let third = LastRefresh {
+            attempts: 3,
+            ..last("sent", 200)
+        };
+        assert!(!install_state(&s, "h1", Some(&third)).2);
+        assert!(
+            install_state(
+                &s,
+                "h1",
+                Some(&LastRefresh {
+                    age_secs: 240,
+                    ..third
+                })
+            )
+            .2
         );
     }
 

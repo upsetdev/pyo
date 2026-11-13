@@ -33,6 +33,9 @@ const CHECK_EVERY_MS: i64 = 6 * 3_600_000;
 const PYO_TIMEOUT_MS: i64 = 45 * 60_000;
 /// An agent has this long to come back on the new version.
 const AGENT_TIMEOUT_MS: i64 = 10 * 60_000;
+/// An agent bringing its cluster's install up to Pyo's has this long to
+/// finish before it's moved to the new image anyway.
+const INSTALL_FIRST_MS: i64 = 3 * 60_000;
 /// release.json is small; anything bigger isn't one.
 const MAX_ASSET: usize = 4 << 20;
 /// Hosts a release check may talk to (GitHub's API, and where it sends
@@ -374,13 +377,16 @@ struct ClusterRow {
     updates: i32,
     same_cluster: bool,
     online: bool,
+    /// What its agent may do there, as it last reported (`agentScope`).
+    scope: Option<Value>,
 }
 
 async fn clusters(db: &PgPool) -> ApiResult<Vec<ClusterRow>> {
     Ok(sqlx::query_as(
         "SELECT c.id, c.team_id, c.name, t.name AS team_name, c.agent_version,
                 coalesce((c.capabilities->>'updates')::int, 0) AS updates, coalesce(c.same_cluster, false) AS same_cluster,
-                (c.last_seen_at > now() - interval '2 minutes') AS online
+                (c.last_seen_at > now() - interval '2 minutes') AS online,
+                c.capabilities->'agentScope' AS scope
            FROM pyo.clusters c JOIN pyo.teams t ON t.id = c.team_id
           WHERE c.status <> 'pending'
           ORDER BY c.same_cluster DESC, c.name",
@@ -903,6 +909,12 @@ async fn advance_pyo(s: &AppState, u: &UpdateRow) -> ApiResult<()> {
     }
 }
 
+/// Whether an agent waits for its install's refresh (`refreshing`) before
+/// it's moved to the new image, `waited_ms` into the agents' step.
+fn waits_for_install(refreshing: bool, waited_ms: i64) -> bool {
+    refreshing && waited_ms < INSTALL_FIRST_MS
+}
+
 async fn advance_agents(s: &AppState, u: &UpdateRow) -> ApiResult<()> {
     let release: Release =
         serde_json::from_value(u.release.clone()).map_err(anyhow::Error::from)?;
@@ -928,6 +940,22 @@ async fn advance_agents(s: &AppState, u: &UpdateRow) -> ApiResult<()> {
             continue;
         };
         let on_new = c.agent_version.as_deref() == Some(u.version.as_str());
+        // The admission policy first: the new agent applies what the new
+        // policy allows (the gateway's pinned objects), not the old one.
+        let refreshing = a["state"] == json!("waiting")
+            && !on_new
+            && c.online
+            && c.updates >= 1
+            && match c
+                .scope
+                .clone()
+                .and_then(|v| serde_json::from_value::<pyo_proto::rbac::AgentScope>(v).ok())
+            {
+                Some(scope) => {
+                    crate::install::refreshing(&s.db, &c.id, &scope, c.same_cluster).await?
+                }
+                None => false,
+            };
         match a["state"].as_str().unwrap_or("") {
             "waiting" if on_new => a["state"] = json!("done"),
             "waiting" if !c.online => {
@@ -941,7 +969,11 @@ async fn advance_agents(s: &AppState, u: &UpdateRow) -> ApiResult<()> {
                     release.images.agent
                 ));
             }
+            "waiting" if waits_for_install(refreshing, now - a["at"].as_i64().unwrap_or(now)) => {
+                a["message"] = json!("Updating its admission policy first.");
+            }
             "waiting" => {
+                a.as_object_mut().map(|o| o.remove("message"));
                 let mut tx = s.db.begin().await?;
                 let cmd = crate::deploy::enqueue(
                     &mut tx,
@@ -1089,6 +1121,16 @@ async fn advance_agents(s: &AppState, u: &UpdateRow) -> ApiResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_move_to_the_new_image_after_their_install() {
+        // Its install being refreshed: the image waits, but not forever.
+        assert!(waits_for_install(true, 0));
+        assert!(waits_for_install(true, INSTALL_FIRST_MS - 1));
+        assert!(!waits_for_install(true, INSTALL_FIRST_MS));
+        // Current, or one only its connect command brings up to date: now.
+        assert!(!waits_for_install(false, 0));
+    }
 
     /// What every install and update applies to Pyo's own namespace keeps
     /// it closed: nothing in by default, Postgres, ClickHouse and the
@@ -1299,6 +1341,7 @@ mod tests {
             updates,
             same_cluster: same,
             online,
+            scope: None,
         }
     }
 
