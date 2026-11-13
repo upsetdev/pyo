@@ -1,0 +1,28 @@
+{
+  "/v10/projects?limit=100": {
+    "projects": [],
+    "pagination": {
+      "count": 0,
+      "next": null
+    }
+  },
+  "/v2/teams?limit=20": {
+    "teams": [
+      {
+        "id": "team_acme",
+        "slug": "acme",
+        "name": "Acme"
+      },
+      {
+        "id": "team_side",
+        "slug": "side-project",
+        "name": "Side"
+      }
+    ],
+    "pagination": {
+      "count": 2,
+      "next": null,
+      "prev": null
+    }
+  }
+}
