@@ -1,3 +1,4 @@
+import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { Segmented } from "~/components/ui/Field";
 import { fetchPreview } from "~/lib/pyo/backend";
 import { Layered } from "~/components/ui/Layered";
@@ -472,10 +473,11 @@ function AnalyticsCard({ app }: { app: Application }) {
   const [range, setRange] = useState<(typeof RANGES)[number]>("24h");
   const [metric, setMetric] = useState(0);
   const hasDomain = app.domains.length > 0;
+  const on = useObservabilityOn();
   const q = useQuery(
-    `app-traffic:${app.id}:${range}:${hasDomain}`,
+    `app-traffic:${app.id}:${range}:${hasDomain && on}`,
     () =>
-      hasDomain
+      hasDomain && on
         ? fetchAnalytics({
             team: app.teamId,
             project: "all",
@@ -489,6 +491,12 @@ function AnalyticsCard({ app }: { app: Application }) {
     },
   );
 
+  if (!on)
+    return (
+      <Panel title="Analytics">
+        <ObservabilityOff compact />
+      </Panel>
+    );
   if (!hasDomain)
     return (
       <Panel title="Analytics">

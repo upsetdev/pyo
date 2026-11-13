@@ -329,12 +329,14 @@ function OverviewPage() {
         </aside>
       </div>
 
-      <Pulse
-        team={ws.id}
-        hasSites={apps.some((a) =>
-          a.domains.some((d) => d.status === "active"),
-        )}
-      />
+      {s.observabilitySettings.enabled ? (
+        <Pulse
+          team={ws.id}
+          hasSites={apps.some((a) =>
+            a.domains.some((d) => d.status === "active"),
+          )}
+        />
+      ) : null}
     </Page>
   );
 }

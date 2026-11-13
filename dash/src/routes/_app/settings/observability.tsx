@@ -4,7 +4,7 @@ import { SettingsSection } from "../settings";
 
 export const Route = createFileRoute("/_app/settings/observability")({
   component: () => (
-    <SettingsSection description="What analytics and logs keep about visitors.">
+    <SettingsSection description="Analytics, request logs and usage history, and what they keep about visitors.">
       <ObservabilitySettingsSection />
     </SettingsSection>
   ),

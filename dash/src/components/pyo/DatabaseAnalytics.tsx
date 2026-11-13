@@ -1,3 +1,4 @@
+import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { ChartLineIcon } from "@phosphor-icons/react";
 import { useState, type ReactNode } from "react";
 import {
@@ -89,13 +90,27 @@ export const RANGE_LABEL: Record<Range, string> = {
   "30d": "Last 30 days",
 };
 
+/** Nothing while observability is off. */
 export function useDatabaseAnalytics(id: string, range: Range) {
-  return useQuery(`db-analytics:${id}:${range}`, () => fetchDatabaseAnalytics(id, range), { refreshMs: 30_000 });
+  const on = useObservabilityOn();
+  return useQuery(on ? `db-analytics:${id}:${range}` : "off", () => (on ? fetchDatabaseAnalytics(id, range) : Promise.resolve(null)), {
+    refreshMs: 30_000,
+  });
 }
 
 type Tab = "throughput" | "connections" | "efficiency" | "storage";
 
-export function DatabaseAnalytics({ d, range }: { d: Database; range: Range }) {
+export function DatabaseAnalytics(props: { d: Database; range: Range }) {
+  return useObservabilityOn() ? (
+    <Analytics {...props} />
+  ) : (
+    <Panel>
+      <ObservabilityOff />
+    </Panel>
+  );
+}
+
+function Analytics({ d, range }: { d: Database; range: Range }) {
   const q = useDatabaseAnalytics(d.id, range);
   if (q.status === "loading")
     return (
@@ -110,7 +125,7 @@ export function DatabaseAnalytics({ d, range }: { d: Database; range: Range }) {
         <ErrorState title="Couldn't load analytics" description={q.error} onRetry={q.retry} />
       </Panel>
     );
-  if (!q.data.times.length)
+  if (!q.data?.times.length)
     return (
       <Panel>
         <EmptyState icon={ChartLineIcon} title="Collecting metrics" description="Shown once its servers report." />

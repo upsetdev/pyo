@@ -1,3 +1,4 @@
+import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { useRef, useState, type ReactNode } from "react";
 import { BarList, Legend, TimeSeriesChart, type Series } from "~/components/charts/Charts";
 import { TimeAgo } from "~/components/pyo/common";
@@ -58,6 +59,18 @@ const country = (code: string) => (
 
 /** What the service's firewall did: "Analytics" on its Firewall tab. */
 export function FirewallAnalytics({ app }: { app: Application }) {
+  return useObservabilityOn() ? (
+    <Analytics app={app} />
+  ) : (
+    <Layered bare>
+      <section aria-label="Analytics" className="overflow-hidden rounded-[14px] border border-card-border bg-card">
+        <ObservabilityOff compact />
+      </section>
+    </Layered>
+  );
+}
+
+function Analytics({ app }: { app: Application }) {
   const s = usePyo();
   const [range, setRange] = useState<(typeof RANGES)[number]>("24h");
   const waf = wafMode(app) !== "off";

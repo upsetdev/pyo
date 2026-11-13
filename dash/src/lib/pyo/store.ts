@@ -108,7 +108,8 @@ export type PyoState = {
   /** Logins for private container registries. */
   registryLogins: RegistryLogin[];
   /** Installation-wide analytics settings. */
-  observabilitySettings: { ipMode: IpMode };
+  /** Installation-wide. `small`: Pyo's server has under 3.5 GB of memory now. */
+  observabilitySettings: { ipMode: IpMode; enabled: boolean; small: boolean | null };
   /** Uploaded TLS certificates of the user's teams. */
   certificates: Certificate[];
   /** Client certificates for CDNs, without their keys. */
@@ -305,7 +306,7 @@ function empty(): PyoState {
     databases: [],
     secretStores: [],
     registryLogins: [],
-    observabilitySettings: { ipMode: "none" },
+    observabilitySettings: { ipMode: "none", enabled: true, small: null },
     builders: [],
     integrations: [],
     gitConnections: [],
@@ -2244,9 +2245,16 @@ export const api = {
   },
   saveObservabilitySettings(ipMode: IpMode) {
     update((s) => {
-      s.observabilitySettings = { ipMode };
+      s.observabilitySettings.ipMode = ipMode;
     });
     return send("saveObservabilitySettings", { ipMode });
+  },
+  /** Observability on or off, for the whole installation (its admin). */
+  setObservability(enabled: boolean) {
+    update((s) => {
+      s.observabilitySettings.enabled = enabled;
+    });
+    return send("setObservability", { enabled });
   },
   /** Checks the login with the registry first; resolves with whether it could. */
   saveRegistryLogin(input: {

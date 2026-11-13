@@ -1,3 +1,4 @@
+import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { useState } from "react";
 import { SERIES, TimeSeriesChart, type Series } from "~/components/charts/Charts";
 import { Select } from "~/components/ui/Field";
@@ -26,7 +27,17 @@ const latest = (v: V[] | undefined): V => {
 };
 const has = (v: V[] | undefined) => !!v?.some((x) => x != null);
 
-export function NodeHistory({ team, clusterId, node }: { team: string; clusterId: string; node: string }) {
+export function NodeHistory(props: { team: string; clusterId: string; node: string }) {
+  return useObservabilityOn() ? (
+    <History {...props} />
+  ) : (
+    <Panel title="History">
+      <ObservabilityOff compact />
+    </Panel>
+  );
+}
+
+function History({ team, clusterId, node }: { team: string; clusterId: string; node: string }) {
   const [range, setRange] = useState("24h");
   const [tab, setTab] = useState<Tab>("cpu");
   const q = useQuery(`metrics:${team}:${clusterId}:${range}`, () => fetchMetrics({ team, cluster: clusterId, range }), { refreshMs: 30_000 });
