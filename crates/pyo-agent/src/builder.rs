@@ -6,6 +6,11 @@
 //! needs user namespaces, which Ubuntu restricts by default). pyo-builder,
 //! which checks out the code and runs Railpack's detection, runs as an
 //! unprivileged user with no capabilities and a read-only filesystem.
+//!
+//! BuildKit runs only while there are builds: its container starts it when
+//! pyo-builder asks (a `wanted` file in the shared socket directory) and
+//! stops it when pyo-builder takes the file away after a while without
+//! builds. Its cache stays on the server's disk in between.
 
 use k8s_openapi::api::{apps::v1::Deployment, core::v1::Secret};
 use kube::{
@@ -28,6 +33,38 @@ fn name(builder_id: &str) -> String {
 fn config_name(name: &str) -> String {
     format!("{name}-config")
 }
+
+/// The BuildKit container's command: runs buildkitd (with the arguments
+/// after the script) while `/run/buildkit/wanted` exists, and marks it
+/// started with `/run/buildkit/up`. A buildkitd that exits on its own is
+/// started again while it's wanted.
+const ON_DEMAND: &str = r#"run=/run/buildkit
+pid=
+stop() {
+  rm -f "$run/up"
+  if [ -n "$pid" ]; then kill -TERM "$pid" 2>/dev/null; wait "$pid"; fi
+  pid=
+}
+trap 'stop; exit 0' TERM INT
+rm -f "$run/up"
+while :; do
+  if [ -e "$run/wanted" ]; then
+    if [ -z "$pid" ]; then
+      buildkitd "$@" &
+      pid=$!
+      touch "$run/up"
+    elif ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      pid=
+      rm -f "$run/up"
+      sleep 2
+    fi
+  elif [ -n "$pid" ]; then
+    stop
+  fi
+  sleep 1
+done
+"#;
 
 pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String> {
     let c = agent.kube.clone();
@@ -80,6 +117,8 @@ pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String>
                                     "image": BUILDKIT_IMAGE,
                                     // The socket is group-owned by the builder's group, so the
                                     // unprivileged builder can talk to it.
+                                    // Started on demand (ON_DEMAND); the rest are buildkitd's.
+                                    "command": ["/bin/sh", "-c", ON_DEMAND, "buildkitd-on-demand"],
                                     "args": ["--addr", "unix:///run/buildkit/buildkitd.sock", "--group", "65532", "--config", "/etc/buildkit/buildkitd.toml"],
                                     "securityContext": { "privileged": true },
                                     "volumeMounts": [
@@ -87,7 +126,8 @@ pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String>
                                         { "name": "config", "mountPath": "/etc/buildkit" },
                                         { "name": "cache", "mountPath": "/var/lib/buildkit" },
                                     ],
-                                    "resources": { "requests": { "cpu": "100m", "memory": "256Mi" } },
+                                    // Asleep between builds: a shell and its sleep.
+                                    "resources": { "requests": { "cpu": "10m", "memory": "64Mi" } },
                                 },
                                 {
                                     "name": "builder",
@@ -96,6 +136,8 @@ pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String>
                                     "envFrom": [{ "secretRef": { "name": name } }],
                                     "env": [
                                         { "name": "BUILDKIT_HOST", "value": "unix:///run/buildkit/buildkitd.sock" },
+                                        // Where it wakes BuildKit (see ON_DEMAND).
+                                        { "name": "PYO_BUILDKIT_WAKE", "value": "/run/buildkit" },
                                         // git and railpack keep their state under $HOME.
                                         { "name": "HOME", "value": "/tmp" },
                                         { "name": "TMPDIR", "value": "/tmp" },
