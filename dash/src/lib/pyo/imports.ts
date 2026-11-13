@@ -17,7 +17,7 @@ export type ImportStarted = {
   extensions: { turnedOn: string[]; madeByImport: string[] };
 };
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+export async function post<T>(path: string, body: unknown): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
