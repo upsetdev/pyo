@@ -669,31 +669,34 @@ run_upgrader() {
   local id name
   id="install-$(date +%s)"
   name="pyo-upgrade-$id"
-  kc create namespace "$NS" --dry-run=client -o yaml | kc apply -f - >/dev/null
+  # The namespace as platform.yaml has it (the upgrader skips Namespaces).
+  kc apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Namespace
+metadata: { name: $NS, labels: { app.kubernetes.io/part-of: pyo } }
+YAML
   first_sign_in
   bootstrap_key kc
   kc -n "$NS" create configmap "$name" --from-file=release.json="$WORK/release.json" >/dev/null
+  # >>> pyo:upgrader-rbac (upgrade.rs's upgrader_rbac, as JSON; cargo test compares them)
+  kc apply --server-side --force-conflicts --field-manager=pyo -f - >/dev/null <<'JSON'
+{"apiVersion": "v1", "kind": "List", "items": [
+  {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": "pyo-upgrade", "namespace": "pyo-system", "labels": {"app.kubernetes.io/managed-by": "pyo"}}},
+  {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": {"name": "pyo-upgrade", "namespace": "pyo-system", "labels": {"app.kubernetes.io/managed-by": "pyo"}}, "rules": [
+    {"apiGroups": ["apps"], "resources": ["deployments", "statefulsets"], "verbs": ["get", "list", "watch", "create", "patch"]},
+    {"apiGroups": [""], "resources": ["services", "configmaps", "persistentvolumeclaims", "serviceaccounts"], "verbs": ["get", "create", "patch"]},
+    {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get", "create"]},
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "delete"]},
+    {"apiGroups": ["policy"], "resources": ["poddisruptionbudgets"], "verbs": ["get", "create", "patch"]},
+    {"apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "create", "patch"]}
+  ]},
+  {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": {"name": "pyo-upgrade", "namespace": "pyo-system", "labels": {"app.kubernetes.io/managed-by": "pyo"}},
+   "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "pyo-upgrade"},
+   "subjects": [{"kind": "ServiceAccount", "name": "pyo-upgrade", "namespace": "pyo-system"}]}
+]}
+JSON
+  # <<< pyo:upgrader-rbac
   kc apply --server-side --force-conflicts --field-manager=pyo -f - >/dev/null <<YAML
-apiVersion: v1
-kind: ServiceAccount
-metadata: { name: pyo-upgrade, namespace: $NS, labels: { app.kubernetes.io/managed-by: pyo } }
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata: { name: pyo-upgrade, namespace: $NS, labels: { app.kubernetes.io/managed-by: pyo } }
-rules:
-  - { apiGroups: [apps], resources: [deployments, statefulsets], verbs: [get, list, watch, create, patch] }
-  - { apiGroups: [""], resources: [services, configmaps, persistentvolumeclaims, serviceaccounts], verbs: [get, create, patch] }
-  - { apiGroups: [""], resources: [secrets], verbs: [get, create] }
-  - { apiGroups: [""], resources: [pods], verbs: [get, list, delete] }
-  - { apiGroups: [policy], resources: [poddisruptionbudgets], verbs: [get, create, patch] }
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: { name: pyo-upgrade, namespace: $NS, labels: { app.kubernetes.io/managed-by: pyo } }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: pyo-upgrade }
-subjects: [{ kind: ServiceAccount, name: pyo-upgrade, namespace: $NS }]
----
 apiVersion: batch/v1
 kind: Job
 metadata: { name: $name, namespace: $NS, labels: { app.kubernetes.io/managed-by: pyo, app.kubernetes.io/name: pyo-upgrade, pyo/update-id: $id } }
@@ -702,7 +705,7 @@ spec:
   activeDeadlineSeconds: 1800
   ttlSecondsAfterFinished: 86400
   template:
-    metadata: { labels: { app.kubernetes.io/name: pyo-upgrade, pyo/update-id: $id } }
+    metadata: { labels: { app.kubernetes.io/managed-by: pyo, app.kubernetes.io/name: pyo-upgrade, pyo/update-id: $id } }
     spec:
       serviceAccountName: pyo-upgrade
       restartPolicy: Never
