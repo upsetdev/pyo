@@ -43,18 +43,6 @@ pub const GATEWAY_LABEL: &str = "pyo.dev/gateway";
 /// Prefix of certificate Secrets in `pyo-gateway`.
 pub const TLS_SECRET_PREFIX: &str = "pyo-tls-";
 
-/// Proxies trust X-Forwarded-For from these: tailnet, private, local (a
-/// tunnel, ngrok's agent, k3s's load balancer, a CDN on a private link).
-pub const TRUSTED_PROXY_CIDRS: [&str; 7] = [
-    "127.0.0.1/32",
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "100.64.0.0/10",
-    "::1/128",
-    "fc00::/7",
-];
-
 /// The access log the proxies write (JSON on stdout), field by field: what
 /// analytics reads (pyo-api's observability.rs maps it).
 pub const ACCESS_LOG_FIELDS: [(&str, &str); 20] = [
@@ -72,8 +60,8 @@ pub const ACCESS_LOG_FIELDS: [(&str, &str); 20] = [
     ("user_agent", "%REQ(USER-AGENT)%"),
     ("referer", "%REQ(REFERER)%"),
     // The visitor as the proxy sees them: the PROXY protocol header's
-    // address when one came, else the TCP peer (or, for HTTP, the address
-    // worked out from X-Forwarded-For behind a trusted proxy).
+    // address when one came, else the TCP peer. X-Forwarded-For never
+    // counts ([`client_policy_spec`]).
     ("remote", "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%"),
     // TCP and UDP ports (connections): where they came in, what they sent,
     // which route took them (`tcproute/pyo-gateway/<route>/rule/0`), and
@@ -888,10 +876,6 @@ pub const TAILNET_WEB_DEFAULTED: [&str; 6] = [
     "internalTrafficPolicy",
 ];
 
-fn client_ip_detection() -> Value {
-    json!({ "xForwardedFor": { "trustedCIDRs": TRUSTED_PROXY_CIDRS } })
-}
-
 /// How the proxies place a website's visitor, for the client policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WebSettings {
@@ -899,25 +883,26 @@ pub struct WebSettings {
     pub origin_pull: bool,
     /// A PROXY protocol header is read when one is sent.
     pub proxy_protocol: bool,
-    /// The visitor is the connection's address (or the PROXY header's),
-    /// never X-Forwarded-For: on while the firewall has country rules, which
-    /// Envoy Gateway only allows with this.
-    pub direct: bool,
 }
 
-/// Client traffic policies: the visitor's address behind trusted proxies
-/// (or, with `direct`, the connection's address), on every Pyo Gateway; and
-/// on HTTPS, with origin pull on, a client certificate from the CDN's CAs
-/// (ConfigMap `cdn-origin-pull`). With `proxy_protocol`, the visitor's
-/// address from a PROXY protocol header when one is sent (optional: plain
-/// connections still work). Each connection's buffer is [`WAF_BODY_LIMIT`]:
-/// the part of a body block mode's WAF inspects before the request goes on.
-/// Its other setting is written out as Envoy Gateway's CRD defaults it, so
-/// the stored spec is exactly one the admission policy lists.
+/// Client traffic policies, on every Pyo Gateway: the visitor is the
+/// connection's address (or, with `proxy_protocol`, a PROXY protocol
+/// header's when one is sent; plain connections still work), never
+/// X-Forwarded-For. Nothing sits in front of the proxies that adds that
+/// header: ServiceLB and the tailnet Services hand them the visitor's own
+/// connection, so whoever could send it there (a tailnet device, a machine
+/// on the servers' network, a connection ServiceLB passed on from its pod)
+/// would pick any address past the firewall's address rules, rate limits
+/// and analytics. Country rules need it this way too. On HTTPS, with origin
+/// pull on, a client certificate from the CDN's CAs (ConfigMap
+/// `cdn-origin-pull`). Each connection's buffer is [`WAF_BODY_LIMIT`]: the
+/// part of a body block mode's WAF inspects before the request goes on. Its
+/// other setting is written out as Envoy Gateway's CRD defaults it, so the
+/// stored spec is exactly one the admission policy lists.
 pub fn client_policy_spec(https: bool, w: WebSettings) -> Value {
     let mut spec = json!({
         "targetSelectors": [{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "matchLabels": { GATEWAY_LABEL: if https { "https" } else { "http" } } }],
-        "clientIPDetection": if w.direct { json!({ "directSourceIP": {} }) } else { client_ip_detection() },
+        "clientIPDetection": { "directSourceIP": {} },
         "connection": { "bufferLimit": WAF_BODY_LIMIT, "maxAcceptPerSocketEvent": 1 },
     });
     let (origin_pull, proxy_protocol) = (w.origin_pull, w.proxy_protocol);
@@ -943,16 +928,13 @@ pub fn client_policy_variants(https: bool) -> Vec<Value> {
     let mut v = vec![];
     for origin_pull in [false, true].into_iter().filter(|p| https || !p) {
         for proxy_protocol in [false, true] {
-            for direct in [false, true] {
-                v.push(client_policy_spec(
-                    https,
-                    WebSettings {
-                        origin_pull,
-                        proxy_protocol,
-                        direct,
-                    },
-                ));
-            }
+            v.push(client_policy_spec(
+                https,
+                WebSettings {
+                    origin_pull,
+                    proxy_protocol,
+                },
+            ));
         }
     }
     v
@@ -1652,6 +1634,28 @@ mod tests {
         }
     }
 
+    /// Websites' visitors are their connection's address (or a PROXY
+    /// protocol header's), never what X-Forwarded-For says: nothing Pyo runs
+    /// in front of the proxies adds it, so any client that reaches them
+    /// directly (a tailnet device, the servers' own network) could name any
+    /// address past the firewall. The admission policy holds the agent to
+    /// these, so it can't write one that trusts the header either.
+    #[test]
+    fn websites_never_trust_forwarded_addresses() {
+        for https in [false, true] {
+            let variants = client_policy_variants(https);
+            assert_eq!(variants.len(), if https { 4 } else { 2 });
+            for spec in &variants {
+                assert_eq!(spec["clientIPDetection"], json!({ "directSourceIP": {} }));
+                assert!(!spec.to_string().contains("xForwardedFor"), "{spec}");
+                assert!(!spec.to_string().contains("100.64.0.0/10"), "{spec}");
+            }
+        }
+        let admission = json!(crate::rbac::admission("w", "g")).to_string();
+        assert!(!admission.contains("xForwardedFor") && !admission.contains("trustedCIDRs"));
+        assert!(!admission.contains("numTrustedHops"));
+    }
+
     /// The fixed objects, for checking them against a cluster:
     /// `cargo test -p pyo-proto print_objects -- --ignored --nocapture`.
     #[test]
@@ -1669,7 +1673,6 @@ mod tests {
                 WebSettings {
                     origin_pull: true,
                     proxy_protocol: true,
-                    direct: true,
                 },
             ),
         ]

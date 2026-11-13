@@ -131,14 +131,7 @@ pub async fn proxy_policy(client: &Client) -> anyhow::Result<()> {
 pub async fn sync(agent: &crate::Agent, sync: FirewallSync) -> anyhow::Result<String> {
     let client = &agent.kube;
     let mut n = 0;
-    // Countries anywhere on the cluster: visitors placed by their connection,
-    // before any route gets a country rule (Envoy Gateway refuses one
-    // otherwise); back to X-Forwarded-For after the last one is gone.
-    let countries = sync.targets.iter().any(|t| t.firewall.has_countries());
     let installed = gateway::installed(client).await;
-    if installed && countries {
-        gateway::set_web_direct(client, true).await?;
-    }
     // The WAF's engine (the API installs it while a service here has its
     // WAF on): its processor before routes point at it.
     let waf_ready = installed && sync.waf && crate::waf::wait_ready(client).await;
@@ -171,9 +164,6 @@ pub async fn sync(agent: &crate::Agent, sync: FirewallSync) -> anyhow::Result<St
         }
         crate::rollout::set_isolation(client, &t.service.namespace, t.network_isolation).await?;
         n += 1;
-    }
-    if installed && !countries {
-        gateway::set_web_direct(client, false).await?;
     }
     // No service wants it: the routes no longer point at it (above); the
     // API removes it.

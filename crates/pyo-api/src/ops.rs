@@ -7109,10 +7109,12 @@ pub(crate) async fn firewall_me(
             .unwrap_or("")
             .to_owned()
     };
-    let ip = crate::observability::client_ip(
+    // As sign-in limits see it: the gateway's forwarded address, nothing a
+    // client wrote itself.
+    let ip = crate::ratelimit::request_ip(
         &peer.ip().to_string(),
         &h("x-forwarded-for"),
-        &h("x-real-ip"),
+        crate::ratelimit::trusted_proxies(),
     );
     Ok(Json(
         json!({ "ip": ip, "country": s.observability.country_of(&ip) }),

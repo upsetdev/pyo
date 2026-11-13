@@ -573,50 +573,18 @@ impl IpMode {
     }
 }
 
-/// Private, local, link-local or tailnet (CGNAT): a proxy's own address,
-/// never a visitor on the internet.
-fn internal_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => {
-            let [a, b, ..] = v.octets();
-            v.is_private()
-                || v.is_loopback()
-                || v.is_link_local()
-                || v.is_unspecified()
-                || (a == 100 && (64..=127).contains(&b))
+impl AccessLine {
+    /// The visitor: the address the proxy placed them at (a PROXY protocol
+    /// header's, else the connection's), as its firewall and rate limits
+    /// see them; the TCP peer for lines without it. Never X-Forwarded-For
+    /// or X-Real-Ip: whoever reaches the proxy could write any address there
+    /// (pyo-proto's `client_policy_spec`).
+    pub fn visitor_ip(&self) -> &str {
+        if self.remote.is_empty() {
+            &self.peer
+        } else {
+            &self.remote
         }
-        IpAddr::V6(v) => {
-            v.is_loopback()
-                || v.is_unspecified()
-                || (v.segments()[0] & 0xfe00) == 0xfc00
-                || (v.segments()[0] & 0xffc0) == 0xfe80
-        }
-    }
-}
-
-/// The visitor's address. The proxy's peer is it, unless the
-/// request came through a proxy on an internal address (ngrok's agent,
-/// k3s's load balancer, a tunnel): then it's in X-Forwarded-For, read from
-/// the right past internal hops, so a visitor can't pick one by sending the
-/// header themselves; else X-Real-Ip.
-pub fn client_ip(peer: &str, forwarded_for: &str, real_ip: &str) -> String {
-    let parse = |s: &str| s.trim().trim_matches(['[', ']']).parse::<IpAddr>().ok();
-    let Some(p) = parse(peer) else {
-        return peer.to_owned();
-    };
-    if !internal_ip(&p) {
-        return p.to_string();
-    }
-    for hop in forwarded_for.rsplit(',') {
-        match parse(hop) {
-            Some(a) if !internal_ip(&a) => return a.to_string(),
-            Some(_) => continue,
-            None => break,
-        }
-    }
-    match parse(real_ip) {
-        Some(a) if !internal_ip(&a) => a.to_string(),
-        _ => p.to_string(),
     }
 }
 
@@ -1156,11 +1124,7 @@ impl Observability {
                     .map(|t| t.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 let salt = self.daily_salt(&day).await?;
-                let ip = if l.remote.is_empty() {
-                    l.peer.clone()
-                } else {
-                    l.remote.clone()
-                };
+                let ip = l.visitor_ip().to_owned();
                 let (country, country_name, city) = self.locate(&ip);
                 let visitor = {
                     let d = Sha256::digest(
@@ -1194,18 +1158,7 @@ impl Observability {
                 .map(|t| t.strftime("%Y-%m-%d").to_string())
                 .unwrap_or_default();
             let salt = self.daily_salt(&day).await?;
-            // With PROXY protocol on, the proxy's view of the visitor (the
-            // header's address) stands in for the TCP peer.
-            let peer = if !l.remote.is_empty()
-                && l.remote != l.peer
-                && !l.remote.parse::<IpAddr>().is_ok_and(|a| internal_ip(&a))
-            {
-                &l.remote
-            } else {
-                &l.peer
-            };
-            let ip = client_ip(peer, &l.forwarded_for, &l.real_ip);
-            let ip = ip.as_str();
+            let ip = l.visitor_ip();
             let ua = l.user_agent.as_str();
             let status = l.status;
             let method = if l.method.is_empty() {
@@ -2398,10 +2351,8 @@ mod tests {
             }
         );
         assert_eq!(a.port_key(), None, "a website request");
-        assert_eq!(
-            super::client_ip(&a.peer, &a.forwarded_for, &a.real_ip),
-            "203.0.113.9"
-        );
+        // Whatever X-Forwarded-For says, the visitor is who the proxy saw.
+        assert_eq!(a.visitor_ip(), "10.42.0.1");
         // Every key the proxy writes is one this reads (and the reverse).
         let mut written: Vec<&str> = pyo_proto::system::ACCESS_LOG_FIELDS
             .iter()
@@ -2537,28 +2488,45 @@ mod tests {
     }
 
     #[test]
-    fn client_ips() {
-        use super::client_ip;
+    fn visitors_are_who_the_proxy_saw() {
+        let line = |peer: &str, remote: &str, xff: &str, real: &str| super::AccessLine {
+            peer: peer.into(),
+            remote: remote.into(),
+            forwarded_for: xff.into(),
+            real_ip: real.into(),
+            ..Default::default()
+        };
         // Straight from the internet: the peer, whatever headers say.
-        assert_eq!(client_ip("203.0.113.7", "1.2.3.4", ""), "203.0.113.7");
-        // Through ngrok or k3s's balancer: the forwarded client.
         assert_eq!(
-            client_ip("10.42.0.1", "2001:db8:728:5b08::1", ""),
-            "2001:db8:728:5b08::1"
+            line("203.0.113.7", "203.0.113.7", "1.2.3.4", "").visitor_ip(),
+            "203.0.113.7"
+        );
+        // A tailnet device (or anything on a private network) naming someone
+        // else: still itself, as the firewall sees it.
+        assert_eq!(
+            line(
+                "100.101.102.103",
+                "100.101.102.103",
+                "198.51.100.9",
+                "198.51.100.10"
+            )
+            .visitor_ip(),
+            "100.101.102.103"
         );
         assert_eq!(
-            client_ip("10.42.0.1", "198.51.100.9, 10.0.0.5", ""),
+            line("10.42.0.1", "10.42.0.1", "198.51.100.9", "").visitor_ip(),
+            "10.42.0.1"
+        );
+        // A PROXY protocol header's address, when the proxy read one.
+        assert_eq!(
+            line("10.0.2.2", "198.51.100.9", "6.6.6.6", "").visitor_ip(),
             "198.51.100.9"
         );
-        // A made-up hop at the left doesn't win over the proxy's.
+        // Lines without the proxy's view: the peer.
         assert_eq!(
-            client_ip("10.42.0.1", "1.1.1.1, 198.51.100.9", ""),
-            "198.51.100.9"
+            line("203.0.113.7", "", "6.6.6.6", "").visitor_ip(),
+            "203.0.113.7"
         );
-        assert_eq!(client_ip("127.0.0.1", "", "198.51.100.10"), "198.51.100.10");
-        // Nothing better: the peer.
-        assert_eq!(client_ip("10.42.0.1", "", ""), "10.42.0.1");
-        assert_eq!(client_ip("100.64.0.11", "garbage", ""), "100.64.0.11");
     }
 
     #[test]

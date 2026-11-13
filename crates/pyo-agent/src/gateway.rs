@@ -580,12 +580,6 @@ pub async fn apply(
     if let Some(p) = &problem {
         notes.push(p.clone());
     }
-    // Country rules: the proxies place visitors by their connection first
-    // (Envoy Gateway refuses country rules otherwise). Switched back by the
-    // firewall's sync, which sees every service.
-    if spec.firewall.as_ref().is_some_and(|f| f.has_countries()) {
-        set_web_direct(client, true).await?;
-    }
     let mut r = route_objects(spec);
     // New public TCP and UDP ports wait for the servers to free them (a port
     // that just stopped being published straight from them), and stay off
@@ -1550,7 +1544,8 @@ async fn ensure_once(client: &Client) -> anyhow::Result<()> {
             &Patch::Apply(system::waf_backend()),
         )
         .await?;
-    // Origin pull, PROXY protocol and how visitors are placed stay as set.
+    // Origin pull and PROXY protocol stay as set; visitors are placed by
+    // their connection (an older install's X-Forwarded-For goes).
     write_web(client, web_settings(client).await?).await
 }
 
@@ -1566,7 +1561,6 @@ async fn web_settings(client: &Client) -> anyhow::Result<system::WebSettings> {
     Ok(system::WebSettings {
         origin_pull: spec["tls"]["clientValidation"].is_object(),
         proxy_protocol: spec["proxyProtocol"].is_object(),
-        direct: spec["clientIPDetection"]["directSourceIP"].is_object(),
     })
 }
 
@@ -1592,16 +1586,6 @@ async fn write_web(client: &Client, w: system::WebSettings) -> anyhow::Result<()
             &Patch::Apply(system::client_policy(true, w)),
         )
         .await?;
-    Ok(())
-}
-
-/// Place websites' visitors by their connection (country rules need it), or
-/// by X-Forwarded-For from trusted proxies again.
-pub async fn set_web_direct(client: &Client, direct: bool) -> anyhow::Result<()> {
-    let w = web_settings(client).await?;
-    if w.direct != direct {
-        write_web(client, system::WebSettings { direct, ..w }).await?;
-    }
     Ok(())
 }
 
