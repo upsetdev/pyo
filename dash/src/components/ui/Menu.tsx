@@ -38,6 +38,7 @@ export function Menu({
   hover = false,
   children,
   search,
+  className = "",
 }: {
   trigger: (p: {
     onClick: () => void;
@@ -55,6 +56,9 @@ export function Menu({
   children?: ReactNode;
   /** Show a search box (its placeholder) that filters the items. */
   search?: string;
+  /** Extra classes on the wrapper, e.g. "min-w-0 max-w-full" so a trigger
+   *  holding a long name can shrink and truncate inside a flex row. */
+  className?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -216,7 +220,7 @@ export function Menu({
   return (
     <div
       ref={ref}
-      className="relative inline-flex"
+      className={`relative inline-flex ${className}`}
       onMouseOver={hover ? enter : undefined}
       onMouseLeave={hover ? leave : undefined}
     >
@@ -284,9 +288,15 @@ export function Menu({
                         {it.icon}
                       </span>
                     ) : null}
-                    <span className="min-w-0 flex-1 truncate">{it.label}</span>
+                    <span
+                      className="min-w-0 flex-1 truncate"
+                      // A long name cut short here still reads in full on hover.
+                      title={typeof it.label === "string" ? it.label : undefined}
+                    >
+                      {it.label}
+                    </span>
                     {it.hint ? (
-                      <span className="text-[11px] text-muted-foreground">
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
                         {it.hint}
                       </span>
                     ) : null}

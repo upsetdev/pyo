@@ -143,7 +143,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             <XIcon size={14} />
           </button>
-          <Sidebar pathname={pathname} />
+          <Sidebar pathname={pathname} drawer />
         </aside>
       </div>
 
@@ -272,7 +272,14 @@ function AccountNav({
  */
 let lastMenu: "team" | "account" | null = null;
 
-function Sidebar({ pathname }: { pathname: string }) {
+function Sidebar({
+  pathname,
+  drawer = false,
+}: {
+  pathname: string;
+  /** In the mobile drawer: the team name stops short of its close button. */
+  drawer?: boolean;
+}) {
   // On pages outside a team (/profile, /settings) no team link is current.
   const inTeam = !!(useParams({ strict: false }) as { team?: string }).team;
   const menu = inTeam ? "team" : "account";
@@ -313,7 +320,7 @@ function Sidebar({ pathname }: { pathname: string }) {
     <>
       {/* Mark, then the team it's showing: "D / Acme". The mark sits
           over the nav icons (both centered 30px in). */}
-      <div className="flex h-14 shrink-0 items-center px-3">
+      <div className={`flex h-14 shrink-0 items-center px-3 ${drawer ? "pr-12" : ""}`}>
         <AppLink
           href="/"
           aria-label="Pyo overview"
@@ -459,14 +466,16 @@ function Trail({ crumbs }: { crumbs: Crumb[] }) {
                 ) : last ? (
                   <span
                     aria-current="page"
-                    className="block truncate px-1.5 py-1 text-foreground"
+                    title={c.label}
+                    className="block min-w-0 truncate px-1.5 py-1 text-foreground"
                   >
                     {c.label}
                   </span>
                 ) : (
                   <AppLink
                     href={c.href}
-                    className="block truncate rounded-md px-1.5 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    title={c.label}
+                    className="block min-w-0 truncate rounded-md px-1.5 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                   >
                     {c.label}
                   </AppLink>
