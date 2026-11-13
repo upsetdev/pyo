@@ -883,14 +883,39 @@ gateway_crds() {
 }
 gateway_crds
 
+# >>> pyo:agent-apply (connect.sh only; join.rs tests it)
+# The Kubernetes minor version the API server reports; empty when it doesn't
+# answer.
+server_minor() {
+  { k3s kubectl version -o json 2>/dev/null || true; } |
+    sed -n '/"serverVersion"/,/}/s/^ *"minor": *"\([0-9][0-9]*\).*/\1/p'
+}
+# The Pyo agent and the admission policy that holds it to its limits. Right
+# after k3s first starts, its API can time out: try again for 3 minutes.
+# Only Kubernetes older than 1.30 (it has no admission policies) goes on
+# without the policy.
+apply_agent() {
+  local minor delay=5 until=$((SECONDS + 180))
+  while :; do
+    if k3s kubectl get --raw=/readyz >/dev/null 2>&1 && k3s kubectl apply -f "$MANIFEST" >/dev/null; then
+      return 0
+    fi
+    minor=$(server_minor)
+    if [ -n "$minor" ] && [ "$minor" -lt 30 ]; then
+      echo "Note: this Kubernetes is 1.$minor, older than 1.30, so the agent's admission policy isn't enforced. Its roles still apply."
+      return 0
+    fi
+    [ "$SECONDS" -lt "$until" ] || return 1
+    echo "Kubernetes isn't taking the agent yet. Trying again in ${delay}s…" >&2
+    sleep "$delay"
+    delay=$((delay * 2 > 30 ? 30 : delay * 2))
+  done
+}
+# <<< pyo:agent-apply
 # The Pyo agent: it dials out to Pyo; nothing here is exposed.
-if ! k3s kubectl apply -f "$MANIFEST" >/dev/null; then
-  # Only the admission policy may be refused: Kubernetes before 1.30 has none.
-  if k3s kubectl api-resources 2>/dev/null | grep -q '^validatingadmissionpolicies '; then
-    echo "Couldn't install the Pyo agent (see above)." >&2
-    exit 1
-  fi
-  echo "Note: this Kubernetes is older than 1.30, so the agent's admission policy isn't enforced. Its roles still apply."
+if ! apply_agent; then
+  echo "Couldn't install the Pyo agent and its admission policy (see above), so its limits wouldn't be enforced. Run this again once k3s answers: systemctl status k3s" >&2
+  exit 1
 fi
 echo "Starting the Pyo agent…"
 if ! k3s kubectl -n pyo-system rollout status deployment/pyo-agent --timeout=180s >/dev/null; then

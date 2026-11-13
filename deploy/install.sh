@@ -590,9 +590,19 @@ SH
 # Connects the machine Pyo runs on as a cluster (its gateway serves Pyo over
 # HTTPS), once a team exists: Pyo hands over the same command as "Add
 # cluster › This machine", which fetches connect.sh from Pyo here (no
-# internet needed). Stops itself once the agent has reported in.
+# internet needed). Stops itself once the agent has reported in and its
+# admission policy, which holds it to its limits, is there.
 set -euo pipefail
 done_() { systemctl disable --now pyo-connect.timer >/dev/null 2>&1 || true; }
+# The policy and its binding are there, or Kubernetes is older than 1.30.
+policy_ok() {
+  local minor
+  k3s kubectl get validatingadmissionpolicy pyo-agent >/dev/null 2>&1 &&
+    k3s kubectl get validatingadmissionpolicybinding pyo-agent >/dev/null 2>&1 && return 0
+  minor=$({ k3s kubectl version -o json 2>/dev/null || true; } |
+    sed -n '/"serverVersion"/,/}/s/^ *"minor": *"\([0-9][0-9]*\).*/\1/p')
+  [ -n "$minor" ] && [ "$minor" -lt 30 ]
+}
 # One run at a time (the timer and the setup's own run): a second one waits,
 # then finds this machine connected, or runs the same command again.
 exec 9>/run/pyo-connect.lock
@@ -600,12 +610,19 @@ flock 9
 key=$(cat /etc/pyo/bootstrap-key)
 r=$(curl -fsS -m 20 "http://127.0.0.1:8000/install/this-machine?key=$key") || exit 0
 case "$r" in
-  *'"state":"connected"'*) done_ ;;
+  *'"state":"connected"'*)
+    # Without its policy (k3s didn't answer in time): connect.sh again, which
+    # reads the agent's token from the cluster.
+    if ! policy_ok; then
+      curl -fsS -m 60 http://127.0.0.1:8000/install/connect.sh | bash
+    fi
+    if policy_ok; then done_; fi
+    ;;
   *'"state":"connect"'*)
     cmd=$(sed -n 's/.*"command":"\([^"]*\)".*/\1/p' <<<"$r")
     [ -n "$cmd" ] || exit 0
     bash -c "$cmd"
-    done_
+    if policy_ok; then done_; fi
     ;;
 esac
 SH
@@ -1213,7 +1230,7 @@ main() {
   # HTTPS on the tailnet before the address is shown, then this machine as
   # a cluster (its gateway serves it; waits for the first sign-up).
   [ -z "$TAILNET_NAME" ] || /usr/local/lib/pyo/tailnet-cert.sh || echo "Couldn't get the tailnet certificate yet. It's tried again daily (pyo-tailnet-cert.timer)." >&2
-  /usr/local/lib/pyo/connect-this-machine.sh || true
+  /usr/local/lib/pyo/connect-this-machine.sh || echo "Couldn't connect this machine to Pyo yet (see above). It's tried again every minute (pyo-connect.timer)." >&2
   print_addresses
   print_sign_in
 }

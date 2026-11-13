@@ -791,8 +791,14 @@ pub fn install_hash(
 
 /// Whether a cluster's install, as its agent reports it, is Pyo's.
 pub fn install_current(scope: &AgentScope, expected: &str) -> bool {
-    // Without an enforced admission policy, nothing pins the system images.
-    scope.admission != "enforced" || scope.install == expected
+    match scope.admission.as_str() {
+        "enforced" => scope.install == expected,
+        // The cluster has admission policies but not the agent's: only its
+        // connect command puts it back.
+        "missing" => false,
+        // Too old for one: nothing pins the system images.
+        _ => true,
+    }
 }
 
 /// The customer's switches in `pyo-system/pyo-policy`, as the agent read
@@ -1241,8 +1247,9 @@ mod tests {
         assert!(!install_current(&scope("enforced", "old"), "abc"));
         // Not stamped (or stamped differently on the policy and the Deployment).
         assert!(!install_current(&scope("enforced", ""), "abc"));
-        // Nothing pins the images without the policy.
-        assert!(install_current(&scope("missing", ""), "abc"));
+        // A missing policy needs the connect command; a cluster too old for
+        // one has nothing to bring up to date.
+        assert!(!install_current(&scope("missing", ""), "abc"));
         assert!(install_current(&scope("unsupported", ""), "abc"));
     }
 

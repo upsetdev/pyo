@@ -283,6 +283,11 @@ pub fn install_state(
     if pyo_proto::rbac::install_current(scope, expected) {
         return ("current", String::new(), false);
     }
+    // The agent may only update its admission policy, never make it: the
+    // cluster's connect command puts a missing one back.
+    if scope.admission == "missing" {
+        return ("outdated", "Its admission policy is missing.".into(), false);
+    }
     // Without the self-update role (or with the cluster read only), its
     // connect command brings it up to date.
     if !scope.self_update || scope.policy.read_only {
@@ -397,6 +402,17 @@ mod tests {
             ..scope("", true)
         };
         assert_eq!(install_state(&loose, "h1", None).0, "current");
+    }
+
+    #[test]
+    fn a_missing_admission_policy_waits_for_the_connect_command() {
+        let missing = AgentScope {
+            admission: "missing".into(),
+            ..scope("", true)
+        };
+        let (state, message, send) = install_state(&missing, "h1", None);
+        assert_eq!((state, send), ("outdated", false));
+        assert!(message.contains("admission policy"));
     }
 
     #[test]
