@@ -922,13 +922,19 @@ server_minor() {
     sed -n '/"serverVersion"/,/}/s/^ *"minor": *"\([0-9][0-9]*\).*/\1/p'
 }
 # The Pyo agent and the admission policy that holds it to its limits. Right
-# after k3s first starts, its API can time out: try again for 3 minutes.
-# Only Kubernetes older than 1.30 (it has no admission policies) goes on
-# without the policy.
+# after k3s first starts, or on a small server under load, its API can take
+# longer to check the policy than it gives a write by default (34 s): each
+# try asks for 2 minutes (the API server caps that at its own limit), as a
+# server-side apply (one request per object, without a copy of it in an
+# annotation), and tries go on for 5 minutes. Only Kubernetes older than
+# 1.30 (it has no admission policies) goes on without the policy.
 apply_agent() {
-  local minor delay=5 until=$((SECONDS + 180))
+  local minor tries=0 delay=5 start=$SECONDS until=$((SECONDS + 300))
+  echo "Installing the Pyo agent and its admission policy…"
   while :; do
-    if k3s kubectl get --raw=/readyz >/dev/null 2>&1 && k3s kubectl apply -f "$MANIFEST" >/dev/null; then
+    tries=$((tries + 1))
+    if k3s kubectl get --raw=/readyz --request-timeout=20s >/dev/null 2>&1 &&
+      k3s kubectl apply --server-side --force-conflicts --field-manager=pyo --request-timeout=120s -f "$MANIFEST" >/dev/null; then
       return 0
     fi
     minor=$(server_minor)
@@ -937,7 +943,7 @@ apply_agent() {
       return 0
     fi
     [ "$SECONDS" -lt "$until" ] || return 1
-    echo "Kubernetes isn't taking the agent yet. Trying again in ${delay}s…" >&2
+    echo "Kubernetes hasn't taken them yet (try $tries, $((SECONDS - start))s so far). Trying again in ${delay}s…" >&2
     sleep "$delay"
     delay=$((delay * 2 > 30 ? 30 : delay * 2))
   done

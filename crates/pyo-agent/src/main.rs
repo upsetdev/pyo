@@ -468,13 +468,15 @@ async fn run_command(agent: Agent, envelope: CommandEnvelope) {
         }
         // The same: the Deployment's pins change last, after reporting.
         Command::RefreshInstall(parts) => {
-            let result = match install::refresh(&agent.kube, &parts).await {
+            let mut progress = install::Progress::default();
+            let mut result = match install::refresh(&agent.kube, &parts, &mut progress).await {
                 Ok(()) => ok(&format!(
                     "This cluster's install is now Pyo's ({}).",
                     parts.hash
                 )),
                 Err(e) => failed(format!("{e:#}")),
             };
+            result.logs = progress.lines;
             let finish = result.ok;
             if let Err(e) = agent.api.command_result(&id, &result).await {
                 tracing::warn!(%id, error = %e, "couldn't report command result; leaving the Deployment as it is");
