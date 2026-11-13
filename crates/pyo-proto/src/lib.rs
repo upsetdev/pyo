@@ -2085,6 +2085,12 @@ pub struct HeartbeatReply {
     /// on, on the tailnet). None (a reply without it): left as it is.
     #[serde(default)]
     pub public_traffic: Option<bool>,
+    /// Observability (an installation-wide setting): on, Vector ships the
+    /// gateway's access logs and the servers' figures, and on the cluster
+    /// Pyo runs on ClickHouse runs. Off: Vector is removed and ClickHouse
+    /// stopped (its data kept). None (a reply without it): left as it is.
+    #[serde(default)]
+    pub observability: Option<bool>,
     /// The team of each project namespace on the cluster, as its
     /// [`TEAM_LABEL`] (one missing or changed by hand is put back).
     #[serde(default)]

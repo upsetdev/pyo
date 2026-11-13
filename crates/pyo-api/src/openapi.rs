@@ -41,6 +41,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::traffic::get,
         crate::cronruns::list,
         crate::ops::metrics,
+        crate::ops::observability_settings,
         crate::ops::observability,
         crate::ops::access_logs,
         crate::ops::connections,

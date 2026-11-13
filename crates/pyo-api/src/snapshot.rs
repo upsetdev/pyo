@@ -358,7 +358,13 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     let mut me = json!(user);
     me["gravatar"] = json!(crate::ids::sha256_hex(&user.email.trim().to_lowercase()));
     let databases = crate::databases::listing(db, &team_ids, None).await?;
-    let observability_settings = json!({ "ipMode": crate::observability::ip_mode(db).await? });
+    // `small`: the server Pyo runs on has under 3.5 GB of memory now (the
+    // dashboard suggests turning observability off, or on when it isn't).
+    let observability_settings = json!({
+        "ipMode": crate::observability::ip_mode(db).await?,
+        "enabled": crate::observability::setting(db).await?,
+        "small": pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
+    });
     Ok(json!({
         "user": me,
         "teams": teams,

@@ -66,6 +66,13 @@ enum Command {
     Logout,
     /// Who you're signed in as.
     Whoami,
+    /// Whether observability (analytics, request logs, usage history) is on
+    /// for this Pyo, or turn it on or off. Turning it is for the
+    /// installation's admin, with a full-access key.
+    Observability {
+        #[arg(value_parser = ["on", "off"])]
+        state: Option<String>,
+    },
     /// Link this folder to a service (writes pyo.toml).
     Link {
         /// "api", "shop/api" or "team/shop/api". Without it, pick from a list.
@@ -409,6 +416,28 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 me["email"].as_str().unwrap_or(""),
                 ui::dim(&format!("on {}", api.base))
             );
+            Ok(())
+        }
+        Command::Observability { state } => {
+            let api = config::client(url, token)?;
+            if let Some(state) = state {
+                api.op(
+                    "setObservability",
+                    serde_json::json!({ "enabled": state == "on" }),
+                )
+                .await?;
+            }
+            let v = api.get("/api/v1/observability/settings").await?;
+            let on = v["enabled"].as_bool().unwrap_or(true);
+            println!("Observability is {}.", if on { "on" } else { "off" });
+            if v["small"].as_bool() == Some(true) && on {
+                println!(
+                    "{}",
+                    ui::dim("This server has under 3.5 GB of memory: turning it off saves memory.")
+                );
+            } else if v["small"].as_bool() == Some(false) && !on {
+                println!("{}", ui::dim("This server has enough memory for it now."));
+            }
             Ok(())
         }
         Command::Link { service } => service::link(&config::client(url, token)?, service).await,

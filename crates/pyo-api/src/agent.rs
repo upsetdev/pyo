@@ -456,8 +456,10 @@ async fn heartbeat(
         .into_iter()
         .map(|(namespace, team_id)| pyo_proto::ProjectTeam { namespace, team_id })
         .collect();
+    // Vector (and on Pyo's own cluster, ClickHouse) runs while it's on.
+    let observability = s.observability.enabled().await;
     Ok(Json(
-        json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "projectTeams": project_teams }),
+        json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "projectTeams": project_teams, "observability": observability }),
     ))
 }
 

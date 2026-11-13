@@ -542,7 +542,9 @@ metadata:
   labels: { app.kubernetes.io/name: pyo-clickhouse, app.kubernetes.io/part-of: pyo }
 spec:
   serviceName: pyo-clickhouse
-  replicas: 1
+  # No replicas here: Pyo's agent sets them (1, or 0 while observability is
+  # off), and an update must not change them back. A new install on a small
+  # server creates it stopped (upgrade.rs).
   selector:
     matchLabels: { app.kubernetes.io/name: pyo-clickhouse }
   template:

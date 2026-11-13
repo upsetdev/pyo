@@ -82,6 +82,7 @@ pub fn routes() -> Router<AppState> {
         .route("/observability", get(observability))
         .route("/access-logs", get(access_logs))
         .route("/metrics", get(metrics))
+        .route("/observability/settings", get(observability_settings))
         .route("/cron-runs", get(crate::cronruns::list))
         .route("/services/{id}/traffic", get(crate::traffic::get))
         .route("/services/{id}/connections", get(connections))
@@ -1556,6 +1557,8 @@ pub(crate) enum Op {
     SaveObservabilitySettings {
         ip_mode: crate::observability::IpMode,
     },
+    /// Turn observability (analytics, request logs, firewall and WAF history, usage history) on or off for the whole installation. The installation's admin. Off stops storing and showing history and frees its memory; what was stored is kept for when it's back on. Live logs, current usage, deploys and the firewall keep working.
+    SetObservability { enabled: bool },
     /// How Pyo updates itself: "manual" or "auto" in a weekly window (UTC).
     SaveUpdateSettings {
         mode: String,
@@ -2267,6 +2270,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SaveUpdateSettings { .. }
         | Op::CheckForUpdates {}
         | Op::StartUpdate { .. } => ("Settings", ""),
+        Op::SetObservability { .. } => ("Observability", ""),
     }
 }
 
@@ -2867,6 +2871,16 @@ async fn apply(
                 .bind(&v)
                 .execute(&mut **tx)
                 .await?;
+            Ok(ok)
+        }
+        Op::SetObservability { enabled } => {
+            require_admin(user)?;
+            sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('observability', jsonb_build_object('enabled', $1)) ON CONFLICT (key) DO UPDATE SET value = pyo.settings.value || excluded.value, updated_at = now()")
+                .bind(enabled)
+                .execute(&mut **tx)
+                .await?;
+            // Each cluster's agent follows at its next heartbeat.
+            s.observability.set_enabled(enabled).await;
             Ok(ok)
         }
         Op::RemoveEmailSettings {} => {
@@ -6559,6 +6573,29 @@ pub(crate) struct MetricsQuery {
     cluster: Option<String>,
     /// "1h", "24h" (the default), "7d" or "30d".
     range: Option<String>,
+}
+
+/// Observability settings
+///
+/// Whether observability is on for this installation (it's off on a new
+/// install on a server with under 3.5 GB of memory), and what it keeps of
+/// visitors' IP addresses. `small`: the server Pyo runs on has under 3.5 GB
+/// of memory now. The installation's admin turns it on or off with
+/// `setObservability`.
+#[utoipa::path(get, path = "/observability/settings", operation_id = "getObservabilitySettings", tag = "Observability",
+    responses(
+        (status = 200, description = "`enabled`, `ipMode` and `small`.", body = Object),
+    ),
+    extensions(("x-pyo-access" = json!("read"))))]
+pub(crate) async fn observability_settings(
+    State(s): State<AppState>,
+    SessionUser(_user): SessionUser,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "enabled": crate::observability::setting(&s.db).await?,
+        "ipMode": crate::observability::ip_mode(&s.db).await?,
+        "small": pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
+    })))
 }
 
 /// Server and service usage

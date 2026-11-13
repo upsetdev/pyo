@@ -1,16 +1,21 @@
 //! Website analytics and server metrics on this cluster: the gateway
 //! (Envoy) writes a JSON access log, and a Vector DaemonSet forwards those lines, plus each
 //! server's own load, disk I/O and network (Vector's host_metrics), to the
-//! Pyo API with this agent's token. The agent (re)applies both on start, so
-//! upgrading the agent upgrades the pipeline.
+//! Pyo API with this agent's token.
+//!
+//! Observability is an installation-wide setting, sent with each heartbeat
+//! reply. On: the agent (re)applies Vector at its first reply, so upgrading
+//! the agent upgrades the pipeline, and on the cluster Pyo runs on it starts
+//! ClickHouse. Off: Vector is removed and ClickHouse stopped, its volume
+//! (and so the history) kept for when it's back on.
 
 use k8s_openapi::api::{
-    apps::v1::DaemonSet,
+    apps::v1::{DaemonSet, StatefulSet},
     core::v1::{Secret, ServiceAccount},
 };
 use kube::{
     Api, Client,
-    api::{Patch, PatchParams},
+    api::{DeleteParams, Patch, PatchParams},
 };
 use serde_json::json;
 
@@ -124,13 +129,63 @@ fn pp() -> PatchParams {
     PatchParams::apply(MANAGER).force()
 }
 
-/// Install Vector (the proxy's access log is in its pinned settings, see
-/// pyo-proto's system.rs). Logs and keeps going on failure:
-/// analytics are optional, deploys are not.
-pub async fn ensure(client: &Client) {
-    if let Err(e) = vector(client).await {
-        tracing::warn!(error = %format!("{e:#}"), "couldn't install Vector; analytics stay empty");
+/// Pyo's ClickHouse (platform.yaml), on the cluster Pyo runs on.
+const CLICKHOUSE: &str = "pyo-clickhouse";
+
+/// Turn observability on or off here: Vector (the proxy's access log is in
+/// its pinned settings, see pyo-proto's system.rs), and with `pyo_cluster`
+/// ClickHouse. An error is for the caller to log and retry: analytics are
+/// optional, deploys are not.
+pub async fn set(client: &Client, on: bool, pyo_cluster: bool) -> anyhow::Result<()> {
+    if pyo_cluster {
+        clickhouse(client, on).await?;
     }
+    if on {
+        vector(client).await
+    } else {
+        remove_vector(client).await
+    }
+}
+
+/// ClickHouse's replicas: 1 or 0. Its volume stays either way. Applied by
+/// this agent's field manager, which then owns the field: the upgrader's
+/// platform.yaml leaves it out, so an update never changes it back.
+async fn clickhouse(client: &Client, on: bool) -> anyhow::Result<()> {
+    let api = Api::<StatefulSet>::namespaced(client.clone(), NS);
+    if api.get_opt(CLICKHOUSE).await?.is_none() {
+        return Ok(());
+    }
+    api.patch(
+        CLICKHOUSE,
+        &pp(),
+        &Patch::Apply(json!({
+            "apiVersion": "apps/v1", "kind": "StatefulSet",
+            "metadata": { "name": CLICKHOUSE },
+            "spec": { "replicas": if on { 1 } else { 0 } },
+        })),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn remove_vector(client: &Client) -> anyhow::Result<()> {
+    let gone = |r: kube::Result<_>| match r {
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
+        r => r.map(|_| ()),
+    };
+    gone(
+        Api::<DaemonSet>::namespaced(client.clone(), NS)
+            .delete("pyo-vector", &DeleteParams::default())
+            .await
+            .map(|_| ()),
+    )?;
+    gone(
+        Api::<Secret>::namespaced(client.clone(), NS)
+            .delete("pyo-vector", &DeleteParams::default())
+            .await
+            .map(|_| ()),
+    )?;
+    Ok(())
 }
 
 async fn vector(client: &Client) -> anyhow::Result<()> {
