@@ -597,8 +597,24 @@ pub fn envoy_proxy(geoip_image: &str, public: bool) -> Value {
 /// The proxies' Service: published on the servers or not. Envoy Gateway's
 /// schema gives externalTrafficPolicy Local either way (it's only used for
 /// a LoadBalancer), written out so the admission policy compares it all.
+///
+/// It never carries the tailnet listeners' ports ([`TAILNET_PORTS`]): one
+/// proxy fleet serves every Gateway, so Envoy Gateway would list them on
+/// this Service too, and ServiceLB would then publish them on every
+/// address of the server, the Tailscale one included. A connection there
+/// would go through ServiceLB's pod (arriving from that pod, which the
+/// tailnet-only policy refuses), competing with `TAILNET_SERVICE`, which
+/// alone takes them. The patch drops them from what Envoy Gateway renders.
 fn envoy_service(public: bool) -> Value {
-    json!({ "type": if public { "LoadBalancer" } else { "ClusterIP" }, "externalTrafficPolicy": "Local" })
+    let drop: Vec<Value> = TAILNET_PORTS
+        .iter()
+        .map(|p| json!({ "port": p, "$patch": "delete" }))
+        .collect();
+    json!({
+        "type": if public { "LoadBalancer" } else { "ClusterIP" },
+        "externalTrafficPolicy": "Local",
+        "patch": { "type": "StrategicMerge", "value": { "spec": { "ports": drop } } },
+    })
 }
 
 /// Whether the proxies' settings (an EnvoyProxy's spec) publish them.
@@ -639,19 +655,18 @@ pub fn http_gateway() -> Value {
 // registry's door behind the gateway with Tailscale's certificate for the
 // host's tailnet name (written into TAILNET_TLS by the host's renew timer).
 // Each on a port of its own, never 80/443 (the websites'), and only for
-// tailnet addresses and the servers themselves (`tailnet_server_cidrs`):
-// the proxies' ports are published on every address of the server, so the
-// SecurityPolicy refuses everyone else, whatever Host or SNI they send.
+// tailnet addresses and the servers themselves (`tailnet_server_cidrs`).
 //
-// The policy needs the client's own address. k3s's ServiceLB keeps it only
-// on the addresses it publishes for the proxies' Service (the servers'
-// InternalIP, or ExternalIP when set: kube-proxy takes those connections
-// straight to the proxy, externalTrafficPolicy Local); a connection to any
-// other address of the server goes through ServiceLB's pod and arrives from
-// that pod. So the host's Tailscale address, when it isn't the server's own,
-// gets a Service of its own (`TAILNET_SERVICE`, externalIPs, Local), written
-// by the host's tailnet-cert timer (deploy/install.sh, scripts/pyo-up.sh)
-// with the certificate: not by the agent, which never sets externalIPs.
+// Their ports are kept off the proxies' own Service ([`envoy_proxy`]), so
+// ServiceLB never publishes them (it would, on every address of the server,
+// and hand those connections over from its own pod, which the policy below
+// refuses). The host's Tailscale address gets a Service of its own instead
+// (`TAILNET_SERVICE`, externalIPs, externalTrafficPolicy Local: kube-proxy
+// takes a connection straight to the proxy, which sees the device's own
+// address), written by the host's tailnet-cert timer (deploy/install.sh,
+// scripts/pyo-up.sh) with the certificate: not by the agent, which never
+// sets externalIPs. The SecurityPolicy still refuses everyone but tailnet
+// addresses and the servers, whatever Host or SNI they send.
 
 /// The Gateway of Pyo's own HTTPS listeners.
 pub const TAILNET_GATEWAY: &str = "pyo-tailnet";
@@ -1041,13 +1056,44 @@ mod tests {
         assert_eq!(chart["spec"]["version"], super::CERT_MANAGER_VERSION);
     }
 
+    /// The proxies' Service (the public LoadBalancer when public traffic is
+    /// on) never carries the tailnet listeners' ports, so ServiceLB never
+    /// publishes them: Envoy Gateway renders one port per listener of every
+    /// Gateway, and the patch (a strategic merge on the Service, keyed by
+    /// port) deletes exactly the tailnet ones, keeping the websites' and
+    /// teams' own TCP/UDP ports.
+    #[test]
+    fn public_service_never_publishes_the_tailnet_ports() {
+        for public in [true, false] {
+            let p = envoy_proxy("g", public);
+            let svc = &p["spec"]["provider"]["kubernetes"]["envoyService"];
+            assert_eq!(svc["patch"]["type"], "StrategicMerge");
+            let patch = svc["patch"]["value"]["spec"]["ports"].as_array().unwrap();
+            assert_eq!(svc["patch"]["value"].as_object().unwrap().len(), 1);
+            assert_eq!(svc["patch"]["value"]["spec"].as_object().unwrap().len(), 1);
+            // Only delete directives, one per tailnet port.
+            assert_eq!(patch.len(), TAILNET_PORTS.len());
+            assert!(
+                patch
+                    .iter()
+                    .all(|e| e["$patch"] == "delete" && e.as_object().unwrap().len() == 2)
+            );
+            // What Envoy Gateway renders for the listeners, as merged.
+            let rendered = [80, 443, DASHBOARD_PORT, REGISTRY_PORT, S3_PORT, 2222, 5353];
+            let kept: Vec<i32> = rendered
+                .into_iter()
+                .filter(|port| !patch.iter().any(|e| e["port"] == *port))
+                .collect();
+            assert_eq!(kept, [80, 443, 2222, 5353]);
+            assert!(TAILNET_PORTS.iter().all(|t| !kept.contains(t)));
+        }
+    }
+
     /// Pyo's own HTTPS listeners: their own ports, tailnet sources only.
-    /// Public clients reach the same proxies (their ports are published on
-    /// every address), so the policy on the Gateway is what refuses them,
-    /// whatever Host or SNI they send: it matches on the client's address,
-    /// which the proxies keep (externalTrafficPolicy Local) on the addresses
-    /// ServiceLB publishes and, for the host's Tailscale address, through
-    /// `TAILNET_SERVICE` (see the section's notes).
+    /// Public clients reach the same proxies, so the policy on the Gateway
+    /// refuses them, whatever Host or SNI they send: it matches on the
+    /// client's address, which the proxies keep (externalTrafficPolicy
+    /// Local) through `TAILNET_SERVICE` (see the section's notes).
     #[test]
     fn tailnet_listeners_admit_the_tailnet_only() {
         let objs = tailnet_objects(&[]);

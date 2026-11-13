@@ -363,12 +363,12 @@ tailscale cert --cert-file "$d/tls.crt" --key-file "$d/tls.key" "$name" >/dev/nu
 k3s kubectl create namespace pyo-gateway --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null
 k3s kubectl -n pyo-gateway create secret tls pyo-tls-tailnet --cert "$d/tls.crt" --key "$d/tls.key" \
   --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null
-# k3s's ServiceLB publishes only the server's own addresses (InternalIP or
-# ExternalIP): a connection to the Tailscale address goes through its pod
-# and arrives from that pod, which the listeners' tailnet-only policy
-# refuses. Listed here, kube-proxy hands it to the proxy on this machine
-# unchanged (externalTrafficPolicy Local), so the proxy sees the device's
-# own 100.x address.
+# The gateway's own Service never carries these ports (k3s's ServiceLB
+# would publish them on every address and hand connections over from its
+# pod, which the listeners' tailnet-only policy refuses): this one alone
+# takes them, on the Tailscale address. kube-proxy hands a connection to
+# the proxy on this machine unchanged (externalTrafficPolicy Local), so
+# the proxy sees the device's own 100.x address.
 ip4=$(tailscale ip -4 2>/dev/null | head -n1)
 [ -n "$ip4" ] || exit 0
 # Its only warning (externalIPs are deprecated) stays out of the journal.
