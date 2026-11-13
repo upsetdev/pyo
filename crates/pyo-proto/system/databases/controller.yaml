@@ -99,7 +99,7 @@ rules:
     resources: [events]
     verbs: [create, patch]
 ---
-# Its lease: one replica reconciles, the other takes over within ~10s.
+# Its lease: one replica reconciles; a replacement takes over once it's gone.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: {name: pyo-db-controller-lease, namespace: pyo-databases}
@@ -118,9 +118,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: {name: pyo-db-controller, namespace: pyo-databases}
 spec:
-  # Two on different servers: losing one server never leaves databases
-  # without a controller to point their addresses at a new primary.
-  replicas: 2
+  # One, to stay small: a lost server's controller starts on another one
+  # within ~10s (the tolerations below), then points addresses at a new
+  # primary. Leader election stays, so a rollout never runs two at once.
+  replicas: 1
   selector: {matchLabels: {app: pyo-db-controller}}
   template:
     metadata: {labels: {app: pyo-db-controller}}

@@ -12876,7 +12876,7 @@ metadata:
   name: moco-controller
   namespace: pyo-databases
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/component: moco-controller
