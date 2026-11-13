@@ -974,6 +974,76 @@ mod tests {
         assert_eq!(filled[0].as_object().unwrap().len(), 1);
     }
 
+    /// The upgrader's Role may get, create and patch every kind a release
+    /// may hold.
+    #[test]
+    fn upgrader_role_covers_every_kind() {
+        let [_, role, _] = upgrader_rbac(&json!({}));
+        for (group, _, kind, plural) in KINDS {
+            let ok = role["rules"].as_array().unwrap().iter().any(|r| {
+                let has = |k: &str, v: &str| r[k].as_array().unwrap().contains(&json!(v));
+                has("apiGroups", group)
+                    && has("resources", plural)
+                    && ["get", "create", "patch"].iter().all(|v| has("verbs", v))
+            });
+            assert!(ok, "the upgrader's Role can't apply a {kind}");
+        }
+    }
+
+    /// install.sh runs the upgrader as the agent does: with the same
+    /// ServiceAccount, Role and RoleBinding (its `pyo:upgrader-rbac` block).
+    #[test]
+    fn install_sh_gives_the_upgrader_the_same_rbac() {
+        let script = include_str!("../../../deploy/install.sh");
+        let block = script
+            .split("# >>> pyo:upgrader-rbac ")
+            .nth(1)
+            .and_then(|r| r.split("# <<< pyo:upgrader-rbac\n").next())
+            .expect("deploy/install.sh has no pyo:upgrader-rbac block");
+        let body = block
+            .split("<<'JSON'\n")
+            .nth(1)
+            .and_then(|r| r.split("\nJSON\n").next())
+            .expect("install.sh's pyo:upgrader-rbac block has no JSON");
+        let list: Value = serde_json::from_str(body).expect("install.sh's upgrader RBAC is JSON");
+        assert_eq!(list["kind"], "List");
+        let expected = upgrader_rbac(&json!({ "app.kubernetes.io/managed-by": MANAGER }));
+        assert_eq!(
+            list["items"].as_array().unwrap().as_slice(),
+            expected.as_slice(),
+            "deploy/install.sh's upgrader RBAC differs from upgrader_rbac(); it should be:\n{}",
+            expected
+                .iter()
+                .map(|o| o.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        // Its Job: the same account, image arguments and limits.
+        for part in [
+            "serviceAccountName: pyo-upgrade",
+            "args: [upgrade, /release/release.json]",
+            "resources: { requests: { cpu: 20m, memory: 32Mi }, limits: { memory: 256Mi } }",
+            "securityContext: { runAsNonRoot: true, runAsUser: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }",
+            "activeDeadlineSeconds: 1800",
+        ] {
+            assert!(
+                script.contains(part),
+                "install.sh's upgrader Job has no {part}"
+            );
+        }
+        // pyo-system as platform.yaml has it (the upgrader skips Namespaces).
+        let platform = include_str!("../../../deploy/k8s/platform.yaml");
+        assert!(
+            platform.contains(
+                "kind: Namespace\nmetadata:\n  name: pyo-system\n  labels:\n    app.kubernetes.io/part-of: pyo\n---"
+            ),
+            "platform.yaml's pyo-system changed: update install.sh's run_upgrader and this test"
+        );
+        assert!(
+            script.contains("metadata: { name: $NS, labels: { app.kubernetes.io/part-of: pyo } }")
+        );
+    }
+
     #[test]
     fn only_pyo_system_and_known_kinds() {
         let ok = prepare(&[
