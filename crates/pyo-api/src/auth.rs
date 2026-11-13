@@ -369,9 +369,26 @@ fn check_password(password: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// Each Argon2 hash takes 19 MiB while it runs: a burst of sign-ins would
+/// take that much per request at once. Two at a time keep the peak small.
+static ARGON2_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Hash or verify a password on a blocking thread, two at a time.
+async fn argon2_task<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    // Never closed, so this always gets a slot.
+    let slot = ARGON2_SLOTS.acquire().await.ok();
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        f()
+    })
+    .await
+}
+
 async fn hash_password(password: &str) -> anyhow::Result<String> {
     let password = password.to_owned();
-    tokio::task::spawn_blocking(move || {
+    argon2_task(move || {
         Argon2::default()
             .hash_password(password.as_bytes())
             .map(|h| h.to_string())
@@ -726,7 +743,7 @@ async fn login(
         (String::new(), String::new(), String::new(), "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA$ZmFrZWZha2VmYWtlZmFrZWZha2VmYWtlZmFrZWZha2U".into(), false, false)
     });
     let password = body.password.clone();
-    let ok = tokio::task::spawn_blocking(move || {
+    let ok = argon2_task(move || {
         PasswordHash::new(&hash)
             .map(|h| {
                 Argon2::default()
@@ -774,7 +791,7 @@ pub(crate) async fn password_matches(
             .await?;
     let hash = hash.unwrap_or_else(|| "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA$ZmFrZWZha2VmYWtlZmFrZWZha2VmYWtlZmFrZWZha2U".into());
     let password = password.to_owned();
-    Ok(tokio::task::spawn_blocking(move || {
+    Ok(argon2_task(move || {
         PasswordHash::new(&hash)
             .map(|h| {
                 Argon2::default()
@@ -840,7 +857,7 @@ async fn setup(
         .fetch_one(&state.db)
         .await?;
     let password = body.password.clone();
-    let same = tokio::task::spawn_blocking(move || {
+    let same = argon2_task(move || {
         PasswordHash::new(&old)
             .map(|h| {
                 Argon2::default()
