@@ -1,11 +1,12 @@
 // Importing from another platform (crates/pyo-api/src/platform_import):
-// preview what a Coolify or Dokploy installation becomes, then import the
-// picked things. The token goes with each request and is never stored.
+// preview what a Coolify or Dokploy installation, or a Railway or Vercel
+// account, becomes, then import the picked things. The token goes with each
+// request and is never stored.
 
 import { post } from "./imports";
 import { refresh } from "./store";
 
-export type Platform = "coolify" | "dokploy";
+export type Platform = "coolify" | "dokploy" | "railway" | "vercel";
 
 export type PlanPort = {
   name: string;
@@ -92,7 +93,8 @@ export type ImportResult = {
   projectId?: string | null;
 };
 
-export type Source = { teamId: string; platform: Platform; url: string; token: string };
+/** `url` is empty for Railway and Vercel (read from their own API). `team` is Vercel's. */
+export type Source = { teamId: string; platform: Platform; url: string; token: string; team?: string };
 
 export const previewImport = (src: Source) => post<ImportPlan>("/api/v1/platform-imports/preview", src);
 

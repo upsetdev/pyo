@@ -12,7 +12,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { z } from "zod";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
-import { CoolifyMark, DokployMark } from "~/components/pyo/platforms/Marks";
+import { CoolifyMark, DokployMark, RailwayMark, VERCEL_TRADEMARK, VercelMark } from "~/components/pyo/platforms/Marks";
 import { GroupLabel } from "~/components/pyo/Databases";
 import { AppLink } from "~/components/ui/AppLink";
 import { Badge, type Tone } from "~/components/ui/Badge";
@@ -35,19 +35,21 @@ import { clustersIn, getState, projectPath, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { seo } from "~/lib/seo";
 
-// Moving a team's services from Coolify or Dokploy: the platform's address
+// Moving a team's services from Coolify, Dokploy, Railway or Vercel: the
+// platform's address (none for Railway and Vercel, read from their own API)
 // and an API token, a preview of what each thing becomes (pick what to
 // bring), then the import. The token is sent with each request, never kept.
 
 export const Route = createFileRoute("/_app/$team/import_/platform")({
   validateSearch: z.object({
-    from: z.enum(["coolify", "dokploy"]).optional().catch(undefined),
+    from: z.enum(["coolify", "dokploy", "railway", "vercel"]).optional().catch(undefined),
   }),
   head: () => ({ meta: seo({ title: "Import from another platform" }) }),
   component: PlatformImportPage,
 });
 
-const PLATFORMS: Record<Platform, { label: string; Mark: (p: { className?: string }) => ReactNode; placeholder: string; hint: string }> = {
+/** `placeholder` is the address field's. Hosted ones (no placeholder) have no address. */
+const PLATFORMS: Record<Platform, { label: string; Mark: (p: { className?: string }) => ReactNode; placeholder?: string; hint: string }> = {
   coolify: {
     label: "Coolify",
     Mark: CoolifyMark,
@@ -59,6 +61,16 @@ const PLATFORMS: Record<Platform, { label: string; Mark: (p: { className?: strin
     Mark: DokployMark,
     placeholder: "https://dokploy.example.com",
     hint: "In Dokploy, your profile's API/CLI section.",
+  },
+  railway: {
+    label: "Railway",
+    Mark: RailwayMark,
+    hint: "In Railway, Account Settings, then Tokens. A workspace or project token works too.",
+  },
+  vercel: {
+    label: "Vercel",
+    Mark: VercelMark,
+    hint: "In Vercel, Account Settings, then Tokens.",
   },
 };
 
@@ -84,6 +96,7 @@ function ImportFlow() {
   const [platform, setPlatform] = useState<Platform>(search.from ?? "coolify");
   const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
+  const [vercelTeam, setVercelTeam] = useState("");
   const clusters = clustersIn(s);
   const team = s.teams.find((t) => t.id === s.currentTeamId);
   const [clusterId, setClusterId] = useState(team?.defaultClusterId ?? clusters[0]?.id ?? "");
@@ -95,8 +108,15 @@ function ImportFlow() {
   const [results, setResults] = useState<ImportResult[] | null>(null);
 
   const p = PLATFORMS[platform];
-  const source = { teamId: s.currentTeamId, platform, url: url.trim(), token: token.trim() };
-  const ready = !!source.url && !!source.token && !busy;
+  const hosted = !p.placeholder;
+  const source = {
+    teamId: s.currentTeamId,
+    platform,
+    url: hosted ? "" : url.trim(),
+    token: token.trim(),
+    team: platform === "vercel" && vercelTeam.trim() ? vercelTeam.trim() : undefined,
+  };
+  const ready = (hosted || !!source.url) && !!source.token && !busy;
   const reset = () => {
     setPlan(null);
     setResults(null);
@@ -175,26 +195,46 @@ function ImportFlow() {
                 };
               })}
             />
-            <Field label="Address">
-              {(f) => (
-                <Input
-                  {...f}
-                  type="url"
-                  inputMode="url"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder={p.placeholder}
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  disabled={!!busy}
-                />
-              )}
-            </Field>
+            {hosted ? null : (
+              <Field label="Address">
+                {(f) => (
+                  <Input
+                    {...f}
+                    type="url"
+                    inputMode="url"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={p.placeholder}
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    disabled={!!busy}
+                  />
+                )}
+              </Field>
+            )}
             <Field label="API token" hint={p.hint}>
               {(f) => (
                 <SecretInput {...f} autoComplete="off" spellCheck={false} value={token} onChange={(e) => setToken(e.target.value)} disabled={!!busy} />
               )}
             </Field>
+            {platform === "vercel" ? (
+              <Field label="Team" hint="Optional. Its slug or id.">
+                {(f) => (
+                  <Input
+                    {...f}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="acme"
+                    value={vercelTeam}
+                    onChange={(e) => {
+                      setVercelTeam(e.target.value);
+                      reset();
+                    }}
+                    disabled={!!busy}
+                  />
+                )}
+              </Field>
+            ) : null}
             {clusters.length > 1 ? (
               <Field label="Cluster">
                 {(f) => (
@@ -216,6 +256,9 @@ function ImportFlow() {
           </div>
         </form>
       </Panel>
+
+      {/* Vercel asks for this wherever its logo appears. */}
+      <p className="px-1 text-[11px] leading-4 text-muted-foreground">{VERCEL_TRADEMARK}</p>
 
       {error ? (
         <Callout tone="danger" icon={WarningIcon} title="Can't import">
