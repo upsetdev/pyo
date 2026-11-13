@@ -311,6 +311,13 @@ fn ordered_keys(c: &Command) -> Vec<String> {
         // removal (which ends once its namespace is gone).
         Command::ApplyBundle { bundle, .. } => vec![format!("bundle/{}", bundle.id)],
         Command::RemoveBundle { id, .. } => vec![format!("bundle/{id}")],
+        // This agent's own Deployment: an install refresh queued before a
+        // move to a new image finishes first, so the new agent starts under
+        // the admission policy it's made for (and the move doesn't stop it
+        // halfway).
+        Command::RefreshInstall(_) | Command::UpdateAgent { .. } => {
+            vec!["agent/deployment".to_owned()]
+        }
         _ => vec![],
     };
     keys.sort();
@@ -645,6 +652,46 @@ mod tests {
         let routes = Command::SyncRoutes(Box::new(one.targets[0].clone()));
         assert_eq!(ordered_keys(&routes), ["bundle/waf", "service/svc_1"]);
         assert_eq!(ordered_keys(&firewall_sync(&[])), ["bundle/waf"]);
+    }
+
+    /// An install refresh queued before a move to a new image finishes
+    /// before the move starts (both change this agent's Deployment).
+    #[tokio::test]
+    async fn an_install_refresh_comes_before_a_new_image() {
+        let parts = pyo_proto::rbac::InstallParts::new(
+            false,
+            true,
+            "w",
+            "g",
+            &pyo_proto::system::db_images_from_env(),
+        );
+        let refresh = Command::RefreshInstall(Box::new(parts));
+        let update = Command::UpdateAgent {
+            image: "agent@sha256:00".into(),
+        };
+        assert_eq!(ordered_keys(&refresh), ["agent/deployment"]);
+        assert_eq!(ordered_keys(&refresh), ordered_keys(&update));
+        let mut order = Ordered::default();
+        let seen = Arc::new(Mutex::new(vec![]));
+        let mut tasks = vec![];
+        for (label, c, slow) in [("refresh", refresh, 100u64), ("update", update, 0)] {
+            let (previous, done) = order.next(&c).expect("ordered");
+            let seen = seen.clone();
+            tasks.push(tokio::spawn(async move {
+                let _done = done;
+                previous.await;
+                seen.lock().unwrap().push(format!("{label} start"));
+                tokio::time::sleep(Duration::from_millis(slow)).await;
+                seen.lock().unwrap().push(format!("{label} end"));
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["refresh start", "refresh end", "update start", "update end"]
+        );
     }
 
     /// The e2e orphans: a firewall sync queued with a service's delete
