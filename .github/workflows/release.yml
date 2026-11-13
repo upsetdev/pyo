@@ -158,6 +158,10 @@ jobs:
             --mysql-operator "$(digest mysql-operator)" --mysql-backup "$(digest mysql-backup)" \
             --postgres-16 "$(tagged postgres 16-)" --postgres-17 "$(tagged postgres 17-)" --postgres-18 "$(tagged postgres 18-)" > release.json
           jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, migrations: (.migrations | length)}' release.json
+      # The release's own upgrader reads it before it's signed: an image
+      # it doesn't accept fails the release here, not on installations.
+      - name: Check release.json with the release's upgrader
+        run: docker run --rm -v "$PWD/release.json:/release.json:ro" "$(jq -r .images.agent release.json)" check-release /release.json
       # release.json is signed like the images: keyless, as this workflow
       # at this tag. install.sh, pyo-up.sh --release and the dashboard's
       # updates (pyo-api sigstore.rs) check it before using anything in it.

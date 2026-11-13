@@ -959,6 +959,12 @@ pub struct ReleaseImages {
     /// pyo-kv, beside each KV database (deploy/images/pyo.Dockerfile, target kv).
     #[serde(default)]
     pub kv: String,
+    /// MySQL's operator, with Pyo's patches (deploy/images/moco).
+    #[serde(default)]
+    pub mysql_operator: String,
+    /// MySQL's backup image, with Pyo's patches (deploy/images/moco).
+    #[serde(default)]
+    pub mysql_backup: String,
     /// Pyo's Postgres per version (deploy/images/postgres.Dockerfile).
     #[serde(default)]
     pub postgres16: String,
@@ -966,6 +972,29 @@ pub struct ReleaseImages {
     pub postgres17: String,
     #[serde(default)]
     pub postgres18: String,
+}
+
+impl ReleaseImages {
+    /// Every image, by its key in release.json. A release pins each image
+    /// scripts/release-manifest.ts writes; adding one there means adding
+    /// it here (a test compares the two).
+    pub fn all(&self) -> [(&'static str, &str); 13] {
+        [
+            ("pyo", &self.pyo),
+            ("agent", &self.agent),
+            ("builder", &self.builder),
+            ("flows", &self.flows),
+            ("waf", &self.waf),
+            ("geoip", &self.geoip),
+            ("dbController", &self.db_controller),
+            ("kv", &self.kv),
+            ("mysqlOperator", &self.mysql_operator),
+            ("mysqlBackup", &self.mysql_backup),
+            ("postgres16", &self.postgres16),
+            ("postgres17", &self.postgres17),
+            ("postgres18", &self.postgres18),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -1030,13 +1059,17 @@ impl Release {
         if parse_version(&self.version).is_none() {
             out.push(format!("\"{}\" isn't a release version.", self.version));
         }
-        let ours = [&self.images.pyo, &self.images.agent, &self.images.builder];
-        for (name, image) in [
-            ("pyo", &self.images.pyo),
-            ("agent", &self.images.agent),
-            ("builder", &self.images.builder),
-        ] {
-            if !pinned_image(image) {
+        // pyo, agent and builder are required; any other image the release
+        // names must be pinned too. Manifests may use only these.
+        let mut ours = vec![];
+        for (name, image) in self.images.all() {
+            let required = matches!(name, "pyo" | "agent" | "builder");
+            if image.is_empty() && !required {
+                continue;
+            }
+            if pinned_image(image) {
+                ours.push(image);
+            } else {
                 out.push(format!("The {name} image isn't pinned by digest: {image}"));
             }
         }
@@ -1053,7 +1086,7 @@ impl Release {
             collect_images(o, &mut images);
             for i in images {
                 let is_ours = !prefix.is_empty() && i.starts_with(&prefix);
-                if is_ours && !ours.iter().any(|o| o.as_str() == i) {
+                if is_ours && !ours.contains(&i.as_str()) {
                     out.push(format!(
                         "A manifest uses {i}, which isn't one of the release's pinned images."
                     ));
@@ -2294,6 +2327,8 @@ mod release_tests {
                 geoip: img("geoip"),
                 db_controller: img("db-controller"),
                 kv: img("kv"),
+                mysql_operator: img("mysql-operator"),
+                mysql_backup: img("mysql-backup"),
                 postgres16: img("postgres-16"),
                 postgres17: img("postgres-17"),
                 postgres18: img("postgres-18"),
@@ -2381,6 +2416,133 @@ mod release_tests {
         let mut r = release();
         r.manifests.pyo.clear();
         assert!(!r.problems().is_empty());
+    }
+
+    /// v0.1.0's release.json as published: its upgrader refused it, as
+    /// only pyo, agent and builder counted as the release's images.
+    fn v0_1_0() -> (Release, serde_json::Value) {
+        let text = include_str!("../testdata/release-0.1.0.json");
+        (
+            serde_json::from_str(text).unwrap(),
+            serde_json::from_str(text).unwrap(),
+        )
+    }
+
+    #[test]
+    fn the_published_release_has_no_problems() {
+        let (r, _) = v0_1_0();
+        assert!(r.problems().is_empty(), "{:?}", r.problems());
+    }
+
+    #[test]
+    fn every_image_release_json_pins_is_read() {
+        let (r, raw) = v0_1_0();
+        // Each of its images is a field here, with the same value.
+        assert_eq!(serde_json::to_value(&r.images).unwrap(), raw["images"]);
+        for (name, image) in r.images.all() {
+            assert!(pinned_image(image), "{name}: {image}");
+        }
+        // And all() names every field.
+        let fields = serde_json::to_value(ReleaseImages::default()).unwrap();
+        let mut fields: Vec<&str> = fields
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut named: Vec<&str> = ReleaseImages::default()
+            .all()
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        fields.sort();
+        named.sort();
+        assert_eq!(fields, named);
+    }
+
+    /// The images scripts/release-manifest.ts writes into release.json are
+    /// the ones a release is checked against, so a new image can't be
+    /// published without the upgrader accepting it.
+    #[test]
+    fn release_manifest_script_writes_these_images() {
+        let script = include_str!("../../../scripts/release-manifest.ts");
+        let names = script
+            .split_once("const names = {")
+            .and_then(|(_, rest)| rest.split_once("} as const;"))
+            .expect("release-manifest.ts has `const names = { … } as const;`")
+            .0;
+        let mut keys: Vec<String> = names
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .filter_map(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().trim_end_matches(',').trim_matches('"').to_owned())
+            .collect();
+        let majors = script
+            .split_once("for (const major of [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .expect("release-manifest.ts lists Postgres versions")
+            .0;
+        keys.extend(
+            majors
+                .split(',')
+                .map(|m| format!("postgres{}", m.trim().trim_matches('"'))),
+        );
+        keys.sort();
+        let mut ours: Vec<String> = ReleaseImages::default()
+            .all()
+            .iter()
+            .map(|(n, _)| n.to_string())
+            .collect();
+        ours.sort();
+        assert_eq!(keys, ours);
+    }
+
+    #[test]
+    fn unpinned_images_of_ours_are_refused() {
+        let (r, _) = v0_1_0();
+        let prefix = "ghcr.io/upsetdev/pyo";
+        let with = |image: String| {
+            let mut r = r.clone();
+            let deployment = r
+                .manifests
+                .pyo
+                .iter_mut()
+                .find(|o| o["kind"] == "Deployment")
+                .unwrap();
+            deployment["spec"]["template"]["spec"]["containers"][0]["image"] = json!(image);
+            r.problems()
+        };
+        // One of Pyo's images that the release doesn't pin, by tag or digest.
+        for image in [
+            format!("{prefix}/x:0.1.0"),
+            format!("{prefix}/x:0.1.0@sha256:{D}"),
+            format!("{prefix}/flows:0.1.0"),
+            format!("{prefix}/flows:0.1.0@sha256:{D}"),
+            format!("{prefix}/postgres:18-0.1.0"),
+        ] {
+            let p = with(image.clone());
+            assert!(
+                p.iter()
+                    .any(|p| p.contains(&image) && p.contains("isn't one of")),
+                "{image}: {p:?}"
+            );
+        }
+        // Another of its pinned images is fine anywhere; so is anyone else's.
+        assert!(with(r.images.mysql_backup.clone()).is_empty());
+        assert!(with("docker.io/library/busybox:1".into()).is_empty());
+        // An image the release names must be pinned itself.
+        let mut bad = r.clone();
+        bad.images.flows = format!("{prefix}/flows:0.1.0");
+        assert!(
+            bad.problems()
+                .iter()
+                .any(|p| p.contains("flows image isn't pinned")),
+            "{:?}",
+            bad.problems()
+        );
+        // and the manifests that use the old pin no longer match it.
+        assert!(bad.problems().iter().any(|p| p.contains("isn't one of")));
     }
 
     #[test]

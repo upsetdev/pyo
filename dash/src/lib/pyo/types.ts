@@ -200,7 +200,22 @@ export type Updates = {
     /** Migrations of the release this database hasn't run. */
     migrations: string[];
     platformImages: string[];
-    images: { pyo: string; agent: string; builder: string };
+    /** Every image the release pins, by its key in release.json. */
+    images: {
+      pyo: string;
+      agent: string;
+      builder: string;
+      flows: string;
+      waf: string;
+      geoip: string;
+      dbController: string;
+      kv: string;
+      mysqlOperator: string;
+      mysqlBackup: string;
+      postgres16: string;
+      postgres17: string;
+      postgres18: string;
+    };
   } | null;
   /** Why "Update now" can't start (empty when it can). */
   blockers: string[];

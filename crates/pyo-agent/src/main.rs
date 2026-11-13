@@ -120,6 +120,14 @@ async fn main() -> anyhow::Result<()> {
         println!("{AGENT_VERSION}");
         return Ok(());
     }
+    // `pyo-agent check-release <release.json>`: what the upgrader would
+    // refuse in a release (the release workflow runs it before publishing).
+    if args.get(1).map(String::as_str) == Some("check-release") {
+        let path = args
+            .get(2)
+            .ok_or_else(|| anyhow::anyhow!("usage: pyo-agent check-release <release.json>"))?;
+        return upgrade::check_release(path);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "pyo_agent=info".into()),

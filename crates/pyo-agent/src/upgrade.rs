@@ -457,6 +457,22 @@ pub async fn switch(client: &Client, image: &str) -> anyhow::Result<()> {
 
 // ── In the Job: the upgrader ───────────────────────────────────────────────
 
+/// `pyo-agent check-release <release.json>`: fails with what the upgrader
+/// would refuse in it.
+pub fn check_release(path: &str) -> anyhow::Result<()> {
+    let release: Release = serde_json::from_slice(&std::fs::read(path)?)?;
+    let problems = release.problems();
+    if !problems.is_empty() {
+        anyhow::bail!(
+            "Pyo {} can't be applied: {}",
+            release.version,
+            problems.join(" ")
+        );
+    }
+    println!("Pyo {} can be applied.", release.version);
+    Ok(())
+}
+
 /// `pyo-agent upgrade <release.json>`. Ends its output with one JSON line
 /// `{"pyoUpgradeOutcome": {"ok", "message", "rolledBack"}}`.
 pub async fn run_job(path: &str) -> anyhow::Result<()> {

@@ -1,0 +1,1708 @@
+{
+  "version": "0.1.0",
+  "images": {
+    "pyo": "ghcr.io/upsetdev/pyo/pyo:0.1.0@sha256:69918f9a596702617a8225bb313307dedb2d8cbf612e9f045265510e29fa9ce6",
+    "agent": "ghcr.io/upsetdev/pyo/agent:0.1.0@sha256:00a45891987673a62204d58d48368a511420673faf9f328440a33cea3e87a045",
+    "builder": "ghcr.io/upsetdev/pyo/builder:0.1.0@sha256:99a2894fe2f3a5c0e4a7fcef30d2dd76887036b4556af12f7302aadbf0f173f7",
+    "flows": "ghcr.io/upsetdev/pyo/flows:0.1.0@sha256:23828174e8b6c05870780e8fe2cb83d3bf919e3ab4a1bec2373157a2cbbe5b52",
+    "waf": "ghcr.io/upsetdev/pyo/waf:0.1.0@sha256:4ec4fd8af8e60ff2f89cb19768a1cf49a2f517504e2150dd6d3793e08fc3027c",
+    "geoip": "ghcr.io/upsetdev/pyo/geoip:0.1.0@sha256:fbc8efc489a0ebe70a4979f3e4373d1fa2a818fc8da9095d9be73d425a0489a2",
+    "dbController": "ghcr.io/upsetdev/pyo/db-controller:0.1.0@sha256:ade0796f568934cd3ce2780b9b2b1942163bc3908302336d55bf2fe356fde990",
+    "kv": "ghcr.io/upsetdev/pyo/kv:0.1.0@sha256:9f46f43a5e6e143eb969b9aeaa3db527f3c490ec433222cb0c1ed4c957dcf03e",
+    "mysqlOperator": "ghcr.io/upsetdev/pyo/mysql-operator:0.1.0@sha256:ee514107d3bbcbf9af61485e631551093abb4fcd127105a05bbc744a2dd9065e",
+    "mysqlBackup": "ghcr.io/upsetdev/pyo/mysql-backup:0.1.0@sha256:b89049c4d9b0940d20ea727e8318e5d19bce6b824caaa10c73d6b5c675232a40",
+    "postgres16": "ghcr.io/upsetdev/pyo/postgres:16-0.1.0@sha256:c58c31dd74b52b2d394607f03f74d36d93a010cc6cd126c066346f7011702709",
+    "postgres17": "ghcr.io/upsetdev/pyo/postgres:17-0.1.0@sha256:09eabb31d47362617bcbe1017f51f06bcdc4b37ec5f3eb7ea1bb2bdd05275aa0",
+    "postgres18": "ghcr.io/upsetdev/pyo/postgres:18-0.1.0@sha256:422e376e09c7bb237706bbfad277ffbe941b70323893a7655d727cd0563a7c3d"
+  },
+  "k3s": {
+    "version": "v1.37.2+k3s1",
+    "installerSha256": "ed01f89fd977bf20ac1516bbebf8370bf3ddbaa55dac8aba610956a4c78cc00b",
+    "amd64Sha256": "265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda",
+    "arm64Sha256": "a779ccf1e5e2e33a62f5a29c2f1c0bbf99431e100579d4c10f0aa0742a6aa84b"
+  },
+  "manifests": {
+    "platform": [
+      {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+          "name": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "default-deny",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {},
+          "policyTypes": [
+            "Ingress"
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "pyo",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo"
+            }
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "ports": [
+                {
+                  "port": 8000
+                },
+                {
+                  "port": 5006
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "pyo-databases",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchExpressions": [
+              {
+                "key": "app.kubernetes.io/name",
+                "operator": "In",
+                "values": [
+                  "pyo-postgres",
+                  "pyo-clickhouse"
+                ]
+              }
+            ]
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "from": [
+                {
+                  "podSelector": {
+                    "matchExpressions": [
+                      {
+                        "key": "app.kubernetes.io/name",
+                        "operator": "In",
+                        "values": [
+                          "pyo",
+                          "pyo-worker"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 5432
+                },
+                {
+                  "port": 8123
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "pyo-backup-store",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-backup-store"
+            }
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "ports": [
+                {
+                  "port": 3900
+                }
+              ]
+            },
+            {
+              "from": [
+                {
+                  "podSelector": {
+                    "matchExpressions": [
+                      {
+                        "key": "app.kubernetes.io/name",
+                        "operator": "In",
+                        "values": [
+                          "pyo",
+                          "pyo-worker"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 3903
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "registry",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "registry"
+            }
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "from": [
+                {
+                  "podSelector": {
+                    "matchExpressions": [
+                      {
+                        "key": "app.kubernetes.io/name",
+                        "operator": "In",
+                        "values": [
+                          "pyo",
+                          "pyo-worker"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 5000
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+          "name": "registry-data",
+          "namespace": "pyo-system"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "20Gi"
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-registry",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "registry",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app.kubernetes.io/name": "registry"
+          },
+          "ports": [
+            {
+              "name": "registry",
+              "port": 5000,
+              "targetPort": "registry"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "registry",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "registry",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "strategy": {
+            "type": "Recreate"
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "registry"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "registry",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "name": "registry",
+                  "image": "registry:3.1.2",
+                  "env": [
+                    {
+                      "name": "REGISTRY_HTTP_ADDR",
+                      "value": "0.0.0.0:5000"
+                    },
+                    {
+                      "name": "REGISTRY_STORAGE_DELETE_ENABLED",
+                      "value": "true"
+                    },
+                    {
+                      "name": "OTEL_TRACES_EXPORTER",
+                      "value": "none"
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "name": "registry",
+                      "containerPort": 5000
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/v2/",
+                      "port": "registry"
+                    },
+                    "periodSeconds": 5
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/registry"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "10m",
+                      "memory": "32Mi"
+                    },
+                    "limits": {
+                      "memory": "512Mi"
+                    }
+                  }
+                },
+                {
+                  "name": "gc",
+                  "image": "registry:3.1.2",
+                  "command": [
+                    "sh",
+                    "-c",
+                    "while sleep 86400; do registry garbage-collect /etc/distribution/config.yml; done"
+                  ],
+                  "volumeMounts": [
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/registry"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "5m",
+                      "memory": "16Mi"
+                    },
+                    "limits": {
+                      "memory": "256Mi"
+                    }
+                  }
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "data",
+                  "persistentVolumeClaim": {
+                    "claimName": "registry-data"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "pyo-host",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-host",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "strategy": {
+            "type": "Recreate"
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-host"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-host",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "hostNetwork": true,
+              "dnsPolicy": "ClusterFirstWithHostNet",
+              "affinity": {
+                "podAffinity": {
+                  "requiredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                      "labelSelector": {
+                        "matchLabels": {
+                          "app.kubernetes.io/name": "registry"
+                        }
+                      },
+                      "topologyKey": "kubernetes.io/hostname"
+                    }
+                  ]
+                }
+              },
+              "containers": [
+                {
+                  "name": "forward",
+                  "image": "alpine/socat:1.8.1.3",
+                  "command": [
+                    "sh",
+                    "-c"
+                  ],
+                  "args": [
+                    "IP=\"__TAILNET_IP__\"\nto=TCP:pyo.pyo-system.svc.cluster.local:8000\nsocat TCP-LISTEN:8000,bind=127.0.0.1,fork,reuseaddr $to &\nsocat TCP-LISTEN:5005,bind=127.0.0.1,fork,reuseaddr TCP:pyo-registry.pyo-system.svc.cluster.local:5000 &\nif [ -n \"$IP\" ]; then\n  socat TCP-LISTEN:8000,bind=\"$IP\",fork,reuseaddr $to &\n  socat TCP-LISTEN:5005,bind=\"$IP\",fork,reuseaddr TCP:pyo-registry-door.pyo-system.svc.cluster.local:5006 &\nfi\nwait\n"
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "5m",
+                      "memory": "8Mi"
+                    },
+                    "limits": {
+                      "memory": "64Mi"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+          "name": "buildkitd",
+          "namespace": "pyo-system"
+        },
+        "data": {
+          "buildkitd.toml": "[registry.\"127.0.0.1:5005\"]\n  http = true\n  insecure = true\n[worker.oci]\n  gc = true\n  gckeepstorage = \"20GB\"\n"
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+          "name": "buildkit-cache",
+          "namespace": "pyo-system"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "30Gi"
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "buildkitd",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "buildkitd",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "strategy": {
+            "type": "Recreate"
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "buildkitd"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "buildkitd",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "hostNetwork": true,
+              "containers": [
+                {
+                  "name": "buildkitd",
+                  "image": "moby/buildkit:v0.34.1",
+                  "args": [
+                    "--addr=tcp://127.0.0.1:1234",
+                    "--addr=unix:///run/buildkit/buildkitd.sock",
+                    "--config=/etc/buildkit/buildkitd.toml"
+                  ],
+                  "securityContext": {
+                    "privileged": true
+                  },
+                  "readinessProbe": {
+                    "exec": {
+                      "command": [
+                        "buildctl",
+                        "debug",
+                        "workers"
+                      ]
+                    },
+                    "initialDelaySeconds": 3,
+                    "periodSeconds": 10
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "config",
+                      "mountPath": "/etc/buildkit"
+                    },
+                    {
+                      "name": "cache",
+                      "mountPath": "/var/lib/buildkit"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "100m",
+                      "memory": "256Mi"
+                    }
+                  }
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "config",
+                  "configMap": {
+                    "name": "buildkitd"
+                  }
+                },
+                {
+                  "name": "cache",
+                  "persistentVolumeClaim": {
+                    "claimName": "buildkit-cache"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-postgres",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-postgres",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app.kubernetes.io/name": "pyo-postgres"
+          },
+          "ports": [
+            {
+              "name": "postgres",
+              "port": 5432,
+              "targetPort": "postgres"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "pyo-postgres",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-postgres",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "serviceName": "pyo-postgres",
+          "replicas": 1,
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-postgres"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-postgres",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "securityContext": {
+                "runAsUser": 70,
+                "runAsGroup": 70,
+                "runAsNonRoot": true
+              },
+              "containers": [
+                {
+                  "name": "postgres",
+                  "image": "postgres:18.6-alpine",
+                  "env": [
+                    {
+                      "name": "POSTGRES_DB",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "POSTGRES_USER",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "POSTGRES_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-postgres",
+                          "key": "password"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PGDATA",
+                      "value": "/var/lib/postgresql/data/pgdata"
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "name": "postgres",
+                      "containerPort": 5432
+                    }
+                  ],
+                  "readinessProbe": {
+                    "exec": {
+                      "command": [
+                        "pg_isready",
+                        "-U",
+                        "pyo",
+                        "-d",
+                        "pyo"
+                      ]
+                    },
+                    "periodSeconds": 5
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/postgresql/data"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "50m",
+                      "memory": "128Mi"
+                    },
+                    "limits": {
+                      "memory": "1Gi"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "volumeClaimTemplates": [
+            {
+              "metadata": {
+                "name": "data"
+              },
+              "spec": {
+                "accessModes": [
+                  "ReadWriteOnce"
+                ],
+                "resources": {
+                  "requests": {
+                    "storage": "10Gi"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-clickhouse",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-clickhouse",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app.kubernetes.io/name": "pyo-clickhouse"
+          },
+          "ports": [
+            {
+              "name": "http",
+              "port": 8123,
+              "targetPort": "http"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "pyo-clickhouse",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-clickhouse",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "serviceName": "pyo-clickhouse",
+          "replicas": 1,
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-clickhouse"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-clickhouse",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "name": "clickhouse",
+                  "image": "clickhouse/clickhouse-server:26.8.36.3",
+                  "env": [
+                    {
+                      "name": "CLICKHOUSE_DB",
+                      "value": "pyo_observability"
+                    },
+                    {
+                      "name": "CLICKHOUSE_USER",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "CLICKHOUSE_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-clickhouse",
+                          "key": "password"
+                        }
+                      }
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "name": "http",
+                      "containerPort": 8123
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/ping",
+                      "port": "http"
+                    },
+                    "periodSeconds": 5
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/clickhouse"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "50m",
+                      "memory": "256Mi"
+                    },
+                    "limits": {
+                      "memory": "2Gi"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "volumeClaimTemplates": [
+            {
+              "metadata": {
+                "name": "data"
+              },
+              "spec": {
+                "accessModes": [
+                  "ReadWriteOnce"
+                ],
+                "resources": {
+                  "requests": {
+                    "storage": "10Gi"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+          "name": "pyo-backup-store",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-backup-store",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "data": {
+          "garage.toml": "metadata_dir = \"/var/lib/garage/meta\"\ndata_dir = \"/var/lib/garage/data\"\ndb_engine = \"lmdb\"\nreplication_factor = 1\ncompression_level = \"none\"\nblock_ram_buffer_max = \"64MiB\"\nrpc_bind_addr = \"127.0.0.1:3901\"\nrpc_public_addr = \"127.0.0.1:3901\"\n\n[s3_api]\ns3_region = \"garage\"\napi_bind_addr = \"0.0.0.0:3900\"\n\n[admin]\napi_bind_addr = \"0.0.0.0:3903\"\nmetrics_require_token = true\n"
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-backup-store",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-backup-store",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app.kubernetes.io/name": "pyo-backup-store"
+          },
+          "ports": [
+            {
+              "name": "s3",
+              "port": 3900,
+              "targetPort": "s3"
+            },
+            {
+              "name": "admin",
+              "port": 3903,
+              "targetPort": "admin"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "pyo-backup-store",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-backup-store",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "serviceName": "pyo-backup-store",
+          "replicas": 1,
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-backup-store"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-backup-store",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "automountServiceAccountToken": false,
+              "securityContext": {
+                "runAsNonRoot": true,
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "fsGroup": 1000,
+                "seccompProfile": {
+                  "type": "RuntimeDefault"
+                }
+              },
+              "containers": [
+                {
+                  "name": "garage",
+                  "image": "dxflrs/garage@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5",
+                  "command": [
+                    "/garage",
+                    "-c",
+                    "/etc/garage/garage.toml",
+                    "server"
+                  ],
+                  "env": [
+                    {
+                      "name": "GARAGE_RPC_SECRET",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "rpc-secret"
+                        }
+                      }
+                    },
+                    {
+                      "name": "GARAGE_ADMIN_TOKEN",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "admin-token"
+                        }
+                      }
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "name": "s3",
+                      "containerPort": 3900
+                    },
+                    {
+                      "name": "admin",
+                      "containerPort": 3903
+                    }
+                  ],
+                  "readinessProbe": {
+                    "tcpSocket": {
+                      "port": "s3"
+                    },
+                    "periodSeconds": 5
+                  },
+                  "securityContext": {
+                    "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true,
+                    "capabilities": {
+                      "drop": [
+                        "ALL"
+                      ]
+                    }
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "config",
+                      "mountPath": "/etc/garage",
+                      "readOnly": true
+                    },
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/garage"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "20m",
+                      "memory": "32Mi"
+                    },
+                    "limits": {
+                      "memory": "512Mi"
+                    }
+                  }
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "config",
+                  "configMap": {
+                    "name": "pyo-backup-store"
+                  }
+                }
+              ]
+            }
+          },
+          "volumeClaimTemplates": [
+            {
+              "metadata": {
+                "name": "data"
+              },
+              "spec": {
+                "accessModes": [
+                  "ReadWriteOnce"
+                ],
+                "resources": {
+                  "requests": {
+                    "storage": "50Gi"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "pyo": [
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "type": "ClusterIP",
+          "selector": {
+            "app.kubernetes.io/name": "pyo"
+          },
+          "ports": [
+            {
+              "name": "http",
+              "port": 8000,
+              "targetPort": "http"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-registry-door",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "type": "ClusterIP",
+          "selector": {
+            "app.kubernetes.io/name": "pyo"
+          },
+          "ports": [
+            {
+              "name": "registry-door",
+              "port": 5006,
+              "targetPort": "registry-door"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "pyo",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 2,
+          "strategy": {
+            "type": "RollingUpdate",
+            "rollingUpdate": {
+              "maxUnavailable": 0,
+              "maxSurge": 1
+            }
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "terminationGracePeriodSeconds": 45,
+              "affinity": {
+                "podAntiAffinity": {
+                  "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                      "weight": 100,
+                      "podAffinityTerm": {
+                        "labelSelector": {
+                          "matchLabels": {
+                            "app.kubernetes.io/name": "pyo"
+                          }
+                        },
+                        "topologyKey": "kubernetes.io/hostname"
+                      }
+                    }
+                  ]
+                }
+              },
+              "containers": [
+                {
+                  "name": "pyo",
+                  "image": "ghcr.io/upsetdev/pyo/pyo:0.1.0@sha256:69918f9a596702617a8225bb313307dedb2d8cbf612e9f045265510e29fa9ce6",
+                  "ports": [
+                    {
+                      "name": "http",
+                      "containerPort": 8000
+                    },
+                    {
+                      "name": "registry-door",
+                      "containerPort": 5006
+                    }
+                  ],
+                  "env": [
+                    {
+                      "name": "DATABASE_URL",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-postgres",
+                          "key": "url"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_AGENT_API_URL",
+                      "value": "http://pyo.pyo-system.svc:8000"
+                    },
+                    {
+                      "name": "PYO_AGENT_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/agent:0.1.0@sha256:00a45891987673a62204d58d48368a511420673faf9f328440a33cea3e87a045"
+                    },
+                    {
+                      "name": "PYO_AGENT_SELF_UPDATE",
+                      "value": "true"
+                    },
+                    {
+                      "name": "PYO_ALLOW_PRIVATE_NETWORKS",
+                      "value": "true"
+                    },
+                    {
+                      "name": "PYO_FLOWS_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/flows:0.1.0@sha256:23828174e8b6c05870780e8fe2cb83d3bf919e3ab4a1bec2373157a2cbbe5b52"
+                    },
+                    {
+                      "name": "PYO_WAF_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/waf:0.1.0@sha256:4ec4fd8af8e60ff2f89cb19768a1cf49a2f517504e2150dd6d3793e08fc3027c"
+                    },
+                    {
+                      "name": "PYO_GEOIP_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/geoip:0.1.0@sha256:fbc8efc489a0ebe70a4979f3e4373d1fa2a818fc8da9095d9be73d425a0489a2"
+                    },
+                    {
+                      "name": "PYO_DB_CONTROLLER_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/db-controller:0.1.0@sha256:ade0796f568934cd3ce2780b9b2b1942163bc3908302336d55bf2fe356fde990"
+                    },
+                    {
+                      "name": "PYO_KV_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/kv:0.1.0@sha256:9f46f43a5e6e143eb969b9aeaa3db527f3c490ec433222cb0c1ed4c957dcf03e"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_16",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:16-0.1.0@sha256:c58c31dd74b52b2d394607f03f74d36d93a010cc6cd126c066346f7011702709"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_17",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:17-0.1.0@sha256:09eabb31d47362617bcbe1017f51f06bcdc4b37ec5f3eb7ea1bb2bdd05275aa0"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_18",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:18-0.1.0@sha256:422e376e09c7bb237706bbfad277ffbe941b70323893a7655d727cd0563a7c3d"
+                    },
+                    {
+                      "name": "PYO_MYSQL_OPERATOR_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/mysql-operator:0.1.0@sha256:ee514107d3bbcbf9af61485e631551093abb4fcd127105a05bbc744a2dd9065e"
+                    },
+                    {
+                      "name": "PYO_MYSQL_BACKUP_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/mysql-backup:0.1.0@sha256:b89049c4d9b0940d20ea727e8318e5d19bce6b824caaa10c73d6b5c675232a40"
+                    },
+                    {
+                      "name": "RUST_LOG",
+                      "value": "pyo_api=info,tower_http=warn"
+                    },
+                    {
+                      "name": "PYO_ROLE",
+                      "value": "web"
+                    },
+                    {
+                      "name": "POD_IP",
+                      "valueFrom": {
+                        "fieldRef": {
+                          "fieldPath": "status.podIP"
+                        }
+                      }
+                    },
+                    {
+                      "name": "CLICKHOUSE_URL",
+                      "value": "http://pyo-clickhouse.pyo-system.svc:8123"
+                    },
+                    {
+                      "name": "CLICKHOUSE_USER",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "CLICKHOUSE_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-clickhouse",
+                          "key": "password"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_GEOIP_DB",
+                      "value": "/geoip/GeoLite2-City.mmdb"
+                    },
+                    {
+                      "name": "MAXMIND_LICENSE_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-geoip",
+                          "key": "maxmind-license-key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BUILDER_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/builder:0.1.0@sha256:99a2894fe2f3a5c0e4a7fcef30d2dd76887036b4556af12f7302aadbf0f173f7"
+                    },
+                    {
+                      "name": "PYO_REGISTRY_PUSH",
+                      "value": "__REGISTRY_PUSH__"
+                    },
+                    {
+                      "name": "PYO_REGISTRY_PULL",
+                      "value": "127.0.0.1:5005"
+                    },
+                    {
+                      "name": "PYO_REGISTRY",
+                      "value": "pyo-registry.pyo-system.svc.cluster.local:5000"
+                    },
+                    {
+                      "name": "PYO_TAILNET_API_URL",
+                      "value": "__TAILNET_API__"
+                    },
+                    {
+                      "name": "PYO_TAILNET_NAME",
+                      "value": "__TAILNET_NAME__"
+                    },
+                    {
+                      "name": "PYO_BOOTSTRAP_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-bootstrap",
+                          "key": "key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_SECRET_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-secrets",
+                          "key": "secret-key"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_ADMIN_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-admin",
+                          "key": "password",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_URL",
+                      "value": "http://pyo-backup-store.pyo-system.svc.cluster.local:3900"
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ADMIN_URL",
+                      "value": "http://pyo-backup-store.pyo-system.svc.cluster.local:3903"
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ADMIN_TOKEN",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "admin-token",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ACCESS_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "access-key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_SECRET_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "secret-key",
+                          "optional": true
+                        }
+                      }
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/readyz",
+                      "port": "http"
+                    },
+                    "periodSeconds": 3,
+                    "failureThreshold": 1
+                  },
+                  "lifecycle": {
+                    "preStop": {
+                      "sleep": {
+                        "seconds": 5
+                      }
+                    }
+                  },
+                  "livenessProbe": {
+                    "httpGet": {
+                      "path": "/healthz",
+                      "port": "http"
+                    },
+                    "initialDelaySeconds": 20,
+                    "periodSeconds": 20
+                  },
+                  "securityContext": {
+                    "runAsNonRoot": true,
+                    "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true,
+                    "capabilities": {
+                      "drop": [
+                        "ALL"
+                      ]
+                    }
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "geoip",
+                      "mountPath": "/geoip"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "20m",
+                      "memory": "128Mi"
+                    },
+                    "limits": {
+                      "memory": "768Mi"
+                    }
+                  }
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "geoip",
+                  "emptyDir": {
+                    "sizeLimit": "256Mi"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "policy/v1",
+        "kind": "PodDisruptionBudget",
+        "metadata": {
+          "name": "pyo",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "minAvailable": 1,
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo"
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "pyo-worker",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-worker",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 2,
+          "strategy": {
+            "type": "RollingUpdate",
+            "rollingUpdate": {
+              "maxUnavailable": 0,
+              "maxSurge": 1
+            }
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-worker"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-worker",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "terminationGracePeriodSeconds": 45,
+              "containers": [
+                {
+                  "name": "worker",
+                  "image": "ghcr.io/upsetdev/pyo/pyo:0.1.0@sha256:69918f9a596702617a8225bb313307dedb2d8cbf612e9f045265510e29fa9ce6",
+                  "ports": [
+                    {
+                      "name": "http",
+                      "containerPort": 8000
+                    }
+                  ],
+                  "env": [
+                    {
+                      "name": "PYO_ROLE",
+                      "value": "worker"
+                    },
+                    {
+                      "name": "DATABASE_URL",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-postgres",
+                          "key": "url"
+                        }
+                      }
+                    },
+                    {
+                      "name": "DATABASE_POOL_MAX",
+                      "value": "15"
+                    },
+                    {
+                      "name": "PYO_AGENT_API_URL",
+                      "value": "http://pyo.pyo-system.svc:8000"
+                    },
+                    {
+                      "name": "PYO_AGENT_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/agent:0.1.0@sha256:00a45891987673a62204d58d48368a511420673faf9f328440a33cea3e87a045"
+                    },
+                    {
+                      "name": "PYO_AGENT_SELF_UPDATE",
+                      "value": "true"
+                    },
+                    {
+                      "name": "PYO_ALLOW_PRIVATE_NETWORKS",
+                      "value": "true"
+                    },
+                    {
+                      "name": "PYO_FLOWS_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/flows:0.1.0@sha256:23828174e8b6c05870780e8fe2cb83d3bf919e3ab4a1bec2373157a2cbbe5b52"
+                    },
+                    {
+                      "name": "PYO_WAF_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/waf:0.1.0@sha256:4ec4fd8af8e60ff2f89cb19768a1cf49a2f517504e2150dd6d3793e08fc3027c"
+                    },
+                    {
+                      "name": "PYO_GEOIP_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/geoip:0.1.0@sha256:fbc8efc489a0ebe70a4979f3e4373d1fa2a818fc8da9095d9be73d425a0489a2"
+                    },
+                    {
+                      "name": "PYO_DB_CONTROLLER_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/db-controller:0.1.0@sha256:ade0796f568934cd3ce2780b9b2b1942163bc3908302336d55bf2fe356fde990"
+                    },
+                    {
+                      "name": "PYO_KV_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/kv:0.1.0@sha256:9f46f43a5e6e143eb969b9aeaa3db527f3c490ec433222cb0c1ed4c957dcf03e"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_16",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:16-0.1.0@sha256:c58c31dd74b52b2d394607f03f74d36d93a010cc6cd126c066346f7011702709"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_17",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:17-0.1.0@sha256:09eabb31d47362617bcbe1017f51f06bcdc4b37ec5f3eb7ea1bb2bdd05275aa0"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_18",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:18-0.1.0@sha256:422e376e09c7bb237706bbfad277ffbe941b70323893a7655d727cd0563a7c3d"
+                    },
+                    {
+                      "name": "PYO_MYSQL_OPERATOR_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/mysql-operator:0.1.0@sha256:ee514107d3bbcbf9af61485e631551093abb4fcd127105a05bbc744a2dd9065e"
+                    },
+                    {
+                      "name": "PYO_MYSQL_BACKUP_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/mysql-backup:0.1.0@sha256:b89049c4d9b0940d20ea727e8318e5d19bce6b824caaa10c73d6b5c675232a40"
+                    },
+                    {
+                      "name": "RUST_LOG",
+                      "value": "pyo_api=info"
+                    },
+                    {
+                      "name": "CLICKHOUSE_URL",
+                      "value": "http://pyo-clickhouse.pyo-system.svc:8123"
+                    },
+                    {
+                      "name": "CLICKHOUSE_USER",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "CLICKHOUSE_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-clickhouse",
+                          "key": "password"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BUILDER_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/builder:0.1.0@sha256:99a2894fe2f3a5c0e4a7fcef30d2dd76887036b4556af12f7302aadbf0f173f7"
+                    },
+                    {
+                      "name": "PYO_REGISTRY_PUSH",
+                      "value": "__REGISTRY_PUSH__"
+                    },
+                    {
+                      "name": "PYO_REGISTRY_PULL",
+                      "value": "127.0.0.1:5005"
+                    },
+                    {
+                      "name": "PYO_REGISTRY",
+                      "value": "pyo-registry.pyo-system.svc.cluster.local:5000"
+                    },
+                    {
+                      "name": "PYO_TAILNET_API_URL",
+                      "value": "__TAILNET_API__"
+                    },
+                    {
+                      "name": "PYO_TAILNET_NAME",
+                      "value": "__TAILNET_NAME__"
+                    },
+                    {
+                      "name": "PYO_BOOTSTRAP_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-bootstrap",
+                          "key": "key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_SECRET_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-secrets",
+                          "key": "secret-key"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_URL",
+                      "value": "http://pyo-backup-store.pyo-system.svc.cluster.local:3900"
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ADMIN_URL",
+                      "value": "http://pyo-backup-store.pyo-system.svc.cluster.local:3903"
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ADMIN_TOKEN",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "admin-token",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ACCESS_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "access-key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_SECRET_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "secret-key",
+                          "optional": true
+                        }
+                      }
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/readyz",
+                      "port": "http"
+                    },
+                    "periodSeconds": 5
+                  },
+                  "livenessProbe": {
+                    "httpGet": {
+                      "path": "/healthz",
+                      "port": "http"
+                    },
+                    "initialDelaySeconds": 20,
+                    "periodSeconds": 20
+                  },
+                  "securityContext": {
+                    "runAsNonRoot": true,
+                    "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true,
+                    "capabilities": {
+                      "drop": [
+                        "ALL"
+                      ]
+                    }
+                  },
+                  "resources": {
+                    "requests": {
+                      "cpu": "10m",
+                      "memory": "64Mi"
+                    },
+                    "limits": {
+                      "memory": "512Mi"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  },
+  "migrations": [
+    "0001_init.sql"
+  ],
+  "minFrom": null,
+  "manualOnly": false,
+  "beforeYouUpdate": []
+}

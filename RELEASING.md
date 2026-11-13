@@ -59,7 +59,12 @@ release carries it as an asset. Installations find it in **Settings › Updates*
 (they ask GitHub every 6 hours) and apply it from there. It holds:
 
 - `version`, and Pyo's images pinned by the digests the workflow just
-  signed (`ghcr.io/upsetdev/pyo/pyo:0.1.0@sha256:…`)
+  signed (`ghcr.io/upsetdev/pyo/pyo:0.1.0@sha256:…`). Each one is a field
+  of `ReleaseImages` (`crates/pyo-proto/src/lib.rs`), and the release's
+  manifests may only use those of Pyo's images: an image added to the
+  script is added there too (`cargo test` compares them), and the workflow
+  checks `release.json` with the release's own agent
+  (`pyo-agent check-release`) before signing it
 - `manifests`: `deploy/k8s/platform.yaml` and `deploy/k8s/pyo.yaml` as JSON
   objects with those images. `__TAILNET_IP__`, `__REGISTRY_PUSH__`,
   `__TAILNET_API__` and `__TAILNET_NAME__` stay as they are, and the upgrader reads each installation's
