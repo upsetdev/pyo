@@ -17,6 +17,7 @@ import { ButtonLink } from "~/components/ui/Button";
 import { Segmented, Select } from "~/components/ui/Field";
 import { EmptyState, ErrorState, Panel, Skeleton } from "~/components/ui/Panel";
 import { SearchInput } from "~/components/ui/Table";
+import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { fetchAnalytics, type AnalyticsResponse } from "~/lib/pyo/backend";
 import { compact, pct, plural } from "~/lib/pyo/format";
 import { useQuery } from "~/lib/pyo/query";
@@ -99,10 +100,11 @@ function AnalyticsPage() {
     void navigate({ search: (prev) => ({ ...prev, ...next }), replace: true });
   const filter = { team: s.currentTeamId, project, site, range };
   // Refreshed every 30s; the API also returns the previous period for the change badges.
+  const on = useObservabilityOn();
   const q = useQuery(
-    view === "web" ? JSON.stringify(filter) : "off",
+    view === "web" && on ? JSON.stringify(filter) : "off",
     () =>
-      view === "web" && allSites.length
+      view === "web" && on && allSites.length
         ? fetchAnalytics(filter)
         : Promise.resolve(null),
     { refreshMs: 30_000 },
@@ -179,6 +181,12 @@ function AnalyticsPage() {
     </Layered>
   );
 
+  if (!on)
+    return (
+      <Panel>
+        <ObservabilityOff />
+      </Panel>
+    );
   return (
     <div className="space-y-6">
       {view === "server" ? (

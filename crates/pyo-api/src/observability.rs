@@ -527,6 +527,9 @@ pub struct Observability {
     db_sampled: Mutex<HashMap<String, Instant>>,
     /// The visitor IP setting, re-read every 30s.
     ip_mode: RwLock<(Instant, IpMode)>,
+    /// Whether observability is on (the installation's setting), re-read
+    /// every 5s: another replica may have changed it.
+    on: RwLock<(Instant, bool)>,
 }
 
 /// What analytics keeps of a visitor's IP address (an installation-wide
@@ -765,6 +768,40 @@ impl AccessLine {
     }
 }
 
+/// What the API answers for history while observability is off.
+pub fn off() -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Observability is off.",
+    )
+}
+
+/// Whether observability is on (the installation's setting, 'enabled' in
+/// pyo.settings 'observability'). On unless turned off: a fresh install
+/// saves its default with its first admin (`first_default`).
+pub async fn setting(db: &PgPool) -> ApiResult<bool> {
+    let v: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM pyo.settings WHERE key = 'observability'")
+            .fetch_optional(db)
+            .await?;
+    Ok(v.and_then(|v| v["enabled"].as_bool()).unwrap_or(true))
+}
+
+/// A fresh install's observability: off on a small server (under
+/// 3.5 GB of memory, as the installers count it), else on. Saved once, with
+/// the first admin. Later it's the admin's: a server given more memory gets
+/// a hint in the dashboard, never a silent change.
+pub async fn first_default(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> sqlx::Result<bool> {
+    let on = pyo_proto::memory::server_tier() != pyo_proto::memory::Tier::Small;
+    sqlx::query(
+        "INSERT INTO pyo.settings (key, value) VALUES ('observability', jsonb_build_object('enabled', $1)) ON CONFLICT (key) DO NOTHING",
+    )
+    .bind(on)
+    .execute(&mut **tx)
+    .await?;
+    Ok(on)
+}
+
 /// The saved setting ('observability' in pyo.settings).
 pub async fn ip_mode(db: &PgPool) -> ApiResult<IpMode> {
     let v: Option<serde_json::Value> =
@@ -809,17 +846,66 @@ impl Observability {
             sampled: Mutex::new(HashMap::new()),
             db_sampled: Mutex::new(HashMap::new()),
             ip_mode: RwLock::new((Instant::now() - Duration::from_secs(60), IpMode::None)),
+            on: RwLock::new((Instant::now() - Duration::from_secs(60), true)),
         })
     }
 
-    pub fn enabled(&self) -> bool {
-        self.ch.is_some()
+    /// Whether observability is on: ClickHouse is configured and the
+    /// installation's setting is on.
+    pub async fn enabled(&self) -> bool {
+        if self.ch.is_none() {
+            return false;
+        }
+        {
+            let g = self.on.read().await;
+            if g.0.elapsed() < Duration::from_secs(5) {
+                return g.1;
+            }
+        }
+        let Ok(on) = setting(&self.db).await else {
+            return self.on.read().await.1;
+        };
+        *self.on.write().await = (Instant::now(), on);
+        on
     }
 
-    /// Create the table, retrying while ClickHouse starts.
+    /// After this replica changed the setting: no waiting for the cache.
+    pub async fn set_enabled(&self, on: bool) {
+        *self.on.write().await = (Instant::now(), on);
+    }
+
+    /// ClickHouse, while observability is on.
+    async fn store(&self) -> Option<&ClickHouse> {
+        if self.enabled().await {
+            self.ch.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// ClickHouse for a reader, or why there's nothing to read.
+    async fn reader(&self) -> ApiResult<&ClickHouse> {
+        let Some(ch) = &self.ch else {
+            return Err(ApiError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Observability storage isn't configured on this installation.",
+            ));
+        };
+        if !self.enabled().await {
+            return Err(off());
+        }
+        Ok(ch)
+    }
+
+    /// Create the tables, retrying while ClickHouse starts. While
+    /// observability is off, waits until it's turned on.
     pub async fn ensure_schema(self: Arc<Self>) {
         let Some(ch) = &self.ch else { return };
         loop {
+            if !self.enabled().await {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
             let r = async {
                 ch.exec("CREATE DATABASE IF NOT EXISTS pyo_observability", None, &[])
                     .await?;
@@ -999,7 +1085,9 @@ impl Observability {
 
     /// Store a batch of access log lines (the gateway's) from one cluster.
     pub async fn ingest(&self, cluster_id: &str, lines: Vec<Value>) -> ApiResult<usize> {
-        let Some(ch) = &self.ch else { return Ok(0) };
+        let Some(ch) = self.store().await else {
+            return Ok(0);
+        };
         if !*self.ready.read().await {
             return Err(ApiError::new(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -1227,7 +1315,7 @@ impl Observability {
     /// Store a heartbeat's CPU and memory figures, at most once a minute per
     /// cluster. Best effort: a failure is logged, never returned.
     pub async fn record_metrics(&self, team_id: &str, cluster_id: &str, hb: &pyo_proto::Heartbeat) {
-        let Some(ch) = &self.ch else { return };
+        let Some(ch) = self.store().await else { return };
         if !*self.ready.read().await {
             return;
         }
@@ -1294,7 +1382,7 @@ impl Observability {
     /// cluster, under the database's id (and its team: databases are the
     /// team's). Best effort, like `record_metrics`.
     pub async fn record_database_metrics(&self, cluster_id: &str, hb: &pyo_proto::Heartbeat) {
-        let Some(ch) = &self.ch else { return };
+        let Some(ch) = self.store().await else { return };
         if hb.database_metrics.is_empty() || !*self.ready.read().await {
             return;
         }
@@ -1341,12 +1429,7 @@ impl Observability {
         database_id: &str,
         range: &str,
     ) -> ApiResult<DatabaseRows> {
-        let Some(ch) = &self.ch else {
-            return Err(ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Metrics storage isn't configured on this installation.",
-            ));
-        };
+        let ch = self.reader().await?;
         let (points, step) = range_steps(range);
         let now = pyo_proto::now_ms() / 1000;
         let end = (now / step + 1) * step;
@@ -1379,7 +1462,9 @@ impl Observability {
         cluster_id: &str,
         events: &[Value],
     ) -> ApiResult<usize> {
-        let Some(ch) = &self.ch else { return Ok(0) };
+        let Some(ch) = self.store().await else {
+            return Ok(0);
+        };
         if !*self.ready.read().await {
             return Ok(0);
         }
@@ -1408,12 +1493,7 @@ impl Observability {
     /// cluster's). Series start at the first sample in the range; a gap
     /// repeats the previous value.
     pub async fn metrics(&self, team_id: &str, cluster_id: &str, range: &str) -> ApiResult<Value> {
-        let Some(ch) = &self.ch else {
-            return Err(ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Metrics storage isn't configured on this installation.",
-            ));
-        };
+        let ch = self.reader().await?;
         let (points, step) = range_steps(range);
         let now = pyo_proto::now_ms() / 1000;
         let end = (now / step + 1) * step;
@@ -1680,7 +1760,7 @@ impl Observability {
         hosts: &[String],
         hours: i64,
     ) -> ApiResult<Vec<Value>> {
-        let Some(ch) = &self.ch else {
+        let Some(ch) = self.store().await else {
             return Ok(vec![]);
         };
         if hosts.is_empty() {
@@ -1715,7 +1795,7 @@ impl Observability {
         hosts: &[String],
         hours: i64,
     ) -> ApiResult<Vec<Value>> {
-        let Some(ch) = &self.ch else {
+        let Some(ch) = self.store().await else {
             return Ok(vec![]);
         };
         if hosts.is_empty() {
@@ -1748,12 +1828,7 @@ impl Observability {
         hosts: &[String],
         f: &LogFilter,
     ) -> ApiResult<Value> {
-        let Some(ch) = &self.ch else {
-            return Err(ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Observability storage isn't configured on this installation.",
-            ));
-        };
+        let ch = self.reader().await?;
         let now = pyo_proto::now_ms();
         let since = now
             - match f.range.as_str() {
@@ -1860,12 +1935,7 @@ impl Observability {
 
     /// The analytics page's data for a set of hostnames of one team.
     pub async fn query(&self, team_id: &str, hosts: &[String], range: &str) -> ApiResult<Value> {
-        let Some(ch) = &self.ch else {
-            return Err(ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Observability storage isn't configured on this installation.",
-            ));
-        };
+        let ch = self.reader().await?;
         let (points, step) = match range {
             "1h" => (60i64, 60i64),
             "24h" => (48, 1800),
@@ -2039,12 +2109,7 @@ impl Observability {
         service_id: &str,
         range: &str,
     ) -> ApiResult<Value> {
-        let Some(ch) = &self.ch else {
-            return Err(ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Observability storage isn't configured on this installation.",
-            ));
-        };
+        let ch = self.reader().await?;
         let (points, step) = match range {
             "1h" => (60i64, 60i64),
             "24h" => (48, 1800),
@@ -2122,12 +2187,7 @@ impl Observability {
         services: &[String],
         range: &str,
     ) -> ApiResult<Value> {
-        let Some(ch) = &self.ch else {
-            return Err(ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Observability storage isn't configured on this installation.",
-            ));
-        };
+        let ch = self.reader().await?;
         let secs = match range {
             "1h" => 3600,
             "7d" => 7 * 86400,
@@ -2190,12 +2250,7 @@ impl Observability {
         services: &[String],
         range: &str,
     ) -> ApiResult<Value> {
-        let Some(ch) = &self.ch else {
-            return Err(ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Observability storage isn't configured on this installation.",
-            ));
-        };
+        let ch = self.reader().await?;
         let secs = match range {
             "1h" => 3600,
             "7d" => 7 * 86400,

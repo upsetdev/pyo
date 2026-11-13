@@ -339,15 +339,17 @@ const CARD = `group/card relative flex flex-col rounded-[14px] border border-car
 export function ProjectTraffic({ p, st }: { p: Project; st: Stats }) {
   const s = usePyo();
   const live = st.apps.some((a) => a.domains.some((d) => d.status === "active"));
+  const on = s.observabilitySettings.enabled;
   const q = useQuery(
-    `project-traffic:${p.id}:${live}`,
+    `project-traffic:${p.id}:${live && on}`,
     () =>
-      live
+      live && on
         ? fetchAnalytics({ team: s.currentTeamId, project: p.id, site: "all", range: "24h" })
         : Promise.resolve(null),
     { refreshMs: 60_000 },
   );
   if (!live) return <TrafficEmpty />;
+  if (!on) return null;
   const data = q.status === "success" ? q.data : null;
   if (!data) return null;
   const total = data.summary.requests;

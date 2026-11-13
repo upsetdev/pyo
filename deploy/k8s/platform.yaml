@@ -342,27 +342,30 @@ spec:
       containers:
         - name: postgres
           image: postgres:18.6-alpine
-          # Sized for a small server: Pyo's database is small and mostly
-          # cached by the OS. Connections: up to 2 web and 2 worker pods
-          # while they roll (pools of 10 and 15, each with its listeners),
-          # backups and migrations, with room to spare.
+          # Sized by the server's memory, read at every start (containers
+          # see the server's /proc/meminfo): a server given more or less
+          # memory gets the matching settings when Postgres restarts. The
+          # tiers are pyo-proto's memory.rs: small under 3.5 GB, large from
+          # 8 GB. Pyo's database is small and mostly cached by the OS.
+          # Pyo's pools follow max_connections (bg.rs pool_size): two web
+          # and two worker processes while they roll, with room to spare.
+          # ($$( is $( to Kubernetes.)
+          command: [sh, -c]
           args:
-            - -c
-            - shared_buffers=32MB
-            - -c
-            - effective_cache_size=256MB
-            - -c
-            - work_mem=2MB
-            - -c
-            - maintenance_work_mem=32MB
-            - -c
-            - wal_buffers=1MB
-            - -c
-            - max_connections=80
-            - -c
-            - autovacuum_max_workers=2
-            - -c
-            - jit=off
+            - |
+              mem=$$(awk '/^MemTotal:/ { print int($2 / 1024) }' "${PYO_MEMINFO:-/proc/meminfo}")
+              if [ "${mem:-4096}" -lt 3584 ]; then
+                set -- -c shared_buffers=16MB -c effective_cache_size=128MB -c maintenance_work_mem=16MB \
+                  -c wal_buffers=512kB -c max_connections=40 -c autovacuum_max_workers=1 \
+                  -c max_parallel_workers_per_gather=0
+              elif [ "$mem" -lt 8192 ]; then
+                set -- -c shared_buffers=32MB -c effective_cache_size=256MB -c maintenance_work_mem=32MB \
+                  -c wal_buffers=1MB -c max_connections=80 -c autovacuum_max_workers=2
+              else
+                set -- -c shared_buffers=64MB -c effective_cache_size=1GB -c maintenance_work_mem=64MB \
+                  -c wal_buffers=2MB -c max_connections=120 -c autovacuum_max_workers=2
+              fi
+              exec docker-entrypoint.sh postgres "$@" -c work_mem=2MB -c jit=off -c huge_pages=off
           env:
             - { name: POSTGRES_DB, value: pyo }
             - { name: POSTGRES_USER, value: pyo }
@@ -539,7 +542,9 @@ metadata:
   labels: { app.kubernetes.io/name: pyo-clickhouse, app.kubernetes.io/part-of: pyo }
 spec:
   serviceName: pyo-clickhouse
-  replicas: 1
+  # No replicas here: Pyo's agent sets them (1, or 0 while observability is
+  # off), and an update must not change them back. A new install on a small
+  # server creates it stopped (upgrade.rs).
   selector:
     matchLabels: { app.kubernetes.io/name: pyo-clickhouse }
   template:

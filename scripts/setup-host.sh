@@ -93,34 +93,69 @@ k3s_install() {
 }
 # <<< pyo:k3s
 # >>> pyo:small-machine (the same in deploy/install.sh, connect.sh and scripts/setup-host.sh)
-# On a small machine (under 4 GB of memory), run before k3s is installed:
-# k3s gets a soft memory limit, GOMEMLIMIT (a fifth of the memory, at least
-# 320 MiB), so its Go runtime collects garbage sooner instead of growing.
-# Under 3 GB, also compressed swap in memory (zram, half the memory,
-# pyo-zram.service) for what runs outside containers, k3s itself above all
-# (containers don't swap), unless the machine already has swap.
+# Run before k3s is installed. What follows this machine's memory, worked
+# out again at every boot by /usr/local/lib/pyo-memory.sh, so a machine
+# given more or less memory gets the matching settings when it restarts.
+# Under 3.5 GB of memory: k3s gets a soft memory limit, GOMEMLIMIT
+# (gomemlimit in the helper), so its Go runtime collects garbage sooner
+# instead of growing. Under 2.75 GB, also compressed swap in memory
+# (zram, half the memory, pyo-zram.service) for what runs outside
+# containers, k3s itself above all (containers don't swap), unless the
+# machine has swap of its own. From 3.5 GB, neither.
 small_machine() {
-  local mem limit
-  mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || true)
-  [ -n "$mem" ] && [ "$mem" -lt 3584 ] || return 0
-  limit=$((mem / 5))
-  [ "$limit" -ge 320 ] || limit=320
+  local env
   mkdir -p /etc/systemd/system/k3s.service.d
-  printf '# Managed by Pyo: k3s on a small machine.\n[Service]\nEnvironment=GOMEMLIMIT=%sMiB\n' "$limit" \
-    > /etc/systemd/system/k3s.service.d/pyo-memory.conf
-  echo "This machine has $mem MiB of memory: k3s gets GOMEMLIMIT=${limit}MiB."
-  [ "$mem" -lt 2816 ] || return 0
-  [ -z "$(swapon --show=NAME --noheadings 2>/dev/null)" ] || return 0
-  command -v zramctl >/dev/null && modprobe zram 2>/dev/null || return 0
+  cat > /usr/local/lib/pyo-memory.sh <<'MEMORY'
+#!/bin/sh
+# Managed by Pyo: k3s's GOMEMLIMIT and compressed swap (zram), from this
+# machine's memory at every boot.
+mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' "${PYO_MEMINFO:-/proc/meminfo}")
+# k3s's soft memory limit in MiB: 40% of the memory, at least 768 MiB
+# (k3s's own heap is 330 to 400 MB: a lower limit keeps its garbage
+# collector running all the time).
+gomemlimit() {
+  limit=$((mem * 2 / 5))
+  [ "$limit" -ge 768 ] || limit=768
+  echo "$limit"
+}
+case "$1" in
+  k3s-env)
+    # For k3s's EnvironmentFile: GOMEMLIMIT under 3.5 GB, else nothing.
+    if [ "${mem:-0}" -gt 0 ] && [ "$mem" -lt 3584 ]; then
+      echo "GOMEMLIMIT=$(gomemlimit)MiB"
+    fi
+    ;;
+  zram-start)
+    [ "${mem:-0}" -gt 0 ] && [ "$mem" -lt 2816 ] || exit 0
+    [ -z "$(swapon --show=NAME --noheadings 2>/dev/null)" ] || exit 0
+    command -v zramctl >/dev/null && modprobe zram 2>/dev/null || exit 0
+    d=$(zramctl --find --size "$((mem / 2))MiB") && mkswap "$d" >/dev/null && swapon -p 100 "$d" && echo "$d" > /run/pyo-zram
+    ;;
+  zram-stop)
+    [ -f /run/pyo-zram ] || exit 0
+    d=$(cat /run/pyo-zram)
+    swapoff "$d"
+    for i in 1 2 3 4 5; do
+      zramctl --reset "$d" 2>/dev/null && break
+      sleep 1
+    done
+    rm -f /run/pyo-zram
+    ;;
+esac
+MEMORY
+  chmod 755 /usr/local/lib/pyo-memory.sh
+  printf '%s\n' '# Managed by Pyo: GOMEMLIMIT on a small machine, worked out at each start.' '[Service]' \
+    "ExecStartPre=-/bin/sh -c '/usr/local/lib/pyo-memory.sh k3s-env > /run/pyo-k3s.env'" \
+    'EnvironmentFile=-/run/pyo-k3s.env' > /etc/systemd/system/k3s.service.d/pyo-memory.conf
   printf '%s\n' '[Unit]' 'Description=Pyo: compressed swap in memory (zram) on a small machine' 'Before=k3s.service' \
     '[Service]' 'Type=oneshot' 'RemainAfterExit=yes' \
-    "ExecStart=/bin/sh -c 'modprobe zram && d=\$\$(zramctl --find --size $((mem / 2))MiB) && mkswap \"\$\$d\" >/dev/null && swapon -p 100 \"\$\$d\" && echo \"\$\$d\" > /run/pyo-zram'" \
-    "ExecStop=/bin/sh -c 'd=\$\$(cat /run/pyo-zram) && swapoff \"\$\$d\" && for i in 1 2 3 4 5; do zramctl --reset \"\$\$d\" 2>/dev/null && exit 0; sleep 1; done; zramctl --reset \"\$\$d\"'" \
+    'ExecStart=/usr/local/lib/pyo-memory.sh zram-start' 'ExecStop=/usr/local/lib/pyo-memory.sh zram-stop' \
     '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/pyo-zram.service
   systemctl daemon-reload
-  systemctl enable --now pyo-zram.service >/dev/null 2>&1 &&
-    echo "Turned on $((mem / 2)) MiB of compressed swap in memory (zram)." ||
-    echo "Couldn't turn on compressed swap (zram); going on without it." >&2
+  systemctl enable --now pyo-zram.service >/dev/null 2>&1 || echo "Couldn't set up compressed swap (zram); going on without it." >&2
+  env=$(/usr/local/lib/pyo-memory.sh k3s-env)
+  [ -z "$env" ] || echo "A small machine: k3s gets $env."
+  [ ! -f /run/pyo-zram ] || echo "Turned on compressed swap in memory (zram)."
 }
 # <<< pyo:small-machine
 # The k3s Pyo pins (deploy/k3s.env), downloaded and checked first.

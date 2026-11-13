@@ -197,9 +197,6 @@ spec:
             - { name: PYO_ROLE, value: worker }
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: pyo-postgres, key: url } }
-            # Each periodic loop keeps a connection for its leader lock while
-            # it runs, and its queries need more: leave plenty of room.
-            - { name: DATABASE_POOL_MAX, value: "15" }
             - { name: PYO_AGENT_API_URL, value: "http://pyo.pyo-system.svc:8000" }
             - { name: PYO_AGENT_IMAGE, value: "__IMAGES__/agent:__TAG__" }
             - { name: PYO_AGENT_SELF_UPDATE, value: "true" }

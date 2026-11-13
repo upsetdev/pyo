@@ -1,3 +1,4 @@
+import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { Segmented } from "~/components/ui/Field";
 import {
   CopyIcon,
@@ -93,8 +94,9 @@ function LogsPage() {
     method: search.method ?? "all",
     q: search.q ?? "",
   };
-  const key = JSON.stringify(filter);
-  const q = useQuery(key, () => fetchAccessLogs(filter), {
+  const on = useObservabilityOn();
+  const key = on ? JSON.stringify(filter) : "off";
+  const q = useQuery(key, () => (on ? fetchAccessLogs(filter) : Promise.resolve(null)), {
     refreshMs: 10_000,
   });
   // The last answer stays on screen while new filters load, so a search
@@ -132,6 +134,12 @@ function LogsPage() {
     !!search.method ||
     !!search.q;
 
+  if (!on)
+    return (
+      <Panel>
+        <ObservabilityOff />
+      </Panel>
+    );
   if (!sites.length)
     return (
       <Panel>

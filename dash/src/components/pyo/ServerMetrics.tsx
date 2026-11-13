@@ -1,3 +1,4 @@
+import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { Layered } from "~/components/ui/Layered";
 import { CpuIcon } from "@phosphor-icons/react";
 import { Link } from "@tanstack/react-router";
@@ -53,7 +54,17 @@ const netOf = (n: MetricsEntity, dir: "rx" | "tx"): V[] => {
 };
 
 /** `inCluster`: shown on one cluster's page, so rows don't repeat its name. */
-export function ServerMetrics({
+export function ServerMetrics(props: Parameters<typeof Metrics>[0]) {
+  return useObservabilityOn() ? (
+    <Metrics {...props} />
+  ) : (
+    <Panel>
+      <ObservabilityOff />
+    </Panel>
+  );
+}
+
+function Metrics({
   team,
   cluster,
   range,

@@ -1,3 +1,4 @@
+import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { useState } from "react";
 import { TimeSeriesChart } from "~/components/charts/Charts";
 import { Segmented } from "~/components/ui/Field";
@@ -34,10 +35,11 @@ export function ConnectionsCard({ app }: { app: Application }) {
   const [metric, setMetric] = useState(0);
   const pub = app.ports.filter((p) => p.exposure === "loadbalancer");
   const proxied = pub.filter((p) => p.proxy !== false);
+  const on = useObservabilityOn();
   const q = useQuery(
-    `app-connections:${app.id}:${range}:${proxied.length}`,
+    `app-connections:${app.id}:${range}:${proxied.length}:${on}`,
     () =>
-      proxied.length
+      proxied.length && on
         ? fetchConnections(app.id, range)
         : Promise.resolve(null),
     { refreshMs: 30_000 },

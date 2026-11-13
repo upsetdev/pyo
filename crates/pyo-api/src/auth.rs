@@ -482,7 +482,13 @@ pub async fn ensure_first_admin(db: &sqlx::PgPool) -> anyhow::Result<()> {
     create_own_team(&mut tx, &user)
         .await
         .map_err(|e| anyhow::anyhow!("creating the first team failed: {e:?}"))?;
+    // A fresh install: observability starts off on a small server.
+    let observability = crate::observability::first_default(&mut tx).await?;
     tx.commit().await?;
+    tracing::info!(
+        on = observability,
+        "observability's default for this install"
+    );
     if from_env.is_some() {
         tracing::info!(email = FIRST_ADMIN_EMAIL, "created the first admin");
     } else {

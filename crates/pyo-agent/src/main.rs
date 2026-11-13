@@ -159,8 +159,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Read only: nothing of Pyo's own is installed or changed either.
     if !policy.read_only {
-        let kube = agent.kube.clone();
-        tokio::spawn(async move { observability::ensure(&kube).await });
         tokio::spawn(tls::ensure(agent.kube.clone()));
         tokio::spawn(gateway::ensure(
             agent.kube.clone(),
@@ -180,6 +178,8 @@ async fn main() -> anyhow::Result<()> {
 async fn heartbeat_loop(agent: Agent) {
     let mut tick = tokio::time::interval(Duration::from_secs(10));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Observability as last applied here (None: not yet since this start).
+    let mut observability_applied: Option<bool> = None;
     loop {
         tick.tick().await;
         let policy = scope::read_policy(&agent.kube).await;
@@ -201,6 +201,21 @@ async fn heartbeat_loop(agent: Agent) {
                             }
                         }
                         databases::label_teams(&agent.kube, &reply.project_teams).await;
+                        if let Some(on) = reply.observability
+                            && observability_applied != Some(on)
+                        {
+                            match observability::set(&agent.kube, on, agent.api.same_cluster())
+                                .await
+                            {
+                                Ok(()) => {
+                                    tracing::info!(on, "observability applied");
+                                    observability_applied = Some(on);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %format!("{e:#}"), on, "couldn't apply observability; retrying")
+                                }
+                            }
+                        }
                     }
                     Err(e) => tracing::warn!(error = %e, "heartbeat not accepted"),
                 }

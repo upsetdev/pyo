@@ -1,3 +1,4 @@
+import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -770,9 +771,10 @@ export function WafSection({ app }: { app: Application }) {
   const [dialog, setDialog] = useState<{ initial: Partial<RuleDraft> | null; rule: WafRule | null } | null>(null);
   const [removing, setRemoving] = useState<WafRule | null>(null);
   const me = useQuery("firewall-me", fetchMyAddress, { refreshMs: 0 });
+  const history = useObservabilityOn();
   const hitsQ = useQuery(
-    `waf-rule-hits:${app.id}:${on}`,
-    () => (on ? fetchWafHits(app.id, "24h") : Promise.resolve(null)),
+    `waf-rule-hits:${app.id}:${on && history}`,
+    () => (on && history ? fetchWafHits(app.id, "24h") : Promise.resolve(null)),
     { refreshMs: 60_000 },
   );
   const data = hitsQ.status === "success" ? hitsQ.data : null;

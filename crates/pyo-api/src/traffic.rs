@@ -374,7 +374,7 @@ pub async fn get(
     let warnings = warnings(&cluster, &domains, &servers, &replicas, &lb_ips, &mode);
 
     // Requests per region, from the server that answered each one.
-    let stats_available = s.observability.enabled();
+    let stats_available = s.observability.enabled().await;
     let per_server = s
         .observability
         .per_server(&team, &hosts, 24)

@@ -672,6 +672,9 @@ pub async fn upgrade(client: &Client, release: &Release) -> Result<(), Failure> 
             {
                 continue;
             }
+            created_stopped(client, ar, name, o)
+                .await
+                .map_err(|e| format!("Couldn't create {} {name}: {e}", ar.kind))?;
             Api::<DynamicObject>::namespaced_with(client.clone(), NS, ar)
                 .patch(name, &pp, &Patch::Apply(o))
                 .await
@@ -714,6 +717,38 @@ pub async fn upgrade(client: &Client, release: &Release) -> Result<(), Failure> 
 
 fn log(msg: &str) {
     println!("{msg}");
+}
+
+/// A new install on a small server (pyo-proto's memory.rs, as Pyo counts it
+/// for observability's default) starts with observability off: its
+/// ClickHouse is created stopped, so it's never pulled or started. Created,
+/// not applied, so the replicas belong to the agent's field manager (which
+/// sets them from then on, observability.rs) and not to the apply after.
+async fn created_stopped(
+    client: &Client,
+    ar: &ApiResource,
+    name: &str,
+    o: &Value,
+) -> anyhow::Result<()> {
+    if ar.kind != "StatefulSet"
+        || name != "pyo-clickhouse"
+        || pyo_proto::memory::server_tier() != pyo_proto::memory::Tier::Small
+    {
+        return Ok(());
+    }
+    let api = Api::<DynamicObject>::namespaced_with(client.clone(), NS, ar);
+    if api.get_opt(name).await?.is_some() {
+        return Ok(());
+    }
+    let mut o = o.clone();
+    o["spec"]["replicas"] = json!(0);
+    let pp = PostParams {
+        field_manager: Some(MANAGER.into()),
+        ..Default::default()
+    };
+    api.create(&pp, &serde_json::from_value(o)?).await?;
+    log("A small server: observability starts off, ClickHouse stopped");
+    Ok(())
 }
 
 /// The secrets pyo-up.sh creates, when a newer release needs one an older
