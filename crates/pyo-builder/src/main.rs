@@ -485,6 +485,23 @@ impl Builder {
             for a in &job.build_args {
                 prep.args(["--env", &format!("{}={}", a.key, a.value)]);
             }
+            // A static site generator whose start script is its development
+            // server: its build's output, served as static files instead.
+            let keys: Vec<String> = job.build_args.iter().map(|a| a.key.clone()).collect();
+            if let Some(site) = source::static_site(&app_dir, &keys) {
+                prep.args(["--env", &site.railpack_env()]);
+                if let Err(e) = source::write_staticfile(&app_dir, &site) {
+                    tracing::warn!(error = %e, "couldn't turn off the index.html fallback");
+                }
+                self.progress(
+                    &job.id,
+                    BuildProgress {
+                        logs: vec![line("info", "builder", &source::static_site_note(&site))],
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
             let out = match tokio::time::timeout(
                 Duration::from_secs(300),
                 prep.stdin(Stdio::null()).output(),

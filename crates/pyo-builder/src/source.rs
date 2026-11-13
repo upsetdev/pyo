@@ -291,6 +291,288 @@ pub fn is_static(info: &Value) -> bool {
         || info["metadata"]["nodeIsSPA"].as_str() == Some("true")
 }
 
+/// A static site generator's build that Pyo has Railpack serve as static
+/// files (Caddy, a few MiB) instead of running its start script, which
+/// would be the generator's development or preview server (a full Node.js
+/// process, 100 MiB and more).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticSite {
+    /// "Eleventy", "Astro", "Hugo" or "Vite".
+    pub framework: &'static str,
+    /// The build's output folder, relative to the app.
+    pub output: String,
+    /// Its start script (a development server), or empty when it has none.
+    pub start: String,
+}
+
+impl StaticSite {
+    /// Railpack's setting that serves the output (its SPA mode): for
+    /// `railpack prepare`.
+    pub fn railpack_env(&self) -> String {
+        format!("RAILPACK_SPA_OUTPUT_DIR={}", self.output)
+    }
+
+    /// A generated site has real pages: an unknown path is a 404, not the
+    /// home page (an app built with Vite routes in the browser, so it keeps
+    /// Railpack's fallback to index.html).
+    pub fn index_fallback(&self) -> bool {
+        self.framework == "Vite"
+    }
+}
+
+/// Build arguments that already say how to run it: Pyo leaves it to them.
+/// RAILPACK_NO_SPA=1 runs the start script.
+const RUN_SETTINGS: [&str; 4] = [
+    "RAILPACK_SPA_OUTPUT_DIR",
+    "RAILPACK_NO_SPA",
+    "RAILPACK_START_CMD",
+    "RAILPACK_STATIC_FILE_ROOT",
+];
+
+/// Commands that serve a site for development or preview, not production.
+const DEV_SERVERS: [&str; 14] = [
+    "eleventy --serve",
+    "eleventy --watch",
+    "astro dev",
+    "astro preview",
+    "vite dev",
+    "vite preview",
+    "vite serve",
+    "hugo server",
+    "hugo serve",
+    "serve ",
+    "http-server",
+    "live-server",
+    "browser-sync",
+    "lite-server",
+];
+
+/// Whether a script runs a development or preview server.
+fn dev_server(script: &str) -> bool {
+    let s = format!("{} ", script.trim());
+    s.split(['&', ';', '|'])
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .any(|c| {
+            let c = c.replace("@11ty/eleventy", "eleventy");
+            let c = c
+                .trim_start_matches("npx ")
+                .trim_start_matches("bunx ")
+                .trim_start_matches("pnpm exec ")
+                .trim_start_matches("cross-env NODE_ENV=production ");
+            let c = format!("{c} ");
+            c == "vite "
+                || c == "astro "
+                || DEV_SERVERS
+                    .iter()
+                    .any(|d| c.starts_with(d) || c.contains(&format!(" {d}")))
+        })
+}
+
+/// A script's command, following one "npm run x" (or pnpm, yarn, bun) to x.
+fn resolve<'a>(scripts: &'a Value, name: &str) -> &'a str {
+    let s = scripts[name].as_str().unwrap_or("").trim();
+    for prefix in [
+        "npm run ",
+        "pnpm run ",
+        "pnpm ",
+        "yarn run ",
+        "yarn ",
+        "bun run ",
+    ] {
+        if let Some(other) = s.strip_prefix(prefix) {
+            let other = other.split_whitespace().next().unwrap_or("");
+            if other != name
+                && let Some(t) = scripts[other].as_str()
+            {
+                return t.trim();
+            }
+        }
+    }
+    s
+}
+
+/// The value after `flag` ("--out x" or "--out=x") in a command.
+fn flag_value(cmd: &str, flags: &[&str]) -> Option<String> {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    for (i, w) in words.iter().enumerate() {
+        for f in flags {
+            if let Some(v) = w.strip_prefix(&format!("{f}=")) {
+                return Some(v.trim_matches(['"', '\'']).to_owned());
+            }
+            if w == f {
+                return words
+                    .get(i + 1)
+                    .map(|v| v.trim_matches(['"', '\'']).to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// `key: "value"` in the first of `files` that's there.
+fn config_value(app_dir: &Path, files: &[&str], key: &str) -> Option<String> {
+    let text = files
+        .iter()
+        .find_map(|f| std::fs::read_to_string(app_dir.join(f)).ok())?;
+    let at = text.find(&format!("{key}:"))? + key.len() + 1;
+    let rest = text[at..].trim_start();
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '"' | '\'' | '`'))?;
+    let value = rest[1..].split(quote).next()?;
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// A relative folder in the app, or None.
+fn folder(v: String) -> Option<String> {
+    let v = v
+        .trim()
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_owned();
+    let p = Path::new(&v);
+    (!v.is_empty() && v != "." && p.components().all(|c| matches!(c, Component::Normal(_))))
+        .then_some(v)
+}
+
+/// When the app is a static site generator's (Eleventy, Astro without a
+/// server adapter, Hugo through npm, Vite) with a build script, and Railpack
+/// would run its start script though that's a development or preview
+/// server (or, for Eleventy and Hugo, there's none): the output to serve as
+/// static files instead. None when a build argument, a Procfile or
+/// railpack.json already says how to run it.
+pub fn static_site(app_dir: &Path, build_args: &[String]) -> Option<StaticSite> {
+    if build_args
+        .iter()
+        .any(|k| RUN_SETTINGS.contains(&k.as_str()))
+        || app_dir.join("Procfile").exists()
+    {
+        return None;
+    }
+    if let Ok(text) = std::fs::read_to_string(app_dir.join("railpack.json")) {
+        let cfg: Value = serde_json::from_str(&text).unwrap_or_default();
+        if cfg["deploy"]["startCommand"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return None;
+        }
+    }
+    let pkg: Value =
+        serde_json::from_str(&std::fs::read_to_string(app_dir.join("package.json")).ok()?).ok()?;
+    let scripts = &pkg["scripts"];
+    let build = resolve(scripts, "build");
+    if build.is_empty() || dev_server(build) {
+        return None;
+    }
+    let start = resolve(scripts, "start").to_owned();
+    let has = |dep: &str| {
+        pkg["dependencies"].get(dep).is_some() || pkg["devDependencies"].get(dep).is_some()
+    };
+    let (framework, output) = if has("astro") && build.contains("astro build") {
+        let config = [
+            "astro.config.mjs",
+            "astro.config.ts",
+            "astro.config.js",
+            "astro.config.mts",
+        ];
+        let server = config_value(app_dir, &config, "output").is_some_and(|o| o == "server");
+        let adapter = [
+            "@astrojs/node",
+            "@astrojs/vercel",
+            "@astrojs/netlify",
+            "@astrojs/cloudflare",
+        ]
+        .iter()
+        .any(|a| has(a));
+        if server || adapter {
+            return None;
+        }
+        (
+            "Astro",
+            config_value(app_dir, &config, "outDir").unwrap_or_else(|| "dist".into()),
+        )
+    } else if has("@11ty/eleventy") && build.contains("eleventy") {
+        let config = [
+            "eleventy.config.js",
+            "eleventy.config.mjs",
+            "eleventy.config.cjs",
+            "eleventy.config.ts",
+            ".eleventy.js",
+        ];
+        let out =
+            flag_value(build, &["--output"]).or_else(|| config_value(app_dir, &config, "output"));
+        ("Eleventy", out.unwrap_or_else(|| "_site".into()))
+    } else if build.split_whitespace().any(|w| w == "hugo") {
+        (
+            "Hugo",
+            flag_value(build, &["-d", "--destination"]).unwrap_or_else(|| "public".into()),
+        )
+    } else if has("vite") && build.contains("vite build") {
+        // Apps that build a server of their own.
+        if [
+            "@sveltejs/kit",
+            "@tanstack/react-start",
+            "@react-router/dev",
+            "@remix-run/dev",
+            "nuxt",
+            "next",
+        ]
+        .iter()
+        .any(|d| has(d))
+        {
+            return None;
+        }
+        let config = [
+            "vite.config.js",
+            "vite.config.ts",
+            "vite.config.mjs",
+            "vite.config.mts",
+        ];
+        let out =
+            flag_value(build, &["--outDir"]).or_else(|| config_value(app_dir, &config, "outDir"));
+        ("Vite", out.unwrap_or_else(|| "dist".into()))
+    } else {
+        return None;
+    };
+    let output = folder(output)?;
+    // Vite and Astro without a start script: Railpack serves them already.
+    let no_start_ok = matches!(framework, "Eleventy" | "Hugo");
+    if !(dev_server(&start) || (start.is_empty() && no_start_ok)) {
+        return None;
+    }
+    Some(StaticSite {
+        framework,
+        output,
+        start,
+    })
+}
+
+/// What the build log says about it.
+pub fn static_site_note(s: &StaticSite) -> String {
+    let why = if s.start.is_empty() {
+        "it has no start script".to_owned()
+    } else {
+        format!("its start script ({}) is a development server", s.start)
+    };
+    format!(
+        "Serving the {} site's {} folder as static files: {why}. To run the start script instead, add the build argument RAILPACK_NO_SPA=1.",
+        s.framework, s.output
+    )
+}
+
+/// Railpack's index.html fallback off for a generated site, through a
+/// Staticfile (its only switch), unless the app has one.
+pub fn write_staticfile(app_dir: &Path, s: &StaticSite) -> std::io::Result<()> {
+    let path = app_dir.join("Staticfile");
+    if s.index_fallback() || std::fs::symlink_metadata(&path).is_ok() {
+        return Ok(());
+    }
+    std::fs::write(path, "index_fallback: false\n")
+}
+
 /// What Railpack found, as people name it: "Next.js", "Go", "Python", …
 pub fn label(info: &Value, app_dir: &Path) -> Option<String> {
     let provider = info["detectedProviders"]
@@ -483,6 +765,182 @@ mod tests {
         );
         assert_eq!(label(&serde_json::json!({}), &dir), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn app(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pyo-ssg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (f, text) in files {
+            std::fs::write(dir.join(f), text).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn eleventys_dev_server_becomes_static_files() {
+        let pkg = r#"{"scripts":{"build":"eleventy","start":"eleventy --serve"},"devDependencies":{"@11ty/eleventy":"3"}}"#;
+        let dir = app("11ty", &[("package.json", pkg)]);
+        let s = static_site(&dir, &[]).unwrap();
+        assert_eq!(
+            s,
+            StaticSite {
+                framework: "Eleventy",
+                output: "_site".into(),
+                start: "eleventy --serve".into()
+            }
+        );
+        assert_eq!(s.railpack_env(), "RAILPACK_SPA_OUTPUT_DIR=_site");
+        assert!(static_site_note(&s).contains("RAILPACK_NO_SPA=1"));
+        // Its output folder from the config, or the build's --output.
+        std::fs::write(
+            dir.join("eleventy.config.js"),
+            "export default function () { return { dir: { input: \"src\", output: \"dist\" } } }",
+        )
+        .unwrap();
+        assert_eq!(static_site(&dir, &[]).unwrap().output, "dist");
+        let pkg = r#"{"scripts":{"build":"npx @11ty/eleventy --output=www","start":"npm run dev","dev":"npx @11ty/eleventy --serve"},"dependencies":{"@11ty/eleventy":"3"}}"#;
+        std::fs::write(dir.join("package.json"), pkg).unwrap();
+        assert_eq!(static_site(&dir, &[]).unwrap().output, "www");
+        // No start script at all: Railpack would have nothing to run.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"eleventy"},"devDependencies":{"@11ty/eleventy":"3"}}"#,
+        )
+        .unwrap();
+        assert_eq!(static_site(&dir, &[]).unwrap().start, "");
+        // The escape hatch, and other ways it's already said.
+        for arg in [
+            "RAILPACK_NO_SPA",
+            "RAILPACK_SPA_OUTPUT_DIR",
+            "RAILPACK_START_CMD",
+        ] {
+            assert_eq!(static_site(&dir, &[arg.to_owned()]), None, "{arg}");
+        }
+        std::fs::write(dir.join("Procfile"), "web: node server.js\n").unwrap();
+        assert_eq!(static_site(&dir, &[]), None);
+        // A generated site's unknown pages are 404s.
+        std::fs::remove_file(dir.join("Procfile")).unwrap();
+        write_staticfile(&dir, &s).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("Staticfile")).unwrap(),
+            "index_fallback: false\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn astro_vite_and_hugo() {
+        // Astro's dev server as its start script, static output.
+        let dir = app(
+            "astro",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"astro build","start":"astro dev"},"dependencies":{"astro":"5"}}"#,
+                ),
+                (
+                    "astro.config.mjs",
+                    "export default defineConfig({ outDir: './build' })",
+                ),
+            ],
+        );
+        assert_eq!(
+            static_site(&dir, &[]).unwrap(),
+            StaticSite {
+                framework: "Astro",
+                output: "build".into(),
+                start: "astro dev".into()
+            }
+        );
+        // With a server adapter it's a server.
+        std::fs::write(dir.join("package.json"), r#"{"scripts":{"build":"astro build","start":"astro preview"},"dependencies":{"astro":"5","@astrojs/node":"9"}}"#).unwrap();
+        assert_eq!(static_site(&dir, &[]), None);
+        // Without a start script Railpack serves it already.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"astro build"},"dependencies":{"astro":"5"}}"#,
+        )
+        .unwrap();
+        assert_eq!(static_site(&dir, &[]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = app(
+            "vite",
+            &[(
+                "package.json",
+                r#"{"scripts":{"build":"tsc && vite build","start":"vite preview --port $PORT"},"devDependencies":{"vite":"6"}}"#,
+            )],
+        );
+        let s = static_site(&dir, &[]).unwrap();
+        assert_eq!((s.framework, s.output.as_str()), ("Vite", "dist"));
+        assert!(s.index_fallback(), "an app routes in the browser");
+        write_staticfile(&dir, &s).unwrap();
+        assert!(!dir.join("Staticfile").exists());
+        // A real server as the start script stays.
+        std::fs::write(dir.join("package.json"), r#"{"scripts":{"build":"vite build","start":"node server.js"},"devDependencies":{"vite":"6"}}"#).unwrap();
+        assert_eq!(static_site(&dir, &[]), None);
+        std::fs::write(dir.join("package.json"), r#"{"scripts":{"build":"vite build","start":"vite"},"devDependencies":{"vite":"6","@sveltejs/kit":"2"}}"#).unwrap();
+        assert_eq!(static_site(&dir, &[]), None, "SvelteKit builds a server");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = app(
+            "hugo",
+            &[(
+                "package.json",
+                r#"{"scripts":{"build":"hugo --minify -d site","start":"hugo server"},"devDependencies":{"hugo-bin":"0.140"}}"#,
+            )],
+        );
+        assert_eq!(static_site(&dir, &[]).unwrap().output, "site");
+        // Not a folder in the app.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"hugo -d ../out","start":"hugo server"}}"#,
+        )
+        .unwrap();
+        assert_eq!(static_site(&dir, &[]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Not a generator, or no package.json.
+        let dir = app(
+            "express",
+            &[(
+                "package.json",
+                r#"{"scripts":{"build":"tsc","start":"node dist/index.js"},"dependencies":{"express":"5"}}"#,
+            )],
+        );
+        assert_eq!(static_site(&dir, &[]), None);
+        std::fs::remove_file(dir.join("package.json")).unwrap();
+        assert_eq!(static_site(&dir, &[]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_servers_are_told_from_servers() {
+        for s in [
+            "eleventy --serve",
+            "npx @11ty/eleventy --serve --port 8080",
+            "astro dev",
+            "vite",
+            "vite preview --host",
+            "npx serve -s dist",
+            "http-server ./public",
+            "hugo server -D",
+            "npm run build && vite preview",
+        ] {
+            assert!(dev_server(s), "{s}");
+        }
+        for s in [
+            "node server.js",
+            "eleventy",
+            "vite build",
+            "astro build",
+            "next start",
+            "",
+            "node ./serve.js",
+        ] {
+            assert!(!dev_server(s), "{s}");
+        }
     }
 
     #[test]
