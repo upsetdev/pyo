@@ -305,6 +305,38 @@ mod tests {
         }
     }
 
+    /// small_machine's boot-time helper follows the machine's memory: k3s's
+    /// GOMEMLIMIT under 3.5 GB (pyo-proto's small tier), nothing from there.
+    #[test]
+    fn memory_helper_follows_memory() {
+        let helper = CONNECT_SCRIPT
+            .split("<<'MEMORY'\n")
+            .nth(1)
+            .and_then(|r| r.split("\nMEMORY\n").next())
+            .expect("connect.sh has the memory helper");
+        let dir = std::env::temp_dir().join(format!("pyo-memory-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let k3s_env = |mib: u64| {
+            let meminfo = dir.join(format!("meminfo-{mib}"));
+            std::fs::write(&meminfo, format!("MemTotal: {} kB\n", mib * 1024)).unwrap();
+            let out = std::process::Command::new("sh")
+                .args(["-c", helper, "pyo-memory.sh", "k3s-env"])
+                .env("PYO_MEMINFO", &meminfo)
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        // 40% of the memory, at least 768 MiB.
+        assert_eq!(k3s_env(1945), "GOMEMLIMIT=778MiB");
+        assert_eq!(k3s_env(1024), "GOMEMLIMIT=768MiB");
+        assert_eq!(
+            k3s_env(pyo_proto::memory::SMALL_MIB - 1),
+            format!("GOMEMLIMIT={}MiB", (pyo_proto::memory::SMALL_MIB - 1) * 2 / 5)
+        );
+        assert_eq!(k3s_env(pyo_proto::memory::SMALL_MIB), "");
+        assert_eq!(k3s_env(16384), "");
+    }
+
     /// The scripts that install k3s, Tailscale and NVIDIA's toolkit share
     /// their installer code (`# >>> pyo:<name>` … `# <<< pyo:<name>`), and
     /// those that carry k3s's pin carry deploy/k3s.env's.
