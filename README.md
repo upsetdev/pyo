@@ -81,8 +81,11 @@ Pyo runs on a laptop, a desktop, a spare machine at home, a VPS or a dedicated
 server. It needs:
 
 - **System:** Linux on x86-64, with root or `sudo` access.
-- **Resources:** at least 2 CPU cores, 4 GB of memory and 40 GB of disk. Add
-  more for the services you run and the images you build.
+- **Resources:** at least 2 CPU cores, 2 GB of memory and 40 GB of disk.
+- **Memory:** 2 GB is the minimum, enough to try Pyo or run a few small
+  services. 4 GB is recommended for real use with databases. Choose 8 GB or
+  more for many services, builds on the same server and several databases. A
+  build server or more servers in the cluster spread the load.
 - **Ports:** 80, 443 and 8000 reachable, with 5005 and 6443 free.
 
 Let's Encrypt certificates need a machine that's reachable from the internet.
