@@ -1,6 +1,7 @@
 //! Mapping tests against recorded answers shaped as each platform's API
-//! answers (tests/fixtures/platforms; see coolify.rs and dokploy.rs for the
-//! documents and source files each field comes from).
+//! answers (tests/fixtures/platforms; see coolify.rs, dokploy.rs,
+//! railway.rs and vercel.rs for the documents and source files each field
+//! comes from).
 
 use super::*;
 
@@ -444,10 +445,464 @@ async fn addresses_are_guarded() {
     assert_eq!(ok.as_str(), "https://203.0.113.9:3000/api");
 }
 
-/// Needs Postgres: DATABASE_URL=… [PYO_SECRET_KEY=<64 hex>] cargo test -p pyo-api -- --ignored platform_import
 #[tokio::test]
-#[ignore]
-async fn importing_twice_makes_nothing_twice() {
+async fn railway_walk_asks_for_every_recorded_answer() {
+    for name in ["railway", "railway-project-token"] {
+        let recorded = fixture(name);
+        let got = railway::gather(&Fetch::Recorded(recorded.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            got.keys().collect::<Vec<_>>(),
+            recorded.keys().collect::<Vec<_>>(),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn vercel_walk_asks_for_every_recorded_answer() {
+    for name in ["vercel", "vercel-empty"] {
+        let recorded = fixture(name);
+        let got = vercel::gather(&Fetch::Recorded(recorded.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            got.keys().collect::<Vec<_>>(),
+            recorded.keys().collect::<Vec<_>>(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn railway_projects_and_environments() {
+    let plan = railway::plan(&fixture("railway"));
+    assert_eq!(
+        (plan.platform.as_str(), plan.host.as_str()),
+        ("railway", "railway.com")
+    );
+    let names: Vec<&str> = plan.projects.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Shop", "Shop (staging)"]);
+    assert_eq!(plan.projects[0].key, "prj-shop/env-prod");
+    // The same service in two environments: two keys.
+    assert_eq!(plan.projects[1].services[0].key, "app:svc-web@env-stage");
+    assert_eq!(
+        plan.projects[1].services[0].service.source.branch,
+        "develop"
+    );
+
+    // A project token reads its own environment only.
+    let plan = railway::plan(&fixture("railway-project-token"));
+    let names: Vec<&str> = plan.projects.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Blog"]);
+    assert_eq!(plan.projects[0].services.len(), 1);
+}
+
+#[test]
+fn railway_services() {
+    let plan = railway::plan(&fixture("railway"));
+    let prod = &plan.projects[0];
+
+    // A repository built with Railpack, its commands as Railpack's.
+    let web = service(prod, "app:svc-web@env-prod");
+    assert!(web.importable);
+    assert_eq!(web.builder, "railpack");
+    assert_eq!(web.service.source.repo_url, "https://github.com/acme/shop");
+    assert_eq!(web.service.source.branch, "main");
+    assert_eq!(web.service.source.build_context, "apps/web");
+    let args: Vec<(&str, &str)> = web
+        .service
+        .source
+        .build_args
+        .iter()
+        .map(|a| (a.key.as_str(), a.value.as_str()))
+        .collect();
+    assert_eq!(
+        args,
+        [
+            ("RAILPACK_BUILD_CMD", "pnpm build"),
+            ("RAILPACK_START_CMD", "pnpm start")
+        ]
+    );
+    assert_eq!(web.service.replicas, 2);
+    assert_eq!(web.service.health_check["path"], "/health");
+    // PORT picks the port; custom domains on it; Railway's own is dropped.
+    assert_eq!(web.service.ports[0].container_port, 3000);
+    let hosts: Vec<&str> = web.domains.iter().map(|d| d.hostname.as_str()).collect();
+    assert_eq!(hosts, ["shop.example.com", "www.shop.example.com"]);
+    assert!(has(
+        &web.warnings,
+        "up.railway.app is a free domain Railway made"
+    ));
+
+    // References: shared, another service's, Railway's own, and missing.
+    assert_eq!(env(&web.service, "SESSION_SECRET").value, "s3ss10n");
+    assert!(env(&web.service, "SESSION_SECRET").secret);
+    assert_eq!(env(&web.service, "CONTACT").value, "help@shop.example.com");
+    assert_eq!(env(&web.service, "API_URL").value, "http://api:8000");
+    assert_eq!(
+        env(&web.service, "SITE_URL").value,
+        "https://shop.example.com"
+    );
+    assert_eq!(env(&web.service, "MISSING").value, "${{shared.NOPE}}");
+    assert!(has(&web.warnings, "${{shared.NOPE}} can't be resolved"));
+    // A database's stays, with a note to connect the new one.
+    assert_eq!(
+        env(&web.service, "DATABASE_URL").value,
+        "${{Postgres.DATABASE_URL}}"
+    );
+    assert!(has(&web.warnings, "DATABASE_URL points at Postgres there"));
+    // Sealed: by name, secret and empty.
+    let stripe = env(&web.service, "STRIPE_KEY");
+    assert!(stripe.secret && stripe.value.is_empty());
+    assert!(has(&web.warnings, "STRIPE_KEY is sealed in Railway"));
+
+    // The config file's Dockerfile, a target port, a TCP proxy, a volume.
+    let api = service(prod, "app:svc-api@env-prod");
+    assert_eq!(api.builder, "dockerfile");
+    assert_eq!(api.service.source.dockerfile_path, "Dockerfile.prod");
+    assert_eq!(api.service.source.build_context, "backend");
+    assert_eq!(api.service.source.branch, "release");
+    assert_eq!(api.service.replicas, 3);
+    assert!(api.service.source.build_args.is_empty());
+    assert!(has(&api.warnings, "start command isn't carried over"));
+    assert!(has(&api.warnings, "pre-deploy command"));
+    assert_eq!(api.domains[0].hostname, "api.example.com");
+    let http = api
+        .service
+        .ports
+        .iter()
+        .find(|p| p.name == api.domains[0].port_name)
+        .unwrap();
+    assert_eq!(http.container_port, 8000);
+    let tcp: Vec<(u16, Option<u16>)> = api
+        .service
+        .ports
+        .iter()
+        .filter(|p| p.protocol == "TCP")
+        .map(|p| (p.container_port, p.public_port))
+        .collect();
+    assert_eq!(tcp, [(5000, Some(5000))]);
+    assert!(has(&api.warnings, "shuttle.proxy.rlwy.net:15140"));
+    assert_eq!(api.service.volumes.len(), 1);
+    assert_eq!(api.service.volumes[0].mount_path, "/app/uploads");
+    assert_eq!(api.service.volumes[0].size_gi, 5);
+    assert!(has(&api.warnings, "REDIS_URL points at Redis there"));
+
+    // An image, on a schedule, with no domain; a name made DNS-safe.
+    let worker = service(prod, "app:svc-worker@env-prod");
+    assert_eq!(worker.service.name, "queue-worker");
+    assert_eq!(worker.service.source.kind, "image");
+    assert_eq!(worker.service.source.image, "ghcr.io/acme/worker");
+    assert_eq!(worker.service.source.reference, "1.4.2");
+    assert!(has(&worker.warnings, "on a schedule (*/15 * * * *)"));
+    assert!(has(&worker.warnings, "doesn't know its port"));
+    assert!(has(&worker.warnings, "put it to sleep"));
+
+    // Uploaded with Railway's CLI: reported, not imported.
+    let legacy = service(prod, "app:svc-upload@env-prod");
+    assert!(!legacy.importable);
+    assert!(has(&legacy.warnings, "uploaded with Railway's CLI"));
+    // Databases aren't services.
+    assert_eq!(prod.services.len(), 4);
+}
+
+#[test]
+fn railway_databases() {
+    let plan = railway::plan(&fixture("railway"));
+    let prod = &plan.projects[0];
+    let pg = database(prod, "db:svc-pg@env-prod");
+    assert_eq!(
+        (pg.target.as_deref(), pg.action.as_str()),
+        (Some("postgres"), "import")
+    );
+    assert_eq!(
+        pg.url.as_deref(),
+        Some("postgresql://postgres:pgS3cret@roundhouse.proxy.rlwy.net:11105/railway")
+    );
+    assert_eq!(pg.name, "postgres-app");
+    let my = database(prod, "db:svc-mysql@env-prod");
+    assert_eq!(
+        (my.target.as_deref(), my.action.as_str()),
+        (Some("mysql"), "create")
+    );
+    assert!(has(&my.warnings, "make it public in Railway"));
+    let redis = database(prod, "db:svc-redis@env-prod");
+    assert_eq!(
+        (redis.target.as_deref(), redis.action.as_str()),
+        (Some("valkey"), "create")
+    );
+    let mongo = database(prod, "db:svc-mongo@env-prod");
+    assert_eq!(
+        (mongo.target.as_deref(), mongo.action.as_str()),
+        (None, "manual")
+    );
+}
+
+/// Without a public URL, a TCP proxy and the database's own variables
+/// still reach it.
+#[test]
+fn railway_database_from_its_proxy() {
+    let mut r = fixture("railway");
+    let d = r.get_mut("details:prj-shop").unwrap();
+    d["data"]["v_0_4"]
+        .as_object_mut()
+        .unwrap()
+        .remove("DATABASE_PUBLIC_URL");
+    d["data"]["v_0_4"]["PGPASSWORD"] = json!("p@ss/word");
+    let plan = railway::plan(&r);
+    let pg = database(&plan.projects[0], "db:svc-pg@env-prod");
+    assert_eq!(
+        pg.url.as_deref(),
+        Some("postgres://postgres:p%40ss%2Fword@roundhouse.proxy.rlwy.net:11105/railway")
+    );
+}
+
+/// One question per project: database variables rendered (for their URL),
+/// the others as written, IDs as variables.
+#[test]
+fn railway_details_query() {
+    let r = fixture("railway");
+    let p = &r["projects:ws-acme"]["data"]["projects"]["edges"][0]["node"];
+    let (q, vars) = railway::details_query(p, None);
+    assert!(q.contains(
+        "v_0_0: variables(projectId: $projectId, environmentId: $e0, serviceId: $s0_0, unrendered: true)"
+    ));
+    assert!(q.contains("v_0_4: variables(projectId: $projectId, environmentId: $e0, serviceId: $s0_4, unrendered: false)"));
+    assert!(q.contains("t_1_0: tcpProxies(environmentId: $e1, serviceId: $s1_0)"));
+    assert!(!q.contains("svc-"), "IDs go in variables");
+    assert_eq!(vars["s0_4"], "svc-pg");
+    assert_eq!(vars["e1"], "env-stage");
+}
+
+#[test]
+fn vercel_plan() {
+    let plan = vercel::plan(&fixture("vercel"));
+    assert_eq!(
+        (plan.platform.as_str(), plan.host.as_str()),
+        ("vercel", "vercel.com")
+    );
+    assert!(has(&plan.warnings, "Preview deployments"));
+    let names: Vec<&str> = plan.projects.iter().map(|p| p.name.as_str()).collect();
+    // Both pages.
+    assert_eq!(names, ["shop", "docs", "cli-app"]);
+
+    let shop = service(&plan.projects[0], "app:prj_shop");
+    assert!(shop.importable);
+    assert_eq!(shop.builder, "railpack");
+    assert_eq!(shop.service.source.repo_url, "https://github.com/acme/shop");
+    assert_eq!(shop.service.source.branch, "main");
+    assert_eq!(shop.service.source.build_context, "apps/web");
+    assert_eq!(shop.service.ports[0].container_port, 3000);
+    let args: Vec<(&str, &str)> = shop
+        .service
+        .source
+        .build_args
+        .iter()
+        .map(|a| (a.key.as_str(), a.value.as_str()))
+        .collect();
+    assert_eq!(
+        args,
+        [
+            ("RAILPACK_INSTALL_CMD", "pnpm install --frozen-lockfile"),
+            ("RAILPACK_NODE_VERSION", "22"),
+            ("NEXT_PUBLIC_SITE_URL", "https://shop.example.com"),
+        ]
+    );
+    // Production values: plain, and encrypted ones read one by one.
+    assert_eq!(
+        env(&shop.service, "NEXT_PUBLIC_SITE_URL").value,
+        "https://shop.example.com"
+    );
+    assert_eq!(
+        env(&shop.service, "SENTRY_DSN").value,
+        "https://k3y@o1.ingest.sentry.io/1"
+    );
+    assert!(env(&shop.service, "KV_REST_API_TOKEN").secret);
+    // Preview, branch and system variables aren't carried; one key once.
+    for k in ["FEATURE_X", "API_BASE", "VERCEL_URL"] {
+        assert!(shop.service.env.iter().all(|e| e.key != k), "{k}");
+    }
+    assert_eq!(
+        shop.service
+            .env
+            .iter()
+            .filter(|e| e.key == "NEXT_PUBLIC_SITE_URL")
+            .count(),
+        1
+    );
+    // Write-only: by name, secret and empty, listed to set again.
+    for k in ["STRIPE_SECRET_KEY", "AUTH_SECRET"] {
+        let e = env(&shop.service, k);
+        assert!(e.secret && e.value.is_empty(), "{k}");
+    }
+    assert!(has(
+        &shop.warnings,
+        "STRIPE_SECRET_KEY, AUTH_SECRET are secret in Vercel"
+    ));
+    // Domains: custom only; a redirect, a branch's and vercel.app's are left out.
+    let hosts: Vec<&str> = shop.domains.iter().map(|d| d.hostname.as_str()).collect();
+    assert_eq!(hosts, ["shop.example.com"]);
+    assert!(has(&shop.warnings, "www.shop.example.com redirected"));
+    assert!(has(&shop.warnings, "served the develop branch"));
+    assert!(has(
+        &shop.warnings,
+        "vercel.app is a free domain Vercel made"
+    ));
+    // What doesn't map.
+    assert!(has(&shop.warnings, "Next.js runs as one server"));
+    assert!(has(&shop.warnings, "/api/cron/digest (0 8 * * *)"));
+    assert!(has(&shop.warnings, "Vercel Blob"));
+    assert!(has(&shop.warnings, "VERCEL_URL"));
+    assert!(has(&shop.warnings, "files from the rest of the repository"));
+    assert!(has(
+        &shop.warnings,
+        "POSTGRES_URL, POSTGRES_URL_NON_POOLING point at Postgres database there"
+    ));
+
+    // A static framework: its output directory for Railpack, functions noted.
+    let docs = service(&plan.projects[1], "app:prj_docs");
+    assert_eq!(docs.service.source.branch, "trunk");
+    let args: Vec<&str> = docs
+        .service
+        .source
+        .build_args
+        .iter()
+        .map(|a| a.key.as_str())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "RAILPACK_BUILD_CMD",
+            "RAILPACK_NODE_VERSION",
+            "RAILPACK_SPA_OUTPUT_DIR",
+            "VITE_API"
+        ]
+    );
+    assert!(has(&docs.warnings, "Vercel Functions"));
+    assert!(has(&docs.warnings, "password protection"));
+    assert!(has(
+        &docs.warnings,
+        "shop.example.com is on another service in this import"
+    ));
+    // Its store is the shop's: listed once, but noted here too.
+    assert!(plan.projects[1].databases.is_empty());
+    assert!(has(
+        &docs.warnings,
+        "POSTGRES_URL points at Postgres database there"
+    ));
+
+    // Deployed with the CLI: reported.
+    let cli = service(&plan.projects[2], "app:prj_cli");
+    assert!(!cli.importable);
+    assert!(has(&cli.warnings, "Vercel's CLI"));
+}
+
+#[test]
+fn vercel_storage() {
+    let plan = vercel::plan(&fixture("vercel"));
+    let shop = &plan.projects[0];
+    // Postgres copied from its direct URL, not the pooled one.
+    let pg = database(shop, "db:store_pg1");
+    assert_eq!(
+        (pg.target.as_deref(), pg.action.as_str()),
+        (Some("postgres"), "import")
+    );
+    assert_eq!(pg.name, "shop-db");
+    assert!(pg.url.as_deref().unwrap().contains("ep-cool-1.us-east-1"));
+    // The key-value store: an empty KV database.
+    let kv = database(shop, "db:store_kv1");
+    assert_eq!(
+        (kv.target.as_deref(), kv.action.as_str()),
+        (Some("valkey"), "create")
+    );
+    assert_eq!(kv.source_name, "key-value store");
+    assert!(kv.url.is_none());
+    // Blob stores aren't databases.
+    assert_eq!(shop.databases.len(), 2);
+}
+
+#[test]
+fn vercel_without_projects_names_the_teams() {
+    let plan = vercel::plan(&fixture("vercel-empty"));
+    assert!(plan.projects.is_empty());
+    assert!(has(&plan.warnings, "acme, side-project"));
+}
+
+#[test]
+fn hosted_previews_have_no_values() {
+    let mut plan = railway::plan(&fixture("railway"));
+    redact(&mut plan);
+    let text = serde_json::to_string(&plan).unwrap();
+    for secret in ["s3ss10n", "t0k3n", "pgS3cret", "pnpm start"] {
+        assert!(!text.contains(secret), "{secret} in the preview");
+    }
+    assert!(text.contains("STRIPE_KEY"));
+    let mut plan = vercel::plan(&fixture("vercel"));
+    redact(&mut plan);
+    let text = serde_json::to_string(&plan).unwrap();
+    for secret in ["npg_S3cr3t", "kvT0kenValue", "k3y@", "vercel_blob_rw"] {
+        assert!(!text.contains(secret), "{secret} in the preview");
+    }
+    assert!(text.contains("STRIPE_SECRET_KEY"));
+}
+
+/// Railway and Vercel are read only from their own API: no address of the
+/// user's is ever contacted.
+#[tokio::test]
+async fn hosted_platforms_use_only_their_api() {
+    for (p, api) in [
+        (
+            Platform::Railway,
+            "https://backboard.railway.com/graphql/v2",
+        ),
+        (Platform::Vercel, "https://api.vercel.com/"),
+    ] {
+        assert_eq!(api_base(p, "").await.unwrap().as_str(), api);
+        assert_eq!(api_base(p, "  ").await.unwrap().as_str(), api);
+        let host = reqwest::Url::parse(api)
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(api_base(p, &host).await.unwrap().as_str(), api);
+        assert_eq!(
+            api_base(p, &format!("https://{host}/x"))
+                .await
+                .unwrap()
+                .as_str(),
+            api
+        );
+        for bad in [
+            "https://evil.example.com",
+            "https://127.0.0.1",
+            "http://169.254.169.254",
+            &format!("http://{host}"),
+            &format!("https://user:pass@{host}"),
+            &format!("https://{host}:8443"),
+            &format!("https://{host}.evil.example.com"),
+        ] {
+            assert!(api_base(p, bad).await.is_err(), "{p:?} {bad}");
+        }
+    }
+    // Teams are Vercel's only, and plain ids or slugs.
+    assert_eq!(
+        team_scope(Platform::Vercel, Some("team_abc123")).unwrap(),
+        [("teamId".to_owned(), "team_abc123".to_owned())]
+    );
+    assert_eq!(
+        team_scope(Platform::Vercel, Some("acme")).unwrap(),
+        [("slug".to_owned(), "acme".to_owned())]
+    );
+    assert!(team_scope(Platform::Vercel, Some("acme&x=1")).is_err());
+    assert!(team_scope(Platform::Railway, Some("acme")).is_err());
+    assert!(team_scope(Platform::Railway, None).unwrap().is_empty());
+}
+
+/// A team with an owner and a connected cluster in the Postgres at
+/// DATABASE_URL, for the ignored tests below.
+async fn test_team() -> (AppState, crate::auth::User, String, sqlx::PgPool) {
     use crate::auth::User;
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
     let db = sqlx::PgPool::connect(&url).await.unwrap();
@@ -467,7 +922,9 @@ async fn importing_twice_makes_nothing_twice() {
         tailnet_api_url: String::new(),
         relay_addr: None,
     };
-    let (_stop, stopping) = tokio::sync::watch::channel(false);
+    let (stop, stopping) = tokio::sync::watch::channel(false);
+    // Kept open for the test's whole run.
+    std::mem::forget(stop);
     let s = AppState {
         db: db.clone(),
         config: std::sync::Arc::new(config),
@@ -508,6 +965,34 @@ async fn importing_twice_makes_nothing_twice() {
         .await
         .unwrap();
 
+    (s, user, team, db)
+}
+
+/// Removes what `test_team` and the import made.
+async fn drop_team(db: &sqlx::PgPool, team: &str, user: &crate::auth::User) {
+    sqlx::query("DELETE FROM pyo.services WHERE team_id = $1")
+        .bind(team)
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+        .bind(team)
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM pyo.users WHERE id = $1")
+        .bind(&user.id)
+        .execute(db)
+        .await
+        .unwrap();
+}
+
+/// Needs Postgres: DATABASE_URL=… [PYO_SECRET_KEY=<64 hex>] cargo test -p pyo-api -- --ignored platform_import
+#[tokio::test]
+#[ignore]
+async fn importing_twice_makes_nothing_twice() {
+    let (s, user, team, db) = test_team().await;
+    let run = team.trim_start_matches("team_").to_owned();
     // Each run is its own Coolify, with its own domains.
     let mut plan = coolify::plan(&fixture("coolify"), &format!("{run}.example.com"));
     let host = run.replace('_', "-");
@@ -627,19 +1112,68 @@ async fn importing_twice_makes_nothing_twice() {
     assert_eq!(third.results[0].project_id, web_project);
     assert_eq!(count("projects").await, p1);
 
-    sqlx::query("DELETE FROM pyo.services WHERE team_id = $1")
-        .bind(&team)
-        .execute(&db)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
-        .bind(&team)
-        .execute(&db)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM pyo.users WHERE id = $1")
-        .bind(&user.id)
-        .execute(&db)
-        .await
-        .unwrap();
+    drop_team(&db, &team, &user).await;
+}
+
+/// Railway and Vercel: a second import makes nothing new, and the source
+/// is recorded with the platform's own host.
+/// Needs Postgres, as above.
+#[tokio::test]
+#[ignore]
+async fn hosted_imports_make_nothing_twice() {
+    let (s, user, team, db) = test_team().await;
+    let host = team.trim_start_matches("team_").replace('_', "-");
+    for (platform, mut plan) in [
+        ("railway", railway::plan(&fixture("railway"))),
+        ("vercel", vercel::plan(&fixture("vercel"))),
+    ] {
+        for p in &mut plan.projects {
+            for svc in &mut p.services {
+                for d in &mut svc.domains {
+                    d.hostname = format!("{platform}-{host}.{}", d.hostname);
+                }
+            }
+        }
+        let items: Vec<String> = plan
+            .projects
+            .iter()
+            .flat_map(|p| p.services.iter().map(|s| s.key.clone()))
+            .collect();
+        let first = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
+            .await
+            .unwrap();
+        let made: Vec<&ImportResult> = first
+            .results
+            .iter()
+            .filter(|r| r.state == "created")
+            .collect();
+        assert!(!made.is_empty(), "{platform}: {:?}", first.results);
+        for r in &first.results {
+            assert!(
+                matches!(r.state.as_str(), "created" | "skipped"),
+                "{platform}: {r:?}"
+            );
+        }
+        let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+            .bind(made[0].id.as_deref().unwrap())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(spec["source"]["importedFrom"]["platform"], platform);
+        assert_eq!(
+            spec["source"]["importedFrom"]["host"],
+            format!("{platform}.com")
+        );
+        assert!(spec["source"]["builder"].as_str().is_some());
+        let second = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
+            .await
+            .unwrap();
+        for r in &second.results {
+            assert!(
+                matches!(r.state.as_str(), "exists" | "skipped"),
+                "{platform}: {r:?}"
+            );
+        }
+    }
+    drop_team(&db, &team, &user).await;
 }

@@ -27,7 +27,7 @@ use serde_json::Value;
 use super::{
     Fetch, ImportDatabase, ImportDomain, ImportPlan, ImportProject, ImportService, ImportStack,
     Platform, Responses, Web, database_action, database_warnings, health_check, https_repo,
-    plan_service, s, unique, volume,
+    plan_service, s, unique, url_escape, volume,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -509,19 +509,6 @@ fn database(d: &Value, engine: &str, host: &str, taken: &mut HashSet<String>) ->
         url,
         hosts: vec![s(d, "appName").to_owned()],
     }
-}
-
-/// Percent-encodes a URL's user, password or database name.
-fn url_escape(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 /// The plan from what `gather` read.

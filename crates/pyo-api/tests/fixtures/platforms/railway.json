@@ -1,0 +1,483 @@
+{
+  "apiToken": {
+    "data": {
+      "apiToken": {
+        "workspaces": [
+          {
+            "id": "ws-acme",
+            "name": "Acme"
+          }
+        ]
+      }
+    }
+  },
+  "projects:ws-acme": {
+    "data": {
+      "projects": {
+        "edges": [
+          {
+            "node": {
+              "id": "prj-shop",
+              "name": "Shop",
+              "primaryEnvironmentId": "env-prod",
+              "environments": {
+                "edges": [
+                  {
+                    "node": {
+                      "id": "env-prod",
+                      "name": "production",
+                      "serviceInstances": {
+                        "edges": [
+                          {
+                            "node": {
+                              "serviceId": "svc-web",
+                              "serviceName": "web",
+                              "builder": "RAILPACK",
+                              "buildCommand": "pnpm build",
+                              "startCommand": "pnpm start",
+                              "rootDirectory": "/apps/web",
+                              "dockerfilePath": null,
+                              "healthcheckPath": "/health",
+                              "numReplicas": 2,
+                              "cronSchedule": null,
+                              "preDeployCommand": null,
+                              "sleepApplication": false,
+                              "railwayConfigFile": null,
+                              "source": {
+                                "image": null,
+                                "repo": "acme/shop"
+                              },
+                              "domains": {
+                                "customDomains": [
+                                  {
+                                    "domain": "shop.example.com",
+                                    "targetPort": null
+                                  },
+                                  {
+                                    "domain": "www.shop.example.com",
+                                    "targetPort": null
+                                  }
+                                ],
+                                "serviceDomains": [
+                                  {
+                                    "domain": "web-production-1a2b.up.railway.app",
+                                    "targetPort": null
+                                  }
+                                ]
+                              },
+                              "resolvedFileConfig": null
+                            }
+                          },
+                          {
+                            "node": {
+                              "serviceId": "svc-api",
+                              "serviceName": "api",
+                              "builder": "RAILPACK",
+                              "buildCommand": null,
+                              "startCommand": "node dist/main.js",
+                              "rootDirectory": "backend",
+                              "dockerfilePath": null,
+                              "healthcheckPath": null,
+                              "numReplicas": 1,
+                              "cronSchedule": null,
+                              "preDeployCommand": [
+                                "npm run migrate"
+                              ],
+                              "sleepApplication": false,
+                              "railwayConfigFile": "railway.json",
+                              "source": {
+                                "image": null,
+                                "repo": "acme/api"
+                              },
+                              "domains": {
+                                "customDomains": [
+                                  {
+                                    "domain": "api.example.com",
+                                    "targetPort": 8000
+                                  }
+                                ],
+                                "serviceDomains": []
+                              },
+                              "resolvedFileConfig": {
+                                "configFile": "railway.json",
+                                "fileManifest": {
+                                  "build": {
+                                    "builder": "DOCKERFILE",
+                                    "dockerfilePath": "Dockerfile.prod"
+                                  },
+                                  "deploy": {
+                                    "numReplicas": 3
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "node": {
+                              "serviceId": "svc-worker",
+                              "serviceName": "Queue Worker",
+                              "builder": "RAILPACK",
+                              "buildCommand": null,
+                              "startCommand": null,
+                              "rootDirectory": null,
+                              "dockerfilePath": null,
+                              "healthcheckPath": null,
+                              "numReplicas": 1,
+                              "cronSchedule": "*/15 * * * *",
+                              "preDeployCommand": null,
+                              "sleepApplication": true,
+                              "railwayConfigFile": null,
+                              "source": {
+                                "image": "ghcr.io/acme/worker:1.4.2",
+                                "repo": null
+                              },
+                              "domains": {
+                                "customDomains": [],
+                                "serviceDomains": []
+                              },
+                              "resolvedFileConfig": null
+                            }
+                          },
+                          {
+                            "node": {
+                              "serviceId": "svc-upload",
+                              "serviceName": "legacy",
+                              "builder": "RAILPACK",
+                              "buildCommand": null,
+                              "startCommand": null,
+                              "rootDirectory": null,
+                              "dockerfilePath": null,
+                              "healthcheckPath": null,
+                              "numReplicas": 1,
+                              "cronSchedule": null,
+                              "preDeployCommand": null,
+                              "sleepApplication": false,
+                              "railwayConfigFile": null,
+                              "source": null,
+                              "domains": {
+                                "customDomains": [],
+                                "serviceDomains": []
+                              },
+                              "resolvedFileConfig": null
+                            }
+                          },
+                          {
+                            "node": {
+                              "serviceId": "svc-pg",
+                              "serviceName": "Postgres",
+                              "builder": "RAILPACK",
+                              "buildCommand": null,
+                              "startCommand": null,
+                              "rootDirectory": null,
+                              "dockerfilePath": null,
+                              "healthcheckPath": null,
+                              "numReplicas": 1,
+                              "cronSchedule": null,
+                              "preDeployCommand": null,
+                              "sleepApplication": false,
+                              "railwayConfigFile": null,
+                              "source": {
+                                "image": "ghcr.io/railwayapp-templates/postgres-ssl:17",
+                                "repo": null
+                              },
+                              "domains": {
+                                "customDomains": [],
+                                "serviceDomains": []
+                              },
+                              "resolvedFileConfig": null
+                            }
+                          },
+                          {
+                            "node": {
+                              "serviceId": "svc-mysql",
+                              "serviceName": "MySQL",
+                              "builder": "RAILPACK",
+                              "buildCommand": null,
+                              "startCommand": null,
+                              "rootDirectory": null,
+                              "dockerfilePath": null,
+                              "healthcheckPath": null,
+                              "numReplicas": 1,
+                              "cronSchedule": null,
+                              "preDeployCommand": null,
+                              "sleepApplication": false,
+                              "railwayConfigFile": null,
+                              "source": {
+                                "image": "mysql:9.1",
+                                "repo": null
+                              },
+                              "domains": {
+                                "customDomains": [],
+                                "serviceDomains": []
+                              },
+                              "resolvedFileConfig": null
+                            }
+                          },
+                          {
+                            "node": {
+                              "serviceId": "svc-redis",
+                              "serviceName": "Redis",
+                              "builder": "RAILPACK",
+                              "buildCommand": null,
+                              "startCommand": null,
+                              "rootDirectory": null,
+                              "dockerfilePath": null,
+                              "healthcheckPath": null,
+                              "numReplicas": 1,
+                              "cronSchedule": null,
+                              "preDeployCommand": null,
+                              "sleepApplication": false,
+                              "railwayConfigFile": null,
+                              "source": {
+                                "image": "redis:8.2.1",
+                                "repo": null
+                              },
+                              "domains": {
+                                "customDomains": [],
+                                "serviceDomains": []
+                              },
+                              "resolvedFileConfig": null
+                            }
+                          },
+                          {
+                            "node": {
+                              "serviceId": "svc-mongo",
+                              "serviceName": "MongoDB",
+                              "builder": "RAILPACK",
+                              "buildCommand": null,
+                              "startCommand": null,
+                              "rootDirectory": null,
+                              "dockerfilePath": null,
+                              "healthcheckPath": null,
+                              "numReplicas": 1,
+                              "cronSchedule": null,
+                              "preDeployCommand": null,
+                              "sleepApplication": false,
+                              "railwayConfigFile": null,
+                              "source": {
+                                "image": "mongo:8",
+                                "repo": null
+                              },
+                              "domains": {
+                                "customDomains": [],
+                                "serviceDomains": []
+                              },
+                              "resolvedFileConfig": null
+                            }
+                          }
+                        ]
+                      },
+                      "volumeInstances": {
+                        "edges": [
+                          {
+                            "node": {
+                              "serviceId": "svc-api",
+                              "mountPath": "/app/uploads",
+                              "sizeMB": 5000,
+                              "volume": {
+                                "name": "api-volume"
+                              }
+                            }
+                          },
+                          {
+                            "node": {
+                              "serviceId": "svc-pg",
+                              "mountPath": "/var/lib/postgresql/data",
+                              "sizeMB": 5000,
+                              "volume": {
+                                "name": "postgres-volume"
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "deploymentTriggers": {
+                        "edges": [
+                          {
+                            "node": {
+                              "serviceId": "svc-web",
+                              "branch": "main",
+                              "repository": "acme/shop",
+                              "provider": "github"
+                            }
+                          },
+                          {
+                            "node": {
+                              "serviceId": "svc-api",
+                              "branch": "release",
+                              "repository": "acme/api",
+                              "provider": "github"
+                            }
+                          }
+                        ]
+                      },
+                      "variables": {
+                        "edges": [
+                          {
+                            "node": {
+                              "name": "STRIPE_KEY",
+                              "serviceId": "svc-web",
+                              "isSealed": true
+                            }
+                          },
+                          {
+                            "node": {
+                              "name": "PORT",
+                              "serviceId": "svc-web",
+                              "isSealed": false
+                            }
+                          },
+                          {
+                            "node": {
+                              "name": "SESSION_SECRET",
+                              "serviceId": null,
+                              "isSealed": false
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "node": {
+                      "id": "env-stage",
+                      "name": "staging",
+                      "serviceInstances": {
+                        "edges": [
+                          {
+                            "node": {
+                              "serviceId": "svc-web",
+                              "serviceName": "web",
+                              "builder": "RAILPACK",
+                              "buildCommand": null,
+                              "startCommand": null,
+                              "rootDirectory": null,
+                              "dockerfilePath": null,
+                              "healthcheckPath": null,
+                              "numReplicas": 1,
+                              "cronSchedule": null,
+                              "preDeployCommand": null,
+                              "sleepApplication": false,
+                              "railwayConfigFile": null,
+                              "source": {
+                                "image": null,
+                                "repo": "acme/shop"
+                              },
+                              "domains": {
+                                "customDomains": [
+                                  {
+                                    "domain": "staging.shop.example.com",
+                                    "targetPort": null
+                                  }
+                                ],
+                                "serviceDomains": []
+                              },
+                              "resolvedFileConfig": null
+                            }
+                          }
+                        ]
+                      },
+                      "volumeInstances": {
+                        "edges": []
+                      },
+                      "deploymentTriggers": {
+                        "edges": [
+                          {
+                            "node": {
+                              "serviceId": "svc-web",
+                              "branch": "develop",
+                              "repository": "acme/shop",
+                              "provider": "github"
+                            }
+                          }
+                        ]
+                      },
+                      "variables": {
+                        "edges": []
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "details:prj-shop": {
+    "data": {
+      "shared_0": {
+        "SESSION_SECRET": "s3ss10n",
+        "SUPPORT_EMAIL": "help@shop.example.com"
+      },
+      "v_0_0": {
+        "PORT": "3000",
+        "DATABASE_URL": "${{Postgres.DATABASE_URL}}",
+        "API_URL": "http://${{api.RAILWAY_PRIVATE_DOMAIN}}:${{ api.PORT }}",
+        "SITE_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
+        "SESSION_SECRET": "${{shared.SESSION_SECRET}}",
+        "CONTACT": "${{shared.SUPPORT_EMAIL}}",
+        "MISSING": "${{shared.NOPE}}",
+        "NODE_ENV": "production"
+      },
+      "t_0_0": [],
+      "v_0_1": {
+        "PORT": "8000",
+        "REDIS_URL": "${{Redis.REDIS_URL}}",
+        "CACHE_TTL": "60",
+        "API_TOKEN": "t0k3n"
+      },
+      "t_0_1": [
+        {
+          "domain": "shuttle.proxy.rlwy.net",
+          "proxyPort": 15140,
+          "applicationPort": 5000
+        }
+      ],
+      "v_0_2": {
+        "QUEUE": "default",
+        "WORKER_NAME": "${{RAILWAY_SERVICE_NAME}}"
+      },
+      "t_0_2": [],
+      "v_0_3": {},
+      "t_0_3": [],
+      "v_0_4": {
+        "PGUSER": "postgres",
+        "PGPASSWORD": "pgS3cret",
+        "PGDATABASE": "railway",
+        "PGHOST": "postgres.railway.internal",
+        "PGPORT": "5432",
+        "DATABASE_URL": "postgresql://postgres:pgS3cret@postgres.railway.internal:5432/railway",
+        "DATABASE_PUBLIC_URL": "postgresql://postgres:pgS3cret@roundhouse.proxy.rlwy.net:11105/railway"
+      },
+      "t_0_4": [
+        {
+          "domain": "roundhouse.proxy.rlwy.net",
+          "proxyPort": 11105,
+          "applicationPort": 5432
+        }
+      ],
+      "v_0_5": {
+        "MYSQLUSER": "root",
+        "MYSQLPASSWORD": "myS3cret",
+        "MYSQLDATABASE": "railway",
+        "MYSQL_URL": "mysql://root:myS3cret@mysql.railway.internal:3306/railway"
+      },
+      "t_0_5": [],
+      "v_0_6": {
+        "REDIS_URL": "redis://default:r3dis@redis.railway.internal:6379"
+      },
+      "t_0_6": [],
+      "v_0_7": {
+        "MONGO_URL": "mongodb://mongo:m0ngo@mongodb.railway.internal:27017"
+      },
+      "t_0_7": [],
+      "shared_1": {},
+      "v_1_0": {
+        "NODE_ENV": "staging"
+      },
+      "t_1_0": []
+    }
+  }
+}

@@ -1,0 +1,697 @@
+{
+  "/v10/projects?limit=100": {
+    "projects": [
+      {
+        "accountId": "team_acme",
+        "id": "prj_shop",
+        "name": "shop",
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "framework": "nextjs",
+        "link": {
+          "type": "github",
+          "org": "acme",
+          "repo": "shop",
+          "repoId": 101,
+          "repoOwnerId": 7,
+          "productionBranch": "main",
+          "gitCredentialId": "",
+          "sourceless": false,
+          "createdAt": 1767225600000,
+          "updatedAt": 1767225600000,
+          "deployHooks": []
+        },
+        "rootDirectory": "apps/web",
+        "buildCommand": null,
+        "installCommand": "pnpm install --frozen-lockfile",
+        "outputDirectory": null,
+        "devCommand": null,
+        "nodeVersion": "22.x",
+        "autoExposeSystemEnvs": true,
+        "passwordProtection": null,
+        "sourceFilesOutsideRootDirectory": true,
+        "live": false,
+        "env": [],
+        "crons": {
+          "enabledAt": 1767225600000,
+          "updatedAt": 1767225600000,
+          "deploymentId": "dpl_1",
+          "disabledAt": null,
+          "definitions": [
+            {
+              "host": "shop.example.com",
+              "path": "/api/cron/digest",
+              "schedule": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      {
+        "accountId": "team_acme",
+        "id": "prj_docs",
+        "name": "docs",
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "framework": "vite",
+        "link": {
+          "type": "github",
+          "org": "acme",
+          "repo": "docs",
+          "repoId": 101,
+          "repoOwnerId": 7,
+          "productionBranch": "trunk",
+          "gitCredentialId": "",
+          "sourceless": false,
+          "createdAt": 1767225600000,
+          "updatedAt": 1767225600000,
+          "deployHooks": []
+        },
+        "rootDirectory": null,
+        "buildCommand": "npm run build:docs",
+        "installCommand": null,
+        "outputDirectory": "dist",
+        "devCommand": null,
+        "nodeVersion": "20.x",
+        "autoExposeSystemEnvs": false,
+        "passwordProtection": {
+          "deploymentType": "all"
+        },
+        "sourceFilesOutsideRootDirectory": false,
+        "live": false,
+        "env": []
+      }
+    ],
+    "pagination": {
+      "count": 2,
+      "next": "JBSWY3DPEHPK3PXP"
+    }
+  },
+  "/v10/projects?limit=100&from=JBSWY3DPEHPK3PXP": {
+    "projects": [
+      {
+        "accountId": "team_acme",
+        "id": "prj_cli",
+        "name": "cli-app",
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "framework": null,
+        "link": null,
+        "rootDirectory": null,
+        "buildCommand": null,
+        "installCommand": null,
+        "outputDirectory": null,
+        "devCommand": null,
+        "nodeVersion": "22.x",
+        "autoExposeSystemEnvs": false,
+        "passwordProtection": null,
+        "sourceFilesOutsideRootDirectory": false,
+        "live": false,
+        "env": []
+      }
+    ],
+    "pagination": {
+      "count": 1,
+      "next": null
+    }
+  },
+  "/v9/projects/prj_shop": {
+    "accountId": "team_acme",
+    "id": "prj_shop",
+    "name": "shop",
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "framework": "nextjs",
+    "link": {
+      "type": "github",
+      "org": "acme",
+      "repo": "shop",
+      "repoId": 101,
+      "repoOwnerId": 7,
+      "productionBranch": "main",
+      "gitCredentialId": "",
+      "sourceless": false,
+      "createdAt": 1767225600000,
+      "updatedAt": 1767225600000,
+      "deployHooks": []
+    },
+    "rootDirectory": "apps/web",
+    "buildCommand": null,
+    "installCommand": "pnpm install --frozen-lockfile",
+    "outputDirectory": null,
+    "devCommand": null,
+    "nodeVersion": "22.x",
+    "autoExposeSystemEnvs": true,
+    "passwordProtection": null,
+    "sourceFilesOutsideRootDirectory": true,
+    "live": false,
+    "env": [],
+    "crons": {
+      "enabledAt": 1767225600000,
+      "updatedAt": 1767225600000,
+      "deploymentId": "dpl_1",
+      "disabledAt": null,
+      "definitions": [
+        {
+          "host": "shop.example.com",
+          "path": "/api/cron/digest",
+          "schedule": "0 8 * * *"
+        }
+      ]
+    }
+  },
+  "/v9/projects/prj_docs": {
+    "accountId": "team_acme",
+    "id": "prj_docs",
+    "name": "docs",
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "framework": "vite",
+    "link": {
+      "type": "github",
+      "org": "acme",
+      "repo": "docs",
+      "repoId": 101,
+      "repoOwnerId": 7,
+      "productionBranch": "trunk",
+      "gitCredentialId": "",
+      "sourceless": false,
+      "createdAt": 1767225600000,
+      "updatedAt": 1767225600000,
+      "deployHooks": []
+    },
+    "rootDirectory": null,
+    "buildCommand": "npm run build:docs",
+    "installCommand": null,
+    "outputDirectory": "dist",
+    "devCommand": null,
+    "nodeVersion": "20.x",
+    "autoExposeSystemEnvs": false,
+    "passwordProtection": {
+      "deploymentType": "all"
+    },
+    "sourceFilesOutsideRootDirectory": false,
+    "live": false,
+    "env": []
+  },
+  "/v9/projects/prj_cli": {
+    "accountId": "team_acme",
+    "id": "prj_cli",
+    "name": "cli-app",
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "framework": null,
+    "link": null,
+    "rootDirectory": null,
+    "buildCommand": null,
+    "installCommand": null,
+    "outputDirectory": null,
+    "devCommand": null,
+    "nodeVersion": "22.x",
+    "autoExposeSystemEnvs": false,
+    "passwordProtection": null,
+    "sourceFilesOutsideRootDirectory": false,
+    "live": false,
+    "env": []
+  },
+  "/v10/projects/prj_shop/env": {
+    "envs": [
+      {
+        "id": "env1",
+        "key": "NEXT_PUBLIC_SITE_URL",
+        "type": "plain",
+        "target": [
+          "production",
+          "preview"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "https://shop.example.com"
+      },
+      {
+        "id": "env2",
+        "key": "POSTGRES_URL",
+        "type": "encrypted",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "eyJ2IjoiMSIsImMiOiJlbmNyeXB0ZWQifQ==",
+        "contentHint": {
+          "type": "postgres-url",
+          "storeId": "store_pg1"
+        }
+      },
+      {
+        "id": "env3",
+        "key": "POSTGRES_URL_NON_POOLING",
+        "type": "encrypted",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "eyJ2IjoiMSIsImMiOiJlbmNyeXB0ZWQifQ==",
+        "contentHint": {
+          "type": "postgres-url-non-pooling",
+          "storeId": "store_pg1"
+        }
+      },
+      {
+        "id": "env4",
+        "key": "STRIPE_SECRET_KEY",
+        "type": "sensitive",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false
+      },
+      {
+        "id": "env5",
+        "key": "KV_REST_API_URL",
+        "type": "encrypted",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "eyJ2IjoiMSIsImMiOiJlbmNyeXB0ZWQifQ==",
+        "contentHint": {
+          "type": "redis-rest-api-url",
+          "storeId": "store_kv1"
+        }
+      },
+      {
+        "id": "env6",
+        "key": "KV_REST_API_TOKEN",
+        "type": "encrypted",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "eyJ2IjoiMSIsImMiOiJlbmNyeXB0ZWQifQ==",
+        "contentHint": {
+          "type": "redis-rest-api-token",
+          "storeId": "store_kv1"
+        }
+      },
+      {
+        "id": "env7",
+        "key": "BLOB_READ_WRITE_TOKEN",
+        "type": "encrypted",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "eyJ2IjoiMSIsImMiOiJlbmNyeXB0ZWQifQ==",
+        "contentHint": {
+          "type": "blob-read-write-token",
+          "storeId": "store_blob1"
+        }
+      },
+      {
+        "id": "env8",
+        "key": "FEATURE_X",
+        "type": "encrypted",
+        "target": [
+          "preview"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "eyJ2IjoiMSIsImMiOiJlbmNyeXB0ZWQifQ=="
+      },
+      {
+        "id": "env9",
+        "key": "API_BASE",
+        "type": "encrypted",
+        "target": [
+          "preview"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "eyJ2IjoiMSIsImMiOiJlbmNyeXB0ZWQifQ==",
+        "gitBranch": "staging"
+      },
+      {
+        "id": "env10",
+        "key": "AUTH_SECRET",
+        "type": "encrypted",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "visibility": "secret"
+      },
+      {
+        "id": "env11",
+        "key": "SENTRY_DSN",
+        "type": "encrypted",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "eyJ2IjoiMSIsImMiOiJlbmNyeXB0ZWQifQ=="
+      },
+      {
+        "id": "env12",
+        "key": "VERCEL_URL",
+        "type": "system",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": ""
+      },
+      {
+        "id": "env13",
+        "key": "NEXT_PUBLIC_SITE_URL",
+        "type": "plain",
+        "target": [
+          "development"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "http://localhost:3000"
+      }
+    ],
+    "pagination": {
+      "count": 1,
+      "next": null,
+      "prev": null
+    }
+  },
+  "/v10/projects/prj_docs/env": {
+    "envs": [
+      {
+        "id": "envd1",
+        "key": "VITE_API",
+        "type": "plain",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "https://api.example.com"
+      },
+      {
+        "id": "envd2",
+        "key": "POSTGRES_URL",
+        "type": "encrypted",
+        "target": [
+          "production"
+        ],
+        "configurationId": null,
+        "createdAt": 1767225600000,
+        "updatedAt": 1767225600000,
+        "createdBy": "usr_1",
+        "decrypted": false,
+        "value": "eyJ2IjoiMSIsImMiOiJlbmNyeXB0ZWQifQ==",
+        "contentHint": {
+          "type": "postgres-url",
+          "storeId": "store_pg1"
+        }
+      }
+    ],
+    "pagination": {
+      "count": 1,
+      "next": null,
+      "prev": null
+    }
+  },
+  "/v10/projects/prj_cli/env": {
+    "envs": [],
+    "pagination": {
+      "count": 1,
+      "next": null,
+      "prev": null
+    }
+  },
+  "/v1/projects/prj_shop/env/env2": {
+    "id": "env2",
+    "key": "POSTGRES_URL",
+    "type": "encrypted",
+    "target": [
+      "production"
+    ],
+    "configurationId": null,
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "createdBy": "usr_1",
+    "decrypted": true,
+    "value": "postgres://neondb_owner:npg_S3cr3t@ep-cool-1-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require",
+    "contentHint": {
+      "type": "postgres-url",
+      "storeId": "store_pg1"
+    }
+  },
+  "/v1/projects/prj_shop/env/env3": {
+    "id": "env3",
+    "key": "POSTGRES_URL_NON_POOLING",
+    "type": "encrypted",
+    "target": [
+      "production"
+    ],
+    "configurationId": null,
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "createdBy": "usr_1",
+    "decrypted": true,
+    "value": "postgres://neondb_owner:npg_S3cr3t@ep-cool-1.us-east-1.aws.neon.tech/neondb?sslmode=require",
+    "contentHint": {
+      "type": "postgres-url-non-pooling",
+      "storeId": "store_pg1"
+    }
+  },
+  "/v1/projects/prj_shop/env/env5": {
+    "id": "env5",
+    "key": "KV_REST_API_URL",
+    "type": "encrypted",
+    "target": [
+      "production"
+    ],
+    "configurationId": null,
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "createdBy": "usr_1",
+    "decrypted": true,
+    "value": "https://fond-kit-1234.kv.example.net",
+    "contentHint": {
+      "type": "redis-rest-api-url",
+      "storeId": "store_kv1"
+    }
+  },
+  "/v1/projects/prj_shop/env/env6": {
+    "id": "env6",
+    "key": "KV_REST_API_TOKEN",
+    "type": "encrypted",
+    "target": [
+      "production"
+    ],
+    "configurationId": null,
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "createdBy": "usr_1",
+    "decrypted": true,
+    "value": "kvT0kenValue",
+    "contentHint": {
+      "type": "redis-rest-api-token",
+      "storeId": "store_kv1"
+    }
+  },
+  "/v1/projects/prj_shop/env/env7": {
+    "id": "env7",
+    "key": "BLOB_READ_WRITE_TOKEN",
+    "type": "encrypted",
+    "target": [
+      "production"
+    ],
+    "configurationId": null,
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "createdBy": "usr_1",
+    "decrypted": true,
+    "value": "vercel_blob_rw_abc123",
+    "contentHint": {
+      "type": "blob-read-write-token",
+      "storeId": "store_blob1"
+    }
+  },
+  "/v1/projects/prj_shop/env/env11": {
+    "id": "env11",
+    "key": "SENTRY_DSN",
+    "type": "encrypted",
+    "target": [
+      "production"
+    ],
+    "configurationId": null,
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "createdBy": "usr_1",
+    "decrypted": true,
+    "value": "https://k3y@o1.ingest.sentry.io/1"
+  },
+  "/v1/projects/prj_docs/env/envd2": {
+    "id": "envd2",
+    "key": "POSTGRES_URL",
+    "type": "encrypted",
+    "target": [
+      "production"
+    ],
+    "configurationId": null,
+    "createdAt": 1767225600000,
+    "updatedAt": 1767225600000,
+    "createdBy": "usr_1",
+    "decrypted": true,
+    "value": "postgres://neondb_owner:npg_S3cr3t@ep-cool-1-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require",
+    "contentHint": {
+      "type": "postgres-url",
+      "storeId": "store_pg1"
+    }
+  },
+  "/v9/projects/prj_shop/domains?limit=100": {
+    "domains": [
+      {
+        "name": "shop.example.com",
+        "apexName": "example.com",
+        "projectId": "prj_shop",
+        "redirect": null,
+        "redirectStatusCode": null,
+        "gitBranch": null,
+        "customEnvironmentId": null,
+        "updatedAt": 1767225600000,
+        "createdAt": 1767225600000,
+        "verified": true
+      },
+      {
+        "name": "www.shop.example.com",
+        "apexName": "example.com",
+        "projectId": "prj_shop",
+        "redirect": "shop.example.com",
+        "redirectStatusCode": 308,
+        "gitBranch": null,
+        "customEnvironmentId": null,
+        "updatedAt": 1767225600000,
+        "createdAt": 1767225600000,
+        "verified": true
+      },
+      {
+        "name": "shop-acme.vercel.app",
+        "apexName": "vercel.app",
+        "projectId": "prj_shop",
+        "redirect": null,
+        "redirectStatusCode": null,
+        "gitBranch": null,
+        "customEnvironmentId": null,
+        "updatedAt": 1767225600000,
+        "createdAt": 1767225600000,
+        "verified": true
+      },
+      {
+        "name": "preview.shop.example.com",
+        "apexName": "example.com",
+        "projectId": "prj_shop",
+        "redirect": null,
+        "redirectStatusCode": null,
+        "gitBranch": "develop",
+        "customEnvironmentId": null,
+        "updatedAt": 1767225600000,
+        "createdAt": 1767225600000,
+        "verified": true
+      }
+    ],
+    "pagination": {
+      "count": 1,
+      "next": null,
+      "prev": null
+    }
+  },
+  "/v9/projects/prj_docs/domains?limit=100": {
+    "domains": [
+      {
+        "name": "docs.example.com",
+        "apexName": "example.com",
+        "projectId": "prj_docs",
+        "redirect": null,
+        "redirectStatusCode": null,
+        "gitBranch": null,
+        "customEnvironmentId": null,
+        "updatedAt": 1767225600000,
+        "createdAt": 1767225600000,
+        "verified": true
+      },
+      {
+        "name": "shop.example.com",
+        "apexName": "example.com",
+        "projectId": "prj_docs",
+        "redirect": null,
+        "redirectStatusCode": null,
+        "gitBranch": null,
+        "customEnvironmentId": null,
+        "updatedAt": 1767225600000,
+        "createdAt": 1767225600000,
+        "verified": true
+      }
+    ],
+    "pagination": {
+      "count": 1,
+      "next": null,
+      "prev": null
+    }
+  },
+  "/v9/projects/prj_cli/domains?limit=100": {
+    "domains": [],
+    "pagination": {
+      "count": 1,
+      "next": null,
+      "prev": null
+    }
+  }
+}

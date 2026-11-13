@@ -1,6 +1,6 @@
-//! Moving a team's services from another self-hosted platform (Coolify,
-//! Dokploy) into Pyo, read through that platform's own API with a token the
-//! user gives. Two steps, like a Compose import:
+//! Moving a team's services from another platform (Coolify and Dokploy,
+//! self hosted, or Railway and Vercel) into Pyo, read through that
+//! platform's own API with a token the user gives. Two steps, like a Compose import:
 //!
 //! - **Preview** (`POST /platform-imports/preview`): read what the token can
 //!   see and show what each thing becomes in Pyo, with a warning for what
@@ -15,7 +15,8 @@
 //!
 //! Safety: the address is checked and every connection to it guarded by
 //! outbound.rs (never this machine, the cluster's networks or metadata
-//! services). The token goes only to that address. It is never logged or
+//! services). Railway and Vercel have no address to give: Pyo talks only to
+//! their official API hosts. The token goes only to that address. It is never logged or
 //! stored, and errors never pass on what the platform answered. Owners and
 //! admins only, and rate limited.
 //!
@@ -30,6 +31,8 @@
 
 mod coolify;
 mod dokploy;
+mod railway;
+mod vercel;
 
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
@@ -81,6 +84,8 @@ const VOLUME_GI: i64 = 10;
 pub enum Platform {
     Coolify,
     Dokploy,
+    Railway,
+    Vercel,
 }
 
 impl Platform {
@@ -88,6 +93,20 @@ impl Platform {
         match self {
             Platform::Coolify => "Coolify",
             Platform::Dokploy => "Dokploy",
+            Platform::Railway => "Railway",
+            Platform::Vercel => "Vercel",
+        }
+    }
+
+    /// The platform's own API, for a hosted one: the only address Pyo
+    /// sends its token to. None for a self-hosted one (the user gives it).
+    pub fn official_api(self) -> Option<&'static str> {
+        match self {
+            // https://docs.railway.com/integrations/api
+            Platform::Railway => Some(railway::API),
+            // https://openapi.vercel.sh/ (`servers`)
+            Platform::Vercel => Some(vercel::API),
+            Platform::Coolify | Platform::Dokploy => None,
         }
     }
 }
@@ -96,9 +115,9 @@ impl Platform {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPlan {
-    /// "coolify" or "dokploy".
+    /// "coolify", "dokploy", "railway" or "vercel".
     pub platform: String,
-    /// The platform's host, as given.
+    /// The platform's host, as given (railway.com or vercel.com for those).
     pub host: String,
     pub projects: Vec<ImportProject>,
     /// About the whole import, e.g. a token that can't read variables' values.
@@ -270,9 +289,17 @@ fn unique(base: &str, taken: &mut HashSet<String>) -> String {
 /// its own free domain instead.
 fn generated_domain(host: &str) -> bool {
     let h = host.to_lowercase();
-    [".sslip.io", ".nip.io", ".traefik.me"]
-        .iter()
-        .any(|d| h.ends_with(d))
+    // Railway's `*.up.railway.app` (and older `*.railway.app`), Vercel's
+    // `*.vercel.app`.
+    [
+        ".sslip.io",
+        ".nip.io",
+        ".traefik.me",
+        ".railway.app",
+        ".vercel.app",
+    ]
+    .iter()
+    .any(|d| h.ends_with(d))
 }
 
 /// Resources when the platform sets none: Compose import's defaults.
@@ -494,6 +521,19 @@ fn database_action(
     }
 }
 
+/// Percent-encodes a URL's user, password or database name.
+pub(super) fn url_escape(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Blanks every variable's value: a preview shows names only.
 fn redact(plan: &mut ImportPlan) {
     let blank = |svc: &mut PlanService| {
@@ -522,6 +562,11 @@ pub(crate) enum Fetch {
         platform: Platform,
         token: String,
         count: std::sync::atomic::AtomicUsize,
+        /// Added to every request: Vercel's team (`teamId` or `slug`).
+        scope: Vec<(String, String)>,
+        /// Railway: send the token as a project token
+        /// (`Project-Access-Token`) instead of a bearer token.
+        project_token: std::sync::atomic::AtomicBool,
     },
     #[cfg(test)]
     Recorded(Responses),
@@ -530,6 +575,16 @@ pub(crate) enum Fetch {
 /// The platform failed or refused: what went wrong, never its answer.
 fn upstream(what: String) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, what)
+}
+
+/// What a platform says when it refuses the token.
+fn refused(p: Platform) -> String {
+    match p {
+        Platform::Coolify => "Coolify refused the token, or its API is off. Turn the API on in Coolify's Settings, and give the token read access.".to_owned(),
+        Platform::Dokploy => "Dokploy refused the token: it can't read this. Use an owner's or admin's token.".to_owned(),
+        Platform::Railway => "Railway refused the token. Use an account, workspace or project token.".to_owned(),
+        Platform::Vercel => "Vercel refused the token: it can't read this. Check the token's scope and the team.".to_owned(),
+    }
 }
 
 impl Fetch {
@@ -545,105 +600,196 @@ impl Fetch {
             Fetch::Http {
                 client,
                 base,
-                platform,
-                token,
-                count,
+                scope,
+                ..
             } => {
-                let p = *platform;
-                if count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MAX_REQUESTS {
-                    return Err(ApiError::bad_request(format!(
-                        "There's too much in {} to read at once. Use a token that sees fewer projects.",
-                        p.label()
-                    )));
-                }
-                let (path, query) = path.split_once('?').unwrap_or((path, ""));
+                let (p, query) = path.split_once('?').unwrap_or((path, ""));
                 let mut url = base.clone();
                 {
                     let mut seg = url
                         .path_segments_mut()
                         .map_err(|_| ApiError::bad_request("That address can't be used."))?;
                     seg.pop_if_empty();
-                    seg.extend(path.split('/').filter(|x| !x.is_empty()));
+                    seg.extend(p.split('/').filter(|x| !x.is_empty()));
                 }
-                if !query.is_empty() {
+                {
                     let mut q = url.query_pairs_mut();
-                    for pair in query.split('&') {
-                        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                    if !query.is_empty() {
+                        for pair in query.split('&') {
+                            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                            q.append_pair(k, v);
+                        }
+                    }
+                    for (k, v) in scope {
                         q.append_pair(k, v);
                     }
                 }
-                let req = client.get(url).header("accept", "application/json");
-                let req = match p {
-                    Platform::Coolify => req.bearer_auth(token),
-                    Platform::Dokploy => req.header("x-api-key", token),
-                };
-                let mut res = req.send().await.map_err(|e| {
-                    if e.is_timeout() {
-                        upstream(format!("{} didn't answer in time.", p.label()))
-                    } else {
-                        upstream(format!(
-                            "Pyo can't reach {} at {}.",
-                            p.label(),
-                            base.host_str().unwrap_or("")
-                        ))
-                    }
-                })?;
-                let status = res.status();
-                if status.is_redirection() {
-                    return Err(upstream(format!(
-                        "{} answered with a redirect, which Pyo doesn't follow. Use its final address, with https://.",
-                        p.label()
-                    )));
+                if url.query() == Some("") {
+                    url.set_query(None);
                 }
-                if status == reqwest::StatusCode::UNAUTHORIZED {
-                    return Err(upstream(format!(
-                        "{} refused the token. Check it and try again.",
-                        p.label()
-                    )));
-                }
-                if status == reqwest::StatusCode::FORBIDDEN {
-                    return Err(upstream(match p {
-                        Platform::Coolify => "Coolify refused the token, or its API is off. Turn the API on in Coolify's Settings, and give the token read access.".to_owned(),
-                        Platform::Dokploy => "Dokploy refused the token: it can't read this. Use an owner's or admin's token.".to_owned(),
-                    }));
-                }
-                if status == reqwest::StatusCode::NOT_FOUND {
-                    return Err(upstream(format!(
-                        "{} has nothing at {path}. Is this the address of {}?",
-                        base.host_str().unwrap_or(""),
-                        p.label()
-                    )));
-                }
-                if !status.is_success() {
-                    return Err(upstream(format!(
-                        "{} answered with an error ({}).",
-                        p.label(),
-                        status.as_u16()
-                    )));
-                }
-                let mut body = Vec::new();
-                while let Some(chunk) = res
-                    .chunk()
-                    .await
-                    .map_err(|_| upstream(format!("{} stopped answering.", p.label())))?
-                {
-                    if body.len() + chunk.len() > MAX_BODY {
-                        return Err(upstream(format!(
-                            "{}'s answer is too big to read.",
-                            p.label()
-                        )));
-                    }
-                    body.extend_from_slice(&chunk);
-                }
-                serde_json::from_slice(&body).map_err(|_| {
-                    upstream(format!(
-                        "{} didn't answer with JSON. Is this the address of {}?",
-                        base.host_str().unwrap_or(""),
-                        p.label()
-                    ))
-                })
+                self.send(client.get(url), path).await
             }
         }
+    }
+
+    /// A GraphQL query (Railway), kept as `key`. IDs go in `variables`,
+    /// never into the query text. A query the platform answers with errors
+    /// and no data is an error; partial data is kept.
+    async fn graphql(&self, key: &str, query: &str, variables: Value) -> ApiResult<Value> {
+        let body = match self {
+            #[cfg(test)]
+            Fetch::Recorded(r) => r
+                .get(key)
+                .cloned()
+                .ok_or_else(|| ApiError::not_found(&format!("Recorded answer for {key}")))?,
+            Fetch::Http { client, base, .. } => {
+                let req = client
+                    .post(base.clone())
+                    .json(&json!({ "query": query, "variables": variables }));
+                self.send(req, key).await?
+            }
+        };
+        let errors = body["errors"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        if body["data"].is_null() && !errors.is_empty() {
+            // "Not Authorized" is how Railway refuses a token per field.
+            let denied = errors.iter().any(|e| {
+                let m = e["message"].as_str().unwrap_or("").to_lowercase();
+                m.contains("not authorized")
+                    || m.contains("unauthorized")
+                    || m.contains("forbidden")
+            });
+            return Err(upstream(if denied {
+                refused(self.platform())
+            } else {
+                format!(
+                    "{} couldn't answer Pyo's question.",
+                    self.platform().label()
+                )
+            }));
+        }
+        Ok(body)
+    }
+
+    fn platform(&self) -> Platform {
+        match self {
+            #[cfg(test)]
+            Fetch::Recorded(_) => Platform::Railway,
+            Fetch::Http { platform, .. } => *platform,
+        }
+    }
+
+    /// Railway: send the token as a project token from now on.
+    fn use_project_token(&self) {
+        match self {
+            Fetch::Http { project_token, .. } => {
+                project_token.store(true, std::sync::atomic::Ordering::Relaxed)
+            }
+            #[cfg(test)]
+            Fetch::Recorded(_) => {}
+        }
+    }
+
+    /// Sends one request with the token and reads its JSON answer.
+    async fn send(&self, req: reqwest::RequestBuilder, what: &str) -> ApiResult<Value> {
+        let (base, p, token, count, project_token) = match self {
+            Fetch::Http {
+                base,
+                platform,
+                token,
+                count,
+                project_token,
+                ..
+            } => (base, *platform, token, count, project_token),
+            #[cfg(test)]
+            Fetch::Recorded(_) => unreachable!("recorded answers aren't sent"),
+        };
+        if count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MAX_REQUESTS {
+            return Err(ApiError::bad_request(format!(
+                "There's too much in {} to read at once. Use a token that sees fewer projects.",
+                p.label()
+            )));
+        }
+        let req = req.header("accept", "application/json");
+        let req = match p {
+            Platform::Dokploy => req.header("x-api-key", token),
+            // https://docs.railway.com/integrations/api: project tokens go
+            // in `Project-Access-Token`, the others as a bearer token.
+            Platform::Railway if project_token.load(std::sync::atomic::Ordering::Relaxed) => {
+                req.header("Project-Access-Token", token)
+            }
+            _ => req.bearer_auth(token),
+        };
+        let host = base.host_str().unwrap_or("");
+        let mut res = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                upstream(format!("{} didn't answer in time.", p.label()))
+            } else {
+                upstream(format!("Pyo can't reach {} at {host}.", p.label()))
+            }
+        })?;
+        let status = res.status();
+        if status.is_redirection() {
+            return Err(upstream(format!(
+                "{} answered with a redirect, which Pyo doesn't follow. Use its final address, with https://.",
+                p.label()
+            )));
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(upstream(format!(
+                "{} refused the token. Check it and try again.",
+                p.label()
+            )));
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Err(upstream(refused(p)));
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(upstream(format!(
+                "{} says the token made too many requests. Try again later.",
+                p.label()
+            )));
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(upstream(match p.official_api() {
+                Some(_) => format!("{} has nothing at {what}.", p.label()),
+                None => format!(
+                    "{host} has nothing at {what}. Is this the address of {}?",
+                    p.label()
+                ),
+            }));
+        }
+        // GraphQL answers its errors with 200 or 400 and a JSON body.
+        let graphql_error = p == Platform::Railway && status == reqwest::StatusCode::BAD_REQUEST;
+        if !status.is_success() && !graphql_error {
+            return Err(upstream(format!(
+                "{} answered with an error ({}).",
+                p.label(),
+                status.as_u16()
+            )));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .map_err(|_| upstream(format!("{} stopped answering.", p.label())))?
+        {
+            if body.len() + chunk.len() > MAX_BODY {
+                return Err(upstream(format!(
+                    "{}'s answer is too big to read.",
+                    p.label()
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(|_| {
+            upstream(match p.official_api() {
+                Some(_) => format!("{} didn't answer with JSON.", p.label()),
+                None => format!(
+                    "{host} didn't answer with JSON. Is this the address of {}?",
+                    p.label()
+                ),
+            })
+        })
     }
 
     /// Several paths, a few at a time, each kept by its path.
@@ -659,10 +805,43 @@ impl Fetch {
     }
 }
 
-/// The platform's API base from the address the user gives (with or
-/// without the API's own path), checked by outbound.rs.
+/// The platform's API base. A self-hosted one's from the address the user
+/// gives (with or without the API's own path), checked by outbound.rs. A
+/// hosted one's is fixed: an address given must be that platform's own.
 async fn api_base(platform: Platform, url: &str) -> ApiResult<Url> {
+    if let Some(api) = platform.official_api() {
+        let api =
+            Url::parse(api).map_err(|_| ApiError::bad_request(Refused::Invalid.to_string()))?;
+        let given = url.trim();
+        if !given.is_empty() {
+            let with_scheme = if given.contains("://") {
+                given.to_owned()
+            } else {
+                format!("https://{given}")
+            };
+            let ok = Url::parse(&with_scheme).ok().is_some_and(|u| {
+                u.scheme() == "https"
+                    && u.username().is_empty()
+                    && u.password().is_none()
+                    && u.port().is_none()
+                    && u.host_str() == api.host_str()
+            });
+            if !ok {
+                return Err(ApiError::bad_request(format!(
+                    "Pyo reads {} only from its own API. Leave the address empty.",
+                    platform.label()
+                )));
+            }
+        }
+        return Ok(api);
+    }
     let mut url = url.trim().trim_end_matches('/').to_owned();
+    if url.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "Give the address of your {}.",
+            platform.label()
+        )));
+    }
     if !url.contains("://") {
         url = format!("https://{url}");
     }
@@ -683,13 +862,47 @@ async fn api_base(platform: Platform, url: &str) -> ApiResult<Url> {
         })?;
     let api = match platform {
         Platform::Coolify => format!("{}/api/v1", base.as_str().trim_end_matches('/')),
-        Platform::Dokploy => format!("{}/api", base.as_str().trim_end_matches('/')),
+        _ => format!("{}/api", base.as_str().trim_end_matches('/')),
     };
     Url::parse(&api).map_err(|_| ApiError::bad_request(Refused::Invalid.to_string()))
 }
 
+/// Vercel's team as a query parameter: `teamId` for an id (`team_…`),
+/// else `slug`. Nothing for the token's own scope.
+fn team_scope(platform: Platform, team: Option<&str>) -> ApiResult<Vec<(String, String)>> {
+    let Some(team) = team.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(vec![]);
+    };
+    if platform != Platform::Vercel {
+        return Err(ApiError::bad_request(format!(
+            "{} has no teams to pick. Leave the team empty.",
+            platform.label()
+        )));
+    }
+    if team.len() > 100
+        || !team
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(ApiError::bad_request(
+            "That isn't a Vercel team id or slug.",
+        ));
+    }
+    let key = if team.starts_with("team_") {
+        "teamId"
+    } else {
+        "slug"
+    };
+    Ok(vec![(key.to_owned(), team.to_owned())])
+}
+
 /// Reads the platform and makes its plan, without values hidden.
-async fn read(platform: Platform, url: &str, token: &str) -> ApiResult<ImportPlan> {
+async fn read(
+    platform: Platform,
+    url: &str,
+    token: &str,
+    team: Option<&str>,
+) -> ApiResult<ImportPlan> {
     let token = token.trim();
     if token.is_empty() || token.len() > 4096 || token.chars().any(char::is_control) {
         return Err(ApiError::bad_request(format!(
@@ -697,8 +910,13 @@ async fn read(platform: Platform, url: &str, token: &str) -> ApiResult<ImportPla
             platform.label()
         )));
     }
+    let scope = team_scope(platform, team)?;
     let base = api_base(platform, url).await?;
-    let host = base.host_str().unwrap_or("").to_owned();
+    let host = match platform {
+        Platform::Railway => railway::HOST.to_owned(),
+        Platform::Vercel => vercel::HOST.to_owned(),
+        _ => base.host_str().unwrap_or("").to_owned(),
+    };
     let client = outbound::client(Reach::team(), TIMEOUT)
         .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
     let f = Fetch::Http {
@@ -707,14 +925,14 @@ async fn read(platform: Platform, url: &str, token: &str) -> ApiResult<ImportPla
         platform,
         token: token.to_owned(),
         count: Default::default(),
-    };
-    let r = match platform {
-        Platform::Coolify => coolify::gather(&f).await?,
-        Platform::Dokploy => dokploy::gather(&f).await?,
+        scope,
+        project_token: Default::default(),
     };
     Ok(match platform {
-        Platform::Coolify => coolify::plan(&r, &host),
-        Platform::Dokploy => dokploy::plan(&r, &host),
+        Platform::Coolify => coolify::plan(&coolify::gather(&f).await?, &host),
+        Platform::Dokploy => dokploy::plan(&dokploy::gather(&f).await?, &host),
+        Platform::Railway => railway::plan(&railway::gather(&f).await?),
+        Platform::Vercel => vercel::plan(&vercel::gather(&f).await?),
     })
 }
 
@@ -811,12 +1029,16 @@ async fn mark_existing(
 #[serde(rename_all = "camelCase")]
 pub struct PreviewBody {
     pub team_id: String,
-    /// "coolify" or "dokploy".
+    /// "coolify", "dokploy", "railway" or "vercel".
     pub platform: Platform,
-    /// The platform's address, e.g. https://coolify.example.com.
+    /// The platform's address, e.g. https://coolify.example.com. Empty for Railway and Vercel: Pyo reads them only from their own API.
+    #[serde(default)]
     pub url: String,
-    /// An API token of the platform's: Coolify's with read and read:sensitive, or a Dokploy API key. Used for this request only, never stored.
+    /// An API token of the platform's: Coolify's with read and read:sensitive, a Dokploy API key, a Railway account, workspace or project token, or a Vercel token. Used for this request only, never stored.
     pub token: String,
+    /// Vercel only: the team to read (its id or slug). The token's own scope when omitted.
+    #[serde(default)]
+    pub team: Option<String>,
 }
 
 /// Owners and admins, with a key that may change things, within the rate
@@ -839,8 +1061,8 @@ async fn allowed(s: &AppState, user: &User, team_id: &str) -> ApiResult<()> {
 
 /// Preview an import from another platform
 ///
-/// Reads a Coolify or Dokploy installation through its API, with a token
-/// you give, and shows what importing would create: per project there, its
+/// Reads a Coolify or Dokploy installation, or a Railway or Vercel
+/// account, through its API with a token you give, and shows what importing would create: per project there, its
 /// services (source, ports, domains, variable names, volumes), Compose
 /// stacks and databases, each with what doesn't carry over. Nothing is
 /// created and the token isn't kept. Things an earlier import made are
@@ -861,7 +1083,7 @@ pub async fn preview(
     Json(b): Json<PreviewBody>,
 ) -> ApiResult<Json<ImportPlan>> {
     allowed(&s, &user, &b.team_id).await?;
-    let mut plan = read(b.platform, &b.url, &b.token).await?;
+    let mut plan = read(b.platform, &b.url, &b.token, b.team.as_deref()).await?;
     let mut tx = s.db.begin().await?;
     mark_existing(&mut tx, &b.team_id, &mut plan).await?;
     tx.commit().await?;
@@ -874,9 +1096,13 @@ pub async fn preview(
 pub struct ApplyBody {
     pub team_id: String,
     pub platform: Platform,
+    #[serde(default)]
     pub url: String,
     /// Read again for this request, never stored.
     pub token: String,
+    /// Vercel only: the team to read (its id or slug).
+    #[serde(default)]
+    pub team: Option<String>,
     /// Where the services and databases go. The team's default cluster when omitted.
     #[serde(default)]
     pub cluster_id: Option<String>,
@@ -949,7 +1175,7 @@ pub async fn apply(
     Json(b): Json<ApplyBody>,
 ) -> ApiResult<Json<ImportOutcome>> {
     allowed(&s, &user, &b.team_id).await?;
-    let plan = read(b.platform, &b.url, &b.token).await?;
+    let plan = read(b.platform, &b.url, &b.token, b.team.as_deref()).await?;
     let out = create(
         &s,
         &user,
@@ -975,11 +1201,8 @@ async fn create(
     deploy: bool,
 ) -> ApiResult<ImportOutcome> {
     let picked = |key: &str| items.is_none_or(|i| i.iter().any(|k| k == key));
-    let platform = if plan.platform == "dokploy" {
-        Platform::Dokploy
-    } else {
-        Platform::Coolify
-    };
+    let platform: Platform = serde_json::from_value(json!(plan.platform))
+        .map_err(|_| ApiError::bad_request("Unknown platform."))?;
     let mut tx = s.db.begin().await?;
     require_role(&mut tx, user, team_id, Role::Admin).await?;
     mark_existing(&mut tx, team_id, &mut plan).await?;

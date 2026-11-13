@@ -1,0 +1,127 @@
+{
+  "projectToken": {
+    "data": {
+      "projectToken": {
+        "projectId": "prj-blog",
+        "environmentId": "env-b-prod"
+      }
+    }
+  },
+  "project:prj-blog": {
+    "data": {
+      "project": {
+        "id": "prj-blog",
+        "name": "Blog",
+        "primaryEnvironmentId": "env-b-prod",
+        "environments": {
+          "edges": [
+            {
+              "node": {
+                "id": "env-b-prod",
+                "name": "production",
+                "serviceInstances": {
+                  "edges": [
+                    {
+                      "node": {
+                        "serviceId": "svc-blog",
+                        "serviceName": "blog",
+                        "builder": "RAILPACK",
+                        "buildCommand": null,
+                        "startCommand": null,
+                        "rootDirectory": null,
+                        "dockerfilePath": null,
+                        "healthcheckPath": null,
+                        "numReplicas": 1,
+                        "cronSchedule": null,
+                        "preDeployCommand": null,
+                        "sleepApplication": false,
+                        "railwayConfigFile": null,
+                        "source": {
+                          "image": null,
+                          "repo": "acme/blog"
+                        },
+                        "domains": {
+                          "customDomains": [
+                            {
+                              "domain": "blog.example.com",
+                              "targetPort": null
+                            }
+                          ],
+                          "serviceDomains": []
+                        },
+                        "resolvedFileConfig": null
+                      }
+                    }
+                  ]
+                },
+                "volumeInstances": {
+                  "edges": []
+                },
+                "deploymentTriggers": {
+                  "edges": []
+                },
+                "variables": {
+                  "edges": []
+                }
+              }
+            },
+            {
+              "node": {
+                "id": "env-b-dev",
+                "name": "dev",
+                "serviceInstances": {
+                  "edges": [
+                    {
+                      "node": {
+                        "serviceId": "svc-blog",
+                        "serviceName": "blog",
+                        "builder": "RAILPACK",
+                        "buildCommand": null,
+                        "startCommand": null,
+                        "rootDirectory": null,
+                        "dockerfilePath": null,
+                        "healthcheckPath": null,
+                        "numReplicas": 1,
+                        "cronSchedule": null,
+                        "preDeployCommand": null,
+                        "sleepApplication": false,
+                        "railwayConfigFile": null,
+                        "source": {
+                          "image": null,
+                          "repo": "acme/blog"
+                        },
+                        "domains": {
+                          "customDomains": [],
+                          "serviceDomains": []
+                        },
+                        "resolvedFileConfig": null
+                      }
+                    }
+                  ]
+                },
+                "volumeInstances": {
+                  "edges": []
+                },
+                "deploymentTriggers": {
+                  "edges": []
+                },
+                "variables": {
+                  "edges": []
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "details:prj-blog": {
+    "data": {
+      "shared_0": {},
+      "v_0_0": {
+        "GREETING": "hi"
+      },
+      "t_0_0": []
+    }
+  }
+}
