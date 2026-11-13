@@ -65,3 +65,27 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker run --rm -v "$PWD/waf:/src" -w /src -e CGO_ENABLED=0 golang:1.26 sh -c 'go vet ./... && go test ./...'
+
+  # install.sh as a user runs it, on a fresh machine: this branch's script
+  # with the latest release's images, end to end (k3s, the upgrader with
+  # the RBAC it applies, every rollout), then Pyo answers.
+  install:
+    name: install.sh on a fresh machine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Pyo
+        run: |
+          set -o pipefail
+          sudo bash deploy/install.sh < /dev/null 2>&1 | sed 's/^\(  Password: \).*/\1(hidden)/'
+      - name: Pyo answers
+        run: |
+          curl -fsS http://localhost:8000/api/v1/meta
+          sudo k3s kubectl -n pyo-system get pods
+      - name: What went wrong
+        if: failure()
+        run: |
+          sudo k3s kubectl get pods -A -o wide || true
+          sudo k3s kubectl -n pyo-system logs -l app.kubernetes.io/name=pyo-upgrade --tail=100 || true
+          sudo k3s kubectl get events -A --sort-by=.lastTimestamp | tail -50 || true
