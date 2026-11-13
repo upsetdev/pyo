@@ -61,6 +61,7 @@ export const RESERVED_PROJECT_SLUGS = [
   "deployments",
   "domains",
   "images",
+  "import",
   "integrations",
   "kv",
   "mcp",

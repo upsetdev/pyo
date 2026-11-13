@@ -950,6 +950,7 @@ const RESERVED_PROJECT_SLUGS: &[&str] = &[
     "deployments",
     "domains",
     "images",
+    "import",
     "integrations",
     "kv",
     "mcp",
