@@ -588,7 +588,9 @@ k3s kubectl -n pyo-gateway create secret tls pyo-tls-tailnet --cert "$d/tls.crt"
 # pod, which the listeners' tailnet-only policy refuses): this one alone
 # takes them, on the Tailscale address. kube-proxy hands a connection to
 # the proxy on this machine unchanged (externalTrafficPolicy Local), so
-# the proxy sees the device's own 100.x address.
+# the proxy sees the device's own 100.x address. The websites' ports (80
+# and 443, 10080 and 10443 in the proxy) too: free domains on this
+# Tailscale address work whether or not the cluster takes public traffic.
 ip4=$(tailscale ip -4 2>/dev/null | head -n1)
 [ -n "$ip4" ] || exit 0
 # Its only warning (externalIPs are deprecated) stays out of the journal.
@@ -610,6 +612,8 @@ spec:
   ports:
     - { name: dashboard, port: 8443, targetPort: 8443 }
     - { name: registry, port: 5443, targetPort: 5443 }
+    - { name: http, port: 80, targetPort: 10080 }
+    - { name: https, port: 443, targetPort: 10443 }
 YAML
 ) || { echo "$out" >&2; exit 1; }
 SH

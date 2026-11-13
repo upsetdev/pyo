@@ -667,6 +667,11 @@ pub fn http_gateway() -> Value {
 // scripts/pyo-up.sh) with the certificate: not by the agent, which never
 // sets externalIPs. The SecurityPolicy still refuses everyone but tailnet
 // addresses and the servers, whatever Host or SNI they send.
+//
+// That Service carries the websites' ports (80 and 443) too, so free
+// domains on the host's Tailscale address ("<name>.100.x.y.z.nip.io") are
+// answered whether or not the cluster takes public traffic; the agent
+// reports where (`Capabilities::tailnet_web_ips`).
 
 /// The Gateway of Pyo's own HTTPS listeners.
 pub const TAILNET_GATEWAY: &str = "pyo-tailnet";
@@ -1234,7 +1239,8 @@ mod tests {
     }
 
     /// The host's timer writes the Service that brings tailnet connections
-    /// to the proxies with their own address: the listeners' ports, onto
+    /// to the proxies with their own address: the listeners' ports and the
+    /// websites' (in the proxy, 10000 higher), onto
     /// the proxies' pods, Local, on the Tailscale address only. Both copies
     /// of the timer's script (the install's and the dev setup's) agree.
     #[test]
@@ -1270,7 +1276,10 @@ mod tests {
                 ports,
                 [
                     (DASHBOARD_PORT as i64, DASHBOARD_PORT as i64),
-                    (REGISTRY_PORT as i64, REGISTRY_PORT as i64)
+                    (REGISTRY_PORT as i64, REGISTRY_PORT as i64),
+                    // The websites', for free domains on the Tailscale address.
+                    (80, 10080),
+                    (443, 10443)
                 ]
             );
             assert!(
