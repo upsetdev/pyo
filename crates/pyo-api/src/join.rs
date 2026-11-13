@@ -358,6 +358,17 @@ mod tests {
                 "{file}'s k3s pin differs from deploy/k3s.env"
             );
         }
+        let small = block("small-machine", "connect.sh", CONNECT_SCRIPT);
+        for (file, script) in [
+            ("deploy/install.sh", install),
+            ("scripts/setup-host.sh", setup_host),
+        ] {
+            assert_eq!(
+                block("small-machine", file, script),
+                small,
+                "{file}'s small_machine differs from connect.sh's"
+            );
+        }
         // How both find Pyo's (or the control plane's) tailnet name.
         assert_eq!(
             block("tailnet-host", "join.sh", SCRIPT),
@@ -374,6 +385,35 @@ mod tests {
             for piped in ["get.k3s.io", "tailscale.com/install.sh"] {
                 assert!(!script.contains(piped), "{file} runs {piped}");
             }
+        }
+    }
+
+    /// install.sh and scripts/pyo-up.sh set up the machine Pyo runs on the
+    /// same way: its timers, bootstrap key and tailnet name.
+    #[test]
+    fn install_and_pyo_up_share_the_host_setup() {
+        let function = |file: &str, script: &str, name: &str| -> String {
+            let start = script
+                .find(&format!("\n{name}() {{"))
+                .unwrap_or_else(|| panic!("{file} has no {name}()"));
+            let end = script[start..]
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("{file}'s {name}() has no end"));
+            script[start..start + end].to_owned()
+        };
+        let install = include_str!("../../../deploy/install.sh");
+        let pyo_up = include_str!("../../../scripts/pyo-up.sh");
+        for name in [
+            "host_units",
+            "bootstrap_key",
+            "tailnet_name",
+            "remote_access_note",
+        ] {
+            assert_eq!(
+                function("deploy/install.sh", install, name),
+                function("scripts/pyo-up.sh", pyo_up, name),
+                "deploy/install.sh's {name}() differs from scripts/pyo-up.sh's"
+            );
         }
     }
 
