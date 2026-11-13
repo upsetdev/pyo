@@ -47,6 +47,7 @@ export function TeamSwitcher() {
         align="start"
         width="w-64"
         label="Switch team"
+        className="min-w-0 max-w-full"
         trigger={(p) => (
           <button
             type="button"
@@ -54,7 +55,10 @@ export function TeamSwitcher() {
             className="flex min-w-0 max-w-full items-center gap-2 rounded-md py-1 pl-1 pr-2 text-left transition-colors hover:bg-accent"
           >
             <TeamAvatar name={ws?.name ?? "?"} />
-            <span className="truncate text-[13px] font-medium text-foreground">
+            <span
+              title={ws?.name}
+              className="min-w-0 truncate text-[13px] font-medium text-foreground"
+            >
               {ws?.name ?? "No team"}
             </span>
             <CaretUpDownIcon

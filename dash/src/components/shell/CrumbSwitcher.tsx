@@ -103,6 +103,8 @@ export function CrumbSwitcher({
       width="w-64"
       label={`Switch ${noun}`}
       search={count > SEARCH_FROM ? `Find ${noun}…` : undefined}
+      // Lets the whole-crumb trigger shrink so a long name truncates.
+      className={whole ? "min-w-0 max-w-full" : "shrink-0"}
       trigger={(p) =>
         whole ? (
           <button
@@ -113,7 +115,7 @@ export function CrumbSwitcher({
             // The team switcher's trigger: name, 8px, the 13px chevron.
             className="flex min-w-0 max-w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-foreground transition-colors hover:bg-accent aria-expanded:bg-accent"
           >
-            <span className="truncate">{name}</span>
+            <span title={name} className="min-w-0 truncate">{name}</span>
             <CaretUpDownIcon size={13} aria-hidden className="shrink-0 text-muted-foreground" />
           </button>
         ) : (
