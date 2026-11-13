@@ -19,7 +19,7 @@ import {
   serviceParams,
 } from "~/lib/pyo/store";
 import { getTemplate } from "~/lib/pyo/templates";
-import { serviceLabel, ServiceStatusBadge, serviceTone, Dot } from "~/components/ui/Badge";
+import { serviceLabel, ServiceStatusBadge, serviceTone, Dot, waitingForRoom } from "~/components/ui/Badge";
 import { Tooltip } from "~/components/ui/Tooltip";
 import { PlaceFlags } from "~/components/ui/Flag";
 import { placesOf } from "~/lib/pyo/location";
@@ -532,10 +532,10 @@ export function AppCard({
           <span className="relative shrink-0">
             <ServiceLogo app={a} />
             <span className="absolute -bottom-1 -right-1 z-10">
-              <Tooltip content={serviceLabel[a.status]}>
+              <Tooltip content={waitingForRoom(a) ? "Waiting for room" : serviceLabel[a.status]}>
                 <span
                   role="img"
-                  aria-label={serviceLabel[a.status]}
+                  aria-label={waitingForRoom(a) ? "Waiting for room" : serviceLabel[a.status]}
                   className="flex rounded-full bg-card p-[2px]"
                 >
                   <Dot tone={serviceTone[a.status]} className="h-2 w-2" />
@@ -576,7 +576,7 @@ export function AppCard({
               {a.status === "deploying" ? (
                 <DeployingStatus serviceId={a.id} />
               ) : (
-                <ServiceStatusBadge status={a.status} />
+                <ServiceStatusBadge status={a.status} waiting={a.runtime.waiting} />
               )}
             </span>
           )}

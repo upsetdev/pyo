@@ -17,7 +17,7 @@ use kube::{
 };
 use pyo_proto::{
     Capabilities, Heartbeat, PROTOCOL_VERSION, ServerCapacity, ServerCondition, ServerReport,
-    ServerUsage, ServiceRuntime, StorageClassReport, VolumeReport, WorkloadReport,
+    ServerRoom, ServerUsage, ServiceRuntime, StorageClassReport, VolumeReport, WorkloadReport,
 };
 
 pub const SERVICE_LABEL: &str = "pyo/service-id";
@@ -83,6 +83,84 @@ fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 const MIB: f64 = 1048576.0;
+
+/// CPU (cores) and memory (bytes) a pod asks for, as the scheduler counts
+/// it: its containers together, or its largest init container when that's
+/// more, plus the runtime's overhead.
+fn pod_requests(p: &Pod) -> (f64, f64) {
+    let Some(spec) = p.spec.as_ref() else {
+        return (0.0, 0.0);
+    };
+    let of = |c: &k8s_openapi::api::core::v1::Container| {
+        let r = c.resources.as_ref().and_then(|r| r.requests.as_ref());
+        (
+            r.and_then(|r| r.get("cpu"))
+                .map(|q| cpu_cores(&q.0))
+                .unwrap_or(0.0),
+            r.and_then(|r| r.get("memory"))
+                .map(|q| bytes(&q.0))
+                .unwrap_or(0.0),
+        )
+    };
+    let (mut cpu, mut mem) = spec
+        .containers
+        .iter()
+        .map(of)
+        .fold((0.0, 0.0), |(a, b), (c, m)| (a + c, b + m));
+    for (c, m) in spec.init_containers.iter().flatten().map(of) {
+        cpu = f64::max(cpu, c);
+        mem = f64::max(mem, m);
+    }
+    if let Some(o) = spec.overhead.as_ref() {
+        cpu += o.get("cpu").map(|q| cpu_cores(&q.0)).unwrap_or(0.0);
+        mem += o.get("memory").map(|q| bytes(&q.0)).unwrap_or(0.0);
+    }
+    (cpu, mem)
+}
+
+/// A pod no server has room for: the scheduler found too little free CPU,
+/// memory or GPU. It starts when there's room.
+fn waiting_for_room(p: &Pod) -> bool {
+    p.metadata.deletion_timestamp.is_none()
+        && p.spec.as_ref().and_then(|s| s.node_name.as_ref()).is_none()
+        && p.status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .is_some_and(|cs| {
+                cs.iter().any(|c| {
+                    c.type_ == "PodScheduled"
+                        && c.status == "False"
+                        && c.reason.as_deref() == Some("Unschedulable")
+                        && c.message
+                            .as_deref()
+                            .is_some_and(|m| m.contains("Insufficient"))
+                })
+            })
+}
+
+/// What the pods placed on each server ask for (cores, bytes); finished
+/// pods hold nothing.
+fn requested_per_node(pods: &[Pod]) -> HashMap<String, (f64, f64)> {
+    let mut out: HashMap<String, (f64, f64)> = HashMap::new();
+    for p in pods {
+        let phase = p
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .unwrap_or("");
+        let Some(node) = p.spec.as_ref().and_then(|s| s.node_name.clone()) else {
+            continue;
+        };
+        if phase == "Succeeded" || phase == "Failed" {
+            continue;
+        }
+        let (c, m) = pod_requests(p);
+        let e = out.entry(node).or_default();
+        e.0 += c;
+        e.1 += m;
+    }
+    out
+}
 
 /// A claim's requested size, in GiB.
 fn claim_gi(p: &PersistentVolumeClaim) -> Option<f64> {
@@ -235,6 +313,7 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
 
     // ── Servers ──
     let gpus_used = crate::gpu::used_per_node(&pods);
+    let requested = requested_per_node(&pods);
     let mut pods_per_node: HashMap<String, u32> = HashMap::new();
     for p in &pods {
         if let Some(n) = p.spec.as_ref().and_then(|s| s.node_name.clone()) {
@@ -282,6 +361,8 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
                 .map(|c| c.status.as_str());
             let info = status.node_info.clone().unwrap_or_default();
             let cap = status.capacity.clone().unwrap_or_default();
+            let alloc = status.allocatable.clone().unwrap_or_default();
+            let (rcpu, rmem) = requested.get(&name).copied().unwrap_or((0.0, 0.0));
             let addr = |kind: &str| {
                 status
                     .addresses
@@ -339,6 +420,16 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
                         net_rx_bps: ks.net_rx_bps,
                         net_tx_bps: ks.net_tx_bps,
                     }
+                },
+                allocatable: ServerRoom {
+                    cpu: round2(alloc.get("cpu").map(|q| cpu_cores(&q.0)).unwrap_or(0.0)),
+                    memory_gi: round2(
+                        alloc.get("memory").map(|q| bytes(&q.0)).unwrap_or(0.0) / GIB,
+                    ),
+                },
+                requested: ServerRoom {
+                    cpu: round2(rcpu),
+                    memory_gi: round2(rmem / GIB),
                 },
                 pod_count: pods_per_node.get(&name).copied().unwrap_or(0),
                 conditions: status
@@ -419,6 +510,7 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
         let mut since: Option<i64> = None;
         let mut on_nodes: Vec<String> = vec![];
         let mut replicas: Vec<pyo_proto::ReplicaReport> = vec![];
+        let mut waiting = 0;
         // Storage and network: summed over replicas the kubelet reported on.
         let (mut storage, mut rx, mut tx, mut seen) = (0.0, None::<f64>, None::<f64>, false);
         for p in &own {
@@ -433,7 +525,10 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
                     tx = Some(tx.unwrap_or(0.0) + t);
                 }
             }
+            let no_room = waiting_for_room(p);
+            waiting += i32::from(no_room);
             replicas.push(pyo_proto::ReplicaReport {
+                waiting: no_room,
                 ephemeral_mi: ks.and_then(|x| x.ephemeral_mi),
                 net_rx_bps: ks.and_then(|x| x.net_rx_bps),
                 net_tx_bps: ks.and_then(|x| x.net_tx_bps),
@@ -502,6 +597,7 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
                 memory_mi: mem / MIB,
                 since,
                 replicas,
+                waiting,
                 storage_mi: seen.then_some((storage * 10.0).round() / 10.0),
                 net_rx_bps: rx,
                 net_tx_bps: tx,
@@ -1021,5 +1117,56 @@ mod tests {
         assert_eq!(bytes("512Mi"), 512.0 * MIB);
         assert_eq!(bytes("1G"), 1e9);
         assert_eq!(bytes("1024"), 1024.0);
+    }
+
+    #[test]
+    fn requests_are_counted_per_server_as_the_scheduler_does() {
+        let pod = |node: Option<&str>, phase: &str, cpu: &str, mem: &str| -> Pod {
+            serde_json::from_value(serde_json::json!({
+                "metadata": { "name": "p" },
+                "spec": {
+                    "nodeName": node,
+                    "initContainers": [{ "name": "init", "resources": { "requests": { "cpu": "2", "memory": "64Mi" } } }],
+                    "containers": [
+                        { "name": "a", "resources": { "requests": { "cpu": cpu, "memory": mem } } },
+                        { "name": "b" },
+                    ],
+                },
+                "status": { "phase": phase },
+            }))
+            .unwrap()
+        };
+        let pods = [
+            pod(Some("s1"), "Running", "500m", "256Mi"),
+            pod(Some("s1"), "Pending", "250m", "128Mi"),
+            pod(Some("s1"), "Succeeded", "4", "1Gi"),
+            pod(None, "Pending", "1", "1Gi"),
+        ];
+        let r = requested_per_node(&pods);
+        assert_eq!(r.len(), 1, "an unplaced pod holds nothing anywhere");
+        let (cpu, mem) = r["s1"];
+        // The init container's 2 CPU wins over 0.5 and 0.25 each; memory
+        // is the containers' 256 + 128 MiB.
+        assert_eq!(cpu, 4.0);
+        assert_eq!(mem, 384.0 * MIB);
+    }
+
+    #[test]
+    fn a_pod_without_room_is_waiting() {
+        let pod = |message: &str| -> Pod {
+            serde_json::from_value(serde_json::json!({
+                "metadata": { "name": "p" },
+                "spec": { "containers": [] },
+                "status": { "phase": "Pending", "conditions": [{ "type": "PodScheduled", "status": "False", "reason": "Unschedulable", "message": message }] },
+            }))
+            .unwrap()
+        };
+        assert!(waiting_for_room(&pod(
+            "0/2 nodes are available: 2 Insufficient cpu."
+        )));
+        // Can't run anywhere it may: not a matter of room.
+        assert!(!waiting_for_room(&pod(
+            "0/2 nodes are available: 2 node(s) didn't match Pod's node affinity/selector."
+        )));
     }
 }

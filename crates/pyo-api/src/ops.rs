@@ -341,11 +341,65 @@ const RESERVED_SLUGS: [&str; 16] = [
     "cli-login",
 ];
 
+/// Replicas are a whole number from 0 up. Pyo sets no maximum: the servers
+/// run as many as fit, and the rest wait for room. Kubernetes counts them
+/// in 32 bits.
+fn check_replicas(v: &Value) -> ApiResult<()> {
+    match v {
+        Value::Null => Ok(()),
+        v => match v.as_i64() {
+            Some(n) if n < 0 => Err(ApiError::bad_request("Replicas can't be below 0.")),
+            Some(n) if n > i32::MAX as i64 => Err(ApiError::bad_request(TOO_MANY_REPLICAS)),
+            Some(_) => Ok(()),
+            None if v.as_u64().is_some() || v.as_f64().is_some_and(|f| f > i32::MAX as f64) => {
+                Err(ApiError::bad_request(TOO_MANY_REPLICAS))
+            }
+            None => Err(ApiError::bad_request("Replicas is a whole number.")),
+        },
+    }
+}
+
+const TOO_MANY_REPLICAS: &str =
+    "That's more replicas than Kubernetes can count. The most is 2147483647.";
+
+/// `ok`, with `warning` when there is one.
+fn with_warning(mut ok: Value, warning: Option<String>) -> Value {
+    if let Some(w) = warning {
+        ok["warning"] = json!(w);
+    }
+    ok
+}
+
+/// When the replicas a service is set to run don't fit on its servers.
+/// `before`: what it was set to, for a change that asks first when it's
+/// very large.
+async fn deploy_warning(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: &str,
+    before: Option<i64>,
+    confirm: bool,
+) -> ApiResult<Option<String>> {
+    crate::capacity::check(
+        tx,
+        service_id,
+        crate::capacity::Ask::Run,
+        None,
+        before,
+        confirm,
+    )
+    .await
+}
+
+/// The replicas a service's spec runs: autoscaling's minimum, or its setting.
+fn set_replicas(spec: &Value) -> i64 {
+    spec["autoscale"]["min"]
+        .as_i64()
+        .unwrap_or_else(|| spec["replicas"].as_i64().unwrap_or(1))
+}
+
 fn check_autoscale(a: &pyo_proto::Autoscale) -> ApiResult<()> {
-    if !(1..=50).contains(&a.min) || !(1..=50).contains(&a.max) {
-        return Err(ApiError::bad_request(
-            "Autoscale between 1 and 50 replicas.",
-        ));
+    if a.min < 1 {
+        return Err(ApiError::bad_request("Autoscale from at least 1 replica."));
     }
     if a.min >= a.max {
         return Err(ApiError::bad_request(
@@ -1060,6 +1114,7 @@ fn validate_service_spec(spec: &Value) -> ApiResult<()> {
             ));
         }
     }
+    check_replicas(&spec["replicas"])?;
     let name = spec["name"].as_str().unwrap_or("");
     require_dns_label(name, "Service name")?;
     if RESERVED_SERVICE_NAMES.contains(&name) {
@@ -1791,6 +1846,9 @@ pub(crate) enum Op {
         #[serde(default)]
         #[schema(value_type = Vec<Object>)]
         databases: Vec<ServiceDatabase>,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
     },
     /// Save a service's configuration. With `deploymentId`, roll it out too. Changes to its `domains` go live without a deploy once it has been deployed.
     #[serde(rename = "saveService")]
@@ -1802,6 +1860,9 @@ pub(crate) enum Op {
         service: Value,
         deployment_id: Option<String>,
         trigger: Option<String>,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
     },
     /// Delete a service and stop it everywhere. Its volumes are kept, detached, unless `deleteVolumes`.
     #[serde(rename = "deleteService")]
@@ -1831,9 +1892,15 @@ pub(crate) enum Op {
     /// Stop a service. Deploy it again to start it.
     #[serde(rename = "stopService")]
     StopService { id: String },
-    /// Change a service's number of replicas without a new deployment.
+    /// Change a service's number of replicas without a new deployment: 1 or more, with no maximum. Replicas that don't fit on the servers wait until there's room, and the response's `warning` says so.
     #[serde(rename = "scaleService")]
-    ScaleService { id: String, replicas: i32 },
+    ScaleService {
+        id: String,
+        replicas: i32,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
+    },
     /// Add a cron job to a service, or change one (by id).
     SaveCronJob {
         service_id: String,
@@ -1853,6 +1920,9 @@ pub(crate) enum Op {
     SetAutoscale {
         id: String,
         autoscale: Option<pyo_proto::Autoscale>,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
     },
     /// Add a persistent volume to a service, mounted at `mountPath` from its next deploy.
     AddVolume {
@@ -2063,7 +2133,7 @@ pub(crate) enum Op {
 #[utoipa::path(post, path = "/ops", operation_id = "runOp", tag = "Operations",
     request_body(content = Op, description = "The operation: `op` and its fields."),
     responses(
-        (status = 200, description = "Done. Always `ok: true`, and some operations add more, such as a new API key or a join command.", body = Object),
+        (status = 200, description = "Done. Always `ok: true`, and some operations add more, such as a new API key or a join command. A `warning` comes with a change that went through but won't fully take effect yet, such as more replicas than the servers have room for.", body = Object),
         (status = 400, description = "Not a known operation, a missing field, or a value Pyo can't accept.", body = ErrorBody),
         (status = 403, description = "Your role in the team, or the API key's access, doesn't allow it.", body = ErrorBody),
         (status = 404, description = "The team or the thing it names doesn't exist, or isn't yours to see.", body = ErrorBody),
@@ -2083,8 +2153,17 @@ async fn run(
 /// Run an operation as `user` from anywhere else (MCP tools): `op` is the
 /// same JSON the dashboard sends, e.g. {"op": "scaleService", "id": …}.
 pub async fn run_json(s: &AppState, user: &User, op: Value) -> ApiResult<Value> {
-    let op: Op = serde_json::from_value(op)
-        .map_err(|e| ApiError::bad_request(format!("Invalid operation: {e}")))?;
+    let op: Op = serde_json::from_value(op).map_err(|e| {
+        let e = e.to_string();
+        // Replicas and other counts Kubernetes keeps in 32 bits.
+        if e.contains("expected i32") {
+            ApiError::bad_request(format!(
+                "Invalid operation: {e}. Numbers like replicas go up to 2147483647."
+            ))
+        } else {
+            ApiError::bad_request(format!("Invalid operation: {e}"))
+        }
+    })?;
     run_op(s, user, op).await
 }
 
@@ -4198,7 +4277,9 @@ async fn apply(
             deployment_id,
             volumes,
             databases,
+            confirm,
         } => {
+            let id = service["id"].as_str().unwrap_or("").to_owned();
             create_service(
                 tx,
                 user,
@@ -4209,12 +4290,16 @@ async fn apply(
                 wake,
             )
             .await?;
-            Ok(ok)
+            Ok(with_warning(
+                ok,
+                deploy_warning(tx, &id, Some(0), confirm).await?,
+            ))
         }
         Op::SaveService {
             service,
             deployment_id,
             trigger,
+            confirm,
         } => {
             let id = service["id"].as_str().unwrap_or("").to_owned();
             let team_id = team_of(tx, "services", &id).await?;
@@ -4368,7 +4453,10 @@ async fn apply(
                 .await?;
                 wake.push(c);
             }
-            Ok(ok)
+            Ok(with_warning(
+                ok,
+                deploy_warning(tx, &id, Some(set_replicas(&old_spec)), confirm).await?,
+            ))
         }
         Op::DeleteService { id, delete_volumes } => {
             let team_id = team_of(tx, "services", &id).await?;
@@ -4451,7 +4539,10 @@ async fn apply(
             )
             .await?;
             wake.push(c);
-            Ok(ok)
+            Ok(with_warning(
+                ok,
+                deploy_warning(tx, &service_id, None, false).await?,
+            ))
         }
         Op::Cancel { deployment_id } => {
             let team_id = team_of(tx, "deployments", &deployment_id).await?;
@@ -4602,12 +4693,16 @@ async fn apply(
         Op::DeleteVolume { id, cluster_id } => {
             crate::volumes::delete(tx, user, &id, cluster_id.as_deref(), wake).await
         }
-        Op::ScaleService { id, replicas } => {
+        Op::ScaleService {
+            id,
+            replicas,
+            confirm,
+        } => {
             let team_id = team_of(tx, "services", &id).await?;
             require_role(tx, user, &team_id, Role::Developer).await?;
-            if !(1..=50).contains(&replicas) {
+            if replicas < 1 {
                 return Err(ApiError::bad_request(
-                    "Scale between 1 and 50 replicas. To scale to zero, stop the service.",
+                    "Scale to at least 1 replica. To scale to zero, stop the service.",
                 ));
             }
             let (cluster_id, current, name, project_id, status, spec): (String, Option<String>, String, String, String, Value) =
@@ -4663,7 +4758,21 @@ async fn apply(
             )
             .await?;
             wake.push(cluster_id);
-            Ok(ok)
+            let before = if status == "stopped" {
+                0
+            } else {
+                spec["replicas"].as_i64().unwrap_or(1)
+            };
+            let warning = crate::capacity::check(
+                tx,
+                &id,
+                crate::capacity::Ask::Run,
+                Some(replicas.into()),
+                Some(before),
+                confirm,
+            )
+            .await?;
+            Ok(with_warning(ok, warning))
         }
         Op::SaveCronJob {
             service_id,
@@ -4757,7 +4866,11 @@ async fn apply(
             wake.push(cluster_id);
             Ok(ok)
         }
-        Op::SetAutoscale { id, autoscale } => {
+        Op::SetAutoscale {
+            id,
+            autoscale,
+            confirm,
+        } => {
             let team_id = team_of(tx, "services", &id).await?;
             require_role(tx, user, &team_id, Role::Developer).await?;
             let (cluster_id, current, name, project_id, status, spec, runtime): (String, Option<String>, String, String, String, Value, Value) =
@@ -4802,7 +4915,10 @@ async fn apply(
             }
             // Turned off, it stays the size it reached.
             let stopped = status == "stopped";
-            let reached = runtime["readyReplicas"].as_i64().unwrap_or(0).clamp(1, 50) as i32;
+            let reached = runtime["readyReplicas"]
+                .as_i64()
+                .unwrap_or(0)
+                .clamp(1, i32::MAX as i64) as i32;
             let saved = match &autoscale {
                 Some(a) => a.min,
                 None if stopped => spec["replicas"].as_i64().unwrap_or(1) as i32,
@@ -4818,6 +4934,12 @@ async fn apply(
                 .bind(&change)
                 .execute(&mut **tx)
                 .await?;
+            let up_to = autoscale.as_ref().map(|a| a.max);
+            let before = spec["autoscale"]["max"].as_i64().unwrap_or(if stopped {
+                0
+            } else {
+                reached.into()
+            });
             let title = match &autoscale {
                 Some(a) => format!(
                     "Autoscaling {name} between {} and {} replicas",
@@ -4847,7 +4969,21 @@ async fn apply(
             )
             .await?;
             wake.push(cluster_id);
-            Ok(ok)
+            let warning = match up_to {
+                Some(max) => {
+                    crate::capacity::check(
+                        tx,
+                        &id,
+                        crate::capacity::Ask::UpTo,
+                        Some(max.into()),
+                        Some(before),
+                        confirm,
+                    )
+                    .await?
+                }
+                None => None,
+            };
+            Ok(with_warning(ok, warning))
         }
         Op::CreateDatabase {
             id,
@@ -7129,6 +7265,92 @@ mod location_tests {
         assert!(require_location("!!").is_err());
         assert_eq!(require_location(" US  East ").unwrap(), "US East");
         assert_eq!(require_location("Frankfurt").unwrap(), "Frankfurt");
+    }
+}
+
+#[cfg(test)]
+mod replica_tests {
+    use super::*;
+
+    #[test]
+    fn replicas_have_no_cap_beyond_kubernetes() {
+        for ok in [
+            json!(null),
+            json!(0),
+            json!(1),
+            json!(50),
+            json!(5000),
+            json!(i32::MAX),
+        ] {
+            assert!(check_replicas(&ok).is_ok(), "{ok}");
+        }
+        assert_eq!(
+            check_replicas(&json!(-1)).unwrap_err().message,
+            "Replicas can't be below 0."
+        );
+        for big in [json!(i32::MAX as i64 + 1), json!(u64::MAX), json!(1e12)] {
+            assert_eq!(
+                check_replicas(&big).unwrap_err().message,
+                TOO_MANY_REPLICAS,
+                "{big}"
+            );
+        }
+        assert!(check_replicas(&json!(2.5)).is_err());
+        assert!(check_replicas(&json!("3")).is_err());
+    }
+
+    #[test]
+    fn autoscaling_has_a_floor_and_no_ceiling() {
+        let a = |min, max| pyo_proto::Autoscale {
+            min,
+            max,
+            target_cpu: 70,
+            target_memory: None,
+        };
+        assert!(check_autoscale(&a(1, 2)).is_ok());
+        assert!(check_autoscale(&a(10, 500)).is_ok());
+        assert!(check_autoscale(&a(1, i32::MAX)).is_ok());
+        assert!(check_autoscale(&a(0, 5)).is_err());
+        assert!(check_autoscale(&a(5, 5)).is_err());
+    }
+
+    #[test]
+    fn counts_past_32_bits_say_so() {
+        let Err(e) = serde_json::from_value::<Op>(
+            json!({ "op": "scaleService", "id": "svc_a", "replicas": 3_000_000_000u64 }),
+        ) else {
+            panic!("3 billion replicas went through");
+        };
+        assert!(e.to_string().contains("expected i32"), "{e}");
+    }
+
+    #[test]
+    fn confirm_is_off_unless_sent() {
+        let op = |v| serde_json::from_value::<Op>(v).unwrap();
+        assert!(matches!(
+            op(json!({ "op": "scaleService", "id": "svc_a", "replicas": 3 })),
+            Op::ScaleService { confirm: false, .. }
+        ));
+        assert!(matches!(
+            op(json!({ "op": "scaleService", "id": "svc_a", "replicas": 3, "confirm": true })),
+            Op::ScaleService { confirm: true, .. }
+        ));
+        assert!(matches!(
+            op(json!({ "op": "setAutoscale", "id": "svc_a", "autoscale": null })),
+            Op::SetAutoscale { confirm: false, .. }
+        ));
+    }
+
+    #[test]
+    fn a_warning_rides_along() {
+        assert_eq!(
+            with_warning(json!({ "ok": true }), None),
+            json!({ "ok": true })
+        );
+        assert_eq!(
+            with_warning(json!({ "ok": true }), Some("x".into())),
+            json!({ "ok": true, "warning": "x" })
+        );
     }
 }
 

@@ -1,4 +1,5 @@
 import { Stepper } from "~/components/ui/Field";
+import { MAX_REPLICAS } from "~/lib/pyo/capacity";
 
 const PRESETS = [1, 2, 3, 5];
 
@@ -9,7 +10,7 @@ const PRESETS = [1, 2, 3, 5];
 export function ReplicaPicker({
   value,
   onChange,
-  max = 50,
+  max = MAX_REPLICAS,
   align = "center",
 }: {
   value: number;

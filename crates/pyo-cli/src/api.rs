@@ -5,6 +5,19 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
+/// A change the API holds back until it's confirmed (a very large replica
+/// change): send it again with `confirm: true` once the user says yes.
+#[derive(Debug)]
+pub struct NeedsConfirm(pub String);
+
+impl std::fmt::Display for NeedsConfirm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NeedsConfirm {}
+
 pub struct Api {
     pub base: String,
     token: String,
@@ -42,6 +55,9 @@ impl Api {
                 .unwrap_or_else(|| format!("Request failed ({status})"));
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 bail!("{msg}\nSign in again: pyo login");
+            }
+            if body["needsConfirm"] == true {
+                return Err(NeedsConfirm(msg).into());
             }
             bail!(msg);
         }

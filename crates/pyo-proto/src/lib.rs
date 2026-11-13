@@ -389,6 +389,14 @@ pub struct ServerReport {
     pub external_ip: Option<String>,
     pub capacity: ServerCapacity,
     pub usage: ServerUsage,
+    /// What Kubernetes can hand out to pods here (capacity less what the
+    /// system keeps).
+    #[serde(default)]
+    pub allocatable: ServerRoom,
+    /// What running and starting pods here ask for: the scheduler places a
+    /// new one only where its requests fit in allocatable less this.
+    #[serde(default)]
+    pub requested: ServerRoom,
     pub pod_count: u32,
     pub conditions: Vec<ServerCondition>,
     pub created_at: i64,
@@ -508,6 +516,14 @@ pub struct ServerCapacity {
     pub pods: u32,
 }
 
+/// CPU (cores) and memory (GiB) pods can ask for on a server.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerRoom {
+    pub cpu: f64,
+    pub memory_gi: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerUsage {
@@ -585,6 +601,9 @@ pub struct ServiceRuntime {
     /// Each replica, for picking one to open a terminal in.
     #[serde(default)]
     pub replicas: Vec<ReplicaReport>,
+    /// Replicas no server has room for yet: they start when there is.
+    #[serde(default, skip_serializing_if = "none_waiting")]
+    pub waiting: i32,
     /// A CronJob's latest run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<CronRun>,
@@ -642,6 +661,9 @@ pub struct ReplicaReport {
     pub server: String,
     pub ready: bool,
     pub started_at: Option<i64>,
+    /// No server has room for it yet (CPU, memory or GPU).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waiting: bool,
     // From the kubelet's stats summary (None: older agent, or not read).
     /// Its writable layer, logs and emptyDirs, in MiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1420,6 +1442,10 @@ pub struct WafSettings {
 }
 
 fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+fn none_waiting(n: &i32) -> bool {
     *n == 0
 }
 

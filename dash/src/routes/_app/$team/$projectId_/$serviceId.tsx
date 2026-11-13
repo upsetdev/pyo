@@ -16,6 +16,8 @@ import {
   WarningIcon,
 } from "@phosphor-icons/react";
 import { ReplicaPicker } from "~/components/pyo/ReplicaPicker";
+import { RoomNote } from "~/components/pyo/RoomNote";
+import { bigChange, MAX_REPLICAS, serviceRoomWarning } from "~/lib/pyo/capacity";
 import { copyIdItem } from "~/components/pyo/copyId";
 import {
   createFileRoute,
@@ -328,7 +330,7 @@ function ScaleDialog({
   const autoscaling = auto && !stopped;
   const turningOff = !!app.autoscale && !auto && !stopped;
   const invalid =
-    !(min >= 1 && max <= 50 && min < max) ||
+    !(min >= 1 && max <= MAX_REPLICAS && min < max) ||
     !(targetCpu >= 10 && targetCpu <= 95) ||
     (byMemory && !(targetMemory >= 10 && targetMemory <= 95));
   const same = autoscaling
@@ -339,50 +341,89 @@ function ScaleDialog({
       (app.autoscale.targetMemory ?? null) === (byMemory ? targetMemory : null)
     : !stopped && !turningOff && n === app.replicas;
   const blocked = same || saving || (autoscaling && invalid);
+  // Accepted either way: replicas that don't fit wait for room.
+  const roomNote = autoscaling
+    ? invalid
+      ? null
+      : serviceRoomWarning(s.servers, app, max, "upTo")
+    : turningOff
+      ? null
+      : serviceRoomWarning(s.servers, app, n);
   const perPod = `${cpu(app.resources.cpuLimit)} and ${mem(app.resources.memoryLimit)}`;
+  // A very large change asks first (the API holds it back otherwise).
+  const big = autoscaling
+    ? invalid
+      ? null
+      : bigChange(s.servers, app, max, app.autoscale?.max ?? (stopped ? 0 : live), "upTo")
+    : turningOff
+      ? null
+      : bigChange(s.servers, app, n, stopped ? 0 : app.replicas);
+  const [asking, setAsking] = useState<{ title: string; body: string } | null>(null);
   return (
     <Dialog
       open={open}
       onClose={onClose}
-      title={`Scale ${app.name}`}
+      title={asking ? asking.title : `Scale ${app.name}`}
       description={
-        stopped
-          ? "It's stopped. Pick how many replicas to start."
-          : "Running replicas keep serving."
+        asking
+          ? asking.body
+          : stopped
+            ? "It's stopped. Pick how many replicas to start."
+            : "Running replicas keep serving."
       }
       onSubmit={async () => {
         if (blocked) return;
+        if (big && !asking) {
+          setAsking(big);
+          return;
+        }
+        const confirm = !!asking;
         setSaving(true);
         const ok = autoscaling
-          ? await api.setAutoscale(app.id, {
-              min,
-              max,
-              targetCpu,
-              ...(byMemory ? { targetMemory } : {}),
-            })
+          ? await api.setAutoscale(
+              app.id,
+              {
+                min,
+                max,
+                targetCpu,
+                ...(byMemory ? { targetMemory } : {}),
+              },
+              confirm,
+            )
           : turningOff
             ? await api.setAutoscale(app.id, null)
-            : await api.scaleService(app.id, n);
+            : await api.scaleService(app.id, n, confirm);
         setSaving(false);
+        setAsking(null);
         if (!ok) return;
+        const warning = typeof ok.warning === "string" ? ok.warning : undefined;
         toast({
           title: autoscaling
             ? `Autoscaling ${app.name} between ${min} and ${max}`
             : turningOff
               ? `Stopped autoscaling ${app.name}`
               : `Scaling ${app.name} to ${n}`,
+          ...(warning ? { description: warning, tone: "warning" as const } : {}),
         });
         onClose();
       }}
       footer={
         <>
-          <Button variant="ghost" size="sm" onClick={onClose}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={asking ? () => setAsking(null) : onClose}
+          >
             Cancel
           </Button>
           <Button type="submit" size="sm" disabled={blocked}>
             {saving
               ? "Saving…"
-              : autoscaling
+              : asking
+                ? autoscaling
+                  ? "Autoscale"
+                  : "Scale"
+                : autoscaling
                 ? "Save autoscaling"
                 : turningOff
                   ? "Turn off autoscaling"
@@ -393,7 +434,7 @@ function ScaleDialog({
         </>
       }
     >
-      <div className="space-y-5">
+      <div className="space-y-5" hidden={!!asking}>
         {stopped ? null : (
           <Switch
             checked={auto}
@@ -414,12 +455,12 @@ function ScaleDialog({
             <div className="grid grid-cols-3 gap-3">
               <Field label="Minimum">
                 {(p) => (
-                  <Stepper {...p} min={1} max={49} value={min} onChange={setMin} />
+                  <Stepper {...p} min={1} max={MAX_REPLICAS - 1} value={min} onChange={setMin} />
                 )}
               </Field>
               <Field label="Maximum">
                 {(p) => (
-                  <Stepper {...p} min={2} max={50} value={max} onChange={setMax} />
+                  <Stepper {...p} min={2} max={MAX_REPLICAS} value={max} onChange={setMax} />
                 )}
               </Field>
               <Field label="CPU target (%)">
@@ -449,10 +490,11 @@ function ScaleDialog({
             <ReplicaPicker value={n} onChange={setN} />
           </div>
         )}
+        <RoomNote text={roomNote} />
         <p className="rounded-lg bg-muted/50 px-3 py-2.5 text-[12.5px] text-muted-foreground">
           {autoscaling ? (
             invalid ? (
-              "1 to 50 replicas, max above min, targets 10% to 95%."
+              "At least 1 replica, max above min, targets 10% to 95%."
             ) : (
               <>
                 Replicas are added when average CPU use goes above {targetCpu}%

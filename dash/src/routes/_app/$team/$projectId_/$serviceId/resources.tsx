@@ -7,10 +7,13 @@ import {
   HealthCheckFields,
   ResourceFields,
 } from "~/components/pyo/editors";
+import { RoomNote } from "~/components/pyo/RoomNote";
 import { VolumeTable } from "~/components/pyo/tables";
 import { Button } from "~/components/ui/Button";
+import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Stepper } from "~/components/ui/Field";
 import { Meter, Panel } from "~/components/ui/Panel";
+import { bigChange, MAX_REPLICAS, serviceRoomWarning } from "~/lib/pyo/capacity";
 import { cpu, mem } from "~/lib/pyo/format";
 import { api, desiredReplicas, usePyo, serviceIdOf } from "~/lib/pyo/store";
 import { getTemplate } from "~/lib/pyo/templates";
@@ -47,7 +50,8 @@ function Resources({ app }: { app: Application }) {
     errors.cpuLimit = "Limit must be at least the request.";
   if (resources.memoryLimit < resources.memoryRequest)
     errors.memoryLimit = "Limit must be at least the request.";
-  if (!(replicas >= 0 && replicas <= 20)) errors.replicas = "Between 0 and 20.";
+  if (!(Number.isInteger(replicas) && replicas >= 0 && replicas <= MAX_REPLICAS))
+    errors.replicas = "0 or more.";
   // A template no longer in the catalog: its workload says if it was stateful.
   const single = t
     ? t.stateful
@@ -62,6 +66,26 @@ function Resources({ app }: { app: Application }) {
       : undefined;
   if (gpuErr) errors.gpu = gpuErr;
   const n = Math.max(1, app.status === "stopped" ? 0 : desiredReplicas(app));
+  // Saved either way: replicas that don't fit wait for room.
+  const roomNote = app.autoscale
+    ? null
+    : serviceRoomWarning(s.servers, app, replicas, "run", resources);
+  // A very large change asks first (the API holds it back otherwise).
+  const big = app.autoscale
+    ? null
+    : bigChange(s.servers, app, replicas, app.replicas, "run", resources);
+  const [asking, setAsking] = useState(false);
+  const save = (confirm: boolean) => {
+    api.updateService(
+      app.id,
+      { resources, replicas },
+      { requiresRedeploy: true, label: "resources", confirm },
+    );
+    toast({
+      title: "Resources saved",
+      description: "Redeploy to apply.",
+    });
+  };
 
   return (
     <div className="space-y-4">
@@ -104,17 +128,7 @@ function Resources({ app }: { app: Application }) {
           <Button
             size="xs"
             disabled={!dirty || Object.keys(errors).length > 0}
-            onClick={() => {
-              api.updateService(
-                app.id,
-                { resources, replicas },
-                { requiresRedeploy: true, label: "resources" },
-              );
-              toast({
-                title: "Resources saved",
-                description: "Redeploy to apply.",
-              });
-            }}
+            onClick={() => (big ? setAsking(true) : save(false))}
           >
             Save changes
           </Button>
@@ -141,7 +155,7 @@ function Resources({ app }: { app: Application }) {
               <Stepper
                 {...p}
                 min={0}
-                max={20}
+                max={MAX_REPLICAS}
                 disabled={!!app.autoscale}
                 value={app.autoscale ? desiredReplicas(app) : replicas}
                 onChange={setReplicas}
@@ -149,6 +163,19 @@ function Resources({ app }: { app: Application }) {
               />
             )}
           </Field>
+          <RoomNote text={roomNote} />
+          <ConfirmDialog
+            open={asking && !!big}
+            onClose={() => setAsking(false)}
+            tone="primary"
+            title={big?.title ?? ""}
+            description={big?.body ?? ""}
+            confirmLabel="Scale"
+            onConfirm={() => {
+              setAsking(false);
+              save(true);
+            }}
+          />
         </div>
       </Panel>
       {app.workloadKind === "CronJob" ? null : <HealthCheck app={app} />}

@@ -418,7 +418,7 @@ pub fn build_spec(
         project_id: project_id.to_owned(),
         team_id: String::new(),
         image: image_ref(&spec["source"])?,
-        replicas: int_at(spec, &["replicas"], 1).clamp(0, 50) as i32,
+        replicas: int_at(spec, &["replicas"], 1).clamp(0, i32::MAX as i64) as i32,
         schedule: str_at(spec, &["schedule"]).trim().to_owned(),
         command: str_at(spec, &["command"]).trim().to_owned(),
         container: serde_json::from_value::<pyo_proto::ContainerOverrides>(

@@ -238,7 +238,7 @@ function ProjectOverview() {
                   </div>
                 </div>
                 <div className="hidden md:block">
-                  <ServiceStatusBadge status={a.status} />
+                  <ServiceStatusBadge status={a.status} waiting={a.runtime.waiting} />
                 </div>
                 <div className="hidden min-w-0 md:block">
                   <SourcePill source={a.source} />

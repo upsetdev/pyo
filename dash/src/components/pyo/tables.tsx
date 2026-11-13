@@ -137,7 +137,7 @@ export function AppTable({
                 </div>
               </Td>
               <Td>
-                <ServiceStatusBadge status={a.status} />
+                <ServiceStatusBadge status={a.status} waiting={a.runtime.waiting} />
               </Td>
               <Td className="max-w-[240px]">
                 <SourceSummary source={a.source} />
