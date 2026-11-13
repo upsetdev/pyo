@@ -331,7 +331,10 @@ mod tests {
         assert_eq!(k3s_env(1024), "GOMEMLIMIT=768MiB");
         assert_eq!(
             k3s_env(pyo_proto::memory::SMALL_MIB - 1),
-            format!("GOMEMLIMIT={}MiB", (pyo_proto::memory::SMALL_MIB - 1) * 2 / 5)
+            format!(
+                "GOMEMLIMIT={}MiB",
+                (pyo_proto::memory::SMALL_MIB - 1) * 2 / 5
+            )
         );
         assert_eq!(k3s_env(pyo_proto::memory::SMALL_MIB), "");
         assert_eq!(k3s_env(16384), "");
