@@ -336,6 +336,9 @@ fi
 if [ -z "$API" ] && [ -z "$TOKEN" ] && command -v k3s >/dev/null; then
   secret() { k3s kubectl -n pyo-system get secret pyo-agent -o "jsonpath={.data.$1}" 2>/dev/null | base64 -d 2>/dev/null || true; }
   API=$(secret PYO_API_URL); API="${API%/}"; TOKEN=$(secret PYO_AGENT_TOKEN)
+  # The cluster Pyo runs on: its agent reaches Pyo inside the cluster, this
+  # machine at Pyo's local address.
+  case "$API" in http://*.svc:* | http://*.svc.cluster.local:*) API=http://127.0.0.1:8000 ;; esac
   [ -z "$API" ] || echo "Updating this cluster's Pyo agent (Pyo at $API)."
 fi
 [ -n "$API" ] && [ -n "$TOKEN" ] || { echo "Usage: connect.sh --api URL --token TOKEN [--tailscale-key KEY] [--registry HOST:PORT --registry-token TOKEN]" >&2; exit 2; }
