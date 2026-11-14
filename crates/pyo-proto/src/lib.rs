@@ -1976,9 +1976,11 @@ pub const BACKUP_DB_USER: &str = "pyo_backup";
 /// Each is the newest release line its dump tool supports: pg_dump dumps
 /// servers as old as 9.2 but refuses newer ones, so it tracks the newest
 /// PostgreSQL. Restoring a PostgreSQL dump takes pg_restore 18 or newer.
+/// PostgreSQL's is the alpine image Pyo's own database runs, so a server
+/// already has it.
 pub fn db_tools_image(engine: &str) -> &'static str {
     match engine {
-        "postgres" => "docker.io/library/postgres:18",
+        "postgres" => "docker.io/library/postgres:18.6-alpine",
         "mysql" => "docker.io/library/mysql:8.4",
         "mariadb" => "docker.io/library/mariadb:11.8",
         "mongo" => "docker.io/library/mongo:8.0",
@@ -2326,6 +2328,9 @@ mod location_tests {
             .rsplit_once(':')
             .unwrap()
             .1
+            .split('.')
+            .next()
+            .unwrap()
             .parse()
             .unwrap();
         assert!(
