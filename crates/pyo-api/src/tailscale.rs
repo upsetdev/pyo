@@ -615,7 +615,7 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
     };
     let install = install_id(&s.db).await?;
     let mark = marker(&install);
-    let devices = c.devices().await.map_err(anyhow::Error::from)?;
+    let devices = c.devices().await?;
     let suffix = devices
         .iter()
         .find_map(|(_, n, _)| suffix_of(n))
@@ -623,7 +623,7 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
     let Some(suffix) = suffix else {
         return Ok(());
     };
-    let remote = c.services().await.map_err(anyhow::Error::from)?;
+    let remote = c.services().await?;
     let ours = |n: &str| remote.get(n).is_some_and(|(cm, _)| *cm == mark);
     let machine = |n: &str| {
         devices
@@ -802,6 +802,17 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
     Ok(())
 }
 
+/// A row of `pyo.tailnet_services`: name, kind, cluster, addresses,
+/// error, retired.
+type ServiceRow = (
+    String,
+    String,
+    Option<String>,
+    Vec<String>,
+    Option<String>,
+    bool,
+);
+
 /// What a cluster's agent hosts on the tailnet (its heartbeat reply). None
 /// without Tailscale set up.
 pub async fn wanted_for(
@@ -809,7 +820,7 @@ pub async fn wanted_for(
     cluster_id: &str,
     same_cluster: bool,
 ) -> ApiResult<Option<pyo_proto::TailnetWanted>> {
-    let rows: Vec<(String, String, Option<String>, Vec<String>, Option<String>, bool)> = sqlx::query_as(
+    let rows: Vec<ServiceRow> = sqlx::query_as(
         "SELECT name, kind, cluster_id, addrs, error, retired_at IS NOT NULL FROM pyo.tailnet_services",
     )
     .fetch_all(db)
@@ -889,12 +900,11 @@ pub async fn check_domain(s: &AppState, host: &str) -> ApiResult<()> {
         return Err(ApiError::bad_request("Pyo uses this name itself."));
     }
     let mark = marker(&install_id(&s.db).await?);
-    let remote = c.services().await.map_err(anyhow::Error::from)?;
+    let remote = c.services().await?;
     let mine = remote.get(label).is_some_and(|(cm, _)| *cm == mark);
     let machine = c
         .devices()
-        .await
-        .map_err(anyhow::Error::from)?
+        .await?
         .iter()
         .any(|(_, full, _)| full.split('.').next() == Some(label));
     if (remote.contains_key(label) && !mine) || machine {
@@ -1037,11 +1047,10 @@ pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
         return Err(ApiError::conflict("Pyo uses this name already."));
     }
     let mark = marker(&install_id(&s.db).await?);
-    let remote = c.services().await.map_err(anyhow::Error::from)?;
+    let remote = c.services().await?;
     let machine = c
         .devices()
-        .await
-        .map_err(anyhow::Error::from)?
+        .await?
         .iter()
         .any(|(_, full, _)| full.split('.').next() == Some(name.as_str()));
     if remote.get(&name).is_some_and(|(cm, _)| *cm != mark) || machine {

@@ -94,7 +94,7 @@ pub fn parse_rule(s: &str) -> anyhow::Result<Rule> {
 }
 
 /// Where a peer on `port` goes, if anywhere.
-pub fn route<'a>(rules: &'a [Rule], port: u16, peer: IpAddr) -> Option<&'a str> {
+pub fn route(rules: &[Rule], port: u16, peer: IpAddr) -> Option<&str> {
     let class = class_of(peer)?;
     rules
         .iter()
@@ -141,10 +141,11 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
             }
         });
     }
-    while let Some(r) = tasks.join_next().await {
+    // The listeners run until the pod stops: one ending is a failure.
+    if let Some(r) = tasks.join_next().await {
         r?;
     }
-    Ok(())
+    anyhow::bail!("a listener stopped")
 }
 
 async fn pipe(mut conn: TcpStream, target: &'static str) {
