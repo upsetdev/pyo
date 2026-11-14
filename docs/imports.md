@@ -217,7 +217,7 @@ and https://railpack.com/languages/node (what Railpack reads).
 | Compose (Coolify services and one-click services, Dokploy raw compose) | A project of its own through Pyo's Compose plan, the platform's variables as its `.env` (so Coolify's `SERVICE_PASSWORD_*` and `SERVICE_FQDN_*` fill in). Each container's domains go to its HTTP port. |
 | Compose from a repository (Coolify `dockercompose` build pack, Dokploy git compose) | Not imported: use Pyo's Compose import from the repository. |
 | Variables | Variables. Secret when locked there (Coolify `is_shown_once`) or when the name looks secret (`compose::secret_key`, a superset of the dashboard's `SECRET_HINT`). Build only ones → build arguments. |
-| Domains | Service domains (TLS auto), live after the first deploy. A port in the domain picks the HTTP port. Domains the platform generated (sslip.io, nip.io, traefik.me) are dropped with a note. Paths are a note (Pyo serves the whole service). A domain seen twice goes to the first service. |
+| Domains | Service domains (TLS auto), live after the first deploy. A port in the domain picks the HTTP port. Domains the platform generated (sslip.io, nip.io, traefik.me) are dropped with a note, and their port stays as a private HTTP port for a free Pyo domain. Paths are a note (Pyo serves the whole service). A domain seen twice goes to the first service. |
 | Exposed ports | HTTP ports, public when a domain uses them. |
 | Published host ports (Coolify `ports_mappings`, Dokploy `ports`) | Public TCP or UDP ports through the gateway, when Pyo allows that port. |
 | Volumes | Volumes of 10 GiB, empty. A host directory becomes an empty volume too, with a note. File mounts are a note. |

@@ -389,6 +389,11 @@ impl Web {
             return;
         }
         if generated_domain(&host) {
+            // Its port still says where the service listens: kept private,
+            // so a free Pyo domain can go on it.
+            if let Some(port) = port {
+                self.port(port, false);
+            }
             self.warnings.push(format!(
                 "{host} is a free domain {} made. Add a free Pyo domain instead.",
                 platform.label()
