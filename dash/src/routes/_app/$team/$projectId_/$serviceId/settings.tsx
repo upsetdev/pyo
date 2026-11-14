@@ -239,10 +239,7 @@ function AppSettings({ app }: { app: Application }) {
                   )}
                 </Field>
               ) : (
-                <Field
-                  label="Dockerfile"
-                  hint="The default also finds a Containerfile."
-                >
+                <Field label="Dockerfile">
                   {(p) => (
                     <Input
                       {...p}

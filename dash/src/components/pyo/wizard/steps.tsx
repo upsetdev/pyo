@@ -296,7 +296,7 @@ export function SourceStep({ d, set, errors }: StepProps) {
             <Field
               label="Dockerfile path"
               error={err(errors, "dockerfilePath")}
-              hint="Relative to the build context. The default also finds a Containerfile."
+              hint="Relative to the build context."
             >
               {(p) => (
                 <Input

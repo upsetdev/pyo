@@ -399,7 +399,7 @@ export function ImportPanel({
               to build from Git.
             </>
           ) : (
-            "Built with its Dockerfile or Containerfile, or the framework detected."
+            "Built with its Dockerfile, or the framework detected."
           )
         ) : (
           "Private images use your registry logins from Integrations."

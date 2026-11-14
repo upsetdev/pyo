@@ -301,7 +301,7 @@ function Source({ d }: { d: Deployment }) {
             className="rounded-md bg-muted px-1.5 py-px text-[11.5px]"
             title={
               src.builder === "railpack"
-                ? "No Dockerfile or Containerfile, so Railpack detected how to build it"
+                ? "No Dockerfile, so Railpack detected how to build it"
                 : `Built with the repository's ${buildFileOf(src.buildpackLanguage)}`
             }
           >
