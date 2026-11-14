@@ -29,6 +29,9 @@ pub const NS: &str = "pyo-system";
 pub const SA: &str = "pyo-agent";
 /// The agent's user name in the API server's eyes.
 pub const AGENT_USER: &str = "system:serviceaccount:pyo-system:pyo-agent";
+/// The servers' tailnet pods (the agent's tailnet mode, a DaemonSet).
+pub const TAILNET_SA: &str = "pyo-tailnet";
+pub const TAILNET_USER: &str = "system:serviceaccount:pyo-system:pyo-tailnet";
 /// Namespaces the agent may write in carry this label, set to "true".
 pub const MANAGED_LABEL: &str = "pyo.dev/managed";
 /// The ClusterRole bound in each managed namespace.
@@ -262,10 +265,28 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
                 { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::FIREWALL_POLICY] },
                 // Websites on the servers' Tailscale addresses: its own Service.
                 { "apiGroups": [""], "resources": ["services"], "verbs": ["create"] },
-                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE] },
+                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE] },
+                // The Tailscale Services' wanted list, for the servers' tailnet pods.
+                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WANTED] },
             ]),
         ),
         role_binding(system::GATEWAY_NS, "pyo-agent", "Role", "pyo-agent"),
+        // The servers' tailnet pods (the agent's tailnet mode): Tailscale's
+        // certificates into their Secrets, and the Services to host.
+        json!({ "apiVersion": "v1", "kind": "ServiceAccount", "metadata": { "name": TAILNET_SA, "namespace": NS, "labels": labels() } }),
+        role(
+            system::GATEWAY_NS,
+            TAILNET_SA,
+            json!([
+                { "apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "patch", "delete"] },
+                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"], "resourceNames": [system::TAILNET_WANTED] },
+            ]),
+        ),
+        json!({
+            "apiVersion": RBAC, "kind": "RoleBinding", "metadata": { "name": TAILNET_SA, "namespace": system::GATEWAY_NS, "labels": labels() },
+            "roleRef": { "apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": TAILNET_SA },
+            "subjects": [{ "kind": "ServiceAccount", "name": TAILNET_SA, "namespace": NS }],
+        }),
         // Cluster-wide objects it owns, by name.
         cluster_role(
             "pyo-agent-cluster",
@@ -362,6 +383,13 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
     // The pod spec of whatever the request makes pods from.
     let pod_spec = "object.kind == 'Pod' ? object.spec : object.kind == 'CronJob' ? object.spec.jobTemplate.spec.template.spec : object.spec.template.spec";
     let validations = json!([
+        // The servers' tailnet pods: only Tailscale's certificates, in
+        // their Secrets (the agent's own rules below apply to them too).
+        {
+            "expression": format!("request.userInfo.username != '{TAILNET_USER}' || (variables.ns == '{gw}' && request.resource.resource == 'secrets' && variables.sub == '' && variables.objName.startsWith('{prefix}') && (request.operation == 'DELETE' || object.type == 'kubernetes.io/tls'))",
+                gw = system::GATEWAY_NS, prefix = system::TAILNET_TLS_PREFIX),
+            "message": "Pyo's tailnet pods only write Tailscale's certificates.",
+        },
         // Only namespaces it manages, and the named objects of kube-system.
         {
             "expression": "variables.ns == '' || request.resource.resource == 'namespaces' || variables.managed || variables.kubeSystemAllowed || variables.gatewayAllowed || variables.drain || variables.bundleAllowed",
@@ -513,7 +541,7 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
                 object.spec.all(k, k in ['targetRefs', 'connection', 'proxyProtocol']) && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name.endsWith('-ports') && has(t.sectionName)) && \
                 (!has(object.spec.connection) || (object.spec.connection.all(k, k in ['connectionLimit', 'maxAcceptPerSocketEvent']) && (!has(object.spec.connection.maxAcceptPerSocketEvent) || object.spec.connection.maxAcceptPerSocketEvent == 1) && (!has(object.spec.connection.connectionLimit) || (object.spec.connection.connectionLimit.all(k, k == 'value') && object.spec.connection.connectionLimit.value >= 1)))) && \
                 (!has(object.spec.proxyProtocol) || object.spec.proxyProtocol == {pp_optional})))) || \
-            (request.resource.resource == 'securitypolicies' && variables.objName != '{tailnet_gw}' && (request.operation == 'DELETE' || variables.portPolicy && (variables.toPortRoute || variables.toWebRoute) && variables.ownRoute && \
+            (request.resource.resource == 'securitypolicies' && variables.objName != '{tailnet_gw}' && (request.operation == 'DELETE' || variables.portPolicy && (variables.toPortRoute || variables.toWebRoute) && variables.ownRoute && !variables.objName.startsWith('{tn_route}') && \
                 object.spec.all(k, k in ['targetRefs', 'authorization']) && object.spec.authorization.all(k, k in ['defaultAction', 'rules']) && \
                 (!has(object.spec.authorization.rules) || object.spec.authorization.rules.all(r, r.all(k, k in ['name', 'action', 'principal']) && r.principal.all(k, k == 'clientCIDRs' || (k == 'clientIPGeoLocations' && variables.toWebRoute)) && \
                     (!has(r.principal.clientIPGeoLocations) || r.principal.clientIPGeoLocations.all(g, g.all(k, k == 'country'))))))) || \
@@ -532,7 +560,12 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
                 {waf_pinned}.all(k, k in object.spec.extProc[0] && object.spec.extProc[0][k] == ((has(object.metadata.annotations) && object.metadata.annotations[?'{waf_annotation}'].orValue('').contains({waf_mark})) ? {waf_block}[k] : {waf_pass}[k])))) || \
             (request.resource.resource == 'networkpolicies' && variables.objName == '{fw_policy}' && (request.operation == 'DELETE' || \
                 (object.spec.all(k, k in ['podSelector', 'policyTypes', 'ingress']) && object.spec.podSelector == {proxy_pods} && object.spec.policyTypes == ['Ingress']))) || \
-            (request.resource.resource == 'gateways' && variables.objName == '{tailnet_gw}' && (request.operation == 'DELETE' || object.spec == {tailnet_spec})) || \
+            (request.resource.resource == 'gateways' && variables.objName == '{tailnet_gw}' && (request.operation == 'DELETE' || object.spec == {tailnet_spec} || \
+                (object.spec.all(k, k in ['gatewayClassName', 'listeners']) && object.spec.gatewayClassName == 'pyo' && size(object.spec.listeners) == 2 && object.spec.listeners[0] == {tailnet_spec}.listeners[0] && \
+                    object.spec.listeners[1].all(k, k in ['name', 'port', 'protocol', 'tls', 'allowedRoutes']) && object.spec.listeners[1].name == '{tn_https}' && object.spec.listeners[1].port == {tn_https_port} && object.spec.listeners[1].protocol == 'HTTPS' && \
+                    object.spec.listeners[1].allowedRoutes == {same_ns} && object.spec.listeners[1].tls.all(k, k in ['mode', 'certificateRefs']) && object.spec.listeners[1].tls.mode == 'Terminate' && \
+                    size(object.spec.listeners[1].tls.certificateRefs) >= 1 && size(object.spec.listeners[1].tls.certificateRefs) <= 512 && \
+                    object.spec.listeners[1].tls.certificateRefs.all(c, c.all(k, k in ['group', 'kind', 'name']) && c.group == '' && c.kind == 'Secret' && c.name.startsWith('{tn_tls}'))))) || \
             (request.resource.resource == 'securitypolicies' && variables.objName == '{tailnet_gw}' && (request.operation == 'DELETE' || object.spec == {tailnet_policy} || \
                 (has(object.spec.authorization) && has(object.spec.authorization.rules) && size(object.spec.authorization.rules) == 2 && object.spec == {tailnet_policy_servers} && \
                     size({servers}) >= 1 && size({servers}) <= 512 && {servers}.all(c, c.matches({server_v4}) || c.matches({server_v6}))))) || \
@@ -540,11 +573,17 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             (request.resource.resource == 'services' && variables.objName == '{tw_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {tw_keys}) && \
                 object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && object.spec.ports == {tw_ports} && \
                 size(object.spec.externalIPs) >= 1 && size(object.spec.externalIPs) <= 512 && object.spec.externalIPs.all(ip, ip.matches({tw_v4}) || ip.matches({tw_v6}))))) || \
+            (request.resource.resource == 'services' && variables.objName == '{vip_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {tw_keys}) && \
+                object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && object.spec.ports == {vip_ports} && \
+                size(object.spec.externalIPs) >= 1 && size(object.spec.externalIPs) <= 1024 && object.spec.externalIPs.all(ip, ip.matches({tw_v4}) || ip.matches({tw_v6}))))) || \
+            (request.resource.resource == 'configmaps' && variables.objName == '{tn_wanted}' && (request.operation == 'DELETE' || (has(object.data) && object.data.all(k, k == '{tn_wanted_key}')))) || \
             (request.resource.resource == 'gateways' && variables.objName != '{tailnet_gw}' && (request.operation == 'DELETE' ? variables.objName != '{http_gw}' : (variables.objName == '{http_gw}' ? object.spec == {http_spec} : \
-                (object.metadata.labels[?'{label}'].orValue('') == 'https' && object.spec.gatewayClassName == 'pyo' && object.spec.listeners.all(l, l.port == 443 && l.protocol == 'HTTPS' && has(l.hostname) && l.tls.mode == 'Terminate' && l.tls.certificateRefs.all(c, c.name.startsWith('{tls}') && (!has(c.namespace) || c.namespace == '{gw}') && c.kind == 'Secret') && has(l.allowedRoutes) && l.allowedRoutes.namespaces.from == 'Same')) || \
+                (object.metadata.labels[?'{label}'].orValue('') == 'https' && object.spec.gatewayClassName == 'pyo' && object.spec.listeners.all(l, l.port == 443 && l.protocol == 'HTTPS' && has(l.hostname) && !l.hostname.lowerAscii().endsWith('{tn_suffix}') && l.tls.mode == 'Terminate' && l.tls.certificateRefs.all(c, c.name.startsWith('{tls}') && (!has(c.namespace) || c.namespace == '{gw}') && c.kind == 'Secret') && has(l.allowedRoutes) && l.allowedRoutes.namespaces.from == 'Same')) || \
                 (object.metadata.labels[?'{label}'].orValue('') == '{ports_label}' && variables.objName.endsWith('-ports') && object.spec.gatewayClassName == 'pyo' && object.spec.listeners.all(l, l.all(k, k in ['name', 'port', 'protocol', 'allowedRoutes']) && \
                     ((l.protocol == 'UDP' && !(l.port in {udp_reserved})) || (l.protocol == 'TCP' && !(l.port in {tcp_reserved}) && !(l.port >= 19000 && l.port <= 19003))) && l.allowedRoutes == {same_ns}))))) || \
-            (request.resource.resource == 'httproutes' && !(variables.objName in {tailnet_names}) && (request.operation == 'DELETE' || (object.spec.parentRefs.all(p, (!has(p.namespace) || p.namespace == '{gw}') && p.name != '{tailnet_gw}') && object.spec.rules.all(r, (!has(r.backendRefs) || r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}'))) && (!has(r.filters) || r.filters.all(f, f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https')))))) || \
+            (request.resource.resource == 'httproutes' && !(variables.objName in {tailnet_names}) && (request.operation == 'DELETE' || (object.spec.parentRefs.all(p, (!has(p.namespace) || p.namespace == '{gw}') && \
+                (p.name == '{tailnet_gw}' ? (variables.objName.startsWith('{tn_route}') && has(p.sectionName) && p.sectionName == '{tn_https}' && has(object.spec.hostnames) && size(object.spec.hostnames) >= 1 && object.spec.hostnames.all(h, h.lowerAscii().endsWith('{tn_suffix}'))) : \
+                 (!variables.objName.startsWith('{tn_route}') && (!has(object.spec.hostnames) || object.spec.hostnames.all(h, !h.lowerAscii().endsWith('{tn_suffix}')))))) && object.spec.rules.all(r, (!has(r.backendRefs) || r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}'))) && (!has(r.filters) || r.filters.all(f, f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https')))))) || \
             (request.resource.resource in ['tcproutes', 'udproutes'] && (request.operation == 'DELETE' || (object.spec.all(k, k in ['parentRefs', 'rules']) && object.spec.parentRefs.all(p, (!has(p.namespace) || p.namespace == '{gw}') && p.name.endsWith('-ports')) && size(object.spec.rules) == 1 && \
                 object.spec.rules.all(r, r.all(k, k == 'backendRefs') && r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}')))))) || \
             (request.resource.resource == 'backends' && variables.objName == '{waf}' && (request.operation == 'DELETE' || object.spec == {waf_backend})) || \
@@ -557,7 +596,7 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             // Pyo's own HTTPS listeners on the tailnet (system.rs): these
             // exact objects only, nothing else may attach to their Gateway.
             tailnet_gw = system::TAILNET_GATEWAY,
-            tailnet_spec = cel_literal(&system::tailnet_gateway_spec()),
+            tailnet_spec = cel_literal(&system::tailnet_gateway_spec(&[])),
             tailnet_policy = cel_literal(&system::tailnet_policy_spec(&[])),
             // With the servers' own rule: the spec as written, its addresses
             // only the servers' first /31s (/127s) (system.rs
@@ -566,12 +605,28 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             servers = TAILNET_SERVERS,
             server_v4 = cel_literal(&json!(system::TAILNET_SERVER_CIDR_V4)),
             server_v6 = cel_literal(&json!(system::TAILNET_SERVER_CIDR_V6)),
-            tailnet_names = cel_literal(&json!(system::TAILNET_ROUTES.iter().map(|r| r.0).collect::<Vec<_>>())),
-            tailnet_routes = system::TAILNET_ROUTES.iter().map(|(name, section, host, port)| format!(
+            tailnet_names = cel_literal(&json!(system::TAILNET_NAMES)),
+            tailnet_routes = [system::TAILNET_DASHBOARD, system::TAILNET_REGISTRY].iter().map(|(name, host, port)| format!(
                 "(request.resource.resource == 'backends' && variables.objName == '{name}' && (request.operation == 'DELETE' || object.spec == {spec})) || \
-                 (request.resource.resource == 'httproutes' && variables.objName == '{name}' && (request.operation == 'DELETE' || (size(object.spec.parentRefs) == 1 && object.spec.parentRefs[0].name == '{gw}' && object.spec.parentRefs[0].sectionName == '{section}' && (!has(object.spec.parentRefs[0].namespace) || object.spec.parentRefs[0].namespace == '{ns}') && \
+                 (request.resource.resource == 'httproutes' && variables.objName == '{name}' && (request.operation == 'DELETE' || (has(object.spec.hostnames) && size(object.spec.hostnames) == 1 && object.spec.hostnames.all(h, h.matches({host_re})) && \
+                    size(object.spec.parentRefs) == 1 && object.spec.parentRefs[0].name == '{gw}' && object.spec.parentRefs[0].sectionName == '{section}' && (!has(object.spec.parentRefs[0].namespace) || object.spec.parentRefs[0].namespace == '{ns}') && \
                     size(object.spec.rules) == 1 && object.spec.rules.all(r, !has(r.filters) && size(r.backendRefs) == 1 && r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && b.name == '{name}' && (!has(b.namespace) || b.namespace == '{ns}'))))))",
-                spec = cel_literal(&system::tailnet_backend_spec(host, *port)), gw = system::TAILNET_GATEWAY, ns = system::GATEWAY_NS)).collect::<Vec<_>>().join(" || "),
+                spec = cel_literal(&system::tailnet_backend_spec(host, *port)),
+                host_re = cel_literal(&json!(system::TAILNET_HOST_RE)),
+                gw = system::TAILNET_GATEWAY, section = system::TAILNET_HTTPS_SECTION, ns = system::GATEWAY_NS)).chain([format!(
+                "(request.resource.resource == 'httproutes' && variables.objName == '{name}' && (request.operation == 'DELETE' || (!has(object.spec.hostnames) && \
+                    size(object.spec.parentRefs) == 1 && object.spec.parentRefs[0].name == '{gw}' && object.spec.parentRefs[0].sectionName == '{section}' && (!has(object.spec.parentRefs[0].namespace) || object.spec.parentRefs[0].namespace == '{ns}') && \
+                    size(object.spec.rules) == 1 && object.spec.rules.all(r, (!has(r.backendRefs) || size(r.backendRefs) == 0) && size(r.filters) == 1 && r.filters.all(f, f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https')))))",
+                name = system::TAILNET_REDIRECT, gw = system::TAILNET_GATEWAY, section = system::TAILNET_HTTP_SECTION, ns = system::GATEWAY_NS)]).collect::<Vec<_>>().join(" || "),
+            tn_route = system::TAILNET_ROUTE_PREFIX,
+            tn_https = system::TAILNET_HTTPS_SECTION,
+            tn_https_port = system::TAILNET_HTTPS_PORT,
+            tn_tls = system::TAILNET_TLS_PREFIX,
+            tn_suffix = system::TAILNET_SUFFIX,
+            tn_wanted = system::TAILNET_WANTED,
+            tn_wanted_key = system::TAILNET_WANTED_KEY,
+            vip_svc = system::TAILNET_VIP_SERVICE,
+            vip_ports = cel_literal(&system::tailnet_vip_ports()),
             // Websites on the servers' Tailscale addresses (system.rs): this
             // Service only, onto the proxies, the websites' ports, and
             // Tailscale's addresses alone.
@@ -639,6 +694,7 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
         { "name": "systemException", "expression": "variables.hasPods && (\
             (variables.ns == 'pyo-system' && object.kind == 'Deployment' && variables.objName.startsWith('pyo-builder-') && (!has(variables.spec.volumes) || variables.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path.startsWith('/var/lib/pyo-builder-'))) && variables.containers.all(c, c.name == 'buildkitd' || !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged) && !has(variables.spec.hostNetwork) && !has(variables.spec.hostPID)) || \
             (variables.ns == 'pyo-system' && object.kind == 'DaemonSet' && variables.objName == 'pyo-vector' && (!has(variables.spec.volumes) || variables.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path in ['/var/lib/pyo-vector', '/var/log', '/proc', '/sys'])) && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged) && variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, !(m.name in ['var-log', 'host-proc', 'host-sys']) || (has(m.readOnly) && m.readOnly))) && !has(variables.spec.hostNetwork)) || \
+            (variables.ns == 'pyo-system' && object.kind == 'DaemonSet' && variables.objName == 'pyo-tailnet' && has(variables.spec.volumes) && variables.spec.volumes.all(v, !has(v.hostPath) || (v.name == 'tailscale' && v.hostPath.path == '/var/run/tailscale')) && variables.containers.all(c, (!has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged) && (!has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'tailscale' || (has(m.readOnly) && m.readOnly)))) && !has(variables.spec.hostNetwork) && !has(variables.spec.hostPID) && !has(variables.spec.hostIPC)) || \
             (variables.ns == 'pyo-system' && object.kind == 'Pod' && variables.objName.startsWith('pyo-locate-') && (!has(variables.spec.volumes) || variables.spec.volumes.all(v, !has(v.hostPath))) && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged) && !has(variables.spec.hostPID)) || \
             (variables.ns == 'kube-system' && object.kind == 'DaemonSet' && variables.objName == 'nvidia-device-plugin' && (!has(variables.spec.volumes) || variables.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path == '/var/lib/kubelet/device-plugins')) && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged) && !has(variables.spec.hostNetwork)))" },
     ]);
@@ -649,7 +705,7 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             "spec": {
                 "failurePolicy": "Fail",
                 "matchConstraints": { "resourceRules": [{ "apiGroups": ["*"], "apiVersions": ["*"], "operations": ["CREATE", "UPDATE", "DELETE"], "resources": ["*/*"] }] },
-                "matchConditions": [{ "name": "pyo-agent", "expression": format!("request.userInfo.username == '{AGENT_USER}'") }],
+                "matchConditions": [{ "name": "pyo-agent", "expression": format!("request.userInfo.username in ['{AGENT_USER}', '{TAILNET_USER}']") }],
                 "variables": variables,
                 "validations": validations,
             },
@@ -1219,7 +1275,7 @@ mod tests {
             svc,
             [
                 &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["create"] }),
-                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE] }),
+                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE] }),
             ]
         );
         let policy = admission("w", "g");

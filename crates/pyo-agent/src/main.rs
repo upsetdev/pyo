@@ -32,6 +32,7 @@ mod runs;
 mod scope;
 mod terminal;
 mod tls;
+mod tailnet;
 mod upgrade;
 mod volumes;
 mod waf;
@@ -142,6 +143,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     // `pyo-agent upgrade <release.json>`: the upgrader Job (upgrade.rs).
+    // A server's tailnet pod (tailnet.rs).
+    if args.get(1).map(String::as_str) == Some("tailnet") {
+        return tailnet::run_pod().await;
+    }
     if args.get(1).map(String::as_str) == Some("upgrade") {
         let path = args
             .get(2)
@@ -168,10 +173,7 @@ async fn main() -> anyhow::Result<()> {
     // Read only: nothing of Pyo's own is installed or changed either.
     if !policy.read_only {
         tokio::spawn(tls::ensure(agent.kube.clone()));
-        tokio::spawn(gateway::ensure(
-            agent.kube.clone(),
-            agent.api.same_cluster(),
-        ));
+        tokio::spawn(gateway::ensure(agent.kube.clone()));
         tokio::spawn(locate::run(agent.kube.clone()));
         tokio::spawn(gpu::run(agent.kube.clone()));
         tokio::spawn(gateway::collect_loop(agent.clone()));
@@ -197,6 +199,7 @@ async fn heartbeat_loop(agent: Agent) {
             Ok(mut hb) => {
                 hb.host_proof = agent.api.host_proof(&agent.kube).await;
                 hb.scope = Some(scope::detect(&agent.kube, policy.clone()).await);
+                hb.tailnet = tailnet::statuses(&agent.kube).await;
                 match agent.api.heartbeat(&hb).await {
                     Ok(_) if policy.read_only => {}
                     Ok(reply) => {
@@ -213,6 +216,9 @@ async fn heartbeat_loop(agent: Agent) {
                             gateway::set_tailnet_web(&agent.kube, address == "tailscale").await;
                         }
                         databases::label_teams(&agent.kube, &reply.project_teams).await;
+                        if let Some(t) = &reply.tailnet {
+                            tailnet::apply(&agent.kube, t, agent.api.same_cluster()).await;
+                        }
                         if let Some(on) = reply.observability
                             && observability_applied != Some(on)
                         {

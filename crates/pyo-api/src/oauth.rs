@@ -72,7 +72,7 @@ pub fn base_url(headers: &HeaderMap) -> String {
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost:8000");
-    pick_base_url(configured_public_url(), crate::web::public_url(), host)
+    pick_base_url(configured_public_url(), &crate::web::https_urls(), host)
 }
 
 fn configured_public_url() -> Option<&'static str> {
@@ -86,7 +86,7 @@ fn configured_public_url() -> Option<&'static str> {
     .as_deref()
 }
 
-fn pick_base_url(configured: Option<&str>, tailnet: Option<&str>, host: &str) -> String {
+fn pick_base_url(configured: Option<&str>, https: &[String], host: &str) -> String {
     if let Some(u) = configured {
         return u.to_owned();
     }
@@ -96,14 +96,13 @@ fn pick_base_url(configured: Option<&str>, tailnet: Option<&str>, host: &str) ->
         } else {
             host
         };
-    match tailnet {
-        Some(t)
-            if t.strip_prefix("https://")
-                .is_some_and(|h| h.eq_ignore_ascii_case(host)) =>
-        {
-            t.to_owned()
-        }
-        _ => format!("http://{host}"),
+    let bare = host.strip_suffix(":443").unwrap_or(host);
+    match https.iter().find(|t| {
+        t.strip_prefix("https://")
+            .is_some_and(|h| h.eq_ignore_ascii_case(bare))
+    }) {
+        Some(t) => t.clone(),
+        None => format!("http://{host}"),
     }
 }
 
@@ -225,7 +224,7 @@ fn resource_ok(asked: Option<&str>, ours: &[String]) -> bool {
 fn our_resources(s: &AppState, headers: &HeaderMap) -> Vec<String> {
     let mut bases = vec![base_url(headers)];
     bases.extend(configured_public_url().map(str::to_owned));
-    bases.extend(crate::web::public_url().map(str::to_owned));
+    bases.extend(crate::web::https_urls());
     bases.extend(
         Some(s.config.tailnet_api_url.trim_end_matches('/').to_owned()).filter(|u| !u.is_empty()),
     );
@@ -726,18 +725,18 @@ mod tests {
     #[test]
     fn tokens_are_for_this_mcp_server_only() {
         let ours = [
-            "https://pyo.tail1.ts.net:8443/api/mcp".to_owned(),
+            "https://pyo.tail1.ts.net/api/mcp".to_owned(),
             "http://100.64.0.1:8000/api/mcp".to_owned(),
         ];
         assert!(resource_ok(None, &ours));
         assert!(resource_ok(Some(""), &ours));
         assert!(resource_ok(
-            Some("https://pyo.tail1.ts.net:8443/api/mcp"),
+            Some("https://pyo.tail1.ts.net/api/mcp"),
             &ours
         ));
         assert!(resource_ok(Some("http://100.64.0.1:8000/api/mcp"), &ours));
         assert!(resource_ok(
-            Some("https://pyo.tail1.ts.net:8443/api/mcp/"),
+            Some("https://pyo.tail1.ts.net/api/mcp/"),
             &ours
         ));
         assert!(!resource_ok(
@@ -745,14 +744,14 @@ mod tests {
             &ours
         ));
         assert!(!resource_ok(
-            Some("https://pyo.tail1.ts.net:8443/api"),
+            Some("https://pyo.tail1.ts.net/api"),
             &ours
         ));
     }
 
     #[test]
     fn the_issuer_isnt_read_from_forwarded_headers() {
-        let tailnet = Some("https://pyo.tail1.ts.net:8443");
+        let tailnet = &["https://pyo.tail1.ts.net".to_owned()];
         // Set: always that.
         assert_eq!(
             pick_base_url(Some("https://pyo.example.com"), tailnet, "evil.example.com"),
@@ -760,12 +759,12 @@ mod tests {
         );
         // The tailnet name: https.
         assert_eq!(
-            pick_base_url(None, tailnet, "pyo.tail1.ts.net:8443"),
-            "https://pyo.tail1.ts.net:8443"
+            pick_base_url(None, tailnet, "pyo.tail1.ts.net"),
+            "https://pyo.tail1.ts.net"
         );
         assert_eq!(
-            pick_base_url(None, tailnet, "PYO.tail1.ts.net:8443"),
-            "https://pyo.tail1.ts.net:8443"
+            pick_base_url(None, tailnet, "PYO.tail1.ts.net"),
+            "https://pyo.tail1.ts.net"
         );
         // Anything else: plain http at that host, as it came.
         assert_eq!(
@@ -773,11 +772,11 @@ mod tests {
             "http://100.64.0.1:8000"
         );
         assert_eq!(
-            pick_base_url(None, None, "localhost:8000"),
+            pick_base_url(None, &[], "localhost:8000"),
             "http://localhost:8000"
         );
         assert_eq!(
-            pick_base_url(None, None, "evil.com/x@"),
+            pick_base_url(None, &[], "evil.com/x@"),
             "http://localhost:8000"
         );
         let mut h = HeaderMap::new();

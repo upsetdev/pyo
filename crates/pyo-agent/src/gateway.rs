@@ -168,6 +168,11 @@ pub fn port_route_name(spec: &DeploySpec, p: &PortSpec) -> String {
 
 /// The objects for a service's domains and proxied TCP and UDP ports (none
 /// without either).
+/// A service's route on the tailnet Gateway, for a port.
+pub fn tailnet_route_name(base: &str, port: &str) -> String {
+    format!("{}{base}-{port}", system::TAILNET_ROUTE_PREFIX)
+}
+
 pub fn route_objects(spec: &DeploySpec) -> Routes {
     let base = base_name(spec);
     let labels = json!({ "app.kubernetes.io/managed-by": MANAGER, SERVICE_LABEL: spec.service.service_id, "pyo/project-namespace": spec.service.namespace });
@@ -274,6 +279,9 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         out.objects.push(backend(p));
     }
     let reachable = |d: &&DomainSpec| ports.contains(&d.port_name.as_str());
+    // Tailnet names go on the tailnet Gateway only (below), never on a
+    // public listener or the shared :80.
+    let public = |d: &&DomainSpec| !system::is_tailnet_host(&d.hostname);
 
     // HTTPS: a Gateway with a listener per domain, a route per port.
     let secure: Vec<&DomainSpec> = spec
@@ -281,6 +289,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         .iter()
         .filter(|d| !d.tls.is_empty())
         .filter(reachable)
+        .filter(public)
         .collect();
     if !secure.is_empty() {
         let mut listeners = vec![];
@@ -342,6 +351,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
             .domains
             .iter()
             .filter(reachable)
+            .filter(public)
             .filter(|d| d.port_name == *p && !(!d.tls.is_empty() && d.redirect_https))
             .map(|d| d.hostname.as_str())
             .collect();
@@ -353,8 +363,28 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         }
     }
 
+    // Tailnet names: a route per port on the tailnet Gateway's HTTPS
+    // listener, with Tailscale's certificate (the Gateway's own).
+    for p in &ports {
+        let hosts: Vec<&str> = spec
+            .domains
+            .iter()
+            .filter(reachable)
+            .filter(|d| d.port_name == *p && system::is_tailnet_host(&d.hostname))
+            .map(|d| d.hostname.as_str())
+            .collect();
+        if !hosts.is_empty() {
+            out.objects.push(json!({
+                "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(&tailnet_route_name(&base, p)),
+                "spec": { "parentRefs": [{ "name": system::TAILNET_GATEWAY, "sectionName": system::TAILNET_HTTPS_SECTION }], "hostnames": hosts, "rules": [{ "backendRefs": [backend_ref(p)] }] },
+            }));
+        }
+    }
+
     // The service's firewall on each of its routes (not the redirect to
-    // HTTPS): addresses and countries, and its rate limits.
+    // HTTPS): addresses and countries, and its rate limits. Not on tailnet
+    // routes: a route's own SecurityPolicy would replace the tailnet
+    // Gateway's, which admits the tailnet only.
     let layers = fw_layers(spec, None);
     let authorization =
         pyo_proto::firewall::authorization(&layers.iter().collect::<Vec<_>>(), true);
@@ -373,7 +403,9 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
     for name in names {
         let route_ref =
             json!([{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": name }]);
-        if let Some(a) = &authorization {
+        let on_tailnet = name.starts_with(system::TAILNET_ROUTE_PREFIX);
+        let authorization = authorization.as_ref().filter(|_| !on_tailnet);
+        if let Some(a) = authorization {
             out.objects.push(json!({
                 "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "SecurityPolicy", "metadata": meta(&name),
                 "spec": { "targetRefs": route_ref, "authorization": a },
@@ -453,6 +485,10 @@ pub fn ip_blocks_json(layers: &[Firewall]) -> String {
     pyo_proto::firewall::ip_blocks(&layers.iter().collect::<Vec<_>>())
         .map(|b| serde_json::to_string(&b).unwrap_or_default())
         .unwrap_or_default()
+}
+
+pub fn api_of_kind(client: &Client, kind: &str) -> Api<DynamicObject> {
+    api_of(client, kind)
 }
 
 fn api_of(client: &Client, kind: &str) -> Api<DynamicObject> {
@@ -1229,59 +1265,26 @@ pub async fn remove(client: &Client, service_id: &str) {
 /// client policies (with origin pull as last set). Retried until the APIs
 /// exist (Envoy Gateway installs a minute or so after the manifest). Run at
 /// each start, so a new GeoIP image (`PYO_GEOIP_IMAGE`, from the install
-/// manifest that also allows it) reaches the proxies, which then roll.
-/// `pyo_host`: this is the cluster Pyo runs on, so Pyo's own HTTPS listeners
-/// on the tailnet are applied too (system.rs `tailnet_objects`; without the
-/// host's certificate they just stay unready, and only admit the tailnet).
-/// Their policy then follows the servers as they join and leave.
-pub async fn ensure(client: Client, pyo_host: bool) {
-    let mut servers = loop {
-        let r = match ensure_once(&client).await {
-            Ok(()) if pyo_host => ensure_tailnet(&client).await,
-            Ok(()) => Ok(Vec::new()),
-            Err(e) => Err(e),
-        };
-        match r {
-            Ok(servers) => {
+/// manifest that also allows it) reaches the proxies, which then roll. The
+/// tailnet Gateway follows the API's wanted list (tailnet.rs).
+pub async fn ensure(client: Client) {
+    loop {
+        match ensure_once(&client).await {
+            Ok(()) => {
                 tracing::info!("gateway ready");
-                break servers;
+                return;
             }
             Err(e) => {
                 tracing::info!(error = %format!("{e:#}"), "gateway not ready yet; retrying");
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
         }
-    };
-    if !pyo_host {
-        return;
-    }
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tick.tick().await;
-        match server_cidrs(&client).await {
-            Ok(now) if now != servers => match api_of(&client, "SecurityPolicy")
-                .patch(
-                    system::TAILNET_GATEWAY,
-                    &pp(),
-                    &Patch::Apply(system::tailnet_policy(&now)),
-                )
-                .await
-            {
-                Ok(_) => servers = now,
-                Err(e) => {
-                    tracing::warn!(error = %e, "couldn't update the tailnet listeners' policy")
-                }
-            },
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "couldn't list the servers"),
-        }
     }
 }
 
 /// The servers' own addresses on the pod network, as the tailnet listeners
 /// admit them (system.rs `tailnet_server_cidrs`).
-async fn server_cidrs(client: &Client) -> kube::Result<Vec<String>> {
+pub async fn server_cidrs(client: &Client) -> kube::Result<Vec<String>> {
     let nodes = Api::<k8s_openapi::api::core::v1::Node>::all(client.clone())
         .list(&ListParams::default())
         .await?
@@ -1299,21 +1302,6 @@ async fn server_cidrs(client: &Client) -> kube::Result<Vec<String>> {
     Ok(system::tailnet_server_cidrs(
         ranges.iter().map(String::as_str),
     ))
-}
-
-/// Pyo's dashboard and registry door over HTTPS, on the tailnet only (and
-/// the servers themselves): the servers' addresses it admits.
-async fn ensure_tailnet(client: &Client) -> anyhow::Result<Vec<String>> {
-    let servers = server_cidrs(client).await?;
-    for o in system::tailnet_objects(&servers) {
-        let kind = o["kind"].as_str().unwrap_or("");
-        let name = o["metadata"]["name"].as_str().unwrap_or("");
-        api_of(client, kind)
-            .patch(name, &pp(), &Patch::Apply(&o))
-            .await
-            .map_err(|e| anyhow::anyhow!("{kind} {name}: {e}"))?;
-    }
-    Ok(servers)
 }
 
 /// The cluster's public traffic as the API last said: 0 not heard yet,
@@ -1832,6 +1820,51 @@ mod tests {
         ];
         s.domains = domains;
         s
+    }
+
+    /// A tailnet name is only on the tailnet Gateway: never a public
+    /// listener or the shared :80 (a public request with that Host or SNI
+    /// finds no route), and no firewall SecurityPolicy replaces the tailnet
+    /// Gateway's (which admits only the tailnet); rate limits still apply.
+    #[test]
+    fn tailnet_names_stay_on_the_tailnet_gateway() {
+        let mut s = spec(vec![
+            domain("blog.tail1234.ts.net", "http", "", false),
+            domain("Docs.Tail1234.TS.NET", "http", "letsencrypt", true),
+            domain("shop.example.com", "http", "letsencrypt", true),
+        ]);
+        s.firewall = Some(Firewall {
+            rules: vec![pyo_proto::firewall::FirewallRule {
+                id: "fwr_1".into(),
+                action: "rateLimit".into(),
+                operator: "in".into(),
+                sources: vec![],
+                limit: Some(pyo_proto::firewall::RateLimit { requests: 60, per: "minute".into() }),
+            }, pyo_proto::firewall::FirewallRule {
+                id: "fwr_2".into(),
+                action: "block".into(),
+                operator: "in".into(),
+                sources: vec!["203.0.113.0/24".into()],
+                limit: None,
+            }],
+        });
+        let r = route_objects(&s);
+        let tn = find(&r, "HTTPRoute", "tn--shop-web-http");
+        assert_eq!(
+            tn["spec"]["parentRefs"],
+            json!([{ "name": system::TAILNET_GATEWAY, "sectionName": system::TAILNET_HTTPS_SECTION }])
+        );
+        assert_eq!(tn["spec"]["hostnames"], json!(["blog.tail1234.ts.net", "Docs.Tail1234.TS.NET"]));
+        for o in &r.objects {
+            let hosts = o["spec"]["hostnames"].to_string() + &o["spec"]["listeners"].to_string();
+            if o["metadata"]["name"] != "tn--shop-web-http" {
+                assert!(!hosts.to_ascii_lowercase().contains(".ts.net"), "{o}");
+            }
+        }
+        assert!(!r.objects.iter().any(|o| o["kind"] == "Certificate" && o.to_string().contains("ts.net")));
+        assert!(!r.objects.iter().any(|o| o["kind"] == "SecurityPolicy" && o["metadata"]["name"] == "tn--shop-web-http"));
+        assert!(r.objects.iter().any(|o| o["kind"] == "SecurityPolicy" && o["metadata"]["name"] == "shop-web-https-http"));
+        assert!(r.objects.iter().any(|o| o["kind"] == "BackendTrafficPolicy" && o["metadata"]["name"] == "tn--shop-web-http"));
     }
 
     fn domain(host: &str, port: &str, tls: &str, redirect: bool) -> DomainSpec {
@@ -2966,7 +2999,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(900), crate::tls::ensure(sa.clone()))
             .await
             .expect("cert-manager");
-        tokio::time::timeout(Duration::from_secs(900), ensure(sa.clone(), false))
+        tokio::time::timeout(Duration::from_secs(900), ensure(sa.clone()))
             .await
             .expect("the gateway");
         eprintln!("installed");

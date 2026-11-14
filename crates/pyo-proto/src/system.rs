@@ -20,6 +20,7 @@
 //! they're published on the servers' addresses is the cluster's public
 //! traffic setting ([`envoy_proxy`]).
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// cert-manager release (Helm chart from charts.jetstack.io).
@@ -596,8 +597,8 @@ pub fn envoy_proxy(geoip_image: &str, public: bool) -> Value {
 /// this Service too, and ServiceLB would then publish them on every
 /// address of the server, the Tailscale one included. A connection there
 /// would go through ServiceLB's pod (arriving from that pod, which the
-/// tailnet-only policy refuses), competing with `TAILNET_SERVICE`, which
-/// alone takes them. The patch drops them from what Envoy Gateway renders.
+/// tailnet-only policy refuses), competing with `TAILNET_VIP_SERVICE`,
+/// which alone takes them. The patch drops them from what Envoy Gateway renders.
 fn envoy_service(public: bool) -> Value {
     let drop: Vec<Value> = TAILNET_PORTS
         .iter()
@@ -642,75 +643,101 @@ pub fn http_gateway() -> Value {
     })
 }
 
-// ── Pyo itself over HTTPS, on the tailnet only ──────────────────────────────
+// ── Names on the tailnet (Tailscale Services) ───────────────────────────────
 //
-// On the cluster Pyo runs on, its agent puts the dashboard and the
-// registry's door behind the gateway with Tailscale's certificate for the
-// host's tailnet name (written into TAILNET_TLS by the host's renew timer).
-// Each on a port of its own, never 80/443 (the websites'), and only for
-// tailnet addresses and the servers themselves (`tailnet_server_cidrs`).
+// Pyo itself ("pyo.<tailnet>.ts.net", the dashboard and API), its registry
+// ("registry.<tailnet>.ts.net") and services' tailnet domains
+// ("blog.<tailnet>.ts.net") are Tailscale Services: each a name with its
+// own Tailscale addresses (VIPs), hosted by every server that runs a proxy.
+// tailscaled hands a VIP's packets to the server (a `Tun` serve entry,
+// pyo-tailnet's DaemonSet), and `TAILNET_VIP_SERVICE` (externalIPs,
+// externalTrafficPolicy Local) takes ports 80 and 443 to this Gateway's own
+// listeners on the proxy there, which sees the device's own address.
+// Tailscale's certificate for each name is a Secret
+// (`tailnet_tls_secret`), fetched on one of the servers.
 //
-// Their ports are kept off the proxies' own Service ([`envoy_proxy`]), so
-// ServiceLB never publishes them (it would, on every address of the server,
-// and hand those connections over from its own pod, which the policy below
-// refuses). The host's Tailscale address gets a Service of its own instead
-// (`TAILNET_SERVICE`, externalIPs, externalTrafficPolicy Local: kube-proxy
-// takes a connection straight to the proxy, which sees the device's own
-// address), written by the host's tailnet-cert timer (deploy/install.sh,
-// scripts/pyo-up.sh) with the certificate: not by the agent. The
-// SecurityPolicy still refuses everyone but tailnet addresses and the
-// servers, whatever Host or SNI they send.
+// The listeners' ports are kept off the proxies' own Service
+// ([`envoy_proxy`]), so ServiceLB never publishes them (it would, on every
+// address of the server, and hand those connections over from its own pod,
+// which the policy below refuses). The SecurityPolicy on the whole Gateway
+// still refuses everyone but tailnet addresses and the servers, whatever
+// Host or SNI they send. No other SecurityPolicy targets its routes (one
+// would replace it), and the public Gateways never carry a tailnet name.
 
-/// The Gateway of Pyo's own HTTPS listeners.
+/// The Gateway of the names on the tailnet.
 pub const TAILNET_GATEWAY: &str = "pyo-tailnet";
-/// Tailscale's certificate for the host's tailnet name (pyo-gateway).
-pub const TAILNET_TLS: &str = "pyo-tls-tailnet";
-/// The Service that takes the tailnet listeners' connections on the host's
-/// Tailscale address (pyo-gateway; the host writes it).
-pub const TAILNET_SERVICE: &str = "pyo-tailnet";
-/// The dashboard (and API) over HTTPS.
-pub const DASHBOARD_PORT: i32 = 8443;
-/// Pyo registry's door for teams' own images.
-pub const REGISTRY_PORT: i32 = 5443;
-/// Kept for S3 (object storage, to be built in): its listener and route
-/// will come with it, as a third entry in `tailnet_listener`'s list and
-/// `tailnet_objects`.
-pub const S3_PORT: i32 = 3443;
-/// Ports of Pyo's own HTTPS listeners; services can't publish them.
-pub const TAILNET_PORTS: [i32; 3] = [DASHBOARD_PORT, REGISTRY_PORT, S3_PORT];
+/// Its HTTPS listener (port 443 of the VIPs).
+pub const TAILNET_HTTPS_PORT: i32 = 7443;
+/// Its HTTP listener (port 80 of the VIPs): a redirect to HTTPS.
+pub const TAILNET_HTTP_PORT: i32 = 7080;
+/// The listeners' names.
+pub const TAILNET_HTTPS_SECTION: &str = "web";
+pub const TAILNET_HTTP_SECTION: &str = "web-http";
+/// Ports of the tailnet listeners; services can't publish them.
+pub const TAILNET_PORTS: [i32; 2] = [TAILNET_HTTPS_PORT, TAILNET_HTTP_PORT];
 /// Tailscale's address ranges: the only sources the listeners admit.
 pub const TAILNET_CIDRS: [&str; 2] = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"];
+/// Prefix of the Secrets with Tailscale's certificates (pyo-gateway): a
+/// [`TLS_SECRET_PREFIX`] one no service's can be (those go on with a
+/// namespace, which never starts with "-").
+pub const TAILNET_TLS_PREFIX: &str = "pyo-tls--";
+/// The redirect to HTTPS on the HTTP listener.
+pub const TAILNET_REDIRECT: &str = "pyo-tailnet-redirect";
+/// The Service that takes the VIPs' ports 80 and 443 to the listeners.
+pub const TAILNET_VIP_SERVICE: &str = "pyo-tailnet-vip";
+/// Tailnet names end with this (MagicDNS).
+pub const TAILNET_SUFFIX: &str = ".ts.net";
+/// A tailnet name, as the admission policy checks Pyo's own routes' ones.
+pub const TAILNET_HOST_RE: &str = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\.ts\.net$";
+/// Services' routes on the tailnet Gateway start with this ("tn--<base>-<port>",
+/// never a project's: those start with its namespace).
+pub const TAILNET_ROUTE_PREFIX: &str = "tn--";
+/// The ConfigMap with the Services the servers host (pyo-gateway), for the
+/// servers' tailnet pods, and its one key.
+pub const TAILNET_WANTED: &str = "pyo-tailnet-services";
+pub const TAILNET_WANTED_KEY: &str = "services.json";
 
-fn tailnet_listener(name: &str, port: i32) -> Value {
-    json!({
-        "name": name, "port": port, "protocol": "HTTPS",
-        "tls": { "mode": "Terminate", "certificateRefs": [{ "group": "", "kind": "Secret", "name": TAILNET_TLS }] },
+/// A tailnet name ("blog.tail1234.ts.net").
+pub fn is_tailnet_host(host: &str) -> bool {
+    host.to_ascii_lowercase().ends_with(TAILNET_SUFFIX)
+}
+
+/// The Secret with Tailscale's certificate for a Service ("blog").
+pub fn tailnet_tls_secret(service: &str) -> String {
+    format!("{TAILNET_TLS_PREFIX}{service}")
+}
+
+/// The Gateway's spec. The HTTPS listener comes once a certificate is
+/// there (`certs`: Secrets, sorted): Envoy picks one by SNI.
+pub fn tailnet_gateway_spec(certs: &[String]) -> Value {
+    let mut listeners = vec![json!({
+        "name": TAILNET_HTTP_SECTION, "port": TAILNET_HTTP_PORT, "protocol": "HTTP",
         "allowedRoutes": { "namespaces": { "from": "Same" } },
-    })
+    })];
+    if !certs.is_empty() {
+        let refs: Vec<Value> = certs
+            .iter()
+            .map(|c| json!({ "group": "", "kind": "Secret", "name": c }))
+            .collect();
+        listeners.push(json!({
+            "name": TAILNET_HTTPS_SECTION, "port": TAILNET_HTTPS_PORT, "protocol": "HTTPS",
+            "tls": { "mode": "Terminate", "certificateRefs": refs },
+            "allowedRoutes": { "namespaces": { "from": "Same" } },
+        }));
+    }
+    json!({ "gatewayClassName": "pyo", "listeners": listeners })
 }
 
-pub fn tailnet_gateway_spec() -> Value {
-    json!({
-        "gatewayClassName": "pyo",
-        "listeners": [tailnet_listener("dashboard", DASHBOARD_PORT), tailnet_listener("registry", REGISTRY_PORT)],
-    })
-}
-
-/// (route and backend name, listener, in-cluster host, port)
-pub const TAILNET_ROUTES: [(&str, &str, &str, i32); 2] = [
-    (
-        "pyo-dashboard",
-        "dashboard",
-        "pyo.pyo-system.svc.cluster.local",
-        8000,
-    ),
-    (
-        "pyo-registry-door",
-        "registry",
-        "pyo-registry-door.pyo-system.svc.cluster.local",
-        5006,
-    ),
-];
+/// Pyo's own routes: (route and backend name, in-cluster host, port).
+pub const TAILNET_DASHBOARD: (&str, &str, i32) =
+    ("pyo-dashboard", "pyo.pyo-system.svc.cluster.local", 8000);
+pub const TAILNET_REGISTRY: (&str, &str, i32) = (
+    "pyo-registry-door",
+    "pyo-registry-door.pyo-system.svc.cluster.local",
+    5006,
+);
+/// Names of the objects the Gateway's fixed part uses.
+pub const TAILNET_NAMES: [&str; 3] = [TAILNET_DASHBOARD.0, TAILNET_REGISTRY.0, TAILNET_REDIRECT];
 
 /// A Backend's spec as the API server keeps it: with the `type` Envoy
 /// Gateway's schema fills in, so the admission policy can compare the
@@ -721,6 +748,24 @@ pub fn fqdn_backend_spec(host: &str, port: i32) -> Value {
 
 pub fn tailnet_backend_spec(host: &str, port: i32) -> Value {
     fqdn_backend_spec(host, port)
+}
+
+/// One of Pyo's own routes on the HTTPS listener, for its tailnet name.
+pub fn tailnet_route_spec(name: &str, hostname: &str) -> Value {
+    json!({
+        "parentRefs": [{ "name": TAILNET_GATEWAY, "sectionName": TAILNET_HTTPS_SECTION }],
+        "hostnames": [hostname],
+        // No request timeout: image layers and long-polls take their time.
+        "rules": [{ "backendRefs": [{ "group": "gateway.envoyproxy.io", "kind": "Backend", "name": name }], "timeouts": { "request": "0s" } }],
+    })
+}
+
+/// The HTTP listener's one route: everything to HTTPS.
+pub fn tailnet_redirect_spec() -> Value {
+    json!({
+        "parentRefs": [{ "name": TAILNET_GATEWAY, "sectionName": TAILNET_HTTP_SECTION }],
+        "rules": [{ "filters": [{ "type": "RequestRedirect", "requestRedirect": { "scheme": "https", "statusCode": 301 } }] }],
+    })
 }
 
 /// The servers themselves: a server's own connections to its tailnet name
@@ -801,26 +846,112 @@ pub fn tailnet_policy(servers: &[String]) -> Value {
     })
 }
 
-/// Everything the agent applies for them, in pyo-gateway (`servers`:
-/// [`tailnet_server_cidrs`]).
-pub fn tailnet_objects(servers: &[String]) -> Vec<Value> {
+/// Pyo's own tailnet names, on the cluster Pyo runs on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TailnetOwn {
+    /// "pyo.tail1234.ts.net": the dashboard and API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<String>,
+    /// "registry.tail1234.ts.net": the registry's door.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+}
+
+/// The Gateway's fixed objects, in pyo-gateway (`servers`:
+/// [`tailnet_server_cidrs`]; `certs`: the certificates' Secrets that are
+/// there; `own`: Pyo's own names, on the cluster it runs on). Services'
+/// tailnet routes come with their other routes (the agent's gateway.rs).
+pub fn tailnet_objects(servers: &[String], certs: &[String], own: &TailnetOwn) -> Vec<Value> {
     let meta = |name: &str| json!({ "name": name, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } });
     let mut out = vec![
-        json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway", "metadata": meta(TAILNET_GATEWAY), "spec": tailnet_gateway_spec() }),
+        json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway", "metadata": meta(TAILNET_GATEWAY), "spec": tailnet_gateway_spec(certs) }),
         tailnet_policy(servers),
+        json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(TAILNET_REDIRECT), "spec": tailnet_redirect_spec() }),
     ];
-    for (name, section, host, port) in TAILNET_ROUTES {
+    for ((name, host, port), hostname) in [
+        (TAILNET_DASHBOARD, own.dashboard.as_deref()),
+        (TAILNET_REGISTRY, own.registry.as_deref()),
+    ] {
+        let Some(hostname) = hostname else { continue };
         out.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "Backend", "metadata": meta(name), "spec": tailnet_backend_spec(host, port) }));
-        out.push(json!({
-            "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(name),
-            "spec": {
-                "parentRefs": [{ "name": TAILNET_GATEWAY, "sectionName": section }],
-                // No request timeout: image layers and long-polls take their time.
-                "rules": [{ "backendRefs": [{ "group": "gateway.envoyproxy.io", "kind": "Backend", "name": name }], "timeouts": { "request": "0s" } }],
-            },
-        }));
+        out.push(json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(name), "spec": tailnet_route_spec(name, hostname) }));
     }
     out
+}
+
+/// The servers' tailnet pods: the agent's tailnet mode (its own image), on
+/// every server that runs a proxy, with tailscaled's socket. They report
+/// each server's Tailscale (their log), set the Services it hosts (a `Tun`
+/// serve entry each, through LocalAPI) and keep Tailscale's certificates in
+/// their Secrets ([`tailnet_tls_secret`]). Root in the pod: tailscaled
+/// lets only root change its settings. No capabilities, no host network.
+pub const TAILNET_DAEMONSET: &str = "pyo-tailnet";
+/// tailscaled's socket directory on the servers.
+pub const TAILSCALE_SOCKET_DIR: &str = "/var/run/tailscale";
+
+pub fn tailnet_daemonset(image: &str) -> Value {
+    let labels = json!({ "app.kubernetes.io/name": TAILNET_DAEMONSET, "app.kubernetes.io/managed-by": "pyo" });
+    json!({
+        "apiVersion": "apps/v1", "kind": "DaemonSet",
+        "metadata": { "name": TAILNET_DAEMONSET, "namespace": "pyo-system", "labels": labels },
+        "spec": {
+            "selector": { "matchLabels": { "app.kubernetes.io/name": TAILNET_DAEMONSET } },
+            "updateStrategy": { "type": "RollingUpdate", "rollingUpdate": { "maxUnavailable": "100%" } },
+            "template": {
+                "metadata": { "labels": labels },
+                "spec": {
+                    "serviceAccountName": TAILNET_DAEMONSET,
+                    "affinity": gateway_affinity(),
+                    "tolerations": [{ "key": crate::GPU_RESOURCE, "operator": "Exists", "effect": "NoSchedule" }],
+                    "containers": [{
+                        "name": "tailnet",
+                        "image": image,
+                        "args": ["tailnet"],
+                        "env": [
+                            { "name": "RUST_LOG", "value": "pyo_agent=info" },
+                            { "name": "PYO_NODE_NAME", "valueFrom": { "fieldRef": { "fieldPath": "spec.nodeName" } } },
+                        ],
+                        "resources": { "requests": { "cpu": "5m", "memory": "16Mi" }, "limits": { "memory": "64Mi" } },
+                        "securityContext": { "runAsUser": 0, "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": { "drop": ["ALL"] } },
+                        "volumeMounts": [{ "name": "tailscale", "mountPath": TAILSCALE_SOCKET_DIR, "readOnly": true }],
+                    }],
+                    "volumes": [{ "name": "tailscale", "hostPath": { "path": TAILSCALE_SOCKET_DIR, "type": "Directory" } }],
+                },
+            },
+        },
+    })
+}
+
+/// The VIP Service's ports: (name, the VIP's port, the listener's).
+pub const TAILNET_VIP_PORTS: [(&str, i32, i32); 2] = [
+    ("http", 80, TAILNET_HTTP_PORT),
+    ("https", 443, TAILNET_HTTPS_PORT),
+];
+
+pub fn tailnet_vip_ports() -> Value {
+    Value::Array(
+        TAILNET_VIP_PORTS
+            .iter()
+            .map(|(name, port, target)| json!({ "name": name, "port": port, "targetPort": target, "protocol": "TCP" }))
+            .collect(),
+    )
+}
+
+/// The Service that takes the Tailscale Services' VIPs (`addrs`, at least
+/// one) to the tailnet listeners on the proxy of the server they reach.
+pub fn tailnet_vip_service(addrs: &[String]) -> Value {
+    json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": TAILNET_VIP_SERVICE, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
+        "spec": {
+            "type": "ClusterIP",
+            "externalIPs": addrs,
+            "externalTrafficPolicy": "Local",
+            "selector": proxy_pods()["matchLabels"],
+            "ports": tailnet_vip_ports(),
+        },
+    })
 }
 
 // ── Websites on the servers' Tailscale addresses ────────────────────────────
@@ -829,9 +960,8 @@ pub fn tailnet_objects(servers: &[String]) -> Vec<Value> {
 // ("<name>.100.x.y.z.nip.io"), the agent publishes the websites' ports (80
 // and 443; 10080 and 10443 in the proxy) on every server's Tailscale
 // address that runs a proxy, whether or not the cluster takes public
-// traffic: a Service of its own, `TAILNET_WEB_SERVICE` (the host's
-// `TAILNET_SERVICE` stays the host's, with only the listeners' ports). Like
-// that one: externalIPs, externalTrafficPolicy Local, so kube-proxy takes a
+// traffic: a Service of its own, `TAILNET_WEB_SERVICE`. Like
+// `TAILNET_VIP_SERVICE`: externalIPs, externalTrafficPolicy Local, so kube-proxy takes a
 // connection straight to the proxy on that server and the proxy sees the
 // visitor's own tailnet address: a service's access rules and WAF apply as
 // on the internet. The admission policy pins it: this name, these ports,
@@ -1124,7 +1254,7 @@ mod tests {
                     .all(|e| e["$patch"] == "delete" && e.as_object().unwrap().len() == 2)
             );
             // What Envoy Gateway renders for the listeners, as merged.
-            let rendered = [80, 443, DASHBOARD_PORT, REGISTRY_PORT, S3_PORT, 2222, 5353];
+            let rendered = [80, 443, TAILNET_HTTP_PORT, TAILNET_HTTPS_PORT, 2222, 5353];
             let kept: Vec<i32> = rendered
                 .into_iter()
                 .filter(|port| !patch.iter().any(|e| e["port"] == *port))
@@ -1134,30 +1264,38 @@ mod tests {
         }
     }
 
-    /// Pyo's own HTTPS listeners: their own ports, tailnet sources only.
-    /// Public clients reach the same proxies, so the policy on the Gateway
-    /// refuses them, whatever Host or SNI they send: it matches on the
-    /// client's address, which the proxies keep (externalTrafficPolicy
-    /// Local) through `TAILNET_SERVICE` (see the section's notes).
+    /// The tailnet listeners: their own ports, tailnet sources only. Public
+    /// clients reach the same proxies, so the policy on the Gateway refuses
+    /// them, whatever Host or SNI they send: it matches on the client's
+    /// address, which the proxies keep (externalTrafficPolicy Local) through
+    /// `TAILNET_VIP_SERVICE`.
     #[test]
     fn tailnet_listeners_admit_the_tailnet_only() {
-        let objs = tailnet_objects(&[]);
+        let own = TailnetOwn {
+            dashboard: Some("pyo.tail1234.ts.net".into()),
+            registry: Some("registry.tail1234.ts.net".into()),
+        };
+        let certs = vec![tailnet_tls_secret("blog"), tailnet_tls_secret("pyo")];
+        let objs = tailnet_objects(&[], &certs, &own);
         let gw = objs.iter().find(|o| o["kind"] == "Gateway").unwrap();
-        let ports: Vec<i64> = gw["spec"]["listeners"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|l| l["port"].as_i64().unwrap())
-            .collect();
-        assert_eq!(ports, [8443, 5443]);
-        assert!(
-            gw["spec"]["listeners"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|l| l["protocol"] == "HTTPS"
-                    && l["tls"]["certificateRefs"][0]["name"] == TAILNET_TLS)
+        let listeners = gw["spec"]["listeners"].as_array().unwrap();
+        let ports: Vec<i64> = listeners.iter().map(|l| l["port"].as_i64().unwrap()).collect();
+        assert_eq!(ports, [TAILNET_HTTP_PORT as i64, TAILNET_HTTPS_PORT as i64]);
+        let https = &listeners[1];
+        assert_eq!(https["protocol"], "HTTPS");
+        assert!(https.get("hostname").is_none(), "one listener, a certificate per name");
+        assert_eq!(
+            https["tls"]["certificateRefs"],
+            json!([
+                { "group": "", "kind": "Secret", "name": "pyo-tls--blog" },
+                { "group": "", "kind": "Secret", "name": "pyo-tls--pyo" },
+            ])
         );
+        // Without a certificate yet: the HTTP listener alone.
+        let bare = tailnet_gateway_spec(&[]);
+        assert_eq!(bare["listeners"].as_array().unwrap().len(), 1);
+        assert_eq!(bare["listeners"][0]["name"], TAILNET_HTTP_SECTION);
+
         let sp = objs.iter().find(|o| o["kind"] == "SecurityPolicy").unwrap();
         assert_eq!(
             sp["spec"]["targetRefs"],
@@ -1169,17 +1307,50 @@ mod tests {
             sp["spec"]["authorization"]["rules"],
             json!([{ "name": "tailnet", "action": "Allow", "principal": { "clientCIDRs": ["100.64.0.0/10", "fd7a:115c:a1e0::/48"] } }])
         );
-        // Only these routes attach to it, each to its own listener.
+        // Pyo's own routes, each on its tailnet name; the redirect on HTTP.
         let routes: Vec<&Value> = objs.iter().filter(|o| o["kind"] == "HTTPRoute").collect();
-        assert_eq!(routes.len(), 2);
-        for r in routes {
+        assert_eq!(routes.len(), 3);
+        for r in &routes {
             assert_eq!(r["spec"]["parentRefs"][0]["name"], TAILNET_GATEWAY);
         }
+        let dash = routes.iter().find(|r| r["metadata"]["name"] == TAILNET_DASHBOARD.0).unwrap();
+        assert_eq!(dash["spec"]["hostnames"], json!(["pyo.tail1234.ts.net"]));
+        assert_eq!(dash["spec"]["parentRefs"][0]["sectionName"], TAILNET_HTTPS_SECTION);
+        let redirect = routes.iter().find(|r| r["metadata"]["name"] == TAILNET_REDIRECT).unwrap();
+        assert_eq!(redirect["spec"]["parentRefs"][0]["sectionName"], TAILNET_HTTP_SECTION);
+        assert_eq!(redirect["spec"]["rules"][0]["filters"][0]["requestRedirect"]["scheme"], "https");
+        // On another cluster: no routes of Pyo's own.
+        let other = tailnet_objects(&[], &certs, &TailnetOwn::default());
+        assert_eq!(other.iter().filter(|o| o["kind"] == "HTTPRoute").count(), 1);
+        assert_eq!(other.iter().filter(|o| o["kind"] == "Backend").count(), 0);
         // Websites' listeners stay on 80/443, and services can't take these ports.
         assert!(!TAILNET_PORTS.contains(&443) && !TAILNET_PORTS.contains(&80));
         for p in TAILNET_PORTS {
             assert!(crate::reserved_public_port("TCP", p).is_some(), "{p}");
+            assert_ne!(crate::proxy_listen_port(p), 10080);
+            assert_ne!(crate::proxy_listen_port(p), 10443);
         }
+        assert!(is_tailnet_host("Blog.Tail1234.TS.NET") && !is_tailnet_host("blog.example.com"));
+    }
+
+    /// The VIPs' Service: ports 80 and 443 onto the tailnet listeners, on
+    /// the proxies, Local (the proxy sees the device's own address).
+    #[test]
+    fn the_vips_reach_the_tailnet_listeners() {
+        let addrs = vec!["100.100.1.2".to_owned(), "fd7a:115c:a1e0::1:2".to_owned()];
+        let svc = tailnet_vip_service(&addrs);
+        assert_eq!(svc["metadata"]["name"], TAILNET_VIP_SERVICE);
+        assert_eq!(
+            svc["spec"],
+            json!({
+                "type": "ClusterIP", "externalIPs": addrs, "externalTrafficPolicy": "Local",
+                "selector": proxy_pods()["matchLabels"],
+                "ports": [
+                    { "name": "http", "port": 80, "targetPort": TAILNET_HTTP_PORT, "protocol": "TCP" },
+                    { "name": "https", "port": 443, "targetPort": TAILNET_HTTPS_PORT, "protocol": "TCP" },
+                ],
+            })
+        );
     }
 
     /// The servers themselves: their own connections to their tailnet name
@@ -1250,7 +1421,7 @@ mod tests {
                 { "name": "servers", "action": "Allow", "principal": { "clientCIDRs": ["10.42.0.0/31", "10.42.1.0/31"] } },
             ])
         );
-        let objs = tailnet_objects(&got);
+        let objs = tailnet_objects(&got, &[], &TailnetOwn::default());
         let sp = objs.iter().find(|o| o["kind"] == "SecurityPolicy").unwrap();
         assert_eq!(sp["spec"], tailnet_policy_spec(&got));
         assert_eq!(sp["metadata"]["name"], TAILNET_GATEWAY);
@@ -1278,63 +1449,15 @@ mod tests {
         );
     }
 
-    /// The host's timer writes the Service that brings tailnet connections
-    /// to the proxies with their own address: the listeners' ports, onto
-    /// the proxies' pods, Local, on the Tailscale address only. Both copies
-    /// of the timer's script (the install's and the dev setup's) agree.
-    #[test]
-    fn the_hosts_tailnet_service_matches_the_listeners() {
-        for script in [
-            include_str!("../../../deploy/install.sh"),
-            include_str!("../../../scripts/pyo-up.sh"),
-        ] {
-            let start = script.find("kind: Service\n").expect("the Service");
-            let end = start + script[start..].find("\nYAML\n").expect("its end");
-            let doc: Value = serde_norway::from_str(
-                &format!("apiVersion: v1\n{}", &script[start..end]).replace("$ip4", "100.64.0.1"),
-            )
-            .unwrap();
-            assert_eq!(doc["metadata"]["name"], TAILNET_SERVICE);
-            assert_eq!(doc["metadata"]["namespace"], GATEWAY_NS);
-            assert_eq!(doc["spec"]["type"], "ClusterIP");
-            assert_eq!(doc["spec"]["externalTrafficPolicy"], "Local");
-            assert_eq!(doc["spec"]["externalIPs"], json!(["100.64.0.1"]));
-            assert_eq!(doc["spec"]["selector"], proxy_pods()["matchLabels"]);
-            let ports: Vec<(i64, i64)> = doc["spec"]["ports"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|p| {
-                    (
-                        p["port"].as_i64().unwrap(),
-                        p["targetPort"].as_i64().unwrap(),
-                    )
-                })
-                .collect();
-            assert_eq!(
-                ports,
-                [
-                    (DASHBOARD_PORT as i64, DASHBOARD_PORT as i64),
-                    (REGISTRY_PORT as i64, REGISTRY_PORT as i64)
-                ]
-            );
-            assert!(
-                script[..start].contains("ip4=$(tailscale ip -4"),
-                "the Tailscale address"
-            );
-        }
-    }
-
     /// The agent's Service for websites on the servers' Tailscale
     /// addresses: the websites' ports onto the proxies' (10000 higher), on
     /// those addresses only, Local (the proxy sees the visitor's address).
-    /// The host's Service keeps only the listeners' ports.
     #[test]
     fn websites_on_the_tailnet_are_the_agents_own_service() {
         let ips = vec!["100.64.0.1".to_owned(), "100.101.67.2".to_owned()];
         let svc = tailnet_web_service(&ips);
         assert_eq!(svc["metadata"]["name"], TAILNET_WEB_SERVICE);
-        assert_ne!(TAILNET_WEB_SERVICE, TAILNET_SERVICE);
+        assert_ne!(TAILNET_WEB_SERVICE, TAILNET_VIP_SERVICE);
         assert_eq!(svc["metadata"]["namespace"], GATEWAY_NS);
         assert_eq!(
             svc["spec"],
@@ -1371,14 +1494,6 @@ mod tests {
         }
         assert!(v6.is_match("fd7a:115c:a1e0::6930:4303"));
         assert!(!v6.is_match("fd7a:115c:a1e1::1") && !v6.is_match("2001:db8::1"));
-        // The host's Service: still only the listeners' ports.
-        for script in [
-            include_str!("../../../deploy/install.sh"),
-            include_str!("../../../scripts/pyo-up.sh"),
-        ] {
-            assert!(!script.contains("targetPort: 10080") && !script.contains("targetPort: 10443"));
-            assert!(!script.contains(TAILNET_WEB_SERVICE));
-        }
     }
 
     /// The API server keeps a Backend with the `type` Envoy Gateway's schema
@@ -1386,7 +1501,7 @@ mod tests {
     /// exactly must carry it, or the agent's own writes are refused.
     #[test]
     fn pinned_backends_carry_what_the_api_server_fills_in() {
-        for (_, _, host, port) in TAILNET_ROUTES {
+        for (_, host, port) in [TAILNET_DASHBOARD, TAILNET_REGISTRY] {
             assert_eq!(tailnet_backend_spec(host, port)["type"], "Endpoints");
         }
         assert_eq!(waf_backend_spec()["type"], "Endpoints");
@@ -1394,8 +1509,8 @@ mod tests {
         assert!(policy.contains(&format!(
             "object.spec == {}",
             cel_literal(&tailnet_backend_spec(
-                TAILNET_ROUTES[0].2,
-                TAILNET_ROUTES[0].3
+                TAILNET_DASHBOARD.1,
+                TAILNET_DASHBOARD.2
             ))
         )));
         assert!(policy.contains(&format!(
@@ -1537,15 +1652,24 @@ mod tests {
     #[test]
     fn admission_keeps_the_tailnet_gateway_to_itself() {
         let policy = crate::rbac::admission("w", "g")[0].to_string();
-        // The exact objects, and no other route may attach to the Gateway.
+        // Its fixed part, and only services' tailnet routes may attach to
+        // it: their own names, the HTTPS listener, tailnet names only. No
+        // other route carries a tailnet name.
         assert!(policy.contains("variables.objName == 'pyo-tailnet' && (request.operation == 'DELETE' || object.spec == "));
-        assert!(policy.contains("p.name != 'pyo-tailnet'"));
+        assert!(policy.contains("(p.name == 'pyo-tailnet' ? (variables.objName.startsWith('tn--') && has(p.sectionName) && p.sectionName == 'web' && has(object.spec.hostnames) && size(object.spec.hostnames) >= 1 && object.spec.hostnames.all(h, h.lowerAscii().endsWith('.ts.net')))"));
+        assert!(policy.contains("(!variables.objName.startsWith('tn--') && (!has(object.spec.hostnames) || object.spec.hostnames.all(h, !h.lowerAscii().endsWith('.ts.net'))))"));
+        // Public HTTPS listeners never take a tailnet name.
+        assert!(policy.contains("has(l.hostname) && !l.hostname.lowerAscii().endsWith('.ts.net')"));
+        // Its certificates: Tailscale's Secrets only.
+        assert!(policy.contains("c.name.startsWith('pyo-tls--')"));
+        // No firewall policy may replace the Gateway's on a tailnet route.
+        assert!(policy.contains("variables.ownRoute && !variables.objName.startsWith('tn--')"));
         assert!(policy.contains("variables.objName == 'pyo-dashboard'"));
         assert!(policy.contains("pyo.pyo-system.svc.cluster.local"));
         // Other Backends still can't point into Pyo's namespaces.
         assert!(
             policy.contains(
-                "!(variables.objName in [dyn('pyo-dashboard'), dyn('pyo-registry-door')])"
+                "!(variables.objName in [dyn('pyo-dashboard'), dyn('pyo-registry-door'), dyn('pyo-tailnet-redirect')])"
             )
         );
     }
@@ -1621,8 +1745,15 @@ mod tests {
             pinned.extend(client_policy_variants(https).into_iter().map(|spec| json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "spec": spec })));
         }
         pinned.extend(
-            tailnet_objects(&tailnet_server_cidrs(["10.42.0.0/24"]))
-                .into_iter()
+            tailnet_objects(
+                &tailnet_server_cidrs(["10.42.0.0/24"]),
+                &[tailnet_tls_secret("pyo")],
+                &TailnetOwn {
+                    dashboard: Some("pyo.tail1234.ts.net".into()),
+                    registry: None,
+                },
+            )
+            .into_iter()
                 .filter(|o| o["kind"] != "HTTPRoute"),
         );
         for o in pinned {
@@ -1683,7 +1814,11 @@ mod tests {
         ]
         .into_iter()
         .chain(issuers)
-        .chain(tailnet_objects(&tailnet_server_cidrs(["10.42.0.0/24"])))
+        .chain(tailnet_objects(
+            &tailnet_server_cidrs(["10.42.0.0/24"]),
+            &[tailnet_tls_secret("pyo")],
+            &TailnetOwn::default(),
+        ))
         .chain([cert_manager_chart(), envoy_gateway_chart()])
         {
             println!("{o}");

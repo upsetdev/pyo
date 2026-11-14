@@ -794,6 +794,7 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
         databases,
         databases_listed,
         database_metrics: crate::dbmetrics::report(&pods, &m.pods, &k.volumes),
+        tailnet: Vec::new(),
     })
 }
 

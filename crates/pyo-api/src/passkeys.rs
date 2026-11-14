@@ -76,8 +76,8 @@ impl Rp {
 /// HTTPS origins Pyo's dashboard is served at, besides localhost.
 async fn allowed_origins(state: &AppState) -> Vec<Url> {
     let mut out: Vec<Url> = Vec::new();
-    if let Some(u) = crate::web::public_url() {
-        out.extend(Url::parse(u).ok());
+    for u in crate::web::https_urls() {
+        out.extend(Url::parse(&u).ok());
     }
     if let Ok(Some(mail)) = crate::mail::settings(&state.db).await {
         out.extend(Url::parse(mail.public_url.trim()).ok());

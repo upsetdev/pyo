@@ -28,7 +28,7 @@ pub fn scripts_url(reach: Option<&str>) -> String {
         .map(|u| friendly(&u));
     pick_scripts_url(
         configured.as_deref(),
-        &[reach, tailnet.as_deref(), crate::web::public_url()],
+        &[reach, tailnet.as_deref(), crate::web::public_url().as_deref()],
     )
 }
 

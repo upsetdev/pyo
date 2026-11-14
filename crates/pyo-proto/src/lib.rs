@@ -72,6 +72,108 @@ pub struct Heartbeat {
     /// analytics); none from older agents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub database_metrics: Vec<DatabaseMemberMetrics>,
+    /// Each server's Tailscale, as its tailnet pod last said (servers that
+    /// run a proxy).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tailnet: Vec<ServerTailnet>,
+}
+
+/// A server's Tailscale, as tailscaled says (the agent's tailnet pod on it).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerTailnet {
+    pub server: String,
+    /// tailscaled's state: "Running", "NeedsLogin", "Stopped"…; "" when
+    /// its socket didn't answer.
+    #[serde(default)]
+    pub state: String,
+    /// Its stable node ID (the API's device ID).
+    #[serde(default)]
+    pub node_id: String,
+    /// "server-1.tail1234.ts.net".
+    #[serde(default)]
+    pub dns_name: String,
+    /// The tailnet's MagicDNS suffix ("tail1234.ts.net").
+    #[serde(default)]
+    pub suffix: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Its Tailscale addresses.
+    #[serde(default)]
+    pub ips: Vec<String>,
+    /// Tailscale's client version.
+    #[serde(default)]
+    pub version: String,
+    /// Tailnet Lock is on and this server's key isn't signed yet: the
+    /// command to run on a signing device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_sign: Option<String>,
+    /// The Services it advertises ("blog").
+    #[serde(default)]
+    pub advertised: Vec<String>,
+    /// The Services whose certificate it keeps (in their Secret).
+    #[serde(default)]
+    pub certificates: Vec<String>,
+    /// What went wrong last, if anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What the agent hosts on the tailnet ([`HeartbeatReply::tailnet`]).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TailnetWanted {
+    /// The tailnet's MagicDNS suffix ("tail1234.ts.net").
+    pub suffix: String,
+    /// The Tailscale Services this cluster's servers host.
+    #[serde(default)]
+    pub services: Vec<TailnetService>,
+    /// Pyo's Services that these servers don't host (anymore): taken off
+    /// them if they still advertise one.
+    #[serde(default)]
+    pub retired: Vec<String>,
+    /// Pyo's own names, on the cluster it runs on.
+    #[serde(default)]
+    pub own: system::TailnetOwn,
+}
+
+/// A Tailscale Service ("svc:blog"), by its name ("blog").
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TailnetService {
+    pub name: String,
+    /// Its VIPs, IPv4 then IPv6.
+    #[serde(default)]
+    pub addrs: Vec<String>,
+}
+
+impl TailnetWanted {
+    /// "blog.tail1234.ts.net".
+    pub fn host(&self, name: &str) -> String {
+        format!("{name}.{}", self.suffix)
+    }
+}
+
+/// What the agent hands its servers' tailnet pods
+/// (system.rs `TAILNET_WANTED`, as JSON).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TailnetHosting {
+    #[serde(default)]
+    pub services: Vec<TailnetHosted>,
+    #[serde(default)]
+    pub retired: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TailnetHosted {
+    /// "blog".
+    pub name: String,
+    /// "blog.tail1234.ts.net".
+    pub host: String,
+    /// The server that keeps its certificate.
+    pub cert_server: String,
 }
 
 /// The figures a database member can report in
@@ -1741,7 +1843,7 @@ pub fn reserved_public_port(protocol: &str, port: i32) -> Option<&'static str> {
         80 | 443 => Some("Ports 80 and 443 are for websites: add a domain to the service instead."),
         10080 | 10443 => Some("The gateway uses this port for websites (80 and 443 inside it)."),
         p if system::TAILNET_PORTS.contains(&p) => Some(
-            "Pyo uses this port itself, on your tailnet (its dashboard, registry and storage).",
+            "The gateway uses this port for names on your tailnet.",
         ),
         19000..=19003 => Some("The gateway uses ports 19000 to 19003 itself."),
         p if SERVER_TCP_PORTS.contains(&p) => {
@@ -2155,6 +2257,10 @@ pub struct HeartbeatReply {
     /// [`TEAM_LABEL`] (one missing or changed by hand is put back).
     #[serde(default)]
     pub project_teams: Vec<ProjectTeam>,
+    /// The Tailscale Services its servers host. None (a reply without
+    /// it): left as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailnet: Option<TailnetWanted>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

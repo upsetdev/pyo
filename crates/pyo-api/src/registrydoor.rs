@@ -40,11 +40,10 @@ use serde_json::json;
 
 use crate::{AppState, deploy, ids::sha256_hex};
 
-/// Where users push from: the host's tailnet name on the registry's HTTPS
-/// port ("<host>.<tailnet>.ts.net:5443"). None while Pyo is only on its own
-/// machine (no tailnet with MagicDNS and HTTPS certificates).
+/// Where users push from: the registry's tailnet name
+/// ("registry.<tailnet>.ts.net"). None until Tailscale is set up.
 pub fn address() -> Option<String> {
-    crate::web::tailnet_name().map(|n| format!("{n}:{}", pyo_proto::system::REGISTRY_PORT))
+    crate::web::addresses().registry
 }
 
 /// The path a team's images go under: its slug.

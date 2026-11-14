@@ -304,7 +304,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         geoip_image: pyo_proto::system::geoip_image_from_env(),
         // Secure when Pyo is on HTTPS (its tailnet name); browsers keep
         // Secure cookies on http://localhost too.
-        cookie_secure: env("PYO_COOKIE_SECURE", "false") == "true" || web::tailnet_name().is_some(),
+        cookie_secure: env("PYO_COOKIE_SECURE", "false") == "true",
         allow_signup: env("PYO_ALLOW_SIGNUP", "false") == "true",
         builder_image: env("PYO_BUILDER_IMAGE", "127.0.0.1:5005/pyo/builder:dev"),
         tailnet_api_url: env("PYO_TAILNET_API_URL", ""),
@@ -426,7 +426,6 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 state.config.cookie_secure,
                 web::headers,
             ))
-            .layer(axum::middleware::from_fn(web::redirect_to_https))
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
             .layer(TraceLayer::new_for_http())
             .with_state(state)

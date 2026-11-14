@@ -163,7 +163,8 @@ pub fn check(p: &InstallParts) -> Result<(), String> {
         return Err("the admission policy isn't stamped with this install".into());
     }
     let spec = &policy["spec"];
-    let agent = json!([{ "name": "pyo-agent", "expression": format!("request.userInfo.username == '{}'", rbac::AGENT_USER) }]);
+    // The agent, and the servers' tailnet pods it runs.
+    let agent = json!([{ "name": "pyo-agent", "expression": format!("request.userInfo.username in ['{}', '{}']", rbac::AGENT_USER, rbac::TAILNET_USER) }]);
     if spec["failurePolicy"] != "Fail"
         || spec["matchConditions"] != agent
         || !spec["validations"]

@@ -66,8 +66,17 @@ fn stamp(html: &str, nonce: &str) -> String {
 }
 
 /// Caching and security headers on every response.
-pub async fn headers(https: axum::extract::State<bool>, req: Request, next: Next) -> Response {
+pub async fn headers(force: axum::extract::State<bool>, req: Request, next: Next) -> Response {
     let assets = req.uri().path().starts_with("/assets/");
+    // Over HTTPS (one of Pyo's HTTPS names, through the gateway): HSTS and
+    // Secure cookies. Plain HTTP on this machine or a private network:
+    // neither (the browser would drop a Secure cookie there).
+    let https = *force
+        || req
+            .headers()
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(is_https_host);
     let mut res = next.run(req).await;
     let html = res
         .headers()
@@ -97,7 +106,8 @@ pub async fn headers(https: axum::extract::State<bool>, req: Request, next: Next
         "permissions-policy",
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
-    if *https {
+    if https {
+        secure_cookies(hs);
         hs.insert(
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=31536000"),
@@ -106,8 +116,9 @@ pub async fn headers(https: axum::extract::State<bool>, req: Request, next: Next
     res
 }
 
-/// The host's tailnet name (`PYO_TAILNET_NAME`, "<host>.<tailnet>.ts.net"),
-/// set by its setup when the tailnet has MagicDNS and HTTPS certificates.
+/// This machine's tailnet name (`PYO_TAILNET_NAME`,
+/// "<host>.<tailnet>.ts.net"), when it's on a tailnet with MagicDNS: for
+/// the commands that name Pyo's tailnet IP (join.rs `friendly`).
 pub fn tailnet_name() -> Option<&'static str> {
     static N: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     N.get_or_init(|| {
@@ -119,96 +130,106 @@ pub fn tailnet_name() -> Option<&'static str> {
     .as_deref()
 }
 
-/// Pyo's HTTPS address on its tailnet ("https://<name>:8443"); None while
-/// it's only on its own machine (http://localhost:8000).
-pub fn public_url() -> Option<&'static str> {
-    static U: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    U.get_or_init(|| {
-        tailnet_name().map(|n| format!("https://{n}:{}", pyo_proto::system::DASHBOARD_PORT))
-    })
-    .as_deref()
+/// Pyo's HTTPS names, as they're ready (tailscale.rs and the public
+/// dashboard set them): on the tailnet ("pyo.tail1234.ts.net") and on the
+/// public IP ("pyo.203.0.113.7.nip.io").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Addresses {
+    /// The dashboard on the tailnet.
+    pub tailnet: Option<String>,
+    /// The registry on the tailnet.
+    pub registry: Option<String>,
+    /// The dashboard on the public IP, while it's open.
+    pub public: Option<String>,
 }
 
-/// Where a request should go instead: the dashboard over HTTPS, for a
-/// browser that reached plain HTTP at another address than this machine's
-/// own (the tailnet's :8000). The API, installers, probes and anything
-/// already at the HTTPS address stay as they are: agents and builders use
-/// plain HTTP on the tailnet.
-pub(crate) fn https_redirect(
-    public: &str,
-    method: &axum::http::Method,
-    host: &str,
-    path_and_query: &str,
-) -> Option<String> {
-    if !matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD) {
-        return None;
+static ADDRESSES: std::sync::RwLock<Addresses> = std::sync::RwLock::new(Addresses {
+    tailnet: None,
+    registry: None,
+    public: None,
+});
+
+pub fn addresses() -> Addresses {
+    ADDRESSES.read().map(|a| a.clone()).unwrap_or_default()
+}
+
+pub fn set_addresses(a: Addresses) {
+    if let Ok(mut w) = ADDRESSES.write() {
+        *w = a;
     }
-    let path = path_and_query.split('?').next().unwrap_or("");
-    if ["/api/", "/install/", "/healthz", "/readyz"]
-        .iter()
-        .any(|p| path.starts_with(p))
-    {
-        return None;
-    }
+}
+
+/// Pyo's best HTTPS address: on the tailnet, else on the public IP. None
+/// while it has neither (only on this machine and its network).
+pub fn public_url() -> Option<String> {
+    let a = addresses();
+    a.tailnet.or(a.public).map(|h| format!("https://{h}"))
+}
+
+/// Every HTTPS address of the dashboard.
+pub fn https_urls() -> Vec<String> {
+    let a = addresses();
+    [a.tailnet, a.public]
+        .into_iter()
+        .flatten()
+        .map(|h| format!("https://{h}"))
+        .collect()
+}
+
+/// Whether a request's Host is one of Pyo's HTTPS names (the gateway
+/// terminates TLS for those alone).
+pub fn is_https_host(host: &str) -> bool {
     let name = host
         .rsplit_once(':')
         .filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit()))
-        .map_or(host, |(h, _)| h);
-    let public_host = public.trim_start_matches("https://");
-    let local = matches!(name, "localhost" | "127.0.0.1" | "[::1]" | "")
-        || name.ends_with(".svc")
-        || name.ends_with(".svc.cluster.local");
-    (!local && host != public_host).then(|| format!("{public}{path_and_query}"))
+        .map_or(host, |(h, _)| h)
+        .to_ascii_lowercase();
+    let a = addresses();
+    [a.tailnet, a.public, a.registry]
+        .into_iter()
+        .flatten()
+        .any(|h| h == name)
 }
 
-pub async fn redirect_to_https(req: Request, next: Next) -> Response {
-    if let Some(public) = public_url() {
-        let host = req
-            .headers()
-            .get(header::HOST)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("");
-        let pq = req.uri().path_and_query().map_or("/", |p| p.as_str());
-        if let Some(to) = https_redirect(public, req.method(), host, pq) {
-            return axum::response::Redirect::permanent(&to).into_response();
-        }
+/// Cookies set over HTTPS get `Secure`.
+fn secure_cookies(hs: &mut axum::http::HeaderMap) {
+    let cookies: Vec<HeaderValue> = hs.get_all(header::SET_COOKIE).iter().cloned().collect();
+    if cookies.is_empty() {
+        return;
     }
-    next.run(req).await
+    hs.remove(header::SET_COOKIE);
+    for c in cookies {
+        let v = match c.to_str() {
+            Ok(t) if !t.to_ascii_lowercase().contains("; secure") => {
+                HeaderValue::from_str(&format!("{t}; Secure")).unwrap_or(c)
+            }
+            _ => c,
+        };
+        hs.append(header::SET_COOKIE, v);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_dashboard_moves_to_https_on_the_tailnet() {
-        use axum::http::Method;
-        let public = "https://server-1.tail1234.ts.net:8443";
-        let r = |m: &Method, host: &str, pq: &str| super::https_redirect(public, m, host, pq);
-        assert_eq!(
-            r(&Method::GET, "100.64.0.7:8000", "/acme?x=1").as_deref(),
-            Some("https://server-1.tail1234.ts.net:8443/acme?x=1")
-        );
-        assert_eq!(
-            r(&Method::GET, "server-1.tail1234.ts.net:8000", "/").as_deref(),
-            Some("https://server-1.tail1234.ts.net:8443/")
-        );
-        // This machine itself, already HTTPS, agents and builders: as they are.
-        assert_eq!(r(&Method::GET, "localhost:8000", "/"), None);
-        assert_eq!(r(&Method::GET, "127.0.0.1:8000", "/"), None);
-        assert_eq!(r(&Method::GET, "server-1.tail1234.ts.net:8443", "/"), None);
-        assert_eq!(
-            r(&Method::GET, "100.64.0.7:8000", "/api/agent/v1/poll"),
-            None
-        );
-        assert_eq!(
-            r(
-                &Method::GET,
-                "100.64.0.7:8000",
-                "/install/agent.yaml?token=x"
-            ),
-            None
-        );
-        assert_eq!(r(&Method::POST, "100.64.0.7:8000", "/"), None);
-        assert_eq!(r(&Method::GET, "pyo.pyo-system.svc:8000", "/"), None);
+    fn https_names_and_secure_cookies() {
+        super::set_addresses(super::Addresses {
+            tailnet: Some("pyo.tail1234.ts.net".into()),
+            registry: Some("registry.tail1234.ts.net".into()),
+            public: Some("pyo.203.0.113.7.nip.io".into()),
+        });
+        assert!(super::is_https_host("PYO.tail1234.ts.net"));
+        assert!(super::is_https_host("pyo.203.0.113.7.nip.io:443"));
+        assert!(!super::is_https_host("192.168.1.5:8000"));
+        assert!(!super::is_https_host("localhost:8000"));
+        assert_eq!(super::public_url().as_deref(), Some("https://pyo.tail1234.ts.net"));
+        let mut hs = axum::http::HeaderMap::new();
+        hs.append(header::SET_COOKIE, HeaderValue::from_static("a=1; Path=/; HttpOnly"));
+        hs.append(header::SET_COOKIE, HeaderValue::from_static("b=2; Path=/; Secure"));
+        super::secure_cookies(&mut hs);
+        let got: Vec<&str> = hs.get_all(header::SET_COOKIE).iter().map(|v| v.to_str().unwrap()).collect();
+        assert_eq!(got, ["a=1; Path=/; HttpOnly; Secure", "b=2; Path=/; Secure"]);
+        super::set_addresses(super::Addresses::default());
     }
 
     use super::*;

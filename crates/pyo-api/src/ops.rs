@@ -36,7 +36,7 @@ pub(crate) struct Meta {
     /// Features a hosted Pyo turned on. None when self-hosted.
     #[schema(value_type = Vec<String>)]
     features: &'static [String],
-    /// Where Pyo is reached over HTTPS on its tailnet (https://<host>.<tailnet>.ts.net:8443). Null when it's only on its own machine.
+    /// Pyo's HTTPS address: on the tailnet (https://pyo.<tailnet>.ts.net), else on its public IP. Null when it has neither.
     public_url: Option<String>,
 }
 
@@ -51,7 +51,7 @@ pub(crate) async fn meta() -> Json<Meta> {
     Json(Meta {
         version: env!("CARGO_PKG_VERSION"),
         features: crate::features(),
-        public_url: crate::web::public_url().map(str::to_owned),
+        public_url: crate::web::public_url(),
     })
 }
 
