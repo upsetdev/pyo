@@ -1,10 +1,8 @@
 {
-  "version": "0.2.3",
+  "version": "0.2.4",
   "minFrom": null,
-  "manualOnly": true,
+  "manualOnly": false,
   "beforeYouUpdate": [
-    "Pyo's own Postgres and ClickHouse restart once: the dashboard is unavailable for about a minute.",
-    "Small databases restart once and are unavailable for about a minute.",
-    "After updating, run the connect command shown in each cluster's settings."
+    "Run the connect command on each cluster's server to apply the memory reserve for k3s."
   ]
 }
