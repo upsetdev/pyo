@@ -1,4 +1,4 @@
-//! `pyo upgrade`: the CLI replaces itself with a newer release.
+//! `pyo upgrade`, and the notice that a newer CLI is out.
 //!
 //! Releases come from GitHub: `releases/latest` redirects to the latest
 //! release's tag, which tells its version without the API (and its rate
@@ -10,9 +10,14 @@
 //! with PYO_CLI_RELEASE set (deploy/images/pyo.Dockerfile). A CLI built
 //! from source with cargo is left to whoever built it.
 
-use std::{io::Write, path::Path, time::Duration};
+use std::{
+    io::{IsTerminal, Write},
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::ui;
@@ -22,6 +27,7 @@ const RELEASE_BUILD: bool = option_env!("PYO_CLI_RELEASE").is_some();
 const RELEASES: &str = "https://github.com/upsetdev/pyo/releases";
 const ASSET: &str = "pyo-linux-x86_64";
 const INSTALL: &str = "curl -fsSL https://pyo.dev/cli.sh | sh";
+const DAY: u64 = 24 * 60 * 60;
 
 /// "1.2.3" or "v1.2.3" → (1, 2, 3). Anything after a `-` or `+` is ignored.
 fn parse(v: &str) -> Option<(u64, u64, u64)> {
@@ -185,6 +191,103 @@ fn matches_sha256(sums: &[u8], bin: &[u8]) -> bool {
         .unwrap_or("")
         .to_ascii_lowercase();
     want.len() == 64 && want == hex::encode(Sha256::digest(bin))
+}
+
+// ── The notice ────────────────────────────────────────────────────────
+
+/// What the last check found (`~/.cache/pyo/update-check.json`).
+#[derive(Default, Serialize, Deserialize)]
+struct Seen {
+    /// When GitHub was last asked (Unix seconds).
+    #[serde(default)]
+    checked: u64,
+    /// The latest version it answered.
+    #[serde(default)]
+    latest: String,
+    /// When the notice was last shown.
+    #[serde(default)]
+    noticed: u64,
+}
+
+fn cache_path() -> Option<PathBuf> {
+    let base = match std::env::var_os("XDG_CACHE_HOME") {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => PathBuf::from(std::env::var_os("HOME")?).join(".cache"),
+    };
+    Some(base.join("pyo").join("update-check.json"))
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn set(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// A look for a newer release while a command runs: at most once a day,
+/// in the background, so it never holds a command up. When the command
+/// ends before GitHub answers, the next command asks again.
+pub struct Check {
+    path: PathBuf,
+    seen: Seen,
+    task: Option<tokio::task::JoinHandle<Result<String>>>,
+}
+
+impl Check {
+    /// None when it's off: not a release build, stderr isn't a terminal,
+    /// in CI, or PYO_NO_UPDATE_CHECK=1.
+    pub fn start() -> Option<Self> {
+        if !RELEASE_BUILD
+            || !std::io::stderr().is_terminal()
+            || set("CI")
+            || set("PYO_NO_UPDATE_CHECK")
+        {
+            return None;
+        }
+        let path = cache_path()?;
+        let seen: Seen = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let task = (now().saturating_sub(seen.checked) >= DAY)
+            .then(|| tokio::spawn(latest(Duration::from_secs(10))));
+        Some(Self { path, seen, task })
+    }
+
+    /// After the command: note what GitHub said, if it answered, and say
+    /// when a newer CLI is out (once a day at most).
+    pub fn finish(mut self) {
+        let mut changed = false;
+        if let Some(task) = self.task.take().filter(|t| t.is_finished()) {
+            // Answered, or failed (offline): either way, not again today.
+            self.seen.checked = now();
+            if let Some(Ok(Ok(v))) = futures::FutureExt::now_or_never(task) {
+                self.seen.latest = v;
+            }
+            changed = true;
+        }
+        if newer(&self.seen.latest, VERSION) && now().saturating_sub(self.seen.noticed) >= DAY {
+            eprintln!(
+                "{}",
+                ui::yellow(&format!(
+                    "Pyo CLI {} is out (you have {VERSION}). Run pyo upgrade.",
+                    self.seen.latest
+                ))
+            );
+            self.seen.noticed = now();
+            changed = true;
+        }
+        if changed {
+            let _ = std::fs::create_dir_all(self.path.parent().unwrap_or(Path::new(".")));
+            if let Ok(json) = serde_json::to_vec(&self.seen) {
+                let _ = std::fs::write(&self.path, json);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

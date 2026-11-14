@@ -211,6 +211,9 @@ enum Command {
         which: Which,
     },
     /// Update the CLI to the latest release.
+    ///
+    /// Once a day, the CLI looks for a new release and says when one is
+    /// out. PYO_NO_UPDATE_CHECK=1 turns that off.
     #[command(disable_version_flag = true)]
     Upgrade {
         /// A release instead of the latest, e.g. 0.3.0.
@@ -426,8 +429,18 @@ enum EnvCommand {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    if let Err(e) = run(cli).await {
+    let check = match cli.command {
+        Command::Upgrade { .. } => None,
+        _ => upgrade::Check::start(),
+    };
+    let result = run(cli).await;
+    if let Err(e) = &result {
         eprintln!("{} {e:#}", ui::red("error:"));
+    }
+    if let Some(check) = check {
+        check.finish();
+    }
+    if result.is_err() {
         std::process::exit(1);
     }
 }
