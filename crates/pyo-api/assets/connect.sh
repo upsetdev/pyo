@@ -440,9 +440,10 @@ k3s_install() {
 }
 # <<< pyo:k3s
 # >>> pyo:small-machine (the same in deploy/install.sh, connect.sh and scripts/setup-host.sh)
-# Run before k3s is installed. What follows this machine's memory, worked
-# out again at every boot by /usr/local/lib/pyo-memory.sh, so a machine
-# given more or less memory gets the matching settings when it restarts.
+# Run before k3s is installed, or on a k3s that's already installed with
+# k3s_memory_refresh. What follows this machine's memory, worked out again
+# at every boot by /usr/local/lib/pyo-memory.sh, so a machine given more
+# or less memory gets the matching settings when it restarts.
 # Under 3.5 GB of memory: k3s gets a soft memory limit, GOMEMLIMIT
 # (gomemlimit in the helper), so its Go runtime collects garbage sooner
 # instead of growing. Under 2.75 GB, also compressed swap in memory
@@ -454,8 +455,11 @@ k3s_install() {
 # containers what's left: 256 MiB under 1.5 GB, 512 MiB under 3.5 GB,
 # 768 MiB under 8 GB, 1 GiB from there.
 K3S_MEMORY_CONFIG=/etc/rancher/k3s/config.yaml.d/50-pyo-memory.yaml
+K3S_MEMORY_CHANGED=""
 small_machine() {
-  local env
+  local env before
+  # What k3s runs with now: kubelet's reservations and its GOMEMLIMIT.
+  before=$(cat "$K3S_MEMORY_CONFIG" /run/pyo-k3s.env 2>/dev/null || true)
   mkdir -p /etc/systemd/system/k3s.service.d
   cat > /usr/local/lib/pyo-memory.sh <<'MEMORY'
 #!/bin/sh
@@ -537,6 +541,19 @@ MEMORY
   [ -z "$env" ] || echo "A small machine: k3s gets $env."
   /usr/local/lib/pyo-memory.sh k3s-config "$K3S_MEMORY_CONFIG" || true
   [ ! -f /run/pyo-zram ] || echo "Turned on compressed swap in memory (zram)."
+  [ "$before" = "$(cat "$K3S_MEMORY_CONFIG" 2>/dev/null; [ -z "$env" ] || echo "$env")" ] || K3S_MEMORY_CHANGED=1
+}
+# The same on a k3s that's already installed (k3s.service). k3s uses what
+# changed once it restarts: it restarts here, unless $1 is "later" (the
+# caller restarts it, when K3S_MEMORY_CHANGED is set). Containers keep
+# running while k3s restarts.
+k3s_memory_refresh() {
+  systemctl cat k3s.service >/dev/null 2>&1 || return 0
+  K3S_MEMORY_CHANGED=""
+  small_machine
+  [ -n "$K3S_MEMORY_CHANGED" ] || return 0
+  echo "k3s restarts briefly to apply its memory reserve. Services keep running."
+  [ "${1:-}" = later ] || systemctl restart k3s
 }
 # <<< pyo:small-machine
 
@@ -894,8 +911,10 @@ CFG
   small_machine
   k3s_install "$K3S_DIR" server
 else
+  # Its memory reserve brought up to date; k3s restarts below if it changed.
+  k3s_memory_refresh later
   # k3s finds a newly installed NVIDIA toolkit only when it starts.
-  if [ -n "$REGISTRY" ] || [ -n "$GPU_TOOLKIT_NEW" ]; then systemctl restart k3s 2>/dev/null || true; fi
+  if [ -n "$REGISTRY" ] || [ -n "$GPU_TOOLKIT_NEW" ] || [ -n "$K3S_MEMORY_CHANGED" ]; then systemctl restart k3s 2>/dev/null || true; fi
   # An existing k3s keeps its settings; say how to encrypt its Secrets.
   if ! k3s secrets-encrypt status 2>/dev/null | grep -q "Encryption Status: Enabled"; then
     echo "Note: this k3s doesn't encrypt Secrets at rest. To turn it on:"

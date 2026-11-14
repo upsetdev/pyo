@@ -877,6 +877,73 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
         assert!(out.trim().ends_with("ok after 1"), "{out}");
     }
 
+    /// Run again on a k3s that's installed (the connect command, install.sh,
+    /// setup-host.sh), small_machine brings the memory reserve up to date,
+    /// and k3s restarts only when what it runs with changed.
+    #[test]
+    fn existing_k3s_restarts_only_for_a_new_memory_reserve() {
+        let dir = std::env::temp_dir().join(format!("pyo-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("run")).unwrap();
+        let d = dir.display();
+        let block = script_block("small-machine", CONNECT_SCRIPT)
+            .replace("/usr/local/lib/", &format!("{d}/"))
+            .replace("/etc/systemd/system", &format!("{d}/systemd"))
+            .replace("/run/", &format!("{d}/run/"))
+            .replace(
+                "/etc/rancher/k3s/config.yaml.d/50-pyo-memory.yaml",
+                &format!("{d}/config.yaml.d/50-pyo-memory.yaml"),
+            );
+        assert!(!block.contains("/etc/") && !block.contains(" /run/"));
+        let run = |mem: u64, steps: &str| {
+            let (code, out, err) = bash(&format!(
+                "set -euo pipefail\nsystemctl() {{ [ \"$1\" != restart ] || echo RESTART; }}\n{block}\n\
+                 export PYO_MEMINFO={d}/meminfo; echo \"MemTotal: {} kB\" > $PYO_MEMINFO\n\
+                 started() {{ {d}/pyo-memory.sh k3s-env > {d}/run/pyo-k3s.env; }}\n{steps}",
+                mem * 1024
+            ));
+            assert_eq!(code, 0, "{err}");
+            out.matches("RESTART").count()
+        };
+        // A k3s from before the reserve: it restarts once to use it.
+        assert_eq!(run(1973, "k3s_memory_refresh"), 1);
+        assert_eq!(run(1973, "started; k3s_memory_refresh"), 0);
+        // The machine got more memory: a new reserve, and no GOMEMLIMIT.
+        assert_eq!(run(16384, "k3s_memory_refresh"), 1);
+        assert_eq!(run(16384, "started; k3s_memory_refresh"), 0);
+        // "later": the caller restarts it.
+        assert_eq!(
+            run(
+                960,
+                "k3s_memory_refresh later; [ -n \"$K3S_MEMORY_CHANGED\" ]"
+            ),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // Each script runs it on a k3s that's already installed.
+        for (file, script, call) in [
+            ("connect.sh", CONNECT_SCRIPT, "  k3s_memory_refresh later\n"),
+            (
+                "deploy/install.sh",
+                include_str!("../../../deploy/install.sh"),
+                "    say \"Using the k3s that's installed\"\n    k3s_memory_refresh\n",
+            ),
+            (
+                "scripts/setup-host.sh",
+                include_str!("../../../scripts/setup-host.sh"),
+                "  k3s_memory_refresh later\n  systemctl restart k3s\n",
+            ),
+        ] {
+            assert!(
+                script.contains(call),
+                "{file} doesn't refresh k3s's memory reserve"
+            );
+        }
+        assert!(CONNECT_SCRIPT.contains(
+            "if [ -n \"$REGISTRY\" ] || [ -n \"$GPU_TOOLKIT_NEW\" ] || [ -n \"$K3S_MEMORY_CHANGED\" ]; then systemctl restart k3s"
+        ));
+    }
+
     #[test]
     fn k3s_gets_room_above_its_live_heap() {
         let block = script_block("small-machine", CONNECT_SCRIPT);
