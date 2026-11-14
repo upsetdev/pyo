@@ -15,6 +15,7 @@ mod login;
 mod registry;
 mod service;
 mod ui;
+mod upgrade;
 mod volume;
 
 use clap::{Args, Parser, Subcommand};
@@ -208,6 +209,13 @@ enum Command {
         command: BackupCommand,
         #[command(flatten)]
         which: Which,
+    },
+    /// Update the CLI to the latest release.
+    #[command(disable_version_flag = true)]
+    Upgrade {
+        /// A release instead of the latest, e.g. 0.3.0.
+        #[arg(long)]
+        version: Option<String>,
     },
 }
 
@@ -677,6 +685,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
         }
+        Command::Upgrade { version } => upgrade::run(version).await,
         Command::Backup {
             command: BackupCommand::Now { volume, db, wait },
             which,

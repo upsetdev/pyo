@@ -24,13 +24,15 @@ COPY crates ./crates
 ARG CARGO_PROFILE=release
 # Static (musl): pyo-builder (it also runs on any Linux VM), pyo-flows (a
 # scratch image) and the CLI. The two builds run side by side, each in its
-# own target directory.
+# own target directory. PYO_CLI_RELEASE marks the CLI as a release build:
+# `pyo upgrade` replaces only those (a CLI built with plain cargo is left to
+# its builder).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     set -e; \
     cargo build --profile "$CARGO_PROFILE" --locked --target-dir target/gnu \
       -p pyo-api -p pyo-agent -p pyo-db-controller -p pyo-kv & gnu=$!; \
-    cargo build --profile "$CARGO_PROFILE" --locked --target-dir target/musl --target x86_64-unknown-linux-musl \
+    PYO_CLI_RELEASE=1 cargo build --profile "$CARGO_PROFILE" --locked --target-dir target/musl --target x86_64-unknown-linux-musl \
       -p pyo-builder -p pyo-flows -p pyo-cli & musl=$!; \
     wait "$gnu"; wait "$musl"; \
     mkdir /out; \
