@@ -57,6 +57,7 @@ jobs:
           toolchain: 1.99.1
           components: clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: scripts/install-railpack.sh
       - run: cargo test --locked --workspace
 
   waf:

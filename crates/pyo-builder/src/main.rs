@@ -482,35 +482,25 @@ impl Builder {
                 .arg(&plan)
                 .arg("--info-out")
                 .arg(&info);
-            // The build arguments, and Pyo's own settings for Railpack:
-            // each one given to `prepare`, and as a secret to the build,
-            // which the plan reads them from.
-            let mut settings: Vec<(String, String)> = job
-                .build_args
-                .iter()
-                .map(|a| (a.key.clone(), a.value.clone()))
-                .collect();
             // A static site generator whose start script is its development
             // server: its build's output, served as static files instead.
             let keys: Vec<String> = job.build_args.iter().map(|a| a.key.clone()).collect();
-            if let Some(site) = source::static_site(&app_dir, &keys) {
-                let (k, v) = site.railpack_setting();
-                settings.push((k.to_owned(), v));
-                if let Err(e) = source::write_staticfile(&app_dir, &site) {
+            let site = source::static_site(&app_dir, &keys);
+            let settings = railpack_settings(&job.build_args, site.as_ref());
+            if let Some(site) = &site {
+                if let Err(e) = source::write_staticfile(&app_dir, site) {
                     tracing::warn!(error = %e, "couldn't turn off the index.html fallback");
                 }
                 self.progress(
                     &job.id,
                     BuildProgress {
-                        logs: vec![line("info", "builder", &source::static_site_note(&site))],
+                        logs: vec![line("info", "builder", &source::static_site_note(site))],
                         ..Default::default()
                     },
                 )
                 .await;
             }
-            for (k, v) in &settings {
-                prep.args(["--env", &format!("{k}={v}")]);
-            }
+            prep.args(prepare_env_args(&settings));
             let out = match tokio::time::timeout(
                 Duration::from_secs(300),
                 prep.stdin(Stdio::null()).output(),
@@ -574,8 +564,9 @@ impl Builder {
                 &format!("build-arg:cache-key={cache_key}"),
             ]);
             // Build-time variables reach the plan as secrets.
+            cmd.args(buildctl_secret_args(&settings));
             for (k, v) in &settings {
-                cmd.args(["--secret", &format!("id={k},env={k}")]).env(k, v);
+                cmd.env(k, v);
             }
         } else {
             return fail(
@@ -724,6 +715,42 @@ impl Builder {
 }
 
 /// BuildKit's client login (`$DOCKER_CONFIG/config.json`) for the door.
+/// What a Railpack build is given: the build arguments, and Pyo's own
+/// settings for Railpack. Railpack's plan reads every setting given to
+/// `prepare` as a build secret, so each one goes to `prepare`
+/// ([`prepare_env_args`]) and to the build ([`buildctl_secret_args`]).
+fn railpack_settings(
+    build_args: &[pyo_proto::EnvVar],
+    site: Option<&source::StaticSite>,
+) -> Vec<(String, String)> {
+    let mut settings: Vec<(String, String)> = build_args
+        .iter()
+        .map(|a| (a.key.clone(), a.value.clone()))
+        .collect();
+    if let Some(site) = site {
+        let (k, v) = site.railpack_setting();
+        settings.push((k.to_owned(), v));
+    }
+    settings
+}
+
+/// `railpack prepare`'s `--env` arguments for the settings.
+fn prepare_env_args(settings: &[(String, String)]) -> Vec<String> {
+    settings
+        .iter()
+        .flat_map(|(k, v)| ["--env".to_owned(), format!("{k}={v}")])
+        .collect()
+}
+
+/// `buildctl`'s `--secret` arguments for the settings, each read from the
+/// environment variable of the same name.
+fn buildctl_secret_args(settings: &[(String, String)]) -> Vec<String> {
+    settings
+        .iter()
+        .flat_map(|(k, _)| ["--secret".to_owned(), format!("id={k},env={k}")])
+        .collect()
+}
+
 fn docker_config(registry: &str, token: &str) -> String {
     use base64::Engine;
     let auth = base64::engine::general_purpose::STANDARD.encode(format!("pyo-builder:{token}"));
@@ -806,5 +833,122 @@ mod explain_tests {
         let raw = r#"failed to solve: failed to compute cache key: failed to calculate checksum of ref x9kr::pfwk: "/data": not found"#;
         assert!(super::explain(raw).starts_with("The Dockerfile copies /data,"));
         assert_eq!(super::explain("something else"), "something else");
+    }
+}
+
+#[cfg(test)]
+mod railpack_tests {
+    use super::*;
+
+    fn secret_ids(args: &[String]) -> Vec<String> {
+        args.windows(2)
+            .filter(|w| w[0] == "--secret")
+            .map(|w| {
+                let id = w[1].split(',').next().unwrap();
+                id.strip_prefix("id=").unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    /// Every secret Railpack's plan reads is given to the build: what
+    /// `railpack prepare` plans from the settings, with Railpack itself
+    /// when it's on the PATH (CI installs the builder's version), else
+    /// Railpack's rule that each `--env` is a secret of the plan.
+    #[test]
+    fn the_build_gets_every_secret_the_plan_reads() {
+        let dir = std::env::temp_dir().join(format!("pyo-rp-secrets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"eleventy","start":"eleventy --serve"},"devDependencies":{"@11ty/eleventy":"3"}}"#,
+        )
+        .unwrap();
+        let railpack = std::process::Command::new("railpack")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        assert!(
+            railpack || std::env::var_os("CI").is_none(),
+            "CI runs this with railpack on the PATH"
+        );
+        for args in [
+            vec![],
+            vec![pyo_proto::EnvVar {
+                key: "SITE_URL".into(),
+                value: "https://example.com".into(),
+            }],
+        ] {
+            let keys: Vec<String> = args.iter().map(|a| a.key.clone()).collect();
+            let site = source::static_site(&dir, &keys);
+            assert!(site.is_some());
+            let settings = railpack_settings(&args, site.as_ref());
+            let env = prepare_env_args(&settings);
+            let planned: Vec<String> = if railpack {
+                let plan = dir.join("plan.json");
+                let out = std::process::Command::new("railpack")
+                    .arg("prepare")
+                    .arg(&dir)
+                    .arg("--plan-out")
+                    .arg(&plan)
+                    .args(&env)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{out:?}");
+                let plan: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&plan).unwrap()).unwrap();
+                plan["secrets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.as_str().unwrap().to_owned())
+                    .collect()
+            } else {
+                env.windows(2)
+                    .filter(|w| w[0] == "--env")
+                    .map(|w| w[1].split('=').next().unwrap().to_owned())
+                    .collect()
+            };
+            assert!(planned.contains(&"RAILPACK_SPA_OUTPUT_DIR".to_owned()));
+            let given = secret_ids(&buildctl_secret_args(&settings));
+            for s in &planned {
+                assert!(
+                    given.contains(s),
+                    "the plan reads {s}, the build isn't given it"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CI's Railpack is the builder image's.
+    #[test]
+    fn ci_installs_the_builders_railpack() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let dockerfile =
+            std::fs::read_to_string(format!("{root}/deploy/images/pyo.Dockerfile")).unwrap();
+        let script =
+            std::fs::read_to_string(format!("{root}/scripts/install-railpack.sh")).unwrap();
+        let pin = |text: &str, key: &str| {
+            text.lines()
+                .find_map(|l| l.trim().strip_prefix(key))
+                .map(|v| v.split_whitespace().next().unwrap().to_owned())
+        };
+        assert_eq!(
+            pin(&script, "sha256="),
+            pin(&dockerfile, "ADD --checksum=sha256:")
+        );
+        assert_eq!(
+            pin(&script, "url="),
+            dockerfile
+                .lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("https://github.com/railwayapp/railpack/"))
+                .map(|l| l.split_whitespace().next().unwrap().to_owned())
+        );
+        assert!(
+            source::railpack_frontend()
+                .ends_with(pin(&script, "url=").unwrap().split('/').nth(7).unwrap())
+        );
     }
 }
