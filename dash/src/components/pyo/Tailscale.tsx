@@ -156,7 +156,13 @@ function NameRow({ kind, label }: { kind: "dashboard" | "registry"; label: strin
       ) : ready ? (
         <Badge tone="success">Ready</Badge>
       ) : (
-        <Badge>Starting</Badge>
+        <Badge tone="progress">
+          {ts.hostMove?.state === "moving"
+            ? "Moving server"
+            : ts.onTailnet
+              ? "Getting certificate"
+              : "Joining tailnet"}
+        </Badge>
       )}
       {editing ? (
         <form
