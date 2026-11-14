@@ -238,6 +238,7 @@ Railway:
 | Service from an image | Service from that image. A start command is a note. |
 | Variables | Variables, references resolved, sealed ones by name. |
 | Custom domains | Service domains on their target port, else the `PORT` the service sets, else 8080. `*.up.railway.app` dropped with a note. |
+| No domain | HTTP port 8080 (a new service's default, Pyo sets `PORT` to it), private, with no health check unless Railway has a path, since it may be a worker. |
 | TCP proxy | A public TCP port on its application port, with a note of the old address. |
 | Volumes | Empty volumes of the same size (at least 1 GiB). |
 | Replicas, health check path | Replicas, an HTTP health check. |

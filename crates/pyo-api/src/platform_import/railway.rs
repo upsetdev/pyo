@@ -75,7 +75,8 @@ const P: Platform = Platform::Railway;
 
 /// The port a service gets when Railway says none: Railway gives each
 /// service a `PORT` to listen on (docs.railway.com/deployments/healthchecks),
-/// and Pyo sets `PORT` to the service's first port, so any number works.
+/// and Pyo sets `PORT` to the service's first port. 8080 is the port the
+/// dashboard gives a new service (dash/src/lib/pyo/draft.ts).
 const DEFAULT_PORT: u16 = 8080;
 
 /// A project with what Pyo reads of it.
@@ -611,7 +612,11 @@ fn application(
         .find(|e| e.key == "PORT")
         .and_then(|e| e.value.trim().parse::<u16>().ok());
     let mut web = Web::default();
-    if !all.is_empty() || set_port.is_some() {
+    // Without a domain or a PORT, Pyo's default HTTP port: Pyo sets PORT to
+    // it, as Railway sets PORT to the one it picked. It may be a worker
+    // that doesn't listen, so it gets no TCP check.
+    let guessed = all.is_empty() && set_port.is_none() && importable;
+    if !all.is_empty() || set_port.is_some() || guessed {
         let first = set_port
             .or_else(|| all.iter().find_map(|d| port_of(d)))
             .unwrap_or(DEFAULT_PORT);
@@ -637,12 +642,18 @@ fn application(
             ));
         }
     }
-    if web.ports.is_empty() && importable {
-        warnings.push("It has no domain in Railway, so Pyo doesn't know its port. Add one if it serves traffic.".into());
+    if guessed {
+        warnings.push(format!(
+            "It has no domain in Railway, so it gets HTTP port {DEFAULT_PORT} and Pyo sets PORT to it."
+        ));
     }
+    let check_path = setting(i, "deploy", "healthcheckPath");
     svc.health_check = health_check(
-        web.ports.first().map(|p| p.container_port),
-        setting(i, "deploy", "healthcheckPath"),
+        web.ports
+            .first()
+            .map(|p| p.container_port)
+            .filter(|_| !guessed || check_path.is_some()),
+        check_path,
     );
     warnings.append(&mut web.warnings);
     svc.ports = web.ports;
