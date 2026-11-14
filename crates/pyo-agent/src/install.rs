@@ -11,11 +11,17 @@
 //! 3. Last, after reporting: the Deployment's image pins and its stamp.
 //!    When the pins change, the agent restarts on them.
 //!
+//! On a small server under load, the API server can take longer to check
+//! the policy than it gives a write by default (34 s): each write here asks
+//! for [`WRITE_TIMEOUT`] and one that times out (or finds the API server
+//! busy) is tried again with a backoff, for [`BUDGET`] in all, before the
+//! refresh fails. Each step is logged as it goes.
+//!
 //! Every step finds what's already done, so a refresh that stops halfway
 //! is simply sent again. The agent's token, Pyo's address, its image and
 //! everything else of its Deployment are never touched here.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use k8s_openapi::api::apps::v1::Deployment;
 use kube::{
@@ -30,6 +36,100 @@ use crate::scope::{api_for, same};
 const DEPLOYMENT: &str = "pyo-agent";
 /// What a refresh can't do by itself.
 const RERUN: &str = "run the cluster's connect command to bring them up to date";
+/// What each write of the admission policy (and the dry run through it)
+/// asks the API server for: more than its 34 s default for a write. It
+/// caps this at its own request timeout (60 s unless set higher); the
+/// agent waits a little longer than this for the answer.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a refresh keeps trying writes that time out before it fails.
+const BUDGET: Duration = Duration::from_secs(300);
+/// The first wait before trying again; it doubles up to [`MAX_BACKOFF`].
+const FIRST_BACKOFF: Duration = Duration::from_secs(5);
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// A refresh's progress: logged as it goes, and sent back with its result.
+#[derive(Default)]
+pub struct Progress {
+    pub lines: Vec<pyo_proto::LogLine>,
+}
+
+impl Progress {
+    fn say(&mut self, message: String) {
+        tracing::info!("{message}");
+        self.lines.push(pyo_proto::LogLine {
+            at: pyo_proto::now_ms(),
+            level: "info".into(),
+            source: "agent".into(),
+            message,
+        });
+    }
+}
+
+/// Worth trying again: the API server ran out of time or was busy (it may
+/// still have made the change), or the agent stopped waiting for it.
+fn transient(e: &kube::Error) -> bool {
+    match e {
+        kube::Error::Api(s) => matches!(s.code, 429 | 500 | 502 | 503 | 504),
+        kube::Error::HyperError(_) | kube::Error::Service(_) => true,
+        _ => false,
+    }
+}
+
+/// The wait before try `tries + 1`, if there's still time for it (`left`
+/// of the budget).
+fn backoff(tries: u32, left: Duration) -> Option<Duration> {
+    let wait = FIRST_BACKOFF
+        .saturating_mul(1 << tries.saturating_sub(1).min(8))
+        .min(MAX_BACKOFF);
+    (wait < left).then_some(wait)
+}
+
+/// `req` (a write, whose URL kube always ends with its query) asking the
+/// API server for [`WRITE_TIMEOUT`].
+fn with_timeout(mut req: http::Request<Vec<u8>>) -> Result<http::Request<Vec<u8>>, kube::Error> {
+    let uri = req.uri().to_string();
+    let sep = if uri.ends_with('?') { "" } else { "&" };
+    *req.uri_mut() = format!("{uri}{sep}timeout={}s", WRITE_TIMEOUT.as_secs())
+        .parse()
+        .map_err(|e: http::uri::InvalidUri| kube::Error::Service(e.into()))?;
+    Ok(req)
+}
+
+/// `req` with [`WRITE_TIMEOUT`] for the API server, sent; the agent waits a
+/// little longer than that for its answer.
+async fn send_with_timeout(
+    client: &Client,
+    req: http::Request<Vec<u8>>,
+) -> Result<DynamicObject, kube::Error> {
+    let req = with_timeout(req)?;
+    match tokio::time::timeout(WRITE_TIMEOUT + Duration::from_secs(10), client.request(req)).await {
+        Ok(r) => r,
+        Err(_) => Err(kube::Error::Service(
+            format!(
+                "no answer from the API server in {}s",
+                WRITE_TIMEOUT.as_secs() + 10
+            )
+            .into(),
+        )),
+    }
+}
+
+/// Replace `name` (in `api`'s resource) with `obj`, with [`WRITE_TIMEOUT`].
+async fn replace(
+    client: &Client,
+    api: &Api<DynamicObject>,
+    name: &str,
+    obj: &DynamicObject,
+) -> Result<DynamicObject, kube::Error> {
+    let req = kube::core::Request::new(api.resource_url())
+        .replace(
+            name,
+            &PostParams::default(),
+            serde_json::to_vec(obj).map_err(kube::Error::SerdeError)?,
+        )
+        .map_err(kube::Error::BuildRequest)?;
+    send_with_timeout(client, req).await
+}
 
 /// The install stamped on the agent's Deployment, if any.
 pub async fn deployment_stamp(client: &Client) -> Option<String> {
@@ -116,8 +216,13 @@ fn deployment_patch(p: &InstallParts) -> Value {
 
 /// Steps 1 and 2. Ok once the admission policy is this install's and lets
 /// the Deployment change through; `finish` makes that change.
-pub async fn refresh(client: &Client, p: &InstallParts) -> anyhow::Result<()> {
+pub async fn refresh(
+    client: &Client,
+    p: &InstallParts,
+    progress: &mut Progress,
+) -> anyhow::Result<()> {
     check(p).map_err(|e| anyhow::anyhow!("Pyo sent an install this agent won't apply: {e}"))?;
+    let deadline = Instant::now() + BUDGET;
     // 1. Its roles, as Pyo's are.
     for o in &p.access {
         let kind = o["kind"].as_str().unwrap_or("");
@@ -144,9 +249,12 @@ pub async fn refresh(client: &Client, p: &InstallParts) -> anyhow::Result<()> {
     let mut replaced: Vec<(Api<DynamicObject>, DynamicObject)> = vec![];
     for o in &p.admission {
         let (api, name) = api_for(client, o);
-        // Changed under it (another process of this agent, on its way out,
-        // making the same refresh): read it again.
-        for attempt in 1.. {
+        let kind = o["kind"].as_str().unwrap_or("");
+        // What was there before the first write: put back if the new policy
+        // refuses the agent (below), even when that write's answer was lost.
+        let mut before: Option<DynamicObject> = None;
+        let mut tries = 0;
+        loop {
             let Some(old) = api.get_opt(&name).await? else {
                 anyhow::bail!("this cluster has no admission policy for the agent; {RERUN}")
             };
@@ -156,6 +264,11 @@ pub async fn refresh(client: &Client, p: &InstallParts) -> anyhow::Result<()> {
                 && stamp(&old).as_deref()
                     == o["metadata"]["annotations"][rbac::INSTALL_ANNOTATION].as_str()
             {
+                // In place, by an earlier try whose answer didn't come back.
+                if let Some(b) = before.take() {
+                    progress.say(format!("The {kind} is in place."));
+                    replaced.push((api.clone(), b));
+                }
                 break;
             }
             let mut new: DynamicObject = serde_json::from_value(o.clone())?;
@@ -167,18 +280,42 @@ pub async fn refresh(client: &Client, p: &InstallParts) -> anyhow::Result<()> {
             let mut annotations = old.annotations().clone();
             annotations.extend(new.annotations().clone());
             new.metadata.annotations = Some(annotations);
-            match api.replace(&name, &PostParams::default(), &new).await {
+            tries += 1;
+            progress.say(if tries == 1 {
+                format!("Updating the {kind}…")
+            } else {
+                format!("Updating the {kind} (try {tries})…")
+            });
+            if before.is_none() {
+                before = Some(old);
+            }
+            match replace(client, &api, &name, &new).await {
                 Ok(_) => {
-                    replaced.push((api, old));
+                    if let Some(b) = before.take() {
+                        replaced.push((api.clone(), b));
+                    }
                     break;
                 }
-                Err(kube::Error::Api(e)) if e.code == 409 && attempt < 3 => {
+                // Changed under it (another process of this agent, on its
+                // way out, making the same refresh): read it again.
+                Err(kube::Error::Api(e)) if e.code == 409 && tries < 3 => {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
-                Err(e) => anyhow::bail!(
-                    "couldn't update {} {name}: {e}",
-                    o["kind"].as_str().unwrap_or("")
-                ),
+                Err(e) if transient(&e) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    let Some(wait) = backoff(tries, left) else {
+                        anyhow::bail!(
+                            "couldn't update {kind} {name} in {} minutes: {e}. The API server may be overloaded; this is tried again later",
+                            BUDGET.as_secs() / 60
+                        );
+                    };
+                    progress.say(format!(
+                        "The API server didn't take it ({e}). Trying again in {}s…",
+                        wait.as_secs()
+                    ));
+                    tokio::time::sleep(wait).await;
+                }
+                Err(e) => anyhow::bail!("couldn't update {kind} {name}: {e}"),
             }
         }
     }
@@ -187,34 +324,80 @@ pub async fn refresh(client: &Client, p: &InstallParts) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
     let deployments = Api::<Deployment>::namespaced(client.clone(), rbac::NS);
-    let probe = deployments
-        .patch(
+    progress.say("Checking the agent's own update against it…".into());
+    let mut tries = 0;
+    let probe = loop {
+        tries += 1;
+        let req = kube::core::Request::new(deployments.resource_url()).patch(
             DEPLOYMENT,
             &PatchParams {
                 dry_run: true,
                 ..Default::default()
             },
             &Patch::Strategic(deployment_patch(p)),
-        )
-        .await;
+        );
+        let sent = match req {
+            Ok(req) => send_with_timeout(client, req).await.map(|_| ()),
+            Err(e) => Err(kube::Error::BuildRequest(e)),
+        };
+        match sent {
+            Err(e) if transient(&e) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let Some(wait) = backoff(tries, left) else {
+                    break Err(e);
+                };
+                progress.say(format!(
+                    "The API server didn't answer the check ({e}). Trying again in {}s…",
+                    wait.as_secs()
+                ));
+                tokio::time::sleep(wait).await;
+            }
+            other => break other,
+        }
+    };
     if let Err(e) = probe {
+        let why = if transient(&e) {
+            format!(
+                "couldn't check the new admission policy against the agent's own update in {} minutes ({e})",
+                BUDGET.as_secs() / 60
+            )
+        } else {
+            format!("the new admission policy refused the agent's own update ({e})")
+        };
+        if !replaced.is_empty() {
+            progress.say("Putting the old admission policy back…".into());
+        }
         let mut back = String::new();
         for (api, mut old) in replaced.into_iter().rev() {
             let name = old.name_any();
             old.metadata.managed_fields = None;
-            old.metadata.resource_version = api
-                .get(&name)
-                .await
-                .ok()
-                .and_then(|cur| cur.resource_version());
-            if let Err(e) = api.replace(&name, &PostParams::default(), &old).await {
-                back = format!(" Putting back the old one failed too: {e}.");
+            for attempt in 1..=3 {
+                old.metadata.resource_version = api
+                    .get(&name)
+                    .await
+                    .ok()
+                    .and_then(|cur| cur.resource_version());
+                match replace(client, &api, &name, &old).await {
+                    Ok(_) => {
+                        back.clear();
+                        break;
+                    }
+                    Err(e) => {
+                        back = format!(" Putting back the old one failed too: {e}.");
+                        if attempt < 3
+                            && (transient(&e) || matches!(&e, kube::Error::Api(s) if s.code == 409))
+                        {
+                            tokio::time::sleep(FIRST_BACKOFF).await;
+                        } else {
+                            break;
+                        }
+                    }
+                }
             }
         }
-        anyhow::bail!(
-            "the new admission policy refused the agent's own update ({e}), so the old one stays.{back}"
-        );
+        anyhow::bail!("{why}, so the old one stays.{back}");
     }
+    progress.say("The new admission policy lets the agent's own update through.".into());
     Ok(())
 }
 
@@ -250,6 +433,141 @@ mod tests {
             "127.0.0.1:5005/pyo/geoip:dev",
             &db,
         )
+    }
+
+    /// Writes ask the API server for more than its 34 s default.
+    #[test]
+    fn writes_ask_for_a_longer_timeout() {
+        let r = kube::core::Request::new(
+            "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies",
+        );
+        let put = with_timeout(
+            r.replace("pyo-agent", &PostParams::default(), vec![])
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            put.uri().to_string(),
+            "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/pyo-agent?timeout=120s"
+        );
+        let r = kube::core::Request::new("/apis/apps/v1/namespaces/pyo-system/deployments");
+        let dry = r
+            .patch(
+                DEPLOYMENT,
+                &PatchParams {
+                    dry_run: true,
+                    ..Default::default()
+                },
+                &Patch::Strategic(json!({})),
+            )
+            .unwrap();
+        let uri = with_timeout(dry).unwrap().uri().to_string();
+        assert!(
+            uri.starts_with("/apis/apps/v1/namespaces/pyo-system/deployments/pyo-agent?")
+                && uri.contains("dryRun=All")
+                && uri.ends_with("&timeout=120s")
+                && uri.matches('?').count() == 1,
+            "{uri}"
+        );
+    }
+
+    /// Timeouts and a busy API server are tried again, with a backoff, for
+    /// about five minutes; a refusal isn't.
+    #[test]
+    fn timeouts_are_tried_again_for_five_minutes() {
+        let status = |code: u16| {
+            kube::Error::Api(Box::new(
+                serde_json::from_value(
+                    json!({ "status": "Failure", "code": code, "message": "m", "reason": "r" }),
+                )
+                .unwrap(),
+            ))
+        };
+        for code in [429, 500, 502, 503, 504] {
+            assert!(transient(&status(code)), "{code}");
+        }
+        for code in [400, 403, 404, 409, 422] {
+            assert!(!transient(&status(code)), "{code}");
+        }
+        assert!(transient(&kube::Error::Service("no answer".into())));
+        let waits: Vec<u64> = (1..=6)
+            .map(|t| backoff(t, BUDGET).unwrap().as_secs())
+            .collect();
+        assert_eq!(waits, [5, 10, 20, 30, 30, 30]);
+        assert_eq!(backoff(1, Duration::from_secs(5)), None);
+        assert_eq!(backoff(4, Duration::from_secs(31)), Some(MAX_BACKOFF));
+        // Writes that time out at once: tries until the budget is spent.
+        let (mut left, mut tries) = (BUDGET, 1);
+        while let Some(w) = backoff(tries, left) {
+            left -= w;
+            tries += 1;
+        }
+        assert!((10..=14).contains(&tries), "{tries}");
+        // A write that takes the API server's whole minute each time: fewer.
+        let (mut left, mut tries) = (BUDGET, 1);
+        loop {
+            left = left.saturating_sub(Duration::from_secs(60));
+            match backoff(tries, left) {
+                Some(w) => {
+                    left -= w;
+                    tries += 1;
+                }
+                None => break,
+            }
+        }
+        assert!((3..=5).contains(&tries), "{tries}");
+    }
+
+    /// The API server takes the timeout on a replace and a dry-run patch.
+    ///
+    /// PYO_TEST_KUBECONFIG=<throwaway kubeconfig> cargo test -p pyo-agent -- --ignored writes_with_a_timeout
+    #[tokio::test]
+    #[ignore = "needs a throwaway Kubernetes API server"]
+    async fn writes_with_a_timeout_on_a_cluster() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+        let Ok(path) = std::env::var("PYO_TEST_KUBECONFIG") else {
+            panic!("set PYO_TEST_KUBECONFIG to a throwaway cluster's kubeconfig")
+        };
+        let kc = kube::config::Kubeconfig::read_from(&path).unwrap();
+        let config = kube::Config::from_custom_kubeconfig(kc, &Default::default())
+            .await
+            .unwrap();
+        let client = Client::try_from(config).unwrap();
+        let maps = Api::<ConfigMap>::namespaced(client.clone(), "default");
+        let _ = maps.delete("pyo-t-timeout", &Default::default()).await;
+        maps.create(
+            &PostParams::default(),
+            &serde_json::from_value(
+                json!({ "metadata": { "name": "pyo-t-timeout" }, "data": { "a": "1" } }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let (api, name) = api_for(
+            &client,
+            &json!({ "apiVersion": "v1", "kind": "ConfigMap", "metadata": { "name": "pyo-t-timeout", "namespace": "default" } }),
+        );
+        let mut obj = api.get(&name).await.unwrap();
+        obj.data["data"]["a"] = json!("2");
+        let out = replace(&client, &api, &name, &obj).await.unwrap();
+        assert_eq!(out.data["data"]["a"], "2");
+        let req = kube::core::Request::new(api.resource_url())
+            .patch(
+                &name,
+                &PatchParams {
+                    dry_run: true,
+                    ..Default::default()
+                },
+                &Patch::Strategic(json!({ "data": { "a": "3" } })),
+            )
+            .unwrap();
+        let dry = send_with_timeout(&client, req).await.unwrap();
+        assert_eq!(dry.data["data"]["a"], "3");
+        assert_eq!(api.get(&name).await.unwrap().data["data"]["a"], "2");
+        maps.delete("pyo-t-timeout", &Default::default())
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -736,7 +1054,9 @@ mod tests {
         )
         .0;
         roles.patch(rbac::STATS_ROLE, &pp, &Patch::Apply(json!({ "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": { "name": rbac::STATS_ROLE }, "rules": [] }))).await.unwrap();
-        let err = refresh(&sa, &new).await.expect_err("its roles differ");
+        let err = refresh(&sa, &new, &mut Progress::default())
+            .await
+            .expect_err("its roles differ");
         assert!(format!("{err:#}").contains("connect command"), "{err:#}");
         assert_eq!(detect().await.install, old.hash, "nothing changed");
         apply(
@@ -749,7 +1069,17 @@ mod tests {
         .await;
 
         // Its roles as Pyo's: the policy is refreshed, then the pins.
-        refresh(&sa, &new).await.unwrap();
+        let mut progress = Progress::default();
+        refresh(&sa, &new, &mut progress).await.unwrap();
+        let said: Vec<&str> = progress.lines.iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                "Updating the ValidatingAdmissionPolicy…",
+                "Checking the agent's own update against it…",
+                "The new admission policy lets the agent's own update through.",
+            ]
+        );
         assert_eq!(
             vaps.get(rbac::ADMISSION_POLICY)
                 .await
@@ -784,7 +1114,7 @@ mod tests {
             .collect();
         assert_eq!(env, new.pins);
         // Sent again: nothing to do.
-        refresh(&sa, &new).await.unwrap();
+        refresh(&sa, &new, &mut Progress::default()).await.unwrap();
         // Still enforced: a privileged pod is refused.
         let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(json!({ "metadata": { "name": "pyo-test-privileged" }, "spec": { "containers": [{ "name": "x", "image": "registry.k8s.io/pause:3.10", "securityContext": { "privileged": true } }] } })).unwrap();
         let refused = Api::<k8s_openapi::api::core::v1::Pod>::namespaced(sa.clone(), rbac::NS)
@@ -809,7 +1139,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(!detect().await.self_update);
         assert!(
-            refresh(&sa, &old).await.is_err(),
+            refresh(&sa, &old, &mut Progress::default()).await.is_err(),
             "without the binding it can't read its roles or write the policy"
         );
 

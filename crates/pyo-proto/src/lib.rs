@@ -975,6 +975,12 @@ pub struct Release {
     /// What to know or do before updating (breaking changes, manual steps).
     #[serde(default)]
     pub before_you_update: Vec<String>,
+    /// The release's [`rbac::access_hash`]: its agent's roles. When it isn't
+    /// the running Pyo's, every cluster needs its connect command after
+    /// the update (updates.rs says so first). The release's own agent
+    /// checks it (`pyo-agent check-release`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

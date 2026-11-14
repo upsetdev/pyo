@@ -825,20 +825,49 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
     #[test]
     fn the_agent_is_applied_again_until_kubernetes_takes_it() {
         let (code, out, err) = apply_agent(&version_json("37", "37"), 3);
-        assert_eq!((code, out.trim()), (0, "ok after 4"), "{err}");
-        assert!(err.contains("Trying again"));
+        assert_eq!(code, 0, "{err}");
+        assert!(out.trim().ends_with("ok after 4"), "{out}");
+        // Progress as it goes: what it's doing, then each try and the time.
+        assert!(out.starts_with("Installing the Pyo agent and its admission policy…"));
+        assert!(
+            err.contains("(try 1, 0s so far). Trying again in 5s…"),
+            "{err}"
+        );
+        assert!(
+            err.contains("(try 3, 15s so far). Trying again in 20s…"),
+            "{err}"
+        );
+    }
+
+    /// Each try gives the API server 2 minutes for the policy (not its 34 s
+    /// default for a write) and applies server-side.
+    #[test]
+    fn the_agent_is_applied_with_time_to_spare() {
+        let block = script_block("agent-apply", CONNECT_SCRIPT);
+        let apply = block.lines().find(|l| l.contains("kubectl apply")).unwrap();
+        for flag in [
+            "--server-side",
+            "--force-conflicts",
+            "--field-manager=pyo",
+            "--request-timeout=120s",
+            "-f \"$MANIFEST\"",
+        ] {
+            assert!(apply.contains(flag), "{flag}: {apply}");
+        }
+        assert!(block.contains("until=$((SECONDS + 300))"));
     }
 
     #[test]
     fn without_its_admission_policy_the_agent_isnt_installed() {
-        // 1.30 or later, or a version that can't be read: about 3 minutes
+        // 1.30 or later, or a version that can't be read: about 5 minutes
         // of tries, then a failure, never "older than 1.30".
         for version in [version_json("37", "37"), String::new()] {
             let (code, out, err) = apply_agent(&version, u32::MAX);
             assert_eq!(code, 0, "{err}");
-            assert!(out.starts_with("failed after "), "{out}");
-            let tries: u32 = out.trim()["failed after ".len()..].parse().unwrap();
-            assert!((5..=12).contains(&tries), "{tries} tries");
+            let last = out.trim().lines().last().unwrap();
+            assert!(last.starts_with("failed after "), "{out}");
+            let tries: u32 = last["failed after ".len()..].parse().unwrap();
+            assert!((10..=14).contains(&tries), "{tries} tries");
             assert!(!out.contains("older than") && !err.contains("older than"));
         }
         // Only a server that says it's older goes on without the policy.

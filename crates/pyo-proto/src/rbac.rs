@@ -795,9 +795,26 @@ pub fn install_hash(
     admission: &[Value],
     pins: &std::collections::BTreeMap<String, String>,
 ) -> String {
+    short_hash(&json!([access, admission, pins]))
+}
+
+/// A short hash (16 hex digits) of the roles and charts every install sets
+/// up, on any cluster and on the one Pyo runs on, with the optional
+/// self-update role: what only a cluster's connect command can change (a
+/// refresh never writes them). A release carries its own (release.json's
+/// `agentAccess`), so an update that changes it says, before it starts,
+/// that every cluster needs its connect command afterwards.
+pub fn access_hash() -> String {
+    short_hash(&json!([
+        objects(false),
+        objects(true),
+        self_update_objects()
+    ]))
+}
+
+fn short_hash(doc: &Value) -> String {
     use sha2::{Digest, Sha256};
-    let doc = json!([access, admission, pins]).to_string();
-    Sha256::digest(doc.as_bytes())
+    Sha256::digest(doc.to_string().as_bytes())
         .iter()
         .take(8)
         .map(|b| format!("{b:02x}"))
@@ -1297,6 +1314,30 @@ mod tests {
             mysql_operator: "mo".into(),
             mysql_backup: "mb".into(),
         }
+    }
+
+    /// The roles' hash: stable for the same roles, 16 hex digits, and
+    /// not moved by what a refresh can change (pins, the policy).
+    #[test]
+    fn access_hash_covers_only_the_roles() {
+        let h = access_hash();
+        assert_eq!(h.len(), 16);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(h, access_hash());
+        let db = crate::system::db_images_from_env();
+        let a = InstallParts::new(false, true, "w:1", "g:1", &db);
+        let b = InstallParts::new(false, true, "w:2", "g:2", &db);
+        assert_ne!(a.hash, b.hash, "pins change the install");
+        assert_eq!(access_hash(), h, "but not the roles");
+        // Its content: every role set an install can have.
+        assert_eq!(
+            short_hash(&json!([
+                objects(false),
+                objects(true),
+                self_update_objects()
+            ])),
+            h
+        );
     }
 
     #[test]
