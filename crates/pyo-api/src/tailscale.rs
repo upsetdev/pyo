@@ -309,9 +309,16 @@ impl Client {
         Ok(strings(&v["addrs"]))
     }
 
-    /// One Service, read directly (the list can leave some out): its
-    /// comment and addresses, or None when there's no such Service. Any
-    /// other answer is an error, so a name Pyo can't see is never taken.
+    /// One Service, read directly: its comment and addresses, or None when
+    /// there's no such Service (404). The list leaves some out (Tailscale's
+    /// API reference: it has the Services of the admin console's
+    /// "Advertised" tab, so not one defined and hosted nowhere). Any other
+    /// answer is an error, 403 included ("access to the Service is
+    /// forbidden"), so a name Pyo can't read is never taken.
+    ///
+    /// There's no create-only write: PUT creates or updates, with no
+    /// If-Match or If-None-Match for Services (only the policy file has
+    /// ETags). So this read is what keeps Pyo off Services it didn't make.
     pub async fn service(&self, name: &str) -> anyhow::Result<Option<(String, Vec<String>)>> {
         match self
             .call(
