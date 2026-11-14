@@ -282,6 +282,13 @@ export const fetchImages = (team: string) =>
     `/api/v1/images?${new URLSearchParams({ team })}`,
   );
 
+/** Imports from other platforms (lib/pyo/platformImport.ts). */
+export const fetchPlatformImport = <T>(id: string) =>
+  request<T>(`/api/v1/platform-imports/${encodeURIComponent(id)}`);
+
+export const fetchPlatformImports = <T>(teamId: string) =>
+  request<{ imports: T[] }>(`/api/v1/platform-imports?${new URLSearchParams({ teamId })}`);
+
 export const fetchState = () =>
   request<Record<string, unknown>>("/api/v1/state");
 
