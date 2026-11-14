@@ -212,11 +212,11 @@ function PublicDashboardRow() {
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium">Public dashboard</p>
-          <p className="font-mono text-[12px] text-muted-foreground">
-            {pd.open ? (pd.host ?? "Starting") : "Closed"}
+          <p className={`text-[12px] text-muted-foreground ${pd.possible ? "font-mono" : ""}`}>
+            {!pd.possible ? "Off. Ports 80 and 443 don't reach this server." : pd.open ? (pd.host ?? "Starting") : "Closed"}
           </p>
         </div>
-        {pd.open ? (
+        {!pd.possible ? null : pd.open ? (
           <Button size="xs" variant="secondary" disabled={!onTailnet} onClick={() => setConfirm(true)}>
             Close
           </Button>
@@ -226,7 +226,7 @@ function PublicDashboardRow() {
           </Button>
         )}
       </div>
-      {pd.open && onTailnet ? (
+      {pd.possible && pd.open && onTailnet ? (
         <Callout tone="info">Pyo is on your tailnet. You can close the public dashboard.</Callout>
       ) : null}
       <ConfirmDialog

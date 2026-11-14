@@ -61,9 +61,11 @@ pub async fn host(db: &PgPool) -> ApiResult<Option<String>> {
     // Only where its free domains are public too: behind NAT (free domains
     // on Tailscale) Let's Encrypt can't reach it, and every try would count
     // against its limits.
-    Ok(c.filter(|(_, c)| c.public_traffic && c.mode() == crate::freedomain::Mode::Public)
-        .and_then(|(_, c)| c.address())
-        .and_then(|ip| pyo_proto::system::public_dashboard_host(&ip.to_string())))
+    Ok(
+        c.filter(|(_, c)| c.public_traffic && c.mode() == crate::freedomain::Mode::Public)
+            .and_then(|(_, c)| c.address())
+            .and_then(|ip| pyo_proto::system::public_dashboard_host(&ip.to_string())),
+    )
 }
 
 /// The heartbeat reply's `publicDashboard`, for the cluster Pyo runs on.
@@ -106,8 +108,11 @@ async fn answers(host: &str) -> bool {
 /// For the dashboard (admins): its name, and whether it's open and ready.
 pub async fn snapshot(db: &PgPool) -> ApiResult<Value> {
     let closed = closed(db).await?;
+    // Behind NAT (or without public traffic) there's none to open or close.
+    let possible = closed || host(db).await?.is_some();
     Ok(json!({
         "open": !closed,
         "host": crate::web::addresses().public,
+        "possible": possible,
     }))
 }
