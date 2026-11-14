@@ -758,13 +758,12 @@ pub(crate) async fn repos(
     Ok(Json(json!({ "repositories": out })))
 }
 
-/// The file a Git build of a repository would use by default: its Dockerfile,
-/// else its Containerfile, in the build context. None: the build is
-/// zero-config (Railpack).
+/// The Dockerfile a Git build of a repository would use by default, in the
+/// build context. None: the build is zero-config (Railpack).
 #[utoipa::path(get, path = "/github/build-file", operation_id = "getGithubBuildFile", tag = "GitHub",
     params(BuildFileQuery),
     responses(
-        (status = 200, description = "`file`: \"Dockerfile\" or \"Containerfile\" (a Dockerfile wins when there are both), or null when there's neither.", body = Object),
+        (status = 200, description = "`file`: the Dockerfile Pyo would use, or null when there's none.", body = Object),
         (status = 400, description = "No `team`, `repo` or `branch`, or the team hasn't connected GitHub.", body = crate::error::ErrorBody),
         (status = 404, description = "No such team, or you aren't in it.", body = crate::error::ErrorBody),
     ),
