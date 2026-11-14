@@ -1854,6 +1854,22 @@ async fn refresh_links(tx: &mut Transaction<'_, Postgres>, db: &Db) -> ApiResult
     Ok(())
 }
 
+/// The variables `connect` gives a service without names of its own, and
+/// every one it can give under a service's own names.
+pub(crate) async fn variable_names(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> ApiResult<(Vec<String>, Vec<String>)> {
+    let db = load(tx, id).await?;
+    let given: Vec<String> = variables(&db, "", "", "")
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    let mut offered = given.clone();
+    offered.extend(parts(&db, "").into_iter().map(|(k, _)| k));
+    Ok((given, offered))
+}
+
 /// Connect a service: its variables, under the names `env` gives (all of
 /// them, as they are, without).
 pub async fn connect(

@@ -26,8 +26,8 @@ use serde_json::Value;
 
 use super::{
     Fetch, ImportDatabase, ImportDomain, ImportPlan, ImportProject, ImportService, ImportStack,
-    Platform, Responses, Web, database_action, database_name, database_warnings, health_check,
-    https_repo, plan_service, s, unique, url_escape, volume,
+    Platform, Responses, Web, coolify::internal_port, database_action, database_name, health_check,
+    https_repo, link_plan, links::DbAddress, plan_service, s, unique, url_escape, volume,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -226,7 +226,6 @@ fn application(
     a: &Value,
     name: String,
     shared: (&str, &str),
-    dbs: &[ImportDatabase],
     seen: &mut HashSet<String>,
 ) -> ImportService {
     let id = s(a, "applicationId");
@@ -310,7 +309,6 @@ fn application(
 
     // Variables, and build arguments for a build.
     let env = env_list(resolve(s(a, "env"), shared.0, shared.1, &mut warnings));
-    warnings.extend(database_warnings(&env, dbs));
     svc.env = env;
     if svc.source.kind == "git" {
         svc.source.build_args = env_list(resolve(
@@ -362,7 +360,7 @@ fn application(
         domains: web.domains,
         warnings,
         importable,
-        existing_id: None,
+        ..Default::default()
     }
 }
 
@@ -484,6 +482,20 @@ fn database(d: &Value, engine: &str, host: &str) -> ImportDatabase {
         )),
         _ => None,
     });
+    // Inside Dokploy's network it's reached by its `appName`.
+    let mut address = DbAddress {
+        user: s(d, "databaseUser").to_owned(),
+        password: s(d, "databasePassword").to_owned(),
+        database: s(d, "databaseName").to_owned(),
+        ..Default::default()
+    };
+    address.add_host(s(d, "appName"), internal_port(engine));
+    if let Some(port) = d["externalPort"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+    {
+        address.add_host(ip, port);
+    }
     let reachable = url.is_some();
     let (target, action, note) = database_action(engine, reachable, P);
     let mut warnings: Vec<String> = note.into_iter().collect();
@@ -507,7 +519,8 @@ fn database(d: &Value, engine: &str, host: &str) -> ImportDatabase {
         warnings,
         existing_id: None,
         url,
-        hosts: vec![s(d, "appName").to_owned()],
+        address,
+        rest: false,
     }
 }
 
@@ -570,13 +583,9 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
                     continue;
                 };
                 let n = unique(s(full, "name"), &mut names);
-                project.services.push(application(
-                    full,
-                    n,
-                    shared,
-                    &project.databases,
-                    &mut seen_domains,
-                ));
+                project
+                    .services
+                    .push(application(full, n, shared, &mut seen_domains));
             }
             for c in arr(&e["compose"]) {
                 if let Some(full) = r.get(&one("compose", s(c, "composeId"))) {
@@ -588,5 +597,8 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
             out.projects.push(project);
         }
     }
+    // `${{project.X}}` and `${{environment.X}}` come resolved: a
+    // database's internal URL there.
+    link_plan(&mut out, &[host.to_owned()]);
     out
 }

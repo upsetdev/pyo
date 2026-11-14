@@ -31,6 +31,7 @@
 
 mod coolify;
 mod dokploy;
+mod links;
 mod railway;
 mod vercel;
 
@@ -51,7 +52,7 @@ use sqlx::{Postgres, Transaction};
 use crate::{
     AppState,
     auth::{KeyAccess, SessionUser, User},
-    compose::{ComposePlan, PlanEnv, PlanPort, PlanResources, PlanService, PlanVolume},
+    compose::{ComposePlan, PlanPort, PlanResources, PlanService, PlanVolume},
     error::{ApiError, ApiResult, ErrorBody},
     ids::new_id,
     ops::{Role, require_role},
@@ -169,6 +170,27 @@ pub struct ImportService {
     /// The Pyo service an earlier import made from it.
     #[serde(default)]
     pub existing_id: Option<String>,
+    /// Databases of this import its variables point at: Pyo connects each
+    /// one to it before its first deploy, in place of those variables. One
+    /// that isn't picked holds its deploy.
+    #[serde(default)]
+    pub connects: Vec<ImportConnect>,
+    /// Why Pyo won't deploy it: a variable points at a database Pyo can't
+    /// match, or one it doesn't import.
+    #[serde(default)]
+    pub holds: Vec<String>,
+}
+
+/// A database of the import a service gets connected to.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportConnect {
+    /// The database's `key` in this plan.
+    pub database: String,
+    /// The service's variables that point at it, each with the database's
+    /// variable it becomes, as `connectDatabase` maps them:
+    /// `{"DATABASE_URL": "DATABASE_URL", "PGHOST": "POSTGRES_HOST"}`.
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema, PartialEq)]
@@ -223,9 +245,12 @@ pub struct ImportDatabase {
     /// Where Pyo copies it from. Never sent back.
     #[serde(skip)]
     pub url: Option<String>,
-    /// The names services there reach it by, to warn about variables that still do.
+    /// Where services there reach it, to tell which variables point at it.
     #[serde(skip)]
-    pub hosts: Vec<String>,
+    pub address: links::DbAddress,
+    /// A KV database whose REST API services use (Vercel's KV variables).
+    #[serde(skip)]
+    pub rest: bool,
 }
 
 // ── Shared mapping helpers ───────────────────────────────────────────────────
@@ -463,31 +488,39 @@ impl Web {
     }
 }
 
-/// Warnings for variables that still point at one of the platform's
-/// databases by its name there.
-fn database_warnings(env: &[PlanEnv], dbs: &[ImportDatabase]) -> Vec<String> {
-    let mut out = vec![];
-    for db in dbs {
-        let keys: Vec<&str> = env
+/// Links a service's variables to the databases of its import
+/// (links.rs): the ones Pyo connects, and why it holds its deploy. `env`
+/// has the values to read (references resolved), `explicit` what the
+/// platform says a variable is.
+fn link_databases(
+    svc: &mut ImportService,
+    env: &[(String, String)],
+    explicit: &BTreeMap<String, (String, links::Role)>,
+    dbs: &[ImportDatabase],
+    platform_hosts: &[String],
+) {
+    let l = links::link(env, explicit, dbs, platform_hosts);
+    svc.connects = l.connects;
+    svc.holds = l.holds;
+}
+
+/// Links every service of a plan to the plan's databases, by its
+/// variables' values (Coolify, Dokploy: references there come resolved).
+fn link_plan(plan: &mut ImportPlan, platform_hosts: &[String]) {
+    let dbs: Vec<ImportDatabase> = plan
+        .projects
+        .iter()
+        .flat_map(|p| p.databases.iter().cloned())
+        .collect();
+    for svc in plan.projects.iter_mut().flat_map(|p| &mut p.services) {
+        let pairs: Vec<(String, String)> = svc
+            .service
+            .env
             .iter()
-            .filter(|e| {
-                db.hosts
-                    .iter()
-                    .any(|h| !h.is_empty() && e.value.contains(h.as_str()))
-            })
-            .map(|e| e.key.as_str())
+            .map(|e| (e.key.clone(), e.value.clone()))
             .collect();
-        if !keys.is_empty() {
-            out.push(format!(
-                "{} point{} at {} there. Connect the service to it in Pyo and remove {}.",
-                keys.join(", "),
-                if keys.len() == 1 { "s" } else { "" },
-                db.source_name,
-                if keys.len() == 1 { "it" } else { "them" }
-            ));
-        }
+        link_databases(svc, &pairs, &BTreeMap::new(), &dbs, platform_hosts);
     }
-    out
 }
 
 /// A plain service (no stack) with its defaults filled in.
@@ -1205,7 +1238,7 @@ pub struct ApplyBody {
 pub struct ImportResult {
     pub key: String,
     pub name: String,
-    /// "created", "importing" (a database whose data is being copied), "exists" (an earlier import made it), "skipped" (it can't be imported) or "failed".
+    /// "created", "importing" (a database whose data is being copied), "exists" (an earlier import made it), "held" (a service made but not deployed: `message` says why), "skipped" (it can't be imported) or "failed".
     pub state: String,
     #[serde(default)]
     pub message: String,
@@ -1214,6 +1247,21 @@ pub struct ImportResult {
     pub id: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    /// A service: the databases of the import Pyo connected it to.
+    #[serde(default)]
+    pub connected: Vec<ImportConnected>,
+}
+
+/// A database Pyo connected a service to, in place of the variables that
+/// pointed at the old one.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportConnected {
+    /// The database's name in Pyo.
+    pub database: String,
+    pub database_id: String,
+    /// The service's variables it set.
+    pub variables: Vec<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -1231,6 +1279,7 @@ fn result(key: &str, name: &str, state: &str, message: impl Into<String>) -> Imp
         message: message.into(),
         id: None,
         project_id: None,
+        connected: vec![],
     }
 }
 
@@ -1325,17 +1374,23 @@ async fn load_run(db: &sqlx::PgPool, id: &str) -> ApiResult<Option<ImportRun>> {
     Ok(row.map(Into::into))
 }
 
-/// Adds results to a run as they come.
+/// Adds results to a run as they come, in place of earlier ones for the
+/// same items (a service's, once it's connected and deployed).
 async fn record(db: &sqlx::PgPool, run: Option<&str>, results: &[ImportResult]) {
     let Some(run) = run else { return };
     if results.is_empty() {
         return;
     }
+    let keys: Vec<&str> = results.iter().map(|r| r.key.as_str()).collect();
     if let Err(e) = sqlx::query(
-        "UPDATE pyo.platform_imports SET results = results || $2, updated_at = now() WHERE id = $1",
+        "UPDATE pyo.platform_imports
+            SET results = coalesce((SELECT jsonb_agg(r) FROM jsonb_array_elements(results) r WHERE NOT (r->>'key' = ANY($3))), '[]'::jsonb) || $2,
+                updated_at = now()
+          WHERE id = $1",
     )
     .bind(run)
     .bind(json!(results))
+    .bind(&keys)
     .execute(db)
     .await
     {
@@ -1633,6 +1688,8 @@ async fn create(
 
     let label = platform.label();
     let mut results = vec![];
+    // Services with databases to connect, or a deploy to hold.
+    let mut pending: Vec<Pending> = vec![];
     let mut wake = vec![];
     let now = pyo_proto::now_ms();
     let from = |id: &str, project: &str| json!({ "platform": plan.platform, "host": plan.host, "id": id, "project": project });
@@ -1647,6 +1704,14 @@ async fn create(
                     "An earlier import made it.",
                 );
                 r.id = Some(id.clone());
+                if !svc.connects.is_empty() {
+                    pending.push(Pending {
+                        result: r.clone(),
+                        connects: svc.connects.clone(),
+                        holds: vec![],
+                        new: false,
+                    });
+                }
                 results.push(r);
                 continue;
             }
@@ -1684,7 +1749,9 @@ async fn create(
                 spec["source"]["importedFrom"] = from(&svc.key, &p.key);
                 spec["domains"] = domains_json(&svc.domains, now);
                 let volumes = crate::compose::volume_specs(&service, &new_id);
-                let deployment = deploy.then(|| new_id("dpl"));
+                // One with databases to connect deploys once they are.
+                let deployment = (deploy && svc.connects.is_empty() && svc.holds.is_empty())
+                    .then(|| new_id("dpl"));
                 crate::ops::create_service(
                     &mut sp,
                     user,
@@ -1705,6 +1772,14 @@ async fn create(
                     let mut r = result(&svc.key, &svc.service.name, "created", "");
                     r.id = Some(id);
                     r.project_id = Some(pid);
+                    if !svc.connects.is_empty() || !svc.holds.is_empty() {
+                        pending.push(Pending {
+                            result: r.clone(),
+                            connects: svc.connects.clone(),
+                            holds: svc.holds.clone(),
+                            new: true,
+                        });
+                    }
                     results.push(r);
                 }
                 Err(e) => {
@@ -1816,7 +1891,308 @@ async fn create(
         r
     });
     results.extend(futures::future::join_all(jobs).await);
+
+    // Then the services that use them: connected, and deployed once
+    // they're ready.
+    let all: Vec<&ImportDatabase> = plan.projects.iter().flat_map(|p| &p.databases).collect();
+    let done = connect_and_deploy(s, user, run, pending, &all, &results, deploy).await;
+    for r in done {
+        match results.iter_mut().find(|x| x.key == r.key) {
+            Some(x) => *x = r,
+            None => results.push(r),
+        }
+    }
     Ok(ImportOutcome { ok: true, results })
+}
+
+/// A service with databases to connect, or a deploy to hold.
+struct Pending {
+    result: ImportResult,
+    connects: Vec<ImportConnect>,
+    holds: Vec<String>,
+    /// Made by this import (deployed by it), not an earlier one's.
+    new: bool,
+}
+
+/// How long a deploy waits for its databases (and their data).
+#[cfg(not(test))]
+const READY_WAIT: Duration = Duration::from_secs(45 * 60);
+#[cfg(test)]
+const READY_WAIT: Duration = Duration::from_secs(30);
+#[cfg(not(test))]
+const READY_POLL: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const READY_POLL: Duration = Duration::from_millis(200);
+
+/// Connects each pending service to the databases it uses, in place of the
+/// variables that pointed at the old ones, then deploys the new ones whose
+/// databases are ready (their data copied) and holds the others, saying
+/// why. Their results, as they end.
+async fn connect_and_deploy(
+    s: &AppState,
+    user: &User,
+    run: Option<&str>,
+    pending: Vec<Pending>,
+    dbs: &[&ImportDatabase],
+    made: &[ImportResult],
+    deploy: bool,
+) -> Vec<ImportResult> {
+    let mut out = vec![];
+    // Per service: the databases to wait for (id, name).
+    let mut waits: Vec<Vec<(String, String)>> = vec![];
+    for p in pending {
+        let Pending {
+            mut result,
+            connects,
+            mut holds,
+            new,
+        } = p;
+        let mut wait = vec![];
+        for c in &connects {
+            let keys: Vec<String> = c.env.keys().cloned().collect();
+            let Some(db) = dbs.iter().find(|d| d.key == c.database) else {
+                continue;
+            };
+            let got = made.iter().find(|r| r.key == c.database);
+            // Made now, or by an earlier import (not picked again).
+            let Some((db_id, name)) = got
+                .and_then(|r| r.id.clone().map(|id| (id, r.name.clone())))
+                .or_else(|| db.existing_id.clone().map(|id| (id, db.name.clone())))
+            else {
+                holds.push(match got {
+                    None => links::not_brought(&keys, db),
+                    Some(_) => format!(
+                        "{} couldn't be made, so it isn't connected. Connect a database, then deploy.",
+                        db.name
+                    ),
+                });
+                continue;
+            };
+            let Some(service_id) = result.id.clone() else {
+                continue;
+            };
+            match connect_one(s, user, &service_id, &db_id, c).await {
+                Ok(Some(variables)) => result.connected.push(ImportConnected {
+                    database: name.clone(),
+                    database_id: db_id.clone(),
+                    variables,
+                }),
+                Ok(None) => {}
+                Err(e) => holds.push(format!("Pyo couldn't connect {name}: {}", e.message)),
+            }
+            wait.push((db_id, name));
+        }
+        if new && deploy && holds.is_empty() && !wait.is_empty() {
+            let names: Vec<&str> = wait.iter().map(|(_, n)| n.as_str()).collect();
+            result.message = format!(
+                "Deploys once {} {} ready.",
+                names.join(", "),
+                if names.len() == 1 { "is" } else { "are" }
+            );
+        } else if new {
+            result.state = if deploy && !holds.is_empty() {
+                "held"
+            } else {
+                "created"
+            }
+            .into();
+            result.message = holds.join(" ");
+        } else if !result.connected.is_empty() {
+            result.message = "An earlier import made it. Pyo connected it now.".into();
+        }
+        record(&s.db, run, std::slice::from_ref(&result)).await;
+        waits.push(if new && deploy && holds.is_empty() {
+            wait
+        } else {
+            vec![]
+        });
+        out.push(result);
+    }
+
+    // Each database once, however many services wait for it.
+    let mut ids: Vec<(String, String)> = waits.iter().flatten().cloned().collect();
+    ids.sort();
+    ids.dedup();
+    let checks = ids
+        .iter()
+        .map(|(id, name)| async move { (id.clone(), ready(&s.db, id, name).await) });
+    let ready: BTreeMap<String, Result<(), String>> = futures::future::join_all(checks)
+        .await
+        .into_iter()
+        .collect();
+    for (result, wait) in out.iter_mut().zip(waits) {
+        if wait.is_empty() {
+            continue;
+        }
+        let why: Vec<String> = wait
+            .iter()
+            .filter_map(|(id, _)| ready.get(id).and_then(|r| r.clone().err()))
+            .collect();
+        let service_id = result.id.clone().unwrap_or_default();
+        let deployed = if why.is_empty() {
+            first_deploy(s, user, &service_id)
+                .await
+                .map_err(|e| format!("Its first deploy couldn't start: {}", e.message))
+        } else {
+            Err(why.join(" "))
+        };
+        match deployed {
+            Ok(()) => {
+                result.state = "created".into();
+                result.message.clear();
+            }
+            Err(why) => {
+                result.state = "held".into();
+                result.message = why;
+            }
+        }
+        record(&s.db, run, std::slice::from_ref(result)).await;
+    }
+    out
+}
+
+/// Connects database `db_id` to a service in place of the variables that
+/// pointed at the old one (`c.env`), as the database's Connect action
+/// does: with its own names when the service used them, else under the
+/// service's. None when there's nothing to do: connected already (an
+/// earlier run), or those variables changed since.
+async fn connect_one(
+    s: &AppState,
+    user: &User,
+    service_id: &str,
+    db_id: &str,
+    c: &ImportConnect,
+) -> ApiResult<Option<Vec<String>>> {
+    let mut tx = s.db.begin().await?;
+    let linked: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.database_links WHERE database_id = $1 AND service_id = $2)",
+    )
+    .bind(db_id)
+    .bind(service_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if linked {
+        return Ok(None);
+    }
+    let Some(mut spec): Option<Value> = sqlx::query_scalar(
+        "SELECT spec FROM pyo.services WHERE id = $1 AND NOT deleting FOR UPDATE",
+    )
+    .bind(service_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let (given, offered) = crate::databases::variable_names(&mut tx, db_id).await?;
+    // Only what Pyo's database has (a KV database without its REST API
+    // has no KV_REST_API_URL): others stay as they are.
+    let env: BTreeMap<String, String> = c
+        .env
+        .iter()
+        .filter(|(_, to)| to.split(':').all(|p| offered.iter().any(|o| o == p)))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let mut vars: Vec<Value> = spec["env"].as_array().cloned().unwrap_or_default();
+    let key = |e: &Value| e["key"].as_str().unwrap_or("").to_owned();
+    if env.is_empty() || !env.keys().all(|k| vars.iter().any(|e| key(e) == *k)) {
+        return Ok(None);
+    }
+    vars.retain(|e| !env.contains_key(&key(e)));
+    let left: Vec<String> = vars.iter().map(key).collect();
+    let free = |n: &String| !left.contains(n);
+    // The service used the database's own names: Connect's, as they are.
+    let map = if env.iter().all(|(k, v)| k == v) && given.iter().all(free) {
+        None
+    } else {
+        let mut m = env;
+        for n in given.iter().filter(|n| free(n)) {
+            m.entry(n.clone()).or_insert_with(|| n.clone());
+        }
+        Some(m)
+    };
+    spec["env"] = Value::Array(vars);
+    sqlx::query("UPDATE pyo.services SET spec = $2 WHERE id = $1")
+        .bind(service_id)
+        .bind(&spec)
+        .execute(&mut *tx)
+        .await?;
+    let r = crate::databases::connect(&mut tx, user, db_id, service_id, map).await?;
+    tx.commit().await?;
+    Ok(Some(
+        r["variables"]
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    ))
+}
+
+/// A database's state, its phase on the cluster and its latest import's state.
+type ReadyRow = (String, Option<String>, Option<String>);
+
+/// Waits for a database to be ready, with its data copied when it's being
+/// imported. Err: why the service isn't deployed.
+async fn ready(db: &sqlx::PgPool, id: &str, name: &str) -> Result<(), String> {
+    let until = tokio::time::Instant::now() + READY_WAIT;
+    loop {
+        let row: Result<Option<ReadyRow>, _> = sqlx::query_as(
+            "SELECT d.state, d.status->>'phase',
+                    (SELECT i.state FROM pyo.database_imports i WHERE i.database_id = d.id ORDER BY i.created_at DESC LIMIT 1)
+               FROM pyo.databases d WHERE d.id = $1",
+        )
+        .bind(id)
+        .fetch_optional(db)
+        .await;
+        match row {
+            Ok(None) => return Err(format!("{name} is gone. Connect a database, then deploy.")),
+            Ok(Some((state, _, _))) if state == "deleting" => {
+                return Err(format!(
+                    "{name} is being deleted. Connect a database, then deploy."
+                ));
+            }
+            Ok(Some((_, _, Some(i)))) if i == "failed" => {
+                return Err(format!(
+                    "Copying {name}'s data failed. Retry it on the database's page, then deploy."
+                ));
+            }
+            Ok(Some((_, Some(phase), i)))
+                if phase == "Ready" && i.as_deref().is_none_or(|i| i == "succeeded") =>
+            {
+                return Ok(());
+            }
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= until {
+            return Err(format!("{name} wasn't ready in time. Deploy once it is."));
+        }
+        tokio::time::sleep(READY_POLL).await;
+    }
+}
+
+/// A service's first deploy, as Deploy starts one.
+async fn first_deploy(s: &AppState, user: &User, service_id: &str) -> ApiResult<()> {
+    let mut tx = s.db.begin().await?;
+    let id = new_id("dpl");
+    let c = crate::deploy::create(
+        &mut tx,
+        crate::deploy::DeployRequest {
+            deployment_id: &id,
+            service_id,
+            trigger: "manual",
+            actor: &user.name,
+            rollback_of: None,
+            retry_of: None,
+            commit: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    s.wake(&c).await;
+    s.wake("builders:*").await;
+    Ok(())
 }
 
 /// A new project for an import, with a free slug.
@@ -1891,6 +2267,7 @@ async fn empty_database(
     name: &str,
     engine: &str,
     size: &str,
+    rest: bool,
     from: Value,
 ) -> ApiResult<()> {
     let mut tx = s.db.begin().await?;
@@ -1909,7 +2286,7 @@ async fn empty_database(
             version: None,
             storage_gi: None,
             pooler: None,
-            rest: false,
+            rest: rest && engine == "valkey",
             restore: None,
             restored_from: None,
             cpu_millis: None,
@@ -1968,7 +2345,7 @@ async fn database(
             }
         }
         _ => empty_database(
-            s, user, team_id, cluster_id, &id, &db.name, engine, size, from,
+            s, user, team_id, cluster_id, &id, &db.name, engine, size, db.rest, from,
         )
         .await
         .map(|_| "created"),

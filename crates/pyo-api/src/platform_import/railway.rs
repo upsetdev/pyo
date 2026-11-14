@@ -60,8 +60,10 @@ use serde_json::{Value, json};
 
 use super::{
     Fetch, ImportDatabase, ImportPlan, ImportProject, ImportService, Platform, Responses, Web,
-    database_action, database_name, database_warnings, health_check, plan_service, s, unique,
-    url_escape, volume,
+    coolify::internal_port,
+    database_action, database_name, health_check, link_databases,
+    links::{DbAddress, Role},
+    plan_service, s, unique, url_escape, volume,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -278,6 +280,7 @@ fn var_map(v: &Value) -> BTreeMap<String, String> {
 }
 
 /// What references in one environment resolve against.
+#[derive(Clone)]
 struct Scope<'a> {
     shared: BTreeMap<String, String>,
     /// Railway's service name → its position.
@@ -288,6 +291,9 @@ struct Scope<'a> {
     pyo_names: Vec<String>,
     /// Each one's first custom domain.
     public: Vec<Option<String>>,
+    /// Resolve references to a database too (to its values there), to
+    /// tell which database a variable points at. Off: they're kept.
+    render_dbs: bool,
 }
 
 impl Scope<'_> {
@@ -307,7 +313,7 @@ impl Scope<'_> {
                     .map(|x| self.deeper(me, x, depth, missing)),
                 Some((svc, k)) => match self.by_name.get(svc.trim()) {
                     // A database there: kept, for a note to connect the new one.
-                    Some(&n) if self.is_db[n] => {
+                    Some(&n) if self.is_db[n] && !self.render_dbs => {
                         Some(format!("${{{{{}.{}}}}}", svc.trim(), k.trim()))
                     }
                     Some(&n) => self.lookup(n, k.trim(), depth, missing),
@@ -339,6 +345,15 @@ impl Scope<'_> {
     /// Service `j`'s variable `k`, its own or one Railway provides.
     fn lookup(&self, j: usize, k: &str, depth: u8, missing: &mut Vec<String>) -> Option<String> {
         match k {
+            // A database's, as it was there: it isn't a service in Pyo.
+            "RAILWAY_PRIVATE_DOMAIN" if self.render_dbs && self.is_db[j] => {
+                self.vars[j].get(k).cloned().or_else(|| {
+                    self.by_name
+                        .iter()
+                        .find(|(_, n)| **n == j)
+                        .map(|(name, _)| format!("{}.railway.internal", name.to_lowercase()))
+                })
+            }
             "RAILWAY_PRIVATE_DOMAIN" => Some(self.pyo_names[j].clone()),
             "RAILWAY_PUBLIC_DOMAIN" => self.public[j].clone(),
             _ => self.vars[j]
@@ -418,11 +433,71 @@ fn database(
     };
     let (target, action, note) = database_action(engine, url.is_some(), P);
     let source_name = s(i, "serviceName").to_owned();
-    let mut hosts = vec![
-        format!("${{{{{source_name}."),
+    // Its login, then where it's reached: its private domain inside the
+    // project, its URLs, its TCP proxy.
+    let first = |keys: &[&str]| {
+        keys.iter()
+            .map(|k| v(k))
+            .find(|x| !x.is_empty())
+            .unwrap_or("")
+            .to_owned()
+    };
+    let mut address = DbAddress {
+        user: first(&[
+            "PGUSER",
+            "POSTGRES_USER",
+            "MYSQLUSER",
+            "REDISUSER",
+            "MONGOUSER",
+        ]),
+        password: first(&[
+            "PGPASSWORD",
+            "POSTGRES_PASSWORD",
+            "MYSQLPASSWORD",
+            "REDISPASSWORD",
+            "REDIS_PASSWORD",
+            "MONGOPASSWORD",
+        ]),
+        database: first(&[
+            "PGDATABASE",
+            "POSTGRES_DB",
+            "MYSQLDATABASE",
+            "MYSQL_DATABASE",
+        ]),
+        ..Default::default()
+    };
+    let port = first(&["PGPORT", "MYSQLPORT", "REDISPORT", "MONGOPORT"])
+        .parse()
+        .unwrap_or(internal_port(engine));
+    for h in [
+        v("RAILWAY_PRIVATE_DOMAIN").to_owned(),
+        v("PGHOST").to_owned(),
+        v("MYSQLHOST").to_owned(),
+        v("REDISHOST").to_owned(),
+        v("MONGOHOST").to_owned(),
         format!("{}.railway.internal", source_name.to_lowercase()),
-    ];
-    hosts.extend(proxy.map(|t| s(t, "domain").to_owned()));
+    ] {
+        if !h.contains("${{") {
+            address.add_host(&h, port);
+        }
+    }
+    for k in [
+        "DATABASE_URL",
+        "DATABASE_PUBLIC_URL",
+        "MYSQL_URL",
+        "MYSQL_PUBLIC_URL",
+        "REDIS_URL",
+        "REDIS_PUBLIC_URL",
+        "MONGO_URL",
+        "MONGO_PUBLIC_URL",
+    ] {
+        address.add_url(v(k));
+    }
+    if let Some(t) = proxy
+        && let Some(p) = t["proxyPort"].as_u64().and_then(|p| u16::try_from(p).ok())
+    {
+        address.add_host(s(t, "domain"), p);
+    }
     ImportDatabase {
         key,
         source_name,
@@ -434,8 +509,39 @@ fn database(
         warnings: note.into_iter().collect(),
         existing_id: None,
         url,
-        hosts,
+        address,
+        rest: false,
     }
+}
+
+/// What a database's own variable holds, by its name there
+/// (docs.railway.com/databases): a reference to it says.
+fn role_of(key: &str) -> Option<Role> {
+    Some(match key {
+        "DATABASE_URL"
+        | "DATABASE_PRIVATE_URL"
+        | "DATABASE_PUBLIC_URL"
+        | "MYSQL_URL"
+        | "MYSQL_PRIVATE_URL"
+        | "MYSQL_PUBLIC_URL"
+        | "REDIS_URL"
+        | "REDIS_PRIVATE_URL"
+        | "REDIS_PUBLIC_URL"
+        | "MONGO_URL"
+        | "MONGO_PUBLIC_URL" => Role::Url,
+        "PGHOST" | "MYSQLHOST" | "REDISHOST" | "MONGOHOST" | "RAILWAY_PRIVATE_DOMAIN" => Role::Host,
+        "PGPORT" | "MYSQLPORT" | "REDISPORT" | "MONGOPORT" => Role::Port,
+        "PGUSER" | "POSTGRES_USER" | "MYSQLUSER" | "REDISUSER" | "MONGOUSER" => Role::User,
+        "PGPASSWORD"
+        | "POSTGRES_PASSWORD"
+        | "MYSQLPASSWORD"
+        | "MYSQL_ROOT_PASSWORD"
+        | "REDISPASSWORD"
+        | "REDIS_PASSWORD"
+        | "MONGOPASSWORD" => Role::Password,
+        "PGDATABASE" | "POSTGRES_DB" | "MYSQLDATABASE" | "MYSQL_DATABASE" => Role::Database,
+        _ => return None,
+    })
 }
 
 /// What one environment holds: each instance's variables and TCP proxies.
@@ -447,11 +553,13 @@ struct Env<'a> {
     shared: BTreeMap<String, String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn application(
     i: &Value,
     me: usize,
     env: &Env,
     scope: &Scope,
+    rendered: &Scope,
     dbs: &[ImportDatabase],
     sealed: &[&str],
     seen: &mut HashSet<String>,
@@ -597,7 +705,30 @@ fn application(
             if locked.len() == 1 { "it" } else { "them" },
         ));
     }
-    warnings.extend(database_warnings(&env_list, dbs));
+    // What each variable holds with references to a database resolved
+    // too, and what a reference that is the whole value says it is
+    // (`${{Postgres.DATABASE_URL}}`).
+    let mut pairs = vec![];
+    let mut explicit = BTreeMap::new();
+    for (k, v) in &env.vars[me] {
+        if sealed.contains(&k.as_str()) {
+            continue;
+        }
+        let whole = v.trim();
+        if let Some(r) = whole.strip_prefix("${{").and_then(|x| x.strip_suffix("}}"))
+            && !r.contains("${{")
+            && let Some((svc, key)) = r.split_once('.')
+            && let Some(&n) = scope.by_name.get(svc.trim())
+            && scope.is_db[n]
+            && let Some(role) = role_of(key.trim())
+        {
+            explicit.insert(
+                k.clone(),
+                (format!("db:{}@{eid}", s(env.insts[n], "serviceId")), role),
+            );
+        }
+        pairs.push((k.clone(), rendered.expand(me, v, 0, &mut vec![])));
+    }
 
     // Ports: the domains' target port, else the PORT it sets, else any
     // (Pyo sets PORT to it).
@@ -674,7 +805,7 @@ fn application(
         warnings.push(format!("Volume {at} starts empty. Its data isn't copied."));
     }
 
-    ImportService {
+    let mut out = ImportService {
         key: format!("app:{id}@{eid}"),
         source_name,
         builder,
@@ -682,8 +813,10 @@ fn application(
         domains: web.domains,
         warnings,
         importable,
-        existing_id: None,
-    }
+        ..Default::default()
+    };
+    link_databases(&mut out, &pairs, &explicit, dbs, &[]);
+    out
 }
 
 /// The plan from what `gather` read.
@@ -750,6 +883,11 @@ pub(super) fn plan(r: &Responses) -> ImportPlan {
                             .map(|d| s(d, "domain").to_owned())
                     })
                     .collect(),
+                render_dbs: false,
+            };
+            let rendered = Scope {
+                render_dbs: true,
+                ..scope.clone()
             };
             let mut project = ImportProject {
                 key: format!("{pid}/{eid}"),
@@ -787,6 +925,7 @@ pub(super) fn plan(r: &Responses) -> ImportPlan {
                     n,
                     &env,
                     &scope,
+                    &rendered,
                     &project.databases,
                     &sealed,
                     &mut seen_domains,
