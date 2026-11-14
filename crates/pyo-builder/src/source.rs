@@ -306,10 +306,11 @@ pub struct StaticSite {
 }
 
 impl StaticSite {
-    /// Railpack's setting that serves the output (its SPA mode): for
-    /// `railpack prepare`.
-    pub fn railpack_env(&self) -> String {
-        format!("RAILPACK_SPA_OUTPUT_DIR={}", self.output)
+    /// Railpack's setting that serves the output (its SPA mode), for
+    /// `railpack prepare`. Its plan reads every setting given to `prepare`
+    /// as a build secret, so the build is given it too.
+    pub fn railpack_setting(&self) -> (&'static str, String) {
+        ("RAILPACK_SPA_OUTPUT_DIR", self.output.clone())
     }
 
     /// A generated site has real pages: an unknown path is a 404, not the
@@ -790,7 +791,10 @@ mod tests {
                 start: "eleventy --serve".into()
             }
         );
-        assert_eq!(s.railpack_env(), "RAILPACK_SPA_OUTPUT_DIR=_site");
+        assert_eq!(
+            s.railpack_setting(),
+            ("RAILPACK_SPA_OUTPUT_DIR", "_site".to_owned())
+        );
         assert!(static_site_note(&s).contains("RAILPACK_NO_SPA=1"));
         // Its output folder from the config, or the build's --output.
         std::fs::write(

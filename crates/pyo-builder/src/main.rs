@@ -482,14 +482,20 @@ impl Builder {
                 .arg(&plan)
                 .arg("--info-out")
                 .arg(&info);
-            for a in &job.build_args {
-                prep.args(["--env", &format!("{}={}", a.key, a.value)]);
-            }
+            // The build arguments, and Pyo's own settings for Railpack:
+            // each one given to `prepare`, and as a secret to the build,
+            // which the plan reads them from.
+            let mut settings: Vec<(String, String)> = job
+                .build_args
+                .iter()
+                .map(|a| (a.key.clone(), a.value.clone()))
+                .collect();
             // A static site generator whose start script is its development
             // server: its build's output, served as static files instead.
             let keys: Vec<String> = job.build_args.iter().map(|a| a.key.clone()).collect();
             if let Some(site) = source::static_site(&app_dir, &keys) {
-                prep.args(["--env", &site.railpack_env()]);
+                let (k, v) = site.railpack_setting();
+                settings.push((k.to_owned(), v));
                 if let Err(e) = source::write_staticfile(&app_dir, &site) {
                     tracing::warn!(error = %e, "couldn't turn off the index.html fallback");
                 }
@@ -501,6 +507,9 @@ impl Builder {
                     },
                 )
                 .await;
+            }
+            for (k, v) in &settings {
+                prep.args(["--env", &format!("{k}={v}")]);
             }
             let out = match tokio::time::timeout(
                 Duration::from_secs(300),
@@ -565,9 +574,8 @@ impl Builder {
                 &format!("build-arg:cache-key={cache_key}"),
             ]);
             // Build-time variables reach the plan as secrets.
-            for a in &job.build_args {
-                cmd.args(["--secret", &format!("id={0},env={0}", a.key)])
-                    .env(&a.key, &a.value);
+            for (k, v) in &settings {
+                cmd.args(["--secret", &format!("id={k},env={k}")]).env(k, v);
             }
         } else {
             return fail(
