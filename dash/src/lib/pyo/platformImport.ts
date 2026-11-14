@@ -45,7 +45,14 @@ export type ImportService = {
   warnings: string[];
   importable: boolean;
   existingId?: string | null;
+  /** Databases of the import its variables point at: connected before its first deploy. */
+  connects: ImportConnect[];
+  /** Why it isn't deployed. */
+  holds: string[];
 };
+
+/** `env`: the service's variables Pyo replaces, each with the database's variable it becomes. */
+export type ImportConnect = { database: string; env: Record<string, string> };
 
 export type ImportStack = {
   key: string;
@@ -88,10 +95,12 @@ export type ImportPlan = {
 export type ImportResult = {
   key: string;
   name: string;
-  state: "created" | "importing" | "exists" | "skipped" | "failed";
+  state: "created" | "importing" | "exists" | "held" | "skipped" | "failed";
   message: string;
   id?: string | null;
   projectId?: string | null;
+  /** A service: the databases Pyo connected it to, with the variables each set. */
+  connected?: { database: string; databaseId: string; variables: string[] }[];
 };
 
 /** `url` is empty for Railway and Vercel (read from their own API). `team` is Vercel's. */
@@ -138,6 +147,23 @@ export const pickable = (x: ImportService | ImportStack | ImportDatabase) =>
   "importable" in x
     ? x.importable && !("existingId" in x && x.existingId) && !("existingProjectId" in x && x.existingProjectId)
     : x.action !== "manual" && !x.existingId;
+
+/** What Pyo does with a service's databases given the picks: the ones it connects, and why it holds the deploy. */
+export function serviceLinks(plan: ImportPlan, svc: ImportService, picks: Set<string>) {
+  const dbs = plan.projects.flatMap((p) => p.databases);
+  const connects: { vars: string[]; database: string }[] = [];
+  const holds = [...(svc.holds ?? [])];
+  for (const c of svc.connects ?? []) {
+    const db = dbs.find((d) => d.key === c.database);
+    const vars = Object.keys(c.env);
+    if (db && (db.existingId || picks.has(db.key))) connects.push({ vars, database: db.name });
+    else
+      holds.push(
+        `${vars.join(", ")} ${vars.length === 1 ? "points" : "point"} at ${db?.sourceName ?? "a database"}, which this import doesn't bring.`,
+      );
+  }
+  return { connects, holds };
+}
 
 /** Every key picked by default. */
 export function defaultPicks(plan: ImportPlan): Set<string> {
