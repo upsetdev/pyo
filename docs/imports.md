@@ -72,6 +72,126 @@ Rules:
   pods), gets the platform in front: `railway-shop`, then `railway2-shop`.
 - **Not deployed** unless `deploy`: services are saved with status stopped
   and no deployment. Domains are stored and go live with the first deploy.
+- **Databases a service uses** are connected to it before its first
+  deploy, and a service Pyo can't connect is held (next section).
+
+## Databases a service uses
+
+Code: `platform_import/links.rs` (detection), `connect_and_deploy` in
+mod.rs (apply).
+
+When a service's variable points at a database the same import brings,
+Pyo connects the new database to the service in place of that variable,
+as the database's Connect action does, before the first deploy. So the
+first deploy runs against the new database with nothing to fix by hand.
+When a variable points at a database Pyo can't match, the service is
+held: made, not deployed, with the reason.
+
+**Detection** (while planning, conservative). Each platform first says
+what it can, then every value is read as a database is reached:
+
+- **Railway:** a value that is one reference to a database service,
+  `${{Postgres.DATABASE_URL}}`, links by that service and the variable's
+  name: `DATABASE_URL`, `DATABASE_PRIVATE_URL`, `DATABASE_PUBLIC_URL`,
+  `MYSQL_URL`, `REDIS_URL`, `MONGO_URL` (and their public and private
+  ones) are its URL, `PGHOST`, `MYSQLHOST`, `REDISHOST`,
+  `RAILWAY_PRIVATE_DOMAIN` its host, then the `*PORT`, `*USER`,
+  `*PASSWORD`, `*DATABASE` ones. A value built from several references
+  (`postgresql://${{Postgres.PGUSER}}:…@${{Postgres.PGHOST}}:5432/…`) is
+  read with them resolved to the database's values there.
+- **Vercel:** a variable's `contentHint` names its store (`storeId`) and
+  what it is: `postgres-url`, `postgres-prisma-url` (URL),
+  `postgres-url-non-pooling` (direct URL), `postgres-host`, `-user`,
+  `-password`, `-database`, `redis-url`, `redis-rest-api-url`, `-token`,
+  `-read-only-token`. That works for secret values too. A KV store whose
+  REST variables a project uses is made with its REST API on.
+- **Coolify:** `real_value` comes with `{{environment.X}}` and the others
+  resolved, so it's read by value. A database is reached by its uuid inside
+  Coolify (`internal_db_url`) and by `external_db_url` from outside.
+- **Dokploy:** `${{project.X}}` and `${{environment.X}}` are resolved as
+  Dokploy does, so they're read by value. A database is reached by its
+  `appName` on its engine's port, and by `externalPort` on its server's
+  `ipAddress` (or Dokploy's address).
+- **Every platform**, by value: a URL with scheme `postgres`,
+  `postgresql`, `mysql`, `redis`, `rediss`, `mongodb` or `mongodb+srv`
+  whose host and port (the scheme's default when none) are one database's
+  and whose database name is that database's (not checked for Redis). A
+  value that is a database's host with its port (`host:port`), or its
+  host alone in a variable named `…HOST` or `…HOSTNAME`. Next to such a
+  host, the variables with the same prefix (`PG` of `PGHOST`, `DB_` of
+  `DB_HOST`) ending in `PORT`, `USER`/`USERNAME`, `PASSWORD`/`PASS`,
+  `DATABASE`/`DB`/`NAME`/`DBNAME` whose value is that database's. A name
+  with `DIRECT`, `NON_POOLING` or `UNPOOLED` in it is the direct URL.
+
+Each link is in the plan as the service's `connects`:
+`{database: <key>, env: {<its variable>: <the database's variable>}}`, and
+the preview shows it ("DATABASE_URL: Pyo connects it to postgres, the
+database it imports"). A link to a database Pyo doesn't import (MariaDB,
+MongoDB and the others) is a hold instead.
+
+**What Connect sets.** Each variable becomes the database's own:
+
+| It held | Postgres | MySQL | KV |
+| --- | --- | --- | --- |
+| URL | `DATABASE_URL` | `DATABASE_URL` | `REDIS_URL` |
+| Direct URL | `DATABASE_URL_DIRECT` | `DATABASE_URL` | `REDIS_URL` |
+| Host | `POSTGRES_HOST` | `MYSQL_HOST` | `REDIS_HOST` |
+| host:port | `POSTGRES_HOST:POSTGRES_PORT` | `MYSQL_HOST:MYSQL_PORT` | `REDIS_HOST:REDIS_PORT` |
+| Port, user, password, database | `POSTGRES_PORT`, `_USER`, `_PASSWORD`, `_DATABASE` | `MYSQL_PORT`, `_USER`, `_PASSWORD`, `_DATABASE` | `REDIS_PORT`, `REDIS_PASSWORD` (no user or database: left as they are) |
+| REST URL, token, read-only token | | | `KV_REST_API_URL`, `KV_REST_API_TOKEN`, `KV_REST_API_READ_ONLY_TOKEN` |
+
+When the service used the database's own names only (`DATABASE_URL` for
+Postgres), Pyo connects it as the Connect button does, without names of
+its own: Postgres gives `DATABASE_URL` and `DATABASE_URL_DIRECT`, MySQL
+`DATABASE_URL` and the `MYSQL_*` set, KV `REDIS_URL`. Otherwise it
+connects with the service's names (`connect`'s `env` map, as for a
+template), plus the database's own names the service doesn't use. So
+`DATABASE_PUBLIC_URL` and the `PGHOST`, `PGUSER`… set aren't dropped:
+they're replaced, under their names, with the new database's values
+(the public URL becomes the internal one). The old variables are
+removed in the same transaction, so Connect never refuses because
+`DATABASE_URL` exists. The values are sealed, secret variables, and the
+link is a `pyo.database_links` row like any connection.
+
+**Apply** (the background run). Services with links, or a hold, are made
+without a deployment. Then the databases are made. Then each such
+service is connected to each of its databases that this import made, or
+an earlier import made. Then, with `deploy`, Pyo waits (polling, up to
+45 minutes) for each of those databases to be ready (`status.phase`
+"Ready") and, when it's imported, for its data copy to succeed. Only then
+does it start the first deploy. The result goes from "created" with
+"Deploys once postgres is ready." to "created" with `connected`
+(`[{database, databaseId, variables}]`), or "held" with why.
+
+**Holds** (the service is made, not deployed, `state: "held"`. Without
+`deploy` the reason is the result's message):
+
+- "DATABASE_URL points at a database Pyo couldn't match. Connect one,
+  then deploy." A database URL that matches none of the import's
+  databases, or several, and whose host only the platform knows: no dot,
+  `.internal`, `.local`, `.lan`, a private, loopback or 100.64/10
+  address, the platform's own host, or one of its databases' hosts. Also
+  a value that is a database's host (or `host:port`) shared by several.
+  A URL to a public host outside the platform (a hosted database) is
+  left alone: the service reaches it from Pyo the same.
+- "MONGO_URL points at events, which Pyo doesn't import. Connect a
+  database, then deploy."
+- "DATABASE_URL points at shop-db, which this import doesn't bring.
+  Import it, or connect a database, then deploy." The database wasn't
+  picked.
+- "shop-db couldn't be made, so it isn't connected. Connect a database,
+  then deploy."
+- "Copying shop-db's data failed. Retry it on the database's page, then
+  deploy." / "shop-db wasn't ready in time. Deploy once it is."
+- "Pyo couldn't connect shop-db: …" / "Its first deploy couldn't start: …"
+
+Other services still deploy.
+
+**Idempotent.** A service already linked to the database (a
+`pyo.database_links` row) isn't connected again. A service an earlier
+import made is connected on a later run when it isn't linked yet and
+still has every variable the link replaces (a re-run after a crash, or a
+database picked only the second time). It isn't deployed by the re-run.
 
 ## Coolify
 
@@ -163,7 +283,7 @@ sealed variables, Railway's own variables), `/config-as-code/reference`,
   `${{shared.KEY}}`, `${{Service.KEY}}`, `${{KEY}}`. Railway's own
   `RAILWAY_PRIVATE_DOMAIN` becomes the service's name in Pyo,
   `RAILWAY_PUBLIC_DOMAIN` its first custom domain. A reference to a database
-  stays as written, with a note to connect the new one. Others that can't be
+  stays as written: Pyo connects the new database in its place. Others that can't be
   resolved stay as written, with a note. Sealed variables are never sent by
   the API: they come over secret and empty, with a note. A database's
   variables are read rendered, for its public URL.
@@ -285,8 +405,8 @@ Vercel:
 Not carried over (each one a note on its item, never dropped silently):
 start, build and install commands, build secrets, file mounts, deploy keys,
 preview environments, labels and custom Docker options, and volume data.
-A variable that still points at one of the platform's databases by its
-internal name gets a note to connect the new database instead.
+A variable that points at one of the platform's databases is replaced by
+the new database's, or holds the service's deploy (above).
 
 ## Tests
 
@@ -300,6 +420,18 @@ internal name gets a note to connect the new database instead.
   both pages, production values only, write-only variables by name, skipped
   domains, storage, the empty answer naming teams. Both: only the official
   API host is used, Vercel's team checked.
+- Databases a service uses, per platform (`coolify_database_links`,
+  `dokploy_database_links`, `railway_database_links`,
+  `vercel_database_links`): a reference or hint, a matching host (inside
+  and outside the platform, `host:port`, a `PGHOST` set), an unmatched URL
+  and a database Pyo doesn't import hold, a database outside the platform
+  is left alone. `a_database_not_brought_holds`.
+- `imports_connect_databases_before_the_first_deploy` (ignored, needs
+  Postgres): deploy on, the service's `DATABASE_URL` is replaced by the
+  connection (`DATABASE_URL`, `DATABASE_URL_DIRECT`, secret) once the
+  database is ready, one deployment, a `database_links` row. An unmatched
+  URL and a database not picked hold, with no deployment. A second run
+  connects and deploys nothing again.
 - `hosted_imports_make_nothing_twice` (ignored, needs Postgres): imports the
   Railway and Vercel fixtures twice, the second run creates nothing, and
   `importedFrom.host` is `railway.com` or `vercel.com`.
@@ -403,6 +535,10 @@ pyo import vercel --source-token <token> --source-team acme
 - Postgres and MySQL databases the platform makes reachable from outside are
   copied into new Pyo databases. Others are made empty or listed for you to
   move. Redis becomes a KV database.
+- A service whose variables point at a database you import is connected to
+  the new one before its first deploy, in place of those variables. When
+  Pyo can't tell which database a variable points at, it doesn't deploy
+  that service and says why.
 - From Railway: each environment becomes a project. Build and start commands,
   references between services, TCP proxies and volume sizes come over.
   Turn on public access for a Postgres or MySQL database there to have its
