@@ -39,6 +39,7 @@ import {
   tailnetHostname,
 } from "~/lib/pyo/freeDomain";
 import { BrandMark, GITHUB_LOGO } from "~/components/pyo/common";
+import { CloudflareFields } from "~/components/pyo/Cloudflare";
 import { SearchInput } from "~/components/ui/Table";
 import { fetchGithubRepos } from "~/lib/pyo/backend";
 import { cpu, describeCron, mem, timeAgo } from "~/lib/pyo/format";
@@ -64,6 +65,7 @@ import {
   type Issues,
 } from "~/lib/pyo/draft";
 import {
+  cloudflareZoneFor,
   clusterSummary,
   clustersIn,
   draftProject,
@@ -1007,6 +1009,9 @@ const TLS_CHOICES: { value: TlsMode; label: string }[] = [
 export function DomainsStep({ d, set, errors }: StepProps) {
   const s = usePyo();
   const cluster = s.clusters.find((c) => c.id === d.clusterId);
+  // A connected Cloudflare zone covers it: Pyo creates its record.
+  const cfFor = (host: string) =>
+    !!cloudflareZoneFor(s, host)?.canEdit && !!cluster?.publicIp;
   const httpPorts = d.ports.filter((p) => p.protocol === "HTTP");
   const project = draftProject(s, d);
   const ip = d.clusterId ? freeDomainIp(s, d.clusterId) : undefined;
@@ -1136,6 +1141,17 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                     <TrashIcon size={14} />
                   </Button>
                 </div>
+                <CloudflareFields
+                  hostname={error ? "" : dm.hostname}
+                  clusterId={d.clusterId}
+                  value={{
+                    create: dm.cloudflare !== false,
+                    proxied: !!dm.proxied,
+                  }}
+                  onChange={(v) =>
+                    setD({ cloudflare: v.create, proxied: v.proxied })
+                  }
+                />
                 <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[11.5px]">
                   <span
                     className={
@@ -1147,6 +1163,10 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                         "Only devices on your tailnet can open it."
                       ) : freeOne ? (
                         "No DNS record needed."
+                      ) : dm.hostname &&
+                        dm.cloudflare !== false &&
+                        cfFor(dm.hostname) ? (
+                        "Pyo creates the DNS record in Cloudflare."
                       ) : dm.hostname ? (
                         `Point its DNS to ${cluster?.publicIp ?? "the cluster's public address"}.`
                       ) : free && !hasPublic ? (

@@ -49,6 +49,7 @@ import type {
   PublicDashboard,
   TailscaleCheck,
   TailscaleInfo,
+  CloudflareAccount,
   IpMode,
   OAuthGrant,
   PortMapping,
@@ -92,6 +93,8 @@ export type PyoState = {
   tailscale: TailscaleInfo | null;
   /** Pyo on the public IP; null unless you're the installation's admin. */
   publicDashboard: PublicDashboard | null;
+  /** Teams' Cloudflare accounts (zones only). */
+  cloudflare: CloudflareAccount[];
   /** URL the agents of in-cluster installs use; shown in install commands. */
   agentApiUrl: string;
   /** Outgoing email (SMTP), or null when it isn't set up. */
@@ -316,6 +319,7 @@ function empty(): PyoState {
     builders: [],
     tailscale: null,
     publicDashboard: null,
+    cloudflare: [],
     gitConnections: [],
     ...loadPrefs(),
   };
@@ -652,6 +656,23 @@ export const gitConnectionsIn = (s: PyoState, wsId = s.currentTeamId) =>
   (s.gitConnections ?? []).filter((c) => c.teamId === wsId);
 export const buildersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.builders.filter((b) => b.teamId === wsId);
+/** The team's Cloudflare account, when connected. */
+export const cloudflareIn = (s: PyoState, wsId = s.currentTeamId) =>
+  s.cloudflare?.find((c) => c.teamId === wsId);
+/** The connected zone a hostname is in: the longest one it's in or is. */
+export function cloudflareZoneFor(
+  s: PyoState,
+  hostname: string,
+  wsId = s.currentTeamId,
+) {
+  const host = hostname.trim().replace(/\.$/, "").toLowerCase();
+  return (cloudflareIn(s, wsId)?.zones ?? [])
+    .filter((z) => host === z.name || host.endsWith(`.${z.name}`))
+    .sort((a, b) => b.name.length - a.name.length)[0];
+}
+/** Your role in a team. */
+export const roleIn = (s: PyoState, wsId = s.currentTeamId) =>
+  s.members.find((m) => m.teamId === wsId && m.email === s.user.email)?.role;
 export const membersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.filter((m) => m.teamId === wsId);
 
@@ -1552,6 +1573,7 @@ export const api = {
     const serviceId = newId("svc");
     let deploymentId = "";
     const volumes: Volume[] = [];
+    const dnsRecords: { domainId: string; proxied: boolean }[] = [];
     // No project picked: create one named after the app, before the app itself.
     const fresh =
       draft.projectId === NEW_PROJECT
@@ -1615,16 +1637,27 @@ export const api = {
         updatedAt: now,
         };
       });
-      const domains: Domain[] = d.domains.map((x) => ({
-        id: newId("dom"),
-        hostname: x.hostname,
-        portName: x.portName,
-        status: "pending_dns",
-        tls: x.tlsMode === "off" ? "disabled" : "pending",
-        tlsMode: x.tlsMode ?? "auto",
-        redirectHttps: x.tlsMode !== "off" && x.redirectHttps,
-        createdAt: now,
-      }));
+      const domains: Domain[] = d.domains.map((x) => {
+        const id = newId("dom");
+        // On unless turned off, when a connected zone covers it.
+        if (
+          x.cloudflare !== false &&
+          !d.cron &&
+          cloudflareZoneFor(s, x.hostname, d.teamId)?.canEdit &&
+          s.clusters.find((c) => c.id === d.clusterId)?.publicIp
+        )
+          dnsRecords.push({ domainId: id, proxied: !!x.proxied });
+        return {
+          id,
+          hostname: x.hostname,
+          portName: x.portName,
+          status: "pending_dns",
+          tls: x.tlsMode === "off" ? "disabled" : "pending",
+          tlsMode: x.tlsMode ?? "auto",
+          redirectHttps: x.tlsMode !== "off" && x.redirectHttps,
+          createdAt: now,
+        };
+      });
       const ports: PortMapping[] = d.ports.map((p) => ({
         ...p,
         id: newId("port"),
@@ -1738,13 +1771,20 @@ export const api = {
     // Ops are separate requests, so the project has to exist before the app's arrives.
     const done = (async () => {
       if (fresh && !(await send("createProject", fresh))) return false;
-      return !!(await send("createService", {
+      const made = !!(await send("createService", {
         service: app,
         deploymentId,
         volumes,
         ...(opts.databases?.length ? { databases: opts.databases } : {}),
         ...(opts.confirm ? { confirm: true } : {}),
       }));
+      // Its DNS records in Cloudflare, once the service exists.
+      if (made)
+        for (const r of dnsRecords)
+          await api.createDnsRecord(serviceId, r.domainId, {
+            proxied: r.proxied,
+          });
+      return made;
     })();
     return { serviceId, deploymentId, done };
   },
@@ -1793,7 +1833,7 @@ export const api = {
     });
     return saveService(id);
   },
-  addDomain(
+  async addDomain(
     id: string,
     input: {
       hostname: string;
@@ -1802,11 +1842,14 @@ export const api = {
       tlsMode?: TlsMode;
       certificateId?: string;
     },
+    /** Create its DNS record in Cloudflare once it's saved. */
+    cloudflare?: { proxied: boolean },
   ) {
+    const domainId = newId("dom");
     update((s) => {
       const a = findService(s, id);
       a.domains.push({
-        id: newId("dom"),
+        id: domainId,
         ...input,
         status: "pending_dns",
         tls: input.tlsMode === "off" ? "disabled" : "pending",
@@ -1815,7 +1858,10 @@ export const api = {
       const port = a.ports.find((p) => p.name === input.portName);
       if (port) port.exposure = "http";
     });
-    return saveService(id);
+    const res = await saveService(id);
+    if (res?.ok && cloudflare)
+      await api.createDnsRecord(id, domainId, { proxied: cloudflare.proxied });
+    return res;
   },
   /** HTTPS settings of a domain; applied live once the service is deployed. */
   updateDomain(
@@ -1837,7 +1883,15 @@ export const api = {
     });
     return saveService(id);
   },
-  removeDomain(id: string, domainId: string) {
+  async removeDomain(
+    id: string,
+    domainId: string,
+    opts?: { deleteDnsRecord?: boolean },
+  ) {
+    if (opts?.deleteDnsRecord) {
+      const res = await send("deleteDnsRecord", { serviceId: id, domainId });
+      if (!res?.ok) return null;
+    }
     update((s) => {
       const a = findService(s, id);
       a.domains = a.domains.filter((x) => x.id !== domainId);
@@ -2305,6 +2359,63 @@ export const api = {
       s.registryLogins = s.registryLogins.filter((l) => l.id !== id);
     });
     return send("removeRegistryLogin", { id });
+  },
+  /** Connect the team's Cloudflare account, or replace its token. */
+  connectCloudflare(token: string) {
+    return attempt<{ zones: CloudflareAccount["zones"]; problems: string[] }>(
+      "connectCloudflare",
+      { teamId: get().currentTeamId, token },
+    );
+  },
+  testCloudflare() {
+    return send<{ zones: CloudflareAccount["zones"]; problems: string[] }>(
+      "testCloudflare",
+      { teamId: get().currentTeamId },
+    );
+  },
+  removeCloudflare() {
+    const teamId = get().currentTeamId;
+    update((s) => {
+      s.cloudflare = s.cloudflare.filter((c) => c.teamId !== teamId);
+    });
+    return send("removeCloudflare", { teamId });
+  },
+  /** A domain's DNS record in Cloudflare: created, found, or what's in the way. */
+  async createDnsRecord(
+    serviceId: string,
+    domainId: string,
+    opts: { proxied: boolean; replace?: boolean },
+  ) {
+    const host =
+      get()
+        .services.find((a) => a.id === serviceId)
+        ?.domains.find((d) => d.id === domainId)?.hostname ?? "Domain";
+    const res = await send<{
+      status: "created" | "exists" | "conflict" | "failed";
+      error?: string | null;
+    }>("createDnsRecord", {
+      serviceId,
+      domainId,
+      proxied: opts.proxied,
+      replace: opts.replace ?? false,
+    });
+    if (!res) return null;
+    if (res.status === "created")
+      toast({ title: `Created the DNS record of ${host} in Cloudflare` });
+    else if (res.status === "exists")
+      toast({ title: `${host} already points to the cluster` });
+    else if (res.status === "conflict")
+      toast({
+        tone: "error",
+        title: `${host} has another DNS record in Cloudflare`,
+        description: "See it under the service's Domains.",
+      });
+    else
+      toast({
+        tone: "error",
+        title: res.error ?? "Cloudflare didn't create the record.",
+      });
+    return res;
   },
   saveTailscale(clientId: string, secret?: string) {
     return attempt<{ checks: TailscaleCheck[] }>("saveTailscale", {

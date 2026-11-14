@@ -25,6 +25,10 @@ import { Tooltip } from "~/components/ui/Tooltip";
 import { DomainKind, DomainStatus } from "~/components/pyo/DomainState";
 import { AppLink } from "~/components/ui/AppLink";
 import { AddDomainDialog } from "~/components/pyo/AddDomainDialog";
+import {
+  DeleteRecordSwitch,
+  DnsRecordLine,
+} from "~/components/pyo/Cloudflare";
 import { useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
@@ -48,6 +52,7 @@ function Domains({ app }: { app: Application }) {
   const s = usePyo();
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<Domain | null>(null);
+  const [deleteRecord, setDeleteRecord] = useState(true);
   const [picking, setPicking] = useState<Domain | null>(null);
   const [replacing, setReplacing] = useState<Certificate | null>(null);
   const certOf = (d: Domain) =>
@@ -206,7 +211,10 @@ function Domains({ app }: { app: Application }) {
                             label: "Remove domain",
                             icon: <TrashIcon size={14} />,
                             danger: true,
-                            onSelect: () => setRemoving(d),
+                            onSelect: () => {
+                              setDeleteRecord(true);
+                              setRemoving(d);
+                            },
                           },
                         ]}
                         trigger={(t) => (
@@ -252,7 +260,13 @@ function Domains({ app }: { app: Application }) {
                       {d.tlsError}
                     </p>
                   ) : null}
-                  {d.status !== "active" && !isFreeDomain(d.hostname) ? (
+                  <DnsRecordLine app={app} d={d} />
+                  {d.status !== "active" &&
+                  !isFreeDomain(d.hostname) &&
+                  !(
+                    d.dnsRecord &&
+                    ["created", "exists"].includes(d.dnsRecord.status)
+                  ) ? (
                     <div className="mt-3 rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-[12px]">
                       <p className="mb-1.5 text-muted-foreground">
                         Create this DNS record at your DNS provider:
@@ -320,12 +334,20 @@ function Domains({ app }: { app: Application }) {
         title={`Remove ${removing?.hostname}?`}
         description="Traffic to this hostname stops."
         confirmLabel="Remove domain"
-        onConfirm={() => {
+        onConfirm={async () => {
           if (!removing) return;
-          api.removeDomain(app.id, removing.id);
-          toast({ title: `Removed ${removing.hostname}` });
+          const res = await api.removeDomain(app.id, removing.id, {
+            deleteDnsRecord: !!removing.dnsRecord?.mine && deleteRecord,
+          });
+          if (res) toast({ title: `Removed ${removing.hostname}` });
         }}
-      />
+      >
+        <DeleteRecordSwitch
+          d={removing}
+          checked={deleteRecord}
+          onChange={setDeleteRecord}
+        />
+      </ConfirmDialog>
     </div>
   );
 }

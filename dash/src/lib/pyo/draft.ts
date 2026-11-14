@@ -48,6 +48,10 @@ export type DraftDomain = {
   portName: string;
   redirectHttps: boolean;
   tlsMode?: TlsMode;
+  /** Create its DNS record in the team's Cloudflare account (on unless false). */
+  cloudflare?: boolean;
+  /** Proxied by Cloudflare. */
+  proxied?: boolean;
 };
 export type DraftVolume = {
   id: string;

@@ -6,6 +6,11 @@ import {
   expiry,
   TLS_MODES,
 } from "~/components/pyo/Certificates";
+import {
+  CloudflareFields,
+  useCloudflareFor,
+  type CloudflareChoice,
+} from "~/components/pyo/Cloudflare";
 import { Button } from "~/components/ui/Button";
 import { Dialog } from "~/components/ui/Dialog";
 import {
@@ -74,6 +79,10 @@ export function AddDomainDialog({
   const [redirect, setRedirect] = useState(true);
   const [certificateId, setCertificateId] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [cf, setCf] = useState<CloudflareChoice>({
+    create: true,
+    proxied: false,
+  });
   const port = portName || httpPorts[0]?.name || "";
   const cluster = s.clusters.find((c) => c.id === app?.clusterId);
   const freeIp = app ? freeDomainIp(s, app.clusterId) : undefined;
@@ -96,6 +105,10 @@ export function AddDomainDialog({
         ).slice(0, -suffix!.length - 1);
   const name = label ?? suggested;
   const hostname = k === "own" ? ownHost : `${name}.${suffix}`;
+  const inCloudflare = useCloudflareFor(
+    k === "own" ? hostname : "",
+    app?.clusterId,
+  );
   const matching = s.certificates.filter(
     (c) =>
       c.teamId === (app?.teamId ?? s.currentTeamId) &&
@@ -124,6 +137,7 @@ export function AddDomainDialog({
     setPicked("");
     setPortName("");
     setTouched(false);
+    setCf({ create: true, proxied: false });
     onClose();
   };
   return (
@@ -134,7 +148,7 @@ export function AddDomainDialog({
       onSubmit={() => {
         setTouched(true);
         if (error || !app) return;
-        api.addDomain(
+        void api.addDomain(
           app.id,
           k === "tailnet"
             ? // Tailscale serves its HTTPS.
@@ -148,6 +162,9 @@ export function AddDomainDialog({
                   ? { certificateId: cert.id }
                   : {}),
               },
+          k === "own" && inCloudflare && cf.create
+            ? { proxied: cf.proxied }
+            : undefined,
         );
         toast({
           title: fixed
@@ -155,7 +172,7 @@ export function AddDomainDialog({
             : `Added ${hostname} to ${app.name}`,
           description: !app.currentDeploymentId
             ? "Live after the first deploy."
-            : k !== "own"
+            : k !== "own" || (inCloudflare && cf.create)
               ? undefined
               : "Create the DNS record, then check DNS.",
         });
@@ -294,6 +311,14 @@ export function AddDomainDialog({
             )
           }
         </Field>
+        {k === "own" ? (
+          <CloudflareFields
+            hostname={HOSTNAME.test(hostname) ? hostname : ""}
+            clusterId={app?.clusterId}
+            value={cf}
+            onChange={setCf}
+          />
+        ) : null}
         {httpPorts.length > 1 ? (
           <Field label="Route to port">
             {(p) => (

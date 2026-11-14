@@ -737,6 +737,55 @@ export type Domain = {
   redirectHttps: boolean;
   error?: string;
   createdAt: Timestamp;
+  /** Its DNS record in the team's Cloudflare account, when Pyo was asked to make one. */
+  dnsRecord?: DnsRecordState;
+};
+
+/** A domain's DNS record in Cloudflare, as Pyo left it. */
+export type DnsRecordState = {
+  zone: string;
+  type: string;
+  content: string;
+  /** Proxied by Cloudflare now. */
+  proxied: boolean;
+  /** Proxied was asked for: on once the certificate is issued. */
+  proxy: boolean;
+  /** "created": Pyo made it. "exists": it already pointed there. "conflict": other records have the name. */
+  status: "created" | "exists" | "conflict" | "failed";
+  error?: string | null;
+  /** The records in the way, on a conflict. */
+  existing: CloudflareRecord[];
+  /** Pyo made it, so Pyo may delete it. */
+  mine: boolean;
+  updatedAt: Timestamp;
+};
+
+export type CloudflareRecord = {
+  id: string;
+  type: string;
+  name: string;
+  content: string;
+  proxied: boolean;
+};
+
+export type CloudflareZone = {
+  id: string;
+  name: string;
+  /** Pyo can create and delete DNS records in it. */
+  canEdit: boolean;
+  /** The permission the token lacks there. */
+  missing?: string;
+};
+
+/** A team's Cloudflare account: its zones, never the token. */
+export type CloudflareAccount = {
+  teamId: ID;
+  zones: CloudflareZone[];
+  createdAt: Timestamp;
+  testedAt: Timestamp;
+  /** The token's last characters: owners and admins only. */
+  hint?: string;
+  createdBy?: string;
 };
 
 export type TlsMode = "auto" | "letsencrypt" | "selfsigned" | "custom" | "off";

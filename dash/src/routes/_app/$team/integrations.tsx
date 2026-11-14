@@ -2,6 +2,7 @@ import { KeyIcon, TreeStructureIcon } from "@phosphor-icons/react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { RegistryLoginsPanel } from "~/components/pyo/RegistryLogins";
 import { SecretStoresPanel } from "~/components/pyo/SecretStores";
+import { CloudflarePanel } from "~/components/pyo/Cloudflare";
 import { TailscalePanel } from "~/components/pyo/Tailscale";
 import { useEffect, useState, type ReactNode } from "react";
 import { Badge, ClusterStatusBadge } from "~/components/ui/Badge";
@@ -57,6 +58,7 @@ function Integrations() {
           <GithubRows />
         </ul>
       </Panel>
+      <CloudflarePanel />
       <RegistryLoginsPanel />
       <Panel title="Cluster connections">
         <ul className="list-rows">
