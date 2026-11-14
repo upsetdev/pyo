@@ -151,7 +151,7 @@ fn curated() -> Vec<Value> {
             "region": { "type": "string", "description": "Where to run it: a region of the team's servers (e.g. \"US East\" or \"Singapore, SG\"), a country code (DE, SG) or a city. The team's default cluster when omitted" },
             "server_tags": { "type": "array", "items": { "type": "string" }, "description": "Run only on servers that have all of these tags (see list_servers)" },
         }), &["name", "image"]), "annotations": write }),
-        json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain. It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" } }), &["service_id"]), "annotations": write }),
+        json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain. It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" } }), &["service_id"]), "annotations": write }),
         json!({ "name": "stop_service", "title": "Stop service", "description": "Stop the service (scale to zero). Settings and data are kept.", "inputSchema": schema(json!({ "service_id": service }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
     ]
 }
@@ -1168,6 +1168,29 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
             // Domains go live in place, without a redeploy; a service never
             // deployed gets them with its first deploy.
             op(json!({ "op": "saveService", "service": a })).await?;
+            // Its record in Cloudflare, when a connected zone covers it.
+            let team = a["teamId"].clone();
+            let covered = crate::freedomain::ip_in(&host).is_none()
+                && list("cloudflare")
+                    .iter()
+                    .filter(|c| c["teamId"] == team)
+                    .flat_map(|c| c["zones"].as_array().cloned().unwrap_or_default())
+                    .any(|z| {
+                        let n = z["name"].as_str().unwrap_or("");
+                        z["canEdit"] == json!(true)
+                            && !n.is_empty()
+                            && (host == n || host.ends_with(&format!(".{n}")))
+                    });
+            let dns_record = if covered && args["cloudflare_dns"].as_bool().unwrap_or(true) {
+                op(json!({
+                    "op": "createDnsRecord", "serviceId": id, "domainId": d["id"],
+                    "proxied": args["proxied"].as_bool().unwrap_or(false),
+                }))
+                .await
+                .unwrap_or_else(|e| json!({ "status": "failed", "error": e }))
+            } else {
+                Value::Null
+            };
             let next = if deps_of(id).is_empty() {
                 "Saved. It goes live with the service's first deploy (deploy_service)."
             } else if crate::deploy::private_host(&host) || d["tlsMode"] == json!("off") {
@@ -1175,7 +1198,12 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
             } else {
                 "Live in a few seconds, once the cluster has applied it. HTTPS starts once its certificate is issued (get_service shows it)."
             };
-            Ok(json!({ "hostname": host, "url": url, "next": next }))
+            let mut out = json!({ "hostname": host, "url": url, "next": next });
+            // "created", "exists", "conflict" (with `existing`: create_dns_record with replace) or "failed".
+            if !dns_record.is_null() {
+                out["dnsRecord"] = dns_record;
+            }
+            Ok(out)
         }
         other => Err(format!("Unknown tool {other}")),
     }
