@@ -1,3 +1,4 @@
+import { NeedsTailscale } from "~/components/pyo/Tailscale";
 import { ClusterChecklist } from "~/components/pyo/ClusterChecklist";
 import { TagInput } from "~/components/ui/TagInput";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -10,7 +11,6 @@ import { currentSlug } from "~/lib/pyo/paths";
 import { useClusterDraft } from "~/lib/pyo/useClusterDraft";
 import { LiveCommand } from "~/components/pyo/LiveCommand";
 import { seo } from "~/lib/seo";
-import { MenuPath } from "~/components/ui/MenuPath";
 
 export const Route = createFileRoute("/_app/$team/clusters/new")({
   head: () => ({ meta: seo({ title: "Add cluster" }) }),
@@ -126,6 +126,7 @@ function AddServers() {
                       ? "Run this on the machine Pyo runs on"
                       : "Run this on the machine"}
                   </p>
+                  {thisMachine ? null : <NeedsTailscale />}
                   {live.data && !live.error ? (
                     <>
                       <AgentInstall
@@ -134,17 +135,6 @@ function AddServers() {
                         stale={live.stale}
                         thisMachine={thisMachine}
                       />
-                      {!thisMachine &&
-                      !live.data.publicNet &&
-                      live.data.tailnet &&
-                      !live.data.tailscale ? (
-                        <Callout tone="warning">
-                          Not on your tailnet yet? Save a Tailscale auth key.{" "}
-                          <ButtonLink href="/integrations" size="xs" variant="secondary">
-                            <MenuPath bare steps={["Integrations", "Tailscale"]} />
-                          </ButtonLink>
-                        </Callout>
-                      ) : null}
                     </>
                   ) : (
                     <LiveCommand

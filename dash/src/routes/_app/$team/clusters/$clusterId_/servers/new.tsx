@@ -1,10 +1,11 @@
+import { NeedsTailscale } from "~/components/pyo/Tailscale";
 import { TreeStructureIcon } from "@phosphor-icons/react";
 import { site } from "~/config/site";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { ButtonLink } from "~/components/ui/Button";
 import { Field, Input, Select } from "~/components/ui/Field";
-import { Callout, EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
+import { EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { TagInput } from "~/components/ui/TagInput";
 import { LiveCommand } from "~/components/pyo/LiveCommand";
 import { SetupChecklist } from "~/components/pyo/SetupChecklist";
@@ -20,7 +21,6 @@ import {
   usePyo,
 } from "~/lib/pyo/store";
 import { useLiveCommand } from "~/lib/pyo/useLiveCommand";
-import { MenuPath } from "~/components/ui/MenuPath";
 
 export const Route = createFileRoute(
   "/_app/$team/clusters/$clusterId_/servers/new",
@@ -171,6 +171,7 @@ function JoinForm({
           </div>
           <div className="space-y-2 text-[13px]">
             <p className="font-medium">Run this on the machine</p>
+            <NeedsTailscale />
             <LiveCommand
               command={made?.command}
               stale={live.stale}
@@ -215,14 +216,6 @@ function JoinForm({
                 </p>
               ) : null}
             </LiveCommand>
-            {made && !made.tailscale ? (
-              <Callout tone="warning">
-                Not on your tailnet yet? Save a Tailscale auth key.{" "}
-                <ButtonLink href="/integrations" size="xs" variant="secondary">
-                  <MenuPath bare steps={["Integrations", "Tailscale"]} />
-                </ButtonLink>
-              </Callout>
-            ) : null}
           </div>
         </div>
       </Panel>

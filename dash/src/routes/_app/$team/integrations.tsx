@@ -1,21 +1,21 @@
-import { MenuPath } from "~/components/ui/MenuPath";
 import { KeyIcon, TreeStructureIcon } from "@phosphor-icons/react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { RegistryLoginsPanel } from "~/components/pyo/RegistryLogins";
 import { SecretStoresPanel } from "~/components/pyo/SecretStores";
+import { TailscalePanel } from "~/components/pyo/Tailscale";
 import { useEffect, useState, type ReactNode } from "react";
 import { Badge, ClusterStatusBadge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { seo } from "~/lib/seo";
-import { api, clustersIn, integrationIn, usePyo } from "~/lib/pyo/store";
+import { api, clustersIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import { Input } from "~/components/ui/Field";
 import { BrandMark, GITHUB_LOGO } from "~/components/pyo/common";
 import { currentSlug } from "~/lib/pyo/paths";
 
-// Everything Pyo connects to on the team's behalf: Git, registries,
-// clusters and secret stores. Notification channels live in Settings.
+// Everything Pyo connects to: third-party services (each a panel, so more
+// can be added), then Git, registries, clusters and secret stores.
+// Notification channels live in Settings.
 export const Route = createFileRoute("/_app/$team/integrations")({
   head: () => ({ meta: seo({ title: "Integrations" }) }),
   component: Integrations,
@@ -51,20 +51,7 @@ function Integrations() {
   return (
     <Page width="max-w-4xl">
       <PageHeader title="Integrations" />
-      <Panel title="Tailscale" description="Joins new servers and clusters to your tailnet.">
-        <ul className="list-rows">
-          <KeyRow
-            kind="tailscale"
-            title="Tailscale auth key"
-            placeholder="tskey-auth-…"
-            help={
-              <>
-                Use a one-off or pre-approved key: <MenuPath steps={["Settings", "Keys"]} />.
-              </>
-            }
-          />
-        </ul>
-      </Panel>
+      <TailscalePanel />
       <Panel title="Git providers">
         <ul className="list-rows">
           <GithubRows />
@@ -220,72 +207,5 @@ function GithubRows() {
         }
       />
     </>
-  );
-}
-
-function KeyRow({
-  kind,
-  title,
-  placeholder,
-  help,
-}: {
-  kind: "tailscale";
-  title: string;
-  placeholder: string;
-  help: ReactNode;
-}) {
-  const s = usePyo();
-  const saved = integrationIn(s, kind);
-  const [value, setValue] = useState("");
-  const [saving, setSaving] = useState(false);
-  return (
-    <li className="flex flex-wrap items-center gap-3 px-4 py-3">
-      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
-        <KeyIcon size={15} />
-      </span>
-      <div className="min-w-0 flex-1">
-        <p className="text-[13px] font-medium">{title}</p>
-        <p className="text-[12px] text-muted-foreground">
-          {saved ? `Saved · ${saved.hint}` : help}
-        </p>
-      </div>
-      {saved ? (
-        <Button
-          variant="secondary"
-          size="xs"
-          onClick={() => void api.removeIntegration(kind)}
-        >
-          Remove
-        </Button>
-      ) : (
-        <form
-          className="flex w-full gap-2 sm:w-auto"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!value.trim()) return;
-            setSaving(true);
-            const r = await api.saveIntegration(kind, value.trim());
-            setSaving(false);
-            if (r) {
-              setValue("");
-              toast({ title: `${title} saved` });
-            }
-          }}
-        >
-          <Input
-            type="password"
-            autoComplete="off"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder={placeholder}
-            aria-label={title}
-            className="h-8 sm:w-56"
-          />
-          <Button type="submit" size="xs" disabled={saving || !value.trim()}>
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </form>
-      )}
-    </li>
   );
 }

@@ -15,7 +15,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { AppLink } from "~/components/ui/AppLink";
-import { siDocker, siGit, siGithub, type SimpleIcon } from "simple-icons";
+import { siDocker, siGit, siGithub, siTailscale, type SimpleIcon } from "simple-icons";
 import type { ReactNode } from "react";
 import { dateTime, shortSha, timeAgo } from "~/lib/pyo/format";
 import { getTemplate } from "~/lib/pyo/templates";
@@ -62,6 +62,7 @@ export function IconTile({
 
 export const GIT_LOGO = siGit;
 export const GITHUB_LOGO = siGithub;
+export const TAILSCALE_LOGO = siTailscale;
 export const DOCKER_LOGO = siDocker;
 
 /** A brand logo in its own color, or the text color when the brand color is too dark to read. */

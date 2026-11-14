@@ -241,7 +241,9 @@ export function AddDomainDialog({
                 ? "Pick a service first"
                 : tailnet
                   ? "Free on ts.net"
-                  : "Not on Tailscale"
+                  : s.tailscale
+                    ? "Cluster not on your tailnet"
+                    : "Set up Tailscale in Integrations"
             }
             selected={k === "tailnet"}
             disabled={!tailnet}

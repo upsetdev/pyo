@@ -1650,12 +1650,34 @@ export type Builder = {
   lastSeenAt?: Timestamp | null;
 };
 
-/** A saved third-party key; only its last characters are ever shown. */
-export type Integration = {
-  teamId: ID;
-  kind: "tailscale";
-  hint: string;
-  createdAt: Timestamp;
+/** Tailscale for the whole Pyo (Integrations › Tailscale). The client only for admins. */
+export type TailscaleInfo = {
+  /** The tailnet ("tail1234.ts.net"), once Pyo has seen it. */
+  suffix: string | null;
+  /** Pyo on the tailnet ("pyo.tail1234.ts.net"), once it answers. */
+  dashboard: string | null;
+  /** The registry on the tailnet, once it answers. */
+  registry: string | null;
+  /** Pyo's own server is on the tailnet. */
+  onTailnet: boolean;
+  clientId?: string;
+  /** The secret's last characters. */
+  hint?: string;
+  dashboardName?: string | null;
+  dashboardError?: string | null;
+  registryName?: string | null;
+  registryError?: string | null;
+  hostName?: string | null;
+};
+
+/** One check of the Tailscale client (Test). */
+export type TailscaleCheck = { name: string; ok: boolean; message: string };
+
+/** Pyo on the public IP (admins only). */
+export type PublicDashboard = {
+  open: boolean;
+  /** "pyo.203.0.113.7.nip.io", once it answers over HTTPS. */
+  host: string | null;
 };
 
 // ── Integrations ───────────────────────────────────────────────────────────

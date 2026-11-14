@@ -1,3 +1,4 @@
+import { NeedsTailscale } from "~/components/pyo/Tailscale";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { z } from "zod";
@@ -19,7 +20,6 @@ import {
 import { toast } from "~/lib/pyo/toast";
 import type { Builder } from "~/lib/pyo/types";
 import { useLiveCommand } from "~/lib/pyo/useLiveCommand";
-import { MenuPath } from "~/components/ui/MenuPath";
 
 export const Route = createFileRoute("/_app/$team/builders/new")({
   head: () => ({ meta: seo({ title: "Add builder" }) }),
@@ -299,6 +299,7 @@ function AddBuilder() {
                 </div>
                 <div className="space-y-2 text-[13px]">
                   <p className="font-medium">Run this on the machine</p>
+                  <NeedsTailscale />
                   <LiveCommand
                     command={live.data?.command}
                     stale={live.stale}
@@ -313,15 +314,6 @@ function AddBuilder() {
                       Expires in 1 hour
                     </p>
                   </LiveCommand>
-                  {live.data &&
-                  !live.data.command.includes("--tailscale-key") ? (
-                    <Callout tone="warning">
-                      Not on your tailnet yet? Save a Tailscale auth key.{" "}
-                      <ButtonLink href="/integrations" size="xs" variant="secondary">
-                        <MenuPath bare steps={["Integrations", "Tailscale"]} />
-                      </ButtonLink>
-                    </Callout>
-                  ) : null}
                 </div>
               </>
             ) : (

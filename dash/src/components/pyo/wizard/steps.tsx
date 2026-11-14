@@ -1223,7 +1223,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
         </p>
       ) : !tailnet && d.clusterId ? (
         <p className="text-[11.5px] text-muted-foreground">
-          Not on Tailscale, so no tailnet domain.
+          No tailnet domain without Tailscale.
         </p>
       ) : null}
     </div>

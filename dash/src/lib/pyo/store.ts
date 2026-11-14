@@ -9,11 +9,6 @@ import {
 import { NEW_PROJECT, type DeployDraft } from "./draft";
 import { newId, slugify } from "./format";
 import { isActive, revisionFor } from "./simulation";
-import {
-  isStubDomain,
-  takeTailnetDomains,
-  withTailnetStub,
-} from "./tailnetStub"; // TODO(tailnet-domains): backend
 import { generateValue, getTemplate, templateArgs, templateRecord, templateRefs } from "./templates";
 import { toast } from "./toast";
 import type {
@@ -51,7 +46,9 @@ import type {
   EnvironmentVariable,
   GithubAppInfo,
   GithubInstallation,
-  Integration,
+  PublicDashboard,
+  TailscaleCheck,
+  TailscaleInfo,
   IpMode,
   OAuthGrant,
   PortMapping,
@@ -91,7 +88,10 @@ export type PyoState = {
   activity: ActivityEvent[];
   registries: Registry[];
   builders: Builder[];
-  integrations: Integration[];
+  /** Tailscale for the whole Pyo, or null when it isn't set up. */
+  tailscale: TailscaleInfo | null;
+  /** Pyo on the public IP; null unless you're the installation's admin. */
+  publicDashboard: PublicDashboard | null;
   /** URL the agents of in-cluster installs use; shown in install commands. */
   agentApiUrl: string;
   /** Outgoing email (SMTP), or null when it isn't set up. */
@@ -314,7 +314,8 @@ function empty(): PyoState {
     registryLogins: [],
     observabilitySettings: { ipMode: "none", enabled: true, small: null },
     builders: [],
-    integrations: [],
+    tailscale: null,
+    publicDashboard: null,
     gitConnections: [],
     ...loadPrefs(),
   };
@@ -368,8 +369,7 @@ let generation = 0;
 /** Fetch the snapshot and make it the state. */
 export async function refresh() {
   const started = generation;
-  // TODO(tailnet-domains): backend (was `(await fetchState()) as Partial<PyoState>`)
-  const snap = withTailnetStub((await fetchState()) as Partial<PyoState>);
+  const snap = (await fetchState()) as Partial<PyoState>;
   if (pending > 0 || started !== generation) return;
   const prev = get();
   const next: PyoState = {
@@ -652,11 +652,6 @@ export const gitConnectionsIn = (s: PyoState, wsId = s.currentTeamId) =>
   (s.gitConnections ?? []).filter((c) => c.teamId === wsId);
 export const buildersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.builders.filter((b) => b.teamId === wsId);
-export const integrationIn = (
-  s: PyoState,
-  kind: Integration["kind"],
-  wsId = s.currentTeamId,
-) => s.integrations.find((i) => i.teamId === wsId && i.kind === kind);
 export const membersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.filter((m) => m.teamId === wsId);
 
@@ -899,14 +894,6 @@ export function desiredReplicas(a: Application) {
   return a.autoscale ? (a.runtime.desired ?? a.replicas) : a.replicas;
 }
 
-// TODO(tailnet-domains): backend. Stub domains stay in the browser for now.
-function saveTailnetOnly(serviceId: string) {
-  const app = get().services.find((a) => a.id === serviceId);
-  if (app) takeTailnetDomains(app);
-  void refresh().catch(() => undefined);
-  return Promise.resolve({ ok: true } as Record<string, unknown> & { ok: boolean });
-}
-
 function saveService(
   serviceId: string,
   deploy?: { deploymentId: string; trigger: DeploymentTrigger },
@@ -915,7 +902,7 @@ function saveService(
   const app = get().services.find((a) => a.id === serviceId);
   if (!app) return Promise.resolve(null);
   return send("saveService", {
-    service: takeTailnetDomains(app), // TODO(tailnet-domains): backend (was `app`)
+    service: app,
     deploymentId: deploy?.deploymentId,
     trigger: deploy?.trigger,
     // A very large replica change the user said yes to.
@@ -1744,7 +1731,7 @@ export const api = {
     const done = (async () => {
       if (fresh && !(await send("createProject", fresh))) return false;
       return !!(await send("createService", {
-        service: app && takeTailnetDomains(app), // TODO(tailnet-domains): backend (was `app`)
+        service: app,
         deploymentId,
         volumes,
         ...(opts.databases?.length ? { databases: opts.databases } : {}),
@@ -1820,7 +1807,6 @@ export const api = {
       const port = a.ports.find((p) => p.name === input.portName);
       if (port) port.exposure = "http";
     });
-    if (isStubDomain(input.hostname)) return saveTailnetOnly(id); // TODO(tailnet-domains): backend
     return saveService(id);
   },
   /** HTTPS settings of a domain; applied live once the service is deployed. */
@@ -1841,16 +1827,9 @@ export const api = {
       if (patch.tlsMode === "off") d.tls = "disabled";
       else if (patch.tlsMode) d.tls = "pending";
     });
-    // TODO(tailnet-domains): backend
-    if (isStubDomain(findService(get(), id).domains.find((x) => x.id === domainId)?.hostname ?? ""))
-      return saveTailnetOnly(id);
     return saveService(id);
   },
   removeDomain(id: string, domainId: string) {
-    // TODO(tailnet-domains): backend
-    const tailnetOnly = isStubDomain(
-      findService(get(), id).domains.find((x) => x.id === domainId)?.hostname ?? "",
-    );
     update((s) => {
       const a = findService(s, id);
       a.domains = a.domains.filter((x) => x.id !== domainId);
@@ -1861,7 +1840,6 @@ export const api = {
         )
           p.exposure = "internal";
     });
-    if (tailnetOnly) return saveTailnetOnly(id); // TODO(tailnet-domains): backend
     return saveService(id);
   },
   /** Default-deny networking for a project, on every cluster it runs on. */
@@ -1892,9 +1870,6 @@ export const api = {
   },
   /** Resolves the hostname from the API server. */
   async verifyDomain(id: string, domainId: string) {
-    // TODO(tailnet-domains): backend. A stub domain isn't in the API.
-    if (isStubDomain(findService(get(), id).domains.find((x) => x.id === domainId)?.hostname ?? ""))
-      return;
     update((s) => {
       const d = findService(s, id).domains.find((x) => x.id === domainId);
       if (d) {
@@ -2323,20 +2298,26 @@ export const api = {
     });
     return send("removeRegistryLogin", { id });
   },
-  saveIntegration(kind: Integration["kind"], secret: string) {
-    return send("saveIntegration", {
-      teamId: get().currentTeamId,
-      kind,
-      secret,
+  saveTailscale(clientId: string, secret?: string) {
+    return attempt<{ checks: TailscaleCheck[] }>("saveTailscale", {
+      clientId: clientId.trim(),
+      ...(secret?.trim() ? { secret: secret.trim() } : {}),
     });
   },
-  removeIntegration(kind: Integration["kind"]) {
+  testTailscale() {
+    return attempt<{ checks: TailscaleCheck[] }>("testTailscale", {});
+  },
+  removeTailscale() {
+    return send("removeTailscale", {});
+  },
+  renameTailscaleName(kind: "dashboard" | "registry", name: string) {
+    return attempt("renameTailscaleName", { kind, name: name.trim() });
+  },
+  setPublicDashboard(open: boolean) {
     update((s) => {
-      s.integrations = s.integrations.filter(
-        (i) => !(i.teamId === s.currentTeamId && i.kind === kind),
-      );
+      if (s.publicDashboard) s.publicDashboard.open = open;
     });
-    return send("removeIntegration", { teamId: get().currentTeamId, kind });
+    return send("setPublicDashboard", { open });
   },
 
   // Preferences (this browser)
