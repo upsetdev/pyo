@@ -4773,7 +4773,7 @@ async fn apply(
             .await?;
             // The agent removes the objects; the row goes when it reports back.
             let source: Value = sqlx::query_scalar(
-                "UPDATE pyo.services SET deleting = true WHERE id = $1 RETURNING spec->'source'",
+                "UPDATE pyo.services SET deleting = true WHERE id = $1 RETURNING coalesce(spec->'source', 'null')",
             )
             .bind(&id)
             .fetch_one(&mut **tx)
