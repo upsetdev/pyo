@@ -64,6 +64,26 @@ async fn dokploy_walk_asks_for_every_recorded_answer() {
 }
 
 #[test]
+fn free_domain_keeps_its_port() {
+    // Only a free platform domain: the hostname is left out, the port it
+    // served stays (private, for a free Pyo domain).
+    let mut web = Web::default();
+    let mut seen = HashSet::new();
+    web.domain(
+        Platform::Dokploy,
+        "demo.10.97.0.169.sslip.io",
+        Some(3000),
+        "/",
+        &mut seen,
+    );
+    assert!(web.domains.is_empty());
+    assert_eq!(web.ports.len(), 1);
+    assert_eq!(web.ports[0].container_port, 3000);
+    assert!(!web.ports[0].public);
+    assert!(has(&web.warnings, "sslip.io is a free domain Dokploy made"));
+}
+
+#[test]
 fn coolify_projects_and_environments() {
     let plan = coolify::plan(&fixture("coolify"), "coolify.example.com");
     assert_eq!(plan.platform, "coolify");
