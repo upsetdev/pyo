@@ -55,6 +55,7 @@ mod secrets;
 mod secretstores;
 mod sigstore;
 mod snapshot;
+mod tailscale;
 mod teambackup;
 mod template_source;
 mod terminal;
@@ -340,6 +341,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
     if role.web() {
         tokio::spawn(bg::listen(state.clone()));
         tokio::spawn(geoip::keeper(state.clone()));
+        tokio::spawn(tailscale::addresses_follower(state.db.clone()));
     }
     if role.worker() {
         // Each loop runs on one worker at a time (leader lock); jobs on any.
@@ -353,6 +355,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tokio::spawn(teambackup::runner(state.clone()));
         tokio::spawn(database_imports::runner(state.clone()));
         tokio::spawn(updates::runner(state.clone()));
+        tokio::spawn(tailscale::runner(state.clone()));
         for task in tasks {
             tokio::spawn(task(state.clone()));
         }
