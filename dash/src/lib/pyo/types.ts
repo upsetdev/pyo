@@ -1022,7 +1022,7 @@ export type FirewallRule = {
   serviceId: ID;
   action: "allow" | "block" | "rateLimit";
   operator: "in" | "notIn";
-  /** Address ranges ("203.0.113.0/24") or country codes ("DE"); none: any client. */
+  /** Address ranges ("203.0.113.0/24") and presets ("cloudflare"), or country codes ("DE"); none: any client. */
   sources: string[];
   /** A rate limit's requests from each client address per `per`. */
   requests: number | null;
@@ -1047,6 +1047,8 @@ export type Application = {
   waf?: Partial<WafSettings>;
   /** Set while its WAF is on: "installing" while the WAF starts on its cluster. */
   wafState?: { state: "installing" | "ready" | "failed" | "removing"; message: string };
+  /** The CDN in front of its websites: only it reaches them. */
+  behindCdn?: "cloudflare" | null;
   name: string;
   description: string;
   kind: AppKind;

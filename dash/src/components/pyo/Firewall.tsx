@@ -2,7 +2,7 @@ import { ArrowDownIcon, ArrowUpIcon, DotsThreeIcon, PencilSimpleIcon, PlusIcon, 
 import { useEffect, useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { Dialog } from "~/components/ui/Dialog";
-import { Field, Input, Select } from "~/components/ui/Field";
+import { Field, Input, Select, Switch } from "~/components/ui/Field";
 import { Flag } from "~/components/ui/Flag";
 import { Menu } from "~/components/ui/Menu";
 import { TagInput } from "~/components/ui/TagInput";
@@ -23,6 +23,19 @@ import type { Application, Cluster, FirewallRule, FirewallRuleInput } from "~/li
 // matches counting the request per client IP.
 
 const isCountry = (s: string) => /^[A-Z]{2}$/.test(s);
+
+/** Named lists of ranges a rule can use next to addresses (pyo-proto's firewall.rs). */
+export const PRESETS: { name: string; label: string; group: "CDNs" | "Your networks"; ranges?: string[] }[] = [
+  { name: "cloudflare", label: "Cloudflare", group: "CDNs" },
+  { name: "fastly", label: "Fastly", group: "CDNs" },
+  { name: "bunny", label: "bunny.net", group: "CDNs" },
+  { name: "cloudfront", label: "Amazon CloudFront", group: "CDNs" },
+  { name: "tailnet", label: "Tailnet", group: "Your networks", ranges: ["100.64.0.0/10", "fd7a:115c:a1e0::/48"] },
+  { name: "private", label: "Private networks", group: "Your networks", ranges: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"] },
+];
+const presetOf = (s: string) => PRESETS.find((p) => p.name === s);
+const isPreset = (s: string) => !!presetOf(s);
+const isCdn = (s: string) => !!presetOf(s) && !presetOf(s)?.ranges;
 
 /** An address inside a range ("203.0.113.0/24"), IPv4 or IPv6. */
 function inRange(ip: string, range: string) {
@@ -58,7 +71,10 @@ type Rule = Pick<FirewallRule, "action" | "operator" | "sources">;
 /** Whether a rule matches a client. */
 const matches = (r: Rule, ip: string, country: string) => {
   if (!r.sources.length) return true;
-  const listed = r.sources.some((s) => (isCountry(s) ? s === country : inRange(ip, s)));
+  // A CDN's ranges aren't here: a browser is never taken for one.
+  const listed = r.sources.some((s) =>
+    isCountry(s) ? s === country : isPreset(s) ? (presetOf(s)?.ranges ?? []).some((c) => inRange(ip, c)) : inRange(ip, s),
+  );
   return listed !== (r.operator === "notIn");
 };
 
@@ -70,7 +86,7 @@ export function admits(rules: Rule[], ip: string, country: string) {
 
 /** A single address as a range ("/32" for IPv4, "/128" for IPv6). */
 const isHost = (s: string) => !s.includes("/") || (s.includes(":") ? s.endsWith("/128") : s.endsWith("/32"));
-const shownSource = (s: string) => (isCountry(s) || !isHost(s) ? s : s.split("/")[0]);
+const shownSource = (s: string) => presetOf(s)?.label ?? (isCountry(s) || !isHost(s) ? s : s.split("/")[0]);
 const fieldLabel = (r: Rule) => (r.sources.some(isCountry) ? "country" : "client IP");
 const perLabel = (per: string | null) => (per === "second" ? "a second" : "a minute");
 
@@ -86,6 +102,7 @@ function ruleText(r: Rule) {
 /** What turned a request away: a rule's name, or why. */
 export const ruleLabel = (rule: string, rules: FirewallRule[]) => {
   if (rule === "rate-limit") return "Over a rate limit";
+  if (rule === "cdn") return "Behind Cloudflare";
   if (rule === "blocked") return "A firewall rule";
   const r = rules.find((x) => x.id === rule);
   return r ? r.note || ruleText(r) : "A removed rule";
@@ -120,9 +137,12 @@ export function FirewallEditor({
 
   // The dashboard comes from this cluster: warn before a change would shut
   // this browser out.
+  // Behind Cloudflare, this browser reaches the service through Cloudflare
+  // or not at all, whatever the rules say.
+  const behind = !!app.behindCdn;
   const guard = (next: Rule[], what: string, run: () => Promise<void>, cancel?: () => void) => {
     const addr = me.status === "success" ? me.data : null;
-    if (cluster.sameCluster && addr?.ip && !admits(next, addr.ip, addr.country)) {
+    if (cluster.sameCluster && addr?.ip && !behind && !admits(next, addr.ip, addr.country)) {
       setConfirm({ what, run, cancel });
       return;
     }
@@ -152,17 +172,39 @@ export function FirewallEditor({
     </Button>
   );
 
+  const setBehind = async (on: boolean) => {
+    const res = await api.setServiceBehindCdn(app.id, on ? "cloudflare" : null);
+    if ("error" in res) toast({ title: "Not changed", description: res.error, tone: "error" });
+    else toast({ title: on ? "Behind Cloudflare" : "No longer behind Cloudflare", description: app.name });
+  };
+  const toggleBehind = (on: boolean) => {
+    const addr = me.status === "success" ? me.data : null;
+    // Turned on, only Cloudflare gets in: this browser too, unless it comes through Cloudflare.
+    if (on && cluster.sameCluster && addr?.ip) setConfirm({ what: "Behind Cloudflare", run: () => setBehind(true) });
+    else void setBehind(on);
+  };
+
   return (
     <div className="space-y-6">
-      <Panel title="Access" actions={rules.length && editable ? add : undefined}>
+      <Panel title="Access" actions={rules.length || behind ? (editable ? add : undefined) : undefined}>
+        <div className="border-b border-border px-4 py-3">
+          <Switch
+            checked={behind}
+            disabled={!editable}
+            onChange={toggleBehind}
+            label="Behind Cloudflare"
+            description="Only Cloudflare reaches the service. Rules see the visitor's real address."
+          />
+        </div>
         {portsShut ? (
           <div className="border-b border-border p-4">
             <Callout tone="warning">TCP and UDP ports can't see countries, so they let no one in.</Callout>
           </div>
         ) : null}
-        {rules.length ? (
+        {rules.length || behind ? (
           <RuleList
             rules={rules}
+            behind={behind}
             editable={editable}
             onEdit={(r) => setEditing(r)}
             onMove={move}
@@ -265,11 +307,12 @@ function LockoutConfirm({
   );
 }
 
-type FwField = "ip" | "range" | "country" | "any";
+type FwField = "ip" | "range" | "country" | "network" | "any";
 const FW_FIELDS: { value: FwField; label: string }[] = [
   { value: "ip", label: "IP address" },
   { value: "range", label: "IP range" },
   { value: "country", label: "Country" },
+  { value: "network", label: "Network" },
   { value: "any", label: "Any client" },
 ];
 type FwAction = FirewallRule["action"];
@@ -280,7 +323,15 @@ const FW_ACTIONS: ActionOption<FwAction>[] = [
 ];
 const actionOf = (a: string) => FW_ACTIONS.find((x) => x.value === a) ?? FW_ACTIONS[0];
 const fieldOf = (r: Rule): FwField =>
-  !r.sources.length ? "any" : r.sources.some(isCountry) ? "country" : r.sources.every(isHost) ? "ip" : "range";
+  !r.sources.length
+    ? "any"
+    : r.sources.some(isCountry)
+      ? "country"
+      : r.sources.every(isPreset)
+        ? "network"
+        : r.sources.every((s) => isHost(s) && !isPreset(s))
+          ? "ip"
+          : "range";
 
 /** "If country is not in Germany" for one rule, with flags. */
 function FwSummary({ rule }: { rule: FirewallRule }) {
@@ -300,7 +351,7 @@ function FwSummary({ rule }: { rule: FirewallRule }) {
           </span>
         ) : (
           <span key={s}>
-            <span className="font-mono text-[12.5px]">{shownSource(s)}</span>
+            {isPreset(s) ? shownSource(s) : <span className="font-mono text-[12.5px]">{shownSource(s)}</span>}
             {comma}
           </span>
         );
@@ -313,26 +364,38 @@ function FwSummary({ rule }: { rule: FirewallRule }) {
 
 function RuleList({
   rules,
+  behind,
   editable,
   onRemove,
   onEdit,
   onMove,
 }: {
   rules: FirewallRule[];
+  /** Behind Cloudflare: its rule first, numbered with the rest. */
+  behind: boolean;
   editable: boolean;
   onRemove: (r: FirewallRule) => void;
   onEdit: (r: FirewallRule) => void;
   onMove: (from: number, to: number) => void;
 }) {
   const ordered = rules.filter((r) => r.action !== "rateLimit").length;
+  const first = behind ? 1 : 0;
   return (
     <ul className="list-rows">
+      {behind ? (
+        <RuleRow
+          order={1}
+          name="Added by Behind Cloudflare"
+          summary="If the connection is not from Cloudflare"
+          action={actionOf("block")}
+        />
+      ) : null}
       {rules.map((r, i) => {
         const inOrder = r.action !== "rateLimit";
         return (
           <RuleRow
             key={r.id}
-            order={inOrder ? i + 1 : null}
+            order={inOrder ? i + 1 + first : null}
             name={r.note || undefined}
             summary={<FwSummary rule={r} />}
             action={actionOf(r.action)}
@@ -377,6 +440,8 @@ const cleanAddress = (raw: string) => {
   return t && !t.includes("/") ? t : null;
 };
 const cleanRange = (raw: string) => {
+  const name = raw.trim().toLowerCase();
+  if (isPreset(name)) return name;
   const t = cleanIp(raw);
   return t && t.includes("/") ? t : null;
 };
@@ -412,7 +477,7 @@ function FwRuleDialog({
     setNote(rule?.note ?? "");
     setField(f);
     setOperator(rule?.operator ?? "in");
-    setValues(rule ? rule.sources.map((s) => (f === "range" ? s : shownSource(s))) : []);
+    setValues(rule ? rule.sources.map((s) => (f === "range" || f === "network" ? s : shownSource(s))) : []);
     setAction(rule?.action ?? "block");
     setRequests(String(rule?.requests ?? 100));
     setPer(rule?.per ?? "minute");
@@ -421,7 +486,7 @@ function FwRuleDialog({
   const label = FW_FIELDS.find((f) => f.value === field)?.label ?? "";
   const any = field === "any";
   const sources = any ? [] : values;
-  const shown = field === "country" ? values.map((v) => countryName(v) || v) : values;
+  const shown = field === "country" ? values.map((v) => countryName(v) || v) : values.map((v) => presetOf(v)?.label ?? v);
   const list = `${shown.slice(0, 3).join(", ")}${shown.length > 3 ? "…" : ""}`;
   const act = actionOf(action).label;
   const autoName = any ? `${act} any client` : shown.length ? `${act} ${operator === "notIn" ? "all but " : ""}${list}` : "";
@@ -431,9 +496,13 @@ function FwRuleDialog({
     !any && !values.length
       ? field === "country"
         ? "Pick a country."
-        : "Add a value."
+        : field === "network"
+          ? "Pick a network."
+          : "Add a value."
       : limited && field === "country"
         ? "Rate limits can't use countries."
+        : limited && values.some(isCdn)
+          ? "Rate limits can't use a CDN's list."
         : limited && operator === "notIn" && values.length > 1
           ? "Rate limits take one value with “is not in”."
           : limited && !(Number.isInteger(n) && n >= 1 && n <= 1_000_000)
@@ -502,6 +571,8 @@ function FwRuleDialog({
               </Select>
               {field === "country" ? (
                 <CountryPicker key="country" value={values} onChange={setValues} label="Countries" />
+              ) : field === "network" ? (
+                <NetworkPicker value={values} onChange={setValues} />
               ) : (
                 <div className="min-w-[12rem] flex-1">
                   <TagInput
@@ -521,5 +592,34 @@ function FwRuleDialog({
         </div>
       }
     />
+  );
+}
+
+/** Presets as toggle chips, CDNs and your own networks. */
+function NetworkPicker({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+  return (
+    <div className="min-w-[12rem] flex-1 space-y-2">
+      {(["CDNs", "Your networks"] as const).map((group) => (
+        <div key={group} role="group" aria-label={group} className="flex flex-wrap items-center gap-1">
+          <span className="w-[6.5rem] shrink-0 text-[12px] text-muted-foreground">{group}</span>
+          {PRESETS.filter((p) => p.group === group).map((p) => {
+            const on = value.includes(p.name);
+            return (
+              <button
+                key={p.name}
+                type="button"
+                aria-pressed={on}
+                onClick={() => onChange(on ? value.filter((x) => x !== p.name) : [...value, p.name])}
+                className={`rounded-md border px-2 py-1 text-[12px] transition-colors ${
+                  on ? "border-primary bg-primary/12 text-foreground" : "border-border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
+      ))}
+    </div>
   );
 }

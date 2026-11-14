@@ -1311,6 +1311,14 @@ export const api = {
     return send("revokeRegistryToken", { id });
   },
   /** A service's web application firewall settings (all its domains). */
+  /** Put a service's websites behind a CDN, or take them out (null). */
+  setServiceBehindCdn(serviceId: string, cdn: "cloudflare" | null) {
+    update((s) => {
+      const a = s.services.find((x) => x.id === serviceId);
+      if (a) a.behindCdn = cdn;
+    });
+    return attempt("setServiceBehindCdn", { serviceId, cdn });
+  },
   setServiceWaf(serviceId: string, settings: WafSettings) {
     update((s) => {
       const a = s.services.find((x) => x.id === serviceId);
