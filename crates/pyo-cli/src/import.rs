@@ -61,35 +61,68 @@ pub async fn run(api: &Api, a: Args<'_>) -> Result<()> {
     body["clusterId"] = json!(cluster_id);
     body["items"] = json!(keys);
     body["deploy"] = json!(a.deploy);
-    let out = api.post("/api/v1/platform-imports", &body).await?;
-    for r in out["results"].as_array().into_iter().flatten() {
-        let state = r["state"].as_str().unwrap_or("");
-        let mark = match state {
-            "created" | "importing" => ui::green("✓"),
-            "failed" => ui::red("✗"),
-            _ => ui::dim("·"),
-        };
-        let label = match state {
-            "created" => "created",
-            "importing" => "copying its data",
-            "exists" => "imported before",
-            "skipped" => "not imported",
-            _ => "failed",
-        };
-        let msg = r["message"].as_str().unwrap_or("");
-        println!(
-            "{mark} {} {}{}",
-            r["name"].as_str().unwrap_or(""),
-            ui::dim(label),
-            if msg.is_empty() {
-                String::new()
-            } else {
-                format!(": {msg}")
-            }
-        );
+    // It runs on the server: stopping here doesn't stop it. Follow it.
+    let run = api.post("/api/v1/platform-imports", &body).await?;
+    let id = run["id"].as_str().unwrap_or("").to_owned();
+    if id.is_empty() {
+        bail!("Pyo didn't say which import it started.");
+    }
+    println!(
+        "{}",
+        ui::dim("Importing. It goes on in Pyo if you stop this.")
+    );
+    let mut shown = 0;
+    let run = loop {
+        let run = api.get(&format!("/api/v1/platform-imports/{id}")).await?;
+        let results = run["results"].as_array().cloned().unwrap_or_default();
+        for r in results.iter().skip(shown) {
+            print_result(r);
+        }
+        shown = shown.max(results.len());
+        if !matches!(run["status"].as_str(), Some("reading" | "importing")) {
+            break run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    };
+    match run["status"].as_str() {
+        Some("failed") => bail!(
+            "The import stopped: {}",
+            run["error"].as_str().unwrap_or("no reason given")
+        ),
+        Some("interrupted") => {
+            bail!("Pyo restarted during the import. Run it again: what's there already is skipped.")
+        }
+        _ => {}
     }
     ui::ok(&format!("Done. See it in the dashboard: {}", api.base));
     Ok(())
+}
+
+fn print_result(r: &Value) {
+    let state = r["state"].as_str().unwrap_or("");
+    let mark = match state {
+        "created" | "importing" => ui::green("✓"),
+        "failed" => ui::red("✗"),
+        _ => ui::dim("·"),
+    };
+    let label = match state {
+        "created" => "created",
+        "importing" => "copying its data",
+        "exists" => "imported before",
+        "skipped" => "not imported",
+        _ => "failed",
+    };
+    let msg = r["message"].as_str().unwrap_or("");
+    println!(
+        "{mark} {} {}{}",
+        r["name"].as_str().unwrap_or(""),
+        ui::dim(label),
+        if msg.is_empty() {
+            String::new()
+        } else {
+            format!(": {msg}")
+        }
+    );
 }
 
 /// Prints the plan; returns the keys to import (all that can be).
