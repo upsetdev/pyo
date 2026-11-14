@@ -624,7 +624,7 @@ check_update() {
 pyo_addresses() {
   local url="" lan="" i
   for i in $(seq 0 5 "${1:-0}"); do
-    url=$(curl -fsS -m 5 http://127.0.0.1:8000/api/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
+    url=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
     [ -n "$url" ] && break
     [ "$i" -ge "${1:-0}" ] || sleep 5
   done
@@ -637,7 +637,7 @@ pyo_addresses() {
   if [ -z "$url" ]; then
     echo
     echo "Its HTTPS address on this machine's public IP isn't ready yet. See it later with:"
-    echo "  curl -s http://localhost:8000/api/meta"
+    echo "  curl -s http://localhost:8000/api/v1/meta"
   fi
 }
 # The host's own helpers, as systemd timers (root), every minute: connecting
