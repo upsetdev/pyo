@@ -1,3 +1,4 @@
+-- pyo:contract since=v0.2.5 the kind check only widens, so every row a release writes still fits, and the unique index is on a table this migration creates, which no release writes
 -- A team's Hetzner Cloud token (Integrations › Hetzner), sealed with the
 -- team's data key like its other credentials.
 ALTER TABLE pyo.integrations DROP CONSTRAINT integrations_kind_check;
