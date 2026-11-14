@@ -1,8 +1,9 @@
 # ── Pyo: API + dashboard on :8000 (role "web", one replica, rolling
 # updates without a gap), plus a "worker" replica for background loops and
-# jobs. One of each keeps Pyo small enough for a 2 GB server. Inside the cluster only: platform.yaml's pyo-host puts :8000 on this
-# machine's localhost and tailnet IP, never its public addresses; other
-# devices use HTTPS through the gateway (:8443). ──
+# jobs. One of each keeps Pyo small enough for a 2 GB server. Inside the
+# cluster only: pyo-host (below) puts :8000 on this machine for loopback,
+# private and tailnet peers. Other devices use HTTPS through the gateway
+# (pyo.<public IP>.nip.io while it's open, pyo.<tailnet>.ts.net). ──
 apiVersion: v1
 kind: Service
 metadata:
@@ -17,9 +18,9 @@ spec:
 ---
 # The registry's door (registrydoor.rs): every request with a login (a
 # team's registry token, a cluster's pull token or a builder's token).
-# Users reach it over HTTPS through the gateway (:5443); other machines'
-# containerd and builders on this machine's tailnet IP, :5005 (pyo-host in
-# platform.yaml); this cluster's builders here, in the cluster.
+# Users reach it over HTTPS through the gateway (registry.<tailnet>.ts.net);
+# other machines' containerd and builders on this machine's tailnet IP,
+# :5005 (pyo-host below); this cluster's builders here, in the cluster.
 apiVersion: v1
 kind: Service
 metadata:
@@ -95,20 +96,11 @@ spec:
             # GeoLite2's license key (pyo-up.sh saves it from MAXMIND_LICENSE_KEY).
             - name: MAXMIND_LICENSE_KEY
               valueFrom: { secretKeyRef: { name: pyo-geoip, key: maxmind-license-key, optional: true } }
-            # Builders: image; the registry door on the tailnet (for servers
-            # and builders on other machines; empty without a tailnet); the
-            # name every node pulls by; the registry itself (in the cluster
-            # only); and this API on the tailnet for servers that join over it.
+            # Builders: image; the name every node pulls by; the registry
+            # itself (in the cluster only).
             - { name: PYO_BUILDER_IMAGE, value: "__IMAGES__/builder:__TAG__" }
-            - { name: PYO_REGISTRY_PUSH, value: "__REGISTRY_PUSH__" }
             - { name: PYO_REGISTRY_PULL, value: "127.0.0.1:5005" }
             - { name: PYO_REGISTRY, value: "pyo-registry.pyo-system.svc.cluster.local:5000" }
-            - { name: PYO_TAILNET_API_URL, value: "__TAILNET_API__" }
-            # This machine's tailnet name, when its tailnet has MagicDNS and
-            # HTTPS certificates: Pyo is then https://<name>:8443 and its
-            # registry <name>:5443 (the gateway, tailnet only). Empty: Pyo is
-            # only on this machine (http://localhost:8000).
-            - { name: PYO_TAILNET_NAME, value: "__TAILNET_NAME__" }
             # The key this machine's setup connects it as a cluster with.
             - name: PYO_BOOTSTRAP_KEY
               valueFrom: { secretKeyRef: { name: pyo-bootstrap, key: key, optional: true } }
@@ -217,15 +209,8 @@ spec:
             - name: CLICKHOUSE_PASSWORD
               valueFrom: { secretKeyRef: { name: pyo-clickhouse, key: password } }
             - { name: PYO_BUILDER_IMAGE, value: "__IMAGES__/builder:__TAG__" }
-            - { name: PYO_REGISTRY_PUSH, value: "__REGISTRY_PUSH__" }
             - { name: PYO_REGISTRY_PULL, value: "127.0.0.1:5005" }
             - { name: PYO_REGISTRY, value: "pyo-registry.pyo-system.svc.cluster.local:5000" }
-            - { name: PYO_TAILNET_API_URL, value: "__TAILNET_API__" }
-            # This machine's tailnet name, when its tailnet has MagicDNS and
-            # HTTPS certificates: Pyo is then https://<name>:8443 and its
-            # registry <name>:5443 (the gateway, tailnet only). Empty: Pyo is
-            # only on this machine (http://localhost:8000).
-            - { name: PYO_TAILNET_NAME, value: "__TAILNET_NAME__" }
             # The key this machine's setup connects it as a cluster with.
             - name: PYO_BOOTSTRAP_KEY
               valueFrom: { secretKeyRef: { name: pyo-bootstrap, key: key, optional: true } }
@@ -257,3 +242,51 @@ spec:
           resources:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 512Mi }
+---
+# ── Pyo on this machine (host network), beside the registry: the dashboard
+# and API on :8000 for loopback, private and tailnet peers, never public
+# ones; the registry on :5005 for this node's containerd and BuildKit
+# (loopback); and the registry door (logins only) on :5005 for tailnet
+# peers, other machines' containerd and builders. Each connection is
+# admitted by its real peer address (the agent's forward mode). ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyo-host
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo-host }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # On the registry's node: its connections from this node's own
+      # address are the ones the registry's network policy lets through.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app.kubernetes.io/name: registry } }
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: forward
+          image: __IMAGES__/agent:__TAG__
+          args:
+            - forward
+            - 8000/local,private,tailnet=pyo.pyo-system.svc.cluster.local:8000
+            - 5005/local=pyo-registry.pyo-system.svc.cluster.local:5000
+            - 5005/tailnet=pyo-registry-door.pyo-system.svc.cluster.local:5006
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 64Mi }

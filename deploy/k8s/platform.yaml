@@ -7,8 +7,8 @@
 #     Pyo itself); this node's containerd and BuildKit reach it on
 #     127.0.0.1:5005 through pyo-host. Other machines (servers, builders)
 #     reach it only through Pyo's registry door, which wants a login: on
-#     this node's Tailscale IP, __TAILNET_IP__:5005 (filled in by
-#     pyo-up.sh), with a registries.yaml mirror (connect.sh, join.sh);
+#     this node's Tailscale IP, :5005 (pyo-host in pyo.yaml), with a
+#     registries.yaml mirror (connect.sh, join.sh);
 #   - volumes use local-path, so their data stays on the node that made them.
 apiVersion: v1
 kind: Namespace
@@ -282,56 +282,6 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: registry-data }
----
-# ── Pyo on this machine, beside the registry: the dashboard and API
-# (:8000) on localhost and the Tailscale IP only, never public addresses;
-# the registry on localhost:5005, for this node's containerd and BuildKit;
-# and the registry door (logins only) on the Tailscale IP's :5005, for
-# other machines' containerd and builders. The plain registry is never on
-# the tailnet. Teams' own pushes use HTTPS through the gateway (:5443,
-# tailnet only). ──
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: pyo-host
-  namespace: pyo-system
-  labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
-spec:
-  replicas: 1
-  strategy: { type: Recreate }
-  selector:
-    matchLabels: { app.kubernetes.io/name: pyo-host }
-  template:
-    metadata:
-      labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      # On the registry's node: its connections from this node's own
-      # address are the ones the registry's network policy lets through.
-      affinity:
-        podAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector: { matchLabels: { app.kubernetes.io/name: registry } }
-              topologyKey: kubernetes.io/hostname
-      containers:
-        - name: forward
-          image: alpine/socat:1.8.1.3
-          command: ["sh", "-c"]
-          args:
-            - |
-              IP="__TAILNET_IP__"
-              to=TCP:pyo.pyo-system.svc.cluster.local:8000
-              socat TCP-LISTEN:8000,bind=127.0.0.1,fork,reuseaddr $to &
-              socat TCP-LISTEN:5005,bind=127.0.0.1,fork,reuseaddr TCP:pyo-registry.pyo-system.svc.cluster.local:5000 &
-              if [ -n "$IP" ]; then
-                socat TCP-LISTEN:8000,bind="$IP",fork,reuseaddr $to &
-                socat TCP-LISTEN:5005,bind="$IP",fork,reuseaddr TCP:pyo-registry-door.pyo-system.svc.cluster.local:5006 &
-              fi
-              wait
-          resources:
-            requests: { cpu: 5m, memory: 8Mi }
-            limits: { memory: 64Mi }
 ---
 # ── BuildKit for building Pyo's own images from a repository copy
 # (scripts/pyo-up.sh). Listens on 127.0.0.1:1234 on the node, without TLS:

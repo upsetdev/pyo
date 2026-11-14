@@ -18,6 +18,7 @@ mod dbmetrics;
 mod dns;
 mod drain;
 mod firewall;
+mod forward;
 mod gateway;
 mod gpu;
 mod install;
@@ -142,11 +143,15 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "pyo_agent=info".into()),
         )
         .init();
-    // `pyo-agent upgrade <release.json>`: the upgrader Job (upgrade.rs).
     // A server's tailnet pod (tailnet.rs).
     if args.get(1).map(String::as_str) == Some("tailnet") {
         return tailnet::run_pod().await;
     }
+    // pyo-host's port forwards on Pyo's machine (forward.rs).
+    if args.get(1).map(String::as_str) == Some("forward") {
+        return forward::run(&args[2..]).await;
+    }
+    // `pyo-agent upgrade <release.json>`: the upgrader Job (upgrade.rs).
     if args.get(1).map(String::as_str) == Some("upgrade") {
         let path = args
             .get(2)

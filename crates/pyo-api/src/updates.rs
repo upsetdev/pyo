@@ -1158,11 +1158,15 @@ mod tests {
     /// no plain registry on the tailnet.
     #[test]
     fn pyos_namespace_is_closed() {
-        let docs: Vec<Value> = include_str!("../../../deploy/k8s/platform.yaml")
-            .split("\n---")
-            .filter_map(|d| serde_norway::from_str::<Value>(d).ok())
-            .filter(|d| d.is_object())
-            .collect();
+        let docs: Vec<Value> = [
+            include_str!("../../../deploy/k8s/platform.yaml"),
+            include_str!("../../../deploy/k8s/pyo.yaml"),
+        ]
+        .join("\n---\n")
+        .split("\n---")
+        .filter_map(|d| serde_norway::from_str::<Value>(d).ok())
+        .filter(|d| d.is_object())
+        .collect();
         let find = |kind: &str, name: &str| {
             docs.iter()
                 .find(|d| d["kind"] == kind && d["metadata"]["name"] == name)
@@ -1236,11 +1240,17 @@ mod tests {
         // The registry isn't on the host's network; the tailnet gets only the door.
         let registry = find("Deployment", "registry");
         assert!(registry["spec"]["template"]["spec"]["hostNetwork"].is_null());
-        let host = find("Deployment", "pyo-host").to_string();
-        assert!(host.contains("bind=\\\"$IP\\\",fork,reuseaddr TCP:pyo-registry-door.pyo-system.svc.cluster.local:5006"), "the tailnet's :5005 is the door");
-        assert!(
-            !host.contains("bind=\\\"$IP\\\",fork,reuseaddr TCP:pyo-registry.pyo-system"),
-            "never the plain registry"
+        let host = find("Deployment", "pyo-host");
+        let args = &host["spec"]["template"]["spec"]["containers"][0]["args"];
+        assert_eq!(
+            args,
+            &json!([
+                "forward",
+                "8000/local,private,tailnet=pyo.pyo-system.svc.cluster.local:8000",
+                "5005/local=pyo-registry.pyo-system.svc.cluster.local:5000",
+                "5005/tailnet=pyo-registry-door.pyo-system.svc.cluster.local:5006",
+            ]),
+            "the tailnet's :5005 is the door, never the plain registry"
         );
         // The backup store (Garage): RPC on localhost, a pinned image, not root.
         let config = find("ConfigMap", "pyo-backup-store")["data"]["garage.toml"]
@@ -1314,7 +1324,8 @@ mod tests {
                     "Service",
                     "Deployment",
                     "StatefulSet",
-                    "ConfigMap"
+                    "ConfigMap",
+                    "PodDisruptionBudget"
                 ]
                 .contains(&k),
                 "{k}"

@@ -11,9 +11,7 @@
 //     --agent-access "$(pyo-agent access-hash)" > release.json
 //
 // Images are pinned by digest. deploy/k8s/{platform,pyo}.yaml become JSON
-// objects; the values only an installation knows (__TAILNET_IP__,
-// __REGISTRY_PUSH__, __TAILNET_API__, __TAILNET_NAME__) stay as they are, and the upgrader
-// fills them in from what's running. Notices for this release come from
+// objects. Notices for this release come from
 // deploy/release-notices.json when its "version" is this one; the k3s a
 // fresh install gets, from deploy/k3s.env. `agentAccess` is the hash of the
 // roles the release's agent is installed with (`pyo-agent access-hash`):

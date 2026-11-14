@@ -527,80 +527,6 @@ impl<E: std::fmt::Display> From<E> for Failure {
     }
 }
 
-/// What an installation fills in itself (pyo-up.sh works these out on the host).
-#[derive(Debug, Default, PartialEq)]
-pub struct InstallValues {
-    pub tailnet_ip: String,
-    pub registry_push: String,
-    pub tailnet_api: String,
-    /// The host's tailnet name (Self.DNSName, "<host>.<tailnet>.ts.net"), when
-    /// its tailnet has MagicDNS and HTTPS certificates; else empty.
-    pub tailnet_name: String,
-}
-
-impl InstallValues {
-    /// Put them in a release's objects. Values are JSON-escaped.
-    pub fn fill(&self, objects: &[Value]) -> anyhow::Result<Vec<Value>> {
-        let esc = |s: &str| serde_json::to_string(s).map(|q| q[1..q.len() - 1].to_owned());
-        let text = serde_json::to_string(objects)?
-            .replace("__TAILNET_IP__", &esc(&self.tailnet_ip)?)
-            .replace("__REGISTRY_PUSH__", &esc(&self.registry_push)?)
-            .replace("__TAILNET_API__", &esc(&self.tailnet_api)?)
-            .replace("__TAILNET_NAME__", &esc(&self.tailnet_name)?);
-        Ok(serde_json::from_str(&text)?)
-    }
-
-    /// install.sh knows them from the host itself (its Tailscale IP), so its
-    /// values win: PYO_INSTALL_TAILNET_IP, _REGISTRY_PUSH, _TAILNET_API.
-    pub fn override_from_env(&mut self) {
-        let get = |k: &str| std::env::var(k).ok();
-        if let Some(ip) = get("PYO_INSTALL_TAILNET_IP") {
-            self.tailnet_ip = ip;
-        }
-        if let Some(r) = get("PYO_INSTALL_REGISTRY_PUSH").filter(|r| !r.is_empty()) {
-            self.registry_push = r;
-        }
-        if let Some(a) = get("PYO_INSTALL_TAILNET_API") {
-            self.tailnet_api = a;
-        }
-        if let Some(h) = get("PYO_INSTALL_TAILNET_NAME") {
-            self.tailnet_name = h;
-        }
-    }
-
-    /// From the running pyo-host (its tailnet IP) and Pyo Deployments.
-    pub fn read(host: Option<&Deployment>, pyo: Option<&Deployment>) -> Self {
-        let mut v = InstallValues::default();
-        let containers = |d: Option<&Deployment>| {
-            d.and_then(|d| d.spec.as_ref())
-                .and_then(|s| s.template.spec.as_ref())
-                .map(|s| s.containers.clone())
-                .unwrap_or_default()
-        };
-        for c in containers(host).iter().filter(|c| c.name == "forward") {
-            let script = c.args.clone().unwrap_or_default().join("\n");
-            if let Some(rest) = script.split("IP=\"").nth(1) {
-                v.tailnet_ip = rest.split('"').next().unwrap_or("").to_owned();
-            }
-        }
-        for c in containers(pyo).iter().filter(|c| c.name == "pyo") {
-            for e in c.env.clone().unwrap_or_default() {
-                match e.name.as_str() {
-                    "PYO_REGISTRY_PUSH" => v.registry_push = e.value.unwrap_or_default(),
-                    "PYO_TAILNET_API_URL" => v.tailnet_api = e.value.unwrap_or_default(),
-                    "PYO_TAILNET_NAME" => v.tailnet_name = e.value.unwrap_or_default(),
-                    _ => {}
-                }
-            }
-        }
-        // The registry door on the tailnet (pyo-host); none without one.
-        if v.registry_push.is_empty() && !v.tailnet_ip.is_empty() {
-            v.registry_push = format!("{}:5005", v.tailnet_ip);
-        }
-        v
-    }
-}
-
 /// A release's objects for pyo-system, checked before anything is applied:
 /// known kinds, in pyo-system, no Namespace (it exists).
 fn prepare(objects: &[Value]) -> anyhow::Result<Vec<(ApiResource, String, Value)>> {
@@ -634,23 +560,9 @@ pub async fn upgrade(client: &Client, release: &Release) -> Result<(), Failure> 
     }
     let deployments = Api::<Deployment>::namespaced(client.clone(), NS);
     let statefulsets = Api::<StatefulSet>::namespaced(client.clone(), NS);
-    let mut values = InstallValues::read(
-        deployments.get_opt("pyo-host").await?.as_ref(),
-        deployments.get_opt("pyo").await?.as_ref(),
-    );
-    values.override_from_env();
-    log(&format!(
-        "Updating Pyo to {} (registry push {}, tailnet IP {})",
-        release.version,
-        values.registry_push,
-        if values.tailnet_ip.is_empty() {
-            "none"
-        } else {
-            &values.tailnet_ip
-        }
-    ));
-    let platform = prepare(&values.fill(&release.manifests.platform)?)?;
-    let pyo = prepare(&values.fill(&release.manifests.pyo)?)?;
+    log(&format!("Updating Pyo to {}", release.version));
+    let platform = prepare(&release.manifests.platform)?;
+    let pyo = prepare(&release.manifests.pyo)?;
 
     // What's running now, to put back if the new version doesn't come up.
     let mut saved: Vec<(String, String, Value)> = vec![];
@@ -998,54 +910,6 @@ mod tests {
         assert!(job_name(&"x".repeat(80)).len() <= 52);
     }
 
-    #[test]
-    fn install_values_come_from_whats_running() {
-        let registry: Deployment = serde_json::from_value(json!({
-            "metadata": { "name": "pyo-host" },
-            "spec": { "selector": {}, "template": { "spec": { "containers": [
-                { "name": "forward", "image": "alpine/socat", "args": ["IP=\"100.64.0.7\"\nsocat TCP-LISTEN:8000 &\nwait\n"] },
-            ] } } },
-        }))
-        .unwrap();
-        let pyo: Deployment = serde_json::from_value(json!({
-            "metadata": { "name": "pyo" },
-            "spec": { "selector": {}, "template": { "spec": { "containers": [{ "name": "pyo", "env": [
-                { "name": "PYO_REGISTRY_PUSH", "value": "100.64.0.7:5005" },
-                { "name": "PYO_TAILNET_API_URL", "value": "http://100.64.0.7:8000" },
-            ] }] } } },
-        }))
-        .unwrap();
-        let v = InstallValues::read(Some(&registry), Some(&pyo));
-        assert_eq!(
-            v,
-            InstallValues {
-                tailnet_ip: "100.64.0.7".into(),
-                registry_push: "100.64.0.7:5005".into(),
-                tailnet_api: "http://100.64.0.7:8000".into(),
-                tailnet_name: String::new()
-            }
-        );
-        // No tailnet, nothing running yet: what pyo-up.sh would fill in.
-        assert_eq!(
-            InstallValues::read(None, None).registry_push,
-            "",
-            "no door without a tailnet"
-        );
-
-        let filled = v.fill(&[json!({ "a": "IP=\"__TAILNET_IP__\"", "b": "__REGISTRY_PUSH__", "c": "__TAILNET_API__" })]).unwrap();
-        assert_eq!(
-            filled[0],
-            json!({ "a": "IP=\"100.64.0.7\"", "b": "100.64.0.7:5005", "c": "http://100.64.0.7:8000" })
-        );
-        // A value can't break out of its string.
-        let evil = InstallValues {
-            tailnet_ip: "\", \"x\": \"y".into(),
-            ..Default::default()
-        };
-        let filled = evil.fill(&[json!({ "a": "__TAILNET_IP__" })]).unwrap();
-        assert_eq!(filled[0].as_object().unwrap().len(), 1);
-    }
-
     /// The upgrader's Role may get, create and patch every kind a release
     /// may hold.
     #[test]
@@ -1193,16 +1057,10 @@ mod tests {
                 .unwrap();
         }
         // What pyo-up.sh would have running: the old release, and the Postgres secret.
-        let values = InstallValues {
-            tailnet_ip: "100.64.0.9".into(),
-            registry_push: "100.64.0.9:5005".into(),
-            tailnet_api: "http://100.64.0.9:8000".into(),
-            tailnet_name: String::new(),
-        };
-        for (ar, name, o) in prepare(&values.fill(&old.manifests.platform).unwrap())
+        for (ar, name, o) in prepare(&old.manifests.platform)
             .unwrap()
             .into_iter()
-            .chain(prepare(&values.fill(&old.manifests.pyo).unwrap()).unwrap())
+            .chain(prepare(&old.manifests.pyo).unwrap())
         {
             Api::<DynamicObject>::namespaced_with(admin.clone(), NS, &ar)
                 .patch(&name, &pp, &Patch::Apply(&o))
