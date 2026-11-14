@@ -71,31 +71,41 @@ async fn apply(client: &Client, o: &Value) -> anyhow::Result<()> {
 /// Whether an error is the admission policy refusing a namespace that isn't
 /// labelled managed. Right after the label is set the policy can still see
 /// the namespace without it, for a moment.
-fn unlabelled_refusal(e: &anyhow::Error) -> bool {
+pub(crate) fn unlabelled_refusal(e: &anyhow::Error) -> bool {
     let m = format!("{e:#}");
     m.contains("ValidatingAdmissionPolicy")
         && m.contains("pyo.dev/managed=true")
         && m.contains("isn't one")
 }
 
+/// Run a write into a namespace Pyo just labelled managed, again while the
+/// admission policy still sees it unlabelled (its namespace cache lags the
+/// label for a moment), for up to 10 seconds.
+pub async fn retry_unlabelled<T, F, Fut>(mut write: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let mut wait = std::time::Duration::from_millis(100);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match write().await {
+            Err(e) if unlabelled_refusal(&e) && tokio::time::Instant::now() < deadline => {
+                tracing::info!(error = %format!("{e:#}"), "the namespace's label hasn't reached the admission policy yet; retrying");
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(std::time::Duration::from_secs(1));
+            }
+            r => return r,
+        }
+    }
+}
+
 /// A namespace the agent writes in: labelled, with the write role bound.
 /// A new binding takes a moment to apply; this waits until it does.
 pub async fn ensure_managed(client: &Client, ns: &str) -> anyhow::Result<()> {
     apply(client, &rbac::managed_namespace(ns)).await?;
-    // The policy reads namespaces from a cache that can lag the label.
     let binding = rbac::write_binding(ns);
-    let mut wait = std::time::Duration::from_millis(100);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match apply(client, &binding).await {
-            Ok(()) => break,
-            Err(e) if unlabelled_refusal(&e) && tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(wait).await;
-                wait = (wait * 2).min(std::time::Duration::from_secs(1));
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    retry_unlabelled(|| apply(client, &binding)).await?;
     // Installed bundles' bindings (the databases controller's, say).
     if let Err(e) = crate::bundles::bind_in(client, ns).await {
         tracing::warn!(namespace = ns, error = %format!("{e:#}"), "couldn't bind system bundles in a namespace");
@@ -357,6 +367,33 @@ mod tests {
         assert!(!unlabelled_refusal(&anyhow::anyhow!(
             "RoleBinding x: connection refused"
         )));
+    }
+
+    const UNLABELLED: &str = "Deployment pyo-db-controller: ApiError: admission webhook: ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request: Pyo's agent only changes namespaces labelled pyo.dev/managed=true; pyo-databases isn't one. (Invalid)";
+
+    #[tokio::test]
+    async fn a_write_refused_while_the_label_lags_is_tried_again() {
+        let tries = std::sync::atomic::AtomicU32::new(0);
+        let r = retry_unlabelled(|| async {
+            match tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => Err(anyhow::anyhow!(UNLABELLED)),
+                n => Ok(n),
+            }
+        })
+        .await;
+        assert_eq!(r.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn other_errors_are_not_retried() {
+        let tries = std::sync::atomic::AtomicU32::new(0);
+        let r: anyhow::Result<()> = retry_unlabelled(|| async {
+            tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("Deployment x: connection refused"))
+        })
+        .await;
+        assert!(r.is_err());
+        assert_eq!(tries.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

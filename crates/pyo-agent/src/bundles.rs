@@ -135,17 +135,20 @@ fn plain(bundle: &str, e: anyhow::Error) -> anyhow::Error {
     })
 }
 
+/// Apply one object. A bundle's namespace is labelled managed just before
+/// its objects go in; a refusal while the policy hasn't seen the label yet
+/// is tried again.
 async fn apply_one(client: &Client, o: &Value) -> anyhow::Result<()> {
     let r = ObjectRef::of(o);
-    api_for(client, &r)
-        .patch(
-            &r.name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(o),
-        )
-        .await
-        .map_err(|e| object_error(&r, e))?;
-    Ok(())
+    let api = api_for(client, &r);
+    let params = PatchParams::apply(FIELD_MANAGER).force();
+    crate::scope::retry_unlabelled(|| async {
+        api.patch(&r.name, &params, &Patch::Apply(o))
+            .await
+            .map(drop)
+            .map_err(|e| object_error(&r, e))
+    })
+    .await
 }
 
 /// Delete one of the bundle's objects; fine when it's gone, and skipped
@@ -527,6 +530,36 @@ mod tests {
         kube::Error::Api(Box::new(
             Status::failure("configmaps \"pyo-waf\" is forbidden: unable to create new content in namespace pyo-waf because it is being terminated", "Forbidden").with_code(403).with_details(details),
         ))
+    }
+
+    /// The refusal the databases bundle got once on a server, right after
+    /// its namespace was labelled: retried, not reported.
+    #[test]
+    fn a_refusal_before_the_label_reaches_the_policy_is_retried() {
+        let r = ObjectRef {
+            api_version: "rbac.authorization.k8s.io/v1".into(),
+            kind: "RoleBinding".into(),
+            namespace: Some("pyo-databases".into()),
+            name: "pyo-agent".into(),
+        };
+        let e = object_error(
+            &r,
+            api(
+                422,
+                "Invalid",
+                "admission webhook: ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request: Pyo's agent only changes namespaces labelled pyo.dev/managed=true; pyo-databases isn't one.",
+            ),
+        );
+        assert!(crate::scope::unlabelled_refusal(&e));
+        let other = object_error(
+            &r,
+            api(
+                422,
+                "Invalid",
+                "ValidatingAdmissionPolicy 'pyo-agent' denied request: In kube-system, Pyo's agent only writes its own objects, with exactly the content this release defines.",
+            ),
+        );
+        assert!(!crate::scope::unlabelled_refusal(&other));
     }
 
     #[test]
