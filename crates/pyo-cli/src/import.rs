@@ -33,7 +33,7 @@ pub async fn run(api: &Api, a: Args<'_>) -> Result<()> {
     let plan = api
         .post("/api/v1/platform-imports/preview", &source)
         .await?;
-    let keys = print_plan(&plan);
+    let keys = print_plan(&plan, a.deploy);
     if keys.is_empty() {
         println!("Nothing new to import.");
         return Ok(());
@@ -71,14 +71,19 @@ pub async fn run(api: &Api, a: Args<'_>) -> Result<()> {
         "{}",
         ui::dim("Importing. It goes on in Pyo if you stop this.")
     );
-    let mut shown = 0;
+    // Each result as last printed: a service's comes again once it's
+    // connected and deployed, or held.
+    let mut shown: std::collections::HashMap<String, Value> = Default::default();
     let run = loop {
         let run = api.get(&format!("/api/v1/platform-imports/{id}")).await?;
         let results = run["results"].as_array().cloned().unwrap_or_default();
-        for r in results.iter().skip(shown) {
-            print_result(r);
+        for r in &results {
+            let key = r["key"].as_str().unwrap_or("").to_owned();
+            if shown.get(&key) != Some(r) {
+                print_result(r);
+                shown.insert(key, r.clone());
+            }
         }
-        shown = shown.max(results.len());
         if !matches!(run["status"].as_str(), Some("reading" | "importing")) {
             break run;
         }
@@ -103,6 +108,7 @@ fn print_result(r: &Value) {
     let mark = match state {
         "created" | "importing" => ui::green("✓"),
         "failed" => ui::red("✗"),
+        "held" => ui::yellow("!"),
         _ => ui::dim("·"),
     };
     let label = match state {
@@ -110,6 +116,7 @@ fn print_result(r: &Value) {
         "importing" => "copying its data",
         "exists" => "imported before",
         "skipped" => "not imported",
+        "held" => "held, not deployed",
         _ => "failed",
     };
     let msg = r["message"].as_str().unwrap_or("");
@@ -123,10 +130,36 @@ fn print_result(r: &Value) {
             format!(": {msg}")
         }
     );
+    for c in r["connected"].as_array().into_iter().flatten() {
+        let vars: Vec<&str> = c["variables"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        println!(
+            "    {} {} {}",
+            ui::dim("connected to"),
+            c["database"].as_str().unwrap_or(""),
+            ui::dim(&vars.join(", "))
+        );
+    }
+}
+
+/// A database of the plan by its key: its name in Pyo.
+fn database_name<'a>(plan: &'a Value, key: &'a str) -> &'a str {
+    plan["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|p| p["databases"].as_array().into_iter().flatten())
+        .find(|d| d["key"] == key)
+        .and_then(|d| d["name"].as_str())
+        .unwrap_or(key)
 }
 
 /// Prints the plan; returns the keys to import (all that can be).
-fn print_plan(plan: &Value) -> Vec<String> {
+fn print_plan(plan: &Value, deploy: bool) -> Vec<String> {
     let mut keys = vec![];
     let list = |v: &Value| v.as_array().cloned().unwrap_or_default();
     let notes = |w: &Value| {
@@ -164,6 +197,27 @@ fn print_plan(plan: &Value) -> Vec<String> {
                 );
             }
             notes(&s["warnings"]);
+            for c in list(&s["connects"]) {
+                let vars: Vec<String> = c["env"]
+                    .as_object()
+                    .map(|o| o.keys().cloned().collect())
+                    .unwrap_or_default();
+                println!(
+                    "      {} {}: Pyo connects {} to {}, the database it imports",
+                    ui::dim("connect"),
+                    vars.join(", "),
+                    if vars.len() == 1 { "it" } else { "them" },
+                    database_name(plan, c["database"].as_str().unwrap_or(""))
+                );
+            }
+            for h in list(&s["holds"]) {
+                println!(
+                    "      {} {}{}",
+                    ui::yellow("!"),
+                    if deploy { "Not deployed: " } else { "" },
+                    h.as_str().unwrap_or("")
+                );
+            }
         }
         for st in list(&p["stacks"]) {
             let n = st["plan"]["services"].as_array().map(Vec::len).unwrap_or(0);
