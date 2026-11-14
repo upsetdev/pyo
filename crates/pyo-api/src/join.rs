@@ -190,26 +190,45 @@ fn q(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-pub fn command(base: &str, j: &Join) -> String {
-    let mut c = format!(
-        "curl -fsSL {base}/join.sh | bash -s -- --server {} --token {} --name {}",
-        q(j.server_ip),
-        q(j.token),
-        q(j.server_name)
-    );
+/// join.sh's arguments: each flag, and its value when it takes one.
+pub fn args(j: &Join) -> Vec<(&'static str, Option<String>)> {
+    let mut a = vec![
+        ("--server", Some(j.server_ip.to_owned())),
+        ("--token", Some(j.token.to_owned())),
+        ("--name", Some(j.server_name.to_owned())),
+    ];
     if !j.k3s_version.is_empty() {
-        c.push_str(&format!(" --k3s {}", q(j.k3s_version)));
+        a.push(("--k3s", Some(j.k3s_version.to_owned())));
     }
     if let Some(k) = j.tailscale_key {
-        c.push_str(&format!(" --tailscale-key {}", q(k)));
+        a.push(("--tailscale-key", Some(k.to_owned())));
     }
     if j.builder {
-        c.push_str(" --builder");
+        a.push(("--builder", None));
     }
     if let Some((r, t)) = j.registry {
-        c.push_str(&format!(" --registry {} --registry-token {}", q(r), q(t)));
+        a.push(("--registry", Some(r.to_owned())));
+        a.push(("--registry-token", Some(t.to_owned())));
     }
-    c
+    a
+}
+
+/// Arguments on a command line, values single-quoted.
+fn quoted(args: &[(&str, Option<String>)]) -> String {
+    args.iter()
+        .map(|(f, v)| match v {
+            Some(v) => format!("{f} {}", q(v)),
+            None => (*f).to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn command(base: &str, j: &Join) -> String {
+    format!(
+        "curl -fsSL {base}/join.sh | bash -s -- {}",
+        quoted(&args(j))
+    )
 }
 
 /// Pyo on the machine it runs on: where "This machine"'s installer
@@ -232,18 +251,31 @@ pub fn connect_command(
     tailscale_key: Option<&str>,
     registry: Option<(&str, &str)>,
 ) -> String {
-    let mut c = format!(
-        "curl -fsSL {base}/connect.sh | bash -s -- --api {} --token {}",
-        q(api),
-        q(token)
-    );
+    format!(
+        "curl -fsSL {base}/connect.sh | bash -s -- {}",
+        quoted(&connect_args(api, token, tailscale_key, registry))
+    )
+}
+
+/// connect.sh's arguments, as [`args`].
+pub fn connect_args(
+    api: &str,
+    token: &str,
+    tailscale_key: Option<&str>,
+    registry: Option<(&str, &str)>,
+) -> Vec<(&'static str, Option<String>)> {
+    let mut a = vec![
+        ("--api", Some(api.to_owned())),
+        ("--token", Some(token.to_owned())),
+    ];
     if let Some(k) = tailscale_key {
-        c.push_str(&format!(" --tailscale-key {}", q(k)));
+        a.push(("--tailscale-key", Some(k.to_owned())));
     }
     if let Some((r, t)) = registry {
-        c.push_str(&format!(" --registry {} --registry-token {}", q(r), q(t)));
+        a.push(("--registry", Some(r.to_owned())));
+        a.push(("--registry-token", Some(t.to_owned())));
     }
-    c
+    a
 }
 
 /// The command that brings a connected cluster's agent install up to date
