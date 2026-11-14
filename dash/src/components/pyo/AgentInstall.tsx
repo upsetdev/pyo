@@ -13,7 +13,8 @@ export function agentInstallCommand(token: string) {
   return `kubectl apply -f "${origin}/install/agent.yaml?token=${token}"`;
 }
 
-function Command({ value }: { value: string }) {
+/** A command to copy and run. */
+export function Command({ value }: { value: string }) {
   return (
     <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3">
       <code className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-[12px] leading-5 text-foreground">

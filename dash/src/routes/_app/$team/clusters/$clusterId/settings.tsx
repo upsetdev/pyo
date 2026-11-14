@@ -1,8 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { TagInput } from "~/components/ui/TagInput";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 import { RESERVED_CLUSTER_NAMES } from "~/lib/pyo/location";
-import { AgentInstall } from "~/components/pyo/AgentInstall";
+import { AgentInstall, Command } from "~/components/pyo/AgentInstall";
 import { ClusterMtls } from "~/components/pyo/Mtls";
 import { ClusterPublicTraffic, ClusterTrafficMode } from "~/components/pyo/TrafficMode";
 import { Badge, ClusterStatusBadge } from "~/components/ui/Badge";
@@ -10,7 +10,6 @@ import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Input } from "~/components/ui/Field";
 import { KeyValue, Panel } from "~/components/ui/Panel";
-import { CopyButton } from "~/components/ui/Table";
 import { clusterGpuText, dateTime, timeAgo } from "~/lib/pyo/format";
 import { DNS_LABEL } from "~/lib/pyo/format";
 import { api, clusterByRef, clustersIn, usePyo } from "~/lib/pyo/store";
@@ -185,19 +184,6 @@ function ClusterSettings({ c }: { c: Cluster }) {
                 ) : null}
               </span>,
             ],
-            ...(install?.state === "outdated" && install.command
-              ? ([
-                  [
-                    "Update on its server",
-                    <span className="inline-flex items-center gap-1">
-                      <span className="font-mono text-[11.5px]">
-                        {install.command}
-                      </span>
-                      <CopyButton value={install.command} />
-                    </span>,
-                  ],
-                ] as [ReactNode, ReactNode][])
-              : []),
             ["Distribution", `${c.distribution} ${c.version}`],
             [
               "Metrics server",
@@ -207,6 +193,18 @@ function ClusterSettings({ c }: { c: Cluster }) {
             ["Registered", dateTime(c.createdAt)],
           ]}
         />
+        {install?.command ? (
+          <div className="space-y-2 border-t border-border px-4 py-3">
+            <div>
+              <p className="text-[13px] font-medium">Refresh this cluster</p>
+              <p className="text-[12px] text-muted-foreground">
+                Applies Pyo's latest host settings, like the memory reserve for
+                k3s.
+              </p>
+            </div>
+            <Command value={install.command} />
+          </div>
+        ) : null}
       </Panel>
       <ConfirmDialog
         open={confirm === "rotate"}

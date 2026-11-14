@@ -410,7 +410,9 @@ export type Cluster = {
     /** The agent's update protocol (0: it can't update Pyo or itself). */
     updates?: number;
     /** Whether its install is this Pyo's: "updating" while the agent
-     * refreshes it, "outdated" until `command` runs on the cluster. */
+     * refreshes it, "outdated" until `command` runs on the cluster.
+     * `command` (any state): the connect command again, for the cluster's
+     * first server, which also applies Pyo's latest host settings. */
     agentInstall?: {
       state: "current" | "updating" | "outdated";
       message?: string;

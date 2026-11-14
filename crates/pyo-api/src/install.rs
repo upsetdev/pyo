@@ -367,7 +367,9 @@ pub async fn refreshing(
 /// From a heartbeat: where the cluster's install stands against this Pyo's,
 /// as `capabilities.agentInstall` (`{state, message, command}`), sending
 /// the agent a refresh when it can make one. Returns it, and whether a
-/// command was queued.
+/// command was queued. `command`, in every state, is the connect command
+/// run again on the cluster's first server: it also applies Pyo's latest
+/// host settings (the memory reserve for k3s), which no agent can.
 pub async fn sync(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     cluster_id: &str,
@@ -377,7 +379,10 @@ pub async fn sync(
     use serde_json::json;
     // Agents that don't say: as they are.
     let Some(scope) = scope else {
-        return Ok((json!({ "state": "current" }), false));
+        return Ok((
+            json!({ "state": "current", "command": command(same_cluster) }),
+            false,
+        ));
     };
     let parts = parts(same_cluster);
     let last = last_refresh(&mut **tx, cluster_id, &parts.hash).await?;
@@ -391,22 +396,23 @@ pub async fn sync(
         .await?;
         tracing::info!(cluster = cluster_id, install = %parts.hash, "sent the agent its install's refresh");
     }
-    let mut out = json!({ "state": state });
+    let mut out = json!({ "state": state, "command": command(same_cluster) });
     if !message.is_empty() {
         out["message"] = json!(message);
     }
-    if state == "outdated" {
-        // Run on the cluster's first server: it reads Pyo's address and the
-        // token from the agent already there.
-        // (The cluster Pyo runs on: from Pyo on that machine.)
-        let base = if same_cluster {
-            crate::join::local_scripts_url()
-        } else {
-            crate::join::scripts_url(None)
-        };
-        out["command"] = json!(crate::join::refresh_command(&base));
-    }
     Ok((out, send))
+}
+
+/// The connect command again, run on the cluster's first server: it reads
+/// Pyo's address and the token from the agent already there. (The cluster
+/// Pyo runs on: from Pyo on that machine.)
+fn command(same_cluster: bool) -> String {
+    let base = if same_cluster {
+        crate::join::local_scripts_url()
+    } else {
+        crate::join::scripts_url(None)
+    };
+    crate::join::refresh_command(&base)
 }
 
 #[cfg(test)]
