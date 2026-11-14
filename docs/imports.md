@@ -97,7 +97,9 @@ https://github.com/Dokploy/website/blob/main/apps/docs/public/openapi.json
 `packages/server/src/utils/docker/utils.ts` (variable references).
 
 - **Auth:** `x-api-key: <key>`, base `<url>/api`. Keys are made in the
-  profile's API/CLI section (admins can let members make them).
+  profile's API/CLI section (admins can let members make them). A key with
+  Rate Limiting on gets better-auth's default, 10 requests a day, so an
+  import answers 429: Pyo says to make a key with it off.
 - **Walk:** `GET /project.all` (projects → environments → ids of
   applications, compose, postgres, mysql, mariadb, mongo, redis, libsql) →
   `GET /environment.one?environmentId=` (shared `env`) →
@@ -344,7 +346,8 @@ imports the ones you pick. Owners and admins can import.
 
 - Coolify: in Keys & Tokens, make an API token with read and read:sensitive.
   Turn the API on in Settings if it's off.
-- Dokploy: in your profile, API/CLI, generate an API key.
+- Dokploy: in your profile, API/CLI, generate an API key with Rate Limiting
+  off.
 - Railway: in Account Settings, Tokens, make a token. A workspace token or a
   project token works too. A project token reads one environment.
 - Vercel: in Account Settings, Tokens, make a token with access to the team

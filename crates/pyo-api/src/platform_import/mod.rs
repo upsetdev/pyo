@@ -761,10 +761,15 @@ impl Fetch {
             return Err(upstream(refused(p)));
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(upstream(format!(
-                "{} says the token made too many requests. Try again later.",
-                p.label()
-            )));
+            // A Dokploy key with Rate Limiting on allows few requests a day
+            // (better-auth's API key plugin), fewer than an import makes.
+            return Err(upstream(match p {
+                Platform::Dokploy => "Dokploy says the key made too many requests. Make a key with Rate Limiting off.".to_owned(),
+                _ => format!(
+                    "{} says the token made too many requests. Try again later.",
+                    p.label()
+                ),
+            }));
         }
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(upstream(match p.official_api() {
