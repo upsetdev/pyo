@@ -9,7 +9,7 @@ import {
   WarningIcon,
 } from "@phosphor-icons/react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { z } from "zod";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
 import { CoolifyMark, DokployMark, RailwayMark, VERCEL_TRADEMARK, VercelMark } from "~/components/pyo/platforms/Marks";
@@ -21,17 +21,22 @@ import { Checkbox, Field, Input, SecretInput, Segmented, Select } from "~/compon
 import { Callout, EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import {
   defaultPicks,
+  getImport,
+  listImports,
   pickable,
   previewImport,
+  running,
   startImport,
   type ImportDatabase,
   type ImportPlan,
   type ImportResult,
+  type ImportRun,
   type ImportService,
   type ImportStack,
   type Platform,
 } from "~/lib/pyo/platformImport";
 import { clustersIn, getState, projectPath, usePyo } from "~/lib/pyo/store";
+import { timeAgo } from "~/lib/pyo/format";
 import { toast } from "~/lib/pyo/toast";
 import { seo } from "~/lib/seo";
 
@@ -39,10 +44,14 @@ import { seo } from "~/lib/seo";
 // platform's address (none for Railway and Vercel, read from their own API)
 // and an API token, a preview of what each thing becomes (pick what to
 // bring), then the import. The token is sent with each request, never kept.
+// The import runs on the server: leaving the page doesn't stop it, and the
+// page picks it back up (its id is in the address, and the team's last
+// import shows when there's none).
 
 export const Route = createFileRoute("/_app/$team/import_/platform")({
   validateSearch: z.object({
     from: z.enum(["coolify", "dokploy", "railway", "vercel"]).optional().catch(undefined),
+    run: z.string().optional().catch(undefined),
   }),
   head: () => ({ meta: seo({ title: "Import from another platform" }) }),
   component: PlatformImportPage,
@@ -105,7 +114,8 @@ function ImportFlow() {
   const [deploy, setDeploy] = useState(false);
   const [busy, setBusy] = useState<"" | "preview" | "import">("");
   const [error, setError] = useState("");
-  const [results, setResults] = useState<ImportResult[] | null>(null);
+  const [run, setRun] = useState<ImportRun | null>(null);
+  const navigate = Route.useNavigate();
 
   const p = PLATFORMS[platform];
   const hosted = !p.placeholder;
@@ -119,9 +129,49 @@ function ImportFlow() {
   const ready = (hosted || !!source.url) && !!source.token && !busy;
   const reset = () => {
     setPlan(null);
-    setResults(null);
+    setRun(null);
     setError("");
+    if (search.run) void navigate({ search: { ...search, run: undefined }, replace: true });
   };
+
+  // The import in the address, else the team's last one of the past day.
+  const teamId = s.currentTeamId;
+  useEffect(() => {
+    let gone = false;
+    const load = search.run
+      ? getImport(search.run)
+      : listImports(teamId).then((all) => all.find((r) => Date.now() - r.createdAt < 24 * 3600 * 1000) ?? null);
+    load.then((r) => !gone && r && setRun((cur) => cur ?? r)).catch(() => undefined);
+    return () => {
+      gone = true;
+    };
+    // Once per page: a new import sets `run` itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamId]);
+
+  // Follows a running import until it ends.
+  const runId = run?.id;
+  const live = run ? running(run) : false;
+  useEffect(() => {
+    if (!runId || !live) return;
+    let gone = false;
+    const t = setInterval(() => {
+      getImport(runId)
+        .then((r) => {
+          if (gone) return;
+          setRun(r);
+          if (!running(r) && r.status === "done") {
+            const made = r.results.filter((x) => x.state === "created" || x.state === "importing").length;
+            toast({ title: made ? `Imported ${made} of ${r.results.length}` : "Nothing new to import" });
+          }
+        })
+        .catch(() => undefined);
+    }, 1500);
+    return () => {
+      gone = true;
+      clearInterval(t);
+    };
+  }, [runId, live]);
 
   const preview = async () => {
     if (!ready) return;
@@ -138,15 +188,14 @@ function ImportFlow() {
     }
   };
 
-  const run = async () => {
+  const start = async () => {
     if (!plan || !picks.size || busy) return;
     setBusy("import");
     setError("");
     try {
       const r = await startImport({ ...source, clusterId: clusterId || undefined, items: [...picks], deploy });
-      setResults(r);
-      const made = r.filter((x) => x.state === "created" || x.state === "importing").length;
-      toast({ title: made ? `Imported ${made} of ${r.length}` : "Nothing new to import" });
+      setRun(r);
+      void navigate({ search: { ...search, run: r.id }, replace: true });
     } catch (e) {
       setError(e instanceof Error ? e.message : "That didn't work.");
     } finally {
@@ -266,9 +315,9 @@ function ImportFlow() {
         </Callout>
       ) : null}
 
-      {results ? <Results results={results} /> : null}
+      {run ? <RunView run={run} fresh={!!plan} /> : null}
 
-      {plan && !results ? (
+      {plan && !run ? (
         <Panel>
           <div className="space-y-5 p-6">
             {plan.warnings.map((w) => (
@@ -307,7 +356,7 @@ function ImportFlow() {
             <span className="mr-auto">
               <Checkbox checked={deploy} onChange={setDeploy} label="Deploy services once imported" disabled={!!busy} />
             </span>
-            <Button type="button" size="sm" disabled={!picks.size || !!busy} onClick={() => void run()}>
+            <Button type="button" size="sm" disabled={!picks.size || !!busy} onClick={() => void start()}>
               {busy === "import" ? "Importing…" : `Import ${picks.size || ""}`.trim()}
             </Button>
           </div>
@@ -418,18 +467,64 @@ const STATE: Record<ImportResult["state"], { label: string; tone: Tone }> = {
   failed: { label: "Failed", tone: "danger" },
 };
 
-function Results({ results }: { results: ImportResult[] }) {
+const KIND_ICON = { service: CubeIcon, stack: StackIcon, database: DatabaseIcon } as const;
+
+const PLATFORM_NAME: Record<Platform, string> = { coolify: "Coolify", dokploy: "Dokploy", railway: "Railway", vercel: "Vercel" };
+
+/** An import: how it's doing, then what became of each thing. `fresh`: started from this page now. */
+function RunView({ run, fresh }: { run: ImportRun; fresh: boolean }) {
+  const done = run.results.length;
+  const total = Math.max(run.items.length, done);
+  const head =
+    run.status === "reading"
+      ? `Reading ${PLATFORM_NAME[run.platform] ?? run.platform}…`
+      : run.status === "importing"
+        ? `Importing ${done} of ${total}…`
+        : null;
+  // Each item with its result, in the order they were picked.
+  const rows: (ImportResult | { key: string; name: string; state: "waiting"; message: string; kind: string })[] = run.items.map(
+    (i) => run.results.find((r) => r.key === i.key) ?? { key: i.key, name: i.name, state: "waiting", message: "", kind: i.kind },
+  );
+  for (const r of run.results) if (!run.items.some((i) => i.key === r.key)) rows.push(r);
+  return (
+    <div className="space-y-3">
+      {run.status === "failed" ? (
+        <Callout tone="danger" icon={WarningIcon} title="The import stopped">
+          {run.error || "It stopped without a reason."}
+        </Callout>
+      ) : null}
+      {run.status === "interrupted" ? (
+        <Callout tone="warning" icon={WarningIcon} title="The import was cut off">
+          Pyo restarted during it. Import again: what's there already is skipped.
+        </Callout>
+      ) : null}
+      {!fresh ? (
+        <p className="px-1 text-[12px] text-muted-foreground">
+          Import from {PLATFORM_NAME[run.platform] ?? run.platform} by {run.createdBy}, {timeAgo(run.createdAt)}
+        </p>
+      ) : null}
+      {head ? <p className="px-1 text-[13px] text-foreground">{head}</p> : null}
+      {rows.length ? <Results results={rows} /> : null}
+    </div>
+  );
+}
+
+function Results({ results }: { results: (ImportResult | { key: string; name: string; state: "waiting"; message: string; kind: string })[] }) {
   const s = getState();
   return (
     <Panel>
       <ul className="divide-y divide-border">
         {results.map((r) => {
-          const st = STATE[r.state];
-          const project = r.projectId ? s.projects.find((p) => p.id === r.projectId) : undefined;
+          const st = r.state === "waiting" ? { label: "Waiting", tone: "progress" as Tone } : STATE[r.state];
+          const projectId = "projectId" in r ? r.projectId : undefined;
+          const project = projectId ? s.projects.find((p) => p.id === projectId) : undefined;
+          const Icon = "kind" in r ? KIND_ICON[r.kind as keyof typeof KIND_ICON] : undefined;
           return (
             <li key={r.key} className="flex items-start gap-2.5 px-6 py-3">
               {r.state === "created" ? (
                 <CheckCircleIcon size={16} weight="fill" className="mt-0.5 shrink-0 text-success" />
+              ) : Icon ? (
+                <Icon size={16} className="mt-0.5 shrink-0 text-muted-foreground" />
               ) : (
                 <span className="mt-0.5 size-4 shrink-0" />
               )}

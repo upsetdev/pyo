@@ -3,6 +3,7 @@
 // account, becomes, then import the picked things. The token goes with each
 // request and is never stored.
 
+import { fetchPlatformImport, fetchPlatformImports } from "./backend";
 import { post } from "./imports";
 import { refresh } from "./store";
 
@@ -98,13 +99,39 @@ export type Source = { teamId: string; platform: Platform; url: string; token: s
 
 export const previewImport = (src: Source) => post<ImportPlan>("/api/v1/platform-imports/preview", src);
 
-export async function startImport(
-  src: Source & { clusterId?: string; items: string[]; deploy: boolean },
-): Promise<ImportResult[]> {
-  const r = await post<{ ok: true; results: ImportResult[] }>("/api/v1/platform-imports", src);
-  await refresh();
-  return r.results;
+/** One thing an import makes. */
+export type ImportItem = { key: string; name: string; kind: "service" | "stack" | "database" };
+
+/** An import as it runs on the server, and once it's done. */
+export type ImportRun = {
+  id: string;
+  teamId: string;
+  platform: Platform;
+  status: "reading" | "importing" | "done" | "failed" | "interrupted";
+  deploy: boolean;
+  items: ImportItem[];
+  results: ImportResult[];
+  error: string;
+  createdBy: string;
+  createdAt: number;
+  finishedAt?: number | null;
+};
+
+/** Whether it's still going. */
+export const running = (r: ImportRun) => r.status === "reading" || r.status === "importing";
+
+/** Starts an import. It runs on the server whatever happens to this page. */
+export const startImport = (src: Source & { clusterId?: string; items: string[]; deploy: boolean }) =>
+  post<ImportRun>("/api/v1/platform-imports", src);
+
+export async function getImport(id: string): Promise<ImportRun> {
+  const r = await fetchPlatformImport<ImportRun>(id);
+  if (!running(r)) await refresh();
+  return r;
 }
+
+/** The team's imports, newest first. */
+export const listImports = async (teamId: string) => (await fetchPlatformImports<ImportRun>(teamId)).imports;
 
 /** Whether a thing can be picked: importable and not imported before. */
 export const pickable = (x: ImportService | ImportStack | ImportDatabase) =>
