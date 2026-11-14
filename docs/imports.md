@@ -50,8 +50,11 @@ Rules:
 - **Idempotent:** each service stores `source.importedFrom`
   `{platform, host, id, project}`. For Railway and Vercel the host is
   `railway.com` or `vercel.com` (their ids are unique across accounts). A second import skips what's there and
-  adds new services to the project the first one made. Databases match by
-  name in the team.
+  adds new services to the project the first one made. Databases keep the
+  same record in `pyo.databases.imported_from` and match by it, never by
+  name. A new database whose name is taken in the team, or whose objects
+  would meet another database's (`shop-2` is one of Postgres `shop`'s
+  pods), gets the platform in front: `railway-shop`, then `railway2-shop`.
 - **Not deployed** unless `deploy`: services are saved with status stopped
   and no deployment. Domains are stored and go live with the first deploy.
 

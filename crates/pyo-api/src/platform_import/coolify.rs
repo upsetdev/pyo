@@ -29,8 +29,8 @@ use serde_json::Value;
 
 use super::{
     Fetch, ImportDatabase, ImportDomain, ImportPlan, ImportProject, ImportService, ImportStack,
-    Platform, Responses, Web, database_action, database_warnings, health_check, https_repo,
-    plan_service, s, unique_database_name, volume,
+    Platform, Responses, Web, database_action, database_name, database_warnings, health_check,
+    https_repo, plan_service, s, volume,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -492,7 +492,7 @@ fn dotenv_quote(v: &str) -> String {
     }
 }
 
-fn database(d: &Value, engine: &str, taken: &mut HashSet<String>) -> ImportDatabase {
+fn database(d: &Value, engine: &str) -> ImportDatabase {
     // `is_public` and `external_db_url` (with the password) when Coolify
     // publishes it; the container is named by its uuid inside Coolify's
     // network (`internal_db_url`).
@@ -503,7 +503,7 @@ fn database(d: &Value, engine: &str, taken: &mut HashSet<String>) -> ImportDatab
     ImportDatabase {
         key: format!("db:{}", s(d, "uuid")),
         source_name: s(d, "name").to_owned(),
-        name: unique_database_name(s(d, "name"), taken),
+        name: database_name(s(d, "name")),
         engine: engine.to_owned(),
         image: s(d, "image").to_owned(),
         target: target.map(str::to_owned),
@@ -523,7 +523,6 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
         ..Default::default()
     };
     let mut seen_domains = HashSet::new();
-    let mut db_names = HashSet::new();
     let mut seen_dbs = HashSet::new();
     let mut unreadable = false;
     // Environment ids (the Environment schema's `id`), by project.
@@ -553,7 +552,7 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
             for (k, engine) in DATABASES {
                 for d in arr(&env[k]) {
                     seen_dbs.insert(s(d, "uuid").to_owned());
-                    project.databases.push(database(d, engine, &mut db_names));
+                    project.databases.push(database(d, engine));
                 }
             }
             let mut names = HashSet::new();
@@ -594,7 +593,7 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
             .and_then(|id| env_ids.iter().position(|e| *e == Some(id)));
         match at {
             Some(i) => {
-                let db = database(d, engine, &mut db_names);
+                let db = database(d, engine);
                 out.projects[i].databases.push(db);
             }
             None => out.warnings.push(format!(
