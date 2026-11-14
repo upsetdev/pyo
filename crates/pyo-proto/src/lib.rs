@@ -111,6 +111,10 @@ pub struct ServerTailnet {
     /// The Services it advertises ("blog").
     #[serde(default)]
     pub advertised: Vec<String>,
+    /// The tailnet's other machines, by their MagicDNS name's first label
+    /// ("laptop"), as its tailscaled sees them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
     /// The Services whose certificate it keeps (in their Secret).
     #[serde(default)]
     pub certificates: Vec<String>,

@@ -160,6 +160,24 @@ fn read_status(server: &str, st: &Value, tka: &Value, advertised: &[String]) -> 
             .to_owned(),
         lock_sign,
         advertised: advertised.iter().map(|s| bare(s).to_owned()).collect(),
+        peers: {
+            let mut p: Vec<String> = st["Peer"]
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.values())
+                .filter_map(|p| {
+                    p["DNSName"]
+                        .as_str()?
+                        .split('.')
+                        .next()
+                        .map(str::to_ascii_lowercase)
+                })
+                .filter(|n| !n.is_empty())
+                .collect();
+            p.sort();
+            p.dedup();
+            p
+        },
         certificates: Vec::new(),
         error: None,
     }

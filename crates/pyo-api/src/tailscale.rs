@@ -103,6 +103,8 @@ fn http() -> &'static reqwest::Client {
 
 /// The OAuth client, with its access token while it lasts.
 pub struct Client {
+    /// The API ("https://api.tailscale.com/api/v2"; a mock in tests).
+    base: String,
     id: String,
     secret: String,
     token: Mutex<Option<(String, Instant)>>,
@@ -119,9 +121,55 @@ pub fn client(id: &str, secret: &str) -> std::sync::Arc<Client> {
         id: id.to_owned(),
         secret: secret.to_owned(),
         token: Mutex::new(None),
+        base: API.to_owned(),
     });
     *g = Some(c.clone());
     c
+}
+
+#[cfg(test)]
+fn test_client(base: &str) -> Client {
+    Client {
+        base: base.to_owned(),
+        id: "id".into(),
+        secret: "secret".into(),
+        token: Mutex::new(None),
+    }
+}
+
+/// What a wanted name is on the tailnet.
+#[derive(Debug, PartialEq)]
+pub enum Claim {
+    /// Pyo's (made by this installation): its addresses.
+    Ours(Vec<String>),
+    /// Someone else's, or one Pyo can't read.
+    Taken,
+}
+
+/// A wanted name: Pyo's own Service, made now if there's none by that name
+/// at all. Read directly first, whatever the list said: a name that
+/// exists and isn't marked as this installation's is never written.
+pub async fn claim(c: &Client, name: &str, mark: &str) -> anyhow::Result<Claim> {
+    match c.service(name).await? {
+        Some((comment, addrs)) if comment == mark => Ok(Claim::Ours(addrs)),
+        Some(_) => Ok(Claim::Taken),
+        None => {
+            let addrs = c.create_service(name, mark).await?;
+            tracing::info!(name, "tailnet name made");
+            Ok(Claim::Ours(addrs))
+        }
+    }
+}
+
+/// Deletes a Service only if its own record has this installation's mark.
+pub async fn delete_if_ours(c: &Client, name: &str, mark: &str) -> anyhow::Result<bool> {
+    match c.service(name).await? {
+        Some((comment, _)) if comment == mark => {
+            c.delete_service(name).await?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// The saved client, opened.
@@ -157,7 +205,7 @@ impl Client {
             return Ok(t);
         }
         let r = http()
-            .post(format!("{API}/oauth/token"))
+            .post(format!("{}/oauth/token", self.base))
             .header(
                 reqwest::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
@@ -203,7 +251,7 @@ impl Client {
     ) -> anyhow::Result<Value> {
         let token = self.access_token().await?;
         let mut req = http()
-            .request(method, format!("{API}{path}"))
+            .request(method, format!("{}{path}", self.base))
             .bearer_auth(token);
         if let Some(b) = body {
             req = req.json(b);
@@ -259,6 +307,27 @@ impl Client {
             )
             .await?;
         Ok(strings(&v["addrs"]))
+    }
+
+    /// One Service, read directly (the list can leave some out): its
+    /// comment and addresses, or None when there's no such Service. Any
+    /// other answer is an error, so a name Pyo can't see is never taken.
+    pub async fn service(&self, name: &str) -> anyhow::Result<Option<(String, Vec<String>)>> {
+        match self
+            .call(
+                reqwest::Method::GET,
+                &format!("/tailnet/-/services/svc:{name}"),
+                None,
+            )
+            .await
+        {
+            Ok(v) => Ok(Some((
+                v["comment"].as_str().unwrap_or("").to_owned(),
+                strings(&v["addrs"]),
+            ))),
+            Err(e) if e.downcast_ref::<TsError>().is_some_and(|t| t.status == 404) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn delete_service(&self, name: &str) -> anyhow::Result<()> {
@@ -537,6 +606,16 @@ pub async fn save_address(db: &PgPool, key: &str, host: Option<&str>) -> ApiResu
     Ok(())
 }
 
+/// The tailnet's machines as Pyo's servers see them (their tailscaled's
+/// peers): the API's device list only shows what the client's tags allow.
+async fn peer_names(db: &PgPool) -> ApiResult<BTreeSet<String>> {
+    Ok(servers(db)
+        .await?
+        .into_iter()
+        .flat_map(|s| s.status.peers)
+        .collect())
+}
+
 /// A server's Tailscale as its cluster last reported it.
 #[derive(Debug, Clone)]
 struct Server {
@@ -625,10 +704,12 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
     };
     let remote = c.services().await?;
     let ours = |n: &str| remote.get(n).is_some_and(|(cm, _)| *cm == mark);
+    let peers = peer_names(&s.db).await?;
     let machine = |n: &str| {
-        devices
-            .iter()
-            .any(|(_, full, _)| full.split('.').next() == Some(n))
+        peers.contains(n)
+            || devices
+                .iter()
+                .any(|(_, full, _)| full.split('.').next() == Some(n))
     };
     // Pyo's own names, picked once: "pyo", then "pyo-<cluster>"…
     let mut changed = cfg.suffix.as_deref() != Some(suffix.as_str());
@@ -659,11 +740,9 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
             Some((_, addrs)) if ours(name) => (addrs.clone(), None),
             Some(_) => (Vec::new(), Some("Taken on your tailnet")),
             None if machine(name) => (Vec::new(), Some("Taken on your tailnet")),
-            None => match c.create_service(name, &mark).await {
-                Ok(a) => {
-                    tracing::info!(name, "tailnet name made");
-                    (a, None)
-                }
+            None => match claim(&c, name, &mark).await {
+                Ok(Claim::Ours(a)) => (a, None),
+                Ok(Claim::Taken) => (Vec::new(), Some("Taken on your tailnet")),
                 Err(e) => {
                     tracing::warn!(name, error = %e, "couldn't make the tailnet name");
                     (Vec::new(), Some("Couldn't make it on your tailnet"))
@@ -683,13 +762,20 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
         .execute(&s.db)
         .await?;
     }
-    // Ours, no longer used: deleted on the tailnet, and its servers take it off.
+    // Ours, no longer used: deleted on the tailnet, and its servers take it
+    // off. Only names Pyo made (its own rows), each read again first.
+    let made: BTreeSet<String> = sqlx::query_scalar("SELECT name FROM pyo.tailnet_services")
+        .fetch_all(&s.db)
+        .await?
+        .into_iter()
+        .collect();
     for name in remote
         .keys()
-        .filter(|n| ours(n) && !wanted_names.contains(n.as_str()))
+        .filter(|n| ours(n) && made.contains(*n) && !wanted_names.contains(n.as_str()))
     {
-        match c.delete_service(name).await {
-            Ok(()) => tracing::info!(name, "tailnet name deleted"),
+        match delete_if_ours(&c, name, &mark).await {
+            Ok(true) => tracing::info!(name, "tailnet name deleted"),
+            Ok(false) => tracing::warn!(name, "not deleted: not Pyo's on the tailnet"),
             Err(e) => tracing::warn!(name, error = %e, "couldn't delete the tailnet name"),
         }
     }
@@ -902,15 +988,23 @@ pub async fn check_domain(s: &AppState, host: &str) -> ApiResult<()> {
     let mark = marker(&install_id(&s.db).await?);
     let remote = c.services().await?;
     let mine = remote.get(label).is_some_and(|(cm, _)| *cm == mark);
-    let machine = c
-        .devices()
-        .await?
-        .iter()
-        .any(|(_, full, _)| full.split('.').next() == Some(label));
+    let machine = peer_names(&s.db).await?.contains(label)
+        || c.devices()
+            .await?
+            .iter()
+            .any(|(_, full, _)| full.split('.').next() == Some(label));
     if (remote.contains_key(label) && !mine) || machine {
         return Err(ApiError::conflict("Taken on your tailnet"));
     }
-    Ok(())
+    // The list can leave some out: the Service itself, read directly.
+    match c.service(label).await {
+        Ok(None) => Ok(()),
+        Ok(Some((comment, _))) if comment == mark => Ok(()),
+        Ok(Some(_)) => Err(ApiError::conflict("Taken on your tailnet")),
+        Err(e) => Err(ApiError::bad_request(format!(
+            "Couldn't check the name on your tailnet. {e}"
+        ))),
+    }
 }
 
 // ── Integrations › Tailscale ────────────────────────────────────────────────
@@ -988,15 +1082,13 @@ pub async fn test_saved(s: &AppState) -> ApiResult<Value> {
 pub async fn remove(s: &AppState) -> ApiResult<()> {
     if let Some((_, c)) = saved_client(s).await? {
         let mark = marker(&install_id(&s.db).await?);
-        if let Ok(remote) = c.services().await {
-            for name in remote
-                .iter()
-                .filter(|(_, (cm, _))| *cm == mark)
-                .map(|(n, _)| n)
-            {
-                if let Err(e) = c.delete_service(name).await {
-                    tracing::warn!(name, error = %e, "couldn't delete the tailnet name");
-                }
+        // Only names Pyo made (its own rows), and each checked again.
+        let made: Vec<String> = sqlx::query_scalar("SELECT name FROM pyo.tailnet_services")
+            .fetch_all(&s.db)
+            .await?;
+        for name in &made {
+            if let Err(e) = delete_if_ours(&c, name, &mark).await {
+                tracing::warn!(name, error = %e, "couldn't delete the tailnet name");
             }
         }
     }
@@ -1048,12 +1140,16 @@ pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
     }
     let mark = marker(&install_id(&s.db).await?);
     let remote = c.services().await?;
-    let machine = c
-        .devices()
-        .await?
-        .iter()
-        .any(|(_, full, _)| full.split('.').next() == Some(name.as_str()));
-    if remote.get(&name).is_some_and(|(cm, _)| *cm != mark) || machine {
+    let machine = peer_names(&s.db).await?.contains(&name)
+        || c.devices()
+            .await?
+            .iter()
+            .any(|(_, full, _)| full.split('.').next() == Some(name.as_str()));
+    let direct = c.service(&name).await?;
+    if remote.get(&name).is_some_and(|(cm, _)| *cm != mark)
+        || direct.is_some_and(|(cm, _)| cm != mark)
+        || machine
+    {
         return Err(ApiError::conflict("Taken on your tailnet"));
     }
     match kind {
@@ -1177,6 +1273,72 @@ pub async fn host_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mock Tailscale API: a Service ("docker", someone else's) that the
+    /// list leaves out but a direct read finds. Pyo must refuse the name and
+    /// never write to it.
+    #[tokio::test]
+    async fn a_service_the_list_leaves_out_is_never_written() {
+        use axum::{
+            Json, Router,
+            extract::Path,
+            routing::{get, post},
+        };
+        use std::sync::Arc;
+        let writes: Arc<Mutex<Vec<String>>> = Arc::default();
+        let w = writes.clone();
+        let app = Router::new()
+            .route("/oauth/token", post(|| async { Json(json!({ "access_token": "t" })) }))
+            .route("/tailnet/-/services", get(|| async { Json(json!({ "vipServices": [] })) }))
+            .route(
+                "/tailnet/-/services/{svc}",
+                get(|Path(svc): Path<String>| async move {
+                    match svc.as_str() {
+                        "svc:docker" => (axum::http::StatusCode::OK, Json(json!({ "name": "svc:docker", "comment": "the user's", "addrs": ["100.100.1.1"] }))),
+                        "svc:mine" => (axum::http::StatusCode::OK, Json(json!({ "name": "svc:mine", "comment": "Made by Pyo (abc)", "addrs": ["100.100.1.2"] }))),
+                        _ => (axum::http::StatusCode::NOT_FOUND, Json(json!({ "message": "not found" }))),
+                    }
+                })
+                .put({
+                    let w = w.clone();
+                    move |Path(svc): Path<String>| {
+                        let w = w.clone();
+                        async move {
+                            w.lock().unwrap().push(format!("PUT {svc}"));
+                            Json(json!({ "addrs": ["100.100.1.3"] }))
+                        }
+                    }
+                })
+                .delete(move |Path(svc): Path<String>| {
+                    let w = w.clone();
+                    async move {
+                        w.lock().unwrap().push(format!("DELETE {svc}"));
+                        Json(json!({}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let c = test_client(&format!("http://{addr}"));
+        let mark = marker("abc");
+        assert!(
+            c.services().await.unwrap().is_empty(),
+            "the list leaves it out"
+        );
+        assert_eq!(claim(&c, "docker", &mark).await.unwrap(), Claim::Taken);
+        assert!(!delete_if_ours(&c, "docker", &mark).await.unwrap());
+        assert_eq!(
+            claim(&c, "mine", &mark).await.unwrap(),
+            Claim::Ours(vec!["100.100.1.2".into()])
+        );
+        assert_eq!(
+            claim(&c, "blog", &mark).await.unwrap(),
+            Claim::Ours(vec!["100.100.1.3".into()])
+        );
+        assert!(delete_if_ours(&c, "mine", &mark).await.unwrap());
+        assert_eq!(*writes.lock().unwrap(), ["PUT svc:blog", "DELETE svc:mine"]);
+    }
 
     #[test]
     fn names() {
