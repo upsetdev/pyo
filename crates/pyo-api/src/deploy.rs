@@ -63,12 +63,12 @@ pub fn registry() -> &'static Registry {
     })
 }
 
-/// The registry's door on the tailnet (pyo-host, `<tailnet IP>:5005`),
+/// The registry's door on the tailnet (pyo-forward, `<tailnet IP>:5006`),
 /// where other machines' builders push and their containerd pulls, with a
 /// login. Empty until this machine is on the tailnet.
 pub fn registry_push() -> String {
     crate::web::tailnet_ip()
-        .map(|ip| format!("{ip}:5005"))
+        .map(|ip| format!("{ip}:5006"))
         .unwrap_or_default()
 }
 

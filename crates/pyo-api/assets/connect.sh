@@ -3,14 +3,17 @@
 # Pyo agent. Pyo's "Add cluster" gives you the full command, e.g.:
 #
 #   curl -fsSL https://your-pyo/install/connect.sh | bash -s -- \
-#     --api http://pyo.tail1234.ts.net:8000 --token 3f9a... [--tailscale-key tskey-auth-...] \
-#     [--registry pyo.tail1234.ts.net:5005 --registry-token 9b1c...]
+#     --api https://pyo.tail1234.ts.net --token 3f9a... --tailscale-key tskey-auth-... \
+#     [--registry server-1.tail1234.ts.net:5006 --registry-token 9b1c...]
 #
 #   --api            where the agent reaches Pyo
 #   --token          the cluster's agent token (shown once in Pyo)
-#   --tailscale-key  joins your tailnet first, when Pyo is reachable over it
+#   --tailscale-key  joins your tailnet first (a single-use key from Pyo)
 #   --registry       Pyo's registry door, for images Pyo builds
 #   --registry-token this cluster's login there (pull only)
+#
+# Or only joins this machine to the tailnet (Pyo's own machine does this
+# once Tailscale is set up in Pyo): --tailnet-only, with TS_AUTHKEY.
 #
 # Or removes what Pyo put into this cluster, leaving the cluster itself
 # (k3s stays):
@@ -52,7 +55,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 API="" TOKEN="" TS_AUTHKEY="${TS_AUTHKEY:-}" REGISTRY="" REGISTRY_TOKEN=""
-UNINSTALL="" KEEP_DATA="" YES="" DRY_RUN="" WITH_PYO=""
+UNINSTALL="" KEEP_DATA="" YES="" DRY_RUN="" WITH_PYO="" TAILNET_ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --api) API="${2%/}"; shift 2 ;;
@@ -60,6 +63,7 @@ while [ $# -gt 0 ]; do
     --tailscale-key) TS_AUTHKEY="$2"; shift 2 ;;
     --registry) REGISTRY="$2"; shift 2 ;;
     --registry-token) REGISTRY_TOKEN="$2"; shift 2 ;;
+    --tailnet-only) TAILNET_ONLY=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     --keep-data) KEEP_DATA=1; shift ;;
     --yes | -y) YES=1; shift ;;
@@ -359,7 +363,7 @@ if [ -n "$UNINSTALL" ]; then
 fi
 # Without them, on a cluster that's already connected: bring its agent's
 # install up to date with Pyo (Pyo shows this command when it's older).
-if [ -z "$API" ] && [ -z "$TOKEN" ] && command -v k3s >/dev/null; then
+if [ -z "$TAILNET_ONLY" ] && [ -z "$API" ] && [ -z "$TOKEN" ] && command -v k3s >/dev/null; then
   secret() { k3s kubectl -n pyo-system get secret pyo-agent -o "jsonpath={.data.$1}" 2>/dev/null | base64 -d 2>/dev/null || true; }
   API=$(secret PYO_API_URL); API="${API%/}"; TOKEN=$(secret PYO_AGENT_TOKEN)
   # The cluster Pyo runs on: its agent reaches Pyo inside the cluster, this
@@ -367,7 +371,7 @@ if [ -z "$API" ] && [ -z "$TOKEN" ] && command -v k3s >/dev/null; then
   case "$API" in http://*.svc:* | http://*.svc.cluster.local:*) API=http://127.0.0.1:8000 ;; esac
   [ -z "$API" ] || echo "Updating this cluster's Pyo agent (Pyo at $API)."
 fi
-[ -n "$API" ] && [ -n "$TOKEN" ] || { echo "Usage: connect.sh --api URL --token TOKEN [--tailscale-key KEY] [--registry HOST:PORT --registry-token TOKEN]" >&2; exit 2; }
+[ -n "$TAILNET_ONLY" ] || { [ -n "$API" ] && [ -n "$TOKEN" ]; } || { echo "Usage: connect.sh --api URL --token TOKEN [--tailscale-key KEY] [--registry HOST:PORT --registry-token TOKEN]" >&2; exit 2; }
 [ -z "$REGISTRY" ] || [ -n "$REGISTRY_TOKEN" ] || { echo "--registry needs --registry-token: copy the full command from Pyo." >&2; exit 2; }
 case "$REGISTRY_TOKEN" in *[!0-9a-fA-F]*) echo "That registry token doesn't look like one from Pyo." >&2; exit 2 ;; esac
 # The agent's token and its commands' secrets travel to --api: plain http
@@ -399,7 +403,7 @@ api_ok() {
   esac
   return 1
 }
-api_ok "$API" || { echo "Pyo's address must be https:// ($API isn't on a private network or the tailnet)." >&2; exit 2; }
+[ -n "$TAILNET_ONLY" ] || api_ok "$API" || { echo "Pyo's address must be https:// ($API isn't on a private network or the tailnet)." >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "Run it as root (sudo)." >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo "Pyo clusters run on Linux, and this is $(uname -s)." >&2; exit 1; }
 case "$(uname -m)" in
@@ -407,7 +411,7 @@ case "$(uname -m)" in
   *) echo "Pyo's agent is built for x86-64 (amd64), and this machine is $(uname -m)." >&2; exit 1 ;;
 esac
 command -v curl >/dev/null || { echo "curl is missing. Install it and run this again." >&2; exit 1; }
-case "$TOKEN" in *[!0-9a-fA-F]* | "") echo "That token doesn't look like one from Pyo (letters a-f and digits only)." >&2; exit 2 ;; esac
+[ -n "$TAILNET_ONLY" ] || case "$TOKEN" in *[!0-9a-fA-F]* | "") echo "That token doesn't look like one from Pyo (letters a-f and digits only)." >&2; exit 2 ;; esac
 
 # >>> pyo:k3s-pin (deploy/k3s.env)
 PYO_K3S_VERSION=v1.37.2+k3s1
@@ -668,19 +672,45 @@ REPO
 }
 # <<< pyo:repos
 
+# >>> pyo:tailnet-lock (the same in connect.sh and join.sh)
+# With Tailnet Lock on, a new machine waits until a signing device signs
+# its key: the command to run there, then the wait (up to an hour).
+tailnet_lock_wait() {
+  local js key i
+  js=$(tailscale lock status --json 2>/dev/null) || return 0
+  grep -Eq '"Enabled": *true' <<<"$js" || return 0
+  grep -Eq '"NodeKeySigned": *true' <<<"$js" && return 0
+  key=$(sed -n 's/^ *"NodeKey": *"\([^"]*\)".*/\1/p' <<<"$js" | head -n1)
+  echo "Your tailnet has Tailnet Lock on. On a signing device, run:"
+  echo "  tailscale lock sign $key"
+  echo "Waiting for the signature..."
+  for i in $(seq 720); do
+    tailscale lock status --json 2>/dev/null | grep -Eq '"NodeKeySigned": *true' && { echo "Signed."; return 0; }
+    sleep 5
+  done
+  echo "This machine isn't signed yet. Sign it and run this again." >&2
+  exit 1
+}
+# <<< pyo:tailnet-lock
 # Tailscale, when Pyo is on your tailnet (or this machine already is).
 # TS_NAME: this machine's MagicDNS name, when the tailnet has MagicDNS.
 TS_IP="" TS_NAME=""
-if [ -n "$TS_AUTHKEY" ] || command -v tailscale >/dev/null; then
+if [ -n "$TS_AUTHKEY" ] || [ -n "$TAILNET_ONLY" ] || command -v tailscale >/dev/null; then
   tailscale_install
   systemctl enable --now tailscaled
   if [ -z "$(tailscale ip -4 2>/dev/null)" ]; then
-    [ -n "$TS_AUTHKEY" ] || { echo "Not on the tailnet yet: add --tailscale-key tskey-auth-..." >&2; exit 1; }
-    tailscale up --authkey "$TS_AUTHKEY" --hostname "$(hostname)"
+    [ -n "$TS_AUTHKEY" ] || { echo "Not on the tailnet yet: copy the full command from Pyo." >&2; exit 1; }
+    tailscale up --authkey "$TS_AUTHKEY" --hostname "$(hostname)" --timeout 120s || true
   fi
-  TS_IP=$(tailscale ip -4 | head -n1)
+  tailnet_lock_wait
+  TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+  [ -n "$TS_IP" ] || { echo "This machine didn't join the tailnet (see above)." >&2; exit 1; }
   TS_NAME=$(tailscale status --json 2>/dev/null | sed -n '/"Self"/,/}/s/^ *"DNSName": *"\([^"]*\)",*$/\1/p' | head -n1 || true)
   TS_NAME=${TS_NAME%.}
+fi
+if [ -n "$TAILNET_ONLY" ]; then
+  echo "$(hostname) is on your tailnet: $TS_IP${TS_NAME:+ ($TS_NAME)}."
+  exit 0
 fi
 
 # >>> pyo:tailnet-host (the same in connect.sh and join.sh)

@@ -10,11 +10,12 @@
 //!   builds (`pyo/services/<id>`), pull its team's images.
 //!
 //! It listens beside the API (`PYO_REGISTRY_DOOR_ADDR`, :5006, in the
-//! cluster). Users reach it over HTTPS on the host's tailnet name, port
-//! 5443: the gateway terminates TLS with Tailscale's certificate and admits
-//! tailnet addresses only (pyo-proto system.rs `tailnet_objects`). Other
+//! cluster). Users reach it over HTTPS at the registry's tailnet name
+//! (registry.<tailnet>.ts.net): the tailnet Gateway terminates TLS with
+//! Tailscale's certificate and admits tailnet addresses only (pyo-proto
+//! system.rs `tailnet_objects`). Other
 //! machines' containerd and builders reach it on the host's tailnet IP,
-//! :5005 (pyo-host); this cluster's builders in the cluster. The registry
+//! :5006 (pyo-forward); this cluster's builders in the cluster. The registry
 //! itself answers only Pyo, in the cluster (platform.yaml).
 //!
 //! A repository belongs to the team that first pushed it

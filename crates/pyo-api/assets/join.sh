@@ -328,14 +328,37 @@ REPO
 }
 # <<< pyo:repos
 
+# >>> pyo:tailnet-lock (the same in connect.sh and join.sh)
+# With Tailnet Lock on, a new machine waits until a signing device signs
+# its key: the command to run there, then the wait (up to an hour).
+tailnet_lock_wait() {
+  local js key i
+  js=$(tailscale lock status --json 2>/dev/null) || return 0
+  grep -Eq '"Enabled": *true' <<<"$js" || return 0
+  grep -Eq '"NodeKeySigned": *true' <<<"$js" && return 0
+  key=$(sed -n 's/^ *"NodeKey": *"\([^"]*\)".*/\1/p' <<<"$js" | head -n1)
+  echo "Your tailnet has Tailnet Lock on. On a signing device, run:"
+  echo "  tailscale lock sign $key"
+  echo "Waiting for the signature..."
+  for i in $(seq 720); do
+    tailscale lock status --json 2>/dev/null | grep -Eq '"NodeKeySigned": *true' && { echo "Signed."; return 0; }
+    sleep 5
+  done
+  echo "This machine isn't signed yet. Sign it and run this again." >&2
+  exit 1
+}
+# <<< pyo:tailnet-lock
+
 # Tailscale: the cluster talks over your tailnet.
 tailscale_install
 systemctl enable --now tailscaled
 if [ -z "$(tailscale ip -4 2>/dev/null)" ]; then
-  [ -n "$TS_AUTHKEY" ] || { echo "Not on the tailnet yet: add --tailscale-key tskey-auth-..., or save a key in Pyo Integrations." >&2; exit 1; }
-  tailscale up --authkey "$TS_AUTHKEY" --hostname "$NODE_NAME"
+  [ -n "$TS_AUTHKEY" ] || { echo "Not on the tailnet yet: copy the full command from Pyo." >&2; exit 1; }
+  tailscale up --authkey "$TS_AUTHKEY" --hostname "$NODE_NAME" --timeout 120s || true
 fi
-TS_IP=$(tailscale ip -4 | head -n1)
+tailnet_lock_wait
+TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+[ -n "$TS_IP" ] || { echo "This machine didn't join the tailnet (see above)." >&2; exit 1; }
 
 # >>> pyo:tailnet-host (the same in connect.sh and join.sh)
 # A tailnet machine's address, from the MagicDNS name Pyo's commands give

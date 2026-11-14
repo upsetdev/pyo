@@ -129,7 +129,7 @@ pub fn tailnet_ip() -> Option<String> {
 }
 
 /// This API on the tailnet, for machines that join over it: its HTTPS name
-/// when that's ready, else this machine's tailnet IP on :8000 (pyo-host).
+/// when that's ready, else this machine's tailnet IP on :8000 (pyo-forward).
 pub fn tailnet_api_url() -> Option<String> {
     let a = addresses();
     a.tailnet

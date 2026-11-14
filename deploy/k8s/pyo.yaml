@@ -1,7 +1,7 @@
 # ── Pyo: API + dashboard on :8000 (role "web", one replica, rolling
 # updates without a gap), plus a "worker" replica for background loops and
 # jobs. One of each keeps Pyo small enough for a 2 GB server. Inside the
-# cluster only: pyo-host (below) puts :8000 on this machine for loopback,
+# cluster only: pyo-forward (below) puts :8000 on this machine for loopback,
 # private and tailnet peers. Other devices use HTTPS through the gateway
 # (pyo.<public IP>.nip.io while it's open, pyo.<tailnet>.ts.net). ──
 apiVersion: v1
@@ -20,7 +20,7 @@ spec:
 # team's registry token, a cluster's pull token or a builder's token).
 # Users reach it over HTTPS through the gateway (registry.<tailnet>.ts.net);
 # other machines' containerd and builders on this machine's tailnet IP,
-# :5005 (pyo-host below); this cluster's builders here, in the cluster.
+# :5006 (pyo-forward below); this cluster's builders here, in the cluster.
 apiVersion: v1
 kind: Service
 metadata:
@@ -243,31 +243,30 @@ spec:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 512Mi }
 ---
-# ── Pyo on this machine (host network), beside the registry: the dashboard
-# and API on :8000 for loopback, private and tailnet peers, never public
-# ones; the registry on :5005 for this node's containerd and BuildKit
-# (loopback); and the registry door (logins only) on :5005 for tailnet
-# peers, other machines' containerd and builders. Each connection is
-# admitted by its real peer address (the agent's forward mode). ──
+# ── Pyo on this machine (host network): the dashboard and API on :8000
+# for loopback, private and tailnet peers, never public ones; and the
+# registry door (logins only) on :5006 for tailnet peers, other machines'
+# containerd and builders. Each connection is admitted by its real peer
+# address (the agent's forward mode). The registry itself is on
+# 127.0.0.1:5005 (pyo-host in platform.yaml). ──
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pyo-host
+  name: pyo-forward
   namespace: pyo-system
-  labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
+  labels: { app.kubernetes.io/name: pyo-forward, app.kubernetes.io/part-of: pyo }
 spec:
   replicas: 1
   strategy: { type: Recreate }
   selector:
-    matchLabels: { app.kubernetes.io/name: pyo-host }
+    matchLabels: { app.kubernetes.io/name: pyo-forward }
   template:
     metadata:
-      labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
+      labels: { app.kubernetes.io/name: pyo-forward, app.kubernetes.io/part-of: pyo }
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      # On the registry's node: its connections from this node's own
-      # address are the ones the registry's network policy lets through.
+      # On the registry's node, where Pyo's tailnet address is.
       affinity:
         podAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -279,8 +278,7 @@ spec:
           args:
             - forward
             - 8000/local,private,tailnet=pyo.pyo-system.svc.cluster.local:8000
-            - 5005/local=pyo-registry.pyo-system.svc.cluster.local:5000
-            - 5005/tailnet=pyo-registry-door.pyo-system.svc.cluster.local:5006
+            - 5006/tailnet=pyo-registry-door.pyo-system.svc.cluster.local:5006
           securityContext:
             runAsNonRoot: true
             runAsUser: 65532

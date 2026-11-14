@@ -1241,16 +1241,23 @@ mod tests {
         let registry = find("Deployment", "registry");
         assert!(registry["spec"]["template"]["spec"]["hostNetwork"].is_null());
         let host = find("Deployment", "pyo-host");
-        let args = &host["spec"]["template"]["spec"]["containers"][0]["args"];
         assert_eq!(
-            args,
-            &json!([
+            host["spec"]["template"]["spec"]["containers"][0]["args"],
+            json!([
+                "TCP-LISTEN:5005,bind=127.0.0.1,fork,reuseaddr",
+                "TCP:pyo-registry.pyo-system.svc.cluster.local:5000"
+            ]),
+            "the plain registry on loopback only"
+        );
+        let forward = find("Deployment", "pyo-forward");
+        assert_eq!(
+            forward["spec"]["template"]["spec"]["containers"][0]["args"],
+            json!([
                 "forward",
                 "8000/local,private,tailnet=pyo.pyo-system.svc.cluster.local:8000",
-                "5005/local=pyo-registry.pyo-system.svc.cluster.local:5000",
-                "5005/tailnet=pyo-registry-door.pyo-system.svc.cluster.local:5006",
+                "5006/tailnet=pyo-registry-door.pyo-system.svc.cluster.local:5006",
             ]),
-            "the tailnet's :5005 is the door, never the plain registry"
+            "the tailnet gets only the door"
         );
         // The backup store (Garage): RPC on localhost, a pinned image, not root.
         let config = find("ConfigMap", "pyo-backup-store")["data"]["garage.toml"]

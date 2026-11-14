@@ -168,7 +168,7 @@ pub fn trusted_proxies() -> &'static [Cidr] {
 }
 
 /// A server's own end of the pod network (the bridge at `.1`, flannel's
-/// tunnel at `.0`): host processes such as `pyo-host`'s port forward reach
+/// tunnel at `.0`): host processes such as `pyo-forward`'s port forward reach
 /// Pyo from there, passing on whatever headers their client sent.
 fn server_end(ip: &IpAddr) -> bool {
     match ip.to_canonical() {
@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(ip("100.101.102.103", "198.51.100.9"), "100.101.102.103");
         assert_eq!(ip("192.168.1.20", "198.51.100.9"), "192.168.1.20");
         assert_eq!(ip("127.0.0.1", "198.51.100.9"), "127.0.0.1");
-        // The server's end of the pod network (pyo-host's port forward)
+        // The server's end of the pod network (pyo-forward's port forward)
         // passes a client's headers on: not trusted.
         assert_eq!(ip("10.42.0.1", "198.51.100.9"), "10.42.0.1");
         assert_eq!(ip("10.42.3.0", "198.51.100.9"), "10.42.3.0");

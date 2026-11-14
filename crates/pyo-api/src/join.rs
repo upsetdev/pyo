@@ -481,7 +481,7 @@ mod tests {
     }
 
     /// install.sh and scripts/pyo-up.sh set up the machine Pyo runs on the
-    /// same way: its timers, bootstrap key and tailnet name.
+    /// same way: its timers, bootstrap key and where Pyo is.
     #[test]
     fn install_and_pyo_up_share_the_host_setup() {
         let function = |file: &str, script: &str, name: &str| -> String {
@@ -495,12 +495,7 @@ mod tests {
         };
         let install = include_str!("../../../deploy/install.sh");
         let pyo_up = include_str!("../../../scripts/pyo-up.sh");
-        for name in [
-            "host_units",
-            "bootstrap_key",
-            "tailnet_name",
-            "remote_access_note",
-        ] {
+        for name in ["host_units", "bootstrap_key", "pyo_addresses"] {
             assert_eq!(
                 function("deploy/install.sh", install, name),
                 function("scripts/pyo-up.sh", pyo_up, name),

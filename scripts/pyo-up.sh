@@ -312,87 +312,41 @@ if "$AA" needed && ! "$AA" installed; then
   fi
 fi
 
-# ── HTTPS on the tailnet, and connecting this machine ──────────────────────
-# Pyo is reached from other devices over HTTPS on this machine's tailnet
-# name (https://<name>:8443; its registry on :5443), with Tailscale's
-# certificate. That needs MagicDNS and HTTPS certificates on the tailnet;
-# without them Pyo stays on this machine (http://localhost:8000).
-TAILNET_NAME=""
-tailnet_name() {
-  TAILNET_NAME=""
-  command -v tailscale >/dev/null || return 0
-  local js name
-  js=$(tailscale status --json 2>/dev/null) || return 0
-  name=$(sed -n '/"Self"/,/}/s/^ *"DNSName": *"\([^"]*\)",*$/\1/p' <<<"$js" | head -n1)
-  name=${name%.}
-  [ -n "$name" ] && grep -q '"CertDomains": *\[' <<<"$js" || return 0
-  TAILNET_NAME=$name
-}
-remote_access_note() {
-  if [ -z "$TAILNET_NAME" ]; then
-    echo "Pyo is only on this machine: http://localhost:8000. To use it from other devices,"
-    echo "put this machine on Tailscale, turn on MagicDNS and HTTPS Certificates"
-    echo "(Tailscale admin console › DNS), and run this again."
-  else
-    echo "Note: HTTPS certificates are public: \"$TAILNET_NAME\" (this machine's and your"
-    echo "tailnet's name) is in Certificate Transparency logs. Prefer a randomized tailnet"
-    echo "name (admin console › DNS › Rename tailnet) and a generic machine name."
+# ── Where Pyo is, and this machine's helpers ───────────────────────────────
+# One server needs no Tailscale: Pyo is on this machine's public IP over
+# HTTPS (https://pyo.<public IP>.nip.io, Let's Encrypt) until an admin
+# closes it, and over plain HTTP on :8000 from this machine and its private
+# network. Once Tailscale is set up in Pyo (Integrations), this machine
+# joins the tailnet by itself and Pyo is also https://pyo.<tailnet>.ts.net.
+
+# Pyo's addresses. Waits up to $1 seconds for its HTTPS one.
+pyo_addresses() {
+  local url="" lan="" i
+  for i in $(seq 0 5 "${1:-0}"); do
+    url=$(curl -fsS -m 5 http://127.0.0.1:8000/api/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
+    [ -n "$url" ] && break
+    [ "$i" -ge "${1:-0}" ] || sleep 5
+  done
+  lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
+  echo
+  echo "Pyo is at:"
+  [ -z "$url" ] || echo "  $url"
+  [ -z "$lan" ] || echo "  http://$lan:8000  (your network)"
+  echo "  http://localhost:8000  (this machine)"
+  if [ -z "$url" ]; then
+    echo
+    echo "Its HTTPS address on this machine's public IP isn't ready yet. See it later with:"
+    echo "  curl -s http://localhost:8000/api/meta"
   fi
 }
-# The host's own helpers, as systemd timers (root): Tailscale's certificate
-# into the gateway's Secret, daily; and connecting this machine as a cluster
-# once someone has signed up, every minute until it's done. Idempotent.
+# The host's own helpers, as systemd timers (root), every minute: connecting
+# this machine as a cluster until it's done, and putting it on the tailnet
+# once Tailscale is set up in Pyo. Idempotent.
 host_units() {
   local sudo=()
   [ "$(id -u)" = 0 ] || sudo=(sudo)
   "${sudo[@]}" install -d -m 755 /usr/local/lib/pyo
   "${sudo[@]}" install -d -m 700 /etc/pyo
-  "${sudo[@]}" tee /usr/local/lib/pyo/tailnet-cert.sh >/dev/null <<'SH'
-#!/usr/bin/env bash
-# Tailscale's certificate for this machine's tailnet name, into Pyo
-# Gateway's Secret pyo-gateway/pyo-tls-tailnet; and the Service that takes
-# the tailnet listeners' connections on this machine's Tailscale address.
-# Daily; idempotent.
-set -euo pipefail
-name=$(tailscale status --json | sed -n '/"Self"/,/}/s/^ *"DNSName": *"\([^"]*\)",*$/\1/p' | head -n1)
-name=${name%.}
-[ -n "$name" ] || exit 0
-d=$(mktemp -d)
-trap 'rm -rf "$d"' EXIT
-tailscale cert --cert-file "$d/tls.crt" --key-file "$d/tls.key" "$name" >/dev/null
-k3s kubectl create namespace pyo-gateway --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null
-k3s kubectl -n pyo-gateway create secret tls pyo-tls-tailnet --cert "$d/tls.crt" --key "$d/tls.key" \
-  --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null
-# The gateway's own Service never carries these ports (k3s's ServiceLB
-# would publish them on every address and hand connections over from its
-# pod, which the listeners' tailnet-only policy refuses): this one alone
-# takes them, on the Tailscale address. kube-proxy hands a connection to
-# the proxy on this machine unchanged (externalTrafficPolicy Local), so
-# the proxy sees the device's own 100.x address.
-ip4=$(tailscale ip -4 2>/dev/null | head -n1)
-[ -n "$ip4" ] || exit 0
-# Its only warning (externalIPs are deprecated) stays out of the journal.
-out=$(k3s kubectl apply -f - 2>&1 <<YAML
-apiVersion: v1
-kind: Service
-metadata:
-  name: pyo-tailnet
-  namespace: pyo-gateway
-  labels: { app.kubernetes.io/managed-by: pyo }
-spec:
-  type: ClusterIP
-  externalIPs: ["$ip4"]
-  externalTrafficPolicy: Local
-  selector:
-    app.kubernetes.io/component: proxy
-    app.kubernetes.io/managed-by: envoy-gateway
-    gateway.envoyproxy.io/owning-gatewayclass: pyo
-  ports:
-    - { name: dashboard, port: 8443, targetPort: 8443 }
-    - { name: registry, port: 5443, targetPort: 5443 }
-YAML
-) || { echo "$out" >&2; exit 1; }
-SH
   "${sudo[@]}" tee /usr/local/lib/pyo/connect-this-machine.sh >/dev/null <<'SH'
 #!/usr/bin/env bash
 # Connects the machine Pyo runs on as a cluster (its gateway serves Pyo over
@@ -434,25 +388,33 @@ case "$r" in
     ;;
 esac
 SH
-  "${sudo[@]}" chmod 755 /usr/local/lib/pyo/tailnet-cert.sh /usr/local/lib/pyo/connect-this-machine.sh
-  "${sudo[@]}" tee /etc/systemd/system/pyo-tailnet-cert.service >/dev/null <<'UNIT'
-[Unit]
-Description=Pyo: Tailscale certificate for HTTPS on the tailnet
-After=network-online.target tailscaled.service k3s.service
-[Service]
-Type=oneshot
-ExecStart=/usr/local/lib/pyo/tailnet-cert.sh
-UNIT
-  "${sudo[@]}" tee /etc/systemd/system/pyo-tailnet-cert.timer >/dev/null <<'UNIT'
-[Unit]
-Description=Pyo: renew the tailnet certificate daily
-[Timer]
-OnCalendar=daily
-RandomizedDelaySec=1h
-Persistent=true
-[Install]
-WantedBy=timers.target
-UNIT
+  "${sudo[@]}" tee /usr/local/lib/pyo/tailnet-this-machine.sh >/dev/null <<'SH'
+#!/usr/bin/env bash
+# Tells Pyo this machine's Tailscale (its address and name, none when it's
+# not on a tailnet). Once Tailscale is set up in Pyo and this machine isn't
+# on the tailnet yet, Pyo hands over a single-use key, and connect.sh (from
+# Pyo here) installs Tailscale and joins with it.
+set -euo pipefail
+exec 9>/run/pyo-tailnet.lock
+flock -n 9 || exit 0
+key=$(cat /etc/pyo/bootstrap-key)
+ip="" name=""
+if command -v tailscale >/dev/null; then
+  ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+  name=$(tailscale status --json 2>/dev/null | sed -n '/"Self"/,/}/s/^ *"DNSName": *"\([^"]*\)",*$/\1/p' | head -n1 || true)
+fi
+r=$(curl -fsS -m 30 --data-urlencode "key=$key" --data-urlencode "ip=$ip" --data-urlencode "name=${name%.}" \
+  http://127.0.0.1:8000/install/this-machine/tailnet) || exit 0
+case "$r" in
+  *'"state":"join"'*)
+    k=$(sed -n 's/.*"authKey":"\([^"]*\)".*/\1/p' <<<"$r")
+    [ -n "$k" ] || exit 0
+    curl -fsS -m 60 http://127.0.0.1:8000/install/connect.sh | TS_AUTHKEY="$k" bash -s -- --tailnet-only
+    exec "$0"
+    ;;
+esac
+SH
+  "${sudo[@]}" chmod 755 /usr/local/lib/pyo/connect-this-machine.sh /usr/local/lib/pyo/tailnet-this-machine.sh
   "${sudo[@]}" tee /etc/systemd/system/pyo-connect.service >/dev/null <<'UNIT'
 [Unit]
 Description=Pyo: connect this machine as a cluster
@@ -470,14 +432,25 @@ OnUnitActiveSec=1min
 [Install]
 WantedBy=timers.target
 UNIT
+  "${sudo[@]}" tee /etc/systemd/system/pyo-tailnet.service >/dev/null <<'UNIT'
+[Unit]
+Description=Pyo: this machine on the tailnet
+After=network-online.target k3s.service tailscaled.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/pyo/tailnet-this-machine.sh
+UNIT
+  "${sudo[@]}" tee /etc/systemd/system/pyo-tailnet.timer >/dev/null <<'UNIT'
+[Unit]
+Description=Pyo: put this machine on the tailnet once Tailscale is set up
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+[Install]
+WantedBy=timers.target
+UNIT
   "${sudo[@]}" systemctl daemon-reload
-  # Only on the tailnet with HTTPS certificates; off otherwise.
-  if [ -n "$TAILNET_NAME" ]; then
-    "${sudo[@]}" systemctl enable --now pyo-tailnet-cert.timer >/dev/null
-  else
-    "${sudo[@]}" systemctl disable --now pyo-tailnet-cert.timer >/dev/null 2>&1 || true
-  fi
-  "${sudo[@]}" systemctl enable --now pyo-connect.timer >/dev/null
+  "${sudo[@]}" systemctl enable --now pyo-connect.timer pyo-tailnet.timer >/dev/null
 }
 # The key the host proves itself with to connect this machine (Pyo reads it
 # from the pyo-bootstrap Secret). Made once.
@@ -495,9 +468,6 @@ bootstrap_key() { # $1: kubectl command
 
 # ── Platform: namespace, registry, BuildKit, Postgres ──────────────────────
 log "Applying platform services"
-# Other nodes reach the registry on this machine's Tailscale IP (if any).
-TAILNET_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
-tailnet_name
 # Server-side, with the field manager the dashboard's updates use too
 # (crates/pyo-agent/src/upgrade.rs), so both own the same fields.
 APPLY=(kubectl apply --server-side --force-conflicts --field-manager=pyo-install -f -)
@@ -515,7 +485,7 @@ split_kind() { # $1 = keep (ns|pvc|rest); manifest on stdin
     { doc = doc $0 "\n" }
     END { flush() }'
 }
-PLATFORM=$(sed "s/__TAILNET_IP__/$TAILNET_IP/g" deploy/k8s/platform.yaml)
+PLATFORM=$(cat deploy/k8s/platform.yaml)
 split_kind ns <<<"$PLATFORM" | "${APPLY[@]}" >/dev/null
 # Claims that already exist are fine; any other error stops here.
 if ! out=$(split_kind pvc <<<"$PLATFORM" | kubectl create -f - 2>&1); then
@@ -616,10 +586,6 @@ TAG=${TAG_OF[pyo]}
 
 # ── Deploy ─────────────────────────────────────────────────────────────────
 log "Deploying pyo:$TAG"
-# Other machines' builders and servers reach the registry door on the
-# tailnet (pyo-host); none without one.
-REGISTRY_PUSH=${TAILNET_IP:+$TAILNET_IP:5005}
-TAILNET_API=${TAILNET_IP:+http://$TAILNET_IP:8000}
 # Every image at its own tag (postgres:<version>-<tag>).
 IMAGE_SED=()
 for image in "${!TAG_OF[@]}"; do
@@ -628,7 +594,7 @@ for image in "${!TAG_OF[@]}"; do
     *) IMAGE_SED+=(-e "s|__IMAGES__/$image:__TAG__|$IMAGES/$image:${TAG_OF[$image]}|g") ;;
   esac
 done
-PYO_YAML=$(sed "${IMAGE_SED[@]}" -e "s|__IMAGES__|$IMAGES|g" -e "s|__REGISTRY_PUSH__|$REGISTRY_PUSH|g" -e "s|__TAILNET_API__|$TAILNET_API|g" -e "s|__TAILNET_NAME__|$TAILNET_NAME|g" deploy/k8s/pyo.yaml)
+PYO_YAML=$(sed "${IMAGE_SED[@]}" -e "s|__IMAGES__|$IMAGES|g" deploy/k8s/pyo.yaml)
 if grep -q "__TAG__" <<<"$PYO_YAML"; then
   echo "pyo-up: deploy/k8s/pyo.yaml has an image scripts/build-images.sh doesn't build:" >&2
   grep "__TAG__" <<<"$PYO_YAML" >&2
@@ -637,6 +603,7 @@ fi
 "${APPLY[@]}" <<<"$PYO_YAML" >/dev/null || { echo "pyo-up: applying Pyo failed" >&2; exit 1; }
 wait_rollout deployment/pyo 300s
 wait_rollout deployment/pyo-worker 300s
+wait_rollout deployment/pyo-forward 300s
 
 # An agent installed on this cluster runs the image it was installed with;
 # move it to this build too. (Agents on other clusters don't self-update yet.)
@@ -700,24 +667,16 @@ for b in $(kubectl -n "$NS" get deployments -l app.kubernetes.io/name=pyo-builde
   kubectl -n "$NS" set image "$b" "builder=$IMAGES/builder:${TAG_OF[builder]}" >/dev/null
 done
 
-# HTTPS on the tailnet before the address is shown, then this machine as a
-# cluster (its gateway serves Pyo over HTTPS; waits for the first sign-up).
+# This machine as a cluster: its gateway serves Pyo over HTTPS on the
+# public IP, which the addresses wait for.
 host_units
 as_root
-if [ -n "$TAILNET_NAME" ]; then
-  log "Getting the tailnet certificate for $TAILNET_NAME"
-  if ! run_step "Getting the certificate" "${SUDO[@]}" /usr/local/lib/pyo/tailnet-cert.sh; then
-    sed 's/^/    | /' "$STEP_OUT" >&2
-    echo "pyo-up: couldn't get the tailnet certificate yet. pyo-tailnet-cert.timer tries again daily." >&2
-  fi
-fi
 run_step "Connecting this machine to Pyo" "${SUDO[@]}" /usr/local/lib/pyo/connect-this-machine.sh || true
 sed 's/^/    | /' "$STEP_OUT"
 
 echo
-echo "Pyo $TAG is up: http://localhost:8000"
-[ -z "$TAILNET_NAME" ] || echo "  and https://$TAILNET_NAME:8443 from your tailnet (registry: $TAILNET_NAME:5443)"
-remote_access_note
+echo "Pyo $TAG is up."
+pyo_addresses 120
 if [ -n "$ADMIN_PASSWORD" ]; then
   echo
   echo "Sign in with this login, then choose your own email and password:"

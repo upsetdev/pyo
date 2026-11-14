@@ -1,4 +1,4 @@
-//! `pyo-agent forward`: pyo-host's port forwards on the machine Pyo runs
+//! `pyo-agent forward`: pyo-forward's port forwards on the machine Pyo runs
 //! on (host network). Each port listens on every address and admits a
 //! connection by its real peer address, never a header:
 //!
@@ -202,8 +202,7 @@ mod tests {
     fn rules_route_by_port_and_class() {
         let rules: Vec<Rule> = [
             "8000/local,private,tailnet=pyo.pyo-system.svc.cluster.local:8000",
-            "5005/local=pyo-registry.pyo-system.svc.cluster.local:5000",
-            "5005/tailnet=pyo-registry-door.pyo-system.svc.cluster.local:5006",
+            "5006/tailnet=pyo-registry-door.pyo-system.svc.cluster.local:5006",
         ]
         .iter()
         .map(|r| parse_rule(r).unwrap())
@@ -214,16 +213,13 @@ mod tests {
         );
         assert_eq!(route(&rules, 8000, ip("203.0.113.7")), None);
         assert_eq!(
-            route(&rules, 5005, ip("127.0.0.1")),
-            Some("pyo-registry.pyo-system.svc.cluster.local:5000")
-        );
-        assert_eq!(
-            route(&rules, 5005, ip("100.70.0.2")),
+            route(&rules, 5006, ip("100.70.0.2")),
             Some("pyo-registry-door.pyo-system.svc.cluster.local:5006")
         );
-        // The registry is never on the LAN or the public address.
-        assert_eq!(route(&rules, 5005, ip("10.0.0.2")), None);
-        assert_eq!(route(&rules, 5005, ip("203.0.113.7")), None);
+        // The door is never on the LAN, this machine or the public address.
+        assert_eq!(route(&rules, 5006, ip("10.0.0.2")), None);
+        assert_eq!(route(&rules, 5006, ip("127.0.0.1")), None);
+        assert_eq!(route(&rules, 5006, ip("203.0.113.7")), None);
         for bad in [
             "8000=x:1",
             "x/local=a:1",

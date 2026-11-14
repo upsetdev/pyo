@@ -7,7 +7,7 @@
 #     Pyo itself); this node's containerd and BuildKit reach it on
 #     127.0.0.1:5005 through pyo-host. Other machines (servers, builders)
 #     reach it only through Pyo's registry door, which wants a login: on
-#     this node's Tailscale IP, :5005 (pyo-host in pyo.yaml), with a
+#     this node's Tailscale IP, :5006 (pyo-forward in pyo.yaml), with a
 #     registries.yaml mirror (connect.sh, join.sh);
 #   - volumes use local-path, so their data stays on the node that made them.
 apiVersion: v1
@@ -34,7 +34,7 @@ spec:
 # The dashboard, API and registry door: Pyo's front, with its own logins.
 # Only from the gateway's proxies, Pyo's own pods (the worker, the agent,
 # builders, the upgrader, log and traffic collectors), a database import
-# fetching its dump, and the servers themselves (pyo-host's forwards on
+# fetching its dump, and the servers themselves (pyo-forward's forwards on
 # localhost and the tailnet, kubelet probes). Never from a project's pods:
 # Pyo believes X-Forwarded-For from the pod network, so they'd name any
 # address. A server reaches a pod on another server from its own end of
@@ -282,6 +282,41 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: registry-data }
+---
+# ── The registry on this machine's 127.0.0.1:5005, for this node's
+# containerd and BuildKit (loopback only). Other machines reach the
+# registry's door instead (pyo-forward in pyo.yaml). ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyo-host
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo-host }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-host, app.kubernetes.io/part-of: pyo }
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # On the registry's node: its connections from this node's own
+      # address are the ones the registry's network policy lets through.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app.kubernetes.io/name: registry } }
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: forward
+          image: alpine/socat:1.8.1.3
+          args: ["TCP-LISTEN:5005,bind=127.0.0.1,fork,reuseaddr", "TCP:pyo-registry.pyo-system.svc.cluster.local:5000"]
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 64Mi }
 ---
 # ── BuildKit for building Pyo's own images from a repository copy
 # (scripts/pyo-up.sh). Listens on 127.0.0.1:1234 on the node, without TLS:
