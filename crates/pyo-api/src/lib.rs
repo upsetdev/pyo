@@ -415,8 +415,6 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             )
             .nest("/api/builder/v1", builders::routes())
             .merge(extra_routes)
-            .route("/install/pyo", get(cli::binary))
-            .route("/install/cli.sh", get(cli::install_script))
             .route("/api/{*rest}", get(error::not_found).post(error::not_found))
             .route("/install/agent.yaml", get(install::manifest))
             .route("/install/gateway-crds.yaml", get(install::gateway_crds))

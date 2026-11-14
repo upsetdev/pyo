@@ -179,13 +179,21 @@ jobs:
           cosign-release: v3.1.4
       - name: Sign release.json
         run: cosign sign-blob --yes --signing-config .github/release-signing-config.json --bundle release.json.sigstore.json release.json
-      - name: Take the CLI from the signed image
-        env:
-          VERSION: ${{ needs.verify.outputs.version }}
+      # The CLI (pyo.Dockerfile's `cli` target), from the binaries this run
+      # built: deploy/cli.sh and `pyo upgrade` download it and check it
+      # against its sha256.
+      - name: Build the CLI
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/images/pyo.Dockerfile
+          target: cli
+          platforms: linux/amd64
+          cache-from: type=gha,scope=rust-${{ github.run_id }}
+          outputs: type=local,dest=cli
+      - name: Name the CLI
         run: |
-          id=$(docker create "$IMAGES/pyo:$VERSION")
-          docker cp "$id:/app/bin/pyo" pyo-linux-x86_64
-          docker rm "$id"
+          cp cli/pyo pyo-linux-x86_64
           sha256sum pyo-linux-x86_64 > pyo-linux-x86_64.sha256
       # The release's text: the changes since the previous release, from the
       # Conventional Commits in between (scripts/release-notes.ts).
@@ -198,7 +206,8 @@ jobs:
       # connect.sh beside it: install.sh --uninstall runs its own release's.
       # pyo.dev/connect.sh and pyo.dev/join.sh fetch connect.sh and join.sh
       # the same way (Pyo's commands use them when it has no address other
-      # machines can reach).
+      # machines can reach). pyo.dev/cli.sh fetches cli.sh, the CLI's
+      # installer.
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           body_path: release-notes.md
@@ -208,5 +217,6 @@ jobs:
             release.json
             release.json.sigstore.json
             deploy/install.sh
+            deploy/cli.sh
             crates/pyo-api/assets/connect.sh
             crates/pyo-api/assets/join.sh

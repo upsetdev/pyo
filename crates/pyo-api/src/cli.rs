@@ -132,39 +132,6 @@ async fn token(State(s): State<AppState>, Json(b): Json<TokenBody>) -> ApiResult
     ))
 }
 
-const INSTALL_SCRIPT: &str = include_str!("../assets/cli.sh");
-
-/// GET /install/cli.sh: the installer, pointed at this Pyo.
-pub async fn install_script(headers: axum::http::HeaderMap) -> impl axum::response::IntoResponse {
-    let url = crate::oauth::base_url(&headers);
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/x-shellscript; charset=utf-8",
-        )],
-        INSTALL_SCRIPT.replace("__PYO_URL__", &url),
-    )
-}
-
-/// GET /install/pyo: the CLI binary (Linux x86-64, static), built into
-/// the image next to the builder's.
-pub async fn binary() -> ApiResult<impl axum::response::IntoResponse> {
-    let path = std::env::var("PYO_CLI_BIN").unwrap_or_else(|_| "/app/bin/pyo".into());
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|_| ApiError::not_found("CLI binary"))?;
-    Ok((
-        [
-            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
-            (
-                axum::http::header::CONTENT_DISPOSITION,
-                "attachment; filename=\"pyo\"",
-            ),
-        ],
-        bytes,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     #[test]

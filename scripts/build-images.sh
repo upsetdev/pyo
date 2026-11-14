@@ -126,7 +126,7 @@ input_key() {
 # The binaries in each Rust image.
 binaries() {
   case "$1" in
-    pyo) echo "pyo-api pyo" ;;
+    pyo) echo pyo-api ;;
     agent) echo pyo-agent ;;
     builder) echo pyo-builder ;;
     flows) echo pyo-flows ;;

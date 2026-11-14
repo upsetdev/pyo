@@ -2,7 +2,7 @@
 # Pyo's Rust images, one target each, from one build of every binary:
 #
 #   pyo            the control plane: pyo-api plus the dashboard it serves
-#                  and the CLI it hands out (the default target)
+#                  (the default target)
 #   agent          pyo-agent: runs in each cluster and dials out to the API
 #   builder        pyo-builder, with buildctl, git and railpack
 #   flows          pyo-flows, the connection collector
@@ -14,6 +14,9 @@
 # BuildKit reuses that stage for every target. CARGO_PROFILE picks the Cargo
 # profile: `release` (the default; releases) or `dev-release`
 # (scripts/pyo-up.sh, quicker to compile).
+#
+# The `cli` target is the CLI alone, for the GitHub release
+# (pyo-linux-x86_64, installed with `curl -fsSL https://pyo.dev/cli.sh | sh`).
 
 FROM rust:1.99.1-trixie AS rust
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/* \
@@ -43,6 +46,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # images changed).
 FROM scratch AS bins
 COPY --from=rust /out/ /
+
+# The CLI, for the release's pyo-linux-x86_64.
+FROM scratch AS cli
+COPY --from=rust /out/pyo /pyo
 
 FROM debian:trixie-20261020-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -115,12 +122,10 @@ FROM alpine:3.24.3 AS geo
 RUN wget -qO- https://raw.githubusercontent.com/GitSquared/node-geolite2-redist/master/redist/GeoLite2-City.tar.gz | tar xz -C /tmp \
  && mkdir -p /geo && mv /tmp/GeoLite2-City_*/GeoLite2-City.mmdb /geo/
 
-# The control plane: the API, the dashboard it serves, and the static CLI
-# binary it hands out (`curl -fsSL <url>/install/cli.sh | sh`).
+# The control plane: the API and the dashboard it serves.
 FROM runtime AS pyo
 COPY --from=rust /out/pyo-api /usr/local/bin/pyo-api
 COPY --from=web /src/dash/dist/client /app/web
-COPY --from=rust /out/pyo /app/bin/pyo
 COPY --from=geo /geo/GeoLite2-City.mmdb /app/geoip/GeoLite2-City.mmdb
 ENV PYO_WEB_DIR=/app/web LISTEN_ADDR=0.0.0.0:8000
 USER 65532:65532
