@@ -391,21 +391,7 @@ pub async fn remove(
         )));
     }
     let conn = load(&s.db, Some(&team_id), id).await?;
-    let hooks: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT repo, hook_id FROM pyo.git_webhooks WHERE connection_id = $1 AND hook_id IS NOT NULL",
-    )
-    .bind(id)
-    .fetch_all(&mut **tx)
-    .await?;
-    if !hooks.is_empty()
-        && let Ok(api) = conn.api().await
-    {
-        for (repo, hook) in hooks {
-            if let Err(e) = api.delete_hook(&repo, hook as u64).await {
-                tracing::warn!(connection = %id, %repo, error = %e, "webhook not removed");
-            }
-        }
-    }
+    remove_hooks(tx, &conn).await?;
     sqlx::query("DELETE FROM pyo.git_connections WHERE id = $1")
         .bind(id)
         .execute(&mut **tx)
@@ -422,6 +408,60 @@ pub async fn remove(
     )
     .await?;
     Ok(json!({ "ok": true }))
+}
+
+/// Remove the webhooks Pyo made for a connection that's going. Best
+/// effort: one GitLab can't reach or refuses is logged and left.
+async fn remove_hooks(tx: &mut Transaction<'_, Postgres>, conn: &Connection) -> ApiResult<()> {
+    let hooks: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT repo, hook_id FROM pyo.git_webhooks WHERE connection_id = $1 AND hook_id IS NOT NULL",
+    )
+    .bind(&conn.id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if hooks.is_empty() {
+        return Ok(());
+    }
+    let failed = match conn.api().await {
+        Ok(api) => api.delete_hooks(&hooks).await,
+        Err(e) => hooks
+            .iter()
+            .map(|(r, _)| {
+                let e = gitlab::Error {
+                    status: None,
+                    message: e.message.clone(),
+                };
+                (r.clone(), e)
+            })
+            .collect(),
+    };
+    for (repo, e) in failed {
+        tracing::warn!(connection = %conn.id, %repo, error = %e, "webhook not removed");
+    }
+    Ok(())
+}
+
+/// Before a team is deleted (its connections go with it): remove the
+/// webhooks they made, best effort.
+pub async fn forget_team(
+    s: &AppState,
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+) -> ApiResult<()> {
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM pyo.git_connections WHERE team_id = $1")
+            .bind(team_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    for id in ids {
+        match load(&s.db, Some(team_id), &id).await {
+            Ok(conn) => remove_hooks(tx, &conn).await?,
+            Err(e) => {
+                tracing::warn!(connection = %id, error = %e.message, "webhooks not removed")
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A service's source, when it names a connection: the team's, a

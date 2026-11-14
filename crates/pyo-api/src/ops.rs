@@ -2667,6 +2667,8 @@ async fn apply(
                     "This is your only team. Create another one before deleting it.",
                 ));
             }
+            // Its Git connections go with it: their webhooks first.
+            crate::git::forget_team(s, tx, &id).await?;
             sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
                 .bind(&id)
                 .execute(&mut **tx)

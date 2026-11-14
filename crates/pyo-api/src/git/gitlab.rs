@@ -511,6 +511,18 @@ impl Gitlab {
         .await
     }
 
+    /// Remove several webhooks, carrying on past failures: the ones that
+    /// couldn't be removed, with why.
+    pub async fn delete_hooks(&self, hooks: &[(String, i64)]) -> Vec<(String, Error)> {
+        let mut failed = vec![];
+        for (repo, hook) in hooks {
+            if let Err(e) = self.delete_hook(repo, *hook as u64).await {
+                failed.push((repo.clone(), e));
+            }
+        }
+        failed
+    }
+
     /// Gone already counts as done.
     async fn delete(&self, url: Url, what: &str) -> Result<()> {
         let (status, v) = self.send(self.http.delete(url)).await?;
@@ -952,6 +964,37 @@ mod tests {
         assert_eq!(seen[1].1["token"], "s3cret");
         assert_eq!(seen[1].1["push_events"], true);
         assert_eq!(seen[1].1["enable_ssl_verification"], true);
+    }
+
+    /// Removing a connection's hooks carries on past one that fails, and a
+    /// GitLab that can't be reached fails each without stopping.
+    #[tokio::test]
+    async fn removes_hooks_best_effort() {
+        let (g, seen) = mock().await;
+        let hooks = vec![
+            ("acme/web/shop".to_owned(), 54),
+            ("acme/docs".to_owned(), 99),
+        ];
+        assert!(
+            g.delete_hooks(&hooks).await.is_empty(),
+            "gone counts as done"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = closed.local_addr().unwrap();
+        drop(closed);
+        let down = Gitlab::with_client(
+            normalize(&format!("http://{addr}")).unwrap(),
+            TOKEN,
+            reqwest::Client::new(),
+        );
+        let failed = down.delete_hooks(&hooks).await;
+        assert_eq!(failed.len(), 2);
+        assert!(
+            failed[0].1.message.contains("can't reach"),
+            "{}",
+            failed[0].1
+        );
     }
 
     #[test]
