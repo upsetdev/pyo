@@ -54,12 +54,17 @@ async fn local(
 ) -> anyhow::Result<(u16, BTreeMap<String, String>, Vec<u8>)> {
     let call = async {
         let mut s = tokio::net::UnixStream::connect(SOCKET).await?;
-        let mut req = format!("{method} {path} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nSec-Tailscale: localapi\r\n");
+        let mut req = format!(
+            "{method} {path} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nSec-Tailscale: localapi\r\n"
+        );
         for (k, v) in headers {
             req.push_str(&format!("{k}: {v}\r\n"));
         }
         if let Some(b) = body {
-            req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", b.len()));
+            req.push_str(&format!(
+                "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                b.len()
+            ));
         }
         req.push_str("\r\n");
         s.write_all(req.as_bytes()).await?;
@@ -116,7 +121,11 @@ fn read_status(server: &str, st: &Value, tka: &Value, advertised: &[String]) -> 
     let me = &st["Self"];
     let strings = |v: &Value| -> Vec<String> {
         v.as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     // Tailnet Lock on, this server's key not signed: the command to sign it.
@@ -129,7 +138,11 @@ fn read_status(server: &str, st: &Value, tka: &Value, advertised: &[String]) -> 
         server: server.to_owned(),
         state: st["BackendState"].as_str().unwrap_or("").to_owned(),
         node_id: me["ID"].as_str().unwrap_or("").to_owned(),
-        dns_name: me["DNSName"].as_str().unwrap_or("").trim_end_matches('.').to_owned(),
+        dns_name: me["DNSName"]
+            .as_str()
+            .unwrap_or("")
+            .trim_end_matches('.')
+            .to_owned(),
         suffix: st["CurrentTailnet"]["MagicDNSSuffix"]
             .as_str()
             .or(st["MagicDNSSuffix"].as_str())
@@ -138,7 +151,13 @@ fn read_status(server: &str, st: &Value, tka: &Value, advertised: &[String]) -> 
             .to_owned(),
         tags: strings(&me["Tags"]),
         ips: strings(&st["TailscaleIPs"]),
-        version: st["Version"].as_str().unwrap_or("").split('-').next().unwrap_or("").to_owned(),
+        version: st["Version"]
+            .as_str()
+            .unwrap_or("")
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .to_owned(),
         lock_sign,
         advertised: advertised.iter().map(|s| bare(s).to_owned()).collect(),
         certificates: Vec::new(),
@@ -151,7 +170,11 @@ fn read_status(server: &str, st: &Value, tka: &Value, advertised: &[String]) -> 
 fn wanted_prefs(current: &[String], wanted: &[String], retired: &[String]) -> Vec<String> {
     let svc = |n: &str| format!("svc:{n}");
     let off: BTreeSet<String> = retired.iter().map(|n| svc(n)).collect();
-    let mut out: Vec<String> = current.iter().filter(|s| !off.contains(*s)).cloned().collect();
+    let mut out: Vec<String> = current
+        .iter()
+        .filter(|s| !off.contains(*s))
+        .cloned()
+        .collect();
     for n in wanted {
         let s = svc(n);
         if !out.contains(&s) {
@@ -164,7 +187,11 @@ fn wanted_prefs(current: &[String], wanted: &[String], retired: &[String]) -> Ve
 /// The serve config with a `Tun` entry for each wanted Service and none for
 /// retired ones; None when it's already so.
 fn wanted_serve(config: &Value, wanted: &[String], retired: &[String]) -> Option<Value> {
-    let mut c = if config.is_object() { config.clone() } else { json!({}) };
+    let mut c = if config.is_object() {
+        config.clone()
+    } else {
+        json!({})
+    };
     let services = c
         .as_object_mut()?
         .entry("Services")
@@ -243,10 +270,16 @@ async fn round(
     let tka = local_json("GET", "/localapi/v0/tka/status", None)
         .await
         .unwrap_or(Value::Null);
-    let prefs = local_json("GET", "/localapi/v0/prefs", None).await.unwrap_or(Value::Null);
+    let prefs = local_json("GET", "/localapi/v0/prefs", None)
+        .await
+        .unwrap_or(Value::Null);
     let current: Vec<String> = prefs["AdvertiseServices"]
         .as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
     let mut out = read_status(server, &st, &tka, &current);
     if out.state != "Running" {
@@ -263,20 +296,42 @@ async fn round(
     let mut errors = Vec::new();
     // Serve entries first, then advertise: a Service is only advertised
     // once the server takes its packets.
-    match local("GET", "/localapi/v0/serve-config", &[], None, Duration::from_secs(20)).await {
+    match local(
+        "GET",
+        "/localapi/v0/serve-config",
+        &[],
+        None,
+        Duration::from_secs(20),
+    )
+    .await
+    {
         Ok((200, h, body)) => {
             let config: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             if let Some(next) = wanted_serve(&config, &wanted, &hosting.retired) {
                 let etag = h.get("etag").cloned().unwrap_or_default();
                 let b = serde_json::to_vec(&next).unwrap_or_default();
-                match local("POST", "/localapi/v0/serve-config", &[("If-Match", &etag)], Some(&b), Duration::from_secs(20)).await {
+                match local(
+                    "POST",
+                    "/localapi/v0/serve-config",
+                    &[("If-Match", &etag)],
+                    Some(&b),
+                    Duration::from_secs(20),
+                )
+                .await
+                {
                     Ok((200, _, _)) => {}
-                    Ok((code, _, body)) => errors.push(format!("serve config: {code} {}", String::from_utf8_lossy(&body).trim())),
+                    Ok((code, _, body)) => errors.push(format!(
+                        "serve config: {code} {}",
+                        String::from_utf8_lossy(&body).trim()
+                    )),
                     Err(e) => errors.push(format!("serve config: {e:#}")),
                 }
             }
         }
-        Ok((code, _, body)) => errors.push(format!("serve config: {code} {}", String::from_utf8_lossy(&body).trim())),
+        Ok((code, _, body)) => errors.push(format!(
+            "serve config: {code} {}",
+            String::from_utf8_lossy(&body).trim()
+        )),
         Err(e) => errors.push(format!("serve config: {e:#}")),
     }
     let next = wanted_prefs(&current, &wanted, &hosting.retired);
@@ -298,7 +353,15 @@ async fn round(
             || !written.contains_key(&s.name);
         if due {
             last_check.insert(s.name.clone(), std::time::Instant::now());
-            match local("GET", &format!("/localapi/v0/cert/{}?type=pair", s.host), &[], None, Duration::from_secs(300)).await {
+            match local(
+                "GET",
+                &format!("/localapi/v0/cert/{}?type=pair", s.host),
+                &[],
+                None,
+                Duration::from_secs(300),
+            )
+            .await
+            {
                 Ok((200, _, body)) => match split_pair(&String::from_utf8_lossy(&body)) {
                     Some((key, cert)) if written.get(&s.name) != Some(&cert) => {
                         let secret = json!({
@@ -306,19 +369,31 @@ async fn round(
                             "metadata": { "name": system::tailnet_tls_secret(&s.name), "labels": { "app.kubernetes.io/managed-by": "pyo", "pyo.dev/tailnet-service": s.name } },
                             "stringData": { "tls.crt": cert, "tls.key": key },
                         });
-                        match secrets.patch(&system::tailnet_tls_secret(&s.name), &pp(), &Patch::Apply(&secret)).await {
+                        match secrets
+                            .patch(
+                                &system::tailnet_tls_secret(&s.name),
+                                &pp(),
+                                &Patch::Apply(&secret),
+                            )
+                            .await
+                        {
                             Ok(_) => {
                                 tracing::info!(service = %s.name, "certificate kept");
                                 written.insert(s.name.clone(), cert);
                             }
-                            Err(e) => errors.push(format!("{}: couldn't keep its certificate: {e}", s.name)),
+                            Err(e) => errors
+                                .push(format!("{}: couldn't keep its certificate: {e}", s.name)),
                         }
                     }
                     Some(_) => {}
                     None => errors.push(format!("{}: Tailscale's certificate didn't read", s.name)),
                 },
                 Ok((code, _, body)) => {
-                    errors.push(format!("{}: certificate: {code} {}", s.name, String::from_utf8_lossy(&body).trim()));
+                    errors.push(format!(
+                        "{}: certificate: {code} {}",
+                        s.name,
+                        String::from_utf8_lossy(&body).trim()
+                    ));
                     // Not this server's yet (approval on its way): ask again soon.
                     last_check.remove(&s.name);
                 }
@@ -336,13 +411,19 @@ async fn round(
         .filter(|s| s.cert_server == server)
         .map(|s| s.name.as_str())
         .collect();
-    let gone: Vec<String> = written.keys().filter(|n| !keep.contains(n.as_str())).cloned().collect();
+    let gone: Vec<String> = written
+        .keys()
+        .filter(|n| !keep.contains(n.as_str()))
+        .cloned()
+        .collect();
     for n in gone {
         written.remove(&n);
         last_check.remove(&n);
         // Another server may hold it now: only Services retired everywhere.
         if hosting.retired.contains(&n) {
-            let _ = secrets.delete(&system::tailnet_tls_secret(&n), &DeleteParams::default()).await;
+            let _ = secrets
+                .delete(&system::tailnet_tls_secret(&n), &DeleteParams::default())
+                .await;
         }
     }
     out.certificates = written.keys().cloned().collect();
@@ -370,16 +451,31 @@ async fn wanted_hosting(kube: &Client) -> anyhow::Result<TailnetHosting> {
 /// The servers' Tailscale, from their tailnet pods' last status lines.
 pub async fn statuses(kube: &Client) -> Vec<ServerTailnet> {
     let pods: Api<Pod> = Api::namespaced(kube.clone(), NS);
-    let lp = ListParams::default().labels(&format!("app.kubernetes.io/name={}", system::TAILNET_DAEMONSET));
+    let lp = ListParams::default().labels(&format!(
+        "app.kubernetes.io/name={}",
+        system::TAILNET_DAEMONSET
+    ));
     let Ok(list) = pods.list(&lp).await else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for p in list.items {
-        let Some(name) = p.metadata.name.clone() else { continue };
-        let server = p.spec.as_ref().and_then(|s| s.node_name.clone()).unwrap_or_default();
+        let Some(name) = p.metadata.name.clone() else {
+            continue;
+        };
+        let server = p
+            .spec
+            .as_ref()
+            .and_then(|s| s.node_name.clone())
+            .unwrap_or_default();
         let logs = pods
-            .logs(&name, &LogParams { tail_lines: Some(400), ..Default::default() })
+            .logs(
+                &name,
+                &LogParams {
+                    tail_lines: Some(400),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap_or_default();
         let last = logs
@@ -425,7 +521,11 @@ pub fn objects(
         services: wanted
             .services
             .iter()
-            .map(|s| TailnetHosted { name: s.name.clone(), host: wanted.host(&s.name), cert_server: holder.clone() })
+            .map(|s| TailnetHosted {
+                name: s.name.clone(),
+                host: wanted.host(&s.name),
+                cert_server: holder.clone(),
+            })
             .collect(),
         retired: wanted.retired.clone(),
     };
@@ -440,14 +540,22 @@ pub fn objects(
         .collect();
     certs.sort();
     certs.dedup();
-    let own = if own_names { wanted.own.clone() } else { Default::default() };
+    let own = if own_names {
+        wanted.own.clone()
+    } else {
+        Default::default()
+    };
     let mut objs = system::tailnet_objects(servers, &certs, &own);
     objs.push(json!({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": { "name": system::TAILNET_WANTED, "namespace": system::GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
         "data": { system::TAILNET_WANTED_KEY: serde_json::to_string(&hosting).unwrap_or_default() },
     }));
-    let addrs: Vec<String> = wanted.services.iter().flat_map(|s| s.addrs.iter().cloned()).collect();
+    let addrs: Vec<String> = wanted
+        .services
+        .iter()
+        .flat_map(|s| s.addrs.iter().cloned())
+        .collect();
     let vip = (!addrs.is_empty()).then(|| system::tailnet_vip_service(&addrs));
     (objs, vip, hosting)
 }
@@ -465,7 +573,11 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
     let (objs, vip, _) = objects(wanted, &statuses, &servers, same_cluster);
     let image = own_image(kube).await;
     let key = serde_json::to_string(&(&objs, &vip, &image)).unwrap_or_default();
-    if APPLIED.lock().map(|a| a.as_deref() == Some(key.as_str())).unwrap_or(false) {
+    if APPLIED
+        .lock()
+        .map(|a| a.as_deref() == Some(key.as_str()))
+        .unwrap_or(false)
+    {
         return;
     }
     let mut ok = true;
@@ -500,14 +612,20 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
         }
     }
     // Pyo's own routes, off a cluster that no longer has them.
-    let own = if same_cluster { wanted.own.clone() } else { Default::default() };
+    let own = if same_cluster {
+        wanted.own.clone()
+    } else {
+        Default::default()
+    };
     for ((name, _, _), on) in [
         (system::TAILNET_DASHBOARD, own.dashboard.is_some()),
         (system::TAILNET_REGISTRY, own.registry.is_some()),
     ] {
         if !on {
             for kind in ["HTTPRoute", "Backend"] {
-                let _ = crate::gateway::api_of_kind(kube, kind).delete(name, &DeleteParams::default()).await;
+                let _ = crate::gateway::api_of_kind(kube, kind)
+                    .delete(name, &DeleteParams::default())
+                    .await;
             }
         }
     }
@@ -517,7 +635,10 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
             .patch(system::TAILNET_VIP_SERVICE, &pp(), &Patch::Apply(v))
             .await
             .map(|_| ()),
-        None => match services.delete(system::TAILNET_VIP_SERVICE, &DeleteParams::default()).await {
+        None => match services
+            .delete(system::TAILNET_VIP_SERVICE, &DeleteParams::default())
+            .await
+        {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
             Err(e) => Err(e),
@@ -554,7 +675,8 @@ mod tests {
 
     #[test]
     fn localapi_answers_parse() {
-        let raw = b"HTTP/1.0 200 OK\r\nEtag: \"abc\"\r\nContent-Type: application/json\r\n\r\n{\"a\":1}";
+        let raw =
+            b"HTTP/1.0 200 OK\r\nEtag: \"abc\"\r\nContent-Type: application/json\r\n\r\n{\"a\":1}";
         let (code, h, body) = parse_response(raw).unwrap();
         assert_eq!(code, 200);
         assert_eq!(h["etag"], "\"abc\"");
@@ -573,9 +695,21 @@ mod tests {
         let config = json!({ "TCP": { "22": { "TCPForward": "x" } }, "Services": { "svc:mine": { "TCP": {} }, "svc:old": { "Tun": true } } });
         let next = wanted_serve(&config, &["blog".into()], &["old".into()]).unwrap();
         assert_eq!(next["TCP"], config["TCP"]);
-        assert_eq!(next["Services"], json!({ "svc:mine": { "TCP": {} }, "svc:blog": { "Tun": true } }));
-        assert_eq!(wanted_serve(&next, &["blog".into()], &["old".into()]), None, "nothing to change");
-        let empty = wanted_serve(&json!({ "Services": { "svc:old": { "Tun": true } } }), &[], &["old".into()]).unwrap();
+        assert_eq!(
+            next["Services"],
+            json!({ "svc:mine": { "TCP": {} }, "svc:blog": { "Tun": true } })
+        );
+        assert_eq!(
+            wanted_serve(&next, &["blog".into()], &["old".into()]),
+            None,
+            "nothing to change"
+        );
+        let empty = wanted_serve(
+            &json!({ "Services": { "svc:old": { "Tun": true } } }),
+            &[],
+            &["old".into()],
+        )
+        .unwrap();
         assert_eq!(empty, json!({}));
     }
 
@@ -594,7 +728,10 @@ mod tests {
         assert_eq!(s.version, "1.90.1");
         assert_eq!(s.tags, ["tag:pyo"]);
         assert_eq!(s.advertised, ["pyo"]);
-        assert_eq!(s.lock_sign.as_deref(), Some("tailscale lock sign nodekey:abcd"));
+        assert_eq!(
+            s.lock_sign.as_deref(),
+            Some("tailscale lock sign nodekey:abcd")
+        );
         let signed = json!({ "Enabled": true, "NodeKeySigned": true, "NodeKey": "nodekey:abcd" });
         assert_eq!(read_status("s", &st, &signed, &[]).lock_sign, None);
         assert_eq!(read_status("s", &st, &Value::Null, &[]).lock_sign, None);
@@ -604,8 +741,14 @@ mod tests {
     fn pairs_split_into_key_and_chain() {
         let pem = "-----BEGIN EC PRIVATE KEY-----\nk\n-----END EC PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\ni\n-----END CERTIFICATE-----\n";
         let (key, cert) = split_pair(pem).unwrap();
-        assert!(key.starts_with("-----BEGIN EC PRIVATE KEY-----") && key.ends_with("-----END EC PRIVATE KEY-----\n"));
-        assert!(cert.starts_with("-----BEGIN CERTIFICATE-----") && cert.matches("BEGIN CERTIFICATE").count() == 2);
+        assert!(
+            key.starts_with("-----BEGIN EC PRIVATE KEY-----")
+                && key.ends_with("-----END EC PRIVATE KEY-----\n")
+        );
+        assert!(
+            cert.starts_with("-----BEGIN CERTIFICATE-----")
+                && cert.matches("BEGIN CERTIFICATE").count() == 2
+        );
         assert_eq!(split_pair("-----BEGIN CERTIFICATE-----\nc\n"), None);
     }
 
@@ -616,28 +759,71 @@ mod tests {
         let wanted = TailnetWanted {
             suffix: "tail1234.ts.net".into(),
             services: vec![
-                pyo_proto::TailnetService { name: "pyo".into(), addrs: vec!["100.100.0.1".into(), "fd7a:115c:a1e0::a".into()] },
-                pyo_proto::TailnetService { name: "blog".into(), addrs: vec!["100.100.0.2".into()] },
+                pyo_proto::TailnetService {
+                    name: "pyo".into(),
+                    addrs: vec!["100.100.0.1".into(), "fd7a:115c:a1e0::a".into()],
+                },
+                pyo_proto::TailnetService {
+                    name: "blog".into(),
+                    addrs: vec!["100.100.0.2".into()],
+                },
             ],
             retired: vec!["old".into()],
-            own: system::TailnetOwn { dashboard: Some("pyo.tail1234.ts.net".into()), registry: None },
+            own: system::TailnetOwn {
+                dashboard: Some("pyo.tail1234.ts.net".into()),
+                registry: None,
+            },
         };
         let statuses = vec![
-            ServerTailnet { server: "b".into(), state: "Running".into(), certificates: vec!["pyo".into(), "gone".into()], ..Default::default() },
-            ServerTailnet { server: "a".into(), state: "NeedsLogin".into(), ..Default::default() },
-            ServerTailnet { server: "c".into(), state: "Running".into(), ..Default::default() },
+            ServerTailnet {
+                server: "b".into(),
+                state: "Running".into(),
+                certificates: vec!["pyo".into(), "gone".into()],
+                ..Default::default()
+            },
+            ServerTailnet {
+                server: "a".into(),
+                state: "NeedsLogin".into(),
+                ..Default::default()
+            },
+            ServerTailnet {
+                server: "c".into(),
+                state: "Running".into(),
+                ..Default::default()
+            },
         ];
         let (objs, vip, hosting) = objects(&wanted, &statuses, &[], true);
-        assert_eq!(hosting.services.iter().map(|s| s.cert_server.as_str()).collect::<Vec<_>>(), ["b", "b"]);
+        assert_eq!(
+            hosting
+                .services
+                .iter()
+                .map(|s| s.cert_server.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "b"]
+        );
         assert_eq!(hosting.services[1].host, "blog.tail1234.ts.net");
         assert_eq!(hosting.retired, ["old"]);
         let gw = objs.iter().find(|o| o["kind"] == "Gateway").unwrap();
-        assert_eq!(gw["spec"]["listeners"][1]["tls"]["certificateRefs"], json!([{ "group": "", "kind": "Secret", "name": "pyo-tls--pyo" }]));
-        assert_eq!(vip.unwrap()["spec"]["externalIPs"], json!(["100.100.0.1", "fd7a:115c:a1e0::a", "100.100.0.2"]));
-        assert!(objs.iter().any(|o| o["metadata"]["name"] == system::TAILNET_DASHBOARD.0 && o["kind"] == "HTTPRoute"));
+        assert_eq!(
+            gw["spec"]["listeners"][1]["tls"]["certificateRefs"],
+            json!([{ "group": "", "kind": "Secret", "name": "pyo-tls--pyo" }])
+        );
+        assert_eq!(
+            vip.unwrap()["spec"]["externalIPs"],
+            json!(["100.100.0.1", "fd7a:115c:a1e0::a", "100.100.0.2"])
+        );
+        assert!(
+            objs.iter()
+                .any(|o| o["metadata"]["name"] == system::TAILNET_DASHBOARD.0
+                    && o["kind"] == "HTTPRoute")
+        );
         // Another cluster: no routes of Pyo's own.
         let (objs, _, _) = objects(&wanted, &statuses, &[], false);
-        assert!(!objs.iter().any(|o| o["metadata"]["name"] == system::TAILNET_DASHBOARD.0));
+        assert!(
+            !objs
+                .iter()
+                .any(|o| o["metadata"]["name"] == system::TAILNET_DASHBOARD.0)
+        );
         // Nothing hosted: no VIPs' Service.
         let (_, vip, _) = objects(&TailnetWanted::default(), &statuses, &[], false);
         assert!(vip.is_none());

@@ -1834,19 +1834,25 @@ mod tests {
             domain("shop.example.com", "http", "letsencrypt", true),
         ]);
         s.firewall = Some(Firewall {
-            rules: vec![pyo_proto::firewall::FirewallRule {
-                id: "fwr_1".into(),
-                action: "rateLimit".into(),
-                operator: "in".into(),
-                sources: vec![],
-                limit: Some(pyo_proto::firewall::RateLimit { requests: 60, per: "minute".into() }),
-            }, pyo_proto::firewall::FirewallRule {
-                id: "fwr_2".into(),
-                action: "block".into(),
-                operator: "in".into(),
-                sources: vec!["203.0.113.0/24".into()],
-                limit: None,
-            }],
+            rules: vec![
+                pyo_proto::firewall::FirewallRule {
+                    id: "fwr_1".into(),
+                    action: "rateLimit".into(),
+                    operator: "in".into(),
+                    sources: vec![],
+                    limit: Some(pyo_proto::firewall::RateLimit {
+                        requests: 60,
+                        per: "minute".into(),
+                    }),
+                },
+                pyo_proto::firewall::FirewallRule {
+                    id: "fwr_2".into(),
+                    action: "block".into(),
+                    operator: "in".into(),
+                    sources: vec!["203.0.113.0/24".into()],
+                    limit: None,
+                },
+            ],
         });
         let r = route_objects(&s);
         let tn = find(&r, "HTTPRoute", "tn--shop-web-http");
@@ -1854,17 +1860,34 @@ mod tests {
             tn["spec"]["parentRefs"],
             json!([{ "name": system::TAILNET_GATEWAY, "sectionName": system::TAILNET_HTTPS_SECTION }])
         );
-        assert_eq!(tn["spec"]["hostnames"], json!(["blog.tail1234.ts.net", "Docs.Tail1234.TS.NET"]));
+        assert_eq!(
+            tn["spec"]["hostnames"],
+            json!(["blog.tail1234.ts.net", "Docs.Tail1234.TS.NET"])
+        );
         for o in &r.objects {
             let hosts = o["spec"]["hostnames"].to_string() + &o["spec"]["listeners"].to_string();
             if o["metadata"]["name"] != "tn--shop-web-http" {
                 assert!(!hosts.to_ascii_lowercase().contains(".ts.net"), "{o}");
             }
         }
-        assert!(!r.objects.iter().any(|o| o["kind"] == "Certificate" && o.to_string().contains("ts.net")));
-        assert!(!r.objects.iter().any(|o| o["kind"] == "SecurityPolicy" && o["metadata"]["name"] == "tn--shop-web-http"));
-        assert!(r.objects.iter().any(|o| o["kind"] == "SecurityPolicy" && o["metadata"]["name"] == "shop-web-https-http"));
-        assert!(r.objects.iter().any(|o| o["kind"] == "BackendTrafficPolicy" && o["metadata"]["name"] == "tn--shop-web-http"));
+        assert!(
+            !r.objects
+                .iter()
+                .any(|o| o["kind"] == "Certificate" && o.to_string().contains("ts.net"))
+        );
+        assert!(
+            !r.objects
+                .iter()
+                .any(|o| o["kind"] == "SecurityPolicy"
+                    && o["metadata"]["name"] == "tn--shop-web-http")
+        );
+        assert!(r.objects.iter().any(
+            |o| o["kind"] == "SecurityPolicy" && o["metadata"]["name"] == "shop-web-https-http"
+        ));
+        assert!(
+            r.objects.iter().any(|o| o["kind"] == "BackendTrafficPolicy"
+                && o["metadata"]["name"] == "tn--shop-web-http")
+        );
     }
 
     fn domain(host: &str, port: &str, tls: &str, redirect: bool) -> DomainSpec {

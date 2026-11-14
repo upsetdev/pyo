@@ -688,7 +688,8 @@ pub const TAILNET_VIP_SERVICE: &str = "pyo-tailnet-vip";
 /// Tailnet names end with this (MagicDNS).
 pub const TAILNET_SUFFIX: &str = ".ts.net";
 /// A tailnet name, as the admission policy checks Pyo's own routes' ones.
-pub const TAILNET_HOST_RE: &str = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\.ts\.net$";
+pub const TAILNET_HOST_RE: &str =
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\.ts\.net$";
 /// Services' routes on the tailnet Gateway start with this ("tn--<base>-<port>",
 /// never a project's: those start with its namespace).
 pub const TAILNET_ROUTE_PREFIX: &str = "tn--";
@@ -1279,11 +1280,17 @@ mod tests {
         let objs = tailnet_objects(&[], &certs, &own);
         let gw = objs.iter().find(|o| o["kind"] == "Gateway").unwrap();
         let listeners = gw["spec"]["listeners"].as_array().unwrap();
-        let ports: Vec<i64> = listeners.iter().map(|l| l["port"].as_i64().unwrap()).collect();
+        let ports: Vec<i64> = listeners
+            .iter()
+            .map(|l| l["port"].as_i64().unwrap())
+            .collect();
         assert_eq!(ports, [TAILNET_HTTP_PORT as i64, TAILNET_HTTPS_PORT as i64]);
         let https = &listeners[1];
         assert_eq!(https["protocol"], "HTTPS");
-        assert!(https.get("hostname").is_none(), "one listener, a certificate per name");
+        assert!(
+            https.get("hostname").is_none(),
+            "one listener, a certificate per name"
+        );
         assert_eq!(
             https["tls"]["certificateRefs"],
             json!([
@@ -1313,12 +1320,27 @@ mod tests {
         for r in &routes {
             assert_eq!(r["spec"]["parentRefs"][0]["name"], TAILNET_GATEWAY);
         }
-        let dash = routes.iter().find(|r| r["metadata"]["name"] == TAILNET_DASHBOARD.0).unwrap();
+        let dash = routes
+            .iter()
+            .find(|r| r["metadata"]["name"] == TAILNET_DASHBOARD.0)
+            .unwrap();
         assert_eq!(dash["spec"]["hostnames"], json!(["pyo.tail1234.ts.net"]));
-        assert_eq!(dash["spec"]["parentRefs"][0]["sectionName"], TAILNET_HTTPS_SECTION);
-        let redirect = routes.iter().find(|r| r["metadata"]["name"] == TAILNET_REDIRECT).unwrap();
-        assert_eq!(redirect["spec"]["parentRefs"][0]["sectionName"], TAILNET_HTTP_SECTION);
-        assert_eq!(redirect["spec"]["rules"][0]["filters"][0]["requestRedirect"]["scheme"], "https");
+        assert_eq!(
+            dash["spec"]["parentRefs"][0]["sectionName"],
+            TAILNET_HTTPS_SECTION
+        );
+        let redirect = routes
+            .iter()
+            .find(|r| r["metadata"]["name"] == TAILNET_REDIRECT)
+            .unwrap();
+        assert_eq!(
+            redirect["spec"]["parentRefs"][0]["sectionName"],
+            TAILNET_HTTP_SECTION
+        );
+        assert_eq!(
+            redirect["spec"]["rules"][0]["filters"][0]["requestRedirect"]["scheme"],
+            "https"
+        );
         // On another cluster: no routes of Pyo's own.
         let other = tailnet_objects(&[], &certs, &TailnetOwn::default());
         assert_eq!(other.iter().filter(|o| o["kind"] == "HTTPRoute").count(), 1);
@@ -1754,7 +1776,7 @@ mod tests {
                 },
             )
             .into_iter()
-                .filter(|o| o["kind"] != "HTTPRoute"),
+            .filter(|o| o["kind"] != "HTTPRoute"),
         );
         for o in pinned {
             let key = (

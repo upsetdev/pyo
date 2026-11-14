@@ -1842,9 +1842,9 @@ pub fn reserved_public_port(protocol: &str, port: i32) -> Option<&'static str> {
     match port {
         80 | 443 => Some("Ports 80 and 443 are for websites: add a domain to the service instead."),
         10080 | 10443 => Some("The gateway uses this port for websites (80 and 443 inside it)."),
-        p if system::TAILNET_PORTS.contains(&p) => Some(
-            "The gateway uses this port for names on your tailnet.",
-        ),
+        p if system::TAILNET_PORTS.contains(&p) => {
+            Some("The gateway uses this port for names on your tailnet.")
+        }
         19000..=19003 => Some("The gateway uses ports 19000 to 19003 itself."),
         p if SERVER_TCP_PORTS.contains(&p) => {
             Some("The servers need this port themselves (SSH, DNS lookups, Kubernetes).")
