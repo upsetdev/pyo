@@ -4,6 +4,7 @@
 // requires on anything that changes state.
 
 import type {
+  CloudOptions,
   DatabaseExtension,
   AnalyticsSummary,
   AnalyticsTimeseries,
@@ -278,6 +279,10 @@ export type RegistryToken = {
 };
 export const fetchRegistry = (team: string) =>
   request<RegistryInfo>(`/api/v1/registry?${new URLSearchParams({ team })}`);
+
+/** Locations, server types and prices at the team's cloud provider. */
+export const fetchCloudOptions = (team: string) =>
+  request<CloudOptions>(`/api/v1/cloud/options?${new URLSearchParams({ team })}`);
 
 export const fetchImages = (team: string) =>
   request<{ images: TeamImage[] }>(

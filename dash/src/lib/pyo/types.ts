@@ -1778,6 +1778,82 @@ export type TailscaleInfo = {
   hostName?: string | null;
 };
 
+/** A team's cloud provider (Integrations › Hetzner): the token's end only. */
+export type CloudConnection = {
+  teamId: string;
+  provider: "hetzner";
+  /** The token's last characters. */
+  hint: string;
+  createdAt: Timestamp;
+};
+
+export type CloudServerState =
+  | "creating"
+  | "booting"
+  | "joining"
+  | "ready"
+  | "failed"
+  | "removing";
+
+/** A server Pyo made at a cloud provider. */
+export type CloudServer = {
+  id: string;
+  teamId: string;
+  provider: "hetzner";
+  /** Null once its cluster was removed. */
+  clusterId: string | null;
+  name: string;
+  /** The cluster's first server (its control plane). */
+  firstServer: boolean;
+  builder: boolean;
+  location: string;
+  serverType: string;
+  /** A month, before VAT. */
+  monthly: number;
+  currency: string;
+  ipv4: string | null;
+  state: CloudServerState;
+  error: string | null;
+  /** Tailnet Lock waits for its key: run this on a signing device. */
+  signCommand: string | null;
+  createdBy: string;
+  createdAt: Timestamp;
+  /** When Pyo stops waiting for it. */
+  deadlineAt: Timestamp;
+  readyAt: Timestamp | null;
+};
+
+export type CloudLocation = {
+  name: string;
+  city: string;
+  country: string;
+  networkZone: string;
+};
+
+export type CloudServerType = {
+  name: string;
+  description: string;
+  cores: number;
+  memoryGb: number;
+  diskGb: number;
+  cpuType: string;
+  architecture: string;
+  /** Pyo's servers run x86-64. */
+  supported: boolean;
+  /** A month per location, before VAT, with its IPv4 address. */
+  prices: Record<string, number>;
+  /** Locations that can make it now. */
+  available: string[];
+};
+
+/** GET /cloud/options: read live from the provider. */
+export type CloudOptions = {
+  provider: "hetzner";
+  currency: string;
+  locations: CloudLocation[];
+  serverTypes: CloudServerType[];
+};
+
 /** One check of the Tailscale client (Test). */
 export type TailscaleCheck = { name: string; ok: boolean; message: string };
 

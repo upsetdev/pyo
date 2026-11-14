@@ -5,6 +5,7 @@ import { SecretStoresPanel } from "~/components/pyo/SecretStores";
 import { CloudflarePanel } from "~/components/pyo/Cloudflare";
 import { TailscalePanel } from "~/components/pyo/Tailscale";
 import { GitlabRows } from "~/components/pyo/GitConnections";
+import { HetznerPanel } from "~/components/pyo/Hetzner";
 import { useEffect, useState, type ReactNode } from "react";
 import { Badge, ClusterStatusBadge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -53,7 +54,10 @@ function Integrations() {
   return (
     <Page width="max-w-4xl">
       <PageHeader title="Integrations" />
-      <TailscalePanel />
+      <div id="tailscale" className="scroll-mt-4">
+        <TailscalePanel />
+      </div>
+      <HetznerPanel />
       <Panel title="Git providers">
         <ul className="list-rows">
           <GithubRows />

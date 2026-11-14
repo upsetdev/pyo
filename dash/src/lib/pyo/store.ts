@@ -52,6 +52,9 @@ import type {
   CloudflareAccount,
   GitConnection,
   GitConnectionCheck,
+  CloudConnection,
+  CloudLocation,
+  CloudServer,
   IpMode,
   OAuthGrant,
   PortMapping,
@@ -93,6 +96,10 @@ export type PyoState = {
   builders: Builder[];
   /** Tailscale for the whole Pyo, or null when it isn't set up. */
   tailscale: TailscaleInfo | null;
+  /** Teams' cloud providers (Integrations › Hetzner). */
+  cloudConnections: CloudConnection[];
+  /** Servers Pyo made at a cloud provider, until they're deleted. */
+  cloudServers: CloudServer[];
   /** Pyo on the public IP; null unless you're the installation's admin. */
   publicDashboard: PublicDashboard | null;
   /** Teams' Cloudflare accounts (zones only). */
@@ -316,6 +323,8 @@ function empty(): PyoState {
     observabilitySettings: { ipMode: "none", enabled: true, small: null },
     builders: [],
     tailscale: null,
+    cloudConnections: [],
+    cloudServers: [],
     publicDashboard: null,
     cloudflare: [],
     ...loadPrefs(),
@@ -2457,6 +2466,62 @@ export const api = {
   },
   renameTailscaleName(kind: "dashboard" | "registry", name: string) {
     return attempt("renameTailscaleName", { kind, name: name.trim() });
+  },
+  saveHetzner(token: string) {
+    return attempt<{ locations: CloudLocation[] }>("saveHetzner", {
+      teamId: get().currentTeamId,
+      token: token.trim(),
+    });
+  },
+  testHetzner() {
+    return attempt<{ locations: CloudLocation[] }>("testHetzner", {
+      teamId: get().currentTeamId,
+    });
+  },
+  removeHetzner() {
+    return send("removeHetzner", { teamId: get().currentTeamId });
+  },
+  /** Confirmed with its price already: the API asks otherwise. */
+  createCloudServer(input: {
+    clusterId: string;
+    name: string;
+    location: string;
+    serverType: string;
+    builder: boolean;
+    sshKey?: string;
+    tags: string[];
+  }) {
+    return attempt<{ id: string }>("createCloudServer", {
+      id: newId("cs"),
+      ...input,
+      sshKey: input.sshKey?.trim() || undefined,
+      confirm: true,
+    });
+  },
+  /** A new cluster whose first server Pyo makes. Confirmed with its price. */
+  createCloudCluster(input: {
+    name: string;
+    location: string;
+    serverType: string;
+    sshKey?: string;
+    tags: string[];
+  }) {
+    return attempt<{ id: string; clusterId: string }>("createCloudCluster", {
+      id: newId("cl"),
+      serverId: newId("cs"),
+      teamId: get().currentTeamId,
+      ...input,
+      sshKey: input.sshKey?.trim() || undefined,
+      confirm: true,
+    });
+  },
+  /** Confirmed with the cost that stops. */
+  deleteCloudServer(id: string) {
+    update((s) => {
+      const c = s.cloudServers.find((x) => x.id === id);
+      if (c) c.state = "removing";
+    });
+    return send("deleteCloudServer", { id, confirm: true });
   },
   setPublicDashboard(open: boolean) {
     update((s) => {

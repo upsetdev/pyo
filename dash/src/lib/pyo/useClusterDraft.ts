@@ -22,7 +22,13 @@ export type ClusterDraft = {
  * issues its agent token) and edits after that rename it. Leaving without
  * `keep` takes it back, unless its agent has connected (the API checks).
  */
-export function useClusterDraft(name = "", tags: string[] = [], publicNet = false) {
+export function useClusterDraft(
+  name = "",
+  tags: string[] = [],
+  publicNet = false,
+  /** Made another way (Hetzner): no command, so no draft. */
+  paused = false,
+) {
   const s = usePyo();
   const [draft, setDraft] = useState<ClusterDraft | null>(null);
   const draftRef = useRef<ClusterDraft | null>(null);
@@ -65,7 +71,7 @@ export function useClusterDraft(name = "", tags: string[] = [], publicNet = fals
   const live = useLiveCommand<ClusterDraft>(
     `${where}|${name}|${tags.join(",")}|${publicNet}`,
     // Connected: its token isn't to be changed from here.
-    showForm && !nameError && !connected,
+    showForm && !nameError && !connected && !paused,
     () => {
       const next = chain.current.then(async () => {
         const d = draftRef.current;

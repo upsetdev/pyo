@@ -15,6 +15,7 @@ import { parseLocation } from "~/lib/pyo/location";
 import { api, serversOf, usePyo, type PyoState } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Application, ClusterServer } from "~/lib/pyo/types";
+import { cloudServerOf, money } from "~/components/pyo/Hetzner";
 
 /** Run on the machine to finish a drained server's removal. */
 export const UNINSTALL_COMMAND = "sudo /usr/local/bin/k3s-agent-uninstall.sh";
@@ -111,6 +112,8 @@ export function RemoveServerDialog({
   const n = node;
   const c = n ? removalCheck(s, n) : null;
   const force = !!c && !c.online;
+  // Made by Pyo at Hetzner: deleted there once it's out of the cluster.
+  const cloud = n ? cloudServerOf(s, n.clusterId, n.name) : undefined;
   // Offline: what's on it is lost or restarts elsewhere anyway, so only control-plane/last-server block.
   const stop =
     c &&
@@ -133,14 +136,14 @@ export function RemoveServerDialog({
       description={
         c?.blocked
           ? undefined
-          : force
-            ? "Offline: removed now. Services restart elsewhere."
-            : "Services move elsewhere first."
+          : `${force ? "Offline: removed now. Services restart elsewhere." : "Services move elsewhere first."}${cloud ? " Then Hetzner deletes it." : ""}`
       }
       onSubmit={async () => {
         if (!n || stop) return;
         setBusy(true);
-        const r = await api.removeServer(n.id, force);
+        const r = cloud
+          ? await api.deleteCloudServer(cloud.id)
+          : await api.removeServer(n.id, force);
         setBusy(false);
         if (r) {
           toast({
@@ -223,6 +226,12 @@ export function RemoveServerDialog({
                   }
                 />
               ) : null}
+              {cloud ? (
+                <Row
+                  label="Stops"
+                  value={`${money(cloud.currency, cloud.monthly)} a month at Hetzner`}
+                />
+              ) : null}
               {c.builders.length ? (
                 <Row
                   label="Builders removed with it"
@@ -231,7 +240,7 @@ export function RemoveServerDialog({
               ) : null}
             </ul>
           ) : null}
-          {!c.blocked && !force ? (
+          {!c.blocked && !force && !cloud ? (
             <p className="text-[12.5px] text-muted-foreground">
               Pyo&apos;s own system workloads on it move too. Nothing is
               deleted from the machine until you uninstall k3s there.
@@ -255,8 +264,22 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 /** Where a server's removal is, with what to do next. */
 export function RemovalNote({ n }: { n: ClusterServer }) {
   const r = n.removal;
+  const s = usePyo();
   const [busy, setBusy] = useState(false);
   if (!r) return null;
+  const cloud = cloudServerOf(s, n.clusterId, n.name);
+  if (cloud?.state === "removing" && r.state !== "failed")
+    return (
+      <StatusNote
+        tone="progress"
+        icon={<ArrowsClockwiseIcon size={15} className="animate-spin" />}
+        title="Deleting at Hetzner"
+      >
+        {r.state === "draining"
+          ? `Pyo is moving ${n.name}'s services to the other servers. Then Hetzner deletes it.`
+          : `${n.name} leaves the cluster and your tailnet, and Hetzner deletes it.`}
+      </StatusNote>
+    );
   const cancel = async () => {
     setBusy(true);
     if (await api.cancelServerRemoval(n.id))

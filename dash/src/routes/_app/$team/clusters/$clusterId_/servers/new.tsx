@@ -3,9 +3,18 @@ import { TreeStructureIcon } from "@phosphor-icons/react";
 import { site } from "~/config/site";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { ButtonLink } from "~/components/ui/Button";
-import { Field, Input, Select } from "~/components/ui/Field";
-import { EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
+import { Button, ButtonLink } from "~/components/ui/Button";
+import { ConfirmDialog } from "~/components/ui/Dialog";
+import { Field, Input, Segmented, Select } from "~/components/ui/Field";
+import { Callout, EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
+import {
+  CloudProgress,
+  CloudServerFields,
+  hetznerOf,
+  priceOf,
+  useCloudOptions,
+  type CloudChoice,
+} from "~/components/pyo/Hetzner";
 import { TagInput } from "~/components/ui/TagInput";
 import { LiveCommand } from "~/components/pyo/LiveCommand";
 import { SetupChecklist } from "~/components/pyo/SetupChecklist";
@@ -77,7 +86,23 @@ function JoinForm({
   });
   const [name, setName] = useState("");
   const [tags, setTags] = useState<string[]>([]);
+  // Run the command on a machine, or have Pyo make one at Hetzner.
+  const [how, setHow] = useState<"command" | "hetzner">("command");
+  const [builder, setBuilder] = useState(false);
+  const [choice, setChoice] = useState<CloudChoice>({
+    location: "",
+    serverType: "",
+    sshKey: "",
+  });
+  const [confirming, setConfirming] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
+  const hetzner = hetznerOf(s);
+  const { options } = useCloudOptions(how === "hetzner" && !!hetzner);
   const value = name || suggested;
+  const cloud = s.cloudServers.find(
+    (x) => x.clusterId === clusterId && x.name === value,
+  );
   const connected = c.status === "connected" || c.status === "degraded";
   const joined = existing.has(value)
     ? undefined
@@ -89,9 +114,26 @@ function JoinForm({
       : existing.has(value)
         ? "A server with this name exists."
         : "";
+  const price = priceOf(options, choice);
+  const create = async () => {
+    setConfirming(false);
+    setCreating(true);
+    setCreateError("");
+    const r = await api.createCloudServer({
+      clusterId,
+      name: value,
+      location: choice.location,
+      serverType: choice.serverType,
+      builder,
+      sshKey: choice.sshKey,
+      tags,
+    });
+    setCreating(false);
+    if ("error" in r) setCreateError(r.error);
+  };
   const live = useLiveCommand(
     `${value}|${tags.join(",")}`,
-    connected && !error && !joined,
+    how === "command" && connected && !error && !joined,
     () => api.draftJoin(clusterId, value, tags),
   );
   const made = live.data;
@@ -102,6 +144,15 @@ function JoinForm({
       <PageHeader
         title="Add server"
         description="Join a server to a cluster."
+      />
+      <Segmented
+        label="How"
+        value={how}
+        onChange={setHow}
+        options={[
+          { value: "command", label: "Run a command" },
+          { value: "hetzner", label: "Hetzner" },
+        ]}
       />
       <Panel>
         <div className="space-y-5 p-5">
@@ -116,7 +167,7 @@ function JoinForm({
                   {...p}
                   mono
                   value={value}
-                  disabled={!!joined}
+                  disabled={!!joined || !!cloud}
                   onChange={(e) => setName(e.target.value.toLowerCase())}
                   autoFocus
                 />
@@ -169,6 +220,60 @@ function JoinForm({
               )}
             </Field>
           </div>
+          {how === "hetzner" ? (
+            <div className="space-y-4 text-[13px]">
+              <NeedsTailscale />
+              {!hetzner ? (
+                <Callout tone="warning">
+                  Connect Hetzner first.{" "}
+                  <ButtonLink href="/integrations" size="xs" variant="secondary">
+                    Integrations
+                  </ButtonLink>
+                </Callout>
+              ) : cloud ? (
+                <CloudProgress server={cloud} />
+              ) : (
+                <>
+                  <Segmented
+                    label="Role"
+                    value={builder ? "builder" : "services"}
+                    onChange={(v) => setBuilder(v === "builder")}
+                    options={[
+                      { value: "services", label: "Runs services" },
+                      { value: "builder", label: "Builds only" },
+                    ]}
+                  />
+                  <CloudServerFields value={choice} onChange={setChoice} />
+                  {createError ? <Callout tone="danger">{createError}</Callout> : null}
+                  {!connected ? (
+                    <Callout tone="warning">The cluster isn't connected.</Callout>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    disabled={
+                      !!error || !price || !connected || !s.tailscale || creating
+                    }
+                    onClick={() => setConfirming(true)}
+                  >
+                    {creating
+                      ? "Creating…"
+                      : price
+                        ? `Create for ${price}/mo`
+                        : "Pick a server type"}
+                  </Button>
+                  <ConfirmDialog
+                    open={confirming}
+                    onClose={() => setConfirming(false)}
+                    onConfirm={() => void create()}
+                    tone="primary"
+                    title={`Create ${value} at Hetzner?`}
+                    description={`${choice.serverType} in ${choice.location}. ${price ?? ""} a month, before VAT.`}
+                    confirmLabel="Create server"
+                  />
+                </>
+              )}
+            </div>
+          ) : (
           <div className="space-y-2 text-[13px]">
             <p className="font-medium">Run this on the machine</p>
             <NeedsTailscale />
@@ -217,9 +322,10 @@ function JoinForm({
               ) : null}
             </LiveCommand>
           </div>
+          )}
         </div>
       </Panel>
-      {made || joined ? (
+      {(how === "command" && made) || joined ? (
         <SetupChecklist
           title={`Waiting for ${value} to join`}
           doneTitle={`${value} joined`}
@@ -258,7 +364,7 @@ function JoinForm({
           </ButtonLink>
         ) : (
           <ButtonLink href={`${base}/servers`} variant="ghost" size="sm">
-            {made ? "Finish later" : "Cancel"}
+            {made || cloud ? "Finish later" : "Cancel"}
           </ButtonLink>
         )}
       </div>
