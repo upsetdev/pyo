@@ -2,6 +2,7 @@ import { ArrowsClockwiseIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { BrandMark, CLOUDFLARE_LOGO } from "~/components/pyo/common";
 import { Badge } from "~/components/ui/Badge";
+import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { SecretInput, Switch } from "~/components/ui/Field";
@@ -13,6 +14,7 @@ import {
   cloudflareIn,
   cloudflareZoneFor,
   roleIn,
+  servicePath,
   usePyo,
 } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
@@ -362,6 +364,14 @@ export function DnsRecordLine({ app, d }: { app: Application; d: Domain }) {
           ? "· Proxied once the certificate is issued"
           : null}
       {r.error ? <span className="text-destructive">· {r.error}</span> : null}
+      {(r.proxied || r.proxy) && !app.behindCdn ? (
+        <AppLink
+          href={servicePath(app.id, "firewall", s)}
+          className="font-medium text-primary hover:text-primary/80"
+        >
+          · Turn on Behind Cloudflare
+        </AppLink>
+      ) : null}
     </p>
   );
 }

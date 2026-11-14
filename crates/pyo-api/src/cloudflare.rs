@@ -17,10 +17,8 @@
 //! - Proxied by Cloudflare: made DNS-only first and proxied once the
 //!   domain's certificate is issued ([`proxy_ready`]), so Let's Encrypt's
 //!   first HTTP-01 check reaches the cluster directly.
-//!
-//! TODO(firewall-cdn-presets): a proxied record should suggest the
-//! service's "Behind Cloudflare" firewall switch (branch
-//! feat/firewall-cdn-presets) once both have landed.
+//! - A proxied record suggests the service's "Behind Cloudflare" firewall
+//!   switch (the dashboard's DNS record line), until it's on.
 
 use std::{collections::HashMap, time::Duration};
 
