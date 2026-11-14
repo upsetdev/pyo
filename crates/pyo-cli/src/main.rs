@@ -10,6 +10,7 @@ mod db;
 mod domain;
 mod dotenv;
 mod exec;
+mod firewall;
 mod import;
 mod login;
 mod registry;
@@ -178,6 +179,13 @@ enum Command {
         #[command(flatten)]
         which: Which,
     },
+    /// Who may reach the service: its firewall rules, and a CDN in front.
+    Firewall {
+        #[command(subcommand)]
+        command: FirewallCommand,
+        #[command(flatten)]
+        which: Which,
+    },
     /// Bring services over from Coolify, Dokploy, Railway or Vercel: see
     /// what they become, then import them. Owners and admins.
     Import {
@@ -251,6 +259,50 @@ enum DomainCommand {
         /// Don't ask to confirm.
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum FirewallCommand {
+    /// The rules, in the order they're checked.
+    List,
+    /// Add a rule at the end.
+    ///
+    /// Values: IP addresses and ranges, two-letter country codes, or
+    /// presets: cloudflare, fastly, bunny, cloudfront (a CDN's current
+    /// ranges), tailnet, private. None: any client.
+    Add {
+        /// allow, block or rate-limit.
+        action: String,
+        /// The values to match.
+        values: Vec<String>,
+        /// Match clients not in the values instead.
+        #[arg(long)]
+        not: bool,
+        /// A rate limit's requests from each client address.
+        #[arg(long)]
+        requests: Option<u32>,
+        /// A rate limit's window: second or minute.
+        #[arg(long, value_parser = ["second", "minute"])]
+        per: Option<String>,
+        /// A name for it.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Remove a rule, by its number in the list or its id.
+    Remove {
+        rule: String,
+        /// Don't ask to confirm.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Put the service's websites behind a CDN, or "off".
+    ///
+    /// Behind Cloudflare, only Cloudflare reaches them, and rules, rate
+    /// limits and analytics see the visitor it forwards.
+    Behind {
+        #[arg(value_parser = ["cloudflare", "off"])]
+        cdn: String,
     },
 }
 
@@ -685,6 +737,39 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     })?;
                     volume::attach(&api, &volume, &service, path, detach).await
                 }
+            }
+        }
+        Command::Firewall { command, which } => {
+            let api = config::client(url, token)?;
+            let s = which.service.as_deref();
+            match command {
+                FirewallCommand::List => firewall::list(&api, s).await,
+                FirewallCommand::Add {
+                    action,
+                    values,
+                    not,
+                    requests,
+                    per,
+                    name,
+                } => {
+                    firewall::add(
+                        &api,
+                        s,
+                        firewall::NewRule {
+                            action,
+                            not,
+                            sources: values,
+                            requests,
+                            per,
+                            name,
+                        },
+                    )
+                    .await
+                }
+                FirewallCommand::Remove { rule, yes } => {
+                    firewall::remove(&api, s, &rule, yes).await
+                }
+                FirewallCommand::Behind { cdn } => firewall::behind(&api, s, &cdn).await,
             }
         }
         Command::Domain { command, which } => {
