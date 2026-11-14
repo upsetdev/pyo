@@ -239,6 +239,23 @@ function PublicDashboardRow() {
   );
 }
 
+/** Pyo's own server moving k3s onto the tailnet, while it happens or if it failed. */
+function HostMove() {
+  const move = usePyo().tailscale?.hostMove;
+  if (!move) return null;
+  return (
+    <li className="px-4 py-3">
+      {move.state === "moving" ? (
+        <Callout tone="info">Moving this server to your tailnet…</Callout>
+      ) : (
+        <Callout tone="danger">
+          This server couldn't move to your tailnet. {move.error ?? ""} Pyo tries again tomorrow.
+        </Callout>
+      )}
+    </li>
+  );
+}
+
 /** Integrations › Tailscale: the OAuth client for the whole Pyo (admins). */
 export function TailscalePanel() {
   const s = usePyo();
@@ -264,6 +281,7 @@ export function TailscalePanel() {
             </span>
             {ts ? <Badge tone="success">Set up</Badge> : <Badge>Not set up</Badge>}
           </li>
+          <HostMove />
         </ul>
       </Panel>
     );
@@ -322,6 +340,7 @@ export function TailscalePanel() {
             <NameRow kind="registry" label="Registry" />
           </>
         ) : null}
+        <HostMove />
         <PublicDashboardRow />
       </ul>
       <ConfirmDialog

@@ -1660,6 +1660,8 @@ export type TailscaleInfo = {
   registry: string | null;
   /** Pyo's own server is on the tailnet. */
   onTailnet: boolean;
+  /** Pyo's own server moving k3s onto the tailnet: while it happens, or why it failed. */
+  hostMove: { state: "moving" | "failed"; error?: string | null } | null;
   clientId?: string;
   /** The secret's last characters. */
   hint?: string;

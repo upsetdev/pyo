@@ -1075,6 +1075,7 @@ pub async fn snapshot(db: &PgPool, admin: bool) -> ApiResult<Value> {
         "dashboard": a.tailnet,
         "registry": a.registry,
         "onTailnet": a.host_ip.is_some(),
+        "hostMove": host_move(db).await?,
     });
     if admin {
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(
@@ -1098,6 +1099,22 @@ pub async fn snapshot(db: &PgPool, admin: bool) -> ApiResult<Value> {
     Ok(v)
 }
 
+/// Pyo's own server moving k3s onto the tailnet: `{"state": "moving"}`, or
+/// `{"state": "failed", "error"}`. Null once done, or when it never did.
+async fn host_move(db: &PgPool) -> ApiResult<Value> {
+    let v: Option<(Value, bool)> = sqlx::query_as(
+        "SELECT value, updated_at < now() - interval '30 minutes' FROM pyo.settings WHERE key = 'host_k3s'",
+    )
+    .fetch_optional(db)
+    .await?;
+    Ok(match v {
+        // A move that never said how it ended: Pyo's own restart lost it.
+        Some((v, stale)) if v["state"] == "moving" && !stale => v,
+        Some((v, _)) if v["state"] == "failed" => v,
+        _ => Value::Null,
+    })
+}
+
 /// When Pyo's server last got a key to join with: one at a time.
 static HOST_KEY_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -1106,7 +1123,26 @@ static HOST_KEY_AT: Mutex<Option<Instant>> = Mutex::new(None);
 /// as Pyo's tailnet address. Answers `{"state": "off"}` without Tailscale,
 /// `{"state": "ok"}` once it's on the tailnet, or `{"state": "join",
 /// "authKey"}` to join it (at most one key every ten minutes).
-pub async fn host_report(s: &AppState, ip: &str, name: &str) -> ApiResult<Value> {
+pub async fn host_report(
+    s: &AppState,
+    ip: &str,
+    name: &str,
+    k3s: &str,
+    error: &str,
+) -> ApiResult<Value> {
+    // Moving k3s onto the tailnet: what the dashboard shows meanwhile.
+    if matches!(k3s, "moving" | "done" | "failed") {
+        let error: String = error.trim().chars().take(300).collect();
+        sqlx::query(
+            "INSERT INTO pyo.settings (key, value) VALUES ('host_k3s', jsonb_build_object('state', $1::text, 'error', $2::text))
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()",
+        )
+        .bind(k3s)
+        .bind((k3s == "failed").then_some(error))
+        .execute(&s.db)
+        .await?;
+        tracing::info!(state = k3s, "this machine: k3s onto the tailnet");
+    }
     let ip = ip.trim();
     let ip = crate::freedomain::tailnet_v4(ip).map(|v| v.to_string());
     let name = name.trim().trim_end_matches('.').to_ascii_lowercase();

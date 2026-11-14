@@ -677,9 +677,15 @@ pub struct ThisMachineTailnet {
     ip: String,
     #[serde(default)]
     name: String,
+    /// Moving k3s onto the tailnet: "moving", "done" or "failed".
+    #[serde(default)]
+    k3s: String,
+    /// Why it failed.
+    #[serde(default)]
+    error: String,
 }
 
-/// POST /install/this-machine/tailnet (form: key, ip, name): this machine's
+/// POST /install/this-machine/tailnet (form: key, ip, name, k3s, error): this machine's
 /// Tailscale, from its timer, with the bootstrap key as for
 /// [`this_machine`]. Answers what it does next (tailscale.rs `host_report`).
 pub async fn this_machine_tailnet(
@@ -691,7 +697,7 @@ pub async fn this_machine_tailnet(
         return Err(ApiError::not_found("Install key"));
     }
     Ok(axum::Json(
-        crate::tailscale::host_report(&s, &f.ip, &f.name).await?,
+        crate::tailscale::host_report(&s, &f.ip, &f.name, &f.k3s, &f.error).await?,
     ))
 }
 

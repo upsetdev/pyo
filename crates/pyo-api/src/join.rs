@@ -337,6 +337,40 @@ mod tests {
         assert_eq!(k3s_env(16384), "");
     }
 
+    /// k3s over the tailnet: its own drop-in, written only when it changes
+    /// (Pyo's server restarts k3s only then).
+    #[test]
+    fn k3s_tailnet_drop_in() {
+        let start = CONNECT_SCRIPT.find("# >>> pyo:k3s-tailnet ").unwrap();
+        let end = CONNECT_SCRIPT.find("# <<< pyo:k3s-tailnet\n").unwrap();
+        let block = &CONNECT_SCRIPT[start..end];
+        let dir = std::env::temp_dir().join(format!("pyo-k3s-tailnet-{}", std::process::id()));
+        let file = dir.join("config.yaml.d/40-pyo-tailnet.yaml");
+        let run = |args: &str| {
+            std::process::Command::new("bash")
+                .args(["-c", &format!("{block}\nk3s_tailnet_config {args}")])
+                .env("K3S_TAILNET_CONFIG", &file)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(run("100.64.0.7 100.64.0.7 pyo-1.tail1234.ts.net"));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "node-ip: \"100.64.0.7\"\nflannel-iface: tailscale0\ntls-san+:\n  - \"100.64.0.7\"\n  - \"pyo-1.tail1234.ts.net\"\n"
+        );
+        assert!(
+            !run("100.64.0.7 100.64.0.7 pyo-1.tail1234.ts.net"),
+            "the same: nothing to do"
+        );
+        assert!(run("100.64.0.8"), "a new address");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "node-ip: \"100.64.0.8\"\nflannel-iface: tailscale0\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The helper's k3s config drop-in: what kubelet sets aside for k3s and
     /// the system, by memory, so the scheduler doesn't count it as room.
     #[test]
@@ -455,6 +489,20 @@ mod tests {
                 "{file}'s small_machine differs from connect.sh's"
             );
         }
+        // How they move k3s onto the tailnet, and how both wait for Tailnet Lock.
+        let k3s_tailnet = block("k3s-tailnet", "connect.sh", CONNECT_SCRIPT);
+        for (file, script) in [("join.sh", SCRIPT), ("deploy/install.sh", install)] {
+            assert_eq!(
+                block("k3s-tailnet", file, script),
+                k3s_tailnet,
+                "{file}'s k3s_tailnet_config differs from connect.sh's"
+            );
+        }
+        assert_eq!(
+            block("tailnet-lock", "join.sh", SCRIPT),
+            block("tailnet-lock", "connect.sh", CONNECT_SCRIPT),
+            "join.sh's tailnet_lock_wait differs from connect.sh's"
+        );
         // How both become root.
         assert_eq!(
             block("become-root", "join.sh", SCRIPT),

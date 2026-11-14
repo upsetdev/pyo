@@ -391,26 +391,69 @@ SH
   "${sudo[@]}" tee /usr/local/lib/pyo/tailnet-this-machine.sh >/dev/null <<'SH'
 #!/usr/bin/env bash
 # Tells Pyo this machine's Tailscale (its address and name, none when it's
-# not on a tailnet). Once Tailscale is set up in Pyo and this machine isn't
-# on the tailnet yet, Pyo hands over a single-use key, and connect.sh (from
-# Pyo here) installs Tailscale and joins with it.
+# not on a tailnet). Once Tailscale is set up in Pyo, connect.sh (from Pyo
+# here) puts this machine on the tailnet with the single-use key Pyo hands
+# over, and moves k3s onto it with one restart. Each step is reported, so
+# the dashboard shows it. A move that failed is tried again a day later.
 set -euo pipefail
 exec 9>/run/pyo-tailnet.lock
 flock -n 9 || exit 0
 key=$(cat /etc/pyo/bootstrap-key)
+failed=/etc/pyo/k3s-tailnet-failed
 ip="" name=""
-if command -v tailscale >/dev/null; then
+look() {
+  ip="" name=""
+  command -v tailscale >/dev/null || return 0
   ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
   name=$(tailscale status --json 2>/dev/null | sed -n '/"Self"/,/}/s/^ *"DNSName": *"\([^"]*\)",*$/\1/p' | head -n1 || true)
-fi
-r=$(curl -fsS -m 30 --data-urlencode "key=$key" --data-urlencode "ip=$ip" --data-urlencode "name=${name%.}" \
-  http://127.0.0.1:8000/install/this-machine/tailnet) || exit 0
+}
+# report [k3s state] [error]: Pyo's answer. Pyo may be restarting with k3s,
+# so this tries for a few minutes.
+report() {
+  local i
+  for i in $(seq 36); do
+    curl -fsS -m 30 --data-urlencode "key=$key" --data-urlencode "ip=$ip" --data-urlencode "name=${name%.}" \
+      --data-urlencode "k3s=${1:-}" --data-urlencode "error=${2:-}" \
+      http://127.0.0.1:8000/install/this-machine/tailnet && return 0
+    [ -n "${1:-}" ] || return 1
+    sleep 5
+  done
+  return 1
+}
+# k3s isn't on this tailnet address yet.
+k3s_off_tailnet() {
+  command -v k3s >/dev/null || return 1
+  ! grep -qx "node-ip: \"$ip\"" /etc/rancher/k3s/config.yaml.d/40-pyo-tailnet.yaml 2>/dev/null
+}
+move() { # [auth key]
+  local out rc=0
+  report moving >/dev/null || true
+  out=$(curl -fsS -m 60 http://127.0.0.1:8000/install/connect.sh | TS_AUTHKEY="${1:-}" bash -s -- --tailnet-only 2>&1) || rc=$?
+  printf '%s\n' "$out"
+  look
+  if [ "$rc" = 0 ]; then
+    rm -f "$failed"
+    report done >/dev/null || true
+  else
+    echo "$ip" > "$failed"
+    report failed "$(grep -v '^ *$' <<<"$out" | tail -n1)" >/dev/null || true
+  fi
+}
+look
+r=$(report) || exit 0
 case "$r" in
   *'"state":"join"'*)
     k=$(sed -n 's/.*"authKey":"\([^"]*\)".*/\1/p' <<<"$r")
-    [ -n "$k" ] || exit 0
-    curl -fsS -m 60 http://127.0.0.1:8000/install/connect.sh | TS_AUTHKEY="$k" bash -s -- --tailnet-only
-    exec "$0"
+    if [ -n "$k" ]; then move "$k"; fi
+    ;;
+  *'"state":"ok"'*)
+    # On the tailnet, k3s not yet: unless that failed for this address in
+    # the last day.
+    if [ -n "$ip" ] && k3s_off_tailnet; then
+      if ! grep -qx "$ip" "$failed" 2>/dev/null || [ -n "$(find "$failed" -mmin +1440 2>/dev/null)" ]; then
+        move
+      fi
+    fi
     ;;
 esac
 SH

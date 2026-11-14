@@ -692,6 +692,63 @@ tailnet_lock_wait() {
   exit 1
 }
 # <<< pyo:tailnet-lock
+# >>> pyo:k3s-tailnet (the same in connect.sh, join.sh and deploy/install.sh)
+# k3s over the tailnet: the node's address and flannel's interface are
+# Tailscale's, in their own drop-in. With names, the Kubernetes API's
+# certificate names them too. Succeeds when it wrote something new.
+K3S_TAILNET_CONFIG=${K3S_TAILNET_CONFIG:-/etc/rancher/k3s/config.yaml.d/40-pyo-tailnet.yaml}
+k3s_tailnet_config() { # IP [NAME...]
+  local ip=$1 new n
+  shift
+  new=$(
+    printf 'node-ip: "%s"\nflannel-iface: tailscale0\n' "$ip"
+    if [ $# -gt 0 ]; then
+      echo "tls-san+:"
+      for n in "$@"; do printf '  - "%s"\n' "$n"; done
+    fi
+  )
+  [ -f "$K3S_TAILNET_CONFIG" ] && [ "$(cat "$K3S_TAILNET_CONFIG")" = "$new" ] && return 1
+  mkdir -p "$(dirname "$K3S_TAILNET_CONFIG")"
+  printf '%s\n' "$new" > "$K3S_TAILNET_CONFIG"
+}
+# <<< pyo:k3s-tailnet
+# Pyo's own server, once it's on the tailnet (--tailnet-only): k3s moves
+# to it with one restart, then waits for the server and Pyo to be ready.
+# If k3s doesn't come back, the drop-in goes back as it was, k3s restarts
+# again, and this exits with 3.
+k3s_ready() {
+  local node i d
+  node=$(hostname | tr 'A-Z' 'a-z')
+  for i in $(seq 120); do
+    [ "$(k3s kubectl get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)" = "$1" ] &&
+      k3s kubectl wait --for=condition=Ready "node/$node" --timeout=5s >/dev/null 2>&1 && break
+    sleep 5
+  done
+  [ "$i" -lt 120 ] || return 1
+  for d in $(k3s kubectl -n pyo-system get deployments,statefulsets -o name 2>/dev/null); do
+    k3s kubectl -n pyo-system rollout status "$d" --timeout=300s >/dev/null 2>&1 || return 1
+  done
+}
+k3s_move_to_tailnet() {
+  local old="" node
+  [ -f "$K3S_TAILNET_CONFIG" ] && old=$(cat "$K3S_TAILNET_CONFIG")
+  k3s_tailnet_config "$TS_IP" "$TS_IP" ${TS_NAME:+"$TS_NAME"} || return 0
+  echo "Moving k3s to the tailnet ($TS_IP). It restarts once. Services keep running."
+  systemctl restart k3s
+  if k3s_ready "$TS_IP"; then
+    # Flannel's address for this server, as other servers reach it.
+    node=$(hostname | tr 'A-Z' 'a-z')
+    k3s kubectl annotate node "$node" --overwrite "flannel.alpha.coreos.com/public-ip=$TS_IP" >/dev/null 2>&1 || true
+    echo "k3s is on the tailnet."
+    return 0
+  fi
+  echo "k3s didn't come back on the tailnet. Putting it back." >&2
+  if [ -n "$old" ]; then printf '%s\n' "$old" > "$K3S_TAILNET_CONFIG"; else rm -f "$K3S_TAILNET_CONFIG"; fi
+  systemctl restart k3s
+  k3s_ready "$(k3s kubectl get node "$(hostname | tr 'A-Z' 'a-z')" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)" || true
+  echo "k3s couldn't move to the tailnet, so it's back as it was."
+  exit 3
+}
 # Tailscale, when Pyo is on your tailnet (or this machine already is).
 # TS_NAME: this machine's MagicDNS name, when the tailnet has MagicDNS.
 TS_IP="" TS_NAME=""
@@ -710,6 +767,9 @@ if [ -n "$TS_AUTHKEY" ] || [ -n "$TAILNET_ONLY" ] || command -v tailscale >/dev/
 fi
 if [ -n "$TAILNET_ONLY" ]; then
   echo "$(hostname) is on your tailnet: $TS_IP${TS_NAME:+ ($TS_NAME)}."
+  if command -v k3s >/dev/null && systemctl is-active --quiet k3s; then
+    k3s_move_to_tailnet
+  fi
   exit 0
 fi
 
@@ -959,16 +1019,9 @@ CFG
     echo "node-label:" >> /etc/rancher/k3s/config.yaml
     for l in $GPU_LABELS; do echo "  - \"$l\"" >> /etc/rancher/k3s/config.yaml; done
   fi
-  if [ -n "$TS_IP" ]; then
-    cat >> /etc/rancher/k3s/config.yaml <<CFG
-node-ip: "$TS_IP"
-flannel-iface: tailscale0
-tls-san:
-  - "$TS_IP"
-CFG
-    # The Kubernetes API's certificate also names the machine's MagicDNS name.
-    [ -z "$TS_NAME" ] || echo "  - \"$TS_NAME\"" >> /etc/rancher/k3s/config.yaml
-  fi
+  # Over the tailnet; the Kubernetes API's certificate also names the
+  # machine's MagicDNS name.
+  [ -z "$TS_IP" ] || k3s_tailnet_config "$TS_IP" "$TS_IP" ${TS_NAME:+"$TS_NAME"} || true
   small_machine
   k3s_install "$K3S_DIR" server
 else

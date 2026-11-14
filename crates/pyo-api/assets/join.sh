@@ -348,6 +348,26 @@ tailnet_lock_wait() {
   exit 1
 }
 # <<< pyo:tailnet-lock
+# >>> pyo:k3s-tailnet (the same in connect.sh, join.sh and deploy/install.sh)
+# k3s over the tailnet: the node's address and flannel's interface are
+# Tailscale's, in their own drop-in. With names, the Kubernetes API's
+# certificate names them too. Succeeds when it wrote something new.
+K3S_TAILNET_CONFIG=${K3S_TAILNET_CONFIG:-/etc/rancher/k3s/config.yaml.d/40-pyo-tailnet.yaml}
+k3s_tailnet_config() { # IP [NAME...]
+  local ip=$1 new n
+  shift
+  new=$(
+    printf 'node-ip: "%s"\nflannel-iface: tailscale0\n' "$ip"
+    if [ $# -gt 0 ]; then
+      echo "tls-san+:"
+      for n in "$@"; do printf '  - "%s"\n' "$n"; done
+    fi
+  )
+  [ -f "$K3S_TAILNET_CONFIG" ] && [ "$(cat "$K3S_TAILNET_CONFIG")" = "$new" ] && return 1
+  mkdir -p "$(dirname "$K3S_TAILNET_CONFIG")"
+  printf '%s\n' "$new" > "$K3S_TAILNET_CONFIG"
+}
+# <<< pyo:k3s-tailnet
 
 # Tailscale: the cluster talks over your tailnet.
 tailscale_install
@@ -489,9 +509,8 @@ REG
   )
   chmod 600 /etc/rancher/k3s/registries.yaml
 fi
+k3s_tailnet_config "$TS_IP" || true
 cat > /etc/rancher/k3s/config.yaml <<CFG
-node-ip: "$TS_IP"
-flannel-iface: tailscale0
 node-name: "$NODE_NAME"
 node-label:
   - "pyo/via=tailscale"
