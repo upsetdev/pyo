@@ -5,7 +5,7 @@ import { BrandMark, TAILSCALE_LOGO } from "~/components/pyo/common";
 import { Badge } from "~/components/ui/Badge";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
-import { Input } from "~/components/ui/Field";
+import { Input, Switch } from "~/components/ui/Field";
 import { Callout, Panel } from "~/components/ui/Panel";
 import { site } from "~/config/site";
 import { api, usePyo } from "~/lib/pyo/store";
@@ -203,43 +203,26 @@ function NameRow({ kind, label }: { kind: "dashboard" | "registry"; label: strin
 
 function PublicDashboardRow() {
   const s = usePyo();
-  const [confirm, setConfirm] = useState(false);
   const pd = s.publicDashboard;
   if (!pd) return null;
   const onTailnet = !!s.tailscale?.dashboard;
+  const locked = pd.possible && pd.open && !onTailnet;
   return (
-    <li className="space-y-2 px-4 py-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-medium">Public dashboard</p>
-          <p className={`text-[12px] text-muted-foreground ${pd.possible ? "font-mono" : ""}`}>
-            {!pd.possible ? "Off. Ports 80 and 443 don't reach this server." : pd.open ? (pd.host ?? "Starting") : "Closed"}
-          </p>
-        </div>
-        {!pd.possible ? null : pd.open ? (
-          <Button size="xs" variant="secondary" disabled={!onTailnet} onClick={() => setConfirm(true)}>
-            Close
-          </Button>
-        ) : (
-          <Button size="xs" variant="secondary" onClick={() => void api.setPublicDashboard(true)}>
-            Open
-          </Button>
-        )}
-      </div>
-      {pd.possible && pd.open && onTailnet ? (
-        <Callout tone="info">Pyo is on your tailnet. You can close the public dashboard.</Callout>
-      ) : null}
-      <ConfirmDialog
-        open={confirm}
-        onClose={() => setConfirm(false)}
-        onConfirm={() => {
-          setConfirm(false);
-          void api.setPublicDashboard(false);
-        }}
-        tone="primary"
-        title="Close the public dashboard?"
-        description={`Pyo stays at https://${s.tailscale?.dashboard ?? ""} on your tailnet.`}
-        confirmLabel="Close it"
+    <li className="px-4 py-3">
+      <Switch
+        checked={pd.possible && pd.open}
+        disabled={!pd.possible || locked}
+        onChange={(on) => void api.setPublicDashboard(on)}
+        label="Public dashboard"
+        description={
+          !pd.possible
+            ? "Off. Ports 80 and 443 don't reach this server."
+            : locked
+              ? "Stays on until Pyo is on your tailnet."
+              : pd.open
+                ? (pd.host ?? "Starting")
+                : undefined
+        }
       />
     </li>
   );
