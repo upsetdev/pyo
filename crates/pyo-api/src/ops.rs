@@ -6680,7 +6680,6 @@ async fn apply(
                     money(&catalog.currency, monthly)
                 )));
             }
-            crate::check_add_server(tx, &team_id).await?;
             save_server_tags(tx, &cluster_id, &name, &tags).await?;
             let join = join_command(tx, s, &team_id, &cluster_id, &name, builder, wake).await?;
             let command = join["command"].as_str().unwrap_or_default().to_owned();
