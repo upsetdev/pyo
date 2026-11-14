@@ -293,7 +293,6 @@ mod lifecycle_tests {
             cookie_secure: false,
             allow_signup: false,
             builder_image: String::new(),
-            tailnet_api_url: String::new(),
             relay_addr: None,
         };
         let (_stop, stopping) = tokio::sync::watch::channel(false);

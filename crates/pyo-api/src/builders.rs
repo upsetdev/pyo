@@ -468,7 +468,6 @@ pub(crate) mod first_builder_tests {
             cookie_secure: false,
             allow_signup: false,
             builder_image: "builder@sha256:00".into(),
-            tailnet_api_url: String::new(),
             relay_addr: None,
         }
     }

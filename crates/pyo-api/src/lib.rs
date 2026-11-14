@@ -93,8 +93,6 @@ pub struct Config {
     pub allow_signup: bool,
     /// Image of in-cluster builders (BuildKit runs beside it).
     pub builder_image: String,
-    /// This API on the tailnet, for servers that join over it.
-    pub tailnet_api_url: String,
     /// This replica's own host:port (POD_IP), so other replicas can relay
     /// a terminal's agent socket to it. None when there's one process.
     pub relay_addr: Option<String>,
@@ -308,7 +306,6 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         cookie_secure: env("PYO_COOKIE_SECURE", "false") == "true",
         allow_signup: env("PYO_ALLOW_SIGNUP", "false") == "true",
         builder_image: env("PYO_BUILDER_IMAGE", "127.0.0.1:5005/pyo/builder:dev"),
-        tailnet_api_url: env("PYO_TAILNET_API_URL", ""),
         // Other replicas reach this one on the port it listens on.
         relay_addr: std::env::var("POD_IP")
             .ok()
@@ -322,7 +319,6 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             }),
     };
     let _ = deploy::REGISTRY.set(deploy::Registry {
-        push: env("PYO_REGISTRY_PUSH", ""),
         pull: env("PYO_REGISTRY_PULL", deploy::PULL_DEFAULT),
         internal: env("PYO_REGISTRY", deploy::INTERNAL_DEFAULT),
     });
@@ -422,6 +418,10 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             .route("/install/agent.yaml", get(install::manifest))
             .route("/install/gateway-crds.yaml", get(install::gateway_crds))
             .route("/install/this-machine", get(install::this_machine))
+            .route(
+                "/install/this-machine/tailnet",
+                axum::routing::post(install::this_machine_tailnet),
+            )
             .route("/install/join.sh", get(join::serve))
             .route("/install/connect.sh", get(join::serve_connect))
             .fallback_service(tower_http::compression::Compression::new(spa))

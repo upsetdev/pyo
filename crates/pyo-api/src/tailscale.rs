@@ -30,6 +30,8 @@ const API: &str = "https://api.tailscale.com/api/v2";
 pub const TAG: &str = "tag:pyo";
 /// Names Pyo keeps for itself: services' domains can't take them.
 pub const RESERVED: [&str; 2] = ["pyo", "registry"];
+/// Why a join or connect command can't be made yet.
+pub const NEEDED: &str = "Servers join over your tailnet. Set up Tailscale in Integrations first.";
 
 /// The saved client, and Pyo's own names on the tailnet.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -156,11 +158,17 @@ impl Client {
         }
         let r = http()
             .post(format!("{API}/oauth/token"))
-            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
             .body(
                 reqwest::Url::parse_with_params(
                     "http://form/",
-                    &[("client_id", self.id.as_str()), ("client_secret", self.secret.as_str())],
+                    &[
+                        ("client_id", self.id.as_str()),
+                        ("client_secret", self.secret.as_str()),
+                    ],
                 )?
                 .query()
                 .unwrap_or("")
@@ -187,9 +195,16 @@ impl Client {
         Ok(t.to_owned())
     }
 
-    async fn call(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> anyhow::Result<Value> {
+    async fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> anyhow::Result<Value> {
         let token = self.access_token().await?;
-        let mut req = http().request(method, format!("{API}{path}")).bearer_auth(token);
+        let mut req = http()
+            .request(method, format!("{API}{path}"))
+            .bearer_auth(token);
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -212,14 +227,22 @@ impl Client {
 
     /// The tailnet's Services: name ("blog") → (comment, addresses).
     pub async fn services(&self) -> anyhow::Result<BTreeMap<String, (String, Vec<String>)>> {
-        let v = self.call(reqwest::Method::GET, "/tailnet/-/services", None).await?;
+        let v = self
+            .call(reqwest::Method::GET, "/tailnet/-/services", None)
+            .await?;
         Ok(v["vipServices"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|s| {
                 let name = s["name"].as_str()?.strip_prefix("svc:")?.to_owned();
-                Some((name, (s["comment"].as_str().unwrap_or("").to_owned(), strings(&s["addrs"]))))
+                Some((
+                    name,
+                    (
+                        s["comment"].as_str().unwrap_or("").to_owned(),
+                        strings(&s["addrs"]),
+                    ),
+                ))
             })
             .collect())
     }
@@ -229,21 +252,33 @@ impl Client {
     pub async fn create_service(&self, name: &str, comment: &str) -> anyhow::Result<Vec<String>> {
         let body = json!({ "name": format!("svc:{name}"), "comment": comment, "ports": ["tcp:80", "tcp:443"], "tags": [TAG] });
         let v = self
-            .call(reqwest::Method::PUT, &format!("/tailnet/-/services/svc:{name}"), Some(&body))
+            .call(
+                reqwest::Method::PUT,
+                &format!("/tailnet/-/services/svc:{name}"),
+                Some(&body),
+            )
             .await?;
         Ok(strings(&v["addrs"]))
     }
 
     pub async fn delete_service(&self, name: &str) -> anyhow::Result<()> {
-        self.call(reqwest::Method::DELETE, &format!("/tailnet/-/services/svc:{name}"), None)
-            .await
-            .map(|_| ())
+        self.call(
+            reqwest::Method::DELETE,
+            &format!("/tailnet/-/services/svc:{name}"),
+            None,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// A Service's hosts: node ID → approved.
     pub async fn hosts(&self, name: &str) -> anyhow::Result<BTreeMap<String, bool>> {
         let v = self
-            .call(reqwest::Method::GET, &format!("/tailnet/-/services/svc:{name}/devices"), None)
+            .call(
+                reqwest::Method::GET,
+                &format!("/tailnet/-/services/svc:{name}/devices"),
+                None,
+            )
             .await?;
         Ok(v["hosts"]
             .as_array()
@@ -252,7 +287,9 @@ impl Client {
             .filter_map(|h| {
                 Some((
                     h["stableNodeID"].as_str()?.to_owned(),
-                    h["approvalLevel"].as_str().is_some_and(|l| l.starts_with("approved")),
+                    h["approvalLevel"]
+                        .as_str()
+                        .is_some_and(|l| l.starts_with("approved")),
                 ))
             })
             .collect())
@@ -270,7 +307,9 @@ impl Client {
 
     /// The tailnet's machines: (node ID, full name, tags).
     pub async fn devices(&self) -> anyhow::Result<Vec<(String, String, Vec<String>)>> {
-        let v = self.call(reqwest::Method::GET, "/tailnet/-/devices", None).await?;
+        let v = self
+            .call(reqwest::Method::GET, "/tailnet/-/devices", None)
+            .await?;
         Ok(v["devices"]
             .as_array()
             .into_iter()
@@ -278,7 +317,11 @@ impl Client {
             .filter_map(|d| {
                 Some((
                     d["nodeId"].as_str()?.to_owned(),
-                    d["name"].as_str().unwrap_or("").trim_end_matches('.').to_owned(),
+                    d["name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .trim_end_matches('.')
+                        .to_owned(),
                     strings(&d["tags"]),
                 ))
             })
@@ -286,9 +329,13 @@ impl Client {
     }
 
     pub async fn tag(&self, node: &str) -> anyhow::Result<()> {
-        self.call(reqwest::Method::POST, &format!("/device/{node}/tags"), Some(&json!({ "tags": [TAG] })))
-            .await
-            .map(|_| ())
+        self.call(
+            reqwest::Method::POST,
+            &format!("/device/{node}/tags"),
+            Some(&json!({ "tags": [TAG] })),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// A single-use, preauthorized auth key with `tag:pyo`, for an hour:
@@ -299,7 +346,9 @@ impl Client {
             "expirySeconds": 3600,
             "description": description,
         });
-        let v = self.call(reqwest::Method::POST, "/tailnet/-/keys", Some(&body)).await?;
+        let v = self
+            .call(reqwest::Method::POST, "/tailnet/-/keys", Some(&body))
+            .await?;
         match (v["id"].as_str(), v["key"].as_str()) {
             (Some(id), Some(k)) => Ok((id.to_owned(), k.to_owned())),
             _ => anyhow::bail!("Tailscale made no key"),
@@ -307,15 +356,23 @@ impl Client {
     }
 
     pub async fn delete_key(&self, id: &str) -> anyhow::Result<()> {
-        self.call(reqwest::Method::DELETE, &format!("/tailnet/-/keys/{id}"), None)
-            .await
-            .map(|_| ())
+        self.call(
+            reqwest::Method::DELETE,
+            &format!("/tailnet/-/keys/{id}"),
+            None,
+        )
+        .await
+        .map(|_| ())
     }
 }
 
 fn strings(v: &Value) -> Vec<String> {
     v.as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -329,14 +386,21 @@ pub fn suffix_of(name: &str) -> Option<String> {
 pub fn valid_name(n: &str) -> bool {
     !n.is_empty()
         && n.len() <= 63
-        && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && n.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && !n.starts_with('-')
         && !n.ends_with('-')
 }
 
 /// The first free name: `base`, then `base-<more>`, then `base-<more>-2`…
 pub fn pick_name(base: &str, more: &str, taken: impl Fn(&str) -> bool) -> String {
-    let cut = |x: &str| x.chars().take(63).collect::<String>().trim_end_matches('-').to_owned();
+    let cut = |x: &str| {
+        x.chars()
+            .take(63)
+            .collect::<String>()
+            .trim_end_matches('-')
+            .to_owned()
+    };
     let first = cut(base);
     if !taken(&first) {
         return first;
@@ -367,20 +431,44 @@ pub async fn test(c: &Client) -> (Vec<Check>, Option<String>) {
     let mut out = Vec::new();
     let mut suffix = None;
     if let Err(e) = c.access_token().await {
-        out.push(Check { name: "client", ok: false, message: format!("Couldn't sign in with it. {e}") });
+        out.push(Check {
+            name: "client",
+            ok: false,
+            message: format!("Couldn't sign in with it. {e}"),
+        });
         return (out, None);
     }
-    out.push(Check { name: "client", ok: true, message: "Signed in.".into() });
+    out.push(Check {
+        name: "client",
+        ok: true,
+        message: "Signed in.".into(),
+    });
     match c.devices().await {
         Ok(d) => {
             suffix = d.iter().find_map(|(_, n, _)| suffix_of(n));
-            out.push(Check { name: "devices", ok: true, message: "Can read the tailnet's machines.".into() });
+            out.push(Check {
+                name: "devices",
+                ok: true,
+                message: "Can read the tailnet's machines.".into(),
+            });
         }
-        Err(e) => out.push(Check { name: "devices", ok: false, message: format!("Needs the Devices › Core scope with tag:pyo. {e}") }),
+        Err(e) => out.push(Check {
+            name: "devices",
+            ok: false,
+            message: format!("Needs the Devices › Core scope with tag:pyo. {e}"),
+        }),
     }
     match c.services().await {
-        Ok(_) => out.push(Check { name: "services", ok: true, message: "Can manage Services.".into() }),
-        Err(e) => out.push(Check { name: "services", ok: false, message: format!("Needs the Services scope. {e}") }),
+        Ok(_) => out.push(Check {
+            name: "services",
+            ok: true,
+            message: "Can manage Services.".into(),
+        }),
+        Err(e) => out.push(Check {
+            name: "services",
+            ok: false,
+            message: format!("Needs the Services scope. {e}"),
+        }),
     }
     match c.auth_key("Pyo test").await {
         Ok((id, _)) => {
@@ -424,13 +512,16 @@ pub async fn addresses_follower(db: PgPool) {
                 tailnet: s("tailnet"),
                 registry: s("registry"),
                 public: s("public"),
+                host_ip: s("hostIp"),
+                host_name: s("hostName"),
             });
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }
 
-/// Saves one of Pyo's HTTPS names ("tailnet", "registry", "public").
+/// Saves one of Pyo's addresses: its HTTPS names ("tailnet", "registry",
+/// "public") and this machine's on the tailnet ("hostIp", "hostName").
 pub async fn save_address(db: &PgPool, key: &str, host: Option<&str>) -> ApiResult<()> {
     sqlx::query(
         "INSERT INTO pyo.settings (key, value) VALUES ('addresses', jsonb_build_object($1::text, $2::text))
@@ -462,13 +553,20 @@ async fn servers(db: &PgPool) -> ApiResult<Vec<Server>> {
             serde_json::from_value::<Vec<pyo_proto::ServerTailnet>>(v)
                 .unwrap_or_default()
                 .into_iter()
-                .map(move |status| Server { cluster_id: cluster_id.clone(), status })
+                .map(move |status| Server {
+                    cluster_id: cluster_id.clone(),
+                    status,
+                })
         })
         .collect())
 }
 
 /// The names on the tailnet Pyo wants: (name, kind, cluster).
-async fn wanted(db: &PgPool, cfg: &Settings, suffix: &str) -> ApiResult<Vec<(String, &'static str, String)>> {
+async fn wanted(
+    db: &PgPool,
+    cfg: &Settings,
+    suffix: &str,
+) -> ApiResult<Vec<(String, &'static str, String)>> {
     let mut out = Vec::new();
     let host: Option<String> =
         sqlx::query_scalar("SELECT id FROM pyo.clusters WHERE same_cluster LIMIT 1")
@@ -490,7 +588,10 @@ async fn wanted(db: &PgPool, cfg: &Settings, suffix: &str) -> ApiResult<Vec<(Str
     .fetch_all(db)
     .await?;
     for (cluster, host) in domains {
-        if let Some(label) = host.strip_suffix(&format!(".{suffix}")).filter(|l| valid_name(l)) {
+        if let Some(label) = host
+            .strip_suffix(&format!(".{suffix}"))
+            .filter(|l| valid_name(l))
+        {
             out.push((label.to_owned(), "domain", cluster));
         }
     }
@@ -580,7 +681,10 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
         .await?;
     }
     // Ours, no longer used: deleted on the tailnet, and its servers take it off.
-    for name in remote.keys().filter(|n| ours(n) && !wanted_names.contains(n.as_str())) {
+    for name in remote
+        .keys()
+        .filter(|n| ours(n) && !wanted_names.contains(n.as_str()))
+    {
         match c.delete_service(name).await {
             Ok(()) => tracing::info!(name, "tailnet name deleted"),
             Err(e) => tracing::warn!(name, error = %e, "couldn't delete the tailnet name"),
@@ -605,7 +709,9 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
         if !id.is_empty() && tagged.get(id) == Some(&false) {
             match c.tag(id).await {
                 Ok(()) => tracing::info!(server = %sv.status.server, "tagged tag:pyo"),
-                Err(e) => tracing::warn!(server = %sv.status.server, error = %e, "couldn't tag the server"),
+                Err(e) => {
+                    tracing::warn!(server = %sv.status.server, error = %e, "couldn't tag the server")
+                }
             }
         }
     }
@@ -615,7 +721,9 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
         }
         let nodes: Vec<&str> = servers
             .iter()
-            .filter(|sv| sv.cluster_id == *cluster && sv.status.advertised.iter().any(|a| a == name))
+            .filter(|sv| {
+                sv.cluster_id == *cluster && sv.status.advertised.iter().any(|a| a == name)
+            })
             .map(|sv| sv.status.node_id.as_str())
             .filter(|n| !n.is_empty())
             .collect();
@@ -628,7 +736,9 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
         if nodes.iter().all(|n| asked(n)) {
             continue;
         }
-        let Ok(hosts) = c.hosts(name).await else { continue };
+        let Ok(hosts) = c.hosts(name).await else {
+            continue;
+        };
         for n in nodes {
             let ok = hosts.get(n) == Some(&true) || c.approve(name, n).await.is_ok();
             if ok && let Ok(mut a) = APPROVED.lock() {
@@ -650,7 +760,9 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
     let ready = |kind: &str| {
         wanted
             .iter()
-            .find(|(n, k, cl)| *k == kind && ours(n) && host_id.as_deref() == Some(cl.as_str()) && has_cert(n, cl))
+            .find(|(n, k, cl)| {
+                *k == kind && ours(n) && host_id.as_deref() == Some(cl.as_str()) && has_cert(n, cl)
+            })
             .map(|(n, _, _)| format!("{n}.{suffix}"))
     };
     save_address(&s.db, "tailnet", ready("dashboard").as_deref()).await?;
@@ -689,21 +801,32 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
 
 /// What a cluster's agent hosts on the tailnet (its heartbeat reply). None
 /// without Tailscale set up.
-pub async fn wanted_for(db: &PgPool, cluster_id: &str, same_cluster: bool) -> ApiResult<Option<pyo_proto::TailnetWanted>> {
-    let Some(cfg) = settings(db).await? else {
-        return Ok(None);
-    };
-    let Some(suffix) = cfg.suffix.clone() else {
-        return Ok(None);
-    };
+pub async fn wanted_for(
+    db: &PgPool,
+    cluster_id: &str,
+    same_cluster: bool,
+) -> ApiResult<Option<pyo_proto::TailnetWanted>> {
     let rows: Vec<(String, String, Option<String>, Vec<String>, Option<String>, bool)> = sqlx::query_as(
         "SELECT name, kind, cluster_id, addrs, error, retired_at IS NOT NULL FROM pyo.tailnet_services",
     )
     .fetch_all(db)
     .await?;
-    let mut w = pyo_proto::TailnetWanted { suffix: suffix.clone(), ..Default::default() };
+    // Without Tailscale (removed): every server takes Pyo's names off.
+    let suffix = match settings(db).await?.and_then(|c| c.suffix) {
+        Some(x) => x,
+        None if rows.is_empty() => return Ok(None),
+        None => String::new(),
+    };
+    let mut w = pyo_proto::TailnetWanted {
+        suffix: suffix.clone(),
+        ..Default::default()
+    };
     for (name, kind, cluster, addrs, error, retired) in rows {
-        let here = cluster.as_deref() == Some(cluster_id) && !retired && error.is_none() && !addrs.is_empty();
+        let here = !suffix.is_empty()
+            && cluster.as_deref() == Some(cluster_id)
+            && !retired
+            && error.is_none()
+            && !addrs.is_empty();
         if !here {
             w.retired.push(name);
             continue;
@@ -723,9 +846,7 @@ pub async fn wanted_for(db: &PgPool, cluster_id: &str, same_cluster: bool) -> Ap
 /// A join command's auth key: single-use, preauthorized, tag:pyo, an hour.
 pub async fn join_key(s: &AppState, what: &str) -> ApiResult<String> {
     let Some((_, c)) = saved_client(s).await? else {
-        return Err(ApiError::bad_request(
-            "Set up Tailscale in Integrations first. Servers talk over your tailnet, with no open ports.",
-        ));
+        return Err(ApiError::bad_request(NEEDED));
     };
     c.auth_key(what)
         .await
@@ -738,17 +859,25 @@ pub async fn join_key(s: &AppState, what: &str) -> ApiResult<String> {
 /// tailnet has.
 pub async fn check_domain(s: &AppState, host: &str) -> ApiResult<()> {
     let Some((cfg, c)) = saved_client(s).await? else {
-        return Err(ApiError::bad_request("Tailnet domains need Tailscale. Set it up in Integrations."));
+        return Err(ApiError::bad_request(
+            "Tailnet domains need Tailscale. Set it up in Integrations.",
+        ));
     };
     let Some(suffix) = cfg.suffix.as_deref() else {
-        return Err(ApiError::bad_request("Pyo hasn't seen your tailnet yet. Try again in a minute."));
+        return Err(ApiError::bad_request(
+            "Pyo hasn't seen your tailnet yet. Try again in a minute.",
+        ));
     };
     let host = host.to_ascii_lowercase();
     let Some(label) = host.strip_suffix(&format!(".{suffix}")) else {
-        return Err(ApiError::bad_request(format!("A tailnet domain ends with .{suffix}.")));
+        return Err(ApiError::bad_request(format!(
+            "A tailnet domain ends with .{suffix}."
+        )));
     };
     if !valid_name(label) {
-        return Err(ApiError::bad_request("Use one name: lowercase letters, digits and dashes."));
+        return Err(ApiError::bad_request(
+            "Use one name: lowercase letters, digits and dashes.",
+        ));
     }
     if RESERVED.contains(&label)
         || cfg.dashboard_name.as_deref() == Some(label)
@@ -771,18 +900,251 @@ pub async fn check_domain(s: &AppState, host: &str) -> ApiResult<()> {
     Ok(())
 }
 
+// ── Integrations › Tailscale ────────────────────────────────────────────────
+
+/// Saves the OAuth client once it signs in (a missing secret keeps the saved
+/// one), and says what it can do, check by check.
+pub async fn save_client(s: &AppState, client_id: &str, secret: Option<&str>) -> ApiResult<Value> {
+    let client_id = client_id.trim();
+    if client_id.is_empty()
+        || client_id.len() > 100
+        || !client_id.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        return Err(ApiError::bad_request(
+            "Paste the client ID from Tailscale's Trust credentials page.",
+        ));
+    }
+    let saved = settings(&s.db).await?;
+    let secret = match secret.map(str::trim).filter(|x| !x.is_empty()) {
+        Some(x)
+            if x.starts_with("tskey-client-")
+                && x.len() > 20
+                && !x.contains(char::is_whitespace) =>
+        {
+            x.to_owned()
+        }
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "A client secret starts with tskey-client-.",
+            ));
+        }
+        None => match &saved {
+            Some(c) if c.client_id == client_id => s.sealer.open(&c.secret_sealed)?,
+            _ => return Err(ApiError::bad_request("Paste the client secret too.")),
+        },
+    };
+    if !s.sealer.enabled() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "This installation has no PYO_SECRET_KEY, so it can't store the secret.",
+        ));
+    }
+    let (checks, suffix) = test(&client(client_id, &secret)).await;
+    if let Some(c) = checks.iter().find(|c| c.name == "client" && !c.ok) {
+        return Err(ApiError::bad_request(c.message.clone()));
+    }
+    let mut cfg = saved.unwrap_or_default();
+    // Another tailnet: Pyo's names there are picked again.
+    if cfg.suffix.is_some() && suffix.is_some() && cfg.suffix != suffix {
+        cfg.dashboard_name = None;
+        cfg.registry_name = None;
+    }
+    cfg.client_id = client_id.to_owned();
+    cfg.hint = format!("…{}", &secret[secret.len() - 4..]);
+    cfg.secret_sealed = s.sealer.seal(&secret)?;
+    cfg.suffix = suffix.or(cfg.suffix);
+    save(&s.db, &cfg).await?;
+    Ok(json!({ "ok": checks.iter().all(|c| c.ok), "checks": checks }))
+}
+
+/// The Test button: the saved client's checks.
+pub async fn test_saved(s: &AppState) -> ApiResult<Value> {
+    let Some((mut cfg, c)) = saved_client(s).await? else {
+        return Err(ApiError::bad_request("Tailscale isn't set up."));
+    };
+    let (checks, suffix) = test(&c).await;
+    if suffix.is_some() && cfg.suffix != suffix {
+        cfg.suffix = suffix;
+        save(&s.db, &cfg).await?;
+    }
+    Ok(json!({ "ok": checks.iter().all(|c| c.ok), "checks": checks }))
+}
+
+/// Forgets the client: Pyo's Services on the tailnet are deleted while it
+/// still can, and its servers take them off.
+pub async fn remove(s: &AppState) -> ApiResult<()> {
+    if let Some((_, c)) = saved_client(s).await? {
+        let mark = marker(&install_id(&s.db).await?);
+        if let Ok(remote) = c.services().await {
+            for name in remote
+                .iter()
+                .filter(|(_, (cm, _))| *cm == mark)
+                .map(|(n, _)| n)
+            {
+                if let Err(e) = c.delete_service(name).await {
+                    tracing::warn!(name, error = %e, "couldn't delete the tailnet name");
+                }
+            }
+        }
+    }
+    sqlx::query("UPDATE pyo.tailnet_services SET retired_at = coalesce(retired_at, now()), updated_at = now()")
+        .execute(&s.db)
+        .await?;
+    sqlx::query("DELETE FROM pyo.settings WHERE key = 'tailscale'")
+        .execute(&s.db)
+        .await?;
+    for k in ["tailnet", "registry"] {
+        save_address(&s.db, k, None).await?;
+    }
+    Ok(())
+}
+
+/// Renames Pyo's own name on the tailnet ("dashboard" or "registry"). The
+/// old one goes once the new one is made.
+pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
+    let name = name.trim().to_ascii_lowercase();
+    let Some((mut cfg, c)) = saved_client(s).await? else {
+        return Err(ApiError::bad_request("Tailscale isn't set up."));
+    };
+    if !valid_name(&name) {
+        return Err(ApiError::bad_request(
+            "Use one name: lowercase letters, digits and dashes.",
+        ));
+    }
+    let other = match kind {
+        "dashboard" => &cfg.registry_name,
+        "registry" => &cfg.dashboard_name,
+        _ => {
+            return Err(ApiError::bad_request(
+                "The kind is \"dashboard\" or \"registry\".",
+            ));
+        }
+    };
+    let domain: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.tailnet_services WHERE name = $1 AND kind = 'domain' AND retired_at IS NULL)",
+    )
+    .bind(&name)
+    .fetch_one(&s.db)
+    .await?;
+    if other.as_deref() == Some(name.as_str()) || domain {
+        return Err(ApiError::conflict("Pyo uses this name already."));
+    }
+    let mark = marker(&install_id(&s.db).await?);
+    let remote = c.services().await.map_err(anyhow::Error::from)?;
+    let machine = c
+        .devices()
+        .await
+        .map_err(anyhow::Error::from)?
+        .iter()
+        .any(|(_, full, _)| full.split('.').next() == Some(name.as_str()));
+    if remote.get(&name).is_some_and(|(cm, _)| *cm != mark) || machine {
+        return Err(ApiError::conflict("Taken on your tailnet"));
+    }
+    match kind {
+        "dashboard" => cfg.dashboard_name = Some(name),
+        _ => cfg.registry_name = Some(name),
+    }
+    save(&s.db, &cfg).await
+}
+
+/// For the dashboard: whether Tailscale is set up and Pyo's names on it;
+/// the client (never the secret) only for admins.
+pub async fn snapshot(db: &PgPool, admin: bool) -> ApiResult<Value> {
+    let Some(cfg) = settings(db).await? else {
+        return Ok(Value::Null);
+    };
+    let a = crate::web::addresses();
+    let mut v = json!({
+        "suffix": cfg.suffix,
+        "dashboard": a.tailnet,
+        "registry": a.registry,
+        "onTailnet": a.host_ip.is_some(),
+    });
+    if admin {
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT name, error FROM pyo.tailnet_services WHERE kind IN ('dashboard', 'registry') AND retired_at IS NULL",
+        )
+        .fetch_all(db)
+        .await?;
+        let error = |n: &Option<String>| {
+            n.as_ref()
+                .and_then(|n| rows.iter().find(|r| r.0 == *n))
+                .and_then(|r| r.1.clone())
+        };
+        v["clientId"] = json!(cfg.client_id);
+        v["hint"] = json!(cfg.hint);
+        v["dashboardName"] = json!(cfg.dashboard_name);
+        v["dashboardError"] = json!(error(&cfg.dashboard_name));
+        v["registryName"] = json!(cfg.registry_name);
+        v["registryError"] = json!(error(&cfg.registry_name));
+        v["hostName"] = json!(a.host_name);
+    }
+    Ok(v)
+}
+
+/// When Pyo's server last got a key to join with: one at a time.
+static HOST_KEY_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Pyo's own server, on its timer (install.sh `host_units`): what its
+/// Tailscale says (`ip` and `name`, empty when it's not on a tailnet). Kept
+/// as Pyo's tailnet address. Answers `{"state": "off"}` without Tailscale,
+/// `{"state": "ok"}` once it's on the tailnet, or `{"state": "join",
+/// "authKey"}` to join it (at most one key every ten minutes).
+pub async fn host_report(s: &AppState, ip: &str, name: &str) -> ApiResult<Value> {
+    let ip = ip.trim();
+    let ip = crate::freedomain::tailnet_v4(ip).map(|v| v.to_string());
+    let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+    let name = (ip.is_some() && name.ends_with(".ts.net") && name.split('.').all(valid_name))
+        .then_some(name);
+    let a = crate::web::addresses();
+    if a.host_ip != ip || a.host_name != name {
+        save_address(&s.db, "hostIp", ip.as_deref()).await?;
+        save_address(&s.db, "hostName", name.as_deref()).await?;
+    }
+    let Some((_, c)) = saved_client(s).await? else {
+        return Ok(json!({ "state": "off" }));
+    };
+    if ip.is_some() {
+        return Ok(json!({ "state": "ok" }));
+    }
+    {
+        let mut at = HOST_KEY_AT.lock().unwrap_or_else(|e| e.into_inner());
+        if at.is_some_and(|t| t.elapsed() < Duration::from_secs(600)) {
+            return Ok(json!({ "state": "wait" }));
+        }
+        *at = Some(Instant::now());
+    }
+    let (_, key) = c
+        .auth_key("Pyo: its own server")
+        .await
+        .map_err(|e| ApiError::bad_request(format!("Couldn't make an auth key. {e}")))?;
+    tracing::info!("this machine: joining the tailnet");
+    Ok(json!({ "state": "join", "authKey": key }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn names() {
-        assert_eq!(suffix_of("server-1.tail1234.ts.net."), Some("tail1234.ts.net".into()));
+        assert_eq!(
+            suffix_of("server-1.tail1234.ts.net."),
+            Some("tail1234.ts.net".into())
+        );
         assert_eq!(suffix_of("example.com"), None);
-        assert!(valid_name("blog-2") && !valid_name("Blog") && !valid_name("-a") && !valid_name("a.b"));
+        assert!(
+            valid_name("blog-2") && !valid_name("Blog") && !valid_name("-a") && !valid_name("a.b")
+        );
         let taken = ["pyo", "pyo-home"];
-        assert_eq!(pick_name("pyo", "home", |n| taken.contains(&n)), "pyo-home-2");
-        assert_eq!(pick_name("registry", "home", |n| taken.contains(&n)), "registry");
+        assert_eq!(
+            pick_name("pyo", "home", |n| taken.contains(&n)),
+            "pyo-home-2"
+        );
+        assert_eq!(
+            pick_name("registry", "home", |n| taken.contains(&n)),
+            "registry"
+        );
         assert_eq!(pick_name("pyo", "home", |n| n == "pyo"), "pyo-home");
         let long = "a".repeat(70);
         assert!(pick_name(&long, "x", |_| false).len() <= 63);

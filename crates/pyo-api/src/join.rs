@@ -19,16 +19,19 @@ pub const PUBLISHED_SCRIPTS_URL: &str = "https://pyo.dev";
 /// 2. Pyo itself (`<url>/install`) at `reach`: the address the command gives
 ///    the machine for Pyo (the tailnet API, or the public URL people gave),
 ///    which it has to reach anyway;
-/// 3. Pyo on the tailnet (`PYO_TAILNET_API_URL`, then its HTTPS dashboard);
+/// 3. Pyo on the tailnet ([`crate::web::tailnet_api_url`]), then its HTTPS
+///    dashboard;
 /// 4. pyo.dev, when Pyo is only on its own machine or in its cluster.
 pub fn scripts_url(reach: Option<&str>) -> String {
     let configured = std::env::var("PYO_SCRIPTS_URL").ok();
-    let tailnet = std::env::var("PYO_TAILNET_API_URL")
-        .ok()
-        .map(|u| friendly(&u));
+    let tailnet = crate::web::tailnet_api_url().map(|u| friendly(&u));
     pick_scripts_url(
         configured.as_deref(),
-        &[reach, tailnet.as_deref(), crate::web::public_url().as_deref()],
+        &[
+            reach,
+            tailnet.as_deref(),
+            crate::web::public_url().as_deref(),
+        ],
     )
 }
 
@@ -100,12 +103,6 @@ pub fn secure_transport(url: &str) -> bool {
     }
 }
 
-/// Pyo's tailnet IP: the host of `PYO_TAILNET_API_URL` ("http://100.x:8000").
-fn pyo_tailnet_ip() -> Option<String> {
-    let url = std::env::var("PYO_TAILNET_API_URL").ok()?;
-    url_host(url.trim()).filter(|h| h.parse::<std::net::Ipv4Addr>().is_ok())
-}
-
 /// An address in a command people copy (a URL, "host:port" or a host),
 /// with Pyo's tailnet IP as its tailnet name ("<host>.<tailnet>.ts.net")
 /// when it has one. The scripts look the name up in Tailscale's own list of
@@ -116,8 +113,8 @@ fn pyo_tailnet_ip() -> Option<String> {
 pub fn friendly(addr: &str) -> String {
     with_tailnet_name(
         addr,
-        pyo_tailnet_ip().as_deref(),
-        crate::web::tailnet_name(),
+        crate::web::tailnet_ip().as_deref(),
+        crate::web::tailnet_name().as_deref(),
     )
 }
 

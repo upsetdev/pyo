@@ -670,6 +670,31 @@ pub async fn this_machine(
     }))
 }
 
+#[derive(Deserialize)]
+pub struct ThisMachineTailnet {
+    key: String,
+    #[serde(default)]
+    ip: String,
+    #[serde(default)]
+    name: String,
+}
+
+/// POST /install/this-machine/tailnet (form: key, ip, name): this machine's
+/// Tailscale, from its timer, with the bootstrap key as for
+/// [`this_machine`]. Answers what it does next (tailscale.rs `host_report`).
+pub async fn this_machine_tailnet(
+    State(s): State<AppState>,
+    axum::Form(f): axum::Form<ThisMachineTailnet>,
+) -> ApiResult<axum::Json<serde_json::Value>> {
+    let key = std::env::var("PYO_BOOTSTRAP_KEY").unwrap_or_default();
+    if key.len() < 32 || !crate::util::constant_time_eq(key.as_bytes(), f.key.as_bytes()) {
+        return Err(ApiError::not_found("Install key"));
+    }
+    Ok(axum::Json(
+        crate::tailscale::host_report(&s, &f.ip, &f.name).await?,
+    ))
+}
+
 #[derive(Debug, PartialEq)]
 enum Handover {
     /// The cluster is there (its agent reported in).

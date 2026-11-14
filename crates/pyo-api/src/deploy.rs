@@ -42,14 +42,11 @@ const GIT_STAGES: [&str; 8] = [
 ];
 
 /// Pyo's registry, by who reaches it how (all host:port, plain HTTP):
-/// - `push`: its door on the tailnet (pyo-host, `<tailnet IP>:5005`), where
-///   other machines' builders push and their containerd pulls, with a login.
-///   Empty without a tailnet.
+/// - its door on the tailnet ([`registry_push`]);
 /// - `pull`: the name every node pulls by: on Pyo's node, the registry
 ///   itself through pyo-host; elsewhere mirrored to the door (registries.yaml).
 /// - `internal`: the registry itself, in the cluster only (Pyo's own calls).
 pub struct Registry {
-    pub push: String,
     pub pull: String,
     pub internal: String,
 }
@@ -61,10 +58,18 @@ pub const DOOR_IN_CLUSTER: &str = "pyo-registry-door.pyo-system.svc.cluster.loca
 
 pub fn registry() -> &'static Registry {
     REGISTRY.get_or_init(|| Registry {
-        push: String::new(),
         pull: PULL_DEFAULT.into(),
         internal: INTERNAL_DEFAULT.into(),
     })
+}
+
+/// The registry's door on the tailnet (pyo-host, `<tailnet IP>:5005`),
+/// where other machines' builders push and their containerd pulls, with a
+/// login. Empty until this machine is on the tailnet.
+pub fn registry_push() -> String {
+    crate::web::tailnet_ip()
+        .map(|ip| format!("{ip}:5005"))
+        .unwrap_or_default()
 }
 
 /// Where a builder on this cluster pushes: the door in the cluster on Pyo's
@@ -73,8 +78,8 @@ pub fn builder_registry(on_pyos_cluster: bool) -> Option<String> {
     if on_pyos_cluster {
         return Some(DOOR_IN_CLUSTER.into());
     }
-    let push = &registry().push;
-    (!push.is_empty()).then(|| push.clone())
+    let push = registry_push();
+    (!push.is_empty()).then_some(push)
 }
 
 /// A build job for a deployment's Git source.
@@ -1382,11 +1387,10 @@ pub fn pyo_registry_image(image: &str) -> Option<Result<String, &'static str>> {
     }
     let host = host.to_ascii_lowercase();
     let pulled = || Some(Ok(format!("{}/{rest}", r.pull)));
-    if host == r.pull
-        || host == r.internal
-        || host == DOOR_IN_CLUSTER
-        || (!r.push.is_empty() && host == r.push.to_ascii_lowercase())
-    {
+    if host == r.pull || host == r.internal || host == DOOR_IN_CLUSTER || {
+        let push = registry_push();
+        !push.is_empty() && host == push.to_ascii_lowercase()
+    } {
         return pulled();
     }
     let (name, port) = split_port(&host);

@@ -313,7 +313,7 @@ fn example_value(k: &str, p: &Value, components: &Value, tag: &str, id_prefix: &
         ("schedule", _) if tag == "Cron jobs" => json!("0 3 * * *"),
         ("schedule", _) => json!("daily"),
         ("role", _) => json!("developer"),
-        ("kind", _) if tag == "Integrations" => json!("tailscale"),
+        ("kind", _) if tag == "Integrations" => json!("dashboard"),
         ("endpoint", _) => json!("https://s3.eu-central-1.amazonaws.com"),
         ("region", _) => json!("eu-central-1"),
         ("bucket", _) => json!("acme-backups"),

@@ -1197,7 +1197,6 @@ async fn test_team() -> (AppState, crate::auth::User, String, sqlx::PgPool) {
         cookie_secure: false,
         allow_signup: false,
         builder_image: String::new(),
-        tailnet_api_url: String::new(),
         relay_addr: None,
     };
     let (stop, stopping) = tokio::sync::watch::channel(false);

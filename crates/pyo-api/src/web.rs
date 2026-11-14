@@ -116,18 +116,25 @@ pub async fn headers(force: axum::extract::State<bool>, req: Request, next: Next
     res
 }
 
-/// This machine's tailnet name (`PYO_TAILNET_NAME`,
-/// "<host>.<tailnet>.ts.net"), when it's on a tailnet with MagicDNS: for
-/// the commands that name Pyo's tailnet IP (join.rs `friendly`).
-pub fn tailnet_name() -> Option<&'static str> {
-    static N: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    N.get_or_init(|| {
-        std::env::var("PYO_TAILNET_NAME")
-            .ok()
-            .map(|n| n.trim().trim_end_matches('.').to_ascii_lowercase())
-            .filter(|n| !n.is_empty() && n.contains('.'))
-    })
-    .as_deref()
+/// This machine's tailnet name ("<host>.<tailnet>.ts.net"), once it's on
+/// the tailnet (its host reports it, tailscale.rs `host_report`): for the
+/// commands that name Pyo's tailnet IP (join.rs `friendly`).
+pub fn tailnet_name() -> Option<String> {
+    addresses().host_name
+}
+
+/// This machine's Tailscale IPv4 address, once it's on the tailnet.
+pub fn tailnet_ip() -> Option<String> {
+    addresses().host_ip
+}
+
+/// This API on the tailnet, for machines that join over it: its HTTPS name
+/// when that's ready, else this machine's tailnet IP on :8000 (pyo-host).
+pub fn tailnet_api_url() -> Option<String> {
+    let a = addresses();
+    a.tailnet
+        .map(|h| format!("https://{h}"))
+        .or_else(|| a.host_ip.map(|ip| format!("http://{ip}:8000")))
 }
 
 /// Pyo's HTTPS names, as they're ready (tailscale.rs and the public
@@ -141,12 +148,18 @@ pub struct Addresses {
     pub registry: Option<String>,
     /// The dashboard on the public IP, while it's open.
     pub public: Option<String>,
+    /// This machine's Tailscale IPv4 address.
+    pub host_ip: Option<String>,
+    /// This machine's tailnet name ("<host>.<tailnet>.ts.net").
+    pub host_name: Option<String>,
 }
 
 static ADDRESSES: std::sync::RwLock<Addresses> = std::sync::RwLock::new(Addresses {
     tailnet: None,
     registry: None,
     public: None,
+    host_ip: None,
+    host_name: None,
 });
 
 pub fn addresses() -> Addresses {
@@ -217,18 +230,40 @@ mod tests {
             tailnet: Some("pyo.tail1234.ts.net".into()),
             registry: Some("registry.tail1234.ts.net".into()),
             public: Some("pyo.203.0.113.7.nip.io".into()),
+            host_ip: Some("100.64.0.7".into()),
+            host_name: None,
         });
+        assert_eq!(
+            super::tailnet_api_url().as_deref(),
+            Some("https://pyo.tail1234.ts.net")
+        );
         assert!(super::is_https_host("PYO.tail1234.ts.net"));
         assert!(super::is_https_host("pyo.203.0.113.7.nip.io:443"));
         assert!(!super::is_https_host("192.168.1.5:8000"));
         assert!(!super::is_https_host("localhost:8000"));
-        assert_eq!(super::public_url().as_deref(), Some("https://pyo.tail1234.ts.net"));
+        assert_eq!(
+            super::public_url().as_deref(),
+            Some("https://pyo.tail1234.ts.net")
+        );
         let mut hs = axum::http::HeaderMap::new();
-        hs.append(header::SET_COOKIE, HeaderValue::from_static("a=1; Path=/; HttpOnly"));
-        hs.append(header::SET_COOKIE, HeaderValue::from_static("b=2; Path=/; Secure"));
+        hs.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("a=1; Path=/; HttpOnly"),
+        );
+        hs.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("b=2; Path=/; Secure"),
+        );
         super::secure_cookies(&mut hs);
-        let got: Vec<&str> = hs.get_all(header::SET_COOKIE).iter().map(|v| v.to_str().unwrap()).collect();
-        assert_eq!(got, ["a=1; Path=/; HttpOnly; Secure", "b=2; Path=/; Secure"]);
+        let got: Vec<&str> = hs
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            got,
+            ["a=1; Path=/; HttpOnly; Secure", "b=2; Path=/; Secure"]
+        );
         super::set_addresses(super::Addresses::default());
     }
 

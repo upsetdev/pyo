@@ -221,13 +221,11 @@ fn resource_ok(asked: Option<&str>, ours: &[String]) -> bool {
 
 /// This installation's MCP endpoint at each of its addresses: the one the
 /// request came to, the configured and tailnet ones, and this machine's.
-fn our_resources(s: &AppState, headers: &HeaderMap) -> Vec<String> {
+fn our_resources(headers: &HeaderMap) -> Vec<String> {
     let mut bases = vec![base_url(headers)];
     bases.extend(configured_public_url().map(str::to_owned));
     bases.extend(crate::web::https_urls());
-    bases.extend(
-        Some(s.config.tailnet_api_url.trim_end_matches('/').to_owned()).filter(|u| !u.is_empty()),
-    );
+    bases.extend(crate::web::tailnet_api_url());
     bases.extend([
         "http://localhost:8000".to_owned(),
         "http://127.0.0.1:8000".to_owned(),
@@ -365,7 +363,7 @@ async fn checked(s: &AppState, headers: &HeaderMap, p: &AuthorizeParams) -> ApiR
             "This app didn't send a PKCE (S256) challenge, which Pyo requires.",
         ));
     }
-    if !resource_ok(p.resource.as_deref(), &our_resources(s, headers)) {
+    if !resource_ok(p.resource.as_deref(), &our_resources(headers)) {
         return Err(ApiError::bad_request(
             "This app asked for access to something other than Pyo's MCP server.",
         ));
@@ -730,10 +728,7 @@ mod tests {
         ];
         assert!(resource_ok(None, &ours));
         assert!(resource_ok(Some(""), &ours));
-        assert!(resource_ok(
-            Some("https://pyo.tail1.ts.net/api/mcp"),
-            &ours
-        ));
+        assert!(resource_ok(Some("https://pyo.tail1.ts.net/api/mcp"), &ours));
         assert!(resource_ok(Some("http://100.64.0.1:8000/api/mcp"), &ours));
         assert!(resource_ok(
             Some("https://pyo.tail1.ts.net/api/mcp/"),
@@ -743,10 +738,7 @@ mod tests {
             Some("https://other.example.com/api/mcp"),
             &ours
         ));
-        assert!(!resource_ok(
-            Some("https://pyo.tail1.ts.net/api"),
-            &ours
-        ));
+        assert!(!resource_ok(Some("https://pyo.tail1.ts.net/api"), &ours));
     }
 
     #[test]

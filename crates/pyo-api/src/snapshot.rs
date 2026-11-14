@@ -366,13 +366,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
 
     // Which keys are saved, never the keys themselves.
-    let integrations = values(
-        db,
-        "SELECT jsonb_build_object('teamId', team_id, 'kind', kind, 'hint', hint, 'createdAt', pyo.ms(created_at))
-           FROM pyo.integrations WHERE team_id = ANY($1)",
-        &team_ids,
-    )
-    .await?;
+    // Tailscale (Integrations › Tailscale): the client only for admins.
+    let tailscale = crate::tailscale::snapshot(db, user.is_admin).await?;
 
     // Gravatar's key for the profile picture: sha256 of the trimmed, lowercased email.
     let mut me = json!(user);
@@ -400,7 +395,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "volumes": volumes,
         "activity": activity,
         "builders": builders,
-        "integrations": integrations,
+        "tailscale": tailscale,
         "agentApiUrl": agent_api_url,
         // Whether email goes out; the settings themselves only for admins.
         // What analytics keeps of visitors' IPs (installation-wide).

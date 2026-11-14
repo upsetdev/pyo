@@ -617,6 +617,33 @@ async fn waf_changed(
     Ok(())
 }
 
+/// New tailnet domains (`blog.<tailnet>.ts.net`) need Tailscale and a name
+/// nothing else on the tailnet has (tailscale.rs `check_domain`). Ones Pyo
+/// already hosts are left to its loop.
+async fn tailnet_domains_ok(s: &AppState, domains: &Value) -> ApiResult<()> {
+    let hosts: Vec<String> = domains
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d["hostname"].as_str())
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| pyo_proto::system::is_tailnet_host(h))
+        .collect();
+    for host in hosts {
+        let label = host.split('.').next().unwrap_or("");
+        let ours: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pyo.tailnet_services WHERE name = $1 AND kind = 'domain' AND retired_at IS NULL AND error IS NULL)",
+        )
+        .bind(label)
+        .fetch_one(&s.db)
+        .await?;
+        if !ours {
+            crate::tailscale::check_domain(s, &host).await?;
+        }
+    }
+    Ok(())
+}
+
 /// A hostname routes to one service: two services claiming it would fight over the
 /// cluster's ingress. Checked across every team; another team's service isn't named.
 async fn domains_unique(
@@ -654,38 +681,32 @@ async fn domains_unique(
     }
 }
 
-/// How a machine outside the cluster reaches Pyo: the API (over the
-/// tailnet when there's one), the team's Tailscale key, and the registry
-/// door for Pyo-built images with the cluster's pull token (when Pyo is on
-/// a tailnet). Tailnet addresses by Pyo's tailnet name when it has one.
+/// How a machine outside the cluster reaches Pyo: the API over the
+/// tailnet, a fresh auth key for it (single-use, tag:pyo, an hour), and the
+/// registry door for Pyo-built images with the cluster's pull token.
+/// Tailnet addresses by Pyo's tailnet name when it has one. Refused without
+/// Tailscale (Integrations › Tailscale), or while Pyo's own server isn't on
+/// the tailnet yet.
 async fn reach(
     tx: &mut Transaction<'_, Postgres>,
     s: &AppState,
-    team_id: &str,
     cluster_id: &str,
-) -> ApiResult<(String, Option<String>, Option<(String, String)>)> {
-    let api = if s.config.tailnet_api_url.is_empty() {
-        s.config.agent_api_url.clone()
-    } else {
-        crate::join::friendly(&s.config.tailnet_api_url)
-    };
-    let ts_key = match sqlx::query_scalar::<_, String>(
-        "SELECT secret FROM pyo.integrations WHERE team_id = $1 AND kind = 'tailscale'",
-    )
-    .bind(team_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    {
-        Some(sealed) => s.sealer.open(&sealed).ok(),
-        None => None,
-    };
-    let door = crate::join::friendly(&deploy::registry().push);
+    what: &str,
+) -> ApiResult<(String, String, Option<(String, String)>)> {
+    if crate::tailscale::settings(&s.db).await?.is_none() {
+        return Err(ApiError::bad_request(crate::tailscale::NEEDED));
+    }
+    let api = crate::web::tailnet_api_url().ok_or_else(|| {
+        ApiError::conflict("Pyo's server isn't on your tailnet yet. Try again in a minute.")
+    })?;
+    let key = crate::tailscale::join_key(s, what).await?;
+    let door = crate::join::friendly(&deploy::registry_push());
     let registry = if door.is_empty() {
         None
     } else {
         Some((door, registry_token(tx, s, cluster_id).await?))
     };
-    Ok((api, ts_key, registry))
+    Ok((crate::join::friendly(&api), key, registry))
 }
 
 /// The cluster's pull token at Pyo's registry door (its servers'
@@ -715,22 +736,17 @@ async fn registry_token(
 }
 
 /// The one-line command that sets up a machine as this cluster: the agent
-/// reaches Pyo over the tailnet when there's one, pulls Pyo-built images
-/// from its registry, and joins the tailnet with the team's key. With
-/// `public`, over the public internet at that URL instead (no tailnet, so
-/// no registry). Also: whether a Tailscale key is saved, and whether this
-/// installation is on a tailnet.
+/// reaches Pyo over the tailnet, pulls Pyo-built images from its registry,
+/// and joins the tailnet with a fresh key ([`reach`]). With `public`, over
+/// the public internet at that URL instead (no tailnet, so no registry).
+/// Also whether it uses the tailnet.
 async fn connect_command(
     tx: &mut Transaction<'_, Postgres>,
     s: &AppState,
-    team_id: &str,
     cluster_id: &str,
     token: &str,
     public: Option<&str>,
-) -> ApiResult<(String, bool, bool)> {
-    let (api, ts_key, registry) = reach(tx, s, team_id, cluster_id).await?;
-    let tailnet = !s.config.tailnet_api_url.is_empty();
-    let saved = ts_key.is_some();
+) -> ApiResult<(String, bool)> {
     if let Some(url) = public {
         let url = url.trim().trim_end_matches('/');
         if !(url.starts_with("https://") || url.starts_with("http://"))
@@ -754,20 +770,19 @@ async fn connect_command(
                 None,
                 None,
             ),
-            saved,
-            tailnet,
+            false,
         ));
     }
+    let (api, key, registry) = reach(tx, s, cluster_id, "Pyo: connect a cluster").await?;
     Ok((
         crate::join::connect_command(
             &crate::join::scripts_url(Some(&api)),
             &api,
             token,
-            ts_key.as_deref(),
+            Some(&key),
             registry.as_ref().map(|(r, t)| (r.as_str(), t.as_str())),
         ),
-        saved,
-        tailnet,
+        true,
     ))
 }
 
@@ -801,9 +816,10 @@ async fn join_command(
             format!("Servers can only join a k3s cluster. This one runs Kubernetes {version}.")
         }));
     }
-    // The control plane's address, which new servers join through.
+    // The control plane's address, which new servers join through: its
+    // Tailscale address when it has one.
     let server_ip: Option<String> = sqlx::query_scalar(
-        "SELECT report->>'internalIP' FROM pyo.servers WHERE cluster_id = $1 AND report->'roles' ? 'control-plane'
+        "SELECT coalesce(nullif(report->>'tailnetIp', ''), report->>'internalIP') FROM pyo.servers WHERE cluster_id = $1 AND report->'roles' ? 'control-plane'
           ORDER BY (report->>'status' = 'ready') DESC LIMIT 1",
     )
     .bind(cluster_id)
@@ -812,7 +828,8 @@ async fn join_command(
     let server_ip = server_ip.filter(|ip| !ip.is_empty()).ok_or_else(|| {
         ApiError::conflict("The cluster has no control-plane server reported yet.")
     })?;
-    let (_, ts_key, registry) = reach(tx, s, team_id, cluster_id).await?;
+    let (_, ts_key, registry) =
+        reach(tx, s, cluster_id, &format!("Pyo: join {server_name}")).await?;
     let alnum = |n: usize| {
         crate::ids::secret_token()
             .chars()
@@ -841,13 +858,13 @@ async fn join_command(
             token: &format!("{token_id}.{token_secret}"),
             server_name,
             k3s_version: &version,
-            tailscale_key: ts_key.as_deref(),
+            tailscale_key: Some(&ts_key),
             builder,
             registry: registry.as_ref().map(|(r, t)| (r.as_str(), t.as_str())),
         },
     );
     Ok(
-        json!({ "ok": true, "command": command, "scriptUrl": format!("{base}/join.sh"), "expiresAt": now_ms() + ttl as i64 * 1000, "tailscale": ts_key.is_some() }),
+        json!({ "ok": true, "command": command, "scriptUrl": format!("{base}/join.sh"), "expiresAt": now_ms() + ttl as i64 * 1000, "tailscale": true }),
     )
 }
 
@@ -2118,12 +2135,17 @@ pub(crate) enum Op {
     RemoveBuilder { id: String },
     /// A new token for a builder. The old one stops working.
     RotateBuilderToken { id: String },
-    /// Save a team integration's key (`kind` "tailscale": an auth key, used when servers join over Tailscale).
-    SaveIntegration {
-        team_id: String,
-        kind: String,
-        secret: String,
+    /// Set up Tailscale for this installation (admins only): an OAuth client with the scopes Devices › Core and Auth Keys (both with tag:pyo) and Services. Servers and clusters join your tailnet with it, and Pyo gets names on it. Pyo checks it first and says what it can do. A missing secret keeps the saved one.
+    SaveTailscale {
+        client_id: String,
+        secret: Option<String>,
     },
+    /// Check the saved Tailscale OAuth client again, scope by scope.
+    TestTailscale {},
+    /// Forget the Tailscale OAuth client. Pyo's names on your tailnet are deleted. Servers stay on it.
+    RemoveTailscale {},
+    /// Rename Pyo's own name on your tailnet: `kind` "dashboard" (pyo.<tailnet>.ts.net) or "registry".
+    RenameTailscaleName { kind: String, name: String },
     /// Connect an external secret store, or change one. No credential keeps
     /// the saved one.
     SaveSecretStore {
@@ -2150,7 +2172,7 @@ pub(crate) enum Op {
     },
     /// Remove a registry login.
     RemoveRegistryLogin { id: String },
-    /// Create a token to push (or only pull) the team's own images in Pyo registry, as `<host>:5443/<team>/<project>/<service>:<tag>`. These are slugs, and `<host>` is the installation's tailnet name. A push needs that project and service to exist. It works over HTTPS from a device on the installation's tailnet. Team owners and admins. The token comes back only once, with the username, address and team path to log in and push with.
+    /// Create a token to push (or only pull) the team's own images in Pyo registry, as `<host>/<team>/<project>/<service>:<tag>`. These are slugs, and `<host>` is the registry's name on the installation's tailnet (registry.<tailnet>.ts.net). A push needs that project and service to exist. It works over HTTPS from a device on the installation's tailnet. Team owners and admins. The token comes back only once, with the username, address and team path to log in and push with.
     CreateRegistryToken {
         /// A new id you choose: `rtk_` then 4 to 40 lowercase letters, digits, dashes or underscores.
         id: String,
@@ -2165,8 +2187,6 @@ pub(crate) enum Op {
     },
     /// Revoke a Pyo registry token. Team owners and admins.
     RevokeRegistryToken { id: String },
-    /// Remove a team integration's key.
-    RemoveIntegration { team_id: String, kind: String },
     /// Create a project and its services from a Docker Compose plan (from `POST /compose/preview`, edited if you like), and deploy them in order.
     ImportCompose {
         team_id: String,
@@ -2263,6 +2283,10 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::SendTestEmail {}
             | Op::GithubManifest { .. }
             | Op::RemoveGithubApp {}
+            | Op::SaveTailscale { .. }
+            | Op::TestTailscale {}
+            | Op::RemoveTailscale {}
+            | Op::RenameTailscaleName { .. }
             | Op::CreateOriginPullCertificate { .. }
             | Op::RemoveOriginPullCertificate { .. }
             | Op::SetClusterOriginPull { .. }
@@ -2385,9 +2409,11 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::RemoveGithubInstallation { .. }
         | Op::GithubManifest { .. }
         | Op::RemoveGithubApp {} => ("GitHub", "team"),
-        Op::SaveIntegration { .. }
-        | Op::RemoveIntegration { .. }
-        | Op::CheckSecretImport { .. }
+        Op::SaveTailscale { .. }
+        | Op::TestTailscale {}
+        | Op::RemoveTailscale {}
+        | Op::RenameTailscaleName { .. } => ("Integrations", ""),
+        Op::CheckSecretImport { .. }
         | Op::SaveSecretStore { .. }
         | Op::RemoveSecretStore { .. } => ("Integrations", "sst"),
         // Not for API keys, so not in the reference.
@@ -4390,6 +4416,7 @@ async fn apply(
             confirm,
         } => {
             let id = service["id"].as_str().unwrap_or("").to_owned();
+            tailnet_domains_ok(s, &service["domains"]).await?;
             create_service(
                 tx,
                 user,
@@ -4487,6 +4514,7 @@ async fn apply(
             github_source_ok(tx, &team_id, &spec).await?;
             crate::certs::domains_ok(tx, &team_id, &spec).await?;
             domains_unique(tx, &team_id, &id, &spec).await?;
+            tailnet_domains_ok(s, &spec["domains"]).await?;
             let cluster_id: String =
                 sqlx::query_scalar("SELECT cluster_id FROM pyo.services WHERE id = $1")
                     .bind(&id)
@@ -5367,7 +5395,7 @@ async fn apply(
             sqlx::query("UPDATE pyo.teams SET default_cluster_id = coalesce(default_cluster_id, $2) WHERE id = $1").bind(&team_id).bind(&id).execute(&mut **tx).await?;
             // Run on this machine, the installer reaches Pyo at localhost,
             // so the agent is given the in-cluster address (install.rs).
-            let (command, tailscale, tailnet) = if this_machine {
+            let (command, tailnet) = if this_machine {
                 (
                     crate::join::connect_command(
                         &crate::join::local_scripts_url(),
@@ -5377,13 +5405,12 @@ async fn apply(
                         None,
                     ),
                     true,
-                    true,
                 )
             } else {
-                connect_command(tx, s, &team_id, &id, &token, public_api_url.as_deref()).await?
+                connect_command(tx, s, &id, &token, public_api_url.as_deref()).await?
             };
             Ok(
-                json!({ "ok": true, "token": token, "command": command, "tailscale": tailscale, "tailnet": tailnet }),
+                json!({ "ok": true, "token": token, "command": command, "tailscale": tailnet, "tailnet": tailnet }),
             )
         }
         Op::RotateAgentToken {
@@ -5400,7 +5427,7 @@ async fn apply(
                 .execute(&mut **tx)
                 .await?;
             // As in CreateCluster: run where Pyo runs, the agent dials the in-cluster address.
-            let (command, tailscale, tailnet) = if this_machine {
+            let (command, tailnet) = if this_machine {
                 (
                     crate::join::connect_command(
                         &crate::join::local_scripts_url(),
@@ -5410,13 +5437,12 @@ async fn apply(
                         None,
                     ),
                     true,
-                    true,
                 )
             } else {
-                connect_command(tx, s, &team_id, &id, &token, public_api_url.as_deref()).await?
+                connect_command(tx, s, &id, &token, public_api_url.as_deref()).await?
             };
             Ok(
-                json!({ "ok": true, "token": token, "command": command, "tailscale": tailscale, "tailnet": tailnet }),
+                json!({ "ok": true, "token": token, "command": command, "tailscale": tailnet, "tailnet": tailnet }),
             )
         }
         Op::UpdateCluster {
@@ -6138,48 +6164,22 @@ async fn apply(
             keys.sort();
             Ok(json!({ "ok": true, "keys": keys }))
         }
-        Op::SaveIntegration {
-            team_id,
-            kind,
-            secret,
-        } => {
-            require_role(tx, user, &team_id, Role::Admin).await?;
-            let secret = secret.trim().to_owned();
-            let valid = match kind.as_str() {
-                "tailscale" => secret.starts_with("tskey-") && secret.len() > 20,
-                _ => return Err(ApiError::bad_request("Unknown integration.")),
-            };
-            if !valid {
-                return Err(ApiError::bad_request(
-                    "A Tailscale auth key starts with tskey-.",
-                ));
-            }
-            if !s.sealer.enabled() {
-                return Err(ApiError::new(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    "This installation has no PYO_SECRET_KEY, so it can't store keys.",
-                ));
-            }
-            let hint = format!("…{}", &secret[secret.len() - 4..]);
-            sqlx::query(
-                "INSERT INTO pyo.integrations (team_id, kind, secret, hint) VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (team_id, kind) DO UPDATE SET secret = excluded.secret, hint = excluded.hint, created_at = now()",
-            )
-            .bind(&team_id)
-            .bind(&kind)
-            .bind(s.sealer.seal(&secret)?)
-            .bind(&hint)
-            .execute(&mut **tx)
-            .await?;
+        Op::SaveTailscale { client_id, secret } => {
+            require_admin(user)?;
+            crate::tailscale::save_client(s, &client_id, secret.as_deref()).await
+        }
+        Op::TestTailscale {} => {
+            require_admin(user)?;
+            crate::tailscale::test_saved(s).await
+        }
+        Op::RemoveTailscale {} => {
+            require_admin(user)?;
+            crate::tailscale::remove(s).await?;
             Ok(ok)
         }
-        Op::RemoveIntegration { team_id, kind } => {
-            require_role(tx, user, &team_id, Role::Admin).await?;
-            sqlx::query("DELETE FROM pyo.integrations WHERE team_id = $1 AND kind = $2")
-                .bind(&team_id)
-                .bind(&kind)
-                .execute(&mut **tx)
-                .await?;
+        Op::RenameTailscaleName { kind, name } => {
+            require_admin(user)?;
+            crate::tailscale::rename(s, &kind, &name).await?;
             Ok(ok)
         }
         Op::UpdateProfile { name, timezone } => {
@@ -7857,7 +7857,6 @@ mod waf_lifecycle_tests {
             cookie_secure: false,
             allow_signup: false,
             builder_image: String::new(),
-            tailnet_api_url: String::new(),
             relay_addr: None,
         };
         let (_stop, stopping) = tokio::sync::watch::channel(false);
@@ -8295,7 +8294,6 @@ mod compose_import_tests {
             cookie_secure: false,
             allow_signup: false,
             builder_image: String::new(),
-            tailnet_api_url: String::new(),
             relay_addr: None,
         };
         let (_stop, stopping) = tokio::sync::watch::channel(false);
