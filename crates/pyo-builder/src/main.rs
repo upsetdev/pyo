@@ -362,7 +362,9 @@ impl Builder {
             &commit,
             &job.build_context,
             &ws.src(),
-            job.clone_token.as_deref(),
+            job.clone_token
+                .as_deref()
+                .map(|t| (job.clone_username.as_deref().unwrap_or("x-access-token"), t)),
         )
         .await
         {

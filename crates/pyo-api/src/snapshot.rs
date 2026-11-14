@@ -385,6 +385,18 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     )
     .await?;
 
+    // Git connections, never their tokens.
+    let git_connections = values(
+        db,
+        "SELECT jsonb_build_object('id', c.id, 'teamId', c.team_id, 'provider', c.provider, 'url', c.base_url,
+                'account', c.account, 'publicUrl', c.public_url, 'info', c.info, 'createdAt', pyo.ms(c.created_at),
+                'webhooks', coalesce((SELECT jsonb_agg(jsonb_build_object('repo', w.repo, 'active', w.hook_id IS NOT NULL, 'error', w.error) ORDER BY w.repo)
+                                       FROM pyo.git_webhooks w WHERE w.connection_id = c.id), '[]'::jsonb))
+           FROM pyo.git_connections c WHERE c.team_id = ANY($1) ORDER BY c.created_at",
+        &team_ids,
+    )
+    .await?;
+
     // Which keys are saved, never the keys themselves.
     // Tailscale (Integrations › Tailscale): the client only for admins.
     let tailscale = crate::tailscale::snapshot(db, user.is_admin).await?;
@@ -427,6 +439,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "email": email.map(|e| if user.is_admin { e.public() } else { json!({ "fromEmail": e.from_email }) }),
         "github": github.map(|g| g.public()),
         "githubInstallations": github_installations,
+        "gitConnections": git_connections,
         "deployHooks": deploy_hooks,
         // Your own API tokens: names and prefixes, never the tokens.
         "apiTokens": api_tokens,

@@ -125,7 +125,12 @@ fn build_job(
         registry_host: r.pull.clone(),
         timeout_seconds: 30 * 60,
         github_installation_id: source["installationId"].as_i64(),
+        git_connection_id: source["gitConnectionId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
         clone_token: None,
+        clone_username: None,
     }
 }
 const FINAL: [&str; 3] = ["succeeded", "failed", "cancelled"];
@@ -1087,7 +1092,7 @@ pub async fn apply_progress(
             )
             .await?;
         }
-        if data["source"]["installationId"].is_i64() {
+        if crate::git::reports_status(&data["source"]) {
             let msg = data["failure"]["message"].as_str().unwrap_or("");
             let (gh, text) = match p.status.as_str() {
                 "succeeded" => ("success", "Deployed"),
@@ -1103,8 +1108,8 @@ pub async fn apply_progress(
             };
             crate::jobs::enqueue(
                 &mut *tx,
-                "github.status",
-                crate::jobs::github_status(deployment_id, gh, text),
+                "git.status",
+                crate::jobs::git_status(deployment_id, gh, text),
             )
             .await?;
         }

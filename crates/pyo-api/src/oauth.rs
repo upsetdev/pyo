@@ -75,7 +75,7 @@ pub fn base_url(headers: &HeaderMap) -> String {
     pick_base_url(configured_public_url(), &crate::web::https_urls(), host)
 }
 
-fn configured_public_url() -> Option<&'static str> {
+pub(crate) fn configured_public_url() -> Option<&'static str> {
     static U: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     U.get_or_init(|| {
         std::env::var("PYO_PUBLIC_URL")

@@ -35,9 +35,8 @@ use tokio::sync::Mutex;
 use crate::{
     AppState,
     auth::SessionUser,
-    deploy::{self, DeployRequest},
     error::{ApiError, ApiResult},
-    ids::{new_id, secret_token},
+    ids::secret_token,
     ops::{Role, log_activity, require_role},
 };
 
@@ -798,7 +797,7 @@ pub(crate) async fn build_file(
 
 /// The build context as a prefix for its files ("" for the repository's
 /// root, "apps/web/" for a folder). None when it leaves the repository.
-fn build_dir(context: &str) -> Option<String> {
+pub(crate) fn build_dir(context: &str) -> Option<String> {
     let d = context.trim().trim_start_matches("./").trim_matches('/');
     if d.split('/').any(|p| p == "..") {
         return None;
@@ -833,21 +832,16 @@ pub(crate) struct TeamQuery {
 
 // ── Commit statuses ──────────────────────────────────────────────────────────
 
-/// Report a deployment on its commit (run as the "github.status" job).
-/// Deployments not from a GitHub App repository have nothing to report.
+/// Report a deployment of a GitHub App repository on its commit (for the
+/// "git.status" job, git.rs `report`). "running" is GitHub's "pending".
 pub async fn report(
     s: &AppState,
+    data: &Value,
+    slug: &str,
     deployment_id: &str,
     state: &str,
     description: &str,
 ) -> anyhow::Result<()> {
-    let row: Option<(Value, String)> = sqlx::query_as("SELECT d.data, t.slug FROM pyo.deployments d JOIN pyo.teams t ON t.id = d.team_id WHERE d.id = $1")
-        .bind(deployment_id)
-        .fetch_optional(&s.db)
-        .await?;
-    let Some((data, slug)) = row else {
-        return Ok(());
-    };
     let src = &data["source"];
     let (Some(inst), Some(repo), Some(sha)) = (
         src["installationId"].as_i64(),
@@ -862,6 +856,7 @@ pub async fn report(
     else {
         return Ok(());
     };
+    let state = if state == "running" { "pending" } else { state };
     let tok = installation_token(s, inst).await?;
     let res = http()
         .post(format!("{API}/repos/{repo}/statuses/{sha}"))
@@ -929,7 +924,8 @@ async fn webhook(
         return Ok((StatusCode::OK, "ignored"));
     };
     let pusher = v["pusher"]["name"].as_str().unwrap_or("GitHub").to_owned();
-    let n = deploy_push(&s, repo, branch, sha, &pusher).await?;
+    let n =
+        crate::git::deploy_push(&s, crate::git::Follow::Github(repo), branch, sha, &pusher).await?;
     Ok((
         StatusCode::OK,
         if n > 0 {
@@ -938,93 +934,6 @@ async fn webhook(
             "no matching services"
         },
     ))
-}
-
-/// Deploy `sha` to every service that follows `repo`@`branch` with deploy on
-/// push. Skips services pinned to a commit, rolled back, already on `sha`, or
-/// mid-deploy (the poller picks those up once they're free).
-pub async fn deploy_push(
-    s: &AppState,
-    repo: &str,
-    branch: &str,
-    sha: &str,
-    actor: &str,
-) -> ApiResult<usize> {
-    let services: Vec<(String, String, Value)> = sqlx::query_as(
-        "SELECT a.id, a.team_id, a.spec->'source' FROM pyo.services a
-          WHERE NOT a.deleting AND a.spec->'source'->>'type' = 'git' AND a.spec->'source'->>'installationId' IS NOT NULL
-            AND coalesce(a.spec->'source'->>'branch', 'main') = $1 AND coalesce((a.spec->'source'->>'autoDeploy')::bool, true)
-            AND coalesce(a.spec->'source'->>'commit', '') = ''",
-    )
-    .bind(branch)
-    .fetch_all(&s.db)
-    .await?;
-    let mut started = 0;
-    for (service_id, team_id, src) in services {
-        if full_name(src["repoUrl"].as_str().unwrap_or(""))
-            .is_none_or(|r| !r.eq_ignore_ascii_case(repo))
-        {
-            continue;
-        }
-        let mut tx = s.db.begin().await?;
-        // Off the newest deploy: what it built, whether it's a rollback, whether it's running.
-        let last: Option<(String, Value)> = sqlx::query_as("SELECT status, data FROM pyo.deployments WHERE service_id = $1 ORDER BY created_at DESC LIMIT 1").bind(&service_id).fetch_optional(&mut *tx).await?;
-        let current_trigger: Option<String> = sqlx::query_scalar("SELECT d.data->>'trigger' FROM pyo.services a JOIN pyo.deployments d ON d.id = a.current_deployment_id WHERE a.id = $1").bind(&service_id).fetch_optional(&mut *tx).await?.flatten();
-        if let Some((status, data)) = &last
-            && (data["source"]["commit"].as_str() == Some(sha) || !deploy::is_final(status))
-        {
-            continue;
-        }
-        if current_trigger.as_deref() == Some("rollback") {
-            // Rolled back on purpose: wait for someone to deploy again.
-            continue;
-        }
-        let dep = new_id("dpl");
-        match deploy::create(
-            &mut tx,
-            DeployRequest {
-                deployment_id: &dep,
-                service_id: &service_id,
-                trigger: "git_push",
-                actor,
-                rollback_of: None,
-                retry_of: None,
-                commit: Some(sha),
-            },
-        )
-        .await
-        {
-            Ok(_) => {
-                log_activity(
-                    &mut tx,
-                    &team_id,
-                    actor,
-                    "deployment.started",
-                    "info",
-                    &format!(
-                        "Push to {branch} ({}) is deploying",
-                        &sha[..sha.len().min(7)]
-                    ),
-                    json!({ "kind": "deployment", "id": dep, "label": dep }),
-                    json!({ "serviceId": service_id }),
-                )
-                .await?;
-                crate::jobs::enqueue(
-                    &mut *tx,
-                    "github.status",
-                    crate::jobs::github_status(&dep, "pending", "Building…"),
-                )
-                .await?;
-                tx.commit().await?;
-                s.wake(&format!("builders:{team_id}")).await;
-                started += 1;
-            }
-            Err(e) => {
-                tracing::info!(service = %service_id, reason = %e.message, "push not deployed")
-            }
-        }
-    }
-    Ok(started)
 }
 
 /// Without webhooks (Pyo isn't public), check each followed branch every minute.
@@ -1058,7 +967,15 @@ async fn poll_once(s: &AppState) {
             };
             match branch_head(s, inst, &repo, &branch).await {
                 Ok(sha) if sha.len() == 40 => {
-                    if let Err(e) = deploy_push(s, &repo, &branch, &sha, "GitHub").await {
+                    if let Err(e) = crate::git::deploy_push(
+                        s,
+                        crate::git::Follow::Github(&repo),
+                        &branch,
+                        &sha,
+                        "GitHub",
+                    )
+                    .await
+                    {
                         tracing::warn!(%repo, error = ?e.message, "push poll");
                     }
                 }

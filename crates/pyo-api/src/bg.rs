@@ -69,6 +69,7 @@ pub fn pool_size(role: Role, max_connections: u32) -> u32 {
 pub const LOCK_SWEEPER: i64 = 7_001;
 pub const LOCK_BUILDERS: i64 = 7_002;
 pub const LOCK_GITHUB: i64 = 7_003;
+pub const LOCK_GIT: i64 = 7_051;
 pub const LOCK_DNS: i64 = 7_004;
 pub const LOCK_BACKUP: i64 = 7_005;
 pub const LOCK_TEAM_BACKUP: i64 = 7_006;

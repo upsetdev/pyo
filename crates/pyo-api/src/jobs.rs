@@ -1,5 +1,5 @@
 //! Durable background jobs in Postgres: things that must happen eventually
-//! even if a process dies mid-way (reporting a commit status to GitHub,
+//! even if a process dies mid-way (reporting a commit status to GitHub or GitLab,
 //! deleting an old image, retrying an email). Enqueued in the same
 //! transaction as what caused them where possible; claimed with
 //! `FOR UPDATE SKIP LOCKED` by any worker; retried with backoff; a job whose
@@ -102,8 +102,8 @@ async fn claim_and_run(s: &AppState) -> sqlx::Result<bool> {
 async fn run(s: &AppState, kind: &str, p: &Value) -> anyhow::Result<()> {
     let str_of = |k: &str| p[k].as_str().unwrap_or("").to_owned();
     match kind {
-        "github.status" => {
-            crate::github::report(
+        "git.status" => {
+            crate::git::report(
                 s,
                 &str_of("deploymentId"),
                 &str_of("state"),
@@ -111,6 +111,8 @@ async fn run(s: &AppState, kind: &str, p: &Value) -> anyhow::Result<()> {
             )
             .await
         }
+        "git.hooks" => crate::git::sync_hooks(s, &str_of("connectionId")).await,
+        "git.revoke" => crate::git::revoke(s, p).await,
         "registry.delete" => crate::deploy::delete_image(&str_of("repo"), &str_of("digest")).await,
         "email.invite" => {
             crate::ops::send_invite_email(
@@ -150,6 +152,6 @@ pub async fn prune(s: &AppState) -> sqlx::Result<()> {
 }
 
 /// Payload helpers, so enqueuers and the runner agree on field names.
-pub fn github_status(deployment_id: &str, state: &str, description: &str) -> Value {
+pub fn git_status(deployment_id: &str, state: &str, description: &str) -> Value {
     json!({ "deploymentId": deployment_id, "state": state, "description": description })
 }

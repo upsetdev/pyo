@@ -306,6 +306,7 @@ pub async fn team_of(
         "deployments" => "Deployment",
         "certificates" | "origin_pull_certificates" => "Certificate",
         "secret_stores" => "Secret store",
+        "git_connections" => "Git connection",
         "members" => "Member",
         "deploy_hooks" => "Deploy hook",
         "volumes" => "Volume",
@@ -1865,6 +1866,40 @@ pub(crate) enum Op {
     GithubInstallUrl { team_id: String },
     /// Unlink a GitHub installation from a team.
     RemoveGithubInstallation { team_id: String, id: i64 },
+    /// Connect GitLab (gitlab.com or self-managed) with an access token.
+    /// Team owners and admins. Pyo checks the token first: it needs the
+    /// `api` scope, and the Maintainer role on the projects to deploy. The
+    /// token is sealed and never shown again. `warning` says what's missing,
+    /// such as a token with no Maintainer role yet.
+    AddGitConnection {
+        /// A new id you choose: `gitc_` then 4 to 40 lowercase letters, digits, dashes or underscores.
+        id: String,
+        team_id: String,
+        /// "gitlab".
+        provider: String,
+        /// The GitLab address, like https://gitlab.example.com. https://gitlab.com when omitted.
+        #[serde(default)]
+        url: String,
+        /// A group, project or personal access token.
+        token: String,
+        /// Where GitLab sends webhooks and where commit statuses link: this Pyo's address. Pyo's own setting when omitted.
+        #[serde(default)]
+        public_url: Option<String>,
+    },
+    /// Replace a Git connection's access token. Team owners and admins.
+    ReplaceGitConnectionToken {
+        id: String,
+        token: String,
+        /// This Pyo's address, for webhooks and links. Pyo's own setting when omitted.
+        #[serde(default)]
+        public_url: Option<String>,
+    },
+    /// Check what a Git connection's token can do now. `problems` says what's
+    /// missing, and `working` whether it works at all. Team owners and admins.
+    TestGitConnection { id: String },
+    /// Disconnect a Git connection, and remove the webhooks Pyo made. Not
+    /// while a service deploys from it. Team owners and admins.
+    RemoveGitConnection { id: String },
     /// Create a deploy hook: a secret URL that deploys a service, or every service of a project.
     CreateDeployHook {
         /// A new id you choose: `hook_` then 4 to 40 lowercase letters, digits, dashes or underscores.
@@ -2449,6 +2484,10 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::RemoveGithubInstallation { .. }
         | Op::GithubManifest { .. }
         | Op::RemoveGithubApp {} => ("GitHub", "team"),
+        Op::AddGitConnection { .. }
+        | Op::ReplaceGitConnectionToken { .. }
+        | Op::TestGitConnection { .. }
+        | Op::RemoveGitConnection { .. } => ("Git providers", "gitc"),
         Op::SaveTailscale { .. }
         | Op::TestTailscale {}
         | Op::RemoveTailscale {}
@@ -3140,6 +3179,34 @@ async fn apply(
             .await?;
             Ok(ok)
         }
+        Op::AddGitConnection {
+            id,
+            team_id,
+            provider,
+            url,
+            token,
+            public_url,
+        } => {
+            client_id(&id, "gitc")?;
+            crate::git::add(
+                tx,
+                user,
+                &id,
+                &team_id,
+                &provider,
+                &url,
+                &token,
+                public_url.as_deref(),
+            )
+            .await
+        }
+        Op::ReplaceGitConnectionToken {
+            id,
+            token,
+            public_url,
+        } => crate::git::replace(tx, user, &id, &token, public_url.as_deref()).await,
+        Op::TestGitConnection { id } => crate::git::test(s, tx, user, &id).await,
+        Op::RemoveGitConnection { id } => crate::git::remove(s, tx, user, &id).await,
         Op::CreateDeployHook {
             id,
             project_id,
@@ -4412,6 +4479,7 @@ async fn apply(
         Op::DeleteProject { id, delete_volumes } => {
             let team_id = team_of(tx, "projects", &id).await?;
             require_role(tx, user, &team_id, Role::Admin).await?;
+            crate::git::queue_sync_team(tx, &team_id).await?;
             let (namespace, name): (String, String) =
                 sqlx::query_as("SELECT namespace, name FROM pyo.projects WHERE id = $1")
                     .bind(&id)
@@ -4595,6 +4663,8 @@ async fn apply(
                 gpu_ok(tx, &cluster_id, &spec).await?;
             }
             github_source_ok(tx, &team_id, &spec).await?;
+            crate::git::source_ok(tx, &team_id, &spec).await?;
+            crate::git::queue_sync_for(tx, &[&old_spec["source"], &spec["source"]]).await?;
             crate::certs::domains_ok(tx, &team_id, &spec).await?;
             domains_unique(tx, &team_id, &id, &spec).await?;
             tailnet_domains_ok(s, &spec["domains"]).await?;
@@ -4697,10 +4767,14 @@ async fn apply(
             .fetch_one(&mut **tx)
             .await?;
             // The agent removes the objects; the row goes when it reports back.
-            sqlx::query("UPDATE pyo.services SET deleting = true WHERE id = $1")
-                .bind(&id)
-                .execute(&mut **tx)
-                .await?;
+            let source: Value = sqlx::query_scalar(
+                "UPDATE pyo.services SET deleting = true WHERE id = $1 RETURNING spec->'source'",
+            )
+            .bind(&id)
+            .fetch_one(&mut **tx)
+            .await?;
+            // Its repository's webhook goes when no other service follows it.
+            crate::git::queue_sync_for(tx, &[&source]).await?;
             sqlx::query("UPDATE pyo.deployments SET status = 'cancelled', finished_at = now() WHERE service_id = $1 AND status NOT IN ('succeeded', 'failed', 'cancelled')")
                 .bind(&id)
                 .execute(&mut **tx)
@@ -7391,6 +7465,8 @@ pub(crate) async fn create_service(
     validate_service_spec(&spec)?;
     gpu_ok(tx, &cluster_id, &spec).await?;
     github_source_ok(tx, &team_id, &spec).await?;
+    crate::git::source_ok(tx, &team_id, &spec).await?;
+    crate::git::queue_sync_for(tx, &[&spec["source"]]).await?;
     crate::certs::domains_ok(tx, &team_id, &spec).await?;
     domains_unique(tx, &team_id, &id, &spec).await?;
     ports_unique(tx, &team_id, &id, &cluster_id, &spec).await?;

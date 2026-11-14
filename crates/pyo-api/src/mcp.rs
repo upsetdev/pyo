@@ -188,6 +188,8 @@ const NOT_TOOLS: &[&str] = &[
     // They take another platform's API token: kept out of assistants.
     "previewPlatformImport",
     "startPlatformImport",
+    "addGitConnection",
+    "replaceGitConnectionToken",
     // Platform imports stay with the dashboard and the CLI as a whole.
     "getPlatformImport",
     "listPlatformImports",
@@ -425,7 +427,7 @@ fn build_catalog() -> Vec<Tool> {
         .collect();
     let mut op_tools: Vec<(usize, Tool)> = vec![];
     for (name, o) in &ops {
-        if covered(name) {
+        if covered(name) || NOT_TOOLS.contains(&name.as_str()) {
             continue;
         }
         let mut input = inline(o, schemas);
@@ -600,6 +602,11 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "listGithubRepos" => json_of(crate::github::repos(st(), me(), Query(args_as(args)?)).await),
         "getGithubBuildFile" => {
             json_of(crate::github::build_file(st(), me(), Query(args_as(args)?)).await)
+        }
+        "listGitRepos" => json_of(crate::git::repos(st(), me(), Query(args_as(args)?)).await),
+        "listGitBranches" => json_of(crate::git::branches(st(), me(), Query(args_as(args)?)).await),
+        "getGitBuildFile" => {
+            json_of(crate::git::build_file(st(), me(), Query(args_as(args)?)).await)
         }
         "addDatabaseBackup" => {
             json_of(crate::database_backups::add(st(), me(), Json(args_as(args)?)).await)

@@ -94,22 +94,17 @@ async fn git(dir: &Path, args: &[&str], auth: Option<&str>) -> anyhow::Result<()
 /// Check out `commit` of `repo` into `dir`. Fetches only that commit when
 /// the server allows it (GitHub, GitLab, Gitea do); otherwise the branch.
 /// With a `subdir` (a service inside a monorepo), only that folder's files are
-/// downloaded. `token`: a GitHub App installation token, for private repositories.
+/// downloaded. `login`: a username and short-lived token for private
+/// repositories (a GitHub App installation token, a GitLab deploy token).
 pub async fn checkout(
     repo: &str,
     branch: &str,
     commit: &str,
     subdir: &str,
     dir: &Path,
-    token: Option<&str>,
+    login: Option<(&str, &str)>,
 ) -> anyhow::Result<()> {
-    use base64::Engine;
-    let header = token.map(|t| {
-        format!(
-            "Authorization: Basic {}",
-            base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{t}"))
-        )
-    });
+    let header = login.map(|(user, token)| auth_header(user, token));
     let auth = header.as_deref();
     git(dir, &["init", "-q"], None).await?;
     git(dir, &["remote", "add", "origin", repo], None).await?;
@@ -161,6 +156,16 @@ pub async fn checkout(
     .await
     .with_context(|| format!("commit {commit} isn't in {repo}"))?;
     Ok(())
+}
+
+/// The HTTP header git sends a login in (basic auth). It goes through the
+/// environment only, never into the remote URL, .git/config or a message.
+fn auth_header(user: &str, token: &str) -> String {
+    use base64::Engine;
+    format!(
+        "Authorization: Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{user}:{token}"))
+    )
 }
 
 /// `rel` inside `base`, refusing absolute paths, "..", and a symbolic link
@@ -629,6 +634,85 @@ pub fn label(info: &Value, app_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logins_go_in_a_basic_auth_header() {
+        assert_eq!(
+            auth_header("gitlab+deploy-token-31", "gldt-x"),
+            "Authorization: Basic Z2l0bGFiK2RlcGxveS10b2tlbi0zMTpnbGR0LXg="
+        );
+        assert_eq!(
+            auth_header("x-access-token", "ghs_1"),
+            "Authorization: Basic eC1hY2Nlc3MtdG9rZW46Z2hzXzE="
+        );
+    }
+
+    /// A clone with a login leaves the token nowhere in the checkout (the
+    /// build context): not in .git/config, the remote URL or any file.
+    #[tokio::test]
+    async fn a_clone_keeps_no_token() {
+        let root = std::env::temp_dir().join(format!("pyo-clone-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (origin, out) = (root.join("origin"), root.join("out"));
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&origin)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{args:?}");
+            String::from_utf8_lossy(&o.stdout).trim().to_owned()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("Dockerfile"), "FROM scratch\n").unwrap();
+        run(&["add", "."]);
+        run(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "x",
+        ]);
+        let sha = run(&["rev-parse", "HEAD"]);
+        let secret = "glpat-must-not-stay";
+        checkout(
+            origin.to_str().unwrap(),
+            "main",
+            &sha,
+            ".",
+            &out,
+            Some(("oauth2", secret)),
+        )
+        .await
+        .unwrap();
+        assert!(out.join("Dockerfile").is_file());
+        fn scan(dir: &Path, secret: &str) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    scan(&p, secret);
+                } else {
+                    let b = std::fs::read(&p).unwrap();
+                    let encoded = {
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD.encode(format!("oauth2:{secret}"))
+                    };
+                    let text = String::from_utf8_lossy(&b);
+                    assert!(
+                        !text.contains(secret) && !text.contains(&encoded),
+                        "{}",
+                        p.display()
+                    );
+                }
+            }
+        }
+        scan(&out, secret);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn subdirectories_stay_inside() {

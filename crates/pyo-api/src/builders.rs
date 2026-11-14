@@ -146,28 +146,7 @@ async fn poll(
                 job.push_repository = format!("{host}/{rest}");
             }
             job.registry_host = host;
-            if let Some(inst) = job.github_installation_id {
-                // Private repositories: clone with a short-lived token, and
-                // resolve the branch through the API (git ls-remote can't).
-                match crate::github::installation_token(&s, inst).await {
-                    Ok(tok) => job.clone_token = Some(tok),
-                    Err(e) => {
-                        tracing::warn!(job = %job.id, error = %format!("{e:#}"), "no GitHub token for build")
-                    }
-                }
-                if job.commit.is_empty()
-                    && let Some(repo) = crate::github::full_name(&job.repo_url)
-                    && let Ok(sha) = crate::github::branch_head(&s, inst, &repo, &job.branch).await
-                {
-                    job.commit = sha;
-                }
-                crate::jobs::enqueue_now(
-                    &s,
-                    "github.status",
-                    crate::jobs::github_status(&job.deployment_id, "pending", "Building…"),
-                )
-                .await;
-            }
+            crate::git::prepare_build(&s, &mut job).await;
             return Ok(Json(Some(job)));
         }
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -222,6 +201,7 @@ async fn result(
     Path(id): Path<String>,
     Json(r): Json<BuildResult>,
 ) -> ApiResult<Json<Value>> {
+    crate::git::after_build(&s, &id).await;
     if let Some(cluster) = deploy::finish_build(&s, &id, &b.id, r).await? {
         s.wake(&cluster).await;
     }

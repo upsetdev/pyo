@@ -31,6 +31,7 @@ pub mod error;
 mod firewall;
 mod freedomain;
 mod geoip;
+mod git;
 mod github;
 mod hooks;
 pub mod ids;
@@ -348,6 +349,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tokio::spawn(deploy::dns_watcher(state.clone()));
         tokio::spawn(builders::watcher(state.clone()));
         tokio::spawn(github::poller(state.clone()));
+        tokio::spawn(git::poller(state.clone()));
         tokio::spawn(jobs::runner(state.clone()));
         tokio::spawn(backupstore::keeper(state.db.clone()));
         tokio::spawn(backup::runner(state.clone()));
@@ -398,6 +400,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 "/api/v1",
                 ops::routes()
                     .merge(github::api_routes())
+                    .merge(git::api_routes())
                     .merge(cli::routes())
                     .layer(CompressionLayer::new())
                     .merge(terminal::routes())
@@ -406,6 +409,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             )
             .nest("/api/cli", cli::public_routes())
             .nest("/api/github", github::routes())
+            .nest("/api/git", git::routes())
             .nest("/api/hooks", hooks::routes())
             .nest("/api/mcp", mcp::routes())
             .nest("/api/oauth", oauth::routes())

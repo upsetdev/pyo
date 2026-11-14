@@ -1375,10 +1375,18 @@ pub struct BuildJob {
     /// Repositories connected through Pyo's GitHub App.
     #[serde(default)]
     pub github_installation_id: Option<i64>,
-    /// Short-lived token to clone with (GitHub App installations); added
-    /// when a builder claims the job, never stored.
+    /// Repositories of a team's Git connection (GitLab).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_connection_id: Option<String>,
+    /// Short-lived token to clone with (a GitHub App installation token, a
+    /// GitLab deploy token); added when a builder claims the job, never
+    /// stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_token: Option<String>,
+    /// The username that goes with `clone_token` ("x-access-token" when
+    /// there's none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_username: Option<String>,
 }
 
 /// A step of a build. `stage` is "building" or "pushing" (or empty for logs only).
