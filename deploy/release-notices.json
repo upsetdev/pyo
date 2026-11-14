@@ -1,8 +1,6 @@
 {
-  "version": "0.2.4",
+  "version": "0.2.5",
   "minFrom": null,
   "manualOnly": false,
-  "beforeYouUpdate": [
-    "Run the connect command on each cluster's server to apply the memory reserve for k3s."
-  ]
+  "beforeYouUpdate": []
 }
