@@ -276,6 +276,18 @@ fn unique(base: &str, taken: &mut HashSet<String>) -> String {
     } else {
         base
     };
+    free(base, taken)
+}
+
+/// A unique DNS-safe database name from `base` among `taken`. Databases
+/// have no address of their own under /<project>/, so any name works,
+/// "postgres" included (Railway's default).
+fn unique_database_name(base: &str, taken: &mut HashSet<String>) -> String {
+    free(crate::compose::dns_name(base, 40), taken)
+}
+
+/// `base`, or `base-2`, `base-3`... when it's taken.
+fn free(base: String, taken: &mut HashSet<String>) -> String {
     let mut name = base.clone();
     let mut n = 2;
     while !taken.insert(name.clone()) {

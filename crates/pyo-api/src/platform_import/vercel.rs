@@ -44,6 +44,7 @@ use serde_json::Value;
 use super::{
     Fetch, ImportDatabase, ImportPlan, ImportProject, ImportService, Platform, Responses, Web,
     database_action, database_warnings, health_check, https_repo, plan_service, s, unique,
+    unique_database_name,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -315,7 +316,7 @@ fn store_database(st: &Store, project_name: &str, taken: &mut HashSet<String>) -
     ImportDatabase {
         key: format!("db:{}", st.id),
         source_name: source_name.to_owned(),
-        name: unique(&base, taken),
+        name: unique_database_name(&base, taken),
         engine: engine.to_owned(),
         image: String::new(),
         target: target.map(str::to_owned),

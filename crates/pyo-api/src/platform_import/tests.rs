@@ -621,7 +621,7 @@ fn railway_databases() {
         pg.url.as_deref(),
         Some("postgresql://postgres:pgS3cret@roundhouse.proxy.rlwy.net:11105/railway")
     );
-    assert_eq!(pg.name, "postgres-app");
+    assert_eq!(pg.name, "postgres");
     let my = database(prod, "db:svc-mysql@env-prod");
     assert_eq!(
         (my.target.as_deref(), my.action.as_str()),

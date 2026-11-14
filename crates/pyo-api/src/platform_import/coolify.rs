@@ -30,7 +30,7 @@ use serde_json::Value;
 use super::{
     Fetch, ImportDatabase, ImportDomain, ImportPlan, ImportProject, ImportService, ImportStack,
     Platform, Responses, Web, database_action, database_warnings, health_check, https_repo,
-    plan_service, s, unique, volume,
+    plan_service, s, unique_database_name, volume,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -503,7 +503,7 @@ fn database(d: &Value, engine: &str, taken: &mut HashSet<String>) -> ImportDatab
     ImportDatabase {
         key: format!("db:{}", s(d, "uuid")),
         source_name: s(d, "name").to_owned(),
-        name: unique(s(d, "name"), taken),
+        name: unique_database_name(s(d, "name"), taken),
         engine: engine.to_owned(),
         image: s(d, "image").to_owned(),
         target: target.map(str::to_owned),

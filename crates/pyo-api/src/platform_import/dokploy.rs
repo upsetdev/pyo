@@ -27,7 +27,7 @@ use serde_json::Value;
 use super::{
     Fetch, ImportDatabase, ImportDomain, ImportPlan, ImportProject, ImportService, ImportStack,
     Platform, Responses, Web, database_action, database_warnings, health_check, https_repo,
-    plan_service, s, unique, url_escape, volume,
+    plan_service, s, unique, unique_database_name, url_escape, volume,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -499,7 +499,7 @@ fn database(d: &Value, engine: &str, host: &str, taken: &mut HashSet<String>) ->
             )
         ),
         source_name: s(d, "name").to_owned(),
-        name: unique(s(d, "name"), taken),
+        name: unique_database_name(s(d, "name"), taken),
         engine: engine.to_owned(),
         image: s(d, "dockerImage").to_owned(),
         target: target.map(str::to_owned),
@@ -559,7 +559,7 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
                             project.databases.push(ImportDatabase {
                                 key: format!("db:{did}"),
                                 source_name: s(d, "name").to_owned(),
-                                name: unique(s(d, "name"), &mut db_names),
+                                name: unique_database_name(s(d, "name"), &mut db_names),
                                 engine: engine.to_owned(),
                                 action: "manual".into(),
                                 warnings: note.into_iter().collect(),
