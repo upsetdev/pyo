@@ -10,7 +10,9 @@ import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Input, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
-import { DNS_LABEL } from "~/lib/pyo/format";
+import { BuildArgsEditor, type BuildArg } from "~/components/pyo/editors";
+import { draftId } from "~/lib/pyo/draft";
+import { DNS_LABEL, ENV_KEY } from "~/lib/pyo/format";
 import { api, usePyo, projectParams, serviceIdOf } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Application, ServiceSource } from "~/lib/pyo/types";
@@ -99,6 +101,18 @@ function AppSettings({ app }: { app: Application }) {
     serverTags.every((t) => n.tags?.includes(t)),
   ).length;
   const [source, setSource] = useState<ServiceSource>(app.source);
+  const savedArgs = app.source.type === "git" ? app.source.buildArgs : [];
+  const [buildArgs, setBuildArgs] = useState<BuildArg[]>(() =>
+    (savedArgs ?? []).map((a) => ({ id: draftId(), ...a })),
+  );
+  const argList = buildArgs
+    .filter((a) => a.key.trim())
+    .map(({ key, value }) => ({ key: key.trim(), value }));
+  const argErrors = Object.fromEntries(
+    buildArgs
+      .filter((a) => a.key.trim() && !ENV_KEY.test(a.key.trim()))
+      .map((a) => [`buildArg.${a.id}`, "Use letters, digits and underscores."]),
+  );
   const [confirm, setConfirm] = useState<"stop" | "restart" | "delete" | null>(
     null,
   );
@@ -114,7 +128,9 @@ function AppSettings({ app }: { app: Application }) {
         : "";
   const generalDirty =
     name !== app.name || serverTags.join() !== (app.serverTags ?? []).join();
-  const sourceDirty = JSON.stringify(source) !== JSON.stringify(app.source);
+  const sourceDirty =
+    JSON.stringify(source) !== JSON.stringify(app.source) ||
+    JSON.stringify(argList) !== JSON.stringify(savedArgs ?? []);
 
   return (
     <div className="space-y-4">
@@ -239,6 +255,14 @@ function AppSettings({ app }: { app: Application }) {
                   )}
                 </Field>
               )}
+              <div className="sm:col-span-2">
+                <BuildArgsEditor
+                  value={buildArgs}
+                  onChange={setBuildArgs}
+                  errors={argErrors}
+                  note="Used on the next deploy."
+                />
+              </div>
             </>
           ) : (
             <>
@@ -281,11 +305,16 @@ function AppSettings({ app }: { app: Application }) {
         <div className="flex justify-end border-t border-border px-4 py-3">
           <Button
             size="sm"
-            disabled={!sourceDirty}
+            disabled={!sourceDirty || Object.keys(argErrors).length > 0}
             onClick={() => {
               api.updateService(
                 app.id,
-                { source },
+                {
+                  source:
+                    source.type === "git"
+                      ? { ...source, buildArgs: argList }
+                      : source,
+                },
                 { requiresRedeploy: true, label: "deployment source" },
               );
               toast({

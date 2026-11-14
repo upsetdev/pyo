@@ -87,7 +87,7 @@ const MIB: f64 = 1048576.0;
 /// CPU (cores) and memory (bytes) a pod asks for, as the scheduler counts
 /// it: its containers together, or its largest init container when that's
 /// more, plus the runtime's overhead.
-fn pod_requests(p: &Pod) -> (f64, f64) {
+pub(crate) fn pod_requests(p: &Pod) -> (f64, f64) {
     let Some(spec) = p.spec.as_ref() else {
         return (0.0, 0.0);
     };

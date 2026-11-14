@@ -173,6 +173,7 @@ export function emptyDraft(
       command: "",
       initialDelaySeconds: 10,
       periodSeconds: 10,
+      auto: "default",
     },
     volumes: [],
     ports: [

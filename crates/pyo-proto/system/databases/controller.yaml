@@ -156,6 +156,6 @@ spec:
           readinessProbe: {httpGet: {path: /readyz, port: 8081}}
           livenessProbe: {httpGet: {path: /healthz, port: 8081}, initialDelaySeconds: 10}
           resources:
-            requests: {cpu: 20m, memory: 48Mi}
+            requests: {cpu: 20m, memory: 16Mi}
             limits: {memory: 256Mi}
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}

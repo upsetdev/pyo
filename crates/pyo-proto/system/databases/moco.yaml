@@ -19,6 +19,8 @@
 #   MySQLCluster spec.restore) and BackupPolicy spec.retentionDays.
 # - The operator (2 replicas, it elects a leader) prefers different
 #   servers and leaves a lost server after 10s.
+# - The operator's memory request is 32Mi, not 20Mi: it holds ~25 MiB
+#   (measured).
 # Needs cert-manager (cert-manager.io/v1): the webhook's serving
 # certificate and the gRPC CA below are cert-manager Certificates, and the
 # operator makes a Certificate per MySQLCluster for its agents.
@@ -12928,7 +12930,7 @@ spec:
         resources:
           requests:
             cpu: 100m
-            memory: 20Mi
+            memory: 32Mi
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

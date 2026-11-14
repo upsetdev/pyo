@@ -72,6 +72,7 @@ import {
 import { getTemplate } from "~/lib/pyo/templates";
 import {
   EnvEditor,
+  BuildArgsEditor,
   HealthCheckFields,
   PortEditor,
   ResourceFields,
@@ -317,80 +318,11 @@ export function SourceStep({ d, set, errors }: StepProps) {
               )}
             </Field>
           </div>
-          <div>
-            <p className="mb-1.5 text-[12px] font-medium">Build arguments</p>
-            <div className="space-y-2">
-              {g.buildArgs.map((a) => (
-                <div key={a.id}>
-                  <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_32px] gap-2">
-                    <Input
-                      mono
-                      value={a.key}
-                      placeholder="ARG_NAME"
-                      aria-label="Build argument name"
-                      onChange={(e) =>
-                        setGit({
-                          buildArgs: g.buildArgs.map((x) =>
-                            x.id === a.id
-                              ? { ...x, key: e.target.value.toUpperCase() }
-                              : x,
-                          ),
-                        })
-                      }
-                    />
-                    <Input
-                      mono
-                      value={a.value}
-                      placeholder="value"
-                      aria-label="Build argument value"
-                      onChange={(e) =>
-                        setGit({
-                          buildArgs: g.buildArgs.map((x) =>
-                            x.id === a.id ? { ...x, value: e.target.value } : x,
-                          ),
-                        })
-                      }
-                    />
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label="Remove build argument"
-                      onClick={() =>
-                        setGit({
-                          buildArgs: g.buildArgs.filter((x) => x.id !== a.id),
-                        })
-                      }
-                    >
-                      <TrashIcon size={14} />
-                    </Button>
-                  </div>
-                  {errors[`buildArg.${a.id}`] ? (
-                    <p className="mt-1 text-[11.5px] text-destructive">
-                      {errors[`buildArg.${a.id}`]}
-                    </p>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-            <Button
-              variant="secondary"
-              size="xs"
-              className="mt-2"
-              onClick={() =>
-                setGit({
-                  buildArgs: [
-                    ...g.buildArgs,
-                    { id: draftId(), key: "", value: "" },
-                  ],
-                })
-              }
-            >
-              <PlusIcon size={12} /> Add build argument
-            </Button>
-            <p className="mt-1.5 text-[11.5px] text-muted-foreground">
-              Visible in the image, so don&apos;t put secrets here.
-            </p>
-          </div>
+          <BuildArgsEditor
+            value={g.buildArgs}
+            onChange={(buildArgs) => setGit({ buildArgs })}
+            errors={errors}
+          />
         </Advanced>
       </div>
     );

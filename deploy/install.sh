@@ -269,14 +269,19 @@ k3s_install() {
 # instead of growing. Under 2.75 GB, also compressed swap in memory
 # (zram, half the memory, pyo-zram.service) for what runs outside
 # containers, k3s itself above all (containers don't swap), unless the
-# machine has swap of its own. From 3.5 GB, neither.
+# machine has swap of its own. From 3.5 GB, neither. At any size, kubelet
+# sets aside memory for k3s and the system (kube-reserved and
+# system-reserved, in a k3s config drop-in), so the scheduler only hands
+# containers what's left: 256 MiB under 1.5 GB, 512 MiB under 3.5 GB,
+# 768 MiB under 8 GB, 1 GiB from there.
+K3S_MEMORY_CONFIG=/etc/rancher/k3s/config.yaml.d/50-pyo-memory.yaml
 small_machine() {
   local env
   mkdir -p /etc/systemd/system/k3s.service.d
   cat > /usr/local/lib/pyo-memory.sh <<'MEMORY'
 #!/bin/sh
-# Managed by Pyo: k3s's GOMEMLIMIT and compressed swap (zram), from this
-# machine's memory at every boot.
+# Managed by Pyo: k3s's GOMEMLIMIT, kubelet's reservations and compressed
+# swap (zram), from this machine's memory at every boot.
 mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' "${PYO_MEMINFO:-/proc/meminfo}")
 # k3s's soft memory limit in MiB: 40% of the memory, at least 768 MiB
 # (k3s's own heap is 330 to 400 MB: a lower limit keeps its garbage
@@ -286,11 +291,38 @@ gomemlimit() {
   [ "$limit" -ge 768 ] || limit=768
   echo "$limit"
 }
+# What kubelet sets aside in MiB, for k3s (kube-reserved: its one process
+# holds 500 to 600 MB on a small machine) and for the system
+# (system-reserved: sshd, tailscaled, journald, …).
+reserved() {
+  if [ "$mem" -lt 1536 ]; then
+    echo "192 64"
+  elif [ "$mem" -lt 3584 ]; then
+    echo "384 128"
+  elif [ "$mem" -lt 8192 ]; then
+    echo "512 256"
+  else
+    echo "768 256"
+  fi
+}
 case "$1" in
   k3s-env)
     # For k3s's EnvironmentFile: GOMEMLIMIT under 3.5 GB, else nothing.
     if [ "${mem:-0}" -gt 0 ] && [ "$mem" -lt 3584 ]; then
       echo "GOMEMLIMIT=$(gomemlimit)MiB"
+    fi
+    ;;
+  k3s-config)
+    # k3s's config drop-in ($2): kubelet's reservations; none (no file)
+    # when the memory can't be read.
+    [ -n "$2" ] || exit 2
+    if [ "${mem:-0}" -gt 0 ]; then
+      set -- "$2" $(reserved)
+      mkdir -p "$(dirname "$1")"
+      printf '%s\n' "# Managed by Pyo: what kubelet sets aside, from this machine's memory at each start." \
+        'kubelet-arg+:' "  - \"kube-reserved=memory=$2Mi\"" "  - \"system-reserved=memory=$3Mi\"" > "$1.new" && mv -f "$1.new" "$1"
+    else
+      rm -f "$2"
     fi
     ;;
   zram-start)
@@ -312,8 +344,9 @@ case "$1" in
 esac
 MEMORY
   chmod 755 /usr/local/lib/pyo-memory.sh
-  printf '%s\n' '# Managed by Pyo: GOMEMLIMIT on a small machine, worked out at each start.' '[Service]' \
+  printf '%s\n' '# Managed by Pyo: GOMEMLIMIT on a small machine and what kubelet sets aside, worked out at each start.' '[Service]' \
     "ExecStartPre=-/bin/sh -c '/usr/local/lib/pyo-memory.sh k3s-env > /run/pyo-k3s.env'" \
+    "ExecStartPre=-/usr/local/lib/pyo-memory.sh k3s-config $K3S_MEMORY_CONFIG" \
     'EnvironmentFile=-/run/pyo-k3s.env' > /etc/systemd/system/k3s.service.d/pyo-memory.conf
   printf '%s\n' '[Unit]' 'Description=Pyo: compressed swap in memory (zram) on a small machine' 'Before=k3s.service' \
     '[Service]' 'Type=oneshot' 'RemainAfterExit=yes' \
@@ -323,6 +356,7 @@ MEMORY
   systemctl enable --now pyo-zram.service >/dev/null 2>&1 || echo "Couldn't set up compressed swap (zram); going on without it." >&2
   env=$(/usr/local/lib/pyo-memory.sh k3s-env)
   [ -z "$env" ] || echo "A small machine: k3s gets $env."
+  /usr/local/lib/pyo-memory.sh k3s-config "$K3S_MEMORY_CONFIG" || true
   [ ! -f /run/pyo-zram ] || echo "Turned on compressed swap in memory (zram)."
 }
 # <<< pyo:small-machine
@@ -1154,7 +1188,7 @@ uninstall_pyo() {
     say "Uninstalling k3s"
     act /usr/local/bin/k3s-uninstall.sh >/dev/null 2>&1
     # What small_machine set up for it.
-    act rm -f /etc/systemd/system/k3s.service.d/pyo-memory.conf /run/pyo-k3s.env
+    act rm -f /etc/systemd/system/k3s.service.d/pyo-memory.conf /run/pyo-k3s.env /etc/rancher/k3s/config.yaml.d/50-pyo-memory.yaml
     if [ -e /etc/systemd/system/pyo-zram.service ]; then
       act systemctl disable --now pyo-zram.service >/dev/null 2>&1 || true
       act rm -f /etc/systemd/system/pyo-zram.service

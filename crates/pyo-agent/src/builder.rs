@@ -127,7 +127,8 @@ pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String>
                                         { "name": "cache", "mountPath": "/var/lib/buildkit" },
                                     ],
                                     // Asleep between builds: a shell and its sleep.
-                                    "resources": { "requests": { "cpu": "10m", "memory": "64Mi" } },
+                                    // A build's memory isn't set aside: it uses what's free.
+                                    "resources": { "requests": { "cpu": "10m", "memory": "8Mi" } },
                                 },
                                 {
                                     "name": "builder",
@@ -149,7 +150,8 @@ pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String>
                                     },
                                     "volumeMounts": [{ "name": "run", "mountPath": "/run/buildkit" }, { "name": "tmp", "mountPath": "/tmp" }],
                                     // Checkouts and Railpack live in /tmp while a build runs.
-                                    "resources": { "requests": { "cpu": "10m", "memory": "64Mi" }, "limits": { "memory": "1Gi" } },
+                                    // A few MiB between builds (measured).
+                                    "resources": { "requests": { "cpu": "10m", "memory": "16Mi" }, "limits": { "memory": "1Gi" } },
                                 },
                             ],
                             "volumes": [

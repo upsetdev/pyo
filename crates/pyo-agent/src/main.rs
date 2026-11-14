@@ -26,6 +26,7 @@ mod locate;
 mod observability;
 mod observe;
 mod rollout;
+mod room;
 mod runs;
 mod scope;
 mod terminal;

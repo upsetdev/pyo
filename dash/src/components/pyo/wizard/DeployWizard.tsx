@@ -236,6 +236,8 @@ export function gitImport(raw: string): {
     };
   const probe = emptyDraft("", "", "");
   // Port 8080 with a TCP check until the build reveals the EXPOSE'd port.
+  // Pyo picks the check: a static site gets one of /.
+  const defaults = imageDefaults("");
   return {
     patch: {
       sourceType: "git",
@@ -245,7 +247,8 @@ export function gitImport(raw: string): {
         branch: branch.replace(/\/+$/, "") || "main",
         builder: "dockerfile",
       },
-      ...imageDefaults(""),
+      ...defaults,
+      healthCheck: { ...defaults.healthCheck, auto: "default" },
     },
   };
 }

@@ -246,7 +246,8 @@ async fn vector(client: &Client) -> anyhow::Result<()> {
                                     { "name": "PROCFS_ROOT", "value": "/host/proc" },
                                     { "name": "SYSFS_ROOT", "value": "/host/sys" },
                                 ],
-                                "resources": { "requests": { "cpu": "10m", "memory": "32Mi" }, "limits": { "memory": "256Mi" } },
+                                // ~35 MiB at rest (measured).
+                                "resources": { "requests": { "cpu": "10m", "memory": "48Mi" }, "limits": { "memory": "256Mi" } },
                                 "volumeMounts": [
                                     { "name": "config", "mountPath": "/etc/vector", "readOnly": true },
                                     { "name": "data", "mountPath": "/vector-data-dir" },

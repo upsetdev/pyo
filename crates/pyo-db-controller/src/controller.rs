@@ -283,6 +283,16 @@ fn validate(db: &Database) -> anyhow::Result<()> {
         );
     }
     anyhow::ensure!(!s.storage.is_empty(), "storage is required");
+    if !s.memory_request.is_empty() {
+        let (req, mem) = (
+            crate::mysql::bytes(&s.memory_request),
+            crate::mysql::bytes(&s.memory),
+        );
+        anyhow::ensure!(
+            req.is_some() && mem.is_some() && req <= mem,
+            "memoryRequest is a size no more than memory"
+        );
+    }
     anyhow::ensure!(
         !s.rest || s.engine == Engine::Valkey,
         "the REST API is for Valkey only"
@@ -591,8 +601,10 @@ pub fn phase_for(st: &mut DatabaseStatus, ready: i32, want: i32, serving: bool) 
     };
 }
 
-/// CPU and memory as container resources (memory is also the limit).
-pub fn resources(cpu: &str, memory: &str) -> Option<Value> {
+/// CPU and memory as container resources: memory is the limit, and the
+/// request too unless `memory_request` sets aside less (a small database
+/// holds far less than it may use).
+pub fn resources(cpu: &str, memory: &str, memory_request: &str) -> Option<Value> {
     if cpu.is_empty() && memory.is_empty() {
         return None;
     }
@@ -602,7 +614,12 @@ pub fn resources(cpu: &str, memory: &str) -> Option<Value> {
         req.insert("cpu".into(), json!(cpu));
     }
     if !memory.is_empty() {
-        req.insert("memory".into(), json!(memory));
+        let request = if memory_request.is_empty() {
+            memory
+        } else {
+            memory_request
+        };
+        req.insert("memory".into(), json!(request));
         r["limits"] = json!({ "memory": memory });
     }
     r["requests"] = Value::Object(req);
@@ -700,6 +717,31 @@ mod tests {
             assert!(validate(&db("valkey", n)).is_ok(), "{n}");
         }
         assert!(validate(&db("valkey", 6)).is_err());
+    }
+
+    #[test]
+    fn a_small_database_sets_aside_less_than_it_may_use() {
+        let r = resources("250m", "512Mi", "128Mi").unwrap();
+        assert_eq!(
+            r["requests"],
+            serde_json::json!({ "cpu": "250m", "memory": "128Mi" })
+        );
+        assert_eq!(r["limits"], serde_json::json!({ "memory": "512Mi" }));
+        // Without one, the request is the limit.
+        let r = resources("1", "2Gi", "").unwrap();
+        assert_eq!(r["requests"]["memory"], "2Gi");
+        assert_eq!(r["limits"]["memory"], "2Gi");
+        let with = |req: &str, mem: &str| {
+            let mut d = db("postgres", 1);
+            d.spec.memory = mem.into();
+            d.spec.memory_request = req.into();
+            validate(&d)
+        };
+        assert!(with("128Mi", "512Mi").is_ok());
+        assert!(with("512Mi", "512Mi").is_ok());
+        assert!(with("1Gi", "512Mi").is_err());
+        assert!(with("lots", "512Mi").is_err());
+        assert!(with("128Mi", "").is_err());
     }
 
     #[test]

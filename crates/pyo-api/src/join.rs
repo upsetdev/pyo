@@ -340,6 +340,58 @@ mod tests {
         assert_eq!(k3s_env(16384), "");
     }
 
+    /// The helper's k3s config drop-in: what kubelet sets aside for k3s and
+    /// the system, by memory, so the scheduler doesn't count it as room.
+    #[test]
+    fn kubelet_sets_aside_memory_for_k3s() {
+        let helper = CONNECT_SCRIPT
+            .split("<<'MEMORY'\n")
+            .nth(1)
+            .and_then(|r| r.split("\nMEMORY\n").next())
+            .expect("connect.sh has the memory helper");
+        let dir = std::env::temp_dir().join(format!("pyo-reserved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = |meminfo: &str| {
+            let info = dir.join("meminfo");
+            std::fs::write(&info, meminfo).unwrap();
+            let out = dir.join("config.yaml.d/50-pyo-memory.yaml");
+            let status = std::process::Command::new("sh")
+                .args(["-c", helper, "pyo-memory.sh", "k3s-config"])
+                .arg(&out)
+                .env("PYO_MEMINFO", &info)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            std::fs::read_to_string(&out).ok()
+        };
+        let mib = |m: u64| format!("MemTotal: {} kB\n", m * 1024);
+        for (mem, kube, system) in [
+            (960, 192, 64),
+            (1973, 384, 128),
+            (pyo_proto::memory::SMALL_MIB - 1, 384, 128),
+            (pyo_proto::memory::SMALL_MIB, 512, 256),
+            (pyo_proto::memory::LARGE_MIB, 768, 256),
+        ] {
+            let text = config(&mib(mem)).expect("a drop-in");
+            assert!(text.contains("\nkubelet-arg+:\n"), "{text}");
+            assert!(
+                text.contains(&format!("  - \"kube-reserved=memory={kube}Mi\"\n  - \"system-reserved=memory={system}Mi\"\n")),
+                "{mem}: {text}"
+            );
+        }
+        // Memory it can't read: no drop-in (the one before is removed).
+        assert_eq!(config("nothing\n"), None);
+        // The unit runs it at every start, at the path small_machine writes.
+        let block = script_block("small-machine", CONNECT_SCRIPT);
+        assert!(
+            block.contains("K3S_MEMORY_CONFIG=/etc/rancher/k3s/config.yaml.d/50-pyo-memory.yaml\n")
+        );
+        assert!(block.contains(
+            "\"ExecStartPre=-/usr/local/lib/pyo-memory.sh k3s-config $K3S_MEMORY_CONFIG\""
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The scripts that install k3s, Tailscale and NVIDIA's toolkit share
     /// their installer code (`# >>> pyo:<name>` … `# <<< pyo:<name>`), and
     /// those that carry k3s's pin carry deploy/k3s.env's.

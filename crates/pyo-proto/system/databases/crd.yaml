@@ -48,6 +48,7 @@ spec:
                 - {rule: "self.engine != 'mysql' || self.instances >= oldSelf.instances", message: "mysql instances can only grow (1 to 3 or 5, 3 to 5)"}
                 - {rule: "self.engine != 'mysql' || !has(self.version) || self.version in ['', '8.4']", message: "the mysql version is 8.4"}
                 - {rule: "self.engine != 'mysql' || (has(self.memory) && isQuantity(self.memory) && quantity(self.memory).compareTo(quantity('1Gi')) >= 0)", message: "mysql needs memory of at least 1Gi"}
+                - {rule: "!has(self.memoryRequest) || self.memoryRequest == '' || (isQuantity(self.memoryRequest) && has(self.memory) && isQuantity(self.memory) && quantity(self.memoryRequest).compareTo(quantity(self.memory)) <= 0)", message: "memoryRequest is a quantity no more than memory"}
                 - {rule: "self.engine != 'mysql' || !has(self.readReplicas) || !has(self.readReplicas.instances) || self.readReplicas.instances == 0", message: "mysql has no read replicas (its replicas serve reads: endpoints.replicas)"}
                 - {rule: "self.engine != 'mysql' || !has(self.postgres) || !has(self.postgres.pooler) || !self.postgres.pooler", message: "mysql has no pooler"}
               properties:
@@ -59,6 +60,9 @@ spec:
                 cpu: {type: string}
                 # MySQL: at least 1Gi; its buffers are sized from it.
                 memory: {type: string, maxLength: 20}
+                # Set aside per instance (the request) when less than
+                # memory, which stays the limit. Default: memory.
+                memoryRequest: {type: string, maxLength: 20}
                 credentialsSecret: {type: string}
                 rest: {type: boolean}
                 # Instances that only serve reads and are never promoted, apart

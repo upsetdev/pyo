@@ -1069,6 +1069,81 @@ export function ResourceFields({
   );
 }
 
+export type BuildArg = { id: string; key: string; value: string };
+
+/** A Git service's build arguments: Dockerfile ARGs, or Railpack settings. */
+export function BuildArgsEditor({
+  value,
+  onChange,
+  errors = {},
+  note,
+}: {
+  value: BuildArg[];
+  onChange: (args: BuildArg[]) => void;
+  /** By `buildArg.<id>`. */
+  errors?: Record<string, string>;
+  note?: string;
+}) {
+  const change = (id: string, patch: Partial<BuildArg>) =>
+    onChange(value.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+  return (
+    <div>
+      <p className="mb-1.5 text-[12px] font-medium">Build arguments</p>
+      <div className="space-y-2">
+        {value.map((a) => (
+          <div key={a.id}>
+            <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_32px] gap-2">
+              <Input
+                mono
+                value={a.key}
+                placeholder="ARG_NAME"
+                aria-label="Build argument name"
+                onChange={(e) =>
+                  change(a.id, { key: e.target.value.toUpperCase() })
+                }
+              />
+              <Input
+                mono
+                value={a.value}
+                placeholder="value"
+                aria-label="Build argument value"
+                onChange={(e) => change(a.id, { value: e.target.value })}
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Remove build argument"
+                onClick={() => onChange(value.filter((x) => x.id !== a.id))}
+              >
+                <TrashIcon size={14} />
+              </Button>
+            </div>
+            {errors[`buildArg.${a.id}`] ? (
+              <p className="mt-1 text-[11.5px] text-destructive">
+                {errors[`buildArg.${a.id}`]}
+              </p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+      <Button
+        variant="secondary"
+        size="xs"
+        className="mt-2"
+        onClick={() =>
+          onChange([...value, { id: draftId(), key: "", value: "" }])
+        }
+      >
+        <PlusIcon size={12} /> Add build argument
+      </Button>
+      <p className="mt-1.5 text-[11.5px] text-muted-foreground">
+        Visible in the image, so don&apos;t put secrets here.
+        {note ? ` ${note}` : null}
+      </p>
+    </div>
+  );
+}
+
 export function HealthCheckFields({
   value,
   onChange,
@@ -1080,7 +1155,9 @@ export function HealthCheckFields({
   errors?: Record<string, string>;
   label?: string;
 }) {
-  const set = (patch: Partial<HealthCheck>) => onChange({ ...value, ...patch });
+  // Chosen here, so Pyo no longer picks it.
+  const set = (patch: Partial<HealthCheck>) =>
+    onChange({ ...value, ...patch, auto: undefined });
   return (
     <div className="grid gap-4 sm:grid-cols-4">
       <Field label={label} className="sm:col-span-1">
@@ -1092,8 +1169,8 @@ export function HealthCheckFields({
               set({ type: e.target.value as HealthCheck["type"] })
             }
           >
-            <option value="http">Web request</option>
-            <option value="tcp">Port is open</option>
+            <option value="http">HTTP path</option>
+            <option value="tcp">TCP</option>
             <option value="exec">Command</option>
             <option value="none">None</option>
           </Select>
@@ -1147,7 +1224,7 @@ export function HealthCheckFields({
       ) : null}
       {value.type === "none" ? (
         <p className="self-end pb-2 text-[12px] text-muted-foreground sm:col-span-3">
-          Healthy as soon as it starts.
+          Deploys won&apos;t wait for it to be ready.
         </p>
       ) : null}
       {value.type !== "none" ? (

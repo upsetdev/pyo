@@ -1294,6 +1294,10 @@ pub struct BuildResult {
     /// How it was built: "Dockerfile" or "Containerfile", or what Railpack detected ("Next.js", "Go", …).
     #[serde(default)]
     pub detected: Option<String>,
+    /// Railpack built it as a static site or single-page app: a web server
+    /// that answers `/` (its own image, so no /healthz).
+    #[serde(default)]
+    pub static_site: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

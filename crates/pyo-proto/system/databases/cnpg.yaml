@@ -10,6 +10,8 @@
 # - The operator runs 2 replicas (it elects a leader), preferably on
 #   different servers, and leaves a lost server after 10s: with one, losing
 #   its server blocks Postgres failover and every CloudNativePG webhook.
+# - The operator's memory request is 48Mi, not 100Mi: it holds ~36 MiB
+#   (measured), and a small server's room goes to databases and services.
 # To update: take the new release's file and make the same changes (the
 # bundle's version follows its content).
 apiVersion: apiextensions.k8s.io/v1
@@ -21065,7 +21067,7 @@ spec:
             memory: 200Mi
           requests:
             cpu: 100m
-            memory: 100Mi
+            memory: 48Mi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

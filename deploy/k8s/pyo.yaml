@@ -253,6 +253,7 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
+          # ~20 MiB between jobs (measured); the limit is for big ones.
           resources:
-            requests: { cpu: 10m, memory: 48Mi }
+            requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 512Mi }

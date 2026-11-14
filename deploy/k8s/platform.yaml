@@ -167,8 +167,10 @@ spec:
             periodSeconds: 5
           volumeMounts:
             - { name: data, mountPath: /var/lib/registry }
+          # Requests are what each part holds at rest (measured), so a
+          # small server's room goes to services; limits are the ceilings.
           resources:
-            requests: { cpu: 10m, memory: 32Mi }
+            requests: { cpu: 10m, memory: 24Mi }
             limits: { memory: 512Mi }
         # Frees the layers of images Pyo deleted (deployments past the
         # team's retention). Daily; untagged manifests of live services are kept
@@ -179,7 +181,7 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /var/lib/registry }
           resources:
-            requests: { cpu: 5m, memory: 16Mi }
+            requests: { cpu: 5m, memory: 8Mi }
             limits: { memory: 256Mi }
       volumes:
         - name: data
@@ -379,8 +381,9 @@ spec:
             periodSeconds: 5
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql/data }
+          # ~90 MiB at rest on a small server (measured).
           resources:
-            requests: { cpu: 50m, memory: 64Mi }
+            requests: { cpu: 50m, memory: 112Mi }
             limits: { memory: 512Mi }
   volumeClaimTemplates:
     - metadata:
@@ -577,7 +580,7 @@ spec:
           # busy site, ~200-250 MiB at the peak of Analytics pages (measured).
           # ClickHouse stops at 70% of the limit; the rest is its code.
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
+            requests: { cpu: 50m, memory: 144Mi }
             limits: { memory: 512Mi }
       volumes:
         - name: config
@@ -694,7 +697,7 @@ spec:
           # 200 MiB (block buffers are capped at 64 MiB above). The limit
           # leaves room for several uploads at once and LMDB's page cache.
           resources:
-            requests: { cpu: 20m, memory: 32Mi }
+            requests: { cpu: 20m, memory: 16Mi }
             limits: { memory: 512Mi }
       volumes:
         - name: config

@@ -401,6 +401,7 @@ impl Builder {
             .arg("--local")
             .arg(format!("context={}", app_dir.display()));
         let detected: String;
+        let mut static_site = false;
         if let Some(dockerfile) = build_file {
             // The repository says how to build it.
             let name = dockerfile
@@ -484,6 +485,23 @@ impl Builder {
             for a in &job.build_args {
                 prep.args(["--env", &format!("{}={}", a.key, a.value)]);
             }
+            // A static site generator whose start script is its development
+            // server: its build's output, served as static files instead.
+            let keys: Vec<String> = job.build_args.iter().map(|a| a.key.clone()).collect();
+            if let Some(site) = source::static_site(&app_dir, &keys) {
+                prep.args(["--env", &site.railpack_env()]);
+                if let Err(e) = source::write_staticfile(&app_dir, &site) {
+                    tracing::warn!(error = %e, "couldn't turn off the index.html fallback");
+                }
+                self.progress(
+                    &job.id,
+                    BuildProgress {
+                        logs: vec![line("info", "builder", &source::static_site_note(&site))],
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
             let out = match tokio::time::timeout(
                 Duration::from_secs(300),
                 prep.stdin(Stdio::null()).output(),
@@ -524,6 +542,7 @@ impl Builder {
                 );
             }
             detected = source::label(&info_json, &app_dir).unwrap_or_else(|| "Railpack".into());
+            static_site = source::is_static(&info_json);
             self.progress(&job.id, BuildProgress { logs: vec![line("info", "builder", &format!("No Dockerfile or Containerfile. Building it as {detected} with Railpack"))], ..Default::default() }).await;
             let cache_key = job
                 .push_repository
@@ -691,6 +710,7 @@ impl Builder {
             message: None,
             exposed_ports,
             detected: Some(detected),
+            static_site,
         })
     }
 }
