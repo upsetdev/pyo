@@ -628,6 +628,9 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
             json_of(ops::firewall_blocked(st(), me(), Query(args_as(args)?)).await)
         }
         "getWafHits" => json_of(ops::waf_hits(st(), me(), Query(args_as(args)?)).await),
+        "getCloudOptions" => {
+            json_of(crate::cloud::options(st(), me(), Query(args_as(args)?)).await)
+        }
         other => Err(format!("No tool runs {other}")),
     }
 }

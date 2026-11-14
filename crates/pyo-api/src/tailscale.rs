@@ -404,6 +404,47 @@ impl Client {
             .collect())
     }
 
+    /// The tailnet's machines with what Pyo's cloud servers need: their
+    /// hostname, and their key while Tailnet Lock waits for its signature.
+    pub async fn device_details(&self) -> anyhow::Result<Vec<Device>> {
+        let v = self
+            .call(
+                reqwest::Method::GET,
+                "/tailnet/-/devices?fields=default",
+                None,
+            )
+            .await?;
+        Ok(v["devices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| {
+                Some(Device {
+                    node_id: d["nodeId"].as_str()?.to_owned(),
+                    hostname: d["hostname"].as_str().unwrap_or("").to_owned(),
+                    tags: strings(&d["tags"]),
+                    node_key: d["nodeKey"].as_str().unwrap_or("").to_owned(),
+                    lock_error: d["tailnetLockError"].as_str().unwrap_or("").to_owned(),
+                })
+            })
+            .collect())
+    }
+
+    /// Takes a machine off the tailnet (only tag:pyo ones: the client's
+    /// Devices › Core scope is for that tag).
+    pub async fn delete_device(&self, node: &str) -> anyhow::Result<()> {
+        if node.is_empty() || !node.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            anyhow::bail!("not a node ID");
+        }
+        match self
+            .call(reqwest::Method::DELETE, &format!("/device/{node}"), None)
+            .await
+        {
+            Err(e) if e.downcast_ref::<TsError>().is_some_and(|t| t.status == 404) => Ok(()),
+            r => r.map(|_| ()),
+        }
+    }
+
     pub async fn tag(&self, node: &str) -> anyhow::Result<()> {
         self.call(
             reqwest::Method::POST,
@@ -440,6 +481,18 @@ impl Client {
         .await
         .map(|_| ())
     }
+}
+
+/// A machine on the tailnet ([`Client::device_details`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Device {
+    pub node_id: String,
+    pub hostname: String,
+    pub tags: Vec<String>,
+    /// "nodekey:…"
+    pub node_key: String,
+    /// Set while Tailnet Lock waits for this machine's key to be signed.
+    pub lock_error: String,
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -571,6 +624,9 @@ pub async fn runner(state: AppState) {
             }
             if let Err(e) = crate::publicdash::tick(&st).await {
                 tracing::warn!(error = %format!("{e:?}"), "public dashboard");
+            }
+            if let Err(e) = crate::cloud::tick(&st).await {
+                tracing::warn!(error = %e.message, "cloud servers");
             }
         })
         .await;

@@ -400,6 +400,9 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // Which keys are saved, never the keys themselves.
     // Tailscale (Integrations › Tailscale): the client only for admins.
     let tailscale = crate::tailscale::snapshot(db, user.is_admin).await?;
+    // Teams' cloud providers (Integrations › Hetzner, the token's end only)
+    // and the servers Pyo made there.
+    let (cloud_connections, cloud_servers) = crate::cloud::snapshot(db, &team_ids).await?;
 
     // Gravatar's key for the profile picture: sha256 of the trimmed, lowercased email.
     let mut me = json!(user);
@@ -428,6 +431,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "activity": activity,
         "builders": builders,
         "tailscale": tailscale,
+        "cloudConnections": cloud_connections,
+        "cloudServers": cloud_servers,
         // Pyo's dashboard on the public IP: the installation's admin only.
         "publicDashboard": if user.is_admin { crate::publicdash::snapshot(db).await? } else { Value::Null },
         // Cloudflare accounts: their zones, never the token.

@@ -18,6 +18,7 @@ mod capacity;
 mod cdn;
 mod certs;
 mod cli;
+mod cloud;
 mod cloudflare;
 pub mod compose;
 mod cronruns;

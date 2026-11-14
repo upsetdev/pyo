@@ -103,6 +103,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/database-backups", post(crate::database_backups::add))
         .route("/compose/preview", post(crate::compose::preview))
+        .route("/cloud/options", get(crate::cloud::options))
 }
 
 /// Everything you can see
@@ -874,6 +875,225 @@ async fn join_command(
     Ok(
         json!({ "ok": true, "command": command, "scriptUrl": format!("{base}/join.sh"), "expiresAt": now_ms() + ttl as i64 * 1000, "tailscale": true }),
     )
+}
+
+/// Server names that are cluster pages (/clusters/<cluster>/<server>).
+const CLUSTER_PAGES: [&str; 5] = ["servers", "workloads", "networking", "storage", "settings"];
+
+/// The cloud providers there are: Hetzner.
+fn cloud_provider(p: Option<&str>) -> ApiResult<()> {
+    match p.unwrap_or("hetzner") {
+        "hetzner" => Ok(()),
+        _ => Err(ApiError::bad_request("The provider is \"hetzner\".")),
+    }
+}
+
+/// An SSH key for a new server, when one is given.
+fn cloud_ssh_key(k: Option<String>) -> ApiResult<Option<String>> {
+    match k.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty()) {
+        Some(k) if crate::cloud::valid_ssh_key(&k) => Ok(Some(k)),
+        Some(_) => Err(ApiError::bad_request(
+            "Paste an OpenSSH public key on one line, like the contents of ~/.ssh/id_ed25519.pub.",
+        )),
+        None => Ok(None),
+    }
+}
+
+/// A price as people read it: "€4.29".
+fn money(currency: &str, amount: f64) -> String {
+    match currency {
+        "EUR" => format!("€{amount:.2}"),
+        "USD" => format!("${amount:.2}"),
+        c => format!("{amount:.2} {c}"),
+    }
+}
+
+/// No server, or server being made, has the name in the cluster.
+async fn cloud_name_free(
+    tx: &mut Transaction<'_, Postgres>,
+    cluster_id: &str,
+    name: &str,
+) -> ApiResult<()> {
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.servers WHERE cluster_id = $1 AND name = $2)
+             OR EXISTS (SELECT 1 FROM pyo.cloud_servers WHERE cluster_id = $1 AND name = $2 AND state <> 'deleted')",
+    )
+    .bind(cluster_id)
+    .bind(name)
+    .fetch_one(&mut **tx)
+    .await?;
+    if taken {
+        return Err(ApiError::conflict(format!(
+            "{name} is already a server in this cluster."
+        )));
+    }
+    Ok(())
+}
+
+/// A server to make at the provider.
+struct CloudNew<'a> {
+    id: &'a str,
+    team_id: &'a str,
+    cluster_id: &'a str,
+    name: &'a str,
+    location: &'a str,
+    server_type: &'a str,
+    monthly: f64,
+    currency: &'a str,
+    /// The cluster's first server (connect.sh).
+    first: bool,
+    builder: bool,
+    /// The join or connect command, as the dashboard shows it.
+    command: &'a str,
+    ssh_key: Option<&'a str>,
+    by: &'a str,
+}
+
+/// Makes the server at the provider, labelled as this installation's and
+/// behind its firewall, with cloud-init that runs the command, and keeps
+/// it to follow (cloud/mod.rs `tick`). The last step before the operation
+/// commits.
+async fn make_cloud_server<P: crate::cloud::Provider>(
+    s: &AppState,
+    p: &P,
+    n: CloudNew<'_>,
+    tx: &mut Transaction<'_, Postgres>,
+) -> ApiResult<Value> {
+    if n.command.is_empty() {
+        return Err(ApiError::conflict("Pyo couldn't make the join command."));
+    }
+    let install = crate::tailscale::install_id(&s.db).await?;
+    let firewall = p.firewall(&install).await?;
+    let user_data = crate::cloud::user_data(n.command, n.ssh_key);
+    let made = p
+        .create(&crate::cloud::Create {
+            name: n.name,
+            location: n.location,
+            server_type: n.server_type,
+            user_data: &user_data,
+            labels: crate::cloud::labels(&install, n.cluster_id),
+            firewall: Some(&firewall),
+        })
+        .await?;
+    tracing::info!(
+        server = n.name,
+        provider = p.title(),
+        "cloud server created"
+    );
+    sqlx::query(
+        "INSERT INTO pyo.cloud_servers (id, team_id, provider, cluster_id, name, first_server, builder, location, server_type, monthly, currency, remote_id, ipv4, state, created_by)
+         VALUES ($1, $2, 'hetzner', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'creating', $13)",
+    )
+    .bind(n.id)
+    .bind(n.team_id)
+    .bind(n.cluster_id)
+    .bind(n.name)
+    .bind(n.first)
+    .bind(n.builder)
+    .bind(n.location)
+    .bind(n.server_type)
+    .bind(n.monthly)
+    .bind(n.currency)
+    .bind(&made.id)
+    .bind(&made.ipv4)
+    .bind(n.by)
+    .execute(&mut **tx)
+    .await?;
+    Ok(json!({
+        "ok": true, "id": n.id, "clusterId": n.cluster_id, "name": n.name, "state": "creating",
+        "monthly": n.monthly, "currency": n.currency,
+    }))
+}
+
+/// Deletes a server Pyo made at a cloud provider: drained and taken out of
+/// its cluster first (as RemoveServer does), then off the tailnet and
+/// deleted there by cloud/mod.rs `tick`. A cluster's control plane only
+/// once the cluster is removed.
+async fn delete_cloud_server(
+    tx: &mut Transaction<'_, Postgres>,
+    user: &User,
+    id: &str,
+    confirm: bool,
+    wake: &mut Vec<String>,
+) -> ApiResult<Value> {
+    let (team_id, cluster_id, name, first, state, monthly, currency): (
+        String,
+        Option<String>,
+        String,
+        bool,
+        String,
+        f64,
+        String,
+    ) = sqlx::query_as(
+        "SELECT team_id, cluster_id, name, first_server, state, monthly, currency FROM pyo.cloud_servers WHERE id = $1 AND state <> 'deleted'",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Server"))?;
+    require_role(tx, user, &team_id, Role::Admin).await?;
+    if state == "removing" {
+        return Err(ApiError::conflict(format!(
+            "{name} is already being deleted."
+        )));
+    }
+    if !confirm {
+        return Err(ApiError::needs_confirm(format!(
+            "Deletes {name} at Hetzner. {} a month stops.",
+            money(&currency, monthly)
+        )));
+    }
+    if let Some(cluster_id) = &cluster_id {
+        let cluster_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM pyo.clusters WHERE id = $1")
+                .bind(cluster_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        let cluster_gone = matches!(
+            cluster_status.as_deref(),
+            None | Some("pending" | "disconnected")
+        );
+        let joined: Option<(String, Value, Option<Value>)> = sqlx::query_as(
+            "SELECT id, report, removal FROM pyo.servers WHERE cluster_id = $1 AND name = $2",
+        )
+        .bind(cluster_id)
+        .bind(&name)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let control = first
+            || joined.as_ref().is_some_and(|(_, r, _)| {
+                r["roles"]
+                    .as_array()
+                    .is_some_and(|r| r.iter().any(|x| x == "control-plane" || x == "master"))
+            });
+        if control && !cluster_gone {
+            return Err(ApiError::bad_request(format!(
+                "{name} runs the cluster. Remove the cluster first, then delete the server here."
+            )));
+        }
+        if let Some((server_id, report, None)) = joined
+            && !cluster_gone
+        {
+            let online = report["status"] == json!("ready");
+            remove_node(tx, user, &server_id, !online, wake).await?;
+        }
+    }
+    sqlx::query("UPDATE pyo.cloud_servers SET state = 'removing', error = NULL, sign_command = NULL, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    log_activity(
+        tx,
+        &team_id,
+        &user.name,
+        "server.removed",
+        "warning",
+        &format!("Deleting {name} at Hetzner"),
+        json!({ "kind": "server", "id": name, "label": name }),
+        json!({ "clusterId": cluster_id, "cloudServerId": id }),
+    )
+    .await?;
+    Ok(json!({ "ok": true }))
 }
 
 /// A machine runs at most one builder: they'd share its BuildKit cache and disk.
@@ -2166,6 +2386,59 @@ pub(crate) enum Op {
     },
     /// Set a server's region: a name ("US East", "Singapore, SG"), or "" to detect it again.
     SetServerLocation { server_id: String, location: String },
+    /// Make a server at a cloud provider and join it to a cluster over your tailnet (team admins). Read the locations, server types and prices with getCloudOptions first. Pyo creates it with cloud-init that runs the cluster's join command, labels it as this installation's and puts it behind a firewall that allows only the web (80 and 443) and Tailscale. Follow it in `cloudServers` of getState: creating, booting, joining, then ready. Without `confirm` it answers 409 with the monthly price. Confirm that with the user, then send it again with `confirm: true`.
+    CreateCloudServer {
+        /// A new id you choose: `cs_` then 4 to 40 lowercase letters, digits, dashes or underscores.
+        id: String,
+        cluster_id: String,
+        /// Its name in the cluster, on your tailnet and at the provider.
+        name: String,
+        /// "hetzner" (the default).
+        #[serde(default)]
+        provider: Option<String>,
+        /// A location's `name` from getCloudOptions ("fsn1").
+        location: String,
+        /// A server type's `name` from getCloudOptions ("cx22").
+        server_type: String,
+        /// A build-only server: only Pyo's builder runs on it.
+        #[serde(default)]
+        builder: bool,
+        /// Your OpenSSH public key, to sign in to it over your tailnet.
+        #[serde(default)]
+        ssh_key: Option<String>,
+        #[serde(default)]
+        tags: Vec<String>,
+        #[serde(default)]
+        confirm: bool,
+    },
+    /// Add a cluster whose first server Pyo makes at a cloud provider (team admins). It runs connect.sh there the way Add cluster's command does, over your tailnet. Without `confirm` it answers 409 with the monthly price. Confirm that with the user, then send it again with `confirm: true`.
+    CreateCloudCluster {
+        /// A new id you choose: `cl_` then 4 to 40 lowercase letters, digits, dashes or underscores.
+        id: String,
+        team_id: String,
+        /// The cluster's name. Its first server is named `<name>-1`.
+        name: String,
+        /// A new id you choose for its server: `cs_` then 4 to 40 lowercase letters, digits, dashes or underscores.
+        server_id: String,
+        /// "hetzner" (the default).
+        #[serde(default)]
+        provider: Option<String>,
+        location: String,
+        server_type: String,
+        #[serde(default)]
+        ssh_key: Option<String>,
+        #[serde(default)]
+        tags: Vec<String>,
+        #[serde(default)]
+        confirm: bool,
+    },
+    /// Delete a server Pyo made at a cloud provider (team admins): its services move off it, it leaves the cluster and your tailnet, then it's deleted at the provider. Only servers with this installation's label are ever deleted there. A cluster's first server goes once the cluster is removed. Without `confirm` it answers 409 with the monthly cost that stops. Confirm that with the user, then send it again with `confirm: true`.
+    DeleteCloudServer {
+        /// The cloud server's id (`cs_…`), from `cloudServers` in getState.
+        id: String,
+        #[serde(default)]
+        confirm: bool,
+    },
     /// Change your name and time zone.
     UpdateProfile { name: String, timezone: String },
     /// Add a builder that builds images from Git on one of the team's servers (`kind` "cluster").
@@ -2194,6 +2467,12 @@ pub(crate) enum Op {
     RemoveTailscale {},
     /// Rename Pyo's own name on your tailnet: `kind` "dashboard" (pyo.<tailnet>.ts.net) or "registry".
     RenameTailscaleName { kind: String, name: String },
+    /// Connect a team to Hetzner Cloud (team admins): a project API token with Read & Write, from the project's Security page. Pyo checks it by listing the locations, and keeps it encrypted. Servers join over your tailnet, so Tailscale comes first.
+    SaveHetzner { team_id: String, token: String },
+    /// List the locations the team's Hetzner token sees.
+    TestHetzner { team_id: String },
+    /// Forget the team's Hetzner token. Servers Pyo made there keep running.
+    RemoveHetzner { team_id: String },
     /// Open or close Pyo's dashboard on the public IP (https://pyo.<public IP>.nip.io), admins only. Closing needs Pyo on your tailnet first.
     SetPublicDashboard { open: bool },
     /// Connect an external secret store, or change one. No credential keeps
@@ -2478,6 +2757,11 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::RemoveServer { .. }
         | Op::CancelServerRemoval { .. }
         | Op::SetServerLocation { .. } => ("Servers", "srv"),
+        Op::CreateCloudServer { .. } | Op::DeleteCloudServer { .. } => ("Servers", "cs"),
+        Op::CreateCloudCluster { .. } => ("Clusters", "cl"),
+        Op::SaveHetzner { .. } | Op::TestHetzner { .. } | Op::RemoveHetzner { .. } => {
+            ("Integrations", "team")
+        }
         Op::CreateBuilder { .. } | Op::RemoveBuilder { .. } | Op::RotateBuilderToken { .. } => {
             ("Builders", "bld")
         }
@@ -5741,9 +6025,7 @@ async fn apply(
             require_role(tx, user, &team_id, Role::Admin).await?;
             require_dns_label(&server_name, "Server name")?;
             // Its page is /clusters/<cluster>/<server>, beside the cluster's tabs.
-            if ["servers", "workloads", "networking", "storage", "settings"]
-                .contains(&server_name.as_str())
-            {
+            if CLUSTER_PAGES.contains(&server_name.as_str()) {
                 return Err(ApiError::bad_request(
                     "That name is used by a cluster page. Pick another.",
                 ));
@@ -6326,6 +6608,222 @@ async fn apply(
                 .collect();
             keys.sort();
             Ok(json!({ "ok": true, "keys": keys }))
+        }
+        Op::SaveHetzner { team_id, token } => {
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            let out = crate::cloud::save(s, &team_id, &token).await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "integration.added",
+                "info",
+                "Connected Hetzner",
+                json!({ "kind": "integration", "id": "hetzner", "label": "Hetzner" }),
+                json!({}),
+            )
+            .await?;
+            Ok(out)
+        }
+        Op::TestHetzner { team_id } => {
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            crate::cloud::test(s, &team_id).await
+        }
+        Op::RemoveHetzner { team_id } => {
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            crate::cloud::remove(&s.db, &team_id).await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "integration.removed",
+                "info",
+                "Disconnected Hetzner",
+                json!({ "kind": "integration", "id": "hetzner", "label": "Hetzner" }),
+                json!({}),
+            )
+            .await?;
+            Ok(ok)
+        }
+        Op::CreateCloudServer {
+            id,
+            cluster_id,
+            name,
+            provider,
+            location,
+            server_type,
+            builder,
+            ssh_key,
+            tags,
+            confirm,
+        } => {
+            client_id(&id, "cs")?;
+            let team_id = team_of(tx, "clusters", &cluster_id).await?;
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            cloud_provider(provider.as_deref())?;
+            require_dns_label(&name, "Server name")?;
+            if CLUSTER_PAGES.contains(&name.as_str()) {
+                return Err(ApiError::bad_request(
+                    "That name is used by a cluster page. Pick another.",
+                ));
+            }
+            let tags = valid_tags(&tags)?;
+            let ssh_key = cloud_ssh_key(ssh_key)?;
+            cloud_name_free(tx, &cluster_id, &name).await?;
+            crate::cloud::needs_tailscale(&s.db).await?;
+            let p = crate::cloud::provider(&s.db, &team_id).await?;
+            let catalog = crate::cloud::catalog(&s.db, &team_id).await?;
+            let monthly = catalog.pick(&location, &server_type)?;
+            if !confirm {
+                return Err(ApiError::needs_confirm(format!(
+                    "{name} costs {} a month at Hetzner ({server_type} in {location}, before VAT).",
+                    money(&catalog.currency, monthly)
+                )));
+            }
+            crate::check_add_server(tx, &team_id).await?;
+            save_server_tags(tx, &cluster_id, &name, &tags).await?;
+            let join = join_command(tx, s, &team_id, &cluster_id, &name, builder, wake).await?;
+            let command = join["command"].as_str().unwrap_or_default().to_owned();
+            if builder {
+                let cluster_name: String =
+                    sqlx::query_scalar("SELECT name FROM pyo.clusters WHERE id = $1")
+                        .bind(&cluster_id)
+                        .fetch_one(&mut **tx)
+                        .await?;
+                sqlx::query(
+                    "INSERT INTO pyo.builders (id, team_id, name, kind, cluster_id, server, token_hash, info, status_message)
+                     VALUES ($1, $2, $3, 'server', $4, $5, $6, jsonb_build_object('specVersion', 0), $7)",
+                )
+                .bind(new_id("bld"))
+                .bind(&team_id)
+                .bind(&name)
+                .bind(&cluster_id)
+                .bind(&name)
+                .bind(sha256_hex(&secret_token()))
+                .bind(format!("Waiting for {name} to join {cluster_name}."))
+                .execute(&mut **tx)
+                .await?;
+            }
+            let made = make_cloud_server(
+                s,
+                &p,
+                CloudNew {
+                    id: &id,
+                    team_id: &team_id,
+                    cluster_id: &cluster_id,
+                    name: &name,
+                    location: &location,
+                    server_type: &server_type,
+                    monthly,
+                    currency: &catalog.currency,
+                    first: false,
+                    builder,
+                    command: &command,
+                    ssh_key: ssh_key.as_deref(),
+                    by: &user.name,
+                },
+                tx,
+            )
+            .await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "server.join",
+                "info",
+                &format!(
+                    "Creating {name} at Hetzner ({server_type}, {} a month)",
+                    money(&catalog.currency, monthly)
+                ),
+                json!({ "kind": "server", "id": name, "label": name }),
+                json!({ "clusterId": cluster_id, "cloudServerId": id }),
+            )
+            .await?;
+            Ok(made)
+        }
+        Op::CreateCloudCluster {
+            id,
+            team_id,
+            name,
+            server_id,
+            provider,
+            location,
+            server_type,
+            ssh_key,
+            tags,
+            confirm,
+        } => {
+            client_id(&id, "cl")?;
+            client_id(&server_id, "cs")?;
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            cloud_provider(provider.as_deref())?;
+            require_dns_label(&name, "Cluster name")?;
+            reserved_cluster_name(&name)?;
+            let server = format!("{name}-1");
+            require_dns_label(&server, "Cluster name")?;
+            let tags = valid_tags(&tags)?;
+            let ssh_key = cloud_ssh_key(ssh_key)?;
+            crate::cloud::needs_tailscale(&s.db).await?;
+            let p = crate::cloud::provider(&s.db, &team_id).await?;
+            let catalog = crate::cloud::catalog(&s.db, &team_id).await?;
+            let monthly = catalog.pick(&location, &server_type)?;
+            if !confirm {
+                return Err(ApiError::needs_confirm(format!(
+                    "{server} costs {} a month at Hetzner ({server_type} in {location}, before VAT).",
+                    money(&catalog.currency, monthly)
+                )));
+            }
+            crate::check_add_server(tx, &team_id).await?;
+            let token = secret_token();
+            sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, tags) VALUES ($1, $2, $3, $4, $5)")
+                .bind(&id)
+                .bind(&team_id)
+                .bind(&name)
+                .bind(sha256_hex(&token))
+                .bind(&tags)
+                .execute(&mut **tx)
+                .await?;
+            sqlx::query("UPDATE pyo.teams SET default_cluster_id = coalesce(default_cluster_id, $2) WHERE id = $1").bind(&team_id).bind(&id).execute(&mut **tx).await?;
+            let (command, _) = connect_command(tx, s, &id, &token, None).await?;
+            let made = make_cloud_server(
+                s,
+                &p,
+                CloudNew {
+                    id: &server_id,
+                    team_id: &team_id,
+                    cluster_id: &id,
+                    name: &server,
+                    location: &location,
+                    server_type: &server_type,
+                    monthly,
+                    currency: &catalog.currency,
+                    first: true,
+                    builder: false,
+                    command: &command,
+                    ssh_key: ssh_key.as_deref(),
+                    by: &user.name,
+                },
+                tx,
+            )
+            .await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "cluster.created",
+                "info",
+                &format!(
+                    "Creating cluster {name} at Hetzner ({server_type}, {} a month)",
+                    money(&catalog.currency, monthly)
+                ),
+                json!({ "kind": "cluster", "id": id, "label": name }),
+                json!({ "cloudServerId": server_id }),
+            )
+            .await?;
+            Ok(made)
+        }
+        Op::DeleteCloudServer { id, confirm } => {
+            delete_cloud_server(tx, user, &id, confirm, wake).await
         }
         Op::SaveTailscale { client_id, secret } => {
             require_admin(user)?;
