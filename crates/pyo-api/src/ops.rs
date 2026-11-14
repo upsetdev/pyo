@@ -2146,6 +2146,8 @@ pub(crate) enum Op {
     RemoveTailscale {},
     /// Rename Pyo's own name on your tailnet: `kind` "dashboard" (pyo.<tailnet>.ts.net) or "registry".
     RenameTailscaleName { kind: String, name: String },
+    /// Open or close Pyo's dashboard on the public IP (https://pyo.<public IP>.nip.io), admins only. Closing needs Pyo on your tailnet first.
+    SetPublicDashboard { open: bool },
     /// Connect an external secret store, or change one. No credential keeps
     /// the saved one.
     SaveSecretStore {
@@ -2287,6 +2289,7 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::TestTailscale {}
             | Op::RemoveTailscale {}
             | Op::RenameTailscaleName { .. }
+            | Op::SetPublicDashboard { .. }
             | Op::CreateOriginPullCertificate { .. }
             | Op::RemoveOriginPullCertificate { .. }
             | Op::SetClusterOriginPull { .. }
@@ -2413,6 +2416,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::TestTailscale {}
         | Op::RemoveTailscale {}
         | Op::RenameTailscaleName { .. } => ("Integrations", ""),
+        Op::SetPublicDashboard { .. } => ("Settings", ""),
         Op::CheckSecretImport { .. }
         | Op::SaveSecretStore { .. }
         | Op::RemoveSecretStore { .. } => ("Integrations", "sst"),
@@ -6180,6 +6184,11 @@ async fn apply(
         Op::RenameTailscaleName { kind, name } => {
             require_admin(user)?;
             crate::tailscale::rename(s, &kind, &name).await?;
+            Ok(ok)
+        }
+        Op::SetPublicDashboard { open } => {
+            require_admin(user)?;
+            crate::publicdash::set_open(&s.db, open).await?;
             Ok(ok)
         }
         Op::UpdateProfile { name, timezone } => {

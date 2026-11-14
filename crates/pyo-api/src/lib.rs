@@ -46,6 +46,7 @@ pub mod ops;
 mod outbound;
 mod passkeys;
 mod platform_import;
+mod publicdash;
 mod ratelimit;
 mod refs;
 mod registry;

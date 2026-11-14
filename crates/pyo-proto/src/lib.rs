@@ -2261,6 +2261,19 @@ pub struct HeartbeatReply {
     /// it): left as it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tailnet: Option<TailnetWanted>,
+    /// The public dashboard, on the cluster Pyo runs on. None (a reply
+    /// without it): left as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_dashboard: Option<PublicDashboard>,
+}
+
+/// Pyo's dashboard on the public IP ([`system::public_dashboard_objects`]).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicDashboard {
+    /// "pyo.203.0.113.7.nip.io". None: closed (its objects removed).
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -396,6 +396,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "activity": activity,
         "builders": builders,
         "tailscale": tailscale,
+        // Pyo's dashboard on the public IP: the installation's admin only.
+        "publicDashboard": if user.is_admin { crate::publicdash::snapshot(db).await? } else { Value::Null },
         "agentApiUrl": agent_api_url,
         // Whether email goes out; the settings themselves only for admins.
         // What analytics keeps of visitors' IPs (installation-wide).

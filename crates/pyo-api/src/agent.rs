@@ -472,8 +472,10 @@ async fn heartbeat(
     let observability = s.observability.enabled().await;
     // The names its servers host on the tailnet.
     let tailnet = crate::tailscale::wanted_for(&s.db, &cluster.id, same_cluster).await?;
+    // Pyo's dashboard on the public IP, while it's open.
+    let public_dashboard = crate::publicdash::wanted_for(&s.db, same_cluster).await?;
     Ok(Json(
-        json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability, "tailnet": tailnet }),
+        json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability, "tailnet": tailnet, "publicDashboard": public_dashboard }),
     ))
 }
 

@@ -570,6 +570,7 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
                 (has(object.spec.authorization) && has(object.spec.authorization.rules) && size(object.spec.authorization.rules) == 2 && object.spec == {tailnet_policy_servers} && \
                     size({servers}) >= 1 && size({servers}) <= 512 && {servers}.all(c, c.matches({server_v4}) || c.matches({server_v6}))))) || \
             {tailnet_routes} || \
+            (request.resource.resource == 'backends' && variables.objName == '{public_dash}' && (request.operation == 'DELETE' || object.spec == {public_dash_backend})) || \
             (request.resource.resource == 'services' && variables.objName == '{tw_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {tw_keys}) && \
                 object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && object.spec.ports == {tw_ports} && \
                 size(object.spec.externalIPs) >= 1 && size(object.spec.externalIPs) <= 512 && object.spec.externalIPs.all(ip, ip.matches({tw_v4}) || ip.matches({tw_v6}))))) || \
@@ -618,6 +619,9 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
                     size(object.spec.parentRefs) == 1 && object.spec.parentRefs[0].name == '{gw}' && object.spec.parentRefs[0].sectionName == '{section}' && (!has(object.spec.parentRefs[0].namespace) || object.spec.parentRefs[0].namespace == '{ns}') && \
                     size(object.spec.rules) == 1 && object.spec.rules.all(r, (!has(r.backendRefs) || size(r.backendRefs) == 0) && size(r.filters) == 1 && r.filters.all(f, f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https')))))",
                 name = system::TAILNET_REDIRECT, gw = system::TAILNET_GATEWAY, section = system::TAILNET_HTTP_SECTION, ns = system::GATEWAY_NS)]).collect::<Vec<_>>().join(" || "),
+            // The public dashboard's Backend (system.rs): Pyo's own, pinned.
+            public_dash = system::PUBLIC_DASHBOARD,
+            public_dash_backend = cel_literal(&system::fqdn_backend_spec(system::TAILNET_DASHBOARD.1, system::TAILNET_DASHBOARD.2)),
             tn_route = system::TAILNET_ROUTE_PREFIX,
             tn_https = system::TAILNET_HTTPS_SECTION,
             tn_https_port = system::TAILNET_HTTPS_PORT,

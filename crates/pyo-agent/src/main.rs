@@ -27,6 +27,7 @@ mod locate;
 mod observability;
 mod observe;
 mod operators;
+mod publicdash;
 mod rollout;
 mod room;
 mod runs;
@@ -223,6 +224,11 @@ async fn heartbeat_loop(agent: Agent) {
                         databases::label_teams(&agent.kube, &reply.project_teams).await;
                         if let Some(t) = &reply.tailnet {
                             tailnet::apply(&agent.kube, t, agent.api.same_cluster()).await;
+                        }
+                        if let Some(p) = &reply.public_dashboard
+                            && agent.api.same_cluster()
+                        {
+                            publicdash::apply(&agent.kube, p).await;
                         }
                         if let Some(on) = reply.observability
                             && observability_applied != Some(on)

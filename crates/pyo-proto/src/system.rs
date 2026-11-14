@@ -643,6 +643,58 @@ pub fn http_gateway() -> Value {
     })
 }
 
+// ── The public dashboard ────────────────────────────────────────────────────
+//
+// On the cluster Pyo runs on, until an admin closes it: the dashboard and
+// API over HTTPS at "pyo.<public IP>.nip.io", with Let's Encrypt's
+// certificate, on the public Gateway like a service's domain. Its Backend
+// is pinned by the admission policy (rbac.rs); the rest passes as any
+// service's HTTPS objects do.
+
+/// The Gateway, its route and the Backend.
+pub const PUBLIC_DASHBOARD: &str = "pyo-public";
+/// The redirect to HTTPS on the shared :80 listener.
+pub const PUBLIC_DASHBOARD_REDIRECT: &str = "pyo-public-redirect";
+/// Its certificate's Secret (and Certificate): no service's or tailnet
+/// name's can be this (those never have a "-" after the prefix's).
+pub const PUBLIC_DASHBOARD_TLS: &str = "pyo-tls---dashboard";
+
+/// "pyo.203.0.113.7.nip.io", for a public IPv4 address.
+pub fn public_dashboard_host(ip: &str) -> Option<String> {
+    let v4: std::net::Ipv4Addr = ip.trim().parse().ok()?;
+    Some(format!("pyo.{v4}.nip.io"))
+}
+
+/// Its objects in pyo-gateway, for `host`.
+pub fn public_dashboard_objects(host: &str) -> Vec<Value> {
+    let (_, backend_host, port) = TAILNET_DASHBOARD;
+    let meta = |n: &str, https: bool| {
+        let mut m = json!({ "name": n, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } });
+        if https {
+            m["labels"][GATEWAY_LABEL] = json!("https");
+        }
+        m
+    };
+    vec![
+        json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "Backend", "metadata": meta(PUBLIC_DASHBOARD, false), "spec": fqdn_backend_spec(backend_host, port) }),
+        json!({ "apiVersion": "cert-manager.io/v1", "kind": "Certificate", "metadata": meta(PUBLIC_DASHBOARD_TLS, false),
+            "spec": { "secretName": PUBLIC_DASHBOARD_TLS, "dnsNames": [host], "issuerRef": { "name": "pyo-letsencrypt", "kind": "ClusterIssuer" } } }),
+        json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway", "metadata": meta(PUBLIC_DASHBOARD, true),
+            "spec": { "gatewayClassName": "pyo", "listeners": [{
+                "name": "dashboard", "port": 443, "protocol": "HTTPS", "hostname": host,
+                "tls": { "mode": "Terminate", "certificateRefs": [{ "kind": "Secret", "name": PUBLIC_DASHBOARD_TLS }] },
+                "allowedRoutes": { "namespaces": { "from": "Same" } },
+            }] } }),
+        json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(PUBLIC_DASHBOARD, false),
+            "spec": { "parentRefs": [{ "name": PUBLIC_DASHBOARD }], "hostnames": [host],
+                // No request timeout: long-polls and uploads take their time.
+                "rules": [{ "backendRefs": [{ "group": "gateway.envoyproxy.io", "kind": "Backend", "name": PUBLIC_DASHBOARD }], "timeouts": { "request": "0s" } }] } }),
+        json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(PUBLIC_DASHBOARD_REDIRECT, false),
+            "spec": { "parentRefs": [{ "name": HTTP_GATEWAY, "sectionName": "http" }], "hostnames": [host],
+                "rules": [{ "filters": [{ "type": "RequestRedirect", "requestRedirect": { "scheme": "https", "statusCode": 301 } }] }] } }),
+    ]
+}
+
 // ── Names on the tailnet (Tailscale Services) ───────────────────────────────
 //
 // Pyo itself ("pyo.<tailnet>.ts.net", the dashboard and API), its registry
@@ -1198,6 +1250,31 @@ pub fn cel_literal(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_dashboard() {
+        assert_eq!(
+            public_dashboard_host("203.0.113.7").as_deref(),
+            Some("pyo.203.0.113.7.nip.io")
+        );
+        assert_eq!(public_dashboard_host("2001:db8::1"), None);
+        let objs = public_dashboard_objects("pyo.203.0.113.7.nip.io");
+        let kinds: Vec<&str> = objs.iter().map(|o| o["kind"].as_str().unwrap()).collect();
+        assert_eq!(
+            kinds,
+            [
+                "Backend",
+                "Certificate",
+                "Gateway",
+                "HTTPRoute",
+                "HTTPRoute"
+            ]
+        );
+        assert!(PUBLIC_DASHBOARD_TLS.starts_with(TLS_SECRET_PREFIX));
+        assert!(
+            !PUBLIC_DASHBOARD_TLS
+                .starts_with(&tailnet_tls_secret("a")[..TAILNET_TLS_PREFIX.len() + 1])
+        );
+    }
 
     /// The chart installs no CRDs: its own would bring the experimental
     /// Gateway API, which k3s 1.37+ refuses (connect.sh applies them).

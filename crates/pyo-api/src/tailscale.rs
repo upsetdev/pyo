@@ -493,6 +493,9 @@ pub async fn runner(state: AppState) {
             if let Err(e) = tick(&st).await {
                 tracing::warn!(error = %format!("{e:?}"), "tailscale");
             }
+            if let Err(e) = crate::publicdash::tick(&st).await {
+                tracing::warn!(error = %format!("{e:?}"), "public dashboard");
+            }
         })
         .await;
         tokio::time::sleep(Duration::from_secs(20)).await;
@@ -991,6 +994,10 @@ pub async fn remove(s: &AppState) -> ApiResult<()> {
         .execute(&s.db)
         .await?;
     sqlx::query("DELETE FROM pyo.settings WHERE key = 'tailscale'")
+        .execute(&s.db)
+        .await?;
+    // Without the tailnet, the public dashboard is the way in again.
+    sqlx::query("DELETE FROM pyo.settings WHERE key = 'public_dashboard'")
         .execute(&s.db)
         .await?;
     for k in ["tailnet", "registry"] {
