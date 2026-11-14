@@ -1,12 +1,12 @@
 import { Panel } from "~/components/ui/Panel";
 import { CopyButton } from "~/components/ui/Table";
 
-/** How to get the `pyo` command line, from this Pyo. */
+/** How to get the `pyo` command line and sign it in to this Pyo. */
 export function CliInstallPanel() {
   const origin = typeof window === "undefined" ? "" : window.location.origin;
   const steps = [
-    `curl -fsSL ${origin}/install/cli.sh | sh`,
-    "pyo login",
+    "curl -fsSL https://pyo.dev/cli.sh | sh",
+    `pyo login --url ${origin}`,
     "pyo link && pyo deploy",
   ];
   return (
