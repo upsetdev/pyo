@@ -444,10 +444,14 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
     };
 
     // The registry's front door for teams' own images (reached over the
-    // tailnet only; registrydoor.rs).
+    // tailnet only; registrydoor.rs), and where servers Pyo made at a cloud
+    // provider fetch their join details (cloud/bootstrap.rs), which checks
+    // each connection's real peer.
     if role.web() {
         let door: SocketAddr = env("PYO_REGISTRY_DOOR_ADDR", "0.0.0.0:5006").parse()?;
-        let door_app = registrydoor::router(door_state);
+        let door_app = registrydoor::router(door_state.clone())
+            .merge(cloud::bootstrap::router(door_state))
+            .into_make_service_with_connect_info::<SocketAddr>();
         match tokio::net::TcpListener::bind(door).await {
             Ok(l) => {
                 tracing::info!(%door, "registry door listening");

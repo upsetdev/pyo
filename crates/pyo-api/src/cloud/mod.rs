@@ -7,10 +7,11 @@
 //!   a Pyo serving other people's teams, one team can never spend another's
 //!   money. The token is sealed with the team's data key (vault.rs) in
 //!   `pyo.integrations`.
-//! - **Making a server**: Pyo mints the same join (or connect) command the
-//!   dashboard shows, with a fresh single-use Tailscale key, and creates the
-//!   server with cloud-init user data that runs it ([`user_data`]). Nothing
-//!   else secret goes in it. The server carries this installation's label
+//! - **Making a server**: its user data holds only two one-time values, a
+//!   single-use Tailscale key and a single-use code ([`user_data`]). On its
+//!   first boot it joins the tailnet, trades the code for its join details
+//!   over the tailnet ([`bootstrap`]), and runs join.sh (or connect.sh for
+//!   a new cluster) with them. The server carries this installation's label
 //!   (`pyo=<install id>`, `pyo-cluster=<cluster>`) and Pyo's firewall: the
 //!   web from anywhere and Tailscale's port, nothing else.
 //! - **Following it** ([`tick`]): Creating → Booting → Joining → Ready,
@@ -22,6 +23,7 @@
 //!
 //! [`Provider`] is what each provider does. Only Hetzner for now.
 
+pub mod bootstrap;
 pub mod hetzner;
 
 use std::collections::BTreeMap;
@@ -290,14 +292,59 @@ pub fn valid_ssh_key(k: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
 }
 
-/// The server's cloud-init user data: it runs `command` (the join or
-/// connect command the dashboard shows) once, logging to
-/// /var/log/pyo-join.log. Nothing else secret is in it. The provider's
-/// metadata service, which serves it, is closed to the server's pods at
-/// every boot, so only root on the server can read it again. Password
-/// logins over SSH are off. `ssh_key` lets its owner in over the tailnet.
-pub fn user_data(command: &str, ssh_key: Option<&str>) -> String {
-    debug_assert!(!command.contains('\n'));
+/// The script a new server runs on its first boot (as root, from its user
+/// data): it joins the tailnet, trades its code for its join details over
+/// the tailnet ([`bootstrap`]), and runs join.sh or connect.sh with them.
+pub const BOOT_SCRIPT: &str = include_str!("boot.sh");
+/// Where the user data puts the boot script, the key and the code: in
+/// memory, root only.
+pub const BOOT_DIR: &str = "/run/pyo-boot";
+
+/// What a new server boots with.
+pub struct Boot<'a> {
+    /// Pyo's tailnet door, where it asks: "http://100.64.0.1:5006".
+    pub pyo: &'a str,
+    /// Its cloud server ID.
+    pub server_id: &'a str,
+    pub cluster_id: &'a str,
+    pub role: bootstrap::Role,
+    /// Its name in the cluster and on the tailnet.
+    pub name: &'a str,
+    /// Single-use, tagged tag:pyo, valid an hour.
+    pub tailscale_key: &'a str,
+    /// Single-use, valid 15 minutes ([`bootstrap::new_code`]).
+    pub code: &'a str,
+}
+
+/// A value fit for the user data: one line, nothing YAML or a shell reads
+/// specially.
+fn plain(v: &str) -> bool {
+    !v.is_empty()
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:/".contains(&b))
+}
+
+/// The server's cloud-init user data. Its only secrets are two one-time
+/// values: the Tailscale key and the code, written to root-only files in
+/// memory and deleted once used. The boot script holds none. The
+/// provider's metadata service, which serves the user data, is closed to
+/// the server's pods at every boot, so only root on the server can read it
+/// again. Password logins over SSH are off. `ssh_key` lets its owner in
+/// over the tailnet.
+pub fn user_data(b: &Boot, ssh_key: Option<&str>) -> ApiResult<String> {
+    let values = [
+        b.pyo,
+        b.server_id,
+        b.cluster_id,
+        b.name,
+        b.tailscale_key,
+        b.code,
+    ];
+    if !values.iter().all(|v| plain(v)) {
+        return Err(ApiError::conflict(
+            "Pyo couldn't make this server's setup. Try again.",
+        ));
+    }
     let mut out = String::from(
         "#cloud-config\n# Made by Pyo: joins this server to a cluster over your tailnet.\nssh_pwauth: false\n",
     );
@@ -309,11 +356,31 @@ pub fn user_data(command: &str, ssh_key: Option<&str>) -> String {
         ));
     }
     out.push_str("bootcmd:\n  - [sh, -c, \"iptables -t raw -C PREROUTING -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -t raw -I PREROUTING -d 169.254.169.254/32 -j DROP\"]\n");
+    out.push_str("write_files:\n");
+    let file = |out: &mut String, name: &str, mode: &str, block: &str, body: &str| {
+        out.push_str(&format!(
+            "  - path: {BOOT_DIR}/{name}\n    owner: root:root\n    permissions: \"{mode}\"\n    content: {block}\n"
+        ));
+        for line in body.lines() {
+            if line.is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str(&format!("      {line}\n"));
+            }
+        }
+    };
+    file(&mut out, "tailscale-key", "0600", "|-", b.tailscale_key);
+    file(&mut out, "code", "0600", "|-", b.code);
+    file(&mut out, "boot.sh", "0700", "|", BOOT_SCRIPT);
     out.push_str(&format!(
-        "runcmd:\n  - |\n    exec >>/var/log/pyo-join.log 2>&1\n    {}\n",
-        command.trim()
+        "runcmd:\n  - [bash, {BOOT_DIR}/boot.sh, \"{}\", \"{}\", \"{}\", \"{}\", \"{}\"]\n",
+        b.pyo,
+        b.server_id,
+        b.cluster_id,
+        b.role.as_str(),
+        b.name
     ));
-    out
+    Ok(out)
 }
 
 // ── The connection (Integrations › Hetzner) ─────────────────────────────────
@@ -552,6 +619,7 @@ async fn tailnet_devices(s: &AppState) -> Option<Vec<crate::tailscale::Device>> 
 /// One pass: new servers move on, deleted ones go. Run by the Tailscale
 /// loop's leader.
 pub async fn tick(s: &AppState) -> ApiResult<()> {
+    bootstrap::prune(&s.db).await?;
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT id, team_id, cluster_id, name, remote_id, state,
                 extract(epoch FROM now() - created_at)::float8 AS age_secs, sign_command, first_server
@@ -647,7 +715,12 @@ async fn follow(
         in_cluster,
         sign: sign.clone(),
     };
-    let (state, error) = next_state(&seen, Duration::from_secs_f64(r.age_secs.max(0.0)));
+    let (mut state, error) = next_state(&seen, Duration::from_secs_f64(r.age_secs.max(0.0)));
+    // It traded its code over the tailnet: Joining, even when the tailnet's
+    // list can't be read now.
+    if r.state == "joining" && matches!(state, "creating" | "booting") {
+        state = "joining";
+    }
     let ipv4 = remote.and_then(|x| x.ipv4);
     if state != r.state || sign != r.sign_command || error.is_some() {
         sqlx::query(
@@ -978,44 +1051,168 @@ mod tests {
         );
     }
 
+    const TS_KEY: &str = "tskey-auth-kAbc1CNTRL-0123456789abcdefSECRET";
+    const CODE: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    const SSH_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq0QvB8p6jWl1y3o7nZ me@laptop";
+
+    fn boot(role: bootstrap::Role) -> Boot<'static> {
+        Boot {
+            pyo: "http://100.64.0.1:5006",
+            server_id: "cs_web1",
+            cluster_id: "cl_one",
+            role,
+            name: "web-1",
+            tailscale_key: TS_KEY,
+            code: CODE,
+        }
+    }
+
     #[test]
-    fn user_data_runs_the_join_command_and_holds_no_other_secret() {
-        let command = "curl -fsSL https://pyo.tail1234.ts.net/install/join.sh | bash -s -- --server 'pyo.tail1234.ts.net' --token 'abc123.0123456789abcdef' --name 'web-1' --k3s 'v1.37.2+k3s1' --tailscale-key 'tskey-auth-kAbc-SECRET'";
-        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq0QvB8p6jWl1y3o7nZ me@laptop";
-        let ud = user_data(command, Some(key));
+    fn user_data_holds_only_the_two_one_time_values_and_the_ssh_key() {
+        let ud = user_data(&boot(bootstrap::Role::Join), Some(SSH_KEY)).unwrap();
         assert!(ud.starts_with("#cloud-config\n"));
-        assert!(ud.contains(&format!("\n    {command}\n")));
-        assert!(ud.contains(&format!("  - \"{key}\"\n")));
         assert!(ud.contains("ssh_pwauth: false\n"));
         assert!(ud.contains("169.254.169.254"));
-        // Line by line: cloud-config, the key, the metadata block and the
-        // command. Nothing else carries a value.
+        // Line by line: every line is structure, the boot script (which
+        // holds no secret), or one of the three values. Each value once.
+        let script: std::collections::BTreeSet<&str> = BOOT_SCRIPT.lines().collect();
+        let mut values = Vec::new();
         for line in ud.lines() {
             let l = line.trim();
+            if [TS_KEY, CODE, &format!("- \"{SSH_KEY}\"")].contains(&l) {
+                values.push(l.to_owned());
+                continue;
+            }
             let known = l.is_empty()
                 || l.starts_with('#')
-                || l == "ssh_pwauth: false"
-                || l == "ssh_authorized_keys:"
-                || l == format!("- \"{key}\"")
-                || l == "bootcmd:"
+                || [
+                    "ssh_pwauth: false",
+                    "ssh_authorized_keys:",
+                    "bootcmd:",
+                    "write_files:",
+                    "- path: /run/pyo-boot/tailscale-key",
+                    "- path: /run/pyo-boot/code",
+                    "- path: /run/pyo-boot/boot.sh",
+                    "owner: root:root",
+                    "permissions: \"0600\"",
+                    "permissions: \"0700\"",
+                    "content: |-",
+                    "content: |",
+                    "runcmd:",
+                    "- [bash, /run/pyo-boot/boot.sh, \"http://100.64.0.1:5006\", \"cs_web1\", \"cl_one\", \"join\", \"web-1\"]",
+                ]
+                .contains(&l)
                 || l.starts_with("- [sh, -c, \"iptables -t raw")
-                || l == "runcmd:"
-                || l == "- |"
-                || l == "exec >>/var/log/pyo-join.log 2>&1"
-                || l == command;
-            assert!(known, "unexpected line in user data: {l}");
+                || (line.starts_with("      ") && script.contains(&line[6..]));
+            assert!(known, "unexpected line in user data: {line}");
         }
-        // Without a key: no keys line.
-        let ud = user_data(command, None);
-        assert!(!ud.contains("ssh_authorized_keys"));
-        // Its YAML parses, and runs the command as given.
-        let y: serde_json::Value = serde_norway::from_str(&user_data(command, Some(key))).unwrap();
+        assert_eq!(values.len(), 3, "{values:?}");
+        // The boot script has no value of its own: no key, no token.
+        for secret in ["tskey", "--token", "--registry-token", "K3S_TOKEN"] {
+            assert!(!BOOT_SCRIPT.contains(secret), "{secret}");
+        }
+
+        // As cloud-init reads it.
+        let y: serde_json::Value = serde_norway::from_str(&ud).unwrap();
         assert_eq!(y["ssh_pwauth"], false);
-        assert_eq!(y["ssh_authorized_keys"][0], key);
+        assert_eq!(y["ssh_authorized_keys"][0], SSH_KEY);
+        let files = y["write_files"].as_array().unwrap();
+        let file = |name: &str| {
+            files
+                .iter()
+                .find(|f| f["path"] == format!("/run/pyo-boot/{name}"))
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(file("tailscale-key")["content"], TS_KEY);
+        assert_eq!(file("tailscale-key")["permissions"], "0600");
+        assert_eq!(file("code")["content"], CODE);
+        assert_eq!(file("code")["permissions"], "0600");
+        assert_eq!(file("boot.sh")["content"], BOOT_SCRIPT);
+        assert_eq!(file("boot.sh")["permissions"], "0700");
+        assert_eq!(files.len(), 3);
         assert_eq!(
-            y["runcmd"][0].as_str().unwrap(),
-            format!("exec >>/var/log/pyo-join.log 2>&1\n{command}\n")
+            y["runcmd"][0],
+            json!([
+                "bash",
+                "/run/pyo-boot/boot.sh",
+                "http://100.64.0.1:5006",
+                "cs_web1",
+                "cl_one",
+                "join",
+                "web-1"
+            ])
         );
+        // Nothing else.
+        let keys: Vec<&str> = y.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "bootcmd",
+                "runcmd",
+                "ssh_authorized_keys",
+                "ssh_pwauth",
+                "write_files"
+            ]
+        );
+
+        // Without an SSH key: no keys line. A new cluster's first server.
+        let ud = user_data(&boot(bootstrap::Role::Connect), None).unwrap();
+        assert!(!ud.contains("ssh_authorized_keys"));
+        let y: serde_json::Value = serde_norway::from_str(&ud).unwrap();
+        assert_eq!(y["runcmd"][0][5], "connect");
+        // Nothing that could break out of its line.
+        let mut bad = boot(bootstrap::Role::Join);
+        bad.name = "web-1\"]\nruncmd: [x]";
+        assert!(user_data(&bad, None).is_err());
+        let mut bad = boot(bootstrap::Role::Join);
+        bad.code = "abc\n  - path: /etc/x";
+        assert!(user_data(&bad, None).is_err());
+    }
+
+    #[test]
+    fn the_boot_script_parses_and_keeps_each_detail_whole() {
+        let ok = std::process::Command::new("bash")
+            .args(["-n", "-c", BOOT_SCRIPT])
+            .status()
+            .unwrap();
+        assert!(ok.success(), "bash -n");
+        // Its reading of Pyo's answer: each value one argument, as it was.
+        let parse = BOOT_SCRIPT
+            .split("# >>> parse\n")
+            .nth(1)
+            .and_then(|r| r.split("# <<< parse\n").next())
+            .expect("the boot script has its parse block");
+        let material = bootstrap::Material::new(
+            "https://pyo.tail1234.ts.net/install/join.sh".into(),
+            &crate::join::args(&crate::join::Join {
+                server_ip: "100.64.0.1",
+                token: "abc123.0123456789abcdef",
+                server_name: "web 1 $(touch /tmp/x) 'q'",
+                k3s_version: "v1.37.2+k3s1",
+                tailscale_key: None,
+                builder: true,
+                registry: Some(("100.64.0.1:5006", "9b1c")),
+            }),
+        );
+        let out = std::process::Command::new("bash")
+            .args([
+                "-c",
+                &format!("set -u\n{parse}printf '%s\\n' \"$script\" \"${{#args[@]}}\"; printf '[%s]\\n' \"${{args[@]}}\""),
+                "boot",
+            ])
+            .env("body", material.render().unwrap())
+            .output()
+            .unwrap();
+        // `body` comes from the environment here; in the script, from curl.
+        let out = String::from_utf8(out.stdout).unwrap();
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some(material.script.as_str()));
+        assert_eq!(lines.next(), Some(material.args.len().to_string().as_str()));
+        let args: Vec<String> = lines.map(|l| l[1..l.len() - 1].to_owned()).collect();
+        assert_eq!(args, material.args);
+        assert!(args.contains(&"web 1 $(touch /tmp/x) 'q'".to_owned()));
+        assert!(!args.iter().any(|a| a == "--tailscale-key"));
     }
 
     #[test]

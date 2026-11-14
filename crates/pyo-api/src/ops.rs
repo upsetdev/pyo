@@ -795,6 +795,38 @@ async fn connect_command(
     ))
 }
 
+/// What a new server of a cluster joins with (a k3s join token the agent
+/// makes, valid an hour): join.sh's details and a fresh Tailscale key.
+struct JoinParts {
+    /// Where join.sh is.
+    base: String,
+    server_ip: String,
+    token: String,
+    k3s_version: String,
+    tailscale_key: String,
+    registry: Option<(String, String)>,
+    ttl: u64,
+}
+
+impl JoinParts {
+    /// join.sh's details, with the Tailscale key or without it (a server
+    /// already on the tailnet).
+    fn join<'a>(&'a self, name: &'a str, builder: bool, key: bool) -> crate::join::Join<'a> {
+        crate::join::Join {
+            server_ip: &self.server_ip,
+            token: &self.token,
+            server_name: name,
+            k3s_version: &self.k3s_version,
+            tailscale_key: key.then_some(self.tailscale_key.as_str()),
+            builder,
+            registry: self
+                .registry
+                .as_ref()
+                .map(|(r, t)| (r.as_str(), t.as_str())),
+        }
+    }
+}
+
 /// A join command for a new server of a cluster (a k3s join token the agent
 /// makes, valid an hour). `builder`: a build-only server (join.sh --builder).
 async fn join_command(
@@ -806,6 +838,22 @@ async fn join_command(
     builder: bool,
     wake: &mut Vec<String>,
 ) -> ApiResult<Value> {
+    let p = join_parts(tx, s, team_id, cluster_id, server_name, wake).await?;
+    let command = crate::join::command(&p.base, &p.join(server_name, builder, true));
+    Ok(
+        json!({ "ok": true, "command": command, "scriptUrl": format!("{}/join.sh", p.base), "expiresAt": now_ms() + p.ttl as i64 * 1000, "tailscale": true }),
+    )
+}
+
+/// [`JoinParts`] for a new server of a cluster.
+async fn join_parts(
+    tx: &mut Transaction<'_, Postgres>,
+    s: &AppState,
+    team_id: &str,
+    cluster_id: &str,
+    server_name: &str,
+    wake: &mut Vec<String>,
+) -> ApiResult<JoinParts> {
     crate::check_add_server(tx, team_id).await?;
     let (status, version): (String, String) =
         sqlx::query_as("SELECT status, coalesce(version, '') FROM pyo.clusters WHERE id = $1")
@@ -859,22 +907,15 @@ async fn join_command(
     )
     .await?;
     wake.push(cluster_id.to_owned());
-    let base = crate::join::scripts_url(None);
-    let command = crate::join::command(
-        &base,
-        &crate::join::Join {
-            server_ip: &crate::join::friendly(&server_ip),
-            token: &format!("{token_id}.{token_secret}"),
-            server_name,
-            k3s_version: &version,
-            tailscale_key: Some(&ts_key),
-            builder,
-            registry: registry.as_ref().map(|(r, t)| (r.as_str(), t.as_str())),
-        },
-    );
-    Ok(
-        json!({ "ok": true, "command": command, "scriptUrl": format!("{base}/join.sh"), "expiresAt": now_ms() + ttl as i64 * 1000, "tailscale": true }),
-    )
+    Ok(JoinParts {
+        base: crate::join::scripts_url(None),
+        server_ip: crate::join::friendly(&server_ip),
+        token: format!("{token_id}.{token_secret}"),
+        k3s_version: version,
+        tailscale_key: ts_key,
+        registry,
+        ttl,
+    })
 }
 
 /// Server names that are cluster pages (/clusters/<cluster>/<server>).
@@ -943,28 +984,59 @@ struct CloudNew<'a> {
     /// The cluster's first server (connect.sh).
     first: bool,
     builder: bool,
-    /// The join or connect command, as the dashboard shows it.
-    command: &'a str,
+    /// Single-use, for its user data.
+    tailscale_key: &'a str,
+    /// What its code opens: join.sh's or connect.sh's details.
+    material: crate::cloud::bootstrap::Material,
     ssh_key: Option<&'a str>,
     by: &'a str,
 }
 
 /// Makes the server at the provider, labelled as this installation's and
-/// behind its firewall, with cloud-init that runs the command, and keeps
-/// it to follow (cloud/mod.rs `tick`). The last step before the operation
-/// commits.
+/// behind its firewall, with user data that holds only its Tailscale key
+/// and a single-use code (cloud/bootstrap.rs), and keeps it to follow
+/// (cloud/mod.rs `tick`). The last step before the operation commits.
 async fn make_cloud_server<P: crate::cloud::Provider>(
     s: &AppState,
     p: &P,
     n: CloudNew<'_>,
     tx: &mut Transaction<'_, Postgres>,
 ) -> ApiResult<Value> {
-    if n.command.is_empty() {
-        return Err(ApiError::conflict("Pyo couldn't make the join command."));
+    use crate::cloud::bootstrap;
+    let door = deploy::registry_push();
+    if door.is_empty() {
+        return Err(ApiError::conflict(
+            "Pyo's server isn't on your tailnet yet. Try again in a minute.",
+        ));
     }
+    let role = if n.first {
+        bootstrap::Role::Connect
+    } else {
+        bootstrap::Role::Join
+    };
+    // Checked before anything is made: its details are kept sealed.
+    n.material.render()?;
+    if !s.sealer.enabled() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "This installation has no PYO_SECRET_KEY, so it can't keep a new server's join details.",
+        ));
+    }
+    let code = bootstrap::new_code();
+    let user_data = crate::cloud::user_data(
+        &crate::cloud::Boot {
+            pyo: &format!("http://{door}"),
+            server_id: n.id,
+            cluster_id: n.cluster_id,
+            role,
+            name: n.name,
+            tailscale_key: n.tailscale_key,
+            code: &code,
+        },
+        n.ssh_key,
+    )?;
     let install = crate::tailscale::install_id(&s.db).await?;
     let firewall = p.firewall(&install).await?;
-    let user_data = crate::cloud::user_data(n.command, n.ssh_key);
     let made = p
         .create(&crate::cloud::Create {
             name: n.name,
@@ -999,6 +1071,7 @@ async fn make_cloud_server<P: crate::cloud::Provider>(
     .bind(n.by)
     .execute(&mut **tx)
     .await?;
+    bootstrap::keep(tx, &s.sealer, &code, n.id, n.cluster_id, role, &n.material).await?;
     Ok(json!({
         "ok": true, "id": n.id, "clusterId": n.cluster_id, "name": n.name, "state": "creating",
         "monthly": n.monthly, "currency": n.currency,
@@ -1082,6 +1155,7 @@ async fn delete_cloud_server(
         .bind(id)
         .execute(&mut **tx)
         .await?;
+    crate::cloud::bootstrap::forget(tx, id).await?;
     log_activity(
         tx,
         &team_id,
@@ -2386,7 +2460,7 @@ pub(crate) enum Op {
     },
     /// Set a server's region: a name ("US East", "Singapore, SG"), or "" to detect it again.
     SetServerLocation { server_id: String, location: String },
-    /// Make a server at a cloud provider and join it to a cluster over your tailnet (team admins). Read the locations, server types and prices with getCloudOptions first. Pyo creates it with cloud-init that runs the cluster's join command, labels it as this installation's and puts it behind a firewall that allows only the web (80 and 443) and Tailscale. Follow it in `cloudServers` of getState: creating, booting, joining, then ready. Without `confirm` it answers 409 with the monthly price. Confirm that with the user, then send it again with `confirm: true`.
+    /// Make a server at a cloud provider and join it to a cluster over your tailnet (team admins). Read the locations, server types and prices with getCloudOptions first. Its startup script holds only one-time keys: on its first boot it joins your tailnet, then fetches its join details from Pyo over the tailnet. Pyo labels it as this installation's and puts it behind a firewall that allows only the web (80 and 443) and Tailscale. Follow it in `cloudServers` of getState: creating, booting, joining, then ready. Without `confirm` it answers 409 with the monthly price. Confirm that with the user, then send it again with `confirm: true`.
     CreateCloudServer {
         /// A new id you choose: `cs_` then 4 to 40 lowercase letters, digits, dashes or underscores.
         id: String,
@@ -6681,8 +6755,12 @@ async fn apply(
                 )));
             }
             save_server_tags(tx, &cluster_id, &name, &tags).await?;
-            let join = join_command(tx, s, &team_id, &cluster_id, &name, builder, wake).await?;
-            let command = join["command"].as_str().unwrap_or_default().to_owned();
+            let parts = join_parts(tx, s, &team_id, &cluster_id, &name, wake).await?;
+            // It's on the tailnet before it asks: no key in its details.
+            let material = crate::cloud::bootstrap::Material::new(
+                format!("{}/join.sh", parts.base),
+                &crate::join::args(&parts.join(&name, builder, false)),
+            );
             if builder {
                 let cluster_name: String =
                     sqlx::query_scalar("SELECT name FROM pyo.clusters WHERE id = $1")
@@ -6717,7 +6795,8 @@ async fn apply(
                     currency: &catalog.currency,
                     first: false,
                     builder,
-                    command: &command,
+                    tailscale_key: &parts.tailscale_key,
+                    material,
                     ssh_key: ssh_key.as_deref(),
                     by: &user.name,
                 },
@@ -6783,7 +6862,18 @@ async fn apply(
                 .execute(&mut **tx)
                 .await?;
             sqlx::query("UPDATE pyo.teams SET default_cluster_id = coalesce(default_cluster_id, $2) WHERE id = $1").bind(&team_id).bind(&id).execute(&mut **tx).await?;
-            let (command, _) = connect_command(tx, s, &id, &token, None).await?;
+            let (api, tailscale_key, registry) =
+                reach(tx, s, &id, "Pyo: connect a cluster").await?;
+            // It's on the tailnet before it asks: no key in its details.
+            let material = crate::cloud::bootstrap::Material::new(
+                format!("{}/connect.sh", crate::join::scripts_url(Some(&api))),
+                &crate::join::connect_args(
+                    &api,
+                    &token,
+                    None,
+                    registry.as_ref().map(|(r, t)| (r.as_str(), t.as_str())),
+                ),
+            );
             let made = make_cloud_server(
                 s,
                 &p,
@@ -6798,7 +6888,8 @@ async fn apply(
                     currency: &catalog.currency,
                     first: true,
                     builder: false,
-                    command: &command,
+                    tailscale_key: &tailscale_key,
+                    material,
                     ssh_key: ssh_key.as_deref(),
                     by: &user.name,
                 },

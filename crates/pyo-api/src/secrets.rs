@@ -72,6 +72,16 @@ impl Sealer {
     pub fn enabled(&self) -> bool {
         self.secretbox.is_some()
     }
+
+    /// A sealer with a fixed key, for tests.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        Self {
+            secretbox: Some(<XSalsa20Poly1305 as crypto_secretbox::aead::KeyInit>::new(
+                &BoxKey::from([7u8; 32]),
+            )),
+        }
+    }
 }
 
 #[cfg(test)]

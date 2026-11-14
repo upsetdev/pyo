@@ -40,3 +40,21 @@ CREATE TABLE pyo.cloud_servers (
 );
 CREATE INDEX cloud_servers_team ON pyo.cloud_servers (team_id);
 CREATE UNIQUE INDEX cloud_servers_name ON pyo.cloud_servers (cluster_id, name) WHERE state <> 'deleted';
+
+-- A server's single-use code (cloud/bootstrap.rs), the only secret in its
+-- user data besides a single-use Tailscale key. Kept as its hash, bound to
+-- the server, its cluster and its role. On its first boot the server trades
+-- it over the tailnet for its join details, sealed here until then. The
+-- first use burns it. Expired details go at once, the row a day later.
+CREATE TABLE pyo.cloud_bootstrap (
+  code_hash        text PRIMARY KEY,
+  cloud_server_id  text NOT NULL REFERENCES pyo.cloud_servers (id) ON DELETE CASCADE,
+  cluster_id       text NOT NULL REFERENCES pyo.clusters (id) ON DELETE CASCADE,
+  -- join.sh, or connect.sh for a new cluster's first server.
+  role             text NOT NULL CHECK (role IN ('join', 'connect')),
+  material_sealed  text,
+  expires_at       timestamptz NOT NULL,
+  used_at          timestamptz,
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX cloud_bootstrap_server ON pyo.cloud_bootstrap (cloud_server_id);

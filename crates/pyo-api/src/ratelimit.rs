@@ -177,6 +177,16 @@ fn server_end(ip: &IpAddr) -> bool {
     }
 }
 
+/// A process on a server's host (pyo-forward's port forwards, k3s), as Pyo
+/// sees it: k3s's pod network, at a server's own end.
+pub fn from_server_host(ip: &IpAddr) -> bool {
+    DEFAULT_TRUSTED_PROXIES
+        .split(',')
+        .filter_map(Cidr::parse)
+        .any(|c| c.contains(ip))
+        && server_end(ip)
+}
+
 fn trusted(ip: &IpAddr, proxies: &[Cidr]) -> bool {
     proxies.iter().any(|c| c.contains(ip)) && !server_end(ip)
 }
@@ -353,6 +363,8 @@ mod tests {
             PASSKEY_PASSWORD_USER,
             SIGNUP_IP,
             OAUTH_REGISTER_IP,
+            crate::cloud::bootstrap::WRONG_CODE_SERVER,
+            crate::cloud::bootstrap::WRONG_CODE_ALL,
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(
