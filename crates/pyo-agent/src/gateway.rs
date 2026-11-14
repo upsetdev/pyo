@@ -36,7 +36,7 @@ use kube::{
 };
 use pyo_proto::{
     DeploySpec, DomainSpec, PortSpec,
-    firewall::Firewall,
+    firewall::{Entry, Firewall},
     system::{self, GATEWAY_LABEL, GATEWAY_NS, HTTP_GATEWAY, TLS_SECRET_PREFIX},
 };
 use serde_json::{Value, json};
@@ -117,6 +117,11 @@ pub fn host_hash(hostname: &str) -> String {
 /// What a service's objects are named after.
 pub fn base_name(spec: &DeploySpec) -> String {
     format!("{}-{}", spec.service.namespace, spec.service.name)
+}
+
+/// A service's client policy for its HTTPS behind a CDN.
+pub fn cdn_policy_name(spec: &DeploySpec) -> String {
+    format!("{}-cdn", base_name(spec))
 }
 
 /// A domain's certificate Secret in `pyo-gateway`.
@@ -384,14 +389,14 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
     // The service's firewall on each of its routes (not the redirect to
     // HTTPS): addresses and countries, and its rate limits. Not on tailnet
     // routes: a route's own SecurityPolicy would replace the tailnet
-    // Gateway's, which admits the tailnet only.
-    let layers = fw_layers(spec, None);
-    let authorization =
-        pyo_proto::firewall::authorization(&layers.iter().collect::<Vec<_>>(), true);
-    let rate = spec
-        .firewall
-        .as_ref()
-        .and_then(pyo_proto::firewall::rate_limit);
+    // Gateway's, which admits the tailnet only. Let's Encrypt's
+    // challenges always get through. Behind a CDN, only the CDN reaches
+    // them: on HTTPS the visitor is who the CDN says (its client policy,
+    // below), over plain HTTP only the CDN's connections count.
+    let fw = spec.firewall.clone().unwrap_or_default();
+    let https_auth = pyo_proto::firewall::web_authorization(&fw, Entry::Https);
+    let http_auth = pyo_proto::firewall::web_authorization(&fw, Entry::Http);
+    let rate = pyo_proto::firewall::rate_limit(&fw);
     let names: Vec<String> = out
         .objects
         .iter()
@@ -401,10 +406,21 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         .map(str::to_owned)
         .collect();
     for name in names {
+        let https = name.starts_with(&format!("{base}-https-"));
+        let on_tailnet = name.starts_with(system::TAILNET_ROUTE_PREFIX);
+        let (authorization, rate) = if on_tailnet {
+            (&None, rate.as_ref())
+        } else if https {
+            (&https_auth, rate.as_ref())
+        } else {
+            (
+                &http_auth,
+                rate.as_ref()
+                    .filter(|_| pyo_proto::firewall::http_rate_limits(&fw)),
+            )
+        };
         let route_ref =
             json!([{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": name }]);
-        let on_tailnet = name.starts_with(system::TAILNET_ROUTE_PREFIX);
-        let authorization = authorization.as_ref().filter(|_| !on_tailnet);
         if let Some(a) = authorization {
             out.objects.push(json!({
                 "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "SecurityPolicy", "metadata": meta(&name),
@@ -414,7 +430,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         // Its rate limits, and the message a refused visitor gets.
         if rate.is_some() || authorization.is_some() {
             let mut spec = json!({ "targetRefs": route_ref });
-            if let Some(r) = &rate {
+            if let Some(r) = rate {
                 spec["rateLimit"] = r.clone();
             }
             if authorization.is_some() {
@@ -422,6 +438,27 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
             }
             out.objects.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(&name), "spec": spec }));
         }
+    }
+
+    // Behind a CDN: its HTTPS listeners read the visitor from what the CDN
+    // forwards, only on connections from the CDN's ranges. The websites'
+    // settings (origin pull, PROXY protocol) are filled in as the cluster
+    // has them when it's applied (`apply`). Without the CDN's ranges
+    // nothing is trusted, so the CDN check above refuses everyone.
+    if let Some((cdn, ranges)) = fw.behind_ranges().filter(|(_, r)| !r.is_empty())
+        && !secure.is_empty()
+    {
+        let sections: Vec<String> = secure
+            .iter()
+            .map(|d| format!("h-{}", host_hash(&d.hostname)))
+            .collect();
+        let name = cdn_policy_name(spec);
+        let mut m = meta(&name);
+        m["labels"][system::CDN_LABEL] = json!(cdn);
+        out.objects.push(json!({
+            "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": m,
+            "spec": system::cdn_client_policy_spec(&base, &sections, system::WebSettings::default(), &ranges),
+        }));
     }
 
     // The WAF: with the service's WAF on, its routes go through the
@@ -617,6 +654,14 @@ pub async fn apply(
         notes.push(p.clone());
     }
     let mut r = route_objects(spec);
+    // Behind a CDN: its HTTPS client policy as the cluster's websites have
+    // theirs otherwise.
+    if let Some(o) = r.objects.iter_mut().find(|o| {
+        o["kind"] == "ClientTrafficPolicy" && o["metadata"]["labels"][system::CDN_LABEL].is_string()
+    }) {
+        let w = web_settings(client).await?;
+        rewrite_cdn_policy(o, w);
+    }
     // New public TCP and UDP ports wait for the servers to free them (a port
     // that just stopped being published straight from them), and stay off
     // the proxy while something else on the cluster publishes them: one
@@ -1574,7 +1619,44 @@ async fn write_web(client: &Client, w: system::WebSettings) -> anyhow::Result<()
             &Patch::Apply(system::client_policy(true, w)),
         )
         .await?;
+    // Services behind a CDN: their HTTPS policies follow.
+    let cdn = policies
+        .list(&ListParams::default().labels(system::CDN_LABEL))
+        .await?;
+    for p in cdn.items {
+        let name = p.name_any();
+        let mut o = json!({
+            "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy",
+            "metadata": { "name": name, "namespace": GATEWAY_NS, "labels": p.labels() },
+            "spec": p.data["spec"].clone(),
+        });
+        rewrite_cdn_policy(&mut o, w);
+        policies.patch(&name, &pp(), &Patch::Apply(&o)).await?;
+    }
     Ok(())
+}
+
+/// A service's CDN client policy with these websites' settings, its
+/// listeners and trusted ranges as they are.
+fn rewrite_cdn_policy(o: &mut Value, w: system::WebSettings) {
+    let spec = &o["spec"];
+    let gateway = spec["targetRefs"][0]["name"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let sections: Vec<String> = spec["targetRefs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["sectionName"].as_str().map(str::to_owned))
+        .collect();
+    let trusted: Vec<String> = spec["clientIPDetection"]["xForwardedFor"]["trustedCIDRs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.as_str().map(str::to_owned))
+        .collect();
+    o["spec"] = system::cdn_client_policy_spec(&gateway, &sections, w, &trusted);
 }
 
 /// Read the visitor's address from a PROXY protocol header on ports 80 and
@@ -1853,6 +1935,7 @@ mod tests {
                     limit: None,
                 },
             ],
+            ..Default::default()
         });
         let r = route_objects(&s);
         let tn = find(&r, "HTTPRoute", "tn--shop-web-http");
@@ -2165,6 +2248,83 @@ mod tests {
     }
 
     #[test]
+    fn behind_cloudflare_routes() {
+        let mut s = spec(vec![
+            domain("shop.example.com", "http", "letsencrypt", false),
+            domain("plain.example.com", "http", "", false),
+        ]);
+        let cf = vec!["173.245.48.0/20".to_owned(), "2400:cb00::/32".to_owned()];
+        let mut limit = pyo_proto::firewall::FirewallRule {
+            id: "fwr_rl".into(),
+            action: "rateLimit".into(),
+            operator: "in".into(),
+            ..Default::default()
+        };
+        limit.limit = Some(pyo_proto::firewall::RateLimit {
+            requests: 10,
+            per: "second".into(),
+        });
+        s.firewall = Some(Firewall {
+            rules: vec![limit],
+            presets: [("cloudflare".to_owned(), cf.clone())].into(),
+            behind: Some("cloudflare".into()),
+        });
+        let r = route_objects(&s);
+        // HTTPS: the visitor from X-Forwarded-For, from Cloudflare only, on
+        // its own listeners.
+        let ctp = find(&r, "ClientTrafficPolicy", "shop-web-cdn");
+        assert_eq!(ctp["metadata"]["labels"][system::CDN_LABEL], "cloudflare");
+        assert_eq!(
+            ctp["spec"]["clientIPDetection"],
+            json!({ "xForwardedFor": { "trustedCIDRs": cf } })
+        );
+        assert_eq!(
+            ctp["spec"]["targetRefs"],
+            json!([{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "shop-web", "sectionName": format!("h-{}", host_hash("shop.example.com")) }])
+        );
+        let https = find(&r, "SecurityPolicy", "shop-web-https-http");
+        assert_eq!(
+            https["spec"]["authorization"]["rules"][0],
+            pyo_proto::firewall::acme_rule()
+        );
+        assert_eq!(
+            https["spec"]["authorization"]["rules"][1],
+            pyo_proto::firewall::behind_gate_rule()
+        );
+        assert!(
+            find(&r, "BackendTrafficPolicy", "shop-web-https-http")["spec"]["rateLimit"]
+                .is_object()
+        );
+        // Plain HTTP: Cloudflare's connections only, and no rate limits
+        // (every request there comes from Cloudflare's own addresses).
+        let http = find(&r, "SecurityPolicy", "shop-web-http-http");
+        assert_eq!(http["spec"]["authorization"]["defaultAction"], "Deny");
+        assert_eq!(
+            http["spec"]["authorization"]["rules"][1]["principal"]["clientCIDRs"],
+            json!(cf)
+        );
+        assert!(
+            find(&r, "BackendTrafficPolicy", "shop-web-http-http")["spec"]
+                .get("rateLimit")
+                .is_none()
+        );
+        // Not behind it: no client policy of its own.
+        s.firewall.as_mut().unwrap().behind = None;
+        let r = route_objects(&s);
+        assert!(!r.objects.iter().any(|o| o["kind"] == "ClientTrafficPolicy"));
+        // Its ranges missing: nothing trusted, so no one gets past the check.
+        let f = s.firewall.as_mut().unwrap();
+        f.behind = Some("cloudflare".into());
+        f.presets.clear();
+        let r = route_objects(&s);
+        assert!(!r.objects.iter().any(|o| o["kind"] == "ClientTrafficPolicy"));
+        assert_eq!(
+            find(&r, "SecurityPolicy", "shop-web-https-http")["spec"]["authorization"]["rules"][1],
+            pyo_proto::firewall::behind_gate_rule()
+        );
+    }
+
+    #[test]
     fn firewall_on_routes() {
         use pyo_proto::firewall::FirewallRule;
         let rule = |id: &str, action: &str, source: &str| FirewallRule {
@@ -2212,6 +2372,7 @@ mod tests {
                 rule("fwr_bad", "block", "203.0.113.0/24"),
                 limit,
             ],
+            ..Default::default()
         });
         let r = route_objects(&s);
         let sp = find(&r, "SecurityPolicy", "shop-web-https-http");
@@ -2221,8 +2382,8 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2,
-            "the country and the range"
+            3,
+            "Let's Encrypt's challenges, the country and the range"
         );
         assert!(
             !r.objects
@@ -2280,6 +2441,7 @@ mod tests {
         // Access rules alone: the message, no rate limit.
         s.firewall = Some(Firewall {
             rules: vec![rule("fwr_bad", "block", "203.0.113.0/24")],
+            ..Default::default()
         });
         let r = route_objects(&s);
         let btp = find(&r, "BackendTrafficPolicy", "shop-web-https-http");
@@ -2673,6 +2835,7 @@ mod tests {
                     "minute",
                 ),
             ],
+            ..Default::default()
         });
         s.waf = Some(Waf {
             settings: WafSettings {
@@ -2715,6 +2878,88 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // Behind Cloudflare: Let's Encrypt's rule and the CDN check on its
+        // routes, and its HTTPS client policy, trusting only narrow ranges.
+        let mut b = spec(vec![domain(
+            "shop.example.com",
+            "http",
+            "letsencrypt",
+            false,
+        )]);
+        b.firewall = Some(Firewall {
+            behind: Some("cloudflare".into()),
+            presets: [(
+                "cloudflare".to_owned(),
+                vec!["173.245.48.0/20".to_owned(), "2400:cb00::/32".to_owned()],
+            )]
+            .into(),
+            ..Default::default()
+        });
+        let br = route_objects(&b);
+        for name in ["shop-web-https-http", "shop-web-http-http"] {
+            apply(find(&br, "SecurityPolicy", name).clone())
+                .await
+                .unwrap_or_else(|e| panic!("behind Cloudflare, {name}: {e}"));
+            api_of(&sa, "SecurityPolicy")
+                .delete(name, &Default::default())
+                .await
+                .unwrap();
+        }
+        let mut cel = find(&br, "SecurityPolicy", "shop-web-https-http").clone();
+        cel["spec"]["authorization"]["rules"][1]["cel"] = json!("true");
+        assert!(apply(cel).await.is_err(), "another CEL rule");
+        let ctp = find(&br, "ClientTrafficPolicy", "shop-web-cdn").clone();
+        apply(ctp.clone())
+            .await
+            .unwrap_or_else(|e| panic!("the CDN's client policy: {e}"));
+        let tampered: [(&str, Value); 6] = [
+            (
+                "trust everyone",
+                json!({ "xForwardedFor": { "trustedCIDRs": ["0.0.0.0/0"] } }),
+            ),
+            (
+                "too wide",
+                json!({ "xForwardedFor": { "trustedCIDRs": ["100.0.0.0/7"] } }),
+            ),
+            (
+                "too wide (IPv6)",
+                json!({ "xForwardedFor": { "trustedCIDRs": ["2000::/3"] } }),
+            ),
+            (
+                "a hop count",
+                json!({ "xForwardedFor": { "numTrustedHops": 1 } }),
+            ),
+            (
+                "a custom header",
+                json!({ "customHeader": { "name": "CF-Connecting-IP" } }),
+            ),
+            (
+                "no ranges",
+                json!({ "xForwardedFor": { "trustedCIDRs": [] } }),
+            ),
+        ];
+        for (what, detection) in tampered {
+            let mut t = ctp.clone();
+            t["spec"]["clientIPDetection"] = detection;
+            assert!(apply(t).await.is_err(), "{what}");
+        }
+        let mut other = ctp.clone();
+        other["spec"]["targetRefs"][0]["name"] = json!("other-web");
+        assert!(apply(other).await.is_err(), "another service's Gateway");
+        let mut everywhere = ctp.clone();
+        everywhere["spec"]["targetRefs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("sectionName");
+        assert!(apply(everywhere).await.is_err(), "the whole Gateway");
+        let mut no_pull = ctp.clone();
+        no_pull["spec"]["connection"]["bufferLimit"] = json!("1Gi");
+        assert!(apply(no_pull).await.is_err(), "other settings");
+        api_of(&sa, "ClientTrafficPolicy")
+            .delete("shop-web-cdn", &Default::default())
+            .await
+            .unwrap();
+
         // Rate limits: the service's, but nothing else in them.
         let btp = find(&r, "BackendTrafficPolicy", "shop-web-http-http").clone();
         apply(btp.clone())

@@ -7,8 +7,8 @@
 use pyo_proto::{
     Command, DeploySpec, FirewallSync, FirewallTarget,
     firewall::{
-        Firewall, FirewallRule, MAX_RATE_LIMITS, MAX_RULES, MAX_SOURCES, RateLimit, is_country,
-        rate_limit_cost,
+        BEHIND, Firewall, FirewallRule, MAX_POLICY_CIDRS, MAX_RATE_LIMITS, MAX_RULES, MAX_SOURCES,
+        RateLimit, is_country, policy_size, preset, rate_limit_cost,
     },
 };
 use serde_json::Value;
@@ -17,9 +17,14 @@ use sqlx::{Postgres, Transaction};
 use crate::error::{ApiError, ApiResult};
 
 /// A source as stored: an address range ("203.0.113.7" becomes
-/// "203.0.113.7/32") or an upper-case country code.
+/// "203.0.113.7/32"), an upper-case country code, or a preset's name
+/// ("cloudflare", any case).
 pub fn normalize_source(s: &str) -> ApiResult<String> {
     let s = s.trim();
+    let lower = s.to_ascii_lowercase();
+    if let Some(p) = preset(&lower) {
+        return Ok(p.name.to_owned());
+    }
     if s.len() == 2 && s.bytes().all(|b| b.is_ascii_alphabetic()) {
         let cc = s.to_ascii_uppercase();
         if cc == "EU" || cc == "XX" || cc == "ZZ" {
@@ -29,7 +34,12 @@ pub fn normalize_source(s: &str) -> ApiResult<String> {
     }
     crate::deploy::normalize_cidr(s).ok_or_else(|| {
         ApiError::bad_request(format!(
-            "{s:?} isn't an IP address, a range (203.0.113.0/24) or a two-letter country code."
+            "{s:?} isn't an IP address, a range (203.0.113.0/24), a two-letter country code or a preset ({}).",
+            pyo_proto::firewall::PRESETS
+                .iter()
+                .map(|p| p.name)
+                .collect::<Vec<_>>()
+                .join(", ")
         ))
     })
 }
@@ -79,7 +89,16 @@ pub fn check_rule(
         if countries > 0 {
             return Err(ApiError::bad_request("Rate limits can't match countries."));
         }
-        if operator == "notIn" && out.len() > 1 {
+        if out.iter().any(|s| preset(s).is_some_and(|p| p.cdn)) {
+            return Err(ApiError::bad_request(
+                "Rate limits can't use a CDN's list: it holds more ranges than a rate limit takes.",
+            ));
+        }
+        let ranges: usize = out
+            .iter()
+            .map(|s| preset(s).map_or(1, |p| p.fixed.len()))
+            .sum();
+        if operator == "notIn" && ranges > 1 {
             return Err(ApiError::bad_request(
                 "A rate limit with \"notIn\" takes one address or range.",
             ));
@@ -148,9 +167,56 @@ pub async fn for_service(
         .bind(service_id)
         .fetch_all(&mut **tx)
         .await?;
-    Ok(Firewall {
+    let behind: Option<String> =
+        sqlx::query_scalar("SELECT behind_cdn FROM pyo.services WHERE id = $1")
+            .bind(service_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .flatten();
+    let mut fw = Firewall {
         rules: rules.into_iter().map(rule_of).collect(),
-    })
+        behind,
+        ..Default::default()
+    };
+    with_presets(tx, &mut fw).await;
+    Ok(fw)
+}
+
+/// The current ranges of the CDNs a firewall names, with it.
+pub async fn with_presets(tx: &mut Transaction<'_, Postgres>, fw: &mut Firewall) {
+    let named = fw.named_presets();
+    if named.iter().any(|n| preset(n).is_some_and(|p| p.cdn)) {
+        let all = crate::cdn::current(&mut **tx).await;
+        fw.presets = crate::cdn::only(&all, &named);
+    }
+}
+
+/// A CDN a service can be behind: one of [`BEHIND`].
+pub fn check_behind(cdn: Option<&str>) -> ApiResult<Option<String>> {
+    match cdn {
+        None | Some("") => Ok(None),
+        Some(c) if BEHIND.contains(&c) => Ok(Some(c.to_owned())),
+        Some(_) => Err(ApiError::bad_request(format!(
+            "A service can be behind {}.",
+            BEHIND
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+/// A firewall's policies fit: at most [`MAX_POLICY_CIDRS`] ranges in all,
+/// its presets expanded.
+pub fn check_size(fw: &Firewall) -> ApiResult<()> {
+    let n = policy_size(fw);
+    if n > MAX_POLICY_CIDRS {
+        return Err(ApiError::conflict(format!(
+            "These rules would list {n} address ranges in all (CDN lists counted by their ranges), more than the {MAX_POLICY_CIDRS} a service's firewall takes. Use fewer CDN lists, or combine rules."
+        )));
+    }
+    Ok(())
 }
 
 /// A service can take one more rule (`adding`), or this one changed
@@ -185,7 +251,20 @@ pub async fn check_count(
             "A service's rate limits take at most {MAX_RATE_LIMITS} addresses or ranges in all (\"any client\" takes 2). Combine some first."
         )));
     }
-    Ok(())
+    // With it, as it would be.
+    let mut next = Firewall {
+        rules: fw
+            .rules
+            .iter()
+            .filter(|r| Some(r.id.as_str()) != changing)
+            .cloned()
+            .chain([rule.clone()])
+            .collect(),
+        behind: fw.behind.clone(),
+        ..Default::default()
+    };
+    with_presets(tx, &mut next).await;
+    check_size(&next)
 }
 
 /// A rule in words, for the activity log: "Block if client IP is in
@@ -210,16 +289,20 @@ pub fn describe(r: &FirewallRule) -> String {
     } else {
         "client IP"
     };
+    let shown = |s: &String| match preset(s) {
+        Some(p) => p.label.to_owned(),
+        None => match s.split_once('/') {
+            Some((a, "32")) if !a.contains(':') => a.to_owned(),
+            Some((a, "128")) => a.to_owned(),
+            _ => s.clone(),
+        },
+    };
     let op = if r.negated() { "is not in" } else { "is in" };
     let mut list = r
         .sources
         .iter()
         .take(3)
-        .map(|s| match s.split_once('/') {
-            Some((a, "32")) if !a.contains(':') => a.to_owned(),
-            Some((a, "128")) => a.to_owned(),
-            _ => s.clone(),
-        })
+        .map(shown)
         .collect::<Vec<_>>()
         .join(", ");
     if r.sources.len() > 3 {
@@ -370,6 +453,8 @@ mod tests {
             "203.0.113.0/24"
         );
         assert_eq!(normalize_source("2001:db8::1/32").unwrap(), "2001:db8::/32");
+        assert_eq!(normalize_source(" Cloudflare ").unwrap(), "cloudflare");
+        assert_eq!(normalize_source("tailnet").unwrap(), "tailnet");
         assert!(
             normalize_source("Germany").is_err()
                 && normalize_source("10.0.0.0/33").is_err()
@@ -426,6 +511,31 @@ mod tests {
         );
         assert_eq!(describe(&r), "Rate limit any client to 10 a second");
         assert!(check_rule("skip", "in", &[], None, None).is_err());
+        // Presets: next to addresses, never next to countries.
+        let r = check_rule(
+            "block",
+            "notIn",
+            &v(&["Cloudflare", "203.0.113.7"]),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.sources, v(&["cloudflare", "203.0.113.7/32"]));
+        assert_eq!(
+            describe(&r),
+            "Block if client IP is not in Cloudflare, 203.0.113.7"
+        );
+        assert!(check_rule("block", "in", &v(&["cloudflare", "DE"]), None, None).is_err());
+        // Rate limits: your networks, not a CDN's list.
+        assert!(check_rule("rateLimit", "in", &v(&["bunny"]), Some(10), None).is_err());
+        assert!(check_rule("rateLimit", "in", &v(&["private"]), Some(10), None).is_ok());
+        assert!(check_rule("rateLimit", "notIn", &v(&["tailnet"]), Some(10), None).is_err());
+        assert_eq!(
+            check_behind(Some("cloudflare")).unwrap().as_deref(),
+            Some("cloudflare")
+        );
+        assert_eq!(check_behind(None).unwrap(), None);
+        assert!(check_behind(Some("fastly")).is_err());
         assert_eq!(
             describe(&check_rule("block", "notIn", &v(&["DE", "FR"]), None, None).unwrap()),
             "Block if country is not in DE, FR"

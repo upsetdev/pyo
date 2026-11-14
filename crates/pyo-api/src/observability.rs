@@ -984,7 +984,9 @@ impl Observability {
         Ok(map)
     }
 
-    /// The rule behind a refusal: the rule that matches the address (or its
+    /// The rule behind a refusal: behind a CDN, a connection that didn't
+    /// come from it (`peer`, the connection's own address) is the CDN
+    /// check's ("cdn"); else the rule that matches the address (or its
     /// country), else what the proxy said.
     async fn refusal_rule(
         &self,
@@ -992,6 +994,7 @@ impl Observability {
         service_id: &str,
         why: String,
         ip: &str,
+        peer: &str,
         country: &str,
     ) -> String {
         if why != "blocked" && why != "rate-limit" {
@@ -1008,6 +1011,12 @@ impl Observability {
         ) else {
             return why;
         };
+        if why == "blocked"
+            && let Ok(peer) = peer.parse::<IpAddr>()
+            && !pyo_proto::firewall::via_cdn(f, peer)
+        {
+            return pyo_proto::firewall::BEHIND_RULE.to_owned();
+        }
         let rule = if why == "blocked" {
             pyo_proto::firewall::blocking_rule(&[f], addr, Some(country).filter(|c| !c.is_empty()))
         } else {
@@ -1141,7 +1150,7 @@ impl Observability {
                     "duration_ms": l.duration_ms, "bytes_in": l.bytes_in, "bytes_out": l.bytes,
                     "outcome": l.outcome(),
                     "node": l.node.chars().take(253).collect::<String>(),
-                    "rule": self.refusal_rule(cluster_id, &owner.service_id, crate::firewall::refusal("", &l.termination, 0), &ip, &country).await,
+                    "rule": self.refusal_rule(cluster_id, &owner.service_id, crate::firewall::refusal("", &l.termination, 0), &ip, "", &country).await,
                 });
                 conns.push_str(&row.to_string());
                 conns.push('\n');
@@ -1232,7 +1241,7 @@ impl Observability {
                 // As sent, for the request log; capped like a header line.
                 "user_agent": ua.chars().take(512).collect::<String>(),
                 "node": l.node.chars().take(253).collect::<String>(),
-                "blocked_by": self.refusal_rule(cluster_id, &owner.service_id, crate::firewall::refusal(&l.details, "", status), ip, &country).await,
+                "blocked_by": self.refusal_rule(cluster_id, &owner.service_id, crate::firewall::refusal(&l.details, "", status), ip, &l.peer, &country).await,
             });
             out.push_str(&row.to_string());
             out.push('\n');

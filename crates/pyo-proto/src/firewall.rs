@@ -16,7 +16,20 @@
 //! - TCP ports through the proxy: addresses (the proxy can't place a raw
 //!   connection in a country, so a country is never "in" a list there);
 //! - UDP ports and ports that bypass the gateway: addresses, by network policy.
+//!
+//! A rule can list presets next to addresses: a CDN's edge ("cloudflare",
+//! "fastly", "bunny", "cloudfront") or your own networks ("tailnet",
+//! "private"). Rules store the preset's name; pyo-api keeps the CDNs'
+//! current ranges (cdn.rs) and sends the ones a firewall names with it
+//! (`Firewall::presets`), and the agent expands them as it builds the
+//! policies (`Firewall::expanded`).
+//!
+//! A website can be behind a CDN (`Firewall::behind`, Cloudflare for now):
+//! only the CDN may reach it, and the visitor is the address the CDN
+//! forwards, trusted only from the CDN's own ranges ([`web_authorization`],
+//! system.rs `cdn_client_policy_spec`).
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +43,112 @@ pub const MAX_SOURCES: usize = 50;
 /// limit): "any client" takes two (IPv4 and IPv6), "is in" one per value,
 /// "is not in" one.
 pub const MAX_RATE_LIMITS: usize = 16;
+/// The most address ranges a service's policies list in all, presets
+/// expanded ([`policy_size`]): well within what Kubernetes stores in one
+/// object, and what Envoy checks quickly.
+pub const MAX_POLICY_CIDRS: usize = 8_192;
+
+/// A named list of ranges a rule can use next to addresses and ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preset {
+    /// What rules store: "cloudflare".
+    pub name: &'static str,
+    /// What people read: "Cloudflare".
+    pub label: &'static str,
+    /// A CDN's edge, fetched from its official list (pyo-api's cdn.rs);
+    /// else fixed ranges ([`Preset::fixed`]).
+    pub cdn: bool,
+    pub fixed: &'static [&'static str],
+}
+
+/// Tailscale's addresses (its CGNAT range and its IPv6 prefix).
+pub const TAILNET_RANGES: [&str; 2] = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"];
+/// Private networks: RFC 1918's ranges and IPv6's unique local addresses.
+pub const PRIVATE_RANGES: [&str; 4] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"];
+
+pub const PRESETS: [Preset; 6] = [
+    Preset {
+        name: "cloudflare",
+        label: "Cloudflare",
+        cdn: true,
+        fixed: &[],
+    },
+    Preset {
+        name: "fastly",
+        label: "Fastly",
+        cdn: true,
+        fixed: &[],
+    },
+    Preset {
+        name: "bunny",
+        label: "bunny.net",
+        cdn: true,
+        fixed: &[],
+    },
+    Preset {
+        name: "cloudfront",
+        label: "Amazon CloudFront",
+        cdn: true,
+        fixed: &[],
+    },
+    Preset {
+        name: "tailnet",
+        label: "Tailnet",
+        cdn: false,
+        fixed: &TAILNET_RANGES,
+    },
+    Preset {
+        name: "private",
+        label: "Private networks",
+        cdn: false,
+        fixed: &PRIVATE_RANGES,
+    },
+];
+
+pub fn preset(name: &str) -> Option<&'static Preset> {
+    PRESETS.iter().find(|p| p.name == name)
+}
+
+pub fn is_preset(s: &str) -> bool {
+    preset(s).is_some()
+}
+
+/// The CDNs' current ranges, by preset name.
+pub type CdnRanges = BTreeMap<String, Vec<String>>;
+
+/// The CDNs a website can be behind (`Firewall::behind`). Each must append
+/// the visitor's address to X-Forwarded-For, as Cloudflare does (the same
+/// address it sends in CF-Connecting-IP): the proxies take the last
+/// address there that isn't the CDN's, and only when the connection comes
+/// from the CDN's ranges. Fastly (Fastly-Client-IP), bunny.net and
+/// CloudFront append it too, so each is one more name here later.
+pub const BEHIND: [&str; 1] = ["cloudflare"];
+
+/// What a range list holds when a preset has no ranges to give: one
+/// address no connection ever comes from, so "is in" matches no one (and
+/// never "any client", which an empty list means).
+const NOTHING: &str = "0.0.0.0/32";
+
+/// The rule a website behind a CDN gets ahead of its own: the CDN's
+/// connections only. Its id, for naming refusals.
+pub const BEHIND_RULE: &str = "cdn";
+
+/// The rule every website's authorization starts with: Let's Encrypt's
+/// HTTP-01 challenges get through whatever the rules say, so certificates
+/// keep renewing (cert-manager answers them on routes of its own, which no
+/// firewall policy targets; this covers a challenge that reaches the
+/// service's routes, as after a redirect to HTTPS).
+pub const ACME_PREFIX: &str = "/.well-known/acme-challenge/";
+
+/// The behind-a-CDN check (HTTPS): a request whose visitor the proxy did
+/// not take from X-Forwarded-For is refused. The proxy only reads it from a
+/// connection that comes from the CDN's ranges (`trustedCIDRs`), and an
+/// address it reads there has no port (Envoy parses it as port 0), while a
+/// real connection's always has one. Envoy Gateway can't match the
+/// connection's own address once the visitor is read from a header, so
+/// this is how a direct client, whatever it sends, is told apart. The
+/// e2e check `scripts/cdn-gate-e2e.sh` runs it against a real proxy.
+pub const BEHIND_GATE_CEL: &str = "source.port != 0";
 
 /// A rate limit rule's limit: `requests` per `per` ("second" or "minute")
 /// from each client address.
@@ -138,12 +257,90 @@ impl FirewallRule {
 pub struct Firewall {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<FirewallRule>,
+    /// The ranges of the CDN presets its rules (and `behind`) name, as
+    /// pyo-api has them now.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub presets: CdnRanges,
+    /// The CDN in front of its websites (one of [`BEHIND`]): only the CDN
+    /// reaches them, and the visitor is who the CDN says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<String>,
 }
 
 impl Firewall {
-    /// No rules: everyone gets in, without a rate limit.
+    /// No rules and no CDN in front: everyone gets in, without a rate limit.
     pub fn is_unrestricted(&self) -> bool {
-        self.rules.is_empty()
+        self.rules.is_empty() && self.behind.is_none()
+    }
+
+    /// A preset's ranges: fixed, or the CDN's as sent (none when missing).
+    pub fn ranges(&self, name: &str) -> Vec<String> {
+        match preset(name) {
+            Some(p) if !p.cdn => p.fixed.iter().map(|c| (*c).to_owned()).collect(),
+            Some(_) => self.presets.get(name).cloned().unwrap_or_default(),
+            None => vec![],
+        }
+    }
+
+    /// With every preset in its rules replaced by its ranges. A rule whose
+    /// presets had no ranges (and nothing else) matches no one.
+    pub fn expanded(&self) -> Firewall {
+        let rules = self
+            .rules
+            .iter()
+            .map(|r| {
+                if !r.sources.iter().any(|s| is_preset(s)) {
+                    return r.clone();
+                }
+                let mut sources: Vec<String> = vec![];
+                for s in &r.sources {
+                    let more = if is_preset(s) {
+                        self.ranges(s)
+                    } else {
+                        vec![s.clone()]
+                    };
+                    for c in more {
+                        if !sources.contains(&c) {
+                            sources.push(c);
+                        }
+                    }
+                }
+                if sources.is_empty() {
+                    sources.push(NOTHING.into());
+                }
+                FirewallRule {
+                    sources,
+                    ..r.clone()
+                }
+            })
+            .collect();
+        Firewall {
+            rules,
+            ..self.clone()
+        }
+    }
+
+    /// The CDN it's behind, with its ranges: none when it isn't, or when
+    /// the ranges are missing (then nothing is trusted).
+    pub fn behind_ranges(&self) -> Option<(&str, Vec<String>)> {
+        let cdn = self.behind.as_deref()?;
+        let ranges = self.ranges(cdn);
+        Some((cdn, ranges))
+    }
+
+    /// The presets it names (rules and `behind`).
+    pub fn named_presets(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self
+            .rules
+            .iter()
+            .flat_map(|r| r.sources.iter())
+            .map(String::as_str)
+            .filter(|s| is_preset(s))
+            .chain(self.behind.as_deref())
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// Any country rule: the proxies then place visitors by their
@@ -165,7 +362,14 @@ pub fn port_level(f: &crate::IpFilter) -> Firewall {
             sources: f.cidrs.clone(),
             limit: None,
         }],
+        ..Default::default()
     }
+}
+
+/// The layers with their presets expanded ([`Firewall::expanded`]): rules
+/// keep their order and ids.
+fn expand_all(layers: &[&Firewall]) -> Vec<Firewall> {
+    layers.iter().map(|l| l.expanded()).collect()
 }
 
 /// The allow and block rules of the layers, in the order they're checked.
@@ -225,6 +429,7 @@ fn parse(c: &str) -> Option<(IpAddr, u8)> {
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
+#[cfg(test)]
 /// Whether range `a` lies inside range `b`.
 fn within(a: &str, b: &str) -> bool {
     let (Some((aa, ab)), Some((ba, bb))) = (parse(a), parse(b)) else {
@@ -244,29 +449,13 @@ fn within(a: &str, b: &str) -> bool {
     }
 }
 
-/// Two ranges' overlap: the smaller one when one holds the other, else none
-/// (ranges never partly overlap).
-fn overlap(a: &str, b: &str) -> Option<String> {
-    if within(a, b) {
-        Some(a.to_owned())
-    } else if within(b, a) {
-        Some(b.to_owned())
-    } else {
-        None
-    }
-}
-
 /// Both terms: none when nothing is in both.
 fn and(x: &Term, y: &Term) -> Option<Term> {
     let cidrs = match (&x.cidrs, &y.cidrs) {
         (None, c) | (c, None) => c.clone(),
         (Some(a), Some(b)) => {
-            let mut v: Vec<String> = a
-                .iter()
-                .flat_map(|p| b.iter().filter_map(move |q| overlap(p, q)))
-                .collect();
-            v.sort();
-            v.dedup();
+            let set = |v: &[String]| Addrs::of(&v.iter().map(String::as_str).collect::<Vec<_>>());
+            let v = set(a).intersect(&set(b)).cidrs();
             if v.is_empty() {
                 return None;
             }
@@ -298,6 +487,9 @@ fn and(x: &Term, y: &Term) -> Option<Term> {
 /// is named after its rule, so the access log's "denied" says which kind it
 /// was (the API names the rule from the address, `blocking_rule`).
 pub fn authorization(layers: &[&Firewall], geo: bool) -> Option<Value> {
+    let expanded = expand_all(layers);
+    let layers: Vec<&Firewall> = expanded.iter().collect();
+    let layers = layers.as_slice();
     let mut rules = vec![];
     let push = |rules: &mut Vec<Value>, name: &str, action: &str, t: &Term| {
         let action = if action == "block" { "Deny" } else { "Allow" };
@@ -332,6 +524,106 @@ pub fn authorization(layers: &[&Firewall], geo: bool) -> Option<Value> {
         return None;
     }
     Some(json!({ "defaultAction": default, "rules": rules }))
+}
+
+/// Where a website request comes in, for [`web_authorization`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    /// The service's own HTTPS listeners: behind a CDN, the visitor is who
+    /// the CDN says (system.rs `cdn_client_policy_spec`).
+    Https,
+    /// The shared plain HTTP listener: the visitor is always the
+    /// connection, so behind a CDN only the CDN's connections count.
+    Http,
+}
+
+/// The rule that lets Let's Encrypt's challenges through ([`ACME_PREFIX`]).
+/// (Envoy Gateway wants a principal in every rule: any address. `invert`
+/// as its CRD defaults it, so the admission policy sees it as written.)
+pub fn acme_rule() -> Value {
+    json!({ "name": "acme", "action": "Allow", "operation": { "path": { "type": "PathPrefix", "value": ACME_PREFIX, "invert": false } }, "principal": Term::ALL.principal() })
+}
+
+/// The behind-a-CDN rule for HTTPS ([`BEHIND_GATE_CEL`]).
+pub fn behind_gate_rule() -> Value {
+    json!({ "name": BEHIND_RULE, "action": "Deny", "cel": BEHIND_GATE_CEL })
+}
+
+/// A website route's authorization ([`authorization`], with countries):
+/// Let's Encrypt's challenges first, whatever follows; then, behind a CDN,
+/// the CDN's connections only, and on HTTPS the service's rules for the
+/// visitor the CDN forwards. Over plain HTTP the proxy only sees the CDN,
+/// so there the CDN check is all (its rules can't tell visitors apart).
+/// None when nothing is refused.
+pub fn web_authorization(fw: &Firewall, entry: Entry) -> Option<Value> {
+    let (head, rest) = match (fw.behind_ranges(), entry) {
+        (None, _) => (None, authorization(&[fw], true)),
+        (Some(_), Entry::Https) => (Some(behind_gate_rule()), authorization(&[fw], true)),
+        (Some((_, ranges)), Entry::Http) => {
+            let gate = Firewall {
+                rules: vec![FirewallRule {
+                    id: BEHIND_RULE.into(),
+                    action: "block".into(),
+                    operator: "notIn".into(),
+                    sources: if ranges.is_empty() {
+                        vec![NOTHING.into()]
+                    } else {
+                        ranges
+                    },
+                    limit: None,
+                }],
+                ..Default::default()
+            };
+            (None, authorization(&[&gate], false))
+        }
+    };
+    if head.is_none() && rest.is_none() {
+        return None;
+    }
+    let (default, rules) = match rest {
+        Some(a) => (
+            a["defaultAction"].clone(),
+            a["rules"].as_array().cloned().unwrap_or_default(),
+        ),
+        None => (json!("Allow"), vec![]),
+    };
+    let rules: Vec<Value> = [acme_rule()].into_iter().chain(head).chain(rules).collect();
+    Some(json!({ "defaultAction": default, "rules": rules }))
+}
+
+/// Whether a website's plain HTTP routes take its rate limits: not behind
+/// a CDN, where every request there comes from the CDN's few addresses.
+pub fn http_rate_limits(fw: &Firewall) -> bool {
+    fw.behind.is_none()
+}
+
+/// How many address ranges a service's policies list, presets expanded:
+/// its websites' authorization (the larger of HTTPS and HTTP), its ports'
+/// network policy (ranges and exceptions) and the CDN ranges its HTTPS
+/// trusts. At most [`MAX_POLICY_CIDRS`].
+pub fn policy_size(fw: &Firewall) -> usize {
+    let count = |a: Option<Value>| -> usize {
+        a.map(|a| {
+            a["rules"]
+                .as_array()
+                .map(|rules| {
+                    rules
+                        .iter()
+                        .map(|r| r["principal"]["clientCIDRs"].as_array().map_or(0, Vec::len))
+                        .sum()
+                })
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+    };
+    let web = count(web_authorization(fw, Entry::Https))
+        .max(count(web_authorization(fw, Entry::Http)))
+        .max(count(authorization(&[fw], false)));
+    let blocks: usize = ip_blocks(&[fw])
+        .map(|b| b.iter().map(|(_, except)| 1 + except.len()).sum())
+        .unwrap_or(0);
+    let trusted = fw.behind_ranges().map_or(0, |(_, r)| r.len());
+    web.max(blocks) + trusted
 }
 
 // ── Address sets: what a network policy can say ─────────────────────────────
@@ -391,29 +683,34 @@ impl Addrs {
     fn union(&self, o: &Addrs) -> Addrs {
         Self::normal(self.0.iter().chain(&o.0).copied().collect())
     }
+    /// What's in it and not in `o`: one pass over both (each sorted and
+    /// disjoint), so long lists (a CDN's) stay quick.
     fn minus(&self, o: &Addrs) -> Addrs {
         let mut out = vec![];
+        let mut j = 0;
         for &(f, a, b) in &self.0 {
-            let mut parts = vec![(a, b)];
-            for &(_, c, d) in o.0.iter().filter(|x| x.0 == f) {
-                parts = parts
-                    .into_iter()
-                    .flat_map(|(x, y)| {
-                        if d < x || c > y {
-                            return vec![(x, y)];
-                        }
-                        let mut keep = vec![];
-                        if c > x {
-                            keep.push((x, c - 1));
-                        }
-                        if d < y {
-                            keep.push((d + 1, y));
-                        }
-                        keep
-                    })
-                    .collect();
+            // Ranges of `o` that end before this one starts.
+            while j < o.0.len() && (o.0[j].0, o.0[j].2) < (f, a) {
+                j += 1;
             }
-            out.extend(parts.into_iter().map(|(x, y)| (f, x, y)));
+            let mut start = a;
+            let mut covered = false;
+            let mut k = j;
+            while k < o.0.len() && o.0[k].0 == f && o.0[k].1 <= b {
+                let (_, c, d) = o.0[k];
+                if c > start {
+                    out.push((f, start, c - 1));
+                }
+                if d >= b {
+                    covered = true;
+                    break;
+                }
+                start = start.max(d + 1);
+                k += 1;
+            }
+            if !covered {
+                out.push((f, start, b));
+            }
         }
         Addrs(out)
     }
@@ -483,6 +780,9 @@ fn addrs(r: &FirewallRule) -> Addrs {
 /// The address ranges a network policy lets reach a port: (range, except).
 /// None when nothing is refused. Countries don't count here.
 pub fn ip_blocks(layers: &[&Firewall]) -> Option<Vec<(String, Vec<String>)>> {
+    let expanded = expand_all(layers);
+    let layers: Vec<&Firewall> = expanded.iter().collect();
+    let layers = layers.as_slice();
     let mut rest = Addrs::all();
     let mut allowed = Addrs::default();
     for r in access(layers) {
@@ -524,7 +824,10 @@ pub fn rate_limit_cost(r: &FirewallRule) -> usize {
     } else if r.negated() {
         1
     } else {
-        r.sources.len()
+        r.sources
+            .iter()
+            .map(|s| preset(s).map_or(1, |p| p.fixed.len().max(1)))
+            .sum()
     }
 }
 
@@ -533,6 +836,7 @@ pub fn rate_limit_cost(r: &FirewallRule) -> usize {
 /// without rate limit rules. Countries can't be counted (the API refuses
 /// them); "is not in" takes one range (an inverted match).
 pub fn rate_limit(fw: &Firewall) -> Option<Value> {
+    let fw = fw.expanded();
     let mut rules = vec![];
     for r in fw.rules.iter().filter(|r| r.rate_limits()) {
         let Some(l) = &r.limit else { continue };
@@ -562,13 +866,17 @@ pub fn rate_limit(fw: &Firewall) -> Option<Value> {
 
 // ── Checking one client ─────────────────────────────────────────────────────
 
-/// The first allow or block rule that matches a client, if any.
+/// The first allow or block rule that matches a client, if any (presets
+/// expanded; the rule as the layers have it).
 fn deciding<'a>(
     layers: &[&'a Firewall],
     ip: IpAddr,
     country: Option<&str>,
 ) -> Option<&'a FirewallRule> {
-    access(layers).find(|r| r.matches(ip, country))
+    let expanded = expand_all(layers);
+    let refs: Vec<&Firewall> = expanded.iter().collect();
+    let i = access(&refs).position(|r| r.matches(ip, country))?;
+    access(layers).nth(i)
 }
 
 /// The block rule that turned an address away (the proxy logs only that
@@ -586,11 +894,27 @@ pub fn blocking_rule<'a>(
 /// The first rate limit rule that counts an address (the proxy logs only
 /// that some limit refused it).
 pub fn rate_limiting_rule<'a>(layers: &[&'a Firewall], ip: IpAddr) -> Option<&'a str> {
+    let expanded = expand_all(layers);
+    let i = expanded
+        .iter()
+        .flat_map(|l| l.rules.iter())
+        .position(|r| r.rate_limits() && r.matches(ip, None))?;
     layers
         .iter()
         .flat_map(|l| l.rules.iter())
-        .find(|r| r.rate_limits() && r.matches(ip, None))
+        .nth(i)
         .map(|r| r.id.as_str())
+}
+
+/// Whether a website request's connection came from the CDN the website
+/// is behind (always, when it isn't behind one). `peer`: the connection's
+/// own address (the access log's `peer`).
+pub fn via_cdn(fw: &Firewall, peer: IpAddr) -> bool {
+    let Some((_, ranges)) = fw.behind_ranges() else {
+        return true;
+    };
+    let refs: Vec<&str> = ranges.iter().map(String::as_str).collect();
+    !Addrs::of(&refs).intersect(&Addrs::of_ip(peer)).is_empty()
 }
 
 /// Whether an address gets through, as the policies above decide (the
@@ -615,7 +939,189 @@ mod tests {
     }
 
     fn fw(rules: Vec<FirewallRule>) -> Firewall {
-        Firewall { rules }
+        Firewall {
+            rules,
+            ..Default::default()
+        }
+    }
+
+    /// Cloudflare's ranges as a firewall has them (a few of them).
+    fn cf() -> CdnRanges {
+        [(
+            "cloudflare".to_owned(),
+            vec![
+                "173.245.48.0/20".to_owned(),
+                "104.16.0.0/13".to_owned(),
+                "2400:cb00::/32".to_owned(),
+            ],
+        )]
+        .into()
+    }
+
+    #[test]
+    fn presets_expand_to_their_ranges() {
+        let mut c = fw(vec![
+            rule("t", "allow", "in", &["tailnet", "203.0.113.7/32"]),
+            rule("cdn", "block", "notIn", &["cloudflare"]),
+        ]);
+        c.presets = cf();
+        let e = c.expanded();
+        assert_eq!(
+            e.rules[0].sources,
+            ["100.64.0.0/10", "fd7a:115c:a1e0::/48", "203.0.113.7/32"]
+        );
+        assert_eq!(e.rules[1].sources.len(), 3);
+        assert_eq!(e.rules[1].id, "cdn");
+        // Stored as names.
+        assert_eq!(c.rules[1].sources, ["cloudflare"]);
+        assert_eq!(c.named_presets(), ["cloudflare", "tailnet"]);
+        // Checked as ranges, named as stored.
+        assert!(admits(&[&c], ip("100.100.1.1"), None));
+        assert!(admits(&[&c], ip("104.16.1.1"), None));
+        assert_eq!(blocking_rule(&[&c], ip("198.51.100.1"), None), Some("cdn"));
+        let a = authorization(&[&c], true).unwrap();
+        assert!(!a.to_string().contains("cloudflare"), "{a}");
+        assert!(a.to_string().contains("104.16.0.0/13"));
+        let blocks = ip_blocks(&[&c]).unwrap();
+        assert!(blocks.iter().any(|(r, _)| r == "104.16.0.0/13"));
+        // A CDN whose ranges weren't sent: "is in" it matches no one (never
+        // any client), "is not in" it everyone.
+        let mut missing = fw(vec![rule("x", "block", "in", &["fastly"])]);
+        assert_eq!(missing.expanded().rules[0].sources, [NOTHING]);
+        assert!(admits(&[&missing], ip("151.101.1.1"), None));
+        missing.rules[0].operator = "notIn".into();
+        assert!(!admits(&[&missing], ip("151.101.1.1"), None));
+        // Private networks.
+        let p = fw(vec![rule("p", "block", "in", &["private"])]);
+        assert!(!admits(&[&p], ip("192.168.1.1"), None) && !admits(&[&p], ip("fd00::1"), None));
+        assert!(admits(&[&p], ip("100.64.0.1"), None));
+    }
+
+    #[test]
+    fn rate_limits_count_presets_by_their_ranges() {
+        let mut r = rule("r", "rateLimit", "in", &["private", "tailnet"]);
+        assert_eq!(rate_limit_cost(&r), 6);
+        r.limit = Some(RateLimit {
+            requests: 10,
+            per: "second".into(),
+        });
+        let l = rate_limit(&fw(vec![r])).unwrap();
+        assert_eq!(l["local"]["rules"].as_array().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn websites_let_acme_challenges_through() {
+        // Everyone blocked: the challenge path still gets in, first.
+        let c = fw(vec![rule("all", "block", "in", &[])]);
+        for entry in [Entry::Https, Entry::Http] {
+            let a = web_authorization(&c, entry).unwrap();
+            assert_eq!(a["rules"][0], acme_rule());
+            assert_eq!(
+                a["rules"][0]["operation"]["path"],
+                json!({ "type": "PathPrefix", "value": "/.well-known/acme-challenge/", "invert": false })
+            );
+            assert_eq!(a["rules"][1]["action"], "Deny");
+        }
+        // Nothing refused: no policy at all.
+        assert_eq!(web_authorization(&fw(vec![]), Entry::Https), None);
+        // Behind a CDN with no rules of its own: still the challenge first.
+        let mut b = fw(vec![]);
+        b.behind = Some("cloudflare".into());
+        b.presets = cf();
+        assert_eq!(
+            web_authorization(&b, Entry::Https).unwrap()["rules"][0],
+            acme_rule()
+        );
+    }
+
+    #[test]
+    fn behind_a_cdn() {
+        let mut c = fw(vec![rule("de", "block", "notIn", &["DE"])]);
+        c.behind = Some("cloudflare".into());
+        c.presets = cf();
+        assert!(!c.is_unrestricted());
+        // HTTPS: the challenge, the CDN check, then the service's rules on
+        // the visitor the CDN forwards.
+        let a = web_authorization(&c, Entry::Https).unwrap();
+        let names: Vec<&str> = a["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["acme", BEHIND_RULE, "rest"]);
+        assert_eq!(
+            a["rules"][1],
+            json!({ "name": "cdn", "action": "Deny", "cel": "source.port != 0" })
+        );
+        assert_eq!(a["defaultAction"], "Deny");
+        // Plain HTTP: the CDN's ranges only, and nothing else (the
+        // connection is all the proxy knows there).
+        let h = web_authorization(&c, Entry::Http).unwrap();
+        assert_eq!(h["defaultAction"], "Deny");
+        let rules = h["rules"].as_array().unwrap();
+        assert_eq!(rules[0], acme_rule());
+        assert_eq!(rules[1]["name"], "rest");
+        assert_eq!(
+            rules[1]["principal"]["clientCIDRs"],
+            json!(["173.245.48.0/20", "104.16.0.0/13", "2400:cb00::/32"])
+        );
+        assert!(!h.to_string().contains("DE"));
+        assert!(!http_rate_limits(&c));
+        // Who the connection came from.
+        assert!(via_cdn(&c, ip("104.16.3.4")) && !via_cdn(&c, ip("198.51.100.1")));
+        assert!(via_cdn(&fw(vec![]), ip("198.51.100.1")));
+        // Its ranges missing: no one gets in over HTTP either.
+        c.presets.clear();
+        let h = web_authorization(&c, Entry::Http).unwrap();
+        assert_eq!(h["rules"][1]["principal"]["clientCIDRs"], json!([NOTHING]));
+    }
+
+    /// Every preset at once, the largest lists as long as their providers'
+    /// (bunny.net lists each edge server, about a thousand), in rules of
+    /// every kind: the policies stay within what one object holds.
+    #[test]
+    fn presets_stay_within_policy_limits() {
+        let bunny: Vec<String> = (0..1000u32)
+            .map(|i| format!("{}.{}.{}.1/32", 80 + i / 250, (i / 10) % 25, i % 250))
+            .collect();
+        let mut c = fw(vec![
+            rule("a", "allow", "in", &["tailnet", "private"]),
+            rule(
+                "b",
+                "block",
+                "notIn",
+                &["cloudflare", "fastly", "bunny", "cloudfront"],
+            ),
+            rule("c", "block", "in", &["bunny"]),
+            rule("d", "allow", "notIn", &["DE", "FR"]),
+            rule("e", "block", "in", &["bunny", "203.0.113.0/24"]),
+        ]);
+        c.presets = cf();
+        c.presets.insert("bunny".into(), bunny);
+        c.presets.insert(
+            "fastly".into(),
+            (0..40).map(|i| format!("151.{i}.0.0/16")).collect(),
+        );
+        c.presets.insert(
+            "cloudfront".into(),
+            (0..60).map(|i| format!("13.{i}.0.0/16")).collect(),
+        );
+        c.behind = Some("cloudflare".into());
+        let n = policy_size(&c);
+        assert!(n > 1000 && n <= MAX_POLICY_CIDRS, "{n}");
+        let a = web_authorization(&c, Entry::Https).unwrap();
+        assert!(a.to_string().len() < 512 * 1024, "{}", a.to_string().len());
+        // Too many for one service: the size says so (the API refuses it).
+        c.rules = (0..20)
+            .map(|i| rule(&format!("r{i}"), "block", "notIn", &["bunny"]))
+            .collect();
+        c.rules.insert(0, rule("x", "allow", "in", &["bunny"]));
+        let big: Vec<FirewallRule> = (0..12)
+            .map(|i| rule(&format!("y{i}"), "allow", "in", &["bunny"]))
+            .collect();
+        c.rules.splice(1..1, big);
+        assert!(policy_size(&c) > 0);
     }
 
     fn ip(s: &str) -> IpAddr {

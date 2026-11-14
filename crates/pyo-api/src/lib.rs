@@ -15,6 +15,7 @@ mod bg;
 mod builders;
 mod bundles;
 mod capacity;
+mod cdn;
 mod certs;
 mod cli;
 pub mod compose;
@@ -353,6 +354,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tokio::spawn(database_imports::runner(state.clone()));
         tokio::spawn(updates::runner(state.clone()));
         tokio::spawn(tailscale::runner(state.clone()));
+        tokio::spawn(cdn::keeper(state.clone()));
         for task in tasks {
             tokio::spawn(task(state.clone()));
         }

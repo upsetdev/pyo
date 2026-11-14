@@ -1762,7 +1762,7 @@ pub(crate) enum Op {
         /// "in" (the default) or "notIn": whether the client's address or country is in `sources`.
         #[serde(default = "is_in")]
         operator: String,
-        /// Up to 50 IP addresses and ranges ("198.51.100.0/24", "2001:db8::/32") or two-letter country codes ("DE"), but not both. None (with "in") matches any client. Countries apply to websites only, since TCP and UDP ports never see a client's country. Rate limits take no countries, and only one value with "notIn".
+        /// Up to 50 IP addresses and ranges ("198.51.100.0/24", "2001:db8::/32") or two-letter country codes ("DE"), but not both. Presets go with addresses: a CDN's current ranges ("cloudflare", "fastly", "bunny", "cloudfront") or your networks ("tailnet" for Tailscale's addresses, "private" for private networks). None (with "in") matches any client. Countries apply to websites only, since TCP and UDP ports never see a client's country. Rate limits take no countries and no CDN, and only one range with "notIn".
         #[serde(default)]
         sources: Vec<String>,
         /// A rate limit's requests from each client address per `per`: 1 to 1,000,000.
@@ -1786,6 +1786,12 @@ pub(crate) enum Op {
         /// The inbound anomaly score at which a request is blocked: 5 (the default), 10, 20 or 50.
         #[serde(default)]
         threshold: Option<u32>,
+    },
+    /// Put a service's websites behind a CDN, or take them out of it. Behind Cloudflare, only Cloudflare's address ranges reach its websites, and the visitor is the address Cloudflare forwards (taken only from connections that come from those ranges): firewall rules, rate limits and analytics see that visitor. Over plain HTTP only Cloudflare's connections are checked, so set Cloudflare's SSL mode to Full (strict). Let's Encrypt's challenges always get through.
+    SetServiceBehindCdn {
+        service_id: String,
+        /// "cloudflare", or null for none.
+        cdn: Option<String>,
     },
     /// Add a custom web application firewall rule to a service. Custom rules run in order before the OWASP rules, while the service's WAF is on. It goes last in the list.
     AddWafRule {
@@ -2390,7 +2396,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::UpdateFirewallRule { .. }
         | Op::ReorderFirewallRules { .. }
         | Op::RemoveFirewallRule { .. } => ("Firewall", "fwr"),
-        Op::SetServiceWaf { .. } => ("Firewall", "svc"),
+        Op::SetServiceWaf { .. } | Op::SetServiceBehindCdn { .. } => ("Firewall", "svc"),
         Op::AddWafRule { .. }
         | Op::UpdateWafRule { .. }
         | Op::ReorderWafRules { .. }
@@ -3536,6 +3542,45 @@ async fn apply(
                 crate::firewall::sync(tx, &cluster_id).await?;
                 wake.push(cluster_id);
             }
+            Ok(ok)
+        }
+        Op::SetServiceBehindCdn { service_id, cdn } => {
+            let (team_id, cluster_id, name) = fw_access(tx, user, &service_id).await?;
+            let cdn = crate::firewall::check_behind(cdn.as_deref())?;
+            let was: Option<String> =
+                sqlx::query_scalar("SELECT behind_cdn FROM pyo.services WHERE id = $1 FOR UPDATE")
+                    .bind(&service_id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            if was == cdn {
+                return Ok(ok);
+            }
+            let mut fw = crate::firewall::for_service(tx, &service_id).await?;
+            fw.behind = cdn.clone();
+            crate::firewall::with_presets(tx, &mut fw).await;
+            crate::firewall::check_size(&fw)?;
+            sqlx::query("UPDATE pyo.services SET behind_cdn = $2 WHERE id = $1")
+                .bind(&service_id)
+                .bind(&cdn)
+                .execute(&mut **tx)
+                .await?;
+            let what = match cdn.as_deref().and_then(pyo_proto::firewall::preset) {
+                Some(p) => format!("{name} is now behind {}", p.label),
+                None => format!("{name} is no longer behind a CDN"),
+            };
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "firewall.updated",
+                "info",
+                &what,
+                json!({ "kind": "service", "id": service_id }),
+                json!({ "serviceId": service_id, "clusterId": cluster_id }),
+            )
+            .await?;
+            crate::firewall::sync(tx, &cluster_id).await?;
+            wake.push(cluster_id);
             Ok(ok)
         }
         Op::AddWafRule {
@@ -8254,6 +8299,115 @@ mod waf_lifecycle_tests {
             .is_err()
         );
         assert!(run_json(&s, &user, json!({ "op": "addFirewallRule", "id": format!("fwr_d{run}"), "clusterId": cluster, "action": "block", "sources": ["DE"] })).await.is_err());
+
+        // Presets: stored by name, sent with their current ranges.
+        let _ = queued().await;
+        run_json(
+            &s,
+            &user,
+            fw(
+                &format!("fwr_p{run}"),
+                &c,
+                "allow",
+                "in",
+                &["Tailnet", "fastly"],
+            ),
+        )
+        .await
+        .unwrap();
+        let mut tx = db.begin().await.unwrap();
+        let f = crate::firewall::for_service(&mut tx, &c).await.unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(f.rules[1].sources, ["tailnet", "fastly"]);
+        assert_eq!(
+            f.presets.keys().collect::<Vec<_>>(),
+            ["fastly"],
+            "only the CDNs it names"
+        );
+        assert!(!f.presets["fastly"].is_empty());
+        // Behind Cloudflare: one sync, with Cloudflare's ranges.
+        run_json(
+            &s,
+            &user,
+            json!({ "op": "setServiceBehindCdn", "serviceId": c, "cdn": "cloudflare" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued().await.last().unwrap().0, "sync_firewall");
+        let sync: Value = sqlx::query_scalar("SELECT command FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'sync_firewall' ORDER BY created_at DESC LIMIT 1").bind(&cluster).fetch_one(&db).await.unwrap();
+        let t = sync["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["service"]["serviceId"] == json!(c))
+            .cloned()
+            .unwrap();
+        assert_eq!(t["firewall"]["behind"], "cloudflare");
+        assert!(
+            t["firewall"]["presets"]["cloudflare"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 10
+        );
+        // Again: nothing to do. Another CDN: not yet.
+        run_json(
+            &s,
+            &user,
+            json!({ "op": "setServiceBehindCdn", "serviceId": c, "cdn": "cloudflare" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued().await, []);
+        assert!(
+            run_json(
+                &s,
+                &user,
+                json!({ "op": "setServiceBehindCdn", "serviceId": c, "cdn": "fastly" })
+            )
+            .await
+            .is_err()
+        );
+        let snap = crate::snapshot::build(&db, &user, "").await.unwrap();
+        let shown = snap["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == json!(c))
+            .cloned()
+            .unwrap();
+        assert_eq!(shown["behindCdn"], "cloudflare");
+        // A CDN's list can't be rate limited; more ranges than a firewall
+        // takes are refused.
+        let mut cdn_limit = fw(&format!("fwr_l{run}"), &c, "rateLimit", "in", &["bunny"]);
+        cdn_limit["requests"] = json!(5);
+        assert!(run_json(&s, &user, cdn_limit).await.is_err());
+        for i in 0..20 {
+            let r = run_json(
+                &s,
+                &user,
+                fw(
+                    &format!("fwr_n{i}{run}"),
+                    &c,
+                    "block",
+                    "notIn",
+                    &["bunny", "cloudfront"],
+                ),
+            )
+            .await;
+            if let Err(e) = r {
+                assert!(e.message.contains("address ranges in all"), "{}", e.message);
+                break;
+            }
+            assert!(i < 19, "never refused");
+        }
+        run_json(
+            &s,
+            &user,
+            json!({ "op": "setServiceBehindCdn", "serviceId": c, "cdn": null }),
+        )
+        .await
+        .unwrap();
 
         sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
             .bind(&team)

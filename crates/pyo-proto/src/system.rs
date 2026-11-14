@@ -1111,6 +1111,49 @@ pub fn client_policy(https: bool, w: WebSettings) -> Value {
     })
 }
 
+/// Label on a service's client policy for its HTTPS behind a CDN: the CDN's
+/// name. The agent rewrites these when the websites' settings change.
+pub const CDN_LABEL: &str = "pyo.dev/cdn";
+
+/// The most CDN ranges a service's HTTPS trusts, and the widest one
+/// (prefix lengths), as the admission policy holds the agent to.
+pub const MAX_TRUSTED_CIDRS: usize = 128;
+pub const MIN_TRUSTED_V4_PREFIX: u8 = 8;
+pub const MIN_TRUSTED_V6_PREFIX: u8 = 24;
+/// A trusted IPv4 range, /8 to /32 ([`MIN_TRUSTED_V4_PREFIX`]).
+pub const TRUSTED_V4_RE: &str = r"^([0-9]{1,3}\.){3}[0-9]{1,3}/([89]|[12][0-9]|3[0-2])$";
+/// A trusted IPv6 range, /24 to /128 ([`MIN_TRUSTED_V6_PREFIX`]).
+pub const TRUSTED_V6_RE: &str = r"^[0-9a-fA-F:]+/(2[4-9]|[3-9][0-9]|1[01][0-9]|12[0-8])$";
+
+/// A service's client policy for its HTTPS listeners (`sections` of its
+/// Gateway `gateway`) behind a CDN: as [`client_policy_spec`] (which it
+/// overrides on those listeners only: a listener's own policy wins over
+/// one for every Gateway), except that the visitor is read from
+/// X-Forwarded-For, and only on connections from the CDN's ranges
+/// (`trusted`): the last address there that isn't the CDN's, the one the
+/// CDN appended. Any other connection is its own address, whatever it
+/// sends. Envoy's custom header detection (CF-Connecting-IP) would trust
+/// the header from anyone, so it's never used.
+pub fn cdn_client_policy_spec(
+    gateway: &str,
+    sections: &[String],
+    w: WebSettings,
+    trusted: &[String],
+) -> Value {
+    let mut spec = client_policy_spec(true, w);
+    if let Some(m) = spec.as_object_mut() {
+        m.remove("targetSelectors");
+    }
+    spec["targetRefs"] = json!(
+        sections
+            .iter()
+            .map(|s| json!({ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": gateway, "sectionName": s }))
+            .collect::<Vec<_>>()
+    );
+    spec["clientIPDetection"] = json!({ "xForwardedFor": { "trustedCIDRs": trusted } });
+    spec
+}
+
 /// Every client policy spec the agent may write (the admission policy's list).
 pub fn client_policy_variants(https: bool) -> Vec<Value> {
     let mut v = vec![];
@@ -1843,6 +1886,8 @@ mod tests {
         for https in [false, true] {
             pinned.extend(client_policy_variants(https).into_iter().map(|spec| json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "spec": spec })));
         }
+        pinned.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": { "name": "ns-web-cdn" },
+            "spec": cdn_client_policy_spec("ns-web", &["h-1".into()], WebSettings { origin_pull: true, proxy_protocol: true }, &["173.245.48.0/20".into()]) }));
         pinned.extend(
             tailnet_objects(
                 &tailnet_server_cidrs(["10.42.0.0/24"]),
@@ -1886,9 +1931,62 @@ mod tests {
                 assert!(!spec.to_string().contains("100.64.0.0/10"), "{spec}");
             }
         }
+        // Only a service's own HTTPS behind a CDN may read X-Forwarded-For,
+        // from narrow trusted ranges (cdn_policy_trusts_only_the_cdn):
+        // never a hop count or a custom header.
         let admission = json!(crate::rbac::admission("w", "g")).to_string();
-        assert!(!admission.contains("xForwardedFor") && !admission.contains("trustedCIDRs"));
-        assert!(!admission.contains("numTrustedHops"));
+        assert!(!admission.contains("numTrustedHops") && !admission.contains("customHeader"));
+        let re = |r: &str, c: &str| regex::Regex::new(r).unwrap().is_match(c);
+        for ok in [
+            "173.245.48.0/20",
+            "104.16.0.0/13",
+            "10.0.0.0/8",
+            "203.0.113.7/32",
+        ] {
+            assert!(re(TRUSTED_V4_RE, ok), "{ok}");
+        }
+        for bad in ["0.0.0.0/0", "0.0.0.0/7", "1.2.3.4", "1.2.3.4/33"] {
+            assert!(!re(TRUSTED_V4_RE, bad), "{bad}");
+        }
+        for ok in ["2400:cb00::/32", "2a06:98c0::/29", "::1/128"] {
+            assert!(re(TRUSTED_V6_RE, ok), "{ok}");
+        }
+        for bad in ["::/0", "2000::/3", "2400::/23", "::1/129"] {
+            assert!(!re(TRUSTED_V6_RE, bad), "{bad}");
+        }
+    }
+
+    /// A website behind a CDN reads the visitor from X-Forwarded-For only
+    /// on its own HTTPS listeners, and only from the CDN's ranges: never
+    /// a custom header (trusted from anyone), never a hop count.
+    #[test]
+    fn cdn_policy_trusts_only_the_cdn() {
+        let trusted = vec!["173.245.48.0/20".to_owned(), "2400:cb00::/32".to_owned()];
+        for w in [
+            WebSettings::default(),
+            WebSettings {
+                origin_pull: true,
+                proxy_protocol: true,
+            },
+        ] {
+            let spec = cdn_client_policy_spec("ns-web", &["h-1".into(), "h-2".into()], w, &trusted);
+            assert_eq!(
+                spec["clientIPDetection"],
+                json!({ "xForwardedFor": { "trustedCIDRs": trusted } })
+            );
+            assert!(spec.get("targetSelectors").is_none());
+            assert_eq!(
+                spec["targetRefs"][1],
+                json!({ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "ns-web", "sectionName": "h-2" })
+            );
+            // The rest as every website's HTTPS has it.
+            let base = client_policy_spec(true, w);
+            for k in ["connection", "tls", "proxyProtocol"] {
+                assert_eq!(spec.get(k), base.get(k), "{k}");
+            }
+            assert!(!spec.to_string().contains("numTrustedHops"));
+            assert!(!spec.to_string().contains("customHeader"));
+        }
     }
 
     /// The fixed objects, for checking them against a cluster:

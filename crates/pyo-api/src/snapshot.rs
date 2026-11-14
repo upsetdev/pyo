@@ -200,7 +200,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'id', a.id, 'teamId', a.team_id, 'projectId', a.project_id, 'clusterId', a.cluster_id,
             'name', a.name, 'status', a.status, 'runtime', a.runtime,
             'currentDeploymentId', a.current_deployment_id, 'pendingChanges', a.pending_changes,
-            'waf', a.waf,
+            'waf', a.waf, 'behindCdn', a.behind_cdn,
             'createdAt', pyo.ms(a.created_at), 'updatedAt', pyo.ms(a.updated_at))
            FROM pyo.services a WHERE a.team_id = ANY($1) AND NOT a.deleting ORDER BY a.created_at",
         &team_ids,

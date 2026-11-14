@@ -537,14 +537,20 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
         // pyo-tls-* Secrets; nothing of the proxy's own.
         { "name": "gatewayAllowed", "expression": format!("variables.ns == '{gw}' && (\
             (request.resource.resource == 'envoyproxies' && variables.objName == 'pyo' && request.operation != 'DELETE' && {proxies}.exists(p, {proxy_keys}.all(k, k in object.spec && object.spec[k] == p[k])) && object.spec.all(k, k in {proxy_keys})) || \
-            (request.resource.resource == 'clienttrafficpolicies' && (variables.objName in ['pyo-http', 'pyo-https'] ? (request.operation != 'DELETE' && ((variables.objName == 'pyo-http' && object.spec in {ctp_http}) || (variables.objName == 'pyo-https' && object.spec in {ctp_https}))) : (request.operation == 'DELETE' || variables.portPolicy && \
+            (request.resource.resource == 'clienttrafficpolicies' && (variables.objName in ['pyo-http', 'pyo-https'] ? (request.operation != 'DELETE' && ((variables.objName == 'pyo-http' && object.spec in {ctp_http}) || (variables.objName == 'pyo-https' && object.spec in {ctp_https}))) : (request.operation == 'DELETE' || variables.portPolicy && ((\
                 object.spec.all(k, k in ['targetRefs', 'connection', 'proxyProtocol']) && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name.endsWith('-ports') && has(t.sectionName)) && \
                 (!has(object.spec.connection) || (object.spec.connection.all(k, k in ['connectionLimit', 'maxAcceptPerSocketEvent']) && (!has(object.spec.connection.maxAcceptPerSocketEvent) || object.spec.connection.maxAcceptPerSocketEvent == 1) && (!has(object.spec.connection.connectionLimit) || (object.spec.connection.connectionLimit.all(k, k == 'value') && object.spec.connection.connectionLimit.value >= 1)))) && \
-                (!has(object.spec.proxyProtocol) || object.spec.proxyProtocol == {pp_optional})))) || \
+                (!has(object.spec.proxyProtocol) || object.spec.proxyProtocol == {pp_optional})) || \
+                (object.metadata.labels[?'{cdn_label}'].orValue('') in {behind} && object.spec.all(k, k in ['targetRefs', 'clientIPDetection', 'connection', 'tls', 'proxyProtocol']) && \
+                    size(object.spec.targetRefs) >= 1 && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name + '-cdn' == variables.objName && has(t.sectionName) && t.sectionName.startsWith('h-')) && \
+                    {ctp_https}.exists(v, ['connection', 'tls', 'proxyProtocol'].all(k, (k in v) == (k in object.spec) && (!(k in v) || v[k] == object.spec[k]))) && \
+                    object.spec.clientIPDetection.all(k, k == 'xForwardedFor') && object.spec.clientIPDetection.xForwardedFor.all(k, k == 'trustedCIDRs') && \
+                    size(object.spec.clientIPDetection.xForwardedFor.trustedCIDRs) >= 1 && size(object.spec.clientIPDetection.xForwardedFor.trustedCIDRs) <= {max_trusted} && \
+                    object.spec.clientIPDetection.xForwardedFor.trustedCIDRs.all(c, c.matches({trusted_v4}) || c.matches({trusted_v6}))))))) || \
             (request.resource.resource == 'securitypolicies' && variables.objName != '{tailnet_gw}' && (request.operation == 'DELETE' || variables.portPolicy && (variables.toPortRoute || variables.toWebRoute) && variables.ownRoute && !variables.objName.startsWith('{tn_route}') && \
                 object.spec.all(k, k in ['targetRefs', 'authorization']) && object.spec.authorization.all(k, k in ['defaultAction', 'rules']) && \
-                (!has(object.spec.authorization.rules) || object.spec.authorization.rules.all(r, r.all(k, k in ['name', 'action', 'principal']) && r.principal.all(k, k == 'clientCIDRs' || (k == 'clientIPGeoLocations' && variables.toWebRoute)) && \
-                    (!has(r.principal.clientIPGeoLocations) || r.principal.clientIPGeoLocations.all(g, g.all(k, k == 'country'))))))) || \
+                (!has(object.spec.authorization.rules) || object.spec.authorization.rules.all(r, (variables.toWebRoute && (r == {acme_rule} || r == {gate_rule})) || (r.all(k, k in ['name', 'action', 'principal']) && r.principal.all(k, k == 'clientCIDRs' || (k == 'clientIPGeoLocations' && variables.toWebRoute)) && \
+                    (!has(r.principal.clientIPGeoLocations) || r.principal.clientIPGeoLocations.all(g, g.all(k, k == 'country')))))))) || \
             (request.resource.resource == 'backendtrafficpolicies' && (request.operation == 'DELETE' || variables.portPolicy && \
                 ((variables.toPortRoute && object.spec.all(k, k in ['targetRefs', 'proxyProtocol']) && object.spec.proxyProtocol.all(k, k == 'version') && object.spec.proxyProtocol.version in ['V1', 'V2']) || \
                  (variables.toWebRoute && object.spec.all(k, k in ['targetRefs', 'rateLimit', 'responseOverride']) && (has(object.spec.rateLimit) || has(object.spec.responseOverride)) && \
@@ -648,6 +654,21 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             proxy_keys = cel_literal(&json!(system::envoy_proxy(geoip_image, true)["spec"].as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default())),
             ctp_http = cel_literal(&json!(system::client_policy_variants(false))),
             ctp_https = cel_literal(&json!(system::client_policy_variants(true))),
+            // A service's HTTPS behind a CDN (system.rs
+            // `cdn_client_policy_spec`): on its own Gateway's listeners,
+            // as every website's HTTPS is otherwise, trusting X-Forwarded-For
+            // only from a bounded list of narrow ranges (the CDN's, which
+            // change, so they can't be pinned here). Never a hop count or a
+            // custom header, which anyone could set.
+            cdn_label = system::CDN_LABEL,
+            // A website's two fixed rules: Let's Encrypt's challenges, and
+            // behind a CDN its connections only (firewall.rs).
+            acme_rule = cel_literal(&crate::firewall::acme_rule()),
+            gate_rule = cel_literal(&crate::firewall::behind_gate_rule()),
+            behind = cel_literal(&json!(crate::firewall::BEHIND)),
+            max_trusted = system::MAX_TRUSTED_CIDRS,
+            trusted_v4 = cel_literal(&json!(system::TRUSTED_V4_RE)),
+            trusted_v6 = cel_literal(&json!(system::TRUSTED_V6_RE)),
             ports_label = system::L4_GATEWAY,
             pp_optional = cel_literal(&json!({ "optional": true })),
             fw_policy = system::FIREWALL_POLICY,
