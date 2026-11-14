@@ -603,12 +603,14 @@ pub(super) fn plan(r: &Responses) -> ImportPlan {
             .map(|t| s(t, "slug").to_owned())
             .filter(|t| !t.is_empty())
             .collect();
-        if !teams.is_empty() {
-            out.warnings.push(format!(
+        out.warnings.push(if teams.is_empty() {
+            "Vercel has no projects here, or the token can't read them.".to_owned()
+        } else {
+            format!(
                 "Vercel has no projects here. The token also reaches these teams: {}. Pick one as the team.",
                 teams.join(", ")
-            ));
-        }
+            )
+        });
         return out;
     }
     out.warnings.push("Preview deployments and their variables aren't imported. Pyo imports each project's production settings.".into());

@@ -838,6 +838,16 @@ fn vercel_without_projects_names_the_teams() {
     let plan = vercel::plan(&fixture("vercel-empty"));
     assert!(plan.projects.is_empty());
     assert!(has(&plan.warnings, "acme, side-project"));
+
+    // A team with no projects (no other teams to name): still a reason.
+    let mut r = fixture("vercel-empty");
+    r.remove("/v2/teams?limit=20");
+    let plan = vercel::plan(&r);
+    assert!(plan.projects.is_empty());
+    assert!(has(
+        &plan.warnings,
+        "Vercel has no projects here, or the token"
+    ));
 }
 
 #[test]
