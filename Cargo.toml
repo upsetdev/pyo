@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/pyo-proto", "crates/pyo-api", "crates/pyo-agent", "crates/pyo-builder", "crates/pyo-cli", "crates/pyo-flows", "crates/pyo-resp", "crates/pyo-kv", "crates/pyo-db-controller"]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "Apache-2.0"
 publish = false

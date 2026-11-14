@@ -1,6 +1,10 @@
 {
-  "version": "0.2.2",
+  "version": "0.2.3",
   "minFrom": null,
-  "manualOnly": false,
-  "beforeYouUpdate": []
+  "manualOnly": true,
+  "beforeYouUpdate": [
+    "Pyo's own Postgres and ClickHouse restart once: the dashboard is unavailable for about a minute.",
+    "Small databases restart once and are unavailable for about a minute.",
+    "After updating, run the connect command shown in each cluster's settings."
+  ]
 }
