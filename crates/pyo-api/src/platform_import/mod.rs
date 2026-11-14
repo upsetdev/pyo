@@ -1938,8 +1938,8 @@ async fn connect_and_deploy(
     deploy: bool,
 ) -> Vec<ImportResult> {
     let mut out = vec![];
-    // Per service: the databases to wait for (id, name).
-    let mut waits: Vec<Vec<(String, String)>> = vec![];
+    // Per service to deploy: the databases to wait for (id, name).
+    let mut waits: Vec<Option<Vec<(String, String)>>> = vec![];
     for p in pending {
         let Pending {
             mut result,
@@ -2001,16 +2001,12 @@ async fn connect_and_deploy(
             result.message = "An earlier import made it. Pyo connected it now.".into();
         }
         record(&s.db, run, std::slice::from_ref(&result)).await;
-        waits.push(if new && deploy && holds.is_empty() {
-            wait
-        } else {
-            vec![]
-        });
+        waits.push((new && deploy && holds.is_empty()).then_some(wait));
         out.push(result);
     }
 
     // Each database once, however many services wait for it.
-    let mut ids: Vec<(String, String)> = waits.iter().flatten().cloned().collect();
+    let mut ids: Vec<(String, String)> = waits.iter().flatten().flatten().cloned().collect();
     ids.sort();
     ids.dedup();
     let checks = ids
@@ -2021,9 +2017,7 @@ async fn connect_and_deploy(
         .into_iter()
         .collect();
     for (result, wait) in out.iter_mut().zip(waits) {
-        if wait.is_empty() {
-            continue;
-        }
+        let Some(wait) = wait else { continue };
         let why: Vec<String> = wait
             .iter()
             .filter_map(|(id, _)| ready.get(id).and_then(|r| r.clone().err()))
