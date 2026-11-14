@@ -99,6 +99,7 @@ pub async fn link(api: &Api, service: Option<String>) -> Result<()> {
         path.display()
     ));
     println!("{}", ui::dim("Deploy it with: pyo deploy"));
+    crate::upgrade::warn_if_pyo_is_older(&api.base).await;
     Ok(())
 }
 

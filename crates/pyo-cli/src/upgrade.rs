@@ -1,4 +1,5 @@
-//! `pyo upgrade`, and the notice that a newer CLI is out.
+//! `pyo upgrade`, the notice that a newer CLI is out, and the warning when
+//! a Pyo is older than the CLI.
 //!
 //! Releases come from GitHub: `releases/latest` redirects to the latest
 //! release's tag, which tells its version without the API (and its rate
@@ -290,6 +291,38 @@ impl Check {
     }
 }
 
+// ── Pyo older than the CLI ────────────────────────────────────────────
+
+/// Warn when the Pyo at `base` is a minor version or more behind this CLI:
+/// commands new in the CLI may not work there yet. Quiet when it can't
+/// tell.
+pub async fn warn_if_pyo_is_older(base: &str) {
+    let Ok(client) = http(Duration::from_secs(5), true) else {
+        return;
+    };
+    let Ok(res) = client.get(format!("{base}/api/v1/meta")).send().await else {
+        return;
+    };
+    let Ok(meta) = res.json::<serde_json::Value>().await else {
+        return;
+    };
+    let pyo = meta["version"].as_str().unwrap_or("");
+    if pyo_is_behind(pyo, VERSION) {
+        eprintln!(
+            "{}",
+            ui::yellow(&format!(
+                "This Pyo runs {pyo}, older than the CLI ({VERSION}). Some commands may not work \
+                 until you update it under Settings › Updates."
+            ))
+        );
+    }
+}
+
+/// Whether Pyo `pyo` is behind CLI `cli` by a minor version or more.
+fn pyo_is_behind(pyo: &str, cli: &str) -> bool {
+    matches!((parse(pyo), parse(cli)), (Some((a, b, _)), Some((c, d, _))) if (c, d) > (a, b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +336,10 @@ mod tests {
         assert!(newer("0.10.0", "0.9.9"));
         assert!(!newer("0.2.5", "0.2.5"));
         assert!(!newer("", "0.2.5"));
+        assert!(pyo_is_behind("0.2.5", "0.3.0"));
+        assert!(!pyo_is_behind("0.2.5", "0.2.9"));
+        assert!(!pyo_is_behind("0.3.0", "0.2.5"));
+        assert!(!pyo_is_behind("", "0.3.0"));
     }
 
     #[test]

@@ -56,6 +56,13 @@ impl Api {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 bail!("{msg}\nSign in again: pyo login");
             }
+            // An operation this Pyo doesn't have: it's older than the CLI.
+            if msg.starts_with("Invalid operation: unknown variant") {
+                bail!(
+                    "This Pyo doesn't have that yet. It may be older than the CLI ({}): update it under Settings › Updates.",
+                    crate::upgrade::VERSION
+                );
+            }
             if body["needsConfirm"] == true {
                 return Err(NeedsConfirm(msg).into());
             }

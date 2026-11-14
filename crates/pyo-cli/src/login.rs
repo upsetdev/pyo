@@ -38,6 +38,7 @@ pub async fn run(url: Option<String>, token: Option<String>, expires: &str) -> R
     }
     .save()?;
     ui::ok(&format!("Signed in to {url} as {email}"));
+    crate::upgrade::warn_if_pyo_is_older(&url).await;
     Ok(())
 }
 
