@@ -230,6 +230,13 @@ pub async fn list(api: &Api, service: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// What `pyo domain add` does about the DNS record in Cloudflare.
+pub struct Dns {
+    /// Create it when a connected zone covers the hostname (the default).
+    pub cloudflare: bool,
+    pub proxied: bool,
+}
+
 pub async fn add(
     api: &Api,
     service: Option<&str>,
@@ -237,6 +244,7 @@ pub async fn add(
     free: bool,
     port: Option<String>,
     wait: bool,
+    dns: Dns,
 ) -> Result<()> {
     let t = service::target(api, service).await?;
     let mut s = t.service().clone();
@@ -323,11 +331,24 @@ pub async fn add(
         .push(domain);
     api.op("saveService", json!({ "service": s })).await?;
     ui::ok(&format!("Added {host}"));
+    // Its record in the team's Cloudflare account, when a zone there covers it.
+    let team_id = s["teamId"].as_str().unwrap_or("");
+    let in_cloudflare = !is_free(&host)
+        && crate::cloudflare::zone_for(&t.state.0, team_id, &host)
+            .is_some_and(|z| z["canEdit"] == json!(true));
+    let made = if in_cloudflare && dns.cloudflare {
+        crate::cloudflare::create_record(api, &t.id, &id, &host, dns.proxied, false)
+            .await
+            .map_err(|e| eprintln!("{}", ui::red(&e.to_string())))
+            .is_ok()
+    } else {
+        false
+    };
     if !deployed(&s) {
         println!("{}", ui::dim("Live after the first deploy: pyo deploy"));
         return Ok(());
     }
-    if !is_free(&host) {
+    if !is_free(&host) && !made {
         println!("Create this DNS record at your DNS provider:");
         match cluster_ip(&t, "publicIp") {
             Some(ip) => println!(
@@ -411,7 +432,13 @@ async fn follow(api: &Api, service_id: &str, domain_id: &str, host: &str) -> Res
     unreachable!()
 }
 
-pub async fn remove(api: &Api, service: Option<&str>, hostname: &str, yes: bool) -> Result<()> {
+pub async fn remove(
+    api: &Api,
+    service: Option<&str>,
+    hostname: &str,
+    yes: bool,
+    keep_dns_record: bool,
+) -> Result<()> {
     let t = service::target(api, service).await?;
     let mut s = t.service().clone();
     let host = hostname.trim().trim_end_matches('.').to_lowercase();
@@ -446,6 +473,19 @@ pub async fn remove(api: &Api, service: Option<&str>, hostname: &str, yes: bool)
             bail!("Not removed.");
         }
     }
+    // The record Pyo made in Cloudflare goes first, unless it's kept.
+    let d = domains[i].clone();
+    if d["dnsRecord"]["mine"] == json!(true) && !keep_dns_record {
+        api.op(
+            "deleteDnsRecord",
+            json!({ "serviceId": t.id, "domainId": d["id"] }),
+        )
+        .await?;
+        ui::ok(&format!("Deleted the DNS record of {host} in Cloudflare"));
+    }
+    let domains = s["domains"]
+        .as_array_mut()
+        .context("service has no domains list")?;
     domains.remove(i);
     // A port no domain routes to anymore isn't public.
     let used: Vec<Value> = s["domains"]

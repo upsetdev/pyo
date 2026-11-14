@@ -4,6 +4,7 @@
 
 mod api;
 mod backup;
+mod cloudflare;
 mod compose;
 mod config;
 mod db;
@@ -179,6 +180,15 @@ enum Command {
         #[command(flatten)]
         which: Which,
     },
+    /// The team's Cloudflare account: Pyo creates DNS records for domains in
+    /// its zones. Owners and admins connect it.
+    Cloudflare {
+        #[command(subcommand)]
+        command: CloudflareCommand,
+        /// The team (slug or id). Defaults to your first team.
+        #[arg(long, global = true)]
+        team: Option<String>,
+    },
     /// Who may reach the service: its firewall rules, and a CDN in front.
     Firewall {
         #[command(subcommand)]
@@ -251,11 +261,59 @@ enum DomainCommand {
         /// Wait until it's live.
         #[arg(long)]
         wait: bool,
+        /// Don't create the DNS record in Cloudflare, even when a connected zone covers it.
+        #[arg(long)]
+        no_cloudflare: bool,
+        /// Proxied by Cloudflare (once its certificate is issued).
+        #[arg(long, conflicts_with = "no_cloudflare")]
+        proxied: bool,
     },
-    /// Stop serving the service on a hostname.
+    /// Stop serving the service on a hostname. Deletes the DNS record Pyo made for it in Cloudflare.
     Remove {
         /// e.g. app.example.com.
         hostname: String,
+        /// Don't ask to confirm.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Keep the DNS record Pyo made in Cloudflare.
+        #[arg(long)]
+        keep_dns_record: bool,
+    },
+    /// Create a domain's DNS record in Cloudflare, or try again. Never overwrites a record.
+    Dns {
+        /// e.g. app.example.com.
+        hostname: String,
+        /// Proxied by Cloudflare (once its certificate is issued).
+        #[arg(long)]
+        proxied: bool,
+        /// Replace the records in the way. Owners and admins.
+        #[arg(long)]
+        replace: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CloudflareCommand {
+    /// Connect Cloudflare, or replace its token. The token needs Zone:Read and DNS:Edit.
+    Connect {
+        /// A file with the token, or - for stdin. Or set CLOUDFLARE_API_TOKEN.
+        #[arg(long)]
+        token_file: Option<String>,
+        /// The token, from the environment.
+        #[arg(
+            long = "from-env",
+            env = "CLOUDFLARE_API_TOKEN",
+            hide_env_values = true,
+            hide = true
+        )]
+        env_token: Option<String>,
+    },
+    /// Check the token: the zones it covers and what it's missing.
+    Test,
+    /// The zones Pyo can create records in.
+    Zones,
+    /// Forget the token. Records Pyo made stay in Cloudflare.
+    Remove {
         /// Don't ask to confirm.
         #[arg(long, short = 'y')]
         yes: bool,
@@ -782,10 +840,38 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     free,
                     port,
                     wait,
-                } => domain::add(&api, s, hostname, free, port, wait).await,
-                DomainCommand::Remove { hostname, yes } => {
-                    domain::remove(&api, s, &hostname, yes).await
+                    no_cloudflare,
+                    proxied,
+                } => {
+                    let dns = domain::Dns {
+                        cloudflare: !no_cloudflare,
+                        proxied,
+                    };
+                    domain::add(&api, s, hostname, free, port, wait, dns).await
                 }
+                DomainCommand::Remove {
+                    hostname,
+                    yes,
+                    keep_dns_record,
+                } => domain::remove(&api, s, &hostname, yes, keep_dns_record).await,
+                DomainCommand::Dns {
+                    hostname,
+                    proxied,
+                    replace,
+                } => cloudflare::domain_dns(&api, s, &hostname, proxied, replace).await,
+            }
+        }
+        Command::Cloudflare { command, team } => {
+            let api = config::client(url, token)?;
+            let team = team.as_deref();
+            match command {
+                CloudflareCommand::Connect {
+                    token_file,
+                    env_token,
+                } => cloudflare::connect(&api, team, token_file.as_deref(), env_token).await,
+                CloudflareCommand::Test => cloudflare::test(&api, team).await,
+                CloudflareCommand::Zones => cloudflare::zones(&api, team).await,
+                CloudflareCommand::Remove { yes } => cloudflare::remove(&api, team, yes).await,
             }
         }
         Command::Upgrade { version } => upgrade::run(version).await,
