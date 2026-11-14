@@ -195,6 +195,27 @@ pub fn parse(url: &str) -> Result<Url, Refused> {
     Ok(url)
 }
 
+/// Whether an address is on the internet: not a private network (a LAN,
+/// the tailnet's 100.64.0.0/10), this machine or a reserved range.
+pub fn is_public_ip(ip: IpAddr) -> bool {
+    kind(ip) == Kind::Public
+}
+
+/// Whether a URL's host is on the internet: every address it resolves to
+/// now is public. None when it doesn't resolve.
+pub async fn resolves_public(url: &Url) -> Option<bool> {
+    let host = url.host_str()?.trim_matches(['[', ']']);
+    let ips: Vec<IpAddr> = match host.parse::<IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443)))
+            .await
+            .ok()?
+            .map(|a| a.ip())
+            .collect(),
+    };
+    (!ips.is_empty()).then(|| ips.iter().all(|ip| is_public_ip(*ip)))
+}
+
 /// Checks a URL against every address its host resolves to now. Call it
 /// before each request to a URL (an IP address in it isn't resolved, so the
 /// client's resolver never sees it); the client checks names again when it

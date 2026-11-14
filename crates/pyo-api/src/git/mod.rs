@@ -13,8 +13,10 @@
 //!   expires within the hour, and revokes it when the build ends.
 //! - Pushes deploy: Pyo adds a webhook to each repository its services
 //!   follow, with a secret it checks, and removes it when no service
-//!   follows the repository any more. Without one (the provider can't reach
-//!   Pyo), the branch is checked every minute.
+//!   follows the repository any more. A provider on the internet
+//!   (gitlab.com) gets Pyo's public address, one on a private network or
+//!   the tailnet its tailnet address first ([`hook_base`]). Without one it
+//!   can reach, the branch is checked every minute.
 //! - Each deploy sets a commit status (pending, running, success, failed)
 //!   linking to the deployment.
 //!
@@ -96,10 +98,33 @@ impl Connection {
         provider_name(&self.provider)
     }
 
-    /// Where webhooks go, or None when Pyo has no address to give.
-    fn hook_url(&self) -> Option<String> {
-        let base = self.public_url.trim_end_matches('/');
-        (!base.is_empty()).then(|| format!("{base}/api/git/{}/webhook", self.id))
+    /// Where webhooks go ([`hook_base`]), or None when Pyo has no address
+    /// the provider can reach; and whether the provider is on the internet.
+    async fn hook_url(&self) -> (Option<String>, bool) {
+        let public = match gitlab::normalize(&self.base_url) {
+            // One Pyo can't resolve now counts as on the internet, so it's
+            // never handed a private address.
+            Ok(u) => crate::outbound::resolves_public(&u).await.unwrap_or(true),
+            Err(_) => true,
+        };
+        let addrs = PyoAddresses {
+            given: Some(self.public_url.clone()).filter(|u| !u.is_empty()),
+            configured: crate::oauth::configured_public_url().map(str::to_owned),
+            tailnet: crate::web::addresses().tailnet.map(|h| format!("https://{h}")),
+            public: None,
+        };
+        let url = hook_base(public, &addrs)
+            .map(|b| format!("{}/api/git/{}/webhook", b.trim_end_matches('/'), self.id));
+        (url, public)
+    }
+
+    /// Why there's no webhook, when Pyo has no address the provider can reach.
+    fn no_address(&self, public: bool) -> String {
+        if public {
+            format!("Pyo has no public address {} can reach.", self.name())
+        } else {
+            format!("Pyo has no address {} can reach.", self.name())
+        }
     }
 
     /// The repository a URL of this connection names ("group/sub/project").
@@ -168,6 +193,112 @@ pub fn public_url(given: Option<&str>) -> String {
         .or_else(|| crate::oauth::configured_public_url().map(str::to_owned))
         .or_else(crate::web::public_url)
         .unwrap_or_default()
+}
+
+/// Who can reach one of Pyo's addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Anyone on the internet.
+    Public,
+    /// Devices on the tailnet.
+    Tailnet,
+    /// Its own network only (a LAN, this machine).
+    Private,
+}
+
+/// An IP address's reach: the tailnet's 100.64.0.0/10 is the tailnet.
+fn ip_reach(ip: std::net::IpAddr) -> Reach {
+    match ip {
+        std::net::IpAddr::V4(v4)
+            if v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]) =>
+        {
+            Reach::Tailnet
+        }
+        ip if crate::outbound::is_public_ip(ip) => Reach::Public,
+        _ => Reach::Private,
+    }
+}
+
+/// Who can reach a Pyo address, from its host alone: a tailnet name or
+/// address, a private one (an IP on a private network, a name with no
+/// dot, .local, .internal, .lan, .home.arpa), a nip.io or sslip.io name as
+/// the address it holds; any other name is on the internet.
+fn reach_of(url: &str) -> Option<Reach> {
+    let url = reqwest::Url::parse(url).ok()?;
+    let host = url
+        .host_str()?
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase();
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Some(ip_reach(ip));
+    }
+    if host.ends_with(".ts.net") {
+        return Some(Reach::Tailnet);
+    }
+    for suffix in [".nip.io", ".sslip.io"] {
+        if let Some(rest) = host.strip_suffix(suffix) {
+            let labels: Vec<&str> = rest.split('.').collect();
+            let dotted = labels[labels.len().saturating_sub(4)..].join(".");
+            let dashed = labels
+                .last()
+                .map(|l| l.rsplit('-').take(4).collect::<Vec<_>>());
+            let dashed = dashed.map(|mut p| {
+                p.reverse();
+                p.join(".")
+            });
+            if let Some(ip) = [Some(dotted), dashed]
+                .into_iter()
+                .flatten()
+                .find_map(|t| t.parse::<std::net::Ipv4Addr>().ok())
+            {
+                return Some(ip_reach(ip.into()));
+            }
+        }
+    }
+    let private = !host.contains('.')
+        || [".local", ".internal", ".lan", ".home.arpa", ".localhost"]
+            .iter()
+            .any(|s| host.ends_with(s));
+    Some(if private {
+        Reach::Private
+    } else {
+        Reach::Public
+    })
+}
+
+/// The addresses Pyo knows for itself.
+#[derive(Debug, Default)]
+struct PyoAddresses {
+    /// The connection's: what the dashboard was opened at when it was saved.
+    given: Option<String>,
+    /// `PYO_PUBLIC_URL`.
+    configured: Option<String>,
+    /// On the tailnet.
+    tailnet: Option<String>,
+    /// On the server's public IP.
+    public: Option<String>,
+}
+
+/// Where a provider's webhooks go. One on the internet (gitlab.com) gets
+/// only an address on the internet, and none without one: its pushes are
+/// checked every minute instead. One on a private network or the tailnet
+/// gets Pyo's tailnet address first, then the connection's own.
+fn hook_base(provider_public: bool, a: &PyoAddresses) -> Option<String> {
+    let all = [&a.given, &a.configured, &a.tailnet, &a.public];
+    let with = |want: Reach| {
+        all.iter()
+            .filter_map(|u| u.as_deref())
+            .find(|u| reach_of(u) == Some(want))
+            .map(str::to_owned)
+    };
+    if provider_public {
+        with(Reach::Public)
+    } else {
+        with(Reach::Tailnet)
+            .or_else(|| a.given.clone())
+            .or_else(|| a.configured.clone())
+            .or_else(|| with(Reach::Public))
+    }
 }
 
 // ── Connections (ops) ────────────────────────────────────────────────────────
@@ -353,7 +484,13 @@ pub async fn test(
     .fetch_all(&mut **tx)
     .await?;
     let mut problems = c.problems.clone();
-    if let Some((repo, error)) = hooks.first() {
+    let (hook_url, provider_public) = conn.hook_url().await;
+    if hook_url.is_none() {
+        problems.push(format!(
+            "{} So there's no webhook: pushes are checked every minute instead.",
+            conn.no_address(provider_public)
+        ));
+    } else if let Some((repo, error)) = hooks.first() {
         problems.push(format!(
             "No webhook on {repo}, so its pushes are checked every minute instead.{}",
             error
@@ -1095,7 +1232,7 @@ pub async fn sync_hooks(s: &AppState, id: &str) -> anyhow::Result<()> {
         .api()
         .await
         .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-    let hook_url = conn.hook_url();
+    let (hook_url, provider_public) = conn.hook_url().await;
     let mut failed = None;
     for (repo, hook, _) in &have {
         if wanted.iter().any(|w| w.eq_ignore_ascii_case(repo)) {
@@ -1122,10 +1259,16 @@ pub async fn sync_hooks(s: &AppState, id: &str) -> anyhow::Result<()> {
             continue;
         }
         let (hook, error) = match &hook_url {
-            None => (
-                None,
-                Some("Pyo has no address the provider can reach.".to_owned()),
-            ),
+            None => {
+                // Polled instead: the hook Pyo made before goes.
+                if let Some((_, Some(old), _)) = saved
+                    && let Err(e) = api.delete_hook(repo, *old as u64).await
+                {
+                    failed = Some(format!("{repo}: {e}"));
+                    continue;
+                }
+                (None, Some(conn.no_address(provider_public)))
+            }
             Some(url) => match make_hook(&api, repo, url, &conn.webhook_secret, saved).await {
                 Ok(h) => (Some(h as i64), None),
                 Err(e) => (None, Some(e.message)),
@@ -1296,6 +1439,70 @@ mod tests {
         assert!(!reports_status(
             &json!({ "repoUrl": "https://gitlab.com/a/b" })
         ));
+    }
+
+    #[test]
+    fn who_reaches_an_address() {
+        for (url, want) in [
+            ("https://pyo.example.com", Reach::Public),
+            ("https://203.0.113.9:8443", Reach::Public),
+            ("https://pyo.tail1234.ts.net", Reach::Tailnet),
+            ("https://100.101.102.103", Reach::Tailnet),
+            ("http://192.168.1.20:8000", Reach::Private),
+            ("http://localhost:8000", Reach::Private),
+            ("https://pyo.lan", Reach::Private),
+            ("https://pyo.203.0.113.9.nip.io", Reach::Public),
+            ("https://pyo-10-0-0-5.sslip.io", Reach::Private),
+        ] {
+            assert_eq!(reach_of(url), Some(want), "{url}");
+        }
+    }
+
+    #[test]
+    fn webhooks_go_where_the_provider_reaches() {
+        let all = PyoAddresses {
+            given: Some("https://pyo.tail1234.ts.net".into()),
+            configured: None,
+            tailnet: Some("https://pyo.tail1234.ts.net".into()),
+            public: Some("https://pyo.203.0.113.9.nip.io".into()),
+        };
+        // gitlab.com: the public address, even when the dashboard was
+        // opened on the tailnet.
+        assert_eq!(
+            hook_base(true, &all).as_deref(),
+            Some("https://pyo.203.0.113.9.nip.io")
+        );
+        // A GitLab on the LAN or the tailnet: the tailnet address.
+        assert_eq!(
+            hook_base(false, &all).as_deref(),
+            Some("https://pyo.tail1234.ts.net")
+        );
+        // gitlab.com and only private addresses: no webhook (polled).
+        let private = PyoAddresses {
+            given: Some("http://192.168.1.20:8000".into()),
+            tailnet: Some("https://pyo.tail1234.ts.net".into()),
+            ..Default::default()
+        };
+        assert_eq!(hook_base(true, &private), None);
+        // A GitLab on the LAN with no tailnet: the address it was saved with.
+        let lan = PyoAddresses {
+            given: Some("http://192.168.1.20:8000".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            hook_base(false, &lan).as_deref(),
+            Some("http://192.168.1.20:8000")
+        );
+        // PYO_PUBLIC_URL counts as public.
+        let configured = PyoAddresses {
+            configured: Some("https://pyo.example.com".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            hook_base(true, &configured).as_deref(),
+            Some("https://pyo.example.com")
+        );
+        assert_eq!(hook_base(false, &PyoAddresses::default()), None);
     }
 
     #[test]
