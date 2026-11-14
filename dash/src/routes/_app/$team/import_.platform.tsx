@@ -26,6 +26,7 @@ import {
   pickable,
   previewImport,
   running,
+  serviceLinks,
   startImport,
   type ImportDatabase,
   type ImportPlan,
@@ -334,7 +335,14 @@ function ImportFlow() {
                   </div>
                   <ul className="divide-y divide-border rounded-lg border border-border">
                     {pr.services.map((x) => (
-                      <Item key={x.key} item={x} picked={picks.has(x.key)} onPick={(on) => toggle(x.key, on)} />
+                      <Item
+                        key={x.key}
+                        item={x}
+                        picked={picks.has(x.key)}
+                        onPick={(on) => toggle(x.key, on)}
+                        links={serviceLinks(plan, x, picks)}
+                        deploy={deploy}
+                      />
                     ))}
                     {pr.stacks.map((x) => (
                       <Item key={x.key} item={x} picked={picks.has(x.key)} onPick={(on) => toggle(x.key, on)} />
@@ -403,10 +411,14 @@ function Item({
   item,
   picked,
   onPick,
+  links,
+  deploy,
 }: {
   item: ImportService | ImportStack | ImportDatabase;
   picked: boolean;
   onPick: (on: boolean) => void;
+  links?: ReturnType<typeof serviceLinks>;
+  deploy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const d = describe(item);
@@ -427,7 +439,13 @@ function Item({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="truncate text-[13px] font-medium text-foreground">{d.name}</span>
-            {before ? <Badge>Imported before</Badge> : !can ? <Badge tone="warning">Not imported</Badge> : null}
+            {before ? (
+              <Badge>Imported before</Badge>
+            ) : !can ? (
+              <Badge tone="warning">Not imported</Badge>
+            ) : deploy && picked && links?.holds.length ? (
+              <Badge tone="warning">Held</Badge>
+            ) : null}
             {d.badges.map((b) => (
               <Badge key={b} mono>
                 {b}
@@ -435,6 +453,17 @@ function Item({
             ))}
           </div>
           <p className="truncate text-[12px] text-muted-foreground">{d.from}</p>
+          {links?.connects.map((c) => (
+            <p key={c.database} className="text-[12px] text-muted-foreground">
+              <span className="font-mono text-foreground">{c.vars.join(", ")}</span>: Pyo connects {c.vars.length === 1 ? "it" : "them"} to{" "}
+              {c.database}, the database it imports
+            </p>
+          ))}
+          {links?.holds.map((h) => (
+            <p key={h} className="text-[12px] text-warning">
+              {h}
+            </p>
+          ))}
           {item.warnings.length ? (
             <button
               type="button"
@@ -463,6 +492,7 @@ const STATE: Record<ImportResult["state"], { label: string; tone: Tone }> = {
   created: { label: "Created", tone: "success" },
   importing: { label: "Copying data", tone: "progress" },
   exists: { label: "Imported before", tone: "neutral" },
+  held: { label: "Held", tone: "warning" },
   skipped: { label: "Not imported", tone: "warning" },
   failed: { label: "Failed", tone: "danger" },
 };
@@ -540,6 +570,13 @@ function Results({ results }: { results: (ImportResult | { key: string; name: st
                   ) : null}
                 </div>
                 {r.message ? <p className="text-[12px] text-muted-foreground">{r.message}</p> : null}
+                {"connected" in r
+                  ? r.connected?.map((c) => (
+                      <p key={c.databaseId} className="text-[12px] text-muted-foreground">
+                        Connected to {c.database}: <span className="font-mono">{c.variables.join(", ")}</span>
+                      </p>
+                    ))
+                  : null}
               </div>
             </li>
           );
