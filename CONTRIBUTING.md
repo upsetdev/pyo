@@ -243,6 +243,12 @@ Use [Conventional Commits](https://www.conventionalcommits.org):
   commits.
 - Mark breaking changes with `!` after the type or scope, as in
   `feat(api)!: ...`, and add a `BREAKING CHANGE:` footer.
+- Mark a security fix with the scope `security` or a `Security:` footer,
+  with the advisory's id when there is one (`Security: GHSA-xxxx-xxxx-xxxx`).
+  It's listed under Security Fixes in the release.
+- The release notes are made from these messages (see
+  [RELEASING.md](RELEASING.md#release-notes)), so write the summary for
+  the people who run Pyo.
 
 ## Pull requests
 
