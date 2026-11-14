@@ -83,11 +83,21 @@ import { currentSlug } from "~/lib/pyo/paths";
 
 type Stats = ReturnType<typeof projectStats>;
 
+/** A repository on GitLab: one of a GitLab connection, or on gitlab.com. */
+const isGitlab = (s: { repoUrl: string; gitConnectionId?: string }) =>
+  !!s.gitConnectionId || /gitlab\.com/.test(s.repoUrl);
+
 /** A repository's web page, and its branch and commit pages (GitHub, GitLab; other hosts just the repo). */
-export function gitLinks(repoUrl: string, branch: string, commit?: string) {
+export function gitLinks(
+  repoUrl: string,
+  branch: string,
+  commit?: string,
+  gitlab = false,
+) {
   const repo = repoUrl.replace(/\.git$/, "").replace(/\/$/, "");
   const host = /^https?:\/\/([^/]+)/.exec(repo)?.[1] ?? "";
-  const sep = host === "gitlab.com" ? "/-" : host === "github.com" ? "" : null;
+  const sep =
+    gitlab || host === "gitlab.com" ? "/-" : host === "github.com" ? "" : null;
   return {
     repo,
     branch:
@@ -233,7 +243,12 @@ export function SourcePill({
           : (t?.name ?? "Template");
   const git =
     source.type === "git"
-      ? gitLinks(source.repoUrl, source.branch, revision)
+      ? gitLinks(
+          source.repoUrl,
+          source.branch,
+          revision,
+          !!source.gitConnectionId,
+        )
       : undefined;
   const href = git
     ? (git.commit ?? git.repo)
@@ -250,7 +265,7 @@ export function SourcePill({
   return (
     <Pill href={href} title={full} className={className}>
       {source.type === "git" ? (
-        <BrandMark icon={GITHUB_LOGO} size={12} />
+        <BrandMark icon={isGitlab(source) ? siGitlab : GITHUB_LOGO} size={12} />
       ) : (
         <RegistryMark image={source.image} />
       )}
@@ -722,7 +737,7 @@ function serviceMark(
     return t.logo ? { brand: t.logo } : { Icon: CATEGORY_ICONS[t.category] };
   }
   if (src.type === "git")
-    return { brand: /gitlab\.com/.test(src.repoUrl) ? siGitlab : siGithub };
+    return { brand: isGitlab(src) ? siGitlab : siGithub };
   if (!src.image) return { Icon: PackageIcon };
   const name = imageLabel(src.image).split("/").pop() ?? "";
   const brand = IMAGES[name] ?? registryIcon(imageHost(src.image));
@@ -740,7 +755,7 @@ export function SourceMark({
   if (source.type === "git")
     return (
       <BrandMark
-        icon={/gitlab\.com/.test(source.repoUrl) ? siGitlab : siGithub}
+        icon={isGitlab(source) ? siGitlab : siGithub}
         size={size}
       />
     );

@@ -325,7 +325,8 @@ function AppSettings({ app }: { app: Application }) {
         </div>
       </Panel>
 
-      {app.source.type === "git" && app.source.installationId ? (
+      {app.source.type === "git" &&
+      (app.source.installationId || app.source.gitConnectionId) ? (
         <Panel title="Git">
           <div className="p-4">
             <Switch

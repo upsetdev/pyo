@@ -11,7 +11,7 @@ import {
   TimerIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { fetchBuildFile } from "~/lib/pyo/backend";
+import { fetchBuildFile, fetchGitBuildFile } from "~/lib/pyo/backend";
 import {
   validateSection,
   type DeployDraft,
@@ -81,18 +81,19 @@ function githubRepo(url: string) {
 /**
  * The file a Git build of the repository would use by default: "Dockerfile"
  * or "Containerfile", null for neither (zero config), undefined while it isn't
- * known (no team, not on GitHub, or GitHub couldn't be asked).
+ * known (no team, not on GitHub or a GitLab connection, or it couldn't be asked).
  */
 function useBuildFile(
   team: string,
   repoUrl: string,
   branch: string,
   context: string,
+  connection?: string,
 ) {
-  const repo = githubRepo(repoUrl);
+  const repo = connection ? repoUrl.trim() : githubRepo(repoUrl);
   const key =
     team && repo && branch.trim()
-      ? JSON.stringify([team, repo, branch.trim(), context.trim() || "."])
+      ? JSON.stringify([team, repo, branch.trim(), context.trim() || ".", connection ?? ""])
       : "";
   const [found, setFound] = useState<{
     key: string;
@@ -103,8 +104,11 @@ function useBuildFile(
     let cancelled = false;
     // Typing a URL changes it on every key: ask once it settles.
     const t = setTimeout(() => {
-      const [team, repo, branch, context] = JSON.parse(key) as string[];
-      fetchBuildFile({ team, repo, branch, context })
+      const [team, repo, branch, context, connection] = JSON.parse(key) as string[];
+      (connection
+        ? fetchGitBuildFile({ team, connection, repo, branch, context })
+        : fetchBuildFile({ team, repo, branch, context })
+      )
         .then((r) => !cancelled && setFound({ key, file: r.file }))
         .catch(() => {});
     }, 400);
@@ -134,6 +138,7 @@ export function useDraftSections(
     d.git.repoUrl,
     d.git.branch,
     d.git.buildContext,
+    d.git.gitConnectionId,
   );
   const buildText = customPath
     ? `Dockerfile at ${d.git.dockerfilePath.trim()}`

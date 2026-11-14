@@ -50,6 +50,8 @@ import type {
   TailscaleCheck,
   TailscaleInfo,
   CloudflareAccount,
+  GitConnection,
+  GitConnectionCheck,
   IpMode,
   OAuthGrant,
   PortMapping,
@@ -102,6 +104,8 @@ export type PyoState = {
   /** This installation's GitHub App, or null when it isn't set up. */
   github: GithubAppInfo | null;
   githubInstallations: GithubInstallation[];
+  /** The teams' GitLab connections (no tokens). */
+  gitConnections: GitConnection[];
   deployHooks: DeployHook[];
   apiTokens: ApiToken[];
   /** Assistants connected over OAuth (MCP). */
@@ -137,13 +141,6 @@ export type PyoState = {
   notificationsReadAt: number;
   /** Muted notification topics, per team. Everything is on unless listed here. */
   mutedTopics?: Record<string, NotificationTopic[]>;
-  /** Git connections aren't available yet; always empty. */
-  gitConnections?: {
-    teamId: string;
-    provider: string;
-    account: string;
-    connectedAt: number;
-  }[];
 };
 
 // ── Notifications ──────────────────────────────────────────────────────────
@@ -301,6 +298,7 @@ function empty(): PyoState {
     email: null,
     github: null,
     githubInstallations: [],
+    gitConnections: [],
     deployHooks: [],
     apiTokens: [],
     oauthGrants: [],
@@ -320,7 +318,6 @@ function empty(): PyoState {
     tailscale: null,
     publicDashboard: null,
     cloudflare: [],
-    gitConnections: [],
     ...loadPrefs(),
   };
 }
@@ -1155,6 +1152,30 @@ export const api = {
       id,
     });
   },
+  /** Connect GitLab with an access token. `warning`: what the token misses. */
+  addGitConnection(url: string, token: string) {
+    return attempt<{ id: string; warning?: string }>("addGitConnection", {
+      id: newId("gitc"),
+      teamId: get().currentTeamId,
+      provider: "gitlab",
+      url,
+      token,
+      publicUrl: window.location.origin,
+    });
+  },
+  replaceGitConnectionToken(id: string, token: string) {
+    return attempt<{ warning?: string }>("replaceGitConnectionToken", {
+      id,
+      token,
+      publicUrl: window.location.origin,
+    });
+  },
+  testGitConnection(id: string) {
+    return send<GitConnectionCheck>("testGitConnection", { id });
+  },
+  removeGitConnection(id: string) {
+    return send("removeGitConnection", { id });
+  },
   /** Resolves with the new hook's URL path (shown once, revealable later). */
   createDeployHook(projectId: string, serviceId: string | null, name: string) {
     return send<{ path: string }>("createDeployHook", {
@@ -1604,10 +1625,15 @@ export const api = {
                 value,
               })),
               private: d.git.private,
-              webhook: d.git.installationId ? "active" : "unavailable",
+              webhook:
+                d.git.installationId || d.git.gitConnectionId
+                  ? "active"
+                  : "unavailable",
               ...(d.git.installationId
                 ? { installationId: d.git.installationId, autoDeploy: true }
-                : {}),
+                : d.git.gitConnectionId
+                  ? { gitConnectionId: d.git.gitConnectionId, autoDeploy: true }
+                  : {}),
             }
           : d.sourceType === "image"
             ? {

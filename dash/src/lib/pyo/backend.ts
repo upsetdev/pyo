@@ -8,6 +8,8 @@ import type {
   AnalyticsSummary,
   AnalyticsTimeseries,
   GithubRepo,
+  GitBranch,
+  GitRepo,
   LogEntry,
   User,
 } from "./types";
@@ -596,6 +598,23 @@ export const fetchGithubRepos = (team: string) =>
     `/api/v1/github/repos?${new URLSearchParams({ team })}`,
   );
 
+/** Projects the team's GitLab connections can deploy. */
+export const fetchGitRepos = (team: string) =>
+  request<{
+    repositories: GitRepo[];
+    errors: { connectionId: string; message: string }[];
+  }>(`/api/v1/git/repos?${new URLSearchParams({ team })}`);
+
+/** A GitLab repository's branches. */
+export const fetchGitBranches = (q: {
+  team: string;
+  connection: string;
+  repo: string;
+}) =>
+  request<{ branches: GitBranch[] }>(
+    `/api/v1/git/branches?${new URLSearchParams(q)}`,
+  );
+
 /** The file a Git build would use by default: the Dockerfile, else the
  * Containerfile, in the build context; null when there's neither. */
 export const fetchBuildFile = (q: {
@@ -606,6 +625,18 @@ export const fetchBuildFile = (q: {
 }) =>
   request<{ file: "Dockerfile" | "Containerfile" | null }>(
     `/api/v1/github/build-file?${new URLSearchParams(q)}`,
+  );
+
+/** The same for a repository of a GitLab connection. */
+export const fetchGitBuildFile = (q: {
+  team: string;
+  connection: string;
+  repo: string;
+  branch: string;
+  context: string;
+}) =>
+  request<{ file: "Dockerfile" | "Containerfile" | null }>(
+    `/api/v1/git/build-file?${new URLSearchParams(q)}`,
   );
 
 /** Whether the app's site can be shown in a frame (the API asks the site). */

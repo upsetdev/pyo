@@ -590,7 +590,9 @@ export type GitSource = {
   webhook: "active" | "inactive" | "unavailable";
   /** Connected through Pyo's GitHub App: clones with its token (private repos work). */
   installationId?: number;
-  /** Deploy each push to the branch. Default on for GitHub App repositories. */
+  /** A repository of one of the team's Git connections (GitLab). */
+  gitConnectionId?: ID;
+  /** Deploy each push to the branch. Default on for connected repositories. */
   autoDeploy?: boolean;
 };
 
@@ -612,6 +614,59 @@ export type GithubInstallation = {
   accountType: "User" | "Organization";
   repositorySelection: "all" | "selected";
   createdAt: Timestamp;
+};
+
+/** A team's GitLab connection (never its token). */
+export type GitConnection = {
+  id: ID;
+  teamId: ID;
+  provider: "gitlab";
+  url: string;
+  /** The group or project the token is for, else its user. */
+  account: string;
+  publicUrl: string;
+  info: {
+    user?: string;
+    scopes?: string[];
+    expiresAt?: string | null;
+    version?: string;
+    projects?: number;
+    problems?: string[];
+  };
+  createdAt: Timestamp;
+  webhooks: { repo: string; active: boolean; error?: string | null }[];
+};
+
+/** What Test found. */
+export type GitConnectionCheck = {
+  working?: boolean;
+  user?: string;
+  account?: string;
+  scopes?: string[];
+  expiresAt?: string | null;
+  version?: string;
+  projects?: number;
+  problems: string[];
+};
+
+export type GitRepo = {
+  connectionId: ID;
+  provider: "gitlab";
+  host: string;
+  fullName: string;
+  name: string;
+  namespace: string;
+  private: boolean;
+  defaultBranch: string;
+  htmlUrl: string;
+  pushedAt?: string;
+};
+
+export type GitBranch = {
+  name: string;
+  commit: string;
+  default: boolean;
+  protected: boolean;
 };
 
 export type GithubRepo = {

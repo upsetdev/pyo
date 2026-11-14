@@ -41,10 +41,14 @@ import {
 import { BrandMark, GITHUB_LOGO } from "~/components/pyo/common";
 import { CloudflareFields } from "~/components/pyo/Cloudflare";
 import { SearchInput } from "~/components/ui/Table";
-import { fetchGithubRepos } from "~/lib/pyo/backend";
+import {
+  fetchGitBranches,
+  fetchGitRepos,
+  fetchGithubRepos,
+} from "~/lib/pyo/backend";
 import { cpu, describeCron, mem, timeAgo } from "~/lib/pyo/format";
 import { useQuery } from "~/lib/pyo/query";
-import type { GithubRepo, TlsMode } from "~/lib/pyo/types";
+import type { GitRepo, GithubRepo, TlsMode } from "~/lib/pyo/types";
 import { Link } from "@tanstack/react-router";
 import { Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -96,36 +100,51 @@ const err = (e: Issues, k: string) => e[k] || undefined;
 
 // ── 1. Source ──────────────────────────────────────────────────────────────
 
-/** Repositories of the team's GitHub connections, newest push first. */
-function GithubRepoPicker({
+type RepoItem = {
+  key: string;
+  account: string;
+  name: string;
+  private: boolean;
+  pushedAt?: string;
+};
+
+/** A searchable list of repositories, newest push first. */
+function RepoPicker<T extends RepoItem>({
+  icon,
+  title,
+  repos,
   selected,
   onPick,
+  empty,
 }: {
+  icon: typeof siGithub;
+  title: string;
+  repos:
+    | { status: "loading" }
+    | { status: "error"; error: string }
+    | { status: "success"; items: T[]; note?: string };
   selected: string;
-  onPick: (r: GithubRepo) => void;
+  onPick: (r: T) => void;
+  empty: string;
 }) {
-  const s = usePyo();
   const [q, setQ] = useState("");
-  const repos = useQuery(`gh-repos:${s.currentTeamId}`, () =>
-    fetchGithubRepos(s.currentTeamId),
-  );
   const list =
     repos.status === "success"
-      ? repos.data.repositories
+      ? repos.items
           .filter(
             (r) =>
               !q.trim() ||
-              r.fullName.toLowerCase().includes(q.trim().toLowerCase()),
+              `${r.account}/${r.name}`
+                .toLowerCase()
+                .includes(q.trim().toLowerCase()),
           )
           .sort((a, b) => (b.pushedAt ?? "").localeCompare(a.pushedAt ?? ""))
       : [];
   return (
     <div className="overflow-hidden rounded-xl border border-border">
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-        <BrandMark icon={GITHUB_LOGO} size={14} />
-        <span className="text-[13px] font-medium">
-          Your GitHub repositories
-        </span>
+        <BrandMark icon={icon} size={14} />
+        <span className="text-[13px] font-medium">{title}</span>
         <SearchInput
           value={q}
           onChange={setQ}
@@ -145,9 +164,9 @@ function GithubRepoPicker({
           </li>
         ) : list.length ? (
           list.slice(0, 100).map((r) => {
-            const on = selected === r.htmlUrl;
+            const on = selected === r.key;
             return (
-              <li key={r.fullName}>
+              <li key={r.key}>
                 <button
                   type="button"
                   onClick={() => onPick(r)}
@@ -182,9 +201,7 @@ function GithubRepoPicker({
           })
         ) : (
           <li className="px-3 py-4 text-[12.5px] text-muted-foreground">
-            {q
-              ? "No repositories match."
-              : "No repositories shared with Pyo yet. Choose some on GitHub, or connect another account in "}
+            {q ? "No repositories match." : `${empty} `}
             {q ? null : (
               <Link
                 to="/$team/integrations"
@@ -196,8 +213,127 @@ function GithubRepoPicker({
             )}
           </li>
         )}
+        {repos.status === "success" && repos.note ? (
+          <li className="px-3 py-2 text-[12px] text-destructive">
+            {repos.note}
+          </li>
+        ) : null}
       </ul>
     </div>
+  );
+}
+
+/** Repositories of the team's GitHub connections. */
+function GithubRepoPicker({
+  selected,
+  onPick,
+}: {
+  selected: string;
+  onPick: (r: GithubRepo) => void;
+}) {
+  const s = usePyo();
+  const repos = useQuery(`gh-repos:${s.currentTeamId}`, () =>
+    fetchGithubRepos(s.currentTeamId),
+  );
+  return (
+    <RepoPicker
+      icon={GITHUB_LOGO}
+      title="Your GitHub repositories"
+      repos={
+        repos.status === "success"
+          ? {
+              status: "success",
+              items: repos.data.repositories.map((r) => ({
+                ...r,
+                key: r.htmlUrl,
+              })),
+            }
+          : repos
+      }
+      selected={selected}
+      onPick={onPick}
+      empty="No repositories shared with Pyo yet. Choose some on GitHub, or connect another account in"
+    />
+  );
+}
+
+/** Projects of the team's GitLab connections. */
+function GitlabRepoPicker({
+  selected,
+  onPick,
+}: {
+  selected: string;
+  onPick: (r: GitRepo) => void;
+}) {
+  const s = usePyo();
+  const repos = useQuery(`gl-repos:${s.currentTeamId}`, () =>
+    fetchGitRepos(s.currentTeamId),
+  );
+  return (
+    <RepoPicker
+      icon={siGitlab}
+      title="Your GitLab projects"
+      repos={
+        repos.status === "success"
+          ? {
+              status: "success",
+              items: repos.data.repositories.map((r) => ({
+                ...r,
+                key: r.htmlUrl,
+                account: r.namespace || r.fullName.split("/")[0],
+              })),
+              note: repos.data.errors.map((e) => e.message).join(" "),
+            }
+          : repos
+      }
+      selected={selected}
+      onPick={onPick}
+      empty="No projects with the Maintainer role. Check the token in"
+    />
+  );
+}
+
+/** A GitLab repository's branches, or a text field while they load. */
+function BranchSelect({
+  connection,
+  repoUrl,
+  value,
+  onChange,
+  field,
+}: {
+  connection: string;
+  repoUrl: string;
+  value: string;
+  onChange: (v: string) => void;
+  field: Record<string, unknown>;
+}) {
+  const s = usePyo();
+  const list = useQuery(`gl-branches:${connection}:${repoUrl}`, () =>
+    fetchGitBranches({
+      team: s.currentTeamId,
+      connection,
+      repo: repoUrl,
+    }),
+  );
+  if (list.status !== "success" || !list.data.branches.length)
+    return (
+      <Input
+        {...field}
+        mono
+        value={value}
+        onChange={(e) => onChange(e.target.value.trim())}
+      />
+    );
+  const names = list.data.branches.map((b) => b.name);
+  return (
+    <Select {...field} value={value} onChange={(e) => onChange(e.target.value)}>
+      {names.includes(value) ? null : <option value={value}>{value}</option>}
+      {names.map((n) => (
+        <option key={n} value={n}>
+          {n}
+        </option>
+      ))}
+    </Select>
   );
 }
 
@@ -210,12 +346,14 @@ export function SourceStep({ d, set, errors }: StepProps) {
     const g = d.git;
     const setGit = (patch: Partial<DeployDraft["git"]>) =>
       set({ git: { ...g, ...patch } });
-    const connected = s.githubInstallations.some(
+    const github = s.githubInstallations.some(
       (x) => x.teamId === s.currentTeamId,
     );
+    const gitlab = s.gitConnections.some((x) => x.teamId === s.currentTeamId);
+    const connected = github || gitlab;
     return (
       <div className="space-y-5">
-        {connected ? (
+        {github ? (
           <GithubRepoPicker
             selected={g.installationId ? g.repoUrl : ""}
             onPick={(r) =>
@@ -223,6 +361,22 @@ export function SourceStep({ d, set, errors }: StepProps) {
                 repoUrl: r.htmlUrl,
                 branch: r.defaultBranch || "main",
                 installationId: r.installationId,
+                gitConnectionId: undefined,
+                private: r.private,
+                commit: "",
+              })
+            }
+          />
+        ) : null}
+        {gitlab ? (
+          <GitlabRepoPicker
+            selected={g.gitConnectionId ? g.repoUrl : ""}
+            onPick={(r) =>
+              setGit({
+                repoUrl: r.htmlUrl,
+                branch: r.defaultBranch || "main",
+                gitConnectionId: r.connectionId,
+                installationId: undefined,
                 private: r.private,
                 commit: "",
               })
@@ -236,18 +390,22 @@ export function SourceStep({ d, set, errors }: StepProps) {
             error={err(errors, "repoUrl")}
             className="sm:col-span-2"
             hint={
-              g.installationId
-                ? "Private repo, deploys on push."
+              g.installationId || g.gitConnectionId
+                ? "Deploys on push."
                 : connected
                   ? "Any public HTTPS Git URL."
-                  : "A public HTTPS URL. Connect GitHub for private repos."
+                  : "A public HTTPS URL. Connect GitHub or GitLab for private repos."
             }
           >
             {(p) => (
               <div className="relative">
                 <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-foreground/80">
                   <BrandMark
-                    icon={/gitlab\.com/.test(g.repoUrl) ? siGitlab : siGithub}
+                    icon={
+                      g.gitConnectionId || /gitlab\.com/.test(g.repoUrl)
+                        ? siGitlab
+                        : siGithub
+                    }
                     size={15}
                   />
                 </span>
@@ -260,6 +418,7 @@ export function SourceStep({ d, set, errors }: StepProps) {
                     setGit({
                       repoUrl: e.target.value.trim(),
                       installationId: undefined,
+                      gitConnectionId: undefined,
                       private: false,
                     })
                   }
@@ -274,14 +433,24 @@ export function SourceStep({ d, set, errors }: StepProps) {
             error={err(errors, "branch")}
             className="sm:col-span-2"
           >
-            {(p) => (
-              <Input
-                {...p}
-                mono
-                value={g.branch}
-                onChange={(e) => setGit({ branch: e.target.value.trim() })}
-              />
-            )}
+            {(p) =>
+              g.gitConnectionId ? (
+                <BranchSelect
+                  connection={g.gitConnectionId}
+                  repoUrl={g.repoUrl}
+                  value={g.branch}
+                  onChange={(branch) => setGit({ branch })}
+                  field={p}
+                />
+              ) : (
+                <Input
+                  {...p}
+                  mono
+                  value={g.branch}
+                  onChange={(e) => setGit({ branch: e.target.value.trim() })}
+                />
+              )
+            }
           </Field>
         </div>
         <Advanced

@@ -4,6 +4,7 @@ import { RegistryLoginsPanel } from "~/components/pyo/RegistryLogins";
 import { SecretStoresPanel } from "~/components/pyo/SecretStores";
 import { CloudflarePanel } from "~/components/pyo/Cloudflare";
 import { TailscalePanel } from "~/components/pyo/Tailscale";
+import { GitlabRows } from "~/components/pyo/GitConnections";
 import { useEffect, useState, type ReactNode } from "react";
 import { Badge, ClusterStatusBadge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -56,6 +57,7 @@ function Integrations() {
       <Panel title="Git providers">
         <ul className="list-rows">
           <GithubRows />
+          <GitlabRows />
         </ul>
       </Panel>
       <CloudflarePanel />

@@ -79,6 +79,8 @@ export type DeployDraft = {
     private: boolean;
     /** Picked from the team's GitHub App installations. */
     installationId?: number;
+    /** Picked from the team's GitLab connections. */
+    gitConnectionId?: string;
   };
   image: {
     image: string;
