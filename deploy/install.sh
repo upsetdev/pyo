@@ -636,8 +636,9 @@ pyo_addresses() {
   echo "  http://localhost:8000  (this machine)"
   if [ -z "$url" ]; then
     echo
-    echo "Its HTTPS address on this machine's public IP isn't ready yet. See it later with:"
-    echo "  curl -s http://localhost:8000/api/v1/meta"
+    echo "No HTTPS address yet. It comes on this machine's public IP in a minute or two,"
+    echo "unless ports 80 and 443 can't reach it (behind NAT). Then set up Tailscale in Pyo."
+    echo "Check with: curl -s http://localhost:8000/api/v1/meta"
   fi
 }
 # The host's own helpers, as systemd timers (root), every minute: connecting

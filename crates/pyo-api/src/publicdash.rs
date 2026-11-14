@@ -44,7 +44,8 @@ pub async fn set_open(db: &PgPool, open: bool) -> ApiResult<()> {
 }
 
 /// Its name while it's open: "pyo.<public IP>.nip.io" of the cluster Pyo
-/// runs on, when that takes public traffic.
+/// runs on, when that takes public traffic and its free domains are on
+/// its public IP.
 pub async fn host(db: &PgPool) -> ApiResult<Option<String>> {
     if closed(db).await? {
         return Ok(None);
@@ -57,8 +58,11 @@ pub async fn host(db: &PgPool) -> ApiResult<Option<String>> {
     let mut tx = db.begin().await?;
     let c = crate::freedomain::load(&mut tx, &id).await?;
     tx.commit().await?;
-    Ok(c.filter(|(_, c)| c.public_traffic)
-        .and_then(|(_, c)| c.public_ip())
+    // Only where its free domains are public too: behind NAT (free domains
+    // on Tailscale) Let's Encrypt can't reach it, and every try would count
+    // against its limits.
+    Ok(c.filter(|(_, c)| c.public_traffic && c.mode() == crate::freedomain::Mode::Public)
+        .and_then(|(_, c)| c.address())
         .and_then(|ip| pyo_proto::system::public_dashboard_host(&ip.to_string())))
 }
 
