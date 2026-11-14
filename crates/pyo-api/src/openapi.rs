@@ -518,7 +518,7 @@ fn prune(spec: &mut Spec) {
 /// keys can't run it). For tests that check each one is somewhere.
 #[cfg(test)]
 pub(crate) fn all_ops() -> Vec<(String, Option<KeyAccess>)> {
-    let spec = Doc::openapi();
+    let spec = doc();
     let components = spec.components.expect("components");
     let for_sampling = serde_json::to_value(&components.schemas).expect("schemas");
     let Some(RefOr::T(Schema::OneOf(all))) = components.schemas.get("Op") else {
@@ -557,9 +557,21 @@ pub(crate) fn all_ops() -> Vec<(String, Option<KeyAccess>)> {
         .collect()
 }
 
+/// The derived spec, made on a thread of its own: the `Op` schema's
+/// derived code needs more stack than a test or runtime thread has in a
+/// debug build.
+fn doc() -> Spec {
+    std::thread::Builder::new()
+        .stack_size(32 << 20)
+        .spawn(Doc::openapi)
+        .expect("a thread for the API reference")
+        .join()
+        .expect("the API reference")
+}
+
 /// The API reference.
 pub fn spec() -> Spec {
-    let mut spec = Doc::openapi();
+    let mut spec = doc();
     spec.info.version = env!("CARGO_PKG_VERSION").to_owned();
     spec.info.contact = None;
     split_ops(&mut spec);
