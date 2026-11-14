@@ -471,7 +471,18 @@ pub fn databases_bundle(img: &crate::system::DbImages) -> SystemBundle {
             include_str!("../system/databases/controller.yaml"),
         ] {
             for doc in serde_norway::Deserializer::from_str(f) {
-                let v = Value::deserialize(doc).unwrap_or_else(|e| panic!("system/databases: {e}"));
+                let mut v =
+                    Value::deserialize(doc).unwrap_or_else(|e| panic!("system/databases: {e}"));
+                // The operators' replicas are the agent's (operators.rs):
+                // left out, so an update never starts a stopped one.
+                if v["kind"] == "Deployment"
+                    && OPERATORS
+                        .iter()
+                        .any(|o| v["metadata"]["name"] == o.deployment)
+                    && let Some(spec) = v["spec"].as_object_mut()
+                {
+                    spec.remove("replicas");
+                }
                 if !v.is_null() {
                     objects.push(v);
                 }
@@ -557,6 +568,73 @@ pub fn databases_bundle(img: &crate::system::DbImages) -> SystemBundle {
     });
     b.version = format!("{hash:016x}");
     b
+}
+
+/// One of the databases system's Deployments that the agent stops on a
+/// small cluster while nothing needs it (pyo-agent's operators.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Operator {
+    /// Its Deployment in the bundle's namespace.
+    pub deployment: &'static str,
+    /// What the dashboard calls it while it starts.
+    pub label: &'static str,
+    /// The engines it runs (a Database's `spec.engine`).
+    pub engines: &'static [&'static str],
+    /// Its own kinds (apiVersion, kind). While any object of them exists,
+    /// even one being deleted, it runs: its webhooks and finalizers need it.
+    pub kinds: &'static [(&'static str, &'static str)],
+}
+
+/// CloudNativePG, the MySQL operator and pyo-db-controller. Their webhooks
+/// only match their own kinds (and the MySQL operator's own StatefulSets),
+/// so nothing else waits on them while they're stopped.
+pub const OPERATORS: [Operator; 3] = [
+    Operator {
+        deployment: "cnpg-controller-manager",
+        label: "the Postgres operator",
+        engines: &["postgres"],
+        kinds: &[
+            ("postgresql.cnpg.io/v1", "Cluster"),
+            ("postgresql.cnpg.io/v1", "Backup"),
+            ("postgresql.cnpg.io/v1", "ScheduledBackup"),
+            ("postgresql.cnpg.io/v1", "Pooler"),
+            ("postgresql.cnpg.io/v1", "Database"),
+            ("postgresql.cnpg.io/v1", "DatabaseRole"),
+            ("postgresql.cnpg.io/v1", "Publication"),
+            ("postgresql.cnpg.io/v1", "Subscription"),
+        ],
+    },
+    Operator {
+        deployment: "moco-controller",
+        label: "the MySQL operator",
+        engines: &["mysql"],
+        kinds: &[
+            ("moco.cybozu.com/v1beta2", "MySQLCluster"),
+            ("moco.cybozu.com/v1beta2", "BackupPolicy"),
+        ],
+    },
+    Operator {
+        deployment: "pyo-db-controller",
+        label: "the database controller",
+        engines: &["postgres", "mysql", "valkey"],
+        kinds: &[],
+    },
+];
+
+/// The read rules for the operators' kinds (the agent counts them).
+fn operator_read_rules() -> Vec<Value> {
+    let mut by_group: Vec<(&str, Vec<String>)> = vec![];
+    for (api_version, kind) in OPERATORS.iter().flat_map(|o| o.kinds.iter()) {
+        let group = api_version.split_once('/').map_or("", |(g, _)| g);
+        match by_group.iter_mut().find(|(g, _)| *g == group) {
+            Some((_, r)) => r.push(plural(kind)),
+            None => by_group.push((group, vec![plural(kind)])),
+        }
+    }
+    by_group
+        .into_iter()
+        .map(|(g, r)| json!({ "apiGroups": [g], "resources": r, "verbs": ["get", "list"] }))
+        .collect()
 }
 
 const CONTROLLER_PLACEHOLDER: &str = "__DB_CONTROLLER_IMAGE__";
@@ -676,6 +754,9 @@ pub fn cluster_rules(bundles: &[SystemBundle]) -> Vec<Value> {
             .unwrap_or(("", &k.api_version));
         rules.push(json!({ "apiGroups": [group], "resources": [plural(&k.kind)], "verbs": ["get", "list"] }));
     }
+    if bundles.iter().any(|b| b.id == DATABASES_ID) {
+        rules.extend(operator_read_rules());
+    }
     rules
 }
 
@@ -697,6 +778,11 @@ pub fn write_rules(bundles: &[SystemBundle]) -> Vec<Value> {
     let roles: Vec<&str> = bundles.iter().flat_map(|b| b.names_of("Role")).collect();
     if !roles.is_empty() {
         rules.push(json!({ "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["roles"], "verbs": ["escalate", "bind"], "resourceNames": roles }));
+    }
+    // The databases system's operators: started and stopped (their replica
+    // count only, which admission holds to 0 or 1).
+    if bundles.iter().any(|b| b.id == DATABASES_ID) {
+        rules.push(json!({ "apiGroups": ["apps"], "resources": ["deployments/scale"], "verbs": ["get", "patch"], "resourceNames": OPERATORS.map(|o| o.deployment) }));
     }
     rules
 }
@@ -866,6 +952,15 @@ pub fn allowed_cel(bundles: &[SystemBundle]) -> String {
             cel_literal(&json!(crate::rbac::WRITE_BINDING)),
             cel_literal(&b["roleRef"]),
             cel_literal(&b["subjects"]),
+        ));
+    }
+    // The databases system's operators: their scale, 0 or 1 (a Scale leaves
+    // out a count of 0).
+    if let Some(b) = bundles.iter().find(|b| b.id == DATABASES_ID) {
+        any.push(format!(
+            "(request.resource.group == 'apps' && request.resource.resource == 'deployments' && variables.sub == 'scale' && variables.ns == {} && variables.objName in {} && request.operation == 'UPDATE' && (!has(object.spec) || !has(object.spec.replicas) || object.spec.replicas in [0, 1]))",
+            cel_literal(&json!(b.namespace)),
+            cel_literal(&json!(OPERATORS.map(|o| o.deployment))),
         ));
     }
     for b in bundles {
@@ -1285,6 +1380,70 @@ mod tests {
             policy_bundles("w:1", "g:1")
                 .iter()
                 .any(|b| b.id == DATABASES_ID)
+        );
+    }
+
+    /// The agent starts and stops the operators: their replica count is
+    /// left out of what's applied, so an update keeps a stopped one stopped.
+    #[test]
+    fn the_operators_replicas_are_the_agents() {
+        let b = db();
+        for o in OPERATORS {
+            let d = b
+                .objects
+                .iter()
+                .find(|x| x["kind"] == "Deployment" && x["metadata"]["name"] == o.deployment)
+                .unwrap_or_else(|| panic!("{} is in the bundle", o.deployment));
+            assert!(d["spec"].get("replicas").is_none(), "{}", o.deployment);
+            assert!(b.ready.iter().any(|r| r.name == o.deployment));
+        }
+        // Only their scale, by name, in the bundle's namespace.
+        let write = write_rules(&[db()]);
+        let scale: Vec<&Value> = write
+            .iter()
+            .filter(|r| r["resources"].to_string().contains("scale"))
+            .collect();
+        assert_eq!(scale.len(), 1);
+        assert_eq!(scale[0]["verbs"], json!(["get", "patch"]));
+        assert_eq!(
+            scale[0]["resourceNames"],
+            json!([
+                "cnpg-controller-manager",
+                "moco-controller",
+                "pyo-db-controller"
+            ])
+        );
+        assert!(
+            !write_rules(&[waf()])
+                .iter()
+                .any(|r| r["resources"].to_string().contains("scale"))
+        );
+        let allowed = allowed_cel(&[db()]);
+        assert!(allowed.contains("variables.sub == 'scale' && variables.ns == 'pyo-databases' && variables.objName in [dyn('cnpg-controller-manager'), dyn('moco-controller'), dyn('pyo-db-controller')] && request.operation == 'UPDATE' && (!has(object.spec) || !has(object.spec.replicas) || object.spec.replicas in [0, 1])"), "{allowed}");
+        assert!(!allowed_cel(&[waf()]).contains("'scale'"));
+        // It reads their kinds (to know when they're done), never writes them.
+        let rules = cluster_rules(&[db()]);
+        assert!(
+            rules
+                .iter()
+                .any(|r| r["apiGroups"] == json!(["postgresql.cnpg.io"])
+                    && r["verbs"] == json!(["get", "list"])
+                    && r["resources"]
+                        .as_array()
+                        .is_some_and(|x| x.contains(&json!("clusters"))
+                            && x.contains(&json!("databaseroles"))))
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r["apiGroups"] == json!(["moco.cybozu.com"])
+                    && r["resources"] == json!(["mysqlclusters", "backuppolicies"])
+                    && r["verbs"] == json!(["get", "list"]))
+        );
+        assert!(
+            !cluster_rules(&[waf()])
+                .iter()
+                .any(|r| r["apiGroups"] == json!(["postgresql.cnpg.io"]))
         );
     }
 

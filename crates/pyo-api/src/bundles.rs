@@ -78,7 +78,14 @@ fn shown_state(state: &str, message: &str, ready: &Value, workloads: &Value) -> 
             c.name.as_str()
         };
         match w {
-            Some(w) if w["status"] == "healthy" => {}
+            // Stopped: one of the databases system's operators while nothing
+            // uses it (the agent's operators.rs starts it when needed).
+            Some(w)
+                if w["status"] == "healthy"
+                    || (w["status"] == "stopped"
+                        && pyo_proto::bundles::OPERATORS
+                            .iter()
+                            .any(|o| o.deployment == c.name)) => {}
             Some(_) => return ("installing".into(), format!("Starting {what}.")),
             None => return ("installing".into(), format!("Waiting for {what}.")),
         }
@@ -354,6 +361,38 @@ pub async fn databases_state(
         .collect())
 }
 
+/// What a database of `engine` waits for while the operators it needs
+/// start (on a small cluster they're stopped while it has no databases of
+/// their engines), from the cluster's last heartbeat: "Starting the
+/// Postgres operator". None once they run, or when they aren't reported.
+pub fn operator_starting(engine: &str, workloads: &Value) -> Option<String> {
+    let ws = workloads.as_array()?;
+    let mut ops: Vec<&pyo_proto::bundles::Operator> = pyo_proto::bundles::OPERATORS
+        .iter()
+        .filter(|o| o.engines.contains(&engine))
+        .collect();
+    // The engine's own operator first, the controller of every engine last.
+    ops.sort_by_key(|o| o.engines.len());
+    ops.into_iter().find_map(|o| {
+        let w = ws.iter().find(|w| {
+            w["kind"] == "Deployment"
+                && w["name"] == o.deployment
+                && w["namespace"] == "pyo-databases"
+        })?;
+        (w["status"] != "healthy").then(|| format!("Starting {}", o.label))
+    })
+}
+
+/// Each cluster's workloads, as its last heartbeat reported them.
+pub async fn workloads(db: &PgPool, cluster_ids: &[String]) -> ApiResult<HashMap<String, Value>> {
+    let rows: Vec<(String, Value)> =
+        sqlx::query_as("SELECT id, workloads FROM pyo.clusters WHERE id = ANY($1)")
+            .bind(cluster_ids)
+            .fetch_all(db)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// The agent finished a bundle's command (only the latest one counts).
 pub async fn finished(
     tx: &mut Transaction<'_, Postgres>,
@@ -615,6 +654,50 @@ mod tests {
             shown_state("failed", "nope", &ready, &all),
             ("failed".to_owned(), "nope".to_owned())
         );
+    }
+
+    #[test]
+    fn a_new_database_says_which_operator_it_waits_for() {
+        let w = |name: &str, status: &str| json!({ "kind": "Deployment", "name": name, "namespace": "pyo-databases", "status": status });
+        let idle = json!([
+            w("cnpg-controller-manager", "stopped"),
+            w("moco-controller", "stopped"),
+            w("pyo-db-controller", "stopped")
+        ]);
+        assert_eq!(
+            operator_starting("postgres", &idle).as_deref(),
+            Some("Starting the Postgres operator")
+        );
+        assert_eq!(
+            operator_starting("mysql", &idle).as_deref(),
+            Some("Starting the MySQL operator")
+        );
+        assert_eq!(
+            operator_starting("valkey", &idle).as_deref(),
+            Some("Starting the database controller")
+        );
+        let pg_up = json!([
+            w("cnpg-controller-manager", "healthy"),
+            w("moco-controller", "stopped"),
+            w("pyo-db-controller", "failed")
+        ]);
+        assert_eq!(
+            operator_starting("postgres", &pg_up).as_deref(),
+            Some("Starting the database controller")
+        );
+        let all = json!([
+            w("cnpg-controller-manager", "healthy"),
+            w("moco-controller", "stopped"),
+            w("pyo-db-controller", "healthy")
+        ]);
+        assert_eq!(operator_starting("postgres", &all), None);
+        // Not reported (yet): nothing said.
+        assert_eq!(operator_starting("postgres", &json!([])), None);
+        assert_eq!(operator_starting("postgres", &Value::Null), None);
+        // A stopped operator doesn't keep the databases system from ready.
+        let b = known("databases").unwrap();
+        let ready = serde_json::to_value(ready_checks(&b)).unwrap();
+        assert_eq!(shown_state("applied", "", &ready, &idle).0, "ready");
     }
 
     #[test]

@@ -229,12 +229,65 @@ async fn run(
             _ => e.context("credentials"),
         })?;
     st.credentials_secret = secret.name_any();
+    // On a small cluster Pyo's agent stops an engine's operator while it has
+    // no databases, and starts it with the first one: its webhooks refuse
+    // its kinds until it's ready, so a new database waits for it.
+    if starting(&st.phase)
+        && let Some(op) = operator_of(&db.spec.engine)
+        && !operator_ready(ctx, op.deployment).await?
+    {
+        if st.phase.is_empty() || st.phase == crd::FAILED {
+            st.phase = crd::CREATING.into();
+        }
+        st.message = waiting_for(op);
+        return Ok((st, Duration::from_secs(3)));
+    }
     let k = Kube { db, ctx };
     match db.spec.engine {
         Engine::Postgres => k.postgres(st).await,
         Engine::Valkey => k.valkey(st, &secret).await,
         Engine::Mysql => k.mysql(st, &secret).await,
     }
+}
+
+/// The operator an engine's objects need (pyo-proto's `OPERATORS`).
+fn operator_of(engine: &Engine) -> Option<&'static pyo_proto::bundles::Operator> {
+    let name = match engine {
+        Engine::Postgres => "postgres",
+        Engine::Mysql => "mysql",
+        // This controller runs KV itself.
+        Engine::Valkey => return None,
+    };
+    pyo_proto::bundles::OPERATORS
+        .iter()
+        .find(|o| o.engines == [name])
+}
+
+/// A database not running yet: one being made (or a failed one tried
+/// again). A running one doesn't wait: it keeps its operator running.
+fn starting(phase: &str) -> bool {
+    phase.is_empty() || phase == crd::CREATING || phase == crd::FAILED
+}
+
+fn waiting_for(op: &pyo_proto::bundles::Operator) -> String {
+    format!("Starting {}", op.label)
+}
+
+/// Whether the operator's Deployment (beside this controller) has a ready
+/// replica.
+async fn operator_ready(ctx: &Ctx, deployment: &str) -> anyhow::Result<bool> {
+    use k8s_openapi::api::apps::v1::Deployment;
+    let ns = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "pyo-databases".into());
+    let list = Api::<Deployment>::namespaced(ctx.client.clone(), &ns)
+        .list(&ListParams::default().fields(&format!("metadata.name={deployment}")))
+        .await?;
+    Ok(list.items.iter().any(|d| {
+        d.status
+            .as_ref()
+            .and_then(|s| s.ready_replicas)
+            .unwrap_or(0)
+            > 0
+    }))
 }
 
 fn validate(db: &Database) -> anyhow::Result<()> {
@@ -704,6 +757,27 @@ mod tests {
             "spec": { "engine": engine, "instances": instances, "storage": "5Gi" },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_new_database_waits_for_its_operator() {
+        let said = |e: Engine| operator_of(&e).map(waiting_for);
+        assert_eq!(
+            said(Engine::Postgres).as_deref(),
+            Some("Starting the Postgres operator")
+        );
+        assert_eq!(
+            said(Engine::Mysql).as_deref(),
+            Some("Starting the MySQL operator")
+        );
+        assert_eq!(said(Engine::Valkey), None);
+        assert_eq!(
+            operator_of(&Engine::Postgres).unwrap().deployment,
+            "cnpg-controller-manager"
+        );
+        // Only one being made (or failed): a running one doesn't wait.
+        assert!(starting("") && starting(crd::CREATING) && starting(crd::FAILED));
+        assert!(!starting("Ready") && !starting("Degraded"));
     }
 
     #[test]

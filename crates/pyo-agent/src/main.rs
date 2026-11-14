@@ -25,6 +25,7 @@ mod kubelet;
 mod locate;
 mod observability;
 mod observe;
+mod operators;
 mod rollout;
 mod room;
 mod runs;
@@ -174,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(locate::run(agent.kube.clone()));
         tokio::spawn(gpu::run(agent.kube.clone()));
         tokio::spawn(gateway::collect_loop(agent.clone()));
+        tokio::spawn(operators::run(agent.kube.clone()));
     }
     // Reads only: runs in read-only clusters too.
     tokio::spawn(dbmetrics::run(agent.kube.clone()));

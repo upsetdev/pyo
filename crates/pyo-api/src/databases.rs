@@ -2263,6 +2263,7 @@ pub async fn listing(db: &PgPool, team_ids: &[String], id: Option<&str>) -> ApiR
     // it's being installed there (a first database waits for it).
     let clusters: Vec<String> = rows.iter().map(|d| d.cluster_id.clone()).collect();
     let systems = crate::bundles::databases_state(db, &clusters).await?;
+    let workloads = crate::bundles::workloads(db, &clusters).await?;
     let imports = crate::database_imports::listing(
         db,
         &rows.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
@@ -2285,6 +2286,18 @@ pub async fn listing(db: &PgPool, team_ids: &[String], id: Option<&str>) -> ApiR
         .bind(&d.id)
         .fetch_one(db)
         .await?;
+        // Being made while its operator starts (stopped while the cluster
+        // had no databases of its engine).
+        let phase = status["phase"].as_str().unwrap_or("");
+        let setup = match workloads.get(&d.cluster_id) {
+            Some(w) if setup.is_null() && (phase.is_empty() || phase == "Creating") => {
+                crate::bundles::operator_starting(&d.engine, w).map_or(
+                    Value::Null,
+                    |m| json!({ "state": "starting", "message": m }),
+                )
+            }
+            _ => setup,
+        };
         let (cpu, memory) = resources_of(&d);
         // Its instances and the servers they run on (from controllers that
         // report them; none from older ones), primary first.
@@ -2336,7 +2349,7 @@ pub struct ListQuery {
 #[utoipa::path(get, path = "/databases", operation_id = "listDatabases", tag = "Databases",
     params(ListQuery),
     responses(
-        (status = 200, description = "`databases`, each with `id`, `name`, `engine`, `version`, `size`, `cpu`, `memory`, `storageGi`, `instances`, `pooler`, `rest`, `deletionProtection`, `status` (with `backup`: `firstRecoverabilityPoint`, `lastSuccessfulBackup`, `lastArchivedWal`, `lastFailedBackup`, `message`), `backup`, `restoredFrom`, `readReplicas`, `extensions`, `setup`, `members`, `connections` and `variables` (passwords masked). `backup` has `enabled`, `retentionDays` and `hour` for Postgres and MySQL. For KV, once turned on, it has `enabled`, `schedule`, `hour`, `keep` and `backupDatabaseId` (its id in Backups). `readReplicas` is null when off, or has `instances`, `ready`, `reported` and `members` (each with `name`, `ready`, `server` and `lagSeconds`). `extensions` is null for MySQL. For Postgres and KV, it lists each extension or module that's on or being turned off, with `name`, `enabled`, `state` (\"enabled\", \"pending\", \"restarting\", \"disabling\" or \"failed\") and a `message`. `setup` is null once the cluster's databases are set up. While they're being set up or updated, it has `state` (\"installing\" or \"failed\") and a `message`. `members` lists each instance's `name`, `role` (\"primary\" or \"replica\"), `ready` and the `server` it runs on, primary first.", body = Object),
+        (status = 200, description = "`databases`, each with `id`, `name`, `engine`, `version`, `size`, `cpu`, `memory`, `storageGi`, `instances`, `pooler`, `rest`, `deletionProtection`, `status` (with `backup`: `firstRecoverabilityPoint`, `lastSuccessfulBackup`, `lastArchivedWal`, `lastFailedBackup`, `message`), `backup`, `restoredFrom`, `readReplicas`, `extensions`, `setup`, `members`, `connections` and `variables` (passwords masked). `backup` has `enabled`, `retentionDays` and `hour` for Postgres and MySQL. For KV, once turned on, it has `enabled`, `schedule`, `hour`, `keep` and `backupDatabaseId` (its id in Backups). `readReplicas` is null when off, or has `instances`, `ready`, `reported` and `members` (each with `name`, `ready`, `server` and `lagSeconds`). `extensions` is null for MySQL. For Postgres and KV, it lists each extension or module that's on or being turned off, with `name`, `enabled`, `state` (\"enabled\", \"pending\", \"restarting\", \"disabling\" or \"failed\") and a `message`. `setup` is null once the cluster's databases are set up. While they're being set up or updated, it has `state` (\"installing\" or \"failed\") and a `message`. While a new database waits for its engine's operator to start, `state` is \"starting\" and `message` names it. `members` lists each instance's `name`, `role` (\"primary\" or \"replica\"), `ready` and the `server` it runs on, primary first.", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]

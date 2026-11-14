@@ -932,7 +932,7 @@ export type Database = {
   /** Postgres: each extension that's on or being turned off, as its cluster reports it; null for other engines. */
   extensions?: DatabaseExtensionState[] | null;
   /** While databases are being set up on its cluster (its first one there); null once they run. */
-  setup?: { state: "installing" | "failed"; message: string } | null;
+  setup?: { state: "installing" | "starting" | "failed"; message: string } | null;
   /** Made from another database's backups. */
   restoredFrom?: { sourceId: ID; sourceName: string; targetTime: string | null } | null;
   /** Its latest import (from another database or a dump), if any. */

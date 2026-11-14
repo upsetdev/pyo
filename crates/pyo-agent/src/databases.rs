@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::MANAGER;
 
-fn resource() -> ApiResource {
+pub(crate) fn resource() -> ApiResource {
     ApiResource::from_gvk_with_plural(
         &GroupVersionKind::gvk("pyo.dev", "v1alpha1", "Database"),
         "databases",
@@ -285,6 +285,11 @@ pub async fn apply(client: &Client, spec: &DatabaseSpec) -> anyhow::Result<Strin
                 _ => {}
             }
         }
+    }
+    // Its engine's operators, if they're stopped while nothing used them
+    // (operators.rs): pyo-db-controller waits for them to be ready.
+    if let Some(engine) = spec.database["spec"]["engine"].as_str() {
+        crate::operators::start_for(client, engine).await;
     }
     let api = Api::<DynamicObject>::namespaced_with(client.clone(), &spec.namespace, &resource());
     // Strict: a field the cluster's databases system doesn't know yet (an

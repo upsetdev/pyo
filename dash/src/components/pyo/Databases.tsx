@@ -41,6 +41,9 @@ export function dbState(d: Database): { tone: Tone; label: string } {
   if (d.state === "deleting") return { tone: "neutral", label: "Deleting" };
   if (d.import?.state === "pending" || d.import?.state === "running") return { tone: "progress", label: "Importing…" };
   if (d.import?.state === "failed" && d.import.newDatabase) return { tone: "danger", label: "Import failed" };
+  if (d.setup?.state === "starting" && (!d.status?.phase || d.status.phase === "Creating")) {
+    return { tone: "progress", label: `${d.setup.message}…` };
+  }
   if (!d.status?.phase && d.setup) {
     return d.setup.state === "failed"
       ? { tone: "danger", label: d.setup.message ? `Couldn't set up databases on this cluster: ${d.setup.message}` : "Couldn't set up databases on this cluster" }
