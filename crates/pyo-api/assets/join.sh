@@ -2,7 +2,7 @@
 # Joins this machine to a Pyo cluster as a server (k3s agent).
 # Pyo's "Add server" gives you the full command, e.g.:
 #
-#   curl -fsSL https://pyo.dev/join.sh | sudo bash -s -- \
+#   curl -fsSL https://your-pyo/install/join.sh | sudo bash -s -- \
 #     --server pyo.tail1234.ts.net --token abc123.0123456789abcdef --name sg-1 \
 #     --k3s v1.36.5+k3s1 [--tailscale-key tskey-auth-...] \
 #     [--registry pyo.tail1234.ts.net:5005 --registry-token 9b1c...]

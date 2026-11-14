@@ -2,7 +2,7 @@
 # Makes this machine a Pyo cluster: k3s (if it isn't installed) and the
 # Pyo agent. Pyo's "Add cluster" gives you the full command, e.g.:
 #
-#   curl -fsSL https://pyo.dev/connect.sh | sudo bash -s -- \
+#   curl -fsSL https://your-pyo/install/connect.sh | sudo bash -s -- \
 #     --api http://pyo.tail1234.ts.net:8000 --token 3f9a... [--tailscale-key tskey-auth-...] \
 #     [--registry pyo.tail1234.ts.net:5005 --registry-token 9b1c...]
 #
@@ -15,7 +15,7 @@
 # Or removes what Pyo put into this cluster, leaving the cluster itself
 # (k3s stays):
 #
-#   curl -fsSL https://pyo.dev/connect.sh | sudo bash -s -- --uninstall
+#   curl -fsSL https://your-pyo/install/connect.sh | sudo bash -s -- --uninstall
 #
 #   --keep-data      keep project namespaces, databases and their volumes;
 #                    the volumes of what's removed keep their data on disk
