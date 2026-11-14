@@ -43,8 +43,9 @@ use serde_json::Value;
 
 use super::{
     Fetch, ImportDatabase, ImportPlan, ImportProject, ImportService, Platform, Responses, Web,
-    database_action, database_name, database_warnings, health_check, https_repo, plan_service, s,
-    unique,
+    database_action, database_name, health_check, https_repo, link_databases,
+    links::{DbAddress, Role},
+    plan_service, s, unique,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -221,8 +222,27 @@ struct Store {
     /// The best URL to copy it from: the direct one before the pooled one.
     url: Option<String>,
     pooled: Option<String>,
-    /// The hosts its variables point at, to note variables that still do.
-    hosts: Vec<String>,
+    /// Where its variables point, to tell which others still do.
+    address: DbAddress,
+    /// A KV store whose REST API a project uses.
+    rest: bool,
+}
+
+/// What a variable of a store holds, by its `contentHint.type`
+/// (https://openapi.vercel.sh/, the env endpoints' `contentHint`).
+fn hint_role(hint: &str) -> Option<Role> {
+    Some(match hint {
+        "postgres-url" | "postgres-prisma-url" | "postgres-url-no-ssl" | "redis-url" => Role::Url,
+        "postgres-url-non-pooling" => Role::Direct,
+        "postgres-host" => Role::Host,
+        "postgres-user" => Role::User,
+        "postgres-password" => Role::Password,
+        "postgres-database" => Role::Database,
+        "redis-rest-api-url" => Role::RestUrl,
+        "redis-rest-api-token" => Role::RestToken,
+        "redis-rest-api-read-only-token" => Role::RestReadOnly,
+        _ => return None,
+    })
 }
 
 /// A variable's production value, when Vercel sends it.
@@ -271,20 +291,17 @@ fn stores(r: &Responses, projects: &[&Value]) -> Vec<Store> {
                         project: pid.to_owned(),
                         url: None,
                         pooled: None,
-                        hosts: vec![],
+                        address: DbAddress::default(),
+                        rest: false,
                     });
                     out.len() - 1
                 }
             };
             let value = value_of(r, pid, e);
-            if let Some(h) = value
-                .as_deref()
-                .and_then(|v| reqwest::Url::parse(v).ok())
-                .and_then(|u| u.host_str().map(str::to_owned))
-                .filter(|h| !out[at].hosts.contains(h))
-            {
-                out[at].hosts.push(h);
+            if let Some(v) = value.as_deref() {
+                out[at].address.add_url(v);
             }
+            out[at].rest |= s(hint, "type").starts_with("redis-rest-api-");
             let v = value.filter(|v| v.starts_with("postgres"));
             match s(hint, "type") {
                 "postgres-url-non-pooling" if out[at].url.is_none() => out[at].url = v,
@@ -324,7 +341,8 @@ fn store_database(st: &Store, project_name: &str) -> ImportDatabase {
         warnings,
         existing_id: None,
         url: if engine == "postgres" { url } else { None },
-        hosts: st.hosts.clone(),
+        address: st.address.clone(),
+        rest: st.rest,
     }
 }
 
@@ -393,6 +411,7 @@ fn project_service(
     let mut blob = false;
     let mut integration = vec![];
     let mut edge_config = vec![];
+    let mut explicit = BTreeMap::new();
     let list = r
         .get(&format!("/v10/projects/{pid}/env"))
         .map(envs)
@@ -403,6 +422,11 @@ fn project_service(
             continue;
         }
         let hint = s(&e["contentHint"], "type");
+        // A store's variable: Vercel says which store and what it holds.
+        let store = s(&e["contentHint"], "storeId");
+        if let Some(role) = hint_role(hint).filter(|_| !store.is_empty()) {
+            explicit.insert(key.to_owned(), (format!("db:{store}"), role));
+        }
         if hint.starts_with("blob-") {
             blob = true;
         } else if matches!(hint, "integration-store-secret" | "flags-connection-string") {
@@ -481,7 +505,10 @@ fn project_service(
     {
         warnings.push("Vercel gave every variable to the build too. Pyo gives the build only public ones (like NEXT_PUBLIC_). Add others as build arguments if the build needs them.".into());
     }
-    warnings.extend(database_warnings(&env, dbs));
+    let pairs: Vec<(String, String)> = env
+        .iter()
+        .map(|e| (e.key.clone(), e.value.clone()))
+        .collect();
     svc.env = env;
     if svc.source.kind == "git" {
         svc.source.build_args = build_args;
@@ -553,7 +580,7 @@ fn project_service(
     warnings.append(&mut web.warnings);
     svc.ports = web.ports;
 
-    ImportService {
+    let mut out = ImportService {
         key: format!("app:{pid}"),
         source_name,
         builder: if svc.source.kind == "git" {
@@ -565,8 +592,10 @@ fn project_service(
         domains: web.domains,
         warnings,
         importable,
-        existing_id: None,
-    }
+        ..Default::default()
+    };
+    link_databases(&mut out, &pairs, &explicit, dbs, &[]);
+    out
 }
 
 /// The plan from what `gather` read.

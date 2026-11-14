@@ -29,8 +29,8 @@ use serde_json::Value;
 
 use super::{
     Fetch, ImportDatabase, ImportDomain, ImportPlan, ImportProject, ImportService, ImportStack,
-    Platform, Responses, Web, database_action, database_name, database_warnings, health_check,
-    https_repo, plan_service, s, volume,
+    Platform, Responses, Web, database_action, database_name, health_check, https_repo, link_plan,
+    links::DbAddress, plan_service, s, volume,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -181,7 +181,6 @@ fn application(
     a: &Value,
     r: &Responses,
     name: String,
-    dbs: &[ImportDatabase],
     seen: &mut HashSet<String>,
     unreadable: &mut bool,
 ) -> ImportService {
@@ -290,7 +289,6 @@ fn application(
         &mut warnings,
         unreadable,
     );
-    warnings.extend(database_warnings(&env, dbs));
     svc.env = env;
     if svc.source.kind == "git" {
         svc.source.build_args = build;
@@ -393,7 +391,7 @@ fn application(
         domains: web.domains,
         warnings,
         importable,
-        existing_id: None,
+        ..Default::default()
     }
 }
 
@@ -500,6 +498,12 @@ fn database(d: &Value, engine: &str) -> ImportDatabase {
         .as_str()
         .filter(|u| !u.is_empty() && d["is_public"].as_bool() != Some(false));
     let (target, action, note) = database_action(engine, url.is_some(), P);
+    // Inside Coolify's network it's reached by its uuid.
+    let mut address = DbAddress::default();
+    for k in ["internal_db_url", "external_db_url"] {
+        address.add_url(s(d, k));
+    }
+    address.add_host(s(d, "uuid"), internal_port(engine));
     ImportDatabase {
         key: format!("db:{}", s(d, "uuid")),
         source_name: s(d, "name").to_owned(),
@@ -511,7 +515,19 @@ fn database(d: &Value, engine: &str) -> ImportDatabase {
         warnings: note.into_iter().collect(),
         existing_id: None,
         url: url.map(str::to_owned),
-        hosts: vec![s(d, "uuid").to_owned()],
+        address,
+        rest: false,
+    }
+}
+
+/// The port an engine listens on inside the platform's network.
+pub(super) fn internal_port(engine: &str) -> u16 {
+    match engine {
+        "postgres" => 5432,
+        "mysql" | "mariadb" => 3306,
+        "mongodb" => 27017,
+        "clickhouse" => 9000,
+        _ => 6379,
     }
 }
 
@@ -558,14 +574,9 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
             let mut names = HashSet::new();
             for a in arr(&env["applications"]) {
                 let n = super::unique(s(a, "name"), &mut names);
-                project.services.push(application(
-                    a,
-                    r,
-                    n,
-                    &project.databases,
-                    &mut seen_domains,
-                    &mut unreadable,
-                ));
+                project
+                    .services
+                    .push(application(a, r, n, &mut seen_domains, &mut unreadable));
             }
             for sv in arr(&env["services"]) {
                 project
@@ -602,6 +613,9 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
             )),
         }
     }
+    // `real_value` has `{{environment.X}}` and the others resolved: a
+    // database's internal URL there.
+    link_plan(&mut out, &[host.to_owned()]);
     if unreadable {
         out.warnings.push("The token can't read variables' values, so they come over empty. Give it read:sensitive in Coolify.".into());
     }

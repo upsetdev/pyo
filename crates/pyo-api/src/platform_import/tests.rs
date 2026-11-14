@@ -4,6 +4,7 @@
 //! comes from).
 
 use super::*;
+use crate::compose::PlanEnv;
 
 fn fixture(name: &str) -> Responses {
     let text = std::fs::read_to_string(format!(
@@ -37,6 +38,208 @@ fn env<'a>(s: &'a PlanService, key: &str) -> &'a PlanEnv {
 
 fn has(warnings: &[String], part: &str) -> bool {
     warnings.iter().any(|w| w.contains(part))
+}
+
+fn connect(database: &str, env: &[(&str, &str)]) -> ImportConnect {
+    ImportConnect {
+        database: database.to_owned(),
+        env: env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect(),
+    }
+}
+
+// ── Variables that point at the import's databases ───────────────────────────
+
+/// Coolify sends `real_value` with `{{environment.X}}` resolved: read by
+/// what it holds. Its URL inside Coolify (the container's uuid) or from
+/// outside, a host with its port, login and database next to it. A URL to
+/// a container Pyo can't match, or to a database it doesn't import, holds
+/// the deploy. One outside Coolify is left alone.
+#[test]
+fn coolify_database_links() {
+    let mut r = fixture("coolify");
+    let var =
+        |k: &str, v: &str| json!({ "key": k, "value": v, "real_value": v, "is_runtime": true });
+    r.insert(
+        "/applications/a2api/envs".into(),
+        json!([
+            // `{{environment.DATABASE_URL}}` there.
+            json!({ "key": "DB", "value": "{{environment.DATABASE_URL}}", "real_value": "postgresql://postgres:s3cret@d1pg:5432/postgres", "is_runtime": true }),
+            var("DB_PUBLIC", "postgres://postgres:s3cret@203.0.113.7:5433/postgres"),
+            var("PGHOST", "d1pg"),
+            var("PGPORT", "5432"),
+            var("PGUSER", "postgres"),
+            var("PGPASSWORD", "s3cret"),
+            var("PGDATABASE", "postgres"),
+            var("CACHE", "d4redis:6379"),
+            var("EVENTS_URL", "mongodb://u:p@d3mongo:27017/events"),
+            var("OLD_URL", "postgres://u:p@x9gone:5432/app"),
+            var("NEON_URL", "postgres://u:p@ep-1.eu-central-1.aws.neon.tech/app"),
+            var("LOG_LEVEL", "info"),
+        ]),
+    );
+    let plan = coolify::plan(&r, "coolify.example.com");
+    let api = service(&plan.projects[0], "app:a2api");
+    assert_eq!(
+        api.connects,
+        [
+            connect(
+                "db:d1pg",
+                &[
+                    ("DB", "DATABASE_URL"),
+                    ("DB_PUBLIC", "DATABASE_URL"),
+                    ("PGDATABASE", "POSTGRES_DATABASE"),
+                    ("PGHOST", "POSTGRES_HOST"),
+                    ("PGPASSWORD", "POSTGRES_PASSWORD"),
+                    ("PGPORT", "POSTGRES_PORT"),
+                    ("PGUSER", "POSTGRES_USER"),
+                ]
+            ),
+            connect("db:d4redis", &[("CACHE", "REDIS_HOST:REDIS_PORT")]),
+        ]
+    );
+    assert_eq!(
+        api.holds,
+        [
+            "OLD_URL points at a database Pyo couldn't match. Connect one, then deploy.",
+            "EVENTS_URL points at events, which Pyo doesn't import. Connect a database, then deploy.",
+        ]
+    );
+}
+
+/// Dokploy's `${{environment.X}}` comes resolved: the database's
+/// `appName` inside Dokploy, or its external port on the server.
+#[test]
+fn dokploy_database_links() {
+    let mut r = fixture("dokploy");
+    let app = r.get_mut("/application.one?applicationId=appGh01").unwrap();
+    app["env"] = json!(
+        "DATABASE_URL=${{environment.DB}}\nREDIS_URL=redis://default:rpw@blog-sessions-r4t5y6:6379\nFORUM_URL=mysql://forum:fpw@blog-forum-m1n2b3:3306/forum\nOTHER_URL=redis://10.0.0.9:6379\nPUBLIC=postgres://blog:x@dokploy.example.com:5432/blog"
+    );
+    let env = r
+        .get_mut("/environment.one?environmentId=envProd01")
+        .unwrap();
+    env["env"] = json!("DB=postgres://blog:pw@blog-db-a1b2c3:5432/blog");
+    let plan = dokploy::plan(&r, "dokploy.example.com");
+    let web = service(&plan.projects[0], "app:appGh01");
+    assert_eq!(
+        web.connects,
+        [
+            connect(
+                "db:pgMain01",
+                &[("DATABASE_URL", "DATABASE_URL"), ("PUBLIC", "DATABASE_URL")]
+            ),
+            connect("db:redis01", &[("REDIS_URL", "REDIS_URL")]),
+        ]
+    );
+    assert_eq!(
+        web.holds,
+        [
+            "OTHER_URL points at a database Pyo couldn't match. Connect one, then deploy.",
+            "FORUM_URL points at forum-db, which Pyo doesn't import. Connect a database, then deploy.",
+        ]
+    );
+}
+
+/// Railway says it: `${{Postgres.DATABASE_URL}}` is the Postgres
+/// service's URL, `${{Postgres.PGHOST}}` its host. A URL made of its
+/// parts is read as it resolves. A reference to MongoDB, which Pyo
+/// doesn't import, and a `.railway.internal` name of no database hold.
+#[test]
+fn railway_database_links() {
+    let mut r = fixture("railway");
+    let d = &mut r.get_mut("details:prj-shop").unwrap()["data"]["v_0_2"];
+    *d = json!({
+        "QUEUE": "default",
+        "PGHOST": "${{Postgres.PGHOST}}",
+        "PGPASSWORD": "${{Postgres.PGPASSWORD}}",
+        "BUILT": "postgresql://${{Postgres.PGUSER}}:${{Postgres.PGPASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.PGDATABASE}}",
+        "PUBLIC": "${{Postgres.DATABASE_PUBLIC_URL}}",
+        "MYSQL": "${{MySQL.MYSQL_URL}}",
+        "MONGO": "${{MongoDB.MONGO_URL}}",
+        "GONE": "redis://default:x@cache.railway.internal:6379",
+    });
+    let plan = railway::plan(&r);
+    let worker = service(&plan.projects[0], "app:svc-worker@env-prod");
+    assert_eq!(
+        worker.connects,
+        [
+            connect(
+                "db:svc-pg@env-prod",
+                &[
+                    ("BUILT", "DATABASE_URL"),
+                    ("PGHOST", "POSTGRES_HOST"),
+                    ("PGPASSWORD", "POSTGRES_PASSWORD"),
+                    ("PUBLIC", "DATABASE_URL"),
+                ]
+            ),
+            connect("db:svc-mysql@env-prod", &[("MYSQL", "DATABASE_URL")]),
+        ]
+    );
+    assert_eq!(
+        worker.holds,
+        [
+            "GONE points at a database Pyo couldn't match. Connect one, then deploy.",
+            "MONGO points at MongoDB, which Pyo doesn't import. Connect a database, then deploy.",
+        ]
+    );
+    // The value stays as written: the connection replaces it.
+    assert_eq!(
+        env(&worker.service, "MONGO").value,
+        "${{MongoDB.MONGO_URL}}"
+    );
+}
+
+/// Vercel says which store a variable is (`contentHint`), even when its
+/// value is secret. A URL to a store's host is read as it. A KV store
+/// whose REST API is used is made with it.
+#[test]
+fn vercel_database_links() {
+    let mut r = fixture("vercel");
+    let list = r.get_mut("/v10/projects/prj_docs/env").unwrap();
+    let envs = list["envs"].as_array_mut().unwrap();
+    envs.push(json!({ "id": "envd3", "key": "PGHOST", "type": "sensitive", "target": ["production"], "contentHint": { "type": "postgres-host", "storeId": "store_pg1" } }));
+    envs.push(json!({ "id": "envd4", "key": "COPY", "type": "plain", "target": ["production"], "value": "postgres://u:p@ep-cool-1.us-east-1.aws.neon.tech:5432/neondb" }));
+    envs.push(json!({ "id": "envd5", "key": "ELSEWHERE", "type": "plain", "target": ["production"], "value": "postgres://u:p@db.example.org:5432/app" }));
+    let plan = vercel::plan(&r);
+    let docs = plan
+        .projects
+        .iter()
+        .flat_map(|p| &p.services)
+        .find(|s| s.key == "app:prj_docs")
+        .unwrap();
+    assert_eq!(
+        docs.connects,
+        [connect(
+            "db:store_pg1",
+            &[
+                ("COPY", "DATABASE_URL"),
+                ("PGHOST", "POSTGRES_HOST"),
+                ("POSTGRES_URL", "DATABASE_URL")
+            ]
+        )]
+    );
+    assert!(docs.holds.is_empty(), "{:?}", docs.holds);
+    let kv = plan
+        .projects
+        .iter()
+        .flat_map(|p| &p.databases)
+        .find(|d| d.key == "db:store_kv1")
+        .unwrap();
+    assert!(kv.rest);
+}
+
+/// A database the import has but the user didn't pick: the service is held.
+#[test]
+fn a_database_not_brought_holds() {
+    let plan = coolify::plan(&fixture("coolify"), "coolify.example.com");
+    let db = database(&plan.projects[0], "db:d1pg");
+    assert_eq!(
+        links::not_brought(&["DATABASE_URL".into()], db),
+        "DATABASE_URL points at shop-db, which this import doesn't bring. Import it, or connect a database, then deploy."
+    );
 }
 
 #[tokio::test]
@@ -138,8 +341,13 @@ fn coolify_applications() {
         web.service.source.build_args[0].value,
         "https://shop.example.com"
     );
-    // DATABASE_URL still points at the Coolify database's container.
-    assert!(has(&web.warnings, "DATABASE_URL points at shop-db there"));
+    // DATABASE_URL points at the Coolify database's container: Pyo
+    // connects the new one in its place.
+    assert_eq!(
+        web.connects,
+        [connect("db:d1pg", &[("DATABASE_URL", "DATABASE_URL")])]
+    );
+    assert!(web.holds.is_empty());
     // Volumes start empty; a host directory too; a file isn't carried.
     assert_eq!(web.service.volumes.len(), 2);
     assert!(web.service.volumes[1].from_bind);
@@ -317,7 +525,10 @@ fn dokploy_plan() {
         web.service.source.build_args[0].value,
         "https://blog.example.com"
     );
-    assert!(has(&web.warnings, "DATABASE_URL points at blog-db there"));
+    assert_eq!(
+        web.connects,
+        [connect("db:pgMain01", &[("DATABASE_URL", "DATABASE_URL")])]
+    );
     // A preview domain is left out; traefik.me is Dokploy's own.
     let hosts: Vec<&str> = web.domains.iter().map(|d| d.hostname.as_str()).collect();
     assert_eq!(hosts, ["blog.example.com"]);
@@ -572,7 +783,13 @@ fn railway_services() {
         env(&web.service, "DATABASE_URL").value,
         "${{Postgres.DATABASE_URL}}"
     );
-    assert!(has(&web.warnings, "DATABASE_URL points at Postgres there"));
+    assert_eq!(
+        web.connects,
+        [connect(
+            "db:svc-pg@env-prod",
+            &[("DATABASE_URL", "DATABASE_URL")]
+        )]
+    );
     // Sealed: by name, secret and empty.
     let stripe = env(&web.service, "STRIPE_KEY");
     assert!(stripe.secret && stripe.value.is_empty());
@@ -608,7 +825,13 @@ fn railway_services() {
     assert_eq!(api.service.volumes.len(), 1);
     assert_eq!(api.service.volumes[0].mount_path, "/app/uploads");
     assert_eq!(api.service.volumes[0].size_gi, 5);
-    assert!(has(&api.warnings, "REDIS_URL points at Redis there"));
+    assert_eq!(
+        api.connects,
+        [connect(
+            "db:svc-redis@env-prod",
+            &[("REDIS_URL", "REDIS_URL")]
+        )]
+    );
 
     // An image, on a schedule, with no domain; a name made DNS-safe.
     let worker = service(prod, "app:svc-worker@env-prod");
@@ -786,10 +1009,25 @@ fn vercel_plan() {
     assert!(has(&shop.warnings, "Vercel Blob"));
     assert!(has(&shop.warnings, "VERCEL_URL"));
     assert!(has(&shop.warnings, "files from the rest of the repository"));
-    assert!(has(
-        &shop.warnings,
-        "POSTGRES_URL, POSTGRES_URL_NON_POOLING point at Postgres database there"
-    ));
+    assert_eq!(
+        shop.connects,
+        [
+            connect(
+                "db:store_pg1",
+                &[
+                    ("POSTGRES_URL", "DATABASE_URL"),
+                    ("POSTGRES_URL_NON_POOLING", "DATABASE_URL_DIRECT")
+                ]
+            ),
+            connect(
+                "db:store_kv1",
+                &[
+                    ("KV_REST_API_TOKEN", "KV_REST_API_TOKEN"),
+                    ("KV_REST_API_URL", "KV_REST_API_URL")
+                ]
+            ),
+        ]
+    );
 
     // A static framework: its output directory for Railpack, functions noted.
     let docs = service(&plan.projects[1], "app:prj_docs");
@@ -818,10 +1056,10 @@ fn vercel_plan() {
     ));
     // Its store is the shop's: listed once, but noted here too.
     assert!(plan.projects[1].databases.is_empty());
-    assert!(has(
-        &docs.warnings,
-        "POSTGRES_URL points at Postgres database there"
-    ));
+    assert_eq!(
+        docs.connects,
+        [connect("db:store_pg1", &[("POSTGRES_URL", "DATABASE_URL")])]
+    );
 
     // Deployed with the CLI: reported.
     let cli = service(&plan.projects[2], "app:prj_cli");
@@ -1555,5 +1793,208 @@ async fn imports_say_how_they_ended() {
         load_run(&db, &fresh).await.unwrap().unwrap().status,
         "reading"
     );
+    drop_team(&db, &team, &user).await;
+}
+
+/// With deploy on: a service whose DATABASE_URL points at a database of
+/// the import is connected to the new one in place of it, then deployed
+/// once the database is ready. One pointing at a database Pyo can't match,
+/// or at one the import doesn't bring, is held. Importing again connects
+/// nothing twice and deploys nothing again.
+/// Needs Postgres, as above.
+#[tokio::test]
+#[ignore]
+async fn imports_connect_databases_before_the_first_deploy() {
+    let (s, user, team, db) = test_team().await;
+    let run = team.trim_start_matches("team_").to_owned();
+    let host = run.replace('_', "-");
+    let mut r = fixture("coolify");
+    let var =
+        |k: &str, v: &str| json!({ "key": k, "value": v, "real_value": v, "is_runtime": true });
+    r.insert(
+        "/applications/a2api/envs".into(),
+        json!([var("OLD_URL", "postgres://u:p@x9gone:5432/app")]),
+    );
+    // The image's service (a Git one needs a builder to deploy).
+    r.insert(
+        "/applications/a3img/envs".into(),
+        json!([
+            var(
+                "DATABASE_URL",
+                "postgres://postgres:s3cret@d1pg:5432/postgres"
+            ),
+            var("LOG_LEVEL", "info")
+        ]),
+    );
+    r.insert(
+        "/applications/a1web/envs".into(),
+        json!([var("CACHE_URL", "redis://default:x@d4redis:6379")]),
+    );
+    let plan = || {
+        let mut plan = coolify::plan(&r, &format!("{run}.example.com"));
+        for p in &mut plan.projects {
+            for svc in &mut p.services {
+                for d in &mut svc.domains {
+                    d.hostname = format!("{host}.{}", d.hostname);
+                }
+            }
+            // Made empty here: copying data needs a cluster.
+            for d in &mut p.databases {
+                if d.action == "import" {
+                    d.action = "create".into();
+                    d.url = None;
+                }
+            }
+        }
+        plan
+    };
+    // d4redis isn't picked.
+    let items: Vec<String> = ["app:a1web", "app:a2api", "app:a3img", "db:d1pg"]
+        .map(String::from)
+        .to_vec();
+    // The cluster says the database is ready once it's there.
+    let ready = {
+        let (db, team) = (db.clone(), team.clone());
+        tokio::spawn(async move {
+            loop {
+                let _ = sqlx::query("UPDATE pyo.databases SET status = '{\"phase\": \"Ready\"}' WHERE team_id = $1 AND status = '{}'")
+                    .bind(&team)
+                    .execute(&db)
+                    .await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+    };
+    let go = |plan: ImportPlan| {
+        let (s, user, team, items) = (s.clone(), user.clone(), team.clone(), items.clone());
+        async move {
+            let id = new_run(&s, &user, &team, Platform::Coolify, true)
+                .await
+                .unwrap();
+            spawn_run(&s, &user, &id, &team, None, Some(items), true, async move {
+                Ok(plan)
+            });
+            ended(&s, &id).await
+        }
+    };
+
+    let first = go(plan()).await;
+    assert_eq!(first.status, "done", "{first:?}");
+    let by = |run: &ImportRun, k: &str| run.results.iter().find(|r| r.key == k).cloned().unwrap();
+    let pg = by(&first, "db:d1pg");
+    assert_eq!(pg.state, "created", "{pg:?}");
+    let pg_id = pg.id.clone().unwrap();
+
+    // Connected, in place of the old URL, and deployed.
+    let web = by(&first, "app:a3img");
+    assert_eq!(web.state, "created", "{web:?}");
+    assert_eq!(
+        web.connected,
+        [ImportConnected {
+            database: pg.name.clone(),
+            database_id: pg_id.clone(),
+            variables: vec!["DATABASE_URL".into(), "DATABASE_URL_DIRECT".into()],
+        }]
+    );
+    let web_id = web.id.clone().unwrap();
+    let env_of = |id: String| {
+        let db = db.clone();
+        async move {
+            let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            let mut keys: Vec<(String, bool)> = spec["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    (
+                        e["key"].as_str().unwrap().to_owned(),
+                        e["secret"].as_bool().unwrap_or(false),
+                    )
+                })
+                .collect();
+            keys.sort();
+            keys
+        }
+    };
+    let deployments = |id: String| {
+        let db = db.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pyo.deployments WHERE service_id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        }
+    };
+    let env = env_of(web_id.clone()).await;
+    assert_eq!(
+        env.iter()
+            .filter(|(k, _)| k.starts_with("DATABASE_URL"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        [
+            ("DATABASE_URL".to_owned(), true),
+            ("DATABASE_URL_DIRECT".to_owned(), true)
+        ]
+    );
+    let links: Vec<String> =
+        sqlx::query_scalar("SELECT database_id FROM pyo.database_links WHERE service_id = $1")
+            .bind(&web_id)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(links.as_slice(), std::slice::from_ref(&pg_id));
+    assert_eq!(deployments(web_id.clone()).await, 1);
+
+    // Held, saying why, and not deployed.
+    let api = by(&first, "app:a2api");
+    assert_eq!(api.state, "held", "{api:?}");
+    assert_eq!(
+        api.message,
+        "OLD_URL points at a database Pyo couldn't match. Connect one, then deploy."
+    );
+    assert_eq!(deployments(api.id.clone().unwrap()).await, 0);
+    let img = by(&first, "app:a1web");
+    assert_eq!(img.state, "held", "{img:?}");
+    assert!(
+        img.message.contains("which this import doesn't bring"),
+        "{img:?}"
+    );
+    assert_eq!(deployments(img.id.clone().unwrap()).await, 0);
+
+    // Again: nothing twice.
+    let second = go(plan()).await;
+    assert_eq!(second.status, "done", "{second:?}");
+    for r in &second.results {
+        assert_eq!(r.state, "exists", "{r:?}");
+        assert!(r.connected.is_empty(), "{r:?}");
+    }
+    assert_eq!(env_of(web_id.clone()).await, env);
+    assert_eq!(deployments(web_id.clone()).await, 1);
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pyo.database_links WHERE service_id = $1")
+            .bind(&web_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(n, 1);
+
+    ready.abort();
+    sqlx::query("DELETE FROM pyo.deployments WHERE team_id = $1")
+        .bind(&team)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM pyo.databases WHERE team_id = $1")
+        .bind(&team)
+        .execute(&db)
+        .await
+        .unwrap();
     drop_team(&db, &team, &user).await;
 }
