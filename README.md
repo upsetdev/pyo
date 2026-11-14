@@ -120,17 +120,18 @@ them (for example in scripts).
 
 ## Deploy from your terminal
 
-Install the `pyo` CLI from your own Pyo (put its address in place of
-`your-pyo`):
+Install the `pyo` CLI (Linux x86-64), then sign in to your Pyo (put its
+address in place of `your-pyo`):
 
 ```bash
-curl -fsSL https://your-pyo/install/cli.sh | sh
-pyo login     # approve in your browser
+curl -fsSL https://pyo.dev/cli.sh | sh
+pyo login --url https://your-pyo   # approve in your browser
 pyo link      # choose the service this folder deploys
 pyo deploy    # deploy and follow it live
 ```
 
-Run `pyo --help` for logs, environment variables, rollbacks and more.
+Run `pyo upgrade` when it says a new version is out. Run `pyo --help` for
+logs, environment variables, rollbacks and more.
 
 ## Uninstalling
 
