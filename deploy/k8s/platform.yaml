@@ -32,7 +32,15 @@ spec:
   policyTypes: [Ingress]
 ---
 # The dashboard, API and registry door: Pyo's front, with its own logins.
-# The gateway, agents, builders and pyo-host reach it.
+# Only from the gateway's proxies, Pyo's own pods (the worker, the agent,
+# builders, the upgrader, log and traffic collectors), a database import
+# fetching its dump, and the servers themselves (pyo-host's forwards on
+# localhost and the tailnet, kubelet probes). Never from a project's pods:
+# Pyo believes X-Forwarded-For from the pod network, so they'd name any
+# address. A server reaches a pod on another server from its own end of
+# the pod network: the first /31 of its range (k3s gives each server a
+# /24 of 10.42.0.0/16), which pods never get; on its own server, the
+# network policy always lets it in.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -44,7 +52,88 @@ spec:
     matchLabels: { app.kubernetes.io/name: pyo }
   policyTypes: [Ingress]
   ingress:
-    - ports:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: pyo-system }
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: pyo-gateway }
+        # pyo-db-controller's import Jobs, in a team's databases namespace
+        # (dbimport.rs POD_LABEL); never a project's namespace.
+        - namespaceSelector:
+            matchExpressions:
+              - { key: pyo/project-id, operator: DoesNotExist }
+          podSelector:
+            matchLabels: { pyo.dev/component: import }
+      ports:
+        - { port: 8000 }
+        - { port: 5006 }
+    - from: [
+        { ipBlock: { cidr: 10.42.0.0/31 } }, { ipBlock: { cidr: 10.42.1.0/31 } }, { ipBlock: { cidr: 10.42.2.0/31 } }, { ipBlock: { cidr: 10.42.3.0/31 } },
+        { ipBlock: { cidr: 10.42.4.0/31 } }, { ipBlock: { cidr: 10.42.5.0/31 } }, { ipBlock: { cidr: 10.42.6.0/31 } }, { ipBlock: { cidr: 10.42.7.0/31 } },
+        { ipBlock: { cidr: 10.42.8.0/31 } }, { ipBlock: { cidr: 10.42.9.0/31 } }, { ipBlock: { cidr: 10.42.10.0/31 } }, { ipBlock: { cidr: 10.42.11.0/31 } },
+        { ipBlock: { cidr: 10.42.12.0/31 } }, { ipBlock: { cidr: 10.42.13.0/31 } }, { ipBlock: { cidr: 10.42.14.0/31 } }, { ipBlock: { cidr: 10.42.15.0/31 } },
+        { ipBlock: { cidr: 10.42.16.0/31 } }, { ipBlock: { cidr: 10.42.17.0/31 } }, { ipBlock: { cidr: 10.42.18.0/31 } }, { ipBlock: { cidr: 10.42.19.0/31 } },
+        { ipBlock: { cidr: 10.42.20.0/31 } }, { ipBlock: { cidr: 10.42.21.0/31 } }, { ipBlock: { cidr: 10.42.22.0/31 } }, { ipBlock: { cidr: 10.42.23.0/31 } },
+        { ipBlock: { cidr: 10.42.24.0/31 } }, { ipBlock: { cidr: 10.42.25.0/31 } }, { ipBlock: { cidr: 10.42.26.0/31 } }, { ipBlock: { cidr: 10.42.27.0/31 } },
+        { ipBlock: { cidr: 10.42.28.0/31 } }, { ipBlock: { cidr: 10.42.29.0/31 } }, { ipBlock: { cidr: 10.42.30.0/31 } }, { ipBlock: { cidr: 10.42.31.0/31 } },
+        { ipBlock: { cidr: 10.42.32.0/31 } }, { ipBlock: { cidr: 10.42.33.0/31 } }, { ipBlock: { cidr: 10.42.34.0/31 } }, { ipBlock: { cidr: 10.42.35.0/31 } },
+        { ipBlock: { cidr: 10.42.36.0/31 } }, { ipBlock: { cidr: 10.42.37.0/31 } }, { ipBlock: { cidr: 10.42.38.0/31 } }, { ipBlock: { cidr: 10.42.39.0/31 } },
+        { ipBlock: { cidr: 10.42.40.0/31 } }, { ipBlock: { cidr: 10.42.41.0/31 } }, { ipBlock: { cidr: 10.42.42.0/31 } }, { ipBlock: { cidr: 10.42.43.0/31 } },
+        { ipBlock: { cidr: 10.42.44.0/31 } }, { ipBlock: { cidr: 10.42.45.0/31 } }, { ipBlock: { cidr: 10.42.46.0/31 } }, { ipBlock: { cidr: 10.42.47.0/31 } },
+        { ipBlock: { cidr: 10.42.48.0/31 } }, { ipBlock: { cidr: 10.42.49.0/31 } }, { ipBlock: { cidr: 10.42.50.0/31 } }, { ipBlock: { cidr: 10.42.51.0/31 } },
+        { ipBlock: { cidr: 10.42.52.0/31 } }, { ipBlock: { cidr: 10.42.53.0/31 } }, { ipBlock: { cidr: 10.42.54.0/31 } }, { ipBlock: { cidr: 10.42.55.0/31 } },
+        { ipBlock: { cidr: 10.42.56.0/31 } }, { ipBlock: { cidr: 10.42.57.0/31 } }, { ipBlock: { cidr: 10.42.58.0/31 } }, { ipBlock: { cidr: 10.42.59.0/31 } },
+        { ipBlock: { cidr: 10.42.60.0/31 } }, { ipBlock: { cidr: 10.42.61.0/31 } }, { ipBlock: { cidr: 10.42.62.0/31 } }, { ipBlock: { cidr: 10.42.63.0/31 } },
+        { ipBlock: { cidr: 10.42.64.0/31 } }, { ipBlock: { cidr: 10.42.65.0/31 } }, { ipBlock: { cidr: 10.42.66.0/31 } }, { ipBlock: { cidr: 10.42.67.0/31 } },
+        { ipBlock: { cidr: 10.42.68.0/31 } }, { ipBlock: { cidr: 10.42.69.0/31 } }, { ipBlock: { cidr: 10.42.70.0/31 } }, { ipBlock: { cidr: 10.42.71.0/31 } },
+        { ipBlock: { cidr: 10.42.72.0/31 } }, { ipBlock: { cidr: 10.42.73.0/31 } }, { ipBlock: { cidr: 10.42.74.0/31 } }, { ipBlock: { cidr: 10.42.75.0/31 } },
+        { ipBlock: { cidr: 10.42.76.0/31 } }, { ipBlock: { cidr: 10.42.77.0/31 } }, { ipBlock: { cidr: 10.42.78.0/31 } }, { ipBlock: { cidr: 10.42.79.0/31 } },
+        { ipBlock: { cidr: 10.42.80.0/31 } }, { ipBlock: { cidr: 10.42.81.0/31 } }, { ipBlock: { cidr: 10.42.82.0/31 } }, { ipBlock: { cidr: 10.42.83.0/31 } },
+        { ipBlock: { cidr: 10.42.84.0/31 } }, { ipBlock: { cidr: 10.42.85.0/31 } }, { ipBlock: { cidr: 10.42.86.0/31 } }, { ipBlock: { cidr: 10.42.87.0/31 } },
+        { ipBlock: { cidr: 10.42.88.0/31 } }, { ipBlock: { cidr: 10.42.89.0/31 } }, { ipBlock: { cidr: 10.42.90.0/31 } }, { ipBlock: { cidr: 10.42.91.0/31 } },
+        { ipBlock: { cidr: 10.42.92.0/31 } }, { ipBlock: { cidr: 10.42.93.0/31 } }, { ipBlock: { cidr: 10.42.94.0/31 } }, { ipBlock: { cidr: 10.42.95.0/31 } },
+        { ipBlock: { cidr: 10.42.96.0/31 } }, { ipBlock: { cidr: 10.42.97.0/31 } }, { ipBlock: { cidr: 10.42.98.0/31 } }, { ipBlock: { cidr: 10.42.99.0/31 } },
+        { ipBlock: { cidr: 10.42.100.0/31 } }, { ipBlock: { cidr: 10.42.101.0/31 } }, { ipBlock: { cidr: 10.42.102.0/31 } }, { ipBlock: { cidr: 10.42.103.0/31 } },
+        { ipBlock: { cidr: 10.42.104.0/31 } }, { ipBlock: { cidr: 10.42.105.0/31 } }, { ipBlock: { cidr: 10.42.106.0/31 } }, { ipBlock: { cidr: 10.42.107.0/31 } },
+        { ipBlock: { cidr: 10.42.108.0/31 } }, { ipBlock: { cidr: 10.42.109.0/31 } }, { ipBlock: { cidr: 10.42.110.0/31 } }, { ipBlock: { cidr: 10.42.111.0/31 } },
+        { ipBlock: { cidr: 10.42.112.0/31 } }, { ipBlock: { cidr: 10.42.113.0/31 } }, { ipBlock: { cidr: 10.42.114.0/31 } }, { ipBlock: { cidr: 10.42.115.0/31 } },
+        { ipBlock: { cidr: 10.42.116.0/31 } }, { ipBlock: { cidr: 10.42.117.0/31 } }, { ipBlock: { cidr: 10.42.118.0/31 } }, { ipBlock: { cidr: 10.42.119.0/31 } },
+        { ipBlock: { cidr: 10.42.120.0/31 } }, { ipBlock: { cidr: 10.42.121.0/31 } }, { ipBlock: { cidr: 10.42.122.0/31 } }, { ipBlock: { cidr: 10.42.123.0/31 } },
+        { ipBlock: { cidr: 10.42.124.0/31 } }, { ipBlock: { cidr: 10.42.125.0/31 } }, { ipBlock: { cidr: 10.42.126.0/31 } }, { ipBlock: { cidr: 10.42.127.0/31 } },
+        { ipBlock: { cidr: 10.42.128.0/31 } }, { ipBlock: { cidr: 10.42.129.0/31 } }, { ipBlock: { cidr: 10.42.130.0/31 } }, { ipBlock: { cidr: 10.42.131.0/31 } },
+        { ipBlock: { cidr: 10.42.132.0/31 } }, { ipBlock: { cidr: 10.42.133.0/31 } }, { ipBlock: { cidr: 10.42.134.0/31 } }, { ipBlock: { cidr: 10.42.135.0/31 } },
+        { ipBlock: { cidr: 10.42.136.0/31 } }, { ipBlock: { cidr: 10.42.137.0/31 } }, { ipBlock: { cidr: 10.42.138.0/31 } }, { ipBlock: { cidr: 10.42.139.0/31 } },
+        { ipBlock: { cidr: 10.42.140.0/31 } }, { ipBlock: { cidr: 10.42.141.0/31 } }, { ipBlock: { cidr: 10.42.142.0/31 } }, { ipBlock: { cidr: 10.42.143.0/31 } },
+        { ipBlock: { cidr: 10.42.144.0/31 } }, { ipBlock: { cidr: 10.42.145.0/31 } }, { ipBlock: { cidr: 10.42.146.0/31 } }, { ipBlock: { cidr: 10.42.147.0/31 } },
+        { ipBlock: { cidr: 10.42.148.0/31 } }, { ipBlock: { cidr: 10.42.149.0/31 } }, { ipBlock: { cidr: 10.42.150.0/31 } }, { ipBlock: { cidr: 10.42.151.0/31 } },
+        { ipBlock: { cidr: 10.42.152.0/31 } }, { ipBlock: { cidr: 10.42.153.0/31 } }, { ipBlock: { cidr: 10.42.154.0/31 } }, { ipBlock: { cidr: 10.42.155.0/31 } },
+        { ipBlock: { cidr: 10.42.156.0/31 } }, { ipBlock: { cidr: 10.42.157.0/31 } }, { ipBlock: { cidr: 10.42.158.0/31 } }, { ipBlock: { cidr: 10.42.159.0/31 } },
+        { ipBlock: { cidr: 10.42.160.0/31 } }, { ipBlock: { cidr: 10.42.161.0/31 } }, { ipBlock: { cidr: 10.42.162.0/31 } }, { ipBlock: { cidr: 10.42.163.0/31 } },
+        { ipBlock: { cidr: 10.42.164.0/31 } }, { ipBlock: { cidr: 10.42.165.0/31 } }, { ipBlock: { cidr: 10.42.166.0/31 } }, { ipBlock: { cidr: 10.42.167.0/31 } },
+        { ipBlock: { cidr: 10.42.168.0/31 } }, { ipBlock: { cidr: 10.42.169.0/31 } }, { ipBlock: { cidr: 10.42.170.0/31 } }, { ipBlock: { cidr: 10.42.171.0/31 } },
+        { ipBlock: { cidr: 10.42.172.0/31 } }, { ipBlock: { cidr: 10.42.173.0/31 } }, { ipBlock: { cidr: 10.42.174.0/31 } }, { ipBlock: { cidr: 10.42.175.0/31 } },
+        { ipBlock: { cidr: 10.42.176.0/31 } }, { ipBlock: { cidr: 10.42.177.0/31 } }, { ipBlock: { cidr: 10.42.178.0/31 } }, { ipBlock: { cidr: 10.42.179.0/31 } },
+        { ipBlock: { cidr: 10.42.180.0/31 } }, { ipBlock: { cidr: 10.42.181.0/31 } }, { ipBlock: { cidr: 10.42.182.0/31 } }, { ipBlock: { cidr: 10.42.183.0/31 } },
+        { ipBlock: { cidr: 10.42.184.0/31 } }, { ipBlock: { cidr: 10.42.185.0/31 } }, { ipBlock: { cidr: 10.42.186.0/31 } }, { ipBlock: { cidr: 10.42.187.0/31 } },
+        { ipBlock: { cidr: 10.42.188.0/31 } }, { ipBlock: { cidr: 10.42.189.0/31 } }, { ipBlock: { cidr: 10.42.190.0/31 } }, { ipBlock: { cidr: 10.42.191.0/31 } },
+        { ipBlock: { cidr: 10.42.192.0/31 } }, { ipBlock: { cidr: 10.42.193.0/31 } }, { ipBlock: { cidr: 10.42.194.0/31 } }, { ipBlock: { cidr: 10.42.195.0/31 } },
+        { ipBlock: { cidr: 10.42.196.0/31 } }, { ipBlock: { cidr: 10.42.197.0/31 } }, { ipBlock: { cidr: 10.42.198.0/31 } }, { ipBlock: { cidr: 10.42.199.0/31 } },
+        { ipBlock: { cidr: 10.42.200.0/31 } }, { ipBlock: { cidr: 10.42.201.0/31 } }, { ipBlock: { cidr: 10.42.202.0/31 } }, { ipBlock: { cidr: 10.42.203.0/31 } },
+        { ipBlock: { cidr: 10.42.204.0/31 } }, { ipBlock: { cidr: 10.42.205.0/31 } }, { ipBlock: { cidr: 10.42.206.0/31 } }, { ipBlock: { cidr: 10.42.207.0/31 } },
+        { ipBlock: { cidr: 10.42.208.0/31 } }, { ipBlock: { cidr: 10.42.209.0/31 } }, { ipBlock: { cidr: 10.42.210.0/31 } }, { ipBlock: { cidr: 10.42.211.0/31 } },
+        { ipBlock: { cidr: 10.42.212.0/31 } }, { ipBlock: { cidr: 10.42.213.0/31 } }, { ipBlock: { cidr: 10.42.214.0/31 } }, { ipBlock: { cidr: 10.42.215.0/31 } },
+        { ipBlock: { cidr: 10.42.216.0/31 } }, { ipBlock: { cidr: 10.42.217.0/31 } }, { ipBlock: { cidr: 10.42.218.0/31 } }, { ipBlock: { cidr: 10.42.219.0/31 } },
+        { ipBlock: { cidr: 10.42.220.0/31 } }, { ipBlock: { cidr: 10.42.221.0/31 } }, { ipBlock: { cidr: 10.42.222.0/31 } }, { ipBlock: { cidr: 10.42.223.0/31 } },
+        { ipBlock: { cidr: 10.42.224.0/31 } }, { ipBlock: { cidr: 10.42.225.0/31 } }, { ipBlock: { cidr: 10.42.226.0/31 } }, { ipBlock: { cidr: 10.42.227.0/31 } },
+        { ipBlock: { cidr: 10.42.228.0/31 } }, { ipBlock: { cidr: 10.42.229.0/31 } }, { ipBlock: { cidr: 10.42.230.0/31 } }, { ipBlock: { cidr: 10.42.231.0/31 } },
+        { ipBlock: { cidr: 10.42.232.0/31 } }, { ipBlock: { cidr: 10.42.233.0/31 } }, { ipBlock: { cidr: 10.42.234.0/31 } }, { ipBlock: { cidr: 10.42.235.0/31 } },
+        { ipBlock: { cidr: 10.42.236.0/31 } }, { ipBlock: { cidr: 10.42.237.0/31 } }, { ipBlock: { cidr: 10.42.238.0/31 } }, { ipBlock: { cidr: 10.42.239.0/31 } },
+        { ipBlock: { cidr: 10.42.240.0/31 } }, { ipBlock: { cidr: 10.42.241.0/31 } }, { ipBlock: { cidr: 10.42.242.0/31 } }, { ipBlock: { cidr: 10.42.243.0/31 } },
+        { ipBlock: { cidr: 10.42.244.0/31 } }, { ipBlock: { cidr: 10.42.245.0/31 } }, { ipBlock: { cidr: 10.42.246.0/31 } }, { ipBlock: { cidr: 10.42.247.0/31 } },
+        { ipBlock: { cidr: 10.42.248.0/31 } }, { ipBlock: { cidr: 10.42.249.0/31 } }, { ipBlock: { cidr: 10.42.250.0/31 } }, { ipBlock: { cidr: 10.42.251.0/31 } },
+        { ipBlock: { cidr: 10.42.252.0/31 } }, { ipBlock: { cidr: 10.42.253.0/31 } }, { ipBlock: { cidr: 10.42.254.0/31 } }, { ipBlock: { cidr: 10.42.255.0/31 } }
+        ]
+      ports:
         - { port: 8000 }
         - { port: 5006 }
 ---

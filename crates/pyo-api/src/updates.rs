@@ -1195,6 +1195,44 @@ mod tests {
         only_pyo("pyo-databases", 8123);
         only_pyo("registry", 5000);
         only_pyo("pyo-backup-store", 3903);
+        // Pyo's own front: never from a project's pods (Pyo believes
+        // X-Forwarded-For from the pod network). Its own namespace, the
+        // gateway's, import Jobs outside projects, and the servers' own
+        // ends of the pod network only.
+        let front = find("NetworkPolicy", "pyo");
+        let rules = front["spec"]["ingress"].as_array().unwrap();
+        assert_eq!(rules.len(), 2);
+        for r in rules {
+            assert_eq!(r["ports"], json!([{ "port": 8000 }, { "port": 5006 }]));
+            assert!(
+                !r["from"].as_array().unwrap().is_empty(),
+                "never from anywhere"
+            );
+        }
+        assert_eq!(
+            rules[0]["from"],
+            json!([
+                { "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "pyo-system" } } },
+                { "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": pyo_proto::system::GATEWAY_NS } } },
+                {
+                    "namespaceSelector": { "matchExpressions": [{ "key": pyo_proto::rbac::PROJECT_LABEL, "operator": "DoesNotExist" }] },
+                    "podSelector": { "matchLabels": { pyo_proto::dbimport::POD_LABEL.0: pyo_proto::dbimport::POD_LABEL.1 } },
+                },
+            ])
+        );
+        let servers: Vec<String> = rules[1]["from"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["ipBlock"]["cidr"].as_str().unwrap().to_owned())
+            .collect();
+        let mut every: Vec<String> = (0..256).map(|n| format!("10.42.{n}.0/24")).collect();
+        every.sort();
+        let mut want = pyo_proto::system::tailnet_server_cidrs(every.iter().map(String::as_str));
+        let mut have = servers.clone();
+        want.sort();
+        have.sort();
+        assert_eq!(have, want, "each server's first /31, which pods never get");
         // The registry isn't on the host's network; the tailnet gets only the door.
         let registry = find("Deployment", "registry");
         assert!(registry["spec"]["template"]["spec"]["hostNetwork"].is_null());
