@@ -2,7 +2,7 @@
 # Makes this machine a Pyo cluster: k3s (if it isn't installed) and the
 # Pyo agent. Pyo's "Add cluster" gives you the full command, e.g.:
 #
-#   curl -fsSL https://your-pyo/install/connect.sh | sudo bash -s -- \
+#   curl -fsSL https://your-pyo/install/connect.sh | bash -s -- \
 #     --api http://pyo.tail1234.ts.net:8000 --token 3f9a... [--tailscale-key tskey-auth-...] \
 #     [--registry pyo.tail1234.ts.net:5005 --registry-token 9b1c...]
 #
@@ -15,13 +15,39 @@
 # Or removes what Pyo put into this cluster, leaving the cluster itself
 # (k3s stays):
 #
-#   curl -fsSL https://your-pyo/install/connect.sh | sudo bash -s -- --uninstall
+#   curl -fsSL https://your-pyo/install/connect.sh | bash -s -- --uninstall
 #
 #   --keep-data      keep project namespaces, databases and their volumes;
 #                    the volumes of what's removed keep their data on disk
 #   --yes            don't ask first
 #   --dry-run        only say what it would delete
 # With KUBECONFIG set, it uses kubectl and that cluster instead of k3s's.
+# >>> pyo:become-root (the same in connect.sh and join.sh)
+# Root, through sudo when it isn't: the script runs again as root, with
+# the same arguments and Tailscale key. Run from a file, sudo runs that
+# file. Piped into bash (curl ... | bash), the new shell reads the rest of
+# the script from the same pipe, where bash left it: just after the line
+# that calls this. So it's called before anything else runs, and before
+# `set -euo pipefail`, which the rest sets again.
+become_root() {
+  [ "$(id -u)" = 0 ] && return 0
+  if ! command -v sudo >/dev/null; then
+    echo "Pyo needs root, and there's no sudo here. Run this as root." >&2
+    exit 1
+  fi
+  local self=${BASH_SOURCE[1]:-}
+  echo "Pyo needs root. Asking sudo..." >&2
+  if [ -n "$self" ] && [ -f "$self" ]; then
+    exec sudo env TS_AUTHKEY="${TS_AUTHKEY:-}" bash "$self" "$@"
+  elif [ ! -t 0 ]; then
+    exec sudo env TS_AUTHKEY="${TS_AUTHKEY:-}" bash -s -- "$@"
+  fi
+  echo "Run this as root (sudo)." >&2
+  exit 1
+}
+# <<< pyo:become-root
+# --uninstall uses kubectl as you with KUBECONFIG set, or without k3s here.
+case " $* " in *" --uninstall "*) [ -n "${KUBECONFIG:-}" ] || ! command -v k3s >/dev/null || become_root "$@" ;; *) become_root "$@" ;; esac
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 

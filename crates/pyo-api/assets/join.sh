@@ -2,7 +2,7 @@
 # Joins this machine to a Pyo cluster as a server (k3s agent).
 # Pyo's "Add server" gives you the full command, e.g.:
 #
-#   curl -fsSL https://your-pyo/install/join.sh | sudo bash -s -- \
+#   curl -fsSL https://your-pyo/install/join.sh | bash -s -- \
 #     --server pyo.tail1234.ts.net --token abc123.0123456789abcdef --name sg-1 \
 #     --k3s v1.36.5+k3s1 [--tailscale-key tskey-auth-...] \
 #     [--registry pyo.tail1234.ts.net:5005 --registry-token 9b1c...]
@@ -15,6 +15,31 @@
 #   --builder        a build-only server: only Pyo's builder runs on it
 #   --registry       Pyo's registry door, for images Pyo builds
 #   --registry-token the cluster's login there (pull only)
+# >>> pyo:become-root (the same in connect.sh and join.sh)
+# Root, through sudo when it isn't: the script runs again as root, with
+# the same arguments and Tailscale key. Run from a file, sudo runs that
+# file. Piped into bash (curl ... | bash), the new shell reads the rest of
+# the script from the same pipe, where bash left it: just after the line
+# that calls this. So it's called before anything else runs, and before
+# `set -euo pipefail`, which the rest sets again.
+become_root() {
+  [ "$(id -u)" = 0 ] && return 0
+  if ! command -v sudo >/dev/null; then
+    echo "Pyo needs root, and there's no sudo here. Run this as root." >&2
+    exit 1
+  fi
+  local self=${BASH_SOURCE[1]:-}
+  echo "Pyo needs root. Asking sudo..." >&2
+  if [ -n "$self" ] && [ -f "$self" ]; then
+    exec sudo env TS_AUTHKEY="${TS_AUTHKEY:-}" bash "$self" "$@"
+  elif [ ! -t 0 ]; then
+    exec sudo env TS_AUTHKEY="${TS_AUTHKEY:-}" bash -s -- "$@"
+  fi
+  echo "Run this as root (sudo)." >&2
+  exit 1
+}
+# <<< pyo:become-root
+become_root "$@"
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 

@@ -195,7 +195,7 @@ fn q(s: &str) -> String {
 
 pub fn command(base: &str, j: &Join) -> String {
     let mut c = format!(
-        "curl -fsSL {base}/join.sh | sudo bash -s -- --server {} --token {} --name {}",
+        "curl -fsSL {base}/join.sh | bash -s -- --server {} --token {} --name {}",
         q(j.server_ip),
         q(j.token),
         q(j.server_name)
@@ -236,7 +236,7 @@ pub fn connect_command(
     registry: Option<(&str, &str)>,
 ) -> String {
     let mut c = format!(
-        "curl -fsSL {base}/connect.sh | sudo bash -s -- --api {} --token {}",
+        "curl -fsSL {base}/connect.sh | bash -s -- --api {} --token {}",
         q(api),
         q(token)
     );
@@ -253,7 +253,7 @@ pub fn connect_command(
 /// with Pyo's: connect.sh run on the cluster's first server, which reads
 /// Pyo's address and the token from the agent already there.
 pub fn refresh_command(base: &str) -> String {
-    format!("curl -fsSL {base}/connect.sh | sudo bash")
+    format!("curl -fsSL {base}/connect.sh | bash")
 }
 
 /// GET /install/join.sh
@@ -458,6 +458,12 @@ mod tests {
                 "{file}'s small_machine differs from connect.sh's"
             );
         }
+        // How both become root.
+        assert_eq!(
+            block("become-root", "join.sh", SCRIPT),
+            block("become-root", "connect.sh", CONNECT_SCRIPT),
+            "join.sh's become_root differs from connect.sh's"
+        );
         // How both find Pyo's (or the control plane's) tailnet name.
         assert_eq!(
             block("tailnet-host", "join.sh", SCRIPT),
@@ -538,7 +544,7 @@ mod tests {
         );
         assert_eq!(
             c,
-            "curl -fsSL https://pyo.dev/join.sh | sudo bash -s -- --server '100.64.0.1' --token 'abc123.0123456789abcdef' --name 'sg-1' --k3s 'v1.36.5+k3s1'"
+            "curl -fsSL https://pyo.dev/join.sh | bash -s -- --server '100.64.0.1' --token 'abc123.0123456789abcdef' --name 'sg-1' --k3s 'v1.36.5+k3s1'"
         );
         let c = command(
             "https://x",
@@ -566,11 +572,11 @@ mod tests {
                 None,
                 Some(("100.64.0.1:5005", "def"))
             ),
-            "curl -fsSL https://pyo.dev/connect.sh | sudo bash -s -- --api 'http://100.64.0.1:8000' --token 'abc' --registry '100.64.0.1:5005' --registry-token 'def'"
+            "curl -fsSL https://pyo.dev/connect.sh | bash -s -- --api 'http://100.64.0.1:8000' --token 'abc' --registry '100.64.0.1:5005' --registry-token 'def'"
         );
         assert_eq!(
             refresh_command("https://pyo.dev"),
-            "curl -fsSL https://pyo.dev/connect.sh | sudo bash"
+            "curl -fsSL https://pyo.dev/connect.sh | bash"
         );
     }
 
@@ -620,7 +626,7 @@ mod tests {
         );
         assert_eq!(
             c,
-            "curl -fsSL http://server-1.tail1234.ts.net:8000/install/join.sh | sudo bash -s -- --server 'server-1.tail1234.ts.net' --token 't' --name 'server-2' --registry 'server-1.tail1234.ts.net:5005' --registry-token 'tok'"
+            "curl -fsSL http://server-1.tail1234.ts.net:8000/install/join.sh | bash -s -- --server 'server-1.tail1234.ts.net' --token 't' --name 'server-2' --registry 'server-1.tail1234.ts.net:5005' --registry-token 'tok'"
         );
         let api = named("http://100.64.0.1:8000");
         assert!(secure_transport(&api));
@@ -636,7 +642,7 @@ mod tests {
                 None,
                 Some((&named("100.64.0.1:5005"), "def"))
             ),
-            "curl -fsSL http://server-1.tail1234.ts.net:8000/install/connect.sh | sudo bash -s -- --api 'http://server-1.tail1234.ts.net:8000' --token 'abc' --registry 'server-1.tail1234.ts.net:5005' --registry-token 'def'"
+            "curl -fsSL http://server-1.tail1234.ts.net:8000/install/connect.sh | bash -s -- --api 'http://server-1.tail1234.ts.net:8000' --token 'abc' --registry 'server-1.tail1234.ts.net:5005' --registry-token 'def'"
         );
     }
 
@@ -743,7 +749,7 @@ mod tests {
             assert_eq!(local_scripts_url(), "http://127.0.0.1:8000/install");
             assert_eq!(
                 connect_command(&local_scripts_url(), &local_api_url(), "abc", None, None),
-                "curl -fsSL http://127.0.0.1:8000/install/connect.sh | sudo bash -s -- --api 'http://127.0.0.1:8000' --token 'abc'"
+                "curl -fsSL http://127.0.0.1:8000/install/connect.sh | bash -s -- --api 'http://127.0.0.1:8000' --token 'abc'"
             );
         }
     }
@@ -1021,6 +1027,144 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
                 "{file} doesn't run it on k3s-agent"
             );
             assert!(script.contains(install), "{file} doesn't set it up");
+        }
+    }
+
+    /// Not root: connect.sh and join.sh run again through sudo, with their
+    /// arguments and Tailscale key, from their file or, piped into bash, from
+    /// the rest of the pipe. As root, they go straight on. Commands people
+    /// copy pipe into plain bash.
+    #[test]
+    fn scripts_ask_sudo_for_root() {
+        let dir = std::env::temp_dir().join(format!("pyo-sudo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let d = dir.display();
+        // id says root only under the stub sudo, which notes how it was run.
+        let write = |name: &str, body: &str| {
+            let path = dir.join("bin").join(name);
+            std::fs::write(&path, body).unwrap();
+            std::process::Command::new("chmod")
+                .arg("755")
+                .arg(&path)
+                .status()
+                .unwrap();
+        };
+        write(
+            "id",
+            "#!/bin/sh\nif [ -n \"$STUB_ROOT\" ]; then echo 0; else echo 1000; fi\n",
+        );
+        write(
+            "sudo",
+            &format!(
+                "#!/bin/sh\necho \"sudo $*\" >> {d}/sudo.log\nexport STUB_ROOT=1\nexec \"$@\"\n"
+            ),
+        );
+        // Nothing else on the PATH but what the scripts' start runs, so
+        // "no sudo" is no sudo.
+        for tool in ["bash", "cat", "env"] {
+            let found = std::process::Command::new("sh")
+                .args(["-c", &format!("command -v {tool}")])
+                .output()
+                .unwrap();
+            let found = String::from_utf8(found.stdout).unwrap();
+            std::os::unix::fs::symlink(found.trim(), dir.join("bin").join(tool)).unwrap();
+        }
+        // The script's own start, then what shows it ran (as root or not).
+        let rest = "echo \"ran as $(id -u): $* [${TS_AUTHKEY:-}] opts=$-\"\n";
+        for (file, script, call) in [
+            ("connect.sh", CONNECT_SCRIPT, "set -euo pipefail\n"),
+            ("join.sh", SCRIPT, "set -euo pipefail\n"),
+        ] {
+            let start = &script[..script.find(call).expect(file) + call.len()];
+            let path = dir.join(file);
+            std::fs::write(&path, format!("{start}{rest}")).unwrap();
+            let run = |how: &str, root: bool| {
+                let _ = std::fs::remove_file(dir.join("sudo.log"));
+                let out = std::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(how)
+                    .env("PATH", format!("{d}/bin"))
+                    .env("TS_AUTHKEY", "tskey-1")
+                    .env("STUB_ROOT", if root { "1" } else { "" })
+                    .env_remove("KUBECONFIG")
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap();
+                let sudo = std::fs::read_to_string(dir.join("sudo.log")).unwrap_or_default();
+                (
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                    sudo,
+                )
+            };
+            let p = path.display();
+            // Piped, as people run it.
+            let (out, err, sudo) = run(
+                &format!("cat {p} | bash -s -- --api 'http://a b' --token t"),
+                false,
+            );
+            assert_eq!(
+                out.trim(),
+                "ran as 0: --api http://a b --token t [tskey-1] opts=ehuBs",
+                "{file}: {err}"
+            );
+            assert!(err.contains("Pyo needs root. Asking sudo..."), "{err}");
+            assert_eq!(sudo.lines().count(), 1, "{file}: {sudo}");
+            assert!(
+                sudo.contains("env TS_AUTHKEY=tskey-1 bash -s -- --api"),
+                "{sudo}"
+            );
+            // From a file.
+            let (out, _, sudo) = run(&format!("bash {p} --name x"), false);
+            assert_eq!(
+                out.trim(),
+                "ran as 0: --name x [tskey-1] opts=ehuB",
+                "{file}"
+            );
+            assert!(sudo.contains(&format!("bash {p} --name x")), "{sudo}");
+            // As root: no sudo.
+            let (out, _, sudo) = run(&format!("cat {p} | bash -s -- --name x"), true);
+            assert_eq!(
+                out.trim(),
+                "ran as 0: --name x [tskey-1] opts=ehuBs",
+                "{file}"
+            );
+            assert_eq!(sudo, "", "{file}");
+            // No sudo to ask: it says so.
+            std::fs::rename(dir.join("bin/sudo"), dir.join("bin/nosudo")).unwrap();
+            let (out, err, _) = run(&format!("cat {p} | bash"), false);
+            assert_eq!(out, "", "{file}");
+            assert!(err.contains("there's no sudo here"), "{err}");
+            std::fs::rename(dir.join("bin/nosudo"), dir.join("bin/sudo")).unwrap();
+        }
+        // connect.sh --uninstall with KUBECONFIG: kubectl as you, no sudo.
+        let p = dir.join("connect.sh");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("cat {} | bash -s -- --uninstall", p.display()))
+            .env("PATH", format!("{d}/bin"))
+            .env("KUBECONFIG", "/dev/null")
+            .env("STUB_ROOT", "")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "ran as 1000: --uninstall [] opts=ehuBs"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // The commands people copy.
+        for c in [
+            refresh_command("https://pyo.example/install"),
+            connect_command(
+                "https://pyo.example/install",
+                "https://pyo.example",
+                "t",
+                None,
+                None,
+            ),
+        ] {
+            assert!(c.contains(" | bash") && !c.contains("sudo"), "{c}");
         }
     }
 
