@@ -358,10 +358,7 @@ pub async fn save(s: &AppState, team_id: &str, token: &str) -> ApiResult<Value> 
     }
     needs_tailscale(&s.db).await?;
     let locations = hetzner::Hetzner::new(token)?.locations().await?;
-    let sealed = crate::vault::get()
-        .seal(team_id, token)
-        .await
-        .map_err(anyhow::Error::from)?;
+    let sealed = crate::vault::get().seal(team_id, token).await?;
     if !crate::vault::Vault::is_sealed(&sealed) {
         return Err(ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
