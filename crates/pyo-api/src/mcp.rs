@@ -699,8 +699,10 @@ async fn log_call(
 /// Arguments as logged: environment variable values, passwords, keys and
 /// the like may be secrets.
 fn redacted(args: &Value) -> Value {
-    const SECRET: [&str; 7] = [
+    const SECRET: [&str; 8] = [
         "password",
+        // A Cloudflare or platform API token.
+        "token",
         "adminPassword",
         "secret",
         "secretKey",
@@ -1427,6 +1429,12 @@ mod tests {
             ),
             (Some("•••"), Some("•••"), Some("n"))
         );
+        // connect_cloudflare's token.
+        let a = redacted(
+            &json!({ "op": "connectCloudflare", "teamId": "team_a", "token": "cf-secret" }),
+        );
+        assert_eq!(a["token"], "•••");
+        assert_eq!(a["teamId"], "team_a");
     }
 
     fn user(access: Option<KeyAccess>) -> User {
