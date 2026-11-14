@@ -457,7 +457,7 @@ k3s_install() {
 K3S_MEMORY_CONFIG=/etc/rancher/k3s/config.yaml.d/50-pyo-memory.yaml
 K3S_MEMORY_CHANGED=""
 small_machine() {
-  local env before
+  local env before zram_was=""
   # What k3s runs with now: kubelet's reservations and its GOMEMLIMIT.
   before=$(cat "$K3S_MEMORY_CONFIG" /run/pyo-k3s.env 2>/dev/null || true)
   mkdir -p /etc/systemd/system/k3s.service.d
@@ -536,11 +536,13 @@ MEMORY
     'ExecStart=/usr/local/lib/pyo-memory.sh zram-start' 'ExecStop=/usr/local/lib/pyo-memory.sh zram-stop' \
     '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/pyo-zram.service
   systemctl daemon-reload
+  # Said only when it turns on here, not when it's on already.
+  [ ! -f /run/pyo-zram ] || zram_was=1
   systemctl enable --now pyo-zram.service >/dev/null 2>&1 || echo "Couldn't set up compressed swap (zram); going on without it." >&2
   env=$(/usr/local/lib/pyo-memory.sh k3s-env)
   [ -z "$env" ] || echo "A small machine: k3s gets $env."
   /usr/local/lib/pyo-memory.sh k3s-config "$K3S_MEMORY_CONFIG" || true
-  [ ! -f /run/pyo-zram ] || echo "Turned on compressed swap in memory (zram)."
+  [ -n "$zram_was" ] || [ ! -f /run/pyo-zram ] || echo "Turned on compressed swap in memory (zram)."
   [ "$before" = "$(cat "$K3S_MEMORY_CONFIG" 2>/dev/null; [ -z "$env" ] || echo "$env")" ] || K3S_MEMORY_CHANGED=1
 }
 # The same on a k3s that's already installed (k3s.service). k3s uses what

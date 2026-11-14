@@ -880,10 +880,9 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
     /// Run again on a k3s that's installed (the connect command, install.sh,
     /// setup-host.sh), small_machine brings the memory reserve up to date,
     /// and k3s restarts only when what it runs with changed.
-    #[test]
-    fn existing_k3s_restarts_only_for_a_new_memory_reserve() {
-        let dir = std::env::temp_dir().join(format!("pyo-refresh-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+    /// connect.sh's small-machine block with its files under `dir`.
+    fn sandboxed_small_machine(dir: &std::path::Path) -> String {
+        let _ = std::fs::remove_dir_all(dir);
         std::fs::create_dir_all(dir.join("run")).unwrap();
         let d = dir.display();
         let block = script_block("small-machine", CONNECT_SCRIPT)
@@ -895,6 +894,14 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
                 &format!("{d}/config.yaml.d/50-pyo-memory.yaml"),
             );
         assert!(!block.contains("/etc/") && !block.contains(" /run/"));
+        block
+    }
+
+    #[test]
+    fn existing_k3s_restarts_only_for_a_new_memory_reserve() {
+        let dir = std::env::temp_dir().join(format!("pyo-refresh-{}", std::process::id()));
+        let block = sandboxed_small_machine(&dir);
+        let d = dir.display();
         let run = |mem: u64, steps: &str| {
             let (code, out, err) = bash(&format!(
                 "set -euo pipefail\nsystemctl() {{ [ \"$1\" != restart ] || echo RESTART; }}\n{block}\n\
@@ -942,6 +949,33 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
         assert!(CONNECT_SCRIPT.contains(
             "if [ -n \"$REGISTRY\" ] || [ -n \"$GPU_TOOLKIT_NEW\" ] || [ -n \"$K3S_MEMORY_CHANGED\" ]; then systemctl restart k3s"
         ));
+    }
+
+    /// "Turned on compressed swap" only when it turns on here, not when
+    /// it was on already (the connect command run again).
+    #[test]
+    fn zram_is_reported_only_when_it_turns_on() {
+        let dir = std::env::temp_dir().join(format!("pyo-zram-{}", std::process::id()));
+        let block = sandboxed_small_machine(&dir);
+        let d = dir.display();
+        let run = |steps: &str| {
+            let (code, out, err) = bash(&format!(
+                "set -euo pipefail\n\
+                 systemctl() {{ [ \"$*\" != 'enable --now pyo-zram.service' ] || echo /dev/zram0 > {d}/run/pyo-zram; }}\n\
+                 {block}\nexport PYO_MEMINFO={d}/meminfo; echo 'MemTotal: 1973000 kB' > $PYO_MEMINFO\n{steps}"
+            ));
+            assert_eq!(code, 0, "{err}");
+            out
+        };
+        let said = "Turned on compressed swap in memory (zram).";
+        assert!(run("small_machine").contains(said));
+        // On already: the unit was running, and enabling it changes nothing.
+        assert!(!run("small_machine").contains(said));
+        let again = run(&format!(
+            "rm {d}/run/pyo-zram; small_machine; small_machine"
+        ));
+        assert_eq!(again.matches(said).count(), 1, "{again}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
