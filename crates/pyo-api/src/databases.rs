@@ -927,6 +927,9 @@ pub struct Create {
     pub read_replicas: Option<i32>,
     /// Postgres: extensions turned on with it.
     pub extensions: Vec<String>,
+    /// Made by an import from another platform: where it came from
+    /// (platform_import), saved with it so a second import finds it.
+    pub imported_from: Option<Value>,
 }
 
 pub async fn create(
@@ -1050,8 +1053,8 @@ pub async fn create(
         extensions: json!(extensions),
     };
     sqlx::query(
-        "INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, pooler, rest, namespace, password, token, readonly_token, created_by, restore, restored_from, read_replicas, cpu_millis, memory_mi, extensions)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)",
+        "INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, pooler, rest, namespace, password, token, readonly_token, created_by, restore, restored_from, read_replicas, cpu_millis, memory_mi, extensions, imported_from)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)",
     )
     .bind(&db.id)
     .bind(&db.team_id)
@@ -1075,6 +1078,7 @@ pub async fn create(
     .bind(db.cpu_millis)
     .bind(db.memory_mi)
     .bind(&db.extensions)
+    .bind(&c.imported_from)
     .execute(&mut **tx)
     .await?;
     // The cluster's first database sets databases up there; it's sent once
@@ -1619,6 +1623,7 @@ pub async fn restore(
             read_replicas: None,
             // Its data has their objects: their libraries load with it.
             extensions: serde_json::from_value(src.extensions.clone()).unwrap_or_default(),
+            imported_from: None,
         },
     )
     .await?;

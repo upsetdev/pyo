@@ -5134,6 +5134,7 @@ async fn apply(
                     memory_mi,
                     read_replicas,
                     extensions: extensions.unwrap_or_default(),
+                    imported_from: None,
                 },
             )
             .await?;

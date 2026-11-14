@@ -365,6 +365,11 @@ pub struct StartImport {
     /// Or a dump uploaded first (`createDatabaseDumpUpload`, then its file sent).
     #[serde(default)]
     upload_id: Option<String>,
+    /// A new database made by an import from another platform: where it
+    /// came from, saved with it. Set by platform_import, never by a request.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) imported_from: Option<Value>,
 }
 
 /// The database imported into, as far as an import needs it.
@@ -825,6 +830,7 @@ pub async fn start(
                 memory_mi: n.memory_mi,
                 read_replicas: n.read_replicas,
                 extensions,
+                imported_from: req.imported_from.clone(),
             },
         )
         .await?;

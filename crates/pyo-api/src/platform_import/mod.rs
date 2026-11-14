@@ -37,7 +37,12 @@ mod vercel;
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    routing::{get, post},
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -57,7 +62,8 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/platform-imports/preview", post(preview))
-        .route("/platform-imports", post(apply))
+        .route("/platform-imports", post(apply).get(list_runs))
+        .route("/platform-imports/{id}", get(get_run))
 }
 
 /// Previews and imports per person, in 15 minutes: each one reads the
@@ -1194,7 +1200,7 @@ pub struct ApplyBody {
 }
 
 /// What became of one picked thing.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportResult {
     pub key: String,
@@ -1228,48 +1234,336 @@ fn result(key: &str, name: &str, state: &str, message: impl Into<String>) -> Imp
     }
 }
 
+/// One thing an import makes, listed once the platform is read.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportItem {
+    pub key: String,
+    pub name: String,
+    /// "service", "stack" or "database".
+    pub kind: String,
+}
+
+/// An import, as it runs on the server and once it's done.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportRun {
+    pub id: String,
+    pub team_id: String,
+    pub platform: String,
+    /// "reading" (the platform), "importing", "done", "failed" (`error` says why) or "interrupted" (Pyo restarted during it: import again, what's there is skipped).
+    pub status: String,
+    pub deploy: bool,
+    /// What it makes, once the platform is read.
+    pub items: Vec<ImportItem>,
+    /// What became of each item, as each one finishes.
+    pub results: Vec<ImportResult>,
+    #[serde(default)]
+    pub error: String,
+    pub created_by: String,
+    /// Unix milliseconds.
+    pub created_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+/// A run still reading or importing whose heartbeat stopped for this long
+/// was cut off (its process restarted).
+const STALE: &str = "2 minutes";
+/// How often a running import says it's alive.
+const HEARTBEAT: Duration = Duration::from_secs(20);
+
+#[derive(sqlx::FromRow)]
+struct RunRow {
+    id: String,
+    team_id: String,
+    platform: String,
+    status: String,
+    deploy: bool,
+    items: Value,
+    results: Value,
+    error: String,
+    created_by: String,
+    created_at: i64,
+    finished_at: Option<i64>,
+}
+
+impl From<RunRow> for ImportRun {
+    fn from(r: RunRow) -> Self {
+        ImportRun {
+            id: r.id,
+            team_id: r.team_id,
+            platform: r.platform,
+            status: r.status,
+            deploy: r.deploy,
+            items: serde_json::from_value(r.items).unwrap_or_default(),
+            results: serde_json::from_value(r.results).unwrap_or_default(),
+            error: r.error,
+            created_by: r.created_by,
+            created_at: r.created_at,
+            finished_at: r.finished_at,
+        }
+    }
+}
+
+fn runs_query(filter: &str) -> String {
+    format!(
+        "SELECT id, team_id, platform,
+            CASE WHEN status IN ('reading', 'importing') AND updated_at < now() - interval '{STALE}'
+                 THEN 'interrupted' ELSE status END AS status,
+            deploy, items, results, error, created_by,
+            (extract(epoch FROM created_at) * 1000)::bigint AS created_at,
+            (extract(epoch FROM finished_at) * 1000)::bigint AS finished_at
+         FROM pyo.platform_imports WHERE {filter}"
+    )
+}
+
+async fn load_run(db: &sqlx::PgPool, id: &str) -> ApiResult<Option<ImportRun>> {
+    let row: Option<RunRow> = sqlx::query_as(sqlx::AssertSqlSafe(runs_query("id = $1")))
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.map(Into::into))
+}
+
+/// Adds results to a run as they come.
+async fn record(db: &sqlx::PgPool, run: Option<&str>, results: &[ImportResult]) {
+    let Some(run) = run else { return };
+    if results.is_empty() {
+        return;
+    }
+    if let Err(e) = sqlx::query(
+        "UPDATE pyo.platform_imports SET results = results || $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(run)
+    .bind(json!(results))
+    .execute(db)
+    .await
+    {
+        tracing::warn!(run, error = %e, "platform import: result not recorded");
+    }
+}
+
 /// Import from another platform
 ///
-/// Reads the platform again (as `previewPlatformImport`) and creates the
-/// picked things (`items`, all by default): a project per project there,
-/// its services with their variables (secret ones sealed), domains (live
-/// after the first deploy), ports and empty volumes, a project per Compose
-/// stack, and databases. A Postgres or MySQL database reachable from
-/// outside the platform is copied by a database import; others are made
-/// empty or left for you. Services aren't deployed unless `deploy`.
-/// Running it again skips what an earlier import made. Owners and admins.
+/// Starts an import and answers at once with it (`getPlatformImport` follows
+/// it). On the server, whatever happens to this request, Pyo reads the
+/// platform again (as `previewPlatformImport`) and creates the picked
+/// things (`items`, all by default): a project per project there, its
+/// services with their variables (secret ones sealed), domains (live after
+/// the first deploy), ports and empty volumes, a project per Compose stack,
+/// and databases. A Postgres or MySQL database reachable from outside the
+/// platform is copied by a database import. Others are made empty or left
+/// for you. Services aren't deployed unless `deploy`. Running it again
+/// skips what an earlier import made. The token is kept in memory for the
+/// import only, never stored. Owners and admins.
 #[utoipa::path(post, path = "/platform-imports", operation_id = "startPlatformImport", tag = "Projects",
     request_body = ApplyBody,
     responses(
-        (status = 200, description = "What became of each picked thing.", body = ImportOutcome),
-        (status = 400, description = "The address, token or cluster isn't usable.", body = ErrorBody),
+        (status = 202, description = "Started: the import, `reading` at first.", body = ImportRun),
         (status = 403, description = "You aren't an owner or admin of the team, or the API key can't make changes.", body = ErrorBody),
         (status = 429, description = "Too many imports for now.", body = ErrorBody),
-        (status = 502, description = "The platform couldn't be reached or refused the token.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("full"))))]
 pub async fn apply(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
     Json(b): Json<ApplyBody>,
-) -> ApiResult<Json<ImportOutcome>> {
+) -> ApiResult<(StatusCode, Json<ImportRun>)> {
     allowed(&s, &user, &b.team_id).await?;
-    let plan = read(b.platform, &b.url, &b.token, b.team.as_deref()).await?;
-    let out = create(
-        &s,
-        &user,
+    let id = start(&s, &user, b).await?;
+    let run = load_run(&s.db, &id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Import"))?;
+    Ok((StatusCode::ACCEPTED, Json(run)))
+}
+
+/// Records an import and runs it in a task of its own: a client that goes
+/// away (a closed tab, a dropped connection) can't stop it half done.
+async fn start(s: &AppState, user: &User, b: ApplyBody) -> ApiResult<String> {
+    let id = new_run(s, user, &b.team_id, b.platform, b.deploy).await?;
+    let (platform, url, token, team) = (b.platform, b.url, b.token, b.team);
+    spawn_run(
+        s,
+        user,
+        &id,
         &b.team_id,
-        b.cluster_id.clone(),
-        plan,
-        b.items.as_deref(),
+        b.cluster_id,
+        b.items,
         b.deploy,
+        async move { read(platform, &url, &token, team.as_deref()).await },
+    );
+    Ok(id)
+}
+
+/// Runs import `id` in a task of its own, from the plan `plan` gives.
+#[allow(clippy::too_many_arguments)]
+fn spawn_run(
+    s: &AppState,
+    user: &User,
+    id: &str,
+    team_id: &str,
+    cluster_id: Option<String>,
+    items: Option<Vec<String>>,
+    deploy: bool,
+    plan: impl std::future::Future<Output = ApiResult<ImportPlan>> + Send + 'static,
+) {
+    let (s, user, id, team_id) = (s.clone(), user.clone(), id.to_owned(), team_id.to_owned());
+    tokio::spawn(async move {
+        let plan = plan.await;
+        finish(
+            &s,
+            &user,
+            &id,
+            &team_id,
+            cluster_id,
+            plan,
+            items.as_deref(),
+            deploy,
+        )
+        .await;
+    });
+}
+
+async fn new_run(
+    s: &AppState,
+    user: &User,
+    team_id: &str,
+    platform: Platform,
+    deploy: bool,
+) -> ApiResult<String> {
+    let id = new_id("pim");
+    sqlx::query(
+        "INSERT INTO pyo.platform_imports (id, team_id, platform, deploy, created_by) VALUES ($1, $2, $3, $4, $5)",
     )
+    .bind(&id)
+    .bind(team_id)
+    .bind(platform.label().to_lowercase())
+    .bind(deploy)
+    .bind(&user.name)
+    .execute(&s.db)
     .await?;
-    Ok(Json(out))
+    Ok(id)
+}
+
+/// Creates what the platform read gave, keeping the run's record: alive
+/// while it works, then done or failed.
+#[allow(clippy::too_many_arguments)]
+async fn finish(
+    s: &AppState,
+    user: &User,
+    id: &str,
+    team_id: &str,
+    cluster_id: Option<String>,
+    plan: ApiResult<ImportPlan>,
+    items: Option<&[String]>,
+    deploy: bool,
+) {
+    let beat = {
+        let (db, id) = (s.db.clone(), id.to_owned());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(HEARTBEAT).await;
+                let _ = sqlx::query(
+                    "UPDATE pyo.platform_imports SET updated_at = now() WHERE id = $1 AND status IN ('reading', 'importing')",
+                )
+                .bind(&id)
+                .execute(&db)
+                .await;
+            }
+        })
+    };
+    let out = match plan {
+        Ok(plan) => create(s, user, team_id, cluster_id, plan, items, deploy, Some(id)).await,
+        Err(e) => Err(e),
+    };
+    beat.abort();
+    let (status, error) = match out {
+        Ok(_) => ("done", String::new()),
+        Err(e) => ("failed", e.message),
+    };
+    if let Err(e) = sqlx::query(
+        "UPDATE pyo.platform_imports SET status = $2, error = $3, finished_at = now(), updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(&error)
+    .execute(&s.db)
+    .await
+    {
+        tracing::warn!(run = %id, error = %e, "platform import: end not recorded");
+    }
+}
+
+/// The run's team, for its owners and admins.
+async fn run_team(s: &AppState, user: &User, id: &str) -> ApiResult<ImportRun> {
+    let run = load_run(&s.db, id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Import"))?;
+    let mut tx = s.db.begin().await?;
+    require_role(&mut tx, user, &run.team_id, Role::Admin).await?;
+    tx.commit().await?;
+    Ok(run)
+}
+
+/// Get an import from another platform
+///
+/// How an import started with `startPlatformImport` is doing: its status,
+/// what it makes and what became of each item so far. Owners and admins.
+#[utoipa::path(get, path = "/platform-imports/{id}", operation_id = "getPlatformImport", tag = "Projects",
+    params(("id" = String, Path, description = "The import's id.")),
+    responses(
+        (status = 200, description = "The import.", body = ImportRun),
+        (status = 404, description = "No such import.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("read"))))]
+pub async fn get_run(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ImportRun>> {
+    Ok(Json(run_team(&s, &user, &id).await?))
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct RunsQuery {
+    /// The team whose imports to list.
+    team_id: String,
+}
+
+/// List imports from other platforms
+///
+/// A team's imports of the last 30 days, newest first (at most 20). Owners
+/// and admins.
+#[utoipa::path(get, path = "/platform-imports", operation_id = "listPlatformImports", tag = "Projects",
+    params(RunsQuery),
+    responses(
+        (status = 200, description = "`imports`: each one as `getPlatformImport` gives it.", body = Object),
+        (status = 403, description = "You aren't an owner or admin of the team.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("read"))))]
+pub async fn list_runs(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Query(q): Query<RunsQuery>,
+) -> ApiResult<Json<Value>> {
+    let mut tx = s.db.begin().await?;
+    require_role(&mut tx, &user, &q.team_id, Role::Admin).await?;
+    tx.commit().await?;
+    let rows: Vec<RunRow> = sqlx::query_as(sqlx::AssertSqlSafe(runs_query(
+        "team_id = $1 ORDER BY created_at DESC LIMIT 20",
+    )))
+    .bind(&q.team_id)
+    .fetch_all(&s.db)
+    .await?;
+    let runs: Vec<ImportRun> = rows.into_iter().map(Into::into).collect();
+    Ok(Json(json!({ "imports": runs })))
 }
 
 /// Creates what's picked of a plan (with its values): `items` by key, all
 /// when None.
+#[allow(clippy::too_many_arguments)]
 async fn create(
     s: &AppState,
     user: &User,
@@ -1278,6 +1572,7 @@ async fn create(
     mut plan: ImportPlan,
     items: Option<&[String]>,
     deploy: bool,
+    run: Option<&str>,
 ) -> ApiResult<ImportOutcome> {
     let picked = |key: &str| items.is_none_or(|i| i.iter().any(|k| k == key));
     let platform: Platform = serde_json::from_value(json!(plan.platform))
@@ -1307,6 +1602,34 @@ async fn create(
     .bind(team_id)
     .fetch_all(&mut *tx)
     .await?;
+    if let Some(run) = run {
+        let mut list: Vec<ImportItem> = vec![];
+        let mut add = |key: &str, name: &str, kind: &str| {
+            if picked(key) {
+                list.push(ImportItem {
+                    key: key.to_owned(),
+                    name: name.to_owned(),
+                    kind: kind.to_owned(),
+                });
+            }
+        };
+        for p in &plan.projects {
+            for x in &p.services {
+                add(&x.key, &x.service.name, "service");
+            }
+            for x in &p.stacks {
+                add(&x.key, &x.plan.project.name, "stack");
+            }
+            for x in &p.databases {
+                add(&x.key, &x.name, "database");
+            }
+        }
+        sqlx::query("UPDATE pyo.platform_imports SET status = 'importing', items = $2, updated_at = now() WHERE id = $1")
+            .bind(run)
+            .bind(json!(list))
+            .execute(&s.db)
+            .await?;
+    }
 
     let label = platform.label();
     let mut results = vec![];
@@ -1470,6 +1793,7 @@ async fn create(
         }
     }
     tx.commit().await?;
+    record(&s.db, run, &results).await;
     wake.sort();
     wake.dedup();
     for c in wake {
@@ -1486,9 +1810,11 @@ async fn create(
         .filter(|(d, _)| picked(&d.key))
         .map(|(d, project)| (d, from(&d.key, project)))
         .collect();
-    let jobs = dbs
-        .into_iter()
-        .map(|(db, from)| database(s, user, team_id, &cluster_id, db, from));
+    let jobs = dbs.into_iter().map(|(db, from)| async {
+        let r = database(s, user, team_id, &cluster_id, db, from).await;
+        record(&s.db, run, std::slice::from_ref(&r)).await;
+        r
+    });
     results.extend(futures::future::join_all(jobs).await);
     Ok(ImportOutcome { ok: true, results })
 }
@@ -1552,6 +1878,55 @@ fn domains_json(domains: &[ImportDomain], now: i64) -> Value {
     )
 }
 
+/// A new empty database, as `createDatabase` makes it, with where it came
+/// from saved in the same transaction: a crash can't leave one a second
+/// import wouldn't recognize.
+#[allow(clippy::too_many_arguments)]
+async fn empty_database(
+    s: &AppState,
+    user: &User,
+    team_id: &str,
+    cluster_id: &str,
+    id: &str,
+    name: &str,
+    engine: &str,
+    size: &str,
+    from: Value,
+) -> ApiResult<()> {
+    let mut tx = s.db.begin().await?;
+    let r = crate::databases::create(
+        s,
+        &mut tx,
+        user,
+        crate::databases::Create {
+            id: id.to_owned(),
+            team_id: team_id.to_owned(),
+            cluster_id: cluster_id.to_owned(),
+            name: name.to_owned(),
+            engine: engine.to_owned(),
+            size: size.to_owned(),
+            instances: 1,
+            version: None,
+            storage_gi: None,
+            pooler: None,
+            rest: false,
+            restore: None,
+            restored_from: None,
+            cpu_millis: None,
+            memory_mi: None,
+            read_replicas: None,
+            extensions: vec![],
+            imported_from: Some(from),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    if let Some(c) = r["clusterId"].as_str() {
+        s.wake(c).await;
+    }
+    Ok(())
+}
+
 /// One database: copied, made empty, or left for you.
 async fn database(
     s: &AppState,
@@ -1577,34 +1952,26 @@ async fn database(
                 "teamId": team_id, "engine": engine, "url": url,
                 "newDatabase": { "id": id, "clusterId": cluster_id, "name": db.name, "size": size, "instances": 1 },
             });
-            match serde_json::from_value(req) {
-                Ok(req) => crate::database_imports::start(State(s.clone()), SessionUser(user.clone()), Json(req))
+            match serde_json::from_value::<crate::database_imports::StartImport>(req) {
+                Ok(mut req) => {
+                    // Saved with the new database, in the same transaction.
+                    req.imported_from = Some(from);
+                    crate::database_imports::start(
+                        State(s.clone()),
+                        SessionUser(user.clone()),
+                        Json(req),
+                    )
                     .await
-                    .map(|_| "importing"),
+                    .map(|_| "importing")
+                }
                 Err(e) => Err(ApiError::bad_request(e.to_string())),
             }
         }
-        _ => crate::ops::run_json(
-            s,
-            user,
-            json!({ "op": "createDatabase", "id": id, "teamId": team_id, "clusterId": cluster_id, "name": db.name, "engine": engine, "size": size, "instances": 1 }),
+        _ => empty_database(
+            s, user, team_id, cluster_id, &id, &db.name, engine, size, from,
         )
         .await
         .map(|_| "created"),
-    };
-    // Where it came from, so the next import finds it.
-    let out = match out {
-        Ok(state) => sqlx::query(
-            "UPDATE pyo.databases SET imported_from = $1 WHERE id = $2 AND team_id = $3",
-        )
-        .bind(&from)
-        .bind(&id)
-        .bind(team_id)
-        .execute(&s.db)
-        .await
-        .map(|_| state)
-        .map_err(ApiError::from),
-        Err(e) => Err(e),
     };
     match out {
         Ok(state) => {

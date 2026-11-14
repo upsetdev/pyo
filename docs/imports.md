@@ -24,6 +24,21 @@ fixtures in `crates/pyo-api/tests/fixtures/platforms/`, the dashboard page
    `pyo1:` vault) and creates the picked items. Each item gets a result:
    created, importing (database data being copied), exists, skipped or
    failed. One failure doesn't stop the others (a savepoint per item).
+3. **Runs on the server.** The import answers 202 at once with the run
+   (`pyo.platform_imports`) and goes on in a task of its own, so a closed
+   tab or a dropped connection can't stop it half done (services made,
+   databases not). The token stays in that task's memory only. The run
+   records its items once the platform is read, then each result as it
+   finishes (services after their transaction commits, each database as
+   it's made). `GET /api/v1/platform-imports/{id}` follows one and
+   `GET /api/v1/platform-imports?teamId=` lists a team's (30 days). The
+   dashboard keeps the run's id in the address and shows the team's last
+   import when there's none, so a reload or a reopened tab picks it back
+   up. The CLI follows it until it ends. A running import says it's alive
+   every 20 s: one whose process stopped shows as interrupted after 2
+   minutes. Importing again is safe: services and databases are found by
+   `importedFrom`, and a database's record is saved in the same
+   transaction that makes it.
 
 Rules:
 
