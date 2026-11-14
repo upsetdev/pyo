@@ -188,6 +188,9 @@ const NOT_TOOLS: &[&str] = &[
     // They take another platform's API token: kept out of assistants.
     "previewPlatformImport",
     "startPlatformImport",
+    // Platform imports stay with the dashboard and the CLI as a whole.
+    "getPlatformImport",
+    "listPlatformImports",
 ];
 
 /// Tools whose generated name would clash or say too little.

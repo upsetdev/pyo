@@ -1059,9 +1059,18 @@ async fn importing_twice_makes_nothing_twice() {
     .map(String::from)
     .to_vec();
 
-    let first = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
-        .await
-        .unwrap();
+    let first = create(
+        &s,
+        &user,
+        &team,
+        None,
+        plan.clone(),
+        Some(&items),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
     let by = |k: &str| first.results.iter().find(|r| r.key == k).unwrap();
     assert_eq!(by("app:a1web").state, "created", "{:?}", first.results);
     assert_eq!(by("app:a3img").state, "created", "{:?}", first.results);
@@ -1122,9 +1131,18 @@ async fn importing_twice_makes_nothing_twice() {
     let (p1, s1) = (count("projects").await, count("services").await);
 
     // Again: nothing new.
-    let second = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
-        .await
-        .unwrap();
+    let second = create(
+        &s,
+        &user,
+        &team,
+        None,
+        plan.clone(),
+        Some(&items),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
     for r in &second.results {
         assert!(matches!(r.state.as_str(), "exists" | "skipped"), "{r:?}");
     }
@@ -1145,6 +1163,7 @@ async fn importing_twice_makes_nothing_twice() {
         more,
         Some(&["app:a9new".to_owned()]),
         false,
+        None,
     )
     .await
     .unwrap();
@@ -1179,9 +1198,18 @@ async fn hosted_imports_make_nothing_twice() {
             .iter()
             .flat_map(|p| p.services.iter().map(|s| s.key.clone()))
             .collect();
-        let first = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
-            .await
-            .unwrap();
+        let first = create(
+            &s,
+            &user,
+            &team,
+            None,
+            plan.clone(),
+            Some(&items),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         let made: Vec<&ImportResult> = first
             .results
             .iter()
@@ -1205,9 +1233,18 @@ async fn hosted_imports_make_nothing_twice() {
             format!("{platform}.com")
         );
         assert!(spec["source"]["builder"].as_str().is_some());
-        let second = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
-            .await
-            .unwrap();
+        let second = create(
+            &s,
+            &user,
+            &team,
+            None,
+            plan.clone(),
+            Some(&items),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         for r in &second.results {
             assert!(
                 matches!(r.state.as_str(), "exists" | "skipped"),
@@ -1262,9 +1299,18 @@ async fn databases_match_by_where_they_came_from() {
         sqlx::query("INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, namespace, password) VALUES ($1, $2, $3, $4, 'postgres', '18', 'small', 5, 1, 'pyo-db-t', '')")
             .bind(&mine).bind(&team).bind(&cluster).bind(&name).execute(&db).await.unwrap();
 
-        let first = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
-            .await
-            .unwrap();
+        let first = create(
+            &s,
+            &user,
+            &team,
+            None,
+            plan.clone(),
+            Some(&items),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         for r in &first.results {
             assert_eq!(r.state, "created", "{platform}: {r:?}");
             assert_ne!(r.id.as_deref(), Some(mine.as_str()), "{platform}");
@@ -1280,9 +1326,18 @@ async fn databases_match_by_where_they_came_from() {
         assert_eq!(from["platform"], platform);
         assert_eq!(from["id"], wanted[0].key);
 
-        let second = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
-            .await
-            .unwrap();
+        let second = create(
+            &s,
+            &user,
+            &team,
+            None,
+            plan.clone(),
+            Some(&items),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         for (a, b) in first.results.iter().zip(&second.results) {
             assert_eq!(b.state, "exists", "{platform}: {b:?}");
             assert_eq!(a.id, b.id, "{platform}");
@@ -1294,5 +1349,211 @@ async fn databases_match_by_where_they_came_from() {
             .await
             .unwrap();
     }
+    drop_team(&db, &team, &user).await;
+}
+
+/// A Railway plan whose databases are made empty (copying data needs a
+/// cluster to reach the source), with the keys of what can be imported.
+fn railway_plan_to_make(host: &str) -> (ImportPlan, Vec<String>) {
+    let mut plan = railway::plan(&fixture("railway"));
+    for p in &mut plan.projects {
+        for svc in &mut p.services {
+            for d in &mut svc.domains {
+                d.hostname = format!("{host}.{}", d.hostname);
+            }
+        }
+        for d in &mut p.databases {
+            if d.action == "import" {
+                d.action = "create".into();
+                d.url = None;
+            }
+        }
+    }
+    let keys = plan
+        .projects
+        .iter()
+        .flat_map(|p| {
+            p.services
+                .iter()
+                .filter(|x| x.importable)
+                .map(|x| x.key.clone())
+                .chain(
+                    p.databases
+                        .iter()
+                        .filter(|d| d.action == "create")
+                        .map(|d| d.key.clone()),
+                )
+        })
+        .collect();
+    (plan, keys)
+}
+
+/// Waits for an import to end (at most 30 s).
+async fn ended(s: &AppState, id: &str) -> ImportRun {
+    for _ in 0..300 {
+        let run = load_run(&s.db, id).await.unwrap().unwrap();
+        if !matches!(run.status.as_str(), "reading" | "importing") {
+            return run;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("import {id} didn't end");
+}
+
+/// The client goes away once the services are made (a closed tab, a
+/// dropped connection): its request's future is dropped. The import still
+/// makes the databases and records every result.
+/// Needs Postgres: DATABASE_URL=… cargo test -p pyo-api -- --ignored platform_import
+#[tokio::test]
+#[ignore]
+async fn an_import_finishes_when_its_client_goes_away() {
+    let (s, user, team, db) = test_team().await;
+    let host = team.trim_start_matches("team_").replace('_', "-");
+    let (plan, items) = railway_plan_to_make(&host);
+    let databases: Vec<String> = items
+        .iter()
+        .filter(|k| k.starts_with("db:"))
+        .cloned()
+        .collect();
+    assert!(!databases.is_empty());
+
+    let id = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    // As apply runs it, then waits as a client would until it's dropped.
+    let request = {
+        let (s, user, team, id, items) = (
+            s.clone(),
+            user.clone(),
+            team.clone(),
+            id.clone(),
+            items.clone(),
+        );
+        async move {
+            let run = new_run(&s, &user, &team, Platform::Railway, false)
+                .await
+                .unwrap();
+            *id.lock().unwrap() = Some(run.clone());
+            spawn_run(
+                &s,
+                &user,
+                &run,
+                &team,
+                None,
+                Some(items),
+                false,
+                async move { Ok(plan) },
+            );
+            std::future::pending::<()>().await;
+        }
+    };
+    let services_made = async {
+        loop {
+            let n: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.services WHERE team_id = $1")
+                .bind(&team)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            if n > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::select! {
+        _ = request => unreachable!(),
+        _ = tokio::time::timeout(Duration::from_secs(30), services_made) => {}
+    }
+    // The request is gone. The import isn't.
+    let id = id.lock().unwrap().clone().unwrap();
+    let run = ended(&s, &id).await;
+    assert_eq!(run.status, "done", "{run:?}");
+    assert_eq!(run.items.len(), items.len());
+    for key in &items {
+        let r = run.results.iter().find(|r| &r.key == key);
+        assert!(
+            r.is_some_and(|r| r.state == "created"),
+            "{key}: {:?}",
+            run.results
+        );
+    }
+    for key in &databases {
+        let made: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pyo.databases WHERE team_id = $1 AND imported_from->>'id' = $2",
+        )
+        .bind(&team)
+        .bind(key)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(made, 1, "{key}");
+    }
+
+    // Again, as after a crash: nothing twice.
+    let (plan, _) = railway_plan_to_make(&host);
+    let again = new_run(&s, &user, &team, Platform::Railway, false)
+        .await
+        .unwrap();
+    spawn_run(
+        &s,
+        &user,
+        &again,
+        &team,
+        None,
+        Some(items.clone()),
+        false,
+        async move { Ok(plan) },
+    );
+    let run = ended(&s, &again).await;
+    assert_eq!(run.status, "done");
+    for r in &run.results {
+        assert_eq!(r.state, "exists", "{r:?}");
+    }
+    sqlx::query("DELETE FROM pyo.databases WHERE team_id = $1")
+        .bind(&team)
+        .execute(&db)
+        .await
+        .unwrap();
+    drop_team(&db, &team, &user).await;
+}
+
+/// A platform that can't be read fails the import with its reason. One
+/// whose process stopped (no heartbeat) shows as interrupted.
+/// Needs Postgres, as above.
+#[tokio::test]
+#[ignore]
+async fn imports_say_how_they_ended() {
+    let (s, user, team, db) = test_team().await;
+    let id = new_run(&s, &user, &team, Platform::Coolify, false)
+        .await
+        .unwrap();
+    spawn_run(&s, &user, &id, &team, None, None, false, async {
+        Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "Coolify refused the token.",
+        ))
+    });
+    let run = ended(&s, &id).await;
+    assert_eq!(run.status, "failed");
+    assert_eq!(run.error, "Coolify refused the token.");
+    assert!(run.finished_at.is_some());
+
+    let cut = new_run(&s, &user, &team, Platform::Coolify, false)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE pyo.platform_imports SET status = 'importing', updated_at = now() - interval '5 minutes' WHERE id = $1")
+        .bind(&cut)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        load_run(&db, &cut).await.unwrap().unwrap().status,
+        "interrupted"
+    );
+    let fresh = new_run(&s, &user, &team, Platform::Coolify, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        load_run(&db, &fresh).await.unwrap().unwrap().status,
+        "reading"
+    );
     drop_team(&db, &team, &user).await;
 }

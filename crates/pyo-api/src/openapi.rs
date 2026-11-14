@@ -66,6 +66,8 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::compose::preview,
         crate::platform_import::preview,
         crate::platform_import::apply,
+        crate::platform_import::get_run,
+        crate::platform_import::list_runs,
     ),
     components(schemas(ErrorBody, Op)),
     modifiers(&ApiKey),

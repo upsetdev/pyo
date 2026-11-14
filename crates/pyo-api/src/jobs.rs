@@ -140,6 +140,10 @@ pub async fn prune(s: &AppState) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM pyo.api_tokens WHERE expires_at < now() - interval '30 days'")
         .execute(&s.db)
         .await?;
+    // Imports from other platforms: their results are shown for a month.
+    sqlx::query("DELETE FROM pyo.platform_imports WHERE created_at < now() - interval '30 days'")
+        .execute(&s.db)
+        .await?;
     crate::database_logs::prune(&s.db).await?;
     crate::ratelimit::prune(&s.db).await?;
     Ok(())
