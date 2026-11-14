@@ -447,8 +447,10 @@ mod tests {
         }
         let small = block("small-machine", "connect.sh", CONNECT_SCRIPT);
         for (file, script) in [
+            ("join.sh", SCRIPT),
             ("deploy/install.sh", install),
             ("scripts/setup-host.sh", setup_host),
+            ("scripts/join-node.sh", join_node),
         ] {
             assert_eq!(
                 block("small-machine", file, script),
@@ -976,6 +978,50 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
         ));
         assert_eq!(again.matches(said).count(), 1, "{again}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Servers joined to a cluster (join.sh, scripts/join-node.sh) get the
+    /// memory reserve too, on k3s-agent, before k3s starts.
+    #[test]
+    fn joined_servers_get_the_memory_reserve() {
+        let dir = std::env::temp_dir().join(format!("pyo-agent-{}", std::process::id()));
+        let block = sandboxed_small_machine(&dir);
+        let d = dir.display();
+        let (code, out, err) = bash(&format!(
+            "set -euo pipefail\nsystemctl() {{ [ \"$1\" != restart ] || echo \"RESTART $2\"; }}\n\
+             K3S_UNIT=k3s-agent\n{block}\nexport PYO_MEMINFO={d}/meminfo; echo 'MemTotal: 1973000 kB' > $PYO_MEMINFO\n\
+             k3s_memory_refresh"
+        ));
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out.matches("RESTART k3s-agent").count(), 1, "{out}");
+        let unit = std::fs::read_to_string(dir.join("systemd/k3s-agent.service.d/pyo-memory.conf"))
+            .expect("k3s-agent's drop-in");
+        assert!(unit.contains("EnvironmentFile=-"), "{unit}");
+        assert!(
+            std::fs::read_to_string(dir.join("systemd/pyo-zram.service"))
+                .unwrap()
+                .contains("\nBefore=k3s-agent.service\n")
+        );
+        assert!(!dir.join("systemd/k3s.service.d").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        for (file, script, install) in [
+            (
+                "join.sh",
+                SCRIPT,
+                "small_machine\nK3S_URL=\"https://$SERVER_IP:6443\" K3S_TOKEN=\"$K3S_TOKEN\" k3s_install \"$K3S_DIR\" agent\n",
+            ),
+            (
+                "scripts/join-node.sh",
+                include_str!("../../../scripts/join-node.sh"),
+                "small_machine\nif ! command -v k3s >/dev/null; then\n",
+            ),
+        ] {
+            assert!(
+                script.contains("\nK3S_UNIT=k3s-agent\n# >>> pyo:small-machine "),
+                "{file} doesn't run it on k3s-agent"
+            );
+            assert!(script.contains(install), "{file} doesn't set it up");
+        }
     }
 
     #[test]

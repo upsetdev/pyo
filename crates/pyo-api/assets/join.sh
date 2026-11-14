@@ -98,6 +98,130 @@ k3s_install() {
   INSTALL_K3S_SKIP_DOWNLOAD=binary INSTALL_K3S_BIN_DIR=/usr/local/bin sh "$dir/install.sh" "$@"
 }
 # <<< pyo:k3s
+# A joined server runs k3s as k3s-agent.
+K3S_UNIT=k3s-agent
+# >>> pyo:small-machine (the same in deploy/install.sh, connect.sh, join.sh, scripts/setup-host.sh and scripts/join-node.sh)
+# Run before k3s is installed, or on a k3s that's already installed with
+# k3s_memory_refresh. What follows this machine's memory, worked out again
+# at every boot by /usr/local/lib/pyo-memory.sh, so a machine given more
+# or less memory gets the matching settings when it restarts.
+# Under 3.5 GB of memory: k3s gets a soft memory limit, GOMEMLIMIT
+# (gomemlimit in the helper), so its Go runtime collects garbage sooner
+# instead of growing. Under 2.75 GB, also compressed swap in memory
+# (zram, half the memory, pyo-zram.service) for what runs outside
+# containers, k3s itself above all (containers don't swap), unless the
+# machine has swap of its own. From 3.5 GB, neither. At any size, kubelet
+# sets aside memory for k3s and the system (kube-reserved and
+# system-reserved, in a k3s config drop-in), so the scheduler only hands
+# containers what's left: 256 MiB under 1.5 GB, 512 MiB under 3.5 GB,
+# 768 MiB under 8 GB, 1 GiB from there.
+# K3S_UNIT: k3s's systemd unit, k3s (a server) unless the script sets
+# k3s-agent first (a server joined to a cluster).
+K3S_UNIT=${K3S_UNIT:-k3s}
+K3S_MEMORY_CONFIG=/etc/rancher/k3s/config.yaml.d/50-pyo-memory.yaml
+K3S_MEMORY_CHANGED=""
+small_machine() {
+  local env before zram_was=""
+  # What k3s runs with now: kubelet's reservations and its GOMEMLIMIT.
+  before=$(cat "$K3S_MEMORY_CONFIG" /run/pyo-k3s.env 2>/dev/null || true)
+  mkdir -p "/etc/systemd/system/$K3S_UNIT.service.d"
+  cat > /usr/local/lib/pyo-memory.sh <<'MEMORY'
+#!/bin/sh
+# Managed by Pyo: k3s's GOMEMLIMIT, kubelet's reservations and compressed
+# swap (zram), from this machine's memory at every boot.
+mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' "${PYO_MEMINFO:-/proc/meminfo}")
+# k3s's soft memory limit in MiB: 40% of the memory, at least 768 MiB
+# (k3s's own heap is 330 to 400 MB: a lower limit keeps its garbage
+# collector running all the time).
+gomemlimit() {
+  limit=$((mem * 2 / 5))
+  [ "$limit" -ge 768 ] || limit=768
+  echo "$limit"
+}
+# What kubelet sets aside in MiB, for k3s (kube-reserved: its one process
+# holds 500 to 600 MB on a small machine) and for the system
+# (system-reserved: sshd, tailscaled, journald, …).
+reserved() {
+  if [ "$mem" -lt 1536 ]; then
+    echo "192 64"
+  elif [ "$mem" -lt 3584 ]; then
+    echo "384 128"
+  elif [ "$mem" -lt 8192 ]; then
+    echo "512 256"
+  else
+    echo "768 256"
+  fi
+}
+case "$1" in
+  k3s-env)
+    # For k3s's EnvironmentFile: GOMEMLIMIT under 3.5 GB, else nothing.
+    if [ "${mem:-0}" -gt 0 ] && [ "$mem" -lt 3584 ]; then
+      echo "GOMEMLIMIT=$(gomemlimit)MiB"
+    fi
+    ;;
+  k3s-config)
+    # k3s's config drop-in ($2): kubelet's reservations; none (no file)
+    # when the memory can't be read.
+    [ -n "$2" ] || exit 2
+    if [ "${mem:-0}" -gt 0 ]; then
+      set -- "$2" $(reserved)
+      mkdir -p "$(dirname "$1")"
+      printf '%s\n' "# Managed by Pyo: what kubelet sets aside, from this machine's memory at each start." \
+        'kubelet-arg+:' "  - \"kube-reserved=memory=$2Mi\"" "  - \"system-reserved=memory=$3Mi\"" > "$1.new" && mv -f "$1.new" "$1"
+    else
+      rm -f "$2"
+    fi
+    ;;
+  zram-start)
+    [ "${mem:-0}" -gt 0 ] && [ "$mem" -lt 2816 ] || exit 0
+    [ -z "$(swapon --show=NAME --noheadings 2>/dev/null)" ] || exit 0
+    command -v zramctl >/dev/null && modprobe zram 2>/dev/null || exit 0
+    d=$(zramctl --find --size "$((mem / 2))MiB") && mkswap "$d" >/dev/null && swapon -p 100 "$d" && echo "$d" > /run/pyo-zram
+    ;;
+  zram-stop)
+    [ -f /run/pyo-zram ] || exit 0
+    d=$(cat /run/pyo-zram)
+    swapoff "$d"
+    for i in 1 2 3 4 5; do
+      zramctl --reset "$d" 2>/dev/null && break
+      sleep 1
+    done
+    rm -f /run/pyo-zram
+    ;;
+esac
+MEMORY
+  chmod 755 /usr/local/lib/pyo-memory.sh
+  printf '%s\n' '# Managed by Pyo: GOMEMLIMIT on a small machine and what kubelet sets aside, worked out at each start.' '[Service]' \
+    "ExecStartPre=-/bin/sh -c '/usr/local/lib/pyo-memory.sh k3s-env > /run/pyo-k3s.env'" \
+    "ExecStartPre=-/usr/local/lib/pyo-memory.sh k3s-config $K3S_MEMORY_CONFIG" \
+    'EnvironmentFile=-/run/pyo-k3s.env' > "/etc/systemd/system/$K3S_UNIT.service.d/pyo-memory.conf"
+  printf '%s\n' '[Unit]' 'Description=Pyo: compressed swap in memory (zram) on a small machine' "Before=$K3S_UNIT.service" \
+    '[Service]' 'Type=oneshot' 'RemainAfterExit=yes' \
+    'ExecStart=/usr/local/lib/pyo-memory.sh zram-start' 'ExecStop=/usr/local/lib/pyo-memory.sh zram-stop' \
+    '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/pyo-zram.service
+  systemctl daemon-reload
+  # Said only when it turns on here, not when it's on already.
+  [ ! -f /run/pyo-zram ] || zram_was=1
+  systemctl enable --now pyo-zram.service >/dev/null 2>&1 || echo "Couldn't set up compressed swap (zram); going on without it." >&2
+  env=$(/usr/local/lib/pyo-memory.sh k3s-env)
+  [ -z "$env" ] || echo "A small machine: k3s gets $env."
+  /usr/local/lib/pyo-memory.sh k3s-config "$K3S_MEMORY_CONFIG" || true
+  [ -n "$zram_was" ] || [ ! -f /run/pyo-zram ] || echo "Turned on compressed swap in memory (zram)."
+  [ "$before" = "$(cat "$K3S_MEMORY_CONFIG" 2>/dev/null; [ -z "$env" ] || echo "$env")" ] || K3S_MEMORY_CHANGED=1
+}
+# The same on a k3s that's already installed ($K3S_UNIT.service). k3s uses what
+# changed once it restarts: it restarts here, unless $1 is "later" (the
+# caller restarts it, when K3S_MEMORY_CHANGED is set). Containers keep
+# running while k3s restarts.
+k3s_memory_refresh() {
+  systemctl cat "$K3S_UNIT.service" >/dev/null 2>&1 || return 0
+  K3S_MEMORY_CHANGED=""
+  small_machine
+  [ -n "$K3S_MEMORY_CHANGED" ] || return 0
+  echo "k3s restarts briefly to apply its memory reserve. Services keep running."
+  [ "${1:-}" = later ] || systemctl restart "$K3S_UNIT"
+}
+# <<< pyo:small-machine
 
 # >>> pyo:repos (the same in connect.sh, join.sh and scripts/join-node.sh)
 # Packages come from their vendors' repositories, whose signing keys are
@@ -425,6 +549,8 @@ PYO_APPARMOR_PROFILE
 }
 apparmor_workaround
 
+# k3s's memory reserve, as on the cluster's first server: k3s starts with it.
+small_machine
 K3S_URL="https://$SERVER_IP:6443" K3S_TOKEN="$K3S_TOKEN" k3s_install "$K3S_DIR" agent
 if [ -n "$BUILDER" ]; then
   echo "Joined as $NODE_NAME ($TS_IP), for builds only. The builder starts on it in a minute."
