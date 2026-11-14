@@ -26,8 +26,8 @@ use serde_json::Value;
 
 use super::{
     Fetch, ImportDatabase, ImportDomain, ImportPlan, ImportProject, ImportService, ImportStack,
-    Platform, Responses, Web, database_action, database_warnings, health_check, https_repo,
-    plan_service, s, unique, unique_database_name, url_escape, volume,
+    Platform, Responses, Web, database_action, database_name, database_warnings, health_check,
+    https_repo, plan_service, s, unique, url_escape, volume,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -463,7 +463,7 @@ fn quote(v: &str) -> String {
 
 /// A database: reachable from outside when it has an `externalPort`, on
 /// its server's `ipAddress` (server.ts), else on Dokploy's own address.
-fn database(d: &Value, engine: &str, host: &str, taken: &mut HashSet<String>) -> ImportDatabase {
+fn database(d: &Value, engine: &str, host: &str) -> ImportDatabase {
     let enc = |x: &str| url_escape(x);
     let ip = d["server"]["ipAddress"]
         .as_str()
@@ -499,7 +499,7 @@ fn database(d: &Value, engine: &str, host: &str, taken: &mut HashSet<String>) ->
             )
         ),
         source_name: s(d, "name").to_owned(),
-        name: unique_database_name(s(d, "name"), taken),
+        name: database_name(s(d, "name")),
         engine: engine.to_owned(),
         image: s(d, "dockerImage").to_owned(),
         target: target.map(str::to_owned),
@@ -519,7 +519,6 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
         ..Default::default()
     };
     let mut seen_domains = HashSet::new();
-    let mut db_names = HashSet::new();
     let empty = Value::Null;
     for p in arr(r.get("/project.all").unwrap_or(&empty)) {
         let envs = environments(p);
@@ -549,17 +548,13 @@ pub(super) fn plan(r: &Responses, host: &str) -> ImportPlan {
                 for d in arr(&e[list]) {
                     let did = s(d, &format!("{kind}Id"));
                     match r.get(&one(kind, did)) {
-                        Some(full) => {
-                            project
-                                .databases
-                                .push(database(full, engine, host, &mut db_names))
-                        }
+                        Some(full) => project.databases.push(database(full, engine, host)),
                         None => {
                             let (_, _, note) = database_action(engine, false, P);
                             project.databases.push(ImportDatabase {
                                 key: format!("db:{did}"),
                                 source_name: s(d, "name").to_owned(),
-                                name: unique_database_name(s(d, "name"), &mut db_names),
+                                name: database_name(s(d, "name")),
                                 engine: engine.to_owned(),
                                 action: "manual".into(),
                                 warnings: note.into_iter().collect(),

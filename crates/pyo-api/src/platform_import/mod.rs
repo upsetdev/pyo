@@ -279,11 +279,11 @@ fn unique(base: &str, taken: &mut HashSet<String>) -> String {
     free(base, taken)
 }
 
-/// A unique DNS-safe database name from `base` among `taken`. Databases
-/// have no address of their own under /<project>/, so any name works,
-/// "postgres" included (Railway's default).
-fn unique_database_name(base: &str, taken: &mut HashSet<String>) -> String {
-    free(crate::compose::dns_name(base, 40), taken)
+/// A DNS-safe database name from `base`. Clashes with the team's other
+/// databases, and between the ones of one import, are settled by
+/// `mark_existing`, which knows the team's databases.
+fn database_name(base: &str) -> String {
+    crate::compose::dns_name(base, 40)
 }
 
 /// `base`, or `base-2`, `base-3`... when it's taken.
@@ -997,18 +997,27 @@ async fn imported_project(
     .await?)
 }
 
-async fn database_named(
+/// The Pyo database an earlier import made from `id` there: its id and name.
+async fn imported_database(
     tx: &mut Transaction<'_, Postgres>,
     team_id: &str,
-    name: &str,
-) -> ApiResult<Option<String>> {
-    Ok(
-        sqlx::query_scalar("SELECT id FROM pyo.databases WHERE team_id = $1 AND name = $2")
-            .bind(team_id)
-            .bind(name)
-            .fetch_optional(&mut **tx)
-            .await?,
+    platform: &str,
+    host: &str,
+    id: &str,
+) -> ApiResult<Option<(String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT id, name FROM pyo.databases WHERE team_id = $1 AND state <> 'deleting'
+            AND imported_from->>'platform' = $2
+            AND imported_from->>'host' = $3
+            AND imported_from->>'id' = $4
+          LIMIT 1",
     )
+    .bind(team_id)
+    .bind(platform)
+    .bind(host)
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?)
 }
 
 /// Fills in what earlier imports made, so the preview shows it and the
@@ -1029,8 +1038,56 @@ async fn mark_existing(
                 imported_project(tx, team_id, &platform, &host, &st.key).await?;
         }
         for db in &mut p.databases {
-            db.existing_id = database_named(tx, team_id, &db.name).await?;
+            if let Some((id, name)) =
+                imported_database(tx, team_id, &platform, &host, &db.key).await?
+            {
+                db.existing_id = Some(id);
+                db.name = name;
+            }
         }
+    }
+    // A new database needs a name no other database of the team has, and
+    // whose objects don't meet another's: `shop-2` would be one of Postgres
+    // `shop`'s pods (pyo_proto::database_names). One the team made itself
+    // keeps its name, the new one gets the platform in front of its own:
+    // `railway-shop`, then `railway2-shop`... (a deleted one keeps its name
+    // until it's gone).
+    let mut others: Vec<(String, String)> =
+        sqlx::query_as("SELECT engine, name FROM pyo.databases WHERE team_id = $1")
+            .bind(team_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    for db in plan.projects.iter_mut().flat_map(|p| &mut p.databases) {
+        if db.existing_id.is_some() {
+            continue;
+        }
+        let Some(engine) = db.target.clone() else {
+            continue;
+        };
+        let free = |name: &str| {
+            !others.iter().any(|(_, n)| n == name)
+                && pyo_proto::database_names::conflicts(
+                    &engine,
+                    name,
+                    others.iter().map(|(e, n)| (e.as_str(), n.as_str())),
+                )
+                .is_none()
+        };
+        if !free(&db.name) {
+            let base = db.name.clone();
+            db.name = (1..100)
+                .map(|n| {
+                    let prefix = if n == 1 {
+                        platform.clone()
+                    } else {
+                        format!("{platform}{n}")
+                    };
+                    crate::compose::dns_name(&format!("{prefix}-{base}"), 40)
+                })
+                .find(|c| free(c))
+                .unwrap_or(base);
+        }
+        others.push((engine, db.name.clone()));
     }
     Ok(())
 }
@@ -1412,15 +1469,16 @@ async fn create(
 
     // Databases, each on its own: an import checks its source on the
     // cluster first, which takes a while.
-    let dbs: Vec<&ImportDatabase> = plan
+    let dbs: Vec<(&ImportDatabase, Value)> = plan
         .projects
         .iter()
-        .flat_map(|p| &p.databases)
-        .filter(|d| picked(&d.key))
+        .flat_map(|p| p.databases.iter().map(move |d| (d, &p.key)))
+        .filter(|(d, _)| picked(&d.key))
+        .map(|(d, project)| (d, from(&d.key, project)))
         .collect();
     let jobs = dbs
         .into_iter()
-        .map(|db| database(s, user, team_id, &cluster_id, db));
+        .map(|(db, from)| database(s, user, team_id, &cluster_id, db, from));
     results.extend(futures::future::join_all(jobs).await);
     Ok(ImportOutcome { ok: true, results })
 }
@@ -1491,14 +1549,10 @@ async fn database(
     team_id: &str,
     cluster_id: &str,
     db: &ImportDatabase,
+    from: Value,
 ) -> ImportResult {
     if let Some(id) = &db.existing_id {
-        let mut r = result(
-            &db.key,
-            &db.name,
-            "exists",
-            format!("The team has a database called {} already.", db.name),
-        );
+        let mut r = result(&db.key, &db.name, "exists", "An earlier import made it.");
         r.id = Some(id.clone());
         return r;
     }
@@ -1527,6 +1581,20 @@ async fn database(
         )
         .await
         .map(|_| "created"),
+    };
+    // Where it came from, so the next import finds it.
+    let out = match out {
+        Ok(state) => sqlx::query(
+            "UPDATE pyo.databases SET imported_from = $1 WHERE id = $2 AND team_id = $3",
+        )
+        .bind(&from)
+        .bind(&id)
+        .bind(team_id)
+        .execute(&s.db)
+        .await
+        .map(|_| state)
+        .map_err(ApiError::from),
+        Err(e) => Err(e),
     };
     match out {
         Ok(state) => {

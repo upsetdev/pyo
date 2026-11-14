@@ -43,8 +43,8 @@ use serde_json::Value;
 
 use super::{
     Fetch, ImportDatabase, ImportPlan, ImportProject, ImportService, Platform, Responses, Web,
-    database_action, database_warnings, health_check, https_repo, plan_service, s, unique,
-    unique_database_name,
+    database_action, database_name, database_warnings, health_check, https_repo, plan_service, s,
+    unique,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -296,7 +296,7 @@ fn stores(r: &Responses, projects: &[&Value]) -> Vec<Store> {
     out
 }
 
-fn store_database(st: &Store, project_name: &str, taken: &mut HashSet<String>) -> ImportDatabase {
+fn store_database(st: &Store, project_name: &str) -> ImportDatabase {
     let url = st.url.clone().or_else(|| st.pooled.clone());
     let (engine, base, source_name) = match st.kind {
         "postgres" => (
@@ -316,7 +316,7 @@ fn store_database(st: &Store, project_name: &str, taken: &mut HashSet<String>) -
     ImportDatabase {
         key: format!("db:{}", st.id),
         source_name: source_name.to_owned(),
-        name: unique_database_name(&base, taken),
+        name: database_name(&base),
         engine: engine.to_owned(),
         image: String::new(),
         target: target.map(str::to_owned),
@@ -613,7 +613,6 @@ pub(super) fn plan(r: &Responses) -> ImportPlan {
     }
     out.warnings.push("Preview deployments and their variables aren't imported. Pyo imports each project's production settings.".into());
     let stores = stores(r, &full);
-    let mut db_names = HashSet::new();
     let mut by_store: BTreeMap<String, ImportDatabase> = BTreeMap::new();
     for st in &stores {
         let pname = full
@@ -621,7 +620,7 @@ pub(super) fn plan(r: &Responses) -> ImportPlan {
             .find(|p| s(p, "id") == st.project)
             .map(|p| s(p, "name"))
             .unwrap_or("vercel");
-        by_store.insert(st.id.clone(), store_database(st, pname, &mut db_names));
+        by_store.insert(st.id.clone(), store_database(st, pname));
     }
     let all: Vec<ImportDatabase> = by_store.values().cloned().collect();
     let mut seen_domains = HashSet::new();

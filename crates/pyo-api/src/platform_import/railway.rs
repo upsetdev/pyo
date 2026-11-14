@@ -60,8 +60,8 @@ use serde_json::{Value, json};
 
 use super::{
     Fetch, ImportDatabase, ImportPlan, ImportProject, ImportService, Platform, Responses, Web,
-    database_action, database_warnings, health_check, plan_service, s, unique,
-    unique_database_name, url_escape, volume,
+    database_action, database_name, database_warnings, health_check, plan_service, s, unique,
+    url_escape, volume,
 };
 use crate::{
     compose::{self, PlanEnv, PlanSource},
@@ -683,7 +683,6 @@ pub(super) fn plan(r: &Responses) -> ImportPlan {
         ..Default::default()
     };
     let mut seen_domains = HashSet::new();
-    let mut db_names = HashSet::new();
     let (list, only_env) = projects(r);
     let null = Value::Null;
     for p in list {
@@ -758,7 +757,7 @@ pub(super) fn plan(r: &Responses) -> ImportPlan {
                         engine,
                         &env.vars[n],
                         env.tcp[n],
-                        unique_database_name(&base, &mut db_names),
+                        database_name(&base),
                         format!("db:{}@{eid}", s(i, "serviceId")),
                     ));
                 }

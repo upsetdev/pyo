@@ -1177,3 +1177,82 @@ async fn hosted_imports_make_nothing_twice() {
     }
     drop_team(&db, &team, &user).await;
 }
+
+/// Databases: a second import finds the one it made by where it came from,
+/// not by its name. One the team had already, with the same name, isn't
+/// taken for it: the new one gets the platform in front (`shop-2` would
+/// meet `shop`'s pods). Every platform.
+/// Needs Postgres, as above.
+#[tokio::test]
+#[ignore]
+async fn databases_match_by_where_they_came_from() {
+    let (s, user, team, db) = test_team().await;
+    let cluster = format!("cl_{}", team.trim_start_matches("team_"));
+    for (platform, mut plan) in [
+        (
+            "coolify",
+            coolify::plan(&fixture("coolify"), "coolify.example.com"),
+        ),
+        (
+            "dokploy",
+            dokploy::plan(&fixture("dokploy"), "dokploy.example.com"),
+        ),
+        ("railway", railway::plan(&fixture("railway"))),
+        ("vercel", vercel::plan(&fixture("vercel"))),
+    ] {
+        // Made empty here: copying data needs a cluster to reach the source.
+        for d in plan.projects.iter_mut().flat_map(|p| &mut p.databases) {
+            if d.action == "import" {
+                d.action = "create".into();
+                d.url = None;
+            }
+        }
+        let wanted: Vec<ImportDatabase> = plan
+            .projects
+            .iter()
+            .flat_map(|p| &p.databases)
+            .filter(|d| d.action == "create")
+            .cloned()
+            .collect();
+        assert!(!wanted.is_empty(), "{platform}: no database to make");
+        let items: Vec<String> = wanted.iter().map(|d| d.key.clone()).collect();
+        // The team's own database, with the first one's name, made by hand.
+        let mine = crate::ids::new_id("mdb");
+        let name = wanted[0].name.clone();
+        sqlx::query("INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, namespace, password) VALUES ($1, $2, $3, $4, 'postgres', '18', 'small', 5, 1, 'pyo-db-t', '')")
+            .bind(&mine).bind(&team).bind(&cluster).bind(&name).execute(&db).await.unwrap();
+
+        let first = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
+            .await
+            .unwrap();
+        for r in &first.results {
+            assert_eq!(r.state, "created", "{platform}: {r:?}");
+            assert_ne!(r.id.as_deref(), Some(mine.as_str()), "{platform}");
+        }
+        let made = &first.results[0];
+        assert_eq!(made.name, format!("{platform}-{name}"), "{platform}");
+        let from: Value =
+            sqlx::query_scalar("SELECT imported_from FROM pyo.databases WHERE id = $1")
+                .bind(made.id.as_deref().unwrap())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(from["platform"], platform);
+        assert_eq!(from["id"], wanted[0].key);
+
+        let second = create(&s, &user, &team, None, plan.clone(), Some(&items), false)
+            .await
+            .unwrap();
+        for (a, b) in first.results.iter().zip(&second.results) {
+            assert_eq!(b.state, "exists", "{platform}: {b:?}");
+            assert_eq!(a.id, b.id, "{platform}");
+            assert_eq!(a.name, b.name, "{platform}");
+        }
+        sqlx::query("DELETE FROM pyo.databases WHERE team_id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+    drop_team(&db, &team, &user).await;
+}
