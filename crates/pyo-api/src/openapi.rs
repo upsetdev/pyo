@@ -648,7 +648,18 @@ impl serde::Serialize for Node {
 }
 
 /// The API reference as the docs keep it: pretty JSON, ending in a newline.
+/// Built on a thread of its own: the document is built recursively, deeper
+/// than a test thread's 2 MiB stack allows in debug builds.
 pub fn spec_json() -> String {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(spec_json_here)
+        .expect("a thread for the API reference")
+        .join()
+        .expect("the API reference")
+}
+
+fn spec_json_here() -> String {
     let raw = spec().to_json().expect("the spec serializes");
     let node: Node = serde_json::from_str(&raw).expect("the spec parses");
     let mut s = serde_json::to_string_pretty(&node).expect("the spec serializes");

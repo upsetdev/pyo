@@ -655,7 +655,7 @@ export type GitRepo = {
   host: string;
   fullName: string;
   name: string;
-  namespace: string;
+  group: string;
   private: boolean;
   defaultBranch: string;
   htmlUrl: string;

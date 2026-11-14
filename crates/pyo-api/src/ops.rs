@@ -2366,6 +2366,9 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::SetClusterTrafficMode { .. }
             | Op::SaveSecretStore { .. }
             | Op::RemoveSecretStore { .. }
+            // They take a GitLab token: the dashboard only.
+            | Op::AddGitConnection { .. }
+            | Op::ReplaceGitConnectionToken { .. }
     ) {
         return None;
     }

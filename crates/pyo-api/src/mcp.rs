@@ -188,8 +188,6 @@ const NOT_TOOLS: &[&str] = &[
     // They take another platform's API token: kept out of assistants.
     "previewPlatformImport",
     "startPlatformImport",
-    "addGitConnection",
-    "replaceGitConnectionToken",
     // Platform imports stay with the dashboard and the CLI as a whole.
     "getPlatformImport",
     "listPlatformImports",
@@ -427,7 +425,7 @@ fn build_catalog() -> Vec<Tool> {
         .collect();
     let mut op_tools: Vec<(usize, Tool)> = vec![];
     for (name, o) in &ops {
-        if covered(name) || NOT_TOOLS.contains(&name.as_str()) {
+        if covered(name) {
             continue;
         }
         let mut input = inline(o, schemas);

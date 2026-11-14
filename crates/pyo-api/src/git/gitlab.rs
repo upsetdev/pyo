@@ -85,7 +85,8 @@ pub struct Project {
     pub id: u64,
     pub path: String,
     pub name: String,
-    pub namespace: String,
+    /// The group it is in ("acme/web").
+    pub group: String,
     pub private: bool,
     pub default_branch: String,
     pub web_url: String,
@@ -530,7 +531,7 @@ fn project_of(p: &Value) -> Option<Project> {
         id: p["id"].as_u64()?,
         path: p["path_with_namespace"].as_str()?.to_owned(),
         name: p["name"].as_str().unwrap_or("").to_owned(),
-        namespace: p["namespace"]["full_path"]
+        group: p["namespace"]["full_path"]
             .as_str()
             .unwrap_or("")
             .to_owned(),

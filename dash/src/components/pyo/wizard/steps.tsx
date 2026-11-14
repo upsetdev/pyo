@@ -280,7 +280,7 @@ function GitlabRepoPicker({
               items: repos.data.repositories.map((r) => ({
                 ...r,
                 key: r.htmlUrl,
-                account: r.namespace || r.fullName.split("/")[0],
+                account: r.group || r.fullName.split("/")[0],
               })),
               note: repos.data.errors.map((e) => e.message).join(" "),
             }

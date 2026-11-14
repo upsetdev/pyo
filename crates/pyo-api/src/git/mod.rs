@@ -518,7 +518,7 @@ pub(crate) struct ReposQuery {
 #[utoipa::path(get, path = "/git/repos", operation_id = "listGitRepos", tag = "Git providers",
     params(ReposQuery),
     responses(
-        (status = 200, description = "`repositories`: each with `connectionId`, `provider`, `host`, `fullName`, `name`, `namespace`, `private`, `defaultBranch`, `htmlUrl` and `pushedAt`. `errors`: connections that couldn't be listed, with `connectionId` and `message`.", body = Object),
+        (status = 200, description = "`repositories`: each with `connectionId`, `provider`, `host`, `fullName`, `name`, `group`, `private`, `defaultBranch`, `htmlUrl` and `pushedAt`. `errors`: connections that couldn't be listed, with `connectionId` and `message`.", body = Object),
         (status = 400, description = "No `team`.", body = crate::error::ErrorBody),
         (status = 404, description = "No such team, or you aren't in it.", body = crate::error::ErrorBody),
     ),
@@ -555,7 +555,7 @@ pub(crate) async fn repos(
                     .unwrap_or_default();
                 out.extend(list.into_iter().map(|p| json!({
                     "connectionId": conn.id, "provider": conn.provider, "host": host,
-                    "fullName": p.path, "name": p.name, "namespace": p.namespace, "private": p.private,
+                    "fullName": p.path, "name": p.name, "group": p.group, "private": p.private,
                     "defaultBranch": p.default_branch, "htmlUrl": p.web_url, "pushedAt": p.last_activity_at,
                 })));
             }
