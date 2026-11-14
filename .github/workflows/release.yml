@@ -134,7 +134,11 @@ jobs:
       # Signing release.json keyless (Sigstore, this workflow's identity).
       id-token: write
     steps:
+      # Every commit and tag: the notes list the changes since the last release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -180,12 +184,18 @@ jobs:
           docker cp "$id:/app/bin/pyo" pyo-linux-x86_64
           docker rm "$id"
           sha256sum pyo-linux-x86_64 > pyo-linux-x86_64.sha256
+      # The release's text: the changes since the previous release, from the
+      # Conventional Commits in between (scripts/release-notes.ts).
+      - name: Write the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun run scripts/release-notes.ts --to "$GITHUB_REF_NAME" > release-notes.md && cat release-notes.md
       # install.sh goes out as an asset named exactly that: pyo.dev/install.sh
       # fetches releases/latest/download/install.sh (stable releases only).
       # connect.sh beside it: install.sh --uninstall runs its own release's.
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             pyo-linux-x86_64
             pyo-linux-x86_64.sha256

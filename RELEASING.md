@@ -28,10 +28,50 @@ cosign keyless as `release.json.sigstore.json` (the job needs `id-token:
 write`, and `.github/release-signing-config.json` pins Sigstore's public
 instance with Rekor v1).
 
+The release's text lists the changes since the previous release (see
+[Release notes](#release-notes)).
+
 Don't move or reuse a tag. If a release is bad, publish the next version.
 
 Publish releases as stable releases (not drafts or pre-releases): installations
 only see GitHub's "latest" release.
+
+## Release notes
+
+`scripts/release-notes.ts` writes each release's text from the Conventional
+Commits since the previous release, and the release workflow publishes it.
+Try it before tagging:
+
+```bash
+bun run scripts/release-notes.ts --to v0.2.2             # from the version tag before it
+bun run scripts/release-notes.ts --from v0.2.1 --to v0.2.2 --offline
+```
+
+- The changes are the commits the tag reaches and no earlier version tag
+  does. Merge commits are left out, the commits they bring in are listed.
+  A commit whose subject was already released, or that appears twice (a
+  cherry-pick), is listed once.
+- Sections, in this order and only when they have something: Features
+  (`feat`), Bug Fixes (`fix`), Security Fixes, Performance (`perf`), Docs
+  (`docs`) and Other (`refactor`, `build`, `revert`). `chore`, `ci`, `test`
+  and `style` aren't listed.
+- **Security fixes:** a commit with the scope `security`, or with a
+  `Security:` footer line. Put the advisory's id in the footer
+  (`Security: GHSA-xxxx-xxxx-xxxx`) and the release links the advisory.
+  The word "security" in a message isn't enough.
+- Each change links its commit, or its pull request when the subject ends
+  with `(#123)`. An author who isn't a maintainer gets "(Thanks @login)".
+  The maintainers are `MAINTAINERS` in the script (`--maintainers a,b`
+  replaces them for one run).
+- The notices in `deploy/release-notices.json` go first, under "Before you
+  update".
+
+To rewrite a published release's text:
+
+```bash
+bun run scripts/release-notes.ts --to v0.2.2 > notes.md
+gh release edit v0.2.2 -R upsetdev/pyo --notes-file notes.md
+```
 
 ## API reference
 
