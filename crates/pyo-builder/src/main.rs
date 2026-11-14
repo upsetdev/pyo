@@ -537,12 +537,23 @@ impl Builder {
             if !out.status.success() || !plan.is_file() {
                 return fail(
                     &commit,
-                    "Pyo couldn't tell how to build this repository: there's no Dockerfile or Containerfile, and Railpack didn't recognize the language. Add a Dockerfile, or check the build context.".into(),
+                    "Pyo couldn't tell how to build this repository: there's no Dockerfile, and Railpack didn't recognize the language. Add a Dockerfile, or check the build context.".into(),
                 );
             }
             detected = source::label(&info_json, &app_dir).unwrap_or_else(|| "Railpack".into());
             static_site = source::is_static(&info_json);
-            self.progress(&job.id, BuildProgress { logs: vec![line("info", "builder", &format!("No Dockerfile or Containerfile. Building it as {detected} with Railpack"))], ..Default::default() }).await;
+            self.progress(
+                &job.id,
+                BuildProgress {
+                    logs: vec![line(
+                        "info",
+                        "builder",
+                        &format!("No Dockerfile. Building it as {detected} with Railpack"),
+                    )],
+                    ..Default::default()
+                },
+            )
+            .await;
             let cache_key = job
                 .push_repository
                 .rsplit('/')
