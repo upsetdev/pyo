@@ -4,7 +4,51 @@ import type { Application } from "./types";
 // Free domains through nip.io: "<anything>.<ip>.nip.io" resolves to <ip>
 // (e.g. "app.203.0.113.7.nip.io"), so a hostname works with no DNS record.
 
-export const isFreeDomain = (hostname: string) => /\.nip\.io$/.test(hostname);
+// Tailnet domains: "<name>.<tailnet>.ts.net" through Tailscale Services, with
+// Tailscale's own certificate. Only devices on the tailnet can open them.
+
+/** A tailnet domain (ts.net). */
+export const isTailnetDomain = (hostname: string) => /\.ts\.net$/.test(hostname);
+
+/** Free: no DNS record to make (nip.io or the tailnet). */
+export const isFreeDomain = (hostname: string) =>
+  /\.nip\.io$/.test(hostname) || isTailnetDomain(hostname);
+
+/** The kind of free domain, or null for the team's own. */
+export function freeKind(hostname: string): "public" | "private" | "tailnet" | null {
+  if (isTailnetDomain(hostname)) return "tailnet";
+  if (!/\.nip\.io$/.test(hostname)) return null;
+  return isPrivateHost(hostname) ? "private" : "public";
+}
+
+/** The tailnet a cluster's tailnet domains are on ("tail1234.ts.net"); none without Tailscale. */
+export function clusterTailnet(s: PyoState, clusterId: string) {
+  return s.clusters.find((c) => c.id === clusterId)?.tailnet ?? undefined;
+}
+
+/**
+ * "blog.tail1234.ts.net". Names are flat on a tailnet, so a name another
+ * service has gets the project's namespace, like nip.io names: "blog-shop".
+ */
+export function tailnetHostname(
+  s: PyoState,
+  app: Pick<Application, "name"> & { id?: string },
+  namespace: string,
+  tailnet: string,
+) {
+  const taken = (h: string) =>
+    s.services.some(
+      (a) => a.id !== app.id && a.domains.some((d) => d.hostname === h),
+    );
+  const label = (x: string) => x.slice(0, 63).replace(/-+$/, "");
+  const short = `${label(app.name)}.${tailnet}`;
+  if (!taken(short)) return short;
+  const long = `${label(`${app.name}-${namespace}`)}.${tailnet}`;
+  if (!taken(long)) return long;
+  let i = 2;
+  while (taken(`${label(`${app.name}-${namespace}-${i}`)}.${tailnet}`)) i++;
+  return `${label(`${app.name}-${namespace}-${i}`)}.${tailnet}`;
+}
 
 /**
  * Where the cluster's free domains point: its public or Tailscale IP, as its

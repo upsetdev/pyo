@@ -30,10 +30,13 @@ import { useState, type ReactNode } from "react";
 import { locationLabel, parseLocation, placesOf } from "~/lib/pyo/location";
 import { Flag } from "~/components/ui/Flag";
 import {
+  clusterTailnet,
   freeHostname,
   isFreeDomain,
+  isTailnetDomain,
   noFreeDomain,
   freeDomainIp,
+  tailnetHostname,
 } from "~/lib/pyo/freeDomain";
 import { BrandMark, GITHUB_LOGO } from "~/components/pyo/common";
 import { SearchInput } from "~/components/ui/Table";
@@ -1000,7 +1003,7 @@ const TLS_CHOICES: { value: TlsMode; label: string }[] = [
   { value: "off", label: "HTTP only" },
 ];
 
-/** Hostnames the service answers on: a free nip.io one or your own, with HTTPS. */
+/** Hostnames the service answers on: a free one (nip.io or the tailnet) or your own, with HTTPS. */
 export function DomainsStep({ d, set, errors }: StepProps) {
   const s = usePyo();
   const cluster = s.clusters.find((c) => c.id === d.clusterId);
@@ -1010,6 +1013,19 @@ export function DomainsStep({ d, set, errors }: StepProps) {
   const free = ip
     ? freeHostname({ name: d.name || "app" }, project?.namespace ?? "app", ip)
     : "";
+  const tailnet = d.clusterId ? clusterTailnet(s, d.clusterId) : undefined;
+  const tailnetFree = tailnet
+    ? tailnetHostname(
+        s,
+        { name: d.name || "app" },
+        project?.namespace ?? "app",
+        tailnet,
+      )
+    : "";
+  const hasPublic = d.domains.some(
+    (x) => isFreeDomain(x.hostname) && !isTailnetDomain(x.hostname),
+  );
+  const hasTailnet = d.domains.some((x) => isTailnetDomain(x.hostname));
   const add = (hostname = "") =>
     set({
       domains: [
@@ -1044,6 +1060,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                 ),
               });
             const freeOne = isFreeDomain(dm.hostname);
+            const tailnetOne = isTailnetDomain(dm.hostname);
             const tls = dm.tlsMode ?? "auto";
             const error = errors[`domain.${dm.id}`];
             return (
@@ -1060,7 +1077,9 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                       aria-invalid={error ? true : undefined}
                       value={dm.hostname}
                       placeholder="app.example.com"
-                      className={freeOne ? "pr-14" : undefined}
+                      className={
+                        tailnetOne ? "pr-[4.5rem]" : freeOne ? "pr-14" : undefined
+                      }
                       onChange={(e) =>
                         setD({ hostname: e.target.value.trim().toLowerCase() })
                       }
@@ -1068,26 +1087,29 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                     {freeOne ? (
                       <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center">
                         <span className="rounded bg-success/15 px-1.5 text-[10.5px] font-medium text-success">
-                          free
+                          {tailnetOne ? "tailnet" : "free"}
                         </span>
                       </span>
                     ) : null}
                   </div>
-                  <div className="flex-[1_1_9rem]">
-                    <Select
-                      aria-label="HTTPS"
-                      value={tls}
-                      onChange={(e) =>
-                        setD({ tlsMode: e.target.value as TlsMode })
-                      }
-                    >
-                      {TLS_CHOICES.map((c) => (
-                        <option key={c.value} value={c.value}>
-                          {c.label}
-                        </option>
-                      ))}
-                    </Select>
-                  </div>
+                  {/* Tailscale serves a tailnet domain's HTTPS. */}
+                  {tailnetOne ? null : (
+                    <div className="flex-[1_1_9rem]">
+                      <Select
+                        aria-label="HTTPS"
+                        value={tls}
+                        onChange={(e) =>
+                          setD({ tlsMode: e.target.value as TlsMode })
+                        }
+                      >
+                        {TLS_CHOICES.map((c) => (
+                          <option key={c.value} value={c.value}>
+                            {c.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  )}
                   {httpPorts.length > 1 ? (
                     <div className="flex-[1_1_8rem]">
                       <Select
@@ -1121,12 +1143,13 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                     }
                   >
                     {error ??
-                      (freeOne ? (
+                      (tailnetOne ? (
+                        "Only devices on your tailnet can open it."
+                      ) : freeOne ? (
                         "No DNS record needed."
                       ) : dm.hostname ? (
                         `Point its DNS to ${cluster?.publicIp ?? "the cluster's public address"}.`
-                      ) : free &&
-                        !d.domains.some((x) => isFreeDomain(x.hostname)) ? (
+                      ) : free && !hasPublic ? (
                         <button
                           type="button"
                           onClick={() => setD({ hostname: free })}
@@ -1138,7 +1161,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                         "Enter your domain, like app.example.com."
                       ))}
                   </span>
-                  {tls !== "off" ? (
+                  {tls !== "off" && !tailnetOne ? (
                     <label className="inline-flex cursor-pointer items-center gap-1.5 text-muted-foreground">
                       <input
                         type="checkbox"
@@ -1163,14 +1186,27 @@ export function DomainsStep({ d, set, errors }: StepProps) {
       <div className="flex flex-wrap gap-2">
         {free && !d.domains.some((x) => x.hostname === free) ? (
           <Button variant="secondary" size="xs" onClick={() => add(free)}>
-            <PlusIcon size={12} /> Free domain
+            <PlusIcon size={12} />{" "}
+            {cluster?.freeDomainAddress === "tailscale"
+              ? "Tailscale IP domain"
+              : "Public domain"}
+          </Button>
+        ) : null}
+        {!hasTailnet && d.clusterId ? (
+          <Button
+            variant="secondary"
+            size="xs"
+            disabled={!tailnetFree}
+            onClick={() => add(tailnetFree)}
+          >
+            <PlusIcon size={12} /> Tailnet domain
           </Button>
         ) : null}
         <Button variant="secondary" size="xs" onClick={() => add()}>
           <PlusIcon size={12} /> Your domain
         </Button>
       </div>
-      {free && !d.domains.some((x) => isFreeDomain(x.hostname)) ? (
+      {free && !hasPublic ? (
         <p className="text-[11.5px] text-muted-foreground">
           Free domain, ready instantly:{" "}
           <span className="font-mono text-foreground/85">{free}</span>
@@ -1178,6 +1214,16 @@ export function DomainsStep({ d, set, errors }: StepProps) {
       ) : !free && d.clusterId ? (
         <p className="text-[11.5px] text-muted-foreground">
           {noFreeDomain(s, d.clusterId)}
+        </p>
+      ) : null}
+      {tailnetFree && !hasTailnet ? (
+        <p className="text-[11.5px] text-muted-foreground">
+          On your tailnet:{" "}
+          <span className="font-mono text-foreground/85">{tailnetFree}</span>
+        </p>
+      ) : !tailnet && d.clusterId ? (
+        <p className="text-[11.5px] text-muted-foreground">
+          Not on Tailscale, so no tailnet domain.
         </p>
       ) : null}
     </div>

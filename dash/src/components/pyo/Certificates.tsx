@@ -18,7 +18,7 @@ import { Menu } from "~/components/ui/Menu";
 import { EmptyState, Panel } from "~/components/ui/Panel";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import { isPrivateHost } from "~/lib/pyo/freeDomain";
+import { isPrivateHost, isTailnetDomain } from "~/lib/pyo/freeDomain";
 import type {
   Application,
   Certificate,
@@ -489,8 +489,9 @@ export function tlsLine(d: Domain, certs: Certificate[]) {
     if (!c) return "Its certificate was removed. Pick another one.";
     return `${d.tls === "issued" ? "HTTPS with" : "Uses"} your certificate ${c.name}. ${expiry(c).text}.`;
   }
-  const issuer =
-    (d.tlsMode ?? "auto") === "auto"
+  const issuer = isTailnetDomain(d.hostname)
+    ? "Tailscale"
+    : (d.tlsMode ?? "auto") === "auto"
       ? isPrivateHost(d.hostname)
         ? "self-signed"
         : "Let's Encrypt"

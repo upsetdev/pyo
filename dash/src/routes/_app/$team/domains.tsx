@@ -2,7 +2,7 @@ import { ListSection } from "~/components/ui/Layered";
 import { GlobeIcon, PlusIcon } from "@phosphor-icons/react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { DomainStatus } from "~/components/pyo/DomainState";
+import { DomainKind, DomainStatus } from "~/components/pyo/DomainState";
 import { TimeAgo } from "~/components/pyo/common";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
@@ -149,8 +149,11 @@ function Domains() {
                     }
                   >
                     <Td>
-                      <span className="font-mono text-[12.5px]">
-                        {d.hostname}
+                      <span className="inline-flex items-center gap-2">
+                        <span className="font-mono text-[12.5px]">
+                          {d.hostname}
+                        </span>
+                        <DomainKind hostname={d.hostname} />
                       </span>
                     </Td>
                     <Td>

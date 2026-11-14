@@ -11,7 +11,7 @@ import {
 } from "@phosphor-icons/react";
 import { copyIdItem } from "~/components/pyo/copyId";
 import { Menu } from "~/components/ui/Menu";
-import { isFreeDomain } from "~/lib/pyo/freeDomain";
+import { isFreeDomain, isTailnetDomain } from "~/lib/pyo/freeDomain";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   CertificateDialog,
@@ -22,7 +22,7 @@ import {
 } from "~/components/pyo/Certificates";
 import { TlsBadge } from "~/components/ui/Badge";
 import { Tooltip } from "~/components/ui/Tooltip";
-import { DomainStatus } from "~/components/pyo/DomainState";
+import { DomainKind, DomainStatus } from "~/components/pyo/DomainState";
 import { AppLink } from "~/components/ui/AppLink";
 import { AddDomainDialog } from "~/components/pyo/AddDomainDialog";
 import { useState } from "react";
@@ -94,6 +94,8 @@ function Domains({ app }: { app: Application }) {
           <ul className="list-rows">
             {app.domains.map((d) => {
               const cert = certOf(d);
+              // Tailscale serves its HTTPS: no DNS, certificate or redirect to set.
+              const tailnet = isTailnetDomain(d.hostname);
               return (
                 <li key={d.id} className="px-4 py-3.5">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -115,6 +117,7 @@ function Domains({ app }: { app: Application }) {
                         {d.hostname}
                       </span>
                     </span>
+                    <DomainKind hostname={d.hostname} />
                     <Tooltip content={tlsLine(d, s.certificates)}>
                       <TlsBadge status={d.tls} />
                     </Tooltip>
@@ -133,7 +136,16 @@ function Domains({ app }: { app: Application }) {
                     <span className="ml-auto flex gap-1">
                       <Menu
                         label={`Settings of ${d.hostname}`}
-                        items={[
+                        items={tailnet ? [
+                          copyIdItem("Domain", d.id),
+                          { type: "separator" as const },
+                          {
+                            label: "Remove domain",
+                            icon: <TrashIcon size={14} />,
+                            danger: true,
+                            onSelect: () => setRemoving(d),
+                          },
+                        ] : [
                           // Pyo also checks domains waiting for DNS on its own; this checks now.
                           {
                             label: "Check DNS",

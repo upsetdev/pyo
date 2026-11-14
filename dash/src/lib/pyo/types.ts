@@ -360,6 +360,8 @@ export type Cluster = {
   publicIp?: string | null;
   /** Its Tailscale IPv4 address that answers websites; null without one. */
   tailnetIp?: string | null;
+  /** Its tailnet's DNS name, for tailnet domains ("tail1234.ts.net"); null when not on Tailscale. */
+  tailnet?: string | null;
   /** Where its free domains point, as chosen or by default. */
   freeDomainAddress?: FreeDomainAddress;
   /** As chosen in its settings; null: the default. */

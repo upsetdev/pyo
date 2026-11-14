@@ -138,6 +138,20 @@ export function ClusterPublicTraffic({ cluster: c }: { cluster: Cluster }) {
           </p>
         )}
       </div>
+      <div className="border-t border-border p-4">
+        <p className="mb-1 text-[13px] font-medium">Tailnet domains</p>
+        <p className="text-[12px] text-muted-foreground">
+          {c.tailnet ? (
+            <>
+              Services can get a name on{" "}
+              <span className="font-mono text-foreground/85">{c.tailnet}</span>
+              . Only devices on your tailnet can open them.
+            </>
+          ) : (
+            "Not on Tailscale."
+          )}
+        </p>
+      </div>
     </Panel>
   );
 }

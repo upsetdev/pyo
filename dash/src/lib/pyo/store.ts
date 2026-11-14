@@ -9,6 +9,11 @@ import {
 import { NEW_PROJECT, type DeployDraft } from "./draft";
 import { newId, slugify } from "./format";
 import { isActive, revisionFor } from "./simulation";
+import {
+  isStubDomain,
+  takeTailnetDomains,
+  withTailnetStub,
+} from "./tailnetStub"; // TODO(tailnet-domains): backend
 import { generateValue, getTemplate, templateArgs, templateRecord, templateRefs } from "./templates";
 import { toast } from "./toast";
 import type {
@@ -363,7 +368,8 @@ let generation = 0;
 /** Fetch the snapshot and make it the state. */
 export async function refresh() {
   const started = generation;
-  const snap = (await fetchState()) as Partial<PyoState>;
+  // TODO(tailnet-domains): backend (was `(await fetchState()) as Partial<PyoState>`)
+  const snap = withTailnetStub((await fetchState()) as Partial<PyoState>);
   if (pending > 0 || started !== generation) return;
   const prev = get();
   const next: PyoState = {
@@ -893,6 +899,14 @@ export function desiredReplicas(a: Application) {
   return a.autoscale ? (a.runtime.desired ?? a.replicas) : a.replicas;
 }
 
+// TODO(tailnet-domains): backend. Stub domains stay in the browser for now.
+function saveTailnetOnly(serviceId: string) {
+  const app = get().services.find((a) => a.id === serviceId);
+  if (app) takeTailnetDomains(app);
+  void refresh().catch(() => undefined);
+  return Promise.resolve({ ok: true } as Record<string, unknown> & { ok: boolean });
+}
+
 function saveService(
   serviceId: string,
   deploy?: { deploymentId: string; trigger: DeploymentTrigger },
@@ -901,7 +915,7 @@ function saveService(
   const app = get().services.find((a) => a.id === serviceId);
   if (!app) return Promise.resolve(null);
   return send("saveService", {
-    service: app,
+    service: takeTailnetDomains(app), // TODO(tailnet-domains): backend (was `app`)
     deploymentId: deploy?.deploymentId,
     trigger: deploy?.trigger,
     // A very large replica change the user said yes to.
@@ -1730,7 +1744,7 @@ export const api = {
     const done = (async () => {
       if (fresh && !(await send("createProject", fresh))) return false;
       return !!(await send("createService", {
-        service: app,
+        service: app && takeTailnetDomains(app), // TODO(tailnet-domains): backend (was `app`)
         deploymentId,
         volumes,
         ...(opts.databases?.length ? { databases: opts.databases } : {}),
@@ -1806,6 +1820,7 @@ export const api = {
       const port = a.ports.find((p) => p.name === input.portName);
       if (port) port.exposure = "http";
     });
+    if (isStubDomain(input.hostname)) return saveTailnetOnly(id); // TODO(tailnet-domains): backend
     return saveService(id);
   },
   /** HTTPS settings of a domain; applied live once the service is deployed. */
@@ -1826,9 +1841,16 @@ export const api = {
       if (patch.tlsMode === "off") d.tls = "disabled";
       else if (patch.tlsMode) d.tls = "pending";
     });
+    // TODO(tailnet-domains): backend
+    if (isStubDomain(findService(get(), id).domains.find((x) => x.id === domainId)?.hostname ?? ""))
+      return saveTailnetOnly(id);
     return saveService(id);
   },
   removeDomain(id: string, domainId: string) {
+    // TODO(tailnet-domains): backend
+    const tailnetOnly = isStubDomain(
+      findService(get(), id).domains.find((x) => x.id === domainId)?.hostname ?? "",
+    );
     update((s) => {
       const a = findService(s, id);
       a.domains = a.domains.filter((x) => x.id !== domainId);
@@ -1839,6 +1861,7 @@ export const api = {
         )
           p.exposure = "internal";
     });
+    if (tailnetOnly) return saveTailnetOnly(id); // TODO(tailnet-domains): backend
     return saveService(id);
   },
   /** Default-deny networking for a project, on every cluster it runs on. */
@@ -1869,6 +1892,9 @@ export const api = {
   },
   /** Resolves the hostname from the API server. */
   async verifyDomain(id: string, domainId: string) {
+    // TODO(tailnet-domains): backend. A stub domain isn't in the API.
+    if (isStubDomain(findService(get(), id).domains.find((x) => x.id === domainId)?.hostname ?? ""))
+      return;
     update((s) => {
       const d = findService(s, id).domains.find((x) => x.id === domainId);
       if (d) {

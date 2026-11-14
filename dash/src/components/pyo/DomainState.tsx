@@ -1,5 +1,10 @@
 import { expiry } from "~/components/pyo/Certificates";
-import { isFreeDomain, isPrivateHost } from "~/lib/pyo/freeDomain";
+import {
+  freeKind,
+  isFreeDomain,
+  isPrivateHost,
+  isTailnetDomain,
+} from "~/lib/pyo/freeDomain";
 import { Badge, type Tone } from "~/components/ui/Badge";
 import { Tooltip } from "~/components/ui/Tooltip";
 import { timeAgo } from "~/lib/pyo/format";
@@ -53,6 +58,8 @@ export function domainState(
       text: "HTTPS",
       hint: `Your certificate ${certs.find((c) => c.id === d.certificateId)?.name ?? ""}`.trim(),
     };
+  if (isTailnetDomain(d.hostname))
+    return { tone: "ok", text: "HTTPS", hint: "Tailscale certificate" };
   if (selfSigned(d))
     return { tone: "ok", text: "HTTPS", hint: "Self-signed certificate" };
   return { tone: "ok", text: "HTTPS", hint: "Let's Encrypt certificate" };
@@ -78,4 +85,21 @@ export function DomainStatus({
   const st = domainState(d, certs, notDeployed);
   const label = <Badge tone={BADGE[st.tone]}>{st.text}</Badge>;
   return st.hint ? <Tooltip content={st.hint}>{label}</Tooltip> : label;
+}
+
+const KINDS = {
+  public: { label: "Public", tone: "neutral", hint: "Free nip.io domain. Anyone can open it." },
+  private: { label: "Private", tone: "neutral", hint: "Free nip.io domain on a private IP." },
+  tailnet: { label: "Tailnet", tone: "info", hint: "Only devices on your tailnet can open it." },
+} as const;
+
+/** Which free domain it is (none for the team's own), as a badge. */
+export function DomainKind({ hostname }: { hostname: string }) {
+  const k = freeKind(hostname);
+  if (!k) return null;
+  return (
+    <Tooltip content={KINDS[k].hint}>
+      <Badge tone={KINDS[k].tone}>{KINDS[k].label}</Badge>
+    </Tooltip>
+  );
 }
