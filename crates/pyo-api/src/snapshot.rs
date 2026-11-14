@@ -207,6 +207,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     )
     .await?;
     let mut services = for_dashboard(services).await?;
+    crate::cloudflare::attach(db, &team_ids, &mut services).await?;
     // A service with its WAF on: where it stands ("installing" while the
     // engine starts on its cluster, "ready", "failed" with a message).
     for a in &mut services {
@@ -417,6 +418,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "tailscale": tailscale,
         // Pyo's dashboard on the public IP: the installation's admin only.
         "publicDashboard": if user.is_admin { crate::publicdash::snapshot(db).await? } else { Value::Null },
+        // Cloudflare accounts: their zones, never the token.
+        "cloudflare": crate::cloudflare::snapshot(db, user, &team_ids).await?,
         "agentApiUrl": agent_api_url,
         // Whether email goes out; the settings themselves only for admins.
         // What analytics keeps of visitors' IPs (installation-wide).

@@ -92,6 +92,7 @@ pub fn routes() -> Router<AppState> {
         .route("/mcp/calls", get(crate::mcp::calls))
         .route("/images", get(crate::images::list))
         .route("/registry", get(crate::images::registry))
+        .route("/cloudflare", get(crate::cloudflare::get))
         .route("/databases", get(crate::databases::list))
         .route("/databases/{id}", get(crate::databases::get))
         .route("/database-extensions", get(crate::databases::extensions))
@@ -524,6 +525,12 @@ fn service_spec_from(service: &Value) -> Value {
         // Worked out for each response (template_source::show); not stored.
         if let Some(src) = o.get_mut("source").and_then(Value::as_object_mut) {
             src.remove("customized");
+        }
+        // The DNS record Pyo made, from its own table (cloudflare.rs); not stored.
+        if let Some(ds) = o.get_mut("domains").and_then(Value::as_array_mut) {
+            for d in ds.iter_mut().filter_map(Value::as_object_mut) {
+                d.remove("dnsRecord");
+            }
         }
         // The snapshot's marker for a secret that has a value; not stored.
         if let Some(env) = o.get_mut("env").and_then(Value::as_array_mut) {
@@ -2195,6 +2202,28 @@ pub(crate) enum Op {
     },
     /// Revoke a Pyo registry token. Team owners and admins.
     RevokeRegistryToken { id: String },
+    /// Connect the team's Cloudflare account, or replace its token. The token needs Zone:Read and DNS:Edit on the zones Pyo may use. Pyo lists its zones, checks it can edit DNS in each (it makes and deletes a TXT record `_pyo-check.<zone>`), then keeps it encrypted. It's never shown again. Team owners and admins.
+    ConnectCloudflare { team_id: String, token: String },
+    /// Check the saved Cloudflare token again: the zones it covers now, and what it's missing (`problems`). Team owners and admins.
+    TestCloudflare { team_id: String },
+    /// Forget the team's Cloudflare token. DNS records Pyo made stay in Cloudflare. Team owners and admins.
+    RemoveCloudflare { team_id: String },
+    /// Create a domain's DNS record in the team's Cloudflare account, when one of its connected zones covers the hostname: an A record to the cluster's public IP, with the comment "Made by Pyo (<installation id>)". Pyo never overwrites a record. When another A, AAAA or CNAME record has the name, `status` is "conflict" and `existing` lists them. Send it again with `replace` to delete those and create Pyo's (team owners and admins). `status` "exists" means it already points there. With `proxied`, Cloudflare proxies it once the domain's certificate is issued.
+    CreateDnsRecord {
+        service_id: String,
+        domain_id: String,
+        /// Proxied by Cloudflare. Off by default.
+        #[serde(default)]
+        proxied: bool,
+        /// Replace the records in the way.
+        #[serde(default)]
+        replace: bool,
+    },
+    /// Delete the DNS record Pyo made for a domain in Cloudflare. Only a record Pyo made, still with its comment, is deleted. Remove the domain after this.
+    DeleteDnsRecord {
+        service_id: String,
+        domain_id: String,
+    },
     /// Create a project and its services from a Docker Compose plan (from `POST /compose/preview`, edited if you like), and deploy them in order.
     ImportCompose {
         team_id: String,
@@ -2353,7 +2382,9 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         Op::SaveCronJob { .. } | Op::RemoveCronJob { .. } | Op::RunCronJob { .. } => {
             ("Cron jobs", "crn")
         }
-        Op::VerifyDomain { .. } => ("Domains", "dom"),
+        Op::VerifyDomain { .. } | Op::CreateDnsRecord { .. } | Op::DeleteDnsRecord { .. } => {
+            ("Domains", "dom")
+        }
         Op::UploadCertificate { .. }
         | Op::ReplaceCertificate { .. }
         | Op::RemoveCertificate { .. } => ("Domains", "crt"),
@@ -2423,7 +2454,10 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::RemoveTailscale {}
         | Op::RenameTailscaleName { .. } => ("Integrations", ""),
         Op::SetPublicDashboard { .. } => ("Settings", ""),
-        Op::CheckSecretImport { .. }
+        Op::ConnectCloudflare { .. }
+        | Op::TestCloudflare { .. }
+        | Op::RemoveCloudflare { .. }
+        | Op::CheckSecretImport { .. }
         | Op::SaveSecretStore { .. }
         | Op::RemoveSecretStore { .. } => ("Integrations", "sst"),
         // Not for API keys, so not in the reference.
@@ -4616,6 +4650,7 @@ async fn apply(
                 .bind(deployment_id.is_none() && (pending || changed))
                 .execute(&mut **tx)
                 .await?;
+            crate::cloudflare::forget_removed(tx, &id, &spec).await?;
             // New domains go live now; with a deploy, they go out with it.
             if domains_changed
                 && let Some(c) = crate::routes::changed(tx, &id, deployment_id.is_none()).await?
@@ -6236,6 +6271,24 @@ async fn apply(
             crate::publicdash::set_open(&s.db, open).await?;
             Ok(ok)
         }
+        Op::ConnectCloudflare { team_id, token } => {
+            crate::cloudflare::connect(s, tx, user, &team_id, &token).await
+        }
+        Op::TestCloudflare { team_id } => crate::cloudflare::test(s, tx, user, &team_id).await,
+        Op::RemoveCloudflare { team_id } => crate::cloudflare::remove(tx, user, &team_id).await,
+        Op::CreateDnsRecord {
+            service_id,
+            domain_id,
+            proxied,
+            replace,
+        } => {
+            crate::cloudflare::create_record(s, tx, user, &service_id, &domain_id, proxied, replace)
+                .await
+        }
+        Op::DeleteDnsRecord {
+            service_id,
+            domain_id,
+        } => crate::cloudflare::delete_record(s, tx, user, &service_id, &domain_id).await,
         Op::UpdateProfile { name, timezone } => {
             let name = require_text(&name, "Name", 80)?;
             let tz = require_text(&timezone, "Time zone", 64)?;

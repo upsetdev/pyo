@@ -2099,8 +2099,12 @@ pub async fn dns_watcher(state: AppState) {
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     loop {
         tick.tick().await;
-        if let Some(Err(e)) =
-            crate::bg::as_leader(&state.db, crate::bg::LOCK_DNS, || check_pending_dns(&state)).await
+        if let Some(Err(e)) = crate::bg::as_leader(&state.db, crate::bg::LOCK_DNS, || async {
+            check_pending_dns(&state).await?;
+            // Cloudflare records waiting for their certificate to be proxied.
+            crate::cloudflare::proxy_ready(&state).await
+        })
+        .await
         {
             tracing::warn!(error = ?e.message, "DNS check failed");
         }

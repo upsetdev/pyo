@@ -467,7 +467,16 @@ fn build_catalog() -> Vec<Tool> {
 
 pub(crate) fn catalog() -> &'static [Tool] {
     static C: OnceLock<Vec<Tool>> = OnceLock::new();
-    C.get_or_init(build_catalog)
+    // Built from the API's schema, whose operation enum takes a deep stack
+    // to describe (unoptimized builds overflow a test thread's 2 MiB): on a
+    // thread of its own, once.
+    C.get_or_init(|| {
+        std::thread::Builder::new()
+            .stack_size(32 << 20)
+            .spawn(build_catalog)
+            .and_then(|t| t.join().map_err(|_| std::io::Error::other("panicked")))
+            .expect("the MCP tool catalog")
+    })
 }
 
 /// What this connection may run: its grant's access (full for a session).
@@ -573,6 +582,7 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "getAccessLogs" => json_of(ops::access_logs(st(), me(), Query(args_as(args)?)).await),
         "listImages" => json_of(crate::images::list(st(), me(), Query(args_as(args)?)).await),
         "getRegistry" => json_of(crate::images::registry(st(), me(), Query(args_as(args)?)).await),
+        "getCloudflare" => json_of(crate::cloudflare::get(st(), me(), Query(args_as(args)?)).await),
         "listDatabases" => json_of(crate::databases::list(st(), me(), Query(args_as(args)?)).await),
         "getDatabase" => {
             json_of(crate::databases::get(st(), me(), Path(arg(args, "id")?.to_owned())).await)

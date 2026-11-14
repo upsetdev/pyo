@@ -50,6 +50,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::ops::waf_hits,
         crate::images::list,
         crate::images::registry,
+        crate::cloudflare::get,
         crate::databases::list,
         crate::databases::get,
         crate::databases::extensions,
