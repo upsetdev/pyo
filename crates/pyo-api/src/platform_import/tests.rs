@@ -597,7 +597,17 @@ fn railway_services() {
     assert_eq!(worker.service.source.image, "ghcr.io/acme/worker");
     assert_eq!(worker.service.source.reference, "1.4.2");
     assert!(has(&worker.warnings, "on a schedule (*/15 * * * *)"));
-    assert!(has(&worker.warnings, "doesn't know its port"));
+    // No domain: Pyo's default HTTP port, private, and no check, since a
+    // worker may not listen.
+    assert!(has(&worker.warnings, "gets HTTP port 8080"));
+    let ports: Vec<(u16, &str, bool)> = worker
+        .service
+        .ports
+        .iter()
+        .map(|p| (p.container_port, p.protocol.as_str(), p.public))
+        .collect();
+    assert_eq!(ports, [(8080, "HTTP", false)]);
+    assert_eq!(worker.service.health_check["type"], "none");
     assert!(has(&worker.warnings, "put it to sleep"));
 
     // Uploaded with Railway's CLI: reported, not imported.
