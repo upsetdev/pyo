@@ -32,7 +32,7 @@ Kubernetes, so you're never locked in.
 
 ## Features
 
-- **Deploy anything:** build with your Dockerfile or Containerfile, or with
+- **Deploy anything:** build with your Dockerfile, or with
   zero configuration, or run any container image.
 - **Databases:** Postgres, MySQL and KV (Redis-compatible), with
   automatic failover, backups with point-in-time recovery (for MySQL, up to
