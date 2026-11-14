@@ -196,6 +196,9 @@ jobs:
       # install.sh goes out as an asset named exactly that: pyo.dev/install.sh
       # fetches releases/latest/download/install.sh (stable releases only).
       # connect.sh beside it: install.sh --uninstall runs its own release's.
+      # pyo.dev/connect.sh and pyo.dev/join.sh fetch connect.sh and join.sh
+      # the same way (Pyo's commands use them when it has no address other
+      # machines can reach).
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           body_path: release-notes.md
@@ -206,3 +209,4 @@ jobs:
             release.json.sigstore.json
             deploy/install.sh
             crates/pyo-api/assets/connect.sh
+            crates/pyo-api/assets/join.sh
