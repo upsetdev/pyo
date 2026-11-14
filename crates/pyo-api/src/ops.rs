@@ -1866,7 +1866,7 @@ pub(crate) enum Op {
     GithubInstallUrl { team_id: String },
     /// Unlink a GitHub installation from a team.
     RemoveGithubInstallation { team_id: String, id: i64 },
-    /// Connect GitLab (gitlab.com or self-managed) with an access token.
+    /// Connect GitLab (gitlab.com or your own) with an access token.
     /// Team owners and admins. Pyo checks the token first: it needs the
     /// `api` scope, and the Maintainer role on the projects to deploy. The
     /// token is sealed and never shown again. `warning` says what's missing,

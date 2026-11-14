@@ -10,7 +10,7 @@ import { toast } from "~/lib/pyo/toast";
 import type { GitConnection } from "~/lib/pyo/types";
 
 // GitLab connections: a team's owner or admin adds an access token, per
-// GitLab (gitlab.com, a self-managed one, or both).
+// GitLab (gitlab.com, the team's own GitLab, or both).
 
 const host = (url: string) => {
   try {
@@ -208,7 +208,7 @@ export function GitlabRows() {
             {list.length ? "Another GitLab" : "GitLab"}
           </p>
           <p className="text-[12px] text-muted-foreground">
-            gitlab.com or self-managed, with an access token.
+            gitlab.com or your own GitLab, with an access token.
           </p>
         </div>
         <Button size="xs" onClick={() => setAdding(true)}>

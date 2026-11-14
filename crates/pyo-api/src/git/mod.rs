@@ -636,10 +636,11 @@ pub(crate) struct BuildFileQuery {
     context: String,
 }
 
-/// The Dockerfile a Git build of a repository would use by default
+/// Git build file
 ///
-/// For a repository of one of the team's Git connections. Null: the build
-/// is zero-config (Railpack).
+/// The Dockerfile a build of a repository of the team's Git connections
+/// would use by default, in the build context. Null: the build is
+/// zero-config (Railpack).
 #[utoipa::path(get, path = "/git/build-file", operation_id = "getGitBuildFile", tag = "Git providers",
     params(BuildFileQuery),
     responses(
