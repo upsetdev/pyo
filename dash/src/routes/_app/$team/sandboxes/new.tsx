@@ -120,9 +120,11 @@ function NewSandbox() {
             <Field
               label="Template"
               hint={
-                <AppLink href="/sandboxes/templates" className="font-medium text-primary hover:text-primary/80">
-                  Sandbox templates
-                </AppLink>
+                ready.length ? (
+                  <AppLink href="/sandboxes/templates" className="font-medium text-primary hover:text-primary/80">
+                    Sandbox templates
+                  </AppLink>
+                ) : undefined
               }
             >
               {(p) =>
@@ -141,7 +143,23 @@ function NewSandbox() {
                     ))}
                   </Select>
                 ) : (
-                  <Callout tone="neutral">No templates yet.</Callout>
+                  <Callout tone={templates.status === "error" ? "danger" : "neutral"}>
+                    {templates.status === "error" ? (
+                      <>
+                        Couldn't load templates.{" "}
+                        <button type="button" onClick={templates.retry} className="font-medium underline underline-offset-2">
+                          Try again
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        No templates yet.{" "}
+                        <AppLink href="/sandboxes/templates" className="font-medium text-primary hover:text-primary/80">
+                          Add a template
+                        </AppLink>
+                      </>
+                    )}
+                  </Callout>
                 )
               }
             </Field>
