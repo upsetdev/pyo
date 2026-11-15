@@ -189,7 +189,10 @@ check "the ask is valid JSON" "$(python3 -c 'import json,sys; json.load(open(sys
 rm -f "$ETC/config.json"
 fake_body='This code expired. Make a new one in Pyo.' fake_code=403
 out=$( (redeem) 2>&1)
-check "a refusal is shown as Pyo says it" "$out" "Pyo refused: This code expired. Make a new one in Pyo." has
+check "a refusal is shown as Pyo says it" "$out" "Pyo refused this server. This code expired. Make a new one in Pyo." has
+fake_body='{"error":"This join code was used already."}' fake_code=409
+out=$( (redeem) 2>&1)
+check "a JSON refusal shows only its words" "$out" "Pyo refused this server. This join code was used already.$" has
 check "and writes no config" "$(ls "$ETC")" "config.json" lacks
 fake_body='{"serverId":"sbs_other"}' fake_code=200
 out=$( (redeem) 2>&1)

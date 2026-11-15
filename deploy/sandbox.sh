@@ -464,7 +464,7 @@ redeem() {
     case "$status" in
       200) break ;;
       000 | 429 | 5??) ;;
-      *) fail "Pyo refused: $body" ;;
+      *) fail "$(refusal "$body")" ;;
     esac
     [ "$SECONDS" -lt "$deadline" ] || fail "Pyo didn't answer over your tailnet in 10 minutes. Check that Pyo is running, then run the same command again."
     sleep 5
@@ -478,6 +478,18 @@ redeem() {
   esac
   (umask 077 && printf '%s\n' "$body" > "$ETC/config.json.new")
   mv -f "$ETC/config.json.new" "$ETC/config.json"
+}
+
+# Why Pyo refused, in its own words when it gave some (its JSON error, or a
+# short line of text), else in a plain sentence.
+refusal() {
+  local why
+  why=$(sed -n 's/.*"error": *"\([^"\\]*\)".*/\1/p' <<<"$1" | head -n1)
+  if [ -z "$why" ] && [ "${#1}" -le 200 ] && [[ $1 != *[{}\<]* ]]; then
+    why=$(head -n1 <<<"$1")
+  fi
+  [ -n "$why" ] || why="It didn't say why. Copy a fresh command from Pyo and run it again."
+  printf 'Pyo refused this server. %s\n' "$why"
 }
 
 # This server's own settings for the daemon: the sandboxes' network and,
