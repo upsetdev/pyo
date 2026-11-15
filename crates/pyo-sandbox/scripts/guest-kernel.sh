@@ -8,7 +8,7 @@
 #
 #   crates/pyo-sandbox/scripts/guest-kernel.sh <out>
 #
-# Needs gcc, make, flex, bison, bc, perl, libelf and OpenSSL headers
+# Needs gcc, make, strip, flex, bison, bc, perl, libelf and OpenSSL headers
 # (on Ubuntu: build-essential flex bison bc libelf-dev libssl-dev). The
 # release workflow caches the result by this file and firecracker.env, so
 # a change to either builds it again. To update the kernel: the new 6.1
@@ -65,5 +65,8 @@ make -C "$src" -s -j"$(nproc)" "$target"
 
 mkdir -p "$out"
 install -m 644 "$src/$image" "$out/vmlinux"
+# The ELF's symbol table only helps a debugger (the kernel keeps its own
+# kallsyms): without it the x86-64 kernel is 29 MB instead of 44.
+[ "$arch" != x86_64 ] || strip "$out/vmlinux"
 install -m 644 "$src/.config" "$out/vmlinux.config"
 echo "Linux $KERNEL_VERSION ($arch): $(du -h "$out/vmlinux" | cut -f1)"
