@@ -3411,6 +3411,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyo-envd"
+version = "0.3.2"
+dependencies = [
+ "libc",
+ "pyo-proto",
+ "serde_json",
+]
+
+[[package]]
 name = "pyo-flows"
 version = "0.3.2"
 dependencies = [
