@@ -133,11 +133,22 @@ pub async fn run(agent: &Agent, spec: DeploySpec) -> CommandResult {
         stage: "queued".into(),
         pinned: false,
     };
-    let result = match apply_objects(agent, &spec, &mut r).await {
-        // Nothing runs until its schedule says so, so there's nothing to watch.
-        Ok(()) if spec.service.workload_kind == "CronJob" => Ok(Outcome::Ready { revision: None }),
-        Ok(()) => watch_rollout(agent, &spec, &mut r, rx).await,
-        Err(e) => Err(e),
+    let result = match &spec.site {
+        // A static site: its folder, served by the cluster's pyo-static.
+        Some(site) => apply_site(agent, &spec, site, &mut r).await,
+        None => match apply_objects(agent, &spec, &mut r).await {
+            // Nothing runs until its schedule says so, so there's nothing to watch.
+            Ok(()) if spec.service.workload_kind == "CronJob" => {
+                Ok(Outcome::Ready { revision: None })
+            }
+            Ok(()) => match watch_rollout(agent, &spec, &mut r, rx).await {
+                Ok(Outcome::Ready { revision }) => finish_switch(agent, &spec, &mut r)
+                    .await
+                    .map(|()| Outcome::Ready { revision }),
+                other => other,
+            },
+            Err(e) => Err(e),
+        },
     };
     agent.cancels.lock().unwrap().remove(&spec.deployment_id);
 
@@ -145,6 +156,9 @@ pub async fn run(agent: &Agent, spec: DeploySpec) -> CommandResult {
         Ok(Outcome::Ready { revision }) => {
             remove_old_env(agent, &spec);
             let msg = match &spec.autoscale {
+                _ if spec.site.is_some() => {
+                    format!("{} is live, served as static files", spec.service.name)
+                }
                 _ if spec.service.workload_kind == "CronJob" => {
                     format!("{} is scheduled: {} UTC", spec.service.name, spec.schedule)
                 }
@@ -229,9 +243,17 @@ async fn roll_back(agent: &Agent, prev: &DeploySpec, r: &mut Reporter<'_>) -> bo
     .await;
     // Nothing cancels a rollback: it's what makes the service whole again.
     let (_keep, never) = watch::channel(false);
-    let outcome = match apply_objects(agent, prev, r).await {
-        Ok(()) => watch_rollout(agent, prev, r, never).await,
-        Err(e) => Err(e),
+    let outcome = match &prev.site {
+        Some(site) => apply_site(agent, prev, site, r).await,
+        None => match apply_objects(agent, prev, r).await {
+            Ok(()) => match watch_rollout(agent, prev, r, never).await {
+                Ok(Outcome::Ready { revision }) => finish_switch(agent, prev, r)
+                    .await
+                    .map(|()| Outcome::Ready { revision }),
+                other => other,
+            },
+            Err(e) => Err(e),
+        },
     };
     match outcome {
         Ok(Outcome::Ready { .. }) => {
@@ -1424,10 +1446,27 @@ async fn apply_objects(
     // After the Service, so an isolated namespace keeps its public ports open.
     set_isolation(&client, ns, spec.network_isolation).await?;
 
-    // Routes through the gateway (gateway.rs): its domains, with
-    // their certificates and HTTPS redirects.
-    // With the service's newest domains (a change synced since this was
-    // handed out wins: gateway.rs `RouteState`).
+    // Served as static files until now: its routes move to its replicas
+    // once they're ready (`finish_switch`), not before.
+    if crate::sites::marked(&client, &spec.service).await? {
+        r.log(
+            "info",
+            "Its files are served as before until its replicas are ready",
+        )
+        .await;
+        return Ok(());
+    }
+    apply_web_routes(agent, spec, r).await
+}
+
+/// Routes through the gateway (gateway.rs): its domains, with their
+/// certificates and HTTPS redirects. With the service's newest domains (a
+/// change synced since this was handed out wins: gateway.rs `RouteState`).
+async fn apply_web_routes(
+    agent: &Agent,
+    spec: &DeploySpec,
+    r: &mut Reporter<'_>,
+) -> anyhow::Result<()> {
     let (notes, domains) = crate::gateway::apply_routes(agent, spec, false)
         .await?
         .unwrap_or_default();
@@ -1448,8 +1487,132 @@ async fn apply_objects(
         r.log("info", &format!("Serving at {}", hosts.join(", ")))
             .await;
     }
-
     Ok(())
+}
+
+/// How long the proxies get to take a site's new routes before what served
+/// it until then goes.
+const SWITCH_GRACE: Duration = Duration::from_secs(5);
+
+/// A service that was a static site, with its replicas ready now: its
+/// routes move to them, and it's no longer marked as a site. Nothing for
+/// any other.
+async fn finish_switch(
+    agent: &Agent,
+    spec: &DeploySpec,
+    r: &mut Reporter<'_>,
+) -> anyhow::Result<()> {
+    if !crate::sites::marked(&agent.kube, &spec.service).await? {
+        return Ok(());
+    }
+    apply_web_routes(agent, spec, r).await?;
+    tokio::time::sleep(SWITCH_GRACE).await;
+    crate::sites::unmark(&agent.kube, &spec.service).await?;
+    r.log(
+        "info",
+        "It runs as a service now, no longer as static files",
+    )
+    .await;
+    Ok(())
+}
+
+/// A static deploy: pyo-static fetches the folder, then the site's routes
+/// move to it, then whatever served the site before (its replicas, when it
+/// ran as a service) goes. The routes move only once the folder is ready,
+/// so a deploy or rollback that fails leaves the site as it was.
+async fn apply_site(
+    agent: &Agent,
+    spec: &DeploySpec,
+    site: &pyo_proto::site::SiteSpec,
+    r: &mut Reporter<'_>,
+) -> anyhow::Result<Outcome> {
+    let client = agent.kube.clone();
+    let ns = spec.service.namespace.as_str();
+    let name = spec.service.name.as_str();
+    r.stage("applying", &format!("Publishing {name}'s files"))
+        .await;
+    let namespace = project_namespace(ns, &spec.project_id, &spec.team_id);
+    apply(&Api::<Namespace>::all(client.clone()), ns, &namespace).await?;
+    crate::scope::ensure_managed(&client, ns).await?;
+    let failed = |reason: &str, message: String| {
+        Ok(Outcome::Failed {
+            failure: Failure {
+                stage: "applying".into(),
+                reason: reason.into(),
+                message: message.clone(),
+            },
+            logs: vec![line("error", &message)],
+        })
+    };
+    if !crate::sites::wait_ready(&client, Duration::from_secs(1)).await {
+        r.log(
+            "info",
+            "Waiting for the cluster's static file server to start",
+        )
+        .await;
+        if !crate::sites::wait_ready(&client, Duration::from_secs(240)).await {
+            return failed(
+                "StaticServerNotReady",
+                "The cluster's static file server didn't start within 4 minutes.".into(),
+            );
+        }
+    }
+    let mut tries = 0;
+    let (files, fetched) = loop {
+        match crate::sites::warm(&spec.service.service_id, &site.deploy).await {
+            Ok(done) => break done,
+            Err(e) if tries >= 5 => {
+                return failed(
+                    "SiteNotFetched",
+                    format!("The static file server couldn't fetch the site's files: {e:#}"),
+                );
+            }
+            Err(_) => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    };
+    r.log(
+        "info",
+        &format!("{files} file(s) ready ({fetched} fetched, the rest unchanged)"),
+    )
+    .await;
+    crate::sites::mark(&client, spec, &site.deploy).await?;
+    apply_web_routes(agent, spec, r).await?;
+    if remove_workload(agent, spec).await? {
+        r.log("info", "Removed the replicas it ran as before").await;
+    }
+    Ok(Outcome::Ready { revision: None })
+}
+
+/// What ran the service before it was a static site: its workload, its
+/// autoscaler, its Services and its environment, once the proxies have
+/// its new routes. Whether there was a workload.
+async fn remove_workload(agent: &Agent, spec: &DeploySpec) -> anyhow::Result<bool> {
+    let client = agent.kube.clone();
+    let ns = spec.service.namespace.as_str();
+    let name = spec.service.name.as_str();
+    let deployments = Api::<Deployment>::namespaced(client.clone(), ns);
+    let sets = Api::<StatefulSet>::namespaced(client.clone(), ns);
+    let had = deployments.get_opt(name).await?.is_some() || sets.get_opt(name).await?.is_some();
+    if had {
+        tokio::time::sleep(SWITCH_GRACE).await;
+    }
+    delete_if_exists(
+        &Api::<HorizontalPodAutoscaler>::namespaced(client.clone(), ns),
+        name,
+    )
+    .await?;
+    delete_if_exists(&deployments, name).await?;
+    delete_if_exists(&sets, name).await?;
+    let services = Api::<Service>::namespaced(client.clone(), ns);
+    delete_if_exists(&services, name).await?;
+    delete_if_exists(&services, &public_service_name(name)).await?;
+    // Its environment Secrets, once no pod reads them (a static site
+    // has none of its own).
+    remove_old_env(agent, spec);
+    Ok(had)
 }
 
 /// Poll the service's pods and workload until the rollout settles.

@@ -185,16 +185,36 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
     let meta = |name: &str| json!({ "name": name, "namespace": GATEWAY_NS, "labels": labels });
     let backend_name = |port: &str| format!("{base}-{port}");
     let backend_ref = |port: &str| json!({ "group": "gateway.envoyproxy.io", "kind": "Backend", "name": backend_name(port) });
+    // A static site's domains go to pyo-static instead, which serves the
+    // folder each route names (sites.rs); everything else about its routes
+    // (certificates, redirects, firewall, WAF) is a service's.
     let backend = |p: &str| {
+        let backend_spec = match &spec.site {
+            Some(_) => system::static_backend_spec(),
+            None => {
+                json!({ "endpoints": [{ "fqdn": { "hostname": format!("{}.{}.svc.cluster.local", spec.service.name, spec.service.namespace), "port": service_port(spec, p) } }] })
+            }
+        };
         json!({
             "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "Backend", "metadata": meta(&backend_name(p)),
-            "spec": { "endpoints": [{ "fqdn": { "hostname": format!("{}.{}.svc.cluster.local", spec.service.name, spec.service.namespace), "port": service_port(spec, p) } }] },
+            "spec": backend_spec,
         })
+    };
+    let web_rule = |p: &str| match &spec.site {
+        Some(site) => {
+            json!({ "backendRefs": [backend_ref(p)], "filters": [system::static_filter(&spec.service.service_id, &site.deploy)] })
+        }
+        None => json!({ "backendRefs": [backend_ref(p)] }),
     };
 
     // Public TCP and UDP ports through the proxy: a Gateway with a listener
     // per port, a route per port to the port's Backend, and the port's options.
-    let proxied: Vec<&PortSpec> = spec.ports.iter().filter(|p| p.proxied()).collect();
+    // (None for a static site: it only has websites.)
+    let proxied: Vec<&PortSpec> = spec
+        .ports
+        .iter()
+        .filter(|p| p.proxied() && spec.site.is_none())
+        .collect();
     if !proxied.is_empty() {
         let gw = ports_gateway(spec);
         let mut gw_meta = meta(&gw);
@@ -332,7 +352,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
             if !hosts.is_empty() {
                 out.objects.push(json!({
                     "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(&format!("{base}-https-{p}")),
-                    "spec": { "parentRefs": [{ "name": base }], "hostnames": hosts, "rules": [{ "backendRefs": [backend_ref(p)] }] },
+                    "spec": { "parentRefs": [{ "name": base }], "hostnames": hosts, "rules": [web_rule(p)] },
                 }));
             }
         }
@@ -363,7 +383,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         if !hosts.is_empty() {
             out.objects.push(json!({
                 "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(&format!("{base}-http-{p}")),
-                "spec": { "parentRefs": http_parent, "hostnames": hosts, "rules": [{ "backendRefs": [backend_ref(p)] }] },
+                "spec": { "parentRefs": http_parent, "hostnames": hosts, "rules": [web_rule(p)] },
             }));
         }
     }
@@ -848,7 +868,7 @@ pub fn target_spec(t: &pyo_proto::FirewallTarget, waf: bool) -> anyhow::Result<D
         "resources": { "cpuRequest": 0, "cpuLimit": 0, "memoryRequest": 0, "memoryLimit": 0 },
         "healthCheck": { "type": "none", "path": "", "port": 0, "command": "", "initialDelaySeconds": 0, "periodSeconds": 0 },
         "volumes": [], "timeoutSeconds": 0, "networkIsolation": t.network_isolation, "firewall": t.firewall,
-        "waf": t.waf.as_ref().filter(|_| waf),
+        "waf": t.waf.as_ref().filter(|_| waf), "site": t.site,
     }))?)
 }
 
@@ -1140,10 +1160,12 @@ pub async fn workload_exists(
             .await?
             .map(|w| w.metadata),
     };
-    Ok(meta.is_some_and(|m| {
+    let running = meta.is_some_and(|m| {
         m.deletion_timestamp.is_none()
             && m.labels.as_ref().and_then(|l| l.get(SERVICE_LABEL)) == Some(&service.service_id)
-    }))
+    });
+    // A static site has no workload: its marker says it's live.
+    Ok(running || crate::sites::marked(client, service).await?)
 }
 
 /// How old a service's gateway objects must all be before they're
@@ -1168,6 +1190,27 @@ pub fn orphans(
         })
         .map(|(id, _)| id.clone())
         .collect()
+}
+
+/// Whether a service in this namespace is a static site with its marker
+/// (sites.rs).
+async fn static_marked(client: &Client, ns: &str, service_id: &str) -> anyhow::Result<bool> {
+    let list = match Api::<Secret>::namespaced(client.clone(), ns)
+        .list(&ListParams::default().labels(&format!(
+            "{SERVICE_LABEL}={service_id},{}",
+            crate::sites::MARKER_LABEL
+        )))
+        .await
+    {
+        Ok(l) => l,
+        // Not a namespace Pyo writes in (any more): no marker.
+        Err(kube::Error::Api(e)) if matches!(e.code, 403 | 404) => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(list
+        .items
+        .iter()
+        .any(|s| s.metadata.deletion_timestamp.is_none()))
 }
 
 /// Every service id that has a workload on the cluster.
@@ -1231,6 +1274,8 @@ async fn collect_older_than(
     // Each service's newest object first, its workloads after: a rollout
     // that starts in between is in `deploying` by the time it's read.
     let mut found: BTreeMap<String, i64> = BTreeMap::new();
+    // Each service's namespace, to find a static site's marker there.
+    let mut namespaces: BTreeMap<String, String> = BTreeMap::new();
     for kind in SERVICE_KINDS {
         let list = match api_of(client, kind)
             .list(&ListParams::default().labels(SERVICE_LABEL))
@@ -1256,6 +1301,9 @@ async fn collect_older_than(
                 .as_ref()
                 .map(|t| t.0.as_second())
                 .unwrap_or(i64::MAX);
+            if let Some(ns) = o.labels().get("pyo/project-namespace") {
+                namespaces.insert(id.clone(), ns.clone());
+            }
             let newest = found.entry(id).or_insert(i64::MIN);
             *newest = (*newest).max(created);
         }
@@ -1263,7 +1311,13 @@ async fn collect_older_than(
     if found.is_empty() {
         return Ok(vec![]);
     }
-    let live = live_services(client).await?;
+    let mut live = live_services(client).await?;
+    // Static sites have no workload, only their marker.
+    for (id, ns) in &namespaces {
+        if !live.contains(id) && static_marked(client, ns, id).await? {
+            live.insert(id.clone());
+        }
+    }
     let now = k8s_openapi::jiff::Timestamp::now().as_second();
     let gone = orphans(&found, &live, |id| deploying.contains(id), now, min_age);
     for id in &gone {
@@ -2044,6 +2098,42 @@ mod tests {
                         .collect::<Vec<_>>()
                 )
             })
+    }
+
+    #[test]
+    fn a_static_sites_routes_go_to_pyo_static_with_its_folder() {
+        let mut s = spec(vec![
+            domain("site.example.com", "http", "letsencrypt", true),
+            domain("plain.example.com", "http", "", false),
+        ]);
+        s.site = Some(pyo_proto::site::SiteSpec {
+            deploy: "dpl_7".into(),
+            index_fallback: false,
+        });
+        let r = route_objects(&s);
+        // The same objects as a service's, by the same names.
+        let backend = find(&r, "Backend", "shop-web-http");
+        assert_eq!(backend["spec"], system::static_backend_spec());
+        let filter = system::static_filter("svc_web", "dpl_7");
+        for route in ["shop-web-https-http", "shop-web-http-http"] {
+            let rule = &find(&r, "HTTPRoute", route)["spec"]["rules"][0];
+            assert_eq!(rule["filters"], json!([filter]), "{route}");
+            assert_eq!(rule["backendRefs"][0]["name"], "shop-web-http");
+        }
+        assert_eq!(
+            filter["requestHeaderModifier"]["set"][0]["value"],
+            "svc_web/dpl_7"
+        );
+        // The redirect to HTTPS stays as it is.
+        assert!(
+            find(&r, "HTTPRoute", "shop-web-redirect")["spec"]["rules"][0]["backendRefs"].is_null()
+        );
+        // A service's routes have no filter.
+        s.site = None;
+        let r = route_objects(&s);
+        assert!(
+            find(&r, "HTTPRoute", "shop-web-http-http")["spec"]["rules"][0]["filters"].is_null()
+        );
     }
 
     #[test]

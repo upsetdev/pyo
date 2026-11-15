@@ -58,7 +58,10 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         }
         Command::SyncFirewall(sync) => crate::firewall::sync(agent, *sync).await,
         Command::SyncRoutes(target) => crate::gateway::sync_routes(agent, &target).await,
-        Command::ApplyBundle { bundle, prune } => {
+        Command::ApplyBundle { mut bundle, prune } => {
+            if bundle.id == pyo_proto::bundles::STATIC_ID {
+                crate::sites::fill_login(agent, &mut bundle).await;
+            }
             crate::bundles::apply(&agent.kube, &bundle, &prune).await
         }
         Command::RemoveBundle { id, objects } => {
@@ -317,8 +320,10 @@ async fn delete(agent: &Agent, service: &ServiceRef) -> anyhow::Result<String> {
         )
         .await?;
     }
-    // Its routes, Gateway and certificates with the gateway.
+    // Its routes, Gateway and certificates with the gateway, and a static
+    // site's marker after them.
     crate::gateway::remove(&c, &service.service_id).await;
+    crate::sites::unmark(&c, service).await?;
     // Secrets: its pull secret and each deployment's env
     // (<service>-env-<deployment>).
     let secrets = Api::<Secret>::namespaced(c, ns);
@@ -562,6 +567,24 @@ async fn logs(agent: &Agent, service: &ServiceRef, tail_lines: i64) -> CommandRe
         Ok(l) => l.items,
         Err(e) => return failed(format!("Couldn't list pods: {e}")),
     };
+    // A static site: its requests, from pyo-static's output.
+    if list.is_empty()
+        && crate::sites::marked(&agent.kube, service)
+            .await
+            .unwrap_or(false)
+    {
+        return match crate::sites::logs(&agent.kube, &service.service_id, tail_lines).await {
+            Ok(logs) => CommandResult {
+                ok: true,
+                message: Some("Served as static files".into()),
+                logs,
+                data: None,
+            },
+            Err(e) => failed(format!(
+                "Couldn't read the static file server's output: {e}"
+            )),
+        };
+    }
     let mut lines: Vec<LogLine> = vec![];
     for p in &list {
         let name = p.name_any();

@@ -154,6 +154,22 @@ impl PyoApi {
         Ok(Self::check(res).await?.json().await?)
     }
 
+    /// Pyo's address (what this agent reaches it at) and a token for this
+    /// cluster's pyo-static, which reads static sites' folders with it.
+    pub async fn static_login(&self) -> anyhow::Result<(String, String)> {
+        let res = self
+            .http
+            .get(format!("{}/static-login", self.base))
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await?;
+        let v: serde_json::Value = Self::check(res).await?.json().await?;
+        let token = v["token"].as_str().unwrap_or("").to_owned();
+        anyhow::ensure!(!token.is_empty(), "Pyo sent no token");
+        let url = self.base.trim_end_matches("/api/agent/v1").to_owned();
+        Ok((url, token))
+    }
+
     /// An uploaded certificate and its key, for a domain using it.
     pub async fn certificate(&self, id: &str) -> anyhow::Result<TlsCertificate> {
         let res = self

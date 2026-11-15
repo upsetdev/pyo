@@ -32,6 +32,7 @@ mod rollout;
 mod room;
 mod runs;
 mod scope;
+mod sites;
 mod tailnet;
 mod terminal;
 mod tls;
