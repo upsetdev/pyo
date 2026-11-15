@@ -1,0 +1,278 @@
+//! The installation's sandbox signing key, and the tokens it signs.
+//!
+//! One Ed25519 key per installation, made on first use and kept in
+//! `pyo.sandbox_keys` with its seed sealed by PYO_SECRET_KEY. Its `kid` is
+//! in every token, so a new key can take over while tokens of the old one
+//! run out. Sandbox servers get only the public keys ([`verifying_keys`]).
+//!
+//! - Client tokens ([`client_token`]): one sandbox, about an hour, for exec,
+//!   terminals, files and ports. Pause, resume and delete go through Pyo, so
+//!   its records stay right.
+//! - Admin tokens ([`admin_token`]): every sandbox on one server, five
+//!   minutes, for Pyo's own calls to the daemon.
+
+use std::sync::{Arc, Mutex};
+
+use pyo_proto::sandbox::token::{ANY_SANDBOX, Claims, SigningKey, VerifyingKey};
+use pyo_proto::sandbox::wire::Scope;
+use sqlx::PgPool;
+
+use crate::error::{ApiError, ApiResult};
+use crate::secrets::Sealer;
+
+/// How long a client token lives. The SDK asks for a new one before.
+pub const CLIENT_TTL_SECS: u64 = 3600;
+/// How long Pyo's own tokens live: one call each.
+pub const ADMIN_TTL_SECS: u64 = 300;
+
+/// What a client token allows.
+pub const CLIENT_SCOPES: [Scope; 4] = [Scope::Exec, Scope::Pty, Scope::Files, Scope::Ports];
+
+static KEY: Mutex<Option<Arc<SigningKey>>> = Mutex::new(None);
+
+fn now_secs() -> u64 {
+    pyo_proto::now_ms() as u64 / 1000
+}
+
+/// The installation's signing key: the active one, or a new one on first
+/// use. Kept in memory after the first read.
+pub async fn signing_key(db: &PgPool, sealer: &Sealer) -> ApiResult<Arc<SigningKey>> {
+    if let Some(k) = KEY.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+        return Ok(k);
+    }
+    if !sealer.enabled() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "This installation has no PYO_SECRET_KEY, so it can't sign sandbox tokens.",
+        ));
+    }
+    let mut tx = db.begin().await?;
+    // Two processes asking at once make one key.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::bg::LOCK_SANDBOX_KEY)
+        .execute(&mut *tx)
+        .await?;
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT kid, seed_sealed FROM pyo.sandbox_keys WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let key = match row {
+        Some((kid, sealed)) => {
+            let seed = sealer.open(&sealed)?;
+            SigningKey::from_seed_b64(kid, &seed)
+                .map_err(|e| anyhow::anyhow!("the sandbox signing key: {e}"))?
+        }
+        None => {
+            let key = SigningKey::generate(crate::ids::new_id("sbk"));
+            sqlx::query(
+                "INSERT INTO pyo.sandbox_keys (kid, seed_sealed, public_key) VALUES ($1, $2, $3)",
+            )
+            .bind(key.kid())
+            .bind(sealer.seal(&key.seed_b64())?)
+            .bind(&key.verifying_key().public_key)
+            .execute(&mut *tx)
+            .await?;
+            tracing::info!(kid = key.kid(), "made the sandbox signing key");
+            key
+        }
+    };
+    tx.commit().await?;
+    let key = Arc::new(key);
+    *KEY.lock().unwrap_or_else(|p| p.into_inner()) = Some(key.clone());
+    Ok(key)
+}
+
+/// Every key a daemon should accept: the active one and retired ones.
+pub async fn verifying_keys(db: &PgPool, sealer: &Sealer) -> ApiResult<Vec<VerifyingKey>> {
+    // Makes the key when there's none yet.
+    signing_key(db, sealer).await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kid, public_key FROM pyo.sandbox_keys ORDER BY created_at DESC LIMIT 4",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(kid, public_key)| VerifyingKey { kid, public_key })
+        .collect())
+}
+
+/// A token and when it runs out (epoch milliseconds).
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Token {
+    pub token: String,
+    pub expires_at: u64,
+}
+
+fn sign(
+    key: &SigningKey,
+    sbx: &str,
+    team: &str,
+    server: &str,
+    scopes: &[Scope],
+    ttl: u64,
+) -> Token {
+    let iat = now_secs();
+    let exp = iat + ttl;
+    Token {
+        token: key.sign(&Claims {
+            kid: String::new(),
+            sbx: sbx.into(),
+            team: team.into(),
+            srv: server.into(),
+            iat,
+            exp,
+            scopes: scopes.to_vec(),
+        }),
+        expires_at: exp * 1000,
+    }
+}
+
+/// A client's token for one sandbox on its server.
+pub fn client_token(key: &SigningKey, sandbox: &str, team: &str, server: &str) -> Token {
+    sign(key, sandbox, team, server, &CLIENT_SCOPES, CLIENT_TTL_SECS)
+}
+
+/// Pyo's own token for everything on one server.
+pub fn admin_token(key: &SigningKey, server: &str) -> String {
+    sign(
+        key,
+        ANY_SANDBOX,
+        "",
+        server,
+        &[Scope::Admin],
+        ADMIN_TTL_SECS,
+    )
+    .token
+}
+
+/// Pyo's token to create one sandbox for its team.
+pub fn create_token(key: &SigningKey, sandbox: &str, team: &str, server: &str) -> String {
+    sign(key, sandbox, team, server, &[Scope::Create], ADMIN_TTL_SECS).token
+}
+
+#[cfg(test)]
+pub(crate) fn reset_cache() {
+    *KEY.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo_proto::sandbox::token::{Expect, TokenError, verify};
+
+    const SBX: &str = "sbx_abcdefghijklmnop";
+
+    fn expect(sandbox: Option<&str>, scope: Scope) -> Expect<'_> {
+        Expect {
+            server: "sbs_one",
+            sandbox,
+            scope,
+            now: now_secs(),
+        }
+    }
+
+    #[test]
+    fn client_tokens_open_one_sandbox_for_an_hour() {
+        let k = SigningKey::generate("sbk_test");
+        let keys = [k.verifying_key()];
+        let t = client_token(&k, SBX, "tm_one", "sbs_one");
+        let c = verify(&t.token, &keys, expect(Some(SBX), Scope::Exec)).unwrap();
+        assert_eq!((c.kid.as_str(), c.team.as_str()), ("sbk_test", "tm_one"));
+        assert_eq!(c.exp - c.iat, CLIENT_TTL_SECS);
+        assert_eq!(t.expires_at, c.exp * 1000);
+        for s in [Scope::Pty, Scope::Files, Scope::Ports] {
+            verify(&t.token, &keys, expect(Some(SBX), s)).unwrap();
+        }
+        // Pyo keeps the lifecycle, and the server.
+        assert_eq!(
+            verify(&t.token, &keys, expect(Some(SBX), Scope::Lifecycle)),
+            Err(TokenError::MissingScope(Scope::Lifecycle))
+        );
+        assert_eq!(
+            verify(&t.token, &keys, expect(Some(SBX), Scope::Create)),
+            Err(TokenError::MissingScope(Scope::Create))
+        );
+        assert_eq!(
+            verify(&t.token, &keys, expect(None, Scope::Admin)),
+            Err(TokenError::MissingScope(Scope::Admin))
+        );
+        assert_eq!(
+            verify(
+                &t.token,
+                &keys,
+                expect(Some("sbx_otherotherother"), Scope::Exec)
+            ),
+            Err(TokenError::WrongSandbox)
+        );
+        let mut other = expect(Some(SBX), Scope::Exec);
+        other.server = "sbs_two";
+        assert_eq!(verify(&t.token, &keys, other), Err(TokenError::WrongServer));
+        // Another installation's key.
+        let stranger = [SigningKey::generate("sbk_test").verifying_key()];
+        assert_eq!(
+            verify(&t.token, &stranger, expect(Some(SBX), Scope::Exec)),
+            Err(TokenError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_refresh_is_a_new_token_that_runs_longer() {
+        let k = SigningKey::generate("sbk_test");
+        let a = client_token(&k, SBX, "tm_one", "sbs_one");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let b = client_token(&k, SBX, "tm_one", "sbs_one");
+        assert_ne!(a.token, b.token);
+        assert!(b.expires_at > a.expires_at);
+    }
+
+    #[test]
+    fn admin_tokens_cover_one_server_briefly() {
+        let k = SigningKey::generate("sbk_test");
+        let keys = [k.verifying_key()];
+        let t = admin_token(&k, "sbs_one");
+        let c = verify(&t, &keys, expect(None, Scope::Admin)).unwrap();
+        assert_eq!(c.exp - c.iat, ADMIN_TTL_SECS);
+        verify(&t, &keys, expect(Some(SBX), Scope::Lifecycle)).unwrap();
+        let mut other = expect(None, Scope::Admin);
+        other.server = "sbs_two";
+        assert_eq!(verify(&t, &keys, other), Err(TokenError::WrongServer));
+        let c = create_token(&k, SBX, "tm_one", "sbs_one");
+        let claims = verify(&c, &keys, expect(Some(SBX), Scope::Create)).unwrap();
+        assert_eq!(claims.team, "tm_one");
+    }
+
+    /// Against a throwaway Postgres: `DATABASE_URL=… cargo test -p pyo-api
+    /// sandbox::keys -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn one_key_is_made_and_kept_sealed() {
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let sealer = Sealer::for_tests();
+        reset_cache();
+        let a = signing_key(&db, &sealer).await.unwrap();
+        reset_cache();
+        let b = signing_key(&db, &sealer).await.unwrap();
+        assert_eq!(
+            a.verifying_key(),
+            b.verifying_key(),
+            "read back, not made again"
+        );
+        let sealed: String =
+            sqlx::query_scalar("SELECT seed_sealed FROM pyo.sandbox_keys WHERE kid = $1")
+                .bind(a.kid())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(sealed.starts_with("sb1:"));
+        assert!(!sealed.contains(&a.seed_b64()));
+        let keys = verifying_keys(&db, &sealer).await.unwrap();
+        assert!(keys.contains(&a.verifying_key()));
+        reset_cache();
+    }
+}
