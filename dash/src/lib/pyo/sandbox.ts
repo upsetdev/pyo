@@ -513,7 +513,7 @@ export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
   if (b.labels && Object.keys(b.labels).length)
     lines.push(`  labels: ${JSON.stringify(b.labels)},`);
   return [
-    'import { Sandbox } from "@pyo/sandbox";',
+    'import { Sandbox } from "@pyodev/sandbox";',
     "",
     "const sbx = await Sandbox.create({",
     ...lines,

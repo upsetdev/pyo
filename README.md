@@ -40,8 +40,8 @@ Kubernetes, so you're never locked in.
 - **Sandboxes:** isolated machines for AI agents, code interpreters, previews
   and CI, on dedicated sandbox servers. Each one runs in its own Firecracker
   microVM, or in gVisor on servers without KVM. Run commands, read and write
-  files and open ports as live URLs from the TypeScript SDK, MCP, the CLI or
-  the dashboard.
+  files and open ports as live URLs from the TypeScript SDK
+  (`@pyodev/sandbox`), MCP, the CLI or the dashboard.
 - **Templates:** WordPress, Ghost, MongoDB, ClickHouse, n8n, Ollama and more,
   in one click.
 - **Volumes:** back them up, restore them, resize them and move them between

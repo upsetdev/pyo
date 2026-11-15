@@ -290,7 +290,7 @@ function FromCode({ code, template }: { code: string; template: string }) {
             <Highlighted text={code} lang="js" />
           </pre>
           <p className="mt-1.5 text-muted-foreground">
-            <span className="font-mono">npm i @pyo/sandbox</span>, with an{" "}
+            <span className="font-mono">npm i @pyodev/sandbox</span>, with an{" "}
             <a href="/api-keys" className="font-medium text-primary hover:text-primary/80">
               API key
             </a>{" "}
