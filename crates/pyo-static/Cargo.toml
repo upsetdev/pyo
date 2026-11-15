@@ -21,3 +21,6 @@ tokio-util = { version = "0.7.20", features = ["io"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
