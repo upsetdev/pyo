@@ -19,7 +19,7 @@ function ObservabilityLayout() {
         <PageHeader
           title={
             <span className="inline-flex items-center gap-3">
-              {pathname === "/observability/logs" ? "Logs" : "Analytics"}
+              {pathname === "/observability/logs" ? "Request logs" : "Analytics"}
               <Tooltip content="Updates every 30 seconds.">
                 <span className="inline-flex items-center gap-1.5 rounded-full border border-success/25 bg-success/10 px-2 py-0.5 text-[11.5px] font-medium tracking-normal text-success">
                   <span className="relative flex h-1.5 w-1.5">

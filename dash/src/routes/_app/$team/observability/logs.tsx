@@ -47,7 +47,7 @@ export const Route = createFileRoute("/_app/$team/observability/logs")({
     method: z.string().optional(),
     q: z.string().optional(),
   }),
-  head: () => ({ meta: seo({ title: "Logs" }) }),
+  head: () => ({ meta: seo({ title: "Request logs" }) }),
   component: LogsPage,
 });
 
@@ -146,7 +146,7 @@ function LogsPage() {
         <EmptyState
           icon={ListBulletsIcon}
           title="No websites yet"
-          description="Add a domain to a service."
+          description="Add a domain to a service. Service logs are on each service."
           action={
             <ButtonLink href="/projects" size="sm">
               Go to projects
@@ -429,7 +429,7 @@ function Tail({
       <Zoomable
         zoomed={zoomed}
         onClose={() => setZoomed(false)}
-        label="Logs"
+        label="Request logs"
       >
         <div className={zoomed ? "flex min-h-0 flex-1 flex-col" : ""}>
           <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
