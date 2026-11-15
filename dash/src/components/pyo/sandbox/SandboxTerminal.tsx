@@ -78,7 +78,11 @@ export function SandboxTerminal({
         if (disposed) return socket.close();
         ws = socket;
         socket.onerror = () => !started && end(OFF_TAILNET, true);
-        socket.onclose = () => end(started ? "Disconnected." : OFF_TAILNET, !started);
+        // A refused connection closes with code 4000 + the HTTP status and the reason.
+        socket.onclose = (e) =>
+          e.code >= 4000 && e.reason
+            ? end(e.reason, true)
+            : end(started ? "Disconnected." : OFF_TAILNET, !started);
         socket.onmessage = (e) => {
           if (typeof e.data === "string") return;
           let f;
