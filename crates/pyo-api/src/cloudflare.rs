@@ -487,12 +487,12 @@ pub async fn install_id(tx: &mut Transaction<'_, Postgres>) -> ApiResult<String>
 }
 
 /// A team's account: its token, opened, and zones.
-struct Account {
-    token: String,
-    zones: Vec<Zone>,
+pub(crate) struct Account {
+    pub token: String,
+    pub zones: Vec<Zone>,
 }
 
-async fn account(
+pub(crate) async fn account(
     s: &AppState,
     tx: &mut Transaction<'_, Postgres>,
     team_id: &str,

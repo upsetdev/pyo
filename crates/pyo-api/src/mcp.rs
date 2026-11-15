@@ -205,6 +205,10 @@ const NOT_TOOLS: &[&str] = &[
     "createSandboxToken",
     // Its command carries a Tailscale key, for a person to run.
     "addSandboxServer",
+    // A sandbox server's certificate and DNS record: set up once by a
+    // person, in the dashboard.
+    "issueSandboxServerCertificate",
+    "createSandboxServerDnsRecord",
 ];
 
 /// Tools whose generated name would clash or say too little.

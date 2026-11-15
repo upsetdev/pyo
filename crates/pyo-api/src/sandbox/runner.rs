@@ -92,7 +92,8 @@ pub async fn round(s: &AppState) -> anyhow::Result<()> {
             })
             .await;
     }
-    sweep(s).await
+    sweep(s).await?;
+    super::edgecert::run(s).await
 }
 
 /// Saves a report: the server's capability and capacity, its sandboxes'
@@ -120,7 +121,8 @@ async fn apply_report(db: &PgPool, srv: &Server, r: &ServerReport) -> sqlx::Resu
     };
     sqlx::query(
         "UPDATE pyo.sandbox_servers SET state = $2, error = $3, capability = $4, capacity = $5, templates = $6,
-                daemon_version = $7, last_report_at = now(), updated_at = now() WHERE id = $1",
+                daemon_version = $7, edge_domain = coalesce($8, edge_domain), last_report_at = now(), updated_at = now()
+          WHERE id = $1",
     )
     .bind(&srv.id)
     .bind(state)
@@ -129,6 +131,7 @@ async fn apply_report(db: &PgPool, srv: &Server, r: &ServerReport) -> sqlx::Resu
     .bind(json!(r.capacity))
     .bind(json!(r.templates))
     .bind(&r.daemon_version)
+    .bind(r.capability.edge_domain())
     .execute(&mut *tx)
     .await?;
     if srv.state != state {

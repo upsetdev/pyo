@@ -8,6 +8,7 @@
 //! - [`scheduler`]: which server a new sandbox runs on.
 //! - [`limits`]: per-team caps, checked on create.
 //! - [`daemon`]: Pyo's calls to a daemon over the tailnet.
+//! - [`edgecert`]: the edge proxies' wildcard certificates and DNS records.
 //! - [`runner`]: reads each server's report, keeps the records in step,
 //!   meters usage and ends sandboxes past their lifetime.
 //! - [`api`]: the REST endpoints. [`mcp`]: the assistants' tools.
@@ -21,6 +22,7 @@ pub mod api;
 pub mod daemon;
 #[cfg(test)]
 mod e2e;
+pub mod edgecert;
 pub mod join;
 pub mod keys;
 pub mod limits;
@@ -320,7 +322,7 @@ pub async fn server_views(
             'capability', s.capability, 'capacity', s.capacity, 'templates', s.templates,
             'daemonVersion', s.daemon_version, 'lastReportAt', pyo.ms(s.last_report_at),
             'error', s.error, 'createdBy', s.created_by, 'createdAt', pyo.ms(s.created_at),
-            'joinedAt', pyo.ms(s.joined_at),
+            'joinedAt', pyo.ms(s.joined_at), 'edgeDomain', s.edge_domain,
             'sandboxes', (SELECT count(*) FROM pyo.sandboxes x WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed')))
            FROM pyo.sandbox_servers s
           WHERE (s.team_id IS NULL OR s.team_id = ANY($1)) AND ($2::text IS NULL OR s.id = $2)
@@ -336,6 +338,7 @@ pub async fn server_views(
             .map(|c| c.summary());
         r["summary"] = json!(summary);
     }
+    edgecert::attach(db, team_ids, &mut rows).await?;
     Ok(rows)
 }
 
@@ -940,7 +943,9 @@ pub struct AddServer {
     pub name: String,
     /// A domain whose wildcard points at the server, like sbx.example.com.
     /// Sandbox ports are then served at `<port>-<sandbox>.<domain>` on
-    /// ports 80 and 443. The certificate for `*.<domain>` goes in
+    /// ports 80 and 443. Pyo gets the certificate for `*.<domain>` when the
+    /// team's Cloudflare connection covers the domain
+    /// (`issueSandboxServerCertificate`). Otherwise it goes in
     /// /etc/pyo-sandbox/edge on the server.
     #[serde(default)]
     pub edge_domain: Option<String>,
@@ -1001,8 +1006,9 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
     .await?;
     let id = match existing {
         Some((id, state)) if state == "joining" || state == "refused" => {
-            sqlx::query("UPDATE pyo.sandbox_servers SET state = 'joining', error = NULL, updated_at = now() WHERE id = $1")
+            sqlx::query("UPDATE pyo.sandbox_servers SET state = 'joining', error = NULL, edge_domain = $2, updated_at = now() WHERE id = $1")
                 .bind(&id)
+                .bind(&edge)
                 .execute(&mut *tx)
                 .await?;
             id
@@ -1014,11 +1020,12 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
         }
         None => {
             let id = crate::ids::new_id("sbs");
-            sqlx::query("INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by) VALUES ($1, $2, $3, 'joining', $4)")
+            sqlx::query("INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain) VALUES ($1, $2, $3, 'joining', $4, $5)")
                 .bind(&id)
                 .bind(&req.team_id)
                 .bind(&req.name)
                 .bind(&user.name)
+                .bind(&edge)
                 .execute(&mut *tx)
                 .await?;
             id

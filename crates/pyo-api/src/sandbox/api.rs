@@ -37,6 +37,8 @@ pub fn routes() -> Router<AppState> {
             "/sandbox-servers/{id}",
             axum::routing::delete(remove_server),
         )
+        .route("/sandbox-servers/{id}/certificate", post(issue_certificate))
+        .route("/sandbox-servers/{id}/dns-record", post(create_dns_record))
         .route(
             "/sandbox-templates",
             get(list_templates).post(create_template),
@@ -322,7 +324,7 @@ pub(crate) async fn token(
 #[utoipa::path(get, path = "/sandbox-servers", operation_id = "listSandboxServers", tag = "Sandboxes",
     params(TeamQuery),
     responses(
-        (status = 200, description = "`servers`, each with `id`, `teamId` (null for the installation's), `name`, `address`, `state` (\"joining\", \"ready\", \"unreachable\" or \"refused\"), `enabled`, `capability` (`runtime`, `kvm`, `bootMs`, `arch`, `cpus`, `memory`, `disk` and the checks), `summary` (one line about it), `capacity`, `templates`, `daemonVersion`, `lastReportAt`, `error`, `sandboxes` (how many run there) and `createdAt`.", body = Object),
+        (status = 200, description = "`servers`, each with `id`, `teamId` (null for the installation's), `name`, `address`, `state` (\"joining\", \"ready\", \"unreachable\" or \"refused\"), `enabled`, `capability` (`runtime`, `kvm`, `bootMs`, `arch`, `cpus`, `memory`, `disk` and the checks), `summary` (one line about it), `capacity`, `templates`, `daemonVersion`, `lastReportAt`, `error`, `sandboxes` (how many run there), `createdAt`, `edgeDomain` and, with an edge domain, `edge`: its `domain`, `https` (whether it serves HTTPS), `cert` (`state`: \"none\", \"issuing\", \"ready\" or \"failed\", `notAfter`, `issuedAt`, `error`, `served`), `cloudflare` (the connected zone that covers it: `teamId`, `zone`, `canEdit`, or null) and `dns` (`name`, the `records` to point it at the server, and what Pyo `made`).", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -378,6 +380,62 @@ pub(crate) async fn remove_server(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     Ok(Json(super::remove_server(&s, &user, &id).await?))
+}
+
+/// Get a sandbox server's certificate
+///
+/// Gets a Let's Encrypt certificate for `*.<edge domain>` with a DNS-01
+/// challenge in the team's Cloudflare connection, and puts it on the
+/// server, whose edge serves it at once. It runs in the background: the
+/// server's `edge.cert.state` says how it goes. Pyo renews it 30 days
+/// before it runs out. Also renews it now. The zone must be connected and
+/// editable. Team owners and admins, or the installation's admin for its
+/// own servers.
+#[utoipa::path(post, path = "/sandbox-servers/{id}/certificate", operation_id = "issueSandboxServerCertificate", tag = "Sandboxes",
+    params(("id" = String, Path, description = "The sandbox server's id, `sbs_…`.")),
+    request_body(content = super::edgecert::EdgeRequest),
+    responses(
+        (status = 200, description = "`state`: \"issuing\".", body = Object),
+        (status = 400, description = "The server has no edge domain, or no connected Cloudflare zone covers it.", body = ErrorBody),
+        (status = 409, description = "Pyo is getting it already.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("full"))))]
+pub(crate) async fn issue_certificate(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path(id): Path<String>,
+    body: Option<Json<super::edgecert::EdgeRequest>>,
+) -> ApiResult<Json<Value>> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    Ok(Json(super::edgecert::issue(&s, &user, &id, req).await?))
+}
+
+/// Create a sandbox server's DNS record
+///
+/// Creates the wildcard record `*.<edge domain>` in the team's Cloudflare
+/// connection: A (and AAAA) to the public addresses the server reports,
+/// not proxied. Records already on the name are never changed: another one
+/// there is a conflict. Team owners and admins, or the installation's
+/// admin for its own servers.
+#[utoipa::path(post, path = "/sandbox-servers/{id}/dns-record", operation_id = "createSandboxServerDnsRecord", tag = "Sandboxes",
+    params(("id" = String, Path, description = "The sandbox server's id, `sbs_…`.")),
+    request_body(content = super::edgecert::EdgeRequest),
+    responses(
+        (status = 200, description = "`ok`, `status` (\"created\", \"exists\" or \"conflict\") and `existing` (the records in the way).", body = Object),
+        (status = 400, description = "The server has no edge domain, or no connected Cloudflare zone covers it.", body = ErrorBody),
+        (status = 409, description = "The server reports no public address.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("full"))))]
+pub(crate) async fn create_dns_record(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path(id): Path<String>,
+    body: Option<Json<super::edgecert::EdgeRequest>>,
+) -> ApiResult<Json<Value>> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    Ok(Json(
+        super::edgecert::create_dns(&s, &user, &id, req).await?,
+    ))
 }
 
 /// Sandbox templates

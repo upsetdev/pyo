@@ -44,7 +44,11 @@ crypto_secretbox = "0.1.1"
 zeroize = "1"
 flate2 = "1"
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+# ACME for sandbox edge certificates. Its HTTP goes through reqwest.
+instant-acme = { version = "0.8.5", default-features = false, features = ["aws-lc-rs", "rcgen"] }
 serde_norway = "0.9.42"
 
 [dev-dependencies]
 boon = "0.6.1"
+# The mock ACME server signs the CSRs it gets.
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
