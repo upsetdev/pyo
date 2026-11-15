@@ -42,6 +42,27 @@ const FATAL_WAITING: [&str; 5] = [
     "CreateContainerError",
 ];
 
+/// A container Kubernetes couldn't create, in plain words. Its own text
+/// (`secret "x" not found`) stays in the deployment's log.
+fn create_failed(reason: &str, message: &str) -> String {
+    let m = message.to_ascii_lowercase();
+    if m.contains("secret") || m.contains("configmap") || m.contains("couldn't find key") {
+        "A variable or secret the service uses is missing. Check its variables, then deploy again."
+            .into()
+    } else if m.contains("runasnonroot") || m.contains("non-root") {
+        "The image runs as root, and the cluster doesn't allow that. Use an image that runs as a user.".into()
+    } else if reason == "CreateContainerError"
+        && (m.contains("executable file not found") || m.contains("no such file or directory"))
+    {
+        "The start command isn't in the image. Check the service's start command, then deploy again.".into()
+    } else if reason == "CreateContainerConfigError" {
+        "The service's settings couldn't be applied to its container. Check its variables, volumes and start command, then deploy again.".into()
+    } else {
+        "Couldn't create the container. Check the service's start command, then deploy again."
+            .into()
+    }
+}
+
 struct Reporter<'a> {
     agent: &'a Agent,
     deployment_id: String,
@@ -1762,6 +1783,9 @@ async fn watch_rollout(
                                     cs.restart_count
                                 ),
                             },
+                            "CreateContainerConfigError" | "CreateContainerError" => {
+                                create_failed(&reason, w.message.as_deref().unwrap_or(""))
+                            }
                             _ => w.message.clone().unwrap_or_else(|| reason.clone()),
                         };
                         let reason = if crashing && crate::room::out_of_memory(p).is_some() {
@@ -2167,6 +2191,51 @@ mod env_tests {
             assert!(used.contains(name), "{name}");
         }
         assert!(!used.contains("web-env-dpl-new"));
+    }
+}
+
+#[cfg(test)]
+mod create_failed_tests {
+    use super::create_failed;
+
+    #[test]
+    fn plain_words() {
+        for (reason, msg, want) in [
+            (
+                "CreateContainerConfigError",
+                r#"secret "db" not found"#,
+                "A variable or secret",
+            ),
+            (
+                "CreateContainerConfigError",
+                "couldn't find key FOO in Secret app/env",
+                "A variable or secret",
+            ),
+            (
+                "CreateContainerConfigError",
+                "container has runAsNonRoot and image will run as root",
+                "The image runs as root",
+            ),
+            (
+                "CreateContainerError",
+                r#"exec: "web": executable file not found in $PATH"#,
+                "The start command",
+            ),
+            (
+                "CreateContainerConfigError",
+                "something new",
+                "The service's settings",
+            ),
+            (
+                "CreateContainerError",
+                "context deadline exceeded",
+                "Couldn't create the container",
+            ),
+        ] {
+            let got = create_failed(reason, msg);
+            assert!(got.starts_with(want), "{msg}: {got}");
+            assert!(!got.contains(msg), "{got}");
+        }
     }
 }
 
