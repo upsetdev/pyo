@@ -30,8 +30,6 @@ export type NavLink = {
   match?: string[];
   /** Shown only when the API lists this feature (GET /api/v1/meta). */
   feature?: string;
-  /** Shown only when the team can use a sandbox server. */
-  sandboxes?: boolean;
 };
 export type NavItem = NavLink & {
   icon: Icon;
@@ -87,7 +85,6 @@ export const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
         label: "Sandboxes",
         href: "/sandboxes",
         icon: CubeIcon,
-        sandboxes: true,
         children: [
           { label: "All sandboxes", href: "/sandboxes" },
           { label: "Sandbox templates", href: "/sandboxes/templates" },

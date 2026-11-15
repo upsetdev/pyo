@@ -300,8 +300,6 @@ function Sidebar({
   const meta = useQuery("meta", fetchMeta);
   const features = meta.status === "success" ? meta.data.features : [];
   const s = usePyo();
-  // Sandboxes stay hidden until the team can use a sandbox server.
-  const sandboxes = sandboxServersIn(s).length > 0;
   // A project's or service's pages (/<project>/...) count as Projects.
   const inProject = !!projectByRef(s, pathname.split("/").filter(Boolean)[0] ?? "");
   const items = navLinks(NAV_GROUPS.flatMap((g) => g.items));
@@ -359,7 +357,7 @@ function Sidebar({
             {NAV_GROUPS.map((g, i) => (
               <div key={i}>
                 {g.label ? <p className={NAV_LABEL}>{g.label}</p> : null}
-                <ul className="flex flex-col gap-1">{g.items.filter((it) => (!it.feature || features.includes(it.feature)) && (!it.sandboxes || sandboxes)).map(link)}</ul>
+                <ul className="flex flex-col gap-1">{g.items.filter((it) => !it.feature || features.includes(it.feature)).map(link)}</ul>
               </div>
             ))}
           </div>

@@ -51,7 +51,7 @@ export function BootShell() {
                 {g.label ? <p className={NAV_LABEL}>{g.label}</p> : null}
                 <ul className="flex flex-col gap-1">
                   {g.items
-                    .filter((item) => !item.feature && !item.sandboxes)
+                    .filter((item) => !item.feature)
                     .map((item) => {
                       const Icon = item.icon;
                       return (
