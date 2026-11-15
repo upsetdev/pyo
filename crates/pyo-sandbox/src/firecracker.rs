@@ -280,6 +280,16 @@ impl Firecracker {
             let _ = tokio::fs::remove_file(m.dir.join(s)).await;
         }
         if let Some(j) = &self.jailer {
+            // A resume reuses the chroot. The jailer makes its device nodes
+            // and copies Firecracker in on every start, and refuses when
+            // they're already there.
+            let _ = tokio::fs::remove_dir_all(m.dir.join("dev")).await;
+            if let Some(name) = self.firecracker.file_name() {
+                let _ = tokio::fs::remove_file(m.dir.join(name)).await;
+                let mut pid = name.to_os_string();
+                pid.push(".pid");
+                let _ = tokio::fs::remove_file(m.dir.join(pid)).await;
+            }
             chown(m.dir, j.uid, j.gid)?;
             if m.scratch.is_some() {
                 chown(&m.dir.join(SCRATCH), j.uid, j.gid)?;
