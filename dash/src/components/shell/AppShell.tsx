@@ -4,6 +4,7 @@ import {
   ArrowLeftIcon,
   TreeStructureIcon,
   BellIcon,
+  CubeIcon,
   DesktopIcon,
   ArrowSquareInIcon,
   DownloadSimpleIcon,
@@ -48,6 +49,7 @@ import { auth } from "~/lib/pyo/backend";
 import {
   activityIn,
   api,
+  sandboxServersIn,
   clusterByRef,
   resetState,
   isMuted,
@@ -299,6 +301,8 @@ function Sidebar({
   const meta = useQuery("meta", fetchMeta);
   const features = meta.status === "success" ? meta.data.features : [];
   const s = usePyo();
+  // Sandboxes stay hidden until the team can use a sandbox server.
+  const sandboxes = sandboxServersIn(s).length > 0;
   // A project's or service's pages (/<project>/...) count as Projects.
   const inProject = !!projectByRef(s, pathname.split("/").filter(Boolean)[0] ?? "");
   const items = navLinks(NAV_GROUPS.flatMap((g) => g.items));
@@ -356,7 +360,7 @@ function Sidebar({
             {NAV_GROUPS.map((g, i) => (
               <div key={i}>
                 {g.label ? <p className={NAV_LABEL}>{g.label}</p> : null}
-                <ul className="flex flex-col gap-1">{g.items.filter((it) => !it.feature || features.includes(it.feature)).map(link)}</ul>
+                <ul className="flex flex-col gap-1">{g.items.filter((it) => (!it.feature || features.includes(it.feature)) && (!it.sandboxes || sandboxes)).map(link)}</ul>
               </div>
             ))}
           </div>
@@ -566,6 +570,12 @@ export function crumbsFor(pathname: string, s: PyoState): Crumb[] {
         label: s.builders.find((x) => x.id === b)?.name ?? b,
         href: pathname,
       });
+  } else if (a === "sandboxes") {
+    // Sandboxes / sbx_… , Sandboxes / Sandbox templates.
+    out.push({ label: "Sandboxes", href: "/sandboxes" });
+    if (b === "templates") out.push({ label: "Sandbox templates", href: pathname });
+    else if (b === "new") out.push({ label: "New sandbox", href: pathname });
+    else if (b) out.push({ label: b, href: pathname });
   } else if (isDbSection(a)) {
     // Postgres / main / Connect.
     out.push({ label: DB_SECTION_LABEL[a], href: `/${a}` });
@@ -733,6 +743,7 @@ function NewMenu() {
   const canInvite = !me || me.role === "owner" || me.role === "admin";
   // Imports need admins and owners (the Import page's own check).
   const canImport = !!me && (me.role === "owner" || me.role === "admin");
+  const sandboxes = sandboxServersIn(s).length > 0;
   const [dialog, setDialog] = useState<"domain" | "invite" | null>(null);
   // A new database: the engine of the section you're in, else Postgres.
   const section = useTeamPathname().split("/")[1];
@@ -795,6 +806,15 @@ function NewMenu() {
             icon: <SquaresFourIcon size={14} />,
             href: "/templates",
           },
+          ...(sandboxes && canCreateDatabase
+            ? [
+                {
+                  label: "Sandbox",
+                  icon: <CubeIcon size={14} />,
+                  href: "/sandboxes/new",
+                },
+              ]
+            : []),
           ...(canAddDomain
             ? [
                 { type: "separator" as const },

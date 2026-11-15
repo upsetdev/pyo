@@ -1,0 +1,438 @@
+// Pyo Sandbox in the dashboard: the control plane's API (crates/pyo-api/src/sandbox)
+// and the sandbox server's daemon (crates/pyo-sandbox), which the browser
+// calls directly with the client token Pyo signs. The daemon answers only on
+// the tailnet until the edge proxy exists, so its calls need the browser to
+// be on the tailnet too.
+
+import { request } from "./backend";
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+export type SandboxState =
+  | "creating"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "resuming"
+  | "stopping"
+  | "stopped"
+  | "failed";
+
+export type Sandbox = {
+  id: string;
+  teamId: string;
+  projectId: string | null;
+  serverId: string | null;
+  server: string | null;
+  template: string;
+  templateId: string | null;
+  state: SandboxState;
+  runtime: "firecracker" | "gvisor" | null;
+  cpus: number;
+  memoryMib: number;
+  diskMib: number;
+  network: "internet" | "none" | null;
+  isolation: "auto" | "vm" | null;
+  labels: Record<string, string>;
+  pauseWhenIdleSecs: number | null;
+  /** Names only: Pyo never keeps the values. */
+  env: string[];
+  /** Its server's daemon, `http://<tailnet ip>:7070`. */
+  url: string | null;
+  error: string | null;
+  createdBy: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  expiresAt: number | null;
+  pausedAt: number | null;
+  endedAt: number | null;
+};
+
+export type SandboxLimits = {
+  maxRunning: number;
+  maxCpus: number;
+  maxMemoryMib: number;
+  maxDiskMib: number;
+  maxTtlSecs: number;
+};
+
+export type SandboxInUse = {
+  sandboxes: number;
+  cpus: number;
+  memoryMib: number;
+  diskMib: number;
+};
+
+export type Connection = {
+  url: string;
+  sandboxId: string;
+  token: string;
+  /** Seconds since 1970. */
+  expiresAt: number;
+};
+
+export type SandboxCapability = {
+  runtime: "firecracker" | "gvisor" | "none";
+  kvm: "native" | "nested" | "none";
+  bootMs?: number;
+  arch: string;
+  cpus: number;
+  /** Bytes. */
+  memory: number;
+  disk: number;
+  network?: boolean;
+  reason?: string;
+};
+
+export type SandboxCapacity = {
+  memoryTotal: number;
+  memoryAvailable: number;
+  memoryReserved: number;
+  memoryUsed: number;
+  memoryCommitted: number;
+  running: number;
+  paused: number;
+  cpusCommitted: number;
+};
+
+export type SandboxServer = {
+  id: string;
+  /** Null for the installation's, which every team may use. */
+  teamId: string | null;
+  name: string;
+  address: string | null;
+  state: "joining" | "ready" | "unreachable" | "refused";
+  enabled: boolean;
+  capability: SandboxCapability | null;
+  capacity: SandboxCapacity | null;
+  /** The one line shown next to the runtime badge. */
+  summary: string | null;
+  daemonVersion: string | null;
+  lastReportAt: number | null;
+  error: string | null;
+  sandboxes: number;
+  createdAt: number;
+};
+
+export type SandboxTemplate = {
+  id: string;
+  teamId: string | null;
+  name: string;
+  source: { kind: string; image?: string } | null;
+  state: "pending" | "building" | "ready" | "failed";
+  servers: string[];
+  error: string | null;
+  createdBy: string | null;
+  createdAt: number;
+};
+
+export type CreateSandbox = {
+  teamId: string;
+  template: string;
+  cpus?: number;
+  memoryMib?: number;
+  diskMib?: number;
+  ttl?: string;
+  pauseWhenIdleSecs?: number;
+  env?: Record<string, string>;
+  network?: "internet" | "none";
+  isolation?: "auto" | "vm";
+  labels?: Record<string, string>;
+  projectId?: string;
+};
+
+// ── Pyo's API ──────────────────────────────────────────────────────────────
+
+const enc = encodeURIComponent;
+
+export const sandboxApi = {
+  list: (team: string, state: "live" | "all" = "live") =>
+    request<{ sandboxes: Sandbox[]; limits: SandboxLimits; inUse: SandboxInUse }>(
+      `/api/v1/sandboxes?${new URLSearchParams({ team, state })}`,
+    ),
+  get: (id: string) => request<Sandbox>(`/api/v1/sandboxes/${enc(id)}`),
+  create: (body: CreateSandbox) =>
+    request<{ sandbox: Sandbox; connection: Connection }>("/api/v1/sandboxes", {
+      method: "POST",
+      body,
+    }),
+  remove: (id: string) =>
+    request<Sandbox>(`/api/v1/sandboxes/${enc(id)}`, { method: "DELETE" }),
+  pause: (id: string) =>
+    request<Sandbox>(`/api/v1/sandboxes/${enc(id)}/pause`, { method: "POST" }),
+  resume: (id: string) =>
+    request<Sandbox>(`/api/v1/sandboxes/${enc(id)}/resume`, { method: "POST" }),
+  extend: (id: string, ttl: string) =>
+    request<Sandbox>(`/api/v1/sandboxes/${enc(id)}/extend`, {
+      method: "POST",
+      body: { ttl },
+    }),
+  token: (id: string) =>
+    request<Connection>(`/api/v1/sandboxes/${enc(id)}/token`, { method: "POST" }),
+  servers: (team: string) =>
+    request<{ servers: SandboxServer[] }>(
+      `/api/v1/sandbox-servers?${new URLSearchParams({ team })}`,
+    ),
+  addServer: (body: { teamId?: string; name: string }) =>
+    request<{ server: SandboxServer | null; command: string; expiresAt: number }>(
+      "/api/v1/sandbox-servers",
+      { method: "POST", body },
+    ),
+  removeServer: (id: string) =>
+    request<{ ok: boolean; stopped: number }>(
+      `/api/v1/sandbox-servers/${enc(id)}`,
+      { method: "DELETE" },
+    ),
+  templates: (team: string) =>
+    request<{ templates: SandboxTemplate[] }>(
+      `/api/v1/sandbox-templates?${new URLSearchParams({ team })}`,
+    ),
+  createTemplate: (body: { teamId?: string; name: string; image: string }) =>
+    request<SandboxTemplate>("/api/v1/sandbox-templates", {
+      method: "POST",
+      body,
+    }),
+};
+
+// ── Client tokens ──────────────────────────────────────────────────────────
+
+const tokens = new Map<string, Connection>();
+
+/** Keep the connection createSandbox answered, so the first page skips a call. */
+export function rememberConnection(c: Connection) {
+  tokens.set(c.sandboxId, c);
+}
+
+/** A token for the sandbox's server with a minute or more left. */
+export async function connectionFor(id: string): Promise<Connection> {
+  const c = tokens.get(id);
+  if (c && c.expiresAt * 1000 - Date.now() > 60_000) return c;
+  const fresh = await sandboxApi.token(id);
+  tokens.set(id, fresh);
+  return fresh;
+}
+
+// ── The daemon ─────────────────────────────────────────────────────────────
+
+export class DaemonError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+/** The daemon answers only on the tailnet for now. */
+export const OFF_TAILNET =
+  "Can't reach the sandbox server. It answers only on your tailnet for now.";
+
+async function daemon<T>(
+  id: string,
+  path: string,
+  init: { method?: string; query?: Record<string, string>; body?: BodyInit; json?: unknown; raw?: boolean } = {},
+): Promise<T> {
+  const c = await connectionFor(id);
+  const q = new URLSearchParams(init.query ?? {});
+  const url = `${c.url}/v1/sandboxes/${enc(id)}${path}${q.size ? `?${q}` : ""}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: init.method ?? "GET",
+      headers: {
+        authorization: `Bearer ${c.token}`,
+        ...(init.json !== undefined ? { "content-type": "application/json" } : {}),
+      },
+      body: init.json !== undefined ? JSON.stringify(init.json) : init.body,
+    });
+  } catch {
+    throw new DaemonError(OFF_TAILNET, 0);
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new DaemonError(
+      data?.error?.message ?? `The sandbox server answered ${res.status}.`,
+      res.status,
+    );
+  }
+  return (init.raw ? res.blob() : res.json()) as Promise<T>;
+}
+
+export type FileEntry = {
+  name: string;
+  path: string;
+  kind: "file" | "dir" | "symlink" | "other";
+  size: number;
+  mode: number;
+  modified: number;
+  target?: string;
+};
+
+export type ExecResult = {
+  exitCode: number | null;
+  signal?: number;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  timedOut: boolean;
+  durationMs: number;
+};
+
+export const daemonApi = {
+  list: async (id: string, path: string) =>
+    (await daemon<{ entries: FileEntry[] }>(id, "/files/list", { query: { path } }))
+      .entries,
+  read: (id: string, path: string) =>
+    daemon<Blob>(id, "/files", { query: { path }, raw: true }),
+  write: (id: string, path: string, body: Blob) =>
+    daemon<{ bytes: number }>(id, "/files", { method: "PUT", query: { path }, body }),
+  remove: (id: string, path: string, recursive = false) =>
+    daemon<unknown>(id, "/files", {
+      method: "DELETE",
+      query: { path, ...(recursive ? { recursive: "true" } : {}) },
+    }),
+  mkdir: (id: string, path: string) =>
+    daemon<unknown>(id, "/files/mkdir", { method: "POST", query: { path } }),
+  exec: (id: string, cmd: string, timeoutMs?: number) =>
+    daemon<ExecResult>(id, "/exec", { method: "POST", json: { cmd, timeoutMs } }),
+};
+
+// ── The daemon's WebSocket: envd frames, one per binary message ───────────
+// [len u32 BE][kind u8][stream u32 BE][payload], len = payload + 5.
+
+export const Kind = {
+  Hello: 1,
+  Request: 2,
+  Response: 3,
+  Stdin: 4,
+  Stdout: 5,
+  Stderr: 6,
+  Eof: 7,
+} as const;
+
+export type Frame = { kind: number; stream: number; payload: Uint8Array };
+
+export function encodeFrame(kind: number, stream: number, payload: Uint8Array = new Uint8Array(0)) {
+  const out = new Uint8Array(9 + payload.length);
+  const v = new DataView(out.buffer);
+  v.setUint32(0, payload.length + 5);
+  v.setUint8(4, kind);
+  v.setUint32(5, stream);
+  out.set(payload, 9);
+  return out;
+}
+
+export function decodeFrame(bytes: Uint8Array): Frame {
+  if (bytes.length < 9) throw new Error("the frame is cut short");
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const len = v.getUint32(0);
+  if (len < 5 || bytes.length !== 4 + len) throw new Error("the frame is cut short");
+  return { kind: v.getUint8(4), stream: v.getUint32(5), payload: bytes.subarray(9) };
+}
+
+const text = new TextEncoder();
+export const jsonFrame = (kind: number, stream: number, value: unknown) =>
+  encodeFrame(kind, stream, text.encode(JSON.stringify(value)));
+export const parseFrame = <T>(f: Frame): T =>
+  JSON.parse(new TextDecoder().decode(f.payload)) as T;
+
+/** The daemon's WebSocket for a sandbox, with the token in the query (browsers can't set headers). */
+export async function connectSocket(id: string) {
+  const c = await connectionFor(id);
+  const base = c.url.replace(/^http/, "ws");
+  const ws = new WebSocket(
+    `${base}/v1/sandboxes/${enc(id)}/connect?${new URLSearchParams({ token: c.token })}`,
+  );
+  ws.binaryType = "arraybuffer";
+  return ws;
+}
+
+// ── Display ────────────────────────────────────────────────────────────────
+
+export const SANDBOX_STATE: Record<SandboxState, { label: string; tone: "success" | "warning" | "danger" | "neutral" | "info" }> = {
+  creating: { label: "Starting", tone: "info" },
+  running: { label: "Running", tone: "success" },
+  pausing: { label: "Pausing", tone: "info" },
+  paused: { label: "Paused", tone: "neutral" },
+  resuming: { label: "Resuming", tone: "info" },
+  stopping: { label: "Stopping", tone: "info" },
+  stopped: { label: "Stopped", tone: "neutral" },
+  failed: { label: "Failed", tone: "danger" },
+};
+
+export const ended = (s: Sandbox) => s.state === "stopped" || s.state === "failed";
+
+/** "1 CPU · 1 GB". */
+export const sizeLabel = (cpus: number, memoryMib: number) =>
+  `${cpus} CPU · ${memoryMib >= 1024 ? `${+(memoryMib / 1024).toFixed(1)} GB` : `${memoryMib} MB`}`;
+
+/** "45m", "2h 10m", "3d": what's left until `at`, or null once it has passed. */
+export function timeLeft(at: number | null, now = Date.now()) {
+  if (!at) return null;
+  const s = Math.floor((at - now) / 1000);
+  if (s <= 0) return null;
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+/** "1h", "1h30m", "90s", like Pyo's format_ttl. */
+export function formatTtl(secs: number) {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  const out = `${h ? `${h}h` : ""}${m ? `${m}m` : ""}`;
+  return s || !out ? `${out}${s}s` : out;
+}
+
+export const RUNTIME_LABEL: Record<string, string> = {
+  firecracker: "Firecracker",
+  gvisor: "gVisor",
+  none: "None",
+};
+
+export const SERVER_STATE: Record<SandboxServer["state"], { label: string; tone: "success" | "warning" | "danger" | "neutral" | "info" }> = {
+  joining: { label: "Joining", tone: "info" },
+  ready: { label: "Ready", tone: "success" },
+  unreachable: { label: "Unreachable", tone: "danger" },
+  refused: { label: "Can't run sandboxes", tone: "danger" },
+};
+
+export const SIZES = [
+  { value: "1", cpus: 1, memoryMib: 1024 },
+  { value: "2", cpus: 2, memoryMib: 4096 },
+  { value: "4", cpus: 4, memoryMib: 8192 },
+] as const;
+
+export const LIFETIMES = [
+  { value: "10m", label: "10 min", secs: 600 },
+  { value: "1h", label: "1 hour", secs: 3600 },
+  { value: "24h", label: "1 day", secs: 86_400 },
+] as const;
+
+/** The TypeScript SDK call that makes the same sandbox as the form. */
+export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
+  const lines: string[] = [`  template: ${JSON.stringify(b.template)},`];
+  if (b.cpus) lines.push(`  cpus: ${b.cpus},`);
+  if (b.memoryMib) lines.push(`  memoryMib: ${b.memoryMib},`);
+  if (b.ttl) lines.push(`  ttl: ${JSON.stringify(b.ttl)},`);
+  if (b.pauseWhenIdleSecs) lines.push(`  pauseWhenIdleSecs: ${b.pauseWhenIdleSecs},`);
+  if (b.network) lines.push(`  network: ${JSON.stringify(b.network)},`);
+  if (b.isolation && b.isolation !== "auto")
+    lines.push(`  isolation: ${JSON.stringify(b.isolation)},`);
+  if (b.env && Object.keys(b.env).length)
+    lines.push(`  env: { ${Object.keys(b.env).map((k) => `${/^[A-Za-z_$][\w$]*$/.test(k) ? k : JSON.stringify(k)}: "…"`).join(", ")} },`);
+  if (b.labels && Object.keys(b.labels).length)
+    lines.push(`  labels: ${JSON.stringify(b.labels)},`);
+  return [
+    'import { Sandbox } from "@pyo/sandbox";',
+    "",
+    "const sbx = await Sandbox.create({",
+    ...lines,
+    "});",
+    'const out = await sbx.exec("uname -a");',
+  ].join("\n");
+}
