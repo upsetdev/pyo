@@ -160,6 +160,14 @@ jobs:
           PYO_SANDBOX_E2E: "1"
         run: cargo test --locked -p pyo-sandbox --test e2e -- --nocapture
 
+      - name: Forwarding rules
+        if: matrix.arch == 'x86_64'
+        continue-on-error: true
+        run: |
+          sudo iptables -S FORWARD || true
+          sudo nft list ruleset | head -80 || true
+          sudo iptables -L DOCKER-USER -n 2>/dev/null || echo "no DOCKER-USER chain"
+
       # As root: cargo isn't on root's PATH, so build the test binary as
       # the runner user and run only it with sudo -E.
       - name: Networking e2e (root)
