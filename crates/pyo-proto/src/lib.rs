@@ -396,6 +396,18 @@ pub struct CertificateReport {
     pub ready: bool,
     /// Why it isn't ready, from cert-manager.
     pub message: String,
+    /// The last try failed (cert-manager's Issuing condition says Failed,
+    /// or it has a last failure time), and why, as cert-manager has it
+    /// (the ACME error, if any). Pyo turns it into one plain sentence.
+    #[serde(default)]
+    pub failed: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub failure: String,
+    /// When the current try started (unix seconds): the Issuing
+    /// condition's last change, else when the certificate was made. A
+    /// try that takes too long is shown as stuck.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuing_since: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

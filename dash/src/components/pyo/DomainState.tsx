@@ -50,7 +50,8 @@ export function domainState(
         hint: `Your certificate ${c.name}. ${e.text}.`,
       };
   }
-  if (d.tls === "failed") return { tone: "broken", text: "Certificate failed" };
+  if (d.tls === "failed")
+    return { tone: "broken", text: "Certificate failed", hint: d.tlsError };
   if (d.tls !== "issued") return { tone: "busy", text: "Issuing certificate…" };
   if (d.tlsMode === "custom")
     return {

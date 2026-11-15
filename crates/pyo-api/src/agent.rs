@@ -372,20 +372,47 @@ async fn heartbeat(
             .execute(&mut *tx)
             .await?;
     }
-    // HTTPS certificates: issued, still pending, or failing (with why).
+    // HTTPS certificates: issued, still pending, or failing, with why in
+    // one plain sentence. A try that's been going for too long is failing
+    // too: Let's Encrypt can't check the domain.
+    let behind_nat = if hb.certificates.iter().any(|c| !c.ready) {
+        crate::freedomain::load(&mut tx, &cluster.id)
+            .await?
+            .is_some_and(|(_, c)| c.behind_nat())
+    } else {
+        false
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     for c in &hb.certificates {
-        let failing = !c.ready && c.message.to_lowercase().contains("fail");
+        let error = if c.ready {
+            None
+        } else {
+            let dns_pending: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
+                  WHERE s.id = $1 AND d->>'hostname' = $2 AND d->>'status' = 'pending_dns')",
+            )
+            .bind(&c.service_id)
+            .bind(&c.hostname)
+            .fetch_one(&mut *tx)
+            .await?;
+            tls_problem(
+                c,
+                &TlsContext {
+                    stuck: c.issuing_since.is_some_and(|t| now - t > TLS_STUCK_SECS),
+                    dns_pending,
+                    behind_nat,
+                },
+            )
+        };
         let tls = if c.ready {
             "issued"
-        } else if failing {
+        } else if error.is_some() {
             "failed"
         } else {
             "pending"
-        };
-        let error = if failing {
-            Some(c.message.chars().take(300).collect::<String>())
-        } else {
-            None
         };
         sqlx::query(
             "UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', (
@@ -963,6 +990,175 @@ pub(crate) fn host_label(host: &str) -> Option<String> {
         return None;
     }
     Some(out)
+}
+
+/// How long a certificate may take before it's shown as stuck (10 min).
+const TLS_STUCK_SECS: i64 = 600;
+
+/// What the API knows about a certificate's domain beyond cert-manager.
+struct TlsContext {
+    /// Still not issued after [`TLS_STUCK_SECS`].
+    stuck: bool,
+    /// Its DNS doesn't point at the cluster yet.
+    dns_pending: bool,
+    /// The cluster is behind NAT (a home router).
+    behind_nat: bool,
+}
+
+/// Why a certificate isn't issued, as one plain sentence with what to do,
+/// or None while it's on its way. cert-manager's and Let's Encrypt's own
+/// text (ACME error URNs) is never shown.
+fn tls_problem(c: &pyo_proto::CertificateReport, ctx: &TlsContext) -> Option<String> {
+    let unreachable = || {
+        if ctx.behind_nat {
+            "Let's Encrypt can't reach this server on port 80. Forward ports 80 and 443 on your router to it."
+        } else {
+            "Let's Encrypt can't reach this server on port 80. Check that its firewall lets port 80 in."
+        }
+        .to_owned()
+    };
+    let dns = || "The domain doesn't point at this server yet. Check its DNS record.".to_owned();
+    // An agent that only sends the Ready message says "failed" in it.
+    let failed = c.failed || c.message.to_lowercase().contains("fail");
+    if failed {
+        let why = format!("{} {}", c.failure, c.message).to_lowercase();
+        let has = |words: &[&str]| words.iter().any(|w| why.contains(w));
+        return Some(if has(&["ratelimited", "rate limit", "too many"]) {
+            if c.hostname.ends_with(".nip.io") {
+                // nip.io isn't a public suffix, so every nip.io user shares
+                // one weekly limit at Let's Encrypt. cert-manager retries
+                // with a backoff, and slots come back over the week.
+                "Let's Encrypt is busy for free nip.io addresses this week. Pyo tries again on its own. For HTTPS now, add your own domain.".to_owned()
+            } else {
+                "Let's Encrypt's limit for this domain is reached for now. Pyo tries again on its own.".to_owned()
+            }
+        } else if has(&["caa"]) {
+            "The domain's CAA record doesn't allow Let's Encrypt. Add letsencrypt.org to it."
+                .to_owned()
+        } else if has(&["nxdomain", "dns problem", "no valid a records", "servfail"])
+            || ctx.dns_pending
+        {
+            dns()
+        } else if has(&[
+            "connection",
+            "timeout",
+            "timed out",
+            "unauthorized",
+            "invalid response",
+            "incorrect",
+            "refused",
+        ]) {
+            unreachable()
+        } else {
+            "Let's Encrypt didn't issue a certificate. Pyo tries again on its own.".to_owned()
+        });
+    }
+    if ctx.stuck {
+        let why = if ctx.dns_pending {
+            dns()
+        } else {
+            unreachable()
+        };
+        return Some(format!("No certificate after 10 minutes. {why}"));
+    }
+    None
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::{TlsContext, tls_problem};
+    use pyo_proto::CertificateReport;
+
+    fn cert(failed: bool, failure: &str, host: &str) -> CertificateReport {
+        CertificateReport {
+            service_id: "svc".into(),
+            hostname: host.into(),
+            ready: false,
+            message: "Issuing certificate as Secret does not exist".into(),
+            failed,
+            failure: failure.into(),
+            issuing_since: Some(0),
+        }
+    }
+
+    const CALM: TlsContext = TlsContext {
+        stuck: false,
+        dns_pending: false,
+        behind_nat: false,
+    };
+
+    #[test]
+    fn pending_is_quiet_until_stuck() {
+        assert_eq!(tls_problem(&cert(false, "", "a.example.com"), &CALM), None);
+        let stuck = tls_problem(
+            &cert(false, "", "a.example.com"),
+            &TlsContext {
+                stuck: true,
+                dns_pending: false,
+                behind_nat: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            stuck.starts_with("No certificate after 10 minutes."),
+            "{stuck}"
+        );
+        assert!(stuck.contains("router"), "{stuck}");
+        let dns = tls_problem(
+            &cert(false, "", "a.example.com"),
+            &TlsContext {
+                stuck: true,
+                dns_pending: true,
+                behind_nat: false,
+            },
+        )
+        .unwrap();
+        assert!(dns.contains("DNS record"), "{dns}");
+    }
+
+    #[test]
+    fn acme_errors_become_plain_sentences() {
+        let cases = [
+            (
+                "429 urn:ietf:params:acme:error:rateLimited: too many certificates (250000) already issued for \"nip.io\" in the last 168h0m0s",
+                "a.1.2.3.4.nip.io",
+                "busy for free nip.io",
+            ),
+            (
+                "429 urn:ietf:params:acme:error:rateLimited: too many certificates",
+                "shop.example.com",
+                "limit for this domain",
+            ),
+            (
+                "urn:ietf:params:acme:error:caa: CAA record prevents issuance",
+                "a.example.com",
+                "CAA record",
+            ),
+            (
+                "urn:ietf:params:acme:error:dns: DNS problem: NXDOMAIN looking up A",
+                "a.example.com",
+                "DNS record",
+            ),
+            (
+                "urn:ietf:params:acme:error:connection: Timeout during connect",
+                "a.example.com",
+                "port 80",
+            ),
+            ("something new", "a.example.com", "tries again on its own"),
+        ];
+        for (raw, host, want) in cases {
+            let got = tls_problem(&cert(true, raw, host), &CALM).unwrap();
+            assert!(got.contains(want), "{raw}: {got}");
+            assert!(!got.contains("urn:") && !got.contains(';'), "{got}");
+        }
+    }
+
+    #[test]
+    fn an_older_agent_s_message_still_counts() {
+        let mut c = cert(false, "", "a.example.com");
+        c.message = "The certificate request has failed to complete".into();
+        assert!(tls_problem(&c, &CALM).is_some());
+    }
 }
 
 #[cfg(test)]
