@@ -16,8 +16,10 @@
 # profile: `release` (the default; releases) or `dev-release`
 # (scripts/pyo-up.sh, quicker to compile).
 #
-# The `cli` target is the CLI alone, for the GitHub release
-# (pyo-linux-x86_64, installed with `curl -fsSL https://pyo.dev/cli.sh | sh`).
+# The `cli` target is the CLI alone, for the GitHub release's
+# pyo-linux-x86_64 (installed with `curl -fsSL https://pyo.dev/cli.sh | sh`).
+# The CLI for the other platforms is built on their own runners
+# (.github/workflows/cli.yml).
 
 FROM rust:1.99.1-trixie AS rust
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/* \

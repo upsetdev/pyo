@@ -1,0 +1,72 @@
+name: CLI
+
+# The CLI for macOS, Windows and Linux on Arm, each built on its own
+# platform's runner. The Release workflow runs it and puts the binaries in
+# the GitHub release. Run it by hand (Actions › CLI › Run workflow) to try
+# the builds on a branch: it publishes nothing, the binaries stay in the
+# run's artifacts. Linux x86-64's CLI comes from pyo.Dockerfile's `cli`
+# target, in the Release workflow.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Static (musl), like pyo-linux-x86_64.
+          - { asset: pyo-linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { asset: pyo-macos-aarch64, runner: macos-14, target: aarch64-apple-darwin }
+          # Built on the Arm runner too: Xcode builds for Intel Macs as well.
+          - { asset: pyo-macos-x86_64, runner: macos-14, target: x86_64-apple-darwin }
+          - { asset: pyo-windows-x86_64.exe, runner: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.1
+          targets: ${{ matrix.target }}
+      - name: musl
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      # PYO_CLI_RELEASE marks a release build: `pyo upgrade` replaces only
+      # those. On Windows the C runtime goes inside the exe, so it runs
+      # without Visual C++'s redistributable, and aws-lc (rustls's crypto)
+      # uses its prebuilt assembly, since the runner has no NASM.
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+          PYO_CLI_RELEASE: "1"
+        run: |
+          case "$TARGET" in
+            *-linux-musl) export CC_aarch64_unknown_linux_musl=musl-gcc ;;
+            *-windows-*) export RUSTFLAGS="-C target-feature=+crt-static" AWS_LC_SYS_PREBUILT_NASM=1 ;;
+          esac
+          cargo build --release --locked -p pyo-cli --target "$TARGET"
+          bin="target/$TARGET/release/pyo"
+          case "$TARGET" in *-windows-*) bin="$bin.exe" ;; esac
+          mkdir out
+          cp "$bin" "out/$ASSET"
+          cd out
+          if command -v sha256sum >/dev/null; then sha256sum "$ASSET"; else shasum -a 256 "$ASSET"; fi > "$ASSET.sha256"
+          cat "$ASSET.sha256"
+      # The build runs on the platform it's for: it must at least start.
+      - name: Check it runs
+        shell: bash
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: out/${{ matrix.asset }} --version
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-${{ matrix.asset }}
+          path: out/
+          if-no-files-found: error
