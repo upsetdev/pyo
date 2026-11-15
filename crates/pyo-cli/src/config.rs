@@ -1,6 +1,7 @@
 //! Where the CLI keeps things: your sign-in (`~/.config/pyo/config.toml`,
-//! readable only by you) and the service a folder deploys (`pyo.toml`,
-//! found in the current folder or the nearest one above it).
+//! readable only by you, or `%APPDATA%\pyo\config.toml` on Windows, in
+//! your user profile) and the service a folder deploys (`pyo.toml`, found
+//! in the current folder or the nearest one above it).
 
 use std::{
     fs,
@@ -21,11 +22,37 @@ pub struct Credentials {
     pub email: Option<String>,
 }
 
+/// A folder from the environment variable `name`, when it's set.
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Your home folder: `HOME`, or on Windows `USERPROFILE` when there's no
+/// `HOME`.
+fn home() -> Option<PathBuf> {
+    env_dir("HOME").or_else(|| cfg!(windows).then(|| env_dir("USERPROFILE")).flatten())
+}
+
+/// Where the CLI keeps its settings: `XDG_CONFIG_HOME`, `%APPDATA%` on
+/// Windows, or `~/.config`.
+fn config_dir() -> Option<PathBuf> {
+    env_dir("XDG_CONFIG_HOME")
+        .or_else(|| cfg!(windows).then(|| env_dir("APPDATA")).flatten())
+        .or_else(|| Some(home()?.join(".config")))
+}
+
+/// Where the CLI keeps what it can lose: `XDG_CACHE_HOME`,
+/// `%LOCALAPPDATA%` on Windows, or `~/.cache`.
+pub fn cache_dir() -> Option<PathBuf> {
+    env_dir("XDG_CACHE_HOME")
+        .or_else(|| cfg!(windows).then(|| env_dir("LOCALAPPDATA")).flatten())
+        .or_else(|| Some(home()?.join(".cache")))
+}
+
 fn credentials_path() -> Result<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => PathBuf::from(std::env::var_os("HOME").context("HOME isn't set")?).join(".config"),
-    };
+    let base = config_dir().context("Can't find your home folder: HOME isn't set")?;
     Ok(base.join("pyo").join("config.toml"))
 }
 

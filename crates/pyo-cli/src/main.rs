@@ -636,6 +636,7 @@ enum EnvCommand {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    upgrade::remove_old();
     let check = match cli.command {
         Command::Upgrade { .. } => None,
         _ => upgrade::Check::start(),
