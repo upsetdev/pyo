@@ -5172,6 +5172,8 @@ async fn apply(
         } => {
             let id = service["id"].as_str().unwrap_or("").to_owned();
             tailnet_domains_ok(s, &service["domains"]).await?;
+            let mut service = service;
+            fill_in_source(&mut service).await;
             create_service(
                 tx,
                 user,
@@ -8278,6 +8280,30 @@ pub(crate) async fn free_namespace(
         }
         namespace = format!("{base}-{n}");
         n += 1;
+    }
+}
+
+/// What a new service's source leaves to Pyo, filled in before it's saved:
+/// a Git source's branch (the repository's default branch, else main).
+async fn fill_in_source(service: &mut Value) {
+    match service["source"]["type"].as_str() {
+        Some("git")
+            if service["source"]["branch"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .is_empty() =>
+        {
+            let url = service["source"]["repoUrl"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            let branch = crate::git::remote::default_branch(&url)
+                .await
+                .unwrap_or_else(|| "main".to_owned());
+            service["source"]["branch"] = json!(branch);
+        }
+        _ => {}
     }
 }
 

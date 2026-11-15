@@ -28,6 +28,7 @@
 //! route, builds and polling don't change.
 
 pub mod gitlab;
+pub mod remote;
 
 use std::time::Duration;
 
