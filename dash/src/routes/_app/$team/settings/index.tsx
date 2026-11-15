@@ -9,8 +9,10 @@ import {
   clustersIn,
   currentTeam,
   getState,
+  sandboxServersIn,
   usePyo,
 } from "~/lib/pyo/store";
+import { SandboxLimitsPanel } from "~/components/pyo/sandbox/SandboxLimits";
 import { toast } from "~/lib/pyo/toast";
 import type { Team } from "~/lib/pyo/types";
 import { CopyButton } from "~/components/ui/Table";
@@ -135,6 +137,9 @@ function TeamSettings({ ws }: { ws: Team }) {
           </Button>
         </div>
       </Panel>
+      {s.user.isAdmin && sandboxServersIn(s, ws.id).length ? (
+        <SandboxLimitsPanel teamId={ws.id} />
+      ) : null}
       <Panel title="Danger zone" tone="danger">
         <ul className="list-rows">
           <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
