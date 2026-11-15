@@ -107,11 +107,12 @@ impl Connection {
             Ok(u) => crate::outbound::resolves_public(&u).await.unwrap_or(true),
             Err(_) => true,
         };
+        let a = crate::web::addresses();
         let addrs = PyoAddresses {
             given: Some(self.public_url.clone()).filter(|u| !u.is_empty()),
             configured: crate::oauth::configured_public_url().map(str::to_owned),
-            tailnet: crate::web::addresses().tailnet.map(|h| format!("https://{h}")),
-            public: None,
+            tailnet: a.tailnet.map(|h| format!("https://{h}")),
+            public: a.public.map(|h| format!("https://{h}")),
         };
         let url = hook_base(public, &addrs)
             .map(|b| format!("{}/api/git/{}/webhook", b.trim_end_matches('/'), self.id));
