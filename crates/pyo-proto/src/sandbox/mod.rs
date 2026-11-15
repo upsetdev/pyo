@@ -27,6 +27,9 @@ pub const SANDBOX_PROTOCOL: u32 = 1;
 /// Every sandbox ID starts with this.
 pub const SANDBOX_ID_PREFIX: &str = "sbx_";
 
+/// The daemon API's port on a sandbox server's tailnet address.
+pub const DAEMON_PORT: u16 = 7070;
+
 // ── Limits and defaults ────────────────────────────────────────────────────
 
 pub const DEFAULT_CPUS: u32 = 1;
@@ -482,6 +485,30 @@ impl CapacityReport {
     }
 }
 
+/// A sandbox template on a server, and the sizes it has a snapshot for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateReport {
+    pub name: String,
+    /// Snapshot keys, each ending in [`snapshot_size_tag`].
+    #[serde(default)]
+    pub snapshots: Vec<String>,
+}
+
+impl TemplateReport {
+    /// Whether a sandbox of this size restores from a snapshot here.
+    pub fn has_snapshot(&self, cpus: u32, memory_mib: u32, disk_mib: u32) -> bool {
+        let tag = snapshot_size_tag(cpus, memory_mib, disk_mib);
+        self.snapshots.iter().any(|k| k.ends_with(&tag))
+    }
+}
+
+/// The end of a template snapshot's key: the machine size it restores.
+/// The key starts with the Firecracker version and CPU template.
+pub fn snapshot_size_tag(cpus: u32, memory_mib: u32, disk_mib: u32) -> String {
+    format!("-{cpus}c-{memory_mib}m-{disk_mib}d")
+}
+
 /// What a daemon reports to Pyo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -492,6 +519,9 @@ pub struct ServerReport {
     pub capability: CapabilityReport,
     pub capacity: CapacityReport,
     pub sandboxes: Vec<SandboxStatus>,
+    /// The templates on the server, so Pyo places sandboxes where theirs is.
+    #[serde(default)]
+    pub templates: Vec<TemplateReport>,
 }
 
 // ── Commands from Pyo and their results ────────────────────────────────────
@@ -857,6 +887,24 @@ mod tests {
         let j = serde_json::to_value(&e).unwrap();
         assert_eq!(j["error"]["code"], "noCapacity");
         assert_eq!(ErrorCode::NoCapacity.http_status(), 503);
+    }
+
+    #[test]
+    fn template_snapshots_by_size() {
+        let t = TemplateReport {
+            name: "node-22".into(),
+            snapshots: vec![format!("fc1.18.0-none{}", snapshot_size_tag(1, 512, 2048))],
+        };
+        assert!(t.has_snapshot(1, 512, 2048));
+        assert!(!t.has_snapshot(2, 512, 2048));
+        assert!(!t.has_snapshot(1, 512, 20480));
+        let r: ServerReport = serde_json::from_value(serde_json::json!({
+            "protocol": 1, "daemonVersion": "0.4.0", "serverId": "s",
+            "capability": CapabilityReport::default(), "capacity": CapacityReport::default(),
+            "sandboxes": [],
+        }))
+        .unwrap();
+        assert!(r.templates.is_empty(), "older reports have no templates");
     }
 
     #[test]
