@@ -89,7 +89,38 @@ export type SandboxCapability = {
   disk: number;
   network?: boolean;
   edgeUrl?: string;
+  /** The fingerprint of the certificate the edge serves. */
+  edgeCert?: string;
+  publicIps?: string[];
   reason?: string;
+};
+
+/** A server's edge proxy: its domain, certificate and wildcard record. */
+export type SandboxEdge = {
+  domain: string;
+  /** Whether it serves HTTPS now. */
+  https: boolean;
+  cert: {
+    state: "none" | "issuing" | "ready" | "failed";
+    notAfter?: number | null;
+    issuedAt?: number | null;
+    error?: string | null;
+    /** Whether the server serves it. */
+    served?: boolean;
+  };
+  /** The connected Cloudflare zone that covers the domain. */
+  cloudflare: { teamId: string; zone: string; canEdit: boolean } | null;
+  dns: {
+    name: string;
+    /** What to point it at: the server's public addresses. */
+    records: { type: "A" | "AAAA"; content: string }[];
+    /** What Pyo made at Cloudflare. */
+    made: {
+      status: "created" | "exists" | "conflict";
+      records: { type: string; content: string }[];
+      existing: { type: string; content: string }[];
+    } | null;
+  };
 };
 
 export type SandboxCapacity = {
@@ -120,6 +151,8 @@ export type SandboxServer = {
   error: string | null;
   sandboxes: number;
   createdAt: number;
+  edgeDomain: string | null;
+  edge?: SandboxEdge;
 };
 
 export type SandboxTemplate = {
@@ -200,6 +233,16 @@ export const sandboxApi = {
     request<{ ok: boolean; stopped: number }>(
       `/api/v1/sandbox-servers/${enc(id)}`,
       { method: "DELETE" },
+    ),
+  issueCert: (id: string, teamId?: string) =>
+    request<{ state: string }>(`/api/v1/sandbox-servers/${enc(id)}/certificate`, {
+      method: "POST",
+      body: teamId ? { teamId } : {},
+    }),
+  createDnsRecord: (id: string, teamId?: string) =>
+    request<{ ok: boolean; status: string; existing: { type: string; content: string }[] }>(
+      `/api/v1/sandbox-servers/${enc(id)}/dns-record`,
+      { method: "POST", body: teamId ? { teamId } : {} },
     ),
   templates: (team: string) =>
     request<{ templates: SandboxTemplate[] }>(

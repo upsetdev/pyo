@@ -1,10 +1,17 @@
-import { DotsThreeIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import {
+  CertificateIcon,
+  CircleNotchIcon,
+  DotsThreeIcon,
+  GlobeIcon,
+  PlusIcon,
+  TrashIcon,
+} from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Menu } from "~/components/ui/Menu";
 import { Meter } from "~/components/ui/Panel";
-import { refresh, roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
+import { cloudflareZoneFor, refresh, roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import { sandboxApi, type SandboxServer } from "~/lib/pyo/sandbox";
 import { toast } from "~/lib/pyo/toast";
 import {
@@ -25,9 +32,59 @@ export function SandboxServers() {
   const role = roleIn(s);
   const [removing, setRemoving] = useState<SandboxServer | null>(null);
   const [adding, setAdding] = useState(false);
+  const issuing = servers.some((x) => x.edge?.cert.state === "issuing");
+  useEffect(() => {
+    if (!issuing) return;
+    const t = setInterval(() => void refresh().catch(() => undefined), 4000);
+    return () => clearInterval(t);
+  }, [issuing]);
   if (!servers.length) return null;
   const canRemove = (x: SandboxServer) =>
     x.teamId ? role === "owner" || role === "admin" : !!s.user.isAdmin;
+  // The installation's servers use this team's Cloudflare, so its admin
+  // needs to be the team's too.
+  const canEdge = (x: SandboxServer) =>
+    canRemove(x) && (role === "owner" || role === "admin");
+  const zoneOf = (x: SandboxServer) => {
+    const z = x.edge ? cloudflareZoneFor(s, x.edge.domain) : undefined;
+    return z?.canEdit ? z : undefined;
+  };
+  const edgeAct = (x: SandboxServer, what: "cert" | "dns") => {
+    const team = x.teamId ? undefined : s.currentTeamId;
+    const run =
+      what === "cert"
+        ? sandboxApi.issueCert(x.id, team).then(() => ({ title: "Getting a certificate", tone: undefined }))
+        : sandboxApi.createDnsRecord(x.id, team).then((r) =>
+            r.ok
+              ? { title: "DNS record created", tone: undefined }
+              : { title: `${x.edge?.dns.name} has another record in Cloudflare`, tone: "error" as const },
+          );
+    void run
+      .then((t) => toast(t))
+      .catch((e: Error) => toast({ tone: "error", title: e.message }))
+      .finally(() => void refresh().catch(() => undefined));
+  };
+  const edgeItems = (x: SandboxServer) => {
+    const e = x.edge;
+    if (!e || !canEdge(x) || !zoneOf(x)) return [];
+    const items = [
+      {
+        label: e.cert.state === "ready" ? "Renew certificate" : "Get certificate",
+        icon: <CertificateIcon size={14} />,
+        disabled: e.cert.state === "issuing",
+        onSelect: () => edgeAct(x, "cert"),
+      },
+    ];
+    const made = e.dns.made?.status;
+    if (e.dns.records.length && made !== "created" && made !== "exists")
+      items.push({
+        label: "Create DNS record",
+        icon: <GlobeIcon size={14} />,
+        disabled: false,
+        onSelect: () => edgeAct(x, "dns"),
+      });
+    return items;
+  };
   return (
     <section
       aria-labelledby="sandbox-servers"
@@ -64,6 +121,7 @@ export function SandboxServers() {
                   {x.address ? <span className="font-mono text-[11.5px]">{x.address} · </span> : null}
                   {serverCapacity(x)}
                 </p>
+                {x.edge ? <EdgeLine server={x} covered={!!zoneOf(x)} /> : null}
                 {x.state !== "ready" && (x.error || x.summary) ? (
                   <p className={`text-[12px] ${x.state === "refused" || x.state === "unreachable" ? "text-destructive" : "text-muted-foreground"}`}>
                     {x.error ?? x.summary}
@@ -85,6 +143,7 @@ export function SandboxServers() {
                   <Menu
                     label={`Actions for ${x.name}`}
                     items={[
+                      ...edgeItems(x),
                       {
                         label: "Remove server",
                         icon: <TrashIcon size={14} />,
@@ -126,5 +185,48 @@ export function SandboxServers() {
         }}
       />
     </section>
+  );
+}
+
+const day = (at: number) =>
+  new Date(at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+/** The edge's domain, its certificate and, until Pyo made it, the record to point at the server. */
+function EdgeLine({ server, covered }: { server: SandboxServer; covered: boolean }) {
+  const e = server.edge;
+  if (!e) return null;
+  const c = e.cert;
+  const cert =
+    c.state === "issuing" ? (
+      <span className="inline-flex items-center gap-1">
+        <CircleNotchIcon size={11} className="animate-spin" /> Getting a certificate
+      </span>
+    ) : c.state === "ready" && c.notAfter ? (
+      <span>Certificate until {day(c.notAfter)}</span>
+    ) : c.state === "failed" ? (
+      <span className="text-destructive">Certificate failed. {c.error}</span>
+    ) : e.https ? (
+      <span>HTTPS</span>
+    ) : covered ? (
+      <span>No certificate yet</span>
+    ) : (
+      <span>No certificate. Cloudflare doesn't cover this domain, so put one on the server.</span>
+    );
+  const made = e.dns.made?.status;
+  const point = e.dns.records.map((r) => r.content).join(" and ");
+  return (
+    <>
+      <p className="truncate text-[12px] text-muted-foreground">
+        <span className="font-mono text-[11.5px]">{e.domain}</span> · {cert}
+      </p>
+      {made === "conflict" ? (
+        <p className="truncate text-[12px] text-destructive">{e.dns.name} has another record in Cloudflare.</p>
+      ) : made !== "created" && made !== "exists" && point && !e.https ? (
+        <p className="truncate text-[12px] text-muted-foreground">
+          Point <span className="font-mono text-[11.5px]">{e.dns.name}</span> at{" "}
+          <span className="font-mono text-[11.5px]">{point}</span>.
+        </p>
+      ) : null}
+    </>
   );
 }
