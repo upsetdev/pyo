@@ -179,6 +179,7 @@ const COVERED: &[(&str, &str)] = &[
     ("createSandbox", "create_sandbox"),
     ("pauseSandbox", "pause_sandbox"),
     ("openSandboxPort", "open_port"),
+    ("closeSandboxPort", "close_port"),
     ("deleteSandbox", "delete_sandbox"),
 ];
 
@@ -238,6 +239,7 @@ const CURATED_RUNS: &[(&str, &str)] = &[
     ("read_file", "createSandboxToken"),
     ("write_file", "createSandboxToken"),
     ("open_port", "openSandboxPort"),
+    ("close_port", "closeSandboxPort"),
     ("pause_sandbox", "pauseSandbox"),
     ("delete_sandbox", "deleteSandbox"),
 ];
@@ -1868,6 +1870,7 @@ mod tests {
             "read_file",
             "write_file",
             "open_port",
+            "close_port",
             "pause_sandbox",
             "delete_sandbox",
             "list_sandboxes",

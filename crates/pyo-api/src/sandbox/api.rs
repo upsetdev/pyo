@@ -28,6 +28,10 @@ pub fn routes() -> Router<AppState> {
         .route("/sandboxes/{id}/extend", post(extend))
         .route("/sandboxes/{id}/token", post(token))
         .route("/sandboxes/{id}/ports", post(open_port))
+        .route(
+            "/sandboxes/{id}/ports/{port}",
+            axum::routing::delete(close_port),
+        )
         .route("/sandbox-servers", get(list_servers).post(add_server))
         .route(
             "/sandbox-servers/{id}",
@@ -267,6 +271,29 @@ pub(crate) async fn open_port(
     Ok(Json(
         super::open_port(&s, &user, &id, b.port, b.public.unwrap_or(true)).await?,
     ))
+}
+
+/// Close a sandbox port
+///
+/// Stops serving the port at its URL. Closing a port that isn't open is
+/// fine.
+#[utoipa::path(delete, path = "/sandboxes/{id}/ports/{port}", operation_id = "closeSandboxPort", tag = "Sandboxes",
+    params(
+        ("id" = String, Path, description = "The sandbox's id."),
+        ("port" = u16, Path, description = "The port, like 3000."),
+    ),
+    responses(
+        (status = 200, description = "`port` and `closed`.", body = Object),
+        (status = 404, description = "No such sandbox.", body = ErrorBody),
+        (status = 409, description = "It has ended.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("sandboxes"))))]
+pub(crate) async fn close_port(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path((id, port)): Path<(String, u16)>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(super::close_port(&s, &user, &id, port).await?))
 }
 
 /// New sandbox token

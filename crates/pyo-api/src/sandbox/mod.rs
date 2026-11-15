@@ -888,6 +888,29 @@ pub async fn open_port(
     Ok(json!({ "url": url, "port": port, "public": public }))
 }
 
+/// Stops serving a sandbox port on its server's edge proxy. Closing a port
+/// that isn't open is fine.
+pub async fn close_port(s: &AppState, user: &User, id: &str, port: u16) -> ApiResult<Value> {
+    if port == 0 {
+        return Err(ApiError::bad_request("The port must be 1 to 65535."));
+    }
+    let f = find(s, user, id, Need::Use).await?;
+    let (d, token, _) = f.daemon(s).await?;
+    let st = d
+        .sandbox(
+            &token,
+            &DaemonCommand::ClosePort {
+                id: id.to_owned(),
+                port,
+            },
+        )
+        .await
+        .map_err(daemon_error)?;
+    let mut c = s.db.acquire().await?;
+    save_status(&mut c, &st).await?;
+    Ok(json!({ "port": port, "closed": true }))
+}
+
 /// A new client token for a sandbox: the SDK asks before the old one runs
 /// out.
 pub async fn token(s: &AppState, user: &User, id: &str) -> ApiResult<Connection> {

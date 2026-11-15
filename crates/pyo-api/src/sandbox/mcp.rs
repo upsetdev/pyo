@@ -9,13 +9,14 @@ use super::Need;
 use crate::{AppState, auth::User, error::ApiError};
 
 /// The tools, in the order they're listed.
-pub const TOOLS: [&str; 8] = [
+pub const TOOLS: [&str; 9] = [
     "create_sandbox",
     "run_code",
     "exec",
     "read_file",
     "write_file",
     "open_port",
+    "close_port",
     "pause_sandbox",
     "delete_sandbox",
 ];
@@ -71,6 +72,10 @@ pub fn defs() -> Vec<Value> {
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
             "public": { "type": "boolean", "description": "Anyone can open the URL. False needs a sandbox token. Default true." },
         }), &["sandbox_id", "port"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
+        json!({ "name": "close_port", "title": "Close a sandbox port", "description": "Stop serving a sandbox port at its URL.", "inputSchema": schema(json!({
+            "sandbox_id": sandbox,
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        }), &["sandbox_id", "port"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
         json!({ "name": "pause_sandbox", "title": "Pause sandbox", "description": "Pause a sandbox: its memory and files are kept, and it resumes where it was.", "inputSchema": schema(json!({ "sandbox_id": sandbox }), &["sandbox_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "delete_sandbox", "title": "Delete sandbox", "description": "End a sandbox and throw away its files.", "inputSchema": schema(json!({ "sandbox_id": sandbox }), &["sandbox_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
     ]
@@ -235,6 +240,16 @@ pub async fn run(s: &AppState, user: &User, name: &str, args: &Value) -> Result<
                 .ok_or("port must be 1 to 65535")?;
             let public = args["public"].as_bool().unwrap_or(true);
             super::open_port(s, user, arg(args, "sandbox_id")?, port, public)
+                .await
+                .map_err(err)
+        }
+        "close_port" => {
+            let port = args["port"]
+                .as_u64()
+                .and_then(|p| u16::try_from(p).ok())
+                .filter(|p| *p > 0)
+                .ok_or("port must be 1 to 65535")?;
+            super::close_port(s, user, arg(args, "sandbox_id")?, port)
                 .await
                 .map_err(err)
         }
