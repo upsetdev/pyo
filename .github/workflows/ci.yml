@@ -64,6 +64,106 @@ jobs:
       - run: scripts/install-railpack.sh
       - run: cargo test --locked --workspace
 
+  # Pyo Sandbox end to end: real Firecracker microVMs on the runner's KVM.
+  # x64 only, as GitHub's arm runners have no KVM. The networking e2e
+  # changes the host's network as root, so it runs last.
+  sandbox:
+    name: Sandbox end to end
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_PASSWORD: pyo
+          POSTGRES_DB: pyo
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PYO_SANDBOX_ENVD: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/pyo-envd
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: KVM
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::This runner has no KVM (/dev/kvm is missing), so it can't boot microVMs."
+            exit 1
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          for _ in 1 2 3 4 5; do [ -r /dev/kvm ] && [ -w /dev/kvm ] && break; sleep 1; done
+          ls -l /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::error::This runner has no KVM it can use (/dev/kvm isn't open to the runner user)."
+            exit 1
+          fi
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends busybox-static e2fsprogs nftables musl-tools
+      # Firecracker, the jailer and a guest kernel, checked against pinned
+      # sha256 sums. Saved right after the download, before any test runs.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: assets
+        with:
+          path: .cache/sandbox-e2e
+          key: sandbox-e2e-assets-${{ hashFiles('crates/pyo-sandbox/scripts/firecracker.env', 'crates/pyo-sandbox/scripts/e2e-assets.sh') }}
+      - name: Firecracker and kernel
+        run: |
+          set -euo pipefail
+          crates/pyo-sandbox/scripts/e2e-assets.sh | tee -a "$GITHUB_ENV"
+          echo "PYO_SANDBOX_JAILER=$PWD/.cache/sandbox-e2e/bin/jailer" >> "$GITHUB_ENV"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.assets.outputs.cache-hit != 'true'
+        with:
+          path: .cache/sandbox-e2e
+          key: ${{ steps.assets.outputs.cache-primary-key }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.1
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: sandbox
+      # ring compiles C for the musl target, with musl-gcc.
+      - name: Build pyo-envd (musl) and the daemon
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo build --release --locked -p pyo-envd --target x86_64-unknown-linux-musl
+          cargo build --locked -p pyo-sandbox
+      - name: pyo-sandbox e2e
+        env:
+          PYO_SANDBOX_E2E: "1"
+        run: cargo test --locked -p pyo-sandbox --test e2e --test template_e2e -- --nocapture
+      - name: pyo-api sandbox e2e
+        env:
+          PYO_SANDBOX_E2E: "1"
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api sandbox::e2e -- --nocapture
+      # As root, jailed like on a real server. cargo isn't on root's PATH,
+      # so the runner user builds the test binary and sudo -E runs only it.
+      - name: Networking e2e (root)
+        env:
+          PYO_SANDBOX_NET_E2E: "1"
+        run: |
+          set -euo pipefail
+          bin=$(cargo test --locked -p pyo-sandbox --test network_e2e --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "network_e2e" and .executable != null) | .executable')
+          [ -x "$bin" ] || { echo "::error::No network_e2e test binary."; exit 1; }
+          sudo -E "$bin" --nocapture
+      - name: What went wrong
+        if: failure()
+        run: |
+          sudo iptables -S FORWARD || true
+          sudo nft list ruleset | head -80 || true
+          ls -la .cache/sandbox-e2e || true
+
   waf:
     name: WAF
     runs-on: ubuntu-24.04
