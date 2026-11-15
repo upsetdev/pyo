@@ -432,6 +432,94 @@ async fn edge_proxy(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &str) {
 }
 
 /// Firecracker processes running from a directory under `run`.
+/// Over the WebSocket, with the token as a subprotocol: an exec gets the
+/// sandbox's env and the timeout, and a refused upgrade says why.
+async fn ws_exec(addr: &std::net::SocketAddr, keys: &Keys, id: &str) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::{Message, protocol::frame::coding::CloseCode};
+    let open = |token: String| {
+        let mut req = format!("ws://{addr}/v1/sandboxes/{id}/connect")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            format!("pyo, pyo.token.{token}").parse().unwrap(),
+        );
+        tokio_tungstenite::connect_async(req)
+    };
+    let (mut ws, res) = open(keys.token(id, TEAM, &[Scope::Exec])).await.unwrap();
+    assert_eq!(res.headers()["sec-websocket-protocol"], "pyo");
+    let recv = |m: Message| Frame::decode(&m.into_data()).unwrap();
+    let send = |f: Frame| Message::Binary(f.encode().into());
+    assert_eq!(recv(ws.next().await.unwrap().unwrap()).kind, Kind::Hello);
+    let exec = |cmd: &str, timeout_ms: Option<u64>| {
+        Request::Exec(pyo_proto::sandbox::wire::ExecSpec {
+            cmd: Cmd::Shell(cmd.into()),
+            cwd: None,
+            env: BTreeMap::new(),
+            stdin: false,
+            timeout_ms,
+        })
+    };
+    ws.send(send(Frame::request(1, &exec("echo env-$GREETING", None))))
+        .await
+        .unwrap();
+    ws.send(send(Frame::request(2, &exec("sleep 30", Some(300)))))
+        .await
+        .unwrap();
+    let (mut out, mut exits) = (Vec::new(), BTreeMap::new());
+    while exits.len() < 2 {
+        let f = recv(
+            tokio::time::timeout(Duration::from_secs(10), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+        );
+        match f.kind {
+            Kind::Stdout if f.stream == 1 => out.extend(f.payload),
+            Kind::Response => {
+                let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap();
+                if v["type"] == "exit" {
+                    exits.insert(f.stream, v);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(String::from_utf8_lossy(&out).trim(), "env-hi");
+    assert_eq!(exits[&2]["timedOut"], true, "{:?}", exits[&2]);
+    assert_eq!(exits[&2]["signal"], 9, "{:?}", exits[&2]);
+    // A fresh token on the open connection.
+    ws.send(Message::Text(
+        serde_json::json!({"token": keys.token(id, TEAM, &[Scope::Exec])})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(m.to_text().unwrap()).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    drop(ws);
+
+    // A token for another team: upgraded, then closed with the reason.
+    let (mut ws, _) = open(keys.token(id, "intruder", &[Scope::Exec]))
+        .await
+        .unwrap();
+    match ws.next().await {
+        Some(Ok(Message::Close(Some(c)))) => {
+            assert_eq!(c.code, CloseCode::from(4403));
+            assert!(c.reason.contains("another team"), "{}", c.reason);
+        }
+        other => panic!("expected a close, got {other:?}"),
+    }
+}
+
 fn vms_under(run: &Path) -> Vec<u32> {
     let mut pids = Vec::new();
     for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
@@ -864,13 +952,15 @@ async fn boots_real_microvms() {
         matches!(
             refused,
             Some(Response::Error {
-                kind: ErrorKind::PermissionDenied,
+                kind: ErrorKind::Forbidden,
                 ..
             })
         ),
         "{refused:?}"
     );
     drop(ws);
+    ws_exec(&addr, &keys, &ida).await;
+    note("ws_exec", "ok".into());
     server.abort();
 
     edge_proxy(&state, &keys, &run, &ida).await;

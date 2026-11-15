@@ -881,6 +881,11 @@ async fn shell(api: &Api, id: &str) -> Result<()> {
                         _ => {}
                     }
                 }
+                // A refused connection closes at once with the reason.
+                Some(Ok(Message::Close(Some(c)))) if !started && !c.reason.is_empty() => {
+                    drop(raw);
+                    bail!("{}", c.reason);
+                }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => {}
                 Some(Err(e)) => return Err(e.into()),
