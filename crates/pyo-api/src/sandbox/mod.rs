@@ -24,6 +24,7 @@ mod e2e;
 pub mod join;
 pub mod keys;
 pub mod limits;
+pub mod mcp;
 pub mod runner;
 pub mod scheduler;
 
@@ -57,6 +58,31 @@ pub fn format_ttl(secs: u64) -> String {
         out.push_str(&format!("{s}s"));
     }
     out
+}
+
+/// Whether any of these teams can use a sandbox server: its own, or the
+/// installation's. Until then the sandbox tools stay hidden.
+pub async fn available(db: &PgPool, team_ids: &[String]) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.sandbox_servers WHERE team_id IS NULL OR team_id = ANY($1))",
+    )
+    .bind(team_ids)
+    .fetch_one(db)
+    .await
+}
+
+/// The teams a user (or an API key) can see.
+pub async fn teams_of(db: &PgPool, user: &User) -> sqlx::Result<Vec<String>> {
+    let mut ids: Vec<String> = sqlx::query_scalar(
+        "SELECT team_id FROM pyo.members WHERE user_id = $1 AND status = 'active'",
+    )
+    .bind(&user.id)
+    .fetch_all(db)
+    .await?;
+    if let Some(allowed) = user.key.as_ref().and_then(|k| k.teams.as_ref()) {
+        ids.retain(|t| allowed.contains(t));
+    }
+    Ok(ids)
 }
 
 // ── Who may do what ────────────────────────────────────────────────────────
@@ -658,6 +684,16 @@ impl Found {
         ))
     }
 
+    /// A client token for this sandbox, for Pyo's own calls on a user's
+    /// behalf (the assistants' tools).
+    pub async fn client(&self, s: &AppState) -> ApiResult<(daemon::Daemon, String)> {
+        let (d, _, server) = self.daemon(s).await?;
+        let key = keys::signing_key(&s.db, &s.sealer).await?;
+        Ok((
+            d,
+            keys::client_token(&key, &self.id, &self.team_id, &server).token,
+        ))
+    }
 }
 
 async fn view(s: &AppState, f: &Found) -> ApiResult<Value> {
