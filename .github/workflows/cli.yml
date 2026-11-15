@@ -27,9 +27,9 @@ jobs:
         include:
           # Static (musl), like pyo-linux-x86_64.
           - { asset: pyo-linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
-          - { asset: pyo-macos-aarch64, runner: macos-14, target: aarch64-apple-darwin }
+          - { asset: pyo-macos-aarch64, runner: macos-15, target: aarch64-apple-darwin }
           # Built on the Arm runner too: Xcode builds for Intel Macs as well.
-          - { asset: pyo-macos-x86_64, runner: macos-14, target: x86_64-apple-darwin }
+          - { asset: pyo-macos-x86_64, runner: macos-15, target: x86_64-apple-darwin }
           - { asset: pyo-windows-x86_64.exe, runner: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
