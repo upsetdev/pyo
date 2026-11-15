@@ -40,6 +40,21 @@
 //! - Nothing new comes in to a tap. Replies do.
 //! - Sandbox traffic leaving through any other interface is masqueraded.
 //!
+//! The forward chain runs at `filter - 10`, before iptables' `FORWARD`
+//! (`filter`), so its drops always come first.
+//!
+//! ## Other firewalls
+//!
+//! A packet passes only when every forward chain at the hook lets it
+//! through, so an `accept` here doesn't get past another table that drops.
+//! Docker and ufw set iptables' `FORWARD` policy to DROP. When it is, the
+//! daemon adds two rules to `DOCKER-USER` (when Docker made it) or else to
+//! `FORWARD`: accept what comes from a tap, and accept established or
+//! related traffic back to one. What reaches them already passed this
+//! table. They carry the comment `pyo-sandbox`, so every daemon start
+//! replaces them and uninstall removes them. The policy itself is never
+//! changed.
+//!
 //! The daemon also turns on IPv4 forwarding, and turns off IPv6 on taps.
 //!
 //! gVisor servers will get a network namespace per sandbox with a veth
@@ -392,6 +407,12 @@ impl Network {
             .context("installing the sandbox nftables table")?;
         std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
             .context("turning on IPv4 forwarding")?;
+        if let Some(chain) = sync_forward_rules().await? {
+            tracing::info!(
+                %chain,
+                "iptables' FORWARD policy is DROP, so sandbox taps are let through in {chain}"
+            );
+        }
         for (lease, running) in leases {
             self.used().insert(lease.index);
             if !running && !tap_exists(&lease.tap) {
@@ -463,7 +484,7 @@ table inet {TABLE} {{
 	}}
 
 	chain forward {{
-		type filter hook forward priority filter; policy accept;
+		type filter hook forward priority filter - 10; policy accept;
 		iifname "{TAP_PREFIX}*" jump from_sandbox
 		oifname "{TAP_PREFIX}*" ct state established,related accept
 		oifname "{TAP_PREFIX}*" drop
@@ -488,6 +509,150 @@ table inet {TABLE} {{
 "#
         )
     }
+}
+
+/// The comment on the iptables rules the daemon adds. See "Other
+/// firewalls" above.
+pub const RULE_COMMENT: &str = "pyo-sandbox";
+const DOCKER_USER: &str = "DOCKER-USER";
+
+/// iptables' forward chains, as far as sandboxes care.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForwardState {
+    /// The `FORWARD` policy is DROP (or anything but ACCEPT).
+    pub drops: bool,
+    /// Docker's `DOCKER-USER` chain exists.
+    pub docker_user: bool,
+}
+
+impl ForwardState {
+    /// Where the accept rules go, when they are needed.
+    pub fn chain(&self) -> Option<&'static str> {
+        match (self.drops, self.docker_user) {
+            (false, _) => None,
+            (true, true) => Some(DOCKER_USER),
+            (true, false) => Some("FORWARD"),
+        }
+    }
+}
+
+/// Reads `iptables -S FORWARD`. None when iptables isn't installed or
+/// there is no filter table.
+pub async fn forward_state() -> Option<ForwardState> {
+    let rules = run_out("iptables", &["-w", "-S", "FORWARD"]).await.ok()?;
+    let docker_user = run_out("iptables", &["-w", "-S", DOCKER_USER])
+        .await
+        .is_ok();
+    Some(ForwardState {
+        drops: forward_drops(&rules),
+        docker_user,
+    })
+}
+
+/// Whether `iptables -S FORWARD` shows a policy that drops.
+pub fn forward_drops(rules: &str) -> bool {
+    rules
+        .lines()
+        .find_map(|l| l.strip_prefix("-P FORWARD "))
+        .is_some_and(|p| p.trim() != "ACCEPT")
+}
+
+/// Whether another firewall's FORWARD policy drops sandbox traffic and
+/// iptables isn't there to let it through. Read with nft, so it works
+/// without iptables. For the capability report.
+pub async fn forward_unhandled() -> Option<String> {
+    if forward_state().await.is_some() {
+        return None;
+    }
+    let chain = run_out("nft", &["list", "chain", "ip", "filter", "FORWARD"])
+        .await
+        .ok()?;
+    let drops = chain
+        .lines()
+        .any(|l| l.contains("hook forward") && l.contains("policy drop"));
+    drops.then(|| {
+        "The firewall's FORWARD policy is DROP and iptables isn't installed, so sandboxes can't reach the internet. Install iptables.".to_string()
+    })
+}
+
+/// The tagged rules in `iptables -S <chain>` output, as `-D` arguments.
+pub fn tagged_rules(rules: &str) -> Vec<Vec<String>> {
+    let tag = format!("--comment {RULE_COMMENT} ");
+    rules
+        .lines()
+        .filter(|l| l.starts_with("-A ") && format!("{l} ").contains(&tag))
+        .map(|l| {
+            let mut a: Vec<String> = l.split_whitespace().map(str::to_string).collect();
+            a[0] = "-D".into();
+            a
+        })
+        .collect()
+}
+
+/// The rules that let sandbox traffic past a chain that drops, each as
+/// `iptables -I <chain> 1` arguments. Inserted in this order, so the
+/// first ends up on top.
+pub fn accept_rules(chain: &str) -> Vec<Vec<String>> {
+    let tap = format!("{TAP_PREFIX}+");
+    let rule = |dir: &str, extra: &[&str]| {
+        let mut a: Vec<String> = ["-I", chain, "1", dir, &tap]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        a.extend(extra.iter().map(|s| s.to_string()));
+        a.extend(
+            ["-m", "comment", "--comment", RULE_COMMENT, "-j", "ACCEPT"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        a
+    };
+    vec![
+        rule(
+            "-o",
+            &["-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"],
+        ),
+        rule("-i", &[]),
+    ]
+}
+
+/// Removes the daemon's iptables rules, from both chains.
+pub async fn remove_forward_rules() {
+    for chain in ["FORWARD", DOCKER_USER] {
+        let Ok(rules) = run_out("iptables", &["-w", "-S", chain]).await else {
+            continue;
+        };
+        for rule in tagged_rules(&rules) {
+            let mut args = vec!["-w"];
+            args.extend(rule.iter().map(String::as_str));
+            if let Err(e) = run("iptables", &args).await {
+                tracing::warn!(error = %format!("{e:#}"), "can't remove an iptables rule");
+            }
+        }
+    }
+}
+
+/// Replaces the daemon's iptables rules: none when nothing drops, the
+/// accept rules otherwise. Returns the chain they went in.
+async fn sync_forward_rules() -> anyhow::Result<Option<&'static str>> {
+    remove_forward_rules().await;
+    let Some(state) = forward_state().await else {
+        if let Some(why) = forward_unhandled().await {
+            bail!("{why}");
+        }
+        return Ok(None);
+    };
+    let Some(chain) = state.chain() else {
+        return Ok(None);
+    };
+    for rule in accept_rules(chain) {
+        let mut args = vec!["-w"];
+        args.extend(rule.iter().map(String::as_str));
+        run("iptables", &args)
+            .await
+            .with_context(|| format!("letting sandbox taps through iptables' {chain}"))?;
+    }
+    Ok(Some(chain))
 }
 
 fn guest_element(l: &Lease) -> String {
@@ -707,6 +872,8 @@ mod tests {
         // The pool sits inside 198.18.0.0/15, so the set holds it once.
         assert!(!r.contains("198.18.0.0/16,"));
         assert!(r.contains(r#"oifname "tailscale0" drop"#));
+        // Before iptables' FORWARD, so these drops come first.
+        assert!(r.contains("hook forward priority filter - 10;"));
         assert!(r.contains(r#"iifname "pyosbx*" drop"#));
         assert!(r.contains("iifname . ip saddr != @guests drop"));
         assert!(r.contains("iifname vmap @egress"));
@@ -714,6 +881,50 @@ mod tests {
         assert!(r.contains("elements = { 1.1.1.1, 8.8.8.8 }"));
         // No leases: an empty set, not an empty element list.
         assert!(!n.ruleset(&[]).contains("elements = {  }"));
+    }
+
+    #[test]
+    fn forward_rules() {
+        assert!(forward_drops(
+            "-P FORWARD DROP\n-A FORWARD -j DOCKER-USER\n"
+        ));
+        assert!(!forward_drops("-P FORWARD ACCEPT\n"));
+        assert!(!forward_drops(""));
+        let s = ForwardState {
+            drops: true,
+            docker_user: true,
+        };
+        assert_eq!(s.chain(), Some("DOCKER-USER"));
+        let s = ForwardState {
+            drops: true,
+            docker_user: false,
+        };
+        assert_eq!(s.chain(), Some("FORWARD"));
+        let s = ForwardState {
+            drops: false,
+            docker_user: true,
+        };
+        assert_eq!(s.chain(), None);
+        let r = accept_rules("FORWARD");
+        assert_eq!(
+            r[0].join(" "),
+            "-I FORWARD 1 -o pyosbx+ -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment pyo-sandbox -j ACCEPT"
+        );
+        assert_eq!(
+            r[1].join(" "),
+            "-I FORWARD 1 -i pyosbx+ -m comment --comment pyo-sandbox -j ACCEPT"
+        );
+        let listed = "-N DOCKER-USER\n\
+-A DOCKER-USER -i pyosbx+ -m comment --comment pyo-sandbox -j ACCEPT\n\
+-A DOCKER-USER -o pyosbx+ -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment pyo-sandbox -j ACCEPT\n\
+-A DOCKER-USER -m comment --comment pyo-sandbox-other -j ACCEPT\n\
+-A DOCKER-USER -j RETURN\n";
+        let t = tagged_rules(listed);
+        assert_eq!(t.len(), 2);
+        assert_eq!(
+            t[0].join(" "),
+            "-D DOCKER-USER -i pyosbx+ -m comment --comment pyo-sandbox -j ACCEPT"
+        );
     }
 
     #[test]

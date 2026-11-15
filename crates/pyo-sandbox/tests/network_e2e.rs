@@ -37,7 +37,9 @@ use pyo_sandbox::config::Config;
 use pyo_sandbox::detect::{self, Inputs};
 use pyo_sandbox::firecracker::{Firecracker, Jailer};
 use pyo_sandbox::manager::Manager;
-use pyo_sandbox::network::{Network, NetworkConfig, TABLE, TAP_PREFIX};
+use pyo_sandbox::network::{
+    Network, NetworkConfig, RULE_COMMENT, TABLE, TAP_PREFIX, forward_drops, tagged_rules,
+};
 use pyo_sandbox::storage::{self, Layout};
 
 const TEAM: &str = "team-net";
@@ -94,6 +96,27 @@ fn taps() -> Vec<String> {
         .collect();
     v.sort();
     v
+}
+
+/// The daemon's tagged iptables rules, per chain.
+fn tagged() -> Vec<(String, usize)> {
+    ["FORWARD", "DOCKER-USER"]
+        .iter()
+        .map(|c| {
+            let (_, rules) = sh(&format!("iptables -w -S {c} 2>/dev/null"));
+            (c.to_string(), tagged_rules(&rules).len())
+        })
+        .collect()
+}
+
+/// iptables' FORWARD policy line, or "" without iptables.
+fn forward_policy() -> String {
+    let (_, rules) = sh("iptables -w -S FORWARD 2>/dev/null");
+    rules
+        .lines()
+        .find(|l| l.starts_with("-P FORWARD"))
+        .unwrap_or("")
+        .to_string()
 }
 
 fn guests_set() -> String {
@@ -225,6 +248,9 @@ impl Drop for Cleanup {
             let _ = sh(&format!("ip link del {t}"));
         }
         let _ = sh(&format!("nft delete table inet {TABLE}"));
+        let _ = sh(&format!(
+            "for c in FORWARD DOCKER-USER; do iptables -w -S $c 2>/dev/null | grep -e '--comment {RULE_COMMENT} ' | sed 's/^-A /-D /' | while read -r r; do iptables -w $r; done; done"
+        ));
         let _ = sh("ip link del pyosbx999 2>/dev/null");
         let _ = std::fs::remove_dir_all(&self.0);
     }
@@ -398,12 +424,30 @@ async fn sandbox_networking() {
     // A stray tap from an earlier run goes on start.
     must("ip tuntap add dev pyosbx999 mode tap");
 
+    let policy = forward_policy();
+    let (_, docker_user) = sh("iptables -w -S DOCKER-USER");
+    let docker_user = docker_user.starts_with("-N DOCKER-USER");
+    let drops = forward_drops(&policy);
+    println!("net-e2e forward policy: {policy:?}, DOCKER-USER: {docker_user}");
     let mgr = env.daemon().await;
     assert!(!taps().contains(&"pyosbx999".to_string()), "{:?}", taps());
-    println!(
-        "net-e2e table: {}",
-        must(&format!("nft list table inet {TABLE}"))
-    );
+    let table = must(&format!("nft list table inet {TABLE}"));
+    println!("net-e2e table: {table}");
+    // Ahead of iptables' FORWARD, so this table's drops come first.
+    assert!(table.contains("priority filter - 10;"), "{table}");
+    // Another firewall that drops forwarded traffic gets two narrow accept
+    // rules, in DOCKER-USER when Docker made it.
+    let want_chain = if docker_user {
+        "DOCKER-USER"
+    } else {
+        "FORWARD"
+    };
+    let expect: Vec<(String, usize)> = ["FORWARD", "DOCKER-USER"]
+        .iter()
+        .map(|c| (c.to_string(), if drops && *c == want_chain { 2 } else { 0 }))
+        .collect();
+    println!("net-e2e iptables rules: {:?}", tagged());
+    assert_eq!(tagged(), expect, "the daemon's iptables rules");
 
     // ── Cold boot with network ──
     let a = spec(1, NetworkMode::Internet);
@@ -581,6 +625,11 @@ async fn sandbox_networking() {
         let ip = lease_ip.trim_end_matches("/30");
         assert!(set.contains(ip), "{ip} isn't in {set}");
     }
+    assert_eq!(
+        tagged(),
+        expect,
+        "the iptables rules are replaced, not added twice"
+    );
     assert_internet(&mgr, &a.id).await;
     assert!(!connects(&mgr, &a.id, TS_PEER, LISTEN_PORT).await);
     assert!(!connects(&mgr, &a.id, "169.254.169.254", 80).await);
@@ -604,5 +653,6 @@ async fn sandbox_networking() {
         0,
         "VM directories left"
     );
+    assert_eq!(forward_policy(), policy, "the FORWARD policy is untouched");
     println!("net-e2e cleanup after delete: ok");
 }
