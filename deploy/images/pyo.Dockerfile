@@ -8,6 +8,7 @@
 #   flows          pyo-flows, the connection collector
 #   db-controller  pyo-db-controller: runs a cluster's databases
 #   kv             pyo-kv: the Redis address and REST API of each KV database
+#   static         pyo-static: serves a cluster's static sites
 #
 # The `rust` stage builds them all with one `cargo build` per target (glibc
 # and static musl), so building several images compiles the workspace once:
@@ -25,8 +26,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 ARG CARGO_PROFILE=release
-# Static (musl): pyo-builder (it also runs on any Linux VM), pyo-flows (a
-# scratch image) and the CLI. The two builds run side by side, each in its
+# Static (musl): pyo-builder (it also runs on any Linux VM), pyo-flows and
+# pyo-static (scratch images) and the CLI. The two builds run side by side, each in its
 # own target directory. PYO_CLI_RELEASE marks the CLI as a release build:
 # `pyo upgrade` replaces only those (a CLI built with plain cargo is left to
 # its builder).
@@ -36,11 +37,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --profile "$CARGO_PROFILE" --locked --target-dir target/gnu \
       -p pyo-api -p pyo-agent -p pyo-db-controller -p pyo-kv & gnu=$!; \
     PYO_CLI_RELEASE=1 cargo build --profile "$CARGO_PROFILE" --locked --target-dir target/musl --target x86_64-unknown-linux-musl \
-      -p pyo-builder -p pyo-flows -p pyo-cli & musl=$!; \
+      -p pyo-builder -p pyo-flows -p pyo-static -p pyo-cli & musl=$!; \
     wait "$gnu"; wait "$musl"; \
     mkdir /out; \
     for b in pyo-api pyo-agent pyo-db-controller pyo-kv; do cp "target/gnu/$CARGO_PROFILE/$b" /out/; done; \
-    for b in pyo-builder pyo-flows pyo; do cp "target/musl/x86_64-unknown-linux-musl/$CARGO_PROFILE/$b" /out/; done
+    for b in pyo-builder pyo-flows pyo-static pyo; do cp "target/musl/x86_64-unknown-linux-musl/$CARGO_PROFILE/$b" /out/; done
 
 # Just the binaries (scripts/build-images.sh hashes them to tell which
 # images changed).
@@ -81,6 +82,15 @@ FROM scratch AS flows
 COPY --from=rust /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=rust /out/pyo-flows /pyo-flows
 ENTRYPOINT ["/pyo-flows"]
+
+# Pyo Static: serves every static site of a cluster from its cache on the
+# pod's disk, reading folders through Pyo. A static binary and the CA
+# certificates, nothing else; non-root, read-only root.
+FROM scratch AS static
+COPY --from=rust /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=rust /out/pyo-static /pyo-static
+USER 65532:65532
+ENTRYPOINT ["/pyo-static"]
 
 # The builder: pyo-builder plus buildctl, git (it checks out each build's
 # commit) and railpack (zero-config builds of repositories without a

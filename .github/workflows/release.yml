@@ -78,7 +78,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        image: [pyo, agent, builder, flows, waf, geoip, db-controller, kv]
+        image: [pyo, agent, builder, flows, waf, geoip, db-controller, kv, static]
         # Pyo's Postgres, one image per version, from one Dockerfile.
         # One repository, tagged <version>-<release>: CloudNativePG reads
         # the version from the tag.
@@ -90,6 +90,7 @@ jobs:
           - { image: flows, file: pyo, target: flows, rust: true }
           - { image: db-controller, file: pyo, target: db-controller, rust: true }
           - { image: kv, file: pyo, target: kv, rust: true }
+          - { image: static, file: pyo, target: static, rust: true }
           - { image: postgres-16, repo: postgres, tag: "16-", file: postgres, context: deploy/images, args: PG_MAJOR=16 }
           - { image: postgres-17, repo: postgres, tag: "17-", file: postgres, context: deploy/images, args: PG_MAJOR=17 }
           - { image: postgres-18, repo: postgres, tag: "18-", file: postgres, context: deploy/images, args: PG_MAJOR=18 }
@@ -159,7 +160,7 @@ jobs:
           tagged() { docker buildx imagetools inspect "$IMAGES/$1:$2$VERSION" --format '{{json .Manifest}}' | jq -r .digest; }
           bun run scripts/release-manifest.ts --version "$VERSION" --images "$IMAGES" \
             --pyo "$(digest pyo)" --agent "$(digest agent)" --builder "$(digest builder)" --flows "$(digest flows)" --waf "$(digest waf)" --geoip "$(digest geoip)" \
-            --db-controller "$(digest db-controller)" --kv "$(digest kv)" \
+            --db-controller "$(digest db-controller)" --kv "$(digest kv)" --static "$(digest static)" \
             --mysql-operator "$(digest mysql-operator)" --mysql-backup "$(digest mysql-backup)" \
             --postgres-16 "$(tagged postgres 16-)" --postgres-17 "$(tagged postgres 17-)" --postgres-18 "$(tagged postgres 18-)" \
             --agent-access "$(docker run --rm "$IMAGES/agent:$VERSION@$(digest agent)" access-hash)" > release.json

@@ -615,7 +615,7 @@ wait_rollout statefulset/pyo-backup-store 300s
 TAGS=$(mktemp)
 CLEANUP+=("$TAGS")
 if [ -n "$NO_BUILD_TAG" ]; then
-  for image in pyo agent builder flows db-controller kv waf geoip postgres-16 postgres-17 postgres-18 mysql-operator mysql-backup; do
+  for image in pyo agent builder flows db-controller kv static waf geoip postgres-16 postgres-17 postgres-18 mysql-operator mysql-backup; do
     echo "$image $NO_BUILD_TAG"
   done >"$TAGS"
 else

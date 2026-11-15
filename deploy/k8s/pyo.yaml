@@ -79,6 +79,7 @@ spec:
             - { name: PYO_GEOIP_IMAGE, value: "__IMAGES__/geoip:__TAG__" }
             - { name: PYO_DB_CONTROLLER_IMAGE, value: "__IMAGES__/db-controller:__TAG__" }
             - { name: PYO_KV_IMAGE, value: "__IMAGES__/kv:__TAG__" }
+            - { name: PYO_STATIC_IMAGE, value: "__IMAGES__/static:__TAG__" }
             - { name: PYO_POSTGRES_IMAGE_16, value: "__IMAGES__/postgres:16-__TAG__" }
             - { name: PYO_POSTGRES_IMAGE_17, value: "__IMAGES__/postgres:17-__TAG__" }
             - { name: PYO_POSTGRES_IMAGE_18, value: "__IMAGES__/postgres:18-__TAG__" }
@@ -198,6 +199,7 @@ spec:
             - { name: PYO_GEOIP_IMAGE, value: "__IMAGES__/geoip:__TAG__" }
             - { name: PYO_DB_CONTROLLER_IMAGE, value: "__IMAGES__/db-controller:__TAG__" }
             - { name: PYO_KV_IMAGE, value: "__IMAGES__/kv:__TAG__" }
+            - { name: PYO_STATIC_IMAGE, value: "__IMAGES__/static:__TAG__" }
             - { name: PYO_POSTGRES_IMAGE_16, value: "__IMAGES__/postgres:16-__TAG__" }
             - { name: PYO_POSTGRES_IMAGE_17, value: "__IMAGES__/postgres:17-__TAG__" }
             - { name: PYO_POSTGRES_IMAGE_18, value: "__IMAGES__/postgres:18-__TAG__" }

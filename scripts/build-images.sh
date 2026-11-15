@@ -9,7 +9,7 @@
 # build keeps that build's tag (when the registry still has it), so it isn't
 # built, pushed or rolled out again. The images:
 #
-#   pyo agent builder flows db-controller kv   deploy/images/pyo.Dockerfile
+#   pyo agent builder flows db-controller kv static   deploy/images/pyo.Dockerfile
 #   waf geoip                                  deploy/images/<image>.Dockerfile
 #   postgres-16 postgres-17 postgres-18        deploy/images/postgres.Dockerfile
 #   mysql-operator mysql-backup                deploy/images/moco/moco.Dockerfile
@@ -59,7 +59,7 @@ JOBS=${PYO_BUILD_JOBS:-4}
 STATE=${PYO_BUILD_STATE:-$HOME/.cache/pyo-up/images.tsv}
 BUILDCTL=${BUILDCTL:-buildctl}
 
-RUST_IMAGES=(pyo agent builder flows db-controller kv)
+RUST_IMAGES=(pyo agent builder flows db-controller kv static)
 OTHER_IMAGES=(waf geoip postgres-16 postgres-17 postgres-18 mysql-operator mysql-backup)
 ALL_IMAGES=("${RUST_IMAGES[@]}" "${OTHER_IMAGES[@]}")
 
@@ -115,7 +115,7 @@ hash_text() { printf '%s\n' "$@" | sha256sum | cut -c1-64; }
 input_key() {
   case "$1" in
     pyo) hash_text "profile=$PROFILE" "$(hash_files deploy/images/pyo.Dockerfile package.json bun.lock dash/package.json dash/tsconfig.json dash/vite.config.ts dash/public dash/src dash/scripts/fix-shell-css.mjs)" ;;
-    agent|builder|flows|db-controller|kv) hash_text "profile=$PROFILE" "$(hash_files deploy/images/pyo.Dockerfile)" ;;
+    agent|builder|flows|db-controller|kv|static) hash_text "profile=$PROFILE" "$(hash_files deploy/images/pyo.Dockerfile)" ;;
     waf) hash_files deploy/images/waf.Dockerfile waf/go.mod waf/go.sum waf/cmd ;;
     geoip) hash_files deploy/images/geoip.Dockerfile ;;
     postgres-*) hash_text "$1" "$(hash_files deploy/images/postgres.Dockerfile)" ;;
@@ -132,6 +132,7 @@ binaries() {
     flows) echo pyo-flows ;;
     db-controller) echo pyo-db-controller ;;
     kv) echo pyo-kv ;;
+    static) echo pyo-static ;;
   esac
 }
 
@@ -192,7 +193,7 @@ build_cmd() {
       # in BuildKit's cache.
       buildctl_build --local context=. --local dockerfile=deploy/images --opt filename=pyo.Dockerfile \
         --opt target=web ;;
-    pyo|agent|builder|flows|db-controller|kv)
+    pyo|agent|builder|flows|db-controller|kv|static)
       buildctl_build --local context=. --local dockerfile=deploy/images --opt filename=pyo.Dockerfile \
         --opt target="$image" --opt build-arg:CARGO_PROFILE="$PROFILE" --output "$push" ;;
     waf|geoip)
