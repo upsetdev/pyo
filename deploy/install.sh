@@ -107,10 +107,9 @@ check_system() {
 
 installed() { command -v k3s >/dev/null && kc -n "$NS" get deployment pyo >/dev/null 2>&1; }
 
-# Ports Pyo takes. With k3s already running, 80 and 443 are its traffic
-# proxy's.
+# Ports Pyo takes. With k3s already running, 80 and 443 are Pyo Gateway's.
 check_ports() {
-  local ports=(8000 5005)
+  local ports=(8000 5005 5006)
   command -v k3s >/dev/null || ports+=(80 443 6443)
   local p busy=""
   for p in "${ports[@]}"; do
@@ -119,7 +118,7 @@ check_ports() {
   if [ -n "$busy" ]; then
     echo "These ports are in use:$busy" >&2
     ss -ltnpH 2>/dev/null | grep -E ":($(echo "$busy" | xargs | tr ' ' '|'))\b" >&2 || true
-    fail "Pyo needs them (80/443 for your services, 8000 for the dashboard, 5005 for its registry, 6443 for k3s). Stop what holds them and run this again."
+    fail "Pyo needs them (80/443 for your services, 8000 for the dashboard, 5005 and 5006 for its registry, 6443 for k3s). Stop what holds them and run this again."
   fi
 }
 

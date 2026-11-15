@@ -24,15 +24,16 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-# Pyo Gateway needs 80 and 443, the dashboard 8000 and the registry 5005.
+# Pyo Gateway needs 80 and 443, the dashboard 8000 and the registry 5005
+# and 5006.
 # Stop here rather than install k3s with them unable to bind.
 # (A k3s that's already running holds 80 and 443 itself.)
 BUSY=""
-command -v k3s >/dev/null || BUSY=$(ss -ltnH '( sport = :80 or sport = :443 or sport = :8000 or sport = :5005 )' || true)
+command -v k3s >/dev/null || BUSY=$(ss -ltnH '( sport = :80 or sport = :443 or sport = :8000 or sport = :5005 or sport = :5006 )' || true)
 if [ -n "$BUSY" ]; then
   echo "These ports are in use:" >&2
   echo "$BUSY" >&2
-  docker ps --format '  {{.Names}}  {{.Ports}}' 2>/dev/null | grep -E ':(80|443|8000|5005)->' >&2 || true
+  docker ps --format '  {{.Names}}  {{.Ports}}' 2>/dev/null | grep -E ':(80|443|8000|5005|5006)->' >&2 || true
   echo "Stop whatever holds them, then run this script again." >&2
   exit 1
 fi
