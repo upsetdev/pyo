@@ -5,6 +5,7 @@ import {
   HeadContent,
   Outlet,
   Scripts,
+  useRouter,
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { BootShell } from "~/components/shell/BootShell";
@@ -103,6 +104,7 @@ function NotFound() {
 
 /** Shown when a loader or component throws. Logged to the console in dev. */
 function RouteError({ error, reset }: ErrorComponentProps) {
+  const router = useRouter();
   if (import.meta.env.DEV) console.error(error);
   return (
     <main
@@ -119,7 +121,9 @@ function RouteError({ error, reset }: ErrorComponentProps) {
           : "An unexpected error occurred."}
       </p>
       <div className="mt-6 flex flex-wrap justify-center gap-2">
-        <Button onClick={reset}>Try again</Button>
+        {/* reset alone re-renders, but a failed beforeLoad or loader only
+            runs again once the router is invalidated. */}
+        <Button onClick={() => void router.invalidate().finally(reset)}>Try again</Button>
         <ButtonLink href="/" variant="secondary">
           Go to overview
         </ButtonLink>
