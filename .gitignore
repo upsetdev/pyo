@@ -26,3 +26,6 @@ coverage
 
 # Local planning notes
 PLAN.md
+
+# Pyo Sandbox e2e downloads (crates/pyo-sandbox/scripts/e2e-assets.sh)
+/.cache
