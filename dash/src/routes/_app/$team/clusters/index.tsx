@@ -163,7 +163,15 @@ function ServersPage() {
         actions={add()}
         description={
           clusters.length
-            ? `${plural(allServers.length, "server")} in ${plural(clusters.length, "cluster")} · ${offline ? `${offline} offline` : "all online"}`
+            ? `${plural(allServers.length, "server")} in ${plural(clusters.length, "cluster")} · ${
+                !allServers.length
+                  ? clusters.some((c) => c.status === "pending")
+                    ? "connecting"
+                    : "no servers yet"
+                  : offline
+                    ? `${offline} offline`
+                    : "all online"
+              }`
             : undefined
         }
       />
