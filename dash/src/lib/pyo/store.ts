@@ -81,6 +81,8 @@ import type {
 export type PyoState = {
   /** False until the first snapshot arrives. */
   loaded: boolean;
+  /** The last few snapshots failed: Pyo can't be reached (updating, restarting, offline). */
+  unreachable?: boolean;
   user: User;
   teams: Team[];
   members: TeamMember[];
@@ -391,7 +393,9 @@ export async function refresh() {
     ...snap,
     registries: REGISTRIES,
     loaded: true,
+    unreachable: false,
   };
+  failedPolls = 0;
   if (!next.teams.some((t) => t.id === next.currentTeamId))
     next.currentTeamId = next.teams[0]?.id ?? "";
   set(next);
@@ -399,6 +403,8 @@ export async function refresh() {
 
 let poller: ReturnType<typeof setTimeout> | undefined;
 let polling = false;
+/** Snapshots that failed in a row. After a few, the dashboard says Pyo can't be reached. */
+let failedPolls = 0;
 
 /** Keep the snapshot fresh: every second during a rollout, every 4 otherwise. */
 export function startSync() {
@@ -417,6 +423,9 @@ export function startSync() {
           );
           return;
         }
+        failedPolls += 1;
+        if (failedPolls >= 3 && !get().unreachable)
+          set({ ...get(), unreachable: true });
       }
     }
     const busy = get().deployments.some((d) => isActive(d.status));

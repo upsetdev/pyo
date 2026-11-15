@@ -1,3 +1,4 @@
+import { Unreachable } from "~/components/shell/Unreachable";
 import { fetchMeta } from "~/lib/pyo/backend";
 import { useQuery } from "~/lib/pyo/query";
 import {
@@ -100,6 +101,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   if (pathname === "/onboarding")
     return (
       <div data-ready className="min-h-dvh w-full bg-canvas text-foreground">
+        <Unreachable />
         <main id="main" className="min-w-0">
           {children}
         </main>
@@ -153,6 +155,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         className={`flex min-h-dvh min-w-0 flex-col transition-[padding] duration-300 ease-out ${sidebarOpen ? "lg:pl-60" : "lg:pl-0"}`}
       >
         <div className="flex min-h-dvh min-w-0 flex-1 flex-col bg-canvas">
+          <Unreachable />
           <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-2 border-b border-shell-border bg-canvas/85 px-4 backdrop-blur md:px-8">
             <button
               type="button"
