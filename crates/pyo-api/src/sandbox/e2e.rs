@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use pyo_proto::sandbox::token::SigningKey;
@@ -163,7 +164,11 @@ async fn start_daemon(server: &str, template: &str, key: &SigningKey) -> (Run, S
             p.display()
         );
     }
-    let dir = cache.join(format!("api-run-{}", std::process::id()));
+    // Each test its own directory: they run in parallel, and each removes
+    // its directory when it ends.
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let n = RUNS.fetch_add(1, Ordering::Relaxed);
+    let dir = cache.join(format!("api-run-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut run = Run {
