@@ -364,6 +364,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tokio::spawn(updates::runner(state.clone()));
         tokio::spawn(tailscale::runner(state.clone()));
         tokio::spawn(cdn::keeper(state.clone()));
+        tokio::spawn(sandbox::runner::runner(state.clone()));
         for task in tasks {
             tokio::spawn(task(state.clone()));
         }
@@ -408,6 +409,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                     .merge(github::api_routes())
                     .merge(git::api_routes())
                     .merge(cli::routes())
+                    .merge(sandbox::api::routes())
                     .layer(CompressionLayer::new())
                     .merge(terminal::routes())
                     .merge(database_imports::routes())
