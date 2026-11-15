@@ -155,6 +155,15 @@ async fn apply_one(client: &Client, o: &Value) -> anyhow::Result<()> {
 /// when it isn't the bundle's.
 async fn delete_one(client: &Client, id: &str, r: &ObjectRef) -> anyhow::Result<()> {
     let api = api_for(client, r);
+    // A bundle's Secrets (pyo-static's login) are written, never read: by
+    // name only, in its own namespace (the admission policy holds that).
+    if r.kind == "Secret" {
+        return match api.delete(&r.name, &DeleteParams::background()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
+            Err(e) => Err(object_error(r, e)),
+        };
+    }
     let Some(have) = api.get_opt(&r.name).await.map_err(|e| object_error(r, e))? else {
         return Ok(());
     };
@@ -421,7 +430,7 @@ async fn remove_once(client: &Client, id: &str, objects: &[ObjectRef]) -> anyhow
     // Finalizers first (a chart's uninstall runs in its namespace).
     for _ in 0..60 {
         let mut left = 0;
-        for r in &rest {
+        for r in rest.iter().filter(|r| r.kind != "Secret") {
             if api_for(client, r)
                 .get_opt(&r.name)
                 .await?
