@@ -480,6 +480,34 @@ pub async fn log_activity(
     Ok(())
 }
 
+/// An install-wide setting an admin changed. It goes to the activity of
+/// the team whose cluster Pyo runs on, like updates do, so there's a
+/// record of who changed it. Never put a secret in `title`.
+async fn log_setting(
+    tx: &mut Transaction<'_, Postgres>,
+    user: &User,
+    setting: &str,
+    title: &str,
+) -> ApiResult<()> {
+    let team: Option<String> = sqlx::query_scalar(
+        "SELECT team_id FROM pyo.clusters WHERE same_cluster ORDER BY last_seen_at DESC NULLS LAST LIMIT 1",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(team) = team else { return Ok(()) };
+    log_activity(
+        tx,
+        &team,
+        &user.name,
+        "settings.changed",
+        "info",
+        title,
+        json!({ "kind": "settings", "id": setting, "label": setting }),
+        json!({}),
+    )
+    .await
+}
+
 fn client_id(id: &str, prefix: &str) -> ApiResult<()> {
     if valid_client_id(id, prefix) {
         Ok(())
@@ -3181,6 +3209,7 @@ async fn apply(
                 .bind(serde_json::to_value(&cfg).map_err(anyhow::Error::from)?)
                 .execute(&mut **tx)
                 .await?;
+            log_setting(tx, user, "backups", "Changed the backup settings").await?;
             Ok(ok)
         }
         Op::SaveTeamBackupSettings {
@@ -3387,6 +3416,7 @@ async fn apply(
             sqlx::query("DELETE FROM pyo.settings WHERE key = 'backup'")
                 .execute(&mut **tx)
                 .await?;
+            log_setting(tx, user, "backups", "Removed the backup settings").await?;
             Ok(ok)
         }
         Op::RunBackup {} => {
@@ -3439,6 +3469,7 @@ async fn apply(
                 .bind(serde_json::to_value(&cfg).map_err(anyhow::Error::from)?)
                 .execute(&mut **tx)
                 .await?;
+            log_setting(tx, user, "email", "Changed the email settings").await?;
             Ok(ok)
         }
         Op::SaveUpdateSettings {
@@ -3451,21 +3482,38 @@ async fn apply(
             require_admin(user)?;
             let mut days = days;
             days.dedup();
-            let usage = match usage {
-                Some(u) => u,
-                None => crate::updates::settings(&s.db).await?.usage,
+            let before = crate::updates::settings(&s.db).await?;
+            let after = crate::updates::Settings {
+                mode,
+                days,
+                hour,
+                check,
+                usage: usage.unwrap_or(before.usage),
             };
-            crate::updates::save_settings(
-                tx,
-                &crate::updates::Settings {
-                    mode,
-                    days,
-                    hour,
-                    check,
-                    usage,
-                },
-            )
-            .await?;
+            crate::updates::save_settings(tx, &after).await?;
+            let on_off = |on: bool| if on { "on" } else { "off" };
+            let mut changes = Vec::new();
+            if after.check != before.check {
+                changes.push(format!("Turned update checks {}", on_off(after.check)));
+            }
+            if after.usage != before.usage {
+                changes.push(format!(
+                    "Turned anonymous usage counts {}",
+                    on_off(after.usage)
+                ));
+            }
+            if after.mode != before.mode {
+                changes.push(format!(
+                    "Turned automatic updates {}",
+                    on_off(after.mode == "auto")
+                ));
+            }
+            if after.days != before.days || after.hour != before.hour {
+                changes.push("Changed the update window".to_owned());
+            }
+            for title in changes {
+                log_setting(tx, user, "updates", &title).await?;
+            }
             Ok(ok)
         }
         Op::CheckForUpdates {} => {
@@ -3492,11 +3540,24 @@ async fn apply(
                     .fetch_optional(&mut **tx)
                     .await?
                     .unwrap_or_else(|| json!({}));
+            let changed = v.get("ipMode") != Some(&json!(ip_mode));
             v["ipMode"] = json!(ip_mode);
             sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('observability', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
                 .bind(&v)
                 .execute(&mut **tx)
                 .await?;
+            if changed {
+                let title = match ip_mode {
+                    crate::observability::IpMode::None => "Stopped storing visitor IP addresses",
+                    crate::observability::IpMode::Anonymized => {
+                        "Set visitor IP addresses to be stored anonymized"
+                    }
+                    crate::observability::IpMode::Full => {
+                        "Set full visitor IP addresses to be stored"
+                    }
+                };
+                log_setting(tx, user, "observability", title).await?;
+            }
             Ok(ok)
         }
         Op::SetObservability { enabled } => {
@@ -3505,6 +3566,17 @@ async fn apply(
                 .bind(enabled)
                 .execute(&mut **tx)
                 .await?;
+            log_setting(
+                tx,
+                user,
+                "observability",
+                if enabled {
+                    "Turned observability on"
+                } else {
+                    "Turned observability off"
+                },
+            )
+            .await?;
             // Each cluster's agent follows at its next heartbeat.
             s.observability.set_enabled(enabled).await;
             Ok(ok)
@@ -3514,6 +3586,7 @@ async fn apply(
             sqlx::query("DELETE FROM pyo.settings WHERE key = 'email'")
                 .execute(&mut **tx)
                 .await?;
+            log_setting(tx, user, "email", "Removed the email settings").await?;
             Ok(ok)
         }
         Op::GithubManifest { public_url, org } => {
@@ -3533,6 +3606,7 @@ async fn apply(
             sqlx::query("DELETE FROM pyo.github_installations")
                 .execute(&mut **tx)
                 .await?;
+            log_setting(tx, user, "github", "Removed the GitHub app").await?;
             Ok(ok)
         }
         Op::GithubInstallUrl { team_id } => {
@@ -6938,7 +7012,9 @@ async fn apply(
         }
         Op::SaveTailscale { client_id, secret } => {
             require_admin(user)?;
-            crate::tailscale::save_client(s, &client_id, secret.as_deref()).await
+            let out = crate::tailscale::save_client(s, &client_id, secret.as_deref()).await?;
+            log_setting(tx, user, "tailscale", "Connected Tailscale").await?;
+            Ok(out)
         }
         Op::TestTailscale {} => {
             require_admin(user)?;
@@ -6947,16 +7023,38 @@ async fn apply(
         Op::RemoveTailscale {} => {
             require_admin(user)?;
             crate::tailscale::remove(s).await?;
+            log_setting(tx, user, "tailscale", "Removed Tailscale").await?;
             Ok(ok)
         }
         Op::RenameTailscaleName { kind, name } => {
             require_admin(user)?;
             crate::tailscale::rename(s, &kind, &name).await?;
+            let title = format!(
+                "Renamed the {} on the tailnet to {}",
+                if kind == "registry" {
+                    "registry"
+                } else {
+                    "dashboard"
+                },
+                name.trim().to_ascii_lowercase()
+            );
+            log_setting(tx, user, "tailscale", &title).await?;
             Ok(ok)
         }
         Op::SetPublicDashboard { open } => {
             require_admin(user)?;
             crate::publicdash::set_open(&s.db, open).await?;
+            log_setting(
+                tx,
+                user,
+                "public-dashboard",
+                if open {
+                    "Turned the public dashboard on"
+                } else {
+                    "Turned the public dashboard off"
+                },
+            )
+            .await?;
             Ok(ok)
         }
         Op::ConnectCloudflare { team_id, token } => {

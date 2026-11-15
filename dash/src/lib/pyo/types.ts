@@ -1623,7 +1623,9 @@ export type ActivityType =
   | "volume.resized"
   | "volume.resize_failed"
   /** Pyo or an agent updated (Settings › Updates). */
-  | "pyo.update";
+  | "pyo.update"
+  /** An admin changed an install-wide setting. */
+  | "settings.changed";
 
 export type ActivityTarget = {
   kind:
@@ -1635,7 +1637,8 @@ export type ActivityTarget = {
     | "server"
     | "volume"
     | "domain"
-    | "update";
+    | "update"
+    | "settings";
   id: ID;
   label: string;
 };
