@@ -27,7 +27,7 @@ export const TEMPLATE_CATEGORIES: { id: TemplateCategory; label: string }[] = [
   { id: "monitoring", label: "Monitoring" },
   { id: "messaging", label: "Messaging" },
   { id: "developer-tools", label: "Dev tools" },
-  { id: "web", label: "Web apps" },
+  { id: "web", label: "Web" },
   { id: "ai", label: "AI" },
   { id: "other", label: "Other" },
 ];
