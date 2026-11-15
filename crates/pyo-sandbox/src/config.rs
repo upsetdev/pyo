@@ -52,6 +52,9 @@ pub struct Config {
     /// The cgroup under which the jailer puts each VM.
     #[serde(default = "default_cgroup")]
     pub cgroup_parent: String,
+    /// Sandbox networking. See `network`.
+    #[serde(default)]
+    pub network: crate::network::NetworkConfig,
     /// Dev mode: run Firecracker directly as the current user, without the
     /// jailer, seccomp per jail or cgroups. Never on a real server.
     #[serde(default)]

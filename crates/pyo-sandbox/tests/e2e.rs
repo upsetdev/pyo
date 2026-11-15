@@ -259,6 +259,7 @@ async fn boots_real_microvms() {
         jail_uid: 0,
         jail_gid: 0,
         cgroup_parent: "pyo-sandbox".into(),
+        network: Default::default(),
         dev: true,
     };
     let layout = Layout::new(&run, false);
@@ -347,7 +348,8 @@ async fn boots_real_microvms() {
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
-    // Networking isn't there yet, and says so.
+    // Dev mode as a normal user has no networking, and says so. The
+    // network e2e (`network_e2e.rs`) runs as root.
     let mut net = spec(3);
     net.network = NetworkMode::Internet;
     let (s, b) = call(
@@ -621,6 +623,7 @@ async fn boots_real_microvms() {
             cpus: 1,
             memory_mib: 256,
             disk_mib: 256,
+            network: None,
         })
         .unwrap(),
     )
@@ -631,7 +634,10 @@ async fn boots_real_microvms() {
     note("template_snapshot_ms", took_ms.into());
     let templates = mgr.report().templates;
     let busybox = templates.iter().find(|t| t.name == "busybox").unwrap();
-    assert!(busybox.has_snapshot(1, 256, 256), "{templates:?}");
+    assert!(
+        busybox.has_snapshot(NetworkMode::None, 1, 256, 256),
+        "{templates:?}"
+    );
     let sdir = layout.template_snapshot("busybox", &key);
     let mem = std::fs::metadata(sdir.join("vm.mem")).unwrap();
     use std::os::unix::fs::MetadataExt;

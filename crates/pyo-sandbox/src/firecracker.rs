@@ -19,13 +19,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use pyo_proto::sandbox::FAST_BOOT_ARGS;
-use pyo_proto::sandbox::wire::Request;
+use pyo_proto::sandbox::wire::{GuestNetwork, Request, Response};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 
 use crate::envd;
+use crate::network::{GUEST_IFACE, GUEST_MAC};
 use crate::storage;
 
 pub const API_SOCK: &str = "api.sock";
@@ -72,6 +73,17 @@ pub struct Machine<'a> {
     pub scratch: Option<&'a Path>,
     pub cpus: u32,
     pub memory_mib: u32,
+    /// The network interface. None means the VM has none at all.
+    pub nic: Option<Nic<'a>>,
+}
+
+/// A VM's network interface: the host tap it's attached to, and what envd
+/// sets up in the guest once it answers. A template build has a tap but no
+/// guest setup, since each restore sets its own.
+#[derive(Debug, Clone, Copy)]
+pub struct Nic<'a> {
+    pub tap: &'a str,
+    pub guest: Option<&'a GuestNetwork>,
 }
 
 /// A running Firecracker process.
@@ -256,12 +268,18 @@ impl Firecracker {
         if let Some(t) = &self.cpu_template {
             machine["cpu_template"] = json!(t);
         }
-        json!({
+        let mut c = json!({
             "boot-source": {"kernel_image_path": KERNEL, "boot_args": self.boot_args()},
             "drives": drives,
             "machine-config": machine,
             "vsock": {"guest_cid": GUEST_CID, "uds_path": VSOCK},
-        })
+        });
+        if let Some(n) = &m.nic {
+            c["network-interfaces"] = json!([{
+                "iface_id": GUEST_IFACE, "host_dev_name": n.tap, "guest_mac": GUEST_MAC,
+            }]);
+        }
+        c
     }
 
     /// Puts the root disk, the kernel and the writable layer in the VM
@@ -364,7 +382,11 @@ impl Firecracker {
         let mut vm = self.spawn(m, &["--config-file", "vm.json"])?;
         let waited = tokio::time::timeout(timeout, async {
             let (s, _) = ready.accept().await?;
-            envd::Conn::from_ready(s).await
+            let mut conn = envd::Conn::from_ready(s).await?;
+            if let Some(g) = m.nic.and_then(|n| n.guest) {
+                set_network(&mut conn, g).await?;
+            }
+            anyhow::Ok(conn)
         })
         .await;
         let took = t0.elapsed();
@@ -401,24 +423,27 @@ impl Firecracker {
         let mut vm = self.spawn(m, &[])?;
         let res = async {
             wait_for(&vm.api(), timeout).await?;
-            api(
-                &vm.api(),
-                "PUT",
-                "/snapshot/load",
-                Some(json!({
-                    "snapshot_path": format!("{snap}.snap"),
-                    "mem_backend": {"backend_type": "File", "backend_path": format!("{snap}.mem")},
-                    "resume_vm": true,
-                })),
-            )
-            .await?;
+            let mut load = json!({
+                "snapshot_path": format!("{snap}.snap"),
+                "mem_backend": {"backend_type": "File", "backend_path": format!("{snap}.mem")},
+                "resume_vm": true,
+            });
+            // The snapshot names the tap it was taken with. Point it at this
+            // VM's own.
+            if let Some(n) = &m.nic {
+                load["network_overrides"] =
+                    json!([{"iface_id": GUEST_IFACE, "host_dev_name": n.tap}]);
+            }
+            api(&vm.api(), "PUT", "/snapshot/load", Some(load)).await?;
             let mut conn = envd::Conn::connect(&vm.vsock(), timeout).await?;
-            let took = t0.elapsed();
             conn.call(Request::SetTime {
                 unix_ms: crate::now_ms(),
             })
             .await?;
-            anyhow::Ok(took)
+            if let Some(g) = m.nic.and_then(|n| n.guest) {
+                set_network(&mut conn, g).await?;
+            }
+            anyhow::Ok(t0.elapsed())
         }
         .await;
         match res {
@@ -428,6 +453,15 @@ impl Firecracker {
                 Err(e.context(log_tail(m.dir)))
             }
         }
+    }
+}
+
+/// Sets up the guest's interface, route and resolvers through envd.
+async fn set_network(conn: &mut envd::Conn, g: &GuestNetwork) -> anyhow::Result<()> {
+    match conn.call(Request::SetNetwork(g.clone())).await? {
+        Response::Ok => Ok(()),
+        Response::Error { message, .. } => bail!("setting up the guest network: {message}"),
+        other => bail!("setting up the guest network: unexpected answer {other:?}"),
     }
 }
 
@@ -573,6 +607,7 @@ mod tests {
             scratch: Some(Path::new("/p/cache/scratch-64.ext4")),
             cpus: 2,
             memory_mib: 512,
+            nic: None,
         };
         let c = Firecracker {
             cpu_template: Some("T2".into()),
@@ -589,6 +624,19 @@ mod tests {
         let no_scratch = fc().vm_config(&Machine { scratch: None, ..m });
         assert_eq!(no_scratch["drives"].as_array().unwrap().len(), 1);
         assert!(no_scratch["machine-config"].get("cpu_template").is_none());
+        assert!(no_scratch.get("network-interfaces").is_none());
+        let with_nic = fc().vm_config(&Machine {
+            nic: Some(Nic {
+                tap: "pyosbx4",
+                guest: None,
+            }),
+            ..m
+        });
+        assert_eq!(
+            with_nic["network-interfaces"][0]["host_dev_name"],
+            "pyosbx4"
+        );
+        assert_eq!(with_nic["network-interfaces"][0]["iface_id"], "eth0");
     }
 
     #[test]

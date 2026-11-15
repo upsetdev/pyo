@@ -41,7 +41,7 @@
 //!
 //! | Request | Frames back |
 //! |---|---|
-//! | `ping`, `stat`, `list`, `mkdir`, `remove`, `setTime` | one response |
+//! | `ping`, `stat`, `list`, `mkdir`, `remove`, `setTime`, `setNetwork` | one response |
 //! | `exec` | `started`, then `Stdout` and `Stderr`, then `exit` last. With `stdin: true` the host sends `Stdin` frames and `Eof` closes stdin |
 //! | `pty` | `started`, then `Stdout` (the terminal), then `exit`. `Stdin` frames are typed into the terminal |
 //! | `writeFile` | the host sends `Stdin` frames and `Eof` right after the request, without waiting. envd answers `written` at the end |
@@ -410,6 +410,26 @@ pub enum Request {
     SetTime {
         unix_ms: u64,
     },
+    /// Sets up the guest's network interface, default route and
+    /// `/etc/resolv.conf`. The daemon sends it after every start and
+    /// restore, so a sandbox restored from a template snapshot gets its own
+    /// address and not the template's.
+    SetNetwork(GuestNetwork),
+}
+
+/// A sandbox's address on its tap link. Each sandbox has its own /30: the
+/// host end is the gateway and the guest end is `address`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestNetwork {
+    /// The guest interface, `eth0` on Firecracker.
+    pub iface: String,
+    pub address: std::net::Ipv4Addr,
+    pub prefix: u8,
+    pub gateway: std::net::Ipv4Addr,
+    /// Written to `/etc/resolv.conf`.
+    #[serde(default)]
+    pub dns: Vec<std::net::Ipv4Addr>,
 }
 
 /// What a request needs from a client token. The daemon checks this on
@@ -448,7 +468,7 @@ impl Request {
             | Request::Mkdir { .. }
             | Request::Remove { .. } => Some(Scope::Files),
             Request::PortConnect { .. } => Some(Scope::Ports),
-            Request::SetTime { .. } => Some(Scope::Admin),
+            Request::SetTime { .. } | Request::SetNetwork(_) => Some(Scope::Admin),
         }
     }
 
@@ -712,6 +732,19 @@ mod tests {
         );
         // Only Pyo may set the clock.
         assert_eq!(Request::SetTime { unix_ms: 0 }.scope(), Some(Scope::Admin));
+        let net = Request::SetNetwork(GuestNetwork {
+            iface: "eth0".into(),
+            address: [198, 18, 0, 2].into(),
+            prefix: 30,
+            gateway: [198, 18, 0, 1].into(),
+            dns: vec![[1, 1, 1, 1].into()],
+        });
+        assert_eq!(net.scope(), Some(Scope::Admin));
+        assert_eq!(
+            serde_json::to_value(&net).unwrap(),
+            serde_json::json!({"op": "setNetwork", "iface": "eth0", "address": "198.18.0.2",
+                "prefix": 30, "gateway": "198.18.0.1", "dns": ["1.1.1.1"]})
+        );
         assert!(!Request::Signal { signal: 9 }.opens_stream());
     }
 

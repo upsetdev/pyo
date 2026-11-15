@@ -261,10 +261,11 @@ pub async fn run_command(
             cpus,
             memory_mib,
             disk_mib,
+            network,
         } => {
             st.authorize(token, None, Scope::Admin)?;
             let (key, took_ms) = mgr
-                .snapshot_template(&template, cpus, memory_mib, disk_mib)
+                .snapshot_template(&template, cpus, memory_mib, disk_mib, network)
                 .await?;
             DaemonResult::TemplateSnapshot {
                 template,

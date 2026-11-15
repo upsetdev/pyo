@@ -102,6 +102,7 @@ pub fn instance_id(id: &str) -> String {
 pub fn snapshot_key(
     fc_version: &str,
     cpu_template: Option<&str>,
+    network: bool,
     cpus: u32,
     memory_mib: u32,
     disk_mib: u32,
@@ -118,8 +119,13 @@ pub fn snapshot_key(
         })
         .collect();
     format!(
-        "fc{v}-{}{}",
+        "fc{v}-{}{}{}",
         cpu_template.unwrap_or("none").to_lowercase(),
+        if network {
+            pyo_proto::sandbox::SNAPSHOT_NET_TAG
+        } else {
+            ""
+        },
         pyo_proto::sandbox::snapshot_size_tag(cpus, memory_mib, disk_mib)
     )
 }
@@ -258,15 +264,15 @@ mod tests {
     #[test]
     fn snapshot_keys() {
         assert_eq!(
-            snapshot_key("v1.18.0", None, 1, 512, 2048),
+            snapshot_key("v1.18.0", None, false, 1, 512, 2048),
             "fc1.18.0-none-1c-512m-2048d"
         );
         assert_eq!(
-            snapshot_key("1.18.0", Some("T2"), 2, 1024, 64),
-            "fc1.18.0-t2-2c-1024m-64d"
+            snapshot_key("1.18.0", Some("T2"), true, 2, 1024, 64),
+            "fc1.18.0-t2-net-2c-1024m-64d"
         );
         assert_eq!(
-            snapshot_key("1.18/../x", None, 1, 1, 1),
+            snapshot_key("1.18/../x", None, false, 1, 1, 1),
             "fc1.18_.._x-none-1c-1m-1d"
         );
     }

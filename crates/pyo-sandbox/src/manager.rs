@@ -22,7 +22,8 @@ use tokio::sync::Mutex;
 use crate::capacity::{self, MemorySource};
 use crate::config::Config;
 use crate::envd;
-use crate::firecracker::{Firecracker, Machine, SCRATCH, Vm};
+use crate::firecracker::{Firecracker, Machine, Nic, SCRATCH, Vm};
+use crate::network::{Lease, Network};
 use crate::storage::{self, Layout, snapshot_key};
 
 /// Name of the pause snapshot files in a VM directory.
@@ -46,6 +47,8 @@ pub struct Sandbox {
     pub spec: SandboxSpec,
     status: StdMutex<SandboxStatus>,
     vm: Mutex<Option<Vm>>,
+    /// The tap and addresses of a sandbox with network. Kept while paused.
+    pub lease: Option<Lease>,
 }
 
 impl Sandbox {
@@ -70,6 +73,8 @@ struct Record {
     spec: SandboxSpec,
     status: SandboxStatus,
     pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease: Option<Lease>,
 }
 
 pub struct Manager {
@@ -78,6 +83,7 @@ pub struct Manager {
     pub fc: Firecracker,
     capability: StdMutex<CapabilityReport>,
     sandboxes: StdMutex<HashMap<String, Arc<Sandbox>>>,
+    net: Option<Arc<Network>>,
 }
 
 impl Manager {
@@ -93,7 +99,20 @@ impl Manager {
             fc,
             capability: StdMutex::new(capability),
             sandboxes: StdMutex::new(HashMap::new()),
+            net: None,
         }
+    }
+
+    /// Sandbox networking. `adopt` puts its table in place, and the
+    /// capability report says `network: true` once that worked.
+    pub fn with_network(mut self, net: Option<Network>) -> Manager {
+        self.net = net.map(Arc::new);
+        self
+    }
+
+    /// The network, when sandboxes here can have one.
+    fn network(&self) -> Option<&Arc<Network>> {
+        self.net.as_ref().filter(|_| self.capability().network)
     }
 
     pub fn capability(&self) -> CapabilityReport {
@@ -232,13 +251,15 @@ impl Manager {
                 "gVisor sandboxes aren't available on this server yet.",
             ));
         }
-        if spec.network == NetworkMode::Internet {
-            // TODO(network): tap device and nftables per VM. See network.rs.
-            return Err(err(
-                ErrorCode::Unsupported,
-                "Sandbox networking isn't set up on this server yet. Create the sandbox with network set to none.",
-            ));
-        }
+        let net = match spec.network {
+            NetworkMode::Internet => Some(self.network().cloned().ok_or_else(|| {
+                err(
+                    ErrorCode::Unsupported,
+                    "This server has no sandbox networking. Create the sandbox with network set to none.",
+                )
+            })?),
+            NetworkMode::None => None,
+        };
         let rootfs = self.layout.template_rootfs(&spec.template);
         if !rootfs.exists() {
             return Err(err(
@@ -249,9 +270,33 @@ impl Manager {
                 ),
             ));
         }
-        let key = self.snapshot_key(spec.cpus, spec.memory_mib, spec.disk_mib);
+        let key = self.snapshot_key(net.is_some(), spec.cpus, spec.memory_mib, spec.disk_mib);
         let snap_dir = self.layout.template_snapshot(&spec.template, &key);
         let from_snapshot = snap_dir.join("vm.snap").exists();
+        if self
+            .sandboxes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(&spec.id)
+        {
+            return Err(err(
+                ErrorCode::Conflict,
+                format!("Sandbox {} already exists.", spec.id),
+            ));
+        }
+        let lease = match &net {
+            Some(n) => Some(n.acquire().await.map_err(runtime)?),
+            None => None,
+        };
+        // Gives the lease back when the create fails from here on.
+        let give_back = |lease: Option<Lease>| {
+            let net = net.clone();
+            async move {
+                if let (Some(n), Some(l)) = (net, lease) {
+                    n.release(&l).await;
+                }
+            }
+        };
 
         let now = crate::now_ms();
         let status = SandboxStatus {
@@ -277,43 +322,59 @@ impl Manager {
             spec: spec.clone(),
             status: StdMutex::new(status),
             vm: Mutex::new(None),
+            lease: lease.clone(),
         });
         let mut vm_slot = sbx.vm.lock().await;
-        {
+        let admitted = {
             // Admission and insertion under one lock, so two creates can't
             // both take the last room.
             let mut all = self.sandboxes.lock().unwrap_or_else(|p| p.into_inner());
             if all.contains_key(&spec.id) {
-                return Err(err(
+                Err(err(
                     ErrorCode::Conflict,
                     format!("Sandbox {} already exists.", spec.id),
-                ));
+                ))
+            } else {
+                let committed: u64 = all
+                    .values()
+                    .map(|s| s.status())
+                    .filter(|s| !s.state.is_final() && s.state != SandboxState::Paused)
+                    .map(|s| (s.memory_mib as u64) << 20)
+                    .sum();
+                let mem = capacity::meminfo();
+                capacity::admits(
+                    mem,
+                    self.cfg.reserve_bytes(mem.total),
+                    self.cfg.memory_overcommit,
+                    committed,
+                    (spec.memory_mib as u64) << 20,
+                    from_snapshot,
+                )
+                .map_err(|m| err(ErrorCode::NoCapacity, m))
+                .map(|()| {
+                    all.insert(spec.id.clone(), sbx.clone());
+                })
             }
-            let committed: u64 = all
-                .values()
-                .map(|s| s.status())
-                .filter(|s| !s.state.is_final() && s.state != SandboxState::Paused)
-                .map(|s| (s.memory_mib as u64) << 20)
-                .sum();
-            let mem = capacity::meminfo();
-            capacity::admits(
-                mem,
-                self.cfg.reserve_bytes(mem.total),
-                self.cfg.memory_overcommit,
-                committed,
-                (spec.memory_mib as u64) << 20,
-                from_snapshot,
-            )
-            .map_err(|m| err(ErrorCode::NoCapacity, m))?;
-            all.insert(spec.id.clone(), sbx.clone());
+        };
+        if let Err(e) = admitted {
+            give_back(lease).await;
+            return Err(e);
         }
+        let nic = lease
+            .as_ref()
+            .zip(net.as_ref())
+            .map(|(l, n)| (l, n.guest_network(l)));
+        let nic = nic.as_ref().map(|(l, g)| Nic {
+            tap: &l.tap,
+            guest: Some(g),
+        });
 
         let dir = self.layout.vm_dir(&spec.id);
         let started = if from_snapshot {
-            self.start_from_snapshot(&spec, &dir, &rootfs, &snap_dir)
+            self.start_from_snapshot(&spec, &dir, &rootfs, &snap_dir, nic)
                 .await
         } else {
-            self.cold_start(&spec, &dir, &rootfs).await
+            self.cold_start(&spec, &dir, &rootfs, nic).await
         };
         match started {
             Ok((vm, took)) => {
@@ -336,16 +397,18 @@ impl Manager {
                     .unwrap_or_else(|p| p.into_inner())
                     .remove(&spec.id);
                 let _ = tokio::fs::remove_dir_all(self.layout.sandbox_top(&spec.id)).await;
+                give_back(lease).await;
                 tracing::warn!(id = %spec.id, error = %format!("{e:#}"), "sandbox didn't start");
                 Err(runtime(e))
             }
         }
     }
 
-    pub fn snapshot_key(&self, cpus: u32, memory_mib: u32, disk_mib: u32) -> String {
+    pub fn snapshot_key(&self, network: bool, cpus: u32, memory_mib: u32, disk_mib: u32) -> String {
         snapshot_key(
             &self.capability().firecracker_version,
             self.fc.cpu_template.as_deref(),
+            network,
             cpus,
             memory_mib,
             disk_mib,
@@ -357,6 +420,7 @@ impl Manager {
         spec: &SandboxSpec,
         dir: &Path,
         rootfs: &Path,
+        nic: Option<Nic<'_>>,
     ) -> anyhow::Result<(Vm, Duration)> {
         let scratch = storage::empty_ext4(&self.layout.cache(), spec.disk_mib).await?;
         let m = Machine {
@@ -366,6 +430,7 @@ impl Manager {
             scratch: Some(&scratch),
             cpus: spec.cpus,
             memory_mib: spec.memory_mib,
+            nic,
         };
         self.fc.cold_boot(&m, BOOT_TIMEOUT).await
     }
@@ -376,6 +441,7 @@ impl Manager {
         dir: &Path,
         rootfs: &Path,
         snap_dir: &Path,
+        nic: Option<Nic<'_>>,
     ) -> anyhow::Result<(Vm, Duration)> {
         tokio::fs::create_dir_all(dir).await?;
         // The template snapshot is shared by every sandbox and never
@@ -399,6 +465,7 @@ impl Manager {
             scratch: Some(&scratch),
             cpus: spec.cpus,
             memory_mib: spec.memory_mib,
+            nic,
         };
         self.fc.restore(&m, TEMPLATE, BOOT_TIMEOUT).await
     }
@@ -411,6 +478,7 @@ impl Manager {
         cpus: u32,
         memory_mib: u32,
         disk_mib: u32,
+        network: Option<NetworkMode>,
     ) -> Result<(String, u64)> {
         if !pyo_proto::sandbox::is_template_name(template) {
             return Err(err(
@@ -431,11 +499,27 @@ impl Manager {
                 format!("The sandbox template {template} isn't on this server."),
             ));
         }
+        let net = match network {
+            None | Some(NetworkMode::Internet) => self.network().cloned(),
+            Some(NetworkMode::None) => None,
+        };
+        if network == Some(NetworkMode::Internet) && net.is_none() {
+            return Err(err(
+                ErrorCode::Unsupported,
+                "This server has no sandbox networking, so it can't snapshot a template with network.",
+            ));
+        }
         let t0 = std::time::Instant::now();
-        let key = self.snapshot_key(cpus, memory_mib, disk_mib);
+        let key = self.snapshot_key(net.is_some(), cpus, memory_mib, disk_mib);
         let final_dir = self.layout.template_snapshot(template, &key);
         let build_id = format!("tmpl-{}", crate::now_ms());
         let dir = self.layout.vm_dir(&build_id);
+        // The build VM gets a tap only so the snapshot has an interface.
+        // Each restore points it at its own tap and sets its own address.
+        let lease = match &net {
+            Some(n) => Some(n.acquire().await.map_err(runtime)?),
+            None => None,
+        };
         let res = async {
             let scratch = storage::empty_ext4(&self.layout.cache(), disk_mib).await?;
             let m = Machine {
@@ -445,6 +529,10 @@ impl Manager {
                 scratch: Some(&scratch),
                 cpus,
                 memory_mib,
+                nic: lease.as_ref().map(|l| Nic {
+                    tap: &l.tap,
+                    guest: None,
+                }),
             };
             let (mut vm, _) = self.fc.cold_boot(&m, BOOT_TIMEOUT).await?;
             let snap = vm.snapshot("vm").await;
@@ -463,6 +551,9 @@ impl Manager {
         }
         .await;
         let _ = tokio::fs::remove_dir_all(self.layout.sandbox_top(&build_id)).await;
+        if let (Some(n), Some(l)) = (&net, &lease) {
+            n.release(l).await;
+        }
         res.map_err(runtime)?;
         Ok((key, t0.elapsed().as_millis() as u64))
     }
@@ -474,6 +565,9 @@ impl Manager {
         let mut vm = sbx.vm.lock().await;
         if let Some(mut v) = vm.take() {
             v.kill().await;
+        }
+        if let (Some(l), Some(n)) = (&sbx.lease, &self.net) {
+            n.release(l).await;
         }
         sbx.update(|s| s.state = SandboxState::Stopped);
         self.sandboxes
@@ -530,6 +624,10 @@ impl Manager {
         sbx.update(|s| s.state = SandboxState::Resuming);
         let dir = self.layout.vm_dir(id);
         let rootfs = self.layout.template_rootfs(&sbx.spec.template);
+        let guest = match (&sbx.lease, &self.net) {
+            (Some(l), Some(n)) => Some(n.guest_network(l)),
+            _ => None,
+        };
         // The writable layer is already in place, so nothing is copied.
         let m = Machine {
             id,
@@ -538,6 +636,10 @@ impl Manager {
             scratch: None,
             cpus: sbx.spec.cpus,
             memory_mib: sbx.spec.memory_mib,
+            nic: sbx.lease.as_ref().map(|l| Nic {
+                tap: &l.tap,
+                guest: guest.as_ref(),
+            }),
         };
         match self.fc.restore(&m, PAUSE, BOOT_TIMEOUT).await {
             Ok((vm, took)) => {
@@ -642,6 +744,7 @@ impl Manager {
             spec: sbx.spec.clone(),
             status: sbx.status(),
             pid,
+            lease: sbx.lease.clone(),
         };
         let path = self.layout.vm_dir(&sbx.spec.id).join("sandbox.json");
         if let Err(e) = std::fs::write(&path, serde_json::to_vec_pretty(&rec).unwrap_or_default()) {
@@ -651,8 +754,29 @@ impl Manager {
 
     /// Takes over the sandboxes a previous daemon left. Running VMs whose
     /// process is still there and paused sandboxes are kept. The rest is
-    /// cleaned up.
+    /// cleaned up. Then puts the network table in place for the kept ones,
+    /// which removes the taps of the rest.
     pub async fn adopt(&self) -> usize {
+        let mut leases = Vec::new();
+        let adopted = self.adopt_vms(&mut leases).await;
+        if let Some(net) = &self.net {
+            match net.sync(&leases).await {
+                Ok(()) => {
+                    self.capability
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .network = true;
+                    tracing::info!(pool = %net.cfg.pool, "sandbox networking is on");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "sandbox networking is off");
+                }
+            }
+        }
+        adopted
+    }
+
+    async fn adopt_vms(&self, leases: &mut Vec<(Lease, bool)>) -> usize {
         let Ok(mut rd) = tokio::fs::read_dir(self.layout.sandboxes()).await else {
             return 0;
         };
@@ -677,10 +801,14 @@ impl Manager {
             match (rec, keep) {
                 (Some(r), Some(vm)) if storage::instance_id(&r.spec.id) == name => {
                     let id = r.spec.id.clone();
+                    if let Some(l) = &r.lease {
+                        leases.push((l.clone(), vm.is_some()));
+                    }
                     let sbx = Arc::new(Sandbox {
                         spec: r.spec,
                         status: StdMutex::new(r.status),
                         vm: Mutex::new(vm),
+                        lease: r.lease,
                     });
                     self.sandboxes
                         .lock()

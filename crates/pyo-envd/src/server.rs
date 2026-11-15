@@ -255,6 +255,7 @@ impl Conn {
             }
             Request::PortConnect { port } => self.port(id, port).err(),
             Request::SetTime { unix_ms } => Some(ok_or(set_time(unix_ms))),
+            Request::SetNetwork(n) => Some(ok_or(crate::net::apply(&n))),
         };
         if let Some(r) = res {
             self.out.respond(id, &r);
