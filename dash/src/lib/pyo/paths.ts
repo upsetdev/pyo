@@ -75,6 +75,7 @@ export const RESERVED_PROJECT_SLUGS = [
   "postgres",
   "projects",
   "registry",
+  "sandboxes",
   "security",
   "servers",
   "services",
