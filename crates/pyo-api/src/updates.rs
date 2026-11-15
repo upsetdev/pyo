@@ -6,7 +6,8 @@
 //!   asks api.pyo.dev, which answers with GitHub's release and counts active
 //!   installs, and GitHub itself when that fails or is slow. With "Send
 //!   anonymous usage counts" on, the request carries a random install ID
-//!   and the version, nothing else. `PYO_UPDATE_CHECK=off` turns checking
+//!   and the version, nothing else. It starts off on a fresh install whose
+//!   installer was told `PYO_TELEMETRY=off`. `PYO_UPDATE_CHECK=off` turns checking
 //!   off, for installs that can't reach GitHub, and so sends nothing.
 //! - Applying (an admin's "Update now", or the maintenance window when
 //!   updates are automatic): the agent on Pyo's own cluster runs the new
@@ -154,6 +155,43 @@ pub fn checks_off_by_env() -> bool {
             .as_str(),
         "off" | "false" | "0" | "no"
     )
+}
+
+/// PYO_TELEMETRY=off, which the installer passes on from a fresh install
+/// told so (the pyo-install ConfigMap): usage counts start off.
+pub fn telemetry_off_by_env() -> bool {
+    off(&std::env::var("PYO_TELEMETRY").unwrap_or_default())
+}
+
+fn off(v: &str) -> bool {
+    matches!(
+        v.to_ascii_lowercase().as_str(),
+        "off" | "false" | "0" | "no"
+    )
+}
+
+/// A fresh install's update settings, saved once with the first admin:
+/// usage counts off when the installer was told PYO_TELEMETRY=off, else
+/// nothing is saved (the defaults hold). Later they're the admin's.
+pub async fn first_default(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> sqlx::Result<()> {
+    let Some(s) = first_settings(telemetry_off_by_env()) else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT INTO pyo.settings (key, value) VALUES ('updates', $1) ON CONFLICT (key) DO NOTHING",
+    )
+    .bind(serde_json::to_value(&s).unwrap_or_default())
+    .execute(&mut **tx)
+    .await?;
+    tracing::info!("usage counts start off on this install (PYO_TELEMETRY=off)");
+    Ok(())
+}
+
+fn first_settings(telemetry_off: bool) -> Option<Settings> {
+    telemetry_off.then(|| Settings {
+        usage: false,
+        ..Settings::default()
+    })
 }
 
 pub async fn settings(db: &PgPool) -> ApiResult<Settings> {
@@ -1502,6 +1540,21 @@ mod tests {
         let s: Settings = serde_json::from_value(json!({ "mode": "auto" })).unwrap();
         assert_eq!(s.hour, 3);
         assert!(s.usage);
+    }
+
+    #[test]
+    fn telemetry_off_starts_usage_counts_off() {
+        let s = first_settings(true).unwrap();
+        assert!(!s.usage);
+        // Everything else as a new install has it, update checks included.
+        assert_eq!(Settings { usage: true, ..s }, Settings::default());
+        assert_eq!(first_settings(false), None);
+        for v in ["off", "OFF", "false", "0", "no"] {
+            assert!(off(v), "{v}");
+        }
+        for v in ["", "on", "1", "yes"] {
+            assert!(!off(v), "{v}");
+        }
     }
 
     #[test]

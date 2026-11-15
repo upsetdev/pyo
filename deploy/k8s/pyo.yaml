@@ -110,6 +110,10 @@ spec:
             # The first sign-in, printed by the installer; replaced on first use.
             - name: PYO_ADMIN_PASSWORD
               valueFrom: { secretKeyRef: { name: pyo-admin, key: password, optional: true } }
+            # The installer's PYO_TELEMETRY=off: a fresh install starts with
+            # usage counts off (read once, with the first admin).
+            - name: PYO_TELEMETRY
+              valueFrom: { configMapKeyRef: { name: pyo-install, key: telemetry, optional: true } }
             # The backup store on this cluster (platform.yaml): the default destination.
             - { name: PYO_BACKUP_STORE_URL, value: "http://pyo-backup-store.pyo-system.svc.cluster.local:3900" }
             # Its admin API: setting it up, teams' buckets and keys (backupstore.rs).

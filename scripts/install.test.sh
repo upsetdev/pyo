@@ -38,5 +38,30 @@ unset ADMIN_PASSWORD
 out=$(print_sign_in)
 check "nothing to update says nothing of the first sign-in" "$out" "admin@pyo.local|First sign-in" lacks
 
+# PYO_TELEMETRY=off: the fresh install's Pyo gets it (the pyo-install
+# ConfigMap), and the installer says so.
+kc() {
+  echo "kc $*" >>"$calls"
+  case "$*" in *"create configmap"*) echo "kind: ConfigMap" ;; esac
+}
+calls=$(mktemp)
+trap 'rm -f "$calls"' EXIT
+TELEMETRY=off
+install_settings
+check "telemetry off writes pyo-install" "$(cat "$calls")" "create configmap pyo-install --from-literal=telemetry=off" has
+check "and applies it" "$(cat "$calls")" "kc apply -f -" has
+out=$(count_install)
+check "telemetry off says both are off" "$out" "Not counting this install, and usage counts are off" has
+for v in OFF false 0 no; do
+  TELEMETRY=$v
+  telemetry_off || check "PYO_TELEMETRY=$v is off" "on" "^off$" has
+done
+: >"$calls"
+TELEMETRY=""
+install_settings
+check "telemetry on removes pyo-install" "$(cat "$calls")" "delete configmap pyo-install --ignore-not-found" has
+check "and writes nothing" "$(cat "$calls")" "create configmap" lacks
+telemetry_off && check "no PYO_TELEMETRY is on" "off" "^on$" has
+
 [ "$failed" = 0 ] && echo "install.sh: all checks passed"
 exit "$failed"

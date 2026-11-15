@@ -484,6 +484,8 @@ pub async fn ensure_first_admin(db: &sqlx::PgPool) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("creating the first team failed: {e:?}"))?;
     // A fresh install: observability starts off on a small server.
     let observability = crate::observability::first_default(&mut tx).await?;
+    // And usage counts off, when its installer was told PYO_TELEMETRY=off.
+    crate::updates::first_default(&mut tx).await?;
     tx.commit().await?;
     tracing::info!(
         on = observability,

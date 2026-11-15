@@ -7,7 +7,8 @@
 # Options (or environment variables):
 #   --version X   a release instead of the latest (PYO_VERSION)
 #   --yes         don't ask before an update that has notices (PYO_YES=1)
-#   PYO_TELEMETRY=off  don't count this install at api.pyo.dev
+#   PYO_TELEMETRY=off  don't count this install at api.pyo.dev, and start
+#                      Pyo with anonymous usage counts off
 #
 # Or removes Pyo from this machine (see uninstall_pyo below):
 #
@@ -59,7 +60,7 @@ parse_args() {
       --remove-k3s) REMOVE_K3S=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       -h | --help)
-        sed -n '2,19p' "${BASH_SOURCE[0]:-/dev/null}" 2>/dev/null || true
+        sed -n '2,20p' "${BASH_SOURCE[0]:-/dev/null}" 2>/dev/null || true
         echo "Usage: install.sh [--version X] [--yes]"
         echo "       install.sh --uninstall [--purge] [--keep-k3s | --remove-k3s] [--dry-run] [--yes] [--version X]"
         exit 0
@@ -833,10 +834,29 @@ first_sign_in() {
   fi
 }
 
+telemetry_off() {
+  case "${TELEMETRY,,}" in
+    off | false | 0 | no) return 0 ;;
+  esac
+  return 1
+}
+
+# A fresh install told PYO_TELEMETRY=off: the new Pyo starts with anonymous
+# usage counts off too. Pyo reads the pyo-install ConfigMap once, with its
+# first admin, and Settings > Updates changes it later.
+install_settings() {
+  if telemetry_off; then
+    kc -n "$NS" create configmap pyo-install --from-literal=telemetry=off --dry-run=client -o yaml | kc apply -f - >/dev/null
+  else
+    kc -n "$NS" delete configmap pyo-install --ignore-not-found >/dev/null
+  fi
+}
+
 # The release's upgrader, as the agent runs it for dashboard updates (the
-# objects match upgrade.rs's upgrader_rbac and run_upgrader).
+# objects match upgrade.rs's upgrader_rbac and run_upgrader). $1: a fresh
+# install.
 run_upgrader() {
-  local id name
+  local fresh=${1:-} id name
   id="install-$(date +%s)"
   name="pyo-upgrade-$id"
   # The namespace as platform.yaml has it (the upgrader skips Namespaces).
@@ -846,6 +866,7 @@ kind: Namespace
 metadata: { name: $NS, labels: { app.kubernetes.io/part-of: pyo } }
 YAML
   first_sign_in
+  [ -z "$fresh" ] || install_settings
   bootstrap_key kc
   kc -n "$NS" create configmap "$name" --from-file=release.json="$WORK/release.json" >/dev/null
   # >>> pyo:upgrader-rbac (upgrade.rs's upgrader_rbac, as JSON; cargo test compares them)
@@ -936,14 +957,13 @@ YAML
 
 # Counts a fresh install at api.pyo.dev, once the dashboard answers: Pyo's
 # version, the OS and the arch, nothing else (no hostname, address or
-# owner). PYO_TELEMETRY=off skips it. A failure changes nothing.
+# owner). PYO_TELEMETRY=off skips it, and turns usage counts off
+# (install_settings). A failure changes nothing.
 count_install() {
-  case "${TELEMETRY,,}" in
-    off | false | 0 | no)
-      echo "Not counting this install (PYO_TELEMETRY=off)."
-      return 0
-      ;;
-  esac
+  if telemetry_off; then
+    echo "Not counting this install, and usage counts are off (PYO_TELEMETRY=off)."
+    return 0
+  fi
   local arch i
   case "$(uname -m)" in
     x86_64 | amd64) arch=amd64 ;;
@@ -955,7 +975,7 @@ count_install() {
     [ "$i" = 3 ] && return 0
     sleep 5
   done
-  echo "Counting this install at api.pyo.dev (version, OS and arch only). PYO_TELEMETRY=off skips this."
+  echo "Counting this install at api.pyo.dev (version, OS and arch only). Set PYO_TELEMETRY=off to skip this and turn off usage counts."
   curl -fsS --proto '=https' -m 5 -o /dev/null -H 'Content-Type: application/json' \
     --data "{\"version\":\"$R_VERSION\",\"os\":\"linux\",\"arch\":\"$arch\"}" \
     https://api.pyo.dev/v1/installs >/dev/null 2>&1 || true
@@ -1354,7 +1374,7 @@ main() {
   install_k3s
   host_units
   ADMIN_PASSWORD=""
-  run_upgrader
+  run_upgrader "$fresh"
   if [ -n "$fresh" ]; then
     # The first sign-in is printed below.
     count_install
