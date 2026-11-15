@@ -20,7 +20,6 @@ import {
   siDocker,
   siGit,
   siGithub,
-  siTailscale,
   type SimpleIcon,
 } from "simple-icons";
 import type { ReactNode } from "react";
@@ -69,7 +68,6 @@ export function IconTile({
 
 export const GIT_LOGO = siGit;
 export const GITHUB_LOGO = siGithub;
-export const TAILSCALE_LOGO = siTailscale;
 export const DOCKER_LOGO = siDocker;
 export const CLOUDFLARE_LOGO = siCloudflare;
 

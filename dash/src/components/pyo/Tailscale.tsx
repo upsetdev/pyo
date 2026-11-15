@@ -1,7 +1,6 @@
 import { CheckCircleIcon, XCircleIcon } from "@phosphor-icons/react";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { BrandMark, TAILSCALE_LOGO } from "~/components/pyo/common";
 import { Badge } from "~/components/ui/Badge";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
@@ -253,12 +252,7 @@ export function TailscalePanel() {
   const [checks, setChecks] = useState<TailscaleCheck[]>([]);
   const [testing, setTesting] = useState(false);
   const [removing, setRemoving] = useState(false);
-  const title = (
-    <span className="flex items-center gap-2">
-      <BrandMark icon={TAILSCALE_LOGO} size={15} />
-      Tailscale
-    </span>
-  );
+  const title = "Tailscale";
   const description = "For the whole Pyo. Servers join your tailnet with it.";
   if (!s.user.isAdmin)
     return (
