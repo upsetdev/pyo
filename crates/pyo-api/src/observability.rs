@@ -1898,15 +1898,7 @@ impl Observability {
     /// The analytics page's data for a set of hostnames of one team.
     pub async fn query(&self, team_id: &str, hosts: &[String], range: &str) -> ApiResult<Value> {
         let ch = self.reader().await?;
-        let (points, step) = match range {
-            "1h" => (60i64, 60i64),
-            "24h" => (48, 1800),
-            "30d" => (30, 86400),
-            _ => (42, 14400),
-        };
-        let now = pyo_proto::now_ms() / 1000;
-        let end = (now / step + 1) * step;
-        let start = end - points * step;
+        let (points, step, start, end) = window(range, pyo_proto::now_ms() / 1000);
         let prev_start = start - points * step;
 
         let hosts_param = format!(
@@ -2285,6 +2277,22 @@ impl Observability {
 }
 
 /// "/a?token=x&page=2" -> ("/a", "/a?token=[redacted]&page=2", ["token","page"], ["token"]).
+/// The analytics page's buckets for a range at `now` (Unix seconds): how
+/// many, how long each, and the window's start and end. Buckets start at
+/// whole multiples of the step since the epoch, as ClickHouse's
+/// `toStartOfInterval(ts, toIntervalSecond(step))` puts them, and the last
+/// one holds `now`.
+fn window(range: &str, now: i64) -> (i64, i64, i64, i64) {
+    let (points, step) = match range {
+        "1h" => (60, 60),
+        "24h" => (48, 1800),
+        "30d" => (30, 86400),
+        _ => (42, 14400),
+    };
+    let end = (now / step + 1) * step;
+    (points, step, end - points * step, end)
+}
+
 fn split_url(raw: &str) -> (String, String, Vec<String>, Vec<String>) {
     let raw: String = raw.chars().take(2000).collect();
     let (path, query) = match raw.split_once('?') {
@@ -2327,7 +2335,32 @@ fn split_url(raw: &str) -> (String, String, Vec<String>, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{IpMode, split_url};
+    use super::{IpMode, split_url, window};
+
+    /// A request lands in the bucket of its own minute (hour, day), the
+    /// one ClickHouse's toStartOfInterval gives it, and the last bucket
+    /// holds now.
+    #[test]
+    fn buckets_hold_their_own_time() {
+        // 2026-11-15T10:03:29Z, and now a few minutes later.
+        let at = 1_794_737_009;
+        let now = at + 200;
+        for range in ["1h", "24h", "7d", "30d"] {
+            let (points, step, start, end) = window(range, now);
+            assert_eq!(end - start, points * step, "{range}");
+            assert_eq!(start % step, 0, "{range}");
+            assert!(start <= now && now < end, "{range}: now in the last bucket");
+            assert!(end - step <= now, "{range}: the last bucket is now's");
+            let bucket = at / step * step;
+            let i = (bucket - start) / step;
+            assert!((0..points).contains(&i), "{range}");
+            assert!(bucket <= at && at < bucket + step, "{range}");
+        }
+        let (_, step, start, _) = window("1h", now);
+        // 10:03:00Z, three before the last bucket (10:06, now's).
+        assert_eq!(at / step * step, 1_794_736_980);
+        assert_eq!((1_794_736_980 - start) / step, 56);
+    }
 
     /// The proxy's access log, as Vector sends it: every field analytics uses
     /// comes from a field the proxy writes.
