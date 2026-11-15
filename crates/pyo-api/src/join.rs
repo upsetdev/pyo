@@ -904,6 +904,7 @@ mod tests {
     /// `kubectl version -o json` prints (empty: it fails), and `apply`
     /// fails the first `fails` times. Sleeping only moves the clock.
     fn apply_agent(version: &str, fails: u32) -> (i32, String, String) {
+        let progress = script_block("progress", CONNECT_SCRIPT);
         let block = script_block("agent-apply", CONNECT_SCRIPT);
         bash(&format!(
             r#"set -euo pipefail
@@ -920,6 +921,7 @@ k3s() {{
   esac
 }}
 sleep() {{ SECONDS=$((SECONDS + $1)); }}
+{progress}
 {block}
 if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"; fi
 "#
@@ -949,16 +951,18 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
         let (code, out, err) = apply_agent(&version_json("37", "37"), 3);
         assert_eq!(code, 0, "{err}");
         assert!(out.trim().ends_with("ok after 4"), "{out}");
-        // Progress as it goes: what it's doing, then each try and the time.
+        // What it's doing, then one progress line with the time (every 20
+        // seconds off a terminal), and no Kubernetes errors or tries.
         assert!(out.starts_with("Installing the Pyo agent…"));
         assert!(
-            err.contains("(try 1, 0s so far). Trying again in 5s…"),
-            "{err}"
+            out.contains("Still installing the Pyo agent… 0:00"),
+            "{out}"
         );
         assert!(
-            err.contains("(try 3, 15s so far). Trying again in 20s…"),
-            "{err}"
+            out.contains("Still installing the Pyo agent… 0:20"),
+            "{out}"
         );
+        assert!(!out.contains("try ") && !err.contains("try "), "{out}{err}");
     }
 
     /// Each try gives the API server 2 minutes for the policy (not its 34 s
@@ -995,7 +999,10 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
         // Only a server that says it's older goes on without the policy.
         let (code, out, _) = apply_agent(&version_json("37", "29"), u32::MAX);
         assert_eq!(code, 0);
-        assert!(out.contains("1.29, older than 1.30"), "{out}");
+        assert!(
+            !out.contains("older than") && !out.contains("Kubernetes"),
+            "{out}"
+        );
         assert!(out.trim().ends_with("ok after 1"), "{out}");
     }
 

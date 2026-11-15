@@ -212,7 +212,6 @@ apparmor_workaround() {
   kv=$(uname -r); maj=${kv%%.*}; min=${kv#*.}; min=${min%%.*}
   [ "$maj" -gt 6 ] || { [ "$maj" -eq 6 ] && [ "$min" -ge 17 ]; } || return 0
   if [ -f "$f" ] && ! head -n1 "$f" | grep -q '^# Managed by Pyo'; then
-    echo "Note: $f isn't Pyo's, so it's left alone. On this kernel, containers may hang." >&2
     return 0
   fi
   cat > "$f" <<'PYO_APPARMOR_PROFILE'

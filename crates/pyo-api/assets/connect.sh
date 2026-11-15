@@ -917,8 +917,6 @@ apparmor_workaround() {
   kv=$(uname -r); maj=${kv%%.*}; min=${kv#*.}; min=${min%%.*}
   [ "$maj" -gt 6 ] || { [ "$maj" -eq 6 ] && [ "$min" -ge 17 ]; } || return 0
   if [ -f "$f" ] && ! head -n1 "$f" | grep -q '^# Managed by Pyo'; then
-    echo "Note: $f isn't Pyo's, so it's left alone. On this kernel, containers may hang:" >&2
-    echo "  https://github.com/containerd/containerd/issues/14485" >&2
     return 0
   fi
   cat > "$f" <<'PYO_APPARMOR_PROFILE'
@@ -1103,11 +1101,6 @@ else
   k3s_memory_refresh later
   # k3s finds a newly installed NVIDIA toolkit only when it starts.
   if [ -n "$REGISTRY" ] || [ -n "$GPU_TOOLKIT_NEW" ] || [ -n "$K3S_MEMORY_CHANGED" ]; then systemctl restart k3s 2>/dev/null || true; fi
-  # An existing k3s keeps its settings. Say when it doesn't encrypt its
-  # Secrets (k3s secrets-encrypt enable turns that on).
-  if ! k3s secrets-encrypt status 2>/dev/null | grep -q "Encryption Status: Enabled"; then
-    echo "Note: this k3s doesn't encrypt secrets at rest. See https://pyo.dev/docs/encryption"
-  fi
 fi
 
 k3s_up() { k3s kubectl get nodes >/dev/null 2>&1; }
@@ -1139,11 +1132,6 @@ gateway_crds() {
   else
     q="?gatewayApi=1"
   fi
-  # TCP and UDP ports need the Gateway API's v1 routes (1.5 or later).
-  if [ -z "$q" ] && k3s kubectl get "$api" >/dev/null 2>&1 &&
-    [ "$(k3s kubectl get "$crd/tcproutes.gateway.networking.k8s.io" -o jsonpath='{.spec.versions[?(@.name=="v1")].served}' 2>/dev/null || true)" != true ]; then
-    echo "Note: this cluster's Gateway API is older than 1.5, so Pyo's proxied TCP and UDP ports won't work." >&2
-  fi
   # Envoy Gateway already running without its CRDs: restart it once they're in.
   k3s kubectl get "$crd/backends.gateway.envoyproxy.io" >/dev/null 2>&1 || restart=1
   for i in 1 2 3 4; do
@@ -1170,25 +1158,32 @@ server_minor() {
 # longer to check the policy than it gives a write by default (34 s): each
 # try asks for 2 minutes (the API server caps that at its own limit), as a
 # server-side apply (one request per object, without a copy of it in an
-# annotation), and tries go on for 5 minutes. Only Kubernetes older than
-# 1.30 (it has no admission policies) goes on without the policy.
+# annotation), and tries go on for 5 minutes, with a progress line. Only
+# Kubernetes older than 1.30 (it has no admission policies) goes on without
+# the policy, quietly.
 apply_agent() {
-  local minor tries=0 delay=5 start=$SECONDS until=$((SECONDS + 300))
+  local minor i delay=5 until=$((SECONDS + 300))
   echo "Installing the Pyo agent…"
   while :; do
-    tries=$((tries + 1))
     if k3s kubectl get --raw=/readyz --request-timeout=20s >/dev/null 2>&1 &&
       k3s kubectl apply --server-side --force-conflicts --field-manager=pyo --request-timeout=120s -f "$MANIFEST" >/dev/null; then
+      progress_end
       return 0
     fi
     minor=$(server_minor)
     if [ -n "$minor" ] && [ "$minor" -lt 30 ]; then
-      echo "Note: this Kubernetes is 1.$minor, older than 1.30, so the agent's admission policy isn't enforced. Its roles still apply."
+      progress_end
       return 0
     fi
-    [ "$SECONDS" -lt "$until" ] || return 1
-    echo "Kubernetes hasn't taken them yet (try $tries, $((SECONDS - start))s so far). Trying again in ${delay}s…" >&2
-    sleep "$delay"
+    if [ "$SECONDS" -ge "$until" ]; then
+      progress_end
+      return 1
+    fi
+    [ -n "${PROGRESS_MSG:-}" ] || progress_start "Still installing the Pyo agent…"
+    for ((i = 0; i < delay; i++)); do
+      sleep 1
+      progress_tick
+    done
     delay=$((delay * 2 > 30 ? 30 : delay * 2))
   done
 }
