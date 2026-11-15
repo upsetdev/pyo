@@ -143,16 +143,31 @@ function DeploymentPage() {
   const retry = () => app && go(api.deploy(app.id, { trigger: "retry" }));
   const redeploy = () => app && go(api.deploy(app.id, { trigger: "redeploy" }));
 
+  // A failure the settings can fix: where to fix it, beside "Try again".
+  const fix =
+    failed && app ? FIX[d.failure?.reason ?? ""] : undefined;
+
   // The one obvious next step.
   const primary = active ? (
     <Button variant="secondary" size="sm" onClick={() => actions.cancel(d)}>
       <StopIcon size={13} /> Cancel
     </Button>
   ) : failed || d.status === "cancelled" ? (
-    <Button size="sm" disabled={busy || !app} onClick={retry}>
-      <ArrowClockwiseIcon size={13} /> Try again
-    </Button>
-  ) : current && domain ? (
+    <>
+      {fix && app ? (
+        <ButtonLink
+          href={servicePath(app.id, fix.tab)}
+          size="sm"
+          variant="secondary"
+        >
+          {fix.label}
+        </ButtonLink>
+      ) : null}
+      <Button size="sm" disabled={busy || !app} onClick={retry}>
+        <ArrowClockwiseIcon size={13} /> Try again
+      </Button>
+    </>
+  ) : current && url ? (
     <a
       href={url}
       target="_blank"
@@ -161,6 +176,10 @@ function DeploymentPage() {
     >
       Visit <ArrowUpRightIcon size={12} weight="bold" />
     </a>
+  ) : current && app && d.status === "succeeded" && app.ports.length ? (
+    <ButtonLink href={servicePath(app.id, "domains")} size="sm">
+      Add a domain
+    </ButtonLink>
   ) : null;
 
   return (
@@ -285,6 +304,13 @@ function DeploymentPage() {
     </Page>
   );
 }
+
+/** Failures the service's settings can fix, and the tab that has them. */
+const FIX: Record<string, { label: string; tab: string }> = {
+  HealthCheckFailing: { label: "Edit health check", tab: "resources" },
+  OOMKilled: { label: "Edit resources", tab: "resources" },
+  Unschedulable: { label: "Edit resources", tab: "resources" },
+};
 
 function Source({ d }: { d: Deployment }) {
   const src = d.source;
