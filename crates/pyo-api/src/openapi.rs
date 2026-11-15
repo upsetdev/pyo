@@ -81,6 +81,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::sandbox::api::resume,
         crate::sandbox::api::extend,
         crate::sandbox::api::token,
+        crate::sandbox::api::open_port,
         crate::sandbox::api::list_servers,
         crate::sandbox::api::add_server,
         crate::sandbox::api::remove_server,

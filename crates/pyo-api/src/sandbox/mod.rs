@@ -777,6 +777,51 @@ async fn lifecycle(
     view(s, &f).await
 }
 
+/// Opens a sandbox port on its server's edge proxy and returns its URL. A
+/// public port answers anyone. A private one needs a sandbox token, which
+/// a browser can bring once as `?pyo_token=`.
+pub async fn open_port(
+    s: &AppState,
+    user: &User,
+    id: &str,
+    port: u16,
+    public: bool,
+) -> ApiResult<Value> {
+    if port == 0 {
+        return Err(ApiError::bad_request("The port must be 1 to 65535."));
+    }
+    let f = find(s, user, id, Need::Use).await?;
+    let (d, token, server) = f.daemon(s).await?;
+    let capability: Option<Value> =
+        sqlx::query_scalar("SELECT capability FROM pyo.sandbox_servers WHERE id = $1")
+            .bind(&server)
+            .fetch_optional(&s.db)
+            .await?
+            .flatten();
+    let cap: proto::CapabilityReport = capability
+        .and_then(|c| serde_json::from_value(c).ok())
+        .unwrap_or_default();
+    let Some(url) = cap.port_url(id, port) else {
+        return Err(ApiError::conflict(
+            "The sandbox's server has no edge proxy, so its ports can't be reached from outside yet. Reach the port from inside the sandbox with exec.",
+        ));
+    };
+    let st = d
+        .sandbox(
+            &token,
+            &DaemonCommand::OpenPort {
+                id: id.to_owned(),
+                port,
+                public,
+            },
+        )
+        .await
+        .map_err(daemon_error)?;
+    let mut c = s.db.acquire().await?;
+    save_status(&mut c, &st).await?;
+    Ok(json!({ "url": url, "port": port, "public": public }))
+}
+
 /// A new client token for a sandbox: the SDK asks before the old one runs
 /// out.
 pub async fn token(s: &AppState, user: &User, id: &str) -> ApiResult<Connection> {
