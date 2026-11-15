@@ -5,8 +5,6 @@ import {
   WarningCircleIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
-import { siHetzner } from "simple-icons";
-import { BrandMark } from "~/components/pyo/common";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
 import { Badge, type Tone } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -25,7 +23,6 @@ import type {
   CloudServerState,
 } from "~/lib/pyo/types";
 
-export const HETZNER_LOGO = siHetzner;
 const DOCS = `${site.docsUrl}/hetzner`;
 
 /** "€4.29" */
@@ -126,12 +123,7 @@ export function HetznerPanel() {
   const [removing, setRemoving] = useState(false);
   const [deleting, setDeleting] = useState<CloudServer | null>(null);
   const servers = s.cloudServers.filter((c) => c.teamId === s.currentTeamId);
-  const title = (
-    <span className="flex items-center gap-2">
-      <BrandMark icon={HETZNER_LOGO} size={15} />
-      Hetzner
-    </span>
-  );
+  const title = "Hetzner";
   const description = "For this team. Pyo makes servers in your Hetzner project.";
   const save = async () => {
     setBusy(true);
