@@ -51,6 +51,10 @@ const TS_PEER: &str = "100.100.0.2";
 /// A subnet routed over the "tailnet", so only the `tailscale0` rule
 /// stops it.
 const TS_ROUTED: &str = "44.31.0.2";
+/// A private LAN next to the host (RFC1918), on its own veth in the same
+/// namespace, so the `blocked` set has something real to stop.
+const LAN_HOST: &str = "10.254.0.1";
+const LAN_PEER: &str = "10.254.0.2";
 const LISTEN_PORT: u16 = 8080;
 
 fn enabled() -> bool {
@@ -205,7 +209,11 @@ impl FakeTailnet {
              && ip -n {NS} addr add {TS_ROUTED}/24 dev ts-peer \
              && ip -n {NS} link set ts-peer up && ip -n {NS} link set lo up \
              && ip -n {NS} route add default via {TS_HOST} \
-             && ip route add 44.31.0.0/24 dev tailscale0"
+             && ip route add 44.31.0.0/24 dev tailscale0 \
+             && ip link add pyo-e2e-lan type veth peer name lan-peer \
+             && ip link set lan-peer netns {NS} \
+             && ip addr add {LAN_HOST}/24 dev pyo-e2e-lan && ip link set pyo-e2e-lan up \
+             && ip -n {NS} addr add {LAN_PEER}/24 dev lan-peer && ip -n {NS} link set lan-peer up"
         ));
         let child = Command::new("ip")
             .args(["netns", "exec", NS, "busybox", "nc", "-ll", "-p"])
@@ -219,7 +227,7 @@ impl FakeTailnet {
 
     fn down() {
         let _ = sh(
-            "ip link del tailscale0 2>/dev/null; ip netns del pyo-net-e2e 2>/dev/null; ip route del 44.31.0.0/24 2>/dev/null",
+            "ip link del tailscale0 2>/dev/null; ip link del pyo-e2e-lan 2>/dev/null; ip netns del pyo-net-e2e 2>/dev/null; ip route del 44.31.0.0/24 2>/dev/null",
         );
     }
 }
@@ -490,17 +498,27 @@ async fn sandbox_networking() {
     // The host answers on SSH. A sandbox must not.
     assert!(must(&format!("busybox nc -w 3 {host} 22 </dev/null; echo rc=$?")).contains("SSH"));
     assert!(
-        sh(&format!("busybox nc -w 3 {gw} 53 </dev/null")).0,
-        "the host reaches {gw}:53"
+        must(&format!(
+            "busybox nc -w 3 {LAN_PEER} {LISTEN_PORT} </dev/null"
+        ))
+        .contains("hello"),
+        "the host reaches the fake LAN"
     );
-    let blocked = [
+    // A real gateway may not answer on 53 (Azure's doesn't), and then
+    // there's nothing to check there.
+    let gw_answers = sh(&format!("busybox nc -w 3 {gw} 53 </dev/null")).0;
+    println!("net-e2e the host reaches its gateway {gw}:53: {gw_answers}");
+    let mut blocked = vec![
         ("the host", host.as_str(), 22),
-        ("the host's gateway (RFC1918)", gw.as_str(), 53),
+        ("a LAN next to the host (RFC1918)", LAN_PEER, LISTEN_PORT),
         ("cloud metadata", "169.254.169.254", 80),
         ("the tailnet", TS_PEER, LISTEN_PORT),
         ("a subnet behind tailscale0", TS_ROUTED, LISTEN_PORT),
         ("the gateway on the tap", "198.18.0.1", 22),
     ];
+    if gw_answers {
+        blocked.push(("the host's gateway", gw.as_str(), 53));
+    }
     for (what, addr, port) in blocked {
         let ok = connects(&mgr, &a.id, addr, port).await;
         println!("net-e2e blocked {what} {addr}:{port}: {}", !ok);
