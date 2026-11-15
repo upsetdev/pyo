@@ -1159,6 +1159,14 @@ async fn settle_service(
             // Its domains route now (TLS status from the agent's reports).
             crate::routes::mark_routed(tx, service_id, None).await?;
             pin_image(tx, deployment_id, data).await?;
+            // A static site has no replicas of its own: its runtime says
+            // it's served as files (a service's comes with heartbeats).
+            sqlx::query("UPDATE pyo.services SET runtime = '{\"desired\":0,\"readyReplicas\":0,\"cpuMillis\":0,\"memoryMi\":0,\"restarts\":0,\"replicas\":[],\"static\":true}'
+                          WHERE id = $1 AND EXISTS (SELECT 1 FROM pyo.deployments d WHERE d.id = $2 AND jsonb_typeof(d.spec->'site') = 'object')")
+                .bind(service_id)
+                .bind(deployment_id)
+                .execute(&mut **tx)
+                .await?;
             // pyo-static goes once no site there needs it.
             crate::sites::sync(tx, &cluster_id).await?;
             let rollback = data["rollbackOf"].is_string();
