@@ -471,7 +471,8 @@ REGISTRIES
 
 # ── The release ─────────────────────────────────────────────────────────────
 
-# Only GitHub, or the configured mirror, and HTTPS unless the mirror isn't.
+# Only GitHub and api.pyo.dev, or the configured mirror, and HTTPS unless the
+# mirror isn't.
 fetch() {
   local proto='=https'
   case "$SOURCE" in http://*) proto='=http,https' ;; esac
@@ -479,13 +480,39 @@ fetch() {
 }
 
 # The release this script installs: the latest, or --version's (GitHub's
-# description of it, with its assets' download addresses).
+# description of it, with its assets' download addresses). The latest comes
+# from api.pyo.dev first, which keeps a copy of GitHub's answer and still
+# has it when GitHub fails or limits this address, and from GitHub next. A
+# mirror (PYO_UPDATE_SOURCE) is the only place asked. Each gets a few tries,
+# and why each failed goes to stderr. It sends no install ID and no
+# version, so a lookup counts nothing.
 release_meta() {
+  local urls=() url i out why
   if [ -n "$VERSION" ]; then
-    fetch "$SOURCE/releases/tags/v$VERSION"
+    urls=("$SOURCE/releases/tags/v$VERSION")
   else
-    fetch "$SOURCE/releases/latest"
+    [ "$SOURCE" != https://api.github.com/repos/upsetdev/pyo ] || urls=(https://api.pyo.dev/v1/releases/latest)
+    urls+=("$SOURCE/releases/latest")
   fi
+  for url in "${urls[@]}"; do
+    for i in 1 2 3; do
+      if out=$(fetch --connect-timeout 10 --max-time 30 "$url" 2>&1); then
+        if [[ $out == *'"tag_name"'* ]]; then
+          printf '%s\n' "$out"
+          return 0
+        fi
+        why="not a release's description"
+      else
+        why=${out##*$'\n'}
+        why=${why:-no answer}
+      fi
+      # A release that isn't there won't be on another try.
+      [[ $why != *"error: 404"* ]] || break
+      [ "$i" = 3 ] || sleep "$((i * 2))"
+    done
+    echo "  $url: $why" >&2
+  done
+  return 1
 }
 
 # One of the release's assets' download address.
@@ -552,9 +579,12 @@ fetch_release() {
     what="the latest Pyo release"
   fi
   say "Looking up $what"
-  meta=$(release_meta 2>/dev/null) || {
-    [ -n "$VERSION" ] && fail "There's no release $VERSION. See https://github.com/upsetdev/pyo/releases."
-    fail "Couldn't reach $SOURCE to find the latest release."
+  meta=$(release_meta 2>"$WORK/lookup.log") || {
+    if [ -n "$VERSION" ] && grep -q "error: 404" "$WORK/lookup.log"; then
+      fail "There's no release $VERSION. See https://github.com/upsetdev/pyo/releases."
+    fi
+    cat "$WORK/lookup.log" >&2
+    fail "Couldn't look up $what. Tried the addresses above."
   }
   asset=$(printf '%s' "$meta" | asset_url 'release\.json')
   [ -n "$asset" ] || fail "$what has no release.json, so it can't be installed with this script."
