@@ -83,6 +83,9 @@ export function serverUse(x: SandboxServer) {
   return { used: Math.min(usable, c.memoryCommitted), total: usable };
 }
 
+/** What sandbox.sh takes for --edge-domain. */
+const EDGE_DOMAIN = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
+
 /**
  * Add a sandbox server: your own (a one-time code in one command) or one
  * bought at Hetzner, which comes later.
@@ -96,17 +99,24 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<{ id: string; name: string; command: string; expiresAt: number } | null>(null);
+  const [edge, setEdge] = useState("");
   const nameError = DNS_LABEL.test(name) ? "" : "Lowercase letters, digits and dashes.";
+  const edgeDomain = edge.trim().replace(/\.$/, "");
+  const edgeError = !edgeDomain || EDGE_DOMAIN.test(edgeDomain) ? "" : "A domain, like sbx.example.com.";
   const joined = result
     ? s.sandboxServers.find((x) => x.id === result.id && x.state !== "joining")
     : undefined;
 
   const add = async () => {
-    if (nameError || busy) return;
+    if (nameError || edgeError || busy) return;
     setBusy(true);
     setError("");
     try {
-      const r = await sandboxApi.addServer({ teamId: s.currentTeamId, name });
+      const r = await sandboxApi.addServer({
+        teamId: s.currentTeamId,
+        name,
+        ...(edgeDomain ? { edgeDomain } : {}),
+      });
       setResult({ id: r.server?.id ?? "", name: r.server?.name ?? name, command: r.command, expiresAt: r.expiresAt });
     } catch (e) {
       setError((e as Error).message);
@@ -178,18 +188,36 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
         </div>
       ) : (
         <form
-          className="flex flex-wrap items-end gap-3"
+          className="space-y-3"
           onSubmit={(e) => {
             e.preventDefault();
             void add();
           }}
         >
-          <Field label="Name" error={nameError || error || undefined} className="min-w-0 flex-1 basis-48">
-            {(p) => (
-              <Input {...p} mono value={name} onChange={(e) => setName(e.target.value.toLowerCase())} />
-            )}
-          </Field>
-          <Button type="submit" size="sm" disabled={busy || !!nameError || !s.tailscale} className={nameError || error ? "mb-5" : ""}>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Name" error={nameError || error || undefined}>
+              {(p) => (
+                <Input {...p} mono value={name} onChange={(e) => setName(e.target.value.toLowerCase())} />
+              )}
+            </Field>
+            <Field
+              label="Edge domain"
+              optional
+              hint="Serves sandbox ports. Point its wildcard at the server."
+              error={edgeError || undefined}
+            >
+              {(p) => (
+                <Input
+                  {...p}
+                  mono
+                  placeholder="sbx.example.com"
+                  value={edge}
+                  onChange={(e) => setEdge(e.target.value.toLowerCase())}
+                />
+              )}
+            </Field>
+          </div>
+          <Button type="submit" size="sm" disabled={busy || !!nameError || !!edgeError || !s.tailscale}>
             {busy ? "Preparing…" : "Get the command"}
           </Button>
         </form>

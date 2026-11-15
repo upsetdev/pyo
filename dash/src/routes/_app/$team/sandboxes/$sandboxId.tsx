@@ -344,6 +344,19 @@ function Ports({ x, canUse, onChange }: { x: Sandbox; canUse: boolean; onChange:
       setBusy(false);
     }
   };
+  const [closing, setClosing] = useState<number | null>(null);
+  const close = async (p: number) => {
+    setClosing(p);
+    try {
+      await sandboxApi.closePort(x.id, p);
+      toast({ title: `Closed port ${p}` });
+      onChange();
+    } catch (e) {
+      toast({ tone: "error", title: (e as Error).message });
+    } finally {
+      setClosing(null);
+    }
+  };
   // A private port needs a sandbox token, which the edge takes once in the URL.
   const visit = async (p: { url: string | null; public: boolean }) => {
     if (!p.url) return;
@@ -366,19 +379,32 @@ function Ports({ x, canUse, onChange }: { x: Sandbox; canUse: boolean; onChange:
               <span className="font-mono">{p.port}</span>
               <Badge>{p.public ? "Public" : "Private"}</Badge>
             </span>,
-            p.url ? (
-              <button
-                key="u"
-                type="button"
-                onClick={() => void visit(p)}
-                className="inline-flex items-center gap-1 font-mono text-[11.5px] text-primary hover:text-primary/80"
-              >
-                <span className="truncate">{p.url}</span>
-                <ArrowSquareOutIcon size={12} className="shrink-0" />
-              </button>
-            ) : (
-              "—"
-            ),
+            <span key="u" className="inline-flex max-w-full items-center gap-3">
+              {p.url ? (
+                <button
+                  type="button"
+                  onClick={() => void visit(p)}
+                  className="inline-flex min-w-0 items-center gap-1 font-mono text-[11.5px] text-primary hover:text-primary/80"
+                >
+                  <span className="truncate">{p.url}</span>
+                  <ArrowSquareOutIcon size={12} className="shrink-0" />
+                </button>
+              ) : (
+                "—"
+              )}
+              {canUse && live ? (
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={closing === p.port}
+                  onClick={() => void close(p.port)}
+                  className="-my-1"
+                  aria-label={`Close port ${p.port}`}
+                >
+                  {closing === p.port ? "Closing…" : "Close"}
+                </Button>
+              ) : null}
+            </span>,
           ])}
         />
       ) : null}

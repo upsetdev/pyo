@@ -180,13 +180,18 @@ export const sandboxApi = {
       `/api/v1/sandboxes/${enc(id)}/ports`,
       { method: "POST", body: { port, public: isPublic } },
     ),
+  closePort: (id: string, port: number) =>
+    request<{ port: number; closed: boolean }>(
+      `/api/v1/sandboxes/${enc(id)}/ports/${port}`,
+      { method: "DELETE" },
+    ),
   token: (id: string) =>
     request<Connection>(`/api/v1/sandboxes/${enc(id)}/token`, { method: "POST" }),
   servers: (team: string) =>
     request<{ servers: SandboxServer[] }>(
       `/api/v1/sandbox-servers?${new URLSearchParams({ team })}`,
     ),
-  addServer: (body: { teamId?: string; name: string }) =>
+  addServer: (body: { teamId?: string; name: string; edgeDomain?: string }) =>
     request<{ server: SandboxServer | null; command: string; expiresAt: number }>(
       "/api/v1/sandbox-servers",
       { method: "POST", body },
