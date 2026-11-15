@@ -2032,6 +2032,11 @@ pub(crate) enum Op {
         #[serde(default)]
         usage: Option<bool>,
     },
+    /// Set a team's sandbox limits: how many sandboxes it may have at once, their CPUs, memory and disk together, and the longest lifetime. Only the installation's admin can do this.
+    SetSandboxLimits {
+        team_id: String,
+        limits: crate::sandbox::limits::Limits,
+    },
     /// Look for a new release now.
     CheckForUpdates {},
     /// Update to the latest release found (the version the admin saw).
@@ -2747,6 +2752,7 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::RunBackup {}
             | Op::SaveObservabilitySettings { .. }
             | Op::SaveUpdateSettings { .. }
+            | Op::SetSandboxLimits { .. }
             | Op::CheckForUpdates {}
             | Op::StartUpdate { .. }
             | Op::RemoveEmailSettings {}
@@ -2918,6 +2924,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SendTestEmail {}
         | Op::SaveObservabilitySettings { .. }
         | Op::SaveUpdateSettings { .. }
+        | Op::SetSandboxLimits { .. }
         | Op::CheckForUpdates {}
         | Op::StartUpdate { .. } => ("Settings", ""),
         Op::SetObservability { .. } => ("Observability", ""),
@@ -3477,6 +3484,30 @@ async fn apply(
                 .execute(&mut **tx)
                 .await?;
             log_setting(tx, user, "email", "Changed the email settings").await?;
+            Ok(ok)
+        }
+        Op::SetSandboxLimits { team_id, limits } => {
+            require_admin(user)?;
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pyo.teams WHERE id = $1)")
+                    .bind(&team_id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            if !exists {
+                return Err(ApiError::not_found("Team"));
+            }
+            crate::sandbox::limits::save(tx, &team_id, &limits).await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "sandbox.limits",
+                "info",
+                "Changed the team's sandbox limits",
+                json!({ "kind": "team", "id": team_id, "label": "Sandbox limits" }),
+                json!({}),
+            )
+            .await?;
             Ok(ok)
         }
         Op::SaveUpdateSettings {
