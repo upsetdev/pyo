@@ -83,7 +83,7 @@ async fn message(s: &AppState, who: (&User, &str), msg: Value) -> Option<Value> 
     let result = match method {
         "initialize" => Ok(initialize(&params)),
         "ping" => Ok(json!({})),
-        "tools/list" => list_tools(who.0, &params),
+        "tools/list" => list_tools(who.0, sandboxes_on(s, who.0).await, &params),
         "tools/call" => Ok(call(s, who, &params).await),
         other => Err((-32601, format!("Method not found: {other}"))),
     };
@@ -155,6 +155,9 @@ fn curated() -> Vec<Value> {
         json!({ "name": "set_static_serving", "title": "Set static serving", "description": "For a service whose build is a static site: serve its build as static files from the cluster's shared static server (\"static\", the default), or run it as a service of its own (\"service\"). Takes effect with the next deploy.", "inputSchema": schema(json!({ "service_id": service, "serve_as": { "type": "string", "enum": ["static", "service"] } }), &["service_id", "serve_as"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "stop_service", "title": "Stop service", "description": "Stop the service (scale to zero). Settings and data are kept.", "inputSchema": schema(json!({ "service_id": service }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
     ]
+    .into_iter()
+    .chain(crate::sandbox::mcp::defs())
+    .collect()
 }
 
 // ── The catalog: written tools, then the API reference's ─────────────────────
@@ -173,6 +176,9 @@ const COVERED: &[(&str, &str)] = &[
     ("stopService", "stop_service"),
     ("createProject", "create_project"),
     ("getServiceLogs", "get_service_logs"),
+    ("createSandbox", "create_sandbox"),
+    ("pauseSandbox", "pause_sandbox"),
+    ("deleteSandbox", "delete_sandbox"),
 ];
 
 /// Endpoints with no tool: the dashboard's own helpers. getMyAddress is the
@@ -192,6 +198,11 @@ const NOT_TOOLS: &[&str] = &[
     // Platform imports stay with the dashboard and the CLI as a whole.
     "getPlatformImport",
     "listPlatformImports",
+    // A token for talking to a sandbox server directly: assistants go
+    // through Pyo's sandbox tools instead.
+    "createSandboxToken",
+    // Its command carries a Tailscale key, for a person to run.
+    "addSandboxServer",
 ];
 
 /// Tools whose generated name would clash or say too little.
@@ -220,6 +231,14 @@ const CURATED_RUNS: &[(&str, &str)] = &[
     ("create_service", "createService"),
     ("add_domain", "saveService"),
     ("set_static_serving", "saveService"),
+    ("create_sandbox", "createSandbox"),
+    ("run_code", "createSandboxToken"),
+    ("exec", "createSandboxToken"),
+    ("read_file", "createSandboxToken"),
+    ("write_file", "createSandboxToken"),
+    ("open_port", "createSandboxToken"),
+    ("pause_sandbox", "pauseSandbox"),
+    ("delete_sandbox", "deleteSandbox"),
 ];
 
 /// Operations that hand back a secret: said so in their description. They
@@ -241,6 +260,8 @@ pub(crate) struct Tool {
     def: Value,
     access: KeyAccess,
     run: Run,
+    /// Listed only once the user's teams can use a sandbox server.
+    sandbox: bool,
 }
 
 impl Tool {
@@ -370,6 +391,7 @@ fn build_catalog() -> Vec<Tool> {
                 .unwrap_or_else(|| panic!("{name} has no entry in CURATED_RUNS"))
                 .1;
             Tool {
+                sandbox: crate::sandbox::mcp::TOOLS.contains(&name.as_str()),
                 def,
                 access: access_for(behind),
                 run: Run::Written,
@@ -416,6 +438,7 @@ fn build_catalog() -> Vec<Tool> {
             }),
             access: access_of(e["x-pyo-access"].as_str().unwrap_or("full")),
             run: Run::Endpoint(id.clone()),
+            sandbox: e["tags"][0] == "Sandboxes",
         });
     }
 
@@ -460,6 +483,7 @@ fn build_catalog() -> Vec<Tool> {
                 def: json!({ "name": renamed(name), "title": o["title"], "description": description, "inputSchema": input, "annotations": annotations }),
                 access: access_of(o["x-pyo-access"].as_str().unwrap_or("full")),
                 run: Run::Op(name.clone()),
+                sandbox: tag == "Sandboxes",
             },
         ));
     }
@@ -487,11 +511,23 @@ fn allowed(user: &User) -> KeyAccess {
     user.key.as_ref().map_or(KeyAccess::Full, |k| k.access)
 }
 
+/// Whether the user's teams can use a sandbox server, so the sandbox tools
+/// show.
+async fn sandboxes_on(s: &AppState, user: &User) -> bool {
+    match crate::sandbox::teams_of(&s.db, user).await {
+        Ok(teams) => crate::sandbox::available(&s.db, &teams)
+            .await
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 /// tools/list: the tools the connection's access allows, a page at a time.
-fn list_tools(user: &User, params: &Value) -> Result<Value, (i64, String)> {
+/// The sandbox tools only once there's a sandbox server.
+fn list_tools(user: &User, sandboxes: bool, params: &Value) -> Result<Value, (i64, String)> {
     let mine: Vec<&Tool> = catalog()
         .iter()
-        .filter(|t| allowed(user).allows(t.access))
+        .filter(|t| allowed(user).allows(t.access) && (sandboxes || !t.sandbox))
         .collect();
     let start = match params["cursor"].as_str() {
         None => 0,
@@ -634,6 +670,26 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "getCloudOptions" => {
             json_of(crate::cloud::options(st(), me(), Query(args_as(args)?)).await)
         }
+        "listSandboxes" => {
+            json_of(crate::sandbox::api::list(st(), me(), Query(args_as(args)?)).await)
+        }
+        "getSandbox" => json_of(crate::sandbox::api::get_one(st(), me(), path_id()?).await),
+        "resumeSandbox" => json_of(crate::sandbox::api::resume(st(), me(), path_id()?).await),
+        "extendSandbox" => {
+            json_of(crate::sandbox::api::extend(st(), me(), path_id()?, Json(args_as(args)?)).await)
+        }
+        "listSandboxServers" => {
+            json_of(crate::sandbox::api::list_servers(st(), me(), Query(args_as(args)?)).await)
+        }
+        "removeSandboxServer" => {
+            json_of(crate::sandbox::api::remove_server(st(), me(), path_id()?).await)
+        }
+        "listSandboxTemplates" => {
+            json_of(crate::sandbox::api::list_templates(st(), me(), Query(args_as(args)?)).await)
+        }
+        "createSandboxTemplate" => {
+            json_of(crate::sandbox::api::create_template(st(), me(), Json(args_as(args)?)).await)
+        }
         other => Err(format!("No tool runs {other}")),
     }
 }
@@ -656,6 +712,9 @@ fn find_tool(user: &User, name: &str) -> Result<&'static Tool, String> {
 
 async fn dispatch(s: &AppState, user: &User, name: &str, args: &Value) -> Result<Value, String> {
     let t = find_tool(user, name)?;
+    if t.sandbox && !sandboxes_on(s, user).await {
+        return Err(format!("Unknown tool {name}"));
+    }
     match &t.run {
         Run::Written => run_tool(s, user, t.name(), args).await,
         Run::Op(op) => {
@@ -814,6 +873,9 @@ fn structured(tool: &str, v: Value) -> Value {
 }
 
 async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result<Value, String> {
+    if crate::sandbox::mcp::TOOLS.contains(&name) {
+        return crate::sandbox::mcp::run(s, user, name, args).await;
+    }
     let snap = snapshot::build(&s.db, user, &s.config.agent_api_url)
         .await
         .map_err(err)?;
@@ -1741,12 +1803,12 @@ mod tests {
 
     #[test]
     fn access_decides_what_is_listed_and_run() {
-        let names = |a: Option<KeyAccess>| -> Vec<String> {
+        let names_with = |a: Option<KeyAccess>, sandboxes: bool| -> Vec<String> {
             let u = user(a);
             let mut out = vec![];
             let mut cursor: Option<String> = None;
             loop {
-                let page = list_tools(&u, &json!({ "cursor": cursor })).unwrap();
+                let page = list_tools(&u, sandboxes, &json!({ "cursor": cursor })).unwrap();
                 assert!(page["tools"].as_array().unwrap().len() <= PAGE);
                 out.extend(
                     page["tools"]
@@ -1762,6 +1824,7 @@ mod tests {
             }
             out
         };
+        let names = |a: Option<KeyAccess>| names_with(a, true);
         let read = names(Some(KeyAccess::Read));
         let deploy = names(Some(KeyAccess::Deploy));
         let full = names(Some(KeyAccess::Full));
@@ -1793,12 +1856,47 @@ mod tests {
         let e = find_tool(&user(Some(KeyAccess::Deploy)), "delete_service").unwrap_err();
         assert!(e.contains("can only deploy"), "{e}");
         assert!(find_tool(&user(Some(KeyAccess::Read)), "get_metrics").is_ok());
-        assert!(list_tools(&user(None), &json!({ "cursor": "x" })).is_err());
-        // A sandboxes key reads, and changes nothing else.
+        assert!(list_tools(&user(None), true, &json!({ "cursor": "x" })).is_err());
+
+        // Sandbox tools: hidden until a team has a sandbox server, and for
+        // a sandboxes key, those and reads only.
+        let sandbox_tools = [
+            "create_sandbox",
+            "run_code",
+            "exec",
+            "read_file",
+            "write_file",
+            "open_port",
+            "pause_sandbox",
+            "delete_sandbox",
+            "list_sandboxes",
+            "resume_sandbox",
+            "extend_sandbox",
+            "list_sandbox_templates",
+        ];
+        let without = names_with(None, false);
+        for t in sandbox_tools {
+            assert!(full.contains(&t.into()), "{t}");
+            assert!(!without.contains(&t.into()), "{t} shows without a server");
+        }
+        assert!(without.contains(&"list_services".into()));
         let sbx = names(Some(KeyAccess::Sandboxes));
-        assert!(sbx.contains(&"get_state".into()) && !sbx.contains(&"scale_service".into()));
+        for t in sandbox_tools {
+            assert!(sbx.contains(&t.into()), "{t}");
+        }
+        assert!(sbx.contains(&"get_state".into()));
+        assert!(
+            !sbx.contains(&"scale_service".into())
+                && !sbx.contains(&"remove_sandbox_server".into())
+        );
+        assert!(!deploy.contains(&"create_sandbox".into()) && !read.contains(&"exec".into()));
         let e = find_tool(&user(Some(KeyAccess::Sandboxes)), "delete_service").unwrap_err();
         assert!(e.contains("can only use sandboxes"), "{e}");
+        // The token and the join command stay out of assistants.
+        assert!(
+            !full.contains(&"create_sandbox_token".into())
+                && !full.contains(&"add_sandbox_server".into())
+        );
     }
 
     #[test]
