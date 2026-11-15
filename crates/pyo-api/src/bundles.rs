@@ -283,6 +283,32 @@ pub async fn sync_static(
     sync_on_demand(tx, cluster_id, static_bundle(), on).await
 }
 
+/// Whether a static deploy can't go to the cluster until its connect
+/// command runs: its install is outdated (an older admission policy, which
+/// refuses this Pyo's pyo-static) and pyo-static isn't running there yet.
+/// Without this, the deploy would wait minutes for a server that never
+/// starts.
+pub async fn static_blocked(
+    tx: &mut Transaction<'_, Postgres>,
+    cluster_id: &str,
+) -> ApiResult<bool> {
+    let install = crate::install::state_of(&mut **tx, cluster_id).await?;
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM pyo.cluster_bundles WHERE cluster_id = $1 AND bundle = $2",
+    )
+    .bind(cluster_id)
+    .bind(STATIC_ID)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(static_needs_connect(&install, state.as_deref()))
+}
+
+/// [`static_blocked`]'s decision: an install that's updating itself gets
+/// there by itself, and one that already runs pyo-static keeps serving.
+fn static_needs_connect(install: &str, bundle: Option<&str>) -> bool {
+    install == "outdated" && bundle != Some("applied")
+}
+
 /// A bundle that runs only while something on the cluster needs it:
 /// installed (and kept current) while `on`, removed after.
 async fn sync_on_demand(
@@ -597,6 +623,17 @@ pub async fn reported(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_deploys_wait_for_the_connect_command_only_when_they_must() {
+        assert!(static_needs_connect("outdated", None));
+        assert!(static_needs_connect("outdated", Some("failed")));
+        assert!(static_needs_connect("outdated", Some("installing")));
+        // pyo-static from before the update keeps serving.
+        assert!(!static_needs_connect("outdated", Some("applied")));
+        assert!(!static_needs_connect("current", None));
+        assert!(!static_needs_connect("updating", None));
+    }
 
     #[test]
     fn a_services_waf_shows_its_engine_and_its_policy() {

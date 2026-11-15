@@ -646,15 +646,14 @@ async fn command_result(
     if command["kind"] == json!("backup") {
         crate::teambackup::finished(&mut tx, &command, &r).await?;
     }
-    crate::bundles::finished(
-        &mut tx,
-        &cluster.id,
-        &id,
-        &command,
-        r.ok,
-        r.message.as_deref(),
-    )
-    .await?;
+    // Why it failed, as the team reads it (the command keeps the agent's words).
+    let install = if r.ok {
+        String::new()
+    } else {
+        crate::install::state_of(&mut *tx, &cluster.id).await?
+    };
+    let shown = crate::install::shown(r.message.as_deref(), &install);
+    crate::bundles::finished(&mut tx, &cluster.id, &id, &command, r.ok, shown.as_deref()).await?;
     // Databases set up (or updated): the databases waiting for them go out.
     if r.ok
         && command["kind"] == json!("apply_bundle")
@@ -662,16 +661,10 @@ async fn command_result(
     {
         crate::databases::resend(&s, &mut tx, &cluster.id).await?;
     }
-    crate::databases::finished(&mut tx, &cluster.id, &command, r.ok, r.message.as_deref()).await?;
+    crate::databases::finished(&mut tx, &cluster.id, &command, r.ok, shown.as_deref()).await?;
     if command["kind"] == json!("set_origin_pull") {
-        crate::certs::origin_pull_finished(
-            &mut tx,
-            &cluster.id,
-            &command,
-            r.ok,
-            r.message.as_deref(),
-        )
-        .await?;
+        crate::certs::origin_pull_finished(&mut tx, &cluster.id, &command, r.ok, shown.as_deref())
+            .await?;
         if !r.ok {
             crate::ops::log_activity(
                 &mut tx,
@@ -681,7 +674,7 @@ async fn command_result(
                 "warning",
                 &format!(
                     "Couldn't change mTLS: {}",
-                    r.message.as_deref().unwrap_or("the agent failed")
+                    shown.as_deref().unwrap_or("the agent failed")
                 ),
                 json!({ "kind": "cluster", "id": cluster.id, "label": cluster.id }),
                 json!({ "clusterId": cluster.id }),
@@ -689,15 +682,8 @@ async fn command_result(
             .await?;
         }
     }
-    crate::volumes::finished(&mut tx, &cluster.id, &command, r.ok, r.message.as_deref()).await?;
-    crate::routes::finished(
-        &mut tx,
-        &cluster.team_id,
-        &command,
-        r.ok,
-        r.message.as_deref(),
-    )
-    .await?;
+    crate::volumes::finished(&mut tx, &cluster.id, &command, r.ok, shown.as_deref()).await?;
+    crate::routes::finished(&mut tx, &cluster.team_id, &command, r.ok, shown.as_deref()).await?;
     // Volumes deleted with a service go once its objects are gone (or stay, if that failed).
     if command["kind"] == json!("delete_service") {
         crate::volumes::service_deleted(

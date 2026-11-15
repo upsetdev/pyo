@@ -259,6 +259,45 @@ fn token_stamp(token: &str) -> String {
 
 // ── Keeping a cluster's install current ────────────────────────────────────
 
+/// What an outdated install needs, as the cluster's settings say it (where
+/// the command is): shown with its "Update needed", and by what waits for it.
+pub const OUTDATED: &str = "This cluster's agent needs an update. Run the command under Refresh this cluster in the cluster's settings.";
+
+/// A deploy that needs what an outdated install can't do.
+pub fn outdated_deploy() -> String {
+    format!("{OUTDATED} Then deploy again.")
+}
+
+/// Whether an error the agent reported is the cluster's install refusing
+/// the write: its admission policy, or its roles (Kubernetes' "forbidden").
+pub fn refused_by_install(message: &str) -> bool {
+    message.contains("ValidatingAdmissionPolicy")
+        || message.contains(pyo_proto::bundles::POLICY_REFUSED)
+        || (message.contains(" is forbidden: ") && message.contains(" cannot "))
+}
+
+/// A command's error as the team reads it: a refusal while the cluster's
+/// install (`install`, its state) is outdated is [`OUTDATED`]'s to fix.
+pub fn shown(message: Option<&str>, install: &str) -> Option<String> {
+    match message {
+        Some(m) if install == "outdated" && refused_by_install(m) => Some(OUTDATED.into()),
+        m => m.map(str::to_owned),
+    }
+}
+
+/// The cluster's install as its last heartbeat found: "current",
+/// "updating" or "outdated" (current when it never said).
+pub async fn state_of(db: impl sqlx::PgExecutor<'_>, cluster_id: &str) -> ApiResult<String> {
+    Ok(sqlx::query_scalar::<_, Option<String>>(
+        "SELECT capabilities->'agentInstall'->>'state' FROM pyo.clusters WHERE id = $1",
+    )
+    .bind(cluster_id)
+    .fetch_optional(db)
+    .await?
+    .flatten()
+    .unwrap_or_else(|| "current".into()))
+}
+
 /// The last refresh Pyo sent a cluster for the install it has now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LastRefresh {
@@ -399,6 +438,8 @@ pub async fn sync(
     let mut out = json!({ "state": state, "command": command(same_cluster) });
     if !message.is_empty() {
         out["message"] = json!(message);
+    } else if state == "outdated" {
+        out["message"] = json!(OUTDATED);
     }
     Ok((out, send))
 }
@@ -462,6 +503,36 @@ mod tests {
         let (state, message, send) = install_state(&missing, "h1", None);
         assert_eq!((state, send), ("outdated", false));
         assert!(message.contains("admission policy"));
+    }
+
+    /// The refusals a v0.2 install gave a v0.3 Pyo's deploys, and errors
+    /// that aren't the install's.
+    #[test]
+    fn refusals_by_the_install_are_told_apart() {
+        assert!(refused_by_install(
+            "HTTPRoute web-tn: admission webhook \"validation.policy\" denied the request: ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request: failed expression: gatewayAllowed"
+        ));
+        assert!(refused_by_install(
+            "clienttrafficpolicies.gateway.envoyproxy.io \"web-cdn\" is forbidden: User \"system:serviceaccount:pyo-system:pyo-agent\" cannot patch resource \"clienttrafficpolicies\""
+        ));
+        assert!(!refused_by_install("ImagePullBackOff: pull access denied"));
+        assert!(!refused_by_install(
+            "namespaces \"p\" is forbidden: unable to create new content in namespace p because it is being terminated"
+        ));
+        assert!(refused_by_install(&format!(
+            "Deployment pyo-static: {}. Run the cluster's connect command again.",
+            pyo_proto::bundles::POLICY_REFUSED
+        )));
+        assert!(outdated_deploy().starts_with(OUTDATED));
+        let refused = "ValidatingAdmissionPolicy 'pyo-agent' denied request";
+        assert_eq!(shown(Some(refused), "outdated").as_deref(), Some(OUTDATED));
+        assert_eq!(shown(Some(refused), "current").as_deref(), Some(refused));
+        assert_eq!(
+            shown(Some("timed out"), "outdated").as_deref(),
+            Some("timed out")
+        );
+        assert_eq!(shown(None, "outdated"), None);
+        assert!(OUTDATED.contains("Refresh this cluster"));
     }
 
     #[test]

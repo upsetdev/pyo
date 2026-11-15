@@ -587,6 +587,11 @@ pub async fn create(
     if let Some(site) = deploy_spec.site.take() {
         deploy_spec.site = crate::sites::site_for(tx, &spec, &site.deploy).await?;
     }
+    // One on a cluster whose install can't start pyo-static yet: its
+    // connect command first.
+    if deploy_spec.site.is_some() && crate::bundles::static_blocked(tx, &cluster_id).await? {
+        return Err(ApiError::conflict(crate::install::outdated_deploy()));
+    }
     // Its volumes as they are now, rollbacks included: a volume detached
     // (or attached) since isn't mounted (or is) by an older version.
     deploy_spec.volumes = volume_specs(&attached_volumes(tx, req.service_id).await?);
@@ -917,6 +922,38 @@ async fn release_waiting(state: &AppState) -> ApiResult<()> {
     Ok(())
 }
 
+/// A rollout that needs what the cluster's outdated install refuses.
+fn outdated_failure() -> DeploymentProgress {
+    let message = crate::install::outdated_deploy();
+    DeploymentProgress {
+        status: "failed".into(),
+        failure: Some(pyo_proto::Failure {
+            stage: "applying".into(),
+            reason: "AgentOutdated".into(),
+            message: message.clone(),
+        }),
+        logs: vec![pyo_proto::LogLine {
+            at: now_ms(),
+            level: "error".into(),
+            source: "pyo".into(),
+            message,
+        }],
+        ..Default::default()
+    }
+}
+
+/// A failure the agent reported, as the user reads it: a write the
+/// cluster's install refused, while that install is older than Pyo's, is
+/// the connect command's to fix (the agent's log line keeps Kubernetes'
+/// words).
+fn shown_failure(f: &mut pyo_proto::Failure, install: &str) {
+    if crate::install::shown(Some(&f.message), install).as_deref() == Some(crate::install::OUTDATED)
+    {
+        f.reason = "AgentOutdated".into();
+        f.message = crate::install::outdated_deploy();
+    }
+}
+
 fn not_ready_message(names: &[String]) -> String {
     let mins = DATABASE_WAIT_SECS / 60;
     match names {
@@ -1071,8 +1108,14 @@ pub async fn apply_progress(
         }
     }
     data["stageStartedAt"] = json!(now);
-    if let Some(f) = &p.failure {
-        data["failure"] = serde_json::to_value(f).unwrap_or_default();
+    if let Some(mut f) = p.failure.clone() {
+        if f.reason == "ApplyFailed" {
+            shown_failure(
+                &mut f,
+                &crate::install::state_of(&mut *tx, cluster_id).await?,
+            );
+        }
+        data["failure"] = serde_json::to_value(&f).unwrap_or_default();
     }
 
     let finished = is_final(&p.status);
@@ -1717,6 +1760,15 @@ pub async fn finish_build(
                 .bind(&data)
                 .execute(&mut *tx)
                 .await?;
+            // A cluster whose install can't start pyo-static yet: the
+            // deploy fails now, not after waiting for it.
+            if !spec["site"].is_null()
+                && crate::bundles::static_blocked(&mut tx, &cluster_id).await?
+            {
+                tx.commit().await?;
+                apply_progress(state, &cluster_id, &deployment_id, outdated_failure()).await?;
+                return Ok(None);
+            }
             // pyo-static on the cluster before the deploy that needs it (the
             // agent runs its commands in order).
             if !spec["site"].is_null() {
@@ -1846,6 +1898,47 @@ mod auto_health_tests {
     fn uses_the_services_port() {
         let s = json!({ "ports": [{ "containerPort": 3000 }], "healthCheck": { "type": "tcp", "port": 8080, "auto": "default" } });
         assert_eq!(auto_health_check(&s, true).unwrap()["port"], 3000);
+    }
+}
+
+#[cfg(test)]
+mod outdated_tests {
+    use super::{outdated_failure, shown_failure};
+
+    fn failure(message: &str) -> pyo_proto::Failure {
+        pyo_proto::Failure {
+            stage: "applying".into(),
+            reason: "ApplyFailed".into(),
+            message: message.into(),
+        }
+    }
+
+    /// A tailnet route a v0.2 install refused, after Pyo's update.
+    const REFUSED: &str = "HTTPRoute web-tn: admission webhook \"validation.policy\" denied the request: ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request";
+
+    #[test]
+    fn a_refusal_by_an_outdated_install_asks_for_the_connect_command() {
+        let mut f = failure(REFUSED);
+        shown_failure(&mut f, "outdated");
+        assert_eq!(f.reason, "AgentOutdated");
+        assert!(f.message.contains("Refresh this cluster"));
+        // A current install refused something else: as the agent said.
+        let mut f = failure(REFUSED);
+        shown_failure(&mut f, "current");
+        assert_eq!(f.message, REFUSED);
+        // Not a refusal: as the agent said.
+        let mut f = failure("ImagePullBackOff");
+        shown_failure(&mut f, "outdated");
+        assert_eq!(f.reason, "ApplyFailed");
+    }
+
+    #[test]
+    fn a_blocked_static_deploy_fails_with_the_same_words() {
+        let p = outdated_failure();
+        assert_eq!(p.status, "failed");
+        let f = p.failure.unwrap();
+        assert_eq!(f.message, crate::install::outdated_deploy());
+        assert_eq!(p.logs[0].message, f.message);
     }
 }
 
