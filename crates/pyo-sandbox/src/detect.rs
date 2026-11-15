@@ -101,7 +101,7 @@ pub async fn detect(inputs: Inputs<'_>) -> CapabilityReport {
         nft,
         if nft { "nft found" } else { "nft not found" }.into(),
     );
-    // Networking comes in a later step. See network.rs.
+    // Set by the daemon once its nftables table is in place. See network.rs.
     r.network = false;
 
     if flag_ok && kvm_ok && kernel_ok && cgroup2 {
@@ -252,6 +252,7 @@ async fn test_boot(inputs: &Inputs<'_>) -> anyhow::Result<u32> {
         scratch: None,
         cpus: 1,
         memory_mib: 128,
+        nic: None,
     };
     let res = inputs
         .fc

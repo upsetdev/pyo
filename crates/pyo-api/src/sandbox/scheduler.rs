@@ -2,7 +2,8 @@
 //! latest reports. Pure, so it's tested without servers.
 //!
 //! A server qualifies when it's ready, turned on, reported recently, runs
-//! what the sandbox's `isolation` needs, has its template, and has the
+//! what the sandbox's `isolation` needs, has networking when the sandbox
+//! wants the internet, has its template, and has the
 //! memory: its headroom (available memory less the host reserve) less what
 //! Pyo placed there since the report. Of those, in order:
 //! 1. Firecracker before gVisor (`isolation: auto` tries Firecracker first);
@@ -11,7 +12,7 @@
 //! 3. the most headroom left.
 
 use pyo_proto::sandbox::{
-    CapabilityReport, CapacityReport, Isolation, Runtime, SandboxSpec, TemplateReport,
+    CapabilityReport, CapacityReport, Isolation, NetworkMode, Runtime, SandboxSpec, TemplateReport,
 };
 
 /// A report older than this doesn't count: the server may be gone.
@@ -47,6 +48,8 @@ pub enum NoServer {
     NoneUp,
     /// None runs Firecracker, and `isolation: vm` needs it.
     NoVm,
+    /// None has networking, and the sandbox wants the internet.
+    NoNetwork,
     /// None has the template yet.
     NoTemplate(String),
     /// None has the memory left.
@@ -62,6 +65,9 @@ impl NoServer {
             }
             NoServer::NoVm => {
                 "No sandbox server has KVM, so isolation \"vm\" can't run. Use \"auto\".".into()
+            }
+            NoServer::NoNetwork => {
+                "No sandbox server has networking set up. Create the sandbox with network set to none.".into()
             }
             NoServer::NoTemplate(t) => format!("No sandbox server has the template {t} yet."),
             NoServer::Full => {
@@ -108,7 +114,14 @@ pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Cand
             NoServer::NoneUp
         });
     }
-    let with_template: Vec<&Candidate> = isolated
+    let networked: Vec<&Candidate> = isolated
+        .into_iter()
+        .filter(|c| spec.network == NetworkMode::None || c.capability.network)
+        .collect();
+    if networked.is_empty() {
+        return Err(NoServer::NoNetwork);
+    }
+    let with_template: Vec<&Candidate> = networked
         .into_iter()
         .filter(|c| c.templates.iter().any(|t| t.name == spec.template))
         .collect();
@@ -118,7 +131,8 @@ pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Cand
     let need = (spec.memory_mib as u64) << 20;
     let snapshot = |c: &Candidate| {
         c.templates.iter().any(|t| {
-            t.name == spec.template && t.has_snapshot(spec.cpus, spec.memory_mib, spec.disk_mib)
+            t.name == spec.template
+                && t.has_snapshot(spec.network, spec.cpus, spec.memory_mib, spec.disk_mib)
         })
     };
     with_template
@@ -156,6 +170,7 @@ mod tests {
                 } else {
                     Kvm::None
                 },
+                network: true,
                 ..Default::default()
             },
             capacity: CapacityReport {
@@ -191,8 +206,10 @@ mod tests {
         ];
         assert_eq!(pick_id(&s, &spec()).unwrap(), "fc-big");
         let mut s2 = s.clone();
-        s2[1].templates[0].snapshots =
-            vec![format!("fc1.18.0-none{}", snapshot_size_tag(1, 1024, 2048))];
+        s2[1].templates[0].snapshots = vec![format!(
+            "fc1.18.0-none-net{}",
+            snapshot_size_tag(1, 1024, 2048)
+        )];
         assert_eq!(
             pick_id(&s2, &spec()).unwrap(),
             "fc-small",
@@ -266,6 +283,18 @@ mod tests {
     }
 
     #[test]
+    fn internet_needs_a_server_with_networking() {
+        let mut off = server("off", Runtime::Firecracker, 8);
+        off.capability.network = false;
+        assert_eq!(pick_id(&[off.clone()], &spec()), Err(NoServer::NoNetwork));
+        let mut s = spec();
+        s.network = NetworkMode::None;
+        assert_eq!(pick_id(&[off.clone()], &s).unwrap(), "off");
+        let on = server("on", Runtime::Firecracker, 2);
+        assert_eq!(pick_id(&[off, on], &spec()).unwrap(), "on");
+    }
+
+    #[test]
     fn ties_are_stable() {
         let s = vec![
             server("b", Runtime::Firecracker, 4),
@@ -280,6 +309,7 @@ mod tests {
             NoServer::None,
             NoServer::NoneUp,
             NoServer::NoVm,
+            NoServer::NoNetwork,
             NoServer::NoTemplate("x".into()),
             NoServer::Full,
         ] {

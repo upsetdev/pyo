@@ -3,11 +3,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+use pyo_proto::sandbox::{Check, Runtime};
 use pyo_sandbox::api::{self, AppState};
 use pyo_sandbox::config::Config;
 use pyo_sandbox::detect::{self, Inputs};
 use pyo_sandbox::firecracker::{Firecracker, Jailer};
 use pyo_sandbox::manager::Manager;
+use pyo_sandbox::network::Network;
 use pyo_sandbox::storage::Layout;
 
 #[derive(Parser)]
@@ -78,12 +80,17 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Detect(o) => {
             let s = setup(&o).await?;
-            let report = detect::detect(Inputs {
+            let mut report = detect::detect(Inputs {
                 fc: &s.fc,
                 layout: &s.layout,
                 envd: &s.cfg.envd,
             })
             .await;
+            // Only checks. `serve` puts the table in place, and reports
+            // networking once that worked.
+            let (_, check) = open_network(&s, report.runtime).await;
+            report.network = check.ok;
+            report.checks.push(check);
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -91,21 +98,65 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Sandbox networking, when this server can have it, and the check for the
+/// report. Taps belong to the jail user, so Firecracker can open them after
+/// dropping root.
+async fn open_network(s: &Setup, runtime: Runtime) -> (Option<Network>, Check) {
+    let res = if runtime != Runtime::Firecracker {
+        Err(anyhow::anyhow!(
+            "Sandbox networking needs Firecracker for now."
+        ))
+    } else {
+        let (uid, gid) = match &s.fc.jailer {
+            Some(j) => (j.uid, j.gid),
+            // SAFETY: plain getters.
+            None => unsafe { (libc::geteuid(), libc::getegid()) },
+        };
+        Network::open(s.cfg.network.clone(), uid, gid).await
+    };
+    match res {
+        Ok(n) => {
+            let detail = format!("pool {}", n.cfg.pool);
+            (
+                Some(n),
+                Check {
+                    name: "network".into(),
+                    ok: true,
+                    detail,
+                },
+            )
+        }
+        Err(e) => (
+            None,
+            Check {
+                name: "network".into(),
+                ok: false,
+                detail: format!("{e:#}"),
+            },
+        ),
+    }
+}
+
 async fn serve(s: Setup) -> anyhow::Result<()> {
     if s.cfg.listen.ip().is_unspecified() && !s.cfg.dev {
         bail!("The daemon API must listen on the tailnet address, not on every address.");
     }
-    let capability = detect::detect(Inputs {
+    let mut capability = detect::detect(Inputs {
         fc: &s.fc,
         layout: &s.layout,
         envd: &s.cfg.envd,
     })
     .await;
+    let (net, check) = open_network(&s, capability.runtime).await;
+    if !check.ok {
+        tracing::warn!("{}", check.detail);
+    }
+    capability.checks.push(check);
     tracing::info!(runtime = ?capability.runtime, kvm = ?capability.kvm, boot_ms = ?capability.boot_ms, "{}", capability.summary());
     let keys = s.cfg.keys.clone();
     let server_id = s.cfg.server_id.clone();
     let listen = s.cfg.listen;
-    let mgr = Arc::new(Manager::new(s.cfg, s.layout, s.fc, capability));
+    let mgr = Arc::new(Manager::new(s.cfg, s.layout, s.fc, capability).with_network(net));
     let adopted = mgr.adopt().await;
     if adopted > 0 {
         tracing::info!(adopted, "took over sandboxes from before the restart");

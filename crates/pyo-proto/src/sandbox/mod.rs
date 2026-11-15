@@ -496,15 +496,33 @@ pub struct TemplateReport {
 }
 
 impl TemplateReport {
-    /// Whether a sandbox of this size restores from a snapshot here.
-    pub fn has_snapshot(&self, cpus: u32, memory_mib: u32, disk_mib: u32) -> bool {
+    /// Whether a sandbox of this size and network restores from a snapshot
+    /// here.
+    pub fn has_snapshot(
+        &self,
+        network: NetworkMode,
+        cpus: u32,
+        memory_mib: u32,
+        disk_mib: u32,
+    ) -> bool {
         let tag = snapshot_size_tag(cpus, memory_mib, disk_mib);
-        self.snapshots.iter().any(|k| k.ends_with(&tag))
+        self.snapshots.iter().any(|k| {
+            k.strip_suffix(&tag).is_some_and(|head| {
+                head.ends_with(SNAPSHOT_NET_TAG) == (network == NetworkMode::Internet)
+            })
+        })
     }
 }
 
+/// In a template snapshot's key right before the size: the snapshot has a
+/// network interface. Sandboxes with network restore only from those, and
+/// sandboxes without network only from the others, since a snapshot's
+/// devices are fixed.
+pub const SNAPSHOT_NET_TAG: &str = "-net";
+
 /// The end of a template snapshot's key: the machine size it restores.
-/// The key starts with the Firecracker version and CPU template.
+/// The key starts with the Firecracker version and CPU template, then
+/// [`SNAPSHOT_NET_TAG`] for snapshots with a network interface.
 pub fn snapshot_size_tag(cpus: u32, memory_mib: u32, disk_mib: u32) -> String {
     format!("-{cpus}c-{memory_mib}m-{disk_mib}d")
 }
@@ -561,6 +579,10 @@ pub enum DaemonCommand {
         cpus: u32,
         memory_mib: u32,
         disk_mib: u32,
+        /// With a network interface or without. Left out, it's `internet`
+        /// on a server with networking and `none` elsewhere.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        network: Option<NetworkMode>,
     },
 }
 
@@ -871,6 +893,7 @@ mod tests {
                 cpus: 1,
                 memory_mib: 512,
                 disk_mib: 2048,
+                network: Some(NetworkMode::None),
             },
         ];
         for c in cmds {
@@ -893,11 +916,20 @@ mod tests {
     fn template_snapshots_by_size() {
         let t = TemplateReport {
             name: "node-22".into(),
-            snapshots: vec![format!("fc1.18.0-none{}", snapshot_size_tag(1, 512, 2048))],
+            snapshots: vec![
+                format!("fc1.18.0-none{}", snapshot_size_tag(1, 512, 2048)),
+                format!(
+                    "fc1.18.0-none{SNAPSHOT_NET_TAG}{}",
+                    snapshot_size_tag(2, 512, 2048)
+                ),
+            ],
         };
-        assert!(t.has_snapshot(1, 512, 2048));
-        assert!(!t.has_snapshot(2, 512, 2048));
-        assert!(!t.has_snapshot(1, 512, 20480));
+        let (off, on) = (NetworkMode::None, NetworkMode::Internet);
+        assert!(t.has_snapshot(off, 1, 512, 2048));
+        assert!(!t.has_snapshot(on, 1, 512, 2048));
+        assert!(t.has_snapshot(on, 2, 512, 2048));
+        assert!(!t.has_snapshot(off, 2, 512, 2048));
+        assert!(!t.has_snapshot(off, 1, 512, 20480));
         let r: ServerReport = serde_json::from_value(serde_json::json!({
             "protocol": 1, "daemonVersion": "0.4.0", "serverId": "s",
             "capability": CapabilityReport::default(), "capacity": CapacityReport::default(),
