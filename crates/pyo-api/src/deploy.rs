@@ -744,6 +744,10 @@ pub async fn create(
         .execute(&mut **tx)
         .await?;
     let label = deploy_spec.service.name.clone();
+    // A rollback to a static deploy: pyo-static first.
+    if deploy_spec.site.is_some() {
+        crate::sites::sync(tx, &cluster_id).await?;
+    }
     if needs_build {
         let job_id = new_id("bld");
         let job = build_job(
@@ -1688,7 +1692,6 @@ pub async fn finish_build(
                 None => Value::Null,
             };
             if !spec["site"].is_null() {
-                crate::sites::sync(&mut tx, &cluster_id).await?;
                 sqlx::query("INSERT INTO pyo.deployment_logs (deployment_id, at, level, source, message) VALUES ($1, now(), 'info', 'pyo', $2)")
                     .bind(&deployment_id)
                     .bind("Serving the build's output as static files.")
@@ -1714,6 +1717,11 @@ pub async fn finish_build(
                 .bind(&data)
                 .execute(&mut *tx)
                 .await?;
+            // pyo-static on the cluster before the deploy that needs it (the
+            // agent runs its commands in order).
+            if !spec["site"].is_null() {
+                crate::sites::sync(&mut tx, &cluster_id).await?;
+            }
             crate::vault::get().open_env(&mut spec).await?;
             let deploy: DeploySpec = serde_json::from_value(spec).map_err(anyhow::Error::from)?;
             send_or_hold(
