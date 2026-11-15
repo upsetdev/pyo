@@ -531,6 +531,7 @@ mod tests {
                 "scripts/pyo-up.sh",
                 include_str!("../../../scripts/pyo-up.sh"),
             ),
+            ("deploy/sandbox.sh", SANDBOX_SCRIPT),
         ] {
             assert_eq!(
                 block("progress", file, script),

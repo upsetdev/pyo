@@ -75,6 +75,26 @@ WORK=$tmp/work2 BUNDLE=$tmp/short.tar.gz
 mkdir -p "$WORK"
 out=$( (fetch_bundle) 2>&1)
 check "a bundle without the jailer is refused" "$out" "have no jailer" has
+# A download shows progress, and its failure says what to do, without
+# curl's own words.
+curl() { echo "curl: (6) Could not resolve host" >&2; return 6; }
+WORK=$tmp/work2b BUNDLE=""
+mkdir -p "$WORK"
+out=$( (fetch_bundle) 2>&1)
+check "the download shows progress" "$out" "^Downloading the sandbox files… 0:00$" has
+check "a failed download says to run it again" "$out" "Couldn't download the sandbox files from https://github.com/.*run the same command again\.$" has
+curl() {
+  local a o=""
+  for a in "$@"; do [ "$o" = 1 ] && { echo bundle >"$a"; o=""; }; [ "$a" = -o ] && o=1; done
+  case "$*" in *.sha256*) echo "0000  pyo-sandbox-linux-x86_64.tar.gz" ;; esac
+  return 0
+}
+WORK=$tmp/work2c
+mkdir -p "$WORK"
+out=$( (fetch_bundle) 2>&1)
+check "a bad checksum says to run it again" "$out" "don't match their checksum. Run the same command again\.$" has
+check "and shows no sha256sum output" "$out" "FAILED|WARNING" lacks
+unset -f curl
 
 # ── Detection ──
 defaults
@@ -100,6 +120,8 @@ fake_detect '{
 }'
 out=$( (detect) 2>&1)
 check "Firecracker on KVM is reported" "$out" "Firecracker on KVM. A test VM booted in 73 ms." has
+check "the detection shows progress" "$out" "^Checking what this server can run… 0:00$" has
+check "and no raw JSON" "$out" '"runtime"|[{}]' lacks
 check "the detection gets this server's jail user" "$(detect_config)" '"jailUid": 998, "jailGid": 997' has
 fake_detect '{
   "runtime": "none",
@@ -116,6 +138,35 @@ fake_detect '{
   "arch": "x86_64"
 }'
 check "gVisor is reported" "$( (detect) 2>&1)" "gVisor, because this server has no usable KVM" has
+printf '#!/bin/sh\necho "kvm: permission denied" >&2\nexit 1\n' >"$BIN"
+out=$( (detect && echo "went on") 2>&1)
+check "a failed detection shows why" "$out" "kvm: permission denied" has
+check "and says to run it again" "$out" "Couldn't check what this server can run. Run the same command again\.$" has
+check "and stops" "$out" "went on" lacks
+
+# ── Joining the tailnet ──
+defaults
+NAME=sbx-1 TS_AUTHKEY=tskey-auth-x PYO=100.64.0.1:5006
+systemctl() { :; }
+tailnet_lock_wait() { :; }
+tailscale() {
+  case "$1" in
+    ip) [ ! -f "$tmp/ts-up" ] || echo 100.64.0.9 ;;
+    up) echo "Some peers are advertising routes" >&2; [ -z "${ts_fails:-}" ] && touch "$tmp/ts-up" ;;
+  esac
+  return 0
+}
+rm -f "$tmp/ts-up"
+out=$( (join_tailnet && echo "ip=$TS_IP pyo=$PYO") 2>&1)
+check "joining the tailnet shows progress" "$out" "^Joining your tailnet… 0:00$" has
+check "and hides Tailscale's own output" "$out" "advertising" lacks
+check "and gets this server's address" "$out" "^ip=100.64.0.9 pyo=100.64.0.1:5006$" has
+rm -f "$tmp/ts-up"
+out=$( (ts_fails=1 join_tailnet) 2>&1)
+check "a failed join says to run a fresh command" "$out" "didn't join your tailnet. Copy a fresh command from Pyo and run it again\.$" has
+out=$( (TS_AUTHKEY="" join_tailnet) 2>&1)
+check "no key, no join" "$out" "Not on your tailnet yet" has
+unset -f systemctl tailscale tailnet_lock_wait
 
 # ── Joining Pyo ──
 sleep() { :; }
@@ -143,7 +194,36 @@ check "and writes no config" "$(ls "$ETC")" "config.json" lacks
 fake_body='{"serverId":"sbs_other"}' fake_code=200
 out=$( (redeem) 2>&1)
 check "another server's config is refused" "$out" "isn't this server's config" has
+fake_body='{"serverId":"sbs_abc123"}' fake_code=200
+out=$( (redeem) 2>&1)
+check "joining Pyo shows progress" "$out" "^Joining Pyo as sbx-1… 0:00$" has
+# Pyo out of reach: the wait ends after 10 minutes, without curl's words.
+sleep() { SECONDS=$((SECONDS + ${1%.*})); }
+fake_body='curl: (7) Failed to connect' fake_code=000
+out=$( (redeem) 2>&1)
+check "an unreachable Pyo says what to do" "$out" "didn't answer over your tailnet in 10 minutes. Check that Pyo is running, then run the same command again\.$" has
+check "and not curl's error" "$out" "curl:" lacks
+check "the wait shows every 20 seconds in a log" "$out" "^Joining Pyo as sbx-1… 0:20$" has
 unset -f curl sleep
+
+# ── Starting the daemon ──
+defaults
+TS_IP=100.64.0.9
+systemctl() { :; }
+journalctl() { echo "pyo-sandbox: bad config"; }
+sleep() { SECONDS=$((SECONDS + ${1%.*})); }
+curl() { [ -f "$tmp/up" ]; }
+touch "$tmp/up"
+out=$( (start_daemon && echo started) 2>&1)
+check "a daemon that's up at once: nothing but done" "$out" "^started$" has
+check "and no log" "$out" "bad config" lacks
+rm -f "$tmp/up"
+out=$( (start_daemon && echo started) 2>&1)
+check "a daemon that won't start shows progress" "$out" "^Starting the sandbox daemon… 0:00$" has
+check "and its log" "$out" "pyo-sandbox: bad config" has
+check "and says to run it again" "$out" "didn't start. Its last log lines are above. Run the same command again\.$" has
+check "and doesn't go on" "$out" "started$" lacks
+unset -f systemctl journalctl sleep curl
 
 # ── The daemon's unit ──
 defaults

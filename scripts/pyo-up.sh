@@ -320,7 +320,7 @@ fi
 # network. Once Tailscale is set up in Pyo (Integrations), this machine
 # joins the tailnet by itself and Pyo is also https://pyo.<tailnet>.ts.net.
 
-# >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh and scripts/pyo-up.sh)
+# >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh, scripts/pyo-up.sh and deploy/sandbox.sh)
 # A long wait shows it's still going. On a terminal, one line ticks
 # ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), the same line comes
 # every 20 seconds. progress_start MESSAGE, then progress_tick as often as

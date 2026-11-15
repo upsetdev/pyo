@@ -48,6 +48,72 @@
 # download that stops halfway does nothing.
 set -euo pipefail
 
+# >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh, scripts/pyo-up.sh and deploy/sandbox.sh)
+# A long wait shows it's still going. On a terminal, one line ticks
+# ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), the same line comes
+# every 20 seconds. progress_start MESSAGE, then progress_tick as often as
+# it likes, then progress_end.
+progress_start() {
+  PROGRESS_MSG=$1 PROGRESS_T0=$SECONDS PROGRESS_NEXT=0
+  progress_tick
+}
+progress_tick() {
+  [ -n "${PROGRESS_MSG:-}" ] || return 0
+  local t=$((SECONDS - PROGRESS_T0))
+  if [ -t 1 ]; then
+    printf '\r\033[K%s %d:%02d' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+  elif [ "$t" -ge "$PROGRESS_NEXT" ]; then
+    printf '%s %d:%02d\n' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+    PROGRESS_NEXT=$((t + 20))
+  fi
+  return 0
+}
+progress_end() {
+  [ -n "${PROGRESS_MSG:-}" ] || return 0
+  [ ! -t 1 ] || printf '\r\033[K'
+  PROGRESS_MSG=""
+}
+# wait_until MESSAGE SECONDS COMMAND...: COMMAND every 2 seconds until it
+# succeeds, or a failure once SECONDS have passed. Nothing to show when it
+# succeeds at once.
+wait_until() {
+  local msg=$1 limit=$2 t0=$SECONDS
+  shift 2
+  "$@" && return 0
+  progress_start "$msg"
+  until "$@"; do
+    if [ $((SECONDS - t0)) -ge "$limit" ]; then
+      progress_end
+      return 1
+    fi
+    sleep 1
+    progress_tick
+    sleep 1
+    progress_tick
+  done
+  progress_end
+}
+# quietly MESSAGE COMMAND...: COMMAND in the background, its output kept
+# aside and shown only when it fails.
+quietly() {
+  local log pid rc=0
+  log=$(mktemp)
+  progress_start "$1"
+  shift
+  "$@" >"$log" 2>&1 </dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    progress_tick
+  done
+  wait "$pid" || rc=$?
+  progress_end
+  [ "$rc" = 0 ] || cat "$log" >&2
+  rm -f "$log"
+  return "$rc"
+}
+# <<< pyo:progress
+
 # >>> pyo:repos (the same in connect.sh, join.sh, scripts/join-node.sh and deploy/sandbox.sh)
 # Packages come from their vendors' repositories, whose signing keys are
 # checked by fingerprint here: Tailscale's and NVIDIA's.
@@ -58,7 +124,7 @@ os_field() { sed -n "s/^$1=//p" /etc/os-release 2>/dev/null | tr -d '"' | head -
 # signing_key URL FINGERPRINT FILE [armor]: the key with that fingerprint
 # from URL into FILE (only that key), or an error.
 signing_key() {
-  local url=$1 fpr=$2 out=$3 g ok="" pm
+  local url=$1 fpr=$2 out=$3 g ok="" pm got="" i
   if ! command -v gpg >/dev/null; then
     if command -v apt-get >/dev/null; then
       apt-get update -qq && apt-get install -y -qq gnupg >/dev/null
@@ -68,7 +134,11 @@ signing_key() {
     command -v gpg >/dev/null || { echo "gpg is missing, so the signing key at $url can't be checked. Install gnupg and run this again." >&2; return 1; }
   fi
   g=$(mktemp -d)
-  if ! curl -fsSL --proto '=https' --retry 3 --max-time 60 -o "$g/key" "$url"; then
+  for i in 1 2 3 4; do
+    curl -fsSL --proto '=https' --max-time 60 -o "$g/key" "$url" && got=1 && break
+    [ "$i" = 4 ] || sleep 2
+  done
+  if [ -z "$got" ]; then
     echo "Couldn't download the signing key $url." >&2
   elif GNUPGHOME=$g gpg --batch --quiet --import "$g/key" 2>/dev/null &&
     GNUPGHOME=$g gpg --batch --with-colons --fingerprint "$fpr" 2>/dev/null | grep -qx "fpr:::::::::$fpr:" &&
@@ -132,21 +202,21 @@ REPO
 # With Tailnet Lock on, a new machine waits until a signing device signs
 # its key: the command to run there, then the wait (up to an hour).
 tailnet_lock_wait() {
-  local js key i
+  local js key
   js=$(tailscale lock status --json 2>/dev/null) || return 0
   grep -Eq '"Enabled": *true' <<<"$js" || return 0
   grep -Eq '"NodeKeySigned": *true' <<<"$js" && return 0
   key=$(sed -n 's/^ *"NodeKey": *"\([^"]*\)".*/\1/p' <<<"$js" | head -n1)
   echo "Your tailnet has Tailnet Lock on. On a signing device, run:"
   echo "  tailscale lock sign $key"
-  echo "Waiting for the signature..."
-  for i in $(seq 720); do
-    tailscale lock status --json 2>/dev/null | grep -Eq '"NodeKeySigned": *true' && { echo "Signed."; return 0; }
-    sleep 5
-  done
+  if wait_until "Waiting for the signature…" 3600 tailnet_signed; then
+    echo "Signed."
+    return 0
+  fi
   echo "This machine isn't signed yet. Sign it and run this again." >&2
   exit 1
 }
+tailnet_signed() { tailscale lock status --json 2>/dev/null | grep -Eq '"NodeKeySigned": *true'; }
 # <<< pyo:tailnet-lock
 
 # >>> pyo:tailnet-host (the same in connect.sh, join.sh and deploy/sandbox.sh)
@@ -190,6 +260,7 @@ defaults() {
 
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 fail() {
+  progress_end
   printf 'Error: %s\n' "$*" >&2
   exit 1
 }
@@ -287,15 +358,17 @@ fetch_bundle() {
     # The release's own: .github/workflows/sandbox.yml packs it with
     # crates/pyo-sandbox/scripts/bundle.sh, its .sha256 beside it.
     [ -n "$src" ] || src=$(bundle_url)
-    say "Downloading $src"
-    curl -fsSL --proto '=https,http' --retry 3 -o "$tgz" "$src" || fail "Couldn't download $src."
+    quietly "Downloading the sandbox files…" curl -fsSL --proto '=https,http' --retry 3 -o "$tgz" "$src" ||
+      fail "Couldn't download the sandbox files from $src. Check this machine's internet connection and run the same command again."
     if [ -z "$BUNDLE" ]; then
-      sum=$(curl -fsSL --retry 3 "$src.sha256" | awk '{print $1}') || fail "Couldn't download $src.sha256."
-      echo "$sum  $tgz" | sha256sum -c --quiet - || fail "$src doesn't match its checksum."
+      sum=$(curl -fsSL --retry 3 "$src.sha256" 2>/dev/null | awk '{print $1}') && [ -n "$sum" ] ||
+        fail "Couldn't download the sandbox files' checksum. Run the same command again."
+      echo "$sum  $tgz" | sha256sum -c --quiet - >/dev/null 2>&1 ||
+        fail "The sandbox files don't match their checksum. Run the same command again."
     fi
   fi
   mkdir -p "$WORK/bundle"
-  tar -xzf "$tgz" -C "$WORK/bundle" || fail "The sandbox files aren't a .tar.gz."
+  tar -xzf "$tgz" -C "$WORK/bundle" 2>/dev/null || fail "The sandbox files aren't a .tar.gz. Check --bundle, or run the same command again."
   local f
   for f in pyo-sandbox pyo-envd firecracker jailer vmlinux; do
     [ -s "$WORK/bundle/$f" ] || fail "The sandbox files have no $f."
@@ -303,16 +376,16 @@ fetch_bundle() {
 }
 
 join_tailnet() {
-  tailscale_install
-  systemctl enable --now tailscaled >/dev/null
+  command -v tailscale >/dev/null || quietly "Installing Tailscale…" tailscale_install ||
+    fail "Tailscale didn't install. Run the same command again."
+  systemctl enable --now tailscaled >/dev/null 2>&1 || fail "Tailscale didn't start. Run the same command again."
   if [ -z "$(tailscale ip -4 2>/dev/null)" ]; then
-    [ -n "$TS_AUTHKEY" ] || fail "Not on the tailnet yet: copy the full command from Pyo."
-    say "Joining your tailnet as ${NAME:-this server}"
-    tailscale up --authkey "$TS_AUTHKEY" ${NAME:+--hostname "$NAME"} --timeout 120s || true
+    [ -n "$TS_AUTHKEY" ] || fail "Not on your tailnet yet: copy the full command from Pyo."
+    quietly "Joining your tailnet…" tailscale up --authkey "$TS_AUTHKEY" ${NAME:+--hostname "$NAME"} --timeout 120s || true
   fi
   tailnet_lock_wait
   TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
-  [ -n "$TS_IP" ] || fail "This machine didn't join the tailnet (see above)."
+  [ -n "$TS_IP" ] || fail "This machine didn't join your tailnet. Copy a fresh command from Pyo and run it again."
   [ -z "$PYO" ] || PYO=$(tailnet_hostport "$PYO")
 }
 
@@ -348,12 +421,16 @@ CFG
 # A field of the detection's JSON report.
 report_field() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$2" | head -n1; }
 
+# The daemon's detection, its JSON report into capability.json.
+detect_run() { "$BIN" detect --config "$WORK/detect.json" > "$WORK/capability.json"; }
+
 # What this server can run. Stops here, before the code is used, when it
-# can run neither Firecracker nor gVisor.
+# can run neither Firecracker nor gVisor. The detection's own output shows
+# only when it fails.
 detect() {
-  say "Checking what this server can run"
   detect_config > "$WORK/detect.json"
-  "$BIN" detect --config "$WORK/detect.json" > "$WORK/capability.json" || fail "The detection failed (see above)."
+  quietly "Checking what this server can run…" detect_run ||
+    fail "Couldn't check what this server can run. Run the same command again."
   local runtime kvm boot reason
   runtime=$(report_field runtime "$WORK/capability.json")
   kvm=$(report_field kvm "$WORK/capability.json")
@@ -374,12 +451,12 @@ detect() {
 # signed). The first answer burns the code.
 redeem() {
   local out status body deadline=$((SECONDS + 600))
-  say "Joining Pyo as $NAME"
   {
     printf '{"code": "%s", "address": "%s", "jailUid": %s, "jailGid": %s, "capability": ' "$CODE" "$TS_IP" "$JAIL_UID" "$JAIL_GID"
     cat "$WORK/capability.json"
     printf '}\n'
   } > "$WORK/ask.json"
+  progress_start "Joining Pyo as $NAME…"
   while :; do
     out=$(curl -sS -m 30 -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
       --data-binary "@$WORK/ask.json" "http://$PYO/sandbox/join?server=$SERVER" 2>&1) || true
@@ -389,13 +466,15 @@ redeem() {
       000 | 429 | 5??) ;;
       *) fail "Pyo refused: $body" ;;
     esac
-    [ "$SECONDS" -lt "$deadline" ] || fail "Pyo didn't answer over the tailnet in 10 minutes ($body)."
+    [ "$SECONDS" -lt "$deadline" ] || fail "Pyo didn't answer over your tailnet in 10 minutes. Check that Pyo is running, then run the same command again."
     sleep 5
+    progress_tick
   done
+  progress_end
   rm -f "$WORK/ask.json"
   case "$body" in
     *"\"serverId\":\"$SERVER\""* | *"\"serverId\": \"$SERVER\""*) ;;
-    *) fail "Pyo's answer isn't this server's config." ;;
+    *) fail "Pyo's answer isn't this server's config. Copy a fresh command from Pyo and run it again." ;;
   esac
   (umask 077 && printf '%s\n' "$body" > "$ETC/config.json.new")
   mv -f "$ETC/config.json.new" "$ETC/config.json"
@@ -474,17 +553,17 @@ firewall() {
   fi
 }
 
+# The daemon answers its health check on the tailnet.
+daemon_up() { curl -fsS -m 2 "http://$TS_IP:$PORT/v1/health" >/dev/null 2>&1; }
+
+# Its log shows only when it doesn't start.
 start_daemon() {
-  local i
   systemctl daemon-reload
   systemctl enable pyo-sandbox >/dev/null 2>&1
   systemctl restart pyo-sandbox
-  for i in $(seq 60); do
-    curl -fsS -m 2 "http://$TS_IP:$PORT/v1/health" >/dev/null 2>&1 && return 0
-    sleep 1
-  done
+  wait_until "Starting the sandbox daemon…" 60 daemon_up && return 0
   journalctl -u pyo-sandbox -n 20 --no-pager >&2 || true
-  fail "The sandbox daemon didn't start (see above)."
+  fail "The sandbox daemon didn't start. Its last log lines are above. Run the same command again."
 }
 
 uninstall() {
@@ -552,7 +631,7 @@ main() {
   firewall
   start_daemon
   if [ -n "$CODE" ]; then
-    say "$NAME ($TS_IP) is a sandbox server now. It shows up in Pyo in a few seconds."
+    say "$NAME is a sandbox server now. It shows up in Pyo in a few seconds."
   else
     say "The sandbox daemon is updated. Its sandboxes kept running."
   fi
