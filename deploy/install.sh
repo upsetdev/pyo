@@ -232,7 +232,16 @@ k3s_fail() {
   echo "Error: $*" >&2
   exit 1
 }
-k3s_get() { curl -fsSL --proto '=https' --retry 3 --max-time 600 -o "$2" "$1" || k3s_fail "Couldn't download $1."; }
+# Four tries, as a download can fail on a bad connection. Not curl's
+# --retry-all-errors, which older curl (RHEL 8, Ubuntu 20.04) lacks.
+k3s_get() {
+  local i
+  for i in 1 2 3 4; do
+    curl -fsSL --proto '=https' --max-time 600 -o "$2" "$1" && return 0
+    [ "$i" = 4 ] || sleep 2
+  done
+  k3s_fail "Couldn't download $1."
+}
 k3s_sha_ok() { [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ]; }
 k3s_fetch() {
   local dir=$1 version=$2 arch bin want rel
@@ -479,6 +488,18 @@ fetch() {
   curl -fsSL --proto "$proto" --max-time 60 -H 'Accept: application/vnd.github+json' "$@"
 }
 
+# A download, four tries 2 seconds apart, as one can fail on a bad
+# connection (k3s_get's loop, not curl's --retry-all-errors, which older
+# curl lacks).
+tries() {
+  local i
+  for i in 1 2 3; do
+    "$@" && return 0
+    sleep 2
+  done
+  "$@"
+}
+
 # The release this script installs: the latest, or --version's (GitHub's
 # description of it, with its assets' download addresses). The latest comes
 # from api.pyo.dev first, which keeps a copy of GitHub's answer and still
@@ -526,7 +547,7 @@ fetch_connect() {
   local meta asset
   meta=$(release_meta 2>/dev/null) || return 1
   asset=$(printf '%s' "$meta" | asset_url 'connect\.sh')
-  [ -n "$asset" ] && fetch -o "$1" "$asset"
+  [ -n "$asset" ] && tries fetch -o "$1" "$asset"
 }
 
 # release.json is signed by Pyo's release workflow (cosign sign-blob,
@@ -544,7 +565,7 @@ find_cosign() {
   COSIGN=$(command -v cosign || true)
   [ -z "$COSIGN" ] || return 0
   say "Downloading cosign $COSIGN_VERSION to check the release's signature"
-  curl -fsSL --proto '=https' --retry 3 --max-time 300 -o "$WORK/cosign" \
+  tries curl -fsSL --proto '=https' --max-time 300 -o "$WORK/cosign" \
     "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64" ||
     fail "Couldn't download cosign, which checks the release's signature."
   [ "$(sha256sum "$WORK/cosign" | cut -d' ' -f1)" = "$COSIGN_SHA256_AMD64" ] ||
@@ -558,7 +579,7 @@ verify_release() {
   local bundle
   bundle=$(printf '%s' "$2" | asset_url 'release\.json\.sigstore\.json')
   [ -n "$bundle" ] || fail "$1 has no signature for its release.json (release.json.sigstore.json), so it can't be trusted."
-  fetch -o "$WORK/release.json.sigstore.json" "$bundle" || fail "Couldn't download $bundle."
+  tries fetch -o "$WORK/release.json.sigstore.json" "$bundle" || fail "Couldn't download $bundle."
   find_cosign
   say "Checking the release's signature"
   "$COSIGN" verify-blob --bundle "$WORK/release.json.sigstore.json" \
@@ -588,7 +609,7 @@ fetch_release() {
   }
   asset=$(printf '%s' "$meta" | asset_url 'release\.json')
   [ -n "$asset" ] || fail "$what has no release.json, so it can't be installed with this script."
-  fetch -o "$WORK/release.json" "$asset" || fail "Couldn't download $asset."
+  tries fetch -o "$WORK/release.json" "$asset" || fail "Couldn't download $asset."
   [ "$(wc -c < "$WORK/release.json")" -lt 4194304 ] || fail "release.json is too large."
   verify_release "$what" "$meta"
 

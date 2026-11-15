@@ -432,7 +432,16 @@ k3s_fail() {
   echo "Error: $*" >&2
   exit 1
 }
-k3s_get() { curl -fsSL --proto '=https' --retry 3 --max-time 600 -o "$2" "$1" || k3s_fail "Couldn't download $1."; }
+# Four tries, as a download can fail on a bad connection. Not curl's
+# --retry-all-errors, which older curl (RHEL 8, Ubuntu 20.04) lacks.
+k3s_get() {
+  local i
+  for i in 1 2 3 4; do
+    curl -fsSL --proto '=https' --max-time 600 -o "$2" "$1" && return 0
+    [ "$i" = 4 ] || sleep 2
+  done
+  k3s_fail "Couldn't download $1."
+}
 k3s_sha_ok() { [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ]; }
 k3s_fetch() {
   local dir=$1 version=$2 arch bin want rel
@@ -602,7 +611,7 @@ os_field() { sed -n "s/^$1=//p" /etc/os-release 2>/dev/null | tr -d '"' | head -
 # signing_key URL FINGERPRINT FILE [armor]: the key with that fingerprint
 # from URL into FILE (only that key), or an error.
 signing_key() {
-  local url=$1 fpr=$2 out=$3 g ok="" pm
+  local url=$1 fpr=$2 out=$3 g ok="" pm got="" i
   if ! command -v gpg >/dev/null; then
     if command -v apt-get >/dev/null; then
       apt-get update -qq && apt-get install -y -qq gnupg >/dev/null
@@ -612,7 +621,11 @@ signing_key() {
     command -v gpg >/dev/null || { echo "gpg is missing, so the signing key at $url can't be checked. Install gnupg and run this again." >&2; return 1; }
   fi
   g=$(mktemp -d)
-  if ! curl -fsSL --proto '=https' --retry 3 --max-time 60 -o "$g/key" "$url"; then
+  for i in 1 2 3 4; do
+    curl -fsSL --proto '=https' --max-time 60 -o "$g/key" "$url" && got=1 && break
+    [ "$i" = 4 ] || sleep 2
+  done
+  if [ -z "$got" ]; then
     echo "Couldn't download the signing key $url." >&2
   elif GNUPGHOME=$g gpg --batch --quiet --import "$g/key" 2>/dev/null &&
     GNUPGHOME=$g gpg --batch --with-colons --fingerprint "$fpr" 2>/dev/null | grep -qx "fpr:::::::::$fpr:" &&
@@ -1073,7 +1086,11 @@ gateway_crds() {
   fi
   # Envoy Gateway already running without its CRDs: restart it once they're in.
   k3s kubectl get "$crd/backends.gateway.envoyproxy.io" >/dev/null 2>&1 || restart=1
-  curl -fsS --max-time 60 -o "$CRDS" "$API/install/gateway-crds.yaml$q" || { echo "Couldn't get the gateway's CRDs from Pyo at $API." >&2; exit 1; }
+  for i in 1 2 3 4; do
+    curl -fsS --max-time 60 -o "$CRDS" "$API/install/gateway-crds.yaml$q" && break
+    [ "$i" = 4 ] && { echo "Couldn't get the gateway's CRDs from Pyo at $API." >&2; exit 1; }
+    sleep 2
+  done
   k3s kubectl apply --server-side --force-conflicts --field-manager=pyo -f "$CRDS" >/dev/null || { echo "Couldn't install the gateway's CRDs (see above)." >&2; exit 1; }
   if [ -n "$restart" ] && k3s kubectl -n pyo-gateway get deployment envoy-gateway >/dev/null 2>&1; then
     k3s kubectl -n pyo-gateway rollout restart deployment envoy-gateway >/dev/null || true

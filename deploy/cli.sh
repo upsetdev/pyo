@@ -34,6 +34,16 @@ sha256_of() {
   fi
 }
 
+# URL into FILE, four tries 2 seconds apart, as a download can fail on a
+# bad connection.
+download() {
+  for try in 1 2 3 4; do
+    curl -fsSL "$1" -o "$2" && return 0
+    [ "$try" = 4 ] || sleep 2
+  done
+  fail "couldn't download $1"
+}
+
 # The release's binary for this computer: pyo-<os>-<arch>, the names
 # `pyo upgrade` uses too (crates/pyo-cli/src/upgrade.rs).
 asset_for() {
@@ -83,10 +93,8 @@ main() {
 
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
-  curl -fsSL "$base/$ASSET" -o "$work/pyo" \
-    || fail "couldn't download $base/$ASSET"
-  curl -fsSL "$base/$ASSET.sha256" -o "$work/pyo.sha256" \
-    || fail "couldn't download $base/$ASSET.sha256"
+  download "$base/$ASSET" "$work/pyo"
+  download "$base/$ASSET.sha256" "$work/pyo.sha256"
   want=$(cut -d' ' -f1 <"$work/pyo.sha256")
   have=$(sha256_of "$work/pyo")
   [ -n "$want" ] && [ "$want" = "$have" ] \

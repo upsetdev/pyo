@@ -57,7 +57,16 @@ k3s_fail() {
   echo "Error: $*" >&2
   exit 1
 }
-k3s_get() { curl -fsSL --proto '=https' --retry 3 --max-time 600 -o "$2" "$1" || k3s_fail "Couldn't download $1."; }
+# Four tries, as a download can fail on a bad connection. Not curl's
+# --retry-all-errors, which older curl (RHEL 8, Ubuntu 20.04) lacks.
+k3s_get() {
+  local i
+  for i in 1 2 3 4; do
+    curl -fsSL --proto '=https' --max-time 600 -o "$2" "$1" && return 0
+    [ "$i" = 4 ] || sleep 2
+  done
+  k3s_fail "Couldn't download $1."
+}
 k3s_sha_ok() { [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ]; }
 k3s_fetch() {
   local dir=$1 version=$2 arch bin want rel
