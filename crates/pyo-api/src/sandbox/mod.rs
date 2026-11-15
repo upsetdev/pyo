@@ -546,29 +546,29 @@ async fn connection(
     })
 }
 
-/// Creates a sandbox: checks the limits, picks a server, records it, then
-/// asks the server. Returns the sandbox and how to reach it.
 /// The team a create names, else the caller's only one.
 pub async fn team_for_create(s: &AppState, user: &User, team: Option<&str>) -> ApiResult<String> {
     if let Some(t) = team.map(str::trim).filter(|t| !t.is_empty()) {
         return Ok(t.to_owned());
     }
     let teams = teams_of(&s.db, user).await?;
-    only_team(&teams).map_err(ApiError::bad_request)
+    only_team(&teams, "teamId").map_err(ApiError::bad_request)
 }
 
-/// The one team, or why teamId is needed.
-fn only_team(teams: &[String]) -> Result<String, String> {
+/// The one team, or why `field` (the team's argument) is needed.
+pub(crate) fn only_team(teams: &[String], field: &str) -> Result<String, String> {
     match teams {
         [one] => Ok(one.clone()),
-        [] => Err("Pass teamId. You aren't in any team.".into()),
+        [] => Err(format!("Pass {field}. You aren't in any team.")),
         many => Err(format!(
-            "Pass teamId: the team the sandbox belongs to. You can use {} teams.",
+            "Pass {field}: the team the sandbox belongs to. You can use {} teams.",
             many.len()
         )),
     }
 }
 
+/// Creates a sandbox: checks the limits, picks a server, records it, then
+/// asks the server. Returns the sandbox and how to reach it.
 pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<Value> {
     let ttl_secs = parse_ttl_value(req.ttl.as_ref())?;
     let team_id = team_for_create(s, user, req.team_id.as_deref()).await?;
@@ -1213,10 +1213,17 @@ mod tests {
 
     #[test]
     fn a_create_without_a_team_takes_the_only_one() {
-        assert_eq!(only_team(&["tm_a".into()]).unwrap(), "tm_a");
-        assert!(only_team(&[]).unwrap_err().contains("aren't in any team"));
-        let e = only_team(&["tm_a".into(), "tm_b".into()]).unwrap_err();
+        assert_eq!(only_team(&["tm_a".into()], "teamId").unwrap(), "tm_a");
+        assert!(
+            only_team(&[], "teamId")
+                .unwrap_err()
+                .contains("aren't in any team")
+        );
+        let e = only_team(&["tm_a".into(), "tm_b".into()], "teamId").unwrap_err();
         assert!(e.starts_with("Pass teamId") && e.contains("2 teams"), "{e}");
+        // The assistants' tool names its own argument.
+        let e = only_team(&["tm_a".into(), "tm_b".into()], "team").unwrap_err();
+        assert!(e.starts_with("Pass team:"), "{e}");
         let r: CreateSandbox = serde_json::from_value(json!({ "template": "node-22" })).unwrap();
         assert_eq!(r.team_id, None);
     }

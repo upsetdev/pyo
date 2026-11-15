@@ -32,7 +32,7 @@ fn schema(props: Value, required: &[&str]) -> Value {
 pub fn defs() -> Vec<Value> {
     let sandbox =
         json!({ "type": "string", "description": "Sandbox id, sbx_… (from create_sandbox)" });
-    let team = json!({ "type": "string", "description": "Team slug or id. The user's first team when omitted" });
+    let team = json!({ "type": "string", "description": "Team slug or id. May be left out when the user has one team" });
     let timeout = json!({ "type": "integer", "minimum": 1, "maximum": 600000, "description": "Kill it after this many milliseconds (60000 when omitted)" });
     let write = json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false });
     let read = json!({ "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true });
@@ -92,28 +92,25 @@ fn arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("{key} is required"))
 }
 
-/// The team a tool names, else the user's first.
+/// The team a tool names, else the user's only one (as the API does).
 async fn team_id(s: &AppState, user: &User, args: &Value) -> Result<String, String> {
     let ids = super::teams_of(&s.db, user)
         .await
         .map_err(|e| e.to_string())?;
+    let Some(t) = args["team"].as_str().filter(|t| !t.is_empty()) else {
+        return super::only_team(&ids, "team");
+    };
     let teams: Vec<(String, String)> =
         sqlx::query_as("SELECT id, slug FROM pyo.teams WHERE id = ANY($1) ORDER BY created_at")
             .bind(&ids)
             .fetch_all(&s.db)
             .await
             .map_err(|e| e.to_string())?;
-    match args["team"].as_str().filter(|t| !t.is_empty()) {
-        Some(t) => teams
-            .iter()
-            .find(|(id, slug)| id == t || slug == t)
-            .map(|(id, _)| id.clone())
-            .ok_or_else(|| format!("No team {t} among yours")),
-        None => teams
-            .first()
-            .map(|(id, _)| id.clone())
-            .ok_or_else(|| "You aren't in any team".to_owned()),
-    }
+    teams
+        .iter()
+        .find(|(id, slug)| id == t || slug == t)
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| format!("No team {t} among yours"))
 }
 
 fn exec_out(r: ExecResult) -> Value {
