@@ -90,7 +90,9 @@ export function ApiTokensPanel() {
     s.teams.find((t) => t.id === id)?.name ?? "a team you left";
   const scope = (t: ApiToken) =>
     `${ACCESS.find((a) => a.value === t.access)?.label ?? t.access} · ${t.teamIds ? t.teamIds.map(teamName).join(", ") : "All teams"}`;
-  const example = `curl ${baseUrl(s.email?.publicUrl)}/api/v1/state \\\n  -H "Authorization: Bearer ${fresh ?? "<your key>"}"`;
+  const key = fresh ?? "<your key>";
+  const example = `curl ${baseUrl(s.email?.publicUrl)}/api/v1/state \\\n  -H "Authorization: Bearer ${key}"`;
+  const cli = `export PYO_URL=${baseUrl(s.email?.publicUrl)}\nexport PYO_API_KEY=${key}\npyo whoami`;
 
   return (
     <Panel>
@@ -216,6 +218,7 @@ export function ApiTokensPanel() {
       <div className="space-y-2 border-t border-border px-4 py-4">
         <p className="text-[13px] font-medium">Try it</p>
         <Snippet value={example} />
+        <Snippet value={cli} />
       </div>
 
       <ConfirmDialog

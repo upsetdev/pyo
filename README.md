@@ -133,6 +133,9 @@ pyo deploy    # deploy and follow it live
 Run `pyo upgrade` when it says a new version is out. Run `pyo --help` for
 logs, environment variables, rollbacks and more.
 
+In CI, set `PYO_URL` and `PYO_API_KEY` (a key from API keys in Pyo) in
+place of `pyo login`.
+
 ## Uninstalling
 
 To remove Pyo from the machine you installed it on:

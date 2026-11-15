@@ -35,7 +35,14 @@ struct Cli {
     #[arg(long, global = true, env = "PYO_URL", hide_env_values = true)]
     url: Option<String>,
     /// An API key, for CI (default: the one `pyo login` saved).
-    #[arg(long, global = true, env = "PYO_TOKEN", hide_env_values = true)]
+    // PYO_TOKEN, the old name, still works when PYO_API_KEY isn't set.
+    #[arg(
+        long,
+        alias = "api-key",
+        global = true,
+        env = "PYO_API_KEY",
+        hide_env_values = true
+    )]
     token: Option<String>,
     #[command(subcommand)]
     command: Command,
@@ -653,7 +660,14 @@ async fn main() {
     }
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
+/// `--token` or PYO_API_KEY, else PYO_TOKEN (the old name). Blank is unset.
+fn api_key(token: Option<String>, old: Option<String>) -> Option<String> {
+    let set = |k: &String| !k.trim().is_empty();
+    token.filter(set).or(old.filter(set))
+}
+
+async fn run(mut cli: Cli) -> anyhow::Result<()> {
+    cli.token = api_key(cli.token.take(), std::env::var("PYO_TOKEN").ok());
     let (url, token) = (cli.url.as_deref(), cli.token.as_deref());
     match cli.command {
         Command::Login { expires } => {
@@ -1037,5 +1051,31 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             )
             .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn pyo_api_key_wins_over_pyo_token() {
+        let s = |v: &str| Some(v.to_string());
+        // --token or PYO_API_KEY first, PYO_TOKEN only as a fallback.
+        assert_eq!(api_key(s("k"), s("t")), s("k"));
+        assert_eq!(api_key(None, s("t")), s("t"));
+        assert_eq!(api_key(s(" "), s("t")), s("t"));
+        assert_eq!(api_key(None, s(" ")), None);
+        assert_eq!(api_key(None, None), None);
+    }
+
+    #[test]
+    fn the_key_is_documented_as_pyo_api_key() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("PYO_API_KEY"), "{help}");
+        assert!(!help.contains("PYO_TOKEN"), "{help}");
+        let cli = Cli::try_parse_from(["pyo", "--api-key", "k", "whoami"]).unwrap();
+        assert_eq!(cli.token.as_deref(), Some("k"));
     }
 }
