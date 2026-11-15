@@ -274,14 +274,16 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         Some(n) => n,
         None => bg::pool_size(role, max_connections(&connect).await?),
     };
-    let db = PgPoolOptions::new()
+    let options = PgPoolOptions::new()
         .max_connections(pool)
         .acquire_timeout(Duration::from_secs(10))
         // Connections a burst opened close after a minute idle: each one
         // is a Postgres process holding memory.
-        .idle_timeout(Duration::from_secs(60))
-        .connect_with(connect)
-        .await?;
+        .idle_timeout(Duration::from_secs(60));
+    let db = retry_connect(Duration::from_secs(60), || {
+        options.clone().connect_with(connect.clone())
+    })
+    .await?;
     tracing::info!(pool, "database pool");
     // Safe with several processes starting at once: sqlx holds a lock while
     // migrating (migrate.rs). Migrations must keep the previous release working
@@ -500,14 +502,98 @@ async fn readyz(
     }
 }
 
+/// Connecting to Postgres at start, tried again while it can't be reached
+/// yet, for up to `limit`, 250 ms apart and then up to 4 s: a new pod is let
+/// into Postgres once the network policy has its address (pyo-databases in
+/// platform.yaml), a moment after it starts, and until then its connections
+/// are refused. Postgres starting up counts too. Any other error, such as a
+/// wrong password, returns at once. (The pool's own connect tries again
+/// while refused, for its acquire timeout.)
+async fn retry_connect<T, F, Fut>(limit: Duration, mut connect: F) -> Result<T, sqlx::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, sqlx::Error>>,
+{
+    let start = tokio::time::Instant::now();
+    let mut wait = Duration::from_millis(250);
+    loop {
+        let r = connect().await;
+        let again = match &r {
+            Err(sqlx::Error::Io(_)) => true,
+            // cannot_connect_now: "the database system is starting up".
+            Err(sqlx::Error::Database(e)) => e.code().as_deref() == Some("57P03"),
+            _ => false,
+        };
+        if !again || start.elapsed() + wait > limit {
+            return r;
+        }
+        if let Err(e) = &r {
+            tracing::info!(error = %e, "the database isn't reachable yet, trying again");
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(4));
+    }
+}
+
 /// Postgres's max_connections, which pyo-postgres sets by the server's
 /// memory when it starts (platform.yaml): the pools follow it.
 async fn max_connections(connect: &PgConnectOptions) -> anyhow::Result<u32> {
     use sqlx::Connection;
-    let mut c = sqlx::PgConnection::connect_with(connect).await?;
+    let mut c = retry_connect(Duration::from_secs(60), || {
+        sqlx::PgConnection::connect_with(connect)
+    })
+    .await?;
     let max: String = sqlx::query_scalar("SHOW max_connections")
         .fetch_one(&mut c)
         .await?;
     let _ = c.close().await;
     Ok(max.parse()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn refused() -> sqlx::Error {
+        sqlx::Error::Io(std::io::ErrorKind::ConnectionRefused.into())
+    }
+
+    /// Refused at first (a new pod the network policy doesn't know yet):
+    /// tried again until it connects.
+    #[tokio::test]
+    async fn connects_once_postgres_lets_it_in() {
+        let tries = AtomicU32::new(0);
+        let r = retry_connect(Duration::from_secs(60), || async {
+            match tries.fetch_add(1, Ordering::SeqCst) {
+                0 | 1 => Err(refused()),
+                n => Ok(n),
+            }
+        })
+        .await;
+        assert_eq!(r.unwrap(), 2);
+        assert_eq!(tries.load(Ordering::SeqCst), 3);
+    }
+
+    /// Any other error returns at once, and refusals stop at the limit.
+    #[tokio::test]
+    async fn gives_up_on_other_errors_and_at_the_limit() {
+        let tries = AtomicU32::new(0);
+        let r: Result<(), _> = retry_connect(Duration::from_secs(60), || async {
+            tries.fetch_add(1, Ordering::SeqCst);
+            Err(sqlx::Error::Configuration("wrong password".into()))
+        })
+        .await;
+        assert!(matches!(r, Err(sqlx::Error::Configuration(_))));
+        assert_eq!(tries.load(Ordering::SeqCst), 1);
+
+        let tries = AtomicU32::new(0);
+        let r: Result<(), _> = retry_connect(Duration::from_millis(400), || async {
+            tries.fetch_add(1, Ordering::SeqCst);
+            Err(refused())
+        })
+        .await;
+        assert!(matches!(r, Err(sqlx::Error::Io(_))));
+        assert_eq!(tries.load(Ordering::SeqCst), 2);
+    }
 }
