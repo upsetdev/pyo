@@ -973,6 +973,10 @@ update_local_agent() {
 
 # ── Where it is ─────────────────────────────────────────────────────────────
 
+# The first sign-in, only on a fresh install (ADMIN_PASSWORD, from
+# first_sign_in; an install that stopped halfway is one too). The pyo-admin
+# Secret stays after the first sign-in, so an update can't tell from it
+# whether the login still works, and says nothing about it.
 print_sign_in() {
   echo
   if [ -n "${ADMIN_PASSWORD:-}" ]; then
@@ -982,12 +986,6 @@ print_sign_in() {
     echo "It stops working once you do. Lost it before signing in? On this machine:"
     echo "  sudo k3s kubectl -n $NS get secret pyo-admin -o jsonpath='{.data.password}' | base64 -d"
   else
-    if kc -n "$NS" get secret pyo-admin >/dev/null 2>&1; then
-      # An earlier run made the login (maybe one that stopped before
-      # printing it). It works until the first sign-in sets your own.
-      echo "First sign-in: admin@pyo.local, with the password from:"
-      echo "  sudo k3s kubectl -n $NS get secret pyo-admin -o jsonpath='{.data.password}' | base64 -d"
-    fi
     echo "To update later, run the same command again."
   fi
 }
