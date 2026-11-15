@@ -18,3 +18,34 @@
 //! sandbox server exists ([`available`]).
 
 pub mod keys;
+pub mod limits;
+pub mod scheduler;
+
+/// "1h", "1h30m", "90s".
+pub fn format_ttl(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    let mut out = String::new();
+    if h > 0 {
+        out.push_str(&format!("{h}h"));
+    }
+    if m > 0 {
+        out.push_str(&format!("{m}m"));
+    }
+    if s > 0 || out.is_empty() {
+        out.push_str(&format!("{s}s"));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifetimes() {
+        assert_eq!(format_ttl(3600), "1h");
+        assert_eq!(format_ttl(5400), "1h30m");
+        assert_eq!(format_ttl(90), "1m30s");
+        assert_eq!(format_ttl(0), "0s");
+    }
+}
