@@ -429,6 +429,9 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "tailscale": tailscale,
         "cloudConnections": cloud_connections,
         "cloudServers": cloud_servers,
+        // Sandbox servers the teams can use (theirs and the installation's).
+        // None: the dashboard hides sandboxes.
+        "sandboxServers": crate::sandbox::server_views(db, &team_ids, None).await?,
         // Pyo's dashboard on the public IP: the installation's admin only.
         "publicDashboard": if user.is_admin { crate::publicdash::snapshot(db).await? } else { Value::Null },
         // Cloudflare accounts: their zones, never the token.

@@ -78,6 +78,7 @@ pub const LOCK_TAILSCALE: i64 = 7_009;
 /// Not a loop's: the backup store's layout, set up by one process at a time.
 pub const LOCK_BACKUP_STORE: i64 = 7_008;
 pub const LOCK_DATABASE_IMPORTS: i64 = 7_031;
+pub const LOCK_SANDBOXES: i64 = 7_061;
 /// Not a loop's: making the sandbox signing key, once.
 pub const LOCK_SANDBOX_KEY: i64 = 7_062;
 
