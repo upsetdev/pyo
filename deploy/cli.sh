@@ -3,9 +3,11 @@
 #
 #   curl -fsSL https://pyo.dev/cli.sh | sh
 #
-# It downloads pyo-linux-x86_64 from Pyo's latest release on GitHub and
-# checks it against the release's sha256. Set PYO_VERSION=x.y.z for a
-# release other than the latest.
+# It downloads the CLI for this computer (pyo-linux-x86_64,
+# pyo-linux-aarch64, pyo-macos-aarch64 or pyo-macos-x86_64) from Pyo's
+# latest release on GitHub and checks it against the release's sha256. Set
+# PYO_VERSION=x.y.z for a release other than the latest. On Windows,
+# download pyo-windows-x86_64.exe from the release instead.
 #
 # It installs to /usr/local/bin when you can write there, and ~/.local/bin
 # otherwise. Set PYO_INSTALL_DIR for another folder. It never uses sudo.
@@ -16,7 +18,6 @@
 set -eu
 
 RELEASES="https://github.com/upsetdev/pyo/releases"
-ASSET="pyo-linux-x86_64"
 
 fail() {
   echo "pyo: $*" >&2
@@ -33,14 +34,36 @@ sha256_of() {
   fi
 }
 
+# The release's binary for this computer: pyo-<os>-<arch>, the names
+# `pyo upgrade` uses too (crates/pyo-cli/src/upgrade.rs).
+asset_for() {
+  case "$1" in
+    Linux) o=linux ;;
+    Darwin) o=macos ;;
+    *) o= ;;
+  esac
+  case "$2" in
+    x86_64 | amd64) a=x86_64 ;;
+    aarch64 | arm64) a=aarch64 ;;
+    *) a= ;;
+  esac
+  [ -n "$o" ] && [ -n "$a" ] && echo "pyo-$o-$a"
+}
+
 main() {
   os=$(uname -s)
   arch=$(uname -m)
-  if [ "$os" != "Linux" ] || [ "$arch" != "x86_64" ]; then
-    echo "pyo: the CLI is built for Linux x86-64 only ($os $arch here)." >&2
+  # An Intel shell under Rosetta says x86_64 on an Apple silicon Mac: the
+  # Mac's own CLI runs better.
+  if [ "$os" = Darwin ] && [ "$arch" = x86_64 ] \
+    && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then
+    arch=arm64
+  fi
+  ASSET=$(asset_for "$os" "$arch") || {
+    echo "pyo: there's no CLI release for $os $arch. It runs on Linux and macOS (x86-64 and Arm) and Windows (x86-64)." >&2
     echo "Build it from the Pyo source instead: cargo build --release -p pyo-cli" >&2
     exit 1
-  fi
+  }
   command -v curl >/dev/null 2>&1 || fail "curl is needed to download the CLI."
 
   version="${PYO_VERSION:-}"
@@ -70,6 +93,11 @@ main() {
     || fail "the download doesn't match its sha256. Nothing was installed. Try again."
 
   chmod 755 "$work/pyo"
+  # macOS keeps apps from the internet from opening until you allow them.
+  # curl doesn't mark its downloads, but clear the mark in case.
+  if [ "$os" = Darwin ]; then
+    xattr -d com.apple.quarantine "$work/pyo" 2>/dev/null || true
+  fi
   # Beside the old one first, then renamed over it: never half a binary.
   cp "$work/pyo" "$dir/.pyo.new"
   mv -f "$dir/.pyo.new" "$dir/pyo"

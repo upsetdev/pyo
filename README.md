@@ -120,8 +120,8 @@ them (for example in scripts).
 
 ## Deploy from your terminal
 
-Install the `pyo` CLI (Linux x86-64), then sign in to your Pyo (put its
-address in place of `your-pyo`):
+Install the `pyo` CLI on Linux or macOS (the docs show how on Windows), then
+sign in to your Pyo (put its address in place of `your-pyo`):
 
 ```bash
 curl -fsSL https://pyo.dev/cli.sh | sh
