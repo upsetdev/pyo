@@ -1061,7 +1061,10 @@ YAML
     *'"ok":true'*) say "Pyo $R_VERSION is ready" ;;
     *'"ok":false'*)
       upgrader_log "$logs"
-      fail "$(printf '%s' "$outcome" | sed 's/.*"message":"\([^"]*\)".*/\1/')"
+      local why
+      why=$(printf '%s' "$outcome" | sed -n 's/.*"message":"\([^"\\]*\)".*/\1/p' | head -n1)
+      [ -n "$why" ] || why="Pyo $R_VERSION didn't start. The version that was running keeps running. Run the same command again to try again."
+      fail "$why"
       ;;
     *)
       case "$st" in
