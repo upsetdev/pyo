@@ -713,8 +713,13 @@ pub enum DaemonResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCode {
+    /// No token, a bad one or one that ran out.
     Unauthorized,
+    /// The token doesn't allow the call.
     Forbidden,
+    /// The sandbox itself refused, like a file its user can't read or
+    /// write. Also 403, but the token is fine: a new one won't help.
+    PermissionDenied,
     NotFound,
     Conflict,
     InvalidSpec,
@@ -731,7 +736,7 @@ impl ErrorCode {
     pub fn http_status(self) -> u16 {
         match self {
             ErrorCode::Unauthorized => 401,
-            ErrorCode::Forbidden => 403,
+            ErrorCode::Forbidden | ErrorCode::PermissionDenied => 403,
             ErrorCode::NotFound => 404,
             ErrorCode::Conflict => 409,
             ErrorCode::InvalidSpec => 422,
