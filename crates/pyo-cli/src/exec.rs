@@ -12,10 +12,10 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::H
 use crate::{api::Api, service};
 
 /// Puts the terminal back however exec ends.
-struct Raw;
+pub(crate) struct Raw;
 
 impl Raw {
-    fn on() -> Result<Self> {
+    pub(crate) fn on() -> Result<Self> {
         crossterm::terminal::enable_raw_mode().context("This needs an interactive terminal")?;
         Ok(Raw)
     }
