@@ -76,12 +76,14 @@ pub struct KeyScope {
     pub teams: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAccess {
     /// Look, never change.
     Read,
     /// Also deploy, roll back, restart, stop and scale services.
     Deploy,
+    /// Also create and use sandboxes, and nothing else.
+    Sandboxes,
     /// Everything the owner can do in those teams.
     Full,
 }
@@ -91,9 +93,25 @@ impl KeyAccess {
         match s {
             "read" => Some(Self::Read),
             "deploy" => Some(Self::Deploy),
+            "sandboxes" => Some(Self::Sandboxes),
             "full" => Some(Self::Full),
             _ => None,
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Deploy => "deploy",
+            Self::Sandboxes => "sandboxes",
+            Self::Full => "full",
+        }
+    }
+
+    /// Whether this access covers what `need` takes. Deploy and sandboxes
+    /// each add their own to read, and full has both.
+    pub fn allows(self, need: KeyAccess) -> bool {
+        self == need || self == Self::Full || need == Self::Read
     }
 }
 

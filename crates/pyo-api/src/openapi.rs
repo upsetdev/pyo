@@ -25,7 +25,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
 #[openapi(
     info(
         title = "Pyo API",
-        description = "Everything the dashboard does, for scripts. Read with GET, and change things with one operation per POST to `/ops`.\n\nAuthenticate with an API key from the dashboard's API keys page: `Authorization: Bearer pyo_…`. A key acts as you, with your role in each team, and is limited further by its access: **read** (look, never change), **deploy** (also deploy, roll back, restart, stop and scale services) or **full** (everything you can do in its teams). Each endpoint and operation says the access it needs in `x-pyo-access`.\n\nErrors come back as `{\"error\": \"…\"}` with a status code. Times are milliseconds since 1970 unless they say otherwise.",
+        description = "Everything the dashboard does, for scripts. Read with GET, and change things with one operation per POST to `/ops`.\n\nAuthenticate with an API key from the dashboard's API keys page: `Authorization: Bearer pyo_…`. A key acts as you, with your role in each team, and is limited further by its access: **read** (look, never change), **deploy** (also deploy, roll back, restart, stop and scale services), **sandboxes** (also create and use sandboxes) or **full** (everything you can do in its teams). Each endpoint and operation says the access it needs in `x-pyo-access`.\n\nErrors come back as `{\"error\": \"…\"}` with a status code. Times are milliseconds since 1970 unless they say otherwise.",
         license(name = "Apache-2.0", identifier = "Apache-2.0"),
     ),
     servers((url = "https://{host}/api/v1", description = "Your Pyo", variables(("host" = (default = "your-pyo.example.com", description = "Where your Pyo runs."))))),
@@ -358,11 +358,7 @@ fn example_value(k: &str, p: &Value, components: &Value, tag: &str, id_prefix: &
 }
 
 fn access_name(a: Option<KeyAccess>) -> Option<&'static str> {
-    a.map(|a| match a {
-        KeyAccess::Read => "read",
-        KeyAccess::Deploy => "deploy",
-        KeyAccess::Full => "full",
-    })
+    a.map(KeyAccess::as_str)
 }
 
 /// Each operation of `/ops` as its own named schema (`CreateServiceOp`…)
@@ -766,7 +762,9 @@ mod tests {
                 let access = op["x-pyo-access"]
                     .as_str()
                     .unwrap_or_else(|| panic!("{method} {path} has no x-pyo-access"));
-                assert!(["none", "read", "deploy", "full", "varies"].contains(&access));
+                assert!(
+                    ["none", "read", "deploy", "sandboxes", "full", "varies"].contains(&access)
+                );
                 assert!(op["responses"]["500"].is_object(), "{method} {path}");
                 assert!(
                     op["operationId"].is_string() && op["tags"][0].is_string(),

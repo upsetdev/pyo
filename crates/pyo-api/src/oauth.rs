@@ -33,9 +33,9 @@ use crate::{
 const SCOPE: &str = "pyo";
 /// What a connected assistant may do, the same levels as API keys: "pyo"
 /// (everything you can), "pyo:deploy" (look, and deploy, roll back,
-/// restart, stop and scale) or "pyo:read" (look only). The user picks on the
-/// consent page.
-const SCOPES: [&str; 3] = [SCOPE, "pyo:deploy", "pyo:read"];
+/// restart, stop and scale), "pyo:sandboxes" (look, and create and use
+/// sandboxes) or "pyo:read" (look only). The user picks on the consent page.
+const SCOPES: [&str; 4] = [SCOPE, "pyo:deploy", "pyo:sandboxes", "pyo:read"];
 
 /// A grant's scope as API key access. A scope without one of Pyo's is full
 /// access, as an authorization request without a scope gets.
@@ -45,6 +45,8 @@ pub fn scope_access(scope: &str) -> KeyAccess {
         KeyAccess::Full
     } else if has("pyo:deploy") {
         KeyAccess::Deploy
+    } else if has("pyo:sandboxes") {
+        KeyAccess::Sandboxes
     } else if has("pyo:read") {
         KeyAccess::Read
     } else {
@@ -57,6 +59,7 @@ fn access_scope(a: KeyAccess) -> &'static str {
     match a {
         KeyAccess::Full => SCOPE,
         KeyAccess::Deploy => "pyo:deploy",
+        KeyAccess::Sandboxes => "pyo:sandboxes",
         KeyAccess::Read => "pyo:read",
     }
 }
@@ -656,6 +659,7 @@ mod tests {
         assert_eq!(scope_access("pyo"), KeyAccess::Full);
         assert_eq!(scope_access("pyo:deploy"), KeyAccess::Deploy);
         assert_eq!(scope_access("pyo:read"), KeyAccess::Read);
+        assert_eq!(scope_access("pyo:sandboxes"), KeyAccess::Sandboxes);
         assert_eq!(scope_access("openid pyo:read"), KeyAccess::Read);
         assert_eq!(scope_access(""), KeyAccess::Full);
         assert_eq!(access_scope(scope_access("pyo:deploy")), "pyo:deploy");
