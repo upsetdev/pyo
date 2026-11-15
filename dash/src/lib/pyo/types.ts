@@ -1218,11 +1218,15 @@ export type Application = {
     /** Network bytes per second, across its replicas. */
     netRxBps?: number | null;
     netTxBps?: number | null;
+    /** Served as static files by the cluster's static server: no replicas of its own. */
+    static?: boolean;
   };
   /** Configuration saved but not yet rolled out. */
   pendingChanges: boolean;
   /** Put the previous version back when a deploy fails. Default on. */
   autoRollback?: boolean;
+  /** A build detected as a static site: served as static files ("static", the default) or run as a service. */
+  serveAs?: "static" | "service";
   createdAt: Timestamp;
   updatedAt: Timestamp;
 };

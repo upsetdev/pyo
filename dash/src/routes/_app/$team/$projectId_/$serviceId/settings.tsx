@@ -350,6 +350,28 @@ function AppSettings({ app }: { app: Application }) {
       <DeployHooksPanel projectId={app.projectId} serviceId={app.id} />
 
       {app.workloadKind === "CronJob" ? <CronSettings app={app} /> : null}
+      {app.source.type === "git" && app.workloadKind !== "CronJob" ? (
+        <Panel title="Static files">
+          <div className="p-4">
+            <Switch
+              checked={app.serveAs !== "service"}
+              onChange={(on) => {
+                api.updateService(
+                  app.id,
+                  { serveAs: on ? "static" : "service" },
+                  { requiresRedeploy: true, label: "static files" },
+                );
+                toast({
+                  title: on ? "Serve as static files" : "Run as a service",
+                  description: "Redeploy to use it.",
+                });
+              }}
+              label="Serve as static files"
+              description="For static site builds. Off runs it as a service."
+            />
+          </div>
+        </Panel>
+      ) : null}
       <Panel title="Rollbacks">
         <div className="p-4">
           <Switch

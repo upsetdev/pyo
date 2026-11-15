@@ -159,6 +159,8 @@ export function AppTable({
               <Td className="tabular-nums">
                 {a.workloadKind === "CronJob" ? (
                   <span className="font-mono text-[11.5px]">{a.schedule}</span>
+                ) : a.runtime.static ? (
+                  "Static"
                 ) : (
                   `${a.runtime.readyReplicas}/${a.status === "stopped" ? 0 : a.replicas}`
                 )}

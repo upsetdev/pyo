@@ -293,6 +293,10 @@ function Production({
                 <Field label="Last run">
                   <LastRun app={app} />
                 </Field>
+              ) : app.runtime.static ? (
+                <Field label="Served as">
+                  <span>Static files</span>
+                </Field>
               ) : (
               <Field label="Replicas">
                 <span className="flex items-center gap-2">

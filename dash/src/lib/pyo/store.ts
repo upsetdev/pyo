@@ -1836,6 +1836,7 @@ export const api = {
         | "source"
         | "clusterId"
         | "autoRollback"
+        | "serveAs"
         | "serverTags"
         | "secretImports"
         | "schedule"
