@@ -10,6 +10,9 @@ name: CLI
 on:
   workflow_call:
   workflow_dispatch:
+  # Temporary: try the builds on this branch. Drop before merging.
+  push:
+    branches: [feat/cli-platforms]
 
 permissions:
   contents: read
