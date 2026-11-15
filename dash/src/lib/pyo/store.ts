@@ -11,6 +11,7 @@ import { newId, slugify } from "./format";
 import { isActive, revisionFor } from "./simulation";
 import { generateValue, getTemplate, templateArgs, templateRecord, templateRefs } from "./templates";
 import { toast } from "./toast";
+import type { SandboxServer } from "./sandbox";
 import type {
   Autoscale,
   FreeDomainAddress,
@@ -104,6 +105,8 @@ export type PyoState = {
   publicDashboard: PublicDashboard | null;
   /** Teams' Cloudflare accounts (zones only). */
   cloudflare: CloudflareAccount[];
+  /** Sandbox servers the teams can use: theirs and the installation's. Empty hides sandboxes. */
+  sandboxServers: SandboxServer[];
   /** URL the agents of in-cluster installs use; shown in install commands. */
   agentApiUrl: string;
   /** Outgoing email (SMTP), or null when it isn't set up. */
@@ -327,6 +330,7 @@ function empty(): PyoState {
     cloudServers: [],
     publicDashboard: null,
     cloudflare: [],
+    sandboxServers: [],
     ...loadPrefs(),
   };
 }
@@ -662,6 +666,9 @@ export const gitConnectionsIn = (s: PyoState, wsId = s.currentTeamId) =>
   (s.gitConnections ?? []).filter((c) => c.teamId === wsId);
 export const buildersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.builders.filter((b) => b.teamId === wsId);
+/** The team's sandbox servers and the installation's. None: sandboxes stay hidden. */
+export const sandboxServersIn = (s: PyoState, wsId = s.currentTeamId) =>
+  (s.sandboxServers ?? []).filter((x) => !x.teamId || x.teamId === wsId);
 /** The team's Cloudflare account, when connected. */
 export const cloudflareIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.cloudflare?.find((c) => c.teamId === wsId);
