@@ -1,7 +1,7 @@
-# The GeoIP country database the traffic proxy's firewall places visitors
+# The GeoIP country database Pyo Gateway's firewall places visitors
 # with (GeoLite2 Country, the same source as analytics' bundled GeoLite2
-# City). Just the file: the proxies mount this image read-only as a volume
-# (PYO_GEOIP_IMAGE; pyo-proto's system.rs), so they need no credentials or
+# City). Just the file: Pyo Gateway mounts this image read-only as a volume
+# (PYO_GEOIP_IMAGE; pyo-proto's system.rs), so it needs no credentials or
 # downloads for it. Built with each release, and by scripts/pyo-up.sh.
 FROM alpine:3.24.3 AS geo
 RUN wget -qO- https://raw.githubusercontent.com/GitSquared/node-geolite2-redist/master/redist/GeoLite2-Country.tar.gz | tar xz -C /tmp \

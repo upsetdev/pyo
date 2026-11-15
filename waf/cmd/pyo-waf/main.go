@@ -1,5 +1,5 @@
 // pyo-waf: Coraza with the OWASP Core Rule Set, and custom rules, as an
-// Envoy external processor (ext_proc). The traffic proxy sends it each
+// Envoy external processor (ext_proc). Pyo Gateway sends it each
 // request to a service that has the WAF on (Pyo's EnvoyExtensionPolicy); it
 // answers "go on" or a 403, and logs what matched as one JSON line per
 // request on stdout.
