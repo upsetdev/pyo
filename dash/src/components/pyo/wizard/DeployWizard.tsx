@@ -174,7 +174,7 @@ export function DeployWizard({ initial }: { initial: Initial }) {
     return (
       <StartScreen
         cron={!!initial.cron}
-        initialKind={initial.source === "git" ? "git" : "image"}
+        initialKind={initial.source === "image" ? "image" : "git"}
         focusImport={initial.source === "git" || initial.source === "image"}
         recentIds={s.recentTemplateIds}
         onKind={(k) => go({ source: k })}
