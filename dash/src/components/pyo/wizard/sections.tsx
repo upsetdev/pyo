@@ -206,7 +206,7 @@ export function useDraftSections(
         ? {
             icon: <LogoTile icon={GIT_LOGO} />,
             title: repo,
-            sub: `${d.git.branch} · ${buildText}`,
+            sub: `${d.git.branch || "Default branch"} · ${buildText}`,
           }
         : {
             icon: <LogoTile icon={DOCKER_LOGO} />,
@@ -226,7 +226,7 @@ export function useDraftSections(
     schedule: d.cron ? describeCron(d.schedule) || `${d.schedule} UTC` : "Not a cron job: it runs continuously",
     build:
       d.sourceType === "git"
-        ? `${d.git.branch}${d.git.commit ? ` @ ${d.git.commit.slice(0, 7)}` : ""} · ${buildText}${d.git.private ? " · private" : ""}`
+        ? `${d.git.branch || "Default branch"}${d.git.commit ? ` @ ${d.git.commit.slice(0, 7)}` : ""} · ${buildText}${d.git.private ? " · private" : ""}`
         : `${imageShort}${d.image.private ? " · private" : ""}`,
     env: d.env.length
       ? `${d.env.length} variable${d.env.length === 1 ? "" : "s"}${secrets ? ` · ${secrets} secret${secrets === 1 ? "" : "s"}` : ""}`

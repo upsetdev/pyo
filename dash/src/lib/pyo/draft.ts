@@ -455,7 +455,9 @@ function check(step: Section, d: DeployDraft, ctx: ValidationContext): Issues {
       )
         e.repoUrl =
           "Use the repository's HTTPS URL, e.g. https://github.com/org/repo.";
-      if (!d.git.branch.trim()) e.branch = "Branch is required.";
+      // A pasted URL may leave it out: Pyo takes the repository's default branch.
+      if (!d.git.branch.trim() && (d.git.gitConnectionId || d.git.installationId))
+        e.branch = "Branch is required.";
       if (d.git.commit && !/^[0-9a-f]{7,40}$/.test(d.git.commit))
         e.commit =
           "Use a 7–40 character commit SHA, or leave empty for the branch head.";

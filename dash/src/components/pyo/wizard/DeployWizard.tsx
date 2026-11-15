@@ -205,12 +205,26 @@ export function DeployWizard({ initial }: { initial: Initial }) {
   );
 }
 
-/** ?repo= for a Git draft: the URL, with "/tree/<branch>" unless it's main. */
+/** ?repo= for a Git draft: the URL, with "/tree/<branch>" when it names one. */
 export function gitParam(patch: Partial<DeployDraft>) {
   const g = patch.git;
-  return g
-    ? `${g.repoUrl}${g.branch && g.branch !== "main" ? `/tree/${g.branch}` : ""}`
-    : "";
+  return g ? `${g.repoUrl}${g.branch ? `/tree/${g.branch}` : ""}` : "";
+}
+
+/**
+ * A repository URL as pasted, made the HTTPS form builders clone:
+ * "github.com/owner/repo", "git@github.com:owner/repo.git" and
+ * "https://github.com/owner/repo.git" all become
+ * "https://github.com/owner/repo".
+ */
+export function normalizeGitUrl(raw: string) {
+  let url = raw.trim();
+  const scp = /^[\w.-]+@([\w.-]+):(?!\/)(.+)$/.exec(url);
+  if (scp) url = `https://${scp[1]}/${scp[2]}`;
+  url = url.replace(/^(ssh|git):\/\/([^@/]+@)?([^/:]+)(:\d+)?\//, "https://$3/");
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url) && /^[\w-]+(\.[\w-]+)+(:\d+)?\//.test(url))
+    url = `https://${url}`;
+  return url.replace(/\/+$/, "").replace(/\.git$/, "");
 }
 
 /** ?image= for an image draft: "repo:tag" or "repo@sha256:…". */
@@ -221,14 +235,17 @@ export function imageParam(patch: Partial<DeployDraft>) {
     : "";
 }
 
-/** A Git URL as a draft: ".../tree/<branch>" picks that branch, else main. */
+/**
+ * A Git URL as a draft: ".../tree/<branch>" picks that branch. Without
+ * one, Pyo takes the repository's default branch when it's created.
+ */
 export function gitImport(raw: string): {
   patch?: Partial<DeployDraft>;
   error?: string;
 } {
-  const [, base = raw, branch = "main"] =
-    /^(.*?)\/tree\/([^?#]+)/.exec(raw.trim()) ?? [];
-  const url = base.trim().replace(/\/+$/, "");
+  const [, base = raw, branch = ""] =
+    /^(.*?)(?:\/-)?\/tree\/([^?#]+)/.exec(raw.trim()) ?? [];
+  const url = normalizeGitUrl(base);
   if (!/^https?:\/\/[^\s/]+\/\S+$/.test(url))
     return {
       error:
@@ -244,7 +261,7 @@ export function gitImport(raw: string): {
       git: {
         ...probe.git,
         repoUrl: url,
-        branch: branch.replace(/\/+$/, "") || "main",
+        branch: branch.replace(/\/+$/, ""),
         builder: "dockerfile",
       },
       ...defaults,

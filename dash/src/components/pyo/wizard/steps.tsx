@@ -429,7 +429,7 @@ export function SourceStep({ d, set, errors }: StepProps) {
           </Field>
           <Field
             label="Branch"
-            required
+            required={!!(g.gitConnectionId || g.installationId)}
             error={err(errors, "branch")}
             className="sm:col-span-2"
           >
@@ -447,6 +447,7 @@ export function SourceStep({ d, set, errors }: StepProps) {
                   {...p}
                   mono
                   value={g.branch}
+                  placeholder="Default branch"
                   onChange={(e) => setGit({ branch: e.target.value.trim() })}
                 />
               )

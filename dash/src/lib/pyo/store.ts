@@ -1637,7 +1637,8 @@ export const api = {
           ? {
               type: "git",
               repoUrl: d.git.repoUrl.trim(),
-              branch: d.git.branch.trim() || "main",
+              // Empty: Pyo takes the repository's default branch.
+              branch: d.git.branch.trim(),
               commit: d.git.commit.trim(),
               builder: "dockerfile",
               dockerfilePath: d.git.dockerfilePath.trim() || "Dockerfile",
