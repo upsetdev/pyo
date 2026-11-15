@@ -104,7 +104,45 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/sandboxes/{id}/files/stat", get(stat_file))
         .route("/v1/sandboxes/{id}/files/mkdir", post(mkdir))
         .route("/v1/sandboxes/{id}/connect", get(connect))
+        .layer(axum::middleware::from_fn(cors))
         .with_state(state)
+}
+
+/// Lets the dashboard call the daemon from the browser. Every call carries
+/// its token in a header or the query, never a cookie, so any origin may
+/// ask. The preflight also allows a public page to reach the tailnet
+/// address (Chrome's private network access).
+async fn cors(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let preflight = req.method() == axum::http::Method::OPTIONS;
+    let mut res = if preflight {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await
+    };
+    let h = res.headers_mut();
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        header::HeaderValue::from_static("*"),
+    );
+    if preflight {
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            header::HeaderValue::from_static("GET, POST, PUT, DELETE"),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            header::HeaderValue::from_static("authorization, content-type"),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            header::HeaderValue::from_static("600"),
+        );
+        h.insert(
+            "access-control-allow-private-network",
+            header::HeaderValue::from_static("true"),
+        );
+    }
+    res
 }
 
 // ── Auth ───────────────────────────────────────────────────────────────────
@@ -722,6 +760,39 @@ mod tests {
         );
         let admin = claims(vec![Scope::Admin]);
         assert!(refuse(&admin, &Request::SetTime { unix_ms: 0 }, 150).is_none());
+    }
+
+    #[tokio::test]
+    async fn browsers_may_call_the_daemon() {
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route("/v1/health", get(health))
+            .layer(axum::middleware::from_fn(cors));
+        let pre = axum::http::Request::builder()
+            .method("OPTIONS")
+            .uri("/v1/health")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(pre).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(res.headers()["access-control-allow-origin"], "*");
+        assert!(
+            res.headers()["access-control-allow-headers"]
+                .to_str()
+                .unwrap()
+                .contains("authorization")
+        );
+        assert_eq!(
+            res.headers()["access-control-allow-private-network"],
+            "true"
+        );
+        let get = axum::http::Request::builder()
+            .uri("/v1/health")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app.oneshot(get).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["access-control-allow-origin"], "*");
     }
 
     #[test]
