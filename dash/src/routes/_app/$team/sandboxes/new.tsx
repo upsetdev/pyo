@@ -3,7 +3,6 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { useSandboxes } from "~/components/pyo/sandbox/common";
 import { AppLink } from "~/components/ui/AppLink";
-import { Badge } from "~/components/ui/Badge";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { Field, Segmented, Select, Switch, Textarea } from "~/components/ui/Field";
 import { Highlighted } from "~/components/ui/Highlighted";
@@ -22,7 +21,7 @@ import {
   sizeLabel,
   type CreateSandbox,
 } from "~/lib/pyo/sandbox";
-import { projectsIn, usePyo } from "~/lib/pyo/store";
+import { projectsIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import { seo } from "~/lib/seo";
 
 export const Route = createFileRoute("/_app/$team/sandboxes/new")({
@@ -31,8 +30,8 @@ export const Route = createFileRoute("/_app/$team/sandboxes/new")({
 });
 
 // The new sandbox form. The side box shows the same choices as SDK code.
-// Sandbox servers refuse a network for now, so "No network" is the only
-// choice until networking lands.
+// "Internet" is the default when one of the team's servers can give
+// sandboxes a network.
 
 /** Pause after this long without use, when "Pause when idle" is on. */
 const IDLE_SECS = 300;
@@ -52,7 +51,12 @@ function NewSandbox() {
   const [size, setSize] = useState<(typeof SIZES)[number]["value"]>("1");
   const [ttl, setTtl] = useState<(typeof LIFETIMES)[number]["value"]>("1h");
   const [idle, setIdle] = useState(false);
-  const [network, setNetwork] = useState<"none" | "internet">("none");
+  const networked = sandboxServersIn(s).some(
+    (v) => v.enabled && v.state === "ready" && v.capability?.network,
+  );
+  // Follows the servers until picked.
+  const [pickedNetwork, setNetwork] = useState<"none" | "internet" | null>(null);
+  const network = networked ? (pickedNetwork ?? "internet") : "none";
   const [more, setMore] = useState(false);
   const [env, setEnv] = useState("");
   const [labels, setLabels] = useState("");
@@ -184,24 +188,15 @@ function NewSandbox() {
                 </div>
               )}
             </Field>
-            <Field label="Network">
+            <Field label="Network" hint={networked ? undefined : "No sandbox server here has networking."}>
               {() => (
                 <Segmented
                   label="Network"
                   value={network}
                   onChange={setNetwork}
                   options={[
+                    { value: "internet", label: "Internet", disabled: !networked },
                     { value: "none", label: "No network" },
-                    {
-                      value: "internet",
-                      disabled: true,
-                      title: "Coming soon",
-                      label: (
-                        <span className="inline-flex items-center gap-1.5">
-                          Internet <Badge>Coming soon</Badge>
-                        </span>
-                      ),
-                    },
                   ]}
                 />
               )}

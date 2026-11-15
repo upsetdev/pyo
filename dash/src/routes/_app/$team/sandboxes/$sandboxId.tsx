@@ -1,4 +1,5 @@
 import {
+  ArrowSquareOutIcon,
   ClockClockwiseIcon,
   CubeIcon,
   PauseIcon,
@@ -19,7 +20,7 @@ import {
 import { Badge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
-import { Input } from "~/components/ui/Field";
+import { Input, Segmented } from "~/components/ui/Field";
 import { Menu } from "~/components/ui/Menu";
 import {
   Callout,
@@ -36,8 +37,10 @@ import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
   LIFETIMES,
+  connectionFor,
   daemonApi,
   ended,
+  rememberConnection,
   sandboxApi,
   sizeLabel,
   timeLeft,
@@ -67,7 +70,15 @@ function SandboxPage() {
   const { tab = "overview" } = Route.useSearch();
   const navigate = useNavigate();
   const s = usePyo();
-  const q = useQuery(`sandbox:${sandboxId}`, () => sandboxApi.get(sandboxId), { refreshMs: 4000 });
+  const q = useQuery(
+    `sandbox:${sandboxId}`,
+    () =>
+      sandboxApi.get(sandboxId).then((x) => {
+        if (x.connection) rememberConnection(x.connection);
+        return x;
+      }),
+    { refreshMs: 4000 },
+  );
   const [deleting, setDeleting] = useState(false);
   const [busy, setBusy] = useState(false);
   const canUse = roleIn(s) !== "viewer";
@@ -275,6 +286,7 @@ function Overview({ x, canUse, onChange }: { x: Sandbox; canUse: boolean; onChan
             ]}
           />
         </Panel>
+        <Ports x={x} canUse={canUse} onChange={onChange} />
         <Panel title="Environment and labels">
           <KeyValue
             items={[
@@ -307,6 +319,106 @@ function Overview({ x, canUse, onChange }: { x: Sandbox; canUse: boolean; onChan
         </Panel>
       </div>
     </div>
+  );
+}
+
+/** Ports open on the server's edge proxy, and a form to open one. */
+function Ports({ x, canUse, onChange }: { x: Sandbox; canUse: boolean; onChange: () => void }) {
+  const [port, setPort] = useState("");
+  const [access, setAccess] = useState<"public" | "private">("public");
+  const [busy, setBusy] = useState(false);
+  const live = !ended(x);
+  const n = Number(port);
+  const valid = Number.isInteger(n) && n >= 1 && n <= 65535;
+  const open = async () => {
+    if (!valid || busy) return;
+    setBusy(true);
+    try {
+      const r = await sandboxApi.openPort(x.id, n, access === "public");
+      toast({ title: `Port ${n} is open`, description: r.url });
+      setPort("");
+      onChange();
+    } catch (e) {
+      toast({ tone: "error", title: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  // A private port needs a sandbox token, which the edge takes once in the URL.
+  const visit = async (p: { url: string | null; public: boolean }) => {
+    if (!p.url) return;
+    const tab = window.open("", "_blank");
+    try {
+      const url = p.public ? p.url : `${p.url}/?pyo_token=${encodeURIComponent((await connectionFor(x.id)).token)}`;
+      if (tab) tab.location.href = url;
+    } catch (e) {
+      tab?.close();
+      toast({ tone: "error", title: (e as Error).message });
+    }
+  };
+  if (!x.edgeUrl && !x.ports.length && !live) return null;
+  return (
+    <Panel title="Ports">
+      {x.ports.length ? (
+        <KeyValue
+          items={x.ports.map((p) => [
+            <span key="p" className="inline-flex items-center gap-2">
+              <span className="font-mono">{p.port}</span>
+              <Badge>{p.public ? "Public" : "Private"}</Badge>
+            </span>,
+            p.url ? (
+              <button
+                key="u"
+                type="button"
+                onClick={() => void visit(p)}
+                className="inline-flex items-center gap-1 font-mono text-[11.5px] text-primary hover:text-primary/80"
+              >
+                <span className="truncate">{p.url}</span>
+                <ArrowSquareOutIcon size={12} className="shrink-0" />
+              </button>
+            ) : (
+              "—"
+            ),
+          ])}
+        />
+      ) : null}
+      {!x.edgeUrl ? (
+        <p className="px-4 py-3 text-[12.5px] text-muted-foreground">This server has no edge proxy.</p>
+      ) : canUse && live ? (
+        <form
+          className="flex flex-wrap items-center gap-2 border-t border-border p-4 first:border-t-0"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void open();
+          }}
+        >
+          <Input
+            mono
+            inputMode="numeric"
+            aria-label="Port"
+            placeholder="3000"
+            value={port}
+            onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}
+            className="w-24"
+          />
+          <Segmented
+            label="Access"
+            size="xs"
+            value={access}
+            onChange={setAccess}
+            options={[
+              { value: "public", label: "Public" },
+              { value: "private", label: "Private" },
+            ]}
+          />
+          <Button type="submit" size="sm" variant="secondary" disabled={!valid || busy}>
+            {busy ? "Opening…" : "Open port"}
+          </Button>
+        </form>
+      ) : !x.ports.length ? (
+        <p className="px-4 py-3 text-[12.5px] text-muted-foreground">No open ports.</p>
+      ) : null}
+    </Panel>
   );
 }
 

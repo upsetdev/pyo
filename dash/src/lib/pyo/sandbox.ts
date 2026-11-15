@@ -1,8 +1,8 @@
 // Pyo Sandbox in the dashboard: the control plane's API (crates/pyo-api/src/sandbox)
 // and the sandbox server's daemon (crates/pyo-sandbox), which the browser
 // calls directly with the client token Pyo signs. The daemon answers only on
-// the tailnet until the edge proxy exists, so its calls need the browser to
-// be on the tailnet too.
+// the tailnet, so its calls need the browser to be on the tailnet too. Open
+// ports are served on the server's edge proxy instead.
 
 import { request } from "./backend";
 
@@ -39,6 +39,11 @@ export type Sandbox = {
   env: string[];
   /** Its server's daemon, `http://<tailnet ip>:7070`. */
   url: string | null;
+  /** Its server's edge proxy, where open ports are served. */
+  edgeUrl: string | null;
+  ports: SandboxPort[];
+  /** getSandbox only: a fresh connection when you may use the sandbox. */
+  connection?: Connection | null;
   error: string | null;
   createdBy: string | null;
   createdAt: number;
@@ -47,6 +52,8 @@ export type Sandbox = {
   pausedAt: number | null;
   endedAt: number | null;
 };
+
+export type SandboxPort = { port: number; public: boolean; url: string | null };
 
 export type SandboxLimits = {
   maxRunning: number;
@@ -67,7 +74,7 @@ export type Connection = {
   url: string;
   sandboxId: string;
   token: string;
-  /** Seconds since 1970. */
+  /** Milliseconds since 1970. */
   expiresAt: number;
 };
 
@@ -81,6 +88,7 @@ export type SandboxCapability = {
   memory: number;
   disk: number;
   network?: boolean;
+  edgeUrl?: string;
   reason?: string;
 };
 
@@ -167,6 +175,11 @@ export const sandboxApi = {
       method: "POST",
       body: { ttl },
     }),
+  openPort: (id: string, port: number, isPublic: boolean) =>
+    request<{ url: string; port: number; public: boolean }>(
+      `/api/v1/sandboxes/${enc(id)}/ports`,
+      { method: "POST", body: { port, public: isPublic } },
+    ),
   token: (id: string) =>
     request<Connection>(`/api/v1/sandboxes/${enc(id)}/token`, { method: "POST" }),
   servers: (team: string) =>
@@ -206,7 +219,7 @@ export function rememberConnection(c: Connection) {
 /** A token for the sandbox's server with a minute or more left. */
 export async function connectionFor(id: string): Promise<Connection> {
   const c = tokens.get(id);
-  if (c && c.expiresAt * 1000 - Date.now() > 60_000) return c;
+  if (c && c.expiresAt - Date.now() > 60_000) return c;
   const fresh = await sandboxApi.token(id);
   tokens.set(id, fresh);
   return fresh;
@@ -336,13 +349,17 @@ export const jsonFrame = (kind: number, stream: number, value: unknown) =>
 export const parseFrame = <T>(f: Frame): T =>
   JSON.parse(new TextDecoder().decode(f.payload)) as T;
 
-/** The daemon's WebSocket for a sandbox, with the token in the query (browsers can't set headers). */
+/**
+ * The daemon's WebSocket for a sandbox. Browsers can't set headers on it, so
+ * the token goes as a subprotocol and stays out of the URL.
+ */
 export async function connectSocket(id: string) {
   const c = await connectionFor(id);
   const base = c.url.replace(/^http/, "ws");
-  const ws = new WebSocket(
-    `${base}/v1/sandboxes/${enc(id)}/connect?${new URLSearchParams({ token: c.token })}`,
-  );
+  const ws = new WebSocket(`${base}/v1/sandboxes/${enc(id)}/connect`, [
+    "pyo",
+    `pyo.token.${c.token}`,
+  ]);
   ws.binaryType = "arraybuffer";
   return ws;
 }
