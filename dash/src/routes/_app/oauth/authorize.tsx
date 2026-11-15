@@ -28,10 +28,11 @@ const PARAMS = [
 ];
 
 // The same levels as API keys; the grant's scope carries the choice.
-type Access = "full" | "deploy" | "read";
+type Access = "full" | "deploy" | "sandboxes" | "read";
 const SCOPE: Record<Access, string> = {
   full: "pyo",
   deploy: "pyo:deploy",
+  sandboxes: "pyo:sandboxes",
   read: "pyo:read",
 };
 const CAN: Record<Access, string[]> = {
@@ -44,6 +45,11 @@ const CAN: Record<Access, string[]> = {
     "See your teams, services, servers, logs and metrics",
     "Deploy, roll back, restart, stop and scale services",
     "Nothing else: no creating or deleting",
+  ],
+  sandboxes: [
+    "See your teams, services, servers, logs and metrics",
+    "Create, use and delete sandboxes",
+    "Nothing else",
   ],
   read: [
     "See your teams, services, servers, logs and metrics",
@@ -72,7 +78,9 @@ function AuthorizePage() {
       ? "read"
       : asked.includes("pyo:deploy")
         ? "deploy"
-        : "full";
+        : asked.includes("pyo:sandboxes")
+          ? "sandboxes"
+          : "full";
   });
 
   useEffect(() => {
@@ -148,6 +156,10 @@ function AuthorizePage() {
                 options={[
                   { value: "full", label: "Full" },
                   { value: "deploy", label: "Deploy" },
+                  // Once any team can use a sandbox server.
+                  ...(s.sandboxServers.length || access === "sandboxes"
+                    ? [{ value: "sandboxes" as const, label: "Sandboxes" }]
+                    : []),
                   { value: "read", label: "Read only" },
                 ]}
               />

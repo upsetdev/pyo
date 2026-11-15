@@ -1286,7 +1286,7 @@ export type OAuthGrant = {
   access?: ApiKeyAccess;
 };
 /** What an API key may do: look, also deploy, or anything its owner can. */
-export type ApiKeyAccess = "read" | "deploy" | "full";
+export type ApiKeyAccess = "read" | "deploy" | "sandboxes" | "full";
 export type ApiToken = {
   id: ID;
   name: string;

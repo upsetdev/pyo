@@ -46,6 +46,11 @@ const ACCESS: { value: ApiKeyAccess; label: string; hint: string }[] = [
     hint: "Also deploy, roll back, restart, stop and scale services.",
   },
   {
+    value: "sandboxes",
+    label: "Sandboxes",
+    hint: "Also create and use sandboxes.",
+  },
+  {
     value: "full",
     label: "Full access",
     hint: "Anything you can do, except manage your account and keys.",
@@ -84,6 +89,8 @@ export function ApiTokensPanel() {
   const [fresh, setFresh] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<ApiToken | null>(null);
   const [access, setAccess] = useState<ApiKeyAccess>("deploy");
+  // Shown once any team can use a sandbox server.
+  const sandboxes = s.sandboxServers.length > 0;
   const [team, setTeam] = useState("all");
   const [expiry, setExpiry] = useState<Expiry>("90");
   const teamName = (id: string) =>
@@ -190,7 +197,7 @@ export function ApiTokensPanel() {
             label="Access"
             value={access}
             onChange={setAccess}
-            options={ACCESS.map(({ value, label }) => ({ value, label }))}
+            options={ACCESS.filter((a) => a.value !== "sandboxes" || sandboxes || access === "sandboxes").map(({ value, label }) => ({ value, label }))}
           />
           <p className="text-[12px] text-muted-foreground">
             {ACCESS.find((a) => a.value === access)!.hint}
