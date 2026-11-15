@@ -4,11 +4,10 @@
 
 # Pyo
 
-**The open-source, self-hosted PaaS alternative to Vercel, Netlify, Railway, Render and Fly.io.**
+**The open-source PaaS alternative to Vercel, Netlify, Railway, Render and Fly.io.**
 
-Deploy your code, databases and ready-made templates on your own servers.
-Manage everything from the dashboard or the CLI, on one machine or a whole
-cluster.
+Deploy apps, run services, and create isolated sandboxes, from one machine to
+a whole cluster.
 
 </div>
 
@@ -38,6 +37,11 @@ Kubernetes, so you're never locked in.
   automatic failover, backups with point-in-time recovery (for MySQL, up to
   its latest backup), and read replicas for Postgres and KV. Import an
   existing database from a URL or a dump file.
+- **Sandboxes:** isolated machines for AI agents, code interpreters, previews
+  and CI, on dedicated sandbox servers. Each one runs in its own Firecracker
+  microVM, or in gVisor on servers without KVM. Run commands, read and write
+  files and open ports as live URLs from the TypeScript SDK, MCP, the CLI or
+  the dashboard.
 - **Templates:** WordPress, Ghost, MongoDB, ClickHouse, n8n, Ollama and more,
   in one click.
 - **Volumes:** back them up, restore them, resize them and move them between
