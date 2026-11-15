@@ -133,6 +133,8 @@ export type UpdateSettings = {
   hour: number;
   /** Look for new releases. */
   check: boolean;
+  /** Send a random install ID and the version with the check. */
+  usage: boolean;
 };
 export type UpdateAgentStep = {
   clusterId?: ID;

@@ -1996,6 +1996,9 @@ pub(crate) enum Op {
         days: Vec<String>,
         hour: u8,
         check: bool,
+        /// Send anonymous usage counts (a random install ID and Pyo's version) with the update check. Left out, it stays as it is.
+        #[serde(default)]
+        usage: Option<bool>,
     },
     /// Look for a new release now.
     CheckForUpdates {},
@@ -3443,10 +3446,15 @@ async fn apply(
             days,
             hour,
             check,
+            usage,
         } => {
             require_admin(user)?;
             let mut days = days;
             days.dedup();
+            let usage = match usage {
+                Some(u) => u,
+                None => crate::updates::settings(&s.db).await?.usage,
+            };
             crate::updates::save_settings(
                 tx,
                 &crate::updates::Settings {
@@ -3454,6 +3462,7 @@ async fn apply(
                     days,
                     hour,
                     check,
+                    usage,
                 },
             )
             .await?;

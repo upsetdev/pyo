@@ -1,10 +1,13 @@
 //! Updates of Pyo from the dashboard.
 //!
-//! - Checking: a worker loop asks GitHub for the latest stable release of
+//! - Checking: a worker loop asks for the latest stable release of
 //!   upsetdev/pyo every six hours (or when an admin asks) and keeps its
-//!   `release.json` (images pinned by digest, the manifests, notices).
-//!   `PYO_UPDATE_CHECK=off` turns checking off, for installs that can't
-//!   reach GitHub.
+//!   `release.json` (images pinned by digest, the manifests, notices). It
+//!   asks api.pyo.dev, which answers with GitHub's release and counts active
+//!   installs, and GitHub itself when that fails or is slow. With "Send
+//!   anonymous usage counts" on, the request carries a random install ID
+//!   and the version, nothing else. `PYO_UPDATE_CHECK=off` turns checking
+//!   off, for installs that can't reach GitHub, and so sends nothing.
 //! - Applying (an admin's "Update now", or the maintenance window when
 //!   updates are automatic): the agent on Pyo's own cluster runs the new
 //!   release's upgrader (agent upgrade.rs); once Pyo is on the new version,
@@ -28,6 +31,11 @@ use crate::{
 
 /// Where releases come from.
 pub const REPO: &str = "upsetdev/pyo";
+/// GitHub's latest release of [`REPO`], through api.pyo.dev, which counts
+/// active installs by install ID and version.
+const RELEASES_API: &str = "https://api.pyo.dev/v1/releases/latest";
+/// After this, GitHub is asked instead.
+const RELEASES_API_TIMEOUT: Duration = Duration::from_secs(10);
 const CHECK_EVERY_MS: i64 = 6 * 3_600_000;
 /// The upgrader has had this long; after that the update is failed.
 const PYO_TIMEOUT_MS: i64 = 45 * 60_000;
@@ -90,6 +98,8 @@ pub struct Settings {
     pub hour: u8,
     /// Look for new releases at all.
     pub check: bool,
+    /// Send the install ID with the update check (anonymous usage counts).
+    pub usage: bool,
 }
 
 impl Default for Settings {
@@ -99,6 +109,7 @@ impl Default for Settings {
             days: vec!["sun".into()],
             hour: 3,
             check: true,
+            usage: true,
         }
     }
 }
@@ -163,7 +174,44 @@ pub async fn save_settings(
         .bind(serde_json::to_value(s).map_err(anyhow::Error::from)?)
         .execute(&mut **tx)
         .await?;
+    // Off drops the ID, so turning it on again starts a new one.
+    if !s.usage {
+        sqlx::query("DELETE FROM pyo.settings WHERE key = 'install_id'")
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(())
+}
+
+/// A random ID for this installation: 16 random bytes, hex. Made once, on
+/// the first update check that sends it. It says nothing about the server.
+pub fn new_install_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::fill(&mut bytes);
+    hex::encode(bytes)
+}
+
+pub fn valid_install_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// This installation's ID, made the first time it's asked for.
+async fn install_id(db: &PgPool) -> ApiResult<String> {
+    sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('install_id', $1) ON CONFLICT (key) DO NOTHING")
+        .bind(Value::String(new_install_id()))
+        .execute(db)
+        .await?;
+    let v: Option<Value> =
+        sqlx::query_scalar("SELECT value FROM pyo.settings WHERE key = 'install_id'")
+            .fetch_optional(db)
+            .await?;
+    match v {
+        Some(Value::String(id)) if valid_install_id(&id) => Ok(id),
+        _ => Err(anyhow::anyhow!("the install ID isn't readable").into()),
+    }
 }
 
 // ── Checking ───────────────────────────────────────────────────────────────
@@ -196,14 +244,18 @@ pub async fn checked(db: &PgPool) -> ApiResult<Checked> {
         .unwrap_or_default())
 }
 
-/// Where to ask: GitHub, or PYO_UPDATE_SOURCE (a mirror with GitHub's
-/// release API, e.g. for tests or an air-gapped install).
-fn source() -> String {
+/// PYO_UPDATE_SOURCE: a mirror with GitHub's release API, e.g. for tests
+/// or an air-gapped install. It's then the only place asked.
+fn mirror() -> Option<String> {
     std::env::var("PYO_UPDATE_SOURCE")
         .ok()
         .filter(|s| !s.is_empty())
         .map(|s| s.trim_end_matches('/').to_owned())
-        .unwrap_or_else(|| format!("https://api.github.com/repos/{REPO}"))
+}
+
+/// Where GitHub's release API is: GitHub, or the mirror.
+fn source() -> String {
+    mirror().unwrap_or_else(|| format!("https://api.github.com/repos/{REPO}"))
 }
 
 fn client() -> anyhow::Result<reqwest::Client> {
@@ -295,9 +347,43 @@ async fn download(http: &reqwest::Client, asset: &GhAsset, tag: &str) -> anyhow:
     body_limited(res, MAX_ASSET).await
 }
 
-/// The latest stable release, if there is one with a usable release.json.
-pub async fn fetch() -> anyhow::Result<Option<Found>> {
-    let http = client()?;
+/// The latest release from api.pyo.dev, with the install ID when usage
+/// counts are on, and this version.
+async fn from_releases_api(
+    http: &reqwest::Client,
+    install_id: Option<&str>,
+) -> anyhow::Result<GhRelease> {
+    let mut req = http
+        .get(RELEASES_API)
+        .timeout(RELEASES_API_TIMEOUT)
+        .header("accept", "application/vnd.github+json")
+        .header("pyo-version", current());
+    if let Some(id) = install_id {
+        req = req.header("pyo-install-id", id);
+    }
+    let res = req.send().await?;
+    if !res.status().is_success() {
+        anyhow::bail!("api.pyo.dev answered {}", res.status());
+    }
+    Ok(serde_json::from_slice(
+        &body_limited(res, MAX_ASSET).await?,
+    )?)
+}
+
+/// GitHub's latest stable release: from api.pyo.dev, or from GitHub when
+/// that fails or is slow. With a mirror, from the mirror only.
+async fn latest(
+    http: &reqwest::Client,
+    install_id: Option<&str>,
+) -> anyhow::Result<Option<GhRelease>> {
+    if mirror().is_none() {
+        match from_releases_api(http, install_id).await {
+            Ok(gh) => return Ok(Some(gh)),
+            Err(e) => {
+                tracing::info!(error = %format!("{e:#}"), "api.pyo.dev didn't answer, asking GitHub")
+            }
+        }
+    }
     let res = http
         .get(format!("{}/releases/latest", source()))
         .header("accept", "application/vnd.github+json")
@@ -309,7 +395,18 @@ pub async fn fetch() -> anyhow::Result<Option<Found>> {
     if !res.status().is_success() {
         anyhow::bail!("GitHub answered {}", res.status());
     }
-    let gh: GhRelease = serde_json::from_slice(&body_limited(res, MAX_ASSET).await?)?;
+    Ok(Some(serde_json::from_slice(
+        &body_limited(res, MAX_ASSET).await?,
+    )?))
+}
+
+/// The latest stable release, if there is one with a usable release.json.
+/// `install_id` goes to api.pyo.dev only (anonymous usage counts).
+pub async fn fetch(install_id: Option<&str>) -> anyhow::Result<Option<Found>> {
+    let http = client()?;
+    let Some(gh) = latest(&http, install_id).await? else {
+        return Ok(None);
+    };
     if gh.draft || gh.prerelease {
         return Ok(None);
     }
@@ -367,7 +464,12 @@ pub async fn fetch() -> anyhow::Result<Option<Found>> {
 /// Ask now and remember the answer. A failed check keeps what was found before.
 pub async fn check(db: &PgPool) -> ApiResult<Checked> {
     let mut c = checked(db).await?;
-    match fetch().await {
+    let id = if settings(db).await?.usage {
+        Some(install_id(db).await?)
+    } else {
+        None
+    };
+    match fetch(id.as_deref()).await {
         Ok(found) => {
             c.found = found;
             c.error = None;
@@ -1348,6 +1450,7 @@ mod tests {
             days: vec!["sun".into(), "wed".into()],
             hour: 3,
             check: true,
+            usage: true,
         };
         // 2026-11-01 was a Sunday.
         let sunday_3am = 1_793_502_000_000; // 2026-11-01T03:00:00Z
@@ -1398,6 +1501,17 @@ mod tests {
         // Old or partial settings read with defaults.
         let s: Settings = serde_json::from_value(json!({ "mode": "auto" })).unwrap();
         assert_eq!(s.hour, 3);
+        assert!(s.usage);
+    }
+
+    #[test]
+    fn install_ids_are_random_hex() {
+        let a = new_install_id();
+        assert!(valid_install_id(&a));
+        assert_ne!(a, new_install_id());
+        assert!(!valid_install_id(&a.to_uppercase()));
+        assert!(!valid_install_id("pyo.example.com"));
+        assert!(!valid_install_id(&a[1..]));
     }
 
     #[test]

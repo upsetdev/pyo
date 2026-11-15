@@ -363,8 +363,15 @@ function ModeForm({ u }: { u: Updates }) {
           description={
             u.checksOffByEnv
               ? "Turned off for this installation with PYO_UPDATE_CHECK=off."
-              : "Every 6 hours, from GitHub."
+              : "Every 6 hours, through api.pyo.dev or from GitHub."
           }
+        />
+        <Switch
+          checked={f.usage && f.check && !u.checksOffByEnv}
+          disabled={!f.check || u.checksOffByEnv}
+          onChange={(usage) => set({ usage })}
+          label="Send anonymous usage counts"
+          description="A random ID and Pyo's version, with each check. Nothing that names this server."
         />
       </div>
     </Panel>
