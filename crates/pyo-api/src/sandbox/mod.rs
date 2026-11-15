@@ -938,12 +938,41 @@ pub struct AddServer {
     /// Its name in Pyo and on your tailnet: lowercase letters, digits and
     /// dashes.
     pub name: String,
+    /// A domain whose wildcard points at the server, like sbx.example.com.
+    /// Sandbox ports are then served at `<port>-<sandbox>.<domain>` on
+    /// ports 80 and 443. The certificate for `*.<domain>` goes in
+    /// /etc/pyo-sandbox/edge on the server.
+    #[serde(default)]
+    pub edge_domain: Option<String>,
+}
+
+/// An edge domain as given, lowercase with no trailing dot. None when blank.
+fn edge_domain(d: Option<&str>) -> ApiResult<Option<String>> {
+    let d = d
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if d.is_empty() {
+        return Ok(None);
+    }
+    let tld = d.rsplit('.').next().unwrap_or_default();
+    if !crate::util::hostname(&d)
+        || d.split('.').any(|l| l.starts_with('-') || l.ends_with('-'))
+        || !tld.starts_with(|c: char| c.is_ascii_lowercase())
+    {
+        return Err(ApiError::bad_request(format!(
+            "\"{d}\" isn't a domain, like sbx.example.com."
+        )));
+    }
+    Ok(Some(d))
 }
 
 /// Adds a sandbox server, or makes a new code for one that hasn't joined
 /// yet: its row, a one-time code and the command to run on it.
 pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<Value> {
     crate::util::require_dns_label(&req.name, "Server name")?;
+    let edge = edge_domain(req.edge_domain.as_deref())?;
     let mut tx = s.db.begin().await?;
     match &req.team_id {
         Some(t) => require(&mut tx, user, t, Need::Manage).await?,
@@ -1023,6 +1052,7 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
         code: &code,
         tailscale_key: &ts_key,
         version: env!("CARGO_PKG_VERSION"),
+        edge_domain: edge.as_deref(),
     }
     .render();
     let teams: Vec<String> = req.team_id.iter().cloned().collect();
@@ -1209,6 +1239,26 @@ mod tests {
             StatusCode::FORBIDDEN,
             "the sandbox's refusal is the caller's"
         );
+    }
+
+    #[test]
+    fn edge_domains() {
+        assert_eq!(edge_domain(None).unwrap(), None);
+        assert_eq!(edge_domain(Some("  ")).unwrap(), None);
+        assert_eq!(
+            edge_domain(Some(" Sbx.Example.com. ")).unwrap().as_deref(),
+            Some("sbx.example.com")
+        );
+        for bad in [
+            "localhost",
+            "sbx..example.com",
+            "-a.example.com",
+            "a.example.123",
+            "https://a.b",
+            "a.b/c",
+        ] {
+            assert!(edge_domain(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

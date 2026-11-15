@@ -392,11 +392,13 @@ pub struct Command<'a> {
     pub tailscale_key: &'a str,
     /// The Pyo release whose daemon it installs.
     pub version: &'a str,
+    /// Serves sandbox ports at `<port>-<sandbox>.<domain>`.
+    pub edge_domain: Option<&'a str>,
 }
 
 impl Command<'_> {
     pub fn render(&self) -> String {
-        format!(
+        let mut c = format!(
             "curl -fsSL {}/sandbox.sh | bash -s -- --pyo {} --server {} --name {} --code {} --tailscale-key {} --version {}",
             self.base,
             q(self.door),
@@ -405,7 +407,11 @@ impl Command<'_> {
             q(self.code),
             q(self.tailscale_key),
             q(self.version),
-        )
+        );
+        if let Some(d) = self.edge_domain {
+            c.push_str(&format!(" --edge-domain {}", q(d)));
+        }
+        c
     }
 }
 
@@ -478,10 +484,21 @@ mod tests {
             code: "abc",
             tailscale_key: "tskey-auth-1",
             version: "0.4.0",
+            edge_domain: None,
         };
         assert_eq!(
             c.render(),
             "curl -fsSL https://pyo.tail1234.ts.net/install/sandbox.sh | bash -s -- --pyo 'pyo.tail1234.ts.net:5006' --server 'sbs_one' --name 'it'\\''s sbx' --code 'abc' --tailscale-key 'tskey-auth-1' --version '0.4.0'"
+        );
+        let c = Command {
+            edge_domain: Some("sbx.example.com"),
+            ..c
+        };
+        assert!(
+            c.render()
+                .ends_with(" --version '0.4.0' --edge-domain 'sbx.example.com'"),
+            "{}",
+            c.render()
         );
     }
 
