@@ -411,6 +411,10 @@ pyo_addresses() {
     wait_until "Waiting for the HTTPS address (up to $((wait / 60)) minutes)…" "$wait" pyo_https_url || true
   lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
   echo
+  # The dashboard didn't answer in time: it still comes up by itself.
+  if [ -n "${STARTING:-}" ] && ! dashboard_up; then
+    echo "Pyo is still starting. It opens at these addresses in a minute or two."
+  fi
   echo "Open Pyo:"
   [ -z "$PYO_HTTPS_URL" ] || echo "  $PYO_HTTPS_URL"
   [ -z "$lan" ] || echo "  http://$lan:8000  (your network)"
@@ -535,7 +539,50 @@ case "$r" in
     ;;
 esac
 SH
-  "${sudo[@]}" chmod 755 /usr/local/lib/pyo/connect-this-machine.sh /usr/local/lib/pyo/tailnet-this-machine.sh
+  "${sudo[@]}" tee /usr/local/lib/pyo/pyo-reset-login >/dev/null <<'SH'
+#!/usr/bin/env bash
+# Prints a one-time link to choose a new password for a Pyo account, for a
+# password that's lost (the only admin's too). On the server Pyo runs on:
+#
+#   sudo pyo-reset-login [EMAIL]
+#
+# Without an email it's for Pyo's admin. Pyo makes the link with this
+# machine's install key (recovery.rs). It works once, for 30 minutes.
+set -euo pipefail
+[ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
+case "${1:-}" in
+  -h | --help) echo "Usage: sudo pyo-reset-login [EMAIL]"; exit 0 ;;
+esac
+key=$(cat /etc/pyo/bootstrap-key 2>/dev/null) || {
+  echo "Pyo isn't installed on this machine. Run this on the server Pyo runs on." >&2
+  exit 1
+}
+out=$(curl -sS -m 30 -w '\n%{http_code}' --data-urlencode "key=$key" --data-urlencode "email=${1:-}" \
+  http://127.0.0.1:8000/install/reset-login 2>/dev/null) || out=""
+status=${out##*$'\n'} body=${out%$'\n'*}
+field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" <<<"$body" | head -n1; }
+if [ -z "$out" ]; then
+  echo "Pyo isn't answering on this machine. Wait a minute, then run this again." >&2
+  exit 1
+fi
+if [ "$status" != 200 ]; then
+  msg=$(field error)
+  [ -n "$msg" ] || msg="Pyo couldn't make a sign-in link. Run this again."
+  echo "$msg" >&2
+  exit 1
+fi
+path=$(field path) email=$(field email)
+minutes=$(sed -n 's/.*"minutes":\([0-9]*\).*/\1/p' <<<"$body")
+https=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
+lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
+echo "Open one of these links to choose a new password for $email:"
+[ -z "$https" ] || echo "  ${https%/}$path"
+[ -z "$lan" ] || echo "  http://$lan:8000$path  (your network)"
+echo "  http://localhost:8000$path  (this machine)"
+echo "It works once, for ${minutes:-30} minutes."
+SH
+  "${sudo[@]}" chmod 755 /usr/local/lib/pyo/connect-this-machine.sh /usr/local/lib/pyo/tailnet-this-machine.sh /usr/local/lib/pyo/pyo-reset-login
+  "${sudo[@]}" ln -sfn /usr/local/lib/pyo/pyo-reset-login /usr/local/bin/pyo-reset-login
   "${sudo[@]}" tee /etc/systemd/system/pyo-connect.service >/dev/null <<'UNIT'
 [Unit]
 Description=Pyo: connect this machine as a cluster
