@@ -27,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/sandboxes/{id}/resume", post(resume))
         .route("/sandboxes/{id}/extend", post(extend))
         .route("/sandboxes/{id}/token", post(token))
+        .route("/sandboxes/{id}/ports", post(open_port))
         .route("/sandbox-servers", get(list_servers).post(add_server))
         .route(
             "/sandbox-servers/{id}",
@@ -229,6 +230,42 @@ pub(crate) async fn extend(
     Json(b): Json<Extend>,
 ) -> ApiResult<Json<Value>> {
     Ok(Json(super::extend(&s, &user, &id, Some(&b.ttl)).await?))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenPort {
+    /// The port the sandbox listens on, like 3000.
+    port: u16,
+    /// Whether anyone can open the URL. A private port needs a sandbox
+    /// token. True when left out.
+    #[serde(default)]
+    public: Option<bool>,
+}
+
+/// Open a sandbox port
+///
+/// Serves a port the sandbox listens on at its own URL. A public port
+/// answers anyone. A private one needs a sandbox token, in
+/// `Authorization: Bearer` or once as `?pyo_token=` in a browser.
+#[utoipa::path(post, path = "/sandboxes/{id}/ports", operation_id = "openSandboxPort", tag = "Sandboxes",
+    params(("id" = String, Path, description = "The sandbox's id.")),
+    request_body = OpenPort,
+    responses(
+        (status = 200, description = "`url`, `port` and `public`.", body = Object),
+        (status = 404, description = "No such sandbox.", body = ErrorBody),
+        (status = 409, description = "It has ended, or its server has no edge proxy.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("sandboxes"))))]
+pub(crate) async fn open_port(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path(id): Path<String>,
+    Json(b): Json<OpenPort>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        super::open_port(&s, &user, &id, b.port, b.public.unwrap_or(true)).await?,
+    ))
 }
 
 /// New sandbox token

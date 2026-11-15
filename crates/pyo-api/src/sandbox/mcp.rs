@@ -69,7 +69,8 @@ pub fn defs() -> Vec<Value> {
         json!({ "name": "open_port", "title": "Open a sandbox port", "description": "A URL for a port a sandbox listens on.", "inputSchema": schema(json!({
             "sandbox_id": sandbox,
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        }), &["sandbox_id", "port"]), "annotations": read }),
+            "public": { "type": "boolean", "description": "Anyone can open the URL. False needs a sandbox token. Default true." },
+        }), &["sandbox_id", "port"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "pause_sandbox", "title": "Pause sandbox", "description": "Pause a sandbox: its memory and files are kept, and it resumes where it was.", "inputSchema": schema(json!({ "sandbox_id": sandbox }), &["sandbox_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "delete_sandbox", "title": "Delete sandbox", "description": "End a sandbox and throw away its files.", "inputSchema": schema(json!({ "sandbox_id": sandbox }), &["sandbox_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
     ]
@@ -227,10 +228,15 @@ pub async fn run(s: &AppState, user: &User, name: &str, args: &Value) -> Result<
             Ok(json!({ "ok": true, "bytes": bytes }))
         }
         "open_port" => {
-            super::find(s, user, arg(args, "sandbox_id")?, Need::Use)
+            let port = args["port"]
+                .as_u64()
+                .and_then(|p| u16::try_from(p).ok())
+                .filter(|p| *p > 0)
+                .ok_or("port must be 1 to 65535")?;
+            let public = args["public"].as_bool().unwrap_or(true);
+            super::open_port(s, user, arg(args, "sandbox_id")?, port, public)
                 .await
-                .map_err(err)?;
-            Err("Ports aren't open to the outside yet. They come with the sandbox servers' HTTPS proxy. Until then, reach the port from inside the sandbox with exec.".into())
+                .map_err(err)
         }
         "pause_sandbox" => super::pause(s, user, arg(args, "sandbox_id")?)
             .await
