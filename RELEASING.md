@@ -30,7 +30,27 @@ plus its installer `deploy/cli.sh`. Linux x86-64's comes from the Rust
 binaries job. The others are built on macOS, Windows and Linux Arm runners
 by `.github/workflows/cli.yml`, which you can also run by hand (Actions ›
 CLI › Run workflow) to try those builds on a branch. That run publishes
-nothing. It keeps the binaries as the run's artifacts. `release.json` is signed with
+nothing. It keeps the binaries as the run's artifacts.
+
+The release also carries a sandbox server's files for each architecture,
+`pyo-sandbox-linux-x86_64.tar.gz` and `pyo-sandbox-linux-aarch64.tar.gz`,
+each with its `.sha256`, beside `deploy/sandbox.sh`, which installs them.
+`.github/workflows/sandbox.yml` builds them (by hand too, like the CLI's):
+the daemon and `pyo-envd` (static, musl), Firecracker and its jailer at the
+release pinned in `crates/pyo-sandbox/scripts/firecracker.env`, and the guest
+kernel from `crates/pyo-sandbox/scripts/guest-kernel.sh` (Linux 6.1 with
+Firecracker's microVM config, cached until either file changes).
+`crates/pyo-sandbox/scripts/bundle.sh` packs them, locally as well:
+
+```bash
+crates/pyo-sandbox/scripts/guest-kernel.sh out    # on the architecture it's for
+crates/pyo-sandbox/scripts/bundle.sh --arch x86_64 \
+  --sandbox target/x86_64-unknown-linux-musl/release/pyo-sandbox \
+  --envd target/x86_64-unknown-linux-musl/release/pyo-envd \
+  --kernel out/vmlinux --out dist
+```
+
+`release.json` is signed with
 cosign keyless as `release.json.sigstore.json` (the job needs `id-token:
 write`, and `.github/release-signing-config.json` pins Sigstore's public
 instance with Rekor v1).
