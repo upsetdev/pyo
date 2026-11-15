@@ -17,6 +17,7 @@
 //! which every team may use. Nothing here runs or shows until the first
 //! sandbox server exists ([`available`]).
 
+pub mod join;
 pub mod keys;
 pub mod limits;
 pub mod scheduler;
