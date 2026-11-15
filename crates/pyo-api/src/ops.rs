@@ -7842,6 +7842,12 @@ pub(crate) async fn access_logs(
     ))
 }
 
+/// A filter's value: none for "all" or empty (`site=`), which match
+/// everything.
+fn filter_value(v: Option<String>) -> Option<String> {
+    v.filter(|p| !p.is_empty() && p != "all")
+}
+
 /// The hostnames of a team's websites: all, one project's, one domain, or one service's.
 async fn team_hosts(
     s: &AppState,
@@ -7853,8 +7859,9 @@ async fn team_hosts(
 ) -> ApiResult<Vec<String>> {
     let mut tx = s.db.begin().await?;
     require_role(&mut tx, user, team, Role::Viewer).await?;
-    let project = project.filter(|p| p != "all");
-    let site = site.filter(|p| p != "all");
+    let project = filter_value(project);
+    let site = filter_value(site);
+    let service = filter_value(service);
     let hosts: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT lower(d->>'hostname')
            FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
@@ -7889,22 +7896,7 @@ pub(crate) async fn observability(
     SessionUser(user): SessionUser,
     axum::extract::Query(q): axum::extract::Query<ObservabilityQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
-    require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
-    let project = q.project.filter(|p| p != "all");
-    let site = q.site.filter(|p| p != "all");
-    let hosts: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT lower(d->>'hostname')
-           FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
-          WHERE a.team_id = $1 AND ($2::text IS NULL OR a.project_id = $2) AND ($3::text IS NULL OR d->>'id' = $3) AND ($4::text IS NULL OR a.id = $4)",
-    )
-    .bind(&q.team)
-    .bind(&project)
-    .bind(&site)
-    .bind(&q.service)
-    .fetch_all(&mut *tx)
-    .await?;
-    tx.commit().await?;
+    let hosts = team_hosts(&s, &user, &q.team, q.project, q.site, q.service).await?;
     let range = match q.range.as_deref() {
         Some(r @ ("1h" | "24h" | "7d" | "30d")) => r.to_owned(),
         _ => "7d".to_owned(),
@@ -8275,6 +8267,19 @@ pub(crate) async fn create_service(
     .await?;
     wake.push(c);
     Ok(())
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn empty_or_all_matches_everything() {
+        for v in [None, Some(""), Some("all")] {
+            assert_eq!(filter_value(v.map(str::to_owned)), None, "{v:?}");
+        }
+        assert_eq!(filter_value(Some("p1".into())).as_deref(), Some("p1"));
+    }
 }
 
 #[cfg(test)]
