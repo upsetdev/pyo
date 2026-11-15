@@ -173,7 +173,9 @@ check "--version asks GitHub for that release" "$(cat "$asked")" "^https://api.g
 check "once, when it isn't there" "$(wc -l <"$asked")" "^1$" has
 check "and says so" "$out" "There's no release 1.2.3" has
 # The addresses at the end: no wait for an HTTPS address where the machine
-# has no public IP (behind NAT, it never comes), and a word while waiting.
+# has no public IP (behind NAT, it never comes), and progress while waiting.
+# Sleeping only moves the clock.
+sleep() { SECONDS=$((SECONDS + ${1%.*})); }
 hostname() { echo "$ips"; }
 curl() { echo x >>"$asked"; [ -z "$meta" ] || echo "$meta"; }
 ips="10.0.2.15 10.42.0.0 172.17.0.1 100.101.67.2 fd7a:115c::1"
@@ -182,20 +184,35 @@ meta='{"version":"9.9.9"}'
 out=$(pyo_addresses 300)
 check "no public IP: one look" "$(wc -l <"$asked")" "^1$" has
 check "no public IP: no wait" "$out" "Waiting" lacks
-check "no public IP: says so" "$out" "no public IP" has
-check "no public IP: the network address" "$out" "http://10\.0\.2\.15:8000" has
+check "no public IP: the network address" "$out" "http://10\.0\.2\.15:8000  \(your network\)" has
+check "no public IP: one line on HTTPS" "$out" "^For an HTTPS address, set up Tailscale in Pyo\.$" has
+check "no jargon" "$out" "NAT|curl|api/v1|ports? [0-9]" lacks
 ips="10.0.2.15 203.0.113.7"
 : >"$asked"
 out=$(pyo_addresses 300)
-check "a public IP: waits five minutes" "$(wc -l <"$asked")" "^61$" has
-check "a public IP: says it waits" "$out" "Waiting for the HTTPS address \(up to 5 minutes\)" has
+check "a public IP: waits five minutes" "$(wc -l <"$asked")" "^1[45][0-9]$" has
+check "a public IP: says it waits, as it goes" "$out" "^Waiting for the HTTPS address \(up to 5 minutes\)… 0:00$" has
+check "a public IP: every 20 seconds in a log" "$out" "^Waiting for the HTTPS address \(up to 5 minutes\)… 4:40$" has
+check "a public IP: not more often" "$out" "… 0:1[0-9]$" lacks
 meta='{"publicUrl":"https://pyo.203.0.113.7.nip.io"}'
 : >"$asked"
 out=$(pyo_addresses 300)
 check "an HTTPS address: no wait" "$out" "Waiting" lacks
 check "an HTTPS address: shown" "$out" "https://pyo\.203\.0\.113\.7\.nip\.io" has
-unset -f hostname
-unset -f curl sleep
+check "an HTTPS address: no Tailscale hint" "$out" "Tailscale" lacks
+unset -f hostname curl
+
+# quietly: the output of what it runs only when that fails.
+out=$(quietly "Doing it…" bash -c 'echo noisy; exit 0' 2>&1)
+check "quietly: progress" "$out" "^Doing it… 0:00$" has
+check "quietly: no output when it works" "$out" "noisy" lacks
+out=$(quietly "Doing it…" bash -c 'echo what went wrong; exit 3' 2>&1) && rc=0 || rc=$?
+check "quietly: the output when it fails" "$out" "what went wrong" has
+check "quietly: and its exit code" "$rc" "^3$" has
+# A failure ends the progress line first.
+out=$( (progress_start "Working…"; fail "Broke.") 2>&1 || true)
+check "fail after progress" "$out" "Error: Broke\." has
+unset -f sleep
 
 [ "$failed" = 0 ] && echo "install.sh: all checks passed"
 exit "$failed"

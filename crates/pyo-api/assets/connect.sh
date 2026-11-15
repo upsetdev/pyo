@@ -49,6 +49,71 @@ become_root() {
   exit 1
 }
 # <<< pyo:become-root
+# >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh and scripts/pyo-up.sh)
+# A long wait shows it's still going. On a terminal, one line ticks
+# ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), the same line comes
+# every 20 seconds. progress_start MESSAGE, then progress_tick as often as
+# it likes, then progress_end.
+progress_start() {
+  PROGRESS_MSG=$1 PROGRESS_T0=$SECONDS PROGRESS_NEXT=0
+  progress_tick
+}
+progress_tick() {
+  [ -n "${PROGRESS_MSG:-}" ] || return 0
+  local t=$((SECONDS - PROGRESS_T0))
+  if [ -t 1 ]; then
+    printf '\r\033[K%s %d:%02d' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+  elif [ "$t" -ge "$PROGRESS_NEXT" ]; then
+    printf '%s %d:%02d\n' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+    PROGRESS_NEXT=$((t + 20))
+  fi
+  return 0
+}
+progress_end() {
+  [ -n "${PROGRESS_MSG:-}" ] || return 0
+  [ ! -t 1 ] || printf '\r\033[K'
+  PROGRESS_MSG=""
+}
+# wait_until MESSAGE SECONDS COMMAND...: COMMAND every 2 seconds until it
+# succeeds, or a failure once SECONDS have passed. Nothing to show when it
+# succeeds at once.
+wait_until() {
+  local msg=$1 limit=$2 t0=$SECONDS
+  shift 2
+  "$@" && return 0
+  progress_start "$msg"
+  until "$@"; do
+    if [ $((SECONDS - t0)) -ge "$limit" ]; then
+      progress_end
+      return 1
+    fi
+    sleep 1
+    progress_tick
+    sleep 1
+    progress_tick
+  done
+  progress_end
+}
+# quietly MESSAGE COMMAND...: COMMAND in the background, its output kept
+# aside and shown only when it fails.
+quietly() {
+  local log pid rc=0
+  log=$(mktemp)
+  progress_start "$1"
+  shift
+  "$@" >"$log" 2>&1 </dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    progress_tick
+  done
+  wait "$pid" || rc=$?
+  progress_end
+  [ "$rc" = 0 ] || cat "$log" >&2
+  rm -f "$log"
+  return "$rc"
+}
+# <<< pyo:progress
 # --uninstall uses kubectl as you with KUBECONFIG set, or without k3s here.
 case " $* " in *" --uninstall "*) [ -n "${KUBECONFIG:-}" ] || ! command -v k3s >/dev/null || become_root "$@" ;; *) become_root "$@" ;; esac
 set -euo pipefail
@@ -369,7 +434,7 @@ if [ -z "$TAILNET_ONLY" ] && [ -z "$API" ] && [ -z "$TOKEN" ] && command -v k3s 
   # The cluster Pyo runs on: its agent reaches Pyo inside the cluster, this
   # machine at Pyo's local address.
   case "$API" in http://*.svc:* | http://*.svc.cluster.local:*) API=http://127.0.0.1:8000 ;; esac
-  [ -z "$API" ] || echo "Updating this cluster's Pyo agent (Pyo at $API)."
+  [ -z "$API" ] || echo "Updating this cluster's Pyo agent."
 fi
 [ -n "$TAILNET_ONLY" ] || { [ -n "$API" ] && [ -n "$TOKEN" ]; } || { echo "Usage: connect.sh --api URL --token TOKEN [--tailscale-key KEY] [--registry HOST:PORT --registry-token TOKEN]" >&2; exit 2; }
 [ -z "$REGISTRY" ] || [ -n "$REGISTRY_TOKEN" ] || { echo "--registry needs --registry-token: copy the full command from Pyo." >&2; exit 2; }
@@ -499,7 +564,7 @@ K3S_UNIT=${K3S_UNIT:-k3s}
 K3S_MEMORY_CONFIG=/etc/rancher/k3s/config.yaml.d/50-pyo-memory.yaml
 K3S_MEMORY_CHANGED=""
 small_machine() {
-  local env before zram_was=""
+  local env before
   # What k3s runs with now: kubelet's reservations and its GOMEMLIMIT.
   before=$(cat "$K3S_MEMORY_CONFIG" /run/pyo-k3s.env 2>/dev/null || true)
   mkdir -p "/etc/systemd/system/$K3S_UNIT.service.d"
@@ -578,13 +643,9 @@ MEMORY
     'ExecStart=/usr/local/lib/pyo-memory.sh zram-start' 'ExecStop=/usr/local/lib/pyo-memory.sh zram-stop' \
     '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/pyo-zram.service
   systemctl daemon-reload
-  # Said only when it turns on here, not when it's on already.
-  [ ! -f /run/pyo-zram ] || zram_was=1
-  systemctl enable --now pyo-zram.service >/dev/null 2>&1 || echo "Couldn't set up compressed swap (zram); going on without it." >&2
+  systemctl enable --now pyo-zram.service >/dev/null 2>&1 || echo "Couldn't set up compressed swap. Going on without it." >&2
   env=$(/usr/local/lib/pyo-memory.sh k3s-env)
-  [ -z "$env" ] || echo "A small machine: k3s gets $env."
   /usr/local/lib/pyo-memory.sh k3s-config "$K3S_MEMORY_CONFIG" || true
-  [ -n "$zram_was" ] || [ ! -f /run/pyo-zram ] || echo "Turned on compressed swap in memory (zram)."
   [ "$before" = "$(cat "$K3S_MEMORY_CONFIG" 2>/dev/null; [ -z "$env" ] || echo "$env")" ] || K3S_MEMORY_CHANGED=1
 }
 # The same on a k3s that's already installed ($K3S_UNIT.service). k3s uses what
@@ -596,7 +657,7 @@ k3s_memory_refresh() {
   K3S_MEMORY_CHANGED=""
   small_machine
   [ -n "$K3S_MEMORY_CHANGED" ] || return 0
-  echo "k3s restarts briefly to apply its memory reserve. Services keep running."
+  echo "k3s restarts briefly. Services keep running."
   [ "${1:-}" = later ] || systemctl restart "$K3S_UNIT"
 }
 # <<< pyo:small-machine
@@ -689,21 +750,21 @@ REPO
 # With Tailnet Lock on, a new machine waits until a signing device signs
 # its key: the command to run there, then the wait (up to an hour).
 tailnet_lock_wait() {
-  local js key i
+  local js key
   js=$(tailscale lock status --json 2>/dev/null) || return 0
   grep -Eq '"Enabled": *true' <<<"$js" || return 0
   grep -Eq '"NodeKeySigned": *true' <<<"$js" && return 0
   key=$(sed -n 's/^ *"NodeKey": *"\([^"]*\)".*/\1/p' <<<"$js" | head -n1)
   echo "Your tailnet has Tailnet Lock on. On a signing device, run:"
   echo "  tailscale lock sign $key"
-  echo "Waiting for the signature..."
-  for i in $(seq 720); do
-    tailscale lock status --json 2>/dev/null | grep -Eq '"NodeKeySigned": *true' && { echo "Signed."; return 0; }
-    sleep 5
-  done
+  if wait_until "Waiting for the signature…" 3600 tailnet_signed; then
+    echo "Signed."
+    return 0
+  fi
   echo "This machine isn't signed yet. Sign it and run this again." >&2
   exit 1
 }
+tailnet_signed() { tailscale lock status --json 2>/dev/null | grep -Eq '"NodeKeySigned": *true'; }
 # <<< pyo:tailnet-lock
 # >>> pyo:k3s-tailnet (the same in connect.sh, join.sh and deploy/install.sh)
 # k3s over the tailnet: the node's address and flannel's interface are
@@ -746,16 +807,16 @@ k3s_move_to_tailnet() {
   local old="" node
   [ -f "$K3S_TAILNET_CONFIG" ] && old=$(cat "$K3S_TAILNET_CONFIG")
   k3s_tailnet_config "$TS_IP" "$TS_IP" ${TS_NAME:+"$TS_NAME"} || return 0
-  echo "Moving k3s to the tailnet ($TS_IP). It restarts once. Services keep running."
+  echo "Moving k3s to your tailnet. It restarts once. Services keep running."
   systemctl restart k3s
-  if k3s_ready "$TS_IP"; then
+  if quietly "Waiting for k3s…" k3s_ready "$TS_IP"; then
     # Flannel's address for this server, as other servers reach it.
     node=$(hostname | tr 'A-Z' 'a-z')
     k3s kubectl annotate node "$node" --overwrite "flannel.alpha.coreos.com/public-ip=$TS_IP" >/dev/null 2>&1 || true
-    echo "k3s is on the tailnet."
+    echo "k3s is on your tailnet."
     return 0
   fi
-  echo "k3s didn't come back on the tailnet. Putting it back." >&2
+  echo "k3s didn't come back on your tailnet. Putting it back." >&2
   if [ -n "$old" ]; then printf '%s\n' "$old" > "$K3S_TAILNET_CONFIG"; else rm -f "$K3S_TAILNET_CONFIG"; fi
   systemctl restart k3s
   k3s_ready "$(k3s kubectl get node "$(hostname | tr 'A-Z' 'a-z')" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)" || true
@@ -766,20 +827,20 @@ k3s_move_to_tailnet() {
 # TS_NAME: this machine's MagicDNS name, when the tailnet has MagicDNS.
 TS_IP="" TS_NAME=""
 if [ -n "$TS_AUTHKEY" ] || [ -n "$TAILNET_ONLY" ] || command -v tailscale >/dev/null; then
-  tailscale_install
+  command -v tailscale >/dev/null || quietly "Installing Tailscale…" tailscale_install || exit 1
   systemctl enable --now tailscaled
   if [ -z "$(tailscale ip -4 2>/dev/null)" ]; then
     [ -n "$TS_AUTHKEY" ] || { echo "Not on the tailnet yet: copy the full command from Pyo." >&2; exit 1; }
-    tailscale up --authkey "$TS_AUTHKEY" --hostname "$(hostname)" --timeout 120s || true
+    quietly "Joining your tailnet…" tailscale up --authkey "$TS_AUTHKEY" --hostname "$(hostname)" --timeout 120s || true
   fi
   tailnet_lock_wait
   TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
-  [ -n "$TS_IP" ] || { echo "This machine didn't join the tailnet (see above)." >&2; exit 1; }
+  [ -n "$TS_IP" ] || { echo "This machine didn't join your tailnet. Copy a fresh command from Pyo and run it again." >&2; exit 1; }
   TS_NAME=$(tailscale status --json 2>/dev/null | sed -n '/"Self"/,/}/s/^ *"DNSName": *"\([^"]*\)",*$/\1/p' | head -n1 || true)
   TS_NAME=${TS_NAME%.}
 fi
 if [ -n "$TAILNET_ONLY" ]; then
-  echo "$(hostname) is on your tailnet: $TS_IP${TS_NAME:+ ($TS_NAME)}."
+  echo "$(hostname) is on your tailnet."
   if command -v k3s >/dev/null && systemctl is-active --quiet k3s; then
     k3s_move_to_tailnet
   fi
@@ -929,7 +990,6 @@ profile cri-containerd.apparmor.d flags=(attach_disconnected,mediate_deleted) {
 PYO_APPARMOR_PROFILE
   chmod 0644 "$f"
   apparmor_parser -r "$f"
-  echo "Applied Pyo's AppArmor workaround for kernel $kv ($f)."
 }
 apparmor_workaround
 
@@ -959,7 +1019,7 @@ nvidia_gpu() {
     return 0
   fi
   if ! command -v nvidia-container-runtime >/dev/null; then
-    echo "Installing the NVIDIA Container Toolkit, so containers can use the GPU..."
+    echo "Setting up the GPU for containers…"
     if command -v apt-get >/dev/null; then
       if signing_key https://nvidia.github.io/libnvidia-container/gpgkey "$NVIDIA_KEY" /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg; then
         # shellcheck disable=SC2016 # $(ARCH) is apt's
@@ -994,7 +1054,7 @@ REPO
   model=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 | tr -c 'A-Za-z0-9._-' '-' | cut -c1-63 | sed 's/--*/-/g; s/^[-._]*//; s/[-._]*$//')
   mem=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -dc 0-9)
   GPU_LABELS="pyo/gpu=nvidia${model:+ pyo/gpu-model=$model}${mem:+ pyo/gpu-memory-mib=$mem}"
-  echo "NVIDIA GPU ready for containers: $(nvidia-smi -L | head -n1)"
+  echo "The GPU is ready for containers."
 }
 nvidia_gpu
 
@@ -1018,7 +1078,8 @@ REG
 fi
 if ! command -v k3s >/dev/null; then
   # Pyo's k3s (deploy/k3s.env), downloaded and checked before it's set up.
-  k3s_fetch "$K3S_DIR" "$PYO_K3S_VERSION"
+  quietly "Downloading k3s…" k3s_fetch "$K3S_DIR" "$PYO_K3S_VERSION" ||
+    { echo "Couldn't download k3s. Check this machine's internet connection and run the same command again." >&2; exit 1; }
   # Secrets are encrypted in the datastore with secretbox (XSalsa20-Poly1305).
   # Pyo's gateway (Envoy Gateway, from the agent's manifest) answers
   # on 80/443, not k3s's Traefik.
@@ -1036,22 +1097,21 @@ CFG
   # machine's MagicDNS name.
   [ -z "$TS_IP" ] || k3s_tailnet_config "$TS_IP" "$TS_IP" ${TS_NAME:+"$TS_NAME"} || true
   small_machine
-  k3s_install "$K3S_DIR" server
+  quietly "Installing k3s…" k3s_install "$K3S_DIR" server || { echo "k3s didn't install. Run the same command again." >&2; exit 1; }
 else
   # Its memory reserve brought up to date; k3s restarts below if it changed.
   k3s_memory_refresh later
   # k3s finds a newly installed NVIDIA toolkit only when it starts.
   if [ -n "$REGISTRY" ] || [ -n "$GPU_TOOLKIT_NEW" ] || [ -n "$K3S_MEMORY_CHANGED" ]; then systemctl restart k3s 2>/dev/null || true; fi
-  # An existing k3s keeps its settings; say how to encrypt its Secrets.
+  # An existing k3s keeps its settings. Say when it doesn't encrypt its
+  # Secrets (k3s secrets-encrypt enable turns that on).
   if ! k3s secrets-encrypt status 2>/dev/null | grep -q "Encryption Status: Enabled"; then
-    echo "Note: this k3s doesn't encrypt Secrets at rest. To turn it on:"
-    echo "  k3s secrets-encrypt enable && systemctl restart k3s && k3s secrets-encrypt reencrypt"
+    echo "Note: this k3s doesn't encrypt secrets at rest. See https://pyo.dev/docs/encryption"
   fi
 fi
 
-echo "Waiting for k3s…"
-for _ in $(seq 90); do k3s kubectl get nodes >/dev/null 2>&1 && break; sleep 2; done
-k3s kubectl get nodes >/dev/null 2>&1 || { echo "k3s isn't answering. Check: systemctl status k3s" >&2; exit 1; }
+k3s_up() { k3s kubectl get nodes >/dev/null 2>&1; }
+wait_until "Starting k3s…" 180 k3s_up || { echo "k3s didn't start. Restart this machine, then run the same command again." >&2; exit 1; }
 # An existing k3s didn't get the labels at registration: add them now.
 if [ -n "$GPU_LABELS" ] && k3s kubectl get node "$(hostname)" >/dev/null 2>&1; then
   # shellcheck disable=SC2086 # one label per word
@@ -1069,8 +1129,8 @@ gateway_crds() {
   local api="$crd/gateways.gateway.networking.k8s.io"
   if [ -e /var/lib/rancher/k3s/server/manifests/gateway-api-crd.yaml ] || k3s kubectl -n kube-system get helmchart.helm.cattle.io gateway-api-crd >/dev/null 2>&1; then
     if ! k3s kubectl get "$crd/udproutes.gateway.networking.k8s.io" >/dev/null 2>&1; then
-      echo "Waiting for k3s's Gateway API…"
-      for _ in $(seq 90); do k3s kubectl get "$crd/udproutes.gateway.networking.k8s.io" >/dev/null 2>&1 && break; sleep 2; done
+      udp_routes() { k3s kubectl get "$crd/udproutes.gateway.networking.k8s.io" >/dev/null 2>&1; }
+      wait_until "Getting the gateway ready…" 180 udp_routes || true
       k3s kubectl wait --for=condition=Established --timeout=60s "$api" "$crd/tcproutes.gateway.networking.k8s.io" "$crd/udproutes.gateway.networking.k8s.io" >/dev/null 2>&1 ||
         echo "k3s hasn't installed the Gateway API yet. Domains start answering once it has." >&2
     fi
@@ -1114,7 +1174,7 @@ server_minor() {
 # 1.30 (it has no admission policies) goes on without the policy.
 apply_agent() {
   local minor tries=0 delay=5 start=$SECONDS until=$((SECONDS + 300))
-  echo "Installing the Pyo agent and its admission policy…"
+  echo "Installing the Pyo agent…"
   while :; do
     tries=$((tries + 1))
     if k3s kubectl get --raw=/readyz --request-timeout=20s >/dev/null 2>&1 &&
@@ -1135,17 +1195,11 @@ apply_agent() {
 # <<< pyo:agent-apply
 # The Pyo agent: it dials out to Pyo; nothing here is exposed.
 if ! apply_agent; then
-  echo "Couldn't install the Pyo agent and its admission policy (see above), so its limits wouldn't be enforced. Run this again once k3s answers: systemctl status k3s" >&2
+  echo "Couldn't install the Pyo agent (see above). Run the same command again in a minute." >&2
   exit 1
 fi
-echo "Starting the Pyo agent…"
-if ! k3s kubectl -n pyo-system rollout status deployment/pyo-agent --timeout=180s >/dev/null; then
-  echo "The agent hasn't started yet. Look at: k3s kubectl -n pyo-system get pods" >&2
+if ! quietly "Starting the Pyo agent…" k3s kubectl -n pyo-system rollout status deployment/pyo-agent --timeout=180s; then
+  echo "The Pyo agent didn't start. Run the same command again in a minute." >&2
   exit 1
 fi
-
-# How this server shows up: its addresses, Tailscale's included.
-addrs=$(ip -o addr show scope global 2>/dev/null |
-  awk '$2 !~ /^(lo|docker|br-|veth|cni|flannel|kube|tailscale|vxlan|cali|virbr)/ {split($4, x, "/"); printf "%s ", x[1]}')
-echo "Connected $(hostname) (${addrs}${TS_IP:+$TS_IP }${TS_NAME})."
-echo "It shows up in Pyo in a few seconds."
+echo "Connected $(hostname). It shows up in Pyo in a few seconds."

@@ -508,6 +508,21 @@ mod tests {
                 "{file}'s k3s pin differs from deploy/k3s.env"
             );
         }
+        let progress = block("progress", "connect.sh", CONNECT_SCRIPT);
+        for (file, script) in [
+            ("join.sh", SCRIPT),
+            ("deploy/install.sh", install),
+            (
+                "scripts/pyo-up.sh",
+                include_str!("../../../scripts/pyo-up.sh"),
+            ),
+        ] {
+            assert_eq!(
+                block("progress", file, script),
+                progress,
+                "{file}'s progress helpers differ from connect.sh's"
+            );
+        }
         let small = block("small-machine", "connect.sh", CONNECT_SCRIPT);
         for (file, script) in [
             ("join.sh", SCRIPT),
@@ -579,6 +594,7 @@ mod tests {
             "host_units",
             "bootstrap_key",
             "nic_public_ip",
+            "pyo_https_url",
             "pyo_addresses",
         ] {
             assert_eq!(
@@ -910,7 +926,7 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
         assert_eq!(code, 0, "{err}");
         assert!(out.trim().ends_with("ok after 4"), "{out}");
         // Progress as it goes: what it's doing, then each try and the time.
-        assert!(out.starts_with("Installing the Pyo agent and its admission policy…"));
+        assert!(out.starts_with("Installing the Pyo agent…"));
         assert!(
             err.contains("(try 1, 0s so far). Trying again in 5s…"),
             "{err}"
@@ -1033,10 +1049,10 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
         ));
     }
 
-    /// "Turned on compressed swap" only when it turns on here, not when
-    /// it was on already (the connect command run again).
+    /// A small machine is set up without a word: compressed swap turns on,
+    /// and running it again changes nothing.
     #[test]
-    fn zram_is_reported_only_when_it_turns_on() {
+    fn small_machine_setup_is_quiet() {
         let dir = std::env::temp_dir().join(format!("pyo-zram-{}", std::process::id()));
         let block = sandboxed_small_machine(&dir);
         let d = dir.display();
@@ -1049,14 +1065,9 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
             assert_eq!(code, 0, "{err}");
             out
         };
-        let said = "Turned on compressed swap in memory (zram).";
-        assert!(run("small_machine").contains(said));
-        // On already: the unit was running, and enabling it changes nothing.
-        assert!(!run("small_machine").contains(said));
-        let again = run(&format!(
-            "rm {d}/run/pyo-zram; small_machine; small_machine"
-        ));
-        assert_eq!(again.matches(said).count(), 1, "{again}");
+        assert_eq!(run("small_machine"), "");
+        assert!(dir.join("run/pyo-zram").exists());
+        assert_eq!(run("small_machine; small_machine"), "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1088,7 +1099,7 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
             (
                 "join.sh",
                 SCRIPT,
-                "small_machine\nK3S_URL=\"https://$SERVER_IP:6443\" K3S_TOKEN=\"$K3S_TOKEN\" k3s_install \"$K3S_DIR\" agent\n",
+                "small_machine\nexport K3S_URL=\"https://$SERVER_IP:6443\" K3S_TOKEN\nquietly \"Installing k3s and joining the cluster…\" k3s_install \"$K3S_DIR\" agent ||\n",
             ),
             (
                 "scripts/join-node.sh",

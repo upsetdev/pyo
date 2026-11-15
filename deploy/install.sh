@@ -42,11 +42,78 @@ defaults() {
 
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 fail() {
+  progress_end
   printf 'Error: %s\n' "$*" >&2
   exit 1
 }
 
 kc() { k3s kubectl "$@"; }
+
+# >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh and scripts/pyo-up.sh)
+# A long wait shows it's still going. On a terminal, one line ticks
+# ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), the same line comes
+# every 20 seconds. progress_start MESSAGE, then progress_tick as often as
+# it likes, then progress_end.
+progress_start() {
+  PROGRESS_MSG=$1 PROGRESS_T0=$SECONDS PROGRESS_NEXT=0
+  progress_tick
+}
+progress_tick() {
+  [ -n "${PROGRESS_MSG:-}" ] || return 0
+  local t=$((SECONDS - PROGRESS_T0))
+  if [ -t 1 ]; then
+    printf '\r\033[K%s %d:%02d' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+  elif [ "$t" -ge "$PROGRESS_NEXT" ]; then
+    printf '%s %d:%02d\n' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+    PROGRESS_NEXT=$((t + 20))
+  fi
+  return 0
+}
+progress_end() {
+  [ -n "${PROGRESS_MSG:-}" ] || return 0
+  [ ! -t 1 ] || printf '\r\033[K'
+  PROGRESS_MSG=""
+}
+# wait_until MESSAGE SECONDS COMMAND...: COMMAND every 2 seconds until it
+# succeeds, or a failure once SECONDS have passed. Nothing to show when it
+# succeeds at once.
+wait_until() {
+  local msg=$1 limit=$2 t0=$SECONDS
+  shift 2
+  "$@" && return 0
+  progress_start "$msg"
+  until "$@"; do
+    if [ $((SECONDS - t0)) -ge "$limit" ]; then
+      progress_end
+      return 1
+    fi
+    sleep 1
+    progress_tick
+    sleep 1
+    progress_tick
+  done
+  progress_end
+}
+# quietly MESSAGE COMMAND...: COMMAND in the background, its output kept
+# aside and shown only when it fails.
+quietly() {
+  local log pid rc=0
+  log=$(mktemp)
+  progress_start "$1"
+  shift
+  "$@" >"$log" 2>&1 </dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    progress_tick
+  done
+  wait "$pid" || rc=$?
+  progress_end
+  [ "$rc" = 0 ] || cat "$log" >&2
+  rm -f "$log"
+  return "$rc"
+}
+# <<< pyo:progress
 
 parse_args() {
   while [ $# -gt 0 ]; do
@@ -217,7 +284,6 @@ profile cri-containerd.apparmor.d flags=(attach_disconnected,mediate_deleted) {
 PYO_APPARMOR_PROFILE
   chmod 0644 "$f"
   apparmor_parser -r "$f"
-  echo "Applied Pyo's AppArmor workaround for kernel $kv."
 }
 
 # >>> pyo:k3s (the same in deploy/install.sh, connect.sh, join.sh, scripts/setup-host.sh and scripts/join-node.sh)
@@ -299,7 +365,7 @@ K3S_UNIT=${K3S_UNIT:-k3s}
 K3S_MEMORY_CONFIG=/etc/rancher/k3s/config.yaml.d/50-pyo-memory.yaml
 K3S_MEMORY_CHANGED=""
 small_machine() {
-  local env before zram_was=""
+  local env before
   # What k3s runs with now: kubelet's reservations and its GOMEMLIMIT.
   before=$(cat "$K3S_MEMORY_CONFIG" /run/pyo-k3s.env 2>/dev/null || true)
   mkdir -p "/etc/systemd/system/$K3S_UNIT.service.d"
@@ -378,13 +444,9 @@ MEMORY
     'ExecStart=/usr/local/lib/pyo-memory.sh zram-start' 'ExecStop=/usr/local/lib/pyo-memory.sh zram-stop' \
     '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/pyo-zram.service
   systemctl daemon-reload
-  # Said only when it turns on here, not when it's on already.
-  [ ! -f /run/pyo-zram ] || zram_was=1
-  systemctl enable --now pyo-zram.service >/dev/null 2>&1 || echo "Couldn't set up compressed swap (zram); going on without it." >&2
+  systemctl enable --now pyo-zram.service >/dev/null 2>&1 || echo "Couldn't set up compressed swap. Going on without it." >&2
   env=$(/usr/local/lib/pyo-memory.sh k3s-env)
-  [ -z "$env" ] || echo "A small machine: k3s gets $env."
   /usr/local/lib/pyo-memory.sh k3s-config "$K3S_MEMORY_CONFIG" || true
-  [ -n "$zram_was" ] || [ ! -f /run/pyo-zram ] || echo "Turned on compressed swap in memory (zram)."
   [ "$before" = "$(cat "$K3S_MEMORY_CONFIG" 2>/dev/null; [ -z "$env" ] || echo "$env")" ] || K3S_MEMORY_CHANGED=1
 }
 # The same on a k3s that's already installed ($K3S_UNIT.service). k3s uses what
@@ -396,7 +458,7 @@ k3s_memory_refresh() {
   K3S_MEMORY_CHANGED=""
   small_machine
   [ -n "$K3S_MEMORY_CHANGED" ] || return 0
-  echo "k3s restarts briefly to apply its memory reserve. Services keep running."
+  echo "k3s restarts briefly. Services keep running."
   [ "${1:-}" = later ] || systemctl restart "$K3S_UNIT"
 }
 # <<< pyo:small-machine
@@ -433,14 +495,13 @@ install_k3s() {
     say "Using the k3s that's installed"
     k3s_memory_refresh
   else
-    say "Installing k3s"
     # The release's k3s (release.json's "k3s", from deploy/k3s.env),
     # downloaded and checked before anything changes.
     PYO_K3S_VERSION=$(k3s_pin version)
     PYO_K3S_INSTALLER_SHA256=$(k3s_pin installerSha256)
     PYO_K3S_SHA256_AMD64=$(k3s_pin amd64Sha256)
     PYO_K3S_SHA256_ARM64=$(k3s_pin arm64Sha256)
-    k3s_fetch "$WORK/k3s" "$PYO_K3S_VERSION"
+    quietly "Downloading k3s…" k3s_fetch "$WORK/k3s" "$PYO_K3S_VERSION" || fail "Couldn't download k3s. Check this machine's internet connection and run the same command again."
     apparmor_workaround
     mkdir -p /etc/rancher/k3s
     cat > /etc/rancher/k3s/config.yaml <<'CONFIG'
@@ -465,18 +526,14 @@ mirrors:
 REGISTRIES
     small_machine
     # Pyo Gateway takes 80/443, not k3s's Traefik.
-    k3s_install "$WORK/k3s" server --disable traefik
+    quietly "Installing k3s…" k3s_install "$WORK/k3s" server --disable traefik || fail "k3s didn't install. Run the same command again."
     # So --uninstall knows k3s is Pyo's to remove.
     install -d -m 700 /etc/pyo
     echo "k3s was installed by Pyo's install.sh on $(date -u +%F)." > /etc/pyo/k3s-installed
   fi
-  local i
-  for i in $(seq 90); do
-    kc get nodes >/dev/null 2>&1 && return 0
-    sleep 2
-  done
-  fail "k3s isn't answering. Check: sudo systemctl status k3s"
+  wait_until "Starting k3s…" 180 k3s_up || fail "k3s didn't start. Restart this machine, then run the same command again."
 }
+k3s_up() { kc get nodes >/dev/null 2>&1; }
 
 # ── The release ─────────────────────────────────────────────────────────────
 
@@ -564,8 +621,7 @@ RELEASE_ISSUER=https://token.actions.githubusercontent.com
 find_cosign() {
   COSIGN=$(command -v cosign || true)
   [ -z "$COSIGN" ] || return 0
-  say "Downloading cosign $COSIGN_VERSION to check the release's signature"
-  tries curl -fsSL --proto '=https' --max-time 300 -o "$WORK/cosign" \
+  quietly "Downloading the tool that checks it…" tries curl -fsSL --proto '=https' --max-time 300 -o "$WORK/cosign" \
     "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64" ||
     fail "Couldn't download cosign, which checks the release's signature."
   [ "$(sha256sum "$WORK/cosign" | cut -d' ' -f1)" = "$COSIGN_SHA256_AMD64" ] ||
@@ -580,8 +636,8 @@ verify_release() {
   bundle=$(printf '%s' "$2" | asset_url 'release\.json\.sigstore\.json')
   [ -n "$bundle" ] || fail "$1 has no signature for its release.json (release.json.sigstore.json), so it can't be trusted."
   tries fetch -o "$WORK/release.json.sigstore.json" "$bundle" || fail "Couldn't download $bundle."
-  find_cosign
   say "Checking the release's signature"
+  find_cosign
   "$COSIGN" verify-blob --bundle "$WORK/release.json.sigstore.json" \
     --certificate-identity-regexp "$RELEASE_SIGNER" --certificate-oidc-issuer "$RELEASE_ISSUER" \
     "$WORK/release.json" >"$WORK/cosign.log" 2>&1 || {
@@ -690,35 +746,27 @@ nic_public_ip() {
     head -n1 || true
 }
 
+# Pyo's HTTPS address, into PYO_HTTPS_URL, once it has one.
+pyo_https_url() {
+  PYO_HTTPS_URL=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
+  [ -n "$PYO_HTTPS_URL" ]
+}
+
 # Pyo's addresses. Waits up to $1 seconds for its HTTPS one, when this
 # machine has a public IP for it (else it would never come).
 pyo_addresses() {
-  local url="" lan="" i wait=${1:-0} public
-  public=$(nic_public_ip)
-  [ -n "$public" ] || wait=0
-  for i in $(seq 0 5 "$wait"); do
-    url=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
-    [ -n "$url" ] && break
-    [ "$i" != 0 ] || [ "$wait" = 0 ] || echo "Waiting for the HTTPS address (up to $((wait / 60)) minutes)…"
-    [ "$i" -ge "$wait" ] || sleep 5
-  done
+  local lan="" wait=${1:-0}
+  [ -n "$(nic_public_ip)" ] || wait=0
+  PYO_HTTPS_URL=""
+  pyo_https_url || [ "$wait" = 0 ] ||
+    wait_until "Waiting for the HTTPS address (up to $((wait / 60)) minutes)…" "$wait" pyo_https_url || true
   lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
   echo
-  echo "Pyo is at:"
-  [ -z "$url" ] || echo "  $url"
+  echo "Open Pyo:"
+  [ -z "$PYO_HTTPS_URL" ] || echo "  $PYO_HTTPS_URL"
   [ -z "$lan" ] || echo "  http://$lan:8000  (your network)"
   echo "  http://localhost:8000  (this machine)"
-  if [ -z "$url" ]; then
-    echo
-    if [ -z "$public" ]; then
-      echo "This machine has no public IP, so Pyo has no HTTPS address on it."
-      echo "Open Pyo on this machine or your network. For HTTPS, set up Tailscale in Pyo."
-    else
-      echo "No HTTPS address yet. It comes on this machine's public IP in a minute or two,"
-      echo "unless ports 80 and 443 can't reach it. Then set up Tailscale in Pyo."
-      echo "Check with: curl -s http://localhost:8000/api/v1/meta"
-    fi
-  fi
+  [ -n "$PYO_HTTPS_URL" ] || echo "For an HTTPS address, set up Tailscale in Pyo."
 }
 # The host's own helpers, as systemd timers (root), every minute: connecting
 # this machine as a cluster until it's done, and putting it on the tailnet
@@ -981,48 +1029,61 @@ spec:
           securityContext: { runAsNonRoot: true, runAsUser: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
       volumes: [{ name: release, configMap: { name: $name } }]
 YAML
-  say "Applying Pyo $R_VERSION and waiting until it's ready (a few minutes the first time)"
-  local i st printed=0 pod
+  progress_start "Starting Pyo $R_VERSION${fresh:+ (a few minutes the first time)}…"
+  local i st pod why
   for i in $(seq 380); do
     st=$(kc -n "$NS" get job "$name" -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null || true)
     case "$st" in 1/* | */1) break ;; esac
     pod=$(kc -n "$NS" get pods -l "pyo/update-id=$id" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-    # Its progress, as it goes.
     if [ -n "$pod" ]; then
-      local lines
-      lines=$(kc -n "$NS" logs "$pod" 2>/dev/null | grep -v pyoUpgradeOutcome || true)
-      if [ -n "$lines" ]; then
-        printf '%s\n' "$lines" | tail -n +$((printed + 1)) | sed 's/^/    /'
-        printed=$(printf '%s\n' "$lines" | wc -l)
-      fi
-      local why
       why=$(kc -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true)
       case "$why" in
         ErrImagePull | ImagePullBackOff | InvalidImageName)
           if [ "$i" -gt 60 ]; then
             kc -n "$NS" delete job "$name" --wait=false >/dev/null 2>&1 || true
-            fail "This machine can't pull $R_AGENT ($why). Nothing was changed."
+            fail "This machine can't download Pyo. Check its internet connection and run the same command again. Nothing was changed."
           fi
           ;;
       esac
     fi
-    sleep 5
+    for _ in 1 2 3 4 5; do
+      sleep 1
+      progress_tick
+    done
   done
-  local outcome
-  outcome=$(kc -n "$NS" logs "job/$name" 2>/dev/null | grep pyoUpgradeOutcome | tail -n1 || true)
+  progress_end
+  local logs outcome
+  logs=$(kc -n "$NS" logs "job/$name" 2>/dev/null || true)
+  outcome=$(printf '%s\n' "$logs" | grep pyoUpgradeOutcome | tail -n1 || true)
   kc -n "$NS" delete configmap "$name" >/dev/null 2>&1 || true
   # Its last line says how it went; without it (logs gone), the Job's state.
+  # When it failed, what it did goes to stderr first.
   case "$outcome" in
     *'"ok":true'*) say "Pyo $R_VERSION is ready" ;;
-    *'"ok":false'*) fail "$(printf '%s' "$outcome" | sed 's/.*"message":"\([^"]*\)".*/\1/')" ;;
+    *'"ok":false'*)
+      upgrader_log "$logs"
+      fail "$(printf '%s' "$outcome" | sed 's/.*"message":"\([^"]*\)".*/\1/')"
+      ;;
     *)
       case "$st" in
         1/*) say "Pyo $R_VERSION is ready" ;;
-        */1) fail "Updating to $R_VERSION failed. The version that was running keeps running. See: sudo k3s kubectl -n $NS logs job/$name" ;;
-        *) fail "The upgrader didn't finish in time. Look at: sudo k3s kubectl -n $NS logs job/$name" ;;
+        */1)
+          upgrader_log "$logs"
+          fail "Pyo $R_VERSION didn't start. The version that was running keeps running. Run the same command again to try again."
+          ;;
+        *)
+          upgrader_log "$logs"
+          fail "Pyo $R_VERSION didn't start in time. Run the same command again to try again."
+          ;;
       esac
       ;;
   esac
+}
+
+# What the upgrader did, its last lines, when it failed.
+upgrader_log() {
+  [ -n "$1" ] || return 0
+  printf '%s\n' "$1" | grep -v pyoUpgradeOutcome | tail -n 20 | sed 's/^/    /' >&2
 }
 
 # Counts a fresh install at api.pyo.dev, once the dashboard answers: Pyo's
@@ -1032,17 +1093,13 @@ YAML
 # it sends and how to turn it off.
 count_install() {
   telemetry_off && return 0
-  local arch i
+  local arch
   case "$(uname -m)" in
     x86_64 | amd64) arch=amd64 ;;
     aarch64 | arm64) arch=arm64 ;;
     *) return 0 ;;
   esac
-  for i in 1 2 3; do
-    curl -fsS -m 5 -o /dev/null http://127.0.0.1:8000/api/v1/meta 2>/dev/null && break
-    [ "$i" = 3 ] && return 0
-    sleep 5
-  done
+  dashboard_up || return 0
   curl -fsS --proto '=https' -m 5 -o /dev/null -H 'Content-Type: application/json' \
     --data "{\"version\":\"$R_VERSION\",\"os\":\"linux\",\"arch\":\"$arch\"}" \
     https://api.pyo.dev/v1/installs >/dev/null 2>&1 || true
@@ -1052,11 +1109,14 @@ count_install() {
 # (what Pyo's dashboard updates do for every cluster).
 update_local_agent() {
   if kc -n "$NS" get deployment pyo-agent >/dev/null 2>&1; then
-    say "Updating this cluster's agent"
     kc -n "$NS" set image deployment/pyo-agent "agent=$R_AGENT" >/dev/null
-    kc -n "$NS" rollout status deployment/pyo-agent --timeout=180s >/dev/null || echo "The agent is still starting. It shows in the dashboard when it's back." >&2
+    quietly "Updating this machine's agent…" kc -n "$NS" rollout status deployment/pyo-agent --timeout=180s ||
+      echo "The agent is still starting. It shows in the dashboard when it's back."
   fi
 }
+
+# Pyo's dashboard answers on this machine.
+dashboard_up() { curl -fsS -m 5 -o /dev/null http://127.0.0.1:8000/api/v1/meta 2>/dev/null; }
 
 # ── Where it is ─────────────────────────────────────────────────────────────
 
@@ -1469,6 +1529,7 @@ main() {
   host_units
   ADMIN_PASSWORD=""
   run_upgrader "$fresh"
+  wait_until "Waiting for the dashboard…" 120 dashboard_up || true
   if [ -n "$fresh" ]; then
     # The first sign-in is printed below.
     count_install
@@ -1478,7 +1539,8 @@ main() {
   fi
   # This machine as a cluster: its gateway serves Pyo over HTTPS on the
   # public IP, which the addresses wait for.
-  /usr/local/lib/pyo/connect-this-machine.sh || echo "Couldn't connect this machine to Pyo yet (see above). It's tried again every minute (pyo-connect.timer)." >&2
+  quietly "Connecting this machine to Pyo…" /usr/local/lib/pyo/connect-this-machine.sh ||
+    echo "Couldn't connect this machine to Pyo yet. Pyo tries again every minute."
   pyo_addresses 300
   print_sign_in
 }

@@ -320,6 +320,71 @@ fi
 # network. Once Tailscale is set up in Pyo (Integrations), this machine
 # joins the tailnet by itself and Pyo is also https://pyo.<tailnet>.ts.net.
 
+# >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh and scripts/pyo-up.sh)
+# A long wait shows it's still going. On a terminal, one line ticks
+# ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), the same line comes
+# every 20 seconds. progress_start MESSAGE, then progress_tick as often as
+# it likes, then progress_end.
+progress_start() {
+  PROGRESS_MSG=$1 PROGRESS_T0=$SECONDS PROGRESS_NEXT=0
+  progress_tick
+}
+progress_tick() {
+  [ -n "${PROGRESS_MSG:-}" ] || return 0
+  local t=$((SECONDS - PROGRESS_T0))
+  if [ -t 1 ]; then
+    printf '\r\033[K%s %d:%02d' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+  elif [ "$t" -ge "$PROGRESS_NEXT" ]; then
+    printf '%s %d:%02d\n' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+    PROGRESS_NEXT=$((t + 20))
+  fi
+  return 0
+}
+progress_end() {
+  [ -n "${PROGRESS_MSG:-}" ] || return 0
+  [ ! -t 1 ] || printf '\r\033[K'
+  PROGRESS_MSG=""
+}
+# wait_until MESSAGE SECONDS COMMAND...: COMMAND every 2 seconds until it
+# succeeds, or a failure once SECONDS have passed. Nothing to show when it
+# succeeds at once.
+wait_until() {
+  local msg=$1 limit=$2 t0=$SECONDS
+  shift 2
+  "$@" && return 0
+  progress_start "$msg"
+  until "$@"; do
+    if [ $((SECONDS - t0)) -ge "$limit" ]; then
+      progress_end
+      return 1
+    fi
+    sleep 1
+    progress_tick
+    sleep 1
+    progress_tick
+  done
+  progress_end
+}
+# quietly MESSAGE COMMAND...: COMMAND in the background, its output kept
+# aside and shown only when it fails.
+quietly() {
+  local log pid rc=0
+  log=$(mktemp)
+  progress_start "$1"
+  shift
+  "$@" >"$log" 2>&1 </dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    progress_tick
+  done
+  wait "$pid" || rc=$?
+  progress_end
+  [ "$rc" = 0 ] || cat "$log" >&2
+  rm -f "$log"
+  return "$rc"
+}
+# <<< pyo:progress
 # A public IPv4 address on this machine's network cards: not private,
 # tailnet (CGNAT), loopback, link-local or multicast. Pyo puts its HTTPS
 # address on the public IP only when the machine has one itself (the
@@ -330,35 +395,27 @@ nic_public_ip() {
     head -n1 || true
 }
 
+# Pyo's HTTPS address, into PYO_HTTPS_URL, once it has one.
+pyo_https_url() {
+  PYO_HTTPS_URL=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
+  [ -n "$PYO_HTTPS_URL" ]
+}
+
 # Pyo's addresses. Waits up to $1 seconds for its HTTPS one, when this
 # machine has a public IP for it (else it would never come).
 pyo_addresses() {
-  local url="" lan="" i wait=${1:-0} public
-  public=$(nic_public_ip)
-  [ -n "$public" ] || wait=0
-  for i in $(seq 0 5 "$wait"); do
-    url=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
-    [ -n "$url" ] && break
-    [ "$i" != 0 ] || [ "$wait" = 0 ] || echo "Waiting for the HTTPS address (up to $((wait / 60)) minutes)…"
-    [ "$i" -ge "$wait" ] || sleep 5
-  done
+  local lan="" wait=${1:-0}
+  [ -n "$(nic_public_ip)" ] || wait=0
+  PYO_HTTPS_URL=""
+  pyo_https_url || [ "$wait" = 0 ] ||
+    wait_until "Waiting for the HTTPS address (up to $((wait / 60)) minutes)…" "$wait" pyo_https_url || true
   lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
   echo
-  echo "Pyo is at:"
-  [ -z "$url" ] || echo "  $url"
+  echo "Open Pyo:"
+  [ -z "$PYO_HTTPS_URL" ] || echo "  $PYO_HTTPS_URL"
   [ -z "$lan" ] || echo "  http://$lan:8000  (your network)"
   echo "  http://localhost:8000  (this machine)"
-  if [ -z "$url" ]; then
-    echo
-    if [ -z "$public" ]; then
-      echo "This machine has no public IP, so Pyo has no HTTPS address on it."
-      echo "Open Pyo on this machine or your network. For HTTPS, set up Tailscale in Pyo."
-    else
-      echo "No HTTPS address yet. It comes on this machine's public IP in a minute or two,"
-      echo "unless ports 80 and 443 can't reach it. Then set up Tailscale in Pyo."
-      echo "Check with: curl -s http://localhost:8000/api/v1/meta"
-    fi
-  fi
+  [ -n "$PYO_HTTPS_URL" ] || echo "For an HTTPS address, set up Tailscale in Pyo."
 }
 # The host's own helpers, as systemd timers (root), every minute: connecting
 # this machine as a cluster until it's done, and putting it on the tailnet
