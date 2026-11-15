@@ -23,8 +23,14 @@ to `ghcr.io/upsetdev/pyo/{pyo,agent,builder,flows,waf,geoip,db-controller,kv,pos
 (all from `deploy/images/`, at the same version. The Rust binaries are
 compiled once, by the `binaries` job, and the Rust images' jobs take them
 from that run's build cache),
-and creates a GitHub release with the CLI (`pyo-linux-x86_64`, its sha256 and
-its installer `deploy/cli.sh`) and `release.json`. `release.json` is signed with
+and creates a GitHub release with the CLI and `release.json`. The CLI is
+`pyo-linux-x86_64`, `pyo-linux-aarch64`, `pyo-macos-aarch64`,
+`pyo-macos-x86_64` and `pyo-windows-x86_64.exe`, each with its `.sha256`,
+plus its installer `deploy/cli.sh`. Linux x86-64's comes from the Rust
+binaries job. The others are built on macOS, Windows and Linux Arm runners
+by `.github/workflows/cli.yml`, which you can also run by hand (Actions ›
+CLI › Run workflow) to try those builds on a branch. That run publishes
+nothing. It keeps the binaries as the run's artifacts. `release.json` is signed with
 cosign keyless as `release.json.sigstore.json` (the job needs `id-token:
 write`, and `.github/release-signing-config.json` pins Sigstore's public
 instance with Rekor v1).

@@ -1,8 +1,9 @@
 name: Release
 
 # Pushing a tag like v0.1.0 publishes that version: signed images at
-# ghcr.io/upsetdev/pyo, and a GitHub release with the CLI and release.json
-# (what the dashboard's updates apply). See RELEASING.md.
+# ghcr.io/upsetdev/pyo, and a GitHub release with the CLI for each
+# platform and release.json (what the dashboard's updates apply). See
+# RELEASING.md.
 
 on:
   push:
@@ -67,6 +68,12 @@ jobs:
           outputs: type=cacheonly
           cache-to: type=gha,mode=max,scope=rust-${{ github.run_id }}
 
+  # The CLI for macOS, Windows and Linux on Arm (cli.yml).
+  cli:
+    name: CLI
+    needs: verify
+    uses: ./.github/workflows/cli.yml
+
   images:
     name: Publish ${{ matrix.image }}
     needs: [verify, binaries]
@@ -128,7 +135,7 @@ jobs:
 
   release:
     name: GitHub release
-    needs: [verify, images]
+    needs: [verify, images, cli]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -180,9 +187,9 @@ jobs:
           cosign-release: v3.1.4
       - name: Sign release.json
         run: cosign sign-blob --yes --signing-config .github/release-signing-config.json --bundle release.json.sigstore.json release.json
-      # The CLI (pyo.Dockerfile's `cli` target), from the binaries this run
-      # built: deploy/cli.sh and `pyo upgrade` download it and check it
-      # against its sha256.
+      # The CLI for Linux x86-64 (pyo.Dockerfile's `cli` target), from the
+      # binaries this run built. deploy/cli.sh and `pyo upgrade` download
+      # the one for their platform and check it against its sha256.
       - name: Build the CLI
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -196,6 +203,18 @@ jobs:
         run: |
           cp cli/pyo pyo-linux-x86_64
           sha256sum pyo-linux-x86_64 > pyo-linux-x86_64.sha256
+      # The other platforms' CLIs and their sha256, from the cli job.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cli-*
+          path: cli-platforms
+          merge-multiple: true
+      - name: Check the CLIs
+        run: |
+          cd cli-platforms
+          for a in pyo-linux-aarch64 pyo-macos-aarch64 pyo-macos-x86_64 pyo-windows-x86_64.exe; do
+            sha256sum -c "$a.sha256"
+          done
       # The release's text: the changes since the previous release, from the
       # Conventional Commits in between (scripts/release-notes.ts).
       - name: Write the release notes
@@ -215,6 +234,14 @@ jobs:
           files: |
             pyo-linux-x86_64
             pyo-linux-x86_64.sha256
+            cli-platforms/pyo-linux-aarch64
+            cli-platforms/pyo-linux-aarch64.sha256
+            cli-platforms/pyo-macos-aarch64
+            cli-platforms/pyo-macos-aarch64.sha256
+            cli-platforms/pyo-macos-x86_64
+            cli-platforms/pyo-macos-x86_64.sha256
+            cli-platforms/pyo-windows-x86_64.exe
+            cli-platforms/pyo-windows-x86_64.exe.sha256
             release.json
             release.json.sigstore.json
             deploy/install.sh
