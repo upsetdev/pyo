@@ -41,12 +41,21 @@ impl Credentials {
     pub fn save(&self) -> Result<PathBuf> {
         let path = credentials_path()?;
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, toml::to_string(self)?)?;
+        let mut open = fs::OpenOptions::new();
+        open.write(true).create(true).truncate(true);
+        // Readable only by you from the start. On Windows the file is in
+        // your user profile, which only you (and the computer's
+        // administrators) can read.
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            open.mode(0o600);
+            // A file saved before keeps its mode: set it too.
+            if path.exists() {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            }
         }
+        std::io::Write::write_all(&mut open.open(&path)?, toml::to_string(self)?.as_bytes())?;
         Ok(path)
     }
 
