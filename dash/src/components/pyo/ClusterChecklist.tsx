@@ -21,7 +21,7 @@ export function ClusterChecklist({ clusterId }: { clusterId: string }) {
         : "Waiting for the command…",
     },
     {
-      label: "Servers found",
+      label: "Servers",
       done: connected && nodes.length > 0,
       detail: nodes.length
         ? `${plural(nodes.length, "server")}, ${ready} ready`
@@ -41,20 +41,20 @@ export function ClusterChecklist({ clusterId }: { clusterId: string }) {
       ) : undefined,
     },
     {
-      label: "Default storage class",
+      label: "Storage",
       done: connected && !!defaultClass,
       detail: connected
         ? defaultClass
-          ? defaultClass.name
-          : "None: templates with storage can't deploy"
+          ? "Ready"
+          : "None: services with volumes can't deploy"
         : undefined,
     },
     {
-      label: "Metrics",
+      label: "Usage metrics",
       done: connected && !!c?.capabilities.metricsServer,
       detail: connected
         ? c?.capabilities.metricsServer
-          ? "metrics-server"
+          ? "Ready"
           : "Not installed: CPU and memory show as 0"
         : undefined,
     },
