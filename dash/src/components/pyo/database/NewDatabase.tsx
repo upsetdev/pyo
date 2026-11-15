@@ -63,11 +63,25 @@ export function databaseNameError(engine: Engine, name: string, team: Database[]
   return nameConflict(engine, name, team);
 }
 
+/** "main" (or "kv"), or the first free "main2", "main3"… ("main-2" would
+ * meet main's own "main-#" members). */
+function freeName(engine: Engine, team: Database[]) {
+  const base = engine === "valkey" ? "kv" : "main";
+  for (let i = 1; i <= 100; i++) {
+    const name = i === 1 ? base : `${base}${i}`;
+    if (!databaseNameError(engine, name, team)) return name;
+  }
+  return "";
+}
+
 /** A new database's fields, as the form edits them. */
 export function useDatabaseDraft(engine: Engine, init?: { name: string; clusterId: string } | null) {
   const s = usePyo();
   const ready = clustersIn(s).filter((c) => c.status === "connected" || c.status === "degraded");
-  const [name, setName] = useState(() => init?.name ?? "");
+  // Prefilled, so Create works as it opens. An untouched suggestion isn't
+  // carried to another engine, which suggests its own.
+  const [suggested] = useState(() => freeName(engine, s.databases.filter((d) => d.teamId === s.currentTeamId)));
+  const [name, setName] = useState(() => init?.name || suggested);
   const [clusterId, setClusterId] = useState(() => init?.clusterId ?? "");
   const [size, setSize] = useState(() => fitSize(engine, "small"));
   const [cpu, setCpu] = useState(250);
@@ -79,7 +93,7 @@ export function useDatabaseDraft(engine: Engine, init?: { name: string; clusterI
   const [pooler, setPooler] = useState(true);
   const [rest, setRest] = useState(false);
   const cluster = clusterId || ready[0]?.id || "";
-  const nameError = name ? databaseNameError(engine, name, s.databases.filter((d) => d.teamId === s.currentTeamId)) : "";
+  const nameError = name ? databaseNameError(engine, name, s.databases.filter((d) => d.teamId === s.currentTeamId)) : "Enter a name.";
   const custom = size === "custom";
   const spec = custom ? { cpu, mem, storage } : SIZE_SPECS[size];
   const sizeError = custom ? customError(engine, cpu, mem) || (storage >= 1 && storage <= 1000 ? "" : "Storage is 1 to 1000 GiB.") : "";
@@ -88,6 +102,7 @@ export function useDatabaseDraft(engine: Engine, init?: { name: string; clusterI
   return {
     ready,
     name,
+    suggested,
     setName,
     clusterId,
     setClusterId,
@@ -255,7 +270,7 @@ function NewDatabase({ engine }: { engine: Engine }) {
                     selected={engine === x.value}
                     onSelect={() => {
                       if (x.value === engine) return;
-                      carried = { name: f.name, clusterId: f.clusterId };
+                      carried = { name: f.name === f.suggested ? "" : f.name, clusterId: f.clusterId };
                       void navigate({ href: teamPath(currentSlug(), `/${DB_SECTION[x.value]}/new`), replace: true });
                       f.fitEngine(x.value);
                     }}
