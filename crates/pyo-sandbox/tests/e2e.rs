@@ -431,6 +431,196 @@ async fn edge_proxy(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &str) {
     assert_eq!(echo, b"ping through the edge\n");
 }
 
+/// A self-signed certificate for `*.sbx.test`, as (cert, key) PEM.
+fn self_signed(dir: &Path, name: &str) -> (String, String) {
+    let (cert, key) = (
+        dir.join(format!("{name}.crt")),
+        dir.join(format!("{name}.key")),
+    );
+    let made = std::process::Command::new("openssl")
+        .args(["req", "-x509", "-newkey", "ec", "-pkeyopt"])
+        .args(["ec_paramgen_curve:prime256v1", "-nodes", "-days", "1"])
+        .args(["-subj", &format!("/CN={name}")])
+        .args(["-addext", "subjectAltName=DNS:*.sbx.test", "-keyout"])
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    (
+        std::fs::read_to_string(cert).unwrap(),
+        std::fs::read_to_string(key).unwrap(),
+    )
+}
+
+/// An edge that starts without a certificate: HTTPS answers once Pyo
+/// sends one with `SetEdgeCert`, and a second one is served from the next
+/// connection on, all without a restart.
+async fn edge_hot_reload(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &str) {
+    use pyo_proto::sandbox::{SecretPem, port_host};
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = run.join("edge-reload");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert_path, key_path) = (dir.join("live/cert.pem"), dir.join("live/key.pem"));
+    let edge = Arc::new(
+        Edge::new(
+            state.clone(),
+            EdgeConfig {
+                domain: "sbx.test".into(),
+                https: Some("127.0.0.1:0".parse().unwrap()),
+                cert: Some(cert_path.clone()),
+                key: Some(key_path.clone()),
+                http: Some("127.0.0.1:0".parse().unwrap()),
+            },
+        )
+        .unwrap(),
+    );
+    let bound = edge.clone().start().await.unwrap();
+    let (https_port, http_port) = (bound.https.unwrap().port(), bound.http.unwrap().port());
+    let app = api::router(state.clone());
+    let admin = keys.admin();
+    let _: DaemonResult = json(
+        &app,
+        "POST",
+        &format!("/v1/sandboxes/{id}/ports"),
+        &keys.token(id, TEAM, &[Scope::Ports]),
+        serde_json::json!({"port": 3000, "public": true}),
+    )
+    .await;
+    let host = port_host(3000, id, "sbx.test");
+    let https = format!("https://{host}:{https_port}/");
+    let http = format!("http://{host}:{http_port}/");
+    let (c1, k1) = self_signed(&dir, "first");
+    let (c2, k2) = self_signed(&dir, "second");
+    let (ca1, ca2) = (dir.join("first.crt"), dir.join("second.crt"));
+
+    // No certificate: plain HTTP serves, HTTPS doesn't answer, and the
+    // report says HTTP.
+    let (s, _, b) = curl(&http, &ca1, &[]).await;
+    assert_eq!((s, b.trim()), (200, "hello-edge"));
+    let out = tokio::process::Command::new("curl")
+        .args(["-sS", "--max-time", "5", "--connect-to", "::127.0.0.1:"])
+        .arg("--cacert")
+        .arg(&ca1)
+        .arg(&https)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "HTTPS answered without a certificate"
+    );
+    let cap = state.mgr.capability();
+    assert!(
+        cap.edge_url.as_deref().unwrap().starts_with("http://"),
+        "{cap:?}"
+    );
+    assert_eq!(cap.edge_cert, None);
+
+    let set = |cert: String, key: String| {
+        let app = app.clone();
+        let admin = admin.clone();
+        async move {
+            let (s, b) = call(
+                &app,
+                "POST",
+                "/v1/commands",
+                Some(&admin),
+                Body::from(
+                    serde_json::to_string(&DaemonCommand::SetEdgeCert {
+                        cert,
+                        key: SecretPem(key),
+                    })
+                    .unwrap(),
+                ),
+            )
+            .await;
+            (s, serde_json::from_slice::<serde_json::Value>(&b).unwrap())
+        }
+    };
+    // Only an admin token may set it, and a key that isn't the
+    // certificate's is refused.
+    let (s, _) = {
+        let body = serde_json::to_string(&DaemonCommand::SetEdgeCert {
+            cert: c1.clone(),
+            key: SecretPem(k1.clone()),
+        })
+        .unwrap();
+        let ports = keys.token(id, TEAM, &[Scope::Ports]);
+        call(&app, "POST", "/v1/commands", Some(&ports), Body::from(body)).await
+    };
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, v) = set(c1.clone(), k2.clone()).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert!(!cert_path.exists(), "nothing written for a bad pair");
+
+    // The first certificate: HTTPS answers at once, HTTP redirects.
+    let (s, v) = set(c1.clone(), k1.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let fp1 = v["fingerprint"].as_str().unwrap().to_owned();
+    for p in [&cert_path, &key_path] {
+        let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{}", p.display());
+    }
+    assert_eq!(std::fs::read_to_string(&cert_path).unwrap(), c1);
+    let (s, h, b) = curl(&https, &ca1, &[]).await;
+    assert_eq!((s, b.trim()), (200, "hello-edge"), "{h}");
+    let (s, h, _) = curl(&http, &ca1, &[]).await;
+    assert_eq!(s, 308, "{h}");
+    let cap = state.mgr.capability();
+    assert_eq!(
+        cap.edge_url.as_deref(),
+        Some(format!("https://sbx.test:{https_port}").as_str())
+    );
+    assert_eq!(cap.edge_cert.as_deref(), Some(fp1.as_str()));
+
+    // The second: served from the next connection on, the first no more.
+    let (s, v) = set(c2.clone(), k2.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let fp2 = v["fingerprint"].as_str().unwrap().to_owned();
+    assert_ne!(fp1, fp2);
+    let (s, _, b) = curl(&https, &ca2, &[]).await;
+    assert_eq!((s, b.trim()), (200, "hello-edge"));
+    let out = tokio::process::Command::new("curl")
+        .args(["-sS", "--max-time", "5", "--connect-to", "::127.0.0.1:"])
+        .arg("--cacert")
+        .arg(&ca1)
+        .arg(&https)
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success(), "still serving the first certificate");
+    assert_eq!(
+        state.mgr.capability().edge_cert.as_deref(),
+        Some(fp2.as_str())
+    );
+
+    // Files changed by hand are picked up too.
+    let tls = edge.tls().unwrap();
+    std::fs::write(&key_path, &k1).unwrap();
+    std::fs::write(&cert_path, &c1).unwrap();
+    // Same-second writes can keep the modification time: make it differ.
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    for p in [&cert_path, &key_path] {
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+    assert!(tls.reload().unwrap());
+    assert_eq!(tls.fingerprint().as_deref(), Some(fp1.as_str()));
+    let (s, _, _) = curl(&https, &ca1, &[]).await;
+    assert_eq!(s, 200);
+}
+
 /// Firecracker processes running from a directory under `run`.
 /// Over the WebSocket, with the token as a subprotocol: an exec gets the
 /// sandbox's env and the timeout, and a refused upgrade says why.
@@ -965,6 +1155,8 @@ async fn boots_real_microvms() {
 
     edge_proxy(&state, &keys, &run, &ida).await;
     note("edge_proxy", "ok".into());
+    edge_hot_reload(&state, &keys, &run, &ida).await;
+    note("edge_hot_reload", "ok".into());
 
     // ── Template snapshot, then restores ──
     let admin = keys.admin();

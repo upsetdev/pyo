@@ -350,6 +350,19 @@ pub async fn run_command(
                 took_ms,
             }
         }
+        DaemonCommand::SetEdgeCert { cert, key } => {
+            st.authorize(token, None, Scope::Admin)?;
+            let Some(tls) = mgr.edge_tls() else {
+                return Err(fail(
+                    ErrorCode::Conflict,
+                    "This server's edge proxy has no HTTPS listener. Run sandbox.sh again with --edge-domain.",
+                ));
+            };
+            let fingerprint = tls
+                .install(&cert, &key.0)
+                .map_err(|e| fail(ErrorCode::InvalidSpec, format!("{e:#}")))?;
+            DaemonResult::EdgeCert { fingerprint }
+        }
     })
 }
 

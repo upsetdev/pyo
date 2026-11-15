@@ -46,6 +46,7 @@ pub async fn detect(inputs: Inputs<'_>) -> CapabilityReport {
         memory: crate::capacity::meminfo().total,
         disk: storage::free_bytes(&inputs.layout.root),
         cpu_vendor: cpu_vendor(&cpuinfo),
+        public_ips: public_ips(),
         ..Default::default()
     };
     let mut check = |name: &str, ok: bool, detail: String| {
@@ -312,9 +313,77 @@ async fn gvisor() -> Result<(), String> {
     }
 }
 
+/// The addresses the default routes leave from, when they're public: what
+/// a DNS record for the edge points at. Connecting a UDP socket sends
+/// nothing.
+pub fn public_ips() -> Vec<std::net::IpAddr> {
+    use std::net::{IpAddr, UdpSocket};
+    let from = |bind: &str, to: &str| -> Option<IpAddr> {
+        let s = UdpSocket::bind(bind).ok()?;
+        s.connect(to).ok()?;
+        Some(s.local_addr().ok()?.ip())
+    };
+    [
+        from("0.0.0.0:0", "1.1.1.1:53"),
+        from("[::]:0", "[2606:4700:4700::1111]:53"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|ip| is_public(*ip))
+    .collect()
+}
+
+/// An address the internet can reach: not private, shared (CGNAT, which
+/// tailnets use), loopback, link-local, documentation or unique-local.
+pub fn is_public(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v) => {
+            let [a, b, ..] = v.octets();
+            !(v.is_private()
+                || v.is_loopback()
+                || v.is_link_local()
+                || v.is_unspecified()
+                || v.is_broadcast()
+                || v.is_documentation()
+                || v.is_multicast()
+                || a == 0
+                || a >= 240
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 198 && (18..20).contains(&b)))
+        }
+        std::net::IpAddr::V6(v) => {
+            let first = v.segments()[0];
+            // Global unicast is 2000::/3, without documentation (2001:db8::/32).
+            (first & 0xe000) == 0x2000 && !(first == 0x2001 && v.segments()[1] == 0x0db8)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_addresses() {
+        for ip in ["203.0.114.7", "8.8.8.8", "2a01:4f8::1"] {
+            assert!(is_public(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "10.0.0.1",
+            "192.168.1.1",
+            "100.100.1.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "198.18.0.1",
+            "203.0.113.5",
+            "::1",
+            "fd7a:115c:a1e0::1",
+            "fe80::1",
+            "2001:db8::1",
+        ] {
+            assert!(!is_public(ip.parse().unwrap()), "{ip}");
+        }
+    }
 
     #[test]
     fn cpu_flags_and_vendor() {

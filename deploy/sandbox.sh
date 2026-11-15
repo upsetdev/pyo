@@ -39,7 +39,8 @@
 # --edge-domain, the edge proxy that serves sandbox ports on 80 and 443.
 # Edit it and restart pyo-sandbox to change them. A run without
 # --edge-domain keeps it as it is. HTTPS starts once the certificate and
-# key are in place: put them there and run this again with --edge-domain.
+# key are in place, without a restart. Pyo puts them there when your
+# Cloudflare connection covers the domain. Otherwise put them there yourself.
 # With ufw active, this opens 80 and 443 for the edge. Any other firewall
 # in front of the server needs them open too.
 #
@@ -401,17 +402,14 @@ redeem() {
 }
 
 # This server's own settings for the daemon: the sandboxes' network and,
-# with an edge domain, the edge proxy. HTTPS only once the certificate and
-# key are there, so the daemon starts without them.
+# with an edge domain, the edge proxy. Its HTTPS listener serves once the
+# certificate and key are there.
 local_config() {
-  local cert=${EDGE_CERT:-$ETC/edge/cert.pem} key=${EDGE_KEY:-$ETC/edge/key.pem} https=""
-  if [ -s "$cert" ] && [ -s "$key" ]; then
-    https="\"https\": \"0.0.0.0:$EDGE_HTTPS\", "
-  fi
+  local cert=${EDGE_CERT:-$ETC/edge/cert.pem} key=${EDGE_KEY:-$ETC/edge/key.pem}
   printf '{\n  "network": {"pool": "198.18.0.0/16", "dns": ["1.1.1.1", "8.8.8.8"], "blocked": []}'
   if [ -n "$EDGE_DOMAIN" ]; then
-    printf ',\n  "edge": {"domain": "%s", %s"http": "0.0.0.0:%s", "cert": "%s", "key": "%s"}' \
-      "$EDGE_DOMAIN" "$https" "$EDGE_HTTP" "$cert" "$key"
+    printf ',\n  "edge": {"domain": "%s", "https": "0.0.0.0:%s", "http": "0.0.0.0:%s", "cert": "%s", "key": "%s"}' \
+      "$EDGE_DOMAIN" "$EDGE_HTTPS" "$EDGE_HTTP" "$cert" "$key"
   fi
   printf '\n}\n'
 }
@@ -428,8 +426,8 @@ write_local_config() {
   if [ -s "$cert" ] && [ -s "$key" ]; then
     echo "Sandbox ports are served at https://<port>-<sandbox>.$EDGE_DOMAIN."
   else
-    echo "Sandbox ports are served at http://<port>-<sandbox>.$EDGE_DOMAIN for now."
-    echo "For HTTPS, put a certificate for *.$EDGE_DOMAIN at $cert and its key at $key, then run this again with --edge-domain $EDGE_DOMAIN."
+    echo "Sandbox ports are served at http://<port>-<sandbox>.$EDGE_DOMAIN until there's a certificate."
+    echo "Get one in Pyo if Cloudflare has the domain. Or put a certificate for *.$EDGE_DOMAIN at $cert and its key at $key."
   fi
 }
 

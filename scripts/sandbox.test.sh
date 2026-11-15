@@ -178,8 +178,8 @@ check "the settings are valid JSON" "$(json_ok "$ETC/local.json")" "^json$" has
 EDGE_DOMAIN=sbx.example.com
 out=$(write_local_config 2>&1)
 local_json=$(cat "$ETC/local.json")
-check "the edge serves HTTP on 80" "$local_json" "\"edge\": \{\"domain\": \"sbx.example.com\", \"http\": \"0.0.0.0:80\", \"cert\": \"$ETC/edge/cert.pem\", \"key\": \"$ETC/edge/key.pem\"\}" has
-check "and no HTTPS without a certificate" "$local_json" '"https"' lacks
+check "the edge listens on 443 and 80" "$local_json" "\"edge\": \{\"domain\": \"sbx.example.com\", \"https\": \"0.0.0.0:443\", \"http\": \"0.0.0.0:80\", \"cert\": \"$ETC/edge/cert.pem\", \"key\": \"$ETC/edge/key.pem\"\}" has
+check "it serves HTTP until there's a certificate" "$out" "http://<port>-<sandbox>.sbx.example.com until" has
 check "it says where the certificate goes" "$out" "put a certificate for \*.sbx.example.com at $ETC/edge/cert.pem" has
 check "the edge settings are valid JSON" "$(json_ok "$ETC/local.json")" "^json$" has
 mkdir -p "$ETC/edge" && echo cert >"$ETC/edge/cert.pem" && echo key >"$ETC/edge/key.pem"

@@ -84,6 +84,8 @@ pub struct Manager {
     capability: StdMutex<CapabilityReport>,
     sandboxes: StdMutex<HashMap<String, Arc<Sandbox>>>,
     net: Option<Arc<Network>>,
+    /// The edge's certificate, when it serves HTTPS.
+    edge_tls: StdMutex<Option<Arc<crate::edge::EdgeTls>>>,
 }
 
 impl Manager {
@@ -100,6 +102,7 @@ impl Manager {
             capability: StdMutex::new(capability),
             sandboxes: StdMutex::new(HashMap::new()),
             net: None,
+            edge_tls: StdMutex::new(None),
         }
     }
 
@@ -115,8 +118,28 @@ impl Manager {
         self.net.as_ref().filter(|_| self.capability().network)
     }
 
+    /// What the server can run, with the edge's URL and certificate as
+    /// they are now.
     pub fn capability(&self) -> CapabilityReport {
-        self.capability
+        let mut c = self
+            .capability
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(t) = self.edge_tls() {
+            c.edge_url = t.base_url();
+            c.edge_cert = t.fingerprint();
+        }
+        c
+    }
+
+    /// The edge's certificate, once an edge with HTTPS listens.
+    pub fn set_edge_tls(&self, tls: Arc<crate::edge::EdgeTls>) {
+        *self.edge_tls.lock().unwrap_or_else(|p| p.into_inner()) = Some(tls);
+    }
+
+    pub fn edge_tls(&self) -> Option<Arc<crate::edge::EdgeTls>> {
+        self.edge_tls
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()

@@ -143,6 +143,15 @@ pub struct CapabilityReport {
     /// runs. A port's URL comes from [`CapabilityReport::port_url`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_url: Option<String>,
+    /// The fingerprint ([`cert_fingerprint`]) of the certificate the edge
+    /// serves over HTTPS, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_cert: Option<String>,
+    /// The server's public IPv4 and IPv6 addresses, when its default route
+    /// leaves from one. A server behind NAT has none: its DNS record has to
+    /// be made by hand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_ips: Vec<std::net::IpAddr>,
     #[serde(default)]
     pub checks: Vec<Check>,
     /// Why the server can't run sandboxes, in one plain sentence.
@@ -184,6 +193,13 @@ impl CapabilityReport {
             "{scheme}://{}{listen_port}",
             port_host(port, sandbox, domain)
         ))
+    }
+
+    /// The edge proxy's domain, from its URL.
+    pub fn edge_domain(&self) -> Option<&str> {
+        let rest = self.edge_url.as_deref()?.split_once("://")?.1;
+        let host = rest.split(['/', ':']).next()?;
+        (!host.is_empty()).then_some(host)
     }
 
     /// Whether a sandbox asking for `isolation` can run here.
@@ -657,6 +673,32 @@ pub enum DaemonCommand {
         id: String,
         port: u16,
     },
+    /// Puts the edge proxy's certificate and key in place (PEM) and serves
+    /// them at once, without a restart. Admin only.
+    SetEdgeCert {
+        cert: String,
+        key: SecretPem,
+    },
+}
+
+/// A private key in a command: never printed.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretPem(pub String);
+
+impl std::fmt::Debug for SecretPem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<hidden>")
+    }
+}
+
+/// A certificate's fingerprint: the SHA-256 of its DER, in lowercase hex.
+pub fn cert_fingerprint(der: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(der)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn yes() -> bool {
@@ -677,7 +719,8 @@ impl DaemonCommand {
             | DaemonCommand::Get { id } => Some(id),
             DaemonCommand::List
             | DaemonCommand::Report
-            | DaemonCommand::SnapshotTemplate { .. } => None,
+            | DaemonCommand::SnapshotTemplate { .. }
+            | DaemonCommand::SetEdgeCert { .. } => None,
         }
     }
 }
@@ -704,6 +747,10 @@ pub enum DaemonResult {
         /// from the snapshot with the same key.
         key: String,
         took_ms: u64,
+    },
+    /// The edge serves this certificate now.
+    EdgeCert {
+        fingerprint: String,
     },
     Error {
         error: DaemonError,
@@ -1039,6 +1086,25 @@ mod tests {
             "http://1-sbx-abcdefghijklmnop.sbx.test:8081"
         );
         assert_eq!(CapabilityReport::default().port_url(id, 1), None);
+        assert_eq!(cap.edge_domain(), Some("sbx.example.com"));
+        assert_eq!(local.edge_domain(), Some("sbx.test"));
+        assert_eq!(CapabilityReport::default().edge_domain(), None);
+        let set = DaemonCommand::SetEdgeCert {
+            cert: "C".into(),
+            key: SecretPem("K".into()),
+        };
+        assert!(
+            !format!("{set:?}").contains('K'),
+            "the key is never printed"
+        );
+        assert_eq!(
+            serde_json::to_value(&set).unwrap(),
+            serde_json::json!({"type": "setEdgeCert", "cert": "C", "key": "K"})
+        );
+        assert_eq!(
+            cert_fingerprint(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         let open: DaemonCommand =
             serde_json::from_str(r#"{"type":"openPort","id":"x","port":3000}"#).unwrap();
         assert_eq!(

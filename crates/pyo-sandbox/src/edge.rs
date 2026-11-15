@@ -10,18 +10,21 @@
 //!   `X-Pyo-Token`, the `pyo_token` cookie, or once as `?pyo_token=`,
 //!   which sets the cookie and redirects. The proxy strips the token
 //!   before the request reaches the guest.
-//! - HTTPS uses a configured certificate for `*.<domain>`. Getting it
-//!   through DNS-01 comes with the Cloudflare DNS work. Plain HTTP
-//!   redirects to HTTPS when both run, and serves ports when it runs
-//!   alone, for testing.
+//! - HTTPS uses a certificate for `*.<domain>` from the configured files.
+//!   The listener starts without one and serves once it's there: Pyo puts
+//!   it in place with `SetEdgeCert` ([`EdgeTls::install`]), or someone puts
+//!   the files there by hand, which the edge sees within a minute. A new
+//!   certificate is served from the next connection on, without a
+//!   restart. Plain HTTP redirects to HTTPS while there's a certificate,
+//!   and serves ports otherwise.
 //! - Only the edge (80 and 443) faces the internet on a sandbox server.
 //!   The daemon API stays on the tailnet.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, bail};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
@@ -43,6 +46,10 @@ type Body = BoxBody<Bytes, hyper::Error>;
 pub const TOKEN_COOKIE: &str = "pyo_token";
 pub const TOKEN_HEADER: &str = "x-pyo-token";
 const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the edge looks for certificate files changed by hand.
+const WATCH: Duration = Duration::from_secs(30);
+/// The most a certificate chain or key may weigh.
+const PEM_CAP: usize = 64 << 10;
 
 /// The `edge` part of the daemon's config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,7 +58,8 @@ pub struct EdgeConfig {
     /// Ports are served at `<port>-<sandbox>.<domain>`. Needs a wildcard
     /// DNS record pointing at the server.
     pub domain: String,
-    /// The HTTPS listener, usually `0.0.0.0:443`. Needs `cert` and `key`.
+    /// The HTTPS listener, usually `0.0.0.0:443`. Needs the `cert` and
+    /// `key` paths. It serves once the files are there.
     #[serde(default)]
     pub https: Option<SocketAddr>,
     /// PEM certificate chain for `*.<domain>`.
@@ -69,7 +77,156 @@ pub struct EdgeConfig {
 pub struct Edge {
     pub app: Arc<AppState>,
     pub cfg: EdgeConfig,
-    tls: Option<tokio_rustls::TlsAcceptor>,
+    tls: Option<Arc<EdgeTls>>,
+}
+
+/// The edge's certificate: loaded from its files, replaced in place.
+pub struct EdgeTls {
+    pub domain: String,
+    pub cert: PathBuf,
+    pub key: PathBuf,
+    current: RwLock<Option<Loaded>>,
+    /// Where the edge listens, once it does.
+    bound: Mutex<Bound>,
+}
+
+#[derive(Clone)]
+struct Loaded {
+    acceptor: tokio_rustls::TlsAcceptor,
+    fingerprint: String,
+    /// The files' modification times when they were read.
+    stamp: Option<(SystemTime, SystemTime)>,
+}
+
+impl EdgeTls {
+    pub fn new(domain: &str, cert: PathBuf, key: PathBuf) -> EdgeTls {
+        let t = EdgeTls {
+            domain: domain.to_owned(),
+            cert,
+            key,
+            current: RwLock::new(None),
+            bound: Mutex::new(Bound::default()),
+        };
+        if let Err(e) = t.reload() {
+            tracing::warn!(error = %format!("{e:#}"), "the edge serves HTTPS once it has a certificate");
+        }
+        t
+    }
+
+    /// The acceptor for a new connection, if there's a certificate.
+    fn acceptor(&self) -> Option<tokio_rustls::TlsAcceptor> {
+        self.read().as_ref().map(|l| l.acceptor.clone())
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Option<Loaded>> {
+        self.current.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The fingerprint of the certificate served, if any.
+    pub fn fingerprint(&self) -> Option<String> {
+        self.read().as_ref().map(|l| l.fingerprint.clone())
+    }
+
+    pub fn has_cert(&self) -> bool {
+        self.read().is_some()
+    }
+
+    fn stamp(&self) -> Option<(SystemTime, SystemTime)> {
+        let m = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        Some((m(&self.cert)?, m(&self.key)?))
+    }
+
+    /// Reads the files again when they changed since the last read. A
+    /// certificate that doesn't load keeps the one served.
+    pub fn reload(&self) -> anyhow::Result<bool> {
+        let stamp = self.stamp();
+        if stamp.is_none() {
+            bail!(
+                "There's no certificate at {} and {} yet.",
+                self.cert.display(),
+                self.key.display()
+            );
+        }
+        if self.read().as_ref().is_some_and(|l| l.stamp == stamp) {
+            return Ok(false);
+        }
+        let cert = read_capped(&self.cert)?;
+        let key = read_capped(&self.key)?;
+        let (acceptor, fingerprint) = tls_acceptor(&cert, &key)
+            .with_context(|| format!("loading {}", self.cert.display()))?;
+        *self.current.write().unwrap_or_else(|p| p.into_inner()) = Some(Loaded {
+            acceptor,
+            fingerprint: fingerprint.clone(),
+            stamp,
+        });
+        tracing::info!(%fingerprint, "the edge serves a new certificate");
+        Ok(true)
+    }
+
+    /// Checks a certificate and key, writes them to the configured files
+    /// (mode 0600) and serves them from the next connection on. Returns
+    /// the certificate's fingerprint.
+    pub fn install(&self, cert: &str, key: &str) -> anyhow::Result<String> {
+        if cert.len() > PEM_CAP || key.len() > PEM_CAP {
+            bail!("The certificate or key is too big.");
+        }
+        let (acceptor, fingerprint) = tls_acceptor(cert.as_bytes(), key.as_bytes())?;
+        // The key first: a certificate whose key isn't there yet never loads.
+        write_private(&self.key, key.as_bytes())?;
+        write_private(&self.cert, cert.as_bytes())?;
+        *self.current.write().unwrap_or_else(|p| p.into_inner()) = Some(Loaded {
+            acceptor,
+            fingerprint: fingerprint.clone(),
+            stamp: self.stamp(),
+        });
+        tracing::info!(%fingerprint, "the edge serves the certificate Pyo sent");
+        Ok(fingerprint)
+    }
+
+    /// The base URL for port URLs: HTTPS once there's a certificate.
+    pub fn base_url(&self) -> Option<String> {
+        let b = *self.bound.lock().unwrap_or_else(|p| p.into_inner());
+        let b = if self.has_cert() {
+            b
+        } else {
+            Bound { https: None, ..b }
+        };
+        b.base_url(&self.domain)
+    }
+}
+
+fn read_capped(p: &Path) -> anyhow::Result<Vec<u8>> {
+    let b = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+    if b.len() > PEM_CAP {
+        bail!("{} is too big for a certificate or key.", p.display());
+    }
+    Ok(b)
+}
+
+/// Writes a file only root can read, through a temporary file and a
+/// rename, so a reader never sees half of it.
+fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+    let tmp = path.with_extension(format!("new{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 /// What the edge listens on once it runs.
@@ -109,14 +266,24 @@ impl Edge {
                 let (Some(cert), Some(key)) = (&cfg.cert, &cfg.key) else {
                     bail!("The edge's HTTPS listener needs cert and key.");
                 };
-                Some(tls_acceptor(cert, key)?)
+                Some(Arc::new(EdgeTls::new(
+                    &cfg.domain,
+                    cert.clone(),
+                    key.clone(),
+                )))
             }
             None => None,
         };
         Ok(Edge { app, cfg, tls })
     }
 
-    /// Binds the listeners and serves them in the background.
+    /// The certificate, when the edge has an HTTPS listener.
+    pub fn tls(&self) -> Option<&Arc<EdgeTls>> {
+        self.tls.as_ref()
+    }
+
+    /// Binds the listeners and serves them in the background. An edge with
+    /// HTTPS then answers `SetEdgeCert` and watches its files.
     pub async fn start(self: Arc<Self>) -> anyhow::Result<Bound> {
         let mut bound = Bound::default();
         if let Some(addr) = self.cfg.https {
@@ -132,6 +299,20 @@ impl Edge {
                 .with_context(|| format!("edge listening on {addr}"))?;
             bound.http = Some(l.local_addr()?);
             tokio::spawn(self.clone().accept(l, false));
+        }
+        if let Some(tls) = &self.tls {
+            *tls.bound.lock().unwrap_or_else(|p| p.into_inner()) = bound;
+            self.app.mgr.set_edge_tls(tls.clone());
+            let tls = Arc::downgrade(tls);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(WATCH).await;
+                    let Some(t) = tls.upgrade() else { return };
+                    if let Err(e) = t.reload() {
+                        tracing::debug!(error = %format!("{e:#}"), "edge certificate");
+                    }
+                }
+            });
         }
         Ok(bound)
     }
@@ -152,7 +333,9 @@ impl Edge {
                 if !tls {
                     return me.serve(TokioIo::new(tcp), peer, false).await;
                 }
-                let Some(acc) = me.tls.clone() else { return };
+                let Some(acc) = me.tls.as_ref().and_then(|t| t.acceptor()) else {
+                    return;
+                };
                 if let Ok(Ok(s)) = tokio::time::timeout(HEADER_TIMEOUT, acc.accept(tcp)).await {
                     me.serve(TokioIo::new(s), peer, true).await;
                 }
@@ -190,7 +373,10 @@ impl Edge {
             .map(str::to_string)
             .or_else(|| req.uri().authority().map(|a| a.to_string()))
             .unwrap_or_default();
-        if !tls && let Some(https) = self.cfg.https {
+        if !tls
+            && let Some(https) = self.cfg.https
+            && self.tls.as_ref().is_some_and(|t| t.has_cert())
+        {
             let name = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(&host);
             let port = if https.port() == 443 {
                 String::new()
@@ -461,26 +647,27 @@ fn redirect(status: StatusCode, to: &str, cookie: Option<&str>) -> Response<Body
     r
 }
 
-fn tls_acceptor(cert: &Path, key: &Path) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+/// An acceptor for a PEM certificate chain and key, and the leaf's
+/// fingerprint. Fails when the key isn't the certificate's.
+fn tls_acceptor(cert: &[u8], key: &[u8]) -> anyhow::Result<(tokio_rustls::TlsAcceptor, String)> {
     use rustls_pki_types::pem::PemObject;
     use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .with_context(|| format!("reading {}", cert.display()))?
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert)
         .collect::<Result<_, _>>()
-        .with_context(|| format!("reading {}", cert.display()))?;
-    if certs.is_empty() {
-        bail!("{} has no certificate.", cert.display());
-    }
-    let key =
-        PrivateKeyDer::from_pem_file(key).with_context(|| format!("reading {}", key.display()))?;
+        .context("The certificate isn't PEM.")?;
+    let Some(leaf) = certs.first() else {
+        bail!("There's no certificate in it.");
+    };
+    let fingerprint = pyo_proto::sandbox::cert_fingerprint(leaf.as_ref());
+    let key = PrivateKeyDer::from_pem_slice(key).context("The key isn't a PEM private key.")?;
     let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
     let mut cfg = tokio_rustls::rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .context("the edge certificate and key don't fit together")?;
+        .context("The certificate and key don't fit together.")?;
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(cfg)))
+    Ok((tokio_rustls::TlsAcceptor::from(Arc::new(cfg)), fingerprint))
 }
 
 #[cfg(test)]
