@@ -35,11 +35,19 @@ pub fn certificate_resource() -> ApiResource {
 /// The issuers, once cert-manager (from the install manifest) is there;
 /// retried until its CRDs appear.
 pub async fn ensure(client: Client) {
+    let mut refusals = 0;
     loop {
         match ensure_once(&client).await {
             Ok(()) => {
                 tracing::info!("HTTPS ready: cert-manager and issuers in place");
                 return;
+            }
+            // The cluster's install is older than Pyo's: tried again once
+            // its connect command runs.
+            Err(e) if crate::refused::in_chain(&e) => {
+                refusals += 1;
+                tracing::warn!(error = %format!("{e:#}"), "the cluster's install refuses the HTTPS issuers; run the cluster's connect command (tried again once the install changes)");
+                crate::refused::wait_for_install(&client, refusals).await;
             }
             Err(e) => {
                 tracing::info!(error = %format!("{e:#}"), "HTTPS not ready yet; retrying");

@@ -1366,12 +1366,20 @@ pub async fn remove(client: &Client, service_id: &str) {
 /// each start, so a new GeoIP image (`PYO_GEOIP_IMAGE`, from the install
 /// manifest that also allows it) reaches the proxies, which then roll. The
 /// tailnet Gateway follows the API's wanted list (tailnet.rs).
+/// One the cluster's install refuses (older than Pyo's, until the
+/// cluster's connect command runs) waits for that install to change.
 pub async fn ensure(client: Client) {
+    let mut refusals = 0;
     loop {
         match ensure_once(&client).await {
             Ok(()) => {
                 tracing::info!("gateway ready");
                 return;
+            }
+            Err(e) if crate::refused::in_chain(&e) => {
+                refusals += 1;
+                tracing::warn!(error = %format!("{e:#}"), "the cluster's install refuses the gateway's settings; run the cluster's connect command (tried again once the install changes)");
+                crate::refused::wait_for_install(&client, refusals).await;
             }
             Err(e) => {
                 tracing::info!(error = %format!("{e:#}"), "gateway not ready yet; retrying");
@@ -1459,6 +1467,16 @@ pub async fn set_public_traffic(client: &Client, on: bool) {
     if system::envoy_proxy_public(&current.data["spec"]) == on {
         return;
     }
+    // Refused by the install it was refused by before: not tried again
+    // (each heartbeat) until that changes.
+    let stamp = crate::refused::install_stamp(client).await;
+    if PUBLIC_REFUSED
+        .lock()
+        .map(|r| r.as_ref() == Some(&(on, stamp.clone())))
+        .unwrap_or(false)
+    {
+        return;
+    }
     match proxies
         .patch(
             "pyo",
@@ -1468,9 +1486,18 @@ pub async fn set_public_traffic(client: &Client, on: bool) {
         .await
     {
         Ok(_) => tracing::info!(on, "public traffic"),
+        Err(e) if crate::refused::is_refusal(&e) => {
+            tracing::warn!(error = %e, "couldn't change public traffic (run the cluster's connect command)");
+            if let Ok(mut r) = PUBLIC_REFUSED.lock() {
+                *r = Some((on, stamp));
+            }
+        }
         Err(e) => tracing::warn!(error = %e, "couldn't change public traffic"),
     }
 }
+
+/// The public traffic setting the install refused, and that install's stamp.
+static PUBLIC_REFUSED: std::sync::Mutex<Option<(bool, String)>> = std::sync::Mutex::new(None);
 
 /// The Tailscale addresses the websites are published on: every server's
 /// that runs a proxy (all but build-only ones), from what locate.rs found,

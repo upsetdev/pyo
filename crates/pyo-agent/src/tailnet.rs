@@ -598,7 +598,20 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
     {
         return;
     }
+    // Refused by the cluster's install as it still is: not tried (and
+    // logged) again each heartbeat, only once that install or this changes.
+    let refused_before = TAILNET_REFUSED
+        .lock()
+        .ok()
+        .and_then(|r| r.clone())
+        .filter(|(k, _)| *k == key);
+    if let Some((_, stamp)) = refused_before
+        && stamp == crate::refused::install_stamp(kube).await
+    {
+        return;
+    }
     let mut ok = true;
+    let mut refused = false;
     // The servers' tailnet pods, on the agent's own image.
     if let Some(image) = &image {
         let ds = system::tailnet_daemonset(image);
@@ -607,6 +620,7 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
             .await
         {
             tracing::warn!(error = %e, "couldn't apply the tailnet pods");
+            refused |= crate::refused::is_refusal(&e);
             ok = false;
         }
     }
@@ -626,6 +640,7 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
         };
         if let Err(e) = r {
             tracing::warn!(error = %e, kind, name, "couldn't apply a tailnet object");
+            refused |= crate::refused::is_refusal(&e);
             ok = false;
         }
     }
@@ -664,12 +679,24 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
     };
     if let Err(e) = r {
         tracing::warn!(error = %e, "couldn't apply the tailnet VIPs' Service");
+        refused |= crate::refused::is_refusal(&e);
         ok = false;
     }
-    if ok && let Ok(mut a) = APPLIED.lock() {
+    if refused {
+        tracing::warn!(
+            "the cluster's install refuses the tailnet's objects; run the cluster's connect command (tried again once the install changes)"
+        );
+        let stamp = crate::refused::install_stamp(kube).await;
+        if let Ok(mut r) = TAILNET_REFUSED.lock() {
+            *r = Some((key, stamp));
+        }
+    } else if ok && let Ok(mut a) = APPLIED.lock() {
         *a = Some(key);
     }
 }
+
+/// What the cluster's install refused last, and that install's stamp.
+static TAILNET_REFUSED: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
 
 /// The agent's own image (its Deployment's), for its tailnet pods.
 async fn own_image(kube: &Client) -> Option<String> {

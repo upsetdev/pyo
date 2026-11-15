@@ -28,6 +28,7 @@ mod observability;
 mod observe;
 mod operators;
 mod publicdash;
+mod refused;
 mod rollout;
 mod room;
 mod runs;
