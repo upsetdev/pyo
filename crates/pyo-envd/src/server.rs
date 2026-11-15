@@ -54,7 +54,20 @@ impl Server {
     }
 
     /// Serves one connection until it ends.
-    pub fn serve(&self, mut reader: Box<dyn Read + Send>, writer: Box<dyn Write + Send>) {
+    #[cfg(test)]
+    pub fn serve(&self, reader: Box<dyn Read + Send>, writer: Box<dyn Write + Send>) {
+        self.serve_with(reader, writer, None)
+    }
+
+    /// Like [`Server::serve`], and calls `on_first` when the host sends
+    /// its first frame. In dial mode that's when the next connection is
+    /// dialed, so one idle connection is always waiting.
+    pub fn serve_with(
+        &self,
+        mut reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
+        mut on_first: Option<Box<dyn FnOnce() + Send>>,
+    ) {
         let conn = Conn {
             out: Out(Arc::new(Mutex::new(writer))),
             streams: Arc::new(Mutex::new(HashMap::new())),
@@ -68,7 +81,12 @@ impl Server {
         }
         loop {
             match read_frame(&mut reader) {
-                Ok(Some(f)) => conn.handle(f),
+                Ok(Some(f)) => {
+                    if let Some(first) = on_first.take() {
+                        first();
+                    }
+                    conn.handle(f)
+                }
                 Ok(None) => break,
                 Err(e) => {
                     eprintln!("pyo-envd: dropping a connection: {e}");

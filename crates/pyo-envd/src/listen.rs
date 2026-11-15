@@ -1,109 +1,131 @@
-//! Listening on vsock or a Unix socket, and the ready connection.
+//! How envd meets the host. Two modes, and `Hello` is the first frame on
+//! every connection in both.
+//!
+//! - **Listen** (Firecracker): listen on a vsock port. Once listening, dial
+//!   the host once and send `Hello`. That's the ready signal, and the ready
+//!   connection is then served like any other. After a snapshot restore no
+//!   one dials, so the daemon connects and retries.
+//! - **Dial** (gVisor): never listen. A bound host socket blocks
+//!   `runsc checkpoint`, so envd dials a per-sandbox host Unix socket
+//!   (`runsc --host-uds=open`) and keeps retrying while nobody answers. It
+//!   keeps one idle connection waiting: when the host sends the first frame
+//!   on it, or it closes, envd dials the next one. The daemon closes its
+//!   listener and every connection before a checkpoint, and envd just goes
+//!   back to retrying.
 
 use std::fs::File;
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use pyo_proto::sandbox::wire::{ENVD_VSOCK_PORT, HOST_CID, READY_VSOCK_PORT};
 
 use crate::server;
 
+/// Where envd dials.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Listen {
-    Vsock(u32),
-    Unix(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ready {
+pub enum Target {
     Vsock(u32, u32),
     Unix(String),
-    None,
 }
 
-pub fn parse_listen(s: Option<&str>) -> Result<Listen, String> {
-    match s {
-        None | Some("") => Ok(Listen::Vsock(ENVD_VSOCK_PORT)),
-        Some(s) => {
-            if let Some(p) = s.strip_prefix("vsock:") {
-                p.parse()
-                    .map(Listen::Vsock)
-                    .map_err(|_| format!("bad vsock port in {s:?}"))
-            } else if let Some(p) = s.strip_prefix("unix:") {
-                Ok(Listen::Unix(p.to_string()))
-            } else {
-                Err(format!(
-                    "PYO_ENVD_LISTEN must be vsock:<port> or unix:<path>, not {s:?}"
-                ))
-            }
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mode {
+    /// Listen on this vsock port and send the ready signal to `ready`.
+    Listen { port: u32, ready: Option<Target> },
+    /// Only dial.
+    Dial(Target),
+}
+
+impl Mode {
+    /// Whether envd sets up the machine as PID 1. On gVisor, runsc builds
+    /// the root filesystem and mounts, so it doesn't.
+    pub fn sets_up_machine(&self) -> bool {
+        matches!(self, Mode::Listen { .. })
     }
 }
 
-pub fn parse_ready(s: Option<&str>) -> Result<Ready, String> {
-    match s {
-        None | Some("") => Ok(Ready::Vsock(HOST_CID, READY_VSOCK_PORT)),
-        Some("none") => Ok(Ready::None),
-        Some(s) => {
-            if let Some(rest) = s.strip_prefix("vsock:") {
-                let (cid, port) = rest.split_once(':').ok_or_else(|| format!("bad {s:?}"))?;
-                Ok(Ready::Vsock(
-                    cid.parse().map_err(|_| format!("bad cid in {s:?}"))?,
-                    port.parse().map_err(|_| format!("bad port in {s:?}"))?,
-                ))
-            } else if let Some(p) = s.strip_prefix("unix:") {
-                Ok(Ready::Unix(p.to_string()))
-            } else {
-                Err(format!(
-                    "PYO_ENVD_READY must be vsock:<cid>:<port>, unix:<path> or none, not {s:?}"
-                ))
-            }
+/// From `PYO_ENVD_LISTEN`, `PYO_ENVD_READY` and `PYO_ENVD_DIAL`.
+pub fn mode(listen: Option<&str>, ready: Option<&str>, dial: Option<&str>) -> Result<Mode, String> {
+    if let Some(d) = dial.filter(|d| !d.is_empty()) {
+        if listen.is_some_and(|l| !l.is_empty()) {
+            return Err("set PYO_ENVD_LISTEN or PYO_ENVD_DIAL, not both".into());
         }
+        return parse_target(d).map(Mode::Dial);
+    }
+    let port = match listen.filter(|l| !l.is_empty()) {
+        None => ENVD_VSOCK_PORT,
+        Some(l) => l
+            .strip_prefix("vsock:")
+            .and_then(|p| p.parse().ok())
+            .ok_or_else(|| format!("PYO_ENVD_LISTEN must be vsock:<port>, not {l:?}"))?,
+    };
+    let ready = match ready.filter(|r| !r.is_empty()) {
+        None => Some(Target::Vsock(HOST_CID, READY_VSOCK_PORT)),
+        Some("none") => None,
+        Some(r) => Some(parse_target(r)?),
+    };
+    Ok(Mode::Listen { port, ready })
+}
+
+fn parse_target(s: &str) -> Result<Target, String> {
+    if let Some(rest) = s.strip_prefix("vsock:") {
+        let (cid, port) = rest
+            .split_once(':')
+            .ok_or_else(|| format!("{s:?} needs vsock:<cid>:<port>"))?;
+        Ok(Target::Vsock(
+            cid.parse().map_err(|_| format!("bad cid in {s:?}"))?,
+            port.parse().map_err(|_| format!("bad port in {s:?}"))?,
+        ))
+    } else if let Some(p) = s.strip_prefix("unix:") {
+        Ok(Target::Unix(p.to_string()))
+    } else {
+        Err(format!("{s:?} must be vsock:<cid>:<port> or unix:<path>"))
     }
 }
 
-/// Listens, sends the ready signal and serves every connection in its own
-/// thread. Never returns.
-pub fn serve() -> ! {
+pub fn mode_from_env() -> Mode {
     let env = |k: &str| std::env::var(k).ok();
-    let (listen, ready) = match (
-        parse_listen(env("PYO_ENVD_LISTEN").as_deref()),
-        parse_ready(env("PYO_ENVD_READY").as_deref()),
-    ) {
-        (Ok(l), Ok(r)) => (l, r),
-        (Err(e), _) | (_, Err(e)) => {
-            eprintln!("pyo-envd: {e}");
-            std::process::exit(2);
-        }
-    };
-    let accept: Box<dyn FnMut() -> io::Result<File>> = match &listen {
-        Listen::Vsock(port) => {
-            let fd = vsock_listen(*port).unwrap_or_else(|e| {
-                eprintln!("pyo-envd: can't listen on vsock port {port}: {e}");
-                std::process::exit(1);
-            });
-            Box::new(move || vsock_accept(&fd))
-        }
-        Listen::Unix(path) => {
-            let _ = std::fs::remove_file(path);
-            let l = UnixListener::bind(path).unwrap_or_else(|e| {
-                eprintln!("pyo-envd: can't listen on {path}: {e}");
-                std::process::exit(1);
-            });
-            Box::new(move || l.accept().map(|(s, _)| File::from(OwnedFd::from(s))))
-        }
-    };
-    // The listener is up, so tell the host. The ready connection is served
-    // like any other, so the host can use it right away.
-    if let Some(conn) = connect_ready(&ready) {
-        spawn_conn(conn);
+    mode(
+        env("PYO_ENVD_LISTEN").as_deref(),
+        env("PYO_ENVD_READY").as_deref(),
+        env("PYO_ENVD_DIAL").as_deref(),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("pyo-envd: {e}");
+        std::process::exit(2);
+    })
+}
+
+/// Serves connections in the given mode. Never returns.
+pub fn serve(mode: Mode) -> ! {
+    match mode {
+        Mode::Listen { port, ready } => listen(port, ready),
+        Mode::Dial(target) => dial_forever(&target),
     }
-    let mut accept = accept;
+}
+
+fn listen(port: u32, ready: Option<Target>) -> ! {
+    let fd = vsock_listen(port).unwrap_or_else(|e| {
+        eprintln!("pyo-envd: can't listen on vsock port {port}: {e}");
+        std::process::exit(1);
+    });
+    // The listener is up, so tell the host.
+    if let Some(t) = ready {
+        match dial_with_retry(&t, 20) {
+            Some(conn) => {
+                std::thread::spawn(move || serve_conn(conn, None));
+            }
+            None => eprintln!("pyo-envd: can't reach the host for the ready signal"),
+        }
+    }
     loop {
-        match accept() {
-            Ok(conn) => spawn_conn(conn),
+        match vsock_accept(&fd) {
+            Ok(conn) => {
+                std::thread::spawn(move || serve_conn(conn, None));
+            }
             Err(e) => {
                 eprintln!("pyo-envd: accept failed: {e}");
                 std::thread::sleep(Duration::from_millis(50));
@@ -112,27 +134,45 @@ pub fn serve() -> ! {
     }
 }
 
-fn spawn_conn(conn: File) {
-    std::thread::spawn(move || {
-        let Ok(reader) = conn.try_clone() else { return };
-        server::Server::guest().serve(Box::new(reader), Box::new(conn));
-    });
+fn dial_forever(target: &Target) -> ! {
+    loop {
+        let Some(conn) = dial_with_retry(target, usize::MAX) else {
+            continue;
+        };
+        let (tx, rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let first: Box<dyn FnOnce() + Send> = Box::new(move || {
+                let _ = tx.send(());
+            });
+            serve_conn(conn, Some(first));
+        });
+        // Ok when the host started using it, Err when it closed unused.
+        // Either way, dial the next one.
+        let _ = rx.recv();
+    }
 }
 
-fn connect_ready(ready: &Ready) -> Option<File> {
-    // A few tries, in case the host's listener isn't there yet.
-    for _ in 0..20 {
-        let r = match ready {
-            Ready::None => return None,
-            Ready::Vsock(cid, port) => vsock_connect(*cid, *port),
-            Ready::Unix(p) => UnixStream::connect(p).map(|s| File::from(OwnedFd::from(s))),
+fn serve_conn(conn: File, on_first: Option<Box<dyn FnOnce() + Send>>) {
+    let Ok(reader) = conn.try_clone() else { return };
+    server::Server::guest().serve_with(Box::new(reader), Box::new(conn), on_first);
+}
+
+/// Dials up to `tries` times, backing off from 2 ms to 50 ms.
+fn dial_with_retry(target: &Target, tries: usize) -> Option<File> {
+    let mut wait = Duration::from_millis(2);
+    for _ in 0..tries {
+        let r = match target {
+            Target::Vsock(cid, port) => vsock_connect(*cid, *port),
+            Target::Unix(p) => UnixStream::connect(p).map(|s| File::from(OwnedFd::from(s))),
         };
         match r {
             Ok(f) => return Some(f),
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(Duration::from_millis(50));
+            }
         }
     }
-    eprintln!("pyo-envd: can't reach the host for the ready signal");
     None
 }
 
@@ -215,19 +255,86 @@ fn vsock_connect(cid: u32, port: u32) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyo_proto::sandbox::wire::{Frame, Kind, Request, Response, read_frame, write_frame};
+    use std::os::unix::net::UnixListener;
 
     #[test]
-    fn settings() {
-        assert_eq!(parse_listen(None), Ok(Listen::Vsock(52)));
-        assert_eq!(parse_listen(Some("vsock:99")), Ok(Listen::Vsock(99)));
+    fn modes() {
         assert_eq!(
-            parse_listen(Some("unix:/run/e.sock")),
-            Ok(Listen::Unix("/run/e.sock".into()))
+            mode(None, None, None),
+            Ok(Mode::Listen {
+                port: 52,
+                ready: Some(Target::Vsock(2, 1024))
+            })
         );
-        assert!(parse_listen(Some("tcp:1")).is_err());
-        assert_eq!(parse_ready(None), Ok(Ready::Vsock(2, 1024)));
-        assert_eq!(parse_ready(Some("none")), Ok(Ready::None));
-        assert_eq!(parse_ready(Some("vsock:3:5")), Ok(Ready::Vsock(3, 5)));
-        assert!(parse_ready(Some("vsock:3")).is_err());
+        assert_eq!(
+            mode(Some("vsock:99"), Some("none"), None),
+            Ok(Mode::Listen {
+                port: 99,
+                ready: None
+            })
+        );
+        assert_eq!(
+            mode(None, None, Some("unix:/pyo/host.sock")),
+            Ok(Mode::Dial(Target::Unix("/pyo/host.sock".into())))
+        );
+        assert!(!mode(None, None, Some("unix:/x")).unwrap().sets_up_machine());
+        assert!(mode(None, None, None).unwrap().sets_up_machine());
+        // envd never listens on a Unix socket.
+        assert!(mode(Some("unix:/x"), None, None).is_err());
+        assert!(mode(Some("vsock:1"), None, Some("unix:/x")).is_err());
+        assert!(mode(None, Some("vsock:3"), None).is_err());
+    }
+
+    /// Dial mode against a host socket: Hello first on each connection, one
+    /// idle connection waiting, and redialing after the host drops all of
+    /// them, like before a gVisor checkpoint.
+    #[test]
+    fn dial_mode_keeps_one_connection_waiting() {
+        let dir = std::env::temp_dir().join(format!("pyo-envd-dial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("host.sock");
+        // Nobody listens yet. envd keeps retrying.
+        let target = Target::Unix(sock.to_string_lossy().into());
+        std::thread::spawn(move || dial_forever(&target));
+        std::thread::sleep(Duration::from_millis(30));
+
+        let accept_hello = |l: &UnixListener| {
+            let (mut c, _) = l.accept().unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let f = read_frame(&mut c).unwrap().unwrap();
+            assert_eq!(f.kind, Kind::Hello);
+            c
+        };
+        let l = UnixListener::bind(&sock).unwrap();
+        let mut a = accept_hello(&l);
+        // Unused, so no second connection yet.
+        l.set_nonblocking(true).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            l.accept().is_err(),
+            "envd dialed again before the first was used"
+        );
+        l.set_nonblocking(false).unwrap();
+        // Using it makes envd dial the next one.
+        write_frame(&mut a, &Frame::request(0, &Request::Ping)).unwrap();
+        assert_eq!(
+            read_frame(&mut a)
+                .unwrap()
+                .unwrap()
+                .parse::<Response>()
+                .unwrap(),
+            Response::Pong
+        );
+        let b = accept_hello(&l);
+
+        // The host closes everything and the socket, then comes back.
+        drop((a, b, l));
+        std::fs::remove_file(&sock).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        let l = UnixListener::bind(&sock).unwrap();
+        let _c = accept_hello(&l);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

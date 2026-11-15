@@ -4,15 +4,17 @@
 //! PID 1 sets up the machine (see [`init`]), starts the server as its child
 //! and then only reaps orphans, restarting the server if it dies.
 //!
-//! The server listens on vsock port 52, or on a Unix socket on gVisor. When
-//! it's up it connects to the host and sends `Hello`, which is the ready
-//! signal. Every connection speaks `pyo_proto::sandbox::wire`.
+//! On Firecracker the server listens on vsock port 52 and dials the host
+//! once as the ready signal. On gVisor it never listens and only dials a
+//! host Unix socket. See [`listen`]. `Hello` is the first frame on every
+//! connection. Every connection speaks `pyo_proto::sandbox::wire`.
 //!
-//! Settings come from the environment, which the kernel fills from boot
-//! args like `PYO_ENVD_LISTEN=unix:/run/envd.sock`:
-//! - `PYO_ENVD_LISTEN`: `vsock:<port>` (default `vsock:52`) or `unix:<path>`
+//! Settings come from the environment, which the kernel (or runsc) fills:
+//! - `PYO_ENVD_LISTEN`: `vsock:<port>`, default `vsock:52`
 //! - `PYO_ENVD_READY`: `vsock:<cid>:<port>` (default `vsock:2:1024`),
 //!   `unix:<path>` or `none`
+//! - `PYO_ENVD_DIAL`: `unix:<path>` or `vsock:<cid>:<port>`. Dial mode, for
+//!   gVisor. PID 1 then leaves the mounts to runsc.
 
 mod init;
 mod listen;
@@ -27,15 +29,17 @@ fn main() {
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
         Some("--version") => println!("pyo-envd {VERSION}"),
-        Some("serve") => listen::serve(),
-        _ if std::process::id() == 1 => pid1(),
-        _ => listen::serve(),
+        Some("serve") => listen::serve(listen::mode_from_env()),
+        _ if std::process::id() == 1 => pid1(listen::mode_from_env()),
+        _ => listen::serve(listen::mode_from_env()),
     }
 }
 
 /// PID 1: set up the machine, run the server, reap everything.
-fn pid1() -> ! {
-    init::setup();
+fn pid1(mode: listen::Mode) -> ! {
+    if mode.sets_up_machine() {
+        init::setup();
+    }
     let mut server = spawn_server();
     loop {
         let mut status = 0;
