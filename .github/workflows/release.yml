@@ -227,7 +227,7 @@ jobs:
       # pyo.dev/connect.sh and pyo.dev/join.sh fetch connect.sh and join.sh
       # the same way (Pyo's commands use them when it has no address other
       # machines can reach). pyo.dev/cli.sh fetches cli.sh, the CLI's
-      # installer.
+      # installer. sandbox.sh sets up sandbox servers the same way.
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           body_path: release-notes.md
@@ -248,3 +248,4 @@ jobs:
             deploy/cli.sh
             crates/pyo-api/assets/connect.sh
             crates/pyo-api/assets/join.sh
+            deploy/sandbox.sh

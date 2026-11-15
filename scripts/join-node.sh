@@ -204,7 +204,7 @@ k3s_memory_refresh() {
 }
 # <<< pyo:small-machine
 
-# >>> pyo:repos (the same in connect.sh, join.sh and scripts/join-node.sh)
+# >>> pyo:repos (the same in connect.sh, join.sh, scripts/join-node.sh and deploy/sandbox.sh)
 # Packages come from their vendors' repositories, whose signing keys are
 # checked by fingerprint here: Tailscale's and NVIDIA's.
 TAILSCALE_KEY=2596A99EAAB33821893C0A79458CA832957F5868

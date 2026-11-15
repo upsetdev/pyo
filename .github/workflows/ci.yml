@@ -23,6 +23,8 @@ jobs:
       - run: bun test ./scripts
       # install.sh's functions, with kubectl stubbed.
       - run: bash scripts/install.test.sh
+      # sandbox.sh's functions, with the machine's commands stubbed.
+      - run: bash scripts/sandbox.test.sh
       - name: Check migrations
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
