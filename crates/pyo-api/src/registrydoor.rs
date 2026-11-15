@@ -7,7 +7,10 @@
 //!   registries.yaml): pull its team's images, Pyo's builds of its team's
 //!   services (`pyo/services/<id>`) and Pyo's own (`pyo/<name>`);
 //! - a builder's token (username `pyo-builder`): push and pull its team's
-//!   builds (`pyo/services/<id>`), pull its team's images.
+//!   builds (`pyo/services/<id>`), pull its team's images;
+//! - a sandbox server's registry token (username `pyo-sandbox`, signed by
+//!   the sandbox key for an hour): pull its team's images and builds, to
+//!   make a sandbox template from one.
 //!
 //! It listens beside the API (`PYO_REGISTRY_DOOR_ADDR`, :5006, in the
 //! cluster). Users reach it over HTTPS at the registry's tailnet name
@@ -133,6 +136,8 @@ fn login_of(headers: &HeaderMap) -> Option<(String, String)> {
 pub const CLUSTER_USER: &str = "pyo-cluster";
 /// The username builders push with.
 pub const BUILDER_USER: &str = "pyo-builder";
+/// The username sandbox servers pull a template's image with.
+pub const SANDBOX_USER: &str = "pyo-sandbox";
 
 /// Who's at the door, by their login.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -141,6 +146,9 @@ pub(crate) enum Machine {
     Cluster,
     /// A builder: its team's builds too.
     Builder,
+    /// A sandbox server making a template: pull only, its team's images
+    /// and builds.
+    Sandbox,
 }
 
 /// What a cluster's servers or a builder may do, by the path alone:
@@ -282,19 +290,14 @@ async fn door(State(s): State<AppState>, req: Request) -> Response {
             "Log in with a registry token from Pyo.",
         );
     };
-    if user == CLUSTER_USER || user == BUILDER_USER {
-        return machine_door(
-            &s,
-            if user == CLUSTER_USER {
-                Machine::Cluster
-            } else {
-                Machine::Builder
-            },
-            &password,
-            parts,
-            body,
-        )
-        .await;
+    let machine = match user.as_str() {
+        CLUSTER_USER => Some(Machine::Cluster),
+        BUILDER_USER => Some(Machine::Builder),
+        SANDBOX_USER => Some(Machine::Sandbox),
+        _ => None,
+    };
+    if let Some(who) = machine {
+        return machine_door(&s, who, &password, parts, body).await;
     }
     let token = password;
     let found: Option<(String, String, String, String)> = match sqlx::query_as(
@@ -382,19 +385,37 @@ async fn machine_door(
     parts: axum::http::request::Parts,
     body: Body,
 ) -> Response {
-    let sql = match who {
+    let found: sqlx::Result<Option<(String, String)>> = match who {
         Machine::Cluster => {
-            "SELECT c.team_id, t.slug FROM pyo.clusters c JOIN pyo.teams t ON t.id = c.team_id WHERE c.registry_token_hash = $1"
+            sqlx::query_as("SELECT c.team_id, t.slug FROM pyo.clusters c JOIN pyo.teams t ON t.id = c.team_id WHERE c.registry_token_hash = $1")
+                .bind(sha256_hex(password))
+                .fetch_optional(&s.db)
+                .await
         }
         Machine::Builder => {
-            "SELECT b.team_id, t.slug FROM pyo.builders b JOIN pyo.teams t ON t.id = b.team_id WHERE b.token_hash = $1 AND b.status <> 'removing'"
+            sqlx::query_as("SELECT b.team_id, t.slug FROM pyo.builders b JOIN pyo.teams t ON t.id = b.team_id WHERE b.token_hash = $1 AND b.status <> 'removing'")
+                .bind(sha256_hex(password))
+                .fetch_optional(&s.db)
+                .await
+        }
+        // A short-lived token Pyo signed for one template (sandbox/keys.rs).
+        Machine::Sandbox => {
+            let team = match crate::sandbox::keys::verifying_keys(&s.db, &s.sealer).await {
+                Ok(keys) => crate::sandbox::keys::check_registry_token(&keys, password),
+                Err(_) => None,
+            };
+            match team {
+                Some(t) => {
+                    sqlx::query_as("SELECT id, slug FROM pyo.teams WHERE id = $1")
+                        .bind(t)
+                        .fetch_optional(&s.db)
+                        .await
+                }
+                None => Ok(None),
+            }
         }
     };
-    let found: Option<(String, String)> = match sqlx::query_as(sql)
-        .bind(sha256_hex(password))
-        .fetch_optional(&s.db)
-        .await
-    {
+    let found = match found {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, "registry door: login lookup failed");
@@ -745,5 +766,49 @@ mod tests {
             !machine_allowed(Builder, &put, "acme/shop/web", "acme", false),
             "builders push only builds"
         );
+        // Sandbox servers pull their team's images and builds, nothing else.
+        assert!(machine_allowed(
+            Sandbox,
+            &get,
+            "acme/shop/web",
+            "acme",
+            false
+        ));
+        assert!(machine_allowed(
+            Sandbox,
+            &get,
+            "pyo/services/svc_a",
+            "acme",
+            true
+        ));
+        assert!(!machine_allowed(
+            Sandbox,
+            &get,
+            "pyo/services/svc_b",
+            "acme",
+            false
+        ));
+        assert!(!machine_allowed(
+            Sandbox,
+            &get,
+            "other/shop/web",
+            "acme",
+            false
+        ));
+        assert!(!machine_allowed(Sandbox, &get, "pyo/agent", "acme", false));
+        assert!(!machine_allowed(
+            Sandbox,
+            &put,
+            "acme/shop/web",
+            "acme",
+            false
+        ));
+        assert!(!machine_allowed(
+            Sandbox,
+            &put,
+            "pyo/services/svc_a",
+            "acme",
+            true
+        ));
     }
 }

@@ -59,6 +59,7 @@ async fn any_servers(db: &PgPool) -> sqlx::Result<bool> {
 #[derive(sqlx::FromRow)]
 struct Server {
     id: String,
+    team_id: Option<String>,
     address: String,
     state: String,
 }
@@ -67,7 +68,7 @@ struct Server {
 pub async fn round(s: &AppState) -> anyhow::Result<()> {
     let _ = super::join::prune(&s.db).await;
     let servers: Vec<Server> = sqlx::query_as(
-        "SELECT id, address, state FROM pyo.sandbox_servers WHERE address IS NOT NULL AND state <> 'refused'",
+        "SELECT id, team_id, address, state FROM pyo.sandbox_servers WHERE address IS NOT NULL AND state <> 'refused'",
     )
     .fetch_all(&s.db)
     .await?;
@@ -82,7 +83,25 @@ pub async fn round(s: &AppState) -> anyhow::Result<()> {
                     let token = keys::admin_token(&key, &srv.id);
                     let r = Daemon::new(&srv.address).report(&token).await;
                     let res = match r {
-                        Ok(report) => apply_report(&s.db, &srv, &report).await,
+                        Ok(report) => {
+                            let applied = apply_report(&s.db, &srv, &report).await;
+                            if applied.is_ok() && report.server_id == srv.id {
+                                // Templates it lacks, and ones Pyo dropped.
+                                if let Err(e) = super::templates::sync_server(
+                                    &s.db,
+                                    &key,
+                                    &srv.id,
+                                    srv.team_id.as_deref(),
+                                    &srv.address,
+                                    &report,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(server = %srv.id, error = %e, "sandboxes: couldn't sync templates");
+                                }
+                            }
+                            applied
+                        }
                         Err(e) => missed_report(&s.db, &srv, &e.message).await,
                     };
                     if let Err(e) = res {
@@ -91,6 +110,9 @@ pub async fn round(s: &AppState) -> anyhow::Result<()> {
                 }
             })
             .await;
+        if let Err(e) = super::templates::update_states(&s.db).await {
+            tracing::warn!(error = %e, "sandboxes: couldn't update template states");
+        }
     }
     sweep(s).await?;
     super::edgecert::run(s).await

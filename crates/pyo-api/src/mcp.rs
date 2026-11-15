@@ -697,6 +697,9 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "createSandboxTemplate" => {
             json_of(crate::sandbox::api::create_template(st(), me(), Json(args_as(args)?)).await)
         }
+        "deleteSandboxTemplate" => {
+            json_of(crate::sandbox::api::delete_template(st(), me(), path_id()?).await)
+        }
         other => Err(format!("No tool runs {other}")),
     }
 }

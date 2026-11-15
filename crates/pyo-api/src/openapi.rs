@@ -90,6 +90,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::sandbox::api::create_dns_record,
         crate::sandbox::api::list_templates,
         crate::sandbox::api::create_template,
+        crate::sandbox::api::delete_template,
     ),
     components(schemas(ErrorBody, Op)),
     modifiers(&ApiKey),

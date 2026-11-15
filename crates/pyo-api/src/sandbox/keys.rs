@@ -10,6 +10,9 @@
 //!   its records stay right.
 //! - Admin tokens ([`admin_token`]): every sandbox on one server, five
 //!   minutes, for Pyo's own calls to the daemon.
+//! - Registry tokens ([`registry_token`]): pull one team's images from
+//!   Pyo's registry door for an hour, while a server makes a template.
+//!   No daemon takes them.
 
 use std::sync::{Arc, Mutex};
 
@@ -24,6 +27,9 @@ use crate::secrets::Sealer;
 pub const CLIENT_TTL_SECS: u64 = 3600;
 /// How long Pyo's own tokens live: one call each.
 pub const ADMIN_TTL_SECS: u64 = 300;
+/// How long a sandbox server may pull a template's image from Pyo's
+/// registry: long enough for a big image.
+pub const REGISTRY_TTL_SECS: u64 = 3600;
 
 /// What a client token allows.
 pub const CLIENT_SCOPES: [Scope; 4] = [Scope::Exec, Scope::Pty, Scope::Files, Scope::Ports];
@@ -148,6 +154,40 @@ pub fn admin_token(key: &SigningKey, server: &str) -> String {
     .token
 }
 
+/// A sandbox server's login at Pyo's registry door (password, with the
+/// username [`crate::registrydoor::SANDBOX_USER`]) to pull a template's
+/// image of `team`.
+pub fn registry_token(key: &SigningKey, template: &str, team: &str) -> String {
+    sign(
+        key,
+        template,
+        team,
+        pyo_proto::sandbox::token::REGISTRY_AUDIENCE,
+        &[Scope::Registry],
+        REGISTRY_TTL_SECS,
+    )
+    .token
+}
+
+/// Checks a registry token at the door: the team it may pull for.
+pub fn check_registry_token(keys: &[VerifyingKey], token: &str) -> Option<String> {
+    use pyo_proto::sandbox::token::{Expect, verify, verify_signature};
+    let unchecked = verify_signature(token, keys).ok()?;
+    let c = verify(
+        token,
+        keys,
+        Expect {
+            server: pyo_proto::sandbox::token::REGISTRY_AUDIENCE,
+            sandbox: Some(&unchecked.sbx),
+            scope: Scope::Registry,
+            now: now_secs(),
+        },
+    )
+    .ok()?;
+    // Only a token made for this, never one that has it through admin.
+    (c.scopes == [Scope::Registry] && !c.team.is_empty()).then_some(c.team)
+}
+
 /// Pyo's token to create one sandbox for its team.
 pub fn create_token(key: &SigningKey, sandbox: &str, team: &str, server: &str) -> String {
     sign(key, sandbox, team, server, &[Scope::Create], ADMIN_TTL_SECS).token
@@ -242,6 +282,35 @@ mod tests {
         let c = create_token(&k, SBX, "tm_one", "sbs_one");
         let claims = verify(&c, &keys, expect(Some(SBX), Scope::Create)).unwrap();
         assert_eq!(claims.team, "tm_one");
+    }
+
+    #[test]
+    fn registry_tokens_only_open_the_registry() {
+        let k = SigningKey::generate("sbk_test");
+        let keys = [k.verifying_key()];
+        let t = registry_token(&k, "stp_one", "tm_one");
+        assert_eq!(check_registry_token(&keys, &t).as_deref(), Some("tm_one"));
+        // No sandbox server takes it.
+        assert_eq!(
+            verify(&t, &keys, expect(None, Scope::Admin)),
+            Err(TokenError::WrongServer)
+        );
+        // Other tokens don't open the registry.
+        assert_eq!(
+            check_registry_token(&keys, &admin_token(&k, "sbs_one")),
+            None
+        );
+        let c = client_token(&k, SBX, "tm_one", "sbs_one");
+        assert_eq!(check_registry_token(&keys, &c.token), None);
+        let other = SigningKey::generate("sbk_other");
+        assert_eq!(
+            check_registry_token(&keys, &registry_token(&other, "stp_one", "tm_one")),
+            None
+        );
+        assert_eq!(
+            check_registry_token(&keys, &registry_token(&k, "stp_one", "")),
+            None
+        );
     }
 
     /// Against a throwaway Postgres: `DATABASE_URL=… cargo test -p pyo-api

@@ -507,6 +507,98 @@ async fn the_control_plane_drives_a_real_daemon() {
     let id2 = out["sandbox"]["id"].as_str().unwrap().to_owned();
     super::delete(&s, &user, &id2).await.unwrap();
 
+    // ── A template from a public image, made by the server ──
+    let image = std::env::var("PYO_SANDBOX_E2E_IMAGE").unwrap_or("alpine:3.22".into());
+    let made = super::create_template(
+        &s,
+        &user,
+        serde_json::from_value(json!({ "teamId": team, "name": "img-e2e", "image": image }))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(made["state"], "pending", "{made}");
+    let tid = made["id"].as_str().unwrap().to_owned();
+    let dup = super::create_template(
+        &s,
+        &user,
+        serde_json::from_value(json!({ "teamId": team, "name": "img-e2e", "image": "alpine" }))
+            .unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(dup.status, axum::http::StatusCode::CONFLICT);
+    let t0 = std::time::Instant::now();
+    let view = loop {
+        super::runner::round(&s).await.unwrap();
+        let v = super::template_views(&db, std::slice::from_ref(&team), Some(&tid))
+            .await
+            .unwrap()
+            .remove(0);
+        println!(
+            "e2e template after {} ms: {} {}",
+            t0.elapsed().as_millis(),
+            v["state"],
+            v["servers"]
+        );
+        if v["state"] == "ready" || v["state"] == "failed" {
+            break v;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(600), "{v}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    assert_eq!(view["state"], "ready", "{view}");
+    let on = &view["servers"][0];
+    assert_eq!(
+        (on["id"].as_str(), on["state"].as_str()),
+        (Some(server.as_str()), Some("ready")),
+        "{view}"
+    );
+    println!("e2e template: {}", view["servers"]);
+    let tmpl_req: super::CreateSandbox = serde_json::from_value(
+        json!({ "teamId": team, "template": "img-e2e", "network": "none", "ttl": "5m" }),
+    )
+    .unwrap();
+    let out = super::create(&s, &user, tmpl_req).await.unwrap();
+    let id3 = out["sandbox"]["id"].as_str().unwrap().to_owned();
+    let r = Daemon::new(&address)
+        .exec(
+            out["connection"]["token"].as_str().unwrap(),
+            &id3,
+            &exec_req("cat /etc/os-release | head -1; ls -l /sbin/pyo-envd"),
+        )
+        .await
+        .unwrap();
+    println!("e2e template exec: {}", r.stdout);
+    assert_eq!(r.exit_code, Some(0), "{r:?}");
+    let e = super::delete_template(&s, &user, &tid).await.unwrap_err();
+    assert_eq!(e.status, axum::http::StatusCode::CONFLICT, "{}", e.message);
+    super::delete(&s, &user, &id3).await.unwrap();
+    super::delete_template(&s, &user, &tid).await.unwrap();
+    // The server drops its copy: now, or at the next round.
+    let t0 = std::time::Instant::now();
+    loop {
+        super::runner::round(&s).await.unwrap();
+        let srv = &super::server_views(&db, std::slice::from_ref(&team), Some(&server))
+            .await
+            .unwrap()[0];
+        let names: Vec<&str> = srv["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        if !names.contains(&tid.as_str()) {
+            assert!(
+                names.contains(&template.as_str()),
+                "the hand-made one stays"
+            );
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(60), "{names:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
     sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
         .bind(&team)
         .execute(&db)

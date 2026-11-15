@@ -6,6 +6,7 @@
 //! - [`keys`]: the installation's signing key and the tokens.
 //! - [`join`]: a sandbox server's one-time join code and sandbox.sh.
 //! - [`scheduler`]: which server a new sandbox runs on.
+//! - [`templates`]: which servers make which templates, and their state.
 //! - [`limits`]: per-team caps, checked on create.
 //! - [`daemon`]: Pyo's calls to a daemon over the tailnet.
 //! - [`edgecert`]: the edge proxies' wildcard certificates and DNS records.
@@ -29,6 +30,7 @@ pub mod limits;
 pub mod mcp;
 pub mod runner;
 pub mod scheduler;
+pub mod templates;
 
 use axum::http::StatusCode;
 use pyo_proto::sandbox::{
@@ -352,9 +354,20 @@ pub async fn template_views(
             'id', t.id, 'teamId', t.team_id, 'name', t.name, 'source', t.source, 'state', t.state,
             'snapshots', t.snapshots, 'error', t.error, 'createdBy', t.created_by,
             'createdAt', pyo.ms(t.created_at), 'updatedAt', pyo.ms(t.updated_at),
-            'servers', (SELECT coalesce(jsonb_agg(s.id ORDER BY s.name), '[]') FROM pyo.sandbox_servers s
-                         WHERE (s.team_id IS NULL OR s.team_id = t.team_id OR t.team_id IS NULL)
-                           AND s.templates @> jsonb_build_array(jsonb_build_object('name', t.id))))
+            'servers', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                    'id', s.id, 'name', s.name,
+                    'state', CASE WHEN m.e IS NULL THEN 'pending' ELSE coalesce(m.e->>'state', 'ready') END,
+                    'phase', m.e->'build'->'phase', 'error', m.e->'build'->'error',
+                    'pulled', m.e->'build'->'pulled', 'imageBytes', m.e->'build'->'imageBytes',
+                    'pullMs', m.e->'build'->'pullMs', 'unpackMs', m.e->'build'->'unpackMs',
+                    'snapshotMs', m.e->'build'->'snapshotMs',
+                    'bytes', m.e->'bytes', 'snapshots', coalesce(m.e->'snapshots', '[]')) ORDER BY s.name), '[]')
+                  FROM pyo.sandbox_servers s
+                  LEFT JOIN LATERAL (SELECT x AS e FROM jsonb_array_elements(s.templates) x
+                                      WHERE x->>'name' = t.id LIMIT 1) m ON true
+                 WHERE (s.team_id IS NULL OR s.team_id = t.team_id OR t.team_id IS NULL)
+                   AND (s.team_id IS NULL OR s.team_id = ANY($1))
+                   AND (m.e IS NOT NULL OR s.state NOT IN ('joining', 'refused'))))
            FROM pyo.sandbox_templates t
           WHERE (t.team_id IS NULL OR t.team_id = ANY($1)) AND ($2::text IS NULL OR t.id = $2)
           ORDER BY t.team_id NULLS FIRST, t.name",
@@ -1150,14 +1163,13 @@ pub struct CreateTemplate {
     /// Lowercase letters, digits, dashes, dots and underscores, like
     /// "node-22".
     pub name: String,
-    /// The OCI image it's made from, like "node:22".
+    /// The OCI image it's made from, like "node:22", or an image in Pyo's
+    /// registry, like "registry.<tailnet>.ts.net/acme/app/api:1".
     pub image: String,
 }
 
-/// Records a sandbox template made from an OCI image. Building it with
-/// Pyo's builder and putting it on the servers comes next.
-// TODO(sandbox): build the image into a root disk with the builder, put it
-// on each server, then snapshot it once per runtime (`snapshots`).
+/// Records a sandbox template made from an OCI image and has every sandbox
+/// server that may use it make it (see [`templates`]).
 pub async fn create_template(s: &AppState, user: &User, req: CreateTemplate) -> ApiResult<Value> {
     if !proto::is_template_name(&req.name) {
         return Err(ApiError::bad_request(
@@ -1183,14 +1195,53 @@ pub async fn create_template(s: &AppState, user: &User, req: CreateTemplate) -> 
     .bind(json!({ "kind": "image", "image": image }))
     .bind(&user.name)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| match e.as_database_error().and_then(|d| d.code()) {
+        Some(c) if c == "23505" => ApiError::conflict("There's a sandbox template with that name already."),
+        _ => e.into(),
+    })?;
     tx.commit().await?;
+    tokio::spawn(templates::push(s.clone(), id.clone()));
     let teams: Vec<String> = req.team_id.iter().cloned().collect();
     Ok(template_views(&s.db, &teams, Some(&id))
         .await?
         .into_iter()
         .next()
         .unwrap_or_default())
+}
+
+/// Deletes a sandbox template, and has the servers delete their copies.
+/// Refused while sandboxes run from it.
+pub async fn delete_template(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
+    let row: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT team_id, name FROM pyo.sandbox_templates WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&s.db)
+            .await?;
+    let (team_id, name) = row.ok_or_else(|| ApiError::not_found("Sandbox template"))?;
+    let mut tx = s.db.begin().await?;
+    match &team_id {
+        Some(t) => require(&mut tx, user, t, Need::Use).await?,
+        None => require_install_admin(user)?,
+    }
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pyo.sandboxes WHERE template_id = $1 AND state NOT IN ('stopped', 'failed')",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if live > 0 {
+        return Err(ApiError::conflict(format!(
+            "{live} sandboxes still run from {name}. Delete them first."
+        )));
+    }
+    sqlx::query("DELETE FROM pyo.sandbox_templates WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    tokio::spawn(templates::forget(s.clone(), id.to_owned()));
+    Ok(json!({ "ok": true }))
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@
 
 use pyo_proto::sandbox::{
     CapabilityReport, CapacityReport, Isolation, NetworkMode, Runtime, SandboxSpec, TemplateReport,
+    TemplateState,
 };
 
 /// A report older than this doesn't count: the server may be gone.
@@ -123,7 +124,11 @@ pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Cand
     }
     let with_template: Vec<&Candidate> = networked
         .into_iter()
-        .filter(|c| c.templates.iter().any(|t| t.name == spec.template))
+        .filter(|c| {
+            c.templates
+                .iter()
+                .any(|t| t.name == spec.template && t.state == TemplateState::Ready)
+        })
         .collect();
     if with_template.is_empty() {
         return Err(NoServer::NoTemplate(spec.template.clone()));
@@ -280,6 +285,20 @@ mod tests {
             pick_id(&servers, &s),
             Err(NoServer::NoTemplate("stp_python".into()))
         );
+    }
+
+    #[test]
+    fn only_a_ready_template_counts() {
+        let mut building = server("building", Runtime::Firecracker, 16);
+        building.templates[0].state = TemplateState::Building;
+        let mut failed = server("failed", Runtime::Firecracker, 16);
+        failed.templates[0].state = TemplateState::Failed;
+        assert_eq!(
+            pick_id(&[building.clone(), failed], &spec()),
+            Err(NoServer::NoTemplate("stp_node".into()))
+        );
+        let ready = server("ready", Runtime::Firecracker, 2);
+        assert_eq!(pick_id(&[building, ready], &spec()).unwrap(), "ready");
     }
 
     #[test]

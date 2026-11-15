@@ -43,6 +43,10 @@ pub fn routes() -> Router<AppState> {
             "/sandbox-templates",
             get(list_templates).post(create_template),
         )
+        .route(
+            "/sandbox-templates/{id}",
+            axum::routing::delete(delete_template),
+        )
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -445,7 +449,7 @@ pub(crate) async fn create_dns_record(
 #[utoipa::path(get, path = "/sandbox-templates", operation_id = "listSandboxTemplates", tag = "Sandboxes",
     params(TeamQuery),
     responses(
-        (status = 200, description = "`templates`, each with `id`, `teamId` (null for the installation's), `name`, `source` (`kind` and `image`), `state` (\"pending\", \"building\", \"ready\" or \"failed\"), `snapshots` (per runtime), `servers` (the servers that have it), `error` and `createdAt`.", body = Object),
+        (status = 200, description = "`templates`, each with `id`, `teamId` (null for the installation's), `name`, `source` (`kind` and `image`), `state` (\"pending\", \"building\", \"ready\" or \"failed\", from its servers), `servers`, `error` and `createdAt`. Each of `servers` is a sandbox server that may use it, with `id`, `name`, `state` (\"pending\", \"building\", \"ready\" or \"failed\"), `phase` while building (\"queued\", \"pulling\", \"unpacking\" or \"snapshotting\"), `pulled` and `imageBytes`, `pullMs`, `unpackMs` and `snapshotMs`, `bytes` (disk it takes there), `snapshots` and `error`.", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -463,8 +467,10 @@ pub(crate) async fn list_templates(
 
 /// Create a sandbox template
 ///
-/// A template made from an OCI image, like "node:22". It waits as pending
-/// until Pyo has built it and put it on the sandbox servers.
+/// A template made from an OCI image, like "node:22", or an image in Pyo's
+/// registry. Every sandbox server that may use it pulls the image, makes a
+/// root disk from it, boots it once and snapshots it. The template is
+/// ready once one server has it.
 #[utoipa::path(post, path = "/sandbox-templates", operation_id = "createSandboxTemplate", tag = "Sandboxes",
     request_body(content = CreateTemplate),
     responses(
@@ -479,4 +485,24 @@ pub(crate) async fn create_template(
     Json(req): Json<CreateTemplate>,
 ) -> ApiResult<Json<Value>> {
     Ok(Json(super::create_template(&s, &user, req).await?))
+}
+
+/// Delete a sandbox template
+///
+/// Deletes it here and on the sandbox servers. Refused while sandboxes run
+/// from it.
+#[utoipa::path(delete, path = "/sandbox-templates/{id}", operation_id = "deleteSandboxTemplate", tag = "Sandboxes",
+    params(("id" = String, Path, description = "The template's id, `stp_…`.")),
+    responses(
+        (status = 200, description = "`ok`.", body = Object),
+        (status = 404, description = "No such template.", body = ErrorBody),
+        (status = 409, description = "Sandboxes still run from it.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("sandboxes"))))]
+pub(crate) async fn delete_template(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(super::delete_template(&s, &user, &id).await?))
 }
