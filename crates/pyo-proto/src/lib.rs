@@ -15,6 +15,7 @@ pub mod firewall;
 pub mod flows;
 pub mod memory;
 pub mod rbac;
+pub mod sandbox;
 pub mod site;
 pub mod system;
 
