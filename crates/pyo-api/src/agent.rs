@@ -186,8 +186,14 @@ async fn heartbeat(
     .bind(&cluster.id)
     .fetch_one(&mut *tx)
     .await?;
-    let (agent_install, refresh_sent) =
-        crate::install::sync(&mut tx, &cluster.id, hb.scope.as_ref(), same_cluster).await?;
+    let (agent_install, refresh_sent) = crate::install::sync(
+        &mut tx,
+        &cluster.id,
+        hb.scope.as_ref(),
+        &hb.agent_version,
+        same_cluster,
+    )
+    .await?;
     let any_not_ready = hb.servers.iter().any(|n| n.status != "ready");
     let status = if hb.servers.is_empty() || any_not_ready {
         "degraded"
@@ -645,6 +651,9 @@ async fn command_result(
         .await?;
     if command["kind"] == json!("backup") {
         crate::teambackup::finished(&mut tx, &command, &r).await?;
+    }
+    if command["kind"] == json!("refresh_install") {
+        crate::install::answered(&mut tx, &id, &cluster.id).await?;
     }
     // Why it failed, as the team reads it (the command keeps the agent's words).
     let install = if r.ok {

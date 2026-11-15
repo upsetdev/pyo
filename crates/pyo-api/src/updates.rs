@@ -1112,7 +1112,14 @@ async fn advance_agents(s: &AppState, u: &UpdateRow) -> ApiResult<()> {
                 .and_then(|v| serde_json::from_value::<pyo_proto::rbac::AgentScope>(v).ok())
             {
                 Some(scope) => {
-                    crate::install::refreshing(&s.db, &c.id, &scope, c.same_cluster).await?
+                    crate::install::refreshing(
+                        &s.db,
+                        &c.id,
+                        &scope,
+                        c.agent_version.as_deref().unwrap_or(""),
+                        c.same_cluster,
+                    )
+                    .await?
                 }
                 None => false,
             };

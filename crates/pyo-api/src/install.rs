@@ -307,6 +307,9 @@ pub struct LastRefresh {
     pub age_secs: i64,
     /// How many refreshes of this install Pyo has sent the cluster.
     pub attempts: i64,
+    /// It failed with another version of the agent than the one running
+    /// now (an update replaced it): the new agent may well make it.
+    pub agent_changed: bool,
 }
 
 /// A refresh sent (or done) this long without the install turning current
@@ -315,7 +318,8 @@ pub struct LastRefresh {
 /// restarted is handed out again as soon as the new one polls (agent.rs).
 const REFRESH_PATIENCE_SECS: i64 = 60;
 const REFRESH_PATIENCE_MAX_SECS: i64 = 10 * 60;
-/// One that failed is tried again after this long.
+/// One that failed is tried again after this long, or as soon as another
+/// version of the agent runs.
 const REFRESH_RETRY_SECS: i64 = 30 * 60;
 
 /// Where a cluster's install stands, and whether to send it a refresh:
@@ -341,7 +345,7 @@ pub fn install_state(
     match last {
         None => ("updating", String::new(), true),
         Some(l) if l.status == "failed" => {
-            if l.age_secs < REFRESH_RETRY_SECS {
+            if l.age_secs < REFRESH_RETRY_SECS && !l.agent_changed {
                 ("outdated", l.message.clone(), false)
             } else {
                 ("updating", String::new(), true)
@@ -363,15 +367,17 @@ fn refresh_patience(attempts: i64) -> i64 {
     (REFRESH_PATIENCE_SECS << doublings).min(REFRESH_PATIENCE_MAX_SECS)
 }
 
-/// The latest refresh of `hash` sent to the cluster, if any.
+/// The latest refresh of `hash` sent to the cluster, if any, against the
+/// agent version running now (`agent`).
 async fn last_refresh(
     db: impl sqlx::PgExecutor<'_>,
     cluster_id: &str,
     hash: &str,
+    agent: &str,
 ) -> ApiResult<Option<LastRefresh>> {
-    let last: Option<(String, String, i64, i64)> = sqlx::query_as(
+    let last: Option<(String, String, i64, i64, Option<String>)> = sqlx::query_as(
         "SELECT status, coalesce(result->>'message', ''), extract(epoch FROM now() - created_at)::bigint,
-                count(*) OVER () FROM pyo.commands
+                count(*) OVER (), result->>'agentVersion' FROM pyo.commands
           WHERE cluster_id = $1 AND command->>'kind' = 'refresh_install' AND command->>'hash' = $2 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(cluster_id)
@@ -379,13 +385,39 @@ async fn last_refresh(
     .fetch_optional(db)
     .await?;
     Ok(
-        last.map(|(status, message, age_secs, attempts)| LastRefresh {
+        last.map(|(status, message, age_secs, attempts, by)| LastRefresh {
             status,
             message,
             age_secs,
             attempts,
+            agent_changed: agent_changed(by.as_deref(), agent),
         }),
     )
+}
+
+/// Whether the agent that answered a refresh (`by`) isn't the one running
+/// now. Unknown on either side: no.
+fn agent_changed(by: Option<&str>, agent: &str) -> bool {
+    by.is_some_and(|by| !by.is_empty() && !agent.is_empty() && by != agent)
+}
+
+/// A refresh's answer: which agent version gave it, as the cluster's
+/// heartbeat last said, so a failed one is sent again once another runs.
+pub async fn answered(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command_id: &str,
+    cluster_id: &str,
+) -> ApiResult<()> {
+    sqlx::query(
+        "UPDATE pyo.commands c SET result = c.result || jsonb_build_object('agentVersion', k.agent_version)
+           FROM pyo.clusters k
+          WHERE c.id = $1 AND c.cluster_id = $2 AND k.id = c.cluster_id AND k.agent_version IS NOT NULL",
+    )
+    .bind(command_id)
+    .bind(cluster_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// Whether the agent is bringing the cluster's install up to this Pyo's
@@ -396,16 +428,17 @@ pub async fn refreshing(
     db: &sqlx::PgPool,
     cluster_id: &str,
     scope: &pyo_proto::rbac::AgentScope,
+    agent: &str,
     same_cluster: bool,
 ) -> ApiResult<bool> {
     let hash = &parts(same_cluster).hash;
-    let last = last_refresh(db, cluster_id, hash).await?;
+    let last = last_refresh(db, cluster_id, hash, agent).await?;
     Ok(install_state(scope, hash, last.as_ref()).0 == "updating")
 }
 
 /// From a heartbeat: where the cluster's install stands against this Pyo's,
 /// as `capabilities.agentInstall` (`{state, message, command}`), sending
-/// the agent a refresh when it can make one. Returns it, and whether a
+/// the agent (version `agent`) a refresh when it can make one. Returns it, and whether a
 /// command was queued. `command`, in every state, is the connect command
 /// run again on the cluster's first server: it also applies Pyo's latest
 /// host settings (the memory reserve for k3s), which no agent can.
@@ -413,6 +446,7 @@ pub async fn sync(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     cluster_id: &str,
     scope: Option<&pyo_proto::rbac::AgentScope>,
+    agent: &str,
     same_cluster: bool,
 ) -> ApiResult<(serde_json::Value, bool)> {
     use serde_json::json;
@@ -424,7 +458,7 @@ pub async fn sync(
         ));
     };
     let parts = parts(same_cluster);
-    let last = last_refresh(&mut **tx, cluster_id, &parts.hash).await?;
+    let last = last_refresh(&mut **tx, cluster_id, &parts.hash, agent).await?;
     let (state, message, send) = install_state(scope, &parts.hash, last.as_ref());
     if send {
         crate::deploy::enqueue(
@@ -477,6 +511,7 @@ mod tests {
             message: "no".into(),
             age_secs,
             attempts: 1,
+            agent_changed: false,
         }
     }
 
@@ -571,6 +606,23 @@ mod tests {
             install_state(&s, "h1", Some(&last("failed", REFRESH_RETRY_SECS))),
             ("updating", String::new(), true)
         );
+    }
+
+    #[test]
+    fn a_failed_refresh_is_sent_again_once_another_agent_runs() {
+        let s = scope("h0", true);
+        let failed = LastRefresh {
+            agent_changed: true,
+            ..last("failed", 60)
+        };
+        assert_eq!(
+            install_state(&s, "h1", Some(&failed)),
+            ("updating", String::new(), true)
+        );
+        assert!(agent_changed(Some("0.3.1"), "0.3.2"));
+        assert!(!agent_changed(Some("0.3.2"), "0.3.2"));
+        assert!(!agent_changed(None, "0.3.2"));
+        assert!(!agent_changed(Some("0.3.1"), ""));
     }
 
     #[test]
