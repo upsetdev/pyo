@@ -104,6 +104,10 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
   const joined = result
     ? s.sandboxServers.find((x) => x.id === result.id && x.state !== "joining")
     : undefined;
+  // The code works for a while: the countdown ticks, and once it's out the
+  // command is dead, so a new one is a click away.
+  const now = useNow(result && !joined ? 5_000 : 60_000);
+  const expired = !!result && !joined && now >= result.expiresAt;
 
   const add = async () => {
     if (nameError || edgeError || busy) return;
@@ -136,13 +140,22 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
       {result ? (
         <div className="space-y-3 text-[13px]">
           <p className="text-muted-foreground">Run this on the server as root.</p>
-          <LiveCommand command={result.command}>
-            <p className="text-[12px] text-muted-foreground">
-              Works once. Expires in {Math.max(1, Math.round((result.expiresAt - Date.now()) / 60_000))} min.
-            </p>
-          </LiveCommand>
+          {expired ? null : (
+            <LiveCommand command={result.command}>
+              <p className="text-[12px] text-muted-foreground">
+                Works once. Expires in {Math.max(1, Math.ceil((result.expiresAt - now) / 60_000))} min.
+              </p>
+            </LiveCommand>
+          )}
           <div className="flex items-center gap-2 rounded-lg border border-border px-3 py-2.5">
-            {joined?.state === "ready" ? (
+            {expired ? (
+              <>
+                <span className="text-muted-foreground">This command expired.</span>
+                <Button size="xs" variant="secondary" className="ml-auto" disabled={busy} onClick={() => void add()}>
+                  {busy ? "Getting…" : "Get a new command"}
+                </Button>
+              </>
+            ) : joined?.state === "ready" ? (
               <>
                 <CheckCircleIcon size={16} weight="fill" className="text-success" />
                 <span>
