@@ -1114,6 +1114,12 @@ mod tests {
         assert_eq!(e.status, StatusCode::BAD_GATEWAY, "never the caller's 401");
         let e = daemon_error(DaemonError::new(ErrorCode::NotFound, "gone"));
         assert_eq!(e.status, StatusCode::NOT_FOUND);
+        let e = daemon_error(DaemonError::new(ErrorCode::PermissionDenied, "no"));
+        assert_eq!(
+            e.status,
+            StatusCode::FORBIDDEN,
+            "the sandbox's refusal is the caller's"
+        );
     }
 
     #[test]

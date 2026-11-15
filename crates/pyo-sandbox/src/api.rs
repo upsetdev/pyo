@@ -34,6 +34,11 @@
 //! - refuses a request with the error kind `unauthorized` (the token ran
 //!   out) or `forbidden` (its scopes don't allow it).
 //!
+//! Errors are `{"type": "error", "error": {"code", "message"}}`. A token
+//! the daemon refuses is `unauthorized` (401) or `forbidden` (403). The
+//! sandbox's own refusal, like a file its user can't read, is
+//! `permissionDenied` (also 403): a new token won't help.
+//!
 //! A refused upgrade is accepted and closed at once with code 4000 plus
 //! the HTTP status (4401, 4403, 4404…) and the reason, since browsers
 //! don't show an HTTP refusal.
@@ -528,7 +533,8 @@ fn file_error(e: anyhow::Error) -> ApiError {
 fn envd_code(kind: ErrorKind) -> ErrorCode {
     match kind {
         ErrorKind::NotFound => ErrorCode::NotFound,
-        ErrorKind::PermissionDenied | ErrorKind::Forbidden => ErrorCode::Forbidden,
+        ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
+        ErrorKind::Forbidden => ErrorCode::Forbidden,
         ErrorKind::Unauthorized => ErrorCode::Unauthorized,
         ErrorKind::AlreadyExists | ErrorKind::Busy => ErrorCode::Conflict,
         ErrorKind::InvalidInput => ErrorCode::InvalidSpec,
@@ -1215,7 +1221,12 @@ mod tests {
             kind: ErrorKind::PermissionDenied,
             message: "no".into(),
         }));
-        assert_eq!(e.0.code, ErrorCode::Forbidden);
+        assert_eq!(e.0.code, ErrorCode::PermissionDenied);
+        assert_eq!(e.0.code.http_status(), 403);
+        let json = serde_json::to_value(&e.0).unwrap();
+        assert_eq!(json["code"], "permissionDenied");
+        assert_eq!(envd_code(ErrorKind::Forbidden), ErrorCode::Forbidden);
+        assert_eq!(envd_code(ErrorKind::Unauthorized), ErrorCode::Unauthorized);
         let e = file_error(anyhow::Error::new(FileTooBig(1)));
         assert_eq!(e.0.code, ErrorCode::InvalidSpec);
     }
