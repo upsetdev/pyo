@@ -761,6 +761,10 @@ pyo_addresses() {
     wait_until "Waiting for the HTTPS address (up to $((wait / 60)) minutes)…" "$wait" pyo_https_url || true
   lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
   echo
+  # The dashboard didn't answer in time: it still comes up by itself.
+  if [ -n "${STARTING:-}" ] && ! dashboard_up; then
+    echo "Pyo is still starting. It opens at these addresses in a minute or two."
+  fi
   echo "Open Pyo:"
   [ -z "$PYO_HTTPS_URL" ] || echo "  $PYO_HTTPS_URL"
   [ -z "$lan" ] || echo "  http://$lan:8000  (your network)"
@@ -1575,7 +1579,8 @@ main() {
   host_units
   ADMIN_PASSWORD=""
   run_upgrader "$fresh"
-  wait_until "Waiting for the dashboard…" 120 dashboard_up || true
+  STARTING=""
+  wait_until "Waiting for the dashboard…" 300 dashboard_up || STARTING=1
   if [ -n "$fresh" ]; then
     # The first sign-in is printed below.
     count_install
