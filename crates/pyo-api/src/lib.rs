@@ -460,7 +460,8 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
     if role.web() {
         let door: SocketAddr = env("PYO_REGISTRY_DOOR_ADDR", "0.0.0.0:5006").parse()?;
         let door_app = registrydoor::router(door_state.clone())
-            .merge(cloud::bootstrap::router(door_state))
+            .merge(cloud::bootstrap::router(door_state.clone()))
+            .merge(sandbox::join::router(door_state))
             .into_make_service_with_connect_info::<SocketAddr>();
         match tokio::net::TcpListener::bind(door).await {
             Ok(l) => {
