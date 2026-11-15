@@ -523,6 +523,15 @@ pub enum DaemonCommand {
     },
     List,
     Report,
+    /// Boots the template once, waits until envd is ready and snapshots
+    /// it, so new sandboxes of this size restore instead of booting.
+    #[serde(rename_all = "camelCase")]
+    SnapshotTemplate {
+        template: String,
+        cpus: u32,
+        memory_mib: u32,
+        disk_mib: u32,
+    },
 }
 
 impl DaemonCommand {
@@ -535,7 +544,9 @@ impl DaemonCommand {
             | DaemonCommand::Resume { id }
             | DaemonCommand::SetTtl { id, .. }
             | DaemonCommand::Get { id } => Some(id),
-            DaemonCommand::List | DaemonCommand::Report => None,
+            DaemonCommand::List
+            | DaemonCommand::Report
+            | DaemonCommand::SnapshotTemplate { .. } => None,
         }
     }
 }
@@ -543,11 +554,29 @@ impl DaemonCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonResult {
-    Sandbox { sandbox: SandboxStatus },
-    Deleted { id: String },
-    Sandboxes { sandboxes: Vec<SandboxStatus> },
-    Report { report: Box<ServerReport> },
-    Error { error: DaemonError },
+    Sandbox {
+        sandbox: SandboxStatus,
+    },
+    Deleted {
+        id: String,
+    },
+    Sandboxes {
+        sandboxes: Vec<SandboxStatus>,
+    },
+    Report {
+        report: Box<ServerReport>,
+    },
+    #[serde(rename_all = "camelCase")]
+    TemplateSnapshot {
+        template: String,
+        /// Firecracker version, CPU template and size. A sandbox restores
+        /// from the snapshot with the same key.
+        key: String,
+        took_ms: u64,
+    },
+    Error {
+        error: DaemonError,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -807,6 +836,12 @@ mod tests {
                 ttl_secs: 60,
             },
             DaemonCommand::List,
+            DaemonCommand::SnapshotTemplate {
+                template: "node-22".into(),
+                cpus: 1,
+                memory_mib: 512,
+                disk_mib: 2048,
+            },
         ];
         for c in cmds {
             let j = serde_json::to_string(&c).unwrap();
