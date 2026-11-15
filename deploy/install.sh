@@ -885,7 +885,50 @@ case "$r" in
     ;;
 esac
 SH
-  "${sudo[@]}" chmod 755 /usr/local/lib/pyo/connect-this-machine.sh /usr/local/lib/pyo/tailnet-this-machine.sh
+  "${sudo[@]}" tee /usr/local/lib/pyo/pyo-reset-login >/dev/null <<'SH'
+#!/usr/bin/env bash
+# Prints a one-time link to choose a new password for a Pyo account, for a
+# password that's lost (the only admin's too). On the server Pyo runs on:
+#
+#   sudo pyo-reset-login [EMAIL]
+#
+# Without an email it's for Pyo's admin. Pyo makes the link with this
+# machine's install key (recovery.rs). It works once, for 30 minutes.
+set -euo pipefail
+[ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
+case "${1:-}" in
+  -h | --help) echo "Usage: sudo pyo-reset-login [EMAIL]"; exit 0 ;;
+esac
+key=$(cat /etc/pyo/bootstrap-key 2>/dev/null) || {
+  echo "Pyo isn't installed on this machine. Run this on the server Pyo runs on." >&2
+  exit 1
+}
+out=$(curl -sS -m 30 -w '\n%{http_code}' --data-urlencode "key=$key" --data-urlencode "email=${1:-}" \
+  http://127.0.0.1:8000/install/reset-login 2>/dev/null) || out=""
+status=${out##*$'\n'} body=${out%$'\n'*}
+field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" <<<"$body" | head -n1; }
+if [ -z "$out" ]; then
+  echo "Pyo isn't answering on this machine. Wait a minute, then run this again." >&2
+  exit 1
+fi
+if [ "$status" != 200 ]; then
+  msg=$(field error)
+  [ -n "$msg" ] || msg="Pyo couldn't make a sign-in link. Run this again."
+  echo "$msg" >&2
+  exit 1
+fi
+path=$(field path) email=$(field email)
+minutes=$(sed -n 's/.*"minutes":\([0-9]*\).*/\1/p' <<<"$body")
+https=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
+lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
+echo "Open one of these links to choose a new password for $email:"
+[ -z "$https" ] || echo "  ${https%/}$path"
+[ -z "$lan" ] || echo "  http://$lan:8000$path  (your network)"
+echo "  http://localhost:8000$path  (this machine)"
+echo "It works once, for ${minutes:-30} minutes."
+SH
+  "${sudo[@]}" chmod 755 /usr/local/lib/pyo/connect-this-machine.sh /usr/local/lib/pyo/tailnet-this-machine.sh /usr/local/lib/pyo/pyo-reset-login
+  "${sudo[@]}" ln -sfn /usr/local/lib/pyo/pyo-reset-login /usr/local/bin/pyo-reset-login
   "${sudo[@]}" tee /etc/systemd/system/pyo-connect.service >/dev/null <<'UNIT'
 [Unit]
 Description=Pyo: connect this machine as a cluster
@@ -1358,7 +1401,7 @@ uninstall_pyo() {
   [ -n "$k3s_ours" ] && [ -z "$PURGE" ] && [ -n "$(ls -A "$STORAGE" 2>/dev/null)" ] && keep_storage=1
 
   echo "This removes Pyo from this machine:"
-  [ -z "$units" ] || echo "  - Pyo's timers and scripts (pyo-connect, pyo-tailnet; /usr/local/lib/pyo, /etc/pyo)"
+  [ -z "$units" ] || echo "  - Pyo's timers and scripts (pyo-connect, pyo-tailnet, pyo-reset-login; /usr/local/lib/pyo, /etc/pyo)"
   if [ -n "$k3s_ours" ]; then
     echo "  - k3s, which Pyo installed, with everything in it: Pyo, its database and registry,"
     echo "    and ALL YOUR SERVICES, DATABASES AND VOLUMES (with k3s's k3s-uninstall.sh)"
@@ -1421,6 +1464,7 @@ uninstall_pyo() {
   done
   act systemctl daemon-reload
   act rm -rf /usr/local/lib/pyo
+  act rm -f /usr/local/bin/pyo-reset-login
 
   # 2. k3s, or Pyo out of a k3s that stays.
   if [ -n "$k3s_ours" ]; then
