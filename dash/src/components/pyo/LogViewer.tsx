@@ -1,11 +1,14 @@
 import { CopyIcon, PauseIcon, PlayIcon } from "@phosphor-icons/react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Link } from "@tanstack/react-router";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { ZoomButton, Zoomable } from "~/components/ui/Zoom";
 import { Select } from "~/components/ui/Field";
 import { SearchInput } from "~/components/ui/Table";
 import { fetchServiceLogs } from "~/lib/pyo/backend";
 import { clockMs } from "~/lib/pyo/format";
+import { currentSlug } from "~/lib/pyo/paths";
+import { usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { senderColor } from "~/lib/pyo/logColors";
 import type { Application, LogEntry, LogLevel } from "~/lib/pyo/types";
@@ -38,7 +41,7 @@ export function LogLines({
   onToggle?: (id: string) => void;
   follow?: boolean;
   height?: string;
-  empty?: string;
+  empty?: ReactNode;
   /** Wrap long lines on every screen size, not only on phones. */
   wrap?: boolean;
   /** A narrow panel: no sender column, lines wrap. */
@@ -181,6 +184,12 @@ export function WrapSwitch({
 
 export function ServiceLogViewer({ app }: { app: Application }) {
   const running = app.status !== "stopped" && !!app.currentDeploymentId;
+  // Never live, and its last deploy failed: that deploy's logs say why.
+  const failedDeploy = usePyo()
+    .deployments.filter((d) => d.serviceId === app.id)
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
+  const failed =
+    !running && failedDeploy?.status === "failed" ? failedDeploy : undefined;
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(running);
   const [error, setError] = useState("");
@@ -317,7 +326,18 @@ export function ServiceLogViewer({ app }: { app: Application }) {
           onToggle={toggle}
           follow={!paused}
           empty={
-            !running
+            !running && failed ? (
+              <>
+                The last deploy failed.{" "}
+                <Link
+                  to="/$team/deployments/$deploymentId"
+                  params={{ team: currentSlug(), deploymentId: failed.id }}
+                  className="font-medium text-foreground hover:text-primary"
+                >
+                  See its logs
+                </Link>
+              </>
+            ) : !running
               ? "Not running. Deploy it to see logs."
               : error
                 ? error
