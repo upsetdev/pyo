@@ -35,7 +35,8 @@ struct Cli {
     /// Your Pyo, e.g. https://pyo.example.com (default: the one you signed in to).
     #[arg(long, global = true, env = "PYO_URL", hide_env_values = true)]
     url: Option<String>,
-    /// An API key, for CI (default: the one `pyo login` saved).
+    /// An API key, for CI (default: the one `pyo login` saved). Also read
+    /// from PYO_API_KEY, the SDK's name for it, when PYO_TOKEN isn't set.
     #[arg(long, global = true, env = "PYO_TOKEN", hide_env_values = true)]
     token: Option<String>,
     #[command(subcommand)]
@@ -663,7 +664,13 @@ async fn main() {
     }
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
+/// `--token` or PYO_TOKEN, else PYO_API_KEY.
+fn api_key(token: Option<String>, api_key: Option<String>) -> Option<String> {
+    token.or(api_key.filter(|k| !k.trim().is_empty()))
+}
+
+async fn run(mut cli: Cli) -> anyhow::Result<()> {
+    cli.token = api_key(cli.token.take(), std::env::var("PYO_API_KEY").ok());
     let (url, token) = (cli.url.as_deref(), cli.token.as_deref());
     match cli.command {
         Command::Login { expires } => {
@@ -1057,6 +1064,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn pyo_token_wins_over_pyo_api_key() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(api_key(s("t"), s("k")), s("t"));
+        assert_eq!(api_key(None, s("k")), s("k"));
+        assert_eq!(api_key(None, s(" ")), None);
+        assert_eq!(api_key(None, None), None);
+    }
 
     #[test]
     fn every_command_parses_and_has_help() {

@@ -92,7 +92,7 @@ impl Credentials {
     }
 }
 
-/// The API, from flags or env (`PYO_URL`, `PYO_TOKEN`) first, then
+/// The API, from flags or env (`PYO_URL`, `PYO_TOKEN` or `PYO_API_KEY`) first, then
 /// the saved sign-in. CI sets the env and never logs in.
 pub fn client(url: Option<&str>, token: Option<&str>) -> Result<Api> {
     let saved = Credentials::load()?;
