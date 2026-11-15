@@ -11,6 +11,8 @@ name: Sandbox
 on:
   workflow_call:
   workflow_dispatch:
+  push:
+    branches: [ci/sandbox-test]
 
 permissions:
   contents: read

@@ -1,0 +1,175 @@
+name: KVM probe
+
+# Temporary, for ci/sandbox-test only: can GitHub's hosted runners boot
+# Firecracker microVMs? Every step may fail, so the job reports what
+# works instead of stopping. Publishes nothing.
+
+on:
+  push:
+    branches: [ci/sandbox-test]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: KVM probe ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    env:
+      ARCH: ${{ matrix.arch }}
+      PROBE: ${{ github.workspace }}/.cache/kvm-probe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Host
+        continue-on-error: true
+        run: |
+          uname -a
+          nproc
+          ls -l /dev/kvm || true
+          grep -cE 'vmx|svm' /proc/cpuinfo || true
+
+      - name: Open /dev/kvm to the runner user
+        continue-on-error: true
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            sleep 1
+            ls -l /dev/kvm
+          else
+            echo "no /dev/kvm"
+          fi
+
+      - name: Packages
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends busybox-static e2fsprogs nftables musl-tools
+
+      # x86_64 uses the e2e script as is. It only knows x86_64, so aarch64
+      # fetches the same Firecracker release and the same Firecracker CI
+      # kernel for its arch here, each against a pinned sha256.
+      - name: Firecracker and kernel
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ "$ARCH" = x86_64 ]; then
+            crates/pyo-sandbox/scripts/e2e-assets.sh | tee assets.env
+          else
+            . crates/pyo-sandbox/scripts/firecracker.env
+            c=.cache/sandbox-e2e
+            mkdir -p "$c/dl" "$c/bin"
+            tgz=firecracker-$FC_VERSION-aarch64.tgz
+            curl -fsSL --retry 3 -o "$c/dl/$tgz" "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/$tgz"
+            echo "$FC_SHA256_AARCH64  $c/dl/$tgz" | sha256sum -c -
+            curl -fsSL --retry 3 -o "$c/vmlinux" https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-6.1.155
+            echo "e3544b10603acbf3db492cb52e000d22ba202cb4b63b9add027565683e11c591  $c/vmlinux" | sha256sum -c -
+            x=$(mktemp -d)
+            tar -xzf "$c/dl/$tgz" -C "$x"
+            rel="$x/release-$FC_VERSION-aarch64"
+            (cd "$rel" && sha256sum -c --quiet SHA256SUMS)
+            install -m 0755 "$rel/firecracker-$FC_VERSION-aarch64" "$c/bin/firecracker"
+            install -m 0755 "$rel/jailer-$FC_VERSION-aarch64" "$c/bin/jailer"
+            printf 'PYO_SANDBOX_FIRECRACKER=%s\nPYO_SANDBOX_KERNEL=%s\n' "$PWD/$c/bin/firecracker" "$PWD/$c/vmlinux" | tee assets.env
+          fi
+          cat assets.env >> "$GITHUB_ENV"
+          echo "PYO_SANDBOX_JAILER=$(dirname "$(grep FIRECRACKER assets.env | cut -d= -f2)")/jailer" >> "$GITHUB_ENV"
+
+      # A busybox root whose init prints a marker and reboots, which ends
+      # Firecracker. Boot time is from starting Firecracker to the marker.
+      - name: Boot one microVM
+        id: boot
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          "$PYO_SANDBOX_FIRECRACKER" --version
+          mkdir -p "$PROBE/root"/{bin,proc,sys,dev,tmp}
+          cp /usr/bin/busybox "$PROBE/root/bin/busybox"
+          ln -sf busybox "$PROBE/root/bin/sh"
+          printf '#!/bin/busybox sh\n/bin/busybox mount -t proc proc /proc\necho PYO_PROBE_BOOTED\n/bin/busybox reboot -f\n' > "$PROBE/root/init"
+          chmod +x "$PROBE/root/init"
+          rm -f "$PROBE/rootfs.ext4"
+          truncate -s 32M "$PROBE/rootfs.ext4"
+          mkfs.ext4 -q -d "$PROBE/root" "$PROBE/rootfs.ext4"
+          cat > "$PROBE/vm.json" <<EOF
+          {
+            "boot-source": {
+              "kernel_image_path": "$PYO_SANDBOX_KERNEL",
+              "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/init"
+            },
+            "drives": [{
+              "drive_id": "rootfs",
+              "path_on_host": "$PROBE/rootfs.ext4",
+              "is_root_device": true,
+              "is_read_only": false
+            }],
+            "machine-config": { "vcpu_count": 1, "mem_size_mib": 128 }
+          }
+          EOF
+          rm -f "$PROBE/boot_ms"
+          start=$(date +%s%N)
+          timeout 60 "$PYO_SANDBOX_FIRECRACKER" --no-api --config-file "$PROBE/vm.json" < /dev/null 2>&1 \
+            | while IFS= read -r line; do
+                case "$line" in
+                  *PYO_PROBE_BOOTED*) echo $(( ($(date +%s%N) - start) / 1000000 )) > "$PROBE/boot_ms" ;;
+                esac
+                printf '%s\n' "$line"
+              done || echo "firecracker or timeout exited non-zero"
+          echo "exit after $(( ($(date +%s%N) - start) / 1000000 )) ms"
+          test -s "$PROBE/boot_ms"
+
+      - name: Result
+        if: always()
+        run: |
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then kvm=yes; elif [ -e /dev/kvm ]; then kvm="present, not usable"; else kvm=no; fi
+          if [ -s "$PROBE/boot_ms" ]; then boot="$(cat "$PROBE/boot_ms") ms"; else boot="failed"; fi
+          echo "KVM: $kvm"
+          echo "firecracker boot: $boot"
+          printf '### %s\n\nKVM: %s\n\nfirecracker boot: %s\n' "$ARCH" "$kvm" "$boot" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        if: matrix.arch == 'x86_64' && steps.boot.outcome == 'success'
+        continue-on-error: true
+        with:
+          toolchain: 1.99.1
+          targets: x86_64-unknown-linux-musl
+
+      - name: Build pyo-envd (musl)
+        id: envd
+        if: matrix.arch == 'x86_64' && steps.boot.outcome == 'success'
+        continue-on-error: true
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo build --release --locked -p pyo-envd --target x86_64-unknown-linux-musl
+          echo "PYO_SANDBOX_ENVD=$PWD/target/x86_64-unknown-linux-musl/release/pyo-envd" >> "$GITHUB_ENV"
+
+      - name: e2e
+        if: matrix.arch == 'x86_64' && steps.envd.outcome == 'success'
+        continue-on-error: true
+        env:
+          PYO_SANDBOX_E2E: "1"
+        run: cargo test --locked -p pyo-sandbox --test e2e -- --nocapture
+
+      # As root: cargo isn't on root's PATH, so build the test binary as
+      # the runner user and run only it with sudo -E.
+      - name: Networking e2e (root)
+        if: matrix.arch == 'x86_64' && steps.envd.outcome == 'success'
+        continue-on-error: true
+        env:
+          PYO_SANDBOX_NET_E2E: "1"
+        run: |
+          set -euo pipefail
+          bin=$(cargo test --locked -p pyo-sandbox --test network_e2e --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "network_e2e" and .executable != null) | .executable')
+          echo "test binary: $bin"
+          sudo -E "$bin" --nocapture
