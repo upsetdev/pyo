@@ -502,7 +502,7 @@ const TAB_LABELS: Record<string, string> = {
   connect: "Connect",
   extensions: "Extensions",
   terminal: "Terminal",
-  "cron-jobs": "Cron Jobs",
+  "cron-jobs": "Cron jobs",
   security: "Security",
   backups: "Backups",
   billing: "Billing",

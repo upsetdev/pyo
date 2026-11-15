@@ -82,7 +82,7 @@ export const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
           { label: "Activity", href: "/activity" },
         ],
       },
-      { label: "Cron Jobs", href: "/cron-jobs", icon: TimerIcon },
+      { label: "Cron jobs", href: "/cron-jobs", icon: TimerIcon },
       {
         label: "Sandboxes",
         href: "/sandboxes",

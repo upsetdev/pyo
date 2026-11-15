@@ -26,7 +26,7 @@ import type { Application, CronRun, CronTask } from "~/lib/pyo/types";
 import { seo } from "~/lib/seo";
 
 export const Route = createFileRoute("/_app/$team/cron-jobs")({
-  head: () => ({ meta: seo({ title: "Cron Jobs" }) }),
+  head: () => ({ meta: seo({ title: "Cron jobs" }) }),
   component: CronJobsPage,
 });
 
@@ -318,7 +318,7 @@ function CronJobsPage() {
   return (
     <Page>
       <PageHeader
-        title="Cron Jobs"
+        title="Cron jobs"
         description="Commands that run on a schedule, in UTC."
         actions={add}
       />
