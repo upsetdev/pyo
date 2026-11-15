@@ -19,6 +19,8 @@
 
 pub mod api;
 pub mod daemon;
+#[cfg(test)]
+mod e2e;
 pub mod join;
 pub mod keys;
 pub mod limits;
