@@ -116,6 +116,10 @@ pub struct Deploy {
     /// port accepting connections, or "none" to not wait.
     pub health: Option<String>,
     pub auto_rollback: Option<bool>,
+    /// A build Pyo detects as a static site: "static" serves its files
+    /// from the cluster's shared static server (the default), "service"
+    /// runs it as a service of its own.
+    pub serve: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -173,7 +177,7 @@ pub fn write_service(path: Option<&Path>, id: &str, label: &str) -> Result<PathB
             out.join("\n") + "\n"
         }
         Err(_) => format!(
-            "{line}\n\n# Settings here win on `pyo deploy`. Anything left out stays as\n# the dashboard has it. Secrets: `pyo env set --secret KEY=value`.\n\n# [deploy]\n# replicas = 1\n# port = 8080\n# health = \"/healthz\"  # or \"tcp\" or \"none\"\n\n# [build.args]\n# RAILPACK_SPA_OUTPUT_DIR = \"dist\"\n\n# [resources]\n# cpu = \"500m\"\n# memory = \"512Mi\"\n\n# [env]\n# LOG_LEVEL = \"info\"\n"
+            "{line}\n\n# Settings here win on `pyo deploy`. Anything left out stays as\n# the dashboard has it. Secrets: `pyo env set --secret KEY=value`.\n\n# [deploy]\n# replicas = 1\n# port = 8080\n# health = \"/healthz\"  # or \"tcp\" or \"none\"\n# serve = \"static\"  # a static site's files, or \"service\"\n\n# [build.args]\n# RAILPACK_SPA_OUTPUT_DIR = \"dist\"\n\n# [resources]\n# cpu = \"500m\"\n# memory = \"512Mi\"\n\n# [env]\n# LOG_LEVEL = \"info\"\n"
         ),
     };
     fs::write(&path, text)?;

@@ -402,6 +402,17 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
         });
         set(&mut changes, h, new, format!("health check {path}"));
     }
+    if let Some(serve) = &d.serve {
+        if !matches!(serve.as_str(), "static" | "service") {
+            bail!("pyo.toml: serve is \"static\" (a static site's files) or \"service\".");
+        }
+        set(
+            &mut changes,
+            &mut service["serveAs"],
+            json!(serve),
+            format!("serve as {serve}"),
+        );
+    }
     if let Some(on) = d.auto_rollback {
         set(
             &mut changes,
@@ -512,13 +523,17 @@ pub async fn status(api: &Api, service: Option<&str>, as_json: bool) -> Result<(
         ui::dim(&t.state.path_of(a))
     );
     let ready = a["runtime"]["readyReplicas"].as_i64().unwrap_or(0);
+    let status = a["status"].as_str().unwrap_or("?");
     row(
         "Status",
-        format!(
-            "{} · {ready}/{} ready",
-            a["status"].as_str().unwrap_or("?"),
-            a["replicas"].as_i64().unwrap_or(0)
-        ),
+        if a["runtime"]["static"] == json!(true) {
+            format!("{status} · static files")
+        } else {
+            format!(
+                "{status} · {ready}/{} ready",
+                a["replicas"].as_i64().unwrap_or(0)
+            )
+        },
     );
     if let Some(d) = a["currentDeploymentId"]
         .as_str()
@@ -1084,6 +1099,17 @@ mod tests {
         let f: ServiceFile = toml::from_str("[deploy]\nreplicas = -1\n").unwrap();
         assert!(apply(&mut a, &f).is_err());
         let f: ServiceFile = toml::from_str("[deploy]\nreplicas = 3000000000\n").unwrap();
+        assert!(apply(&mut a, &f).is_err());
+    }
+
+    #[test]
+    fn a_static_build_is_served_as_files_or_runs_as_a_service() {
+        let mut a = service();
+        let f: ServiceFile = toml::from_str("[deploy]\nserve = \"service\"\n").unwrap();
+        assert_eq!(apply(&mut a, &f).unwrap(), ["serve as service"]);
+        assert_eq!(a["serveAs"], json!("service"));
+        assert!(apply(&mut a, &f).unwrap().is_empty());
+        let f: ServiceFile = toml::from_str("[deploy]\nserve = \"files\"\n").unwrap();
         assert!(apply(&mut a, &f).is_err());
     }
 
