@@ -279,8 +279,12 @@ pub async fn require_role(
         {
             return Err(ApiError::not_found("Team"));
         }
+        // A sandboxes key changes nothing else (sandbox/ checks its own).
         if k.access == KeyAccess::Read && min > Role::Viewer {
             return Err(ApiError::forbidden("This API key can only read."));
+        }
+        if k.access == KeyAccess::Sandboxes && min > Role::Viewer {
+            return Err(ApiError::forbidden("This API key can only use sandboxes."));
         }
     }
     if role < min {
@@ -2930,9 +2934,12 @@ fn key_allows(user: &User, op: &Op) -> ApiResult<()> {
     };
     match k.access {
         KeyAccess::Read => Err(ApiError::forbidden("This API key can only read.")),
-        KeyAccess::Deploy if need > KeyAccess::Deploy => Err(ApiError::forbidden(
+        KeyAccess::Deploy if !k.access.allows(need) => Err(ApiError::forbidden(
             "This API key can only deploy, roll back, restart, stop and scale services.",
         )),
+        KeyAccess::Sandboxes if !k.access.allows(need) => {
+            Err(ApiError::forbidden("This API key can only use sandboxes."))
+        }
         // A new team would be outside the key's teams.
         KeyAccess::Full if k.teams.is_some() && matches!(op, Op::CreateTeam { .. }) => Err(
             ApiError::forbidden("This API key is limited to some teams, so it can't create teams."),
@@ -3736,7 +3743,9 @@ async fn apply(
             let name = require_text(&name, "Key name", 60)?;
             let access = access.unwrap_or_else(|| "full".into());
             if KeyAccess::parse(&access).is_none() {
-                return Err(ApiError::bad_request("Access is read, deploy or full."));
+                return Err(ApiError::bad_request(
+                    "Access is read, deploy, sandboxes or full.",
+                ));
             }
             let days = crate::auth::key_lifetime(expires_in_days)?;
             let team_ids = team_ids.filter(|t| !t.is_empty());

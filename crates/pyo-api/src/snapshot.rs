@@ -358,11 +358,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // What each may do, in API key terms.
     for g in &mut oauth_grants {
         let access = crate::oauth::scope_access(g["scope"].as_str().unwrap_or(""));
-        g["access"] = json!(match access {
-            crate::auth::KeyAccess::Read => "read",
-            crate::auth::KeyAccess::Deploy => "deploy",
-            crate::auth::KeyAccess::Full => "full",
-        });
+        g["access"] = json!(access.as_str());
         if let Some(o) = g.as_object_mut() {
             o.remove("scope");
         }

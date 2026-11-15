@@ -267,6 +267,7 @@ fn access_of(a: &str) -> KeyAccess {
     match a {
         "full" | "varies" => KeyAccess::Full,
         "deploy" => KeyAccess::Deploy,
+        "sandboxes" => KeyAccess::Sandboxes,
         _ => KeyAccess::Read,
     }
 }
@@ -490,7 +491,7 @@ fn allowed(user: &User) -> KeyAccess {
 fn list_tools(user: &User, params: &Value) -> Result<Value, (i64, String)> {
     let mine: Vec<&Tool> = catalog()
         .iter()
-        .filter(|t| t.access <= allowed(user))
+        .filter(|t| allowed(user).allows(t.access))
         .collect();
     let start = match params["cursor"].as_str() {
         None => 0,
@@ -643,9 +644,10 @@ fn find_tool(user: &User, name: &str) -> Result<&'static Tool, String> {
         .iter()
         .find(|t| t.name() == name)
         .ok_or_else(|| format!("Unknown tool {name}"))?;
-    if t.access > allowed(user) {
+    if !allowed(user).allows(t.access) {
         return Err(match allowed(user) {
             KeyAccess::Read => "This connection can only read. Reconnect the assistant with more access to do this.".to_owned(),
+            KeyAccess::Sandboxes => "This connection can only use sandboxes. Reconnect the assistant with full access to do this.".to_owned(),
             _ => "This connection can only deploy, roll back, restart, stop and scale services. Reconnect the assistant with full access to do this.".to_owned(),
         });
     }
@@ -1792,6 +1794,11 @@ mod tests {
         assert!(e.contains("can only deploy"), "{e}");
         assert!(find_tool(&user(Some(KeyAccess::Read)), "get_metrics").is_ok());
         assert!(list_tools(&user(None), &json!({ "cursor": "x" })).is_err());
+        // A sandboxes key reads, and changes nothing else.
+        let sbx = names(Some(KeyAccess::Sandboxes));
+        assert!(sbx.contains(&"get_state".into()) && !sbx.contains(&"scale_service".into()));
+        let e = find_tool(&user(Some(KeyAccess::Sandboxes)), "delete_service").unwrap_err();
+        assert!(e.contains("can only use sandboxes"), "{e}");
     }
 
     #[test]
