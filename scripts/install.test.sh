@@ -129,6 +129,29 @@ rm -rf "$WORK"
 check "--version asks GitHub for that release" "$(cat "$asked")" "^https://api.github.com/repos/upsetdev/pyo/releases/tags/v1.2.3" has
 check "once, when it isn't there" "$(wc -l <"$asked")" "^1$" has
 check "and says so" "$out" "There's no release 1.2.3" has
+# The addresses at the end: no wait for an HTTPS address where the machine
+# has no public IP (behind NAT, it never comes), and a word while waiting.
+hostname() { echo "$ips"; }
+curl() { echo x >>"$asked"; [ -z "$meta" ] || echo "$meta"; }
+ips="10.0.2.15 10.42.0.0 172.17.0.1 100.101.67.2 fd7a:115c::1"
+meta='{"version":"9.9.9"}'
+: >"$asked"
+out=$(pyo_addresses 300)
+check "no public IP: one look" "$(wc -l <"$asked")" "^1$" has
+check "no public IP: no wait" "$out" "Waiting" lacks
+check "no public IP: says so" "$out" "no public IP" has
+check "no public IP: the network address" "$out" "http://10\.0\.2\.15:8000" has
+ips="10.0.2.15 203.0.113.7"
+: >"$asked"
+out=$(pyo_addresses 300)
+check "a public IP: waits five minutes" "$(wc -l <"$asked")" "^61$" has
+check "a public IP: says it waits" "$out" "Waiting for the HTTPS address \(up to 5 minutes\)" has
+meta='{"publicUrl":"https://pyo.203.0.113.7.nip.io"}'
+: >"$asked"
+out=$(pyo_addresses 300)
+check "an HTTPS address: no wait" "$out" "Waiting" lacks
+check "an HTTPS address: shown" "$out" "https://pyo\.203\.0\.113\.7\.nip\.io" has
+unset -f hostname
 unset -f curl sleep
 
 [ "$failed" = 0 ] && echo "install.sh: all checks passed"

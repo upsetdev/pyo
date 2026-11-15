@@ -659,13 +659,27 @@ check_update() {
 # network. Once Tailscale is set up in Pyo (Integrations), this machine
 # joins the tailnet by itself and Pyo is also https://pyo.<tailnet>.ts.net.
 
-# Pyo's addresses. Waits up to $1 seconds for its HTTPS one.
+# A public IPv4 address on this machine's network cards: not private,
+# tailnet (CGNAT), loopback, link-local or multicast. Pyo puts its HTTPS
+# address on the public IP only when the machine has one itself (the
+# agent's locate.rs, freedomain.rs `direct_public_ip`).
+nic_public_ip() {
+  hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' |
+    grep -vE '^(0|10|127|2(2[4-9]|[3-5][0-9]))\.|^169\.254\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' |
+    head -n1 || true
+}
+
+# Pyo's addresses. Waits up to $1 seconds for its HTTPS one, when this
+# machine has a public IP for it (else it would never come).
 pyo_addresses() {
-  local url="" lan="" i
-  for i in $(seq 0 5 "${1:-0}"); do
+  local url="" lan="" i wait=${1:-0} public
+  public=$(nic_public_ip)
+  [ -n "$public" ] || wait=0
+  for i in $(seq 0 5 "$wait"); do
     url=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
     [ -n "$url" ] && break
-    [ "$i" -ge "${1:-0}" ] || sleep 5
+    [ "$i" != 0 ] || [ "$wait" = 0 ] || echo "Waiting for the HTTPS address (up to $((wait / 60)) minutes)…"
+    [ "$i" -ge "$wait" ] || sleep 5
   done
   lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
   echo
@@ -675,9 +689,14 @@ pyo_addresses() {
   echo "  http://localhost:8000  (this machine)"
   if [ -z "$url" ]; then
     echo
-    echo "No HTTPS address yet. It comes on this machine's public IP in a minute or two,"
-    echo "unless ports 80 and 443 can't reach it (behind NAT). Then set up Tailscale in Pyo."
-    echo "Check with: curl -s http://localhost:8000/api/v1/meta"
+    if [ -z "$public" ]; then
+      echo "This machine has no public IP, so Pyo has no HTTPS address on it."
+      echo "Open Pyo on this machine or your network. For HTTPS, set up Tailscale in Pyo."
+    else
+      echo "No HTTPS address yet. It comes on this machine's public IP in a minute or two,"
+      echo "unless ports 80 and 443 can't reach it. Then set up Tailscale in Pyo."
+      echo "Check with: curl -s http://localhost:8000/api/v1/meta"
+    fi
   fi
 }
 # The host's own helpers, as systemd timers (root), every minute: connecting

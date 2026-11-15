@@ -575,7 +575,12 @@ mod tests {
         };
         let install = include_str!("../../../deploy/install.sh");
         let pyo_up = include_str!("../../../scripts/pyo-up.sh");
-        for name in ["host_units", "bootstrap_key", "pyo_addresses"] {
+        for name in [
+            "host_units",
+            "bootstrap_key",
+            "nic_public_ip",
+            "pyo_addresses",
+        ] {
             assert_eq!(
                 function("deploy/install.sh", install, name),
                 function("scripts/pyo-up.sh", pyo_up, name),
