@@ -3352,6 +3352,7 @@ mod tests {
                 network_isolation: false,
                 firewall: Default::default(),
                 waf: None,
+                site: None,
             }
         };
         let hostnames = || async {

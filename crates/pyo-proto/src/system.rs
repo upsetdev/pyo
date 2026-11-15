@@ -196,6 +196,102 @@ fn image_from_env(var: &str, default: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default.to_owned())
 }
+/// Pyo Static: one `pyo-static` per cluster serves every static site
+/// there (site.rs), in its own namespace (a bundle's: bundles.rs's
+/// `static_bundle`), while the cluster has a static site.
+pub const STATIC_NAME: &str = "pyo-static";
+pub const STATIC_NS: &str = "pyo-static";
+pub const STATIC_PORT: i32 = 8080;
+/// What the gateway sets on each request it sends to `pyo-static`:
+/// `<service id>/<deployment id>`, the site and the folder to serve.
+pub const STATIC_HEADER: &str = "x-pyo-site";
+/// The Secret with its login to Pyo (`url`, `token`): written by the agent,
+/// read only by `pyo-static`, which reads deploys' files through Pyo.
+pub const STATIC_LOGIN: &str = "pyo-static-login";
+/// The field manager the agent writes the login with (not the bundle's,
+/// so applying the bundle again keeps it).
+pub const STATIC_LOGIN_MANAGER: &str = "pyo-agent-static-login";
+pub const STATIC_IMAGE_DEFAULT: &str = "127.0.0.1:5005/pyo/static:dev";
+
+/// `pyo-static`'s image: `PYO_STATIC_IMAGE`, else the default.
+pub fn static_image_from_env() -> String {
+    image_from_env("PYO_STATIC_IMAGE", STATIC_IMAGE_DEFAULT)
+}
+
+pub fn static_labels() -> Value {
+    json!({ "app.kubernetes.io/name": STATIC_NAME, "app.kubernetes.io/managed-by": "pyo" })
+}
+
+/// The Backend a static site's routes send to: `pyo-static` by cluster DNS
+/// name, like services' routes. Each route sets [`STATIC_HEADER`].
+pub fn static_backend_spec() -> Value {
+    fqdn_backend_spec(
+        &format!("{STATIC_NAME}.{STATIC_NS}.svc.cluster.local"),
+        STATIC_PORT,
+    )
+}
+
+/// The header filter on a static site's route rules.
+pub fn static_filter(service_id: &str, deploy: &str) -> Value {
+    json!({ "type": "RequestHeaderModifier", "requestHeaderModifier": { "set": [{ "name": STATIC_HEADER, "value": format!("{service_id}/{deploy}") }] } })
+}
+
+/// Its login's Secret, empty: the agent fills it in ([`STATIC_LOGIN_MANAGER`]).
+pub fn static_login() -> Value {
+    json!({
+        "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+        "metadata": { "name": STATIC_LOGIN, "namespace": STATIC_NS, "labels": static_labels() },
+    })
+}
+
+/// Its Deployment: one small copy (a few MiB of memory; files are read
+/// from its cache on disk, not held in memory). Its cache keeps every
+/// folder it served on the pod's disk, so a storage hiccup doesn't take
+/// sites down. Non-root, read-only, no cluster credentials. Updated
+/// new-before-old.
+pub fn static_deployment(image: &str) -> Value {
+    json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": { "name": STATIC_NAME, "namespace": STATIC_NS, "labels": static_labels() },
+        "spec": {
+            "replicas": 1,
+            "selector": { "matchLabels": { "app.kubernetes.io/name": STATIC_NAME } },
+            "strategy": { "type": "RollingUpdate", "rollingUpdate": { "maxSurge": 1, "maxUnavailable": 0 } },
+            "template": {
+                "metadata": { "labels": static_labels() },
+                "spec": {
+                    "automountServiceAccountToken": false,
+                    "securityContext": { "runAsNonRoot": true, "runAsUser": 65532, "runAsGroup": 65532, "fsGroup": 65532, "seccompProfile": { "type": "RuntimeDefault" } },
+                    "affinity": gateway_affinity(),
+                    "tolerations": [{ "key": crate::GPU_RESOURCE, "operator": "Exists", "effect": "NoSchedule" }],
+                    "containers": [{
+                        "name": "static", "image": image,
+                        "args": ["--listen", format!("0.0.0.0:{STATIC_PORT}"), "--cache", "/cache", "--login", "/etc/pyo-static"],
+                        "ports": [{ "name": "http", "containerPort": STATIC_PORT }],
+                        "resources": { "requests": { "cpu": "10m", "memory": "16Mi" }, "limits": { "memory": "128Mi" } },
+                        "securityContext": { "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": { "drop": ["ALL"] } },
+                        "readinessProbe": { "httpGet": { "path": "/_pyo/ready", "port": STATIC_PORT }, "periodSeconds": 5 },
+                        "volumeMounts": [{ "name": "cache", "mountPath": "/cache" }, { "name": "login", "mountPath": "/etc/pyo-static", "readOnly": true }],
+                    }],
+                    "volumes": [{ "name": "cache", "emptyDir": { "sizeLimit": "2Gi" } }, { "name": "login", "secret": { "secretName": STATIC_LOGIN, "optional": true } }],
+                },
+            },
+        },
+    })
+}
+
+/// Its Service: the gateway's Backend and the agent reach it here.
+pub fn static_service() -> Value {
+    json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": STATIC_NAME, "namespace": STATIC_NS, "labels": static_labels() },
+        "spec": {
+            "selector": { "app.kubernetes.io/name": STATIC_NAME },
+            "ports": [{ "name": "http", "port": STATIC_PORT, "targetPort": STATIC_PORT }],
+        },
+    })
+}
+
 /// Its DaemonSet, Service and settings ConfigMap, in [`WAF_NS`] (a
 /// bundle's namespace: bundles.rs's `waf_bundle`).
 pub const WAF_NAME: &str = "pyo-waf";

@@ -88,6 +88,7 @@ fn build_job(
     deployment_id: &str,
     service_id: &str,
     source: &Value,
+    upload_site: bool,
 ) -> pyo_proto::BuildJob {
     let r = registry();
     pyo_proto::BuildJob {
@@ -131,6 +132,7 @@ fn build_job(
             .map(str::to_owned),
         clone_token: None,
         clone_username: None,
+        upload_site,
     }
 }
 const FINAL: [&str; 3] = ["succeeded", "failed", "cancelled"];
@@ -379,6 +381,7 @@ pub fn build_spec(
         network_isolation: false,
         firewall: None,
         waf: None,
+        site: None,
         server_names: spec["servers"]
             .as_array()
             .into_iter()
@@ -579,6 +582,11 @@ pub async fn create(
         crate::refs::resolve(tx, &project_id, &namespace, &mut built.env).await?;
         (built, spec["source"].clone())
     };
+    // A static deploy's folder, when it's still kept and the service still
+    // serves static builds as files; else its image runs as a service.
+    if let Some(site) = deploy_spec.site.take() {
+        deploy_spec.site = crate::sites::site_for(tx, &spec, &site.deploy).await?;
+    }
     // Its volumes as they are now, rollbacks included: a volume detached
     // (or attached) since isn't mounted (or is) by an older version.
     deploy_spec.volumes = volume_specs(&attached_volumes(tx, req.service_id).await?);
@@ -738,7 +746,13 @@ pub async fn create(
     let label = deploy_spec.service.name.clone();
     if needs_build {
         let job_id = new_id("bld");
-        let job = build_job(&job_id, req.deployment_id, req.service_id, &source);
+        let job = build_job(
+            &job_id,
+            req.deployment_id,
+            req.service_id,
+            &source,
+            crate::sites::serves_static(&spec),
+        );
         sqlx::query(
             "INSERT INTO pyo.build_jobs (id, team_id, deployment_id, job) VALUES ($1, $2, $3, $4)",
         )
@@ -1145,6 +1159,8 @@ async fn settle_service(
             // Its domains route now (TLS status from the agent's reports).
             crate::routes::mark_routed(tx, service_id, None).await?;
             pin_image(tx, deployment_id, data).await?;
+            // pyo-static goes once no site there needs it.
+            crate::sites::sync(tx, &cluster_id).await?;
             let rollback = data["rollbackOf"].is_string();
             let kind = if rollback {
                 "deployment.rollback"
@@ -1226,6 +1242,7 @@ async fn settle_service(
             .await?;
         }
     }
+    crate::sites::sync(tx, &cluster_id).await?;
     Ok(vec![])
 }
 
@@ -1654,6 +1671,22 @@ pub async fn finish_build(
                     .await?;
             }
             spec["image"] = json!(image);
+            // A static build whose folder is uploaded: served as files by
+            // the cluster's pyo-static, which runs from now on.
+            spec["site"] = match &r.site {
+                Some(_) => {
+                    json!(crate::sites::site_for(&mut tx, &service_spec, &deployment_id).await?)
+                }
+                None => Value::Null,
+            };
+            if !spec["site"].is_null() {
+                crate::sites::sync(&mut tx, &cluster_id).await?;
+                sqlx::query("INSERT INTO pyo.deployment_logs (deployment_id, at, level, source, message) VALUES ($1, now(), 'info', 'pyo', $2)")
+                    .bind(&deployment_id)
+                    .bind("Serving the build's output as static files.")
+                    .execute(&mut *tx)
+                    .await?;
+            }
             data["revision"] = json!(r.commit);
             data["revisionLabel"] = json!(r.commit.chars().take(7).collect::<String>());
             data["source"]["commit"] = json!(r.commit);
@@ -1810,7 +1843,7 @@ mod build_job_tests {
             "type": "git", "repoUrl": "https://github.com/acme/site", "branch": "main",
             "buildArgs": [{ "key": "RAILPACK_SPA_OUTPUT_DIR", "value": "build" }, { "key": "", "value": "dropped" }],
         });
-        let job = super::build_job("bld_1", "dpl_1", "svc_1", &source);
+        let job = super::build_job("bld_1", "dpl_1", "svc_1", &source, true);
         assert_eq!(job.build_args.len(), 1);
         assert_eq!(
             (

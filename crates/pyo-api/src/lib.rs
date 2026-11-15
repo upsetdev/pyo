@@ -59,6 +59,7 @@ mod routes;
 mod secrets;
 mod secretstores;
 mod sigstore;
+mod sites;
 mod snapshot;
 mod tailscale;
 mod teambackup;
@@ -353,6 +354,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tokio::spawn(git::poller(state.clone()));
         tokio::spawn(jobs::runner(state.clone()));
         tokio::spawn(backupstore::keeper(state.db.clone()));
+        tokio::spawn(sites::sweeper(state.db.clone()));
         tokio::spawn(backup::runner(state.clone()));
         tokio::spawn(teambackup::runner(state.clone()));
         tokio::spawn(database_imports::runner(state.clone()));
@@ -418,10 +420,15 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             .nest(
                 "/api/agent/v1",
                 agent::routes()
+                    .merge(sites::agent_routes())
                     .merge(terminal::agent_routes())
                     .merge(database_imports::agent_routes()),
             )
-            .nest("/api/builder/v1", builders::routes())
+            .nest(
+                "/api/builder/v1",
+                builders::routes().merge(sites::builder_routes()),
+            )
+            .nest("/api/static/v1", sites::routes())
             .merge(extra_routes)
             .route("/api/{*rest}", get(error::not_found).post(error::not_found))
             .route("/install/agent.yaml", get(install::manifest))

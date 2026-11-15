@@ -15,6 +15,7 @@ pub mod firewall;
 pub mod flows;
 pub mod memory;
 pub mod rbac;
+pub mod site;
 pub mod system;
 
 /// Bumped on breaking changes; the API rejects agents it doesn't speak.
@@ -1107,6 +1108,9 @@ pub struct ReleaseImages {
     /// pyo-kv, beside each KV database (deploy/images/pyo.Dockerfile, target kv).
     #[serde(default)]
     pub kv: String,
+    /// pyo-static, which serves a cluster's static sites (deploy/images/pyo.Dockerfile, target static).
+    #[serde(default, rename = "static")]
+    pub pyo_static: String,
     /// MySQL's operator, with Pyo's patches (deploy/images/moco).
     #[serde(default)]
     pub mysql_operator: String,
@@ -1126,7 +1130,7 @@ impl ReleaseImages {
     /// Every image, by its key in release.json. A release pins each image
     /// scripts/release-manifest.ts writes; adding one there means adding
     /// it here (a test compares the two).
-    pub fn all(&self) -> [(&'static str, &str); 13] {
+    pub fn all(&self) -> [(&'static str, &str); 14] {
         [
             ("pyo", &self.pyo),
             ("agent", &self.agent),
@@ -1136,6 +1140,7 @@ impl ReleaseImages {
             ("geoip", &self.geoip),
             ("dbController", &self.db_controller),
             ("kv", &self.kv),
+            ("static", &self.pyo_static),
             ("mysqlOperator", &self.mysql_operator),
             ("mysqlBackup", &self.mysql_backup),
             ("postgres16", &self.postgres16),
@@ -1384,6 +1389,10 @@ pub struct BuildJob {
     /// there's none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_username: Option<String>,
+    /// A static build's output may be served as static files: the builder
+    /// uploads it (site.rs). Off for a service set to run as a service.
+    #[serde(default)]
+    pub upload_site: bool,
 }
 
 /// A step of a build. `stage` is "building" or "pushing" (or empty for logs only).
@@ -1415,6 +1424,9 @@ pub struct BuildResult {
     /// that answers `/` (its own image, so no /healthz).
     #[serde(default)]
     pub static_site: bool,
+    /// Its output folder, uploaded to be served as static files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<site::SiteUpload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1536,6 +1548,10 @@ pub struct DeploySpec {
     /// The WAF's settings for the service; none while its WAF is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waf: Option<Waf>,
+    /// A static site: its folder, served by the cluster's `pyo-static`
+    /// instead of a workload of its own (site.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<site::SiteSpec>,
 }
 
 /// The web application firewall for one service: the OWASP rules'
@@ -1694,6 +1710,9 @@ pub struct FirewallTarget {
     pub firewall: firewall::Firewall,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waf: Option<Waf>,
+    /// As [`DeploySpec::site`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<site::SiteSpec>,
 }
 
 /// What a service changes about how its image starts. Empty fields keep the
@@ -2525,6 +2544,7 @@ mod release_tests {
                 geoip: img("geoip"),
                 db_controller: img("db-controller"),
                 kv: img("kv"),
+                pyo_static: img("static"),
                 mysql_operator: img("mysql-operator"),
                 mysql_backup: img("mysql-backup"),
                 postgres16: img("postgres-16"),
@@ -2635,9 +2655,18 @@ mod release_tests {
     #[test]
     fn every_image_release_json_pins_is_read() {
         let (r, raw) = v0_1_0();
-        // Each of its images is a field here, with the same value.
-        assert_eq!(serde_json::to_value(&r.images).unwrap(), raw["images"]);
+        // Each of its images is a field here, with the same value (an
+        // image added since, pyo-static's, is empty).
+        let mut images = serde_json::to_value(&r.images).unwrap();
+        images
+            .as_object_mut()
+            .unwrap()
+            .retain(|k, v| !(k == "static" && v == ""));
+        assert_eq!(images, raw["images"]);
         for (name, image) in r.images.all() {
+            if name == "static" && image.is_empty() {
+                continue;
+            }
             assert!(pinned_image(image), "{name}: {image}");
         }
         // And all() names every field.

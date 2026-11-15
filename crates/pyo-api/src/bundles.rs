@@ -1,5 +1,5 @@
-//! System bundles on a cluster: the WAF and the databases system, Pyo's own
-//! parts that run per cluster. One installer for both: the cluster's agent
+//! System bundles on a cluster: the WAF, Pyo Static and the databases
+//! system, Pyo's own parts that run per cluster. One installer for all: the cluster's agent
 //! applies the bundle (pyo-proto's bundles.rs; pyo-agent's bundles.rs), and
 //! its state lives in `pyo.cluster_bundles`, one row per installed bundle.
 //!
@@ -7,6 +7,8 @@
 //!   WAF on, removed when the last one turns it off or is deleted
 //!   (`sync_waf`, from firewall.rs's `sync`), with the installation's
 //!   images, and updated when they change.
+//! - Pyo Static: the same, while the cluster has a static site
+//!   (`sync_static`, from sites.rs's `sync`).
 //! - Databases: set up on a cluster when a team makes its first database
 //!   there, and updated with Pyo (`sync_databases`, every heartbeat). Never
 //!   removed.
@@ -16,8 +18,8 @@ use std::collections::{HashMap, HashSet};
 use pyo_proto::{
     Command,
     bundles::{
-        BundleReport, DATABASES_ID, ObjectRef, POLICY_REFUSED, ReadyCheck, SystemBundle, WAF_ID,
-        never_pruned,
+        BundleReport, DATABASES_ID, ObjectRef, POLICY_REFUSED, ReadyCheck, STATIC_ID, SystemBundle,
+        WAF_ID, never_pruned,
     },
 };
 use serde_json::{Value, json};
@@ -33,6 +35,11 @@ fn waf_bundle() -> SystemBundle {
     )
 }
 
+/// Pyo Static's bundle, with this installation's image.
+fn static_bundle() -> SystemBundle {
+    pyo_proto::bundles::static_bundle(&pyo_proto::system::static_image_from_env())
+}
+
 /// The databases system's bundle, with this installation's images.
 fn databases_bundle() -> SystemBundle {
     pyo_proto::bundles::databases_bundle(&pyo_proto::system::db_images_from_env())
@@ -41,6 +48,7 @@ fn databases_bundle() -> SystemBundle {
 fn known(id: &str) -> Option<SystemBundle> {
     match id {
         WAF_ID => Some(waf_bundle()),
+        STATIC_ID => Some(static_bundle()),
         DATABASES_ID => Some(databases_bundle()),
         _ => None,
     }
@@ -262,9 +270,30 @@ pub async fn sync_waf(
     cluster_id: &str,
     on: bool,
 ) -> ApiResult<()> {
-    let row: Option<(String, String, Value)> = sqlx::query_as("SELECT version, state, objects FROM pyo.cluster_bundles WHERE cluster_id = $1 AND bundle = $2").bind(cluster_id).bind(WAF_ID).fetch_optional(&mut **tx).await?;
+    sync_on_demand(tx, cluster_id, waf_bundle(), on).await
+}
+
+/// Pyo Static's bundle as the cluster's sites need it (sites.rs): there
+/// while the cluster has a static site, like the WAF.
+pub async fn sync_static(
+    tx: &mut Transaction<'_, Postgres>,
+    cluster_id: &str,
+    on: bool,
+) -> ApiResult<()> {
+    sync_on_demand(tx, cluster_id, static_bundle(), on).await
+}
+
+/// A bundle that runs only while something on the cluster needs it:
+/// installed (and kept current) while `on`, removed after.
+async fn sync_on_demand(
+    tx: &mut Transaction<'_, Postgres>,
+    cluster_id: &str,
+    b: SystemBundle,
+    on: bool,
+) -> ApiResult<()> {
+    let id = b.id.clone();
+    let row: Option<(String, String, Value)> = sqlx::query_as("SELECT version, state, objects FROM pyo.cluster_bundles WHERE cluster_id = $1 AND bundle = $2").bind(cluster_id).bind(&id).fetch_optional(&mut **tx).await?;
     if on {
-        let b = waf_bundle();
         match row {
             Some((v, st, _)) if v == b.version && st != "failed" && st != "removing" => {}
             // An update waits for the install that allows it (sent once it's there).
@@ -275,7 +304,7 @@ pub async fn sync_waf(
                 // runs the install after the removal (pyo-agent's
                 // `ordered_keys`), and says so meanwhile.
                 if st == "removing" {
-                    sqlx::query("UPDATE pyo.cluster_bundles SET message = $3 WHERE cluster_id = $1 AND bundle = $2").bind(cluster_id).bind(WAF_ID).bind(WAITING_FOR_REMOVAL).execute(&mut **tx).await?;
+                    sqlx::query("UPDATE pyo.cluster_bundles SET message = $3 WHERE cluster_id = $1 AND bundle = $2").bind(cluster_id).bind(&id).bind(WAITING_FOR_REMOVAL).execute(&mut **tx).await?;
                 }
             }
             None => send(tx, cluster_id, &b, vec![]).await?,
@@ -286,12 +315,12 @@ pub async fn sync_waf(
             tx,
             cluster_id,
             Command::RemoveBundle {
-                id: WAF_ID.to_owned(),
+                id: id.clone(),
                 objects,
             },
         )
         .await?;
-        sqlx::query("UPDATE pyo.cluster_bundles SET state = 'removing', message = '', command_id = $3, updated_at = now() WHERE cluster_id = $1 AND bundle = $2").bind(cluster_id).bind(WAF_ID).bind(command).execute(&mut **tx).await?;
+        sqlx::query("UPDATE pyo.cluster_bundles SET state = 'removing', message = '', command_id = $3, updated_at = now() WHERE cluster_id = $1 AND bundle = $2").bind(cluster_id).bind(&id).bind(command).execute(&mut **tx).await?;
     }
     Ok(())
 }

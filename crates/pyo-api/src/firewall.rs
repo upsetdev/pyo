@@ -358,6 +358,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> ApiRe
             network_isolation: isolation,
             firewall,
             waf: waf_for(tx, engine, &service_id).await?,
+            site: serde_json::from_value(spec["site"].clone()).unwrap_or_default(),
         });
     }
     let status: Option<String> =

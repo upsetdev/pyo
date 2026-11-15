@@ -590,7 +590,7 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
                     ((l.protocol == 'UDP' && !(l.port in {udp_reserved})) || (l.protocol == 'TCP' && !(l.port in {tcp_reserved}) && !(l.port >= 19000 && l.port <= 19003))) && l.allowedRoutes == {same_ns}))))) || \
             (request.resource.resource == 'httproutes' && !(variables.objName in {tailnet_names}) && (request.operation == 'DELETE' || (object.spec.parentRefs.all(p, (!has(p.namespace) || p.namespace == '{gw}') && \
                 (p.name == '{tailnet_gw}' ? (variables.objName.startsWith('{tn_route}') && has(p.sectionName) && p.sectionName == '{tn_https}' && has(object.spec.hostnames) && size(object.spec.hostnames) >= 1 && object.spec.hostnames.all(h, h.lowerAscii().endsWith('{tn_suffix}'))) : \
-                 (!variables.objName.startsWith('{tn_route}') && (!has(object.spec.hostnames) || object.spec.hostnames.all(h, !h.lowerAscii().endsWith('{tn_suffix}')))))) && object.spec.rules.all(r, (!has(r.backendRefs) || r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}'))) && (!has(r.filters) || r.filters.all(f, f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https')))))) || \
+                 (!variables.objName.startsWith('{tn_route}') && (!has(object.spec.hostnames) || object.spec.hostnames.all(h, !h.lowerAscii().endsWith('{tn_suffix}')))))) && object.spec.rules.all(r, (!has(r.backendRefs) || r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}'))) && (!has(r.filters) || r.filters.all(f, (f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https') || (f.type == 'RequestHeaderModifier' && f.requestHeaderModifier.all(k, k == 'set') && size(f.requestHeaderModifier.set) == 1 && f.requestHeaderModifier.set[0].name == '{static_header}'))))))) || \
             (request.resource.resource in ['tcproutes', 'udproutes'] && (request.operation == 'DELETE' || (object.spec.all(k, k in ['parentRefs', 'rules']) && object.spec.parentRefs.all(p, (!has(p.namespace) || p.namespace == '{gw}') && p.name.endsWith('-ports')) && size(object.spec.rules) == 1 && \
                 object.spec.rules.all(r, r.all(k, k == 'backendRefs') && r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}')))))) || \
             (request.resource.resource == 'backends' && variables.objName == '{waf}' && (request.operation == 'DELETE' || object.spec == {waf_backend})) || \
@@ -688,6 +688,8 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             udp_reserved = format!("{:?}", crate::SERVER_UDP_PORTS),
             tcp_reserved = format!("{:?}", [&[80, 443, 10080, 10443][..], &crate::SERVER_TCP_PORTS[..], &system::TAILNET_PORTS[..]].concat()),
             same_ns = cel_literal(&json!({ "namespaces": { "from": "Same" } })),
+            // A static site's routes: the site and folder for pyo-static.
+            static_header = system::STATIC_HEADER,
             system_ns = cel_literal(&json!(["kube-system", "kube-public", "kube-node-lease", "default", "pyo-system", system::GATEWAY_NS, "cert-manager"])),
             http_spec = cel_literal(&system::http_gateway_spec())) },
         // Cluster-wide objects it writes, with exactly Pyo's content.
@@ -765,7 +767,7 @@ pub const INSTALL_ANNOTATION: &str = "pyo.dev/install";
 pub const SELF_UPDATE_ROLE: &str = "pyo-agent-self-update";
 /// The agent Deployment's env that pins system images: the only part of
 /// the Deployment a refresh changes.
-pub const PINNED_ENV: [&str; 9] = [
+pub const PINNED_ENV: [&str; 10] = [
     "PYO_WAF_IMAGE",
     "PYO_GEOIP_IMAGE",
     "PYO_DB_CONTROLLER_IMAGE",
@@ -775,6 +777,7 @@ pub const PINNED_ENV: [&str; 9] = [
     "PYO_POSTGRES_IMAGE_18",
     "PYO_MYSQL_OPERATOR_IMAGE",
     "PYO_MYSQL_BACKUP_IMAGE",
+    "PYO_STATIC_IMAGE",
 ];
 
 /// The optional role (and its binding) that lets the agent refresh its
@@ -856,6 +859,7 @@ impl InstallParts {
                 pg18,
                 db.mysql_operator.clone(),
                 db.mysql_backup.clone(),
+                system::static_image_from_env(),
             ])
             .collect();
         let hash = install_hash(&access, &admission, &pins);
@@ -1101,6 +1105,19 @@ mod tests {
     }
 
     #[test]
+    fn a_static_sites_routes_may_only_name_its_folder() {
+        let policy = admission("w", "g")[0].to_string();
+        assert!(policy.contains("(f.type == 'RequestHeaderModifier' && f.requestHeaderModifier.all(k, k == 'set') && size(f.requestHeaderModifier.set) == 1 && f.requestHeaderModifier.set[0].name == 'x-pyo-site')"));
+        // The filter the agent writes passes those checks.
+        let f = system::static_filter("svc_1", "dep_1");
+        assert_eq!(
+            f["requestHeaderModifier"]["set"][0]["name"],
+            system::STATIC_HEADER
+        );
+        assert_eq!(f["requestHeaderModifier"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
     fn only_a_deleted_projects_namespace_is_deleted() {
         let labels = |pairs: &[(&str, &str)]| {
             pairs
@@ -1164,7 +1181,7 @@ mod tests {
                 "[dyn('kube-'), dyn('pyo-db-')].exists(p, variables.reqName.startsWith(p))"
             )
         );
-        assert!(policy.contains("(variables.reqName in [dyn('pyo-waf'), dyn('pyo-databases')] && oldObject.metadata.labels[?'pyo.dev/bundle'].orValue('') != '')"));
+        assert!(policy.contains("(variables.reqName in [dyn('pyo-waf'), dyn('pyo-static'), dyn('pyo-databases')] && oldObject.metadata.labels[?'pyo.dev/bundle'].orValue('') != '')"));
         assert!(policy.contains("oldObject.metadata.labels[?'pyo/project-id'].orValue('') != ''"));
     }
 

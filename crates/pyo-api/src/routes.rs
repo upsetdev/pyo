@@ -114,6 +114,7 @@ async fn target(
             network_isolation: isolation,
             firewall,
             waf,
+            site: serde_json::from_value(spec["site"].clone()).unwrap_or_default(),
         },
     )))
 }

@@ -634,6 +634,7 @@ mod tests {
                 network_isolation: false,
                 firewall: Default::default(),
                 waf: None,
+                site: None,
             })
             .collect();
         Command::SyncFirewall(Box::new(pyo_proto::FirewallSync {

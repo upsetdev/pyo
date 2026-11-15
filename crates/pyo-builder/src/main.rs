@@ -723,6 +723,7 @@ impl Builder {
             exposed_ports,
             detected: Some(detected),
             static_site,
+            site: None,
         })
     }
 }

@@ -1481,6 +1481,14 @@ fn validate_service_spec(spec: &Value) -> ApiResult<()> {
         }
     }
     check_replicas(&spec["replicas"])?;
+    // A static build: served as static files, or run as a service.
+    if !matches!(&spec["serveAs"], Value::Null)
+        && !matches!(spec["serveAs"].as_str(), Some("static" | "service"))
+    {
+        return Err(ApiError::bad_request(
+            "serveAs is \"static\" (serve static builds as static files) or \"service\" (run them as a service).",
+        ));
+    }
     let name = spec["name"].as_str().unwrap_or("");
     require_dns_label(name, "Service name")?;
     if RESERVED_SERVICE_NAMES.contains(&name) {
@@ -2248,6 +2256,7 @@ pub(crate) enum Op {
         /// A public TCP or UDP port goes through the gateway unless `proxy` is false. Then, for TCP only, it can have `ipFilter` (`{"mode": "allow" or "deny", "cidrs": [...]}`), `connectionLimit` (open connections on the port, from everyone together), `sendProxyProtocol` ("V1" or "V2", to the service) and `acceptProxyProtocol` (read the visitor's address from a header sent by a load balancer in front, while connections without one still work). Ports 22, 53, 80, 443 and a few others can't be public. Each public port belongs to one service on its cluster.
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
+        /// Its `serveAs`, for a build Pyo detects as a static site: "static" (the default) serves the build's output as static files from the cluster's shared static server, "service" runs it as a service of its own. Takes effect with the next deploy.
         #[schema(value_type = Object)]
         service: Value,
         /// A new id you choose for its first deployment: `dpl_` then 4 to 40 lowercase letters, digits, dashes or underscores.
@@ -2272,6 +2281,7 @@ pub(crate) enum Op {
         /// A public TCP or UDP port goes through the gateway unless `proxy` is false. Then, for TCP only, it can have `ipFilter` (`{"mode": "allow" or "deny", "cidrs": [...]}`), `connectionLimit` (open connections on the port, from everyone together), `sendProxyProtocol` ("V1" or "V2", to the service) and `acceptProxyProtocol` (read the visitor's address from a header sent by a load balancer in front, while connections without one still work). Ports 22, 53, 80, 443 and a few others can't be public. Each public port belongs to one service on its cluster.
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
+        /// Its `serveAs`, for a build Pyo detects as a static site: "static" (the default) serves the build's output as static files from the cluster's shared static server, "service" runs it as a service of its own. Takes effect with the next deploy.
         #[schema(value_type = Object)]
         service: Value,
         deployment_id: Option<String>,
@@ -5151,6 +5161,8 @@ async fn apply(
             if crate::waf::is_on(&waf) && !crate::waf::wanted(tx, &cluster_id).await? {
                 crate::firewall::sync(tx, &cluster_id).await?;
             }
+            // The last static site there: pyo-static goes too, after it.
+            crate::sites::sync(tx, &cluster_id).await?;
             let title = match (volumes.len(), delete_volumes) {
                 (0, _) => format!("Deleted {name}"),
                 (_, true) => format!("Deleted {name} and its volumes"),

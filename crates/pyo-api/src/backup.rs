@@ -325,7 +325,7 @@ struct S3<'a> {
     reach: Option<Reach>,
 }
 
-fn hmac(key: &[u8], msg: &str) -> Vec<u8> {
+pub(crate) fn hmac(key: &[u8], msg: &str) -> Vec<u8> {
     let mut m = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key).expect("any key length");
     m.update(msg.as_bytes());
     m.finalize().into_bytes().to_vec()
@@ -365,9 +365,15 @@ pub(crate) struct Signed {
 
 /// SigV4 over host, x-amz-content-sha256 and x-amz-date.
 pub(crate) fn sigv4(r: &Request) -> Signed {
+    sigv4_hashed(r, &hex::encode(Sha256::digest(r.body)))
+}
+
+/// [`sigv4`] for a body given by its SHA-256 (hex) instead (`r.body` is
+/// left out): one that's streamed. The store checks the body against it.
+pub(crate) fn sigv4_hashed(r: &Request, payload_hash: &str) -> Signed {
     let amz_date = stamp(pyo_proto::now_ms());
     let date = amz_date[..8].to_owned();
-    let payload_hash = hex::encode(Sha256::digest(r.body));
+    let payload_hash = payload_hash.to_owned();
     let canonical = format!(
         "{}\n{}\n{}\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n\nhost;x-amz-content-sha256;x-amz-date\n{payload_hash}",
         r.method, r.path, r.query, r.host

@@ -1,7 +1,8 @@
 //! System bundles: Pyo's own parts that run per cluster, installed by the
-//! agent from a bundle. There are two, built in: the WAF ([`waf_bundle`],
-//! there while a service on the cluster has its WAF on) and the databases
-//! system ([`databases_bundle`],
+//! agent from a bundle. There are three, built in: the WAF ([`waf_bundle`],
+//! there while a service on the cluster has its WAF on), Pyo Static
+//! ([`static_bundle`], there while the cluster has a static site) and the
+//! databases system ([`databases_bundle`],
 //! set up with a cluster's first database and updated with Pyo).
 //!
 //! A bundle is its namespace, its Kubernetes objects (CRDs, cluster roles
@@ -61,6 +62,8 @@ const SYSTEM_NAMESPACES: [&str; 7] = [
 /// What a WAF bundle is called (it's built from the installation's images:
 /// [`waf_bundle`]).
 pub const WAF_ID: &str = "waf";
+/// What Pyo Static's bundle is called ([`static_bundle`]).
+pub const STATIC_ID: &str = "static";
 /// Workload kinds whose pods the admission policy holds to the bundle.
 pub const WORKLOAD_KINDS: [&str; 3] = ["Deployment", "StatefulSet", "DaemonSet"];
 /// Namespaced kinds a bundle may have in its namespace (the write role's).
@@ -437,13 +440,45 @@ pub fn bindings_in(
 }
 
 /// Every bundle the agent's roles and admission policy allow: the WAF with
-/// its images, and the databases system with the installation's
-/// (`PYO_DB_CONTROLLER_IMAGE`, `PYO_KV_IMAGE`).
+/// its images, Pyo Static and the databases system with the installation's
+/// (`PYO_STATIC_IMAGE`, `PYO_DB_CONTROLLER_IMAGE`, `PYO_KV_IMAGE`).
 pub fn policy_bundles(waf_image: &str, geoip_image: &str) -> Vec<SystemBundle> {
     vec![
         waf_bundle(waf_image, geoip_image),
+        static_bundle(&crate::system::static_image_from_env()),
         databases_bundle(&crate::system::db_images_from_env()),
     ]
+}
+
+/// Pyo Static: `pyo-static`, which serves every static site of the cluster
+/// (site.rs). Installed with the cluster's first static site, removed after
+/// the last one goes (pyo-api's bundles.rs, `sync_static`); its version
+/// follows its image.
+pub fn static_bundle(image: &str) -> SystemBundle {
+    use crate::system;
+    let hash = image.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+    });
+    SystemBundle {
+        id: STATIC_ID.into(),
+        version: format!("{:08x}", hash >> 32),
+        name: "Pyo Static".into(),
+        description: "Serves static sites.".into(),
+        namespace: system::STATIC_NS.into(),
+        images: vec![image.to_owned()],
+        ready: vec![ReadyCheck {
+            kind: "Deployment".into(),
+            name: system::STATIC_NAME.into(),
+            namespace: None,
+        }],
+        in_use: vec![],
+        managed_namespace_bindings: vec![],
+        objects: vec![
+            system::static_login(),
+            system::static_deployment(image),
+            system::static_service(),
+        ],
+    }
 }
 
 /// What the databases system is called: its id (the `pyo.dev/bundle` label on
@@ -1491,7 +1526,7 @@ mod tests {
             .into_iter()
             .map(|b| b.id)
             .collect();
-        assert_eq!(ids, ["waf", "databases"]);
+        assert_eq!(ids, ["waf", "static", "databases"]);
         let apply = serde_json::to_value(crate::Command::ApplyBundle {
             bundle: Box::new(waf()),
             prune: vec![],
@@ -1506,6 +1541,30 @@ mod tests {
         assert_eq!(remove["kind"], "remove_bundle");
         let v = serde_json::to_value(crate::Heartbeat::default()).unwrap();
         assert!(v.get("bundles").is_some());
+    }
+
+    #[test]
+    fn pyo_static_is_a_bundle_of_its_own() {
+        let b = static_bundle("registry.example.com/pyo/static:1");
+        assert!(b.check().is_ok(), "{:?}", b.check());
+        assert_eq!(
+            b.containers()[0]["image"],
+            "registry.example.com/pyo/static:1"
+        );
+        assert!(
+            b.objects
+                .iter()
+                .all(|o| o["metadata"]["namespace"] == crate::system::STATIC_NS)
+        );
+        // Its login is the agent's to fill in.
+        assert!(b.objects[0].get("data").is_none());
+        assert_ne!(
+            b.version,
+            static_bundle("registry.example.com/pyo/static:2").version
+        );
+        // The admission policy holds its pod to the bundle's.
+        let allowed = allowed_cel(&[b]);
+        assert!(allowed.contains("'registry.example.com/pyo/static:1'"));
     }
 
     #[test]
