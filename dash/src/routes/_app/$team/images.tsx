@@ -11,7 +11,7 @@ import {
 } from "~/components/pyo/ProjectCard";
 import { AppLink } from "~/components/ui/AppLink";
 import { Select } from "~/components/ui/Field";
-import { EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
+import { EmptyState, ErrorState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { SearchInput, Table, Td, Th, Tr } from "~/components/ui/Table";
 import { fetchImages, type TeamImage } from "~/lib/pyo/backend";
 import { mem, plural } from "~/lib/pyo/format";
@@ -39,17 +39,24 @@ function Images() {
     "recent",
   );
   const [open, setOpen] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let live = true;
     setImages(null);
+    setError("");
     fetchImages(s.currentTeamId)
       .then((r) => live && setImages(r.images))
-      .catch(() => live && setImages([]));
+      .catch((e: unknown) => {
+        if (!live) return;
+        setError(e instanceof Error ? e.message : "Couldn't load the images.");
+        setImages([]);
+      });
     return () => {
       live = false;
     };
-  }, [s.currentTeamId, s.deployments.length]);
+  }, [s.currentTeamId, s.deployments.length, attempt]);
 
   const serviceById = useMemo(
     () => new Map(s.services.map((a) => [a.id, a])),
@@ -117,6 +124,14 @@ function Images() {
           <p className="px-4 py-8 text-center text-[13px] text-muted-foreground">
             Loading images…
           </p>
+        </Panel>
+      ) : error ? (
+        <Panel>
+          <ErrorState
+            title="Couldn't load images"
+            description={error}
+            onRetry={() => setAttempt((n) => n + 1)}
+          />
         </Panel>
       ) : rows.length ? (
         <ListSection

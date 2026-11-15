@@ -1,4 +1,5 @@
 import {
+  ArrowClockwiseIcon,
   ArrowLeftIcon,
   ArrowRightIcon,
   GitBranchIcon,
@@ -46,6 +47,7 @@ export function ComposeImport({ onBack }: { onBack: () => void }) {
   const [file, setFile] = useState("");
   const [env, setEnv] = useState("");
   const [repos, setRepos] = useState<GithubRepo[] | null>(null);
+  const [reposError, setReposError] = useState("");
   const [repo, setRepo] = useState("");
   const [branch, setBranch] = useState("");
   const [path, setPath] = useState("compose.yaml");
@@ -59,7 +61,10 @@ export function ComposeImport({ onBack }: { onBack: () => void }) {
     if (from !== "repo" || repos || !team) return;
     fetchGithubRepos(team.id)
       .then((r) => setRepos(r.repositories))
-      .catch(() => setRepos([]));
+      .catch((e: unknown) => {
+        setReposError(e instanceof Error ? e.message : "Couldn't load the repositories.");
+        setRepos([]);
+      });
   }, [from, repos, team]);
 
   const preview = async (e: FormEvent) => {
@@ -197,7 +202,27 @@ export function ComposeImport({ onBack }: { onBack: () => void }) {
             </div>
           ) : (
             <div className="grid gap-4 p-5 sm:grid-cols-2">
-              <Field label="Repository" className="sm:col-span-2">
+              <Field
+                label="Repository"
+                className="sm:col-span-2"
+                hint={
+                  reposError ? (
+                    <>
+                      <span className="text-destructive">{reposError}</span>{" "}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReposError("");
+                          setRepos(null);
+                        }}
+                        className="inline-flex items-center gap-1 font-medium underline underline-offset-2"
+                      >
+                        <ArrowClockwiseIcon size={12} /> Try again
+                      </button>
+                    </>
+                  ) : undefined
+                }
+              >
                 {(f) => (
                   <Select
                     {...f}
@@ -207,7 +232,7 @@ export function ComposeImport({ onBack }: { onBack: () => void }) {
                       setBranch(repos?.find((r) => r.fullName === e.target.value)?.defaultBranch ?? "");
                     }}
                   >
-                    <option value="">{repos === null ? "Loading…" : repos.length ? "Pick a repository" : "No repositories: connect GitHub first"}</option>
+                    <option value="">{repos === null ? "Loading…" : reposError ? "Couldn't load repositories" : repos.length ? "Pick a repository" : "No repositories: connect GitHub first"}</option>
                     {(repos ?? []).map((r) => (
                       <option key={r.fullName} value={r.fullName}>
                         {r.fullName}
