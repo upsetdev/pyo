@@ -5,7 +5,7 @@ import { LiveCommand } from "~/components/pyo/LiveCommand";
 import { Badge, Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { Dialog } from "~/components/ui/Dialog";
-import { Field, Input, Segmented } from "~/components/ui/Field";
+import { Field, Input } from "~/components/ui/Field";
 import { Tooltip } from "~/components/ui/Tooltip";
 import { DNS_LABEL } from "~/lib/pyo/format";
 import {
@@ -87,15 +87,11 @@ export function serverUse(x: SandboxServer) {
 /** What sandbox.sh takes for --edge-domain. */
 const EDGE_DOMAIN = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
 
-/**
- * Add a sandbox server: your own (a one-time code in one command) or one
- * bought at Hetzner, which comes later.
- */
+/** Add a sandbox server: your own, with a one-time code in one command. */
 export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
   const s = usePyo();
   const role = roleIn(s);
   const canManage = role === "owner" || role === "admin";
-  const [how, setHow] = useState<"own" | "hetzner">("own");
   const [name, setName] = useState(`sandbox-${sandboxServersIn(s).length + 1}`);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -135,24 +131,6 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
 
   return (
     <div className="space-y-4">
-      <Segmented
-        label="Server"
-        value={how}
-        onChange={setHow}
-        options={[
-          { value: "own", label: "Your own server" },
-          {
-            value: "hetzner",
-            disabled: true,
-            title: "Coming soon",
-            label: (
-              <span className="inline-flex items-center gap-1.5">
-                Buy one at Hetzner <Badge>Coming soon</Badge>
-              </span>
-            ),
-          },
-        ]}
-      />
       <NeedsTailscale />
       {result ? (
         <div className="space-y-3 text-[13px]">
