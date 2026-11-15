@@ -355,6 +355,7 @@ async fn sandbox_networking() {
         jail_gid: 65534,
         cgroup_parent: "pyo-sandbox-e2e".into(),
         network: NetworkConfig::default(),
+        edge: None,
         dev: !jailed,
     };
     let layout = Layout::new(&root, jailed);

@@ -13,6 +13,7 @@
 //! | `GET /v1/sandboxes/{id}` | any scope for the sandbox |
 //! | `DELETE /v1/sandboxes/{id}`, `POST .../pause`, `.../resume`, `.../ttl` | lifecycle |
 //! | `POST /v1/sandboxes/{id}/exec` | exec |
+//! | `POST /v1/sandboxes/{id}/ports`, `DELETE .../ports/{port}` | ports |
 //! | `GET PUT DELETE .../files`, `GET .../files/list`, `.../files/stat`, `POST .../files/mkdir` | files |
 //! | `GET /v1/sandboxes/{id}/connect` (WebSocket) | any scope, then each request is checked |
 //!
@@ -87,6 +88,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/sandboxes/{id}/resume", post(resume))
         .route("/v1/sandboxes/{id}/ttl", post(set_ttl))
         .route("/v1/sandboxes/{id}/exec", post(exec))
+        .route("/v1/sandboxes/{id}/ports", post(open_port))
+        .route(
+            "/v1/sandboxes/{id}/ports/{port}",
+            axum::routing::delete(close_port),
+        )
         .route(
             "/v1/sandboxes/{id}/files",
             get(read_file)
@@ -133,7 +139,7 @@ impl AppState {
 
     /// Checks the token for `scope` on `sandbox` (or the whole server), and
     /// that a sandbox token's team owns the sandbox.
-    fn authorize(
+    pub fn authorize(
         &self,
         token: Option<&str>,
         sandbox: Option<&str>,
@@ -236,6 +242,18 @@ pub async fn run_command(
             st.authorize(token, Some(&id), Scope::Lifecycle)?;
             DaemonResult::Sandbox {
                 sandbox: mgr.set_ttl(&id, ttl_secs)?,
+            }
+        }
+        DaemonCommand::OpenPort { id, port, public } => {
+            st.authorize(token, Some(&id), Scope::Ports)?;
+            DaemonResult::Sandbox {
+                sandbox: mgr.open_port(&id, port, public).await?,
+            }
+        }
+        DaemonCommand::ClosePort { id, port } => {
+            st.authorize(token, Some(&id), Scope::Ports)?;
+            DaemonResult::Sandbox {
+                sandbox: mgr.close_port(&id, port).await?,
             }
         }
         DaemonCommand::Get { id } => {
@@ -358,6 +376,47 @@ async fn resume(
             DaemonCommand::Resume { id },
         )
         .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortBody {
+    port: u16,
+    #[serde(default = "yes")]
+    public: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+async fn open_port(
+    State(st): S,
+    Path(id): Path<String>,
+    h: HeaderMap,
+    Query(q): Q,
+    axum::Json(b): axum::Json<PortBody>,
+) -> ApiResult<impl IntoResponse> {
+    let cmd = DaemonCommand::OpenPort {
+        id,
+        port: b.port,
+        public: b.public,
+    };
+    Ok(axum::Json(
+        run_command(&st, token_of(&h, &q).as_deref(), cmd).await?,
+    ))
+}
+
+async fn close_port(
+    State(st): S,
+    Path((id, port)): Path<(String, u16)>,
+    h: HeaderMap,
+    Query(q): Q,
+) -> ApiResult<impl IntoResponse> {
+    let cmd = DaemonCommand::ClosePort { id, port };
+    Ok(axum::Json(
+        run_command(&st, token_of(&h, &q).as_deref(), cmd).await?,
     ))
 }
 

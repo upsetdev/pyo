@@ -55,6 +55,9 @@ pub struct Config {
     /// Sandbox networking. See `network`.
     #[serde(default)]
     pub network: crate::network::NetworkConfig,
+    /// The edge proxy for sandbox ports. Off when left out. See `edge`.
+    #[serde(default)]
+    pub edge: Option<crate::edge::EdgeConfig>,
     /// Dev mode: run Firecracker directly as the current user, without the
     /// jailer, seccomp per jail or cgroups. Never on a real server.
     #[serde(default)]

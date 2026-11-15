@@ -139,6 +139,10 @@ pub struct CapabilityReport {
     /// Whether sandboxes on this server can get a network.
     #[serde(default)]
     pub network: bool,
+    /// The edge proxy's base URL, like `https://sbx.example.com`, when it
+    /// runs. A port's URL comes from [`CapabilityReport::port_url`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_url: Option<String>,
     #[serde(default)]
     pub checks: Vec<Check>,
     /// Why the server can't run sandboxes, in one plain sentence.
@@ -166,6 +170,20 @@ impl CapabilityReport {
                 .clone()
                 .unwrap_or_else(|| "This server can't run sandboxes.".into()),
         }
+    }
+
+    /// The URL of a sandbox port on this server's edge proxy.
+    pub fn port_url(&self, sandbox: &str, port: u16) -> Option<String> {
+        let base = self.edge_url.as_deref()?;
+        let (scheme, rest) = base.split_once("://")?;
+        let (domain, listen_port) = match rest.trim_end_matches('/').rsplit_once(':') {
+            Some((d, p)) => (d, format!(":{p}")),
+            None => (rest.trim_end_matches('/'), String::new()),
+        };
+        Some(format!(
+            "{scheme}://{}{listen_port}",
+            port_host(port, sandbox, domain)
+        ))
     }
 
     /// Whether a sandbox asking for `isolation` can run here.
@@ -454,6 +472,49 @@ pub struct SandboxStatus {
     pub memory_used: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Ports open on the server's edge proxy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<OpenPort>,
+}
+
+/// A sandbox port the edge proxy serves at `<port>-<sandbox>.<domain>`.
+/// A public port answers anyone. A private one needs a sandbox token with
+/// the `ports` scope on every request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPort {
+    pub port: u16,
+    pub public: bool,
+}
+
+/// The host a sandbox port has on the edge proxy: `3000-sbx-abc.<domain>`.
+/// The `_` of the sandbox ID becomes `-`, since DNS names and certificates
+/// don't take `_`.
+pub fn port_host(port: u16, sandbox: &str, domain: &str) -> String {
+    format!("{port}-{}.{domain}", sandbox.replacen('_', "-", 1))
+}
+
+/// The other way round: the port and sandbox ID from a host on the edge
+/// proxy, or None when it isn't one. Takes either form of the ID, any
+/// case, and a `:port` at the end.
+pub fn parse_port_host(host: &str, domain: &str) -> Option<(u16, String)> {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let host = match host.rsplit_once(':') {
+        Some((h, p)) if p.bytes().all(|b| b.is_ascii_digit()) => h.to_string(),
+        _ => host,
+    };
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    let label = host.strip_suffix(&domain)?.strip_suffix('.')?;
+    let (port, id) = label.split_once('-')?;
+    if port.is_empty() || port.starts_with('0') {
+        return None;
+    }
+    let port: u16 = port.parse().ok().filter(|p| *p > 0)?;
+    let id = match id.strip_prefix("sbx-") {
+        Some(rest) => format!("{SANDBOX_ID_PREFIX}{rest}"),
+        None => id.to_string(),
+    };
+    is_sandbox_id(&id).then_some((port, id))
 }
 
 /// The memory picture of a sandbox server, for the scheduler.
@@ -584,6 +645,22 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         network: Option<NetworkMode>,
     },
+    /// Serves a sandbox port on the edge proxy. Opening an open port again
+    /// changes whether it's public.
+    OpenPort {
+        id: String,
+        port: u16,
+        #[serde(default = "yes")]
+        public: bool,
+    },
+    ClosePort {
+        id: String,
+        port: u16,
+    },
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl DaemonCommand {
@@ -595,6 +672,8 @@ impl DaemonCommand {
             | DaemonCommand::Pause { id }
             | DaemonCommand::Resume { id }
             | DaemonCommand::SetTtl { id, .. }
+            | DaemonCommand::OpenPort { id, .. }
+            | DaemonCommand::ClosePort { id, .. }
             | DaemonCommand::Get { id } => Some(id),
             DaemonCommand::List
             | DaemonCommand::Report
@@ -910,6 +989,61 @@ mod tests {
         let j = serde_json::to_value(&e).unwrap();
         assert_eq!(j["error"]["code"], "noCapacity");
         assert_eq!(ErrorCode::NoCapacity.http_status(), 503);
+    }
+
+    #[test]
+    fn port_hosts() {
+        let id = "sbx_abcdefghijklmnop";
+        let h = port_host(3000, id, "sbx.example.com");
+        assert_eq!(h, "3000-sbx-abcdefghijklmnop.sbx.example.com");
+        let want = Some((3000, id.to_string()));
+        assert_eq!(parse_port_host(&h, "sbx.example.com"), want);
+        assert_eq!(
+            parse_port_host(
+                "3000-SBX_abcdefghijklmnop.Sbx.Example.com:443",
+                "sbx.example.com."
+            ),
+            want
+        );
+        for bad in [
+            "3000-sbx-abcdefghijklmnop.other.com",
+            "sbx-abcdefghijklmnop.sbx.example.com",
+            "0-sbx-abcdefghijklmnop.sbx.example.com",
+            "03000-sbx-abcdefghijklmnop.sbx.example.com",
+            "70000-sbx-abcdefghijklmnop.sbx.example.com",
+            "3000-sbx-short.sbx.example.com",
+            "3000-sbx-abcdefghijklmnop.x.sbx.example.com",
+            "sbx.example.com",
+        ] {
+            assert_eq!(parse_port_host(bad, "sbx.example.com"), None, "{bad}");
+        }
+        let cap = CapabilityReport {
+            edge_url: Some("https://sbx.example.com".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cap.port_url(id, 8080).unwrap(),
+            "https://8080-sbx-abcdefghijklmnop.sbx.example.com"
+        );
+        let local = CapabilityReport {
+            edge_url: Some("http://sbx.test:8081/".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            local.port_url(id, 1).unwrap(),
+            "http://1-sbx-abcdefghijklmnop.sbx.test:8081"
+        );
+        assert_eq!(CapabilityReport::default().port_url(id, 1), None);
+        let open: DaemonCommand =
+            serde_json::from_str(r#"{"type":"openPort","id":"x","port":3000}"#).unwrap();
+        assert_eq!(
+            open,
+            DaemonCommand::OpenPort {
+                id: "x".into(),
+                port: 3000,
+                public: true
+            }
+        );
     }
 
     #[test]
