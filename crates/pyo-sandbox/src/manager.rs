@@ -835,7 +835,17 @@ impl Manager {
                     tracing::info!(pool = %net.cfg.pool, "sandbox networking is on");
                 }
                 Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"), "sandbox networking is off");
+                    let detail = format!("{e:#}");
+                    tracing::warn!(error = %detail, "sandbox networking is off");
+                    self.capability
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .checks
+                        .push(pyo_proto::sandbox::Check {
+                            name: "networkSetup".into(),
+                            ok: false,
+                            detail,
+                        });
                 }
             }
         }

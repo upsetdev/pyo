@@ -10,8 +10,8 @@
 //! 3. Without KVM: `runsc --platform=systrap do true` as root.
 //! 4. Neither: the server is refused with a plain reason.
 //!
-//! `/dev/net/tun` and nftables only decide whether sandboxes can get a
-//! network, not the runtime.
+//! `/dev/net/tun`, nftables and another firewall's FORWARD policy only
+//! decide whether sandboxes can get a network, not the runtime.
 
 use std::os::fd::AsRawFd;
 use std::path::Path;
@@ -102,6 +102,21 @@ pub async fn detect(inputs: Inputs<'_>) -> CapabilityReport {
         nft,
         if nft { "nft found" } else { "nft not found" }.into(),
     );
+    // Another firewall's FORWARD policy that drops sandbox traffic. The
+    // daemon lets taps through with iptables (see network.rs), so it's
+    // only a problem without iptables.
+    if let Some(why) = crate::network::forward_unhandled().await {
+        check("forwarding", false, why);
+    } else if let Some(chain) = crate::network::forward_state()
+        .await
+        .and_then(|s| s.chain())
+    {
+        check(
+            "forwarding",
+            true,
+            format!("The FORWARD policy is DROP. The daemon lets sandbox taps through in {chain}."),
+        );
+    }
     // Set by the daemon once its nftables table is in place. See network.rs.
     r.network = false;
 

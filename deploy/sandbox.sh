@@ -495,6 +495,19 @@ uninstall() {
   for p in $(pgrep -x firecracker || true); do
     case "$(readlink "/proc/$p/cwd" 2>/dev/null)" in "$DATA"/*) kill -9 "$p" 2>/dev/null || true ;; esac
   done
+  # Its firewall rules: the nftables table, and the iptables rules it adds
+  # when another firewall drops forwarded traffic (they carry its comment).
+  nft delete table inet pyo_sandbox >/dev/null 2>&1 || true
+  if command -v iptables >/dev/null; then
+    local c r
+    for c in FORWARD DOCKER-USER; do
+      iptables -w -S "$c" 2>/dev/null | grep -e '--comment pyo-sandbox ' | sed 's/^-A /-D /' |
+        while read -r r; do
+          # shellcheck disable=SC2086 # one rule's arguments
+          iptables -w $r || true
+        done
+    done
+  fi
   rm -f "$UNIT" "$BIN"
   systemctl daemon-reload || true
   rm -rf "$LIB" "$ETC" "$DATA"
