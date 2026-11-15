@@ -3,6 +3,17 @@
 //! gVisor. Clients speak it too, over the daemon's WebSocket, one frame per
 //! binary message, and the daemon checks every request against the token.
 //!
+//! ## Who connects
+//!
+//! - On Firecracker envd listens on vsock port [`ENVD_VSOCK_PORT`] and dials
+//!   the host once on [`READY_VSOCK_PORT`] as the ready signal.
+//! - On gVisor envd never listens, because a bound host socket blocks
+//!   `runsc checkpoint`. It dials a per-sandbox host Unix socket, keeps one
+//!   idle connection waiting and dials again when that one gets used or
+//!   closes.
+//!
+//! Either way the protocol is the same and `Hello` is the first frame.
+//!
 //! ## Frames
 //!
 //! ```text
