@@ -32,7 +32,7 @@ type Phase =
   | { kind: "closed"; message: string; error?: boolean };
 
 /** The app's theme colors, so the terminal matches light and dark mode. */
-function theme() {
+export function theme() {
   const css = getComputedStyle(document.documentElement);
   const hsl = (name: string) => `hsl(${css.getPropertyValue(name).trim()})`;
   return {
@@ -70,6 +70,54 @@ const SHELLS = [
   },
 ];
 
+/** An xterm in `host`, styled like the dashboard and sized to it. */
+export function openXterm(host: HTMLElement) {
+  const term = new Terminal({
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    fontSize: 12.5,
+    lineHeight: 1.2,
+    cursorBlink: true,
+    theme: theme(),
+    scrollback: 5000,
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.open(host);
+  fit.fit();
+  term.focus();
+  return { term, fit };
+}
+
+/**
+ * Leaving the page ends a live terminal: ask first (and on reload or
+ * closing the tab). Render what it returns.
+ */
+export function useLeaveGuard(live: boolean) {
+  const blocker = useBlocker({
+    shouldBlockFn: () => live,
+    enableBeforeUnload: () => live,
+    withResolver: true,
+  });
+  const leaving = useRef(false);
+  return (
+    <ConfirmDialog
+      open={blocker.status === "blocked"}
+      tone="primary"
+      title="Close the terminal?"
+      description="Leaving ends your terminal session."
+      confirmLabel="Leave and close"
+      onConfirm={() => {
+        leaving.current = true;
+        blocker.proceed?.();
+      }}
+      onClose={() => {
+        if (!leaving.current) blocker.reset?.();
+        leaving.current = false;
+      }}
+    />
+  );
+}
+
 export function ServiceTerminal({ app }: { app: Application }) {
   const host = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
@@ -79,12 +127,7 @@ export function ServiceTerminal({ app }: { app: Application }) {
   const [zoomed, setZoomed] = useState(false);
   // Leaving the page ends the shell: ask first (and on reload or closing the tab).
   const live = phase.kind === "open" || phase.kind === "connecting";
-  const blocker = useBlocker({
-    shouldBlockFn: () => live,
-    enableBeforeUnload: () => live,
-    withResolver: true,
-  });
-  const leaving = useRef(false);
+  const guard = useLeaveGuard(live);
   const replicas = app.runtime.replicas ?? [];
   // A picked replica that's gone (replaced by a deploy) falls back to any.
   const target = replicas.some((r) => r.name === replica) ? replica : "";
@@ -96,19 +139,7 @@ export function ServiceTerminal({ app }: { app: Application }) {
 
   useEffect(() => {
     if (!session || !host.current) return;
-    const term = new Terminal({
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-      fontSize: 12.5,
-      lineHeight: 1.2,
-      cursorBlink: true,
-      theme: theme(),
-      scrollback: 5000,
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(host.current);
-    fit.fit();
-    term.focus();
+    const { term, fit } = openXterm(host.current);
 
     const q = new URLSearchParams({
       shell,
@@ -260,21 +291,7 @@ export function ServiceTerminal({ app }: { app: Application }) {
           </div>
         )}
       </div>
-      <ConfirmDialog
-        open={blocker.status === "blocked"}
-        tone="primary"
-        title="Close the terminal?"
-        description="Leaving ends your terminal session."
-        confirmLabel="Leave and close"
-        onConfirm={() => {
-          leaving.current = true;
-          blocker.proceed?.();
-        }}
-        onClose={() => {
-          if (!leaving.current) blocker.reset?.();
-          leaving.current = false;
-        }}
-      />
+      {guard}
     </Zoomable>
   );
 }
