@@ -1,14 +1,16 @@
-import { SquaresFourIcon } from "@phosphor-icons/react";
+import { DotsThreeIcon, SquaresFourIcon, TrashIcon } from "@phosphor-icons/react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
+import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Input } from "~/components/ui/Field";
+import { Menu } from "~/components/ui/Menu";
 import { EmptyState, ErrorState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
-import { timeAgo } from "~/lib/pyo/format";
+import { megabytes, timeAgo } from "~/lib/pyo/format";
 import { useQuery } from "~/lib/pyo/query";
-import { sandboxApi, type SandboxTemplate } from "~/lib/pyo/sandbox";
+import { sandboxApi, type SandboxTemplate, type SandboxTemplateServer } from "~/lib/pyo/sandbox";
 import { roleIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { seo } from "~/lib/seo";
@@ -31,6 +33,23 @@ const STATE: Record<SandboxTemplate["state"], { label: string; tone: "success" |
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
+const PHASE: Record<NonNullable<SandboxTemplateServer["phase"]>, string> = {
+  queued: "Queued",
+  pulling: "Pulling",
+  unpacking: "Unpacking",
+  snapshotting: "Booting",
+};
+
+/** How far one server got with a template. */
+function serverLabel(x: SandboxTemplateServer) {
+  if (x.state === "building" && x.phase) {
+    const pct = x.phase === "pulling" && x.imageBytes ? ` ${Math.floor(((x.pulled ?? 0) / x.imageBytes) * 100)}%` : "";
+    return PHASE[x.phase] + pct;
+  }
+  if (x.state === "ready" && x.bytes) return `Ready · ${megabytes(x.bytes / 1024 ** 2)}`;
+  return STATE[x.state]?.label ?? x.state;
+}
+
 function TemplatesPage() {
   const s = usePyo();
   const team = s.currentTeamId;
@@ -40,6 +59,8 @@ function TemplatesPage() {
   const [image, setImage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [removing, setRemoving] = useState<SandboxTemplate | null>(null);
+  const canRemove = (t: SandboxTemplate) => (t.teamId ? canCreate : !!s.user.isAdmin);
   const nameError = name && !NAME.test(name) ? "Lowercase letters, digits, dashes, dots and underscores." : "";
 
   const create = async () => {
@@ -77,6 +98,7 @@ function TemplatesPage() {
                 <Th>Status</Th>
                 <Th>Servers</Th>
                 <Th>Added</Th>
+                <Th />
               </tr>
             </thead>
             <tbody>
@@ -93,8 +115,31 @@ function TemplatesPage() {
                       {STATE[t.state]?.label ?? t.state}
                     </span>
                   </Td>
-                  <Td className="tabular-nums text-muted-foreground">{t.servers.length}</Td>
+                  <Td className="text-[12.5px]">
+                    {t.servers.length
+                      ? t.servers.map((x) => (
+                          <div key={x.id} className="flex items-center gap-1.5 whitespace-nowrap" title={x.error ?? undefined}>
+                            <Dot tone={STATE[x.state]?.tone ?? "neutral"} className="h-1.5 w-1.5" />
+                            <span className="truncate">{x.name}</span>
+                            <span className={x.state === "failed" ? "text-destructive" : "text-muted-foreground"}>{serverLabel(x)}</span>
+                          </div>
+                        ))
+                      : <span className="text-muted-foreground">—</span>}
+                  </Td>
                   <Td className="text-muted-foreground">{timeAgo(t.createdAt)}</Td>
+                  <Td className="text-right">
+                    {canRemove(t) ? (
+                      <Menu
+                        label={`Actions for ${t.name}`}
+                        items={[{ label: "Delete template", icon: <TrashIcon size={14} />, danger: true, onSelect: () => setRemoving(t) }]}
+                        trigger={(p) => (
+                          <Button {...p} variant="ghost" size="icon" className="h-7 w-7">
+                            <DotsThreeIcon size={16} weight="bold" />
+                          </Button>
+                        )}
+                      />
+                    ) : null}
+                  </Td>
                 </Tr>
               ))}
             </tbody>
@@ -128,6 +173,22 @@ function TemplatesPage() {
           </form>
         </Panel>
       ) : null}
+      <ConfirmDialog
+        open={!!removing}
+        onClose={() => setRemoving(null)}
+        title={`Delete ${removing?.name ?? "template"}?`}
+        description="The sandbox servers delete their copies too."
+        confirmLabel="Delete template"
+        onConfirm={() => {
+          const t = removing;
+          if (!t) return;
+          void sandboxApi
+            .removeTemplate(t.id)
+            .then(() => toast({ title: `Deleted ${t.name}` }))
+            .catch((e: Error) => toast({ tone: "error", title: e.message }))
+            .finally(() => q.retry());
+        }}
+      />
     </Page>
   );
 }

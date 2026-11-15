@@ -70,6 +70,7 @@ export function serverCapacity(x: SandboxServer) {
   const parts = [
     c?.cpus ? `${c.cpus} CPU` : "",
     c?.memory ? `${Math.round(c.memory / 1024 ** 3)} GB` : "",
+    x.capacity?.diskFree ? `${Math.round(x.capacity.diskFree / 1024 ** 3)} GB disk free` : "",
     `${x.sandboxes} sandbox${x.sandboxes === 1 ? "" : "es"}`,
   ];
   return parts.filter(Boolean).join(" · ");

@@ -132,6 +132,10 @@ export type SandboxCapacity = {
   running: number;
   paused: number;
   cpusCommitted: number;
+  /** Bytes free in the storage pool, and what templates and sandboxes take. */
+  diskFree?: number;
+  diskTemplates?: number;
+  diskSandboxes?: number;
 };
 
 export type SandboxServer = {
@@ -161,10 +165,22 @@ export type SandboxTemplate = {
   name: string;
   source: { kind: string; image?: string } | null;
   state: "pending" | "building" | "ready" | "failed";
-  servers: string[];
+  /** Each sandbox server that may use it, and how far it got there. */
+  servers: SandboxTemplateServer[];
   error: string | null;
   createdBy: string | null;
   createdAt: number;
+};
+
+export type SandboxTemplateServer = {
+  id: string;
+  name: string;
+  state: "pending" | "building" | "ready" | "failed";
+  phase: "queued" | "pulling" | "unpacking" | "snapshotting" | null;
+  pulled: number | null;
+  imageBytes: number | null;
+  bytes: number | null;
+  error: string | null;
 };
 
 export type CreateSandbox = {
@@ -252,6 +268,10 @@ export const sandboxApi = {
     request<SandboxTemplate>("/api/v1/sandbox-templates", {
       method: "POST",
       body,
+    }),
+  removeTemplate: (id: string) =>
+    request<{ ok: boolean }>(`/api/v1/sandbox-templates/${enc(id)}`, {
+      method: "DELETE",
     }),
 };
 
