@@ -1820,6 +1820,9 @@ export const api = {
         ...(opts.databases?.length ? { databases: opts.databases } : {}),
         ...(opts.confirm ? { confirm: true } : {}),
       }));
+      // A project made for it alone goes again when the service is refused,
+      // so a retry doesn't leave an empty one behind.
+      if (!made && fresh) await send("deleteProject", { id: fresh.id }, true);
       // Its DNS records in Cloudflare, once the service exists.
       if (made)
         for (const r of dnsRecords)

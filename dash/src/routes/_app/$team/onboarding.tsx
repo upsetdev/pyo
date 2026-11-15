@@ -485,7 +485,7 @@ function DeployStep({
   const onNetwork = !host && !!port && reach === "network";
   const [busy, setBusy] = useState(false);
 
-  const deploy = () => {
+  const deploy = async () => {
     const ctx = { clusters: clustersIn(s), takenNames: [] };
     const issues = (["source", "basics", "target"] as const).reduce<Issues>(
       (acc, sec) => ({ ...acc, ...validateSection(sec, named, ctx) }),
@@ -493,7 +493,8 @@ function DeployStep({
     );
     setErrors(issues);
     if (Object.keys(issues).length) return;
-    const { deploymentId } = api.createService({
+    setBusy(true);
+    const { deploymentId, done } = api.createService({
       ...named,
       ports: onNetwork
         ? named.ports.map((p) =>
@@ -513,6 +514,11 @@ function DeployStep({
             ]
           : [],
     });
+    // On to the deployment once the API has it. A refusal shows as a toast.
+    if (!(await done)) {
+      setBusy(false);
+      return;
+    }
     toast({ tone: "info", title: `Deploying ${name}` });
     void navigate({
       to: "/$team/deployments/$deploymentId",
@@ -558,9 +564,14 @@ function DeployStep({
         </div>
       </Layered>
       <div className="space-y-2.5">
-        <Button size="lg" className="h-12 w-full text-[15px]" onClick={deploy}>
-          <RocketLaunchIcon size={17} weight="fill" /> Deploy
-          {name ? ` ${name}` : ""}
+        <Button
+          size="lg"
+          className="h-12 w-full text-[15px]"
+          disabled={busy}
+          onClick={() => void deploy()}
+        >
+          <RocketLaunchIcon size={17} weight="fill" />{" "}
+          {busy ? "Creating…" : `Deploy${name ? ` ${name}` : ""}`}
         </Button>
         {problem ? (
           <p

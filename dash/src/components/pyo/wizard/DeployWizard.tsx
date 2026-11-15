@@ -576,6 +576,7 @@ function Configure({
   const dbProblems = useDbProblems(reqs, dbs, d.clusterId, d.name, catalog);
   const [dbError, setDbError] = useState("");
   const [creating, setCreating] = useState(false);
+  const made = useRef<{ projectId?: string; companions: string[] }>({ companions: [] });
   const clusterName = s.clusters.find((c) => c.id === d.clusterId)?.name ?? "the cluster";
 
   // A very large replica count asks first (the API holds it back otherwise).
@@ -640,31 +641,42 @@ function Configure({
     }
     // Services that come with it (Plausible's ClickHouse), first: its
     // variables point at them.
-    let target = d;
+    // What a refused try already made is kept for the next one.
+    let target = made.current.projectId ? { ...d, projectId: made.current.projectId } : d;
     if (t?.companions.length) {
       setCreating(true);
       // One new project for them all, made first.
-      if (d.projectId === NEW_PROJECT) {
+      if (target.projectId === NEW_PROJECT) {
         const p = api.startProject({ ...newProjectFor(s, d.name, d.teamId), description: "" });
         if (!(await p.done)) {
           setCreating(false);
           setDbError("Couldn't create the project.");
           return;
         }
+        made.current.projectId = p.id;
         target = { ...d, projectId: p.id };
       }
       for (const c of t.companions) {
+        const name = companionService(t, c, d.name);
+        if (made.current.companions.includes(name)) continue;
         const registryId = parseImageInput(c.image, s.registries).registryId;
         const { done } = api.createService(companionDraft(t, c, target, registryId));
         if (!(await done)) {
           setCreating(false);
-          setDbError(`Couldn't create ${companionService(t, c, d.name)}.`);
+          setDbError(`Couldn't create ${name}.`);
           return;
         }
+        made.current.companions.push(name);
       }
-      setCreating(false);
     }
-    const { deploymentId } = api.createService(target, { databases, confirm });
+    // On to the deployment once the API has the service. A refusal shows
+    // as a toast and the form stays as it is.
+    setCreating(true);
+    const { deploymentId, done } = api.createService(target, { databases, confirm });
+    if (!(await done)) {
+      setCreating(false);
+      return;
+    }
     toast({ tone: "info", title: `Deploying ${d.name}` });
     void navigate({
       to: "/$team/deployments/$deploymentId",
