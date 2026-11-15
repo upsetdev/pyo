@@ -245,4 +245,29 @@ mod tests {
             (10, 16)
         );
     }
+
+    /// Two holders of one advisory lock key would wait on each other.
+    #[test]
+    fn lock_keys_are_unique() {
+        let keys = [
+            LOCK_SWEEPER,
+            LOCK_BUILDERS,
+            LOCK_GITHUB,
+            LOCK_DNS,
+            LOCK_BACKUP,
+            LOCK_TEAM_BACKUP,
+            LOCK_UPDATES,
+            LOCK_BACKUP_STORE,
+            LOCK_DATABASE_IMPORTS,
+            crate::geoip::LOCK_GEOIP,
+            // updates::start's one-start-at-a-time lock.
+            LOCK_UPDATES + 1000,
+        ];
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(
+            unique.len(),
+            keys.len(),
+            "advisory lock keys clash: {keys:?}"
+        );
+    }
 }

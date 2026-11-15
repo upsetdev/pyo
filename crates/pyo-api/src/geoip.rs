@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AppState, bg};
 
-pub const LOCK_GEOIP: i64 = 7_007;
+pub const LOCK_GEOIP: i64 = 7_010;
 /// How often the file is checked.
 const TICK: Duration = Duration::from_secs(60);
 const MAX_AGE_MS: i64 = 7 * 86_400_000;
