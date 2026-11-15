@@ -27,6 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && r
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# pyo-api serves the sandbox server's installer (include_str! in join.rs).
+COPY deploy/sandbox.sh ./deploy/sandbox.sh
 ARG CARGO_PROFILE=release
 # Static (musl): pyo-builder (it also runs on any Linux VM), pyo-flows and
 # pyo-static (scratch images) and the CLI. The two builds run side by side, each in its
