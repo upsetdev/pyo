@@ -318,7 +318,7 @@ k3s_memory_refresh() {
 }
 # <<< pyo:small-machine
 
-# >>> pyo:repos (the same in connect.sh, join.sh and scripts/join-node.sh)
+# >>> pyo:repos (the same in connect.sh, join.sh, scripts/join-node.sh and deploy/sandbox.sh)
 # Packages come from their vendors' repositories, whose signing keys are
 # checked by fingerprint here: Tailscale's and NVIDIA's.
 TAILSCALE_KEY=2596A99EAAB33821893C0A79458CA832957F5868
@@ -402,7 +402,7 @@ REPO
 }
 # <<< pyo:repos
 
-# >>> pyo:tailnet-lock (the same in connect.sh and join.sh)
+# >>> pyo:tailnet-lock (the same in connect.sh, join.sh and deploy/sandbox.sh)
 # With Tailnet Lock on, a new machine waits until a signing device signs
 # its key: the command to run there, then the wait (up to an hour).
 tailnet_lock_wait() {
@@ -454,7 +454,7 @@ tailnet_lock_wait
 TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
 [ -n "$TS_IP" ] || { echo "This machine didn't join the tailnet (see above)." >&2; exit 1; }
 
-# >>> pyo:tailnet-host (the same in connect.sh and join.sh)
+# >>> pyo:tailnet-host (the same in connect.sh, join.sh and deploy/sandbox.sh)
 # A tailnet machine's address, from the MagicDNS name Pyo's commands give
 # ("<host>.<tailnet>.ts.net"): its IPv4 from Tailscale's own list of the
 # tailnet's machines, so it needn't resolve through DNS here, else from DNS.

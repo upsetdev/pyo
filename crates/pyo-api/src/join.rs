@@ -3,11 +3,15 @@
 //! published at pyo.dev) with the details as arguments, so the scripts hold
 //! no secrets:
 //! - connect.sh makes a machine a new cluster (k3s and the agent);
-//! - join.sh adds a server to an existing cluster (or a build-only server).
+//! - join.sh adds a server to an existing cluster (or a build-only server);
+//! - sandbox.sh makes a machine a sandbox server (sandbox/join.rs).
 
 /// The scripts, served at /install/join.sh and /install/connect.sh.
 pub const SCRIPT: &str = include_str!("../assets/join.sh");
 pub const CONNECT_SCRIPT: &str = include_str!("../assets/connect.sh");
+/// sandbox.sh makes a machine a sandbox server (sandbox/join.rs). It lives
+/// with install.sh, since it sets up a machine outside any cluster.
+pub const SANDBOX_SCRIPT: &str = include_str!("../../../deploy/sandbox.sh");
 
 /// Where the scripts are published, for when this Pyo has no address
 /// another machine can reach.
@@ -307,6 +311,17 @@ pub async fn serve_connect() -> impl axum::response::IntoResponse {
     )
 }
 
+/// GET /install/sandbox.sh
+pub async fn serve_sandbox() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/x-shellscript; charset=utf-8",
+        )],
+        SANDBOX_SCRIPT,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +577,14 @@ mod tests {
             block("tailnet-host", "connect.sh", CONNECT_SCRIPT),
             "join.sh's tailnet_host differs from connect.sh's"
         );
+        // sandbox.sh joins the tailnet the same way.
+        for name in ["repos", "tailnet-lock", "tailnet-host"] {
+            assert_eq!(
+                block(name, "deploy/sandbox.sh", SANDBOX_SCRIPT),
+                block(name, "connect.sh", CONNECT_SCRIPT),
+                "deploy/sandbox.sh's pyo:{name} block differs from connect.sh's"
+            );
+        }
         for (file, script) in [
             ("connect.sh", CONNECT_SCRIPT),
             ("join.sh", SCRIPT),
