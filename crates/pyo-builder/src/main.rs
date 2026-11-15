@@ -13,6 +13,7 @@
 //! and after `PYO_BUILDKIT_IDLE_SECS` (600) without one it's let go again.
 
 mod git;
+mod site;
 mod source;
 
 use std::{process::Stdio, time::Duration};
@@ -590,6 +591,14 @@ impl Builder {
                 ),
             );
         }
+        // A static build that may be served as static files: its image is
+        // also exported to a folder, to upload what it serves (site.rs).
+        // The image is pushed either way, so it can run as a service.
+        let export = (static_site && job.upload_site).then(|| ws.root.join("site-export"));
+        if let Some(dir) = &export {
+            cmd.arg("--output")
+                .arg(format!("type=local,dest={}", dir.display()));
+        }
         cmd.args([
             "--output",
             &format!("type=image,name={tag},push=true,registry.insecure=true"),
@@ -714,7 +723,12 @@ impl Builder {
             }
             None => vec![],
         };
+        let site = match (&export, &digest) {
+            (Some(dir), Some(_)) => self.upload_site(&job.id, dir).await,
+            _ => None,
+        };
         Ok(BuildResult {
+            site,
             ok: digest.is_some(),
             commit: commit.clone(),
             digest,
@@ -723,8 +737,97 @@ impl Builder {
             exposed_ports,
             detected: Some(detected),
             static_site,
-            site: None,
         })
+    }
+}
+
+impl Builder {
+    /// Uploads a static build's output to be served as static files. None
+    /// (said in the build log) when it can't be: then it runs as a service
+    /// from its image.
+    async fn upload_site(
+        &self,
+        job: &str,
+        export: &std::path::Path,
+    ) -> Option<pyo_proto::site::SiteUpload> {
+        let found = {
+            let export = export.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                let (root, fallback) = site::served_root(&export)?;
+                site::manifest(&root, fallback)
+            })
+            .await
+        };
+        let (m, on_disk, warnings) = match found {
+            Ok(Ok(found)) => found,
+            Ok(Err(e)) => {
+                self.log(
+                    job,
+                    "warn",
+                    &format!(
+                        "Running it as a service: Pyo couldn't find the files it serves ({e:#})."
+                    ),
+                )
+                .await;
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't read the output folder");
+                return None;
+            }
+        };
+        for w in warnings {
+            self.log(job, "warn", &w).await;
+        }
+        let bytes: u64 = m.files.iter().map(|f| f.size).sum();
+        self.log(
+            job,
+            "info",
+            &format!(
+                "Uploading the site: {} files, {}",
+                m.files.len(),
+                size_label(bytes)
+            ),
+        )
+        .await;
+        match site::upload(&self.http, &self.base, job, &m, &on_disk).await {
+            Ok(()) => Some(pyo_proto::site::SiteUpload {
+                files: m.files.len() as u64,
+                bytes,
+                index_fallback: m.index_fallback,
+            }),
+            Err(e) => {
+                self.log(
+                    job,
+                    "warn",
+                    &format!(
+                        "Running it as a service: the site's files couldn't be uploaded ({e:#})."
+                    ),
+                )
+                .await;
+                None
+            }
+        }
+    }
+
+    async fn log(&self, job: &str, level: &str, message: &str) {
+        self.progress(
+            job,
+            BuildProgress {
+                logs: vec![line(level, "builder", message)],
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+/// "12 KiB", "3.4 MiB".
+fn size_label(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{} KiB", bytes.div_ceil(1024))
+    } else {
+        format!("{:.1} MiB", bytes as f64 / 1024.0 / 1024.0)
     }
 }
 
