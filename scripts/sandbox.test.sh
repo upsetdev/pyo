@@ -154,6 +154,68 @@ check "sandboxes outlive daemon restarts" "$unit" "^KillMode=process$" has
 check "the unit runs the daemon with its config" "$unit" "^ExecStart=/usr/local/bin/pyo-sandbox serve --config /etc/pyo-sandbox/config.json$" has
 check "it restarts" "$unit" "^Restart=always$" has
 
+# ── This server's settings: the network and the edge ──
+defaults
+ETC=$tmp/etc3
+mkdir -p "$ETC"
+out=$( (parse_args "${args[@]}" --edge-domain SBX.Example.com. && echo "edge=$EDGE_DOMAIN") 2>&1)
+check "an edge domain is taken in lowercase" "$out" "^edge=sbx.example.com$" has
+out=$( (defaults; ETC=$tmp/etc3; parse_args "${args[@]}" --edge-domain 'sbx example') 2>&1)
+check "an edge domain is a domain" "$out" "isn't a domain" has
+out=$( (defaults; ETC=$tmp/etc3; parse_args "${args[@]}" --edge-cert /etc/x.pem) 2>&1)
+check "a certificate goes with a domain" "$out" "go with --edge-domain" has
+out=$( (defaults; ETC=$tmp/etc3; parse_args "${args[@]}" --edge-domain sbx.example.com --edge-key key.pem) 2>&1)
+check "certificate paths are full paths" "$out" "isn't a full path" has
+json_ok() { python3 -c 'import json,sys; json.load(open(sys.argv[1])); print("json")' "$1" 2>&1; }
+
+defaults
+ETC=$tmp/etc3
+out=$(write_local_config 2>&1)
+local_json=$(cat "$ETC/local.json")
+check "the first run writes the network settings" "$local_json" '"network": \{"pool": "198.18.0.0/16", "dns": \["1.1.1.1", "8.8.8.8"\]' has
+check "and no edge without a domain" "$local_json" '"edge"' lacks
+check "the settings are valid JSON" "$(json_ok "$ETC/local.json")" "^json$" has
+EDGE_DOMAIN=sbx.example.com
+out=$(write_local_config 2>&1)
+local_json=$(cat "$ETC/local.json")
+check "the edge serves HTTP on 80" "$local_json" "\"edge\": \{\"domain\": \"sbx.example.com\", \"http\": \"0.0.0.0:80\", \"cert\": \"$ETC/edge/cert.pem\", \"key\": \"$ETC/edge/key.pem\"\}" has
+check "and no HTTPS without a certificate" "$local_json" '"https"' lacks
+check "it says where the certificate goes" "$out" "put a certificate for \*.sbx.example.com at $ETC/edge/cert.pem" has
+check "the edge settings are valid JSON" "$(json_ok "$ETC/local.json")" "^json$" has
+mkdir -p "$ETC/edge" && echo cert >"$ETC/edge/cert.pem" && echo key >"$ETC/edge/key.pem"
+out=$(write_local_config 2>&1)
+check "with the certificate, HTTPS on 443" "$(cat "$ETC/local.json")" '"https": "0.0.0.0:443", "http": "0.0.0.0:80"' has
+check "and it says so" "$out" "served at https://<port>-<sandbox>.sbx.example.com" has
+check "still valid JSON" "$(json_ok "$ETC/local.json")" "^json$" has
+EDGE_DOMAIN=""
+echo '{"edge": {"domain": "edited.example.com"}}' >"$ETC/local.json"
+write_local_config
+check "a run without a domain keeps the settings" "$(cat "$ETC/local.json")" "edited.example.com" has
+
+# ── The firewall ──
+ufw() {
+  echo "ufw $*" >>"$tmp/ufw"
+  [ "$1" = status ] && echo "Status: ${ufw_state:-active}"
+  return 0
+}
+ufw_state=active
+rm -f "$tmp/ufw"
+firewall
+check "ufw: the daemon on the tailnet" "$(cat "$tmp/ufw")" "ufw allow in on tailscale0 to any port 7070 proto tcp" has
+check "ufw: the edge's ports" "$(cat "$tmp/ufw")" "ufw allow 80/tcp comment Pyo sandbox edge" has
+check "ufw: and 443" "$(cat "$tmp/ufw")" "ufw allow 443/tcp" has
+echo '{"network": {}}' >"$ETC/local.json"
+rm -f "$tmp/ufw"
+firewall
+check "ufw: no edge, no 80" "$(cat "$tmp/ufw")" "80/tcp" lacks
+echo '{"edge": {"domain": "sbx.example.com"}}' >"$ETC/local.json"
+ufw_state=inactive
+rm -f "$tmp/ufw"
+out=$(firewall 2>&1)
+check "without ufw, it says which ports to open" "$out" "open TCP 80 and 443" has
+check "and changes no firewall" "$(cat "$tmp/ufw")" "allow" lacks
+unset -f ufw
+
 # ── sudo: the root shell gets the functions, SETTINGS and PYO_* ──
 bin=$tmp/fakebin
 mkdir -p "$bin"

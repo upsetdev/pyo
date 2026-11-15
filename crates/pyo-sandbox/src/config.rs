@@ -1,5 +1,8 @@
 //! The daemon's config file (JSON). The `sandbox.sh` installer writes it
-//! when a server joins.
+//! when a server joins, from Pyo's answer. The server's own settings, its
+//! `network` and `edge`, go in `local.json` next to it: each of its
+//! top-level fields replaces the config's, so Pyo's file stays as Pyo
+//! wrote it.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -78,13 +81,28 @@ fn default_cgroup() -> String {
     "pyo-sandbox".into()
 }
 
+/// The server's own settings, next to the config.
+pub const LOCAL_FILE: &str = "local.json";
+
+fn read_json(path: &Path) -> anyhow::Result<serde_json::Value> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Config> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let c: Config =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        Ok(c)
+        let mut v = read_json(path)?;
+        let local = path.with_file_name(LOCAL_FILE);
+        if local.exists() {
+            let serde_json::Value::Object(fields) = read_json(&local)? else {
+                bail!("{} isn't a JSON object.", local.display());
+            };
+            if let Some(o) = v.as_object_mut() {
+                o.extend(fields);
+            }
+        }
+        serde_json::from_value(v).with_context(|| format!("parsing {}", path.display()))
     }
 
     /// Whether VMs run under the jailer. Root outside dev mode always does,
@@ -141,6 +159,34 @@ mod tests {
         assert!(!c.dev);
         assert_eq!(c.reserve_bytes(30 << 30), 3 << 30);
         assert_eq!(c.reserve_bytes(1 << 30), 512 << 20);
+    }
+
+    #[test]
+    fn local_settings_replace_the_config_fields() {
+        let dir = std::env::temp_dir().join(format!("pyo-sbx-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut base = serde_json::to_value(minimal()).unwrap();
+        base["memoryOvercommit"] = 1.5.into();
+        std::fs::write(&path, base.to_string()).unwrap();
+        let c = Config::load(&path).unwrap();
+        assert!(c.edge.is_none());
+        std::fs::write(
+            dir.join(LOCAL_FILE),
+            r#"{"network": {"dns": ["9.9.9.9"]},
+                "edge": {"domain": "sbx.example.com", "http": "0.0.0.0:80"}}"#,
+        )
+        .unwrap();
+        let c = Config::load(&path).unwrap();
+        assert_eq!(c.server_id, "srv1");
+        assert_eq!(c.memory_overcommit, 1.5);
+        assert_eq!(c.network.dns, vec![std::net::Ipv4Addr::new(9, 9, 9, 9)]);
+        let edge = c.edge.unwrap();
+        assert_eq!(edge.domain, "sbx.example.com");
+        assert_eq!(edge.http, Some("0.0.0.0:80".parse().unwrap()));
+        std::fs::write(dir.join(LOCAL_FILE), "[]").unwrap();
+        assert!(Config::load(&path).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

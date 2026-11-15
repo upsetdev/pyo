@@ -14,6 +14,12 @@
 #   --version        the Pyo release whose sandbox files it installs
 #   --bundle X       the sandbox files from a file or URL instead of the
 #                    release (PYO_SANDBOX_BUNDLE)
+#   --edge-domain D  serve sandbox ports at <port>-<sandbox>.D on ports 80
+#                    and 443 (PYO_SANDBOX_EDGE_DOMAIN). Needs a wildcard DNS
+#                    record *.D pointing at this server.
+#   --edge-cert F    the certificate for *.D (PEM, full chain). Default:
+#                    /etc/pyo-sandbox/edge/cert.pem
+#   --edge-key F     its private key. Default: /etc/pyo-sandbox/edge/key.pem
 #
 # Run it again with --version to update the daemon. A server that has joined
 # needs no code then. Running sandboxes keep running.
@@ -27,6 +33,15 @@
 # can run: Firecracker where it has KVM, gVisor elsewhere. Then it trades
 # the code for the daemon's config at Pyo over the tailnet, and starts the
 # daemon. The daemon answers only on the tailnet.
+#
+# This server's own settings go in /etc/pyo-sandbox/local.json: the
+# sandboxes' network (their address pool, DNS and blocked ranges) and, with
+# --edge-domain, the edge proxy that serves sandbox ports on 80 and 443.
+# Edit it and restart pyo-sandbox to change them. A run without
+# --edge-domain keeps it as it is. HTTPS starts once the certificate and
+# key are in place: put them there and run this again with --edge-domain.
+# With ufw active, this opens 80 and 443 for the edge. Any other firewall
+# in front of the server needs them open too.
 #
 # Everything is in functions and only the last line runs anything, so a
 # download that stops halfway does nothing.
@@ -168,6 +183,8 @@ defaults() {
   ETC=/etc/pyo-sandbox DATA=/var/lib/pyo-sandbox
   UNIT=/etc/systemd/system/pyo-sandbox.service
   PORT=7070 WORK="" TS_IP="" JAIL_UID="" JAIL_GID=""
+  EDGE_DOMAIN=${PYO_SANDBOX_EDGE_DOMAIN:-} EDGE_CERT="" EDGE_KEY=""
+  EDGE_HTTP=80 EDGE_HTTPS=443
 }
 
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
@@ -186,9 +203,13 @@ parse_args() {
       --tailscale-key) TS_AUTHKEY="${2:-}"; shift 2 ;;
       --version) VERSION="${2:-}"; shift 2 ;;
       --bundle) BUNDLE="${2:-}"; shift 2 ;;
+      --edge-domain) EDGE_DOMAIN="${2:-}"; shift 2 ;;
+      --edge-cert) EDGE_CERT="${2:-}"; shift 2 ;;
+      --edge-key) EDGE_KEY="${2:-}"; shift 2 ;;
       --uninstall) UNINSTALL=1; shift ;;
       -h | --help)
         echo "Usage: sandbox.sh --pyo HOST:PORT --server ID --name NAME --code CODE --version X [--tailscale-key KEY] [--bundle FILE|URL]"
+        echo "                  [--edge-domain DOMAIN [--edge-cert FILE] [--edge-key FILE]]"
         echo "       sandbox.sh --uninstall"
         exit 0
         ;;
@@ -196,6 +217,13 @@ parse_args() {
     esac
   done
   [ -n "$UNINSTALL" ] && return 0
+  EDGE_DOMAIN=${EDGE_DOMAIN%.} EDGE_DOMAIN=${EDGE_DOMAIN,,}
+  [ -z "$EDGE_DOMAIN" ] || [[ $EDGE_DOMAIN =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$ ]] || fail "\"$EDGE_DOMAIN\" isn't a domain, like sbx.example.com."
+  [ -n "$EDGE_DOMAIN" ] || [ -z "$EDGE_CERT$EDGE_KEY" ] || fail "--edge-cert and --edge-key go with --edge-domain."
+  local f
+  for f in "$EDGE_CERT" "$EDGE_KEY"; do
+    [ -z "$f" ] || [[ $f == /* && $f != *[\"\\]* ]] || fail "\"$f\" isn't a full path, like /etc/ssl/sbx.pem."
+  done
   VERSION=${VERSION#v}
   [ -n "$VERSION" ] || [ -n "$BUNDLE" ] || fail "Give the Pyo release with --version, like 0.4.0. Copy the full command from Pyo."
   [ -z "$VERSION" ] || [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || fail "\"$VERSION\" isn't a release version, like 0.4.0."
@@ -372,6 +400,42 @@ redeem() {
   mv -f "$ETC/config.json.new" "$ETC/config.json"
 }
 
+# This server's own settings for the daemon: the sandboxes' network and,
+# with an edge domain, the edge proxy. HTTPS only once the certificate and
+# key are there, so the daemon starts without them.
+local_config() {
+  local cert=${EDGE_CERT:-$ETC/edge/cert.pem} key=${EDGE_KEY:-$ETC/edge/key.pem} https=""
+  if [ -s "$cert" ] && [ -s "$key" ]; then
+    https="\"https\": \"0.0.0.0:$EDGE_HTTPS\", "
+  fi
+  printf '{\n  "network": {"pool": "198.18.0.0/16", "dns": ["1.1.1.1", "8.8.8.8"], "blocked": []}'
+  if [ -n "$EDGE_DOMAIN" ]; then
+    printf ',\n  "edge": {"domain": "%s", %s"http": "0.0.0.0:%s", "cert": "%s", "key": "%s"}' \
+      "$EDGE_DOMAIN" "$https" "$EDGE_HTTP" "$cert" "$key"
+  fi
+  printf '\n}\n'
+}
+
+# Written on the first run and whenever --edge-domain is given. Otherwise
+# kept, with whatever was changed in it by hand.
+write_local_config() {
+  local f=$ETC/local.json cert=${EDGE_CERT:-$ETC/edge/cert.pem} key=${EDGE_KEY:-$ETC/edge/key.pem}
+  if [ -s "$f" ] && [ -z "$EDGE_DOMAIN" ]; then
+    return 0
+  fi
+  local_config > "$f.new" && chmod 644 "$f.new" && mv -f "$f.new" "$f"
+  [ -n "$EDGE_DOMAIN" ] || return 0
+  if [ -s "$cert" ] && [ -s "$key" ]; then
+    echo "Sandbox ports are served at https://<port>-<sandbox>.$EDGE_DOMAIN."
+  else
+    echo "Sandbox ports are served at http://<port>-<sandbox>.$EDGE_DOMAIN for now."
+    echo "For HTTPS, put a certificate for *.$EDGE_DOMAIN at $cert and its key at $key, then run this again with --edge-domain $EDGE_DOMAIN."
+  fi
+}
+
+# Whether the daemon's settings turn the edge proxy on.
+edge_on() { grep -q '"edge"' "$ETC/local.json" 2>/dev/null; }
+
 # The daemon's unit. KillMode=process: stopping or updating the daemon stops
 # only the daemon, and the sandboxes (VMs it started) keep running. The new
 # daemon adopts them.
@@ -398,11 +462,17 @@ UNIT
   mv -f "$UNIT.new" "$UNIT"
 }
 
-# The daemon over the tailnet only. Web traffic for sandbox ports comes
-# later, through the daemon's HTTPS proxy.
+# The daemon over the tailnet only, and the edge proxy (80 and 443) to
+# everyone when it's on. Only ufw is managed here.
 firewall() {
   if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
     ufw allow in on tailscale0 to any port "$PORT" proto tcp comment 'Pyo sandbox daemon over Tailscale' >/dev/null
+    if edge_on; then
+      ufw allow "$EDGE_HTTP/tcp" comment 'Pyo sandbox edge' >/dev/null
+      ufw allow "$EDGE_HTTPS/tcp" comment 'Pyo sandbox edge' >/dev/null
+    fi
+  elif edge_on; then
+    echo "If a firewall is in front of this server, open TCP $EDGE_HTTP and $EDGE_HTTPS to it for sandbox ports."
   fi
 }
 
@@ -432,6 +502,11 @@ uninstall() {
   rm -rf "$LIB" "$ETC" "$DATA"
   if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
     ufw delete allow in on tailscale0 to any port "$PORT" proto tcp >/dev/null 2>&1 || true
+    # Only the edge rules this script added: they carry its comment.
+    if ufw status | grep -q "Pyo sandbox edge"; then
+      ufw delete allow "$EDGE_HTTP/tcp" >/dev/null 2>&1 || true
+      ufw delete allow "$EDGE_HTTPS/tcp" >/dev/null 2>&1 || true
+    fi
   fi
   say "Done. This machine is still on your tailnet. You can remove it in the Tailscale admin console."
 }
@@ -461,6 +536,7 @@ main() {
   else
     say "Joined before: updating the daemon"
   fi
+  write_local_config
   write_unit
   firewall
   start_daemon
