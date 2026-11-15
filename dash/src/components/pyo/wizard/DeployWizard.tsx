@@ -300,6 +300,7 @@ export function imageImport(
 export function ImportPanel({
   title = "Import",
   hint,
+  builderStep = false,
   initialKind,
   onKind,
   compose = false,
@@ -310,6 +311,8 @@ export function ImportPanel({
   title?: ReactNode;
   /** In place of the note under the form. */
   hint?: ReactNode;
+  /** A step of its own sets up the builder (onboarding), so no note about it here. */
+  builderStep?: boolean;
   initialKind: "git" | "image";
   onKind: (k: "git" | "image" | "compose") => void;
   /** Offer a Docker Compose import (it opens a page of its own). */
@@ -331,7 +334,8 @@ export function ImportPanel({
   };
 
   const [repo, setRepo] = useState("");
-  const hasBuilder = buildersIn(s).some((b) => b.status === "ready");
+  const hasBuilder =
+    builderStep || buildersIn(s).some((b) => b.status === "ready");
   const submitGit = (e: FormEvent) => {
     e.preventDefault();
     const r = gitImport(repo);

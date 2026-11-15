@@ -153,6 +153,7 @@ function Onboarding() {
             <ImportPanel
               title={<StepTitle n={1}>What do you want to deploy?</StepTitle>}
               hint="Or try the image nginx:1.27."
+              builderStep
               initialKind={search.source === "image" ? "image" : "git"}
               focusImport
               onKind={(source) =>
