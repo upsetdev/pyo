@@ -96,8 +96,9 @@ export function Menu({
     setOpen(true);
   };
   const toggle = () => {
-    // A hover menu is already open under the pointer; a click keeps it open.
-    if (hover && open) {
+    // A menu the mouse opened is already open under it: a click keeps it
+    // open. A second click, or a tap, closes it.
+    if (hover && open && hovered.current) {
       hovered.current = false;
       return;
     }
@@ -106,19 +107,23 @@ export function Menu({
     else show();
   };
 
-  // Hover: open on mouseover (it bubbles from the trigger, and through React
-  // from the portaled menu); close shortly after leaving both the trigger and
-  // the menu (the delay bridges the gap between them).
+  // Hover: open on pointerover (it bubbles from the trigger, and through
+  // React from the portaled menu); close shortly after leaving both the
+  // trigger and the menu (the delay bridges the gap between them). A mouse
+  // only: a tap is a click, and the mouse events a browser makes up after a
+  // tap would close the menu it just opened.
   const hovered = useRef(false);
   const leaveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const enter = () => {
+  const enter = (e: React.PointerEvent) => {
+    if (e.pointerType !== "mouse") return;
     clearTimeout(leaveTimer.current);
     if (!open) {
       hovered.current = true;
       show();
     }
   };
-  const leave = () => {
+  const leave = (e: React.PointerEvent) => {
+    if (e.pointerType !== "mouse") return;
     clearTimeout(leaveTimer.current);
     leaveTimer.current = setTimeout(() => setOpen(false), 150);
   };
@@ -221,8 +226,8 @@ export function Menu({
     <div
       ref={ref}
       className={`relative inline-flex ${className}`}
-      onMouseOver={hover ? enter : undefined}
-      onMouseLeave={hover ? leave : undefined}
+      onPointerOver={hover ? enter : undefined}
+      onPointerLeave={hover ? leave : undefined}
     >
       {trigger({
         onClick: toggle,
@@ -237,10 +242,10 @@ export function Menu({
               role="menu"
               aria-label={label}
               onKeyDown={onKeyDown}
-              onMouseEnter={
+              onPointerEnter={
                 hover ? () => clearTimeout(leaveTimer.current) : undefined
               }
-              onMouseLeave={hover ? leave : undefined}
+              onPointerLeave={hover ? leave : undefined}
               style={pos}
               className={`fixed z-[80] ${width} ${search ? "max-h-[min(24rem,70vh)] overflow-y-auto" : ""} animate-dropdown-in rounded-xl border border-card-border bg-canvas p-1 shadow-pop`}
             >
