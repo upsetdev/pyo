@@ -5,7 +5,6 @@ import {
   HardDrivesIcon,
   PauseIcon,
   PlayIcon,
-  PlusIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -23,6 +22,7 @@ import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Select } from "~/components/ui/Field";
 import { ListSection } from "~/components/ui/Layered";
 import { Menu } from "~/components/ui/Menu";
+import { NewButton } from "~/components/ui/NewButton";
 import {
   EmptyState,
   ErrorState,
@@ -95,15 +95,8 @@ function SandboxesPage() {
   );
 
   const newMenu = (
-    <Menu
+    <NewButton
       width="w-48"
-      label="New"
-      hover
-      trigger={(p) => (
-        <Button size="sm" {...p}>
-          <PlusIcon size={13} weight="bold" /> New
-        </Button>
-      )}
       items={[
         ...(canUse
           ? [{ label: "New sandbox", icon: <CubeIcon size={14} />, href: "/sandboxes/new" }]

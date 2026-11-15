@@ -17,7 +17,6 @@ import {
   ListIcon,
   MoonIcon,
   PlugsConnectedIcon,
-  PlusIcon,
   RocketLaunchIcon,
   SidebarSimpleIcon,
   SignOutIcon,
@@ -38,8 +37,8 @@ import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { Logo } from "~/components/site/Logo";
 import { useTheme } from "~/components/site/ThemeProvider";
 import { Dot } from "~/components/ui/Badge";
-import { Button, ButtonLink } from "~/components/ui/Button";
 import { Menu } from "~/components/ui/Menu";
+import { NewButton } from "~/components/ui/NewButton";
 import { InviteDialog } from "~/components/pyo/InviteDialog";
 import { NewDomainDialog } from "~/components/pyo/NewDomainDialog";
 import { useUpdateAvailable } from "~/components/pyo/UpdateSettings";
@@ -752,16 +751,7 @@ function NewMenu() {
   const importDatabase = section === "mysql" || section === "postgres" ? `/import?engine=${section}` : "/import";
   return (
     <>
-      <Menu
-        width="w-56"
-        label="New"
-        hover
-        trigger={(p) => (
-          <Button size="sm" {...p}>
-            <PlusIcon size={13} weight="bold" />
-            <span className="hidden sm:inline">New</span>
-          </Button>
-        )}
+      <NewButton
         items={[
           {
             label: "Service",
