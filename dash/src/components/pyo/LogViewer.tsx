@@ -194,6 +194,7 @@ export function ServiceLogViewer({ app }: { app: Application }) {
   useEffect(() => {
     if (!running) return;
     let cancelled = false;
+    setLoading(true);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
       try {

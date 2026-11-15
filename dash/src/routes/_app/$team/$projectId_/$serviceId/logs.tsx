@@ -9,7 +9,7 @@ export const Route = createFileRoute("/_app/$team/$projectId_/$serviceId/logs")(
     const app = usePyo().services.find((a) => a.id === serviceId);
     return app ? (
       <Panel>
-        <ServiceLogViewer key={`${app.id}:${app.status}`} app={app} />
+        <ServiceLogViewer key={app.id} app={app} />
       </Panel>
     ) : null;
   },
