@@ -7,6 +7,7 @@
 # Options (or environment variables):
 #   --version X   a release instead of the latest (PYO_VERSION)
 #   --yes         don't ask before an update that has notices (PYO_YES=1)
+#   PYO_TELEMETRY=off  don't count this install at api.pyo.dev
 #
 # Or removes Pyo from this machine (see uninstall_pyo below):
 #
@@ -33,6 +34,7 @@ defaults() {
   SOURCE=${PYO_UPDATE_SOURCE:-https://api.github.com/repos/upsetdev/pyo}
   VERSION=${PYO_VERSION:-}
   YES=${PYO_YES:-}
+  TELEMETRY=${PYO_TELEMETRY:-}
   WORK=""
   UNINSTALL="" PURGE="" KEEP_K3S="" REMOVE_K3S="" DRY_RUN=""
 }
@@ -89,7 +91,7 @@ become_root() {
   command -v sudo >/dev/null || fail "Run this as root (there's no sudo)."
   say "Pyo needs root. Asking sudo"
   # shellcheck disable=SC2016 # expanded by the new shell
-  exec sudo env PYO_VERSION="$VERSION" PYO_YES="$YES" PYO_UPDATE_SOURCE="$SOURCE" \
+  exec sudo env PYO_VERSION="$VERSION" PYO_YES="$YES" PYO_UPDATE_SOURCE="$SOURCE" PYO_TELEMETRY="$TELEMETRY" \
     bash -c "$(declare -f); main \"\$@\"" install.sh "$@"
 }
 
@@ -925,6 +927,33 @@ YAML
   esac
 }
 
+# Counts a fresh install at api.pyo.dev, once the dashboard answers: Pyo's
+# version, the OS and the arch, nothing else (no hostname, address or
+# owner). PYO_TELEMETRY=off skips it. A failure changes nothing.
+count_install() {
+  case "${TELEMETRY,,}" in
+    off | false | 0 | no)
+      echo "Not counting this install (PYO_TELEMETRY=off)."
+      return 0
+      ;;
+  esac
+  local arch i
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=amd64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) return 0 ;;
+  esac
+  for i in 1 2 3; do
+    curl -fsS -m 5 -o /dev/null http://127.0.0.1:8000/api/v1/meta 2>/dev/null && break
+    [ "$i" = 3 ] && return 0
+    sleep 5
+  done
+  echo "Counting this install at api.pyo.dev (version, OS and arch only). PYO_TELEMETRY=off skips this."
+  curl -fsS --proto '=https' -m 5 -o /dev/null -H 'Content-Type: application/json' \
+    --data "{\"version\":\"$R_VERSION\",\"os\":\"linux\",\"arch\":\"$arch\"}" \
+    https://api.pyo.dev/v1/installs >/dev/null 2>&1 || true
+}
+
 # The agent on this machine's cluster, if it's connected, moves along too
 # (what Pyo's dashboard updates do for every cluster).
 update_local_agent() {
@@ -1322,7 +1351,8 @@ main() {
   ADMIN_PASSWORD=""
   run_upgrader
   if [ -n "$fresh" ]; then
-    : # The first sign-in is printed below.
+    # The first sign-in is printed below.
+    count_install
   else
     ADMIN_PASSWORD=""
     update_local_agent
