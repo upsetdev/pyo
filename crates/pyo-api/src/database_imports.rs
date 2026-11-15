@@ -1283,6 +1283,16 @@ pub(crate) async fn observed(
 
 // ── Files ──────────────────────────────────────────────────────────────────
 
+/// The upload store failed: the details go to the log, the user gets one
+/// plain sentence.
+fn store_failed(e: anyhow::Error) -> ApiError {
+    tracing::warn!(error = %format!("{e:#}"), "couldn't store an import's file");
+    ApiError::new(
+        StatusCode::BAD_GATEWAY,
+        "Couldn't store the file. Try again.",
+    )
+}
+
 /// The team's bucket in Pyo's own store.
 struct Store {
     http: reqwest::Client,
@@ -1710,12 +1720,7 @@ async fn store_file(
     let started = store
         .send(reqwest::Method::POST, key, &[("uploads", "")], vec![])
         .await
-        .map_err(|e| {
-            ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                format!("Couldn't store the file: {e:#}"),
-            )
-        })?;
+        .map_err(store_failed)?;
     let xml = started.text().await.unwrap_or_default();
     let upload_id = xml
         .split("<UploadId>")
@@ -1726,7 +1731,7 @@ async fn store_file(
     if upload_id.is_empty() {
         return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
-            "Couldn't store the file: the store started no upload.",
+            "Couldn't store the file. Try again.",
         ));
     }
     // For the sweeper, should this process stop half-way.
@@ -1797,12 +1802,7 @@ async fn store_file(
                         part,
                     )
                     .await
-                    .map_err(|e| {
-                        ApiError::new(
-                            StatusCode::BAD_GATEWAY,
-                            format!("Couldn't store the file: {e:#}"),
-                        )
-                    })?;
+                    .map_err(store_failed)?;
                 parts.push(
                     res.headers()
                         .get("etag")
@@ -1853,10 +1853,7 @@ async fn store_file(
         .await
     {
         abort().await;
-        return Err(ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            format!("Couldn't store the file: {e:#}"),
-        ));
+        return Err(store_failed(e));
     }
     // What was decompressed (a file cut off past the start is fine).
     if let Some(mut d) = gz {
@@ -1924,9 +1921,10 @@ async fn dump(
         .send()
         .await
         .map_err(|e| {
+            tracing::warn!(error = %e, "couldn't read an import's file from the store");
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
-                format!("Couldn't read the file: {e}"),
+                "Couldn't read the file. Try again.",
             )
         })?;
     if !res.status().is_success() {

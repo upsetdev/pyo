@@ -1847,7 +1847,7 @@ impl Observability {
                     params.clone(),
                 )
                 .await
-                .map_err(|e| ApiError::new(axum::http::StatusCode::BAD_GATEWAY, format!("Couldn't read the logs: {e}")))?;
+                .map_err(logs_unreadable)?;
             let r = r.first().cloned().unwrap_or_default();
             let n = |k: &str| {
                 r[k].as_f64()
@@ -1872,7 +1872,7 @@ impl Observability {
                 params,
             )
             .await
-            .map_err(|e| ApiError::new(axum::http::StatusCode::BAD_GATEWAY, format!("Couldn't read the logs: {e}")))?;
+            .map_err(logs_unreadable)?;
         let more = rows.len() > limit as usize;
         let mode = self.current_ip_mode().await;
         let logs: Vec<Value> = rows
@@ -2330,6 +2330,16 @@ fn split_url(raw: &str) -> (String, String, Vec<String>, Vec<String>) {
         format!("{path}?{}", parts.join("&")),
         keys,
         redacted,
+    )
+}
+
+/// A failed request-log query: the details go to the log, the user gets one
+/// plain sentence.
+fn logs_unreadable(e: impl std::fmt::Display) -> ApiError {
+    tracing::warn!(error = %e, "request logs query failed");
+    ApiError::new(
+        axum::http::StatusCode::BAD_GATEWAY,
+        "Couldn't read the logs. Try again in a minute.",
     )
 }
 

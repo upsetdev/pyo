@@ -399,7 +399,8 @@ async fn authorized(
     let inst = app_get(&s, &format!("/app/installations/{id}"))
         .await
         .map_err(|e| {
-            ApiError::bad_request(format!("GitHub doesn't know that installation: {e:#}"))
+            tracing::warn!(installation = id, error = %format!("{e:#}"), "GitHub installation lookup failed");
+            ApiError::bad_request("GitHub doesn't know that installation. Install the GitHub app again.")
         })?;
     let account = inst["account"]["login"].as_str().unwrap_or("").to_owned();
     let mut tx = s.db.begin().await?;

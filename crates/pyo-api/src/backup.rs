@@ -98,7 +98,7 @@ impl Settings {
         }
         let (url, key, _) = local_store().ok_or_else(|| {
             anyhow!(
-                "This installation has no backup store; back up to an S3-compatible bucket instead."
+                "This installation has no backup store. Back up to an S3-compatible bucket instead."
             )
         })?;
         Ok(Self {
@@ -130,7 +130,7 @@ impl Settings {
         if self.is_local() {
             ensure!(
                 local_store().is_some(),
-                "This installation has no backup store; back up to an S3-compatible bucket instead."
+                "This installation has no backup store. Back up to an S3-compatible bucket instead."
             );
         } else {
             ensure!(

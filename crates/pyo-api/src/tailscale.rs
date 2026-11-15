@@ -1006,15 +1006,19 @@ pub async fn wanted_for(
     Ok(Some(w))
 }
 
+/// Tailscale made no auth key: the details go to the log, the user gets one
+/// plain sentence and where to look.
+fn no_auth_key(e: anyhow::Error) -> ApiError {
+    tracing::warn!(error = %format!("{e:#}"), "Tailscale made no auth key");
+    ApiError::bad_request("Tailscale made no auth key. Check the Tailscale setup in Integrations.")
+}
+
 /// A join command's auth key: single-use, preauthorized, tag:pyo, an hour.
 pub async fn join_key(s: &AppState, what: &str) -> ApiResult<String> {
     let Some((_, c)) = saved_client(s).await? else {
         return Err(ApiError::bad_request(NEEDED));
     };
-    c.auth_key(what)
-        .await
-        .map(|(_, k)| k)
-        .map_err(|e| ApiError::bad_request(format!("Couldn't make an auth key. {e}")))
+    c.auth_key(what).await.map(|(_, k)| k).map_err(no_auth_key)
 }
 
 /// Whether a tailnet domain someone typed can be had: Pyo's reserved names
@@ -1064,9 +1068,12 @@ pub async fn check_domain(s: &AppState, host: &str) -> ApiResult<()> {
         Ok(None) => Ok(()),
         Ok(Some((comment, _))) if comment == mark => Ok(()),
         Ok(Some(_)) => Err(ApiError::conflict("Taken on your tailnet")),
-        Err(e) => Err(ApiError::bad_request(format!(
-            "Couldn't check the name on your tailnet. {e}"
-        ))),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "tailnet name check failed");
+            Err(ApiError::bad_request(
+                "Couldn't check the name on your tailnet. Try again in a minute.",
+            ))
+        }
     }
 }
 
@@ -1328,7 +1335,7 @@ pub async fn host_report(
     let (_, key) = c
         .auth_key("Pyo: its own server")
         .await
-        .map_err(|e| ApiError::bad_request(format!("Couldn't make an auth key. {e}")))?;
+        .map_err(no_auth_key)?;
     tracing::info!("this machine: joining the tailnet");
     Ok(json!({ "state": "join", "authKey": key }))
 }

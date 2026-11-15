@@ -2706,18 +2706,72 @@ async fn run(
 /// Run an operation as `user` from anywhere else (MCP tools): `op` is the
 /// same JSON the dashboard sends, e.g. {"op": "scaleService", "id": …}.
 pub async fn run_json(s: &AppState, user: &User, op: Value) -> ApiResult<Value> {
-    let op: Op = serde_json::from_value(op).map_err(|e| {
-        let e = e.to_string();
-        // Replicas and other counts Kubernetes keeps in 32 bits.
-        if e.contains("expected i32") {
-            ApiError::bad_request(format!(
-                "Invalid operation: {e}. Numbers like replicas go up to 2147483647."
-            ))
-        } else {
-            ApiError::bad_request(format!("Invalid operation: {e}"))
-        }
-    })?;
+    let op: Op =
+        serde_json::from_value(op).map_err(|e| ApiError::bad_request(op_error(&e.to_string())))?;
     run_op(s, user, op).await
+}
+
+/// A request that isn't an operation, in one plain sentence: serde's own
+/// text lists every operation there is, or names Rust types.
+fn op_error(e: &str) -> String {
+    let quoted = |s: &str| s.split('`').nth(1).unwrap_or("").to_owned();
+    if let Some(rest) = e.strip_prefix("unknown variant ") {
+        return format!("There's no operation named {}.", quoted(rest));
+    }
+    if e == "missing field `op`" {
+        return "Name the operation in \"op\".".into();
+    }
+    if let Some(rest) = e.strip_prefix("missing field ") {
+        return format!("The operation needs the field {}.", quoted(rest));
+    }
+    if let Some(rest) = e.strip_prefix("unknown field ") {
+        return format!("The operation has no field {}.", quoted(rest));
+    }
+    // Replicas and other counts are kept in 32 bits.
+    if e.contains("expected i32") || e.contains("expected u32") {
+        return "A number is too large or not a whole number. Counts like replicas go up to 2147483647.".into();
+    }
+    if e.starts_with("invalid type") || e.starts_with("invalid value") {
+        let expected = e.rsplit("expected ").next().unwrap_or("");
+        let kind = if expected.contains("string") {
+            "text"
+        } else if expected.contains("bool") {
+            "true or false"
+        } else if [
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "integer", "number",
+        ]
+        .iter()
+        .any(|n| expected.contains(n))
+        {
+            "a number"
+        } else if expected.contains("sequence") {
+            "a list"
+        } else if expected.contains("map") || expected.contains("struct") {
+            "an object"
+        } else {
+            ""
+        };
+        return if kind.is_empty() {
+            "A field has a value Pyo can't accept.".into()
+        } else {
+            format!("A field has the wrong kind of value. Pyo expected {kind}.")
+        };
+    }
+    "Pyo can't read this operation. Check its fields.".into()
+}
+
+/// A backup bucket that failed its probe: the whole chain goes to the log,
+/// the user gets the outer reason ("couldn't write to the bucket"), or that
+/// reason alone when it's a whole sentence already.
+fn bucket_refused(e: anyhow::Error) -> ApiError {
+    tracing::warn!(error = %format!("{e:#}"), "backup bucket probe failed");
+    let reason = e.to_string();
+    if reason.starts_with(|c: char| c.is_uppercase()) {
+        return ApiError::bad_request(reason);
+    }
+    ApiError::bad_request(format!(
+        "Couldn't use that bucket: {reason}. Check the endpoint, bucket and keys."
+    ))
 }
 
 async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
@@ -3219,7 +3273,7 @@ async fn apply(
                 crate::outbound::Reach::installation(),
             )
             .await
-            .map_err(|e| ApiError::bad_request(format!("Couldn't use that bucket: {e:#}")))?;
+            .map_err(bucket_refused)?;
             sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('backup', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()")
                 .bind(serde_json::to_value(&cfg).map_err(anyhow::Error::from)?)
                 .execute(&mut **tx)
@@ -3274,16 +3328,15 @@ async fn apply(
                 crate::backup::team_login(&s.db, &team_id)
                     .await
                     .map_err(|e| {
-                        ApiError::bad_request(format!(
-                            "Couldn't use this server's backup store: {e:#}"
-                        ))
+                        tracing::warn!(error = %format!("{e:#}"), "team backup store login failed");
+                        ApiError::bad_request(
+                            "Couldn't use this server's backup store. Try again in a minute.",
+                        )
                     })?;
             } else {
                 crate::backup::probe(s, &base, secret.as_deref(), crate::outbound::Reach::team())
                     .await
-                    .map_err(|e| {
-                        ApiError::bad_request(format!("Couldn't use that bucket: {e:#}"))
-                    })?;
+                    .map_err(bucket_refused)?;
             }
             let cfg = crate::teambackup::TeamSettings {
                 repo_password_sealed: crate::teambackup::repo_password(&team_id, saved.as_ref())
@@ -8308,6 +8361,36 @@ pub(crate) async fn create_service(
     .await?;
     wake.push(c);
     Ok(())
+}
+
+#[cfg(test)]
+mod op_error_tests {
+    use super::*;
+
+    fn err(v: serde_json::Value) -> String {
+        op_error(&serde_json::from_value::<Op>(v).err().unwrap().to_string())
+    }
+
+    #[test]
+    fn plain_sentences() {
+        assert_eq!(
+            err(json!({ "op": "noSuchOp" })),
+            "There's no operation named noSuchOp."
+        );
+        assert_eq!(err(json!({ "id": "x" })), "Name the operation in \"op\".");
+        assert_eq!(
+            err(json!({ "op": "scaleService" })),
+            "The operation needs the field id."
+        );
+        assert_eq!(
+            err(json!({ "op": "scaleService", "id": "a", "replicas": 4_000_000_000u64 })),
+            "A number is too large or not a whole number. Counts like replicas go up to 2147483647."
+        );
+        assert_eq!(
+            err(json!({ "op": "scaleService", "id": 3, "replicas": 1 })),
+            "A field has the wrong kind of value. Pyo expected text."
+        );
+    }
 }
 
 #[cfg(test)]
