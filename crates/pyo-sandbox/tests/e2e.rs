@@ -629,6 +629,9 @@ async fn boots_real_microvms() {
         panic!("{snap:?}")
     };
     note("template_snapshot_ms", took_ms.into());
+    let templates = mgr.report().templates;
+    let busybox = templates.iter().find(|t| t.name == "busybox").unwrap();
+    assert!(busybox.has_snapshot(1, 256, 256), "{templates:?}");
     let sdir = layout.template_snapshot("busybox", &key);
     let mem = std::fs::metadata(sdir.join("vm.mem")).unwrap();
     use std::os::unix::fs::MetadataExt;

@@ -118,8 +118,9 @@ pub fn snapshot_key(
         })
         .collect();
     format!(
-        "fc{v}-{}-{cpus}c-{memory_mib}m-{disk_mib}d",
-        cpu_template.unwrap_or("none").to_lowercase()
+        "fc{v}-{}{}",
+        cpu_template.unwrap_or("none").to_lowercase(),
+        pyo_proto::sandbox::snapshot_size_tag(cpus, memory_mib, disk_mib)
     )
 }
 

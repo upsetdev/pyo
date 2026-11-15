@@ -14,7 +14,7 @@ use std::time::Duration;
 use pyo_proto::sandbox::{
     CapabilityReport, CapacityReport, DaemonError, ErrorCode, ExecRequest, ExecResult, Isolation,
     MAX_TTL_SECS, NetworkMode, Runtime, SANDBOX_PROTOCOL, SandboxSpec, SandboxState, SandboxStatus,
-    ServerReport,
+    ServerReport, TemplateReport,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -182,7 +182,32 @@ impl Manager {
             capability: self.capability(),
             capacity: self.capacity(),
             sandboxes: self.list(),
+            templates: self.templates(),
         }
+    }
+
+    /// The templates in the storage pool and their snapshots.
+    pub fn templates(&self) -> Vec<TemplateReport> {
+        let dir_names = |p: PathBuf| -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(p)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| !n.ends_with(".tmp"))
+                .collect();
+            v.sort();
+            v
+        };
+        dir_names(self.layout.root.join("templates"))
+            .into_iter()
+            .filter(|n| self.layout.template_rootfs(n).exists())
+            .map(|name| TemplateReport {
+                snapshots: dir_names(self.layout.template_dir(&name).join("snapshots")),
+                name,
+            })
+            .collect()
     }
 
     // ── Create ─────────────────────────────────────────────────────────────
