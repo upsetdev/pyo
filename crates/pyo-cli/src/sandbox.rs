@@ -130,6 +130,11 @@ pub enum Command {
         /// A local file or folder, - for stdout, or <ID>:<PATH>.
         to: String,
     },
+    /// Serve a sandbox's ports at their own URLs.
+    Ports {
+        #[command(subcommand)]
+        command: PortsCommand,
+    },
     /// The servers sandboxes run on.
     Servers {
         #[command(subcommand)]
@@ -143,11 +148,43 @@ pub enum Command {
 }
 
 #[derive(Subcommand)]
+pub enum PortsCommand {
+    /// Serve a port the sandbox listens on and print its URL.
+    Open {
+        /// The sandbox's id, sbx_….
+        id: String,
+        /// The port, like 3000.
+        port: u16,
+        /// Only answer with a sandbox token.
+        #[arg(long)]
+        private: bool,
+    },
+    /// Stop serving a port.
+    Close {
+        /// The sandbox's id, sbx_….
+        id: String,
+        /// The port, like 3000.
+        port: u16,
+    },
+    /// The sandbox's open ports.
+    Ls {
+        /// The sandbox's id, sbx_….
+        id: String,
+        /// Print them as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ServersCommand {
     /// Add a sandbox server: prints the command to run on it. Owners and admins.
     Add {
         /// Its name, lowercase letters, digits and dashes.
         name: String,
+        /// Serve sandbox ports at <port>-<sandbox>.DOMAIN. Point *.DOMAIN at the server.
+        #[arg(long, value_name = "DOMAIN")]
+        edge_domain: Option<String>,
     },
     /// The sandbox servers the team can use.
     Ls {
@@ -311,6 +348,7 @@ pub async fn run(api: &Api, team: Option<&str>, cmd: Command) -> Result<()> {
         }
         Command::Shell { id } => shell(api, &id).await,
         Command::Cp { from, to } => cp(api, &from, &to).await,
+        Command::Ports { command } => ports(api, command).await,
         Command::Servers { command } => servers(api, team, command).await,
         Command::Templates { command } => templates(api, team, command).await,
     }
@@ -513,18 +551,69 @@ fn print_sandbox(x: &Value) {
     }
 }
 
+// ── Ports ──────────────────────────────────────────────────────────────────
+
+async fn ports(api: &Api, cmd: PortsCommand) -> Result<()> {
+    match cmd {
+        PortsCommand::Open { id, port, private } => {
+            let r = api
+                .post(
+                    &format!("/api/v1/sandboxes/{}/ports", seg(&id)),
+                    &json!({ "port": port, "public": !private }),
+                )
+                .await?;
+            println!("{}", r["url"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        PortsCommand::Close { id, port } => {
+            api.delete(&format!("/api/v1/sandboxes/{}/ports/{port}", seg(&id)))
+                .await?;
+            ui::ok(&format!("Closed port {port} of {id}."));
+            Ok(())
+        }
+        PortsCommand::Ls { id, json } => {
+            let r = api.get(&format!("/api/v1/sandboxes/{}", seg(&id))).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r["ports"])?);
+                return Ok(());
+            }
+            let list = r["ports"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            if list.is_empty() {
+                println!("No open ports. Open one: pyo sandbox ports open {id} <port>");
+                return Ok(());
+            }
+            let rows: Vec<[String; 3]> = list
+                .iter()
+                .map(|p| {
+                    [
+                        p["port"].as_u64().unwrap_or(0).to_string(),
+                        if p["public"] == json!(false) {
+                            "private"
+                        } else {
+                            "public"
+                        }
+                        .to_owned(),
+                        p["url"].as_str().unwrap_or("-").to_owned(),
+                    ]
+                })
+                .collect();
+            table(&["PORT", "ACCESS", "URL"], &rows);
+            Ok(())
+        }
+    }
+}
+
 // ── Servers and templates ──────────────────────────────────────────────────
 
 async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<()> {
     let team = team_id(api, team).await?;
     match cmd {
-        ServersCommand::Add { name } => {
-            let r = api
-                .post(
-                    "/api/v1/sandbox-servers",
-                    &json!({ "teamId": team, "name": name }),
-                )
-                .await?;
+        ServersCommand::Add { name, edge_domain } => {
+            let mut body = json!({ "teamId": team, "name": name });
+            if let Some(d) = edge_domain {
+                body["edgeDomain"] = json!(d);
+            }
+            let r = api.post("/api/v1/sandbox-servers", &body).await?;
             let mins = (r["expiresAt"].as_i64().unwrap_or(0) - crate::api::now_ms()) / 60_000;
             println!("Run this on the server as root. It works once, for {mins} minutes:\n");
             println!("{}", r["command"].as_str().unwrap_or(""));
