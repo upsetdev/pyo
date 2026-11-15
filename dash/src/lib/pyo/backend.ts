@@ -70,6 +70,8 @@ export const auth = {
     request<{
       signupOpen: boolean;
       invite: { email: string; team: string } | null;
+      /** Email is set up, so "Forgot password?" can send a link. */
+      passwordReset?: boolean;
     }>(
       `/api/auth/config${invite ? `?${new URLSearchParams({ invite })}` : ""}`,
     ),
@@ -96,6 +98,20 @@ export const auth = {
       body: { name, email, password },
     }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
+  /** "Forgot password?": a sign-in link to the address, when an account has it. */
+  forgot: (email: string) =>
+    request<void>("/api/auth/forgot", { method: "POST", body: { email } }),
+  /** The account a sign-in link is for, while it works. */
+  signInLink: (token: string) =>
+    request<{ email: string }>(
+      `/api/auth/reset?${new URLSearchParams({ token })}`,
+    ),
+  /** Use a sign-in link: the new password, and signed in. */
+  resetPassword: (token: string, password: string) =>
+    request<User>("/api/auth/reset", {
+      method: "POST",
+      body: { token, password },
+    }),
 };
 
 /** Options for navigator.credentials, base64url where the browser wants bytes. */

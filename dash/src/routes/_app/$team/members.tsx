@@ -1,5 +1,6 @@
 import {
   DotsThreeIcon,
+  KeyIcon,
   LinkIcon,
   PaperPlaneTiltIcon,
   UserMinusIcon,
@@ -17,7 +18,8 @@ import { Menu } from "~/components/ui/Menu";
 import { Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { seo } from "~/lib/seo";
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
-import { api, membersIn, usePyo } from "~/lib/pyo/store";
+import { copyText } from "~/lib/pyo/clipboard";
+import { api, membersIn, roleIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Role, TeamMember } from "~/lib/pyo/types";
 import {
@@ -42,6 +44,26 @@ function Members() {
   const [inviting, setInviting] = useState(false);
   const [removing, setRemoving] = useState<TeamMember | null>(null);
   const owners = members.filter((m) => m.role === "owner").length;
+  const owner = roleIn(s) === "owner";
+  // A link to choose a new password: emailed, or copied to pass on.
+  const resetSignIn = async (m: TeamMember) => {
+    const r = await api.resetMemberSignIn(m.id);
+    if (!r) return;
+    if (r.emailed || !r.link) {
+      toast({ title: `Sign-in link sent to ${m.email}` });
+      return;
+    }
+    const url = `${window.location.origin}${r.link}`;
+    try {
+      await copyText(url);
+      toast({
+        title: "Sign-in link copied",
+        description: `Send it to ${m.email}. It works once, for 30 minutes.`,
+      });
+    } catch {
+      toast({ tone: "error", title: "Couldn't copy", description: url });
+    }
+  };
   return (
     <div className="space-y-4">
       <Panel
@@ -153,7 +175,16 @@ function Members() {
                               },
                               { type: "separator" as const },
                             ]
-                          : []),
+                          : owner && m.email !== s.user.email
+                            ? [
+                                {
+                                  label: "Reset sign-in",
+                                  icon: <KeyIcon size={14} />,
+                                  onSelect: () => void resetSignIn(m),
+                                },
+                                { type: "separator" as const },
+                              ]
+                            : []),
                         {
                           label:
                             m.status === "invited"

@@ -490,6 +490,8 @@ const RESERVED_SLUGS = new Set([
   "profile",
   "login",
   "signup",
+  "forgot-password",
+  "reset-password",
   "logout",
   "api",
   "new",
@@ -1035,6 +1037,10 @@ export const api = {
   /** A new invite link (the old one stops working), mailed unless `mail` is false. */
   resendInvite(id: string, mail = true) {
     return send<InviteResult>("resendInvite", { id, send: mail });
+  },
+  /** Owners: a one-time link for a member to choose a new password. Emailed, or returned to pass on. */
+  resetMemberSignIn(id: string) {
+    return send<{ emailed: boolean; link?: string }>("resetMemberSignIn", { id });
   },
   saveEmailSettings(input: {
     host: string;

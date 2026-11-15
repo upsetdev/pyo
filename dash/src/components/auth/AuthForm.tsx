@@ -42,6 +42,7 @@ export function AuthForm({
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [signupOpen, setSignupOpen] = useState(true);
+  const [canReset, setCanReset] = useState(false);
   const [canPasskey, setCanPasskey] = useState(false);
   const autofill = useRef<AbortController | null>(null);
 
@@ -50,6 +51,7 @@ export function AuthForm({
       .config(invite)
       .then((c) => {
         setSignupOpen(c.signupOpen);
+        setCanReset(!!c.passwordReset);
         setInvited(c.invite);
         if (c.invite) setEmail(c.invite.email);
       })
@@ -188,15 +190,25 @@ export function AuthForm({
             />
           </div>
           <div>
-            <label htmlFor="password" className={labelClass}>
-              Password
-              {signup ? (
-                <span className="font-normal text-muted-foreground">
-                  {" "}
-                  · 10+ characters
-                </span>
+            <div className="flex items-baseline justify-between">
+              <label htmlFor="password" className={labelClass}>
+                Password
+                {signup ? (
+                  <span className="font-normal text-muted-foreground">
+                    {" "}
+                    · 10+ characters
+                  </span>
+                ) : null}
+              </label>
+              {!signup && canReset ? (
+                <Link
+                  to="/forgot-password"
+                  className="text-[12.5px] text-muted-foreground transition hover:text-primary"
+                >
+                  Forgot password?
+                </Link>
               ) : null}
-            </label>
+            </div>
             <input
               id="password"
               className={inputClass}
