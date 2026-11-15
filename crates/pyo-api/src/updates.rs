@@ -1201,8 +1201,8 @@ mod tests {
         only_pyo("pyo-backup-store", 3903);
         // Pyo's own front: never from a project's pods (Pyo believes
         // X-Forwarded-For from the pod network). Its own namespace, the
-        // gateway's, import Jobs outside projects, and the servers' own
-        // ends of the pod network only.
+        // gateway's, pyo-static's, import Jobs outside projects, and the
+        // servers' own ends of the pod network only.
         let front = find("NetworkPolicy", "pyo");
         let rules = front["spec"]["ingress"].as_array().unwrap();
         assert_eq!(rules.len(), 2);
@@ -1218,6 +1218,7 @@ mod tests {
             json!([
                 { "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "pyo-system" } } },
                 { "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": pyo_proto::system::GATEWAY_NS } } },
+                { "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": pyo_proto::system::STATIC_NS } } },
                 {
                     "namespaceSelector": { "matchExpressions": [{ "key": pyo_proto::rbac::PROJECT_LABEL, "operator": "DoesNotExist" }] },
                     "podSelector": { "matchLabels": { pyo_proto::dbimport::POD_LABEL.0: pyo_proto::dbimport::POD_LABEL.1 } },

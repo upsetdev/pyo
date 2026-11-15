@@ -33,7 +33,7 @@ spec:
 ---
 # The dashboard, API and registry door: Pyo's front, with its own logins.
 # Only from the gateway's proxies, Pyo's own pods (the worker, the agent,
-# builders, the upgrader, log and traffic collectors), a database import
+# builders, the upgrader, log and traffic collectors, pyo-static), a database import
 # fetching its dump, and the servers themselves (pyo-forward's forwards on
 # localhost and the tailnet, kubelet probes). Never from a project's pods:
 # Pyo believes X-Forwarded-For from the pod network, so they'd name any
@@ -57,6 +57,9 @@ spec:
             matchLabels: { kubernetes.io/metadata.name: pyo-system }
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: pyo-gateway }
+        # pyo-static, reading static sites' folders with its cluster's token.
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: pyo-static }
         # pyo-db-controller's import Jobs, in a team's databases namespace
         # (dbimport.rs POD_LABEL); never a project's namespace.
         - namespaceSelector:
