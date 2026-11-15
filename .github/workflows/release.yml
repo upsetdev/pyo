@@ -163,6 +163,20 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      # The sandbox servers' files and their sha256, from the sandbox job.
+      # release.json lists the sums, so they're signed with it: sandbox.sh
+      # checks release.json's signature, then the file for its architecture.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: sandbox-*
+          path: sandbox
+          merge-multiple: true
+      - name: Check the sandbox files
+        run: |
+          cd sandbox
+          for a in x86_64 aarch64; do
+            sha256sum -c "pyo-sandbox-linux-$a.tar.gz.sha256"
+          done
       # What Pyo needs to update itself from the dashboard: the images
       # pinned by the digests that were just signed, and the manifests.
       - name: Write release.json
@@ -176,8 +190,10 @@ jobs:
             --db-controller "$(digest db-controller)" --kv "$(digest kv)" --static "$(digest static)" \
             --mysql-operator "$(digest mysql-operator)" --mysql-backup "$(digest mysql-backup)" \
             --postgres-16 "$(tagged postgres 16-)" --postgres-17 "$(tagged postgres 17-)" --postgres-18 "$(tagged postgres 18-)" \
-            --agent-access "$(docker run --rm "$IMAGES/agent:$VERSION@$(digest agent)" access-hash)" > release.json
-          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, migrations: (.migrations | length)}' release.json
+            --agent-access "$(docker run --rm "$IMAGES/agent:$VERSION@$(digest agent)" access-hash)" \
+            --sandbox-x86_64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-x86_64.tar.gz.sha256)" \
+            --sandbox-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-aarch64.tar.gz.sha256)" > release.json
+          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, sandbox, migrations: (.migrations | length)}' release.json
       # The release's own upgrader reads it before it's signed: an image
       # it doesn't accept, or an agentAccess that isn't its agent's roles,
       # fails the release here, not on installations.
@@ -220,19 +236,6 @@ jobs:
           cd cli-platforms
           for a in pyo-linux-aarch64 pyo-macos-aarch64 pyo-macos-x86_64 pyo-windows-x86_64.exe; do
             sha256sum -c "$a.sha256"
-          done
-      # The sandbox servers' files and their sha256, from the sandbox job.
-      # sandbox.sh downloads the one for its architecture and checks it.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: sandbox-*
-          path: sandbox
-          merge-multiple: true
-      - name: Check the sandbox files
-        run: |
-          cd sandbox
-          for a in x86_64 aarch64; do
-            sha256sum -c "pyo-sandbox-linux-$a.tar.gz.sha256"
           done
       # The release's text: the changes since the previous release, from the
       # Conventional Commits in between (scripts/release-notes.ts).

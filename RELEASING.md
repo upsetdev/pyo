@@ -50,6 +50,9 @@ crates/pyo-sandbox/scripts/bundle.sh --arch x86_64 \
   --kernel out/vmlinux --out dist
 ```
 
+`sandbox.sh --bundle dist/pyo-sandbox-linux-x86_64.tar.gz` installs such a
+build, with `--bundle-sha256 <its sum>` or, unchecked, `--dev`.
+
 `release.json` is signed with
 cosign keyless as `release.json.sigstore.json` (the job needs `id-token:
 write`, and `.github/release-signing-config.json` pins Sigstore's public
@@ -141,6 +144,9 @@ release carries it as an asset. Installations find it in **Settings › Updates*
   (see [Notices](#notices))
 - `k3s`: the k3s a fresh install gets, from `deploy/k3s.env` (see
   [Bump k3s](#bump-k3s)).
+- `sandbox`: the SHA-256 of each architecture's sandbox server files.
+  `deploy/sandbox.sh` checks release.json's signature with cosign, as
+  `install.sh` does, then the files against these.
 
 To try it before tagging:
 
@@ -150,7 +156,8 @@ bun run scripts/release-manifest.ts --version 0.1.0 --images ghcr.io/upsetdev/py
   --waf sha256:<64 hex> --geoip sha256:<64 hex> --db-controller sha256:<64 hex> --kv sha256:<64 hex> \
   --mysql-operator sha256:<64 hex> --mysql-backup sha256:<64 hex> \
   --postgres-16 sha256:<64 hex> --postgres-17 sha256:<64 hex> --postgres-18 sha256:<64 hex> \
-  --agent-access "$(cargo run -q -p pyo-agent -- access-hash)"
+  --agent-access "$(cargo run -q -p pyo-agent -- access-hash)" \
+  --sandbox-x86_64 <64 hex> --sandbox-aarch64 <64 hex>
 ```
 
 ### Notices

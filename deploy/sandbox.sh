@@ -13,7 +13,10 @@
 #   --tailscale-key  joins the tailnet when the machine isn't on it yet
 #   --version        the Pyo release whose sandbox files it installs
 #   --bundle X       the sandbox files from a file or URL instead of the
-#                    release (PYO_SANDBOX_BUNDLE)
+#                    release (PYO_SANDBOX_BUNDLE). Checked like the
+#                    release's: against --bundle-sha256, else against the
+#                    signed release.json of --version. --dev skips the
+#                    check, for files you built yourself.
 #   --edge-domain D  serve sandbox ports at <port>-<sandbox>.D on ports 80
 #                    and 443 (PYO_SANDBOX_EDGE_DOMAIN). Needs a wildcard DNS
 #                    record *.D pointing at this server.
@@ -43,6 +46,11 @@
 # Cloudflare connection covers the domain. Otherwise put them there yourself.
 # With ufw active, this opens 80 and 443 for the edge. Any other firewall
 # in front of the server needs them open too.
+#
+# The sandbox files are checked before anything changes: release.json is
+# checked against its Sigstore signature with cosign, as install.sh does
+# (keyless, Pyo's release workflow at a v* tag), and the files against the
+# SHA-256 it lists for this architecture.
 #
 # Everything is in functions and only the last line runs anything, so a
 # download that stops halfway does nothing.
@@ -246,8 +254,18 @@ tailnet_hostport() {
 }
 # <<< pyo:tailnet-host
 
+# release.json is signed by Pyo's release workflow (cosign sign-blob,
+# keyless), as install.sh checks it. cosign: the one on this machine, or
+# else this pinned release of it, itself checked against its SHA-256.
+COSIGN_VERSION=v3.1.4
+COSIGN_SHA256_AMD64=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+COSIGN_SHA256_ARM64=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
+RELEASE_SIGNER='^https://github\.com/upsetdev/pyo/\.github/workflows/release\.yml@refs/tags/v'
+RELEASE_ISSUER=https://token.actions.githubusercontent.com
+
 defaults() {
   PYO="" SERVER="" NAME="" CODE="" VERSION=${PYO_VERSION:-} BUNDLE=${PYO_SANDBOX_BUNDLE:-}
+  BUNDLE_SHA256=${PYO_SANDBOX_BUNDLE_SHA256:-} DEV=${PYO_SANDBOX_DEV:-}
   TS_AUTHKEY=${TS_AUTHKEY:-} UNINSTALL=""
   RELEASES=${PYO_RELEASES:-https://github.com/upsetdev/pyo/releases/download}
   LIB=/usr/local/lib/pyo-sandbox BIN=/usr/local/bin/pyo-sandbox
@@ -275,12 +293,15 @@ parse_args() {
       --tailscale-key) TS_AUTHKEY="${2:-}"; shift 2 ;;
       --version) VERSION="${2:-}"; shift 2 ;;
       --bundle) BUNDLE="${2:-}"; shift 2 ;;
+      --bundle-sha256) BUNDLE_SHA256="${2:-}"; shift 2 ;;
+      --dev) DEV=1; shift ;;
       --edge-domain) EDGE_DOMAIN="${2:-}"; shift 2 ;;
       --edge-cert) EDGE_CERT="${2:-}"; shift 2 ;;
       --edge-key) EDGE_KEY="${2:-}"; shift 2 ;;
       --uninstall) UNINSTALL=1; shift ;;
       -h | --help)
-        echo "Usage: sandbox.sh --pyo HOST:PORT --server ID --name NAME --code CODE --version X [--tailscale-key KEY] [--bundle FILE|URL]"
+        echo "Usage: sandbox.sh --pyo HOST:PORT --server ID --name NAME --code CODE --version X [--tailscale-key KEY]"
+        echo "                  [--bundle FILE|URL [--bundle-sha256 SUM | --dev]]"
         echo "                  [--edge-domain DOMAIN [--edge-cert FILE] [--edge-key FILE]]"
         echo "       sandbox.sh --uninstall"
         exit 0
@@ -298,6 +319,10 @@ parse_args() {
   done
   VERSION=${VERSION#v}
   [ -n "$VERSION" ] || [ -n "$BUNDLE" ] || fail "Give the Pyo release with --version, like 0.4.0. Copy the full command from Pyo."
+  BUNDLE_SHA256=${BUNDLE_SHA256,,}
+  [ -z "$BUNDLE_SHA256" ] || [[ $BUNDLE_SHA256 =~ ^[0-9a-f]{64}$ ]] || fail "--bundle-sha256 takes the files' SHA-256: 64 hex digits."
+  [ -z "$BUNDLE" ] || [ -n "$BUNDLE_SHA256$VERSION$DEV" ] ||
+    fail "--bundle needs a checksum to check it against: --bundle-sha256 SUM, or --version X for a release's files. For files you built yourself, add --dev."
   [ -z "$VERSION" ] || [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || fail "\"$VERSION\" isn't a release version, like 0.4.0."
   if [ -z "$CODE" ] && joined; then
     return 0
@@ -315,7 +340,7 @@ joined() { [ -s "${ETC:-/etc/pyo-sandbox}/config.json" ]; }
 # the script travels as its functions plus the settings it sets outside them
 # (SETTINGS, which scripts/sandbox.test.sh checks against the script). sudo
 # clears the environment, so every PYO_* variable goes along too.
-SETTINGS="TAILSCALE_KEY NVIDIA_KEY"
+SETTINGS="TAILSCALE_KEY NVIDIA_KEY COSIGN_VERSION COSIGN_SHA256_AMD64 COSIGN_SHA256_ARM64 RELEASE_SIGNER RELEASE_ISSUER"
 become_root() {
   [ "$(id -u)" = 0 ] && return 0
   command -v sudo >/dev/null || fail "Run this as root (there's no sudo)."
@@ -345,27 +370,74 @@ check_system() {
   fi
 }
 
-# Where the release keeps the sandbox server's files.
-bundle_url() { printf '%s/v%s/pyo-sandbox-linux-%s.tar.gz\n' "$RELEASES" "$VERSION" "$ARCH"; }
+# Where the release keeps its files.
+release_url() { printf '%s/v%s/%s\n' "$RELEASES" "$VERSION" "$1"; }
+# The sandbox server's files for this architecture.
+bundle_url() { release_url "pyo-sandbox-linux-$ARCH.tar.gz"; }
+
+# cosign, into $COSIGN: this machine's, or the pinned one for its
+# architecture, checked against its SHA-256 first.
+find_cosign() {
+  COSIGN=$(command -v cosign || true)
+  [ -z "$COSIGN" ] || return 0
+  local arch=amd64 sum=$COSIGN_SHA256_AMD64
+  [ "$ARCH" != aarch64 ] || { arch=arm64; sum=$COSIGN_SHA256_ARM64; }
+  quietly "Downloading the tool that checks it…" curl -fsSL --proto '=https' --retry 3 --max-time 300 -o "$WORK/cosign" \
+    "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-$arch" ||
+    fail "Couldn't download cosign, which checks the release's signature. Run the same command again."
+  [ "$(sha256sum "$WORK/cosign" | cut -d' ' -f1)" = "$sum" ] ||
+    fail "The downloaded cosign doesn't match the expected checksum, so it won't run."
+  chmod 755 "$WORK/cosign"
+  COSIGN=$WORK/cosign
+}
+
+# The release's release.json, once its signature checks out: the one Pyo's
+# release workflow signed (cosign sign-blob, keyless), as install.sh checks
+# it. Nothing in it is used before.
+release_json() {
+  local f
+  for f in release.json release.json.sigstore.json; do
+    quietly "Downloading the release's checksums…" curl -fsSL --proto '=https,http' --retry 3 -o "$WORK/$f" "$(release_url "$f")" ||
+      fail "Couldn't download $f of Pyo $VERSION. Check this machine's internet connection and run the same command again."
+  done
+  find_cosign
+  quietly "Checking the release's signature…" "$COSIGN" verify-blob --bundle "$WORK/release.json.sigstore.json" \
+    --certificate-identity-regexp "$RELEASE_SIGNER" --certificate-oidc-issuer "$RELEASE_ISSUER" "$WORK/release.json" ||
+    fail "release.json's signature doesn't check out: it isn't the one Pyo's release workflow signed. Nothing was changed."
+}
+
+# The sandbox files' SHA-256 for this architecture, from release.json's
+# "sandbox" (scripts/release-manifest.ts writes it pretty-printed).
+release_sum() {
+  sed -n '/^  "sandbox": {/,/^  }/s/^    "'"$ARCH"'": "\([0-9a-f]\{64\}\)",*$/\1/p' "$WORK/release.json" | head -n1
+}
 
 # The sandbox server's files, checked, before anything changes:
-# pyo-sandbox, pyo-envd, firecracker, jailer and vmlinux.
+# pyo-sandbox, pyo-envd, firecracker, jailer and vmlinux. The release's are
+# checked against its signed release.json. Files from --bundle against
+# --bundle-sha256, or the release.json of --version, or not at all with
+# --dev.
 fetch_bundle() {
-  local tgz=$WORK/bundle.tar.gz src=$BUNDLE sum
+  local tgz=$WORK/bundle.tar.gz src=$BUNDLE sum=$BUNDLE_SHA256
+  if [ -z "$sum" ] && [ -n "$VERSION" ] && [ -z "$DEV" ]; then
+    release_json
+    sum=$(release_sum)
+    [ -n "$sum" ] || fail "Pyo $VERSION doesn't list the sandbox files' checksum, so they can't be checked. Use a newer release."
+  fi
   if [ -n "$src" ] && [ -f "$src" ]; then
     cp "$src" "$tgz"
   else
     # The release's own: .github/workflows/sandbox.yml packs it with
-    # crates/pyo-sandbox/scripts/bundle.sh, its .sha256 beside it.
+    # crates/pyo-sandbox/scripts/bundle.sh.
     [ -n "$src" ] || src=$(bundle_url)
     quietly "Downloading the sandbox files…" curl -fsSL --proto '=https,http' --retry 3 -o "$tgz" "$src" ||
       fail "Couldn't download the sandbox files from $src. Check this machine's internet connection and run the same command again."
-    if [ -z "$BUNDLE" ]; then
-      sum=$(curl -fsSL --retry 3 "$src.sha256" 2>/dev/null | awk '{print $1}') && [ -n "$sum" ] ||
-        fail "Couldn't download the sandbox files' checksum. Run the same command again."
-      echo "$sum  $tgz" | sha256sum -c --quiet - >/dev/null 2>&1 ||
-        fail "The sandbox files don't match their checksum. Run the same command again."
-    fi
+  fi
+  if [ -n "$sum" ]; then
+    echo "$sum  $tgz" | sha256sum -c --quiet - >/dev/null 2>&1 ||
+      fail "The sandbox files don't match their checksum. Run the same command again."
+  else
+    echo "The sandbox files aren't checked (--dev)."
   fi
   mkdir -p "$WORK/bundle"
   tar -xzf "$tgz" -C "$WORK/bundle" 2>/dev/null || fail "The sandbox files aren't a .tar.gz. Check --bundle, or run the same command again."

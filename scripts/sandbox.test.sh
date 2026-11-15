@@ -66,35 +66,87 @@ check "the release URL" "$(bundle_url)" "^https://github.com/upsetdev/pyo/releas
 mkdir -p "$tmp/b"
 for f in pyo-sandbox pyo-envd firecracker jailer vmlinux; do echo "$f" >"$tmp/b/$f"; done
 tar -czf "$tmp/bundle.tar.gz" -C "$tmp/b" .
-WORK=$tmp/work1 BUNDLE=$tmp/bundle.tar.gz
+sum=$(sha256sum "$tmp/bundle.tar.gz" | cut -d' ' -f1)
+WORK=$tmp/work1 BUNDLE=$tmp/bundle.tar.gz BUNDLE_SHA256=$sum
 mkdir -p "$WORK"
 out=$( (fetch_bundle && ls "$WORK/bundle") 2>&1)
-check "a local bundle is used as it is" "$out" "vmlinux" has
+check "a local bundle with its checksum is used" "$out" "vmlinux" has
+WORK=$tmp/work1b BUNDLE_SHA256=$(printf '%064d' 0)
+mkdir -p "$WORK"
+out=$( (fetch_bundle && echo "went on") 2>&1)
+check "a local bundle that doesn't match is refused" "$out" "don't match their checksum" has
+check "and goes no further" "$out" "went on" lacks
+WORK=$tmp/work1c BUNDLE_SHA256="" DEV=1
+mkdir -p "$WORK"
+out=$( (fetch_bundle && ls "$WORK/bundle") 2>&1)
+check "--dev uses a local bundle unchecked" "$out" "vmlinux" has
+check "and says so" "$out" "aren't checked \\(--dev\\)" has
+out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --name n --code "$code" --pyo x:1 --bundle "$tmp/bundle.tar.gz") 2>&1)
+check "--bundle alone is refused" "$out" "--bundle needs a checksum" has
+out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --name n --code "$code" --pyo x:1 --bundle "$tmp/bundle.tar.gz" --dev && echo parsed) 2>&1)
+check "--bundle with --dev parses" "$out" "^parsed$" has
+out=$( (defaults; ETC=$tmp/etc; parse_args --server sbs_a --name n --code "$code" --pyo x:1 --bundle "$tmp/bundle.tar.gz" --bundle-sha256 nothex) 2>&1)
+check "--bundle-sha256 is a sha256" "$out" "64 hex digits" has
 rm "$tmp/b/jailer" && tar -czf "$tmp/short.tar.gz" -C "$tmp/b" .
-WORK=$tmp/work2 BUNDLE=$tmp/short.tar.gz
+WORK=$tmp/work2 BUNDLE=$tmp/short.tar.gz DEV=1
 mkdir -p "$WORK"
 out=$( (fetch_bundle) 2>&1)
 check "a bundle without the jailer is refused" "$out" "have no jailer" has
 # A download shows progress, and its failure says what to do, without
 # curl's own words.
 curl() { echo "curl: (6) Could not resolve host" >&2; return 6; }
-WORK=$tmp/work2b BUNDLE=""
+WORK=$tmp/work2b BUNDLE="" DEV="" BUNDLE_SHA256=""
+mkdir -p "$WORK"
+out=$( (fetch_bundle) 2>&1)
+check "the release's checksums come first" "$out" "^Downloading the release's checksums… 0:00$" has
+check "a failed download says to run it again" "$out" "Couldn't download release.json of Pyo 0.4.0.*run the same command again\.$" has
+WORK=$tmp/work2b2 BUNDLE_SHA256=$(printf '%064d' 0)
 mkdir -p "$WORK"
 out=$( (fetch_bundle) 2>&1)
 check "the download shows progress" "$out" "^Downloading the sandbox files… 0:00$" has
-check "a failed download says to run it again" "$out" "Couldn't download the sandbox files from https://github.com/.*run the same command again\.$" has
+check "and its failure says to run it again" "$out" "Couldn't download the sandbox files from https://github.com/.*run the same command again\.$" has
+# The release: release.json lists the files' checksums, and its signature
+# is checked with cosign first.
+cp "$tmp/bundle.tar.gz" "$tmp/release-bundle"
+good=$(sha256sum "$tmp/release-bundle" | cut -d' ' -f1)
 curl() {
-  local a o=""
-  for a in "$@"; do [ "$o" = 1 ] && { echo bundle >"$a"; o=""; }; [ "$a" = -o ] && o=1; done
-  case "$*" in *.sha256*) echo "0000  pyo-sandbox-linux-x86_64.tar.gz" ;; esac
+  local a o="" url=""
+  for a in "$@"; do case "$a" in http*) url=$a ;; esac; done
+  for a in "$@"; do
+    if [ "$o" = 1 ]; then
+      case "$url" in
+        */release.json) printf '{\n  "version": "0.4.0",\n  "sandbox": {\n    "x86_64": "%s",\n    "aarch64": "%s"\n  }\n}\n' "$fake_sum" "$(printf '%064d' 1)" >"$a" ;;
+        *.sigstore.json) echo '{}' >"$a" ;;
+        *) cp "$tmp/release-bundle" "$a" ;;
+      esac
+      o=""
+    fi
+    [ "$a" = -o ] && o=1
+  done
   return 0
 }
-WORK=$tmp/work2c
+cosign() { echo "$*" >"$tmp/cosign-args"; [ -z "${cosign_fails:-}" ] || { echo "none of the expected identities matched" >&2; return 1; }; }
+WORK=$tmp/work2c BUNDLE_SHA256="" fake_sum=$good
+mkdir -p "$WORK"
+out=$( (fetch_bundle && ls "$WORK/bundle") 2>&1)
+check "the release's signature is checked" "$out" "^Checking the release's signature… 0:00$" has
+check "with cosign, as install.sh does" "$(cat "$tmp/cosign-args")" "verify-blob --bundle .*release.json.sigstore.json --certificate-identity-regexp \^https://github\\\\.com/upsetdev/pyo/.*--certificate-oidc-issuer https://token.actions.githubusercontent.com .*release.json$" has
+check "a release's files that match are used" "$out" "vmlinux" has
+WORK=$tmp/work2d fake_sum=$(printf '%064d' 2)
 mkdir -p "$WORK"
 out=$( (fetch_bundle) 2>&1)
 check "a bad checksum says to run it again" "$out" "don't match their checksum. Run the same command again\.$" has
 check "and shows no sha256sum output" "$out" "FAILED|WARNING" lacks
-unset -f curl
+WORK=$tmp/work2e fake_sum=$good
+mkdir -p "$WORK"
+out=$( (cosign_fails=1 fetch_bundle && echo "went on") 2>&1)
+check "a bad signature stops it" "$out" "signature doesn't check out" has
+check "before the files are used" "$out" "went on" lacks
+WORK=$tmp/work2f fake_sum=""
+mkdir -p "$WORK"
+out=$( (fetch_bundle) 2>&1)
+check "a release without the checksums is refused" "$out" "doesn't list the sandbox files' checksum" has
+unset -f curl cosign
 
 # ── Detection ──
 defaults
