@@ -69,7 +69,7 @@ async fn team_read(s: &AppState, user: &crate::auth::User, team: &str) -> ApiRes
 #[utoipa::path(get, path = "/sandboxes", operation_id = "listSandboxes", tag = "Sandboxes",
     params(ListQuery),
     responses(
-        (status = 200, description = "`sandboxes`, newest first, each with `id`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt`, `pausedAt` and `endedAt`. Also `limits` (the team's) and `inUse` (what its sandboxes take now).", body = Object),
+        (status = 200, description = "`sandboxes`, newest first, each with `id`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon), `edgeUrl` (its server's edge proxy, or null), `ports` (each `port`, `public` and `url`), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt`, `pausedAt` and `endedAt`. Also `limits` (the team's) and `inUse` (what its sandboxes take now).", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -97,11 +97,12 @@ pub(crate) async fn list(
 
 /// A sandbox
 ///
-/// One sandbox, as `listSandboxes` lists them.
+/// One sandbox, as `listSandboxes` lists them, with a fresh `connection`
+/// for its server when you may use it.
 #[utoipa::path(get, path = "/sandboxes/{id}", operation_id = "getSandbox", tag = "Sandboxes",
     params(("id" = String, Path, description = "The sandbox's id, `sbx_…`.")),
     responses(
-        (status = 200, description = "The sandbox.", body = Object),
+        (status = 200, description = "The sandbox, with `connection` (as in `createSandbox`) when you may use sandboxes and it lives. Otherwise `connection` is null and `connectionNote` says why: a read-only key, a viewer, or a sandbox that has ended.", body = Object),
         (status = 404, description = "No such sandbox, or you can't see it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -110,8 +111,7 @@ pub(crate) async fn get_one(
     SessionUser(user): SessionUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let f = super::find(&s, &user, &id, Need::Read).await?;
-    Ok(Json(super::view(&s, &f).await?))
+    Ok(Json(super::get(&s, &user, &id).await?))
 }
 
 /// Create a sandbox
@@ -121,12 +121,13 @@ pub(crate) async fn get_one(
 /// runs until its lifetime ends or it's deleted. The answer has the
 /// `connection`: the server's address and a token, valid an hour, for exec,
 /// terminals, files and ports there. Ask for a new token with
-/// `createSandboxToken`.
+/// `createSandboxToken`. `teamId` may be left out when the API key (or
+/// you) can use only one team.
 #[utoipa::path(post, path = "/sandboxes", operation_id = "createSandbox", tag = "Sandboxes",
     request_body(content = CreateSandbox),
     responses(
         (status = 201, description = "`sandbox` (as in `listSandboxes`) and `connection`: `url`, `sandboxId`, `token` and `expiresAt`.", body = Object),
-        (status = 400, description = "A size, lifetime or other value Pyo can't accept.", body = ErrorBody),
+        (status = 400, description = "A size, lifetime or other value Pyo can't accept, or no `teamId` when you can use more than one team.", body = ErrorBody),
         (status = 403, description = "Your role, the API key's access or the team's sandbox limits don't allow it.", body = ErrorBody),
         (status = 404, description = "No such team, template or project.", body = ErrorBody),
         (status = 409, description = "No sandbox server can run it: none yet, none with the template, or none with KVM for `isolation: vm`.", body = ErrorBody),

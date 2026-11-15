@@ -462,6 +462,11 @@ async fn the_control_plane_drives_a_real_daemon() {
             .unwrap();
     assert_eq!(kept["env"]["GREETING"], "", "env values aren't kept");
 
+    // getSandbox brings a fresh connection, and no ports yet.
+    let got = super::get(&s, &user, &id).await.unwrap();
+    assert_eq!(got["connection"]["sandboxId"], json!(id), "{got}");
+    assert_eq!(got["ports"], json!([]), "{got}");
+
     // A new token, then the runner meters it.
     let t2 = super::token(&s, &user, &id).await.unwrap();
     assert!(
@@ -490,6 +495,17 @@ async fn the_control_plane_drives_a_real_daemon() {
     assert_eq!(v["state"], "stopped");
     let e = super::token(&s, &user, &id).await.unwrap_err();
     assert_eq!(e.status, axum::http::StatusCode::CONFLICT);
+    let got = super::get(&s, &user, &id).await.unwrap();
+    assert!(got["connection"].is_null(), "{got}");
+    assert_eq!(got["connectionNote"], "The sandbox has ended.");
+
+    // Without teamId: the user's only team.
+    let mut no_team = req("5m");
+    no_team.team_id = None;
+    let out = super::create(&s, &user, no_team).await.unwrap();
+    assert_eq!(out["sandbox"]["teamId"], json!(team), "{out}");
+    let id2 = out["sandbox"]["id"].as_str().unwrap().to_owned();
+    super::delete(&s, &user, &id2).await.unwrap();
 
     sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
         .bind(&team)

@@ -208,7 +208,8 @@ pub async fn save_status(db: &mut PgConnection, st: &SandboxStatus) -> sqlx::Res
                 started_at = coalesce(started_at, to_timestamp($5::double precision / 1000)),
                 expires_at = to_timestamp($6::double precision / 1000),
                 paused_at = CASE WHEN $2 = 'paused' THEN coalesce(paused_at, now()) ELSE NULL END,
-                ended_at = CASE WHEN $2 IN ('stopped', 'failed') THEN coalesce(ended_at, now()) ELSE NULL END
+                ended_at = CASE WHEN $2 IN ('stopped', 'failed') THEN coalesce(ended_at, now()) ELSE NULL END,
+                ports = $7
           WHERE id = $1",
     )
     .bind(&st.id)
@@ -217,6 +218,7 @@ pub async fn save_status(db: &mut PgConnection, st: &SandboxStatus) -> sqlx::Res
     .bind(&st.error)
     .bind(st.started_at.map(|t| t as f64))
     .bind(st.expires_at as f64)
+    .bind(json!(st.ports))
     .execute(db)
     .await?;
     Ok(())
@@ -261,7 +263,7 @@ pub async fn sandbox_views(
             'labels', coalesce(x.spec->'labels', '{}'),
             'pauseWhenIdleSecs', x.spec->'pauseWhenIdleSecs',
             'env', (SELECT coalesce(jsonb_agg(k ORDER BY k), '[]') FROM jsonb_object_keys(coalesce(x.spec->'env', '{}')) k),
-            'url', sv.address,
+            'url', sv.address, 'edgeUrl', sv.capability->>'edgeUrl', 'ports', x.ports,
             'error', x.error, 'createdBy', x.created_by,
             'createdAt', pyo.ms(x.created_at), 'startedAt', pyo.ms(x.started_at),
             'expiresAt', pyo.ms(x.expires_at), 'pausedAt', pyo.ms(x.paused_at), 'endedAt', pyo.ms(x.ended_at))
@@ -278,12 +280,27 @@ pub async fn sandbox_views(
     .fetch_all(db)
     .await
     .map(|mut rows: Vec<Value>| {
-        // The server's tailnet address as its daemon's URL.
+        // The server's tailnet address as its daemon's URL, and each open
+        // port's URL on its edge proxy.
         for r in &mut rows {
             r["url"] = match r["url"].as_str() {
                 Some(a) => json!(daemon::base_url(a)),
                 None => Value::Null,
             };
+            let edge = proto::CapabilityReport {
+                edge_url: r["edgeUrl"].as_str().map(str::to_owned),
+                ..Default::default()
+            };
+            let id = r["id"].as_str().unwrap_or_default().to_owned();
+            if let Some(ports) = r["ports"].as_array_mut() {
+                for p in ports {
+                    let url = p["port"]
+                        .as_u64()
+                        .and_then(|n| u16::try_from(n).ok())
+                        .and_then(|n| edge.port_url(&id, n));
+                    p["url"] = json!(url);
+                }
+            }
         }
         rows
     })
@@ -352,7 +369,10 @@ pub async fn template_views(
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSandbox {
-    pub team_id: String,
+    /// The team the sandbox belongs to. May be left out when the API key
+    /// (or user) has exactly one team.
+    #[serde(default)]
+    pub team_id: Option<String>,
     /// A sandbox template's name (or id): the team's own, else the
     /// installation's.
     pub template: String,
@@ -528,30 +548,52 @@ async fn connection(
 
 /// Creates a sandbox: checks the limits, picks a server, records it, then
 /// asks the server. Returns the sandbox and how to reach it.
+/// The team a create names, else the caller's only one.
+pub async fn team_for_create(s: &AppState, user: &User, team: Option<&str>) -> ApiResult<String> {
+    if let Some(t) = team.map(str::trim).filter(|t| !t.is_empty()) {
+        return Ok(t.to_owned());
+    }
+    let teams = teams_of(&s.db, user).await?;
+    only_team(&teams).map_err(ApiError::bad_request)
+}
+
+/// The one team, or why teamId is needed.
+fn only_team(teams: &[String]) -> Result<String, String> {
+    match teams {
+        [one] => Ok(one.clone()),
+        [] => Err("Pass teamId. You aren't in any team.".into()),
+        many => Err(format!(
+            "Pass teamId: the team the sandbox belongs to. You can use {} teams.",
+            many.len()
+        )),
+    }
+}
+
 pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<Value> {
     let ttl_secs = parse_ttl_value(req.ttl.as_ref())?;
+    let team_id = team_for_create(s, user, req.team_id.as_deref()).await?;
     let mut tx = s.db.begin().await?;
-    require(&mut tx, user, &req.team_id, Need::Use).await?;
+    require(&mut tx, user, &team_id, Need::Use).await?;
     // One create at a time per team, so two can't both fit the last slot.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('pyo-sandbox:' || $1))")
-        .bind(&req.team_id)
+        .bind(&team_id)
         .execute(&mut *tx)
         .await?;
     let (template_id, template_name, _) =
-        template_for(&mut tx, &req.team_id, req.template.trim()).await?;
+        template_for(&mut tx, &team_id, req.template.trim()).await?;
     if let Some(p) = &req.project_id {
         let ok: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM pyo.projects WHERE id = $1 AND team_id = $2)",
         )
         .bind(p)
-        .bind(&req.team_id)
+        .bind(&team_id)
         .fetch_one(&mut *tx)
         .await?;
         if !ok {
             return Err(ApiError::not_found("Project"));
         }
     }
-    let mut spec = SandboxSpec::new(new_sandbox_id(), &req.team_id, &template_id);
+    let mut spec = SandboxSpec::new(new_sandbox_id(), &team_id, &template_id);
     spec.cpus = req.cpus.unwrap_or(proto::DEFAULT_CPUS);
     spec.memory_mib = req.memory_mib.unwrap_or(proto::DEFAULT_MEMORY_MIB);
     spec.disk_mib = req.disk_mib.unwrap_or(proto::DEFAULT_DISK_MIB);
@@ -562,10 +604,10 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     spec.isolation = req.isolation.unwrap_or_default();
     spec.labels = req.labels;
     spec.validate().map_err(ApiError::bad_request)?;
-    let lim = limits::load(&mut tx, &req.team_id).await?;
-    let used = limits::in_use(&mut tx, &req.team_id).await?;
+    let lim = limits::load(&mut tx, &team_id).await?;
+    let used = limits::in_use(&mut tx, &team_id).await?;
     limits::check(&lim, &used, &spec).map_err(ApiError::forbidden)?;
-    let servers = candidates(&mut tx, &req.team_id).await?;
+    let servers = candidates(&mut tx, &team_id).await?;
     let list: Vec<scheduler::Candidate> = servers.iter().map(|(c, _)| c.clone()).collect();
     let chosen = scheduler::pick(&list, &spec).map_err(|n| {
         let n = match n {
@@ -592,7 +634,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
          VALUES ($1, $2, $3, $4, $5, $6, 'creating', $7, now() + make_interval(secs => $8))",
     )
     .bind(&spec.id)
-    .bind(&req.team_id)
+    .bind(&team_id)
     .bind(&req.project_id)
     .bind(&server_id)
     .bind(&template_id)
@@ -604,7 +646,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     tx.commit().await?;
 
     let key = keys::signing_key(&s.db, &s.sealer).await?;
-    let token = keys::create_token(&key, &spec.id, &req.team_id, &server_id);
+    let token = keys::create_token(&key, &spec.id, &team_id, &server_id);
     let d = daemon::Daemon::new(&address);
     let st = match d
         .sandbox(&token, &DaemonCommand::Create { spec: spec.clone() })
@@ -619,8 +661,8 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     };
     let mut c = s.db.acquire().await?;
     save_status(&mut c, &st).await?;
-    let conn = connection(s, &spec.id, &req.team_id, &server_id, &address).await?;
-    let teams = [req.team_id.clone()];
+    let conn = connection(s, &spec.id, &team_id, &server_id, &address).await?;
+    let teams = [team_id.clone()];
     let view = sandbox_views(&s.db, &teams, Some(&spec.id), false)
         .await?
         .into_iter()
@@ -694,6 +736,30 @@ impl Found {
             keys::client_token(&key, &self.id, &self.team_id, &server).token,
         ))
     }
+}
+
+/// One sandbox for `getSandbox`, with a fresh `connection` when the caller
+/// may use it and it lives. Null otherwise, and `connectionNote` says why.
+pub async fn get(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
+    let f = find(s, user, id, Need::Read).await?;
+    let mut v = view(s, &f).await?;
+    let mut c = s.db.acquire().await?;
+    let may_use = require(&mut c, user, &f.team_id, Need::Use).await;
+    drop(c);
+    let (conn, note) = match (may_use, &f.server_id, &f.address) {
+        (Err(e), _, _) => (None, e.message),
+        (Ok(()), _, _) if f.is_final() => (None, "The sandbox has ended.".into()),
+        (Ok(()), Some(server), Some(address)) => (
+            Some(connection(s, id, &f.team_id, server, address).await?),
+            String::new(),
+        ),
+        (Ok(()), _, _) => (None, "The sandbox's server was removed.".into()),
+    };
+    v["connection"] = json!(conn);
+    if conn.is_none() {
+        v["connectionNote"] = json!(note);
+    }
+    Ok(v)
 }
 
 async fn view(s: &AppState, f: &Found) -> ApiResult<Value> {
@@ -1120,6 +1186,16 @@ mod tests {
             StatusCode::FORBIDDEN,
             "the sandbox's refusal is the caller's"
         );
+    }
+
+    #[test]
+    fn a_create_without_a_team_takes_the_only_one() {
+        assert_eq!(only_team(&["tm_a".into()]).unwrap(), "tm_a");
+        assert!(only_team(&[]).unwrap_err().contains("aren't in any team"));
+        let e = only_team(&["tm_a".into(), "tm_b".into()]).unwrap_err();
+        assert!(e.starts_with("Pass teamId") && e.contains("2 teams"), "{e}");
+        let r: CreateSandbox = serde_json::from_value(json!({ "template": "node-22" })).unwrap();
+        assert_eq!(r.team_id, None);
     }
 
     #[test]

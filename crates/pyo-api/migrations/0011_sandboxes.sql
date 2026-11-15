@@ -100,7 +100,10 @@ CREATE TABLE pyo.sandboxes (
   started_at   timestamptz,
   expires_at   timestamptz NOT NULL,
   paused_at    timestamptz,
-  ended_at     timestamptz
+  ended_at     timestamptz,
+  -- Ports open on the server's edge proxy, as the server last said:
+  -- [{"port": 3000, "public": true}].
+  ports        jsonb NOT NULL DEFAULT '[]'
 );
 CREATE INDEX sandboxes_team ON pyo.sandboxes (team_id, created_at DESC);
 CREATE INDEX sandboxes_live ON pyo.sandboxes (server_id) WHERE state NOT IN ('stopped', 'failed');
