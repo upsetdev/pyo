@@ -770,10 +770,7 @@ pub async fn this_machine(
     Query(q): Query<ThisMachineQuery>,
 ) -> ApiResult<axum::Json<serde_json::Value>> {
     use serde_json::json;
-    let key = std::env::var("PYO_BOOTSTRAP_KEY").unwrap_or_default();
-    if key.len() < 32 || !crate::util::constant_time_eq(key.as_bytes(), q.key.as_bytes()) {
-        return Err(ApiError::not_found("Install key"));
-    }
+    let key = bootstrap_key(&q.key)?;
     Ok(axum::Json(match hand_over(&s.db, &key).await? {
         Handover::Connected => json!({ "state": "connected" }),
         Handover::Waiting => json!({ "state": "waiting" }),
@@ -791,6 +788,39 @@ pub async fn this_machine(
             json!({ "state": "connect", "command": command })
         }
     }))
+}
+
+/// The installation's bootstrap key, when `given` is it.
+fn bootstrap_key(given: &str) -> ApiResult<String> {
+    let key = std::env::var("PYO_BOOTSTRAP_KEY").unwrap_or_default();
+    if key.len() < 32 || !crate::util::constant_time_eq(key.as_bytes(), given.as_bytes()) {
+        return Err(ApiError::not_found("Install key"));
+    }
+    Ok(key)
+}
+
+/// GET /install/first-sign-in?key=…: whether the first admin
+/// (admin@pyo.local) hasn't signed in and chosen their own email and
+/// password yet, for the installer, which then prints that login again
+/// when it runs again. `key` as for this_machine. Answers
+/// `{"pending": true|false}`.
+pub async fn first_sign_in(
+    State(s): State<AppState>,
+    Query(q): Query<ThisMachineQuery>,
+) -> ApiResult<axum::Json<serde_json::Value>> {
+    bootstrap_key(&q.key)?;
+    let pending = first_admin_pending(&s.db).await?;
+    Ok(axum::Json(serde_json::json!({ "pending": pending })))
+}
+
+/// The first admin is there and hasn't chosen their own login yet.
+async fn first_admin_pending(db: impl sqlx::PgExecutor<'_>) -> ApiResult<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.users WHERE email = $1 AND must_set_up)",
+    )
+    .bind(crate::auth::FIRST_ADMIN_EMAIL)
+    .fetch_one(db)
+    .await?)
 }
 
 #[derive(Deserialize)]
@@ -1046,6 +1076,34 @@ mod this_machine_tests {
         assert_eq!(hand_over(&db, KEY).await.unwrap(), Handover::Connected);
         assert_eq!(hash_of(&db, &cluster_id).await, "rotated");
         reset(&db).await;
+    }
+
+    /// The installer prints the first login again until it's been used:
+    /// while admin@pyo.local is there and hasn't chosen their own. In a
+    /// transaction that's rolled back.
+    #[tokio::test]
+    #[ignore]
+    async fn first_sign_in_is_pending_until_the_admin_sets_up() {
+        let db = db().await;
+        let mut tx = db.begin().await.unwrap();
+        sqlx::query(
+            "UPDATE pyo.users SET email = id || '@moved.test' WHERE email = 'admin@pyo.local'",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        assert!(!first_admin_pending(&mut *tx).await.unwrap());
+        sqlx::query("INSERT INTO pyo.users (id, email, name, password_hash, is_admin, must_set_up) VALUES ('usr_firstsignin', 'admin@pyo.local', 'Admin', 'x', true, true)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert!(first_admin_pending(&mut *tx).await.unwrap());
+        sqlx::query("UPDATE pyo.users SET email = 'me@example.com', must_set_up = false WHERE id = 'usr_firstsignin'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert!(!first_admin_pending(&mut *tx).await.unwrap());
+        tx.rollback().await.unwrap();
     }
 
     /// Two replicas asked at once (the host's setup and its timer): one

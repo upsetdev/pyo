@@ -21,10 +21,20 @@ check() { # $1: what, $2: output, $3: grep -E pattern, $4: "has" or "lacks"
   failed=1
 }
 
-# The pyo-admin Secret is there, as it stays after the first sign-in.
-kc() { return 0; }
+# The pyo-admin Secret is there, as it stays after the first sign-in. Pyo
+# says whether the first admin still has to sign in ($answer: its answer,
+# or none).
+kc() {
+  case "$*" in *"jsonpath="*) printf 'c2VjcmV0LWFnYWlu' ;; esac # "secret-again"
+  return 0
+}
+host_key() { echo k3y; }
+curl() {
+  case "$*" in *"/install/first-sign-in?key=k3y"*) [ -n "$answer" ] && echo "$answer" ;; *) return 7 ;; esac
+}
 
 ADMIN_PASSWORD=s3cret
+answer='{"pending":false}'
 out=$(print_sign_in)
 check "a fresh install prints its login" "$out" "admin@pyo.local" has
 check "a fresh install prints its password" "$out" "Password: s3cret" has
@@ -37,6 +47,27 @@ check "an update says how to update again" "$out" "run the same command again" h
 unset ADMIN_PASSWORD
 out=$(print_sign_in)
 check "nothing to update says nothing of the first sign-in" "$out" "admin@pyo.local|First sign-in" lacks
+
+# Run again before anyone signed in (an install stopped while it waited):
+# the same login again.
+answer='{"pending":true}'
+out=$(print_sign_in)
+check "not signed in yet: the login again" "$out" "Email: +admin@pyo\.local" has
+check "not signed in yet: its password" "$out" "Password: secret-again" has
+ADMIN_PASSWORD=""
+out=$(print_sign_in)
+check "not signed in yet, on an update too" "$out" "Password: secret-again" has
+
+# Pyo can't say (older, or not answering): where the login is, never the
+# password.
+ADMIN_PASSWORD=""
+answer=""
+out=$(print_sign_in)
+check "unknown: the email" "$out" "admin@pyo\.local" has
+check "unknown: where the password is" "$out" "get secret pyo-admin" has
+check "unknown: never the password" "$out" "secret-again|Password:" lacks
+unset ADMIN_PASSWORD
+unset -f curl host_key
 
 # PYO_TELEMETRY=off: the fresh install's Pyo gets it (the pyo-install
 # ConfigMap), and the installer says so.

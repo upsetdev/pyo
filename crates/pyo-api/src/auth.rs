@@ -35,7 +35,7 @@ const SESSION_DAYS: i64 = 30;
 /// And after 7 days without a request; each day of use moves that on.
 const SESSION_IDLE_DAYS: i64 = 7;
 /// The sign-in the installer prints. Replaced on first sign-in.
-const FIRST_ADMIN_EMAIL: &str = "admin@pyo.local";
+pub(crate) const FIRST_ADMIN_EMAIL: &str = "admin@pyo.local";
 
 pub fn routes() -> Router<AppState> {
     Router::new()

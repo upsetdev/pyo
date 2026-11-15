@@ -1063,11 +1063,34 @@ update_local_agent() {
 
 # ── Where it is ─────────────────────────────────────────────────────────────
 
-# The first sign-in, only on a fresh install (ADMIN_PASSWORD, from
-# first_sign_in; an install that stopped halfway is one too). The pyo-admin
-# Secret stays after the first sign-in, so an update can't tell from it
-# whether the login still works, and says nothing about it.
+# This machine's bootstrap key (bootstrap_key), for Pyo's /install calls.
+host_key() { cat /etc/pyo/bootstrap-key 2>/dev/null; }
+
+# Whether the first admin still has to sign in: "yes", "no" or "unknown"
+# (Pyo didn't answer, or is older than this question).
+first_sign_in_pending() {
+  local key r
+  key=$(host_key) && [ -n "$key" ] || { echo unknown; return 0; }
+  r=$(curl -fsS -m 10 "http://127.0.0.1:8000/install/first-sign-in?key=$key" 2>/dev/null) || r=""
+  case "$r" in
+    *'"pending":true'*) echo yes ;;
+    *'"pending":false'*) echo no ;;
+    *) echo unknown ;;
+  esac
+}
+
+# The first sign-in: on a fresh install (ADMIN_PASSWORD, from first_sign_in;
+# an install that stopped halfway is one too), and on any later run while
+# nobody has signed in with it yet (the pyo-admin Secret has it). The Secret
+# stays after the first sign-in, so only Pyo can tell. When it can't, the
+# email and where the password is, never the password itself.
 print_sign_in() {
+  local pending=""
+  if [ -z "${ADMIN_PASSWORD:-}" ]; then
+    pending=$(first_sign_in_pending)
+    [ "$pending" != yes ] ||
+      ADMIN_PASSWORD=$(kc -n "$NS" get secret pyo-admin -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)
+  fi
   echo
   if [ -n "${ADMIN_PASSWORD:-}" ]; then
     echo "Sign in with this login, then choose your own email and password:"
@@ -1075,9 +1098,13 @@ print_sign_in() {
     echo "  Password: $ADMIN_PASSWORD"
     echo "It stops working once you do. Lost it before signing in? On this machine:"
     echo "  sudo k3s kubectl -n $NS get secret pyo-admin -o jsonpath='{.data.password}' | base64 -d"
-  else
-    echo "To update later, run the same command again."
+    return 0
   fi
+  if [ "$pending" = unknown ] && kc -n "$NS" get secret pyo-admin >/dev/null 2>&1; then
+    echo "Not signed in yet? Use the email admin@pyo.local and the password from:"
+    echo "  sudo k3s kubectl -n $NS get secret pyo-admin -o jsonpath='{.data.password}' | base64 -d"
+  fi
+  echo "To update later, run the same command again."
 }
 
 # ── Uninstalling ────────────────────────────────────────────────────────────
