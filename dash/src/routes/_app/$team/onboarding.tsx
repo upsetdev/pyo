@@ -29,7 +29,7 @@ import {
   type DeployDraft,
   type Issues,
 } from "~/lib/pyo/draft";
-import { freeHostname, freeDomainIp } from "~/lib/pyo/freeDomain";
+import { freeHostname, freeDomainIp, reachOf } from "~/lib/pyo/freeDomain";
 import { DNS_LABEL } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import {
@@ -245,13 +245,21 @@ function Onboarding() {
           <StepRow
             n={deployStep}
             title="Deploy"
-            detail="Live on the web, with HTTPS"
+            detail={cluster ? REACH[reachOf(s, cluster.id)] : "Get a link to open it"}
           />
         )}
       </div>
     </Page>
   );
 }
+
+/** What the Deploy step gives, by where the server can be reached. */
+const REACH = {
+  web: "Live on the web, with HTTPS",
+  tailnet: "On your tailnet",
+  network: "On your network",
+  cluster: "Inside the cluster",
+} as const;
 
 function StepNumber({ n, done }: { n: number; done?: boolean }) {
   return (
@@ -464,13 +472,18 @@ function DeployStep({
   const project = draftProject(s, named);
 
   // Without a domain only the cluster can reach it, and the point of a first
-  // deploy is a URL to open: use the free one, which needs no DNS.
+  // deploy is a URL to open: use the free one, which needs no DNS. Without
+  // one (a server at home with no Tailscale), its port on the server, which
+  // the local network can open.
   const ip = freeDomainIp(s, cluster.id);
+  const reach = reachOf(s, cluster.id);
   const port = base.ports.find((p) => p.protocol === "HTTP");
   const host =
     ip && port
       ? freeHostname({ name: name || "app" }, project?.namespace ?? "app", ip)
       : "";
+  const onNetwork = !host && !!port && reach === "network";
+  const [busy, setBusy] = useState(false);
 
   const deploy = () => {
     const ctx = { clusters: clustersIn(s), takenNames: [] };
@@ -482,6 +495,11 @@ function DeployStep({
     if (Object.keys(issues).length) return;
     const { deploymentId } = api.createService({
       ...named,
+      ports: onNetwork
+        ? named.ports.map((p) =>
+            p.name === port?.name ? { ...p, exposure: "nodeport" as const } : p,
+          )
+        : named.ports,
       domains:
         host && port
           ? [
@@ -509,7 +527,11 @@ function DeployStep({
         title={<StepTitle n={n}>Deploy</StepTitle>}
         footer={[
           project ? `New project ${project.name}` : "",
-          host ? `public at ${host}` : "private until you add a domain",
+          host
+            ? `${reach === "web" ? "public" : "on your tailnet"} at ${host}`
+            : onNetwork
+              ? "on your network"
+              : "private until you add a domain",
         ]
           .filter(Boolean)
           .join(" · ")}

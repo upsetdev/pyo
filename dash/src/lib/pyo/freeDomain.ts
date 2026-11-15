@@ -1,5 +1,5 @@
 import type { PyoState } from "./store";
-import type { Application } from "./types";
+import type { Application, ClusterServer } from "./types";
 
 // Free domains through nip.io: "<anything>.<ip>.nip.io" resolves to <ip>
 // (e.g. "app.203.0.113.7.nip.io"), so a hostname works with no DNS record.
@@ -100,4 +100,35 @@ export function isPrivateHost(host: string) {
     a === 0 ||
     (a === 100 && b >= 64 && b <= 127)
   );
+}
+
+/** Where a cluster's first service opens: on the web, on the tailnet, or only on the local network. */
+export function reachOf(s: PyoState, clusterId: string): "web" | "tailnet" | "network" | "cluster" {
+  const ip = freeDomainIp(s, clusterId);
+  if (ip) return isPrivateHost(`x.${ip}.nip.io`) ? "tailnet" : "web";
+  return s.clusters.find((c) => c.id === clusterId)?.publicTraffic === false ? "cluster" : "network";
+}
+
+/** A server of the cluster to open ports on: a ready one first. */
+function lanServer(servers: ClusterServer[], clusterId: string) {
+  const own = servers.filter((x) => x.clusterId === clusterId && x.internalIP);
+  return own.find((x) => x.status === "ready") ?? own[0];
+}
+
+/**
+ * "http://192.168.1.5:31234": where a service with no domain opens on the
+ * local network, through its HTTP port on every server.
+ */
+export function lanUrl(
+  s: PyoState,
+  app: Pick<Application, "clusterId" | "ports">,
+) {
+  if (s.clusters.find((c) => c.id === app.clusterId)?.publicTraffic === false) return undefined;
+  const port = app.ports.find(
+    (p) => p.exposure === "nodeport" && p.protocol === "HTTP" && p.publicPort,
+  );
+  const server = lanServer(s.servers, app.clusterId);
+  if (!port || !server) return undefined;
+  const host = server.internalIP.includes(":") ? `[${server.internalIP}]` : server.internalIP;
+  return `http://${host}:${port.publicPort}`;
 }

@@ -56,6 +56,7 @@ import {
 } from "~/lib/pyo/store";
 import type { Deployment, DeploymentStage } from "~/lib/pyo/types";
 import { buildFileOf } from "~/lib/pyo/detect";
+import { lanUrl } from "~/lib/pyo/freeDomain";
 import { seo } from "~/lib/seo";
 
 export const Route = createFileRoute("/_app/$team/deployments/$deploymentId")({
@@ -123,6 +124,9 @@ function DeploymentPage() {
   const busy = app ? !!activeDeploymentFor(s, app.id) : true;
   const current = app?.currentDeploymentId === d.id;
   const domain = app?.domains.find((x) => x.status === "active");
+  // No domain: its port on the server, on the local network.
+  const lan = app && !domain ? lanUrl(s, app) : undefined;
+  const url = domain ? domainUrl(domain) : lan;
   const live = s.deployments.find((x) => x.id === app?.currentDeploymentId);
   const olderStillLive =
     !!live && live.id !== d.id && live.createdAt < d.createdAt;
@@ -150,7 +154,7 @@ function DeploymentPage() {
     </Button>
   ) : current && domain ? (
     <a
-      href={domainUrl(domain)}
+      href={url}
       target="_blank"
       rel="noreferrer"
       className={buttonClass("primary", "sm")}
@@ -259,7 +263,7 @@ function DeploymentPage() {
         <Celebration
           name={app.name}
           took={duration(elapsed)}
-          url={domain ? domainUrl(domain) : undefined}
+          url={url}
           servicePath={servicePath(app.id)}
         />
       ) : null}
@@ -269,6 +273,7 @@ function DeploymentPage() {
         serviceName={app?.name ?? "The service"}
         current={current}
         domain={domain?.hostname}
+        lan={lan}
         olderStillLive={olderStillLive}
         elapsed={elapsed}
       />
@@ -334,6 +339,7 @@ function StatusCard({
   serviceName,
   current,
   domain,
+  lan,
   olderStillLive,
   elapsed,
 }: {
@@ -341,6 +347,8 @@ function StatusCard({
   serviceName: string;
   current: boolean;
   domain?: string;
+  /** Where it opens on the local network, without a domain. */
+  lan?: string;
   olderStillLive: boolean;
   elapsed: number;
 }) {
@@ -383,6 +391,27 @@ function StatusCard({
           {domain}
         </a>
         . Took {took}.
+      </>
+    ) : lan ? (
+      <>
+        {serviceName} is live on your network at{" "}
+        <a
+          href={lan}
+          target="_blank"
+          rel="noreferrer"
+          className="text-foreground hover:text-primary"
+        >
+          {lan.replace(/^http:\/\//, "")}
+        </a>
+        . Took {took}.{" "}
+        <Link
+          to="/$team/integrations"
+          params={{ team: currentSlug() }}
+          hash="tailscale"
+          className="font-medium text-foreground hover:text-primary"
+        >
+          Set up Tailscale for HTTPS
+        </Link>
       </>
     ) : (
       `${serviceName} is live inside the cluster. Took ${took}.`
