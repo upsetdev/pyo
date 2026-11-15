@@ -1370,6 +1370,7 @@ pub(crate) const RESERVED_PROJECT_SLUGS: &[&str] = &[
     "postgres",
     "projects",
     "registry",
+    "sandboxes",
     "security",
     "servers",
     "services",
