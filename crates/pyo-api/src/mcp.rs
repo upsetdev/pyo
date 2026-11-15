@@ -152,6 +152,7 @@ fn curated() -> Vec<Value> {
             "server_tags": { "type": "array", "items": { "type": "string" }, "description": "Run only on servers that have all of these tags (see list_servers)" },
         }), &["name", "image"]), "annotations": write }),
         json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain. It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" } }), &["service_id"]), "annotations": write }),
+        json!({ "name": "set_static_serving", "title": "Set static serving", "description": "For a service whose build is a static site: serve its build as static files from the cluster's shared static server (\"static\", the default), or run it as a service of its own (\"service\"). Takes effect with the next deploy.", "inputSchema": schema(json!({ "service_id": service, "serve_as": { "type": "string", "enum": ["static", "service"] } }), &["service_id", "serve_as"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "stop_service", "title": "Stop service", "description": "Stop the service (scale to zero). Settings and data are kept.", "inputSchema": schema(json!({ "service_id": service }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
     ]
 }
@@ -218,6 +219,7 @@ const CURATED_RUNS: &[(&str, &str)] = &[
     ("create_project", "createProject"),
     ("create_service", "createService"),
     ("add_domain", "saveService"),
+    ("set_static_serving", "saveService"),
 ];
 
 /// Operations that hand back a secret: said so in their description. They
@@ -1212,6 +1214,19 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
                 out["dnsRecord"] = dns_record;
             }
             Ok(out)
+        }
+        "set_static_serving" => {
+            let id = service_id(args)?;
+            let mut a = find_service(id)?;
+            let serve_as = arg(args, "serve_as")?;
+            if !matches!(serve_as, "static" | "service") {
+                return Err("serve_as is static or service".into());
+            }
+            a["serveAs"] = json!(serve_as);
+            op(json!({ "op": "saveService", "service": a })).await?;
+            Ok(
+                json!({ "serveAs": serve_as, "next": "Saved. It takes effect with the next deploy (deploy_service)." }),
+            )
         }
         other => Err(format!("Unknown tool {other}")),
     }
