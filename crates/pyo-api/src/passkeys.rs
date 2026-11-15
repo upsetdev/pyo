@@ -9,7 +9,8 @@
 //! served there:
 //!
 //! - `localhost` on any port (http is fine there: browsers treat it as secure);
-//! - its tailnet HTTPS address (`PYO_TAILNET_NAME`, web.rs);
+//! - its HTTPS addresses, on the tailnet and on the public IP (web.rs
+//!   `https_urls`);
 //! - the dashboard address set in Settings → Email;
 //! - any HTTPS origin in `PYO_PASSKEY_ORIGINS` (comma-separated), for custom
 //!   domains.
@@ -505,7 +506,7 @@ mod tests {
     #[test]
     fn passkeys_run_where_the_dashboard_is_served() {
         let allowed = [
-            url("https://server-1.tail1234.ts.net:8443"),
+            url("https://pyo.tail1234.ts.net"),
             url("https://pyo.example.com/"),
         ];
         let rp = |o: &str| rp_for(&url(o), &allowed).map(|r| (r.id, r.origin.to_string()));
@@ -514,10 +515,10 @@ mod tests {
             Some(("localhost".into(), "http://localhost:5173/".into()))
         );
         assert_eq!(
-            rp("https://server-1.tail1234.ts.net:8443"),
+            rp("https://pyo.tail1234.ts.net"),
             Some((
-                "server-1.tail1234.ts.net".into(),
-                "https://server-1.tail1234.ts.net:8443/".into()
+                "pyo.tail1234.ts.net".into(),
+                "https://pyo.tail1234.ts.net/".into()
             ))
         );
         assert_eq!(
@@ -525,7 +526,7 @@ mod tests {
             Some(("pyo.example.com".into(), "https://pyo.example.com/".into()))
         );
         // Another port, plain HTTP, an IP address or a stranger: no.
-        assert_eq!(rp("https://server-1.tail1234.ts.net"), None);
+        assert_eq!(rp("https://pyo.tail1234.ts.net:8443"), None);
         assert_eq!(rp("http://pyo.example.com"), None);
         assert_eq!(rp("http://127.0.0.1:8000"), None);
         assert_eq!(rp("https://evil.example.com"), None);
@@ -534,11 +535,8 @@ mod tests {
 
     #[test]
     fn every_relying_party_builds() {
-        for o in [
-            "http://localhost:8000",
-            "https://server-1.tail1234.ts.net:8443",
-        ] {
-            let rp = rp_for(&url(o), &[url("https://server-1.tail1234.ts.net:8443")]).unwrap();
+        for o in ["http://localhost:8000", "https://pyo.tail1234.ts.net"] {
+            let rp = rp_for(&url(o), &[url("https://pyo.tail1234.ts.net")]).unwrap();
             let (options, _) = rp
                 .webauthn()
                 .unwrap()

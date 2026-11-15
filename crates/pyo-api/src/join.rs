@@ -729,10 +729,7 @@ mod tests {
         // Unset or blank: Pyo, at the first address another machine reaches.
         for unset in [None, Some(""), Some("  ")] {
             assert_eq!(
-                pick_scripts_url(
-                    unset,
-                    &[tailnet, Some("https://server-1.tail1234.ts.net:8443")]
-                ),
+                pick_scripts_url(unset, &[tailnet, Some("https://pyo.tail1234.ts.net")]),
                 "http://100.64.0.1:8000/install"
             );
         }
@@ -742,10 +739,10 @@ mod tests {
                 &[
                     Some("http://pyo.pyo-system.svc:8000"),
                     None,
-                    Some("https://server-1.tail1234.ts.net:8443")
+                    Some("https://pyo.tail1234.ts.net")
                 ]
             ),
-            "https://server-1.tail1234.ts.net:8443/install"
+            "https://pyo.tail1234.ts.net/install"
         );
         assert_eq!(
             pick_scripts_url(None, &[Some("https://pyo.example.com")]),

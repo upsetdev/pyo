@@ -66,7 +66,7 @@ pub(crate) fn parts(name: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// A team's own repository as users name it from the tailnet:
-/// "acme/shop/api" → "<host>:5443/acme/shop/api". None for Pyo's own
+/// "acme/shop/api" → "registry.<tailnet>.ts.net/acme/shop/api". None for Pyo's own
 /// repositories (its builds, which the door doesn't serve) or without a
 /// tailnet.
 pub fn as_named(repo: &str) -> Option<String> {
@@ -75,7 +75,8 @@ pub fn as_named(repo: &str) -> Option<String> {
 }
 
 /// An image the door's address names, as servers pull it (the registry's
-/// pull address): "<host>:5443/acme/shop/api:1" → "127.0.0.1:5005/acme/shop/api:1".
+/// pull address): "registry.<tailnet>.ts.net/acme/shop/api:1" →
+/// "127.0.0.1:5005/acme/shop/api:1".
 pub fn as_pulled(image: &str) -> Option<String> {
     let door = address()?;
     image

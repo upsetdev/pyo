@@ -1064,10 +1064,7 @@ pub struct Release {
     pub version: String,
     /// Pyo's own images, pinned by digest.
     pub images: ReleaseImages,
-    /// The Kubernetes objects of pyo-system, as JSON, images pinned. Strings
-    /// may hold an installation's own values as `__TAILNET_IP__`,
-    /// `__REGISTRY_PUSH__`, `__TAILNET_API__` and `__TAILNET_NAME__`; the upgrader fills them
-    /// in from what's running.
+    /// The Kubernetes objects of pyo-system, as JSON, images pinned.
     pub manifests: ReleaseManifests,
     /// Migration files of this release, e.g. "0002_rate_limits.sql".
     #[serde(default)]
