@@ -3474,6 +3474,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyo-sandbox"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures",
+ "libc",
+ "pyo-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pyo-static"
 version = "0.3.2"
 dependencies = [

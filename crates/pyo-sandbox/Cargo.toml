@@ -1,0 +1,21 @@
+[package]
+name = "pyo-sandbox"
+description = "The Pyo Sandbox daemon: runs sandboxes as Firecracker microVMs on a sandbox server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum = { version = "0.8.9", features = ["ws"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+futures.workspace = true
+libc = "0.2.191"
+pyo-proto = { version = "0.3.2", path = "../pyo-proto", features = ["sandbox-token"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
