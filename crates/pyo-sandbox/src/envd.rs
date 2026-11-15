@@ -12,13 +12,15 @@ use pyo_proto::sandbox::wire::{
     CHUNK, Decoder, ENVD_VSOCK_PORT, ExecSpec, Frame, Hello, Kind, Request, Response, negotiate,
 };
 use pyo_proto::sandbox::{ExecRequest, ExecResult};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 /// The most output a buffered exec keeps, per stream.
 pub const EXEC_OUTPUT_CAP: usize = 8 << 20;
 pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a port connection waits for the guest after the client is done.
+const PORT_LINGER: Duration = Duration::from_secs(30);
 
 pub struct Conn {
     r: OwnedReadHalf,
@@ -339,6 +341,76 @@ impl std::fmt::Display for FileTooBig {
     }
 }
 impl std::error::Error for FileTooBig {}
+
+impl Conn {
+    /// Opens a TCP connection to `port` on the guest's loopback and hands it
+    /// back as a byte stream. Takes the whole envd connection, so each port
+    /// connection has its own vsock connection.
+    pub async fn port_stream(mut self, port: u16) -> anyhow::Result<DuplexStream> {
+        let id = self.stream();
+        self.send(&Frame::request(id, &Request::PortConnect { port }))
+            .await?;
+        loop {
+            let f = self
+                .recv()
+                .await?
+                .ok_or_else(|| anyhow!("envd closed the connection"))?;
+            if f.stream != id || f.kind != Kind::Response {
+                continue;
+            }
+            match f.parse::<Response>()? {
+                Response::Ok => break,
+                Response::Error { kind, message } => bail!(EnvdError { kind, message }),
+                other => bail!("unexpected answer from envd: {other:?}"),
+            }
+        }
+        let (ours, theirs) = tokio::io::duplex(2 * CHUNK);
+        let (mut rd, mut wr) = tokio::io::split(ours);
+        let (mut from_envd, mut to_envd) = self.into_split();
+        // Guest to client.
+        let reader = tokio::spawn(async move {
+            while let Ok(Some(f)) = from_envd.recv().await {
+                if f.stream != id {
+                    continue;
+                }
+                match f.kind {
+                    Kind::Stdout => {
+                        if wr.write_all(&f.payload).await.is_err() {
+                            break;
+                        }
+                    }
+                    Kind::Eof | Kind::Response => break,
+                    _ => {}
+                }
+            }
+            let _ = wr.shutdown().await;
+        });
+        // Client to guest. The write half stays open until the guest is done
+        // too, since closing it ends the whole envd connection.
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; CHUNK];
+            loop {
+                match rd.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let f = Frame::new(Kind::Stdin, id, buf[..n].to_vec());
+                        if to_envd.write_all(&f.encode()).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = to_envd.write_all(&Frame::eof(id).encode()).await;
+            // A guest that never answers a half-closed connection doesn't
+            // hold it forever.
+            let abort = reader.abort_handle();
+            if tokio::time::timeout(PORT_LINGER, reader).await.is_err() {
+                abort.abort();
+            }
+        });
+        Ok(theirs)
+    }
+}
 
 pub struct FrameReader {
     r: OwnedReadHalf,

@@ -10,7 +10,8 @@
 //!
 //! Inputs, with defaults from those steps: `PYO_SANDBOX_FIRECRACKER`,
 //! `PYO_SANDBOX_KERNEL` and `PYO_SANDBOX_ENVD`. The template is the host's
-//! static busybox plus envd, so nothing else is downloaded.
+//! static busybox plus envd, so nothing else is downloaded. The edge proxy
+//! part needs `openssl` and `curl` on the host.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ use pyo_proto::sandbox::{
 use pyo_sandbox::api::{self, AppState};
 use pyo_sandbox::config::Config;
 use pyo_sandbox::detect::{self, Inputs};
+use pyo_sandbox::edge::{Edge, EdgeConfig};
 use pyo_sandbox::firecracker::Firecracker;
 use pyo_sandbox::manager::Manager;
 use pyo_sandbox::storage::{self, Layout};
@@ -170,6 +172,265 @@ async fn busybox_template(layout: &Layout, envd: &Path) {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// curl through the edge, resolving every name to 127.0.0.1. Returns the
+/// status, the headers and the body.
+async fn curl(url: &str, cacert: &Path, extra: &[&str]) -> (u16, String, String) {
+    let out = tokio::process::Command::new("curl")
+        .args([
+            "-sS",
+            "-D",
+            "-",
+            "--max-time",
+            "10",
+            "--connect-to",
+            "::127.0.0.1:",
+        ])
+        .arg("--cacert")
+        .arg(cacert)
+        .args(extra)
+        .arg(url)
+        .output()
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "curl {url}: {text} {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+    (status, head.to_string(), body.to_string())
+}
+
+/// The edge proxy: public and private ports over HTTPS and plain HTTP, the
+/// token in its four places, and an upgraded connection.
+async fn edge_proxy(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &str) {
+    use pyo_proto::sandbox::port_host;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = run.join("edge");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+    let made = std::process::Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+        ])
+        .args(["-nodes", "-days", "1", "-subj", "/CN=*.sbx.test"])
+        .args(["-addext", "subjectAltName=DNS:*.sbx.test", "-keyout"])
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let edge = |https: bool| EdgeConfig {
+        domain: "sbx.test".into(),
+        https: https.then(|| "127.0.0.1:0".parse().unwrap()),
+        cert: https.then(|| cert.clone()),
+        key: https.then(|| key.clone()),
+        http: (!https).then(|| "127.0.0.1:0".parse().unwrap()),
+    };
+    let tls = Arc::new(Edge::new(state.clone(), edge(true)).unwrap())
+        .start()
+        .await
+        .unwrap();
+    let plain = Arc::new(Edge::new(state.clone(), edge(false)).unwrap())
+        .start()
+        .await
+        .unwrap();
+    state.mgr.set_edge_url(tls.base_url("sbx.test"));
+    let https_port = tls.https.unwrap().port();
+    let http_port = plain.http.unwrap().port();
+    let url = |port: u16, tls: bool| {
+        let host = port_host(port, id, "sbx.test");
+        if tls {
+            format!("https://{host}:{https_port}/")
+        } else {
+            format!("http://{host}:{http_port}/")
+        }
+    };
+    let app = api::router(state.clone());
+    let ports = keys.token(id, TEAM, &[Scope::Ports]);
+    let open = |port: u16, public: bool| {
+        let app = app.clone();
+        let ports = ports.clone();
+        async move {
+            sandbox_of(
+                json(
+                    &app,
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/ports"),
+                    &ports,
+                    serde_json::json!({"port": port, "public": public}),
+                )
+                .await,
+            )
+        }
+    };
+
+    // A web server and an echo after an upgrade, in the sandbox.
+    let r = state
+        .mgr
+        .exec(
+            id,
+            &pyo_proto::sandbox::ExecRequest {
+                cmd: Cmd::Shell(
+                    "mkdir -p /root/www && echo hello-edge > /root/www/index.html \
+                     && httpd -p 3000 -h /root/www \
+                     && printf '%s\n' '#!/bin/sh' \
+                       'while read -r l; do [ \"$l\" = \"$(printf \"\\r\")\" ] && break; done' \
+                       'printf \"HTTP/1.1 101 Switching Protocols\\r\\nConnection: Upgrade\\r\\nUpgrade: echo\\r\\n\\r\\n\"' \
+                       'exec cat' > /root/up.sh \
+                     && (nc -ll -p 4000 -e /bin/sh /root/up.sh >/dev/null 2>&1 &)"
+                        .into(),
+                ),
+                cwd: None,
+                env: BTreeMap::new(),
+                stdin: None,
+                timeout_ms: Some(5000),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.exit_code, Some(0), "{r:?}");
+
+    // Closed until opened.
+    let (s, _, b) = curl(&url(3000, true), &cert, &[]).await;
+    assert_eq!(s, 404, "{b}");
+    assert!(b.contains("isn't open"), "{b}");
+
+    // Public.
+    let st = open(3000, true).await;
+    assert_eq!(
+        st.ports,
+        vec![pyo_proto::sandbox::OpenPort {
+            port: 3000,
+            public: true
+        }]
+    );
+    let (s, h, b) = curl(&url(3000, true), &cert, &[]).await;
+    assert_eq!((s, b.trim()), (200, "hello-edge"), "{h}");
+    let (s, _, b) = curl(&url(3000, false), &cert, &[]).await;
+    assert_eq!((s, b.trim()), (200, "hello-edge"));
+    assert_eq!(
+        state.mgr.capability().port_url(id, 3000).unwrap(),
+        format!("https://{}:{https_port}", port_host(3000, id, "sbx.test"))
+    );
+
+    // Private: a token in the header, in a cookie, or once in the query.
+    open(3000, false).await;
+    let (s, _, _) = curl(&url(3000, true), &cert, &[]).await;
+    assert_eq!(s, 401);
+    let bearer = format!("Authorization: Bearer {ports}");
+    let (s, _, b) = curl(&url(3000, true), &cert, &["-H", &bearer]).await;
+    assert_eq!((s, b.trim()), (200, "hello-edge"));
+    let cookie = format!("pyo_token={ports}");
+    let (s, _, _) = curl(&url(3000, true), &cert, &["-b", &cookie]).await;
+    assert_eq!(s, 200);
+    let header = format!("X-Pyo-Token: {ports}");
+    let (s, _, _) = curl(&url(3000, true), &cert, &["-H", &header]).await;
+    assert_eq!(s, 200);
+    let q = format!("{}?a=1&pyo_token={ports}", url(3000, true));
+    let (s, h, _) = curl(&q, &cert, &[]).await;
+    assert_eq!(s, 303, "{h}");
+    let hl = h.to_ascii_lowercase();
+    assert!(hl.contains("location: /?a=1"), "{h}");
+    assert!(
+        hl.contains("set-cookie: pyo_token=") && hl.contains("httponly") && hl.contains("secure"),
+        "{h}"
+    );
+    // Tokens for another sandbox, or without the ports scope, don't do.
+    let other = keys.token(&sandbox_id_from([77; 16]), TEAM, &[Scope::Ports]);
+    let wrong = format!("Authorization: Bearer {other}");
+    assert_eq!(curl(&url(3000, true), &cert, &["-H", &wrong]).await.0, 401);
+    let exec_only = format!(
+        "Authorization: Bearer {}",
+        keys.token(id, TEAM, &[Scope::Exec])
+    );
+    assert_eq!(
+        curl(&url(3000, true), &cert, &["-H", &exec_only]).await.0,
+        401
+    );
+    let admin = format!("Authorization: Bearer {}", keys.admin());
+    assert_eq!(curl(&url(3000, true), &cert, &["-H", &admin]).await.0, 401);
+
+    // Nothing listening, closing, and names that aren't sandbox ports.
+    open(3999, true).await;
+    assert_eq!(curl(&url(3999, true), &cert, &[]).await.0, 502);
+    let (s, _, _) = curl(
+        &format!("https://3000-sbx-nosuchsandboxhere.sbx.test:{https_port}/"),
+        &cert,
+        &[],
+    )
+    .await;
+    assert_eq!(s, 404);
+    let closed: DaemonResult = {
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            &format!("/v1/sandboxes/{id}/ports/3999"),
+            Some(&ports),
+            Body::empty(),
+        )
+        .await;
+        assert!(s.is_success(), "{}", String::from_utf8_lossy(&b));
+        serde_json::from_slice(&b).unwrap()
+    };
+    assert_eq!(sandbox_of(closed).ports.len(), 1);
+    assert_eq!(curl(&url(3999, true), &cert, &[]).await.0, 404);
+
+    // An upgraded connection carries bytes both ways.
+    open(4000, true).await;
+    let mut c = tokio::net::TcpStream::connect(("127.0.0.1", http_port))
+        .await
+        .unwrap();
+    let req = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n",
+        port_host(4000, id, "sbx.test")
+    );
+    c.write_all(req.as_bytes()).await.unwrap();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n > 0, "closed: {}", String::from_utf8_lossy(&got));
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert!(
+        got.starts_with(b"HTTP/1.1 101"),
+        "{}",
+        String::from_utf8_lossy(&got)
+    );
+    c.write_all(b"ping through the edge\n").await.unwrap();
+    let mut echo = Vec::new();
+    while !echo.ends_with(b"\n") {
+        let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n > 0);
+        echo.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(echo, b"ping through the edge\n");
+}
+
 /// Firecracker processes running from a directory under `run`.
 fn vms_under(run: &Path) -> Vec<u32> {
     let mut pids = Vec::new();
@@ -260,6 +521,7 @@ async fn boots_real_microvms() {
         jail_gid: 0,
         cgroup_parent: "pyo-sandbox".into(),
         network: Default::default(),
+        edge: None,
         dev: true,
     };
     let layout = Layout::new(&run, false);
@@ -610,6 +872,9 @@ async fn boots_real_microvms() {
     );
     drop(ws);
     server.abort();
+
+    edge_proxy(&state, &keys, &run, &ida).await;
+    note("edge_proxy", "ok".into());
 
     // ── Template snapshot, then restores ──
     let admin = keys.admin();

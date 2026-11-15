@@ -7,6 +7,7 @@ use pyo_proto::sandbox::{Check, Runtime};
 use pyo_sandbox::api::{self, AppState};
 use pyo_sandbox::config::Config;
 use pyo_sandbox::detect::{self, Inputs};
+use pyo_sandbox::edge::Edge;
 use pyo_sandbox::firecracker::{Firecracker, Jailer};
 use pyo_sandbox::manager::Manager;
 use pyo_sandbox::network::Network;
@@ -156,17 +157,27 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
     let keys = s.cfg.keys.clone();
     let server_id = s.cfg.server_id.clone();
     let listen = s.cfg.listen;
+    let edge_cfg = s.cfg.edge.clone();
     let mgr = Arc::new(Manager::new(s.cfg, s.layout, s.fc, capability).with_network(net));
     let adopted = mgr.adopt().await;
     if adopted > 0 {
         tracing::info!(adopted, "took over sandboxes from before the restart");
     }
     mgr.spawn_sweeper();
-    let app = api::router(Arc::new(AppState {
-        mgr,
+    let state = Arc::new(AppState {
+        mgr: mgr.clone(),
         keys,
         server_id,
-    }));
+    });
+    if let Some(cfg) = edge_cfg {
+        let domain = cfg.domain.clone();
+        let edge = Arc::new(Edge::new(state.clone(), cfg)?);
+        let bound = edge.start().await?;
+        let url = bound.base_url(&domain);
+        tracing::info!(https = ?bound.https, http = ?bound.http, url = ?url, "the edge proxy is serving");
+        mgr.set_edge_url(url);
+    }
+    let app = api::router(state);
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("listening on {listen}"))?;

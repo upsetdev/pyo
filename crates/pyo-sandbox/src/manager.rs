@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use pyo_proto::sandbox::{
     CapabilityReport, CapacityReport, DaemonError, ErrorCode, ExecRequest, ExecResult, Isolation,
-    MAX_TTL_SECS, NetworkMode, Runtime, SANDBOX_PROTOCOL, SandboxSpec, SandboxState, SandboxStatus,
-    ServerReport, TemplateReport,
+    MAX_TTL_SECS, NetworkMode, OpenPort, Runtime, SANDBOX_PROTOCOL, SandboxSpec, SandboxState,
+    SandboxStatus, ServerReport, TemplateReport,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -317,6 +317,7 @@ impl Manager {
             from_snapshot,
             memory_used: None,
             error: None,
+            ports: Vec::new(),
         };
         let sbx = Arc::new(Sandbox {
             spec: spec.clone(),
@@ -661,6 +662,48 @@ impl Manager {
                 Err(runtime(e))
             }
         }
+    }
+
+    /// The edge proxy's base URL, once it listens. Ports get their URLs
+    /// from it.
+    pub fn set_edge_url(&self, url: Option<String>) {
+        self.capability
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .edge_url = url;
+    }
+
+    /// Serves a port on the edge proxy, or changes whether it's public.
+    pub async fn open_port(&self, id: &str, port: u16, public: bool) -> Result<SandboxStatus> {
+        if port == 0 {
+            return Err(err(ErrorCode::InvalidSpec, "The port must be 1 to 65535."));
+        }
+        self.change_ports(id, |ports| {
+            ports.retain(|p| p.port != port);
+            ports.push(OpenPort { port, public });
+            ports.sort_by_key(|p| p.port);
+        })
+        .await
+    }
+
+    pub async fn close_port(&self, id: &str, port: u16) -> Result<SandboxStatus> {
+        self.change_ports(id, |ports| ports.retain(|p| p.port != port))
+            .await
+    }
+
+    async fn change_ports(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut Vec<OpenPort>),
+    ) -> Result<SandboxStatus> {
+        let sbx = self.find(id)?;
+        let vm = sbx.vm.lock().await;
+        if sbx.status().state.is_final() {
+            return Err(err(ErrorCode::Conflict, "The sandbox has ended."));
+        }
+        let st = sbx.update(|s| f(&mut s.ports));
+        self.persist(&sbx, vm.as_ref().map(|v| v.pid));
+        Ok(st)
     }
 
     pub fn set_ttl(&self, id: &str, ttl_secs: u64) -> Result<SandboxStatus> {
