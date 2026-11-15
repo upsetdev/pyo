@@ -814,6 +814,10 @@ pub fn write_rules(bundles: &[SystemBundle]) -> Vec<Value> {
     if !roles.is_empty() {
         rules.push(json!({ "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["roles"], "verbs": ["escalate", "bind"], "resourceNames": roles }));
     }
+    // Pyo Static's output: each request a line, read as a site's logs.
+    if bundles.iter().any(|b| b.id == STATIC_ID) {
+        rules.push(json!({ "apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"] }));
+    }
     // The databases system's operators: started and stopped (their replica
     // count only, which admission holds to 0 or 1).
     if bundles.iter().any(|b| b.id == DATABASES_ID) {
