@@ -318,8 +318,19 @@ async fn connects(mgr: &Manager, id: &str, addr: &str, port: u16) -> bool {
     r.exit_code == Some(0)
 }
 
-/// Internet: `curl https://1.1.1.1` with the certificate checked, ICMP,
-/// DNS, and HTTPS by name.
+/// Whether the host itself pings out. Some clouds (Azure, so GitHub's
+/// runners) drop outbound ICMP, and then a sandbox can't either.
+fn host_pings() -> bool {
+    static PINGS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PINGS.get_or_init(|| {
+        let ok = sh("ping -c 1 -W 5 1.1.1.1 >/dev/null").0;
+        println!("net-e2e host pings 1.1.1.1: {ok}");
+        ok
+    })
+}
+
+/// Internet: `curl https://1.1.1.1` with the certificate checked, ICMP
+/// (when the host pings out), DNS, and HTTPS by name.
 async fn assert_internet(mgr: &Manager, id: &str) {
     let r = exec(
         mgr,
@@ -335,6 +346,9 @@ async fn assert_internet(mgr: &Manager, id: &str) {
         r.stdout.trim().replace('\n', " ")
     );
     for want in ["https-ok", "ping-ok", "dns-ok", "https-name-ok"] {
+        if want == "ping-ok" && !host_pings() {
+            continue;
+        }
         assert!(r.stdout.contains(want), "{id}: {want} missing: {r:?}");
     }
 }
