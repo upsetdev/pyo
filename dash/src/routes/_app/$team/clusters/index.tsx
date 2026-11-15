@@ -14,6 +14,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { locationLabel, parseLocation, placesOf } from "~/lib/pyo/location";
 import { Flag, PlaceFlags } from "~/components/ui/Flag";
 import { ClusterCommandDialog } from "~/components/pyo/AgentInstall";
+import { SandboxServers } from "~/components/pyo/sandbox/SandboxServers";
 import { CARD_HOVER, useStoredView, ViewToggle } from "~/components/pyo/ProjectCard";
 import { useState } from "react";
 import {
@@ -427,6 +428,7 @@ function ServersPage() {
           />
         </Panel>
       )}
+      <SandboxServers />
       {dialog}
       {commandFor ? (
         <ClusterCommandDialog
