@@ -57,7 +57,7 @@ export function useExtensionCatalog(): DatabaseExtension[] | null {
 
 /** The ones Pyo turns on, of those the template needs. */
 export const managedOf = (req: TemplateDatabase, catalog: DatabaseExtension[] | null) =>
-  (req.extensions ?? []).filter((n) => catalog?.some((e) => e.name === n && e.section === "managed"));
+  (req.extensions ?? []).filter((n) => catalog?.some((e) => e.name === n && e.section === "pyo"));
 
 /** Of those, the ones an existing database doesn't have on. */
 export const missingOn = (req: TemplateDatabase, db: Database | undefined, catalog: DatabaseExtension[] | null) =>

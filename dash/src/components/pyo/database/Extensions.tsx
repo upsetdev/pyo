@@ -71,7 +71,7 @@ function Extensions({ d }: { d: Database }) {
 
   // Obsolete ones only while this database has them.
   const managed = all
-    .filter((e) => e.section === "managed" && (!e.hidden || states.some((s) => s.name === e.name)))
+    .filter((e) => e.section === "pyo" && (!e.hidden || states.some((s) => s.name === e.name)))
     .sort(byName);
   const additional = all.filter((e) => e.section === "additional").sort(byName);
 
@@ -216,7 +216,7 @@ function Extensions({ d }: { d: Database }) {
   );
 }
 
-/** A managed extension with its switch, aligned the way <Switch> rows are. */
+/** An extension Pyo turns on, with its switch, aligned the way <Switch> rows are. */
 function ExtensionRow({
   e,
   badge,

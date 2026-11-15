@@ -1,6 +1,6 @@
 //! Postgres extensions a Database turns on (`spec.postgres.extensions`), from
 //! the catalog in `extensions.json` (the API and the dashboard read the same
-//! file). The "managed" ones are Pyo's to turn on and off, as superuser:
+//! file). The "pyo" ones are Pyo's to turn on and off, as superuser:
 //!
 //! - Libraries some need loaded at start go in the Cluster's
 //!   `shared_preload_libraries`, with their settings; CloudNativePG restarts
@@ -85,7 +85,7 @@ pub fn catalog() -> &'static [Ext] {
 pub fn managed(name: &str) -> Option<&'static Ext> {
     catalog()
         .iter()
-        .find(|e| e.name == name && e.section == "managed")
+        .find(|e| e.name == name && e.section == "pyo")
 }
 
 /// The CloudNativePG Database through which extensions are made.
@@ -222,7 +222,7 @@ pub fn plan(wanted: &[String], have: &Have, database: &str, owner: &str) -> Plan
     // dropped yet), or still loaded.
     let leaving: Vec<&Ext> = catalog()
         .iter()
-        .filter(|e| e.section == "managed" && !is_wanted(&e.name))
+        .filter(|e| e.section == "pyo" && !is_wanted(&e.name))
         .filter(|e| {
             let created = e.create
                 && (have.listed_present(&e.name)
@@ -353,9 +353,9 @@ mod tests {
         assert!(
             catalog()
                 .iter()
-                .all(|e| e.section == "managed" || e.section == "additional")
+                .all(|e| e.section == "pyo" || e.section == "additional")
         );
-        for e in catalog().iter().filter(|e| e.section == "managed") {
+        for e in catalog().iter().filter(|e| e.section == "pyo") {
             assert!(
                 e.restart == !e.libraries().is_empty(),
                 "{}: restarts exactly when it loads a library",

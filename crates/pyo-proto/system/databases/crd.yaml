@@ -81,7 +81,7 @@ spec:
                     pooler: {type: boolean}
                     parameters: {type: object, additionalProperties: {type: string}}
                     # Extensions Pyo turns on (pyo-db-controller's
-                    # extensions.json, the "managed" ones).
+                    # extensions.json, the "pyo" ones).
                     extensions:
                       type: array
                       maxItems: 50

@@ -151,7 +151,7 @@ pub struct PostgresSpec {
     /// postgresql.conf settings.
     #[serde(default)]
     pub parameters: std::collections::BTreeMap<String, String>,
-    /// Extensions Pyo turns on (extensions.json's "managed" ones).
+    /// Extensions Pyo turns on (extensions.json's "pyo" ones).
     #[serde(default)]
     pub extensions: Vec<String>,
 }

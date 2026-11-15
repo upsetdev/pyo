@@ -11,7 +11,7 @@
 //!   was looked at as it was uploaded (its format, the version it was dumped
 //!   from, the extensions it makes).
 //! - **Extensions:** Postgres extensions the source has that Pyo turns on
-//!   ("managed") are turned on first; the "additional" ones the import makes
+//!   ("pyo") are turned on first; the "additional" ones the import makes
 //!   itself; any other is refused, by name.
 //! - **How:** the Database's `spec.import` (pyo-db-controller's import.rs):
 //!   CloudNativePG's own import for a new Postgres database from a URL, a
@@ -684,7 +684,7 @@ async fn plan(
             .iter()
             .find(|c| c.engine == "postgres" && &c.name == e)
         {
-            Some(c) if c.section == "managed" => {
+            Some(c) if c.section == "pyo" => {
                 if !into.extensions.contains(e) {
                     turn_on.push(e.clone());
                 }

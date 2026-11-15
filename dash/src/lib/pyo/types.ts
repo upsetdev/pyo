@@ -1088,8 +1088,8 @@ export type DatabaseExtensionState = {
 export type DatabaseExtension = {
   name: string;
   engine: "postgres" | "valkey";
-  /** "managed": Pyo turns it on and off. "additional": the database's owner adds it. */
-  section: "managed" | "additional";
+  /** "pyo": Pyo turns it on and off. "additional": the database's owner adds it. */
+  section: "pyo" | "additional";
   description: string;
   docs: string;
   /** A limited build, shown beside its name ("Apache 2 Edition"). */

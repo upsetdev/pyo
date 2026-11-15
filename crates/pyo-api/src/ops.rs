@@ -1911,11 +1911,11 @@ pub(crate) enum Op {
         /// Dedicated read replicas: 0 (the default) to 5 for Postgres, or to 4 for KV. MySQL has none.
         #[serde(default)]
         read_replicas: Option<i32>,
-        /// Postgres extensions or KV modules to turn on with it, from `listDatabaseExtensions` with `section` "managed" for its engine. For example ["vector", "pg_cron"] or ["valkey-json"].
+        /// Postgres extensions or KV modules to turn on with it, from `listDatabaseExtensions` with `section` "pyo" for its engine. For example ["vector", "pg_cron"] or ["valkey-json"].
         #[serde(default)]
         extensions: Option<Vec<String>>,
     },
-    /// Turn a Postgres database's extensions or a KV database's modules on and off. `extensions` is the full list to have on, from `listDatabaseExtensions` with `section` "managed" for its engine. The database's owner adds Postgres's "additional" ones with CREATE EXTENSION. Some load a library, which restarts the database (`restart`). With high availability, it restarts one instance at a time and the primary hands over last. Every KV module restarts the database and needs KV 8.1. Turning a Postgres extension off drops it (DROP EXTENSION, without CASCADE). Postgres refuses while other objects depend on it, and the database's `extensions` shows this. Developers and up.
+    /// Turn a Postgres database's extensions or a KV database's modules on and off. `extensions` is the full list to have on, from `listDatabaseExtensions` with `section` "pyo" for its engine. The database's owner adds Postgres's "additional" ones with CREATE EXTENSION. Some load a library, which restarts the database (`restart`). With high availability, it restarts one instance at a time and the primary hands over last. Every KV module restarts the database and needs KV 8.1. Turning a Postgres extension off drops it (DROP EXTENSION, without CASCADE). Postgres refuses while other objects depend on it, and the database's `extensions` shows this. Developers and up.
     SetDatabaseExtensions { id: String, extensions: Vec<String> },
     /// Change a database's size, instances, storage, version, pooler, REST API, read replicas or deletion protection. Instances are 1 for a single server, or for high availability 2 to 8 replicas for Postgres, 2 to 4 for KV, or 2 or 4 for MySQL. MySQL instances only grow. Storage only grows and the version only goes up. Only owners and admins can turn deletion protection off. Connected services get changed variables on their next deploy.
     UpdateDatabase {

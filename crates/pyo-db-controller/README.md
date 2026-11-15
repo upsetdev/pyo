@@ -37,7 +37,7 @@ The other settings are listed at the top of `src/main.rs`.
 
 ## Extensions
 
-`spec.postgres.extensions` lists the extensions Pyo turns on, the "managed"
+`spec.postgres.extensions` lists the extensions Pyo turns on, the "pyo"
 ones in `extensions.json` (`src/extensions.rs`):
 
 - Libraries that must load at start go in the Cluster's

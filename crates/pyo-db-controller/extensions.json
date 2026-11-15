@@ -1,9 +1,9 @@
 {
-  "_comment": "Postgres extensions Pyo's databases offer (the Extensions tab). 'managed': turned on and off by Pyo, as superuser through CloudNativePG (preload: libraries in shared_preload_libraries, a restart; parameters: {database} and {owner} filled in; library: the one CloudNativePG preloads for the parameters; create: CREATE EXTENSION; requires: created with it; schemaOwner: that schema's owner becomes the database owner; fdw: the owner may use its foreign-data wrapper; edition: shown beside its name). TimescaleDB is the Apache 2 build: its background jobs (and so every policy) need the Timescale license, so its workers are off; otherwise its built-in job history job fails on every run.. 'additional': the database owner (the default role) creates these itself. Only what Pyo's Postgres image has (deploy/images/postgres.Dockerfile), checked against pg_available_extensions and its trusted and superuser flags. hidden: obsolete (Postgres says so), listed only while a database has it on.",
+  "_comment": "Postgres extensions Pyo's databases offer (the Extensions tab). 'pyo': turned on and off by Pyo, as superuser through CloudNativePG (preload: libraries in shared_preload_libraries, a restart; parameters: {database} and {owner} filled in; library: the one CloudNativePG preloads for the parameters; create: CREATE EXTENSION; requires: created with it; schemaOwner: that schema's owner becomes the database owner; fdw: the owner may use its foreign-data wrapper; edition: shown beside its name). TimescaleDB is the Apache 2 build: its background jobs (and so every policy) need the Timescale license, so its workers are off; otherwise its built-in job history job fails on every run.. 'additional': the database owner (the default role) creates these itself. Only what Pyo's Postgres image has (deploy/images/postgres.Dockerfile), checked against pg_available_extensions and its trusted and superuser flags. hidden: obsolete (Postgres says so), listed only while a database has it on.",
   "extensions": [
     {
       "name": "auto_explain",
-      "section": "managed",
+      "section": "pyo",
       "description": "Logs the plan of every query that takes over a second.",
       "docs": "https://www.postgresql.org/docs/current/auto-explain.html",
       "restart": true,
@@ -15,7 +15,7 @@
     },
     {
       "name": "pg_cron",
-      "section": "managed",
+      "section": "pyo",
       "description": "Runs SQL on a schedule, with cron syntax, inside the database.",
       "docs": "https://github.com/citusdata/pg_cron",
       "restart": true,
@@ -31,7 +31,7 @@
     },
     {
       "name": "pg_hint_plan",
-      "section": "managed",
+      "section": "pyo",
       "description": "Steers the query planner with hints in SQL comments.",
       "docs": "https://github.com/ossc-db/pg_hint_plan",
       "restart": true,
@@ -42,7 +42,7 @@
     },
     {
       "name": "pg_partman_bgw",
-      "section": "managed",
+      "section": "pyo",
       "description": "Runs pg_partman's partition maintenance every hour. Add pg_partman itself with the default role.",
       "docs": "https://github.com/pgpartman/pg_partman",
       "restart": true,
@@ -58,7 +58,7 @@
     },
     {
       "name": "pg_stat_statements",
-      "section": "managed",
+      "section": "pyo",
       "description": "Tracks planning and execution statistics of every query.",
       "docs": "https://www.postgresql.org/docs/current/pgstatstatements.html",
       "restart": true,
@@ -70,7 +70,7 @@
     },
     {
       "name": "pgaudit",
-      "section": "managed",
+      "section": "pyo",
       "description": "Writes an audit trail of schema and role changes to the logs.",
       "docs": "https://github.com/pgaudit/pgaudit",
       "restart": true,
@@ -82,7 +82,7 @@
     },
     {
       "name": "timescaledb",
-      "section": "managed",
+      "section": "pyo",
       "description": "Hypertables and time functions for time series, without compression, continuous aggregates or scheduled jobs.",
       "edition": "Apache 2 Edition",
       "docs": "https://github.com/timescale/timescaledb",
@@ -99,7 +99,7 @@
     },
     {
       "name": "vector",
-      "section": "managed",
+      "section": "pyo",
       "description": "Vector similarity search: embeddings and nearest neighbours (pgvector).",
       "docs": "https://github.com/pgvector/pgvector",
       "restart": false,
@@ -107,7 +107,7 @@
     },
     {
       "name": "autoinc",
-      "section": "managed",
+      "section": "pyo",
       "description": "Trigger function that fills a field from a sequence.",
       "docs": "https://www.postgresql.org/docs/current/contrib-spi.html",
       "restart": false,
@@ -115,7 +115,7 @@
     },
     {
       "name": "bloom",
-      "section": "managed",
+      "section": "pyo",
       "description": "Index type based on Bloom filters, for many columns at once.",
       "docs": "https://www.postgresql.org/docs/current/bloom.html",
       "restart": false,
@@ -123,7 +123,7 @@
     },
     {
       "name": "dblink",
-      "section": "managed",
+      "section": "pyo",
       "description": "Runs queries on other Postgres databases from inside this one.",
       "docs": "https://www.postgresql.org/docs/current/dblink.html",
       "restart": false,
@@ -131,7 +131,7 @@
     },
     {
       "name": "dict_xsyn",
-      "section": "managed",
+      "section": "pyo",
       "description": "Text search dictionary that adds synonyms to words.",
       "docs": "https://www.postgresql.org/docs/current/dict-xsyn.html",
       "restart": false,
@@ -139,7 +139,7 @@
     },
     {
       "name": "earthdistance",
-      "section": "managed",
+      "section": "pyo",
       "description": "Great-circle distances between points on the Earth.",
       "docs": "https://www.postgresql.org/docs/current/earthdistance.html",
       "restart": false,
@@ -150,7 +150,7 @@
     },
     {
       "name": "insert_username",
-      "section": "managed",
+      "section": "pyo",
       "description": "Trigger function that records who changed a row.",
       "docs": "https://www.postgresql.org/docs/current/contrib-spi.html",
       "restart": false,
@@ -158,7 +158,7 @@
     },
     {
       "name": "intagg",
-      "section": "managed",
+      "section": "pyo",
       "description": "Integer aggregator and enumerator (obsolete).",
       "docs": "https://www.postgresql.org/docs/current/intagg.html",
       "restart": false,
@@ -167,7 +167,7 @@
     },
     {
       "name": "moddatetime",
-      "section": "managed",
+      "section": "pyo",
       "description": "Trigger function that records when a row changed.",
       "docs": "https://www.postgresql.org/docs/current/contrib-spi.html",
       "restart": false,
@@ -175,7 +175,7 @@
     },
     {
       "name": "pg_prewarm",
-      "section": "managed",
+      "section": "pyo",
       "description": "Loads tables into memory, so the first queries after a restart are fast.",
       "docs": "https://www.postgresql.org/docs/current/pgprewarm.html",
       "restart": false,
@@ -183,7 +183,7 @@
     },
     {
       "name": "pgrowlocks",
-      "section": "managed",
+      "section": "pyo",
       "description": "Shows which rows of a table are locked, and by whom.",
       "docs": "https://www.postgresql.org/docs/current/pgrowlocks.html",
       "restart": false,
@@ -191,7 +191,7 @@
     },
     {
       "name": "postgres_fdw",
-      "section": "managed",
+      "section": "pyo",
       "description": "Queries tables on other Postgres servers as if they were local.",
       "docs": "https://www.postgresql.org/docs/current/postgres-fdw.html",
       "restart": false,
@@ -200,7 +200,7 @@
     },
     {
       "name": "refint",
-      "section": "managed",
+      "section": "pyo",
       "description": "Trigger functions for referential integrity (obsolete).",
       "docs": "https://www.postgresql.org/docs/current/contrib-spi.html",
       "restart": false,
@@ -209,7 +209,7 @@
     },
     {
       "name": "sslinfo",
-      "section": "managed",
+      "section": "pyo",
       "description": "Details of the client's SSL certificate.",
       "docs": "https://www.postgresql.org/docs/current/sslinfo.html",
       "restart": false,
@@ -217,7 +217,7 @@
     },
     {
       "name": "xml2",
-      "section": "managed",
+      "section": "pyo",
       "description": "XPath queries and XSLT on XML.",
       "docs": "https://www.postgresql.org/docs/current/xml2.html",
       "restart": false,

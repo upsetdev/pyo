@@ -599,7 +599,7 @@ pub(crate) async fn import_target(
 }
 
 /// An import into an existing database was recorded: turn on the
-/// extensions it needs first (`turn_on`, Postgres's "managed" ones), and
+/// extensions it needs first (`turn_on`, Postgres's "pyo" ones), and
 /// send it with its import.
 pub(crate) async fn import_into(
     s: &AppState,
@@ -683,9 +683,9 @@ fn label_of(db: &Db) -> Value {
 // ── Extensions: Postgres extensions and KV modules ─────────────────────────
 
 /// The extensions Pyo's databases offer (pyo-db-controller's catalog, the
-/// one its controller turns them on from). Postgres: "managed" ones Pyo
+/// one its controller turns them on from). Postgres: "pyo" ones Pyo
 /// turns on and off; "additional" ones the database's owner creates itself.
-/// KV: Valkey modules (the catalog's "kv" list), all "managed".
+/// KV: Valkey modules (the catalog's "kv" list), all "pyo".
 #[derive(Deserialize, serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Extension {
@@ -727,7 +727,7 @@ pub fn extension_catalog() -> &'static [Extension] {
         // A module loads at start: turning one on or off restarts the database.
         let kv = c.kv.into_iter().map(|e| Extension {
             engine: "valkey".into(),
-            section: "managed".into(),
+            section: "pyo".into(),
             restart: true,
             ..e
         });
@@ -736,7 +736,7 @@ pub fn extension_catalog() -> &'static [Extension] {
 }
 
 /// The extensions asked for, as the database keeps them: Postgres's
-/// "managed" ones or KV's modules, each once, in the catalog's order.
+/// "pyo" ones or KV's modules, each once, in the catalog's order.
 fn check_extensions(engine: &str, wanted: &[String]) -> ApiResult<Vec<String>> {
     if wanted.is_empty() {
         return Ok(vec![]);
@@ -747,7 +747,7 @@ fn check_extensions(engine: &str, wanted: &[String]) -> ApiResult<Vec<String>> {
     let of_engine = || extension_catalog().iter().filter(|e| e.engine == engine);
     for w in wanted {
         match of_engine().find(|e| &e.name == w) {
-            Some(e) if e.section == "managed" => {}
+            Some(e) if e.section == "pyo" => {}
             Some(_) => {
                 return Err(bad(format!(
                     "{w} isn't turned on here: connect to the database with its default role and run CREATE EXTENSION \"{w}\".",
@@ -872,7 +872,7 @@ fn extensions_of(d: &Db, status: &Value) -> Value {
 ///
 /// The extensions Pyo's databases offer: Postgres extensions and KV
 /// modules. Each one's `name`, `engine` ("postgres" or "valkey"), `section`
-/// ("managed" ones are turned on with `setDatabaseExtensions`, and the
+/// ("pyo" ones are turned on with `setDatabaseExtensions`, and the
 /// database's owner adds "additional" ones with CREATE EXTENSION), a
 /// one-line `description`, its `docs`, its `edition` when it's a limited build,
 /// `hidden` when it's obsolete (shown only while a database has it on), and
@@ -2536,7 +2536,7 @@ mod tests {
             extension_catalog()
                 .iter()
                 .filter(|e| e.engine == "valkey")
-                .all(|e| e.restart && e.section == "managed")
+                .all(|e| e.restart && e.section == "pyo")
         );
         assert!(
             extension_catalog()
