@@ -197,6 +197,20 @@ pub fn test(link: &str) -> (String, String, String) {
     )
 }
 
+/// (subject, text, html) of a one-time sign-in link (recovery.rs).
+pub fn sign_in_link(link: &str, minutes: i32) -> (String, String, String) {
+    let body = format!(
+        "Open this link to choose a new password for Pyo. It works once, for {minutes} minutes."
+    );
+    let button = "Choose a new password";
+    let footer = "If you didn't ask for this, you can ignore it. Your password stays as it is.";
+    (
+        "Choose a new Pyo password".into(),
+        format!("{body}\n\n{button}: {link}\n\n{footer}\n"),
+        layout("Choose a new password", &body, button, link, footer),
+    )
+}
+
 fn article(role: &str) -> String {
     match role {
         "admin" => "an admin".into(),

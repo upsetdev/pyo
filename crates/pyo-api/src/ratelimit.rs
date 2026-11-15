@@ -71,6 +71,24 @@ pub const SIGNUP_IP: Limit = Limit {
     max: 20,
     window_secs: HOUR,
 };
+/// "Forgot password?" emails asked for per address.
+pub const FORGOT_IP: Limit = Limit {
+    scope: "forgot:ip",
+    max: 10,
+    window_secs: HOUR,
+};
+/// And per email, existing or not (so a mailbox can't be flooded).
+pub const FORGOT_ACCOUNT: Limit = Limit {
+    scope: "forgot:account",
+    max: 3,
+    window_secs: HOUR,
+};
+/// Sign-in links tried per address (wrong or used ones count).
+pub const SIGN_IN_LINK_IP: Limit = Limit {
+    scope: "sign-in-link:ip",
+    max: 30,
+    window_secs: MIN15,
+};
 /// MCP client registrations per address (unauthenticated, each one a row).
 pub const OAUTH_REGISTER_IP: Limit = Limit {
     scope: "oauth-register:ip",

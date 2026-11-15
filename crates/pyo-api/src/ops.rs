@@ -330,7 +330,7 @@ pub async fn team_of(
 
 /// Top-level paths the dashboard owns can't be team slugs.
 // "pyo": Pyo registry keeps Pyo's own builds under pyo/.
-const RESERVED_SLUGS: [&str; 16] = [
+const RESERVED_SLUGS: [&str; 18] = [
     "profile",
     "settings",
     "oauth",
@@ -347,6 +347,8 @@ const RESERVED_SLUGS: [&str; 16] = [
     "pyo",
     "invite",
     "cli-login",
+    "forgot-password",
+    "reset-password",
 ];
 
 /// Replicas are a whole number from 0 up. Pyo sets no maximum: the servers
@@ -2260,6 +2262,8 @@ pub(crate) enum Op {
     UpdateMemberRole { id: String, role: String },
     /// Remove a member from a team, or revoke an invite.
     RemoveMember { id: String },
+    /// Owners only: a one-time link for a member who lost their password, to choose a new one. It's emailed to them. Without email set up, it's returned to pass on, for an account in this team alone.
+    ResetMemberSignIn { id: String },
     /// Create a project in a team.
     CreateProject {
         /// A new id you choose: `prj_` then 4 to 40 lowercase letters, digits, dashes or underscores.
@@ -2857,7 +2861,8 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         Op::InviteMember { .. }
         | Op::ResendInvite { .. }
         | Op::UpdateMemberRole { .. }
-        | Op::RemoveMember { .. } => ("Teams", "mem"),
+        | Op::RemoveMember { .. }
+        | Op::ResetMemberSignIn { .. } => ("Teams", "mem"),
         Op::RotateDataKey { .. } => ("Teams", "team"),
         Op::CreateProject { .. }
         | Op::UpdateProject { .. }
@@ -4806,6 +4811,55 @@ async fn apply(
                 .execute(&mut **tx)
                 .await?;
             Ok(ok)
+        }
+        Op::ResetMemberSignIn { id } => {
+            let team_id = team_of(tx, "members", &id).await?;
+            require_role(tx, user, &team_id, Role::Owner).await?;
+            let (user_id, email, status): (Option<String>, String, String) =
+                sqlx::query_as("SELECT user_id, email, status FROM pyo.members WHERE id = $1")
+                    .bind(&id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            let Some(user_id) = user_id.filter(|_| status == "active") else {
+                return Err(ApiError::bad_request(
+                    "They haven't joined yet. Send the invite again instead.",
+                ));
+            };
+            if user_id == user.id {
+                return Err(ApiError::bad_request(
+                    "That's you. Change your password in your profile.",
+                ));
+            }
+            let token = crate::recovery::new_link(tx, &user_id).await?;
+            let path = crate::recovery::link_path(&token);
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "member.sign_in_reset",
+                "info",
+                &format!("Reset the sign-in of {email}"),
+                json!({ "kind": "member", "id": id, "label": email }),
+                json!({}),
+            )
+            .await?;
+            if let Some(cfg) = mail::settings(&s.db).await? {
+                let (subject, text, html) =
+                    mail::sign_in_link(&cfg.link(&path), crate::recovery::LINK_MINUTES);
+                return match mail::send(s, &cfg, &email, &subject, text, html).await {
+                    Ok(()) => Ok(json!({ "ok": true, "emailed": true })),
+                    Err(e) => Err(ApiError::bad_request(format!(
+                        "The email to {email} didn't send ({}). Try again.",
+                        smtp_error(&e)
+                    ))),
+                };
+            }
+            if !crate::recovery::owner_may_see(tx, &user_id, &team_id).await? {
+                return Err(ApiError::bad_request(format!(
+                    "Email isn't set up, so the link can't reach {email}. An admin can set it up in Settings, under Email."
+                )));
+            }
+            Ok(json!({ "ok": true, "emailed": false, "link": path }))
         }
         Op::RemoveMember { id } => {
             let team_id = team_of(tx, "members", &id).await?;

@@ -813,6 +813,64 @@ pub async fn first_sign_in(
     Ok(axum::Json(serde_json::json!({ "pending": pending })))
 }
 
+#[derive(Deserialize)]
+pub struct ResetLogin {
+    key: String,
+    /// The account's email. Empty: the installation's admin, when it has one.
+    #[serde(default)]
+    email: String,
+}
+
+/// POST /install/reset-login (form: key, email): a one-time sign-in link for
+/// an account, for `pyo-reset-login` on the host (install.sh), which proves
+/// itself with the bootstrap key as for [`this_machine`]. Without an email,
+/// for the installation's admin, or a list of admins to pick from. Answers
+/// `{"email", "path", "minutes"}`. The link replaces the password, so the
+/// only admin who lost theirs gets back in.
+pub async fn reset_login(
+    State(s): State<AppState>,
+    axum::Form(f): axum::Form<ResetLogin>,
+) -> ApiResult<axum::Json<serde_json::Value>> {
+    bootstrap_key(&f.key)?;
+    let email = f.email.trim().to_lowercase();
+    let mut conn = s.db.acquire().await?;
+    let users: Vec<(String, String)> = if email.is_empty() {
+        sqlx::query_as("SELECT id, email FROM pyo.users WHERE is_admin ORDER BY created_at")
+            .fetch_all(&mut *conn)
+            .await?
+    } else {
+        sqlx::query_as("SELECT id, email FROM pyo.users WHERE email = $1")
+            .bind(&email)
+            .fetch_all(&mut *conn)
+            .await?
+    };
+    let (id, email) = match users.as_slice() {
+        [one] => one.clone(),
+        [] if !email.is_empty() => {
+            return Err(ApiError::new(
+                axum::http::StatusCode::NOT_FOUND,
+                format!("No account has the email {email}."),
+            ));
+        }
+        [] => return Err(ApiError::bad_request("Pyo has no admin yet.")),
+        many => {
+            let list: Vec<&str> = many.iter().map(|(_, e)| e.as_str()).collect();
+            return Err(ApiError::bad_request(format!(
+                "Pyo has more than one admin: {}. Name the account, like: pyo-reset-login {}",
+                list.join(", "),
+                list[0]
+            )));
+        }
+    };
+    let token = crate::recovery::new_link(&mut conn, &id).await?;
+    tracing::info!(user = %id, "sign-in link made on the host");
+    Ok(axum::Json(serde_json::json!({
+        "email": email,
+        "path": crate::recovery::link_path(&token),
+        "minutes": crate::recovery::LINK_MINUTES,
+    })))
+}
+
 /// The first admin is there and hasn't chosen their own login yet.
 async fn first_admin_pending(db: impl sqlx::PgExecutor<'_>) -> ApiResult<bool> {
     Ok(sqlx::query_scalar(

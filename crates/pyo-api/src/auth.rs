@@ -47,6 +47,7 @@ pub fn routes() -> Router<AppState> {
         .route("/config", get(config))
         .route("/invite/accept", post(accept))
         .merge(crate::passkeys::routes())
+        .merge(crate::recovery::routes())
 }
 
 /// A Pyo account.
@@ -375,7 +376,7 @@ struct SignupBody {
     invite: Option<String>,
 }
 
-fn check_password(password: &str) -> ApiResult<()> {
+pub(crate) fn check_password(password: &str) -> ApiResult<()> {
     if password.chars().count() < 10 {
         return Err(ApiError::bad_request(
             "Use at least 10 characters for the password.",
@@ -404,7 +405,7 @@ async fn argon2_task<T: Send + 'static>(
     .await
 }
 
-async fn hash_password(password: &str) -> anyhow::Result<String> {
+pub(crate) async fn hash_password(password: &str) -> anyhow::Result<String> {
     let password = password.to_owned();
     argon2_task(move || {
         Argon2::default()
@@ -517,7 +518,7 @@ pub async fn ensure_first_admin(db: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn normalize_email(email: &str) -> ApiResult<String> {
+pub(crate) fn normalize_email(email: &str) -> ApiResult<String> {
     let e = email.trim().to_lowercase();
     let valid = e.len() <= 254
         && e.split_once('@').is_some_and(|(local, domain)| {
@@ -614,6 +615,8 @@ async fn config(
     };
     Ok(Json(json!({
         "signupOpen": state.config.allow_signup || invite.is_some(),
+        // "Forgot password?" mails a sign-in link, so it needs email.
+        "passwordReset": crate::mail::settings(&state.db).await?.is_some(),
         "invite": invite.map(|i| json!({ "email": i.email, "team": i.team })),
     })))
 }

@@ -52,6 +52,7 @@ mod passkeys;
 mod platform_import;
 mod publicdash;
 mod ratelimit;
+mod recovery;
 mod refs;
 mod registry;
 mod registrydoor;
@@ -440,6 +441,10 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             .route("/install/gateway-crds.yaml", get(install::gateway_crds))
             .route("/install/this-machine", get(install::this_machine))
             .route("/install/first-sign-in", get(install::first_sign_in))
+            .route(
+                "/install/reset-login",
+                axum::routing::post(install::reset_login),
+            )
             .route(
                 "/install/this-machine/tailnet",
                 axum::routing::post(install::this_machine_tailnet),
