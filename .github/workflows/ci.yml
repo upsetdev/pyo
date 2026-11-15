@@ -76,10 +76,27 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A test isn't an install: no install count (PYO_TELEMETRY=off), and
+      # api.pyo.dev doesn't resolve inside k3s, so Pyo's first update check
+      # sends no usage counts and falls back to GitHub. k3s applies this
+      # manifest when it starts, and CoreDNS imports coredns-custom.
+      - name: Keep CI out of the counts
+        run: |
+          sudo install -d /var/lib/rancher/k3s/server/manifests
+          sudo tee /var/lib/rancher/k3s/server/manifests/ci-no-telemetry.yaml >/dev/null <<'YAML'
+          apiVersion: v1
+          kind: ConfigMap
+          metadata: { name: coredns-custom, namespace: kube-system }
+          data:
+            no-telemetry.override: |
+              template IN ANY api.pyo.dev {
+                rcode NXDOMAIN
+              }
+          YAML
       - name: Install Pyo
         run: |
           set -o pipefail
-          sudo bash deploy/install.sh < /dev/null 2>&1 | sed 's/^\(  Password: \).*/\1(hidden)/'
+          sudo env PYO_TELEMETRY=off bash deploy/install.sh < /dev/null 2>&1 | sed 's/^\(  Password: \).*/\1(hidden)/'
       - name: Pyo answers
         run: |
           curl -fsS http://localhost:8000/api/v1/meta

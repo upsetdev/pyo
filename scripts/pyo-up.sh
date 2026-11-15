@@ -84,7 +84,8 @@ if [ "${1:-}" = "--release" ]; then
         --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
     done
   fi
-  exec sudo bash deploy/install.sh --version "$VERSION" "$@"
+  # A dev or test machine: no install count unless PYO_TELEMETRY says so.
+  exec sudo env PYO_TELEMETRY="${PYO_TELEMETRY:-off}" bash deploy/install.sh --version "$VERSION" "$@"
 fi
 
 # What to build: what changed (no arguments), --only a,b, --all, or
