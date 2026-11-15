@@ -107,9 +107,7 @@ release carries it as an asset. Installations find it in **Settings › Updates*
   checks `release.json` with the release's own agent
   (`pyo-agent check-release`) before signing it
 - `manifests`: `deploy/k8s/platform.yaml` and `deploy/k8s/pyo.yaml` as JSON
-  objects with those images. `__TAILNET_IP__`, `__REGISTRY_PUSH__`,
-  `__TAILNET_API__` and `__TAILNET_NAME__` stay as they are, and the upgrader reads each installation's
-  own values from what it's running
+  objects with those images
 - `migrations`: the migration files, so an installation can say how many it
   hasn't run yet
 - the notices from `deploy/release-notices.json`

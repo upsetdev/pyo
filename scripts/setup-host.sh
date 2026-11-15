@@ -7,13 +7,14 @@
 #   sudo bash scripts/setup-host.sh
 #
 # Host ports once Pyo is running:
-#   80 / 443  Pyo Gateway (services' HTTP and HTTPS)
-#   8443      Pyo dashboard over HTTPS (the gateway; tailnet sources only)
-#   5443      Pyo registry for teams' own images (HTTPS; tailnet only)
-#   8000      Pyo dashboard and API, plain HTTP: localhost and the tailnet
+#   80 / 443  Pyo Gateway: services' HTTP and HTTPS, and Pyo's own HTTPS
+#             names (pyo.<tailnet>.ts.net and registry.<tailnet>.ts.net
+#             with Tailscale, else pyo.<public-ip>.nip.io)
+#   8000      Pyo dashboard and API, plain HTTP: loopback, private and
+#             tailnet addresses
 #   6443      k3s API server
-#   5005      Pyo image registry: 127.0.0.1 for this server; on the tailnet IP
-#             only its door, which wants a login
+#   5005      Pyo image registry, on 127.0.0.1 for this server
+#   5006      Pyo registry's door for tailnet peers, which wants a login
 #
 # Undo: /usr/local/bin/k3s-uninstall.sh
 set -euo pipefail

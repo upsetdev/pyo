@@ -98,19 +98,22 @@ What `pyo-up.sh` does besides building and deploying:
 
 - It downloads `buildctl` to `~/.local/bin` if you don't have it.
 - It uses `sudo` to install the systemd timers `pyo-connect` and
-  `pyo-tailnet-cert`, the helper scripts in `/usr/local/lib/pyo`, and a key
-  in `/etc/pyo`. These connect this machine as a server once you've signed up.
+  `pyo-tailnet`, the helper scripts in `/usr/local/lib/pyo`, and a key in
+  `/etc/pyo`. These connect this machine as a server once you've signed up,
+  and put it on your tailnet once Tailscale is set up in Pyo.
 - On Ubuntu with kernel 6.17 or later, it applies the AppArmor workaround in
   `deploy/host/apparmor-workaround.sh`. Without it, Postgres never becomes
   ready.
 - Set `MAXMIND_LICENSE_KEY` when you run it to get visitor locations. Without
   a key, locations show as unknown.
 
-**HTTPS on your tailnet:** if this machine is on Tailscale with MagicDNS and
-HTTPS certificates turned on, Pyo is also served on `https://<machine>:8443`,
-with its registry on `:5443`. Tailscale's certificates are public, so the
-machine's name and your tailnet's name end up in Certificate Transparency
-logs. If you don't want that, use a randomized tailnet name.
+**Where Pyo is:** without Tailscale, Pyo is on `https://pyo.<public-ip>.nip.io`
+and on plain HTTP at `:8000` from this machine and its private network. Once
+Tailscale is set up in Pyo (Integrations), it's also on
+`https://pyo.<tailnet>.ts.net`, with its registry on
+`https://registry.<tailnet>.ts.net`. Tailscale's certificates are public, so
+your tailnet's name ends up in Certificate Transparency logs. If you don't
+want that, use a randomized tailnet name.
 
 ## Work on the dashboard
 
