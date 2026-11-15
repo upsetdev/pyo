@@ -84,15 +84,22 @@ valid_version() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 # a >= b, for versions like 0.1.0.
 version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]; }
 
-# Root, or again with sudo: the whole script travels as its functions, so this
-# works when it came through a pipe.
+# Root, or again with sudo. Piped from curl there's no file to run again, so
+# the script travels as its functions plus the settings it sets outside them
+# (SETTINGS, which CI checks against the script). sudo clears the
+# environment, so every PYO_* variable goes along too.
+SETTINGS="K3S_UNIT K3S_MEMORY_CONFIG K3S_MEMORY_CHANGED K3S_TAILNET_CONFIG COSIGN_VERSION COSIGN_SHA256_AMD64 RELEASE_SIGNER RELEASE_ISSUER"
 become_root() {
   [ "$(id -u)" = 0 ] && return 0
   command -v sudo >/dev/null || fail "Run this as root (there's no sudo)."
   say "Pyo needs root. Asking sudo"
+  local keep=() v settings
+  for v in $(compgen -e -X '!PYO_*'); do keep+=("$v=${!v}"); done
+  # shellcheck disable=SC2086 # a list of names
+  settings=$(declare -p SETTINGS $SETTINGS)
   # shellcheck disable=SC2016 # expanded by the new shell
-  exec sudo env PYO_VERSION="$VERSION" PYO_YES="$YES" PYO_UPDATE_SOURCE="$SOURCE" PYO_TELEMETRY="$TELEMETRY" \
-    bash -c "$(declare -f); main \"\$@\"" install.sh "$@"
+  exec sudo env "${keep[@]}" PYO_VERSION="$VERSION" PYO_YES="$YES" PYO_UPDATE_SOURCE="$SOURCE" PYO_TELEMETRY="$TELEMETRY" \
+    bash -c "$settings; $(declare -f); main \"\$@\"" install.sh "$@"
 }
 
 check_system() {
@@ -1316,7 +1323,7 @@ uninstall_pyo() {
 cleanup() { [ -z "${WORK:-}" ] || rm -rf "$WORK"; }
 
 main() {
-  # Again here: after sudo, only the functions came along.
+  # Again here: after sudo, only the functions and SETTINGS came along.
   set -euo pipefail
   defaults
   parse_args "$@"

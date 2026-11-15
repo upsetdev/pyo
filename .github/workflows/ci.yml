@@ -93,7 +93,42 @@ jobs:
                 rcode NXDOMAIN
               }
           YAML
+      # What install.sh sets outside its functions goes along when it runs
+      # again with sudo (its SETTINGS): without it, a sudo user's install
+      # fails at once.
+      - name: install.sh passes all its settings to sudo
+        run: |
+          export LC_ALL=C
+          bash -c '
+            vars() { compgen -v | sort; }
+            a=$(vars)
+            source <(sed "\$d" deploy/install.sh)
+            missing=$(comm -13 <(echo "$a") <(vars) | grep -vxE "a|PIPESTATUS|SETTINGS|${SETTINGS// /|}" || true)
+            [ -z "$missing" ] || { echo "install.sh sets these outside its functions, and they are not in its SETTINGS: $missing" >&2; exit 1; }
+          '
+      # As the docs say: piped into bash by a user with sudo, not root.
+      - name: Make a sudo user
+        run: |
+          sudo useradd -m pyo-ci
+          echo 'pyo-ci ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/pyo-ci >/dev/null
+          sudo install -m 644 deploy/install.sh crates/pyo-api/assets/connect.sh crates/pyo-api/assets/join.sh /home/pyo-ci/
+      - name: connect.sh and join.sh get root from a sudo user
+        run: |
+          # Past sudo, the root shell reads the options and stops at the
+          # unknown one (exit 2). Without root it stops before that (exit 1).
+          for s in connect join; do
+            set +e
+            out=$(sudo -iu pyo-ci bash -c "cat $s.sh | bash -s -- --not-an-option" 2>&1)
+            rc=$?
+            set -e
+            echo "$out"
+            [ "$rc" = 2 ] && grep -q 'Unknown option: --not-an-option' <<<"$out" || { echo "$s.sh: exit $rc, not 2" >&2; exit 1; }
+          done
       - name: Install Pyo
+        run: |
+          set -o pipefail
+          sudo -iu pyo-ci env PYO_TELEMETRY=off bash -c 'cat install.sh | bash' 2>&1 | sed 's/^\(  Password: \).*/\1(hidden)/'
+      - name: Again as root, nothing to update
         run: |
           set -o pipefail
           sudo env PYO_TELEMETRY=off bash deploy/install.sh < /dev/null 2>&1 | sed 's/^\(  Password: \).*/\1(hidden)/'
