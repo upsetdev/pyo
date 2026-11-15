@@ -6,6 +6,7 @@ import { Badge, Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { Dialog } from "~/components/ui/Dialog";
 import { Field, Input } from "~/components/ui/Field";
+import { Callout } from "~/components/ui/Panel";
 import { Tooltip } from "~/components/ui/Tooltip";
 import { DNS_LABEL } from "~/lib/pyo/format";
 import {
@@ -174,7 +175,7 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
           }}
         >
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Name" error={nameError || error || undefined}>
+            <Field label="Name" error={nameError || undefined}>
               {(p) => (
                 <Input {...p} mono value={name} onChange={(e) => setName(e.target.value.toLowerCase())} />
               )}
@@ -196,6 +197,7 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
               )}
             </Field>
           </div>
+          {error ? <Callout tone="danger">{error}</Callout> : null}
           <Button type="submit" size="sm" disabled={busy || !!nameError || !!edgeError || !s.tailscale}>
             {busy ? "Preparing…" : "Get the command"}
           </Button>
