@@ -8284,7 +8284,9 @@ pub(crate) async fn free_namespace(
 }
 
 /// What a new service's source leaves to Pyo, filled in before it's saved:
-/// a Git source's branch (the repository's default branch, else main).
+/// a Git source's branch (the repository's default branch, else main), and
+/// an image's port while it's still the dashboard's guess (one port, 8080)
+/// and the image EXPOSEs others, as a Git build's first deploy does.
 async fn fill_in_source(service: &mut Value) {
     match service["source"]["type"].as_str() {
         Some("git")
@@ -8302,6 +8304,24 @@ async fn fill_in_source(service: &mut Value) {
                 .await
                 .unwrap_or_else(|| "main".to_owned());
             service["source"]["branch"] = json!(branch);
+        }
+        Some("image") => {
+            let guessed = service["ports"].as_array().is_some_and(|p| p.len() == 1)
+                && service["ports"][0]["containerPort"] == json!(8080);
+            if !guessed {
+                return;
+            }
+            let Ok(image) = crate::deploy::image_ref(&service["source"]) else {
+                return;
+            };
+            let exposed = crate::registry::exposed_ports(&image).await;
+            let Some(&port) = exposed.first().filter(|_| !exposed.contains(&8080)) else {
+                return;
+            };
+            service["ports"][0]["containerPort"] = json!(port);
+            if service["healthCheck"]["port"] == json!(8080) {
+                service["healthCheck"]["port"] = json!(port);
+            }
         }
         _ => {}
     }

@@ -127,9 +127,245 @@ async fn realm_url(realm: &str, reach: Reach) -> Option<reqwest::Url> {
     (url.scheme() == "https" && outbound::check(&url, reach).await.is_ok()).then_some(url)
 }
 
+/// An image reference's repository on its registry and its tag or digest:
+/// "nginx" → ("library/nginx", "latest"), "ghcr.io/acme/api:1.2" →
+/// ("acme/api", "1.2"), "acme/api@sha256:…" → ("acme/api", "sha256:…").
+fn repo_and_reference(image: &str, host: &str) -> Option<(String, String)> {
+    let image = image.trim();
+    let rest = image
+        .strip_prefix(&format!("{host}/"))
+        .or_else(|| {
+            ["index.docker.io/", "registry-1.docker.io/", "docker.io/"]
+                .iter()
+                .find_map(|p| image.strip_prefix(p))
+        })
+        .unwrap_or(image);
+    let (name, reference) = match rest.split_once('@') {
+        Some((n, d)) => (n, d.to_owned()),
+        None => match rest.rsplit_once(':') {
+            Some((n, t)) if !t.contains('/') => (n, t.to_owned()),
+            _ => (rest, "latest".to_owned()),
+        },
+    };
+    let name = if host == "docker.io" && !name.contains('/') {
+        format!("library/{name}")
+    } else {
+        name.to_owned()
+    };
+    let ok = |c: char| c.is_ascii_alphanumeric() || "._-/".contains(c);
+    let ok_ref = |c: char| c.is_ascii_alphanumeric() || "._-:".contains(c);
+    (!name.is_empty()
+        && name.chars().all(ok)
+        && !reference.is_empty()
+        && reference.chars().all(ok_ref))
+    .then_some((name.to_lowercase(), reference))
+}
+
+/// The TCP ports an image config EXPOSEs, lowest first.
+fn config_ports(cfg: &serde_json::Value) -> Vec<u16> {
+    let mut ports: Vec<u16> = cfg["config"]["ExposedPorts"]
+        .as_object()
+        .map(|o| {
+            o.keys()
+                .filter(|k| k.ends_with("/tcp") || !k.contains('/'))
+                .filter_map(|k| k.split('/').next()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// From an image index: the linux/amd64 image's manifest digest, else the
+/// first Linux one's.
+fn platform_digest(index: &serde_json::Value) -> Option<String> {
+    let all = index["manifests"].as_array()?;
+    let linux = |m: &&serde_json::Value| m["platform"]["os"] == "linux";
+    all.iter()
+        .filter(linux)
+        .find(|m| m["platform"]["architecture"] == "amd64")
+        .or_else(|| all.iter().find(linux))
+        .and_then(|m| m["digest"].as_str())
+        .map(str::to_owned)
+}
+
+const MANIFEST_TYPES: &str = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
+
+/// The ports a public image EXPOSEs, read from its config in the registry
+/// without a login. Empty when it exposes none, is private, or the
+/// registry can't be reached in a few seconds: the caller keeps its guess.
+/// Held to [`crate::outbound`] like the login check.
+pub async fn exposed_ports(image: &str) -> Vec<u16> {
+    let reach = Reach::team();
+    let host = image_host(image);
+    let Some((repo, reference)) = repo_and_reference(image, &host) else {
+        return vec![];
+    };
+    let Ok(http) = outbound::client(reach, Duration::from_secs(5)) else {
+        return vec![];
+    };
+    let base = api_base(&host);
+    let mut token: Option<String> = None;
+    let manifest = |r: &str| format!("{base}/v2/{repo}/manifests/{r}");
+    let Some(mut m) = registry_json(&http, reach, &manifest(&reference), &repo, &mut token).await
+    else {
+        return vec![];
+    };
+    if m["manifests"].is_array() {
+        let Some(d) = platform_digest(&m) else {
+            return vec![];
+        };
+        let Some(next) = registry_json(&http, reach, &manifest(&d), &repo, &mut token).await else {
+            return vec![];
+        };
+        m = next;
+    }
+    let Some(cfg) = m["config"]["digest"].as_str() else {
+        return vec![];
+    };
+    let url = format!("{base}/v2/{repo}/blobs/{cfg}");
+    match registry_json(&http, reach, &url, &repo, &mut token).await {
+        Some(c) => config_ports(&c),
+        None => vec![],
+    }
+}
+
+/// A registry API answer as JSON: anonymous, with a pull token from the
+/// registry's token service when it asks for one, following a blob's
+/// redirect to its storage (without the token).
+async fn registry_json(
+    http: &reqwest::Client,
+    reach: Reach,
+    url: &str,
+    repo: &str,
+    token: &mut Option<String>,
+) -> Option<serde_json::Value> {
+    let mut url = outbound::parse(url).ok()?;
+    let origin = url.host_str()?.to_owned();
+    for _ in 0..4 {
+        outbound::check(&url, reach).await.ok()?;
+        let mut req = http
+            .get(url.clone())
+            .header(reqwest::header::ACCEPT, MANIFEST_TYPES);
+        if let Some(t) = token.as_deref()
+            && url.host_str() == Some(origin.as_str())
+        {
+            req = req.bearer_auth(t);
+        }
+        let res = req.send().await.ok()?;
+        let status = res.status();
+        if status.is_redirection() {
+            let to = res
+                .headers()
+                .get(reqwest::header::LOCATION)?
+                .to_str()
+                .ok()?;
+            url = url.join(to).ok()?;
+            if url.scheme() != "https" {
+                return None;
+            }
+            continue;
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED && token.is_none() {
+            let challenge = res
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)?
+                .to_str()
+                .ok()?
+                .to_owned();
+            *token = Some(anonymous_token(http, reach, &challenge, repo).await?);
+            continue;
+        }
+        if !status.is_success() {
+            return None;
+        }
+        let body = res.bytes().await.ok()?;
+        if body.len() > 4 << 20 {
+            return None;
+        }
+        return serde_json::from_slice(&body).ok();
+    }
+    None
+}
+
+/// A pull token for `repo` without a login, from a Bearer challenge.
+async fn anonymous_token(
+    http: &reqwest::Client,
+    reach: Reach,
+    challenge: &str,
+    repo: &str,
+) -> Option<String> {
+    let params = challenge.strip_prefix("Bearer ")?;
+    let field = |k: &str| {
+        params
+            .split(',')
+            .find_map(|p| p.trim().strip_prefix(&format!("{k}=\"")))
+            .map(|v| v.trim_end_matches('"').to_owned())
+    };
+    let realm = realm_url(&field("realm")?, reach).await?;
+    let mut req = http
+        .get(realm)
+        .query(&[("scope", format!("repository:{repo}:pull"))]);
+    if let Some(service) = field("service") {
+        req = req.query(&[("service", service)]);
+    }
+    let v: serde_json::Value = req.send().await.ok()?.json().await.ok()?;
+    v["token"]
+        .as_str()
+        .or_else(|| v["access_token"].as_str())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn references() {
+        let r = |i: &str| repo_and_reference(i, &image_host(i));
+        assert_eq!(r("nginx"), Some(("library/nginx".into(), "latest".into())));
+        assert_eq!(
+            r("nginx:1.27"),
+            Some(("library/nginx".into(), "1.27".into()))
+        );
+        assert_eq!(
+            r("docker.io/acme/api:2"),
+            Some(("acme/api".into(), "2".into()))
+        );
+        assert_eq!(
+            r("ghcr.io/me/api"),
+            Some(("me/api".into(), "latest".into()))
+        );
+        assert_eq!(
+            r("registry.example.com:5000/team/web:v1"),
+            Some(("team/web".into(), "v1".into()))
+        );
+        assert_eq!(
+            r("ghcr.io/me/api@sha256:abc"),
+            Some(("me/api".into(), "sha256:abc".into()))
+        );
+        assert_eq!(r("ghcr.io/me/api?x=1"), None);
+    }
+
+    #[test]
+    fn exposed_ports_from_config() {
+        let cfg =
+            json!({ "config": { "ExposedPorts": { "3000/tcp": {}, "53/udp": {}, "80": {} } } });
+        assert_eq!(config_ports(&cfg), vec![80, 3000]);
+        assert!(config_ports(&json!({ "config": {} })).is_empty());
+    }
+
+    #[test]
+    fn index_picks_linux_amd64() {
+        let index = json!({ "manifests": [
+            { "digest": "sha256:arm", "platform": { "os": "linux", "architecture": "arm64" } },
+            { "digest": "sha256:win", "platform": { "os": "windows", "architecture": "amd64" } },
+            { "digest": "sha256:amd", "platform": { "os": "linux", "architecture": "amd64" } },
+        ] });
+        assert_eq!(platform_digest(&index).as_deref(), Some("sha256:amd"));
+    }
 
     #[test]
     fn hosts() {
