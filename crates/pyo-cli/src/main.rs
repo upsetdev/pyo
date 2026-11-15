@@ -15,6 +15,7 @@ mod firewall;
 mod import;
 mod login;
 mod registry;
+mod sandbox;
 mod server;
 mod service;
 mod ui;
@@ -168,6 +169,15 @@ enum Command {
     Registry {
         #[command(subcommand)]
         command: RegistryCommand,
+    },
+    /// Sandboxes: isolated machines on your sandbox servers. exec, shell and
+    /// cp reach the sandbox's server directly, over your tailnet for now.
+    Sandbox {
+        #[command(subcommand)]
+        command: sandbox::Command,
+        /// The team (slug or id). Defaults to your first team.
+        #[arg(long, global = true)]
+        team: Option<String>,
     },
     /// Built-in databases.
     Db {
@@ -983,6 +993,9 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                 CloudflareCommand::Remove { yes } => cloudflare::remove(&api, team, yes).await,
             }
         }
+        Command::Sandbox { command, team } => {
+            sandbox::run(&config::client(url, token)?, team.as_deref(), command).await
+        }
         Command::Upgrade { version } => upgrade::run(version).await,
         Command::Hetzner { command, team } => {
             let api = config::client(url, token)?;
@@ -1077,5 +1090,53 @@ mod tests {
         assert!(!help.contains("PYO_TOKEN"), "{help}");
         let cli = Cli::try_parse_from(["pyo", "--api-key", "k", "whoami"]).unwrap();
         assert_eq!(cli.token.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn every_command_parses_and_has_help() {
+        Cli::command().debug_assert();
+        // The docs list every command from its help: each one has an about.
+        fn walk(c: &clap::Command, path: &str) {
+            for sub in c.get_subcommands().filter(|s| s.get_name() != "help") {
+                let p = format!("{path} {}", sub.get_name());
+                assert!(sub.get_about().is_some(), "{p} has no help line");
+                walk(sub, &p);
+            }
+        }
+        walk(&Cli::command(), "pyo");
+    }
+
+    #[test]
+    fn sandbox_commands_map_to_the_api() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|c| c.command);
+        let Ok(Command::Sandbox {
+            command: sandbox::Command::Exec { id, command, .. },
+            team,
+        }) = parse(&[
+            "pyo", "sandbox", "exec", "sbx_a", "--team", "acme", "--", "ls", "-la",
+        ])
+        else {
+            panic!("exec didn't parse");
+        };
+        assert_eq!((id.as_str(), team.as_deref()), ("sbx_a", Some("acme")));
+        assert_eq!(command, ["ls", "-la"]);
+        assert!(matches!(
+            parse(&[
+                "pyo", "sandbox", "create", "node-22", "--ttl", "1h", "-e", "A=1"
+            ]),
+            Ok(Command::Sandbox {
+                command: sandbox::Command::Create { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(&["pyo", "sandbox", "servers", "rm", "sandbox-1", "-y"]),
+            Ok(Command::Sandbox {
+                command: sandbox::Command::Servers { .. },
+                ..
+            })
+        ));
+        assert!(parse(&["pyo", "sandbox", "create", "x", "--network", "wifi"]).is_err());
+        assert!(parse(&["pyo", "sandbox", "exec", "sbx_a"]).is_err());
     }
 }
