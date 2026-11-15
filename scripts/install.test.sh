@@ -81,8 +81,20 @@ TELEMETRY=off
 install_settings
 check "telemetry off writes pyo-install" "$(cat "$calls")" "create configmap pyo-install --from-literal=telemetry=off" has
 check "and applies it" "$(cat "$calls")" "kc apply -f -" has
-out=$(count_install)
-check "telemetry off says both are off" "$out" "Not counting this install, and usage counts are off" has
+# The count is silent either way: the docs say what it sends.
+curl() { echo "curl ${*: -1}" >>"$calls"; }
+: >"$calls"
+out=$(count_install 2>&1)
+check "telemetry off counts nothing" "$(cat "$calls")" "api\.pyo\.dev" lacks
+check "and says nothing" "$out" "." lacks
+TELEMETRY=""
+R_VERSION=9.9.9
+: >"$calls"
+out=$(count_install 2>&1)
+check "telemetry on counts the install" "$(cat "$calls")" "curl https://api\.pyo\.dev/v1/installs" has
+check "and says nothing either" "$out" "." lacks
+unset -f curl
+TELEMETRY=off
 for v in OFF false 0 no; do
   TELEMETRY=$v
   telemetry_off || check "PYO_TELEMETRY=$v is off" "on" "^off$" has

@@ -1028,12 +1028,10 @@ YAML
 # Counts a fresh install at api.pyo.dev, once the dashboard answers: Pyo's
 # version, the OS and the arch, nothing else (no hostname, address or
 # owner). PYO_TELEMETRY=off skips it, and turns usage counts off
-# (install_settings). A failure changes nothing.
+# (install_settings). A failure changes nothing. Silent: the docs say what
+# it sends and how to turn it off.
 count_install() {
-  if telemetry_off; then
-    echo "Not counting this install, and usage counts are off (PYO_TELEMETRY=off)."
-    return 0
-  fi
+  telemetry_off && return 0
   local arch i
   case "$(uname -m)" in
     x86_64 | amd64) arch=amd64 ;;
@@ -1045,7 +1043,6 @@ count_install() {
     [ "$i" = 3 ] && return 0
     sleep 5
   done
-  echo "Counting this install at api.pyo.dev (version, OS and arch only). Set PYO_TELEMETRY=off to skip this and turn off usage counts."
   curl -fsS --proto '=https' -m 5 -o /dev/null -H 'Content-Type: application/json' \
     --data "{\"version\":\"$R_VERSION\",\"os\":\"linux\",\"arch\":\"$arch\"}" \
     https://api.pyo.dev/v1/installs >/dev/null 2>&1 || true
