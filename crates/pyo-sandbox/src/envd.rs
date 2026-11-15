@@ -161,6 +161,8 @@ impl Conn {
             cwd: req.cwd.clone(),
             env,
             stdin: req.stdin.is_some(),
+            // This call keeps its own timeout and cap.
+            timeout_ms: None,
         };
         self.send(&Frame::request(id, &Request::Exec(spec))).await?;
         if let Some(input) = &req.stdin {

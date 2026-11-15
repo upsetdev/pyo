@@ -1,8 +1,9 @@
 //! The daemon's API. It listens only on the configured address, the
 //! server's tailnet address in production. Every call except the health
 //! check needs a token Pyo signed (`pyo_proto::sandbox::token`), in
-//! `Authorization: Bearer <token>` or, for browsers opening the WebSocket,
-//! `?token=<token>`.
+//! `Authorization: Bearer <token>`. Browsers opening the WebSocket name it
+//! as the subprotocol `pyo.token.<token>` (next to `pyo`, which the daemon
+//! then answers with), or put it in `?token=<token>`.
 //!
 //! | Route | Scope |
 //! |---|---|
@@ -20,7 +21,22 @@
 //! The WebSocket speaks the envd wire protocol, one frame per binary
 //! message. The first message is envd's `Hello`. The daemon checks every
 //! request against the token's scopes and drops anything that isn't a
-//! request, stdin or EOF.
+//! request, stdin or EOF. On the way it:
+//!
+//! - adds the sandbox's env under each exec's and terminal's own, as
+//!   `POST .../exec` does;
+//! - kills an exec after its `timeoutMs` (60 seconds when left out, none
+//!   for 0) and keeps at most 8 MiB of each output, then marks the exit
+//!   `timedOut` or `truncated`;
+//! - lets resizes and signals on streams the connection opened pass after
+//!   the token runs out, so a long terminal keeps working, and takes a
+//!   fresh token as the text message `{"token": "..."}`;
+//! - refuses a request with the error kind `unauthorized` (the token ran
+//!   out) or `forbidden` (its scopes don't allow it).
+//!
+//! A refused upgrade is accepted and closed at once with code 4000 plus
+//! the HTTP status (4401, 4403, 4404…) and the reason, since browsers
+//! don't show an HTTP refusal.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -512,7 +528,8 @@ fn file_error(e: anyhow::Error) -> ApiError {
 fn envd_code(kind: ErrorKind) -> ErrorCode {
     match kind {
         ErrorKind::NotFound => ErrorCode::NotFound,
-        ErrorKind::PermissionDenied => ErrorCode::Forbidden,
+        ErrorKind::PermissionDenied | ErrorKind::Forbidden => ErrorCode::Forbidden,
+        ErrorKind::Unauthorized => ErrorCode::Unauthorized,
         ErrorKind::AlreadyExists | ErrorKind::Busy => ErrorCode::Conflict,
         ErrorKind::InvalidInput => ErrorCode::InvalidSpec,
         ErrorKind::Unsupported => ErrorCode::Unsupported,
@@ -641,90 +658,383 @@ async fn mkdir(
 
 // ── WebSocket ──────────────────────────────────────────────────────────────
 
+/// The subprotocol a client may name to carry its token, as
+/// `pyo.token.<token>`, so the token stays out of the URL. Browsers can't
+/// set headers on a WebSocket but can name subprotocols. The daemon picks
+/// [`WS_PROTOCOL`] when the client offers it too, else the token's.
+pub const WS_TOKEN_PROTOCOL: &str = "pyo.token.";
+pub const WS_PROTOCOL: &str = "pyo";
+
+/// The token from `Sec-WebSocket-Protocol`, and the subprotocol to answer.
+fn ws_protocol_token(h: &HeaderMap) -> Option<(String, String)> {
+    let offered: Vec<&str> = h
+        .get_all(header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .collect();
+    let (proto, token) = offered
+        .iter()
+        .find_map(|p| p.strip_prefix(WS_TOKEN_PROTOCOL).map(|t| (*p, t)))?;
+    let answer = if offered.contains(&WS_PROTOCOL) {
+        WS_PROTOCOL
+    } else {
+        proto
+    };
+    Some((token.to_string(), answer.to_string()))
+}
+
+/// The close code for a refused upgrade: 4000 plus the HTTP status, like
+/// 4401 for a token that ran out.
+pub fn close_code(code: ErrorCode) -> u16 {
+    4000 + code.http_status()
+}
+
+/// A close reason fits in 123 bytes.
+fn close_reason(msg: &str) -> String {
+    let mut end = msg.len().min(123);
+    while !msg.is_char_boundary(end) {
+        end -= 1;
+    }
+    msg[..end].to_string()
+}
+
 async fn connect(
     State(st): S,
     Path(id): Path<String>,
     h: HeaderMap,
     Query(q): Q,
     ws: WebSocketUpgrade,
-) -> ApiResult<Response> {
-    let claims = st.authorize_any(token_of(&h, &q).as_deref(), &id)?;
-    let (_, conn) = st.mgr.envd(&id).await?;
-    Ok(ws.on_upgrade(move |socket| proxy(socket, claims, conn)))
+) -> Response {
+    let (token, ws) = match ws_protocol_token(&h) {
+        Some((token, answer)) => (Some(token), ws.protocols([answer])),
+        None => (token_of(&h, &q), ws),
+    };
+    let opened = async {
+        let claims = st.authorize_any(token.as_deref(), &id)?;
+        let (sbx, conn) = st.mgr.envd(&id).await?;
+        Ok::<_, ApiError>((claims, sbx.spec.env.clone(), conn))
+    }
+    .await;
+    match opened {
+        Ok((claims, env, conn)) => ws.on_upgrade(move |socket| {
+            proxy(
+                socket,
+                Session {
+                    st,
+                    sandbox: id,
+                    claims,
+                    env,
+                },
+                conn,
+            )
+        }),
+        // Browsers don't show why an upgrade failed, so it's accepted and
+        // closed at once with the reason.
+        Err(ApiError(e)) => ws.on_upgrade(move |mut socket| async move {
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: close_code(e.code),
+                    reason: close_reason(&e.message).into(),
+                })))
+                .await;
+        }),
+    }
 }
 
-/// Why a client request is refused, if it is.
-pub fn refuse(claims: &Claims, req: &Request, now_secs: u64) -> Option<String> {
-    if now_secs > claims.exp + LEEWAY_SECS {
-        return Some(TokenError::Expired.to_string());
+/// Why a client request is refused, if it is. `open` is whether the
+/// request acts on a stream this connection opened already (a resize or a
+/// signal): those pass after the token runs out, so a long terminal keeps
+/// working. New requests need a token that's still good.
+pub fn refuse(claims: &Claims, req: &Request, now_secs: u64, open: bool) -> Option<Refusal> {
+    let acts_on_open = open && !req.opens_stream();
+    if !acts_on_open && now_secs > claims.exp + LEEWAY_SECS {
+        return Some(Refusal(
+            ErrorKind::Unauthorized,
+            TokenError::Expired.to_string(),
+        ));
     }
     match req.scope() {
-        Some(s) if !claims.has(s) => Some(TokenError::MissingScope(s).to_string()),
+        Some(s) if !claims.has(s) => Some(Refusal(
+            ErrorKind::Forbidden,
+            TokenError::MissingScope(s).to_string(),
+        )),
         _ => None,
     }
 }
 
-async fn proxy(socket: WebSocket, claims: Claims, conn: crate::envd::Conn) {
-    let hello = Frame::json(Kind::Hello, 0, &conn.hello);
-    let (mut from_envd, mut to_envd) = conn.into_split();
-    let (mut ws_tx, mut ws_rx) = socket.split();
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Frame>(64);
+#[derive(Debug)]
+pub struct Refusal(pub ErrorKind, pub String);
 
-    // One writer to the client, fed by envd and by the daemon's own refusals.
+/// One WebSocket's state.
+struct Session {
+    st: Arc<AppState>,
+    sandbox: String,
+    claims: Claims,
+    /// The sandbox's env, under each exec's and terminal's own, as
+    /// `POST .../exec` does.
+    env: std::collections::BTreeMap<String, String>,
+}
+
+/// A stream a client opened on this connection.
+#[derive(Default)]
+struct Open {
+    /// An exec with the limits on: the timeout and the output cap.
+    limited: bool,
+    started: bool,
+    out: usize,
+    err: usize,
+    truncated: bool,
+    timed_out: bool,
+    timer: Option<tokio::task::AbortHandle>,
+}
+
+type Streams = Arc<std::sync::Mutex<HashMap<u32, Open>>>;
+
+/// A client's text message: a fresh token for this connection, as
+/// `{"token": "..."}`. The daemon answers
+/// `{"type": "token", "ok": true, "expiresAt": <ms>}` or `"ok": false` with
+/// a `message`, and keeps the old token when it refuses the new one.
+#[derive(Deserialize)]
+struct TokenMessage {
+    token: String,
+}
+
+impl Session {
+    fn renew(&mut self, text: &str) -> serde_json::Value {
+        let refused = |m: String| serde_json::json!({"type": "token", "ok": false, "message": m});
+        let Ok(m) = serde_json::from_str::<TokenMessage>(text) else {
+            return refused("The daemon takes only {\"token\": \"...\"} as text.".into());
+        };
+        match self.st.authorize_any(Some(&m.token), &self.sandbox) {
+            Ok(c) if c.team != self.claims.team && !c.has(Scope::Admin) => {
+                refused("The sandbox token is for another team.".into())
+            }
+            Ok(c) => {
+                let exp = c.exp;
+                self.claims = c;
+                serde_json::json!({"type": "token", "ok": true, "expiresAt": exp * 1000})
+            }
+            Err(ApiError(e)) => refused(e.message),
+        }
+    }
+}
+
+/// The request as it goes to envd: the sandbox's env under an exec's or a
+/// terminal's own.
+fn with_env(base: &std::collections::BTreeMap<String, String>, req: Request) -> Request {
+    let merge = |own: std::collections::BTreeMap<String, String>| {
+        let mut env = base.clone();
+        env.extend(own);
+        env
+    };
+    match req {
+        Request::Exec(mut e) => {
+            e.env = merge(std::mem::take(&mut e.env));
+            Request::Exec(e)
+        }
+        Request::Pty(mut p) => {
+            p.env = merge(std::mem::take(&mut p.env));
+            Request::Pty(p)
+        }
+        r => r,
+    }
+}
+
+/// The timeout of a WebSocket exec, None for none (`timeoutMs: 0`).
+fn ws_exec_timeout(ms: Option<u64>) -> Option<std::time::Duration> {
+    match ms {
+        Some(0) => None,
+        Some(ms) => Some(std::time::Duration::from_millis(ms)),
+        None => Some(crate::envd::DEFAULT_EXEC_TIMEOUT),
+    }
+}
+
+/// What goes on to the client of a frame from envd. Keeps each limited
+/// exec's output under the cap, and adds `timedOut` and `truncated` to its
+/// exit.
+fn from_envd(streams: &Streams, mut f: Frame) -> Option<Frame> {
+    let mut map = streams.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = map.get_mut(&f.stream) else {
+        return Some(f);
+    };
+    match f.kind {
+        Kind::Stdout | Kind::Stderr if s.limited => {
+            let used = if f.kind == Kind::Stdout {
+                &mut s.out
+            } else {
+                &mut s.err
+            };
+            let room = crate::envd::EXEC_OUTPUT_CAP.saturating_sub(*used);
+            if f.payload.len() > room {
+                s.truncated = true;
+                f.payload.truncate(room);
+            }
+            *used += f.payload.len();
+            (!f.payload.is_empty()).then_some(f)
+        }
+        Kind::Response => {
+            match f.parse::<wire::Response>() {
+                Ok(wire::Response::Started { .. }) => s.started = true,
+                Ok(wire::Response::Exit { .. }) => {
+                    let s = map.remove(&f.stream).unwrap_or_default();
+                    if let Some(t) = s.timer {
+                        t.abort();
+                    }
+                    if (s.truncated || s.timed_out)
+                        && let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&f.payload)
+                    {
+                        v["truncated"] = s.truncated.into();
+                        v["timedOut"] = s.timed_out.into();
+                        f.payload = serde_json::to_vec(&v).unwrap_or(f.payload);
+                    }
+                }
+                // A stream that never started has ended.
+                Ok(wire::Response::Error { .. }) if !s.started => {
+                    if let Some(t) = map.remove(&f.stream).and_then(|s| s.timer) {
+                        t.abort();
+                    }
+                }
+                _ => {}
+            }
+            Some(f)
+        }
+        _ => Some(f),
+    }
+}
+
+async fn proxy(socket: WebSocket, mut session: Session, conn: crate::envd::Conn) {
+    let hello = Frame::json(Kind::Hello, 0, &conn.hello);
+    let (mut from_envd_rx, mut to_envd) = conn.into_split();
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(64);
+    let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<Frame>(64);
+    let streams: Streams = Arc::default();
+
+    // One writer to the client, fed by envd and by the daemon's own answers.
     let writer = tokio::spawn(async move {
-        while let Some(f) = out_rx.recv().await {
-            if ws_tx
-                .send(Message::Binary(f.encode().into()))
-                .await
-                .is_err()
-            {
+        while let Some(m) = out_rx.recv().await {
+            if ws_tx.send(m).await.is_err() {
                 break;
             }
         }
         let _ = ws_tx.close().await;
     });
-    let _ = out_tx.send(hello).await;
+    let binary = |f: Frame| Message::Binary(f.encode().into());
+    let _ = out_tx.send(binary(hello)).await;
+    // One writer to envd, fed by the client and by exec timeouts.
+    let envd_writer = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        while let Some(f) = in_rx.recv().await {
+            if to_envd.write_all(&f.encode()).await.is_err() {
+                break;
+            }
+        }
+    });
     let envd_tx = out_tx.clone();
+    let reader_streams = streams.clone();
     let reader = tokio::spawn(async move {
-        while let Ok(Some(f)) = from_envd.recv().await {
-            if envd_tx.send(f).await.is_err() {
+        while let Ok(Some(f)) = from_envd_rx.recv().await {
+            let Some(f) = from_envd(&reader_streams, f) else {
+                continue;
+            };
+            if envd_tx.send(binary(f)).await.is_err() {
                 break;
             }
         }
     });
 
-    use tokio::io::AsyncWriteExt;
     while let Some(Ok(msg)) = ws_rx.next().await {
         let bytes = match msg {
             Message::Binary(b) => b,
+            Message::Text(t) => {
+                let answer = session.renew(t.as_str());
+                let _ = out_tx.send(Message::Text(answer.to_string().into())).await;
+                continue;
+            }
             Message::Close(_) => break,
             _ => continue,
         };
-        let Ok(f) = Frame::decode(&bytes) else { break };
+        let Ok(mut f) = Frame::decode(&bytes) else {
+            break;
+        };
         match f.kind {
             Kind::Request => {
                 let req = match f.parse::<Request>() {
                     Ok(r) => r,
                     Err(e) => {
                         let r = wire::Response::error(ErrorKind::InvalidInput, e.to_string());
-                        let _ = out_tx.send(Frame::response(f.stream, &r)).await;
+                        let _ = out_tx.send(binary(Frame::response(f.stream, &r))).await;
                         continue;
                     }
                 };
-                if let Some(why) = refuse(&claims, &req, crate::now_ms() / 1000) {
-                    let r = wire::Response::error(ErrorKind::PermissionDenied, why);
-                    let _ = out_tx.send(Frame::response(f.stream, &r)).await;
+                let open = streams
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&f.stream);
+                if let Some(Refusal(kind, why)) =
+                    refuse(&session.claims, &req, crate::now_ms() / 1000, open)
+                {
+                    let r = wire::Response::error(kind, why);
+                    let _ = out_tx.send(binary(Frame::response(f.stream, &r))).await;
                     continue;
+                }
+                if matches!(req, Request::Exec(_) | Request::Pty(_)) {
+                    let mut o = Open::default();
+                    if let Request::Exec(e) = &req
+                        && let Some(after) = ws_exec_timeout(e.timeout_ms)
+                    {
+                        o.limited = true;
+                        let (streams, kill, id) = (streams.clone(), in_tx.clone(), f.stream);
+                        let t = tokio::spawn(async move {
+                            tokio::time::sleep(after).await;
+                            if let Some(s) = streams
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .get_mut(&id)
+                            {
+                                s.timed_out = true;
+                            } else {
+                                return;
+                            }
+                            let sig = Request::Signal {
+                                signal: libc::SIGKILL,
+                            };
+                            let _ = kill.send(Frame::request(id, &sig)).await;
+                        });
+                        o.timer = Some(t.abort_handle());
+                    }
+                    f = Frame::request(f.stream, &with_env(&session.env, req));
+                    let old = streams
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(f.stream, o);
+                    if let Some(t) = old.and_then(|o| o.timer) {
+                        t.abort();
+                    }
                 }
             }
             Kind::Stdin | Kind::Eof => {}
             _ => continue,
         }
-        if to_envd.write_all(&f.encode()).await.is_err() {
+        if in_tx.send(f).await.is_err() {
             break;
         }
     }
     reader.abort();
+    for s in streams
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain()
+        .map(|(_, s)| s)
+    {
+        if let Some(t) = s.timer {
+            t.abort();
+        }
+    }
+    drop(in_tx);
+    let _ = envd_writer.await;
     drop(out_tx);
     let _ = writer.await;
 }
@@ -748,18 +1058,121 @@ mod tests {
     #[test]
     fn websocket_requests_are_checked() {
         let c = claims(vec![Scope::Files]);
-        assert!(refuse(&c, &Request::Stat { path: "/".into() }, 150).is_none());
-        let why = refuse(&c, &Request::PortConnect { port: 1 }, 150).unwrap();
+        let stat = Request::Stat { path: "/".into() };
+        assert!(refuse(&c, &stat, 150, false).is_none());
+        let Refusal(kind, why) = refuse(&c, &Request::PortConnect { port: 1 }, 150, false).unwrap();
+        assert_eq!(kind, ErrorKind::Forbidden);
         assert!(why.contains("ports"), "{why}");
-        assert!(refuse(&c, &Request::SetTime { unix_ms: 0 }, 150).is_some());
-        assert!(refuse(&c, &Request::Ping, 150).is_none());
-        assert!(
-            refuse(&c, &Request::Ping, 200 + LEEWAY_SECS + 1)
-                .unwrap()
-                .contains("expired")
-        );
+        assert!(refuse(&c, &Request::SetTime { unix_ms: 0 }, 150, false).is_some());
+        assert!(refuse(&c, &Request::Ping, 150, false).is_none());
+        let late = 200 + LEEWAY_SECS + 1;
+        let Refusal(kind, why) = refuse(&c, &Request::Ping, late, false).unwrap();
+        assert_eq!(kind, ErrorKind::Unauthorized);
+        assert!(why.contains("expired"), "{why}");
         let admin = claims(vec![Scope::Admin]);
-        assert!(refuse(&admin, &Request::SetTime { unix_ms: 0 }, 150).is_none());
+        assert!(refuse(&admin, &Request::SetTime { unix_ms: 0 }, 150, false).is_none());
+    }
+
+    #[test]
+    fn open_streams_outlive_the_token() {
+        let c = claims(vec![Scope::Pty]);
+        let late = 200 + LEEWAY_SECS + 1;
+        let resize = Request::Resize { cols: 1, rows: 1 };
+        let signal = Request::Signal { signal: 2 };
+        // On a stream this connection opened: still fine.
+        assert!(refuse(&c, &resize, late, true).is_none());
+        assert!(refuse(&c, &signal, late, true).is_none());
+        // On a stream it didn't, or a new request on an open one: refused.
+        assert!(refuse(&c, &resize, late, false).is_some());
+        let pty = Request::Pty(wire::PtySpec {
+            cmd: None,
+            cwd: None,
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        });
+        assert!(refuse(&c, &pty, late, true).is_some());
+        assert!(refuse(&c, &pty, 150, false).is_none());
+    }
+
+    #[test]
+    fn the_token_may_come_as_a_subprotocol() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            "pyo, pyo.token.pyosbx1.abc.def".parse().unwrap(),
+        );
+        assert_eq!(
+            ws_protocol_token(&h),
+            Some(("pyosbx1.abc.def".into(), "pyo".into()))
+        );
+        h.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            "pyo.token.t1".parse().unwrap(),
+        );
+        assert_eq!(
+            ws_protocol_token(&h),
+            Some(("t1".into(), "pyo.token.t1".into()))
+        );
+        h.insert(header::SEC_WEBSOCKET_PROTOCOL, "chat".parse().unwrap());
+        assert_eq!(ws_protocol_token(&h), None);
+        assert_eq!(close_code(ErrorCode::Unauthorized), 4401);
+        assert_eq!(close_reason(&"é".repeat(100)).len(), 122);
+    }
+
+    #[test]
+    fn websocket_execs_get_the_limits() {
+        use std::time::Duration;
+        assert_eq!(ws_exec_timeout(None), Some(Duration::from_secs(60)));
+        assert_eq!(ws_exec_timeout(Some(5)), Some(Duration::from_millis(5)));
+        assert_eq!(ws_exec_timeout(Some(0)), None);
+        let streams: Streams = Arc::default();
+        streams.lock().unwrap().insert(
+            3,
+            Open {
+                limited: true,
+                ..Open::default()
+            },
+        );
+        let cap = crate::envd::EXEC_OUTPUT_CAP;
+        let f = from_envd(&streams, Frame::new(Kind::Stdout, 3, vec![b'a'; cap - 2])).unwrap();
+        assert_eq!(f.payload.len(), cap - 2);
+        let f = from_envd(&streams, Frame::new(Kind::Stdout, 3, vec![b'a'; 5])).unwrap();
+        assert_eq!(f.payload.len(), 2);
+        assert!(from_envd(&streams, Frame::new(Kind::Stdout, 3, vec![b'a'; 5])).is_none());
+        // Stderr has its own cap, and other streams none.
+        assert!(from_envd(&streams, Frame::new(Kind::Stderr, 3, vec![b'a'; 5])).is_some());
+        assert!(from_envd(&streams, Frame::new(Kind::Stdout, 4, vec![b'a'; cap + 1])).is_some());
+        let exit = wire::Response::Exit {
+            code: Some(0),
+            signal: None,
+        };
+        let f = from_envd(&streams, Frame::response(3, &exit)).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap();
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["timedOut"], false);
+        assert!(streams.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn execs_and_terminals_get_the_sandbox_env() {
+        let base = [
+            ("A".to_string(), "1".to_string()),
+            ("B".to_string(), "2".to_string()),
+        ]
+        .into();
+        let exec = Request::Exec(wire::ExecSpec {
+            cmd: wire::Cmd::Shell("env".into()),
+            cwd: None,
+            env: [("B".to_string(), "own".to_string())].into(),
+            stdin: false,
+            timeout_ms: None,
+        });
+        let Request::Exec(e) = with_env(&base, exec) else {
+            unreachable!()
+        };
+        assert_eq!(e.env["A"], "1");
+        assert_eq!(e.env["B"], "own");
     }
 
     #[tokio::test]

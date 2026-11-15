@@ -346,6 +346,13 @@ pub struct ExecSpec {
     /// Whether the host sends stdin. Without it stdin is /dev/null.
     #[serde(default)]
     pub stdin: bool,
+    /// Over the daemon's WebSocket: the daemon kills the command after this
+    /// long and keeps at most 8 MiB of each output, as `POST .../exec`
+    /// does. 60 seconds when left out. 0 lifts both limits, for
+    /// long-running processes. The exit then says `timedOut` and
+    /// `truncated` when they applied. envd itself ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -513,6 +520,13 @@ pub enum ErrorKind {
     Busy,
     Unsupported,
     Io,
+    /// The daemon refused the request: the token has run out. envd never
+    /// sends it.
+    Unauthorized,
+    /// The daemon refused the request: the token doesn't allow it. envd
+    /// never sends it. `permissionDenied` is the sandbox's own refusal,
+    /// like a file the user can't read.
+    Forbidden,
 }
 
 impl From<&io::Error> for ErrorKind {
@@ -597,6 +611,7 @@ mod tests {
                     cwd: None,
                     env: BTreeMap::new(),
                     stdin: false,
+                    timeout_ms: None,
                 }),
             ),
             Frame::new(Kind::Stdin, 1, vec![0u8; MAX_PAYLOAD]),

@@ -874,6 +874,7 @@ mod tests {
             cwd: None,
             env: BTreeMap::new(),
             stdin: false,
+            timeout_ms: None,
         })
     }
 
@@ -922,6 +923,7 @@ mod tests {
                 cwd: Some("/".into()),
                 env,
                 stdin: false,
+                timeout_ms: None,
             }),
         );
         let (out, _, exit) = c.collect(1);
@@ -946,6 +948,7 @@ mod tests {
                 cwd: None,
                 env: BTreeMap::new(),
                 stdin: false,
+                timeout_ms: None,
             }),
         );
         assert!(matches!(
@@ -968,6 +971,7 @@ mod tests {
                 cwd: None,
                 env: BTreeMap::new(),
                 stdin: true,
+                timeout_ms: None,
             }),
         );
         c.send(Frame::new(Kind::Stdin, 1, b"hello ".to_vec()));
