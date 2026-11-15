@@ -47,7 +47,7 @@ import {
   usePyo,
 } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import type { ClusterServer, Workload } from "~/lib/pyo/types";
+import type { ClusterServer, Workload, WorkloadStatus } from "~/lib/pyo/types";
 import { EntityLink } from "./common";
 import { currentSlug } from "~/lib/pyo/paths";
 
@@ -554,6 +554,54 @@ function RegionCell({ region }: { region: string }) {
   );
 }
 
+/**
+ * Pyo's own workloads and the cluster's, by what they do: never by their
+ * Kubernetes names, which name the operators and proxies underneath.
+ */
+const SYSTEM_GROUPS: [string, RegExp][] = [
+  ["Agent", /(^|\/)pyo-agent/],
+  ["Databases", /cnpg|moco|mysql|db-controller|pyo-databases|(^|[/-])kv([/-]|$)|valkey/],
+  ["Builds", /build|registry/],
+  ["Logs", /clickhouse|flows|vector|geoip|logs/],
+  ["Gateway", /gateway|envoy|cert-manager|waf|static/],
+  ["Pyo", /^pyo-system\//],
+];
+
+export function systemGroup(w: Pick<Workload, "namespace" | "name">) {
+  const n = `${w.namespace}/${w.name}`;
+  return SYSTEM_GROUPS.find(([, re]) => re.test(n))?.[0] ?? "Cluster";
+}
+
+const WORST: WorkloadStatus[] = ["failed", "degraded", "progressing", "healthy", "completed", "stopped"];
+
+/** System workloads as one row per group and cluster, summed. */
+function systemRows(workloads: Workload[]): Workload[] {
+  const rows = new Map<string, Workload>();
+  for (const w of workloads) {
+    const name = systemGroup(w);
+    const key = `${w.clusterId}/${name}`;
+    const r = rows.get(key);
+    if (!r) {
+      rows.set(key, {
+        ...w,
+        id: key,
+        name,
+        namespace: "",
+        replicas: { ...w.replicas },
+        serviceId: undefined,
+        projectId: undefined,
+      });
+      continue;
+    }
+    r.replicas.desired += w.replicas.desired;
+    r.replicas.ready += w.replicas.ready;
+    r.cpuMillis += w.cpuMillis;
+    r.memoryMi += w.memoryMi;
+    if (WORST.indexOf(w.status) < WORST.indexOf(r.status)) r.status = w.status;
+  }
+  return [...rows.values()];
+}
+
 export function WorkloadTable({
   workloads,
   s,
@@ -565,22 +613,24 @@ export function WorkloadTable({
 }) {
   const [q, setQ] = useState("");
   const [kind, setKind] = useState("all");
-  const [scope, setScope] = useState<"all" | "pyo" | "system">("all");
-  const rows = workloads
-    .filter(
-      (w) =>
-        (!q ||
-          w.name.includes(q.toLowerCase()) ||
-          w.namespace.includes(q.toLowerCase())) &&
-        (kind === "all" || w.kind === kind) &&
-        (scope === "all" || (scope === "system" ? w.system : !w.system)),
-    )
-    .sort(
-      (a, b) =>
-        Number(!!a.system) - Number(!!b.system) ||
-        a.namespace.localeCompare(b.namespace) ||
-        a.name.localeCompare(b.name),
-    );
+  const [scope, setScope] = useState<"services" | "system">("services");
+  const system = scope === "system";
+  const query = q.toLowerCase();
+  const rows = (
+    system
+      ? systemRows(workloads.filter((w) => w.system)).filter(
+          (w) => !query || w.name.toLowerCase().includes(query),
+        )
+      : workloads.filter(
+          (w) =>
+            !w.system &&
+            (!query || w.name.includes(query) || w.namespace.includes(query)) &&
+            (kind === "all" || w.kind === kind),
+        )
+  ).sort(
+    (a, b) =>
+      a.namespace.localeCompare(b.namespace) || a.name.localeCompare(b.name),
+  );
   return (
     <ListSection
       toolbar={
@@ -588,34 +638,35 @@ export function WorkloadTable({
           <SearchInput
             value={q}
             onChange={setQ}
-            placeholder="Search by name or project…"
+            placeholder={system ? "Search…" : "Search by name or project…"}
             className="min-w-0 flex-1 basis-full sm:basis-0"
           />
-          <div className="w-36 sm:w-44">
-            <Select
-              value={kind}
-              onChange={(e) => setKind(e.target.value)}
-              aria-label="Kind"
-              heading="Kind"
-            >
-              <option value="all">All kinds</option>
-              {["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"].map(
-                (k) => (
-                  <option key={k}>{k}</option>
-                ),
-              )}
-            </Select>
-          </div>
+          {system ? null : (
+            <div className="w-36 sm:w-44">
+              <Select
+                value={kind}
+                onChange={(e) => setKind(e.target.value)}
+                aria-label="Kind"
+                heading="Kind"
+              >
+                <option value="all">All kinds</option>
+                {["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"].map(
+                  (k) => (
+                    <option key={k}>{k}</option>
+                  ),
+                )}
+              </Select>
+            </div>
+          )}
           <div className="w-36 sm:w-44">
             <Select
               value={scope}
               onChange={(e) => setScope(e.target.value as typeof scope)}
-              aria-label="Managed by"
+              aria-label="Show"
               heading="Show"
             >
-              <option value="all">All workloads</option>
-              <option value="pyo">Managed by Pyo</option>
-              <option value="system">System workloads</option>
+              <option value="services">Services</option>
+              <option value="system">System</option>
             </Select>
           </div>
         </>
@@ -626,15 +677,15 @@ export function WorkloadTable({
           <Table>
             <thead>
               <tr>
-                <Th>Workload</Th>
-                <Th>Project</Th>
-                <Th>Kind</Th>
+                <Th>{system ? "Name" : "Workload"}</Th>
+                {system ? null : <Th>Project</Th>}
+                {system ? null : <Th>Kind</Th>}
                 <Th>Status</Th>
                 <Th>Ready</Th>
                 <Th>CPU</Th>
                 <Th>Memory</Th>
                 {showCluster ? <Th>Cluster</Th> : null}
-                <Th>Pyo service</Th>
+                {system ? null : <Th>Pyo service</Th>}
               </tr>
             </thead>
             <tbody>
@@ -642,16 +693,20 @@ export function WorkloadTable({
                 const project = s.projects.find((p) => p.id === w.projectId);
                 return (
                   <Tr key={w.id}>
-                    <Td className="font-mono text-[12px]">{w.name}</Td>
-                    <Td className="font-mono text-[11.5px] text-muted-foreground">
-                      {w.namespace}
+                    <Td className={system ? "font-medium" : "font-mono text-[12px]"}>
+                      {w.name}
                     </Td>
-                    <Td>{w.kind}</Td>
+                    {system ? null : (
+                      <Td className="font-mono text-[11.5px] text-muted-foreground">
+                        {w.namespace}
+                      </Td>
+                    )}
+                    {system ? null : <Td>{w.kind}</Td>}
                     <Td>
                       <WorkloadStatusBadge status={w.status} />
                     </Td>
                     <Td className="tabular-nums">
-                      {w.kind === "CronJob"
+                      {w.kind === "CronJob" && !system
                         ? "—"
                         : `${w.replicas.ready}/${w.replicas.desired}`}
                     </Td>
@@ -666,39 +721,42 @@ export function WorkloadTable({
                         {s.clusters.find((c) => c.id === w.clusterId)?.name}
                       </Td>
                     ) : null}
-                    <Td>
-                      {w.serviceId ? (
-                        <span>
-                          <Link
-                            to="/$team/$projectId/$serviceId"
-                            params={{
-                              team: currentSlug(),
-                              ...serviceParams(w.serviceId),
-                            }}
-                            className="font-medium hover:text-primary"
-                          >
-                            {w.name}
-                          </Link>
-                          {project ? (
-                            <span className="text-muted-foreground">
-                              {" "}
-                              · {project.name}
-                            </span>
-                          ) : null}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">
-                          {w.system ? "System" : "Unmanaged"}
-                        </span>
-                      )}
-                    </Td>
+                    {system ? null : (
+                      <Td>
+                        {w.serviceId ? (
+                          <span>
+                            <Link
+                              to="/$team/$projectId/$serviceId"
+                              params={{
+                                team: currentSlug(),
+                                ...serviceParams(w.serviceId),
+                              }}
+                              className="font-medium hover:text-primary"
+                            >
+                              {w.name}
+                            </Link>
+                            {project ? (
+                              <span className="text-muted-foreground">
+                                {" "}
+                                · {project.name}
+                              </span>
+                            ) : null}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">Unmanaged</span>
+                        )}
+                      </Td>
+                    )}
                   </Tr>
                 );
               })}
             </tbody>
           </Table>
         ) : (
-          <EmptyState compact title="No workloads match" />
+          <EmptyState
+            compact
+            title={q || kind !== "all" ? "No workloads match" : system ? "No system workloads" : "No services yet"}
+          />
         )}
       </Panel>
     </ListSection>
