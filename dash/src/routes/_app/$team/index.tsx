@@ -607,7 +607,7 @@ function GetStarted({
       done: !!server,
       action: server ? null : (
         <ButtonLink href="/clusters/new" size="sm">
-          Add cluster
+          Connect a server
         </ButtonLink>
       ),
     },
