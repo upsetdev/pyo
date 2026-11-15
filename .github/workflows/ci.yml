@@ -78,26 +78,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A test isn't an install: no install count (PYO_TELEMETRY=off), and
-      # api.pyo.dev doesn't resolve inside k3s, so Pyo's first update check
-      # sends no usage counts and falls back to GitHub. k3s applies this
-      # manifest when it starts, and CoreDNS imports coredns-custom.
-      # PYO_TELEMETRY=off turns usage counts off too, but only in a Pyo that
-      # reads the pyo-install ConfigMap (0.3.2 on), and this job runs the
-      # latest release's Pyo: drop this once that release is 0.3.2 or later.
-      - name: Keep CI out of the counts
-        run: |
-          sudo install -d /var/lib/rancher/k3s/server/manifests
-          sudo tee /var/lib/rancher/k3s/server/manifests/ci-no-telemetry.yaml >/dev/null <<'YAML'
-          apiVersion: v1
-          kind: ConfigMap
-          metadata: { name: coredns-custom, namespace: kube-system }
-          data:
-            no-telemetry.override: |
-              template IN ANY api.pyo.dev {
-                rcode NXDOMAIN
-              }
-          YAML
       # What install.sh sets outside its functions goes along when it runs
       # again with sudo (its SETTINGS): without it, a sudo user's install
       # fails at once.
@@ -129,6 +109,8 @@ jobs:
             echo "$out"
             [ "$rc" = 2 ] && grep -q 'Unknown option: --not-an-option' <<<"$out" || { echo "$s.sh: exit $rc, not 2" >&2; exit 1; }
           done
+      # A test isn't an install: PYO_TELEMETRY=off sends no install count
+      # and turns usage counts off.
       - name: Install Pyo
         run: |
           set -o pipefail
