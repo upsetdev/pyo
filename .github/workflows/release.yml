@@ -2,8 +2,8 @@ name: Release
 
 # Pushing a tag like v0.1.0 publishes that version: signed images at
 # ghcr.io/upsetdev/pyo, and a GitHub release with the CLI for each
-# platform and release.json (what the dashboard's updates apply). See
-# RELEASING.md.
+# platform, the sandbox server files and release.json (what the
+# dashboard's updates apply). See RELEASING.md.
 
 on:
   push:
@@ -74,6 +74,12 @@ jobs:
     needs: verify
     uses: ./.github/workflows/cli.yml
 
+  # A sandbox server's files for each architecture (sandbox.yml).
+  sandbox:
+    name: Sandbox
+    needs: verify
+    uses: ./.github/workflows/sandbox.yml
+
   images:
     name: Publish ${{ matrix.image }}
     needs: [verify, binaries]
@@ -135,7 +141,7 @@ jobs:
 
   release:
     name: GitHub release
-    needs: [verify, images, cli]
+    needs: [verify, images, cli, sandbox]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -215,6 +221,19 @@ jobs:
           for a in pyo-linux-aarch64 pyo-macos-aarch64 pyo-macos-x86_64 pyo-windows-x86_64.exe; do
             sha256sum -c "$a.sha256"
           done
+      # The sandbox servers' files and their sha256, from the sandbox job.
+      # sandbox.sh downloads the one for its architecture and checks it.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: sandbox-*
+          path: sandbox
+          merge-multiple: true
+      - name: Check the sandbox files
+        run: |
+          cd sandbox
+          for a in x86_64 aarch64; do
+            sha256sum -c "pyo-sandbox-linux-$a.tar.gz.sha256"
+          done
       # The release's text: the changes since the previous release, from the
       # Conventional Commits in between (scripts/release-notes.ts).
       - name: Write the release notes
@@ -227,7 +246,8 @@ jobs:
       # pyo.dev/connect.sh and pyo.dev/join.sh fetch connect.sh and join.sh
       # the same way (Pyo's commands use them when it has no address other
       # machines can reach). pyo.dev/cli.sh fetches cli.sh, the CLI's
-      # installer. sandbox.sh sets up sandbox servers the same way.
+      # installer. pyo.dev/sandbox.sh fetches sandbox.sh, which sets up
+      # sandbox servers with the pyo-sandbox-linux-<arch>.tar.gz beside it.
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           body_path: release-notes.md
@@ -249,3 +269,7 @@ jobs:
             crates/pyo-api/assets/connect.sh
             crates/pyo-api/assets/join.sh
             deploy/sandbox.sh
+            sandbox/pyo-sandbox-linux-x86_64.tar.gz
+            sandbox/pyo-sandbox-linux-x86_64.tar.gz.sha256
+            sandbox/pyo-sandbox-linux-aarch64.tar.gz
+            sandbox/pyo-sandbox-linux-aarch64.tar.gz.sha256

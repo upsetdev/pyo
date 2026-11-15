@@ -284,8 +284,8 @@ fetch_bundle() {
   if [ -n "$src" ] && [ -f "$src" ]; then
     cp "$src" "$tgz"
   else
-    # TODO(release): the release has no sandbox files yet. Packaging them
-    # (and signing them like release.json) comes with the release work.
+    # The release's own: .github/workflows/sandbox.yml packs it with
+    # crates/pyo-sandbox/scripts/bundle.sh, its .sha256 beside it.
     [ -n "$src" ] || src=$(bundle_url)
     say "Downloading $src"
     curl -fsSL --proto '=https,http' --retry 3 -o "$tgz" "$src" || fail "Couldn't download $src."

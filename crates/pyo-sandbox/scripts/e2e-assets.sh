@@ -4,15 +4,18 @@
 # .cache/sandbox-e2e at the repo root, which git ignores. Prints the env
 # vars the tests read.
 #
-# The kernel is a Firecracker CI test artifact. Releases will ship Pyo's
-# own signed guest kernel instead.
+# The kernel is a Firecracker CI test artifact. Releases ship Pyo's own
+# guest kernel (guest-kernel.sh) instead.
 set -euo pipefail
-root=$(cd "$(dirname "$0")/../../.." && pwd)
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/../../.." && pwd)
 cache=${PYO_SANDBOX_CACHE:-$root/.cache/sandbox-e2e}
-fc_version=v1.18.0
+# shellcheck source-path=SCRIPTDIR source=firecracker.env
+. "$here/firecracker.env"
+fc_version=$FC_VERSION
 arch=x86_64
 fc_tgz=firecracker-$fc_version-$arch.tgz
-fc_sha=1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd
+fc_sha=$FC_SHA256_X86_64
 kernel=vmlinux-6.1.155
 kernel_sha=e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2
 
