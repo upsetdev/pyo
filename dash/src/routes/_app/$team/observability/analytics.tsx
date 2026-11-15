@@ -378,7 +378,7 @@ function Loaded({ data }: { data: AnalyticsResponse }) {
     },
     {
       id: "errors",
-      label: "Error rate",
+      label: "Server errors",
       value: pct(a.errorRate, 2),
       change: change(a.errorRate, prev.summary.errorRate),
       lowerIsBetter: true,

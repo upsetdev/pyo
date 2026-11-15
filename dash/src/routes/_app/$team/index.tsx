@@ -487,7 +487,7 @@ function Pulse({ team, hasSites }: { team: string; hasSites: boolean }) {
       label: "Requests",
       period: "7 days",
       value: w ? compact(w.summary.requests) : "–",
-      sub: w ? `${pct(w.summary.errorRate, 1)} errors` : undefined,
+      sub: w ? `${pct(w.summary.errorRate, 1)} server errors` : undefined,
       values: w?.series.map((p) => p.requests) ?? [],
       server: false,
       loading: hasSites && web.status === "loading",

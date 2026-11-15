@@ -539,7 +539,7 @@ function AnalyticsCard({ app }: { app: Application }) {
       format: compact,
     },
     {
-      label: "Error rate",
+      label: "Server errors",
       value: sum ? pct(sum.errorRate, 1) : "–",
       values: series.map((p) => (p.requests ? p.errors / p.requests : 0)),
       format: (v: number) => pct(v, 1),

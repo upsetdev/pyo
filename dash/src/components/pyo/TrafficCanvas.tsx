@@ -478,7 +478,7 @@ function Numbers({ t, r }: { t: ServiceTraffic; r: Region }) {
   return (
     <div className="flex flex-wrap items-end gap-x-8 gap-y-2">
       <Stat label={`Requests · ${t.statsHours}h`} value={st ? compact(st.requests) : "0"} />
-      <Stat label="Errors" value={st && st.requests ? `${((st.errors / st.requests) * 100).toFixed(1)}%` : "0%"} bad={!!st && st.requests > 0 && st.errors / st.requests > 0.05} />
+      <Stat label="Server errors" value={st && st.requests ? `${((st.errors / st.requests) * 100).toFixed(1)}%` : "0%"} bad={!!st && st.requests > 0 && st.errors / st.requests > 0.05} />
       <Stat label="p95" value={st && st.requests ? `${Math.round(st.p95Ms)} ms` : "—"} />
       {r.series && r.series.some((x) => x > 0) ? <Sparkline values={r.series} /> : null}
     </div>
@@ -803,7 +803,7 @@ function RegionBox({ r, b, t, cc }: { r: Region; b: Box; t: ServiceTraffic; cc: 
         ) : (
           <>
             <Stat label="Requests" value={st ? compact(st.requests) : "0"} />
-            <Stat label="Errors" value={st && st.requests ? `${((st.errors / st.requests) * 100).toFixed(1)}%` : "0%"} bad={!!st && st.requests > 0 && st.errors / st.requests > 0.05} />
+            <Stat label="Server errors" value={st && st.requests ? `${((st.errors / st.requests) * 100).toFixed(1)}%` : "0%"} bad={!!st && st.requests > 0 && st.errors / st.requests > 0.05} />
             <Stat label="p95" value={st && st.requests ? `${Math.round(st.p95Ms)} ms` : "—"} />
             {r.series && r.series.some((x) => x > 0) ? (
               <span className="flex flex-col">
