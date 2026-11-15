@@ -39,6 +39,10 @@ pub const LEEWAY_SECS: u64 = 30;
 /// `sbx` of a token for every sandbox on the server. Only valid with the
 /// admin scope.
 pub const ANY_SANDBOX: &str = "*";
+/// `srv` of a registry token: Pyo's registry door takes it, and no sandbox
+/// server does, since none has this ID. Its `sbx` is the template it's
+/// for, and its only scope [`Scope::Registry`].
+pub const REGISTRY_AUDIENCE: &str = "registry";
 
 /// What a token grants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +214,7 @@ fn scope_name(s: Scope) -> &'static str {
         Scope::Ports => "ports",
         Scope::Lifecycle => "pausing, resuming or deleting",
         Scope::Admin => "server-wide calls",
+        Scope::Registry => "pulling images",
     }
 }
 

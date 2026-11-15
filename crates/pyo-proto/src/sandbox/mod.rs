@@ -46,6 +46,9 @@ pub const DEFAULT_TTL_SECS: u64 = 5 * 60;
 pub const MAX_TTL_SECS: u64 = 24 * 60 * 60;
 pub const MAX_ENV: usize = 128;
 pub const MAX_LABELS: usize = 32;
+/// The most a template's files may take, unpacked, unless Pyo says
+/// otherwise when it asks a server to prepare one.
+pub const DEFAULT_TEMPLATE_MAX_MIB: u32 = 10 * 1024;
 
 // ── Runtime detection ──────────────────────────────────────────────────────
 
@@ -553,6 +556,16 @@ pub struct CapacityReport {
     pub paused: u32,
     /// CPUs the running sandboxes asked for.
     pub cpus_committed: u32,
+    /// Bytes free in the storage pool.
+    #[serde(default)]
+    pub disk_free: u64,
+    /// Bytes the templates take: root disks, snapshots and builds.
+    #[serde(default)]
+    pub disk_templates: u64,
+    /// Bytes the sandboxes take: their writable layers and pause snapshots.
+    /// Files shared with a template count once, under templates.
+    #[serde(default)]
+    pub disk_sandboxes: u64,
 }
 
 impl CapacityReport {
@@ -570,6 +583,79 @@ pub struct TemplateReport {
     /// Snapshot keys, each ending in [`snapshot_size_tag`].
     #[serde(default)]
     pub snapshots: Vec<String>,
+    /// Only a ready template takes sandboxes. One put on the server by
+    /// hand is ready.
+    #[serde(default)]
+    pub state: TemplateState,
+    /// Bytes it takes on disk: its root disk, snapshots and build files.
+    #[serde(default)]
+    pub bytes: u64,
+    /// How the server made it. None for a template put there by hand,
+    /// which Pyo never deletes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<TemplateBuild>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TemplateState {
+    /// Pulling, unpacking or snapshotting.
+    Building,
+    #[default]
+    Ready,
+    Failed,
+}
+
+/// How a server made a template from an image, and how far it got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateBuild {
+    /// The image as Pyo gave it.
+    pub image: String,
+    /// The manifest digest it resolved to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// While building: "queued", "pulling", "unpacking" or "snapshotting".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Bytes pulled so far and in all, while pulling.
+    #[serde(default)]
+    pub pulled: u64,
+    /// The image's compressed layers.
+    #[serde(default)]
+    pub image_bytes: u64,
+    /// The root disk, as allocated on disk.
+    #[serde(default)]
+    pub rootfs_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_ms: Option<u64>,
+    /// Unpacking the layers and making the root disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpack_ms: Option<u64>,
+    /// Booting it and taking its snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+}
+
+/// A registry login for pulling a template's image.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryAuth {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for RegistryAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryAuth")
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TemplateReport {
@@ -679,6 +765,29 @@ pub enum DaemonCommand {
         cert: String,
         key: SecretPem,
     },
+    /// Makes a template from an OCI image: pulls it, unpacks its layers
+    /// into a root disk with `pyo-envd`, boots it once and snapshots it.
+    /// Answers at once. The report shows how far it got. A template the
+    /// server has already is left as it is.
+    #[serde(rename_all = "camelCase")]
+    PrepareTemplate {
+        template: String,
+        /// Like `python:3.13-alpine` or `100.64.0.1:5006/acme/app/api:1`.
+        image: String,
+        /// The registry speaks plain HTTP: Pyo's own, over the tailnet.
+        #[serde(default)]
+        plain_http: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<RegistryAuth>,
+        /// The most its files may take, unpacked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_mib: Option<u32>,
+    },
+    /// Deletes a template the server made, or stops its build. Refused
+    /// while sandboxes still use it.
+    DeleteTemplate {
+        template: String,
+    },
 }
 
 /// A private key in a command: never printed.
@@ -720,7 +829,9 @@ impl DaemonCommand {
             DaemonCommand::List
             | DaemonCommand::Report
             | DaemonCommand::SnapshotTemplate { .. }
-            | DaemonCommand::SetEdgeCert { .. } => None,
+            | DaemonCommand::SetEdgeCert { .. }
+            | DaemonCommand::PrepareTemplate { .. }
+            | DaemonCommand::DeleteTemplate { .. } => None,
         }
     }
 }
@@ -751,6 +862,12 @@ pub enum DaemonResult {
     /// The edge serves this certificate now.
     EdgeCert {
         fingerprint: String,
+    },
+    Template {
+        template: TemplateReport,
+    },
+    TemplateDeleted {
+        template: String,
     },
     Error {
         error: DaemonError,
@@ -1026,6 +1143,19 @@ mod tests {
                 disk_mib: 2048,
                 network: Some(NetworkMode::None),
             },
+            DaemonCommand::PrepareTemplate {
+                template: "stp_abc".into(),
+                image: "python:3.13-alpine".into(),
+                plain_http: false,
+                auth: Some(RegistryAuth {
+                    username: "pyo-sandbox".into(),
+                    password: "secret".into(),
+                }),
+                max_mib: Some(1024),
+            },
+            DaemonCommand::DeleteTemplate {
+                template: "stp_abc".into(),
+            },
         ];
         for c in cmds {
             let j = serde_json::to_string(&c).unwrap();
@@ -1128,6 +1258,7 @@ mod tests {
                     snapshot_size_tag(2, 512, 2048)
                 ),
             ],
+            ..Default::default()
         };
         let (off, on) = (NetworkMode::None, NetworkMode::Internet);
         assert!(t.has_snapshot(off, 1, 512, 2048));
@@ -1142,6 +1273,19 @@ mod tests {
         }))
         .unwrap();
         assert!(r.templates.is_empty(), "older reports have no templates");
+        let hand: TemplateReport =
+            serde_json::from_value(serde_json::json!({"name": "busybox"})).unwrap();
+        assert_eq!(
+            hand.state,
+            TemplateState::Ready,
+            "a template put there by hand is ready"
+        );
+        assert!(hand.build.is_none());
+        let auth = RegistryAuth {
+            username: "u".into(),
+            password: "hunter2".into(),
+        };
+        assert!(!format!("{auth:?}").contains("hunter2"));
     }
 
     #[test]

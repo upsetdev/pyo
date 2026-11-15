@@ -14,7 +14,7 @@ use std::time::Duration;
 use pyo_proto::sandbox::{
     CapabilityReport, CapacityReport, DaemonError, ErrorCode, ExecRequest, ExecResult, Isolation,
     MAX_TTL_SECS, NetworkMode, OpenPort, Runtime, SANDBOX_PROTOCOL, SandboxSpec, SandboxState,
-    SandboxStatus, ServerReport, TemplateReport,
+    SandboxStatus, ServerReport, TemplateReport, TemplateState,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -86,6 +86,10 @@ pub struct Manager {
     net: Option<Arc<Network>>,
     /// The edge's certificate, when it serves HTTPS.
     edge_tls: StdMutex<Option<Arc<crate::edge::EdgeTls>>>,
+    /// Template builds in progress (see `templates`).
+    pub(crate) builds: StdMutex<HashMap<String, Arc<crate::templates::Build>>>,
+    /// One template build at a time.
+    pub(crate) build_gate: tokio::sync::Semaphore,
 }
 
 impl Manager {
@@ -103,6 +107,8 @@ impl Manager {
             sandboxes: StdMutex::new(HashMap::new()),
             net: None,
             edge_tls: StdMutex::new(None),
+            builds: StdMutex::new(HashMap::new()),
+            build_gate: tokio::sync::Semaphore::new(1),
         }
     }
 
@@ -116,6 +122,10 @@ impl Manager {
     /// The network, when sandboxes here can have one.
     fn network(&self) -> Option<&Arc<Network>> {
         self.net.as_ref().filter(|_| self.capability().network)
+    }
+
+    pub(crate) fn has_network(&self) -> bool {
+        self.network().is_some()
     }
 
     /// What the server can run, with the edge's URL and certificate as
@@ -201,6 +211,13 @@ impl Manager {
             memory_reserved: self.cfg.reserve_bytes(mem.total),
             ..Default::default()
         };
+        // Disk: templates first, so files a sandbox shares with its
+        // template (hard links) count under templates.
+        let mut seen = std::collections::HashSet::new();
+        c.disk_free = storage::free_bytes(&self.layout.root);
+        c.disk_templates =
+            crate::templates::disk_bytes(&self.layout.root.join("templates"), &mut seen);
+        c.disk_sandboxes = crate::templates::disk_bytes(&self.layout.sandboxes(), &mut seen);
         for s in self.list() {
             match s.state {
                 SandboxState::Paused => c.paused += 1,
@@ -228,27 +245,11 @@ impl Manager {
         }
     }
 
-    /// The templates in the storage pool and their snapshots.
+    /// The templates in the storage pool: their state, snapshots and size.
     pub fn templates(&self) -> Vec<TemplateReport> {
-        let dir_names = |p: PathBuf| -> Vec<String> {
-            let mut v: Vec<String> = std::fs::read_dir(p)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| !n.ends_with(".tmp"))
-                .collect();
-            v.sort();
-            v
-        };
-        dir_names(self.layout.root.join("templates"))
+        storage::dir_names(&self.layout.root.join("templates"))
             .into_iter()
-            .filter(|n| self.layout.template_rootfs(n).exists())
-            .map(|name| TemplateReport {
-                snapshots: dir_names(self.layout.template_dir(&name).join("snapshots")),
-                name,
-            })
+            .filter_map(|name| self.template_report(&name))
             .collect()
     }
 
@@ -284,14 +285,26 @@ impl Manager {
             NetworkMode::None => None,
         };
         let rootfs = self.layout.template_rootfs(&spec.template);
-        if !rootfs.exists() {
-            return Err(err(
-                ErrorCode::NotFound,
-                format!(
-                    "The sandbox template {} isn't on this server.",
-                    spec.template
-                ),
-            ));
+        match self.template_report(&spec.template).map(|t| t.state) {
+            Some(TemplateState::Ready) if rootfs.exists() => {}
+            Some(TemplateState::Building) => {
+                return Err(err(
+                    ErrorCode::Conflict,
+                    format!(
+                        "The sandbox template {} is still being made on this server.",
+                        spec.template
+                    ),
+                ));
+            }
+            _ => {
+                return Err(err(
+                    ErrorCode::NotFound,
+                    format!(
+                        "The sandbox template {} isn't on this server.",
+                        spec.template
+                    ),
+                ));
+            }
         }
         let key = self.snapshot_key(net.is_some(), spec.cpus, spec.memory_mib, spec.disk_mib);
         let snap_dir = self.layout.template_snapshot(&spec.template, &key);
@@ -823,6 +836,7 @@ impl Manager {
     /// cleaned up. Then puts the network table in place for the kept ones,
     /// which removes the taps of the rest.
     pub async fn adopt(&self) -> usize {
+        self.adopt_templates().await;
         let mut leases = Vec::new();
         let adopted = self.adopt_vms(&mut leases).await;
         if let Some(net) = &self.net {

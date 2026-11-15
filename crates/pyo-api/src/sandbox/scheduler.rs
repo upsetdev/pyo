@@ -181,7 +181,7 @@ mod tests {
             },
             templates: vec![TemplateReport {
                 name: "stp_node".into(),
-                snapshots: vec![],
+                ..Default::default()
             }],
             pending_bytes: 0,
         }

@@ -3,6 +3,8 @@
 //! ```text
 //! <root>/
 //!   templates/<name>/rootfs.ext4         read-only root, shared by every sandbox
+//!   templates/<name>/template.json       how the server made it (see templates)
+//!   templates/<name>/build/              layers and the unpacked root, while building
 //!   templates/<name>/snapshots/<key>/    vm.snap, vm.mem (holes punched), scratch.ext4
 //!   cache/scratch-<MiB>.ext4             an empty writable layer per size, sparse
 //!   cache/testboot.ext4                  the detection test boot's root
@@ -196,7 +198,7 @@ pub async fn dig_holes(path: &Path) -> anyhow::Result<()> {
     run(Command::new("fallocate").arg("--dig-holes").arg(path)).await
 }
 
-fn mkfs() -> &'static str {
+pub fn mkfs() -> &'static str {
     for p in ["/usr/sbin/mkfs.ext4", "/sbin/mkfs.ext4"] {
         if Path::new(p).exists() {
             return p;
@@ -219,6 +221,20 @@ async fn run(cmd: &mut Command) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// The directories in `p`, sorted, without unfinished ones (`.tmp`).
+pub fn dir_names(p: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(p)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.ends_with(".tmp"))
+        .collect();
+    v.sort();
+    v
 }
 
 /// Bytes the filesystem holding `path` has free.

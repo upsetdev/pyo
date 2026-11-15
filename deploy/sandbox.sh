@@ -266,7 +266,7 @@ check_system() {
     *) fail "Sandbox servers are x86-64 or arm64, and this is $(uname -m)." ;;
   esac
   local tool
-  for tool in curl tar sha256sum systemctl mkfs.ext4; do
+  for tool in curl tar sha256sum systemctl mkfs.ext4 debugfs; do
     command -v "$tool" >/dev/null || fail "$tool is missing. Install it and run this again."
   done
   if command -v k3s >/dev/null || [ -d /var/lib/rancher/k3s ]; then

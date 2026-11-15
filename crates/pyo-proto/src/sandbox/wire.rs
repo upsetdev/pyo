@@ -458,6 +458,10 @@ pub enum Scope {
     Lifecycle,
     /// Everything on the server, for Pyo itself.
     Admin,
+    /// Pull a template's image from Pyo's registry. Only in the registry
+    /// tokens Pyo gives a sandbox server with a template to prepare (see
+    /// [`super::token::REGISTRY_AUDIENCE`]).
+    Registry,
 }
 
 impl Request {

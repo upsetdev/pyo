@@ -363,6 +363,23 @@ pub async fn run_command(
                 .map_err(|e| fail(ErrorCode::InvalidSpec, format!("{e:#}")))?;
             DaemonResult::EdgeCert { fingerprint }
         }
+        DaemonCommand::PrepareTemplate {
+            template,
+            image,
+            plain_http,
+            auth,
+            max_mib,
+        } => {
+            st.authorize(token, None, Scope::Admin)?;
+            DaemonResult::Template {
+                template: mgr.prepare_template(&template, &image, plain_http, auth, max_mib)?,
+            }
+        }
+        DaemonCommand::DeleteTemplate { template } => {
+            st.authorize(token, None, Scope::Admin)?;
+            mgr.delete_template(&template).await?;
+            DaemonResult::TemplateDeleted { template }
+        }
     })
 }
 
