@@ -2,10 +2,8 @@
 //! Kubernetes holds on to. A run that fails says so in the activity feed,
 //! once, which is what notifications follow.
 
-use axum::{
-    Json,
-    extract::{Query, State},
-};
+use crate::error::Query;
+use axum::{Json, extract::State};
 use pyo_proto::CronRunReport;
 use serde::Deserialize;
 use serde_json::{Value, json};

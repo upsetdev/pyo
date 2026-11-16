@@ -18,12 +18,13 @@
 //! A server that can run neither Firecracker nor gVisor is refused, with
 //! the detection's reason.
 
+use crate::error::Query;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use axum::{
     Router,
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,

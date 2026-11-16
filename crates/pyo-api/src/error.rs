@@ -114,3 +114,83 @@ impl From<anyhow::Error> for ApiError {
 pub async fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "No such endpoint.")
 }
+
+/// Axum's `Query`, with a missing or wrong parameter as a plain 400 the
+/// dashboard can show, instead of axum's own text.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Query<T>(pub T);
+
+impl<T, S> axum::extract::FromRequestParts<S> for Query<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, ApiError> {
+        match axum::extract::Query::<T>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Query(v)) => Ok(Query(v)),
+            Err(e) => Err(ApiError::bad_request(query_message(&e.body_text()))),
+        }
+    }
+}
+
+/// axum's "Failed to deserialize query string: missing field `team`", in
+/// plain words.
+fn query_message(text: &str) -> String {
+    let quoted = |after: &str| {
+        let rest = &text[text.find(after)? + after.len()..];
+        rest.split('`').next().map(str::to_owned)
+    };
+    if let Some(name) = quoted("missing field `") {
+        return format!("Add the {name} parameter.");
+    }
+    if let Some(value) = quoted("unknown variant `") {
+        return format!("\"{value}\" isn't a value this parameter takes.");
+    }
+    "A parameter in the address isn't valid.".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_errors_in_plain_words() {
+        assert_eq!(
+            query_message("Failed to deserialize query string: missing field `team`"),
+            "Add the team parameter."
+        );
+        assert_eq!(
+            query_message(
+                "Failed to deserialize query string: unknown variant `x`, expected `a` or `b`"
+            ),
+            "\"x\" isn't a value this parameter takes."
+        );
+        assert_eq!(
+            query_message("Failed to deserialize query string: invalid digit found in string"),
+            "A parameter in the address isn't valid."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_parameter_is_a_plain_400() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Q {
+            team: String,
+        }
+        let req = axum::http::Request::get("/x?other=1").body(()).unwrap();
+        let (mut parts, ()) = req.into_parts();
+        let e =
+            <Query<Q> as axum::extract::FromRequestParts<()>>::from_request_parts(&mut parts, &())
+                .await
+                .err()
+                .unwrap();
+        assert_eq!(e.status, StatusCode::BAD_REQUEST);
+        assert_eq!(e.message, "Add the team parameter.");
+    }
+}

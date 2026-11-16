@@ -11,9 +11,10 @@
 //!
 //! API keys (Profile → API keys) stay the way scripts call the REST API.
 
+use crate::error::Query;
 use axum::{
     Form, Json, Router,
-    extract::{FromRequestParts, Query, State},
+    extract::{FromRequestParts, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
     routing::{get, post},

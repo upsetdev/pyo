@@ -3,11 +3,8 @@
 //! The token is the cluster's agent credential; it's only valid for the
 //! cluster it was issued to and can be rotated from the dashboard.
 
-use axum::{
-    extract::{Query, State},
-    http::header,
-    response::IntoResponse,
-};
+use crate::error::Query;
+use axum::{extract::State, http::header, response::IntoResponse};
 use serde::Deserialize;
 
 use crate::{

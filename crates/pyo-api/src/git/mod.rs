@@ -30,12 +30,13 @@
 pub mod gitlab;
 pub mod remote;
 
+use crate::error::Query;
 use std::time::Duration;
 
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},

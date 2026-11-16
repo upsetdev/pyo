@@ -6,12 +6,13 @@
 //! on another one, which forwards its socket to the replica holding the
 //! browser (`relay`, its pod address).
 
+use crate::error::Query;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
     Router,
     extract::{
-        Path, Query, State,
+        Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, header},

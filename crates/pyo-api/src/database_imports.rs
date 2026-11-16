@@ -31,12 +31,13 @@
 //!   unless an import is using it; an upload never sent, once its URL
 //!   expired.
 
+use crate::error::Query;
 use std::time::Duration;
 
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     response::Response,
     routing::{get, post, put},

@@ -21,13 +21,14 @@
 //!
 //! Wrong codes are rate-limited. The server then shows as Joining.
 
+use crate::error::Query;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use axum::{
     Router,
     body::Bytes,
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,

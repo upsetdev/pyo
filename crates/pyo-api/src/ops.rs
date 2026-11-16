@@ -7924,7 +7924,7 @@ pub(crate) async fn observability_settings(
 pub(crate) async fn metrics(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
-    axum::extract::Query(q): axum::extract::Query<MetricsQuery>,
+    crate::error::Query(q): crate::error::Query<MetricsQuery>,
 ) -> ApiResult<Json<Value>> {
     let mut tx = s.db.begin().await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
@@ -7994,7 +7994,7 @@ pub(crate) struct AccessLogQuery {
 pub(crate) async fn access_logs(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
-    axum::extract::Query(q): axum::extract::Query<AccessLogQuery>,
+    crate::error::Query(q): crate::error::Query<AccessLogQuery>,
 ) -> ApiResult<Json<Value>> {
     let hosts = team_hosts(
         &s,
@@ -8070,7 +8070,7 @@ async fn team_hosts(
 pub(crate) async fn observability(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
-    axum::extract::Query(q): axum::extract::Query<ObservabilityQuery>,
+    crate::error::Query(q): crate::error::Query<ObservabilityQuery>,
 ) -> ApiResult<Json<Value>> {
     let hosts = team_hosts(&s, &user, &q.team, q.project, q.site, q.service).await?;
     let range = match q.range.as_deref() {
@@ -8107,7 +8107,7 @@ pub(crate) async fn connections(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
     axum::extract::Path(id): axum::extract::Path<String>,
-    axum::extract::Query(q): axum::extract::Query<ConnectionsQuery>,
+    crate::error::Query(q): crate::error::Query<ConnectionsQuery>,
 ) -> ApiResult<Json<Value>> {
     let mut tx = s.db.begin().await?;
     let team_id = team_of(&mut tx, "services", &id).await?;
@@ -8150,7 +8150,7 @@ pub(crate) struct BlockedQuery {
 pub(crate) async fn firewall_blocked(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
-    axum::extract::Query(q): axum::extract::Query<BlockedQuery>,
+    crate::error::Query(q): crate::error::Query<BlockedQuery>,
 ) -> ApiResult<Json<Value>> {
     let mut tx = s.db.begin().await?;
     let team_id = team_of(&mut tx, "services", &q.service).await?;
@@ -8185,7 +8185,7 @@ pub(crate) async fn firewall_blocked(
 pub(crate) async fn waf_hits(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
-    axum::extract::Query(q): axum::extract::Query<BlockedQuery>,
+    crate::error::Query(q): crate::error::Query<BlockedQuery>,
 ) -> ApiResult<Json<Value>> {
     let mut tx = s.db.begin().await?;
     let team_id = team_of(&mut tx, "services", &q.service).await?;

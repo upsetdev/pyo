@@ -606,7 +606,7 @@ struct ConfigQuery {
 
 async fn config(
     State(state): State<AppState>,
-    axum::extract::Query(q): axum::extract::Query<ConfigQuery>,
+    crate::error::Query(q): crate::error::Query<ConfigQuery>,
 ) -> ApiResult<Json<Value>> {
     let mut conn = state.db.acquire().await?;
     let invite = match q.invite.as_deref() {

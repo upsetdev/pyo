@@ -13,6 +13,7 @@
 //! same handlers and `/ops` code with the same checks. Only the tools the
 //! connection's access allows are listed.
 
+use crate::error::Query;
 use axum::{
     Json, Router,
     extract::State,
@@ -595,7 +596,7 @@ fn json_of<T: serde::Serialize>(r: ApiResult<Json<T>>) -> Result<Value, String> 
 
 /// An endpoint's tool: the endpoint's own handler, as this user.
 async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Result<Value, String> {
-    use axum::extract::{Path, Query};
+    use axum::extract::Path;
     let st = || State(s.clone());
     let me = || SessionUser(user.clone());
     let path_id = || arg(args, "id").map(|i| Path(i.to_owned()));

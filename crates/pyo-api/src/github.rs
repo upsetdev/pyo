@@ -12,6 +12,7 @@
 //! - Each deploy reports a commit status on GitHub (pending, success,
 //!   failure) linking to the deployment.
 
+use crate::error::Query;
 use std::{
     collections::HashMap,
     sync::OnceLock,
@@ -21,7 +22,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Query, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect},
     routing::{get, post},

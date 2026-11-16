@@ -3,9 +3,10 @@
 //! talk to the sandbox server with the connection's token: exec, terminals,
 //! files and ports never go through Pyo.
 
+use crate::error::Query;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, post},
 };
