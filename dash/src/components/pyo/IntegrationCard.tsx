@@ -89,7 +89,7 @@ export function IntegrationCard({
                 aria-label={`${name} actions`}
                 variant="ghost"
                 size="icon"
-                className="ml-2 h-7 w-7 shrink-0"
+                className="-ml-2 h-7 w-7 shrink-0"
               >
                 <DotsThreeVerticalIcon size={16} weight="bold" />
               </Button>
