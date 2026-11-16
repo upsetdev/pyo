@@ -312,7 +312,7 @@ function SandboxTable({
             <Td className="tabular-nums text-muted-foreground">{sizeLabel(x.cpus, x.memoryMib)}</Td>
             <Td className="text-muted-foreground">{timeAgo(x.createdAt, now)}</Td>
             <Td className="tabular-nums text-muted-foreground">
-              {ended(x) ? "—" : (timeLeft(x.expiresAt, now) ?? "Ending")}
+              {ended(x) ? "—" : x.expiresAt === null ? "No limit" : (timeLeft(x.expiresAt, now) ?? "Ending")}
             </Td>
             <Td className="max-w-40 truncate text-muted-foreground">{x.createdBy ?? "—"}</Td>
             <Td>

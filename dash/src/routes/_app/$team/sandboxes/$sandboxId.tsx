@@ -16,6 +16,7 @@ import {
   RuntimeBadge,
   SandboxStatus,
   useNow,
+  useSandboxes,
 } from "~/components/pyo/sandbox/common";
 import { Badge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -37,9 +38,11 @@ import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
   LIFETIMES,
+  NO_LIFETIME,
   connectionFor,
   daemonApi,
   ended,
+  lifetimeAllowed,
   rememberConnection,
   sandboxApi,
   sizeLabel,
@@ -201,11 +204,13 @@ function Overview({ x, canUse, onChange }: { x: Sandbox; canUse: boolean; onChan
   const now = useNow(1000);
   const server = s.sandboxServers.find((v) => v.id === x.serverId);
   const project = x.projectId ? projectsIn(s).find((p) => p.id === x.projectId) : undefined;
-  const left = timeLeft(x.expiresAt, now);
-  const extend = async (ttl: string) => {
+  const list = useSandboxes(x.teamId);
+  const limits = list.status === "success" ? list.data.limits : null;
+  const left = x.expiresAt === null ? "No limit" : timeLeft(x.expiresAt, now);
+  const extend = async (ttl: string, label: string) => {
     try {
       await sandboxApi.extend(x.id, ttl);
-      toast({ title: `Ends in ${ttl} from now` });
+      toast({ title: ttl === NO_LIFETIME ? "It runs until you delete it" : `Ends ${label} from now` });
       onChange();
     } catch (e) {
       toast({ tone: "error", title: (e as Error).message });
@@ -229,10 +234,16 @@ function Overview({ x, canUse, onChange }: { x: Sandbox; canUse: boolean; onChan
                     <Menu
                       width="w-40"
                       label="Extend"
-                      items={LIFETIMES.map((l) => ({
-                        label: `${l.label} from now`,
-                        onSelect: () => void extend(l.value),
-                      }))}
+                      items={[
+                        ...LIFETIMES.map((l) => ({
+                          label: `${l.label} from now`,
+                          disabled: !lifetimeAllowed(l.secs, limits),
+                          onSelect: () => void extend(l.value, l.label),
+                        })),
+                        ...(limits?.maxTtlSecs === null
+                          ? [{ label: "No limit", onSelect: () => void extend(NO_LIFETIME, "") }]
+                          : []),
+                      ]}
                       trigger={(t) => (
                         <Button {...t} size="xs" variant="secondary">
                           <ClockClockwiseIcon size={12} /> Extend
