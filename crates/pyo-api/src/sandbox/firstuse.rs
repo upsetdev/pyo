@@ -206,12 +206,15 @@ pub async fn on_server(
     .await
     .map_err(|e| NotReady::Server(DaemonError::new(ErrorCode::Internal, e.to_string())))?
     .ok_or_else(|| NotReady::Failed("it was deleted".into()))?;
+    // Pyo's registry has no tailnet address yet (it just started): the
+    // create says to try again in a minute.
+    let prepare = templates::prepare_command(key, &t).ok_or(NotReady::Slow)?;
     let host = Server {
         db,
         id: server_id,
         daemon: Daemon::new(address),
         token: keys::admin_token(key, server_id),
-        prepare: templates::prepare_command(key, &t),
+        prepare,
         name: name.to_owned(),
     };
     tracing::info!(server = %server_id, template = %name, "a sandbox needs a template its server doesn't have yet: making it");

@@ -122,8 +122,37 @@ pub fn made_ahead(id: &str, reports: &[TemplateReport]) -> bool {
     !super::base::on_demand(id) || reports.iter().any(|r| is_revision_of(&r.name, id))
 }
 
-/// The command that has a server prepare `t`.
-pub fn prepare_command(key: &SigningKey, t: &Template) -> DaemonCommand {
+/// What a server answers a failed copy of one of Pyo's own templates
+/// with: it's deleted after this long, and made again the next round.
+pub const RETRY_FAILED_MS: u64 = 60_000;
+
+/// Failed copies of Pyo's own templates' current revisions that a server
+/// should delete now, so it makes them again. Sandboxes keep starting
+/// from an older revision meanwhile, so nothing else would retry them.
+/// A team's failed template stays failed until someone makes it again.
+pub fn retry_failed(report: &ServerReport, templates: &[Template], now_ms: u64) -> Vec<String> {
+    templates
+        .iter()
+        .filter(|t| super::base::on_demand(&t.id))
+        .map(Template::server_name)
+        .filter(|name| {
+            report.templates.iter().any(|r| {
+                &r.name == name
+                    && r.state == TemplateState::Failed
+                    && r.build
+                        .as_ref()
+                        .and_then(|b| b.finished_at)
+                        .is_some_and(|at| now_ms.saturating_sub(at) >= RETRY_FAILED_MS)
+            })
+        })
+        .collect()
+}
+
+/// The command that has a server prepare `t`. None while an image in
+/// Pyo's own registry can't be reached: Pyo knows no tailnet address for
+/// its registry door yet (right after it starts). A server can't pull
+/// `127.0.0.1:5005`, so it would only fail.
+pub fn prepare_command(key: &SigningKey, t: &Template) -> Option<DaemonCommand> {
     let image = t.source["image"].as_str().unwrap_or_default().trim();
     let push = crate::deploy::registry_push();
     let doors: Vec<String> = [crate::registrydoor::address(), Some(push.clone())]
@@ -131,7 +160,8 @@ pub fn prepare_command(key: &SigningKey, t: &Template) -> DaemonCommand {
         .flatten()
         .collect();
     match (in_pyos_registry(image, &doors), push.is_empty()) {
-        (Some(path), false) => DaemonCommand::PrepareTemplate {
+        (Some(_), true) => None,
+        (Some(path), false) => Some(DaemonCommand::PrepareTemplate {
             template: t.server_name(),
             // The door on the tailnet, as other machines pull from it.
             image: format!("{push}/{path}"),
@@ -147,14 +177,14 @@ pub fn prepare_command(key: &SigningKey, t: &Template) -> DaemonCommand {
                 ),
             }),
             max_mib: None,
-        },
-        _ => DaemonCommand::PrepareTemplate {
+        }),
+        (None, _) => Some(DaemonCommand::PrepareTemplate {
             template: t.server_name(),
             image: image.to_owned(),
             plain_http: false,
             auth: None,
             max_mib: None,
-        },
+        }),
     }
 }
 
@@ -229,7 +259,8 @@ pub async fn sync_server(
     report: &ServerReport,
 ) -> sqlx::Result<()> {
     let templates = all(db).await?;
-    let (prepare, stale) = plan(server_team, report, &templates);
+    let (prepare, mut stale) = plan(server_team, report, &templates);
+    stale.extend(retry_failed(report, &templates, pyo_proto::now_ms() as u64));
     if prepare.is_empty() && stale.is_empty() {
         return Ok(());
     }
@@ -239,7 +270,11 @@ pub async fn sync_server(
         let Some(t) = templates.iter().find(|t| t.server_name() == id) else {
             continue;
         };
-        match d.command(&token, &prepare_command(key, t)).await {
+        let Some(cmd) = prepare_command(key, t) else {
+            tracing::debug!(server = %server_id, template = %id, "Pyo's registry door has no tailnet address yet: next round");
+            continue;
+        };
+        match d.command(&token, &cmd).await {
             Ok(_) => {
                 tracing::info!(server = %server_id, template = %id, "asked the sandbox server to prepare a template")
             }
@@ -303,10 +338,12 @@ pub async fn push(s: AppState, template_id: String) {
             if !eligible(team.as_deref(), t.team_id.as_deref()) || !made_ahead(&t.id, &reports) {
                 continue;
             }
+            // The runner sends it once Pyo's registry door has an address.
+            let Some(cmd) = prepare_command(&key, &t) else {
+                continue;
+            };
             let token = keys::admin_token(&key, &id);
-            if let Err(e) = Daemon::new(&address)
-                .command(&token, &prepare_command(&key, &t))
-                .await
+            if let Err(e) = Daemon::new(&address).command(&token, &cmd).await
             {
                 tracing::warn!(server = %id, template = %t.id, error = %e, "the sandbox server didn't take a template");
             }
@@ -505,6 +542,42 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_new_revision_of_pyos_own_is_made_again() {
+        let mut desktop = t("stp_desktop", None);
+        desktop.revision = Some("bbbb".into());
+        let templates = [desktop, t("stp_team", Some("tm_a"))];
+        let failed = |name: &str, at: u64| {
+            let mut r = made(name, TemplateState::Failed, Some("connection refused"));
+            r.build.as_mut().unwrap().finished_at = Some(at);
+            r
+        };
+        let r = report(
+            Runtime::Firecracker,
+            vec![
+                made("stp_desktop.aaaa", TemplateState::Ready, None),
+                failed("stp_desktop.bbbb", 1_000),
+                failed("stp_team", 1_000),
+            ],
+        );
+        // Not at once: a minute after it failed.
+        assert!(retry_failed(&r, &templates, 1_000 + RETRY_FAILED_MS - 1).is_empty());
+        assert_eq!(
+            retry_failed(&r, &templates, 1_000 + RETRY_FAILED_MS),
+            vec!["stp_desktop.bbbb"],
+            "a team's failed template stays failed"
+        );
+        // Once deleted, the next round makes it again beside the old one.
+        let r = report(
+            Runtime::Firecracker,
+            vec![made("stp_desktop.aaaa", TemplateState::Ready, None)],
+        );
+        assert_eq!(
+            plan(None, &r, &templates).0,
+            vec!["stp_desktop.bbbb", "stp_team"]
+        );
+    }
+
+    #[test]
     fn which_servers_take_which_templates() {
         assert!(eligible(None, Some("tm_a")), "the installation's server");
         assert!(eligible(Some("tm_a"), None), "the installation's template");
@@ -642,7 +715,8 @@ mod tests {
         let key = SigningKey::generate("sbk_t");
         let mut base = t("stp_base", None);
         base.revision = Some("bbbb".into());
-        let DaemonCommand::PrepareTemplate { template, .. } = prepare_command(&key, &base) else {
+        let Some(DaemonCommand::PrepareTemplate { template, .. }) = prepare_command(&key, &base)
+        else {
             panic!("not a prepare");
         };
         assert_eq!(template, "stp_base.bbbb");
@@ -743,13 +817,13 @@ mod tests {
     #[test]
     fn a_public_image_goes_as_is() {
         let key = SigningKey::generate("sbk_t");
-        let DaemonCommand::PrepareTemplate {
+        let Some(DaemonCommand::PrepareTemplate {
             template,
             image,
             plain_http,
             auth,
             ..
-        } = prepare_command(&key, &t("stp_a", Some("tm_a")))
+        }) = prepare_command(&key, &t("stp_a", Some("tm_a")))
         else {
             panic!("not a prepare");
         };
