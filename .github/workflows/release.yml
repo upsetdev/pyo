@@ -176,6 +176,7 @@ jobs:
           cd sandbox
           for a in x86_64 aarch64; do
             sha256sum -c "pyo-sandbox-linux-$a.tar.gz.sha256"
+            sha256sum -c "pyo-sandbox-gvisor-linux-$a.tar.gz.sha256"
           done
       # What Pyo needs to update itself from the dashboard: the images
       # pinned by the digests that were just signed, and the manifests.
@@ -192,8 +193,10 @@ jobs:
             --postgres-16 "$(tagged postgres 16-)" --postgres-17 "$(tagged postgres 17-)" --postgres-18 "$(tagged postgres 18-)" \
             --agent-access "$(docker run --rm "$IMAGES/agent:$VERSION@$(digest agent)" access-hash)" \
             --sandbox-x86_64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-x86_64.tar.gz.sha256)" \
-            --sandbox-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-aarch64.tar.gz.sha256)" > release.json
-          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, sandbox, migrations: (.migrations | length)}' release.json
+            --sandbox-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-aarch64.tar.gz.sha256)" \
+            --sandbox-gvisor-x86_64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-x86_64.tar.gz.sha256)" \
+            --sandbox-gvisor-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-aarch64.tar.gz.sha256)" > release.json
+          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, sandbox, sandboxGvisor, migrations: (.migrations | length)}' release.json
       # The release's own upgrader reads it before it's signed: an image
       # it doesn't accept, or an agentAccess that isn't its agent's roles,
       # fails the release here, not on installations.
@@ -276,3 +279,7 @@ jobs:
             sandbox/pyo-sandbox-linux-x86_64.tar.gz.sha256
             sandbox/pyo-sandbox-linux-aarch64.tar.gz
             sandbox/pyo-sandbox-linux-aarch64.tar.gz.sha256
+            sandbox/pyo-sandbox-gvisor-linux-x86_64.tar.gz
+            sandbox/pyo-sandbox-gvisor-linux-x86_64.tar.gz.sha256
+            sandbox/pyo-sandbox-gvisor-linux-aarch64.tar.gz
+            sandbox/pyo-sandbox-gvisor-linux-aarch64.tar.gz.sha256

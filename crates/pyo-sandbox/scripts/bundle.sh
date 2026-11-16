@@ -13,10 +13,17 @@
 # release pinned in firecracker.env, and checked against its pinned sha256
 # and the release's own SHA256SUMS. The tarball is flat: pyo-sandbox,
 # pyo-envd, firecracker, jailer and vmlinux.
+#
+# Beside it goes pyo-sandbox-gvisor-linux-<arch>.tar.gz with its .sha256:
+# runsc and its gvisor-bin/ from the gVisor release pinned in gvisor.env,
+# checked against its pinned sha512. Only servers without KVM fetch it,
+# since it's about 180 MB unpacked.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source-path=SCRIPTDIR source=firecracker.env
 . "$here/firecracker.env"
+# shellcheck source-path=SCRIPTDIR source=gvisor.env
+. "$here/gvisor.env"
 
 arch="" sandbox="" envd="" kernel="" out=""
 while [ $# -gt 0 ]; do
@@ -30,8 +37,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$arch" in
-  x86_64) fc_sha=$FC_SHA256_X86_64 ;;
-  aarch64) fc_sha=$FC_SHA256_AARCH64 ;;
+  x86_64) fc_sha=$FC_SHA256_X86_64 gv_sha=$GVISOR_SHA512_X86_64 ;;
+  aarch64) fc_sha=$FC_SHA256_AARCH64 gv_sha=$GVISOR_SHA512_AARCH64 ;;
   *) echo "--arch is x86_64 or aarch64." >&2; exit 2 ;;
 esac
 for f in "$sandbox" "$envd" "$kernel"; do
@@ -67,3 +74,19 @@ tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -C "$b" -cf - \
 (cd "$b" && ls -l --block-size=K pyo-sandbox pyo-envd firecracker jailer vmlinux)
 echo "$out/$name: $(du -h "$out/$name" | cut -f1)"
 cat "$out/$name.sha256"
+
+# gVisor: runsc and gvisor-bin/, as the release has them.
+gv_tar=$work/gvisor.tar.zstd
+curl -fsSL --proto '=https' --retry 3 -o "$gv_tar" \
+  "https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$arch/gvisor.tar.zstd"
+echo "$gv_sha  $gv_tar" | sha512sum -c --quiet - || { echo "gVisor $GVISOR_RELEASE doesn't match its pinned sha512." >&2; exit 1; }
+g=$work/gvisor
+mkdir "$g"
+tar --zstd -xf "$gv_tar" -C "$g" runsc gvisor-bin
+[ -x "$g/runsc" ] && [ -d "$g/gvisor-bin" ] || { echo "The gVisor release has no runsc or gvisor-bin." >&2; exit 1; }
+gv_name=pyo-sandbox-gvisor-linux-$arch.tar.gz
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -C "$g" -cf - \
+  runsc gvisor-bin | gzip -n -9 > "$out/$gv_name"
+(cd "$out" && sha256sum "$gv_name" > "$gv_name.sha256")
+echo "$out/$gv_name: $(du -h "$out/$gv_name" | cut -f1)"
+cat "$out/$gv_name.sha256"

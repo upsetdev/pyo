@@ -23,6 +23,10 @@
 #   --edge-cert F    the certificate for *.D (PEM, full chain). Default:
 #                    /etc/pyo-sandbox/edge/cert.pem
 #   --edge-key F     its private key. Default: /etc/pyo-sandbox/edge/key.pem
+#   --gvisor-bundle X  gVisor's files from a file or URL instead of the
+#                    release (PYO_SANDBOX_GVISOR_BUNDLE), for servers without
+#                    KVM. Checked against the signed release.json of
+#                    --version, or not at all with --dev.
 #
 # Run it again with --version to update the daemon. A server that has joined
 # needs no code then. Running sandboxes keep running.
@@ -33,7 +37,9 @@
 #
 # It joins your tailnet, installs the daemon (pyo-sandbox), pyo-envd,
 # Firecracker, its jailer and the guest kernel, and checks what this server
-# can run: Firecracker where it has KVM, gVisor elsewhere. Then it trades
+# can run: Firecracker where it has KVM, gVisor elsewhere. A server without
+# KVM gets gVisor's runsc too, from pyo-sandbox-gvisor-linux-<arch>.tar.gz
+# beside the sandbox files, and is checked again. Then it trades
 # the code for the daemon's config at Pyo over the tailnet, and starts the
 # daemon. The daemon answers only on the tailnet.
 #
@@ -266,6 +272,7 @@ RELEASE_ISSUER=https://token.actions.githubusercontent.com
 defaults() {
   PYO="" SERVER="" NAME="" CODE="" VERSION=${PYO_VERSION:-} BUNDLE=${PYO_SANDBOX_BUNDLE:-}
   BUNDLE_SHA256=${PYO_SANDBOX_BUNDLE_SHA256:-} DEV=${PYO_SANDBOX_DEV:-}
+  GVISOR_BUNDLE=${PYO_SANDBOX_GVISOR_BUNDLE:-} RUNTIME="" KVM="" BOOT="" REASON=""
   TS_AUTHKEY=${TS_AUTHKEY:-} UNINSTALL=""
   RELEASES=${PYO_RELEASES:-https://github.com/upsetdev/pyo/releases/download}
   LIB=/usr/local/lib/pyo-sandbox BIN=/usr/local/bin/pyo-sandbox
@@ -294,6 +301,7 @@ parse_args() {
       --version) VERSION="${2:-}"; shift 2 ;;
       --bundle) BUNDLE="${2:-}"; shift 2 ;;
       --bundle-sha256) BUNDLE_SHA256="${2:-}"; shift 2 ;;
+      --gvisor-bundle) GVISOR_BUNDLE="${2:-}"; shift 2 ;;
       --dev) DEV=1; shift ;;
       --edge-domain) EDGE_DOMAIN="${2:-}"; shift 2 ;;
       --edge-cert) EDGE_CERT="${2:-}"; shift 2 ;;
@@ -301,7 +309,7 @@ parse_args() {
       --uninstall) UNINSTALL=1; shift ;;
       -h | --help)
         echo "Usage: sandbox.sh --pyo HOST:PORT --server ID --name NAME --code CODE --version X [--tailscale-key KEY]"
-        echo "                  [--bundle FILE|URL [--bundle-sha256 SUM | --dev]]"
+        echo "                  [--bundle FILE|URL [--bundle-sha256 SUM | --dev]] [--gvisor-bundle FILE|URL]"
         echo "                  [--edge-domain DOMAIN [--edge-cert FILE] [--edge-key FILE]]"
         echo "       sandbox.sh --uninstall"
         exit 0
@@ -406,10 +414,12 @@ release_json() {
     fail "release.json's signature doesn't check out: it isn't the one Pyo's release workflow signed. Nothing was changed."
 }
 
-# The sandbox files' SHA-256 for this architecture, from release.json's
-# "sandbox" (scripts/release-manifest.ts writes it pretty-printed).
+# The SHA-256 of this architecture's files under a key of release.json:
+# "sandbox" (the default) or "sandboxGvisor". scripts/release-manifest.ts
+# writes it pretty-printed.
 release_sum() {
-  sed -n '/^  "sandbox": {/,/^  }/s/^    "'"$ARCH"'": "\([0-9a-f]\{64\}\)",*$/\1/p' "$WORK/release.json" | head -n1
+  local key=${1:-sandbox}
+  sed -n '/^  "'"$key"'": {/,/^  }/s/^    "'"$ARCH"'": "\([0-9a-f]\{64\}\)",*$/\1/p' "$WORK/release.json" | head -n1
 }
 
 # The sandbox server's files, checked, before anything changes:
@@ -445,6 +455,50 @@ fetch_bundle() {
   for f in pyo-sandbox pyo-envd firecracker jailer vmlinux; do
     [ -s "$WORK/bundle/$f" ] || fail "The sandbox files have no $f."
   done
+}
+
+# gVisor's runsc and its gvisor-bin/, checked, for a server without KVM:
+# the release's against its signed release.json, files from
+# --gvisor-bundle the same way, or not at all with --dev.
+fetch_gvisor() {
+  local tgz=$WORK/gvisor.tar.gz src=$GVISOR_BUNDLE sum=""
+  if [ -z "$DEV" ]; then
+    [ -n "$VERSION" ] || fail "gVisor's files are checked against a release: give --version X, or --dev for files you built yourself."
+    [ -s "$WORK/release.json" ] || release_json
+    sum=$(release_sum sandboxGvisor)
+    [ -n "$sum" ] || fail "Pyo $VERSION doesn't list gVisor's checksum, so it can't be checked. Use a newer release."
+  fi
+  if [ -n "$src" ] && [ -f "$src" ]; then
+    cp "$src" "$tgz"
+  else
+    [ -n "$src" ] || src=$(release_url "pyo-sandbox-gvisor-linux-$ARCH.tar.gz")
+    quietly "Downloading gVisor…" curl -fsSL --proto '=https,http' --retry 3 -o "$tgz" "$src" ||
+      fail "Couldn't download gVisor from $src. Check this machine's internet connection and run the same command again."
+  fi
+  if [ -n "$sum" ]; then
+    echo "$sum  $tgz" | sha256sum -c --quiet - >/dev/null 2>&1 ||
+      fail "gVisor's files don't match their checksum. Run the same command again."
+  else
+    echo "gVisor's files aren't checked (--dev)."
+  fi
+  rm -rf "$WORK/gvisor" && mkdir -p "$WORK/gvisor"
+  tar -xzf "$tgz" -C "$WORK/gvisor" 2>/dev/null || fail "gVisor's files aren't a .tar.gz. Run the same command again."
+  [ -s "$WORK/gvisor/runsc" ] && [ -d "$WORK/gvisor/gvisor-bin" ] || fail "gVisor's files have no runsc."
+}
+
+# runsc finds gvisor-bin/ next to itself. Into place by rename, so running
+# sandboxes keep the binaries they started with.
+install_gvisor() {
+  install -d -m 755 "$LIB"
+  rm -rf "$LIB/.gvisor-bin.new"
+  cp -R "$WORK/gvisor/gvisor-bin" "$LIB/.gvisor-bin.new"
+  rm -rf "$LIB/gvisor-bin" && mv "$LIB/.gvisor-bin.new" "$LIB/gvisor-bin"
+  install -m 755 "$WORK/gvisor/runsc" "$LIB/.runsc.new" && mv -f "$LIB/.runsc.new" "$LIB/runsc"
+}
+
+add_gvisor() {
+  fetch_gvisor
+  install_gvisor
 }
 
 join_tailnet() {
@@ -486,7 +540,7 @@ detect_config() {
   cat <<CFG
 {"serverId": "detect", "listen": "127.0.0.1:$PORT", "root": "$DATA",
  "firecracker": "$LIB/firecracker", "jailer": "$LIB/jailer", "kernel": "$LIB/vmlinux",
- "envd": "$LIB/pyo-envd", "keys": [], "jailUid": $JAIL_UID, "jailGid": $JAIL_GID}
+ "envd": "$LIB/pyo-envd", "runsc": "$LIB/runsc", "keys": [], "jailUid": $JAIL_UID, "jailGid": $JAIL_GID}
 CFG
 }
 
@@ -496,25 +550,31 @@ report_field() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1
 # The daemon's detection, its JSON report into capability.json.
 detect_run() { "$BIN" detect --config "$WORK/detect.json" > "$WORK/capability.json"; }
 
-# What this server can run. Stops here, before the code is used, when it
-# can run neither Firecracker nor gVisor. The detection's own output shows
-# only when it fails.
-detect() {
+# The detection once, its fields into RUNTIME, KVM, BOOT and REASON.
+detect_once() {
   detect_config > "$WORK/detect.json"
   quietly "Checking what this server can run…" detect_run ||
     fail "Couldn't check what this server can run. Run the same command again."
-  local runtime kvm boot reason
-  runtime=$(report_field runtime "$WORK/capability.json")
-  kvm=$(report_field kvm "$WORK/capability.json")
-  boot=$(report_field bootMs "$WORK/capability.json")
-  case "$runtime:$kvm" in
-    firecracker:native) echo "Firecracker on KVM. A test VM booted in ${boot:-?} ms." ;;
-    firecracker:*) echo "Firecracker on nested KVM. A test VM booted in ${boot:-?} ms, so sandboxes start slower." ;;
+  RUNTIME=$(report_field runtime "$WORK/capability.json")
+  KVM=$(report_field kvm "$WORK/capability.json")
+  BOOT=$(report_field bootMs "$WORK/capability.json")
+  REASON=$(report_field reason "$WORK/capability.json")
+}
+
+# What this server can run. Without Firecracker it gets gVisor and is
+# checked again. Stops here, before the code is used, when it can run
+# neither. The detection's own output shows only when it fails.
+detect() {
+  detect_once
+  if [ "$RUNTIME" != firecracker ] && [ ! -x "$LIB/runsc" ]; then
+    add_gvisor
+    detect_once
+  fi
+  case "$RUNTIME:$KVM" in
+    firecracker:native) echo "Firecracker on KVM. A test VM booted in ${BOOT:-?} ms." ;;
+    firecracker:*) echo "Firecracker on nested KVM. A test VM booted in ${BOOT:-?} ms, so sandboxes start slower." ;;
     gvisor:*) echo "gVisor, because this server has no usable KVM." ;;
-    *)
-      reason=$(report_field reason "$WORK/capability.json")
-      fail "This server can't run sandboxes. ${reason:-It has neither KVM nor gVisor.}"
-      ;;
+    *) fail "This server can't run sandboxes. ${REASON:-It has neither KVM nor gVisor.}" ;;
   esac
 }
 
@@ -654,9 +714,21 @@ uninstall() {
   say "Removing the Pyo sandbox daemon"
   systemctl disable --now pyo-sandbox >/dev/null 2>&1 || true
   # Its sandboxes: the VMs it started outlive it by design.
-  local p
+  local p c m
   for p in $(pgrep -x firecracker || true); do
     case "$(readlink "/proc/$p/cwd" 2>/dev/null)" in "$DATA"/*) kill -9 "$p" 2>/dev/null || true ;; esac
+  done
+  # gVisor's sandboxes, their disks and network namespaces.
+  if [ -x "$LIB/runsc" ]; then
+    for c in $("$LIB/runsc" --root="$DATA/runsc" list -q 2>/dev/null || true); do
+      "$LIB/runsc" --root="$DATA/runsc" delete --force "$c" >/dev/null 2>&1 || true
+    done
+  fi
+  for m in $(awk -v d="$DATA/" 'index($5, d) == 1 { print $5 }' /proc/self/mountinfo | sort -r); do
+    umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true
+  done
+  for c in $(ip netns list 2>/dev/null | awk '/^pyosbx[0-9]+/ { print $1 }'); do
+    ip netns del "$c" 2>/dev/null || true
   done
   # Its firewall rules: the nftables table, and the iptables rules it adds
   # when another firewall drops forwarded traffic (they carry its comment).
@@ -704,6 +776,8 @@ main() {
   join_tailnet
   make_user
   install_files
+  # A gVisor server's runsc follows the release too.
+  [ ! -x "$LIB/runsc" ] || add_gvisor
   detect
   if [ -n "$CODE" ]; then
     redeem
