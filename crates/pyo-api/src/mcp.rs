@@ -679,6 +679,9 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "getCloudOptions" => {
             json_of(crate::cloud::options(st(), me(), Query(args_as(args)?)).await)
         }
+        "getTailnetLock" => {
+            json_of(crate::tailscale::lock(st(), me(), Query(args_as(args)?)).await)
+        }
         "listSandboxes" => {
             json_of(crate::sandbox::api::list(st(), me(), Query(args_as(args)?)).await)
         }

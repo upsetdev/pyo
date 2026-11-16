@@ -508,6 +508,87 @@ pub struct Device {
     pub lock_error: String,
 }
 
+/// Pyo's machines (tag:pyo) that Tailnet Lock keeps out until a signing
+/// device signs their key: their hostname, and the command that signs it.
+pub fn lock_waiting(devices: &[Device]) -> Vec<(String, String)> {
+    devices
+        .iter()
+        .filter(|d| {
+            !d.lock_error.is_empty()
+                && d.node_key.starts_with("nodekey:")
+                && d.tags.iter().any(|t| t == TAG)
+        })
+        .map(|d| {
+            (
+                d.hostname.clone(),
+                format!("tailscale lock sign {}", d.node_key),
+            )
+        })
+        .collect()
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct LockQuery {
+    /// The team adding the server (slug or id).
+    team: String,
+}
+
+/// Machines waiting for a Tailnet Lock signature
+///
+/// With Tailnet Lock on, a new server stays off the tailnet until a
+/// signing device signs its key. These are the ones Pyo's commands added
+/// that wait, with the command to run on a signing device. Read from
+/// Tailscale at most every 15 seconds. Empty without Tailscale set up.
+#[utoipa::path(get, path = "/tailnet/lock", operation_id = "getTailnetLock", tag = "Servers",
+    params(LockQuery),
+    responses(
+        (status = 200, description = "`waiting`: each with `name` (the machine's hostname) and `signCommand`.", body = Object),
+        (status = 403, description = "Only owners and admins add servers.", body = crate::error::ErrorBody),
+        (status = 404, description = "No such team, or you aren't in it.", body = crate::error::ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("read"))))]
+pub async fn lock(
+    axum::extract::State(s): axum::extract::State<AppState>,
+    crate::auth::SessionUser(user): crate::auth::SessionUser,
+    crate::error::Query(q): crate::error::Query<LockQuery>,
+) -> ApiResult<crate::error::Json<Value>> {
+    let mut tx = s.db.begin().await?;
+    crate::ops::require_role(&mut tx, &user, &q.team, crate::ops::Role::Admin).await?;
+    drop(tx);
+    /// When the list was read, and what it said.
+    type Seen = Option<(Instant, Vec<(String, String)>)>;
+    static SEEN: Mutex<Seen> = Mutex::new(None);
+    let fresh = |seen: &Seen| {
+        seen.as_ref()
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(15))
+            .map(|(_, w)| w.clone())
+    };
+    let cached = fresh(&SEEN.lock().unwrap_or_else(|e| e.into_inner()));
+    let waiting = match cached {
+        Some(w) => w,
+        None => {
+            let w = match saved_client(&s).await? {
+                Some((_, c)) => match c.device_details().await {
+                    Ok(d) => lock_waiting(&d),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "tailnet lock: couldn't read the tailnet");
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            };
+            *SEEN.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), w.clone()));
+            w
+        }
+    };
+    let waiting: Vec<Value> = waiting
+        .into_iter()
+        .map(|(name, sign)| json!({ "name": name, "signCommand": sign }))
+        .collect();
+    Ok(crate::error::Json(json!({ "waiting": waiting })))
+}
+
 fn strings(v: &Value) -> Vec<String> {
     v.as_array()
         .map(|a| {
@@ -1440,6 +1521,34 @@ mod tests {
         );
         assert!(delete_if_ours(&c, "mine", &mark).await.unwrap());
         assert_eq!(*writes.lock().unwrap(), ["PUT svc:blog", "DELETE svc:mine"]);
+    }
+
+    #[test]
+    fn machines_waiting_for_a_signature() {
+        let d = |host: &str, tag: &str, key: &str, err: &str| Device {
+            node_id: "n".into(),
+            hostname: host.into(),
+            tags: vec![tag.into()],
+            node_key: key.into(),
+            lock_error: err.into(),
+        };
+        let waiting = lock_waiting(&[
+            d(
+                "sbx-1",
+                TAG,
+                "nodekey:ab12",
+                "tailnet lock: node key not signed",
+            ),
+            d("laptop", "tag:other", "nodekey:cd34", "not signed"),
+            d("web-1", TAG, "nodekey:ef56", ""),
+        ]);
+        assert_eq!(
+            waiting,
+            [(
+                "sbx-1".to_owned(),
+                "tailscale lock sign nodekey:ab12".to_owned()
+            )]
+        );
     }
 
     #[test]

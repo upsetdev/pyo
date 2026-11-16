@@ -69,6 +69,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::git::build_file,
         crate::compose::preview,
         crate::cloud::options,
+        crate::tailscale::lock,
         crate::platform_import::preview,
         crate::platform_import::apply,
         crate::platform_import::get_run,

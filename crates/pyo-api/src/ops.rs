@@ -105,6 +105,7 @@ pub fn routes() -> Router<AppState> {
         .route("/database-backups", post(crate::database_backups::add))
         .route("/compose/preview", post(crate::compose::preview))
         .route("/cloud/options", get(crate::cloud::options))
+        .route("/tailnet/lock", get(crate::tailscale::lock))
 }
 
 /// Everything you can see
