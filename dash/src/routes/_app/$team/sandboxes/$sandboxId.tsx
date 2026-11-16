@@ -126,7 +126,25 @@ function SandboxPage() {
         icon={
           <TemplateMark template={template} size="lg" className="mt-1" />
         }
-        title={x.name}
+        title={
+          canUse ? (
+            <button
+              type="button"
+              title="Rename"
+              onClick={() => setRenaming(true)}
+              className="group inline-flex max-w-full items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span className="truncate">{x.name}</span>
+              <PencilSimpleIcon
+                size={16}
+                aria-hidden
+                className="shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+              />
+            </button>
+          ) : (
+            x.name
+          )
+        }
         description={<span className="font-mono text-[12px]">{x.id}</span>}
         meta={
           <>
@@ -144,9 +162,6 @@ function SandboxPage() {
                   <MonitorIcon size={13} /> Open desktop
                 </Button>
               ) : null}
-              <Button size="sm" variant="secondary" onClick={() => setRenaming(true)}>
-                <PencilSimpleIcon size={13} /> Rename
-              </Button>
               {ended(x) ? null : x.state === "paused" ? (
                 <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run("resume")}>
                   <PlayIcon size={13} /> Resume
