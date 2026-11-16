@@ -1264,6 +1264,15 @@ impl Release {
                     ));
                 }
             }
+            let mut refs = vec![];
+            collect_env(o, SANDBOX_BASE_ENV, &mut refs);
+            for r in refs {
+                if !r.is_empty() && r != self.images.sandbox_base {
+                    out.push(format!(
+                        "{SANDBOX_BASE_ENV} is {r}, not the release's sandboxBase image."
+                    ));
+                }
+            }
         }
         if let Some(m) = &self.min_from
             && parse_version(m).is_none()
@@ -1296,8 +1305,35 @@ pub fn image_repo(image: &str) -> &str {
     }
 }
 
+/// The env var Pyo's worker reads the sandbox template `base`'s image from
+/// (pinned to the release's `sandboxBase`).
+pub const SANDBOX_BASE_ENV: &str = "PYO_SANDBOX_BASE_REF";
+
+/// The values of env vars named `name` in a Kubernetes object.
+pub fn collect_env(v: &serde_json::Value, name: &str, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            if m.get("name").and_then(|n| n.as_str()) == Some(name)
+                && let Some(serde_json::Value::String(value)) = m.get("value")
+            {
+                out.push(value.clone());
+            }
+            m.values().for_each(|x| collect_env(x, name, out));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| collect_env(x, name, out)),
+        _ => {}
+    }
+}
+
 /// Every `image` value in a Kubernetes object, and image references in its
 /// containers' env (Pyo passes its agent and builder images that way).
+///
+/// Older Pyos run this same rule on a new release before they update to
+/// it, with only the images they knew. So an env var whose name ends in
+/// `_IMAGE` may only hold one of the images every supported Pyo knows
+/// (the test `manifests_pass_older_pyos_checks` keeps this). A new image
+/// goes in a var named otherwise, like [`SANDBOX_BASE_ENV`], and
+/// [`Release::problems`] checks it by name.
 pub fn collect_images(v: &serde_json::Value, out: &mut Vec<String>) {
     match v {
         serde_json::Value::Object(m) => {
@@ -2578,7 +2614,7 @@ mod release_tests {
                 pyo: vec![
                     json!({ "kind": "Deployment", "spec": { "template": { "spec": { "containers": [{
                     "name": "pyo", "image": img("pyo"),
-                    "env": [{ "name": "PYO_AGENT_IMAGE", "value": img("agent") }, { "name": "PYO_BUILDER_IMAGE", "value": img("builder") }],
+                    "env": [{ "name": "PYO_AGENT_IMAGE", "value": img("agent") }, { "name": "PYO_BUILDER_IMAGE", "value": img("builder") }, { "name": SANDBOX_BASE_ENV, "value": img("sandbox-base") }],
                 }] } } } }),
                 ],
             },
@@ -2790,6 +2826,79 @@ mod release_tests {
         );
         // and the manifests that use the old pin no longer match it.
         assert!(bad.problems().iter().any(|p| p.contains("isn't one of")));
+    }
+
+    #[test]
+    fn the_sandbox_base_ref_is_the_pinned_sandbox_base() {
+        assert!(release().problems().is_empty());
+        let mut r = release();
+        r.images.sandbox_base = format!("ghcr.io/upsetdev/pyo/sandbox-base:0.2.1@sha256:{D}");
+        assert!(
+            r.problems()
+                .iter()
+                .any(|p| p.starts_with("PYO_SANDBOX_BASE_REF is")),
+            "{:?}",
+            r.problems()
+        );
+        // A dev build leaves it empty.
+        let mut r = release();
+        r.manifests.pyo[0]["spec"]["template"]["spec"]["containers"][0]["env"][2]["value"] =
+            json!("");
+        assert!(r.problems().is_empty(), "{:?}", r.problems());
+    }
+
+    /// Before updating, an older Pyo checks the new release with its own
+    /// rule: every `image` and every env var named `*_IMAGE` that's one of
+    /// Pyo's must be one of the release's images it knows. 0.4.0 knew these.
+    /// A new image has to go in an env var named otherwise.
+    #[test]
+    fn manifests_pass_older_pyos_checks() {
+        const KNOWN_TO_0_4_0: &[&str] = &[
+            "pyo",
+            "agent",
+            "builder",
+            "flows",
+            "waf",
+            "geoip",
+            "db-controller",
+            "kv",
+            "static",
+            "mysql-operator",
+            "mysql-backup",
+            "postgres",
+        ];
+        let docs: Vec<serde_json::Value> = [
+            include_str!("../../../deploy/k8s/platform.yaml"),
+            include_str!("../../../deploy/k8s/pyo.yaml"),
+        ]
+        .join("\n---\n")
+        .split("\n---")
+        .filter_map(|d| serde_norway::from_str::<serde_json::Value>(d).ok())
+        .filter(|d| d.is_object())
+        .collect();
+        assert!(docs.len() > 5, "the manifests parse");
+        let mut images = vec![];
+        for d in &docs {
+            collect_images(d, &mut images);
+        }
+        let ours: Vec<&String> = images
+            .iter()
+            .filter(|i| i.starts_with("__IMAGES__/"))
+            .collect();
+        assert!(ours.len() > 5, "{images:?}");
+        for i in ours {
+            let name = i["__IMAGES__/".len()..].split(':').next().unwrap();
+            assert!(
+                KNOWN_TO_0_4_0.contains(&name),
+                "{i}: Pyo 0.4.0 would refuse a release that has it. Name its env var otherwise."
+            );
+        }
+        // The base template's image is still passed, by its own name.
+        let mut refs = vec![];
+        for d in &docs {
+            collect_env(d, SANDBOX_BASE_ENV, &mut refs);
+        }
+        assert_eq!(refs, vec!["__IMAGES__/sandbox-base:__TAG__".to_string()]);
     }
 
     #[test]

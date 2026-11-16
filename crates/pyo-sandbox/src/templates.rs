@@ -216,6 +216,9 @@ impl Manager {
                 "This server can't run sandboxes, so it makes no templates.",
             ));
         }
+        // Two asks at once (Pyo's round and a sandbox's first use) start
+        // one build: the second finds the first's.
+        let _starting = self.starting.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(r) = self.template_report(name) {
             return Ok(r);
         }

@@ -119,7 +119,7 @@ function SandboxPage() {
         title={<span className="font-mono">{x.id}</span>}
         meta={
           <>
-            <SandboxStatus state={x.state} />
+            <SandboxStatus state={x.state} sandbox={x} />
             <span>{x.template}</span>
             <span>{sizeLabel(x.cpus, x.memoryMib)}</span>
             <span>Created {timeAgo(x.createdAt)}</span>
@@ -217,7 +217,7 @@ function Overview({ x, canUse, onChange }: { x: Sandbox; canUse: boolean; onChan
       <Panel title="Sandbox">
         <KeyValue
           items={[
-            ["Status", <SandboxStatus key="s" state={x.state} />],
+            ["Status", <SandboxStatus key="s" state={x.state} sandbox={x} />],
             [
               "Time left",
               ended(x) ? (

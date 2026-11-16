@@ -10,6 +10,10 @@
 //! 2. a snapshot of the template at this size, so it restores in
 //!    milliseconds instead of booting;
 //! 3. the most headroom left.
+//!
+//! A template made on first use (Pyo's `base`) may also go to a server
+//! that doesn't have it yet, which makes it first ([`place`]). One already
+//! making it comes first, so two creates share one build.
 
 use pyo_proto::sandbox::{
     CapabilityReport, CapacityReport, Isolation, NetworkMode, Runtime, SandboxSpec, TemplateReport,
@@ -23,6 +27,9 @@ pub const FRESH_SECS: i64 = 90;
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub id: String,
+    pub name: String,
+    /// None for the installation's, which every team may use.
+    pub team_id: Option<String>,
     pub enabled: bool,
     pub ready: bool,
     /// Seconds since its last report.
@@ -77,6 +84,29 @@ impl NoServer {
         }
     }
 
+    /// Why the one server asked for (`server`, by name) can't take a
+    /// sandbox of `memory_mib`.
+    pub fn message_on(&self, server: &str, memory_mib: u32) -> String {
+        match self {
+            NoServer::None | NoServer::NoneUp => {
+                format!("{server} can't take sandboxes right now. Pick another server.")
+            }
+            NoServer::NoVm => {
+                format!("{server} has no KVM, so isolation \"vm\" can't run there.")
+            }
+            NoServer::NoNetwork => {
+                format!("{server} has no networking. Pick another server, or set network to none.")
+            }
+            NoServer::NoTemplate(t) => {
+                format!("{server} doesn't have the template {t} yet. Pick another server.")
+            }
+            NoServer::Full => format!(
+                "{server} has no room for {}. Pick another server or a smaller size.",
+                size(memory_mib)
+            ),
+        }
+    }
+
     /// 503 for what passes on its own, 409 for what needs a change.
     pub fn status(&self) -> axum::http::StatusCode {
         match self {
@@ -86,9 +116,21 @@ impl NoServer {
     }
 }
 
-/// The best server for `spec`, whose template servers keep as
-/// `spec.template`.
-pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Candidate, NoServer> {
+/// "512 MB", "2 GB", "1.5 GB".
+fn size(mib: u32) -> String {
+    if mib >= 1024 {
+        let gb = (mib as f64 / 1024.0 * 10.0).round() / 10.0;
+        format!("{gb} GB")
+    } else {
+        format!("{mib} MB")
+    }
+}
+
+/// The servers up and able to run `spec`, whatever their templates.
+fn usable<'a>(
+    servers: &'a [Candidate],
+    spec: &SandboxSpec,
+) -> Result<Vec<&'a Candidate>, NoServer> {
     if servers.is_empty() {
         return Err(NoServer::None);
     }
@@ -122,7 +164,13 @@ pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Cand
     if networked.is_empty() {
         return Err(NoServer::NoNetwork);
     }
-    let with_template: Vec<&Candidate> = networked
+    Ok(networked)
+}
+
+/// The best server for `spec`, whose template servers keep as
+/// `spec.template`.
+pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Candidate, NoServer> {
+    let with_template: Vec<&Candidate> = usable(servers, spec)?
         .into_iter()
         .filter(|c| {
             c.templates
@@ -191,6 +239,89 @@ pub fn pick_revision<'a>(
     Err(why)
 }
 
+/// Where a new sandbox goes, and what it starts from there.
+#[derive(Debug, Clone)]
+pub struct Placement<'a> {
+    pub server: &'a Candidate,
+    /// The name the server keeps the template under.
+    pub template: String,
+    /// The server makes the template first: it doesn't have it ready.
+    pub build: bool,
+}
+
+/// [`pick_revision`], and for a template made on first use (`on_demand`)
+/// that no server has ready: a server with room, which makes it first.
+/// One already making it comes first, then Firecracker, then the most
+/// headroom.
+pub fn place<'a>(
+    servers: &'a [Candidate],
+    spec: &SandboxSpec,
+    id: &str,
+    on_demand: bool,
+) -> Result<Placement<'a>, NoServer> {
+    let why = match pick_revision(servers, spec, id) {
+        Ok((server, template)) => {
+            return Ok(Placement {
+                server,
+                template,
+                build: false,
+            });
+        }
+        Err(e) => e,
+    };
+    if !on_demand || !matches!(why, NoServer::NoTemplate(_)) {
+        return Err(why);
+    }
+    let need = (spec.memory_mib as u64) << 20;
+    let building = |c: &Candidate| {
+        c.templates
+            .iter()
+            .any(|t| t.name == spec.template && t.state == TemplateState::Building)
+    };
+    usable(servers, spec)?
+        .into_iter()
+        .filter(|c| c.headroom() >= need)
+        .max_by_key(|c| {
+            (
+                building(c),
+                c.capability.runtime == Runtime::Firecracker,
+                c.headroom(),
+                std::cmp::Reverse(c.id.clone()),
+            )
+        })
+        .map(|server| Placement {
+            server,
+            template: spec.template.clone(),
+            build: true,
+        })
+        .ok_or(NoServer::Full)
+}
+
+/// [`place`] on one server the create asked for, by its id or name: one of
+/// `team`'s or the installation's. The error says why it can't, plainly.
+pub fn place_on<'a>(
+    servers: &'a [Candidate],
+    team: &str,
+    asked: &str,
+    spec: &SandboxSpec,
+    id: &str,
+    on_demand: bool,
+) -> Result<Placement<'a>, (axum::http::StatusCode, String)> {
+    let asked = asked.trim();
+    let server = servers
+        .iter()
+        .filter(|c| c.team_id.as_deref().is_none_or(|t| t == team))
+        .find(|c| c.id == asked || c.name == asked)
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("No sandbox server {asked} in this team."),
+            )
+        })?;
+    place(std::slice::from_ref(server), spec, id, on_demand)
+        .map_err(|n| (n.status(), n.message_on(&server.name, spec.memory_mib)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +332,8 @@ mod tests {
     fn server(id: &str, runtime: Runtime, free_gib: u64) -> Candidate {
         Candidate {
             id: id.into(),
+            name: format!("{id}-name"),
+            team_id: None,
             enabled: true,
             ready: true,
             report_age_secs: 5,
@@ -374,6 +507,167 @@ mod tests {
             pick_revision(&[full], &s, "stp_base").map(|(c, _)| c.id.clone()),
             Err(NoServer::Full)
         );
+    }
+
+    #[test]
+    fn base_goes_to_a_server_without_it_which_makes_it_first() {
+        let mut s = spec();
+        s.template = "stp_base.new".into();
+        let servers = vec![
+            server("small", Runtime::Firecracker, 2),
+            server("big", Runtime::Firecracker, 8),
+            server("gv", Runtime::Gvisor, 30),
+        ];
+        // A team's template isn't made on first use.
+        assert_eq!(
+            place(&servers, &s, "stp_base", false).map(|p| p.server.id.clone()),
+            Err(NoServer::NoTemplate("stp_base.new".into()))
+        );
+        let p = place(&servers, &s, "stp_base", true).unwrap();
+        assert_eq!(
+            (p.server.id.as_str(), p.template.as_str(), p.build),
+            ("big", "stp_base.new", true),
+            "Firecracker, then room"
+        );
+        // A server that has it ready wins, with no build.
+        let mut has = server("has", Runtime::Firecracker, 2);
+        has.templates[0].name = "stp_base.new".into();
+        let mut with = servers.clone();
+        with.push(has);
+        let p = place(&with, &s, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("has", false));
+        // So does one with an older revision, while the new one is made.
+        let mut old = server("old", Runtime::Firecracker, 2);
+        old.templates[0].name = "stp_base.old".into();
+        let mut with = servers.clone();
+        with.push(old);
+        let p = place(&with, &s, "stp_base", true).unwrap();
+        assert_eq!(
+            (p.server.id.as_str(), p.template.as_str(), p.build),
+            ("old", "stp_base.old", false)
+        );
+        // No room anywhere.
+        let mut full = servers.clone();
+        for c in &mut full {
+            c.capacity.memory_available = 0;
+        }
+        assert_eq!(
+            place(&full, &s, "stp_base", true).map(|p| p.server.id.clone()),
+            Err(NoServer::Full)
+        );
+        // The usual reasons still count.
+        let mut vm = s.clone();
+        vm.isolation = Isolation::Vm;
+        assert_eq!(
+            place(&[server("gv", Runtime::Gvisor, 30)], &vm, "stp_base", true)
+                .map(|p| p.server.id.clone()),
+            Err(NoServer::NoVm)
+        );
+        assert_eq!(
+            place(&[], &s, "stp_base", true).map(|p| p.server.id.clone()),
+            Err(NoServer::None)
+        );
+    }
+
+    #[test]
+    fn two_creates_share_one_build() {
+        let mut s = spec();
+        s.template = "stp_base.new".into();
+        // The first create set "small" making it. The second goes there
+        // too, though "big" has more room.
+        let mut small = server("small", Runtime::Firecracker, 3);
+        small.templates[0] = TemplateReport {
+            name: "stp_base.new".into(),
+            state: TemplateState::Building,
+            ..Default::default()
+        };
+        small.pending_bytes = 1 << 30;
+        let mut servers = vec![small, server("big", Runtime::Firecracker, 8)];
+        let p = place(&servers, &s, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("small", true));
+        // Unless it has no room left: then another server makes it.
+        servers[0].pending_bytes = 3 << 30;
+        let p = place(&servers, &s, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("big", true));
+        // A failed build is tried again.
+        let mut failed = server("failed", Runtime::Firecracker, 8);
+        failed.templates[0] = TemplateReport {
+            name: "stp_base.new".into(),
+            state: TemplateState::Failed,
+            ..Default::default()
+        };
+        let p = place(std::slice::from_ref(&failed), &s, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("failed", true));
+    }
+
+    #[test]
+    fn a_server_asked_for_takes_it_or_says_why() {
+        use axum::http::StatusCode;
+        let mut s = spec();
+        let mut other_team = server("theirs", Runtime::Firecracker, 30);
+        other_team.team_id = Some("tm_two".into());
+        let mut ours = server("ours", Runtime::Firecracker, 2);
+        ours.team_id = Some("tm_one".into());
+        let mut joining = server("joining", Runtime::Firecracker, 30);
+        joining.ready = false;
+        let installation = server("shared", Runtime::Gvisor, 30);
+        let servers = vec![other_team, ours, joining, installation];
+        let on = |asked: &str, s: &SandboxSpec, on_demand: bool| {
+            place_on(&servers, "tm_one", asked, s, "stp_node", on_demand)
+                .map(|p| (p.server.id.clone(), p.build))
+        };
+        // By id or name, the team's own or the installation's, even when
+        // another has more room.
+        assert_eq!(on("ours", &s, false), Ok(("ours".into(), false)));
+        assert_eq!(on("ours-name", &s, false), Ok(("ours".into(), false)));
+        assert_eq!(on(" shared ", &s, false), Ok(("shared".into(), false)));
+        // Another team's is as good as missing.
+        assert_eq!(
+            on("theirs", &s, false),
+            Err((
+                StatusCode::NOT_FOUND,
+                "No sandbox server theirs in this team.".into()
+            ))
+        );
+        // Not ready.
+        assert_eq!(
+            on("joining-name", &s, false),
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "joining-name can't take sandboxes right now. Pick another server.".into()
+            ))
+        );
+        // No room.
+        s.memory_mib = 3072;
+        assert_eq!(
+            on("ours", &s, false),
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ours-name has no room for 3 GB. Pick another server or a smaller size.".into()
+            ))
+        );
+        s.memory_mib = 1024;
+        // No KVM for "vm".
+        let mut vm = s.clone();
+        vm.isolation = Isolation::Vm;
+        assert_eq!(
+            on("shared", &vm, false).unwrap_err().1,
+            "shared-name has no KVM, so isolation \"vm\" can't run there."
+        );
+        // A server without base makes it first. A team template it lacks
+        // is refused.
+        let mut base = s.clone();
+        base.template = "stp_base.new".into();
+        let p = place_on(&servers, "tm_one", "ours", &base, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("ours", true));
+        assert_eq!(
+            place_on(&servers, "tm_one", "ours", &base, "stp_base", false)
+                .unwrap_err()
+                .1,
+            "ours-name doesn't have the template stp_base.new yet. Pick another server."
+        );
+        assert_eq!(size(512), "512 MB");
+        assert_eq!(size(1536), "1.5 GB");
     }
 
     #[test]

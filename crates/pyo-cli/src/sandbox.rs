@@ -23,7 +23,12 @@ pub enum Command {
     Create {
         /// The sandbox template, like node-22 (see pyo sandbox templates ls).
         /// Default base: Debian 13 with git, Python, uv, Node.js and pnpm.
+        /// A server makes base the first time it's used there.
         template: Option<String>,
+        /// The sandbox server to run it on, by name or id. Pyo picks one
+        /// when left out.
+        #[arg(long)]
+        server: Option<String>,
         /// CPUs. Default 1.
         #[arg(long)]
         cpus: Option<u32>,
@@ -248,6 +253,7 @@ pub async fn run(api: &Api, team: Option<&str>, cmd: Command) -> Result<()> {
     match cmd {
         Command::Create {
             template,
+            server,
             cpus,
             memory,
             disk,
@@ -264,6 +270,7 @@ pub async fn run(api: &Api, team: Option<&str>, cmd: Command) -> Result<()> {
             let body = create_body(CreateArgs {
                 team: &team,
                 template: template.as_deref(),
+                server: server.as_deref(),
                 cpus,
                 memory,
                 disk,
@@ -411,6 +418,7 @@ async fn lifecycle(api: &Api, id: &str, what: &str, done: &str) -> Result<()> {
 pub struct CreateArgs<'a> {
     pub team: &'a str,
     pub template: Option<&'a str>,
+    pub server: Option<&'a str>,
     pub cpus: Option<u32>,
     pub memory: Option<u32>,
     pub disk: Option<u32>,
@@ -432,6 +440,7 @@ pub fn create_body(a: CreateArgs) -> Result<Value> {
         }
     };
     set("template", json!(a.template));
+    set("server", json!(a.server));
     set("cpus", json!(a.cpus));
     set("memoryMib", json!(a.memory));
     set("diskMib", json!(a.disk));
@@ -777,12 +786,13 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
 /// A template's image as the list shows it. Pyo's built-in one says what
 /// it runs and leaves out its version: Debian 13 · ghcr.io/upsetdev/pyo/sandbox-base.
 fn template_image(t: &Value) -> String {
-    let image = t["source"]["image"].as_str().unwrap_or("-");
-    match t["source"]["os"].as_str() {
-        Some(os) if t["builtin"] == true => {
+    let image = t["source"]["image"].as_str();
+    match (t["source"]["os"].as_str(), image) {
+        (Some(os), Some(image)) if t["builtin"] == true => {
             format!("{os} · {}", pyo_proto::image_repo(image))
         }
-        _ => image.to_owned(),
+        (Some(os), None) if t["builtin"] == true => os.to_owned(),
+        _ => image.unwrap_or("-").to_owned(),
     }
 }
 
@@ -1113,6 +1123,7 @@ mod tests {
         let b = create_body(CreateArgs {
             team: "tm_1",
             template: Some("node-22"),
+            server: Some("sandbox-1"),
             cpus: Some(2),
             memory: None,
             disk: None,
@@ -1130,6 +1141,7 @@ mod tests {
             json!({
                 "teamId": "tm_1",
                 "template": "node-22",
+                "server": "sandbox-1",
                 "cpus": 2,
                 "ttl": "1h",
                 "network": "none",
@@ -1143,6 +1155,7 @@ mod tests {
         let b = create_body(CreateArgs {
             team: "tm_1",
             template: None,
+            server: None,
             cpus: None,
             memory: None,
             disk: None,
@@ -1175,6 +1188,7 @@ mod tests {
         let e = create_body(CreateArgs {
             team: "t",
             template: Some("x"),
+            server: None,
             cpus: None,
             memory: None,
             disk: None,

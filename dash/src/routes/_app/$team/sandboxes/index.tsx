@@ -307,7 +307,7 @@ function SandboxTable({
             <Td className="font-mono text-[12px]">{x.id}</Td>
             <Td>{x.template}</Td>
             <Td>
-              <SandboxStatus state={x.state} />
+              <SandboxStatus state={x.state} sandbox={x} />
             </Td>
             <Td className="tabular-nums text-muted-foreground">{sizeLabel(x.cpus, x.memoryMib)}</Td>
             <Td className="text-muted-foreground">{timeAgo(x.createdAt, now)}</Td>

@@ -8,7 +8,20 @@ import { request } from "./backend";
 import { BASE_TEMPLATE } from "./sandboxTemplates";
 import type { CloudServerState } from "./types";
 
-export { BASE_TEMPLATE, defaultTemplate, fieldsSwapped, imageRepo, templateImage } from "./sandboxTemplates";
+export {
+  BASE_TEMPLATE,
+  defaultTemplate,
+  fieldsSwapped,
+  freeLabel,
+  freeMemory,
+  gettingReady,
+  imageRepo,
+  isBase,
+  serverRefusal,
+  templateImage,
+  templateStatus,
+  usable,
+} from "./sandboxTemplates";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -31,6 +44,8 @@ export type Sandbox = {
   template: string;
   templateId: string | null;
   state: SandboxState;
+  /** While it waits for its server to make its template (base, the first time there). */
+  preparing?: boolean;
   runtime: "firecracker" | "gvisor" | null;
   cpus: number;
   memoryMib: number;
@@ -210,12 +225,15 @@ export type SandboxTemplate = {
   source: { kind: string; image?: string; os?: string; release?: string } | null;
   /** Pyo's own (base): kept in step with Pyo's release, never deleted. */
   builtin?: boolean;
-  state: "pending" | "building" | "ready" | "failed";
-  /** Each sandbox server that may use it, and how far it got there. */
+  /** "unavailable": base, while Pyo has no image for it (`error` says why). */
+  state: "pending" | "building" | "ready" | "failed" | "unavailable";
+  /** Each sandbox server that may use it, and how far it got there. For
+   * base, the servers that have it: they make it on first use. */
   servers: SandboxTemplateServer[];
   error: string | null;
   createdBy: string | null;
-  createdAt: number;
+  /** Null for base before Pyo adds it. */
+  createdAt: number | null;
 };
 
 export type SandboxTemplateServer = {
@@ -232,6 +250,8 @@ export type SandboxTemplateServer = {
 export type CreateSandbox = {
   teamId: string;
   template: string;
+  /** A sandbox server's id: Pyo picks one when left out. */
+  server?: string;
   cpus?: number;
   memoryMib?: number;
   diskMib?: number;
@@ -555,6 +575,7 @@ export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
   // base is the default, so it's left out.
   const lines: string[] =
     b.template && b.template !== BASE_TEMPLATE ? [`  template: ${JSON.stringify(b.template)},`] : [];
+  if (b.server) lines.push(`  server: ${JSON.stringify(b.server)},`);
   if (b.cpus) lines.push(`  cpus: ${b.cpus},`);
   if (b.memoryMib) lines.push(`  memoryMib: ${b.memoryMib},`);
   if (b.ttl) lines.push(`  ttl: ${JSON.stringify(b.ttl)},`);

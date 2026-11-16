@@ -130,6 +130,8 @@ pub struct Manager {
     pub(crate) builds: StdMutex<HashMap<String, Arc<crate::templates::Build>>>,
     /// One template build at a time.
     pub(crate) build_gate: tokio::sync::Semaphore,
+    /// Starting a build: two asks at once start one.
+    pub(crate) starting: StdMutex<()>,
 }
 
 impl Manager {
@@ -150,6 +152,7 @@ impl Manager {
             edge_tls: StdMutex::new(None),
             builds: StdMutex::new(HashMap::new()),
             build_gate: tokio::sync::Semaphore::new(1),
+            starting: StdMutex::new(()),
         }
     }
 

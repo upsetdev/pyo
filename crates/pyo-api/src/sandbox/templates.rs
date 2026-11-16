@@ -5,7 +5,8 @@
 //!
 //! - On create, and in every runner round for a server that doesn't have
 //!   one yet (a new server, or one that was down), Pyo sends
-//!   `PrepareTemplate`.
+//!   `PrepareTemplate`. Pyo's `base` is the exception: a server makes it
+//!   the first time a sandbox needs it there ([`super::firstuse`]).
 //! - An image in Pyo's own registry is pulled over the tailnet from the
 //!   registry door, with a registry token for the template's team that
 //!   lasts an hour. Any other image is pulled from its registry as is.
@@ -114,6 +115,13 @@ pub fn in_pyos_registry(image: &str, doors: &[String]) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Whether a server makes template `id` before a sandbox needs it: every
+/// template but one made on first use ([`super::base`]), which only once
+/// the server has some revision of it.
+pub fn made_ahead(id: &str, reports: &[TemplateReport]) -> bool {
+    !super::base::on_demand(id) || reports.iter().any(|r| is_revision_of(&r.name, id))
+}
+
 /// The command that has a server prepare `t`.
 pub fn prepare_command(key: &SigningKey, t: &Template) -> DaemonCommand {
     let image = t.source["image"].as_str().unwrap_or_default().trim();
@@ -173,12 +181,14 @@ pub fn plan(
         .collect();
     let has: HashSet<&str> = report.templates.iter().map(|t| t.name.as_str()).collect();
     // Firecracker servers boot and snapshot a template. gVisor servers make
-    // the same disk and start sandboxes cold from it.
+    // the same disk and start sandboxes cold from it. One made on first use
+    // only once the server has used it: then a new revision too.
     let mut prepare: Vec<String> = if report.capability.runtime != Runtime::None {
-        wanted
-            .iter()
-            .filter(|id| !has.contains(*id))
-            .map(|s| s.to_string())
+        mine.iter()
+            .zip(&names)
+            .filter(|(_, n)| !has.contains(n.as_str()))
+            .filter(|(t, _)| made_ahead(&t.id, &report.templates))
+            .map(|(_, n)| n.clone())
             .collect()
     } else {
         Vec::new()
@@ -268,8 +278,8 @@ pub async fn push(s: AppState, template_id: String) {
         else {
             return anyhow::Ok(());
         };
-        let servers: Vec<(String, Option<String>, String)> = sqlx::query_as(
-            "SELECT id, team_id, address FROM pyo.sandbox_servers
+        let servers: Vec<(String, Option<String>, String, Value)> = sqlx::query_as(
+            "SELECT id, team_id, address, templates FROM pyo.sandbox_servers
               WHERE state = 'ready' AND enabled AND address IS NOT NULL
                 AND capability->>'runtime' IN ('firecracker', 'gvisor')",
         )
@@ -282,8 +292,9 @@ pub async fn push(s: AppState, template_id: String) {
         let key = keys::signing_key(&s.db, &s.sealer)
             .await
             .map_err(|e| anyhow::anyhow!(e.message))?;
-        for (id, team, address) in servers {
-            if !eligible(team.as_deref(), t.team_id.as_deref()) {
+        for (id, team, address, reports) in servers {
+            let reports: Vec<TemplateReport> = serde_json::from_value(reports).unwrap_or_default();
+            if !eligible(team.as_deref(), t.team_id.as_deref()) || !made_ahead(&t.id, &reports) {
                 continue;
             }
             let token = keys::admin_token(&key, &id);
@@ -425,6 +436,8 @@ pub async fn update_states(db: &PgPool) -> sqlx::Result<()> {
         let (new, why) = match roll_up(&reports, missing.max(0) as usize) {
             ("ready", why) => ("ready", why),
             _ if older_ready => ("ready", None),
+            // Made on first use: ready to use on any server.
+            _ if super::base::on_demand(&id) => ("ready", None),
             r => r,
         };
         if new != state || why != error {
@@ -586,6 +599,36 @@ mod tests {
             older_ready(&r.templates, "stp_base", "stp_base.bbbb").count(),
             1
         );
+    }
+
+    #[test]
+    fn base_is_made_on_first_use_then_kept_up() {
+        let mut base = t("stp_base", None);
+        base.revision = Some("bbbb".into());
+        let templates = [base, t("stp_a", None)];
+        // A new server makes the team's templates, not base.
+        let (prepare, stale) = plan(None, &report(Runtime::Firecracker, vec![]), &templates);
+        assert_eq!(prepare, vec!["stp_a"]);
+        assert!(stale.is_empty());
+        // Once a sandbox made it there, it's kept, not deleted.
+        let r = report(
+            Runtime::Firecracker,
+            vec![
+                made("stp_a", TemplateState::Ready, None),
+                made("stp_base.bbbb", TemplateState::Ready, None),
+            ],
+        );
+        assert_eq!(plan(None, &r, &templates), (vec![], vec![]));
+        // A new release: a server that used it makes the new revision.
+        let r = report(
+            Runtime::Firecracker,
+            vec![made("stp_base.aaaa", TemplateState::Ready, None)],
+        );
+        let (prepare, stale) = plan(None, &r, &templates);
+        assert_eq!(prepare, vec!["stp_a", "stp_base.bbbb"]);
+        assert!(stale.is_empty());
+        assert!(!made_ahead("stp_base", &[]));
+        assert!(made_ahead("stp_a", &[]));
     }
 
     #[test]

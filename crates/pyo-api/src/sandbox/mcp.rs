@@ -39,7 +39,8 @@ pub fn defs() -> Vec<Value> {
     vec![
         json!({ "name": "create_sandbox", "title": "Create sandbox", "description": "Create an isolated machine (a sandbox) on the team's sandbox servers, to run code, commands and files in. It ends after its lifetime (5 minutes when omitted). Returns its id.", "inputSchema": schema(json!({
             "team": team,
-            "template": { "type": "string", "description": "A sandbox template name, like node-22 (list_sandbox_templates shows them). base when omitted: Debian 13 with git, Python, uv, Node.js and pnpm" },
+            "template": { "type": "string", "description": "A sandbox template name, like node-22 (list_sandbox_templates shows them). base when omitted: Debian 13 with git, Python, uv, Node.js and pnpm. A server makes base the first time it's used there, which takes a minute or so" },
+            "server": { "type": "string", "description": "A sandbox server's name or id to run it on. Pyo picks one when omitted" },
             "cpus": { "type": "integer", "minimum": 1, "maximum": 32 },
             "memory_mib": { "type": "integer", "minimum": 128 },
             "ttl": { "type": "string", "description": "How long it lives, like 30m or 1h (24h at most)" },
@@ -152,6 +153,7 @@ pub async fn run(s: &AppState, user: &User, name: &str, args: &Value) -> Result<
             let mut req = json!({ "teamId": team });
             for (from, to) in [
                 ("template", "template"),
+                ("server", "server"),
                 ("cpus", "cpus"),
                 ("memory_mib", "memoryMib"),
                 ("ttl", "ttl"),

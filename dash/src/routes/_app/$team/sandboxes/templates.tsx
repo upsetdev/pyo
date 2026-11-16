@@ -1,5 +1,5 @@
 import { DotsThreeIcon, SquaresFourIcon, TrashIcon } from "@phosphor-icons/react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -9,15 +9,19 @@ import { Menu } from "~/components/ui/Menu";
 import { EmptyState, ErrorState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
 import { megabytes, timeAgo } from "~/lib/pyo/format";
+import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
   fieldsSwapped,
+  isBase,
   sandboxApi,
   templateImage,
+  templateStatus,
+  usable,
   type SandboxTemplate,
   type SandboxTemplateServer,
 } from "~/lib/pyo/sandbox";
-import { roleIn, usePyo } from "~/lib/pyo/store";
+import { roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { seo } from "~/lib/seo";
 
@@ -35,6 +39,7 @@ const STATE: Record<SandboxTemplate["state"], { label: string; tone: "success" |
   building: { label: "Building", tone: "info" },
   ready: { label: "Ready", tone: "success" },
   failed: { label: "Failed", tone: "danger" },
+  unavailable: { label: "Not available yet", tone: "neutral" },
 };
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -58,9 +63,12 @@ function serverLabel(x: SandboxTemplateServer) {
 
 function TemplatesPage() {
   const s = usePyo();
+  const navigate = useNavigate();
   const team = s.currentTeamId;
   const q = useQuery(`sandbox-templates:${team}`, () => sandboxApi.templates(team), { refreshMs: 10_000 });
   const canCreate = roleIn(s) !== "viewer";
+  // New sandboxes need a server that runs them.
+  const canUse = canCreate && sandboxServersIn(s).some((x) => x.state === "ready");
   const [name, setName] = useState("");
   const [image, setImage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -123,7 +131,7 @@ function TemplatesPage() {
                   <Td>
                     <span className={`inline-flex items-center gap-1.5 ${t.state === "failed" ? "text-destructive" : ""}`} title={t.error ?? undefined}>
                       <Dot tone={STATE[t.state]?.tone ?? "neutral"} className="h-2 w-2" />
-                      {STATE[t.state]?.label ?? t.state}
+                      {templateStatus(t)}
                     </span>
                   </Td>
                   <Td className="text-[12.5px]">
@@ -135,10 +143,26 @@ function TemplatesPage() {
                             <span className={x.state === "failed" ? "text-destructive" : "text-muted-foreground"}>{serverLabel(x)}</span>
                           </div>
                         ))
-                      : <span className="text-muted-foreground">—</span>}
+                      : <span className="text-muted-foreground">{isBase(t) ? "Made on first use" : "—"}</span>}
                   </Td>
-                  <Td className="text-muted-foreground">{timeAgo(t.createdAt)}</Td>
+                  <Td className="text-muted-foreground">{t.createdAt ? timeAgo(t.createdAt) : "—"}</Td>
                   <Td className="text-right">
+                    <div className="flex items-center justify-end gap-1">
+                    {canUse && usable(t) ? (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() =>
+                          void navigate({
+                            to: "/$team/sandboxes/new",
+                            params: { team: currentSlug() },
+                            search: { template: t.name },
+                          })
+                        }
+                      >
+                        Use
+                      </Button>
+                    ) : null}
                     {canRemove(t) ? (
                       <Menu
                         label={`Actions for ${t.name}`}
@@ -150,6 +174,7 @@ function TemplatesPage() {
                         )}
                       />
                     ) : null}
+                    </div>
                   </Td>
                 </Tr>
               ))}

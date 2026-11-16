@@ -249,6 +249,8 @@ async fn pyo_drives_a_real_daemon() {
     );
     let candidate = scheduler::Candidate {
         id: server.into(),
+        name: "e2e".into(),
+        team_id: Some(team.into()),
         enabled: true,
         ready: true,
         report_age_secs: 0,
@@ -628,13 +630,90 @@ async fn the_control_plane_drives_a_real_daemon() {
         super::templates::server_name(base::ID, base::revision(&w.image).as_deref())
     };
     let (old_name, new_name) = (rev(&old), rev(&new));
+    // Listed, ready to use, before Pyo adds it.
+    let listed = super::template_views(&db, std::slice::from_ref(&team), None)
+        .await
+        .unwrap();
+    assert_eq!(listed[0]["name"], "base", "{listed:?}");
+    assert_eq!(listed[0]["servers"], json!([]));
     assert_eq!(base::seed_from(&s, &old).await.unwrap(), base::Seed::Insert);
-    wait_for(&s, &team, &server, &old_name, false).await;
-    // No template: base.
+    // The server doesn't make it ahead of use.
+    for _ in 0..3 {
+        super::runner::round(&s).await.unwrap();
+    }
+    let srv = &super::server_views(&db, std::slice::from_ref(&team), Some(&server))
+        .await
+        .unwrap()[0];
+    assert!(
+        srv["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| !t["name"].as_str().unwrap_or("").starts_with("stp_base")),
+        "{srv}"
+    );
+    let views = super::template_views(&db, std::slice::from_ref(&team), Some(base::ID))
+        .await
+        .unwrap();
+    assert_eq!(views[0]["state"], "ready", "ready to use: {}", views[0]);
+    assert_eq!(views[0]["servers"], json!([]), "no server has it yet");
+    // No template: base. Two at once on a server without it: the server
+    // makes it once, both wait for it, then both start.
     let no_template: super::CreateSandbox =
         serde_json::from_value(json!({ "teamId": team, "network": "none", "ttl": "5m" })).unwrap();
-    let first = super::create(&s, &user, no_template.clone()).await.unwrap();
+    let t0 = std::time::Instant::now();
+    let a = tokio::spawn({
+        let (s, user, req) = (s.clone(), user.clone(), no_template.clone());
+        async move { super::create(&s, &user, req).await }
+    });
+    let b = tokio::spawn({
+        let (s, user, req) = (s.clone(), user.clone(), no_template.clone());
+        async move { super::create(&s, &user, req).await }
+    });
+    // Meanwhile the sandboxes say they're waiting for base.
+    let mut saw_preparing = false;
+    while !(a.is_finished() && b.is_finished()) {
+        let list = super::sandbox_views(&db, std::slice::from_ref(&team), None, true)
+            .await
+            .unwrap();
+        saw_preparing |= list.iter().any(|x| x["preparing"] == true);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let first = a.await.unwrap().unwrap();
+    let other = b.await.unwrap().unwrap();
+    println!("e2e base on first use: {} ms", t0.elapsed().as_millis());
+    assert!(saw_preparing);
     assert_eq!(first["sandbox"]["template"], "base", "{first}");
+    assert_eq!(first["sandbox"]["preparing"], false, "{first}");
+    assert_eq!(other["sandbox"]["state"], "running", "{other}");
+    let builds: Vec<serde_json::Value> = Daemon::new(&address)
+        .report(&keys::admin_token(&key, &server))
+        .await
+        .unwrap()
+        .templates
+        .into_iter()
+        .filter(|t| t.name.starts_with("stp_base"))
+        .map(|t| json!({ "name": t.name, "startedAt": t.build.map(|b| b.started_at) }))
+        .collect();
+    assert_eq!(builds.len(), 1, "{builds:?}");
+    let views = super::template_views(&db, std::slice::from_ref(&team), Some(base::ID))
+        .await
+        .unwrap();
+    assert_eq!(views[0]["servers"][0]["id"], json!(server), "{}", views[0]);
+    super::delete(&s, &user, other["sandbox"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    // On the server asked for, by name. One the team doesn't have is refused.
+    let mut on_e2e = no_template.clone();
+    on_e2e.server = Some("e2e".into());
+    let pinned = super::create(&s, &user, on_e2e.clone()).await.unwrap();
+    assert_eq!(pinned["sandbox"]["serverId"], json!(server), "{pinned}");
+    super::delete(&s, &user, pinned["sandbox"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    on_e2e.server = Some("nowhere".into());
+    let e = super::create(&s, &user, on_e2e).await.unwrap_err();
+    assert_eq!(e.status, axum::http::StatusCode::NOT_FOUND, "{}", e.message);
     let first_id = first["sandbox"]["id"].as_str().unwrap().to_owned();
     let on: String =
         sqlx::query_scalar("SELECT spec->>'template' FROM pyo.sandboxes WHERE id = $1")

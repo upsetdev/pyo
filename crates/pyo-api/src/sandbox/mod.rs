@@ -28,6 +28,7 @@ pub mod daemon;
 #[cfg(test)]
 mod e2e;
 pub mod edgecert;
+pub mod firstuse;
 pub mod join;
 pub mod keys;
 pub mod limits;
@@ -266,6 +267,9 @@ pub async fn sandbox_views(
             'serverId', x.server_id, 'server', sv.name,
             'template', coalesce(t.name, x.spec->>'template'), 'templateId', x.template_id,
             'state', x.state, 'runtime', x.runtime,
+            'preparing', x.state = 'creating' AND sv.id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM jsonb_array_elements(coalesce(sv.templates, '[]')) e
+                 WHERE e->>'name' = x.spec->>'template' AND coalesce(e->>'state', 'ready') = 'ready'),
             'cpus', x.spec->'cpus', 'memoryMib', x.spec->'memoryMib', 'diskMib', x.spec->'diskMib',
             'network', x.spec->'network', 'isolation', x.spec->'isolation',
             'labels', coalesce(x.spec->'labels', '{}'),
@@ -375,19 +379,29 @@ pub async fn template_views(
                     'snapshotMs', m.e->'build'->'snapshotMs',
                     'bytes', m.e->'bytes', 'snapshots', coalesce(m.e->'snapshots', '[]')) ORDER BY s.name), '[]')
                   FROM pyo.sandbox_servers s
+                  -- Its current revision there, else an older one.
                   LEFT JOIN LATERAL (SELECT x AS e FROM jsonb_array_elements(s.templates) x
-                                      WHERE x->>'name' = t.id || coalesce('.' || t.revision, '') LIMIT 1) m ON true
+                                      WHERE x->>'name' = t.id || coalesce('.' || t.revision, '')
+                                         OR (t.revision IS NOT NULL AND starts_with(x->>'name', t.id || '.'))
+                                      ORDER BY x->>'name' = t.id || coalesce('.' || t.revision, '') DESC LIMIT 1) m ON true
                  WHERE (s.team_id IS NULL OR s.team_id = t.team_id OR t.team_id IS NULL)
                    AND (s.team_id IS NULL OR s.team_id = ANY($1))
-                   AND (m.e IS NOT NULL OR s.state NOT IN ('joining', 'refused'))))
+                   AND (m.e IS NOT NULL OR s.state NOT IN ('joining', 'refused'))
+                   -- One made on first use: the servers that have it.
+                   AND (m.e IS NOT NULL OR t.id <> $3)))
            FROM pyo.sandbox_templates t
           WHERE (t.team_id IS NULL OR t.team_id = ANY($1)) AND ($2::text IS NULL OR t.id = $2)
           ORDER BY t.team_id NULLS FIRST, t.name",
     )
     .bind(team_ids)
     .bind(id)
+    .bind(base::ID)
     .fetch_all(db)
     .await?;
+    // `base` is listed before it's added, as it will be.
+    if id.is_none_or(|i| i == base::ID) && !rows.iter().any(|r| r["name"] == base::NAME) {
+        rows.insert(0, base::listed(db).await);
+    }
     // Build errors in plain words.
     let plain = |e: &mut Value| {
         if let Some(raw) = e.as_str() {
@@ -416,9 +430,14 @@ pub struct CreateSandbox {
     pub team_id: Option<String>,
     /// A sandbox template's name (or id): the team's own, else the
     /// installation's. "base" (Pyo's built-in Debian 13 template) when
-    /// omitted.
+    /// omitted. A server that doesn't have "base" yet makes it first, so
+    /// the first sandbox from it there takes longer.
     #[serde(default)]
     pub template: Option<String>,
+    /// The sandbox server to run it on, by id or name: the team's own or
+    /// the installation's. Pyo picks one when omitted.
+    #[serde(default)]
+    pub server: Option<String>,
     /// 1 when omitted.
     #[serde(default)]
     pub cpus: Option<u32>,
@@ -507,9 +526,7 @@ async fn template_for(
     .await?;
     let Some((id, name, state, revision)) = row else {
         return Err(if name == base::NAME {
-            ApiError::conflict(
-                "The base sandbox template isn't ready yet. Try again soon, or pass a template.",
-            )
+            ApiError::conflict(base::UNAVAILABLE)
         } else {
             ApiError::not_found("Sandbox template")
         });
@@ -534,6 +551,8 @@ pub async fn candidates(
     #[derive(sqlx::FromRow)]
     struct Row {
         id: String,
+        name: String,
+        team_id: Option<String>,
         address: Option<String>,
         state: String,
         enabled: bool,
@@ -544,7 +563,7 @@ pub async fn candidates(
         pending_mib: i64,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT s.id, s.address, s.state, s.enabled, s.capability, s.capacity, s.templates,
+        "SELECT s.id, s.name, s.team_id, s.address, s.state, s.enabled, s.capability, s.capacity, s.templates,
                 extract(epoch FROM now() - s.last_report_at)::bigint AS age,
                 coalesce((SELECT sum((x.spec->>'memoryMib')::bigint) FROM pyo.sandboxes x
                            WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed', 'paused')
@@ -560,6 +579,8 @@ pub async fn candidates(
         .map(|r| {
             let c = scheduler::Candidate {
                 id: r.id,
+                name: r.name,
+                team_id: r.team_id,
                 enabled: r.enabled,
                 ready: r.state == "ready" && r.address.is_some(),
                 report_age_secs: r.age.unwrap_or(i64::MAX),
@@ -643,6 +664,14 @@ pub(crate) fn only_team(teams: &[String], field: &str) -> Result<String, String>
 pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<Value> {
     let ttl_secs = parse_ttl_value(req.ttl.as_ref())?;
     let team_id = team_for_create(s, user, req.team_id.as_deref()).await?;
+    let asked = template_asked(req.template.as_deref());
+    // `base` is listed before it's added: it's added on first use.
+    if asked == base::NAME
+        && !base::added(&s.db).await?
+        && let Err(e) = base::ensure(s).await
+    {
+        tracing::warn!(error = %format!("{e:#}"), "sandbox template base: couldn't add it");
+    }
     let mut tx = s.db.begin().await?;
     require(&mut tx, user, &team_id, Need::Use).await?;
     // One create at a time per team, so two can't both fit the last slot.
@@ -650,7 +679,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
         .bind(&team_id)
         .execute(&mut *tx)
         .await?;
-    let template = template_for(&mut tx, &team_id, template_asked(req.template.as_deref())).await?;
+    let template = template_for(&mut tx, &team_id, asked).await?;
     if let Some(p) = &req.project_id {
         let ok: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM pyo.projects WHERE id = $1 AND team_id = $2)",
@@ -679,8 +708,21 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     limits::check(&lim, &used, &spec).map_err(ApiError::forbidden)?;
     let servers = candidates(&mut tx, &team_id).await?;
     let list: Vec<scheduler::Candidate> = servers.iter().map(|(c, _)| c.clone()).collect();
-    let (chosen, server_name) =
-        scheduler::pick_revision(&list, &spec, &template.id).map_err(|n| {
+    let on_demand = base::on_demand(&template.id);
+    let placed = match req
+        .server
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(asked) => scheduler::place_on(&list, &team_id, asked, &spec, &template.id, on_demand)
+            .map_err(|(status, message)| {
+                ApiError::new(
+                    status,
+                    message.replace(&template.server_name, &template.name),
+                )
+            })?,
+        None => scheduler::place(&list, &spec, &template.id, on_demand).map_err(|n| {
             let n = match n {
                 scheduler::NoServer::NoTemplate(_) => {
                     scheduler::NoServer::NoTemplate(template.name.clone())
@@ -688,20 +730,24 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
                 n => n,
             };
             ApiError::new(n.status(), n.message())
-        })?;
+        })?,
+    };
     // The server may still start it from an older revision of the template.
-    spec.template = server_name;
+    spec.template = placed.template.clone();
+    let build = placed.build;
+    let (server_id, server_label) = (placed.server.id.clone(), placed.server.name.clone());
     let address = servers
         .iter()
-        .find(|(c, _)| c.id == chosen.id)
+        .find(|(c, _)| c.id == server_id)
         .map(|(_, a)| a.clone())
         .unwrap_or_default();
-    let server_id = chosen.id.clone();
     // Kept without env values: they may be secrets.
     let mut kept = spec.clone();
     for v in kept.env.values_mut() {
         v.clear();
     }
+    // While its server makes the template, its lifetime hasn't started.
+    let wait = if build { firstuse::LIMIT.as_secs() } else { 0 };
     sqlx::query(
         "INSERT INTO pyo.sandboxes (id, team_id, project_id, server_id, template_id, spec, state, created_by, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, 'creating', $7, now() + make_interval(secs => $8))",
@@ -713,12 +759,41 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     .bind(&template.id)
     .bind(json!(kept))
     .bind(&user.name)
-    .bind(ttl_secs as f64)
+    .bind((ttl_secs + wait) as f64)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
 
     let key = keys::signing_key(&s.db, &s.sealer).await?;
+    if build {
+        let ready = firstuse::on_server(
+            &s.db,
+            &key,
+            &server_id,
+            &address,
+            &template.id,
+            &spec.template,
+        )
+        .await;
+        if let Err(e) = ready {
+            let e = e.error(&template.name, &server_label);
+            let mut c = s.db.acquire().await?;
+            end(&mut c, &spec.id, "failed", Some(&e.message)).await?;
+            return Err(e);
+        }
+        // Deleted while it waited.
+        let state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM pyo.sandboxes WHERE id = $1")
+                .bind(&spec.id)
+                .fetch_optional(&s.db)
+                .await?;
+        if state.as_deref() != Some("creating") {
+            return Err(ApiError::conflict(format!(
+                "The sandbox {} was deleted before it started.",
+                spec.id
+            )));
+        }
+    }
     let token = keys::create_token(&key, &spec.id, &team_id, &server_id);
     let d = daemon::Daemon::new(&address);
     let st = match d
