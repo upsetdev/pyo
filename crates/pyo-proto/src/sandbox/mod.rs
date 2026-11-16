@@ -139,6 +139,10 @@ pub struct CapabilityReport {
     pub cpu_vendor: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub firecracker_version: String,
+    /// The runsc release on gVisor servers, like `release-20261109.0`.
+    /// Paused sandboxes only resume under the same one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gvisor_version: String,
     /// Whether sandboxes on this server can get a network.
     #[serde(default)]
     pub network: bool,

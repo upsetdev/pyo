@@ -153,6 +153,7 @@ async fn makes_a_template_from_a_public_image() {
         jailer: None,
         kernel: kernel.clone(),
         envd: envd.clone(),
+        runsc: "runsc".into(),
         keys: vec![key.verifying_key()],
         host_reserve_mib: Some(1024),
         memory_overcommit: 1.0,
@@ -177,6 +178,7 @@ async fn makes_a_template_from_a_public_image() {
         fc: &fc,
         layout: &layout,
         envd: &envd,
+        runsc: std::path::Path::new("runsc"),
     })
     .await;
     assert_eq!(cap.runtime, Runtime::Firecracker, "{}", cap.summary());

@@ -28,8 +28,12 @@ pub struct Config {
     pub jailer: Option<PathBuf>,
     /// The guest kernel.
     pub kernel: PathBuf,
-    /// pyo-envd, for the detection test boot.
+    /// pyo-envd, for the detection test boot and every template.
     pub envd: PathBuf,
+    /// runsc, for servers without KVM (gVisor). Its `gvisor-bin` sits
+    /// next to it.
+    #[serde(default = "default_runsc")]
+    pub runsc: PathBuf,
     /// Pyo's public keys for checking tokens.
     pub keys: Vec<VerifyingKey>,
     /// Memory kept back for the host, in MiB. Default: a tenth of the
@@ -69,6 +73,9 @@ pub struct Config {
 
 fn default_root() -> PathBuf {
     PathBuf::from("/var/lib/pyo-sandbox")
+}
+fn default_runsc() -> PathBuf {
+    PathBuf::from("runsc")
 }
 fn default_overcommit() -> f64 {
     1.0

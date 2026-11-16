@@ -7,7 +7,8 @@
 //! 2. A test boot: a tiny microVM with a 5 s timeout, booted with the same
 //!    fast boot args as every sandbox. Under 300 ms is native KVM, slower is
 //!    nested. The threshold only holds with those args.
-//! 3. Without KVM: `runsc --platform=systrap do true` as root.
+//! 3. Without KVM: `runsc --platform=systrap --network=none do true` as
+//!    root, which proves gVisor runs. The report names the runsc release.
 //! 4. Neither: the server is refused with a plain reason.
 //!
 //! `/dev/net/tun`, nftables and another firewall's FORWARD policy only
@@ -34,6 +35,7 @@ pub struct Inputs<'a> {
     pub fc: &'a Firecracker,
     pub layout: &'a Layout,
     pub envd: &'a Path,
+    pub runsc: &'a Path,
 }
 
 pub async fn detect(inputs: Inputs<'_>) -> CapabilityReport {
@@ -151,18 +153,16 @@ pub async fn detect(inputs: Inputs<'_>) -> CapabilityReport {
         }
     }
 
-    // TODO(gvisor): the gVisor driver comes in a later step. Detection
-    // already finds it, so the report is right. The manager refuses to
-    // create gVisor sandboxes until then.
-    match gvisor().await {
-        Ok(()) => {
+    match gvisor(inputs.runsc).await {
+        Ok(version) => {
             r.runtime = Runtime::Gvisor;
             r.kvm = Kvm::None;
             r.checks.push(Check {
                 name: "gvisor".into(),
                 ok: true,
-                detail: "runsc --platform=systrap works".into(),
+                detail: format!("runsc {version} works on systrap"),
             });
+            r.gvisor_version = version;
         }
         Err(e) => {
             r.checks.push(Check {
@@ -306,12 +306,13 @@ async fn build_test_image(envd: &Path, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn gvisor() -> Result<(), String> {
+/// Whether runsc runs a sandbox here, and its release.
+async fn gvisor(runsc: &Path) -> Result<String, String> {
     if !is_root() {
         return Err("runsc needs root".into());
     }
-    let run = Command::new("runsc")
-        .args(["--platform=systrap", "do", "true"])
+    let run = Command::new(runsc)
+        .args(["--platform=systrap", "--network=none", "do", "true"])
         .kill_on_drop(true)
         .output();
     match tokio::time::timeout(Duration::from_secs(30), run).await {
@@ -320,7 +321,12 @@ async fn gvisor() -> Result<(), String> {
             Err("runsc isn't installed".into())
         }
         Ok(Err(e)) => Err(format!("runsc didn't start: {e}")),
-        Ok(Ok(o)) if o.status.success() => Ok(()),
+        Ok(Ok(o)) if o.status.success() => {
+            let v = Command::new(runsc).arg("--version").output().await;
+            Ok(v.ok()
+                .and_then(|o| crate::gvisor::parse_version(&String::from_utf8_lossy(&o.stdout)))
+                .unwrap_or_else(|| "unknown".into()))
+        }
         Ok(Ok(o)) => Err(format!(
             "runsc failed: {}",
             String::from_utf8_lossy(&o.stderr).trim()
