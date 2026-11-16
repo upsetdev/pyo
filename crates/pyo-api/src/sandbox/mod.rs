@@ -998,8 +998,7 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
     }
     crate::cloud::needs_tailscale(&s.db).await?;
     let door = crate::deploy::registry_push();
-    let api = crate::web::tailnet_api_url();
-    let (false, Some(api)) = (door.is_empty(), api) else {
+    let (false, Some(_)) = (door.is_empty(), crate::web::tailnet_api_url()) else {
         return Err(ApiError::conflict(
             "Pyo's server isn't on your tailnet yet. Try again in a minute.",
         ));
@@ -1062,7 +1061,9 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
         .await?;
     }
     tx.commit().await?;
-    let base = crate::join::scripts_url(Some(&crate::join::friendly(&api)));
+    // The server joins the tailnet in sandbox.sh, so it fetches the script
+    // off the tailnet.
+    let base = crate::join::scripts_url_before_tailnet();
     let door = crate::join::friendly(&door);
     let command = join::Command {
         base: &base,

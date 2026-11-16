@@ -26,6 +26,9 @@ pub const PUBLISHED_SCRIPTS_URL: &str = "https://pyo.dev";
 /// 3. Pyo on the tailnet ([`crate::web::tailnet_api_url`]), then its HTTPS
 ///    dashboard;
 /// 4. pyo.dev, when Pyo is only on its own machine or in its cluster.
+///
+/// Only for machines already on the tailnet, or told Pyo's public URL. A
+/// command with a Tailscale key uses [`scripts_url_before_tailnet`].
 pub fn scripts_url(reach: Option<&str>) -> String {
     let configured = std::env::var("PYO_SCRIPTS_URL").ok();
     let tailnet = crate::web::tailnet_api_url().map(|u| friendly(&u));
@@ -40,8 +43,8 @@ pub fn scripts_url(reach: Option<&str>) -> String {
 }
 
 fn pick_scripts_url(configured: Option<&str>, pyo: &[Option<&str>]) -> String {
-    if let Some(u) = configured.map(str::trim).filter(|u| !u.is_empty()) {
-        return u.trim_end_matches('/').to_owned();
+    if let Some(u) = setting(configured) {
+        return u;
     }
     match pyo
         .iter()
@@ -52,6 +55,38 @@ fn pick_scripts_url(configured: Option<&str>, pyo: &[Option<&str>]) -> String {
         Some(u) => format!("{u}/install"),
         None => PUBLISHED_SCRIPTS_URL.to_owned(),
     }
+}
+
+/// Where a command that gives the machine a Tailscale key (`--tailscale-key`)
+/// fetches its script. The machine joins the tailnet only once the script
+/// runs, so the script can't come from Pyo on the tailnet. Nor from Pyo on
+/// its public IP: that address may not be reachable from outside (a server
+/// behind NAT, like Starlink's). So:
+/// 1. `PYO_SCRIPTS_URL`, when set;
+/// 2. else pyo.dev. Its sandbox.sh runs the script of the release
+///    `--version` names. Its join.sh and connect.sh run the latest
+///    release's script, and join.sh's `--k3s` keeps the server on the
+///    cluster's k3s.
+///
+/// A dev build's version may not be a published release, so pyo.dev has no
+/// sandbox.sh for it and its wrapper fails to download one: dev builds set
+/// `PYO_SCRIPTS_URL` (to a mirror, or a Pyo the new machine can reach).
+///
+/// Commands for machines already on the tailnet use [`scripts_url`].
+pub fn scripts_url_before_tailnet() -> String {
+    pick_scripts_url_before_tailnet(std::env::var("PYO_SCRIPTS_URL").ok().as_deref())
+}
+
+pub(crate) fn pick_scripts_url_before_tailnet(configured: Option<&str>) -> String {
+    setting(configured).unwrap_or_else(|| PUBLISHED_SCRIPTS_URL.to_owned())
+}
+
+/// `PYO_SCRIPTS_URL`, when it's set to something.
+fn setting(configured: Option<&str>) -> Option<String> {
+    configured
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(|u| u.trim_end_matches('/').to_owned())
 }
 
 /// The host of an http(s) URL, lowercase, without brackets or port.
@@ -811,6 +846,63 @@ mod tests {
             );
         }
         assert_eq!(pick_scripts_url(None, &[None, None]), PUBLISHED_SCRIPTS_URL);
+    }
+
+    #[test]
+    fn a_machine_off_the_tailnet_fetches_scripts_from_the_setting_or_pyo_dev() {
+        let pick = pick_scripts_url_before_tailnet;
+        assert_eq!(
+            pick(Some(" https://mirror.example.com/ ")),
+            "https://mirror.example.com"
+        );
+        // Unset or blank: pyo.dev, never Pyo itself (on the tailnet, or on
+        // a public IP that may sit behind NAT).
+        for unset in [None, Some(""), Some("  ")] {
+            assert_eq!(pick(unset), PUBLISHED_SCRIPTS_URL);
+        }
+    }
+
+    #[test]
+    fn commands_with_a_tailscale_key_fetch_their_script_off_the_tailnet() {
+        let base = pick_scripts_url_before_tailnet(None);
+        // join.sh: pyo.dev runs the latest release's join.sh, and --k3s keeps
+        // the server on the cluster's k3s.
+        assert_eq!(
+            command(
+                &base,
+                &Join {
+                    server_ip: "server-1.tail1234.ts.net",
+                    token: "t",
+                    server_name: "server-2",
+                    k3s_version: "v1.37.2+k3s1",
+                    tailscale_key: Some("tskey-auth-1"),
+                    builder: false,
+                    registry: None,
+                },
+            ),
+            "curl -fsSL https://pyo.dev/join.sh | bash -s -- --server 'server-1.tail1234.ts.net' --token 't' --name 'server-2' --k3s 'v1.37.2+k3s1' --tailscale-key 'tskey-auth-1'"
+        );
+        assert_eq!(
+            connect_command(
+                &base,
+                "https://pyo.tail1234.ts.net",
+                "abc",
+                Some("tskey-auth-1"),
+                Some(("pyo-registry.tail1234.ts.net", "def"))
+            ),
+            "curl -fsSL https://pyo.dev/connect.sh | bash -s -- --api 'https://pyo.tail1234.ts.net' --token 'abc' --tailscale-key 'tskey-auth-1' --registry 'pyo-registry.tail1234.ts.net' --registry-token 'def'"
+        );
+        // A mirror the operator set.
+        assert!(
+            connect_command(
+                &pick_scripts_url_before_tailnet(Some("https://mirror.example.com")),
+                "https://pyo.tail1234.ts.net",
+                "abc",
+                Some("k"),
+                None
+            )
+            .starts_with("curl -fsSL https://mirror.example.com/connect.sh | ")
+        );
     }
 
     #[test]

@@ -382,7 +382,8 @@ fn q(s: &str) -> String {
 
 /// The command that makes a machine a sandbox server.
 pub struct Command<'a> {
-    /// Where scripts come from ([`crate::join::scripts_url`]).
+    /// Where scripts come from, off the tailnet the server isn't on yet
+    /// ([`crate::join::scripts_url_before_tailnet`]).
     pub base: &'a str,
     /// Pyo's tailnet door, "pyo.tail1234.ts.net:5006".
     pub door: &'a str,
@@ -476,8 +477,10 @@ mod tests {
 
     #[test]
     fn the_command_quotes_everything() {
+        // The server isn't on the tailnet yet: pyo.dev.
+        let base = crate::join::pick_scripts_url_before_tailnet(None);
         let c = Command {
-            base: "https://pyo.tail1234.ts.net/install",
+            base: &base,
             door: "pyo.tail1234.ts.net:5006",
             server_id: "sbs_one",
             name: "it's sbx",
@@ -488,7 +491,7 @@ mod tests {
         };
         assert_eq!(
             c.render(),
-            "curl -fsSL https://pyo.tail1234.ts.net/install/sandbox.sh | bash -s -- --pyo 'pyo.tail1234.ts.net:5006' --server 'sbs_one' --name 'it'\\''s sbx' --code 'abc' --tailscale-key 'tskey-auth-1' --version '0.4.0'"
+            "curl -fsSL https://pyo.dev/sandbox.sh | bash -s -- --pyo 'pyo.tail1234.ts.net:5006' --server 'sbs_one' --name 'it'\\''s sbx' --code 'abc' --tailscale-key 'tskey-auth-1' --version '0.4.0'"
         );
         let c = Command {
             edge_domain: Some("sbx.example.com"),
@@ -500,6 +503,38 @@ mod tests {
             "{}",
             c.render()
         );
+    }
+
+    #[test]
+    fn a_new_server_fetches_sandbox_sh_off_the_tailnet() {
+        let render = |base: &str| {
+            Command {
+                base,
+                door: "pyo.tail1234.ts.net:5006",
+                server_id: "sbs_one",
+                name: "sbx",
+                code: "abc",
+                tailscale_key: "tskey-auth-1",
+                version: "0.4.0",
+                edge_domain: None,
+            }
+            .render()
+        };
+        let pick = crate::join::pick_scripts_url_before_tailnet;
+        // PYO_SCRIPTS_URL wins.
+        assert!(
+            render(&pick(Some("https://mirror.example.com/")))
+                .starts_with("curl -fsSL https://mirror.example.com/sandbox.sh | bash -s -- ")
+        );
+        // Else pyo.dev, which runs the sandbox.sh of the --version release.
+        for unset in [None, Some(" ")] {
+            let c = render(&pick(unset));
+            assert!(
+                c.starts_with("curl -fsSL https://pyo.dev/sandbox.sh | bash -s -- ")
+                    && c.contains(" --version '0.4.0'"),
+                "{c}"
+            );
+        }
     }
 
     #[test]

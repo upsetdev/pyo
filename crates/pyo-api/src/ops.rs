@@ -817,9 +817,11 @@ async fn connect_command(
         ));
     }
     let (api, key, registry) = reach(tx, s, cluster_id, "Pyo: connect a cluster").await?;
+    // The machine joins the tailnet in connect.sh (--tailscale-key), so it
+    // fetches the script off the tailnet.
     Ok((
         crate::join::connect_command(
-            &crate::join::scripts_url(Some(&api)),
+            &crate::join::scripts_url_before_tailnet(),
             &api,
             token,
             Some(&key),
@@ -832,7 +834,8 @@ async fn connect_command(
 /// What a new server of a cluster joins with (a k3s join token the agent
 /// makes, valid an hour): join.sh's details and a fresh Tailscale key.
 struct JoinParts {
-    /// Where join.sh is.
+    /// Where join.sh is for a server already on the tailnet. A command
+    /// with the Tailscale key uses [`crate::join::scripts_url_before_tailnet`].
     base: String,
     server_ip: String,
     token: String,
@@ -873,9 +876,12 @@ async fn join_command(
     wake: &mut Vec<String>,
 ) -> ApiResult<Value> {
     let p = join_parts(tx, s, team_id, cluster_id, server_name, wake).await?;
-    let command = crate::join::command(&p.base, &p.join(server_name, builder, true));
+    // The server joins the tailnet in join.sh (--tailscale-key), so it
+    // fetches the script off the tailnet.
+    let base = crate::join::scripts_url_before_tailnet();
+    let command = crate::join::command(&base, &p.join(server_name, builder, true));
     Ok(
-        json!({ "ok": true, "command": command, "scriptUrl": format!("{}/join.sh", p.base), "expiresAt": now_ms() + p.ttl as i64 * 1000, "tailscale": true }),
+        json!({ "ok": true, "command": command, "scriptUrl": format!("{base}/join.sh"), "expiresAt": now_ms() + p.ttl as i64 * 1000, "tailscale": true }),
     )
 }
 
