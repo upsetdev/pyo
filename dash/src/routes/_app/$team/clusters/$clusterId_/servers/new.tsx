@@ -226,7 +226,7 @@ function JoinForm({
               {!hetzner ? (
                 <Callout tone="warning">
                   Connect Hetzner first.{" "}
-                  <ButtonLink href="/integrations" size="xs" variant="secondary">
+                  <ButtonLink href="/integrations#hetzner" size="xs" variant="secondary">
                     Integrations
                   </ButtonLink>
                 </Callout>

@@ -1985,7 +1985,7 @@ function ImageReference({
             <GlobeHemisphereEastIcon size={13} />
             Public image.{" "}
             <AppLink
-              href="/integrations"
+              href="/integrations#registries"
               className="font-medium text-primary hover:text-primary/80"
             >
               Private? Add a login
