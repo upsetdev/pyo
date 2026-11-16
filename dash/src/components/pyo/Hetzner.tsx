@@ -102,11 +102,77 @@ export function DeleteCloudServerDialog({
       title={server ? `Delete ${server.name} at Hetzner?` : ""}
       description={
         server
-          ? `Its services move off it first. Then it leaves the cluster and your tailnet, and Hetzner deletes it. ${money(server.currency, server.monthly)} a month stops.`
+          ? server.sandboxServerId
+            ? `Its sandboxes end. Then it leaves your tailnet, and Hetzner deletes it. ${money(server.currency, server.monthly)} a month stops.`
+            : `Its services move off it first. Then it leaves the cluster and your tailnet, and Hetzner deletes it. ${money(server.currency, server.monthly)} a month stops.`
           : ""
       }
       confirmLabel="Delete server"
     />
+  );
+}
+
+/**
+ * The team's Hetzner project token: paste, check and save. In Integrations,
+ * and inline where a server is bought before Hetzner is connected.
+ */
+export function HetznerConnectForm({
+  onSaved,
+  onCancel,
+}: {
+  onSaved?: () => void;
+  onCancel?: () => void;
+}) {
+  const s = usePyo();
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const save = async () => {
+    setBusy(true);
+    setError("");
+    const r = await api.saveHetzner(token);
+    setBusy(false);
+    if ("error" in r) return setError(r.error);
+    setToken("");
+    toast({ title: "Hetzner connected" });
+    onSaved?.();
+  };
+  return (
+    <form
+      className="space-y-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+    >
+      <p className="text-[12px] text-muted-foreground">
+        A project API token with Read & Write.{" "}
+        <a href={DOCS} target="_blank" rel="noreferrer" className="font-medium text-primary hover:text-primary/80">
+          How to make one
+        </a>
+      </p>
+      <Input
+        type="password"
+        value={token}
+        onChange={(e) => setToken(e.target.value)}
+        placeholder="API token"
+        aria-label="API token"
+        autoComplete="off"
+        className="h-8"
+        disabled={!s.tailscale}
+      />
+      {error ? <p className="text-[12px] text-destructive">{error}</p> : null}
+      <div className="flex gap-2">
+        <Button type="submit" size="xs" disabled={busy || !token.trim() || !s.tailscale}>
+          {busy ? "Checking…" : "Save"}
+        </Button>
+        {onCancel ? (
+          <Button type="button" size="xs" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        ) : null}
+      </div>
+    </form>
   );
 }
 
@@ -115,26 +181,14 @@ export function HetznerPanel() {
   const s = usePyo();
   const admin = useTeamAdmin();
   const conn = hetznerOf(s);
-  const [token, setToken] = useState("");
   const [replacing, setReplacing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [seen, setSeen] = useState("");
   const [removing, setRemoving] = useState(false);
   const [deleting, setDeleting] = useState<CloudServer | null>(null);
   const servers = s.cloudServers.filter((c) => c.teamId === s.currentTeamId);
   const title = "Hetzner";
   const description = "For this team. Pyo makes servers in your Hetzner project.";
-  const save = async () => {
-    setBusy(true);
-    setError("");
-    const r = await api.saveHetzner(token);
-    setBusy(false);
-    if ("error" in r) return setError(r.error);
-    setToken("");
-    setReplacing(false);
-    toast({ title: "Hetzner connected" });
-  };
   const test = async () => {
     setBusy(true);
     const r = await api.testHetzner();
@@ -163,41 +217,10 @@ export function HetznerPanel() {
               {conn ? <Badge tone="success">Connected</Badge> : <Badge>Not connected</Badge>}
             </div>
           ) : !conn || replacing ? (
-            <form
-              className="space-y-2"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void save();
-              }}
-            >
-              <p className="text-[12px] text-muted-foreground">
-                A project API token with Read & Write.{" "}
-                <a href={DOCS} target="_blank" rel="noreferrer" className="font-medium text-primary hover:text-primary/80">
-                  How to make one
-                </a>
-              </p>
-              <Input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder="API token"
-                aria-label="API token"
-                autoComplete="off"
-                className="h-8"
-                disabled={!s.tailscale}
-              />
-              {error ? <p className="text-[12px] text-destructive">{error}</p> : null}
-              <div className="flex gap-2">
-                <Button type="submit" size="xs" disabled={busy || !token.trim() || !s.tailscale}>
-                  {busy ? "Checking…" : "Save"}
-                </Button>
-                {conn ? (
-                  <Button type="button" size="xs" variant="ghost" onClick={() => setReplacing(false)}>
-                    Cancel
-                  </Button>
-                ) : null}
-              </div>
-            </form>
+            <HetznerConnectForm
+              onSaved={() => setReplacing(false)}
+              onCancel={conn ? () => setReplacing(false) : undefined}
+            />
           ) : (
             <>
               <div className="flex flex-wrap items-center gap-3">
@@ -227,8 +250,8 @@ export function HetznerPanel() {
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-medium">{c.name}</p>
                 <p className="text-[12px] text-muted-foreground">
-                  {cluster?.name ?? "Cluster removed"} · {c.serverType} · {c.location} ·{" "}
-                  {money(c.currency, c.monthly)}/mo
+                  {c.sandboxServerId ? "Sandbox server" : (cluster?.name ?? "Cluster removed")} ·{" "}
+                  {c.serverType} · {c.location} · {money(c.currency, c.monthly)}/mo
                 </p>
                 {c.error ? <p className="text-[12px] text-destructive">{c.error}</p> : null}
               </div>
@@ -398,7 +421,10 @@ export function CloudProgress({ server }: { server: CloudServer }) {
         icon={<ArrowsClockwiseIcon size={15} className="animate-spin" />}
         title={`Deleting ${server.name}`}
       >
-        {server.error ?? "Its services move off it, then Hetzner deletes it."}
+        {server.error ??
+          (server.sandboxServerId
+            ? "It leaves your tailnet, then Hetzner deletes it."
+            : "Its services move off it, then Hetzner deletes it.")}
       </StatusNote>
     );
   return (

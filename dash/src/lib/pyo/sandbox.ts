@@ -5,6 +5,7 @@
 // ports are served on the server's edge proxy instead.
 
 import { request } from "./backend";
+import type { CloudServerState } from "./types";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -157,6 +158,45 @@ export type SandboxServer = {
   createdAt: number;
   edgeDomain: string | null;
   edge?: SandboxEdge;
+  /** What runs its sandboxes, once it reports. */
+  runtime?: "firecracker" | "gvisor" | null;
+  /** The server Pyo made for it at a cloud provider, until it's deleted there. */
+  cloud?: SandboxServerCloud | null;
+};
+
+export type SandboxServerCloud = {
+  /** The cloud server's id, `cs_…`. */
+  id: string;
+  provider: "hetzner";
+  location: string;
+  serverType: string;
+  /** A month, before VAT. */
+  monthly: number;
+  currency: string;
+  ipv4: string | null;
+  state: CloudServerState;
+  error: string | null;
+  signCommand: string | null;
+  createdAt: number;
+  deadlineAt: number;
+};
+
+/** Where Pyo can buy a sandbox server. More plug in here. */
+export const CLOUD_PROVIDERS = [
+  { value: "hetzner", label: "Hetzner", detail: "Billed to your Hetzner project." },
+] as const;
+
+export type CloudProvider = (typeof CLOUD_PROVIDERS)[number]["value"];
+
+export type AddCloudServer = {
+  teamId: string;
+  name: string;
+  provider: CloudProvider;
+  location: string;
+  serverType: string;
+  edgeDomain?: string;
+  sshKey?: string;
+  confirm: boolean;
 };
 
 export type SandboxTemplate = {
@@ -245,9 +285,15 @@ export const sandboxApi = {
       "/api/v1/sandbox-servers",
       { method: "POST", body },
     ),
-  removeServer: (id: string) =>
-    request<{ ok: boolean; stopped: number }>(
-      `/api/v1/sandbox-servers/${enc(id)}`,
+  addCloudServer: (body: AddCloudServer) =>
+    request<{ server: SandboxServer | null; cloudServer: { id: string; name: string } }>(
+      "/api/v1/sandbox-servers/cloud",
+      { method: "POST", body },
+    ),
+  /** `confirm`: also delete it at the cloud provider Pyo made it at. */
+  removeServer: (id: string, confirm = false) =>
+    request<{ ok: boolean; stopped: number; deleting?: boolean }>(
+      `/api/v1/sandbox-servers/${enc(id)}${confirm ? "?confirm=true" : ""}`,
       { method: "DELETE" },
     ),
   issueCert: (id: string, teamId?: string) =>

@@ -9,11 +9,11 @@ import {
 } from "@phosphor-icons/react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
+import { CloudProgress } from "~/components/pyo/Hetzner";
 import {
   act,
-  AddSandboxServer,
-  AddSandboxServerDialog,
   SandboxStatus,
+  ServerState,
   useNow,
   useSandboxes,
 } from "~/components/pyo/sandbox/common";
@@ -44,6 +44,7 @@ import {
   type SandboxLimits,
 } from "~/lib/pyo/sandbox";
 import { roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
+import type { SandboxServer } from "~/lib/pyo/sandbox";
 import { seo } from "~/lib/seo";
 
 export const Route = createFileRoute("/_app/$team/sandboxes/")({
@@ -51,8 +52,10 @@ export const Route = createFileRoute("/_app/$team/sandboxes/")({
   component: SandboxesPage,
 });
 
-// The team's sandboxes. Until a sandbox server joins, the page is where you
-// add one. Sandboxes aren't in the snapshot, so the list polls on its own.
+// The team's sandboxes. With no sandbox server and no sandboxes it's an
+// empty state like the databases', whose button opens Add sandbox server
+// (sandboxes/servers/new). Servers still being set up show above the list.
+// Sandboxes aren't in the snapshot, so the list polls on its own.
 
 type Filter = "live" | "running" | "paused" | "ended";
 
@@ -60,27 +63,16 @@ function SandboxesPage() {
   const s = usePyo();
   const servers = sandboxServersIn(s);
   const q = useSandboxes(s.currentTeamId);
-  const [adding, setAdding] = useState(false);
   const [filter, setFilter] = useState<Filter>("live");
   const [template, setTemplate] = useState("");
   const [deleting, setDeleting] = useState<Sandbox | null>(null);
   const role = roleIn(s);
   const canUse = role !== "viewer";
+  const canManage = role === "owner" || role === "admin";
   const now = useNow();
-
-  // Until a server has joined, the page is where you add one (a joining
-  // server stays here, so its command stays on screen).
-  if (!servers.some((x) => x.state === "ready" || x.state === "unreachable"))
-    return (
-      <Page width="max-w-3xl">
-        <PageHeader title="Sandboxes" description="Isolated machines on demand, on your own servers." />
-        <Panel title="Add a sandbox server">
-          <div className="p-4">
-            <AddSandboxServer />
-          </div>
-        </Panel>
-      </Page>
-    );
+  const pending = servers.filter(
+    (x) => x.state === "joining" || x.state === "refused" || (x.cloud && x.cloud.state !== "ready"),
+  );
 
   const all = q.status === "success" ? q.data.sandboxes : [];
   const live = all.filter((x) => !ended(x));
@@ -101,10 +93,34 @@ function SandboxesPage() {
         ...(canUse
           ? [{ label: "New sandbox", icon: <CubeIcon size={14} />, href: "/sandboxes/new" }]
           : []),
-        { label: "Add server", icon: <HardDrivesIcon size={14} />, onSelect: () => setAdding(true) },
+        ...(canManage
+          ? [{ label: "Add server", icon: <HardDrivesIcon size={14} />, href: "/sandboxes/servers/new" }]
+          : []),
       ]}
     />
   );
+
+  // Nothing yet: the same empty state as the databases'.
+  if (!servers.length && (q.status !== "success" || !all.length))
+    return (
+      <Page>
+        <PageHeader title="Sandboxes" actions={canUse ? newMenu : undefined} />
+        <Panel>
+          <EmptyState
+            icon={CubeIcon}
+            title="No sandboxes yet"
+            description="Isolated machines on demand, on your own servers."
+            action={
+              canManage ? (
+                <ButtonLink href="/sandboxes/servers/new" size="sm">
+                  Add a sandbox server
+                </ButtonLink>
+              ) : undefined
+            }
+          />
+        </Panel>
+      </Page>
+    );
 
   return (
     <Page>
@@ -116,6 +132,7 @@ function SandboxesPage() {
           </>
         }
       />
+      {pending.length ? <PendingServers servers={pending} /> : null}
       {q.status === "success" ? (
         <Usage
           limits={q.data.limits}
@@ -176,7 +193,6 @@ function SandboxesPage() {
           </Panel>
         </ListSection>
       )}
-      <AddSandboxServerDialog open={adding} onClose={() => setAdding(false)} />
       <ConfirmDialog
         open={!!deleting}
         onClose={() => setDeleting(null)}
@@ -188,6 +204,35 @@ function SandboxesPage() {
         }}
       />
     </Page>
+  );
+}
+
+/** Sandbox servers not running sandboxes yet: Pyo's progress at Hetzner, or the join. */
+function PendingServers({ servers }: { servers: SandboxServer[] }) {
+  const s = usePyo();
+  return (
+    <Panel>
+      <ul className="list-rows">
+        {servers.map((x) => {
+          const cloud = s.cloudServers.find((c) => c.sandboxServerId === x.id);
+          return (
+            <li key={x.id} className="space-y-2.5 px-4 py-3">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="text-[13.5px] font-medium">{x.name}</span>
+                {cloud ? null : <ServerState server={x} />}
+              </div>
+              {cloud ? (
+                <CloudProgress server={cloud} />
+              ) : x.state === "refused" ? (
+                <p className="text-[12px] text-destructive">{x.error ?? x.summary}</p>
+              ) : (
+                <p className="text-[12px] text-muted-foreground">Waiting for its command to run on the server.</p>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </Panel>
   );
 }
 

@@ -7,20 +7,15 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
-import { Button } from "~/components/ui/Button";
+import { CloudStateBadge, money } from "~/components/pyo/Hetzner";
+import { Button, ButtonLink } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Menu } from "~/components/ui/Menu";
 import { Meter } from "~/components/ui/Panel";
 import { cloudflareZoneFor, refresh, roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import { sandboxApi, type SandboxServer } from "~/lib/pyo/sandbox";
 import { toast } from "~/lib/pyo/toast";
-import {
-  AddSandboxServerDialog,
-  RuntimeBadge,
-  ServerState,
-  serverCapacity,
-  serverUse,
-} from "./common";
+import { RuntimeBadge, ServerState, serverCapacity, serverUse } from "./common";
 
 /**
  * Sandbox servers on the servers page, next to the clusters: a third kind,
@@ -31,7 +26,6 @@ export function SandboxServers() {
   const servers = sandboxServersIn(s);
   const role = roleIn(s);
   const [removing, setRemoving] = useState<SandboxServer | null>(null);
-  const [adding, setAdding] = useState(false);
   const issuing = servers.some((x) => x.edge?.cert.state === "issuing");
   useEffect(() => {
     if (!issuing) return;
@@ -100,9 +94,9 @@ export function SandboxServers() {
           </p>
         </div>
         {role === "owner" || role === "admin" ? (
-          <Button size="xs" variant="secondary" onClick={() => setAdding(true)}>
+          <ButtonLink href="/sandboxes/servers/new" size="xs" variant="secondary">
             <PlusIcon size={12} /> Add server
-          </Button>
+          </ButtonLink>
         ) : null}
       </div>
       <ul className="list-rows">
@@ -114,13 +108,23 @@ export function SandboxServers() {
                 <div className="flex items-center gap-2.5">
                   <span className="truncate text-[13.5px] font-medium">{x.name}</span>
                   <RuntimeBadge server={x} />
-                  <ServerState server={x} />
+                  {x.cloud && x.cloud.state !== "ready" ? (
+                    <CloudStateBadge state={x.cloud.state} />
+                  ) : (
+                    <ServerState server={x} />
+                  )}
                   {x.teamId ? null : <span className="text-[12px] text-muted-foreground">Installation</span>}
                 </div>
                 <p className="truncate text-[12px] text-muted-foreground">
                   {x.address ? <span className="font-mono text-[11.5px]">{x.address} · </span> : null}
                   {serverCapacity(x)}
                 </p>
+                {x.cloud ? (
+                  <p className="truncate text-[12px] text-muted-foreground">
+                    Hetzner · {x.cloud.serverType} · {x.cloud.location} · {money(x.cloud.currency, x.cloud.monthly)}/mo
+                  </p>
+                ) : null}
+                {x.cloud?.error ? <p className="text-[12px] text-destructive">{x.cloud.error}</p> : null}
                 {x.edge ? <EdgeLine server={x} covered={!!zoneOf(x)} /> : null}
                 {x.state !== "ready" && (x.error || x.summary) ? (
                   <p className={`text-[12px] ${x.state === "refused" || x.state === "unreachable" ? "text-destructive" : "text-muted-foreground"}`}>
@@ -163,29 +167,34 @@ export function SandboxServers() {
           );
         })}
       </ul>
-      <AddSandboxServerDialog open={adding} onClose={() => setAdding(false)} />
       <ConfirmDialog
         open={!!removing}
         onClose={() => setRemoving(null)}
-        title={`Remove ${removing?.name ?? "server"}?`}
-        description={
-          removing?.sandboxes
-            ? `Its ${removing.sandboxes} sandbox${removing.sandboxes === 1 ? "" : "es"} end. Run sandbox.sh --uninstall on the server to take Pyo off it.`
-            : "Run sandbox.sh --uninstall on the server to take Pyo off it."
-        }
-        confirmLabel="Remove server"
+        title={removing?.cloud ? `Delete ${removing.name} at Hetzner?` : `Remove ${removing?.name ?? "server"}?`}
+        description={removeText(removing)}
+        confirmLabel={removing?.cloud ? "Delete server" : "Remove server"}
         onConfirm={() => {
           const x = removing;
           if (!x) return;
           void sandboxApi
-            .removeServer(x.id)
-            .then(() => toast({ title: `Removed ${x.name}` }))
+            .removeServer(x.id, !!x.cloud)
+            .then(() => toast({ title: x.cloud ? `Deleting ${x.name}` : `Removed ${x.name}` }))
             .catch((e: Error) => toast({ tone: "error", title: e.message }))
             .finally(() => void refresh().catch(() => undefined));
         }}
       />
     </section>
   );
+}
+
+/** What removing a server does: its sandboxes end, and one Pyo made goes at Hetzner. */
+function removeText(x: SandboxServer | null) {
+  if (!x) return "";
+  const n = x.sandboxes;
+  const ending = n ? `Its ${n} sandbox${n === 1 ? "" : "es"} end. ` : "";
+  return x.cloud
+    ? `${ending}It leaves your tailnet, and Hetzner deletes it. ${money(x.cloud.currency, x.cloud.monthly)} a month stops.`
+    : `${ending}Run sandbox.sh --uninstall on the server to take Pyo off it.`;
 }
 
 const day = (at: number) =>

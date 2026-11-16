@@ -1809,8 +1809,10 @@ export type CloudServer = {
   id: string;
   teamId: string;
   provider: "hetzner";
-  /** Null once its cluster was removed. */
+  /** Null once its cluster was removed, and for a sandbox server. */
   clusterId: string | null;
+  /** The sandbox server it becomes, instead of a cluster's. */
+  sandboxServerId?: string | null;
   name: string;
   /** The cluster's first server (its control plane). */
   firstServer: boolean;
