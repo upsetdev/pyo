@@ -23,8 +23,8 @@ import {
 } from "~/components/pyo/sandbox/common";
 import { Badge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
-import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
-import { Field, Input, Segmented } from "~/components/ui/Field";
+import { ConfirmDialog } from "~/components/ui/Dialog";
+import { Input, Segmented } from "~/components/ui/Field";
 import { Menu } from "~/components/ui/Menu";
 import {
   Callout,
@@ -90,7 +90,6 @@ function SandboxPage() {
   );
   const tq = useQuery(`sandbox-templates:${s.currentTeamId}`, () => sandboxApi.templates(s.currentTeamId));
   const [deleting, setDeleting] = useState(false);
-  const [renaming, setRenaming] = useState(false);
   const [busy, setBusy] = useState(false);
   const canUse = roleIn(s) !== "viewer";
   const setTab = (t: Tab) =>
@@ -126,25 +125,7 @@ function SandboxPage() {
         icon={
           <TemplateMark template={template} size="lg" className="mt-1" />
         }
-        title={
-          canUse ? (
-            <button
-              type="button"
-              title="Rename"
-              onClick={() => setRenaming(true)}
-              className="group inline-flex max-w-full items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <span className="truncate">{x.name}</span>
-              <PencilSimpleIcon
-                size={16}
-                aria-hidden
-                className="shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
-              />
-            </button>
-          ) : (
-            x.name
-          )
-        }
+        title={canUse ? <NameField x={x} onDone={q.retry} /> : x.name}
         description={<span className="font-mono text-[12px]">{x.id}</span>}
         meta={
           <>
@@ -228,7 +209,6 @@ function SandboxPage() {
           });
         }}
       />
-      <RenameDialog x={x} open={renaming} onClose={() => setRenaming(false)} onDone={q.retry} />
     </Page>
   );
 }
@@ -249,66 +229,69 @@ async function openDesktop(id: string) {
   }
 }
 
-/** A new name for the sandbox. Its id stays. */
-function RenameDialog({
-  x,
-  open,
-  onClose,
-  onDone,
-}: {
-  x: Sandbox;
-  open: boolean;
-  onClose: () => void;
-  onDone: () => void;
-}) {
+/** The sandbox's name, edited in place. Enter or leaving the field saves,
+ * Escape puts it back. Its id stays. */
+function NameField({ x, onDone }: { x: Sandbox; onDone: () => void }) {
+  const [editing, setEditing] = useState(false);
   const [name, setName] = useState(x.name);
+  const [shown, setShown] = useState(x.name);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [wasOpen, setWasOpen] = useState(open);
-  // Starts from the current name each time it opens.
-  if (open !== wasOpen) {
-    setWasOpen(open);
-    if (open) {
-      setName(x.name);
-      setError("");
-    }
-  }
-  const save = async () => {
+  // Follows renames from elsewhere while not editing.
+  if (!editing && !busy && shown !== x.name) setShown(x.name);
+  const done = async (keep: boolean) => {
     const n = name.trim();
-    if (!n || busy) return;
-    if (n === x.name) return onClose();
+    setEditing(false);
+    if (!keep || !n || n === shown) return;
+    setShown(n);
     setBusy(true);
     try {
       await sandboxApi.rename(x.id, n);
-      onClose();
       onDone();
     } catch (e) {
-      setError((e as Error).message);
+      setShown(x.name);
+      toast({ tone: "error", title: (e as Error).message });
     } finally {
       setBusy(false);
     }
   };
+  if (editing)
+    return (
+      <input
+        autoFocus
+        aria-label="Name"
+        value={name}
+        maxLength={63}
+        onFocus={(e) => e.currentTarget.select()}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={() => void done(true)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") {
+            setName(shown);
+            void done(false);
+          }
+        }}
+        size={Math.max(name.length, 4)}
+        className="-mx-1.5 max-w-full rounded-md bg-transparent px-1.5 font-semibold tracking-tight text-foreground outline-none ring-1 ring-border focus:ring-2 focus:ring-ring"
+      />
+    );
   return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="Rename sandbox"
-      onSubmit={() => void save()}
-      footer={
-        <>
-          <Button variant="ghost" size="sm" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button type="submit" size="sm" disabled={!name.trim() || busy}>
-            {busy ? "Saving…" : "Save"}
-          </Button>
-        </>
-      }
+    <button
+      type="button"
+      title="Rename"
+      onClick={() => {
+        setName(shown);
+        setEditing(true);
+      }}
+      className="group -mx-1.5 inline-flex max-w-full items-center gap-2 rounded-md px-1.5 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring"
     >
-      <Field label="Name" error={error || undefined}>
-        {(p) => <Input {...p} value={name} onChange={(e) => setName(e.target.value)} maxLength={63} autoFocus />}
-      </Field>
-    </Dialog>
+      <span className="truncate">{shown}</span>
+      <PencilSimpleIcon
+        size={16}
+        aria-hidden
+        className="shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+      />
+    </button>
   );
 }
 
