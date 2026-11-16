@@ -304,6 +304,8 @@ async fn makes_a_template_from_a_public_image() {
     note("total_ms", (b.finished_at.unwrap() - b.started_at).into());
     note("snapshots", serde_json::json!(done.snapshots));
     assert_eq!(b.pulled, b.image_bytes);
+    // Every layer counts in full once unpacked.
+    assert_eq!(b.unpacked, b.image_bytes);
     assert!(
         done.has_snapshot(NetworkMode::None, 1, 512, 2048),
         "{done:?}"

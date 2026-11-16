@@ -393,6 +393,17 @@ pub async fn run_command(
             mgr.delete_template(&template).await?;
             DaemonResult::TemplateDeleted { template }
         }
+        DaemonCommand::Template { template } => {
+            st.authorize(token, None, Scope::Admin)?;
+            DaemonResult::Template {
+                template: mgr.template_progress(&template).ok_or_else(|| {
+                    fail(
+                        ErrorCode::NotFound,
+                        format!("The sandbox template {template} isn't on this server."),
+                    )
+                })?,
+            }
+        }
     })
 }
 

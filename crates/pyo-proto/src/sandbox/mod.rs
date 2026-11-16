@@ -681,9 +681,13 @@ pub struct TemplateBuild {
     /// While building: "queued", "pulling", "unpacking" or "snapshotting".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
-    /// Bytes pulled so far and in all, while pulling.
+    /// Bytes pulled so far, of `image_bytes` in all.
     #[serde(default)]
     pub pulled: u64,
+    /// Bytes of the pulled layers unpacked so far, of `image_bytes` in
+    /// all. Daemons before it leave it out.
+    #[serde(default)]
+    pub unpacked: u64,
     /// The image's compressed layers.
     #[serde(default)]
     pub image_bytes: u64,
@@ -853,6 +857,12 @@ pub enum DaemonCommand {
     DeleteTemplate {
         template: String,
     },
+    /// How far a template got, without the rest of the report: cheap
+    /// enough to ask every second while it's made. Daemons before it
+    /// refuse it, and Pyo falls back to the report.
+    Template {
+        template: String,
+    },
 }
 
 /// A private key in a command: never printed.
@@ -896,7 +906,8 @@ impl DaemonCommand {
             | DaemonCommand::SnapshotTemplate { .. }
             | DaemonCommand::SetEdgeCert { .. }
             | DaemonCommand::PrepareTemplate { .. }
-            | DaemonCommand::DeleteTemplate { .. } => None,
+            | DaemonCommand::DeleteTemplate { .. }
+            | DaemonCommand::Template { .. } => None,
         }
     }
 }
@@ -1265,6 +1276,9 @@ mod tests {
                 max_mib: Some(1024),
             },
             DaemonCommand::DeleteTemplate {
+                template: "stp_abc".into(),
+            },
+            DaemonCommand::Template {
                 template: "stp_abc".into(),
             },
         ];

@@ -59,6 +59,8 @@ pub struct Record {
 pub struct Build {
     record: StdMutex<TemplateBuild>,
     pulled: AtomicU64,
+    /// Compressed layer bytes unpacked so far.
+    unpacked: Arc<AtomicU64>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -70,11 +72,26 @@ impl Build {
             .unwrap_or_else(|p| p.into_inner())
             .clone();
         b.pulled = self.pulled.load(Ordering::Relaxed);
+        b.unpacked = self.unpacked.load(Ordering::Relaxed);
         b
     }
 
     fn set(&self, f: impl FnOnce(&mut TemplateBuild)) {
         f(&mut self.record.lock().unwrap_or_else(|p| p.into_inner()));
+    }
+}
+
+/// Counts the bytes read through it, for the unpack's progress.
+struct Counted<R> {
+    inner: R,
+    n: Arc<AtomicU64>,
+}
+
+impl<R: std::io::Read> std::io::Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let k = self.inner.read(buf)?;
+        self.n.fetch_add(k as u64, Ordering::Relaxed);
+        Ok(k)
     }
 }
 
@@ -148,18 +165,33 @@ impl Manager {
     /// One template as the report shows it, or None when there's none by
     /// that name.
     pub fn template_report(&self, name: &str) -> Option<TemplateReport> {
+        self.template_report_with(name, true)
+    }
+
+    /// How far a template got, for Pyo to ask every second while it's
+    /// made: a build in progress leaves out its size, which takes a walk
+    /// through every file it unpacked so far.
+    pub fn template_progress(&self, name: &str) -> Option<TemplateReport> {
+        self.template_report_with(name, false)
+    }
+
+    fn template_report_with(&self, name: &str, building_bytes: bool) -> Option<TemplateReport> {
         let p = self.template_paths(name);
         let snapshots = storage::dir_names(&p.dir.join("snapshots"));
-        let bytes = disk_bytes(&p.dir, &mut Default::default());
         if let Some(b) = self.build_of(name) {
             return Some(TemplateReport {
                 name: name.into(),
                 snapshots,
                 state: TemplateState::Building,
-                bytes,
+                bytes: if building_bytes {
+                    disk_bytes(&p.dir, &mut Default::default())
+                } else {
+                    0
+                },
                 build: Some(b.snapshot()),
             });
         }
+        let bytes = disk_bytes(&p.dir, &mut Default::default());
         if let Some(r) = read_record(&p.dir) {
             return Some(TemplateReport {
                 name: name.into(),
@@ -240,6 +272,7 @@ impl Manager {
         let build = Arc::new(Build {
             record: StdMutex::new(record),
             pulled: AtomicU64::new(0),
+            unpacked: Arc::new(AtomicU64::new(0)),
             cancel: Arc::new(AtomicBool::new(false)),
         });
         self.builds
@@ -395,14 +428,23 @@ impl Manager {
         let out = p.build().join("rootfs.ext4");
         let envd = self.cfg.envd.clone();
         let cancel = b.cancel.clone();
+        let unpacked = b.unpacked.clone();
         let out2 = out.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let mut u = Unpacker::new(&staging, max_bytes, cancel)?;
+            let mut done = 0;
             for (i, (media, f)) in files.iter().enumerate() {
-                let file = std::fs::File::open(f)?;
+                // A layer may end before its last bytes are read: each
+                // layer counts in full once applied.
+                done += std::fs::metadata(f)?.len();
+                let file = Counted {
+                    inner: std::fs::File::open(f)?,
+                    n: unpacked.clone(),
+                };
                 let r = rootfs::decompress(media, std::io::BufReader::new(file))?;
                 u.apply(r)
                     .with_context(|| format!("unpacking layer {}", i + 1))?;
+                unpacked.store(done, Ordering::Relaxed);
                 let _ = std::fs::remove_file(f);
             }
             u.add_file("sbin/pyo-envd", &envd, 0o755)?;
@@ -518,5 +560,26 @@ impl Manager {
                 let _ = tokio::fs::remove_dir_all(dir.join(BUILD_DIR)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn counted_reads_add_up() {
+        let n = Arc::new(AtomicU64::new(5));
+        let mut r = Counted {
+            inner: &b"hello world"[..],
+            n: n.clone(),
+        };
+        let mut buf = [0u8; 4];
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(n.load(Ordering::Relaxed), 9);
+        let mut rest = Vec::new();
+        r.read_to_end(&mut rest).unwrap();
+        assert_eq!(n.load(Ordering::Relaxed), 16);
     }
 }
