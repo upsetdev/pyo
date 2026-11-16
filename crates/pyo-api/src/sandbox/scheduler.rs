@@ -10,6 +10,10 @@
 //! 2. a snapshot of the template at this size, so it restores in
 //!    milliseconds instead of booting;
 //! 3. the most headroom left.
+//!
+//! A template made on first use (Pyo's `base`) may also go to a server
+//! that doesn't have it yet, which makes it first ([`place`]). One already
+//! making it comes first, so two creates share one build.
 
 use pyo_proto::sandbox::{
     CapabilityReport, CapacityReport, Isolation, NetworkMode, Runtime, SandboxSpec, TemplateReport,
@@ -23,6 +27,7 @@ pub const FRESH_SECS: i64 = 90;
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub id: String,
+    pub name: String,
     pub enabled: bool,
     pub ready: bool,
     /// Seconds since its last report.
@@ -86,9 +91,11 @@ impl NoServer {
     }
 }
 
-/// The best server for `spec`, whose template servers keep as
-/// `spec.template`.
-pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Candidate, NoServer> {
+/// The servers up and able to run `spec`, whatever their templates.
+fn usable<'a>(
+    servers: &'a [Candidate],
+    spec: &SandboxSpec,
+) -> Result<Vec<&'a Candidate>, NoServer> {
     if servers.is_empty() {
         return Err(NoServer::None);
     }
@@ -122,7 +129,13 @@ pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Cand
     if networked.is_empty() {
         return Err(NoServer::NoNetwork);
     }
-    let with_template: Vec<&Candidate> = networked
+    Ok(networked)
+}
+
+/// The best server for `spec`, whose template servers keep as
+/// `spec.template`.
+pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Candidate, NoServer> {
+    let with_template: Vec<&Candidate> = usable(servers, spec)?
         .into_iter()
         .filter(|c| {
             c.templates
@@ -191,6 +204,64 @@ pub fn pick_revision<'a>(
     Err(why)
 }
 
+/// Where a new sandbox goes, and what it starts from there.
+#[derive(Debug, Clone)]
+pub struct Placement<'a> {
+    pub server: &'a Candidate,
+    /// The name the server keeps the template under.
+    pub template: String,
+    /// The server makes the template first: it doesn't have it ready.
+    pub build: bool,
+}
+
+/// [`pick_revision`], and for a template made on first use (`on_demand`)
+/// that no server has ready: a server with room, which makes it first.
+/// One already making it comes first, then Firecracker, then the most
+/// headroom.
+pub fn place<'a>(
+    servers: &'a [Candidate],
+    spec: &SandboxSpec,
+    id: &str,
+    on_demand: bool,
+) -> Result<Placement<'a>, NoServer> {
+    let why = match pick_revision(servers, spec, id) {
+        Ok((server, template)) => {
+            return Ok(Placement {
+                server,
+                template,
+                build: false,
+            });
+        }
+        Err(e) => e,
+    };
+    if !on_demand || !matches!(why, NoServer::NoTemplate(_)) {
+        return Err(why);
+    }
+    let need = (spec.memory_mib as u64) << 20;
+    let building = |c: &Candidate| {
+        c.templates
+            .iter()
+            .any(|t| t.name == spec.template && t.state == TemplateState::Building)
+    };
+    usable(servers, spec)?
+        .into_iter()
+        .filter(|c| c.headroom() >= need)
+        .max_by_key(|c| {
+            (
+                building(c),
+                c.capability.runtime == Runtime::Firecracker,
+                c.headroom(),
+                std::cmp::Reverse(c.id.clone()),
+            )
+        })
+        .map(|server| Placement {
+            server,
+            template: spec.template.clone(),
+            build: true,
+        })
+        .ok_or(NoServer::Full)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +272,7 @@ mod tests {
     fn server(id: &str, runtime: Runtime, free_gib: u64) -> Candidate {
         Candidate {
             id: id.into(),
+            name: format!("{id}-name"),
             enabled: true,
             ready: true,
             report_age_secs: 5,
@@ -374,6 +446,97 @@ mod tests {
             pick_revision(&[full], &s, "stp_base").map(|(c, _)| c.id.clone()),
             Err(NoServer::Full)
         );
+    }
+
+    #[test]
+    fn base_goes_to_a_server_without_it_which_makes_it_first() {
+        let mut s = spec();
+        s.template = "stp_base.new".into();
+        let servers = vec![
+            server("small", Runtime::Firecracker, 2),
+            server("big", Runtime::Firecracker, 8),
+            server("gv", Runtime::Gvisor, 30),
+        ];
+        // A team's template isn't made on first use.
+        assert_eq!(
+            place(&servers, &s, "stp_base", false).map(|p| p.server.id.clone()),
+            Err(NoServer::NoTemplate("stp_base.new".into()))
+        );
+        let p = place(&servers, &s, "stp_base", true).unwrap();
+        assert_eq!(
+            (p.server.id.as_str(), p.template.as_str(), p.build),
+            ("big", "stp_base.new", true),
+            "Firecracker, then room"
+        );
+        // A server that has it ready wins, with no build.
+        let mut has = server("has", Runtime::Firecracker, 2);
+        has.templates[0].name = "stp_base.new".into();
+        let mut with = servers.clone();
+        with.push(has);
+        let p = place(&with, &s, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("has", false));
+        // So does one with an older revision, while the new one is made.
+        let mut old = server("old", Runtime::Firecracker, 2);
+        old.templates[0].name = "stp_base.old".into();
+        let mut with = servers.clone();
+        with.push(old);
+        let p = place(&with, &s, "stp_base", true).unwrap();
+        assert_eq!(
+            (p.server.id.as_str(), p.template.as_str(), p.build),
+            ("old", "stp_base.old", false)
+        );
+        // No room anywhere.
+        let mut full = servers.clone();
+        for c in &mut full {
+            c.capacity.memory_available = 0;
+        }
+        assert_eq!(
+            place(&full, &s, "stp_base", true).map(|p| p.server.id.clone()),
+            Err(NoServer::Full)
+        );
+        // The usual reasons still count.
+        let mut vm = s.clone();
+        vm.isolation = Isolation::Vm;
+        assert_eq!(
+            place(&[server("gv", Runtime::Gvisor, 30)], &vm, "stp_base", true)
+                .map(|p| p.server.id.clone()),
+            Err(NoServer::NoVm)
+        );
+        assert_eq!(
+            place(&[], &s, "stp_base", true).map(|p| p.server.id.clone()),
+            Err(NoServer::None)
+        );
+    }
+
+    #[test]
+    fn two_creates_share_one_build() {
+        let mut s = spec();
+        s.template = "stp_base.new".into();
+        // The first create set "small" making it. The second goes there
+        // too, though "big" has more room.
+        let mut small = server("small", Runtime::Firecracker, 3);
+        small.templates[0] = TemplateReport {
+            name: "stp_base.new".into(),
+            state: TemplateState::Building,
+            ..Default::default()
+        };
+        small.pending_bytes = 1 << 30;
+        let mut servers = vec![small, server("big", Runtime::Firecracker, 8)];
+        let p = place(&servers, &s, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("small", true));
+        // Unless it has no room left: then another server makes it.
+        servers[0].pending_bytes = 3 << 30;
+        let p = place(&servers, &s, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("big", true));
+        // A failed build is tried again.
+        let mut failed = server("failed", Runtime::Firecracker, 8);
+        failed.templates[0] = TemplateReport {
+            name: "stp_base.new".into(),
+            state: TemplateState::Failed,
+            ..Default::default()
+        };
+        let p = place(std::slice::from_ref(&failed), &s, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("failed", true));
     }
 
     #[test]

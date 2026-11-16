@@ -23,6 +23,7 @@ pub enum Command {
     Create {
         /// The sandbox template, like node-22 (see pyo sandbox templates ls).
         /// Default base: Debian 13 with git, Python, uv, Node.js and pnpm.
+        /// A server makes base the first time it's used there.
         template: Option<String>,
         /// CPUs. Default 1.
         #[arg(long)]
@@ -777,12 +778,13 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
 /// A template's image as the list shows it. Pyo's built-in one says what
 /// it runs and leaves out its version: Debian 13 · ghcr.io/upsetdev/pyo/sandbox-base.
 fn template_image(t: &Value) -> String {
-    let image = t["source"]["image"].as_str().unwrap_or("-");
-    match t["source"]["os"].as_str() {
-        Some(os) if t["builtin"] == true => {
+    let image = t["source"]["image"].as_str();
+    match (t["source"]["os"].as_str(), image) {
+        (Some(os), Some(image)) if t["builtin"] == true => {
             format!("{os} · {}", pyo_proto::image_repo(image))
         }
-        _ => image.to_owned(),
+        (Some(os), None) if t["builtin"] == true => os.to_owned(),
+        _ => image.unwrap_or("-").to_owned(),
     }
 }
 

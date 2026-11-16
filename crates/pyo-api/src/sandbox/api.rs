@@ -80,7 +80,7 @@ async fn team_read(s: &AppState, user: &crate::auth::User, team: &str) -> ApiRes
 #[utoipa::path(get, path = "/sandboxes", operation_id = "listSandboxes", tag = "Sandboxes",
     params(ListQuery),
     responses(
-        (status = 200, description = "`sandboxes`, newest first, each with `id`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon), `edgeUrl` (its server's edge proxy, or null), `ports` (each `port`, `public` and `url`), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt`, `pausedAt` and `endedAt`. Also `limits` (the team's) and `inUse` (what its sandboxes take now).", body = Object),
+        (status = 200, description = "`sandboxes`, newest first, each with `id`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `preparing` (true while it waits for its server to make its template), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon), `edgeUrl` (its server's edge proxy, or null), `ports` (each `port`, `public` and `url`), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt`, `pausedAt` and `endedAt`. Also `limits` (the team's) and `inUse` (what its sandboxes take now).", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -134,6 +134,10 @@ pub(crate) async fn get_one(
 /// terminals, files and ports there. Ask for a new token with
 /// `createSandboxToken`. `teamId` may be left out when the API key (or
 /// you) can use only one team.
+///
+/// A server that doesn't have the template `base` yet makes it first:
+/// the first sandbox from `base` there takes a minute or so longer, and
+/// later ones start at once.
 #[utoipa::path(post, path = "/sandboxes", operation_id = "createSandbox", tag = "Sandboxes",
     request_body(content = CreateSandbox),
     responses(
@@ -142,7 +146,8 @@ pub(crate) async fn get_one(
         (status = 403, description = "Your role, the API key's access or the team's sandbox limits don't allow it.", body = ErrorBody),
         (status = 404, description = "No such team, template or project.", body = ErrorBody),
         (status = 409, description = "No sandbox server can run it: none yet, none with the template, or none with KVM for `isolation: vm`.", body = ErrorBody),
-        (status = 503, description = "Every sandbox server is full or down. Try again soon.", body = ErrorBody),
+        (status = 502, description = "The server couldn't make `base`. The error says why.", body = ErrorBody),
+        (status = 503, description = "Every sandbox server is full or down, or `base` is still being made there. Try again soon.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("sandboxes"))))]
 pub(crate) async fn create(
@@ -491,7 +496,7 @@ pub(crate) async fn create_dns_record(
 #[utoipa::path(get, path = "/sandbox-templates", operation_id = "listSandboxTemplates", tag = "Sandboxes",
     params(TeamQuery),
     responses(
-        (status = 200, description = "`templates`, each with `id`, `teamId` (null for the installation's), `name`, `source` (`kind` and `image`), `state` (\"pending\", \"building\", \"ready\" or \"failed\", from its servers), `servers`, `error` and `createdAt`. Each of `servers` is a sandbox server that may use it, with `id`, `name`, `state` (\"pending\", \"building\", \"ready\" or \"failed\"), `phase` while building (\"queued\", \"pulling\", \"unpacking\" or \"snapshotting\"), `pulled` and `imageBytes`, `pullMs`, `unpackMs` and `snapshotMs`, `bytes` (disk it takes there), `snapshots` and `error`.", body = Object),
+        (status = 200, description = "`templates`, each with `id`, `teamId` (null for the installation's), `name`, `source` (`kind` and `image`), `state` (\"pending\", \"building\", \"ready\" or \"failed\", from its servers, and \"unavailable\" for `base` while Pyo has no image for it), `builtin`, `servers`, `error` and `createdAt`. `base` is always listed and ready to use: servers make it on first use, so its `servers` are those that have it. Each of the other templates' `servers` is a sandbox server that may use it, with `id`, `name`, `state` (\"pending\", \"building\", \"ready\" or \"failed\"), `phase` while building (\"queued\", \"pulling\", \"unpacking\" or \"snapshotting\"), `pulled` and `imageBytes`, `pullMs`, `unpackMs` and `snapshotMs`, `bytes` (disk it takes there), `snapshots` and `error`.", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]

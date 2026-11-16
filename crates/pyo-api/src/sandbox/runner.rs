@@ -21,8 +21,9 @@ pub const TICK: Duration = Duration::from_secs(15);
 pub const UNREACHABLE_SECS: i64 = 60;
 /// A sandbox past its lifetime by this much is ended by Pyo.
 const GRACE_SECS: i64 = 30;
-/// A sandbox still creating after this long failed.
-const CREATE_TIMEOUT_SECS: i64 = 120;
+/// A sandbox still creating after this long failed. Its create may first
+/// wait for its server to make `base` ([`super::firstuse::LIMIT`]).
+const CREATE_TIMEOUT_SECS: i64 = super::firstuse::LIMIT.as_secs() as i64 + 120;
 
 pub async fn runner(s: AppState) {
     let mut tick = tokio::time::interval(TICK);

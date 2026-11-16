@@ -6,11 +6,16 @@
 //! - Seeding: when a worker starts, and in every sandbox round, Pyo makes
 //!   sure `base` exists and points at its release's image
 //!   (`PYO_SANDBOX_BASE_REF`, pinned by digest in release.json). It's
-//!   idempotent.
+//!   idempotent. It's ready to use from the start, with or without servers.
+//!   Lists show it even before it's added ([`listed`]).
+//! - On first use: servers don't make it when they join. The first sandbox
+//!   that needs it on a server has the server make it, then starts
+//!   ([`super::firstuse`]). Later ones there start from that copy.
 //! - On update: a new release has a new image, so `base` gets a new
-//!   revision (the digest's start). Servers make it beside the old one in
-//!   the background, and [`super::templates`] moves new sandboxes over
-//!   once it's ready and deletes the old one once no sandbox uses it.
+//!   revision (the digest's start). Servers that have an older one make it
+//!   beside it in the background, and [`super::templates`] moves new
+//!   sandboxes over once it's ready and deletes the old one once no
+//!   sandbox uses it. Servers that never used it stay as they are.
 //!   An older Pyo still running during the update never moves it back.
 //! - Dev builds have no image of their own: they use the latest release
 //!   Pyo found when it checked for updates, or wait for one.
@@ -29,6 +34,12 @@ pub const NAME: &str = "base";
 pub const ID: &str = "stp_base";
 /// What it runs, shown beside its image.
 pub const OS: &str = "Debian 13";
+
+/// Whether servers make template `id` on first use instead of when they
+/// join: only `base`.
+pub fn on_demand(id: &str) -> bool {
+    id == ID
+}
 
 /// The image to seed `base` from, and the release it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +69,42 @@ pub fn revision(image: &str) -> Option<String> {
 /// The template's source for an image.
 pub fn source(w: &Wanted) -> Value {
     json!({ "kind": "image", "image": w.image, "os": OS, "release": w.release })
+}
+
+/// Why `base` can't be used yet, when Pyo has no image for it.
+pub const UNAVAILABLE: &str =
+    "Pyo has no image for base yet. It gets one when it checks for updates.";
+
+/// `base` as a list shows it before it's added: as it will be, from the
+/// image it would have. Unavailable, with why, when there's none yet.
+pub fn view(want: Option<&Wanted>) -> Value {
+    let (source, state, error) = match want {
+        Some(w) => (source(w), "ready", None),
+        None => (
+            json!({ "kind": "image", "os": OS }),
+            "unavailable",
+            Some(UNAVAILABLE),
+        ),
+    };
+    json!({
+        "id": ID, "teamId": null, "name": NAME, "source": source, "state": state,
+        "builtin": true, "revision": want.and_then(|w| revision(&w.image)),
+        "snapshots": {}, "error": error, "createdBy": "Pyo",
+        "createdAt": null, "updatedAt": null, "servers": [],
+    })
+}
+
+/// Whether `base` is in the database yet.
+pub async fn added(db: &sqlx::PgPool) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pyo.sandbox_templates WHERE id = $1)")
+        .bind(ID)
+        .fetch_one(db)
+        .await
+}
+
+/// [`view`] with the image Pyo would add it with now.
+pub async fn listed(db: &sqlx::PgPool) -> Value {
+    view(wanted(db).await.as_ref())
 }
 
 /// What seeding does, given the template's source now (None: there's no
@@ -151,7 +198,7 @@ pub async fn seed_from(s: &AppState, want: &Wanted) -> anyhow::Result<Seed> {
         Seed::Insert => {
             let res = sqlx::query(
                 "INSERT INTO pyo.sandbox_templates (id, team_id, name, source, state, created_by, builtin, revision)
-                 VALUES ($1, NULL, $2, $3, 'pending', 'Pyo', true, $4)
+                 VALUES ($1, NULL, $2, $3, 'ready', 'Pyo', true, $4)
                  ON CONFLICT (id) DO NOTHING",
             )
             .bind(ID)
@@ -253,6 +300,25 @@ mod tests {
     }
 
     #[test]
+    fn listed_before_it_is_added() {
+        let v = view(Some(&want(A, "0.4.1")));
+        assert_eq!(
+            (v["id"].as_str(), v["name"].as_str(), v["state"].as_str()),
+            (Some(ID), Some(NAME), Some("ready"))
+        );
+        assert_eq!(v["source"]["image"], A);
+        assert_eq!(v["revision"], "aaaaaaaaaaaa");
+        assert_eq!(v["builtin"], true);
+        assert_eq!(v["servers"], json!([]));
+        // No image anywhere: listed, and why it can't be used yet.
+        let v = view(None);
+        assert_eq!(v["state"], "unavailable");
+        assert_eq!(v["error"], UNAVAILABLE);
+        assert_eq!(v["source"]["os"], OS);
+        assert!(!UNAVAILABLE.contains(';'));
+    }
+
+    #[test]
     fn revisions_come_from_the_digest() {
         assert_eq!(revision(A).as_deref(), Some("aaaaaaaaaaaa"));
         assert_eq!(revision(B).as_deref(), Some("cccccccccccc"));
@@ -319,7 +385,7 @@ mod tests {
         let (n, state, src, rev, builtin, team) = row().await;
         assert_eq!(
             (n.as_str(), state.as_str(), rev.as_deref(), builtin, team),
-            ("base", "pending", Some("aaaaaaaaaaaa"), true, None)
+            ("base", "ready", Some("aaaaaaaaaaaa"), true, None)
         );
         assert_eq!(src["image"], A);
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.sandbox_templates")
