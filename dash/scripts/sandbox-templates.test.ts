@@ -120,6 +120,9 @@ test("the desktop needs room, and opens through the daemon", () => {
   expect(url.origin + url.pathname).toBe("http://100.64.0.2:7070/v1/sandboxes/sbx_abc/web/6080/vnc.html");
   expect(url.searchParams.get("pyo_token")).toBe("pyosbx1.x.y");
   expect(url.searchParams.get("autoconnect")).toBe("1");
+  expect(url.searchParams.has("app")).toBe(false);
+  const chromium = new URL(desktopUrl("http://100.64.0.2:7070", "sbx_abc", "t", "chromium"));
+  expect(chromium.searchParams.get("app")).toBe("chromium");
   // noVNC finds its WebSocket beside the page.
   expect(url.searchParams.has("path")).toBe(false);
 });

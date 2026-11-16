@@ -65,16 +65,21 @@ export const DESKTOP_MIN = { cpus: 2, memoryMib: 2048 };
  * desktop's for it, none for the rest. */
 export const minSize = (t: TemplateLike | undefined) => (t && isDesktop(t) ? DESKTOP_MIN : null);
 
+/** An app the desktop can bring to the front when its screen opens. */
+export type DesktopApp = "chromium";
+
 /** The desktop's screen in a browser: noVNC through the daemon's
  * `/web/{port}/` (crates/pyo-sandbox api.rs), which takes the token once
  * and keeps it in a cookie for that sandbox's pages. noVNC finds its
  * WebSocket beside the page (websockify). */
-export function desktopUrl(daemon: string, sandboxId: string, token: string) {
+export function desktopUrl(daemon: string, sandboxId: string, token: string, app?: DesktopApp) {
   const prefix = `v1/sandboxes/${encodeURIComponent(sandboxId)}/web/${DESKTOP_PORT}/`;
   const q = new URLSearchParams({
     autoconnect: "1",
     resize: "remote",
     reconnect: "1",
+    // The desktop brings it to the front (deploy/images/sandbox-desktop/desktop.py).
+    ...(app ? { app } : {}),
     pyo_token: token,
   });
   return `${daemon.replace(/\/$/, "")}/${prefix}vnc.html?${q}`;

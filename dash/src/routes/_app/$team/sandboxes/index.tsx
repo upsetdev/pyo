@@ -13,6 +13,8 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { CloudProgress } from "~/components/pyo/Hetzner";
 import { TailnetLockWait } from "~/components/pyo/TailnetLock";
+import { siGooglechrome } from "simple-icons";
+import { BrandMark } from "~/components/pyo/common";
 import { TemplateMark, templateOf } from "~/components/pyo/sandbox/TemplateMark";
 import {
   act,
@@ -373,6 +375,19 @@ function SandboxTable({
                       onClick={() => void openDesktop(x.id)}
                     >
                       <MonitorIcon size={16} />
+                    </Button>
+                  </Tooltip>
+                ) : null}
+                {canUse && x.state === "running" && isDesktop(templateOf(x, templates)) ? (
+                  <Tooltip content="Chromium" focusable={false}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      aria-label={`Chromium in ${x.name}`}
+                      onClick={() => void openDesktop(x.id, { app: "chromium" })}
+                    >
+                      <BrandMark icon={siGooglechrome} size={15} tone="mono" />
                     </Button>
                   </Tooltip>
                 ) : null}

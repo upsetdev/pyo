@@ -5,7 +5,7 @@
 // ports are served on the server's edge proxy instead.
 
 import { request } from "./backend";
-import { BASE_TEMPLATE, desktopUrl } from "./sandboxTemplates";
+import { BASE_TEMPLATE, desktopUrl, type DesktopApp } from "./sandboxTemplates";
 import { toast } from "./toast";
 import type { CloudServerState } from "./types";
 
@@ -649,12 +649,12 @@ export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
 
 /** The desktop's screen in a new tab, through the sandbox server's daemon
  * on the tailnet. The tab opens at once, so browsers don't block it. */
-export async function openDesktop(id: string) {
+export async function openDesktop(id: string, opts: { app?: DesktopApp } = {}) {
   const tab = window.open("about:blank", "_blank");
   if (tab) tab.opener = null;
   try {
     const c = await connectionFor(id);
-    const url = desktopUrl(c.url, id, c.token);
+    const url = desktopUrl(c.url, id, c.token, opts.app);
     if (tab) tab.location.href = url;
     else window.location.href = url;
   } catch (e) {
