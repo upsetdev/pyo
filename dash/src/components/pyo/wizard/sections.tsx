@@ -126,6 +126,7 @@ export function useDraftSections(
   attempted: boolean,
   otherNames: string[] = [],
   providers?: Provider[],
+  ownIds: string[] = [],
 ) {
   const s = usePyo();
   // The builder decides when it has the code: the Dockerfile, else the
@@ -147,23 +148,26 @@ export function useDraftSections(
       : (found ?? "Zero config");
   const t = getTemplate(d.templateId);
   const clusters = clustersIn(s);
-  // A new project has no services yet, so any name is free there.
-  const ctx = useMemo(
-    () => ({
+  // A new project has no services yet, so any name is free there. The
+  // service this draft is creating doesn't take its own name or domains.
+  const ctx = useMemo(() => {
+    const others = s.services.filter((a) => !ownIds.includes(a.id));
+    return {
       clusters,
-      takenNames: s.services
+      takenNames: others
         .filter((a) => a.projectId === d.projectId)
         .map((a) => a.name)
         .concat(otherNames),
       takenHosts: Object.fromEntries(
-        s.services.flatMap((a) =>
+        others.flatMap((a) =>
           a.domains.map((x) => [x.hostname.toLowerCase(), a.name]),
         ),
       ),
       providers,
-    }),
+    };
+  },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- names by value
-    [clusters, d.projectId, s.services, otherNames.join(), providers],
+    [clusters, d.projectId, s.services, otherNames.join(), providers, ownIds.join()],
   );
   const issuesOf = (k: Collapsible | "general"): Issues =>
     SECTION_CHECKS[k].reduce<Issues>(

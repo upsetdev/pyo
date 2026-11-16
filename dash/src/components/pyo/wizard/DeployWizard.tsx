@@ -585,7 +585,13 @@ function Configure({
     () => s.services.filter((a) => a.projectId === d.projectId).map((a) => providerOfService(a)),
     [s.services, d.projectId],
   );
-  const sections = useDraftSections(d, set, attempted, [], providers);
+  // Services this form made: shown in the store at once, they don't count
+  // as taking the draft's own name or domains.
+  const [ownIds, setOwnIds] = useState<string[]>([]);
+  const [creating, setCreating] = useState(false);
+  // While it's being created the form was valid: no problems flash up.
+  const showProblems = attempted && !creating;
+  const sections = useDraftSections(d, set, showProblems, [], providers, ownIds);
   const { t, all, count, shown, header, summaries, rows, icons, runsOn, project } = sections;
 
   // A template's databases: each picked or made, connected on create.
@@ -596,7 +602,6 @@ function Configure({
   const catalog = useExtensionCatalog();
   const dbProblems = useDbProblems(reqs, dbs, d.clusterId, d.name, catalog);
   const [dbError, setDbError] = useState("");
-  const [creating, setCreating] = useState(false);
   const made = useRef<{ projectId?: string; companions: string[] }>({ companions: [] });
   const clusterName = s.clusters.find((c) => c.id === d.clusterId)?.name ?? "the cluster";
 
@@ -693,7 +698,8 @@ function Configure({
     // On to the deployment once the API has the service. A refusal shows
     // as a toast and the form stays as it is.
     setCreating(true);
-    const { deploymentId, done } = api.createService(target, { databases, confirm });
+    const { serviceId, deploymentId, done } = api.createService(target, { databases, confirm });
+    setOwnIds((ids) => [...ids, serviceId]);
     if (!(await done)) {
       setCreating(false);
       return;
@@ -718,7 +724,7 @@ function Configure({
   const [open, setOpen] = useState<Partial<Record<Collapsible, boolean>>>(
     initial.cron ? { schedule: true } : {},
   );
-  const bad = (k: Collapsible) => attempted && !!Object.keys(all[k]).length;
+  const bad = (k: Collapsible) => showProblems && !!Object.keys(all[k]).length;
   const isOpen = (k: Collapsible) =>
     bad(k) || (open[k] ?? ((k === "volumes" && !!t?.storage?.required) || (k === "domains" && "domains" in all.domains)));
   const toggle = (k: Collapsible) =>
@@ -748,7 +754,7 @@ function Configure({
           icon={<ProjectIcon size={15} />}
           title="Project & name"
           description={project ? `${project.isNew ? "New project" : "In"} ${project.name}${d.name ? ` · ${d.name}` : ""}` : "Pick a project"}
-          error={attempted && ["name", "projectId"].some((k) => k in all.general)}
+          error={showProblems && ["name", "projectId"].some((k) => k in all.general)}
         >
           <GeneralFields d={d} set={set} errors={shown("general")} part="name" />
         </Block>
@@ -757,7 +763,7 @@ function Configure({
           icon={<MapPinIcon size={15} />}
           title="Where it runs"
           description={runsOn ? `Runs ${runsOn.startsWith("anywhere") ? runsOn : `on ${runsOn}`}` : "Pick where it runs"}
-          error={attempted && ["clusterId", "placement"].some((k) => k in all.general)}
+          error={showProblems && ["clusterId", "placement"].some((k) => k in all.general)}
         >
           <GeneralFields d={d} set={set} errors={shown("general")} part="placement" />
         </Block>
@@ -767,7 +773,7 @@ function Configure({
             icon={<SlidersHorizontalIcon size={15} />}
             title={`${t.name} settings`}
             description={t.fields.map((f) => f.label).slice(0, 3).join(", ")}
-            error={attempted && Object.keys(all.general).some((k) => k.startsWith("field."))}
+            error={showProblems && Object.keys(all.general).some((k) => k.startsWith("field."))}
           >
             <div className="space-y-4">
               <TemplateFields d={d} set={set} errors={shown("general")} />
@@ -791,7 +797,7 @@ function Configure({
                   icon={<DatabaseIcon size={15} />}
                   title={reqs.length > 1 ? `${ENGINE_LABEL[req.engine]} database` : "Database"}
                   description={dbSummary(req, dbs[i], d.name, s.databases.find((x) => x.id === dbs[i].existingId))}
-                  error={(attempted && !!dbProblems[i]) || !!dbError}
+                  error={(showProblems && !!dbProblems[i]) || !!dbError}
                 >
                   <div className="space-y-3">
                     <TemplateDatabaseFields
@@ -804,7 +810,7 @@ function Configure({
                         setDbs((cur) => cur.map((x, j) => (j === i ? v : x)));
                         setDbError("");
                       }}
-                      problem={attempted ? dbProblems[i] : ""}
+                      problem={showProblems ? dbProblems[i] : ""}
                       catalog={catalog}
                     />
                     {dbError ? (
@@ -862,7 +868,7 @@ function Configure({
               </>
             }
             note={
-              attempted && (count || dbProblems.some(Boolean)) ? (
+              showProblems && (count || dbProblems.some(Boolean)) ? (
                 <p className="text-center text-[12.5px] text-destructive" role="alert">
                   {count ? `Fix ${count} field${count === 1 ? "" : "s"} to deploy.` : dbProblems.find(Boolean)}
                 </p>
