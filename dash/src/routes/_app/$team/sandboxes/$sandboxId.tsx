@@ -256,24 +256,29 @@ function NameField({ x, onDone }: { x: Sandbox; onDone: () => void }) {
   };
   if (editing)
     return (
-      <input
-        autoFocus
-        aria-label="Name"
-        value={name}
-        maxLength={63}
-        onFocus={(e) => e.currentTarget.select()}
-        onChange={(e) => setName(e.target.value)}
-        onBlur={() => void done(true)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") e.currentTarget.blur();
-          if (e.key === "Escape") {
-            setName(shown);
-            void done(false);
-          }
-        }}
-        size={Math.max(name.length, 4)}
-        className="-mx-1.5 max-w-full rounded-md bg-transparent px-1.5 font-semibold tracking-tight text-foreground outline-none ring-1 ring-border focus:ring-2 focus:ring-ring"
-      />
+      // The hidden copy sizes the field to its text, so it fits like the name.
+      <span className="-mx-2 inline-grid max-w-full rounded-lg bg-muted px-2">
+        <span aria-hidden className="invisible col-start-1 row-start-1 truncate whitespace-pre">
+          {name || " "}
+        </span>
+        <input
+          autoFocus
+          aria-label="Name"
+          value={name}
+          maxLength={63}
+          onFocus={(e) => e.currentTarget.select()}
+          onChange={(e) => setName(e.target.value)}
+          onBlur={() => void done(true)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+            if (e.key === "Escape") {
+              setName(shown);
+              void done(false);
+            }
+          }}
+          className="col-start-1 row-start-1 w-full min-w-0 bg-transparent p-0 font-semibold tracking-tight text-foreground outline-none"
+        />
+      </span>
     );
   return (
     <button
@@ -283,7 +288,7 @@ function NameField({ x, onDone }: { x: Sandbox; onDone: () => void }) {
         setName(shown);
         setEditing(true);
       }}
-      className="group -mx-1.5 inline-flex max-w-full items-center gap-2 rounded-md px-1.5 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring"
+      className="group -mx-2 inline-flex max-w-full items-center gap-2 rounded-lg px-2 text-left outline-none hover:bg-muted focus-visible:bg-muted"
     >
       <span className="truncate">{shown}</span>
       <PencilSimpleIcon
