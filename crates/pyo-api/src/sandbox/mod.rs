@@ -9,6 +9,7 @@
 //!   sandbox.sh from its first boot (cloud/bootstrap.rs).
 //! - [`scheduler`]: which server a new sandbox runs on.
 //! - [`templates`]: which servers make which templates, and their state.
+//!   [`base`]: Pyo's built-in template, kept in step with the release.
 //! - [`limits`]: per-team caps, checked on create.
 //! - [`daemon`]: Pyo's calls to a daemon over the tailnet.
 //! - [`edgecert`]: the edge proxies' wildcard certificates and DNS records.
@@ -22,6 +23,7 @@
 //! sandbox server exists ([`available`]).
 
 pub mod api;
+pub mod base;
 pub mod daemon;
 #[cfg(test)]
 mod e2e;
@@ -361,6 +363,7 @@ pub async fn template_views(
     sqlx::query_scalar(
         "SELECT jsonb_build_object(
             'id', t.id, 'teamId', t.team_id, 'name', t.name, 'source', t.source, 'state', t.state,
+            'builtin', t.builtin, 'revision', t.revision,
             'snapshots', t.snapshots, 'error', t.error, 'createdBy', t.created_by,
             'createdAt', pyo.ms(t.created_at), 'updatedAt', pyo.ms(t.updated_at),
             'servers', (SELECT coalesce(jsonb_agg(jsonb_build_object(
@@ -373,7 +376,7 @@ pub async fn template_views(
                     'bytes', m.e->'bytes', 'snapshots', coalesce(m.e->'snapshots', '[]')) ORDER BY s.name), '[]')
                   FROM pyo.sandbox_servers s
                   LEFT JOIN LATERAL (SELECT x AS e FROM jsonb_array_elements(s.templates) x
-                                      WHERE x->>'name' = t.id LIMIT 1) m ON true
+                                      WHERE x->>'name' = t.id || coalesce('.' || t.revision, '') LIMIT 1) m ON true
                  WHERE (s.team_id IS NULL OR s.team_id = t.team_id OR t.team_id IS NULL)
                    AND (s.team_id IS NULL OR s.team_id = ANY($1))
                    AND (m.e IS NOT NULL OR s.state NOT IN ('joining', 'refused'))))
@@ -399,8 +402,10 @@ pub struct CreateSandbox {
     #[serde(default)]
     pub team_id: Option<String>,
     /// A sandbox template's name (or id): the team's own, else the
-    /// installation's.
-    pub template: String,
+    /// installation's. "base" (Pyo's built-in Debian 13 template) when
+    /// omitted.
+    #[serde(default)]
+    pub template: Option<String>,
     /// 1 when omitted.
     #[serde(default)]
     pub cpus: Option<u32>,
@@ -456,14 +461,30 @@ pub fn parse_ttl_value(v: Option<&Value>) -> ApiResult<u64> {
     Ok(secs)
 }
 
+/// The template a create asks for: the one named, else [`base::NAME`].
+pub fn template_asked(template: Option<&str>) -> &str {
+    template
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(base::NAME)
+}
+
+/// A template as a create finds it.
+struct AskedTemplate {
+    id: String,
+    name: String,
+    /// The name its servers keep it under (see [`templates::server_name`]).
+    server_name: String,
+}
+
 /// The template a name stands for: the team's, else the installation's.
 async fn template_for(
     tx: &mut PgConnection,
     team_id: &str,
     name: &str,
-) -> ApiResult<(String, String, String)> {
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT id, name, state FROM pyo.sandbox_templates
+) -> ApiResult<AskedTemplate> {
+    let row: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, name, state, revision FROM pyo.sandbox_templates
           WHERE (team_id = $1 OR team_id IS NULL) AND (name = $2 OR id = $2)
           ORDER BY team_id NULLS LAST LIMIT 1",
     )
@@ -471,13 +492,25 @@ async fn template_for(
     .bind(name)
     .fetch_optional(tx)
     .await?;
-    let (id, name, state) = row.ok_or_else(|| ApiError::not_found("Sandbox template"))?;
+    let Some((id, name, state, revision)) = row else {
+        return Err(if name == base::NAME {
+            ApiError::conflict(
+                "The base sandbox template isn't ready yet. Try again soon, or pass a template.",
+            )
+        } else {
+            ApiError::not_found("Sandbox template")
+        });
+    };
     if state == "failed" {
         return Err(ApiError::conflict(format!(
             "The sandbox template {name} failed to build. Make it again."
         )));
     }
-    Ok((id, name, state))
+    Ok(AskedTemplate {
+        server_name: templates::server_name(&id, revision.as_deref()),
+        id,
+        name,
+    })
 }
 
 /// The servers a team's sandbox can go to, with their addresses.
@@ -604,8 +637,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
         .bind(&team_id)
         .execute(&mut *tx)
         .await?;
-    let (template_id, template_name, _) =
-        template_for(&mut tx, &team_id, req.template.trim()).await?;
+    let template = template_for(&mut tx, &team_id, template_asked(req.template.as_deref())).await?;
     if let Some(p) = &req.project_id {
         let ok: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM pyo.projects WHERE id = $1 AND team_id = $2)",
@@ -618,7 +650,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
             return Err(ApiError::not_found("Project"));
         }
     }
-    let mut spec = SandboxSpec::new(new_sandbox_id(), &team_id, &template_id);
+    let mut spec = SandboxSpec::new(new_sandbox_id(), &team_id, &template.server_name);
     spec.cpus = req.cpus.unwrap_or(proto::DEFAULT_CPUS);
     spec.memory_mib = req.memory_mib.unwrap_or(proto::DEFAULT_MEMORY_MIB);
     spec.disk_mib = req.disk_mib.unwrap_or(proto::DEFAULT_DISK_MIB);
@@ -634,15 +666,18 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     limits::check(&lim, &used, &spec).map_err(ApiError::forbidden)?;
     let servers = candidates(&mut tx, &team_id).await?;
     let list: Vec<scheduler::Candidate> = servers.iter().map(|(c, _)| c.clone()).collect();
-    let chosen = scheduler::pick(&list, &spec).map_err(|n| {
-        let n = match n {
-            scheduler::NoServer::NoTemplate(_) => {
-                scheduler::NoServer::NoTemplate(template_name.clone())
-            }
-            n => n,
-        };
-        ApiError::new(n.status(), n.message())
-    })?;
+    let (chosen, server_name) =
+        scheduler::pick_revision(&list, &spec, &template.id).map_err(|n| {
+            let n = match n {
+                scheduler::NoServer::NoTemplate(_) => {
+                    scheduler::NoServer::NoTemplate(template.name.clone())
+                }
+                n => n,
+            };
+            ApiError::new(n.status(), n.message())
+        })?;
+    // The server may still start it from an older revision of the template.
+    spec.template = server_name;
     let address = servers
         .iter()
         .find(|(c, _)| c.id == chosen.id)
@@ -662,7 +697,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     .bind(&team_id)
     .bind(&req.project_id)
     .bind(&server_id)
-    .bind(&template_id)
+    .bind(&template.id)
     .bind(json!(kept))
     .bind(&user.name)
     .bind(ttl_secs as f64)
@@ -1393,6 +1428,11 @@ pub async fn create_template(s: &AppState, user: &User, req: CreateTemplate) -> 
             "A template name is lowercase letters, digits, dashes, dots and underscores, like node-22.",
         ));
     }
+    if req.name == base::NAME {
+        return Err(ApiError::conflict(
+            "base is Pyo's built-in sandbox template. Pick another name.",
+        ));
+    }
     let image = req.image.trim();
     if image.is_empty() || image.len() > 512 || image.contains(char::is_whitespace) {
         return Err(ApiError::bad_request("Give the image, like node:22."));
@@ -1430,12 +1470,17 @@ pub async fn create_template(s: &AppState, user: &User, req: CreateTemplate) -> 
 /// Deletes a sandbox template, and has the servers delete their copies.
 /// Refused while sandboxes run from it.
 pub async fn delete_template(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
-    let row: Option<(Option<String>, String)> =
-        sqlx::query_as("SELECT team_id, name FROM pyo.sandbox_templates WHERE id = $1")
+    let row: Option<(Option<String>, String, bool)> =
+        sqlx::query_as("SELECT team_id, name, builtin FROM pyo.sandbox_templates WHERE id = $1")
             .bind(id)
             .fetch_optional(&s.db)
             .await?;
-    let (team_id, name) = row.ok_or_else(|| ApiError::not_found("Sandbox template"))?;
+    let (team_id, name, builtin) = row.ok_or_else(|| ApiError::not_found("Sandbox template"))?;
+    if builtin {
+        return Err(ApiError::conflict(format!(
+            "{name} is Pyo's built-in sandbox template, so it can't be deleted."
+        )));
+    }
     let mut tx = s.db.begin().await?;
     match &team_id {
         Some(t) => require(&mut tx, user, t, Need::Use).await?,
@@ -1568,5 +1613,14 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn create_without_a_template_uses_base() {
+        let r: CreateSandbox = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(r.template, None);
+        assert_eq!(template_asked(r.template.as_deref()), "base");
+        assert_eq!(template_asked(Some("  ")), "base");
+        assert_eq!(template_asked(Some(" node-22 ")), "node-22");
     }
 }
