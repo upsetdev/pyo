@@ -255,10 +255,10 @@ export async function act(what: "pause" | "resume" | "remove", x: Sandbox) {
     toast({
       title:
         what === "pause"
-          ? `Paused ${x.id}`
+          ? `Paused ${x.name}`
           : what === "resume"
-            ? `Resumed ${x.id}`
-            : `Deleting ${x.id}`,
+            ? `Resumed ${x.name}`
+            : `Deleting ${x.name}`,
     });
     return true;
   } catch (e) {

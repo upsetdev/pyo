@@ -3,6 +3,7 @@ import {
   ClockClockwiseIcon,
   CubeIcon,
   PauseIcon,
+  PencilSimpleIcon,
   PlayIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
@@ -11,6 +12,7 @@ import { useState } from "react";
 import { z } from "zod";
 import { SandboxFiles } from "~/components/pyo/sandbox/SandboxFiles";
 import { SandboxTerminal } from "~/components/pyo/sandbox/SandboxTerminal";
+import { TemplateMark, templateOf } from "~/components/pyo/sandbox/TemplateMark";
 import {
   act,
   RuntimeBadge,
@@ -20,8 +22,8 @@ import {
 } from "~/components/pyo/sandbox/common";
 import { Badge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
-import { ConfirmDialog } from "~/components/ui/Dialog";
-import { Input, Segmented } from "~/components/ui/Field";
+import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
+import { Field, Input, Segmented } from "~/components/ui/Field";
 import { Menu } from "~/components/ui/Menu";
 import {
   Callout,
@@ -82,7 +84,9 @@ function SandboxPage() {
       }),
     { refreshMs: 4000 },
   );
+  const tq = useQuery(`sandbox-templates:${s.currentTeamId}`, () => sandboxApi.templates(s.currentTeamId));
   const [deleting, setDeleting] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const [busy, setBusy] = useState(false);
   const canUse = roleIn(s) !== "viewer";
   const setTab = (t: Tab) =>
@@ -115,11 +119,14 @@ function SandboxPage() {
     <Page>
       <PageHeader
         icon={
-          <span className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-card">
-            <CubeIcon size={18} />
-          </span>
+          <TemplateMark
+            template={templateOf(x, tq.status === "success" ? tq.data.templates : [])}
+            size="lg"
+            className="mt-1"
+          />
         }
-        title={<span className="font-mono">{x.id}</span>}
+        title={x.name}
+        description={<span className="font-mono text-[12px]">{x.id}</span>}
         meta={
           <>
             <SandboxStatus state={x.state} sandbox={x} />
@@ -129,9 +136,12 @@ function SandboxPage() {
           </>
         }
         actions={
-          canUse && !ended(x) ? (
+          canUse ? (
             <>
-              {x.state === "paused" ? (
+              <Button size="sm" variant="secondary" onClick={() => setRenaming(true)}>
+                <PencilSimpleIcon size={13} /> Rename
+              </Button>
+              {ended(x) ? null : x.state === "paused" ? (
                 <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run("resume")}>
                   <PlayIcon size={13} /> Resume
                 </Button>
@@ -140,9 +150,11 @@ function SandboxPage() {
                   <PauseIcon size={13} /> Pause
                 </Button>
               )}
-              <Button size="sm" variant="secondary" className="text-destructive" onClick={() => setDeleting(true)}>
-                <TrashIcon size={13} /> Delete
-              </Button>
+              {ended(x) ? null : (
+                <Button size="sm" variant="secondary" className="text-destructive" onClick={() => setDeleting(true)}>
+                  <TrashIcon size={13} /> Delete
+                </Button>
+              )}
             </>
           ) : undefined
         }
@@ -186,7 +198,7 @@ function SandboxPage() {
       <ConfirmDialog
         open={deleting}
         onClose={() => setDeleting(false)}
-        title={`Delete ${x.id}?`}
+        title={`Delete ${x.name}?`}
         description="Its files are gone for good."
         confirmLabel="Delete sandbox"
         onConfirm={() => {
@@ -195,7 +207,71 @@ function SandboxPage() {
           });
         }}
       />
+      <RenameDialog x={x} open={renaming} onClose={() => setRenaming(false)} onDone={q.retry} />
     </Page>
+  );
+}
+
+/** A new name for the sandbox. Its id stays. */
+function RenameDialog({
+  x,
+  open,
+  onClose,
+  onDone,
+}: {
+  x: Sandbox;
+  open: boolean;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [name, setName] = useState(x.name);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [wasOpen, setWasOpen] = useState(open);
+  // Starts from the current name each time it opens.
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setName(x.name);
+      setError("");
+    }
+  }
+  const save = async () => {
+    const n = name.trim();
+    if (!n || busy) return;
+    if (n === x.name) return onClose();
+    setBusy(true);
+    try {
+      await sandboxApi.rename(x.id, n);
+      onClose();
+      onDone();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Rename sandbox"
+      onSubmit={() => void save()}
+      footer={
+        <>
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" size="sm" disabled={!name.trim() || busy}>
+            {busy ? "Saving…" : "Save"}
+          </Button>
+        </>
+      }
+    >
+      <Field label="Name" error={error || undefined}>
+        {(p) => <Input {...p} value={name} onChange={(e) => setName(e.target.value)} maxLength={63} autoFocus />}
+      </Field>
+    </Dialog>
   );
 }
 

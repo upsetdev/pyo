@@ -1,28 +1,7 @@
-import { CubeIcon, DotsThreeIcon, SquaresFourIcon, TrashIcon } from "@phosphor-icons/react";
+import { DotsThreeIcon, SquaresFourIcon, TrashIcon } from "@phosphor-icons/react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import {
-  siAlmalinux,
-  siAlpinelinux,
-  siArchlinux,
-  siBun,
-  siCentos,
-  siDebian,
-  siDeno,
-  siDocker,
-  siFedora,
-  siGo,
-  siNodedotjs,
-  siOpenjdk,
-  siPhp,
-  siPython,
-  siRockylinux,
-  siRuby,
-  siRust,
-  siUbuntu,
-  type SimpleIcon,
-} from "simple-icons";
-import { BrandMark } from "~/components/pyo/common";
+import { TemplateMark } from "~/components/pyo/sandbox/TemplateMark";
 import { Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
@@ -148,7 +127,7 @@ function TemplatesPage() {
                   <Td>
                     <Tooltip content={<TemplateDetails t={t} />}>
                       <span className="flex min-w-0 items-center gap-3">
-                        <TemplateLogo t={t} />
+                        <TemplateMark template={t} />
                         <span className="truncate text-[13px] font-medium">{t.name}</span>
                       </span>
                     </Tooltip>
@@ -256,44 +235,6 @@ function TemplatesPage() {
         }}
       />
     </Page>
-  );
-}
-
-// Logos by what the image runs: languages first, since node:22 is Debian
-// underneath but reads as Node.
-const LOGOS: [RegExp, SimpleIcon][] = [
-  [/\bnode(js)?\b/, siNodedotjs],
-  [/\bpython\b/, siPython],
-  [/\bbun\b/, siBun],
-  [/\bdeno\b/, siDeno],
-  [/\bgolang\b|(^|\/)go(:|$)/, siGo],
-  [/\brust\b/, siRust],
-  [/\bruby\b/, siRuby],
-  [/\bphp\b/, siPhp],
-  [/\b(openjdk|java|temurin)\b/, siOpenjdk],
-  [/\bubuntu\b/, siUbuntu],
-  [/\bdebian\b/, siDebian],
-  [/\balpine\b/, siAlpinelinux],
-  [/\bfedora\b/, siFedora],
-  [/\barch(linux)?\b/, siArchlinux],
-  [/\bcentos\b/, siCentos],
-  [/\brocky(linux)?\b/, siRockylinux],
-  [/\balma(linux)?\b/, siAlmalinux],
-  [/\bdocker\b/, siDocker],
-];
-
-function logoFor(t: SandboxTemplate) {
-  if (isBase(t)) return siDebian;
-  const text = `${t.source?.image ?? ""} ${t.source?.os ?? ""} ${t.name}`.toLowerCase();
-  return LOGOS.find(([re]) => re.test(text))?.[1];
-}
-
-function TemplateLogo({ t }: { t: SandboxTemplate }) {
-  const logo = logoFor(t);
-  return (
-    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-frame-border bg-card text-muted-foreground">
-      {logo ? <BrandMark icon={logo} size={16} tone={logo === siDebian ? "brand" : "auto"} /> : <CubeIcon size={16} />}
-    </span>
   );
 }
 

@@ -37,6 +37,8 @@ export type SandboxState =
 
 export type Sandbox = {
   id: string;
+  /** For people: not unique, never in URLs. The id addresses it. */
+  name: string;
   teamId: string;
   projectId: string | null;
   serverId: string | null;
@@ -251,6 +253,8 @@ export type SandboxTemplateServer = {
 
 export type CreateSandbox = {
   teamId: string;
+  /** Pyo makes up a short one when left out. */
+  name?: string;
   template: string;
   /** A sandbox server's id: Pyo picks one when left out. */
   server?: string;
@@ -281,6 +285,11 @@ export const sandboxApi = {
     request<{ sandbox: Sandbox; connection: Connection }>("/api/v1/sandboxes", {
       method: "POST",
       body,
+    }),
+  rename: (id: string, name: string) =>
+    request<Sandbox>(`/api/v1/sandboxes/${enc(id)}`, {
+      method: "PATCH",
+      body: { name },
     }),
   remove: (id: string) =>
     request<Sandbox>(`/api/v1/sandboxes/${enc(id)}`, { method: "DELETE" }),
@@ -605,8 +614,8 @@ export const lifetimeAllowed = (secs: number | null, limits: SandboxLimits | nul
 /** The TypeScript SDK call that makes the same sandbox as the form. */
 export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
   // base is the default, so it's left out.
-  const lines: string[] =
-    b.template && b.template !== BASE_TEMPLATE ? [`  template: ${JSON.stringify(b.template)},`] : [];
+  const lines: string[] = b.name ? [`  name: ${JSON.stringify(b.name)},`] : [];
+  if (b.template && b.template !== BASE_TEMPLATE) lines.push(`  template: ${JSON.stringify(b.template)},`);
   if (b.server) lines.push(`  server: ${JSON.stringify(b.server)},`);
   if (b.cpus) lines.push(`  cpus: ${b.cpus},`);
   if (b.memoryMib) lines.push(`  memoryMib: ${b.memoryMib},`);

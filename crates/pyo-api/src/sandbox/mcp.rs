@@ -9,7 +9,7 @@ use super::Need;
 use crate::{AppState, auth::User, error::ApiError};
 
 /// The tools, in the order they're listed.
-pub const TOOLS: [&str; 9] = [
+pub const TOOLS: [&str; 10] = [
     "create_sandbox",
     "run_code",
     "exec",
@@ -17,6 +17,7 @@ pub const TOOLS: [&str; 9] = [
     "write_file",
     "open_port",
     "close_port",
+    "rename_sandbox",
     "pause_sandbox",
     "delete_sandbox",
 ];
@@ -39,6 +40,7 @@ pub fn defs() -> Vec<Value> {
     vec![
         json!({ "name": "create_sandbox", "title": "Create sandbox", "description": "Create an isolated machine (a sandbox) on the team's sandbox servers, to run code, commands and files in. It ends after its lifetime (5 minutes when omitted). Returns its id.", "inputSchema": schema(json!({
             "team": team,
+            "name": { "type": "string", "description": "A name to tell it apart, like checkout tests. Need not be unique. A short one like quiet-river when omitted" },
             "template": { "type": "string", "description": "A sandbox template name, like node-22 (list_sandbox_templates shows them). base when omitted: Debian 13 with git, Python, uv, Node.js and pnpm. A server makes base the first time it's used there, which takes a minute or so" },
             "server": { "type": "string", "description": "A sandbox server's name or id to run it on. Pyo picks one when omitted" },
             "cpus": { "type": "integer", "minimum": 1, "maximum": 32 },
@@ -77,6 +79,10 @@ pub fn defs() -> Vec<Value> {
             "sandbox_id": sandbox,
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         }), &["sandbox_id", "port"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
+        json!({ "name": "rename_sandbox", "title": "Rename sandbox", "description": "Give a sandbox another name. Its id stays the same.", "inputSchema": schema(json!({
+            "sandbox_id": sandbox,
+            "name": { "type": "string", "description": "Up to 63 letters, digits, spaces, dashes, underscores and dots" },
+        }), &["sandbox_id", "name"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "pause_sandbox", "title": "Pause sandbox", "description": "Pause a sandbox: its memory and files are kept, and it resumes where it was.", "inputSchema": schema(json!({ "sandbox_id": sandbox }), &["sandbox_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "delete_sandbox", "title": "Delete sandbox", "description": "End a sandbox and throw away its files.", "inputSchema": schema(json!({ "sandbox_id": sandbox }), &["sandbox_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
     ]
@@ -152,6 +158,7 @@ pub async fn run(s: &AppState, user: &User, name: &str, args: &Value) -> Result<
             let team = team_id(s, user, args).await?;
             let mut req = json!({ "teamId": team });
             for (from, to) in [
+                ("name", "name"),
                 ("template", "template"),
                 ("server", "server"),
                 ("cpus", "cpus"),
@@ -168,7 +175,7 @@ pub async fn run(s: &AppState, user: &User, name: &str, args: &Value) -> Result<
             let out = super::create(s, user, req).await.map_err(err)?;
             let x = &out["sandbox"];
             Ok(
-                json!({ "id": x["id"], "template": x["template"], "state": x["state"], "runtime": x["runtime"], "expiresAt": x["expiresAt"] }),
+                json!({ "id": x["id"], "name": x["name"], "template": x["template"], "state": x["state"], "runtime": x["runtime"], "expiresAt": x["expiresAt"] }),
             )
         }
         "run_code" => {
@@ -253,6 +260,9 @@ pub async fn run(s: &AppState, user: &User, name: &str, args: &Value) -> Result<
                 .await
                 .map_err(err)
         }
+        "rename_sandbox" => super::rename(s, user, arg(args, "sandbox_id")?, arg(args, "name")?)
+            .await
+            .map_err(err),
         "pause_sandbox" => super::pause(s, user, arg(args, "sandbox_id")?)
             .await
             .map_err(err),

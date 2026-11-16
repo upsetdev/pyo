@@ -180,6 +180,7 @@ const COVERED: &[(&str, &str)] = &[
     ("getServiceLogs", "get_service_logs"),
     ("createSandbox", "create_sandbox"),
     ("pauseSandbox", "pause_sandbox"),
+    ("renameSandbox", "rename_sandbox"),
     ("openSandboxPort", "open_port"),
     ("closeSandboxPort", "close_port"),
     ("deleteSandbox", "delete_sandbox"),
@@ -246,6 +247,7 @@ const CURATED_RUNS: &[(&str, &str)] = &[
     ("write_file", "createSandboxToken"),
     ("open_port", "openSandboxPort"),
     ("close_port", "closeSandboxPort"),
+    ("rename_sandbox", "renameSandbox"),
     ("pause_sandbox", "pauseSandbox"),
     ("delete_sandbox", "deleteSandbox"),
 ];
