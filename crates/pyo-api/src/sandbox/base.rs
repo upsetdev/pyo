@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(by_name("desktop").map(|b| b.id), Some("stp_desktop"));
         assert!(by_name("node-22").is_none());
         // desktop's sandboxes get room for Chromium.
-        assert!(DESKTOP.cpus >= 2 && DESKTOP.memory_mib >= 2048);
+        const { assert!(DESKTOP.cpus >= 2 && DESKTOP.memory_mib >= 2048) };
         let images = pyo_proto::ReleaseImages {
             sandbox_base: A.into(),
             sandbox_desktop: B.into(),
