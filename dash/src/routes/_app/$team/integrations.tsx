@@ -1,4 +1,3 @@
-import { TreeStructureIcon } from "@phosphor-icons/react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { siGitlab, siHetzner, siTailscale, siVault } from "simple-icons";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
@@ -17,7 +16,7 @@ import { TailscaleSettings } from "~/components/pyo/Tailscale";
 import { GitlabRows, TokenDialog } from "~/components/pyo/GitConnections";
 import { HetznerSettings, hetznerOf } from "~/components/pyo/Hetzner";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
-import { Badge, ClusterStatusBadge, type Tone } from "~/components/ui/Badge";
+import { Badge, type Tone } from "~/components/ui/Badge";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import type { MenuItem } from "~/components/ui/Menu";
@@ -29,14 +28,12 @@ import { seo } from "~/lib/seo";
 import {
   api,
   cloudflareIn,
-  clustersIn,
   roleIn,
   usePyo,
   type PyoState,
 } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { BrandMark, CLOUDFLARE_LOGO, DOCKER_LOGO, GITHUB_LOGO } from "~/components/pyo/common";
-import { currentSlug } from "~/lib/pyo/paths";
 
 // Everything Pyo connects to, as cards: a filter by category, a search, and
 // each card's settings in a dialog. "/integrations#<id>" scrolls to a card
@@ -103,7 +100,6 @@ function Integrations() {
   const cf = cloudflareIn(s);
   const logins = s.registryLogins.filter((l) => l.teamId === team);
   const stores = s.secretStores.filter((x) => x.teamId === team);
-  const clusters = clustersIn(s);
 
   const connectGithub = async () => {
     setGithubBusy(true);
@@ -172,9 +168,6 @@ function Integrations() {
   const storeUses = s.services.filter(
     (a) => a.teamId === team && a.secretImports?.some((i) => stores.some((x) => x.id === i.storeId)),
   ).length;
-  const worst = (["unreachable", "degraded", "pending"] as const).find((st) =>
-    clusters.some((c) => c.status === st),
-  );
 
   const all: Integration[] = [
     {
@@ -359,39 +352,6 @@ function Integrations() {
       ],
       settings: { title: "Secret stores", body: <SecretStoresSettings /> },
     },
-    {
-      id: "clusters",
-      name: "Clusters",
-      category: "Servers",
-      icon: <TreeStructureIcon size={17} />,
-      description: "The k3s clusters your services run on.",
-      connected: clusters.length > 0,
-      stat: { label: "Clusters", value: clusters.length },
-      tags: ["k3s", "Agent", "Kubeconfig"],
-      status: clusters.length
-        ? worst
-          ? {
-              tone: worst === "unreachable" ? "danger" : worst === "degraded" ? "warning" : "progress",
-              label:
-                worst === "pending"
-                  ? "Connecting"
-                  : `${clusters.filter((c) => c.status === worst).length} ${worst}`,
-            }
-          : { tone: "success", label: "All connected" }
-        : null,
-      docs: "clusters",
-      action: (
-        <ButtonLink href="/clusters/new" size="xs" variant="secondary">
-          Connect
-        </ButtonLink>
-      ),
-      menu: [
-        settingsItem("clusters", "Connections"),
-        { label: "Add a cluster", href: "/clusters/new" },
-        guideItem("clusters"),
-      ],
-      settings: { title: "Cluster connections", body: <ClusterRows /> },
-    },
   ];
 
   // Connected first, each group in the order above.
@@ -575,41 +535,6 @@ function Row({
       </div>
       {right}
     </li>
-  );
-}
-
-/** The team's clusters and how each connects. */
-function ClusterRows() {
-  const s = usePyo();
-  const clusters = clustersIn(s);
-  return (
-    <ul className="list-rows">
-      {clusters.map((c) => (
-        <Row
-          key={c.id}
-          icon={<TreeStructureIcon size={15} />}
-          title={
-            <Link
-              to="/$team/clusters/$clusterId/settings"
-              params={{ team: currentSlug(), clusterId: c.name }}
-              className="hover:text-primary"
-            >
-              {c.name}
-            </Link>
-          }
-          body={`${c.connection.method === "agent" ? `Agent ${c.connection.agentVersion}` : "Kubeconfig"}`}
-          right={<ClusterStatusBadge status={c.status} />}
-        />
-      ))}
-      {!clusters.length ? (
-        <Row
-          icon={<TreeStructureIcon size={15} />}
-          title="No clusters"
-          body="Add a cluster under Clusters."
-          right={null}
-        />
-      ) : null}
-    </ul>
   );
 }
 
