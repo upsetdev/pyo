@@ -461,7 +461,7 @@ impl Client {
         let body = json!({
             "capabilities": { "devices": { "create": { "reusable": false, "ephemeral": false, "preauthorized": true, "tags": [TAG] } } },
             "expirySeconds": 3600,
-            "description": description,
+            "description": key_description(description),
         });
         let v = self
             .call(reqwest::Method::POST, "/tailnet/-/keys", Some(&body))
@@ -481,6 +481,19 @@ impl Client {
         .await
         .map(|_| ())
     }
+}
+
+/// What Tailscale takes as a key's description: letters, digits, spaces,
+/// dashes and underscores, at most 50 characters. "Pyo: join web-1"
+/// becomes "Pyo join web-1".
+fn key_description(s: &str) -> String {
+    let kept: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        .collect();
+    let mut out = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    out.truncate(50);
+    out.trim_end().to_owned()
 }
 
 /// A machine on the tailnet ([`Client::device_details`]).
@@ -1348,6 +1361,19 @@ pub async fn host_report(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_descriptions_are_what_tailscale_takes() {
+        use super::key_description;
+        assert_eq!(key_description("Pyo: join web-1"), "Pyo join web-1");
+        assert_eq!(
+            key_description("Pyo: sandbox server sbx_1"),
+            "Pyo sandbox server sbx_1"
+        );
+        assert_eq!(key_description("Pyo: its own server"), "Pyo its own server");
+        let long = key_description(&format!("Pyo: join {}", "a".repeat(80)));
+        assert_eq!(long.len(), 50);
+    }
+
     use super::*;
 
     /// A mock Tailscale API: a Service ("docker", someone else's) that the
