@@ -257,7 +257,8 @@ function NameField({ x, onDone }: { x: Sandbox; onDone: () => void }) {
   if (editing)
     return (
       // The hidden copy sizes the field to its text, so it fits like the name.
-      <span className="-mx-2 inline-grid max-w-full rounded-lg bg-muted px-2">
+      <span className="-mx-2 inline-flex max-w-full items-center gap-2 rounded-lg bg-muted px-2">
+        <span className="inline-grid min-w-0">
         <span aria-hidden className="invisible col-start-1 row-start-1 truncate whitespace-pre">
           {name || " "}
         </span>
@@ -278,6 +279,8 @@ function NameField({ x, onDone }: { x: Sandbox; onDone: () => void }) {
           }}
           className="col-start-1 row-start-1 w-full min-w-0 bg-transparent p-0 font-semibold tracking-tight text-foreground outline-none"
         />
+        </span>
+        <PencilSimpleIcon size={16} aria-hidden className="shrink-0 text-foreground" />
       </span>
     );
   return (
