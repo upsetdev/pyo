@@ -473,6 +473,45 @@ async fn edge_proxy(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &str) {
         echo.extend_from_slice(&buf[..n]);
     }
     assert_eq!(echo, b"ping through the edge\n");
+
+    // And through the daemon's API (noVNC's WebSocket on Open desktop).
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_port = api.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = axum::serve(api, app.clone()).await;
+    });
+    let mut c = tokio::net::TcpStream::connect(("127.0.0.1", api_port))
+        .await
+        .unwrap();
+    let req = format!(
+        "GET /v1/sandboxes/{id}/web/4000/ HTTP/1.1\r\nHost: daemon\r\nCookie: pyo_token={ports}\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n"
+    );
+    c.write_all(req.as_bytes()).await.unwrap();
+    let mut got = Vec::new();
+    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n > 0, "closed: {}", String::from_utf8_lossy(&got));
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert!(
+        got.starts_with(b"HTTP/1.1 101"),
+        "{}",
+        String::from_utf8_lossy(&got)
+    );
+    c.write_all(b"ping through the daemon\n").await.unwrap();
+    let mut echo = Vec::new();
+    while !echo.ends_with(b"\n") {
+        let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n > 0);
+        echo.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(echo, b"ping through the daemon\n");
 }
 
 /// A self-signed certificate for `*.sbx.test`, as (cert, key) PEM.
