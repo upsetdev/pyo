@@ -17,6 +17,16 @@
 //! | `POST /v1/sandboxes/{id}/ports`, `DELETE .../ports/{port}` | ports |
 //! | `GET PUT DELETE .../files`, `GET .../files/list`, `.../files/stat`, `POST .../files/mkdir` | files |
 //! | `GET /v1/sandboxes/{id}/connect` (WebSocket) | any scope, then each request is checked |
+//! | `ANY /v1/sandboxes/{id}/web/{port}/...` | ports, for that sandbox only |
+//!
+//! `.../web/{port}/` serves a web page on a port of the sandbox to the
+//! browser that opens it, over the tailnet, like the dashboard's Open
+//! desktop (noVNC on 6080). The port needn't be open on the edge. The
+//! token comes once as `?pyo_token=`, which sets an HttpOnly cookie for
+//! that sandbox's pages (SameSite=Lax, so other sites can't use it) and
+//! redirects, then in the cookie, or in `Authorization`. The rest of the
+//! path goes to the port, WebSocket upgrades too. Pages there must use
+//! relative links.
 //!
 //! The WebSocket speaks the envd wire protocol, one frame per binary
 //! message. The first message is envd's `Hello`. The daemon checks every
@@ -52,7 +62,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use futures::{SinkExt, StreamExt};
 use pyo_proto::sandbox::token::{self, Claims, Expect, LEEWAY_SECS, TokenError, VerifyingKey};
 use pyo_proto::sandbox::wire::{self, ErrorKind, Frame, Kind, Request, Scope};
@@ -125,6 +135,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/sandboxes/{id}/files/stat", get(stat_file))
         .route("/v1/sandboxes/{id}/files/mkdir", post(mkdir))
         .route("/v1/sandboxes/{id}/connect", get(connect))
+        .route("/v1/sandboxes/{id}/web/{port}", any(web))
+        .route("/v1/sandboxes/{id}/web/{port}/", any(web))
+        .route("/v1/sandboxes/{id}/web/{port}/{*path}", any(web))
         .layer(axum::middleware::from_fn(cors))
         .with_state(state)
 }
@@ -507,6 +520,87 @@ async fn close_port(
     Ok(axum::Json(
         run_command(&st, token_of(&h, &q).as_deref(), cmd).await?,
     ))
+}
+
+/// A port's web pages through the daemon: see the module's docs.
+async fn web(
+    State(st): S,
+    Path(p): Path<HashMap<String, String>>,
+    mut req: axum::extract::Request,
+) -> Response {
+    let fail = |status: StatusCode, msg: &str| crate::edge::text(status, msg).into_response();
+    let id = p.get("id").cloned().unwrap_or_default();
+    let Some(port) = p.get("port").and_then(|v| v.parse::<u16>().ok()) else {
+        return fail(StatusCode::NOT_FOUND, "That isn't a port.");
+    };
+    let prefix = format!("/v1/sandboxes/{id}/web/{port}/");
+    let Some((token, from_query)) = crate::edge::take_token(&mut req) else {
+        return fail(StatusCode::UNAUTHORIZED, "This needs a sandbox token.");
+    };
+    // Only a token for this sandbox, never a server-wide one.
+    if !matches!(st.authorize(Some(&token), Some(&id), Scope::Ports), Ok(c) if c.sbx == id) {
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "The sandbox token isn't valid here. Open it again from Pyo.",
+        );
+    }
+    let path = req.uri().path().to_owned();
+    let rest = path.strip_prefix(&prefix);
+    if from_query || rest.is_none() {
+        // Into a cookie for this sandbox's pages, out of the address bar.
+        // Its pages are under the prefix, so it ends in a slash.
+        let query = req
+            .uri()
+            .query()
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default();
+        let to = format!("{prefix}{}{query}", rest.unwrap_or_default());
+        let cookie = from_query.then(|| {
+            format!(
+                "{}={token}; Path=/v1/sandboxes/{id}/web/; HttpOnly; SameSite=Lax",
+                crate::edge::TOKEN_COOKIE
+            )
+        });
+        return crate::edge::redirect(StatusCode::SEE_OTHER, &to, cookie.as_deref())
+            .into_response();
+    }
+    match st.mgr.status(&id).map(|s| s.state) {
+        Ok(pyo_proto::sandbox::SandboxState::Running) => {}
+        Ok(pyo_proto::sandbox::SandboxState::Paused) => {
+            return fail(StatusCode::SERVICE_UNAVAILABLE, "The sandbox is paused.");
+        }
+        Ok(_) => {
+            return fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The sandbox isn't running.",
+            );
+        }
+        Err(_) => {
+            return fail(
+                StatusCode::NOT_FOUND,
+                "There is no such sandbox on this server.",
+            );
+        }
+    }
+    // The page sees itself at the root of the port, as from inside.
+    let pq = format!(
+        "/{}{}",
+        rest.unwrap_or_default(),
+        req.uri()
+            .query()
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default()
+    );
+    match pq.parse() {
+        Ok(uri) => *req.uri_mut() = uri,
+        Err(_) => return fail(StatusCode::BAD_REQUEST, "That address isn't valid."),
+    }
+    if let Ok(v) = header::HeaderValue::from_str(&format!("localhost:{port}")) {
+        req.headers_mut().insert(header::HOST, v);
+    }
+    crate::edge::proxy(&st, req, &id, port)
+        .await
+        .into_response()
 }
 
 #[derive(Deserialize)]

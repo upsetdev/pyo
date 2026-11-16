@@ -457,60 +457,71 @@ impl Edge {
         for (k, v) in forwarded(req.headers(), peer, tls, &host) {
             req.headers_mut().insert(k, v);
         }
-        self.proxy(req, &id, port).await
+        proxy(&self.app, req, &id, port).await
     }
+}
 
-    async fn proxy(&self, mut req: Request<Incoming>, id: &str, port: u16) -> Response<Body> {
-        let stream = match self.app.mgr.envd(id).await {
-            Ok((_, conn)) => conn.port_stream(port).await.ok(),
-            Err(_) => None,
-        };
-        let Some(stream) = stream else {
-            return text(
-                StatusCode::BAD_GATEWAY,
-                &format!("Nothing answers on port {port} in the sandbox."),
-            );
-        };
-        let closed = || {
-            text(
-                StatusCode::BAD_GATEWAY,
-                "The sandbox port closed the connection.",
-            )
-        };
-        let Ok((mut send, conn)) =
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await
-        else {
-            return closed();
-        };
+/// Passes `req` to port `port` in sandbox `id` over envd, WebSocket and
+/// other upgrades too, and its answer back. The edge serves ports this way,
+/// and the daemon API too (`.../web/{port}/`, see `api`).
+pub(crate) async fn proxy<B>(
+    app: &AppState,
+    mut req: Request<B>,
+    id: &str,
+    port: u16,
+) -> Response<Body>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let stream = match app.mgr.envd(id).await {
+        Ok((_, conn)) => conn.port_stream(port).await.ok(),
+        Err(_) => None,
+    };
+    let Some(stream) = stream else {
+        return text(
+            StatusCode::BAD_GATEWAY,
+            &format!("Nothing answers on port {port} in the sandbox."),
+        );
+    };
+    let closed = || {
+        text(
+            StatusCode::BAD_GATEWAY,
+            "The sandbox port closed the connection.",
+        )
+    };
+    let Ok((mut send, conn)) =
+        hyper::client::conn::http1::handshake::<_, B>(TokioIo::new(stream)).await
+    else {
+        return closed();
+    };
+    tokio::spawn(async move {
+        let _ = conn.with_upgrades().await;
+    });
+    let client_upgrade = req
+        .headers()
+        .contains_key(header::UPGRADE)
+        .then(|| hyper::upgrade::on(&mut req));
+    let Ok(mut res) = send.send_request(req).await else {
+        return closed();
+    };
+    if res.status() == StatusCode::SWITCHING_PROTOCOLS
+        && let Some(client) = client_upgrade
+    {
+        let guest = hyper::upgrade::on(&mut res);
         tokio::spawn(async move {
-            let _ = conn.with_upgrades().await;
+            if let (Ok(c), Ok(g)) = (client.await, guest.await) {
+                let _ =
+                    tokio::io::copy_bidirectional(&mut TokioIo::new(c), &mut TokioIo::new(g)).await;
+            }
         });
-        let client_upgrade = req
-            .headers()
-            .contains_key(header::UPGRADE)
-            .then(|| hyper::upgrade::on(&mut req));
-        let Ok(mut res) = send.send_request(req).await else {
-            return closed();
-        };
-        if res.status() == StatusCode::SWITCHING_PROTOCOLS
-            && let Some(client) = client_upgrade
-        {
-            let guest = hyper::upgrade::on(&mut res);
-            tokio::spawn(async move {
-                if let (Ok(c), Ok(g)) = (client.await, guest.await) {
-                    let _ =
-                        tokio::io::copy_bidirectional(&mut TokioIo::new(c), &mut TokioIo::new(g))
-                            .await;
-                }
-            });
-        }
-        res.map(|b| b.boxed())
     }
+    res.map(|b| b.boxed())
 }
 
 /// Takes the sandbox token out of the request, so the guest never sees it.
 /// Returns it and whether it came in the query.
-fn take_token(req: &mut Request<Incoming>) -> Option<(String, bool)> {
+pub(crate) fn take_token<B>(req: &mut Request<B>) -> Option<(String, bool)> {
     let mut found = None;
     let h = req.headers_mut();
     if let Some(t) = h
@@ -620,7 +631,7 @@ fn forwarded(
     v
 }
 
-fn text(status: StatusCode, msg: &str) -> Response<Body> {
+pub(crate) fn text(status: StatusCode, msg: &str) -> Response<Body> {
     let mut r = Response::new(
         Full::new(Bytes::from(format!("{msg}\n")))
             .map_err(|e| match e {})
@@ -636,7 +647,7 @@ fn text(status: StatusCode, msg: &str) -> Response<Body> {
     r
 }
 
-fn redirect(status: StatusCode, to: &str, cookie: Option<&str>) -> Response<Body> {
+pub(crate) fn redirect(status: StatusCode, to: &str, cookie: Option<&str>) -> Response<Body> {
     let mut r = text(status, "Redirecting.");
     if let Ok(v) = HeaderValue::from_str(to) {
         r.headers_mut().insert(header::LOCATION, v);

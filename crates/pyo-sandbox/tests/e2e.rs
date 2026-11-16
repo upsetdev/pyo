@@ -368,6 +368,47 @@ async fn edge_proxy(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &str) {
     let admin = format!("Authorization: Bearer {}", keys.admin());
     assert_eq!(curl(&url(3000, true), &cert, &["-H", &admin]).await.0, 401);
 
+    // The same page through the daemon's API (the dashboard's Open
+    // desktop), with this sandbox's ports token only.
+    let web = format!("/v1/sandboxes/{id}/web/3000/");
+    let (s, b) = call(&app, "GET", &web, Some(&ports), Body::empty()).await;
+    assert_eq!(
+        (s.as_u16(), String::from_utf8_lossy(&b).trim()),
+        (200, "hello-edge")
+    );
+    assert_eq!(call(&app, "GET", &web, None, Body::empty()).await.0, 401);
+    let admin = keys.admin();
+    assert_eq!(call(&app, "GET", &web, Some(&admin), Body::empty()).await.0, 401);
+    let res = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!("{web}?a=1&pyo_token={ports}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 303);
+    assert_eq!(res.headers()["location"], format!("{web}?a=1"));
+    let set = res.headers()["set-cookie"].to_str().unwrap();
+    assert!(
+        set.contains(&format!("Path=/v1/sandboxes/{id}/web/")) && set.contains("HttpOnly"),
+        "{set}"
+    );
+    let res = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .uri(&web)
+                .header("cookie", format!("pyo_token={ports}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
     // Nothing listening, closing, and names that aren't sandbox ports.
     open(3999, true).await;
     assert_eq!(curl(&url(3999, true), &cert, &[]).await.0, 502);
