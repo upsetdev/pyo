@@ -441,7 +441,7 @@ async fn gvisor_end_to_end() {
     assert!(connects(&mgr, &paused_c.id, "1.1.1.1", 53).await);
 
     // ── The lifetime ends a sandbox ──
-    mgr.set_ttl(&paused_c.id, 1).unwrap();
+    mgr.set_ttl(&paused_c.id, Some(1)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(1500)).await;
     mgr.sweep().await;
     assert!(mgr.find(&paused_c.id).is_err(), "its lifetime is over");

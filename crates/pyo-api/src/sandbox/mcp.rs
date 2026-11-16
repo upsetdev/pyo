@@ -43,7 +43,7 @@ pub fn defs() -> Vec<Value> {
             "server": { "type": "string", "description": "A sandbox server's name or id to run it on. Pyo picks one when omitted" },
             "cpus": { "type": "integer", "minimum": 1, "maximum": 32 },
             "memory_mib": { "type": "integer", "minimum": 128 },
-            "ttl": { "type": "string", "description": "How long it lives, like 30m or 1h (24h at most)" },
+            "ttl": { "type": "string", "description": "How long it lives, like 30m, 1h or 7d (365d at most, and within the team's limit). none: it runs until it's deleted, when the team allows it" },
             "env": { "type": "object", "additionalProperties": { "type": "string" } },
             "network": { "type": "string", "enum": ["internet", "none"] },
         }), &[]), "annotations": write }),

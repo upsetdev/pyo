@@ -38,7 +38,8 @@ pub enum Command {
         /// Writable disk in MiB. Default 2048.
         #[arg(long)]
         disk: Option<u32>,
-        /// How long it lives, like 30m or 1h. Default 5m.
+        /// How long it lives, like 30m, 1h or 7d, up to 365d. "none" keeps it
+        /// until you delete it. Default 5m.
         #[arg(long)]
         ttl: Option<String>,
         /// Pause after this many seconds without use.
@@ -99,7 +100,7 @@ pub enum Command {
     Extend {
         /// The sandbox's id, sbx_….
         id: String,
-        /// Like 30m or 1h.
+        /// Like 30m, 1h or 7d. "none" keeps it until you delete it.
         ttl: String,
     },
     /// A new token for the sandbox's server, valid an hour.
@@ -331,10 +332,10 @@ pub async fn run(api: &Api, team: Option<&str>, cmd: Command) -> Result<()> {
                     &json!({ "ttl": ttl }),
                 )
                 .await?;
-            ui::ok(&format!(
-                "{id} ends in {}.",
-                left(r["expiresAt"].as_i64(), crate::api::now_ms())
-            ));
+            ui::ok(&match r["expiresAt"].as_i64() {
+                Some(at) => format!("{id} ends in {}.", left(Some(at), crate::api::now_ms())),
+                None => format!("{id} runs until you delete it."),
+            });
             Ok(())
         }
         Command::Token { id, json } => {
@@ -469,8 +470,11 @@ fn pairs(items: &[String], flag: &str) -> Result<BTreeMap<String, String>> {
 }
 
 /// "45m", "2h 10m", or "ended".
+/// Time left until `at`. None: the sandbox has no lifetime.
 fn left(at: Option<i64>, now: i64) -> String {
-    let Some(at) = at else { return "-".into() };
+    let Some(at) = at else {
+        return "never".into();
+    };
     let s = (at - now) / 1000;
     match s {
         ..=0 => "ended".into(),
@@ -567,7 +571,14 @@ fn print_sandbox(x: &Value) {
         ("state", s("state")),
         ("template", s("template")),
         ("size", size(x)),
-        ("ends in", left(x["expiresAt"].as_i64(), now)),
+        (
+            "ends in",
+            if matches!(x["state"].as_str(), Some("stopped" | "failed")) {
+                "-".into()
+            } else {
+                left(x["expiresAt"].as_i64(), now)
+            },
+        ),
         ("server", s("server")),
         ("runtime", s("runtime")),
         ("network", s("network")),
@@ -1256,7 +1267,7 @@ mod tests {
         assert_eq!(left(Some(now + 130 * 60_000), now), "2h 10m");
         assert_eq!(left(Some(now + 3 * 86_400_000), now), "3d");
         assert_eq!(left(Some(now - 1), now), "ended");
-        assert_eq!(left(None, now), "-");
+        assert_eq!(left(None, now), "never");
     }
 
     #[test]

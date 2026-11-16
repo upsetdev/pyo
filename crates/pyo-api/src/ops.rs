@@ -2063,7 +2063,7 @@ pub(crate) enum Op {
         #[serde(default)]
         usage: Option<bool>,
     },
-    /// Set a team's sandbox limits: how many sandboxes it may have at once, their CPUs, memory and disk together, and the longest lifetime. Only the installation's admin can do this.
+    /// Set a team's sandbox limits: how many sandboxes it may have at once, their CPUs, memory and disk together, and the longest lifetime (up to 365 days, or null for no limit). Only the installation's admin can do this.
     SetSandboxLimits {
         team_id: String,
         limits: crate::sandbox::limits::Limits,

@@ -67,6 +67,7 @@ export type Sandbox = {
   createdBy: string | null;
   createdAt: number;
   startedAt: number | null;
+  /** Null: it runs until it's deleted. */
   expiresAt: number | null;
   pausedAt: number | null;
   endedAt: number | null;
@@ -79,7 +80,8 @@ export type SandboxLimits = {
   maxCpus: number;
   maxMemoryMib: number;
   maxDiskMib: number;
-  maxTtlSecs: number;
+  /** Null: no limit, sandboxes may run until they're deleted. */
+  maxTtlSecs: number | null;
 };
 
 export type SandboxInUse = {
@@ -255,6 +257,7 @@ export type CreateSandbox = {
   cpus?: number;
   memoryMib?: number;
   diskMib?: number;
+  /** Like "30m", "1h" or "7d", or "none" to run until it's deleted. */
   ttl?: string;
   pauseWhenIdleSecs?: number;
   env?: Record<string, string>;
@@ -536,13 +539,21 @@ export function timeLeft(at: number | null, now = Date.now()) {
   return `${Math.floor(h / 24)}d`;
 }
 
-/** "1h", "1h30m", "90s", like Pyo's format_ttl. */
+/** "7d", "1h", "1h30m", "90s", like Pyo's format_ttl. */
 export function formatTtl(secs: number) {
-  const h = Math.floor(secs / 3600);
+  const d = Math.floor(secs / 86_400);
+  const h = Math.floor((secs % 86_400) / 3600);
   const m = Math.floor((secs % 3600) / 60);
   const s = secs % 60;
-  const out = `${h ? `${h}h` : ""}${m ? `${m}m` : ""}`;
+  const out = `${d ? `${d}d` : ""}${h ? `${h}h` : ""}${m ? `${m}m` : ""}`;
   return s || !out ? `${out}${s}s` : out;
+}
+
+/** "1 hour", "30 days", "90 minutes": a lifetime in words. */
+export function lifetimeLabel(secs: number) {
+  const unit = LIFETIME_UNITS.find((u) => secs >= u.secs && secs % u.secs === 0) ?? LIFETIME_UNITS[LIFETIME_UNITS.length - 1];
+  const n = +(secs / unit.secs).toFixed(2);
+  return `${n} ${n === 1 ? unit.one : unit.many}`;
 }
 
 export const RUNTIME_LABEL: Record<string, string> = {
@@ -565,10 +576,31 @@ export const SIZES = [
 ] as const;
 
 export const LIFETIMES = [
-  { value: "10m", label: "10 min", secs: 600 },
+  { value: "5m", label: "5 min", secs: 300 },
+  { value: "30m", label: "30 min", secs: 1800 },
   { value: "1h", label: "1 hour", secs: 3600 },
-  { value: "24h", label: "1 day", secs: 86_400 },
+  { value: "6h", label: "6 hours", secs: 21_600 },
+  { value: "1d", label: "1 day", secs: 86_400 },
 ] as const;
+
+/** The `ttl` of a sandbox that runs until it's deleted. */
+export const NO_LIFETIME = "none";
+
+/** The longest lifetime Pyo takes: 365 days. */
+export const MAX_LIFETIME_SECS = 365 * 86_400;
+
+/** Units for a custom lifetime, largest first. `ttl` is how Pyo reads it. */
+export const LIFETIME_UNITS = [
+  { value: "d", one: "day", many: "days", secs: 86_400 },
+  { value: "h", one: "hour", many: "hours", secs: 3600 },
+  { value: "m", one: "minute", many: "minutes", secs: 60 },
+] as const;
+
+export type LifetimeUnit = (typeof LIFETIME_UNITS)[number]["value"];
+
+/** Whether a lifetime fits the team's longest. Null `secs`: no lifetime. */
+export const lifetimeAllowed = (secs: number | null, limits: SandboxLimits | null) =>
+  !limits || limits.maxTtlSecs === null || (secs !== null && secs <= limits.maxTtlSecs);
 
 /** The TypeScript SDK call that makes the same sandbox as the form. */
 export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {

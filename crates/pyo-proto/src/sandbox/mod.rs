@@ -43,7 +43,11 @@ pub const DEFAULT_DISK_MIB: u32 = 2048;
 pub const MIN_DISK_MIB: u32 = 64;
 pub const MAX_DISK_MIB: u32 = 256 * 1024;
 pub const DEFAULT_TTL_SECS: u64 = 5 * 60;
-pub const MAX_TTL_SECS: u64 = 24 * 60 * 60;
+/// The longest lifetime a sandbox can have. A sandbox may also have none
+/// (`ttl_secs` of `None`): it runs until it's deleted.
+pub const MAX_TTL_SECS: u64 = 365 * 24 * 60 * 60;
+/// How "no lifetime" is written where a lifetime is asked for.
+pub const NO_TTL: &str = "none";
 pub const MAX_ENV: usize = 128;
 pub const MAX_LABELS: usize = 32;
 /// The most a template's files may take, unpacked, unless Pyo says
@@ -256,9 +260,10 @@ pub struct SandboxSpec {
     pub memory_mib: u32,
     #[serde(default = "default_disk")]
     pub disk_mib: u32,
-    /// The sandbox is deleted this long after it starts.
+    /// The sandbox is deleted this long after it starts. `None` (null):
+    /// it runs until it's deleted.
     #[serde(default = "default_ttl")]
-    pub ttl_secs: u64,
+    pub ttl_secs: Option<u64>,
     /// Pause after this long without a command or connection. Pause and
     /// resume come in v0.4.x, so the daemon doesn't act on it yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,8 +287,8 @@ fn default_memory() -> u32 {
 fn default_disk() -> u32 {
     DEFAULT_DISK_MIB
 }
-fn default_ttl() -> u64 {
-    DEFAULT_TTL_SECS
+fn default_ttl() -> Option<u64> {
+    Some(DEFAULT_TTL_SECS)
 }
 
 impl SandboxSpec {
@@ -300,7 +305,7 @@ impl SandboxSpec {
             cpus: DEFAULT_CPUS,
             memory_mib: DEFAULT_MEMORY_MIB,
             disk_mib: DEFAULT_DISK_MIB,
-            ttl_secs: DEFAULT_TTL_SECS,
+            ttl_secs: Some(DEFAULT_TTL_SECS),
             pause_when_idle_secs: None,
             env: BTreeMap::new(),
             network: NetworkMode::default(),
@@ -338,9 +343,7 @@ impl SandboxSpec {
                 MAX_DISK_MIB / 1024
             ));
         }
-        if !(1..=MAX_TTL_SECS).contains(&self.ttl_secs) {
-            return Err("The lifetime must be 1 second to 24 hours.".into());
-        }
+        check_ttl(self.ttl_secs)?;
         if self.env.len() > MAX_ENV {
             return Err(format!(
                 "A sandbox takes at most {MAX_ENV} environment variables."
@@ -408,8 +411,34 @@ pub fn is_label_key(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
 }
 
-/// Parses a lifetime like `90s`, `30m`, `1h` or `1h30m`. A bare number is
-/// seconds.
+/// Whether a lifetime is one a sandbox can have. `None` is no lifetime.
+/// The message is fit to show the user.
+pub fn check_ttl(ttl_secs: Option<u64>) -> Result<(), String> {
+    match ttl_secs {
+        Some(t) if !(1..=MAX_TTL_SECS).contains(&t) => {
+            Err("The lifetime must be 1 second to 365 days.".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// When a sandbox with this lifetime ends, from `now` (epoch
+/// milliseconds). `None`: never.
+pub fn expiry(now: u64, ttl_secs: Option<u64>) -> Option<u64> {
+    ttl_secs.map(|t| now.saturating_add(t.saturating_mul(1000)))
+}
+
+/// Parses a lifetime like [`parse_ttl`], or [`NO_TTL`] for none:
+/// `Some(None)`.
+pub fn parse_lifetime(s: &str) -> Option<Option<u64>> {
+    if s.trim().eq_ignore_ascii_case(NO_TTL) {
+        return Some(None);
+    }
+    parse_ttl(s).map(Some)
+}
+
+/// Parses a lifetime like `90s`, `30m`, `1h`, `1h30m` or `7d`. A bare
+/// number is seconds.
 pub fn parse_ttl(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -482,7 +511,9 @@ pub struct SandboxStatus {
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
-    pub expires_at: u64,
+    /// When its lifetime ends. `None`: it runs until it's deleted.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
     /// From the start of the VM process to envd's ready signal, or to the
     /// first answer after a restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -728,10 +759,11 @@ pub enum DaemonCommand {
     Resume {
         id: String,
     },
-    /// Moves the end of the lifetime to `ttl_secs` from now.
+    /// Moves the end of the lifetime to `ttl_secs` from now. `None`: the
+    /// sandbox runs until it's deleted.
     SetTtl {
         id: String,
-        ttl_secs: u64,
+        ttl_secs: Option<u64>,
     },
     Get {
         id: String,
@@ -995,8 +1027,14 @@ mod tests {
         .unwrap();
         assert_eq!(s.cpus, DEFAULT_CPUS);
         assert_eq!(s.memory_mib, DEFAULT_MEMORY_MIB);
-        assert_eq!(s.ttl_secs, DEFAULT_TTL_SECS);
+        assert_eq!(s.ttl_secs, Some(DEFAULT_TTL_SECS));
         assert_eq!(s.network, NetworkMode::Internet);
+        let s: SandboxSpec = serde_json::from_str(
+            r#"{"id":"sbx_abcdefghijklmnop","team":"t","template":"node-22","ttlSecs":null}"#,
+        )
+        .unwrap();
+        assert_eq!(s.ttl_secs, None, "null is no lifetime");
+        s.validate().unwrap();
         assert_eq!(s.isolation, Isolation::Auto);
         s.validate().unwrap();
     }
@@ -1026,8 +1064,8 @@ mod tests {
             |s| s.cpus = MAX_CPUS + 1,
             |s| s.memory_mib = 64,
             |s| s.disk_mib = 1,
-            |s| s.ttl_secs = 0,
-            |s| s.ttl_secs = MAX_TTL_SECS + 1,
+            |s| s.ttl_secs = Some(0),
+            |s| s.ttl_secs = Some(MAX_TTL_SECS + 1),
             |s| {
                 s.env.insert("1BAD".into(), "x".into());
             },
@@ -1065,6 +1103,26 @@ mod tests {
         assert!(!is_template_name(".hidden"));
         assert!(!is_template_name("a/b"));
         assert!(!is_template_name(""));
+    }
+
+    #[test]
+    fn long_and_endless_lifetimes() {
+        assert_eq!(check_ttl(None), Ok(()));
+        assert_eq!(check_ttl(Some(1)), Ok(()));
+        assert_eq!(check_ttl(Some(MAX_TTL_SECS)), Ok(()));
+        assert!(check_ttl(Some(0)).is_err());
+        assert!(check_ttl(Some(MAX_TTL_SECS + 1)).is_err());
+        assert_eq!(parse_ttl("365d"), Some(MAX_TTL_SECS));
+        assert_eq!(parse_lifetime("none"), Some(None));
+        assert_eq!(parse_lifetime(" None "), Some(None));
+        assert_eq!(parse_lifetime("30d"), Some(Some(30 * 86400)));
+        assert_eq!(parse_lifetime("never"), None);
+        assert_eq!(expiry(1_000, None), None);
+        assert_eq!(
+            expiry(1_000, Some(MAX_TTL_SECS)),
+            Some(1_000 + MAX_TTL_SECS * 1000)
+        );
+        assert_eq!(expiry(u64::MAX, Some(10)), Some(u64::MAX));
     }
 
     #[test]
@@ -1138,7 +1196,11 @@ mod tests {
             },
             DaemonCommand::SetTtl {
                 id: "sbx_abcdefghijklmnop".into(),
-                ttl_secs: 60,
+                ttl_secs: Some(60),
+            },
+            DaemonCommand::SetTtl {
+                id: "sbx_abcdefghijklmnop".into(),
+                ttl_secs: None,
             },
             DaemonCommand::List,
             DaemonCommand::SnapshotTemplate {

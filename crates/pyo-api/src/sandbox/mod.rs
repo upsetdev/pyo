@@ -53,10 +53,18 @@ use crate::{
     ops::{Role, require_role},
 };
 
-/// "1h", "1h30m", "90s".
+/// "7d", "1h", "1h30m", "90s".
 pub fn format_ttl(secs: u64) -> String {
-    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    let (d, h, m, s) = (
+        secs / 86400,
+        secs % 86400 / 3600,
+        secs % 3600 / 60,
+        secs % 60,
+    );
     let mut out = String::new();
+    if d > 0 {
+        out.push_str(&format!("{d}d"));
+    }
     if h > 0 {
         out.push_str(&format!("{h}h"));
     }
@@ -226,7 +234,7 @@ pub async fn save_status(db: &mut PgConnection, st: &SandboxStatus) -> sqlx::Res
     .bind(runtime_name(st.runtime))
     .bind(&st.error)
     .bind(st.started_at.map(|t| t as f64))
-    .bind(st.expires_at as f64)
+    .bind(st.expires_at.map(|t| t as f64))
     .bind(json!(st.ports))
     .execute(db)
     .await?;
@@ -447,8 +455,9 @@ pub struct CreateSandbox {
     /// The writable disk, sparse. 2048 when omitted.
     #[serde(default)]
     pub disk_mib: Option<u32>,
-    /// How long it lives, like "30m" or "1h", or seconds. 5 minutes when
-    /// omitted.
+    /// How long it lives, like "30m", "1h" or "7d", or seconds, up to 365
+    /// days and the team's longest lifetime. "none": it runs until it's
+    /// deleted, when the team has no limit. 5 minutes when omitted.
     #[serde(default)]
     #[schema(value_type = Option<String>)]
     pub ttl: Option<Value>,
@@ -475,21 +484,21 @@ pub struct CreateSandbox {
     pub project_id: Option<String>,
 }
 
-/// A lifetime given as "30m", "1h" or seconds.
-pub fn parse_ttl_value(v: Option<&Value>) -> ApiResult<u64> {
-    let bad =
-        || ApiError::bad_request("The lifetime is like \"30m\", \"1h\" or a number of seconds.");
+/// A lifetime given as "30m", "1h", "7d" or seconds, or "none": `None`,
+/// the sandbox runs until it's deleted. 5 minutes when left out.
+pub fn parse_ttl_value(v: Option<&Value>) -> ApiResult<Option<u64>> {
+    let bad = || {
+        ApiError::bad_request(
+            "The lifetime is like \"30m\", \"1h\", \"7d\", a number of seconds or \"none\".",
+        )
+    };
     let secs = match v {
-        None | Some(Value::Null) => proto::DEFAULT_TTL_SECS,
-        Some(Value::Number(n)) => n.as_u64().ok_or_else(bad)?,
-        Some(Value::String(s)) => proto::parse_ttl(s).ok_or_else(bad)?,
+        None | Some(Value::Null) => Some(proto::DEFAULT_TTL_SECS),
+        Some(Value::Number(n)) => Some(n.as_u64().ok_or_else(bad)?),
+        Some(Value::String(s)) => proto::parse_lifetime(s).ok_or_else(bad)?,
         Some(_) => return Err(bad()),
     };
-    if !(1..=proto::MAX_TTL_SECS).contains(&secs) {
-        return Err(ApiError::bad_request(
-            "The lifetime must be 1 second to 24 hours.",
-        ));
-    }
+    proto::check_ttl(secs).map_err(ApiError::bad_request)?;
     Ok(secs)
 }
 
@@ -759,7 +768,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     .bind(&template.id)
     .bind(json!(kept))
     .bind(&user.name)
-    .bind((ttl_secs + wait) as f64)
+    .bind(ttl_secs.map(|t| (t + wait) as f64))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -959,7 +968,8 @@ pub async fn resume(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
     lifecycle(s, user, id, |id| DaemonCommand::Resume { id }).await
 }
 
-/// The sandbox ends `ttl` from now instead, within the team's longest.
+/// The sandbox ends `ttl` from now instead, or never ("none"), within the
+/// team's longest.
 pub async fn extend(s: &AppState, user: &User, id: &str, ttl: Option<&Value>) -> ApiResult<Value> {
     let ttl_secs = parse_ttl_value(ttl)?;
     let f = find(s, user, id, Need::Use).await?;
@@ -1605,10 +1615,29 @@ mod tests {
         assert_eq!(format_ttl(5400), "1h30m");
         assert_eq!(format_ttl(90), "1m30s");
         assert_eq!(format_ttl(0), "0s");
-        assert_eq!(parse_ttl_value(None).unwrap(), proto::DEFAULT_TTL_SECS);
-        assert_eq!(parse_ttl_value(Some(&json!("1h"))).unwrap(), 3600);
-        assert_eq!(parse_ttl_value(Some(&json!(90))).unwrap(), 90);
-        assert!(parse_ttl_value(Some(&json!("2d"))).is_err());
+        assert_eq!(format_ttl(86400), "1d");
+        assert_eq!(format_ttl(36 * 3600), "1d12h");
+        assert_eq!(format_ttl(proto::MAX_TTL_SECS), "365d");
+        assert_eq!(
+            parse_ttl_value(None).unwrap(),
+            Some(proto::DEFAULT_TTL_SECS)
+        );
+        assert_eq!(parse_ttl_value(Some(&json!("1h"))).unwrap(), Some(3600));
+        assert_eq!(parse_ttl_value(Some(&json!(90))).unwrap(), Some(90));
+        assert_eq!(
+            parse_ttl_value(Some(&json!("2d"))).unwrap(),
+            Some(2 * 86400)
+        );
+        assert_eq!(
+            parse_ttl_value(Some(&json!("365d"))).unwrap(),
+            Some(proto::MAX_TTL_SECS)
+        );
+        assert_eq!(
+            parse_ttl_value(Some(&json!(proto::MAX_TTL_SECS))).unwrap(),
+            Some(proto::MAX_TTL_SECS)
+        );
+        assert_eq!(parse_ttl_value(Some(&json!("none"))).unwrap(), None);
+        assert!(parse_ttl_value(Some(&json!("366d"))).is_err());
         assert!(parse_ttl_value(Some(&json!(0))).is_err());
         assert!(parse_ttl_value(Some(&json!("soon"))).is_err());
         assert!(parse_ttl_value(Some(&json!(true))).is_err());

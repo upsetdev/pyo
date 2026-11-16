@@ -3,6 +3,13 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { z } from "zod";
 import { RuntimeBadge, useSandboxes } from "~/components/pyo/sandbox/common";
+import {
+  CustomLifetimeInput,
+  customError,
+  customSecs,
+  customTtl,
+  type CustomLifetime,
+} from "~/components/pyo/sandbox/Lifetime";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { Field, Segmented, Select, Switch, Textarea } from "~/components/ui/Field";
@@ -20,6 +27,9 @@ import {
   gettingReady,
   isBase,
   LIFETIMES,
+  lifetimeAllowed,
+  lifetimeLabel,
+  NO_LIFETIME,
   RUNTIME_LABEL,
   serverRefusal,
   usable,
@@ -111,7 +121,8 @@ function NewSandboxForm() {
   const servers = sandboxServersIn(s);
   const [server, setServer] = useState("");
   const [size, setSize] = useState<(typeof SIZES)[number]["value"]>("1");
-  const [ttl, setTtl] = useState<(typeof LIFETIMES)[number]["value"]>("1h");
+  const [ttl, setTtl] = useState<string>("1h");
+  const [custom, setCustom] = useState<CustomLifetime>({ amount: "2", unit: "d" });
   const [idle, setIdle] = useState(false);
   const networked = sandboxServersIn(s).some(
     (v) => v.enabled && v.state === "ready" && v.capability?.network,
@@ -139,13 +150,37 @@ function NewSandboxForm() {
       : undefined;
   const limits = list.status === "success" ? list.data.limits : null;
   const inUse = list.status === "success" ? list.data.inUse : null;
+  // A preset, "custom" or "none" (no lifetime: it runs until it's deleted).
+  const noLimit = limits?.maxTtlSecs === null;
+  const ttlSecs =
+    ttl === "custom" ? customSecs(custom) : ttl === NO_LIFETIME ? null : (LIFETIMES.find((x) => x.value === ttl)?.secs ?? null);
+  const ttlError =
+    ttl === "custom"
+      ? (customError(custom) ??
+        (lifetimeAllowed(ttlSecs, limits)
+          ? null
+          : `Your team's sandboxes live ${lifetimeLabel(limits?.maxTtlSecs ?? 0)} at most.`))
+      : null;
+  const ttlOk = !ttlError && lifetimeAllowed(ttlSecs, limits);
+  // Custom starts at 2 days, or at the team's longest when that's shorter.
+  const pickTtl = (v: string) => {
+    if (v === "custom" && ttl !== "custom") {
+      const max = limits?.maxTtlSecs ?? null;
+      setCustom(
+        max === null || max >= 2 * 86_400
+          ? { amount: "2", unit: "d" }
+          : { amount: String(Math.max(1, Math.floor(max / 3600))), unit: "h" },
+      );
+    }
+    setTtl(v);
+  };
   const body: CreateSandbox = {
     teamId: team,
     template: picked,
     ...(pinned ? { server: pinned.id } : {}),
     cpus: sz.cpus,
     memoryMib: sz.memoryMib,
-    ttl,
+    ttl: ttl === "custom" ? customTtl(custom) : ttl,
     ...(idle ? { pauseWhenIdleSecs: IDLE_SECS } : {}),
     network,
     ...(isolation !== "auto" ? { isolation } : {}),
@@ -156,7 +191,7 @@ function NewSandboxForm() {
   const { teamId: _, ...code } = body;
 
   const create = async () => {
-    if (!picked || busy) return;
+    if (!picked || busy || !ttlOk) return;
     setBusy(true);
     setError("");
     try {
@@ -282,19 +317,30 @@ function NewSandboxForm() {
                 />
               )}
             </Field>
-            <Field label="Lifetime">
-              {() => (
+            <Field
+              label="Lifetime"
+              error={ttlError ?? undefined}
+              hint={ttl === NO_LIFETIME ? "It runs until you delete it." : undefined}
+            >
+              {(p) => (
                 <div className="space-y-3">
                   <Segmented
                     label="Lifetime"
                     value={ttl}
-                    onChange={setTtl}
-                    options={LIFETIMES.map((x) => ({
-                      value: x.value,
-                      label: x.label,
-                      disabled: !!limits && x.secs > limits.maxTtlSecs,
-                    }))}
+                    onChange={pickTtl}
+                    options={[
+                      ...LIFETIMES.map((x) => ({
+                        value: x.value as string,
+                        label: x.label,
+                        disabled: !lifetimeAllowed(x.secs, limits),
+                      })),
+                      { value: "custom", label: "Custom" },
+                      ...(noLimit ? [{ value: NO_LIFETIME, label: "No limit" }] : []),
+                    ]}
                   />
+                  {ttl === "custom" ? (
+                    <CustomLifetimeInput {...p} value={custom} onChange={setCustom} units={["h", "d"]} />
+                  ) : null}
                   <Switch
                     checked={idle}
                     onChange={setIdle}
@@ -372,7 +418,7 @@ function NewSandboxForm() {
               <ButtonLink href="/sandboxes" variant="ghost" size="sm">
                 Cancel
               </ButtonLink>
-              <Button type="submit" size="sm" disabled={!picked || busy}>
+              <Button type="submit" size="sm" disabled={!picked || busy || !ttlOk}>
                 {preparing ? gettingReady(picked, preparing.server) : busy ? "Creating…" : "Create sandbox"}
               </Button>
             </div>

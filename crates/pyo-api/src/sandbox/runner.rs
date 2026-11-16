@@ -262,7 +262,7 @@ async fn sweep(s: &AppState) -> anyhow::Result<()> {
         end(&mut c, &id, "failed", Some("It didn't start in time.")).await?;
     }
     let due: Vec<(String, Option<String>, Option<String>, bool)> = sqlx::query_as(
-        "SELECT x.id, x.server_id, sv.address, x.expires_at < now() - make_interval(secs => $1) FROM pyo.sandboxes x LEFT JOIN pyo.sandbox_servers sv ON sv.id = x.server_id
+        "SELECT x.id, x.server_id, sv.address, coalesce(x.expires_at < now() - make_interval(secs => $1), false) FROM pyo.sandboxes x LEFT JOIN pyo.sandbox_servers sv ON sv.id = x.server_id
           WHERE x.state NOT IN ('stopped', 'failed')
             AND (x.state = 'stopping' OR x.expires_at < now() - make_interval(secs => $1))
           LIMIT 200",
