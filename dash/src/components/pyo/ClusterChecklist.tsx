@@ -2,6 +2,7 @@ import { plural } from "~/lib/pyo/format";
 import { serversOf, usePyo } from "~/lib/pyo/store";
 import { CodeText } from "./common";
 import { SetupChecklist, type SetupCheck } from "./SetupChecklist";
+import { TailnetLockWait } from "./TailnetLock";
 
 /** What the agent has reported so far, ticked off as it comes in. */
 export function ClusterChecklist({ clusterId }: { clusterId: string }) {
@@ -61,11 +62,15 @@ export function ClusterChecklist({ clusterId }: { clusterId: string }) {
   ];
 
   return (
-    <SetupChecklist
-      title="Waiting for it to connect"
-      checks={checks.map((ch, i) =>
-        i >= 2 ? { ...ch, missing: connected && !ch.done } : ch,
-      )}
-    />
+    <>
+      <SetupChecklist
+        title="Waiting for it to connect"
+        checks={checks.map((ch, i) =>
+          i >= 2 ? { ...ch, missing: connected && !ch.done } : ch,
+        )}
+      />
+      {/* Its hostname isn't known: any of Pyo's machines that waits. */}
+      {connected ? null : <TailnetLockWait />}
+    </>
   );
 }

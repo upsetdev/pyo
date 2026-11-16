@@ -300,6 +300,13 @@ export const fetchRegistry = (team: string) =>
 export const fetchCloudOptions = (team: string) =>
   request<CloudOptions>(`/api/v1/cloud/options?${new URLSearchParams({ team })}`);
 
+/** Pyo's machines that Tailnet Lock keeps off the tailnet until a signing
+ * device signs their key, with the command that signs it. */
+export const fetchTailnetLock = (team: string) =>
+  request<{ waiting: { name: string; signCommand: string }[] }>(
+    `/api/v1/tailnet/lock?${new URLSearchParams({ team })}`,
+  );
+
 export const fetchImages = (team: string) =>
   request<{ images: TeamImage[] }>(
     `/api/v1/images?${new URLSearchParams({ team })}`,

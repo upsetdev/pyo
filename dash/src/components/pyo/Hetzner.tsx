@@ -12,7 +12,7 @@ import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Input, Select, Textarea } from "~/components/ui/Field";
 import { Callout } from "~/components/ui/Panel";
 import { StatusNote } from "~/components/ui/StatusNote";
-import { CopyButton } from "~/components/ui/Table";
+import { TailnetLockSign } from "~/components/pyo/TailnetLock";
 import { site } from "~/config/site";
 import { fetchCloudOptions } from "~/lib/pyo/backend";
 import { api, usePyo, type PyoState } from "~/lib/pyo/store";
@@ -443,19 +443,7 @@ export function CloudProgress({ server }: { server: CloudServer }) {
           </li>
         ))}
       </ol>
-      {server.signCommand ? (
-        <Callout tone="warning">
-          <span className="flex flex-col gap-1.5">
-            Your tailnet has Tailnet Lock on. On a signing device, run:
-            <span className="inline-flex items-center gap-1">
-              <code className="break-all font-mono text-[12px] text-foreground">
-                {server.signCommand}
-              </code>
-              <CopyButton value={server.signCommand} label="Copy command" />
-            </span>
-          </span>
-        </Callout>
-      ) : null}
+      {server.signCommand ? <TailnetLockSign command={server.signCommand} /> : null}
       {server.error ? <p className="text-[12px] text-destructive">{server.error}</p> : null}
     </div>
   );

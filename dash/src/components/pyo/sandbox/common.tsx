@@ -1,6 +1,7 @@
 import { CheckCircleIcon, CircleNotchIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { NeedsTailscale } from "~/components/pyo/Tailscale";
+import { TailnetLockWait } from "~/components/pyo/TailnetLock";
 import { AppLink } from "~/components/ui/AppLink";
 import { LiveCommand } from "~/components/pyo/LiveCommand";
 import { Badge, Dot } from "~/components/ui/Badge";
@@ -174,6 +175,7 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
               </>
             )}
           </div>
+          {joined || expired ? null : <TailnetLockWait name={result.name} />}
           {onDone ? (
             <div className="flex justify-end">
               <Button size="sm" variant="secondary" onClick={onDone}>

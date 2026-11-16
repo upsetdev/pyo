@@ -1,4 +1,5 @@
 import { NeedsTailscale } from "~/components/pyo/Tailscale";
+import { TailnetLockWait } from "~/components/pyo/TailnetLock";
 import { TreeStructureIcon } from "@phosphor-icons/react";
 import { site } from "~/config/site";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -357,6 +358,7 @@ function JoinForm({
           ]}
         />
       ) : null}
+      {how === "command" && made && !joined ? <TailnetLockWait name={value} /> : null}
       <div className="flex justify-end gap-2">
         {joined ? (
           <ButtonLink href={`${base}/${joined.name}`} size="sm">

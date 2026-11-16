@@ -10,6 +10,7 @@ import {
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { CloudProgress } from "~/components/pyo/Hetzner";
+import { TailnetLockWait } from "~/components/pyo/TailnetLock";
 import {
   act,
   SandboxStatus,
@@ -216,7 +217,10 @@ function PendingServers({ servers }: { servers: SandboxServer[] }) {
               ) : x.state === "refused" ? (
                 <p className="text-[12px] text-destructive">{x.error ?? x.summary}</p>
               ) : (
-                <p className="text-[12px] text-muted-foreground">Waiting for its command to run on the server.</p>
+                <>
+                  <p className="text-[12px] text-muted-foreground">Waiting for its command to run on the server.</p>
+                  <TailnetLockWait name={x.name} />
+                </>
               )}
             </li>
           );
