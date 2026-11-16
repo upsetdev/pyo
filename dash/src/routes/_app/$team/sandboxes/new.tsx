@@ -5,7 +5,7 @@ import { z } from "zod";
 import { RuntimeBadge, useSandboxes } from "~/components/pyo/sandbox/common";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button, ButtonLink } from "~/components/ui/Button";
-import { Field, Segmented, Select, Switch, Textarea } from "~/components/ui/Field";
+import { Field, Input, Segmented, Select, Switch, Textarea } from "~/components/ui/Field";
 import { Highlighted } from "~/components/ui/Highlighted";
 import { Callout, EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { Reveal } from "~/components/ui/Reveal";
@@ -108,6 +108,7 @@ function NewSandboxForm() {
   const ready = templates.status === "success" ? templates.data.templates : [];
   const search = Route.useSearch();
   const [template, setTemplate] = useState(search.template ?? "");
+  const [name, setName] = useState("");
   const servers = sandboxServersIn(s);
   const [server, setServer] = useState("");
   const [size, setSize] = useState<(typeof SIZES)[number]["value"]>("1");
@@ -141,6 +142,7 @@ function NewSandboxForm() {
   const inUse = list.status === "success" ? list.data.inUse : null;
   const body: CreateSandbox = {
     teamId: team,
+    ...(name.trim() ? { name: name.trim() } : {}),
     template: picked,
     ...(pinned ? { server: pinned.id } : {}),
     cpus: sz.cpus,
@@ -188,6 +190,11 @@ function NewSandboxForm() {
               void create();
             }}
           >
+            <Field label="Name" optional>
+              {(p) => (
+                <Input {...p} value={name} onChange={(e) => setName(e.target.value)} maxLength={63} placeholder="Generated when empty" />
+              )}
+            </Field>
             <Field
               label="Template"
               hint={

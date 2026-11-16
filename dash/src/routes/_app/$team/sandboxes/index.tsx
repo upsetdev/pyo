@@ -33,8 +33,8 @@ import {
   PageHeader,
   Panel,
 } from "~/components/ui/Panel";
-import { Table, Td, Th, Tr } from "~/components/ui/Table";
-import { timeAgo } from "~/lib/pyo/format";
+import { SearchInput, Table, Td, Th, Tr } from "~/components/ui/Table";
+import { plural, timeAgo } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import {
   ended,
@@ -66,6 +66,7 @@ function SandboxesPage() {
   const q = useSandboxes(s.currentTeamId);
   const [filter, setFilter] = useState<Filter>("live");
   const [template, setTemplate] = useState("");
+  const [query, setQuery] = useState("");
   const [deleting, setDeleting] = useState<Sandbox | null>(null);
   const role = roleIn(s);
   const canUse = role !== "viewer";
@@ -84,7 +85,9 @@ function SandboxesPage() {
         ? !ended(x)
         : filter === "ended"
           ? ended(x)
-          : x.state === filter) && (!template || x.template === template),
+          : x.state === filter) &&
+      (!template || x.template === template) &&
+      matches(x, query),
   );
 
   // Add server is for owners and admins. A viewer gets no New button.
@@ -158,6 +161,13 @@ function SandboxesPage() {
         <ListSection
           toolbar={
             <>
+              <SearchInput
+                value={query}
+                onChange={setQuery}
+                shortcut="/"
+                placeholder={`Search ${plural(all.length, "sandbox", "sandboxes")}…`}
+                className="min-w-0 flex-1 basis-full sm:basis-0"
+              />
               <div className="w-40 sm:w-44">
                 <Select value={filter} onChange={(e) => setFilter(e.target.value as Filter)} aria-label="Status" heading="Status">
                   <option value="live">Live ({live.length})</option>
@@ -187,7 +197,7 @@ function SandboxesPage() {
       <ConfirmDialog
         open={!!deleting}
         onClose={() => setDeleting(null)}
-        title={`Delete ${deleting?.id ?? "sandbox"}?`}
+        title={`Delete ${deleting?.name ?? "sandbox"}?`}
         description="Its files are gone for good."
         confirmLabel="Delete sandbox"
         onConfirm={() => {
@@ -196,6 +206,12 @@ function SandboxesPage() {
       />
     </Page>
   );
+}
+
+/** Whether a sandbox's name or id has the search text. */
+function matches(x: Sandbox, query: string) {
+  const q = query.trim().toLowerCase();
+  return !q || x.name.toLowerCase().includes(q) || x.id.toLowerCase().includes(q);
 }
 
 /** Sandbox servers not running sandboxes yet: Pyo's progress at Hetzner, or the join. */
@@ -289,7 +305,7 @@ function SandboxTable({
     <Table>
       <thead>
         <tr>
-          <Th>ID</Th>
+          <Th>Name</Th>
           <Th>Template</Th>
           <Th>Status</Th>
           <Th>CPU and memory</Th>
@@ -304,7 +320,10 @@ function SandboxTable({
       <tbody>
         {rows.map((x) => (
           <Tr key={x.id} onClick={() => open(x)}>
-            <Td className="font-mono text-[12px]">{x.id}</Td>
+            <Td className="max-w-56">
+              <span className="block truncate font-medium">{x.name}</span>
+              <span className="block truncate font-mono text-[11.5px] text-muted-foreground">{x.id}</span>
+            </Td>
             <Td>{x.template}</Td>
             <Td>
               <SandboxStatus state={x.state} sandbox={x} />
@@ -318,7 +337,7 @@ function SandboxTable({
             <Td>
               <div onClick={(e) => e.stopPropagation()}>
                 <Menu
-                  label={`Actions for ${x.id}`}
+                  label={`Actions for ${x.name}`}
                   items={[
                     { label: "Open", icon: <ArrowSquareOutIcon size={14} />, onSelect: () => open(x) },
                     ...(canUse && !ended(x)
