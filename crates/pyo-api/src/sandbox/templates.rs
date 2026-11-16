@@ -102,7 +102,9 @@ pub fn plan(
         .map(|t| t.id.as_str())
         .collect();
     let has: HashSet<&str> = report.templates.iter().map(|t| t.name.as_str()).collect();
-    let mut prepare: Vec<String> = if report.capability.runtime == Runtime::Firecracker {
+    // Firecracker servers boot and snapshot a template. gVisor servers make
+    // the same disk and start sandboxes cold from it.
+    let mut prepare: Vec<String> = if report.capability.runtime != Runtime::None {
         wanted
             .iter()
             .filter(|id| !has.contains(*id))
@@ -198,7 +200,7 @@ pub async fn push(s: AppState, template_id: String) {
         let servers: Vec<(String, Option<String>, String)> = sqlx::query_as(
             "SELECT id, team_id, address FROM pyo.sandbox_servers
               WHERE state = 'ready' AND enabled AND address IS NOT NULL
-                AND capability->>'runtime' = 'firecracker'",
+                AND capability->>'runtime' IN ('firecracker', 'gvisor')",
         )
         .fetch_all(&s.db)
         .await?;
@@ -284,7 +286,7 @@ pub async fn update_states(db: &PgPool) -> sqlx::Result<()> {
         "SELECT t.id, t.state, t.error,
                 coalesce(jsonb_agg(m.e) FILTER (WHERE m.e IS NOT NULL), '[]'),
                 count(s.id) FILTER (WHERE m.e IS NULL AND s.state = 'ready' AND s.enabled
-                                      AND s.capability->>'runtime' = 'firecracker')
+                                      AND s.capability->>'runtime' IN ('firecracker', 'gvisor'))
            FROM pyo.sandbox_templates t
            LEFT JOIN pyo.sandbox_servers s
              ON s.team_id IS NULL OR t.team_id IS NULL OR s.team_id = t.team_id
@@ -396,11 +398,17 @@ mod tests {
             "the installation's server takes all"
         );
         let (prepare, stale) = plan(Some("tm_a"), &report(Runtime::Gvisor, vec![]), &templates);
-        assert!(
-            prepare.is_empty(),
-            "gVisor servers can't make templates yet"
+        assert_eq!(
+            prepare,
+            vec!["stp_a", "stp_i"],
+            "gVisor servers make them too"
         );
         assert!(stale.is_empty());
+        let (prepare, _) = plan(Some("tm_a"), &report(Runtime::None, vec![]), &templates);
+        assert!(
+            prepare.is_empty(),
+            "a server that runs nothing makes nothing"
+        );
     }
 
     #[test]

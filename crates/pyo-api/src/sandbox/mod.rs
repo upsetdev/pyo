@@ -335,10 +335,11 @@ pub async fn server_views(
     .fetch_all(db)
     .await?;
     for r in &mut rows {
-        let summary = serde_json::from_value::<proto::CapabilityReport>(r["capability"].clone())
-            .ok()
-            .map(|c| c.summary());
-        r["summary"] = json!(summary);
+        let cap = serde_json::from_value::<proto::CapabilityReport>(r["capability"].clone()).ok();
+        r["summary"] = json!(cap.as_ref().map(|c| c.summary()));
+        // What runs its sandboxes: "firecracker" or "gvisor", null until it
+        // reports (or when it can run neither).
+        r["runtime"] = json!(cap.and_then(|c| runtime_name(c.runtime)));
     }
     edgecert::attach(db, team_ids, &mut rows).await?;
     Ok(rows)
