@@ -108,9 +108,85 @@ export function templateStatus(t: TemplateLike) {
   return { pending: "Pending", building: "Building", ready: "Ready", failed: "Failed" }[t.state ?? ""] ?? t.state ?? "";
 }
 
-/** What a sandbox waiting for its server to make its template shows. */
-export const gettingReady = (template: string, server: string | null) =>
-  server ? `Getting ${template} ready on ${server}…` : `Getting ${template} ready…`;
+/** What a sandbox waiting for its server to make its template shows, with
+ * how far it got when known. */
+export function gettingReady(template: string, server: string | null, percent?: number | null) {
+  const pct = percent == null ? "" : ` ${percent}%`;
+  return (server ? `Getting ${template} ready on ${server}…` : `Getting ${template} ready…`) + pct;
+}
+
+type BuildLike = {
+  state: string;
+  phase?: string | null;
+  pulled?: number | null;
+  unpacked?: number | null;
+  imageBytes?: number | null;
+};
+
+/** How far a server got making a template: a short label and the percent
+ * of its step, or null when the step can't say (a bar with no end). */
+export type Progress = { label: string; percent: number | null };
+
+const STEPS = ["queued", "pulling", "unpacking", "snapshotting"];
+
+/** Part of a whole as a percent, never 100 while the step still runs. */
+const part = (done: number | null | undefined, total: number | null | undefined) =>
+  total && total > 0 && done ? Math.min(99, Math.floor((done / total) * 100)) : null;
+
+/** One server's progress, or null when it isn't making the template. A
+ * server too old to count what it unpacked says 0 there: no percent. */
+export function serverProgress(x: BuildLike): Progress | null {
+  if (x.state !== "building") return null;
+  switch (x.phase) {
+    case "queued":
+      return { label: "Waiting", percent: null };
+    case "pulling": {
+      const percent = x.imageBytes ? (part(x.pulled, x.imageBytes) ?? 0) : null;
+      return { label: percent == null ? "Downloading" : `Downloading ${percent}%`, percent };
+    }
+    case "unpacking": {
+      const percent = part(x.unpacked, x.imageBytes);
+      return { label: percent == null ? "Unpacking" : `Unpacking ${percent}%`, percent };
+    }
+    default:
+      return { label: "Starting", percent: null };
+  }
+}
+
+/** How far a server got over all its steps, for a single number that
+ * never goes back: downloading is the first 60%, unpacking the next 30%,
+ * starting the rest. Null when it isn't making the template. */
+export function overallPercent(x: BuildLike): number | null {
+  const p = serverProgress(x);
+  if (!p) return null;
+  const at = (from: number, span: number) => Math.floor(from + ((p.percent ?? 0) / 100) * span);
+  switch (x.phase) {
+    case "queued":
+      return 0;
+    case "pulling":
+      return at(0, 60);
+    case "unpacking":
+      return at(60, 30);
+    default:
+      return 90;
+  }
+}
+
+/** Where a server is, to find the slowest: its step, then its percent. */
+const rank = (x: BuildLike, p: Progress) =>
+  Math.max(0, STEPS.indexOf(x.phase ?? "snapshotting")) * 100 + (p.percent ?? 0);
+
+/** A template's progress over its servers: the slowest one's, and how many
+ * are making it. Null when none is. */
+export function templateProgress(t: { servers: BuildLike[] }): (Progress & { servers: number }) | null {
+  const all = t.servers.flatMap((x) => {
+    const p = serverProgress(x);
+    return p ? [{ p, at: rank(x, p) }] : [];
+  });
+  if (!all.length) return null;
+  const slowest = all.reduce((a, b) => (b.at < a.at ? b : a));
+  return { ...slowest.p, servers: all.length };
+}
 
 type ServerLike = {
   state: string;

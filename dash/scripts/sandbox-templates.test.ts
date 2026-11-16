@@ -10,9 +10,12 @@ import {
   gettingReady,
   imageRepo,
   minSize,
+  overallPercent,
   pyosFirst,
+  serverProgress,
   serverRefusal,
   templateImage,
+  templateProgress,
   templateStatus,
   templateTitle,
   usable,
@@ -136,4 +139,48 @@ test("the desktop needs room, and opens through the daemon", () => {
   expect(chromium.searchParams.get("app")).toBe("chromium");
   // noVNC finds its WebSocket beside the page.
   expect(url.searchParams.has("path")).toBe(false);
+});
+
+test("a server making a template says how far it got", () => {
+  const b = (phase: string | null, more = {}) => ({ state: "building", phase, imageBytes: 1000, ...more });
+  expect(serverProgress({ state: "ready" })).toBe(null);
+  expect(serverProgress(b("queued"))).toEqual({ label: "Waiting", percent: null });
+  expect(serverProgress(b("pulling", { pulled: 0 }))).toEqual({ label: "Downloading 0%", percent: 0 });
+  expect(serverProgress(b("pulling", { pulled: 425 }))).toEqual({ label: "Downloading 42%", percent: 42 });
+  // Never 100 while it still runs.
+  expect(serverProgress(b("pulling", { pulled: 1000 }))?.percent).toBe(99);
+  // Before the manifest says the size: no end known.
+  expect(serverProgress(b("pulling", { imageBytes: 0 }))).toEqual({ label: "Downloading", percent: null });
+  expect(serverProgress(b("unpacking", { unpacked: 800 }))).toEqual({ label: "Unpacking 80%", percent: 80 });
+  // A server too old to count what it unpacked.
+  expect(serverProgress(b("unpacking", { unpacked: 0 }))).toEqual({ label: "Unpacking", percent: null });
+  expect(serverProgress(b("snapshotting"))).toEqual({ label: "Starting", percent: null });
+  expect(serverProgress(b(null))).toEqual({ label: "Starting", percent: null });
+});
+
+test("a template shows its slowest server", () => {
+  const ready = { state: "ready" };
+  const pulling = { state: "building", phase: "pulling", pulled: 300, imageBytes: 1000 };
+  const pulling2 = { ...pulling, pulled: 700 };
+  const unpacking = { state: "building", phase: "unpacking", unpacked: 100, imageBytes: 1000 };
+  expect(templateProgress({ servers: [ready] })).toBe(null);
+  expect(templateProgress({ servers: [] })).toBe(null);
+  expect(templateProgress({ servers: [ready, unpacking] })).toEqual({ label: "Unpacking 10%", percent: 10, servers: 1 });
+  expect(templateProgress({ servers: [unpacking, pulling2, pulling] })).toEqual({
+    label: "Downloading 30%",
+    percent: 30,
+    servers: 3,
+  });
+  expect(templateProgress({ servers: [{ state: "building", phase: "queued" }, pulling] })?.label).toBe("Waiting");
+});
+
+test("the create button counts up over every step", () => {
+  const b = (phase: string, more = {}) => ({ state: "building", phase, imageBytes: 1000, ...more });
+  expect(overallPercent({ state: "ready" })).toBe(null);
+  expect(overallPercent(b("queued"))).toBe(0);
+  expect(overallPercent(b("pulling", { pulled: 500 }))).toBe(30);
+  expect(overallPercent(b("unpacking", { unpacked: 500 }))).toBe(75);
+  expect(overallPercent(b("unpacking", { unpacked: 0 }))).toBe(60);
+  expect(overallPercent(b("snapshotting"))).toBe(90);
+  expect(gettingReady("desktop", "sandbox-1", 42)).toBe("Getting desktop ready on sandbox-1… 42%");
 });

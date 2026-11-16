@@ -25,12 +25,16 @@ export {
   isDesktop,
   isPyos,
   minSize,
+  overallPercent,
   pyosFirst,
+  serverProgress,
   serverRefusal,
   templateImage,
+  templateProgress,
   templateStatus,
   templateTitle,
   usable,
+  type Progress,
 } from "./sandboxTemplates";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -256,6 +260,8 @@ export type SandboxTemplateServer = {
   state: "pending" | "building" | "ready" | "failed";
   phase: "queued" | "pulling" | "unpacking" | "snapshotting" | null;
   pulled: number | null;
+  /** Of `imageBytes`, while unpacking. 0 from servers too old to count it. */
+  unpacked: number | null;
   imageBytes: number | null;
   bytes: number | null;
   error: string | null;

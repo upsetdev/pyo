@@ -420,6 +420,24 @@ dialog.sheet[open] {
     animation: none;
   }
 }
+/* A progress bar with no end known: a short stripe slides across. */
+@keyframes progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+.animate-progress-slide {
+  animation: progress-slide 1.3s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-progress-slide {
+    animation: none;
+    transform: translateX(75%);
+  }
+}
 
 /*
   The primary button: lit from the top, with a crisp rim and a

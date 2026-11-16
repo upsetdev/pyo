@@ -25,6 +25,7 @@ import {
   freeLabel,
   freeMemory,
   gettingReady,
+  overallPercent,
   isDesktop,
   isPyos,
   LIFETIMES,
@@ -116,7 +117,11 @@ function NewSandboxForm() {
   const s = usePyo();
   const navigate = useNavigate();
   const team = s.currentTeamId;
-  const templates = useQuery(`sandbox-templates:${team}`, () => sandboxApi.templates(team));
+  const [following, setFollowing] = useState(false);
+  // Every second or two while a create waits for its template, for how far it got.
+  const templates = useQuery(`sandbox-templates:${team}`, () => sandboxApi.templates(team), {
+    refreshMs: following ? 1500 : undefined,
+  });
   const list = useSandboxes(team);
   const ready = templates.status === "success" ? templates.data.templates : [];
   const search = Route.useSearch();
@@ -156,6 +161,10 @@ function NewSandboxForm() {
     busy && list.status === "success"
       ? list.data.sandboxes.find((x) => x.preparing && x.state === "creating" && x.template === picked)
       : undefined;
+  if (!!preparing !== following) setFollowing(!!preparing);
+  const preparingPct = preparing
+    ? overallPercent(pickedT?.servers.find((x) => x.name === preparing.server) ?? { state: "" })
+    : null;
   const limits = list.status === "success" ? list.data.limits : null;
   const inUse = list.status === "success" ? list.data.inUse : null;
   // A preset, "custom" or "none" (no lifetime: it runs until it's deleted).
@@ -438,7 +447,7 @@ function NewSandboxForm() {
                 Cancel
               </ButtonLink>
               <Button type="submit" size="sm" disabled={!picked || busy || !ttlOk}>
-                {preparing ? gettingReady(picked, preparing.server) : busy ? "Creating…" : "Create sandbox"}
+                {preparing ? gettingReady(picked, preparing.server, preparingPct) : busy ? "Creating…" : "Create sandbox"}
               </Button>
             </div>
           </form>

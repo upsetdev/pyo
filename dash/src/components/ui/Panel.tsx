@@ -342,6 +342,38 @@ export function Meter({
   );
 }
 
+/** How far a task got: a slim bar, sliding when its end isn't known
+ * (`percent` null). */
+export function Progress({
+  percent,
+  label,
+  className = "",
+}: {
+  percent: number | null;
+  label?: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`h-1 min-w-10 overflow-hidden rounded-full bg-foreground/10 ${className}`}
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percent ?? undefined}
+    >
+      {percent == null ? (
+        <div className="h-full w-2/5 rounded-full bg-primary animate-progress-slide dark:bg-info" />
+      ) : (
+        <div
+          className="h-full rounded-full bg-primary transition-[width] duration-700 ease-out dark:bg-info"
+          style={{ width: `${Math.max(percent, 2)}%` }}
+        />
+      )}
+    </div>
+  );
+}
+
 export function Callout({
   tone = "info",
   icon: IconCmp,

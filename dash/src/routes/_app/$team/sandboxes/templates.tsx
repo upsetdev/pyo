@@ -7,7 +7,7 @@ import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Input } from "~/components/ui/Field";
 import { Menu } from "~/components/ui/Menu";
-import { EmptyState, ErrorState, Page, PageHeader, Panel } from "~/components/ui/Panel";
+import { EmptyState, ErrorState, Page, PageHeader, Panel, Progress } from "~/components/ui/Panel";
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
 import { Tooltip } from "~/components/ui/Tooltip";
 import { megabytes, timeAgo } from "~/lib/pyo/format";
@@ -18,7 +18,9 @@ import {
   isPyos,
   pyosFirst,
   sandboxApi,
+  serverProgress,
   templateImage,
+  templateProgress,
   templateStatus,
   usable,
   type SandboxTemplate,
@@ -47,19 +49,10 @@ const STATE: Record<SandboxTemplate["state"], { label: string; tone: "success" |
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
-const PHASE: Record<NonNullable<SandboxTemplateServer["phase"]>, string> = {
-  queued: "Queued",
-  pulling: "Pulling",
-  unpacking: "Unpacking",
-  snapshotting: "Booting",
-};
-
 /** How far one server got with a template. */
 function serverLabel(x: SandboxTemplateServer) {
-  if (x.state === "building" && x.phase) {
-    const pct = x.phase === "pulling" && x.imageBytes ? ` ${Math.floor(((x.pulled ?? 0) / x.imageBytes) * 100)}%` : "";
-    return PHASE[x.phase] + pct;
-  }
+  const p = serverProgress(x);
+  if (p) return p.label;
   if (x.state === "ready" && x.bytes) return `Ready · ${megabytes(x.bytes / 1024 ** 2)}`;
   return STATE[x.state]?.label ?? x.state;
 }
@@ -68,7 +61,11 @@ function TemplatesPage() {
   const s = usePyo();
   const navigate = useNavigate();
   const team = s.currentTeamId;
-  const q = useQuery(`sandbox-templates:${team}`, () => sandboxApi.templates(team), { refreshMs: 10_000 });
+  // Fast while a server makes one, so its bar moves.
+  const [fast, setFast] = useState(false);
+  const q = useQuery(`sandbox-templates:${team}`, () => sandboxApi.templates(team), { refreshMs: fast ? 1500 : 10_000 });
+  const preparing = q.status === "success" && q.data.templates.some((t) => templateProgress(t));
+  if (preparing !== fast) setFast(preparing);
   const canCreate = roleIn(s) !== "viewer";
   // New sandboxes need a server that runs them.
   const canUse = canCreate && sandboxServersIn(s).some((x) => x.state === "ready");
@@ -116,7 +113,7 @@ function TemplatesPage() {
             <thead>
               <tr>
                 <Th>Template</Th>
-                <Th className="w-40">Status</Th>
+                <Th className="w-44">Status</Th>
                 <Th className="w-px">
                   <span className="sr-only">Actions</span>
                 </Th>
@@ -239,8 +236,19 @@ function TemplatesPage() {
   );
 }
 
-/** The status, with its error on hover when there is one. */
+/** The status, with its error on hover when there is one. While servers
+ * make it, how far the slowest got. */
 function TemplateState({ t }: { t: SandboxTemplate }) {
+  const p = t.state === "failed" ? null : templateProgress(t);
+  if (p)
+    return (
+      <Tooltip content={p.servers > 1 ? `${p.label} on ${p.servers} servers` : p.label}>
+        <span className="flex w-36 max-w-full flex-col gap-1">
+          <span className="truncate text-[12.5px] tabular-nums">{p.label}</span>
+          <Progress percent={p.percent} label={`${t.name}: ${p.label}`} />
+        </span>
+      </Tooltip>
+    );
   const label = (
     <span className={`inline-flex items-center gap-1.5 whitespace-nowrap ${t.state === "failed" ? "text-destructive" : ""}`}>
       <Dot tone={STATE[t.state]?.tone ?? "neutral"} className="h-2 w-2" />
