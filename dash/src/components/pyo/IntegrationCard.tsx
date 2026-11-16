@@ -57,7 +57,7 @@ export function IntegrationCard({
       className={`flex min-w-0 scroll-mt-4 flex-col rounded-[20px] border border-frame-border bg-muted p-1.5 transition-shadow duration-500 ${highlight ? "ring-2 ring-ring ring-offset-2 ring-offset-canvas" : ""}`}
     >
       <header className="flex items-center gap-3 px-2 pb-2 pt-1.5">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-card-border bg-card text-muted-foreground shadow-card">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-card-border bg-card text-foreground shadow-card">
           {icon}
         </span>
         <div className="min-w-0 flex-1">

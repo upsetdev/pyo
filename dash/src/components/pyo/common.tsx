@@ -75,10 +75,13 @@ export const CLOUDFLARE_LOGO = siCloudflare;
 export function BrandMark({
   icon,
   size = 16,
+  tone = "auto",
 }: {
   /** A Simple Icon, or a template's logo: one path and its colour. */
   icon: Pick<SimpleIcon, "hex" | "path">;
   size?: number;
+  /** "brand" keeps a dark brand color (Hetzner's red), "mono" takes the text color (Vault's pale yellow). */
+  tone?: "auto" | "brand" | "mono";
 }) {
   const [r, g, b] = [0, 2, 4].map(
     (i) => parseInt(icon.hex.slice(i, i + 2), 16) / 255,
@@ -90,7 +93,11 @@ export function BrandMark({
       width={size}
       height={size}
       aria-hidden
-      fill={luminance < 0.35 ? "currentColor" : `#${icon.hex}`}
+      fill={
+        tone === "mono" || (tone === "auto" && luminance < 0.35)
+          ? "currentColor"
+          : `#${icon.hex}`
+      }
       className="shrink-0"
     >
       <path d={icon.path} />

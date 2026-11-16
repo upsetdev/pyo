@@ -1,12 +1,6 @@
-import {
-  CloudIcon,
-  KeyIcon,
-  PackageIcon,
-  ShareNetworkIcon,
-  TreeStructureIcon,
-} from "@phosphor-icons/react";
+import { TreeStructureIcon } from "@phosphor-icons/react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { siGitlab } from "simple-icons";
+import { siGitlab, siHetzner, siTailscale, siVault } from "simple-icons";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   IntegrationCard,
@@ -41,7 +35,7 @@ import {
   type PyoState,
 } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import { BrandMark, CLOUDFLARE_LOGO, GITHUB_LOGO } from "~/components/pyo/common";
+import { BrandMark, CLOUDFLARE_LOGO, DOCKER_LOGO, GITHUB_LOGO } from "~/components/pyo/common";
 import { currentSlug } from "~/lib/pyo/paths";
 
 // Everything Pyo connects to, as cards: a filter by category, a search, and
@@ -187,8 +181,7 @@ function Integrations() {
       id: "tailscale",
       name: "Tailscale",
       category: "Networking",
-      // No brand logo for Tailscale, on purpose.
-      icon: <ShareNetworkIcon size={17} />,
+      icon: <BrandMark icon={siTailscale} size={17} />,
       description: "Servers join your tailnet with it.",
       connected: !!ts,
       stat: ts?.suffix ? { label: "Tailnet", value: <span className="font-mono text-[12px]">{ts.suffix}</span> } : null,
@@ -213,8 +206,7 @@ function Integrations() {
       id: "hetzner",
       name: "Hetzner",
       category: "Servers",
-      // No brand logo for Hetzner, on purpose.
-      icon: <CloudIcon size={17} />,
+      icon: <BrandMark icon={siHetzner} size={17} tone="brand" />,
       description: "Pyo makes servers in your Hetzner project.",
       connected: !!hetzner,
       stat: hetzner ? { label: "Servers made", value: cloudServers.length } : null,
@@ -326,7 +318,7 @@ function Integrations() {
       id: "registries",
       name: "Container registries",
       category: "Registries",
-      icon: <PackageIcon size={17} />,
+      icon: <BrandMark icon={DOCKER_LOGO} size={17} />,
       description: "Logins for private images. Services pull with them.",
       connected: logins.length > 0,
       stat: { label: "Logins", value: logins.length },
@@ -350,7 +342,7 @@ function Integrations() {
       id: "secrets",
       name: "Secret stores",
       category: "Secrets",
-      icon: <KeyIcon size={17} />,
+      icon: <BrandMark icon={siVault} size={17} tone="mono" />,
       description: "Services import secrets from your store on each deploy.",
       connected: stores.length > 0,
       stat: { label: "Services importing", value: storeUses },
