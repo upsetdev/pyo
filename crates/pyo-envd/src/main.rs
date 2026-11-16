@@ -15,16 +15,26 @@
 //!   `unix:<path>` or `none`
 //! - `PYO_ENVD_DIAL`: `unix:<path>` or `vsock:<cid>:<port>`. Dial mode, for
 //!   gVisor. PID 1 then leaves the mounts to runsc.
+//!
+//! A template's image may have an executable [`START`]. PID 1 runs it once,
+//! after the server starts, in a session of its own: the template's own
+//! background programs (Pyo's `desktop` starts its listener this way).
+//! Templates don't run an image's CMD. On Firecracker the template is
+//! snapshotted after boot, so what it started is already running in every
+//! sandbox restored from it.
 
 mod init;
 mod listen;
 mod net;
 mod server;
 
-use std::process::Command;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// What a template runs at boot, when its image has it.
+pub const START: &str = "/etc/pyo/start";
 
 fn main() {
     let arg = std::env::args().nth(1);
@@ -42,6 +52,7 @@ fn pid1(mode: listen::Mode) -> ! {
         init::setup();
     }
     let mut server = spawn_server();
+    run_start();
     loop {
         let mut status = 0;
         // SAFETY: plain waitpid on any child.
@@ -60,6 +71,33 @@ fn pid1(mode: listen::Mode) -> ! {
             std::thread::sleep(Duration::from_millis(100));
             server = spawn_server();
         }
+    }
+}
+
+/// Runs the template's [`START`], when there is one. PID 1 reaps it and
+/// what it leaves behind.
+fn run_start() {
+    let Ok(meta) = std::fs::metadata(START) else {
+        return;
+    };
+    use std::os::unix::fs::PermissionsExt;
+    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        eprintln!("pyo-envd: {START} isn't an executable file, so it doesn't run");
+        return;
+    }
+    let mut cmd = Command::new(START);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    if let Err(e) = cmd.spawn() {
+        eprintln!("pyo-envd: can't run {START}: {e}");
     }
 }
 
