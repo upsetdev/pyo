@@ -167,7 +167,7 @@ test("a template shows its slowest server", () => {
   expect(templateProgress({ servers: [] })).toBe(null);
   expect(templateProgress({ servers: [ready, unpacking] })).toEqual({ label: "Unpacking 10%", percent: 10, servers: 1 });
   expect(templateProgress({ servers: [unpacking, pulling2, pulling] })).toEqual({
-    label: "Downloading 30%",
+    label: "Pulling 30%",
     percent: 30,
     servers: 3,
   });
