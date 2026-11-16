@@ -72,7 +72,7 @@ export function TemplateCard({
           </button>
         ) : null}
       </div>
-      <p className="mt-3.5 line-clamp-2 min-h-[2.3rem] text-[12.5px] leading-[1.15rem] text-muted-foreground">
+      <p className="mt-auto line-clamp-2 min-h-[2.3rem] pt-3.5 text-[12.5px] leading-[1.15rem] text-muted-foreground">
         {t.description}
       </p>
     </article>
