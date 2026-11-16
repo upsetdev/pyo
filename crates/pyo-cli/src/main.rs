@@ -262,6 +262,9 @@ enum Command {
         #[command(subcommand)]
         command: ServerCommand,
     },
+    /// The CLI's version, like --version.
+    #[command(disable_version_flag = true)]
+    Version,
     /// Update the CLI to the latest release.
     ///
     /// Once a day, the CLI looks for a new release and says when one is
@@ -995,6 +998,10 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
         }
         Command::Sandbox { command, team } => {
             sandbox::run(&config::client(url, token)?, team.as_deref(), command).await
+        }
+        Command::Version => {
+            println!("pyo {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
         }
         Command::Upgrade { version } => upgrade::run(version).await,
         Command::Hetzner { command, team } => {
