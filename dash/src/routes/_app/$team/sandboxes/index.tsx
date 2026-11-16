@@ -11,6 +11,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { CloudProgress } from "~/components/pyo/Hetzner";
 import { TailnetLockWait } from "~/components/pyo/TailnetLock";
+import { TemplateMark, templateOf } from "~/components/pyo/sandbox/TemplateMark";
 import {
   act,
   SandboxStatus,
@@ -36,13 +37,16 @@ import {
 import { SearchInput, Table, Td, Th, Tr } from "~/components/ui/Table";
 import { plural, timeAgo } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
+import { useQuery } from "~/lib/pyo/query";
 import {
   ended,
+  sandboxApi,
   sizeLabel,
   timeLeft,
   type Sandbox,
   type SandboxInUse,
   type SandboxLimits,
+  type SandboxTemplate,
 } from "~/lib/pyo/sandbox";
 import { roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import type { SandboxServer } from "~/lib/pyo/sandbox";
@@ -64,6 +68,7 @@ function SandboxesPage() {
   const s = usePyo();
   const servers = sandboxServersIn(s);
   const q = useSandboxes(s.currentTeamId);
+  const tq = useQuery(`sandbox-templates:${s.currentTeamId}`, () => sandboxApi.templates(s.currentTeamId));
   const [filter, setFilter] = useState<Filter>("live");
   const [template, setTemplate] = useState("");
   const [query, setQuery] = useState("");
@@ -190,7 +195,13 @@ function SandboxesPage() {
           }
         >
           <Panel>
-            <SandboxTable rows={shown} now={now} canUse={canUse} onDelete={setDeleting} />
+            <SandboxTable
+              rows={shown}
+              templates={tq.status === "success" ? tq.data.templates : []}
+              now={now}
+              canUse={canUse}
+              onDelete={setDeleting}
+            />
           </Panel>
         </ListSection>
       )}
@@ -289,11 +300,13 @@ function Bar({ value, max }: { value: number; max: number }) {
 
 function SandboxTable({
   rows,
+  templates,
   now,
   canUse,
   onDelete,
 }: {
   rows: Sandbox[];
+  templates: SandboxTemplate[];
   now: number;
   canUse: boolean;
   onDelete: (x: Sandbox) => void;
@@ -324,7 +337,12 @@ function SandboxTable({
               <span className="block truncate font-medium">{x.name}</span>
               <span className="block truncate font-mono text-[11.5px] text-muted-foreground">{x.id}</span>
             </Td>
-            <Td>{x.template}</Td>
+            <Td>
+              <span className="flex items-center gap-2">
+                <TemplateMark template={templateOf(x, templates)} size="sm" />
+                <span className="truncate">{x.template}</span>
+              </span>
+            </Td>
             <Td>
               <SandboxStatus state={x.state} sandbox={x} />
             </Td>

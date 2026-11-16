@@ -12,6 +12,7 @@ import { useState } from "react";
 import { z } from "zod";
 import { SandboxFiles } from "~/components/pyo/sandbox/SandboxFiles";
 import { SandboxTerminal } from "~/components/pyo/sandbox/SandboxTerminal";
+import { TemplateMark, templateOf } from "~/components/pyo/sandbox/TemplateMark";
 import {
   act,
   RuntimeBadge,
@@ -80,6 +81,7 @@ function SandboxPage() {
       }),
     { refreshMs: 4000 },
   );
+  const tq = useQuery(`sandbox-templates:${s.currentTeamId}`, () => sandboxApi.templates(s.currentTeamId));
   const [deleting, setDeleting] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -114,9 +116,11 @@ function SandboxPage() {
     <Page>
       <PageHeader
         icon={
-          <span className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-card">
-            <CubeIcon size={18} />
-          </span>
+          <TemplateMark
+            template={templateOf(x, tq.status === "success" ? tq.data.templates : [])}
+            size="lg"
+            className="mt-1"
+          />
         }
         title={x.name}
         description={<span className="font-mono text-[12px]">{x.id}</span>}
