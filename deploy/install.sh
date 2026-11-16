@@ -888,6 +888,13 @@ case "$r" in
     fi
     ;;
 esac
+# The host setup of the Pyo running now, once per version: an update from
+# the dashboard brings new scripts and timers here too. Last, since it
+# rewrites this script.
+units=$(curl -fsS -m 30 http://127.0.0.1:8000/install/host-units.sh) || exit 0
+sum=$(sha256sum <<<"$units" | cut -d' ' -f1)
+[ "$sum" != "$(cat /etc/pyo/host-units 2>/dev/null)" ] || exit 0
+exec bash -c "$units"$'\n'"echo $sum > /etc/pyo/host-units"
 SH
   "${sudo[@]}" tee /usr/local/lib/pyo/pyo-reset-login >/dev/null <<'SH'
 #!/usr/bin/env bash
@@ -1565,6 +1572,9 @@ main() {
     cur=$(current_version)
     if ! check_update "$cur"; then
       install_k3s
+      # Pyo's scripts on this machine, like pyo-reset-login, as this
+      # release has them.
+      host_units
       say "Pyo $R_VERSION is already installed. Nothing to update"
       pyo_addresses
       print_sign_in

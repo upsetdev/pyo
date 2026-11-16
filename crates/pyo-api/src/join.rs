@@ -357,9 +357,58 @@ pub async fn serve_sandbox() -> impl axum::response::IntoResponse {
     )
 }
 
+/// install.sh's `host_units`: the scripts and timers on the machine Pyo
+/// runs on. The host's tailnet timer runs it whenever it changes, so an
+/// update from the dashboard brings them too.
+static HOST_UNITS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let install = include_str!("../../../deploy/install.sh");
+    let mut lines = install.lines().skip_while(|l| *l != "host_units() {");
+    let mut body = String::new();
+    // Its end is the first "}" line outside the scripts it writes (their
+    // own functions end the same way).
+    let mut heredoc: Option<String> = None;
+    for line in lines.by_ref() {
+        body.push_str(line);
+        body.push('\n');
+        match &heredoc {
+            Some(end) if line == end => heredoc = None,
+            Some(_) => {}
+            None if line == "}" => break,
+            None => {
+                if let Some((_, rest)) = line.split_once("<<'") {
+                    heredoc = rest.split_once('\'').map(|(d, _)| d.to_owned());
+                }
+            }
+        }
+    }
+    assert!(body.ends_with("\n}\n"), "install.sh's host_units() ends");
+    format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}host_units\n")
+});
+
+/// GET /install/host-units.sh
+pub async fn serve_host_units() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/x-shellscript; charset=utf-8",
+        )],
+        HOST_UNITS.as_str(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_units_script_is_install_sh_s() {
+        let s = HOST_UNITS.as_str();
+        assert!(s.starts_with("#!/usr/bin/env bash\nset -euo pipefail\nhost_units() {\n"));
+        assert!(s.ends_with("\n}\nhost_units\n"));
+        assert!(s.contains("/usr/local/bin/pyo-reset-login"));
+        assert!(s.contains("http://127.0.0.1:8000/install/host-units.sh"));
+        assert!(s.contains("systemctl enable --now pyo-connect.timer pyo-tailnet.timer"));
+    }
 
     /// connect.sh, join.sh and install.sh carry the AppArmor workaround's
     /// profile: it must be the asset's, character for character.

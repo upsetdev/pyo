@@ -453,6 +453,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             .route("/install/join.sh", get(join::serve))
             .route("/install/connect.sh", get(join::serve_connect))
             .route("/install/sandbox.sh", get(join::serve_sandbox))
+            .route("/install/host-units.sh", get(join::serve_host_units))
             .fallback_service(tower_http::compression::Compression::new(spa))
             .layer(axum::middleware::from_fn_with_state(
                 state.config.cookie_secure,
