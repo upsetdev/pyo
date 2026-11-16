@@ -265,6 +265,8 @@ function NameField({ x, onDone }: { x: Sandbox; onDone: () => void }) {
         <input
           autoFocus
           aria-label="Name"
+          // Its own width would win over the copy that sizes it.
+          size={1}
           value={name}
           maxLength={63}
           onFocus={(e) => e.currentTarget.select()}
