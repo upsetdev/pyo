@@ -6,13 +6,11 @@
 //! `reported`) and the team's activity on it. Team members only, like
 //! service logs; not an MCP tool for now.
 
+use crate::error::Json;
 use crate::error::Query;
 use std::time::Duration;
 
-use axum::{
-    Json,
-    extract::{Path, State},
-};
+use axum::extract::{Path, State};
 use pyo_proto::{Command, CommandResult, now_ms};
 use serde::Deserialize;
 use serde_json::{Value, json};

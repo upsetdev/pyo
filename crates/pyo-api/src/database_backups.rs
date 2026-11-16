@@ -3,9 +3,10 @@
 //! (agent backup.rs) that every backup then runs as. The admin login is used
 //! for that and never stored.
 
+use crate::error::Json;
 use std::time::Duration;
 
-use axum::{Json, extract::State};
+use axum::extract::State;
 use pyo_proto::{BackupSpec, Command, CommandResult, DbConnection};
 use serde::Deserialize;
 use serde_json::{Value, json};

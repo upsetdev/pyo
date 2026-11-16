@@ -1,5 +1,4 @@
 use axum::{
-    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -71,7 +70,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut r = (
             self.status,
-            Json(ErrorBody {
+            axum::Json(ErrorBody {
                 error: self.message,
                 needs_confirm: self.needs_confirm,
             }),
@@ -154,6 +153,97 @@ fn query_message(text: &str) -> String {
     "A parameter in the address isn't valid.".to_owned()
 }
 
+/// Axum's `Json`, with a body it can't read as a plain 400 the dashboard
+/// can show, instead of axum's own text and 422. As a response, the same.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Json<T>(pub T);
+
+impl<T, S> axum::extract::FromRequest<S> for Json<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, ApiError> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(v)) => Ok(Json(v)),
+            Err(e) => Err(json_rejection(&e)),
+        }
+    }
+}
+
+/// An optional body: none without a JSON Content-Type, as axum's.
+impl<T, S> axum::extract::OptionalFromRequest<S> for Json<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &S,
+    ) -> Result<Option<Self>, ApiError> {
+        match <axum::Json<T> as axum::extract::OptionalFromRequest<S>>::from_request(req, state)
+            .await
+        {
+            Ok(v) => Ok(v.map(|axum::Json(v)| Json(v))),
+            Err(e) => Err(json_rejection(&e)),
+        }
+    }
+}
+
+fn json_rejection(e: &axum::extract::rejection::JsonRejection) -> ApiError {
+    let status = match e.status() {
+        StatusCode::UNPROCESSABLE_ENTITY => StatusCode::BAD_REQUEST,
+        s => s,
+    };
+    ApiError::new(status, json_message(&e.body_text()))
+}
+
+impl<T: serde::Serialize> IntoResponse for Json<T> {
+    fn into_response(self) -> Response {
+        axum::Json(self.0).into_response()
+    }
+}
+
+/// axum's "Failed to deserialize the JSON body into the target type:
+/// missing field `template` at line 1 column 2", in plain words.
+fn json_message(text: &str) -> String {
+    let quoted = |after: &str| {
+        let rest = &text[text.find(after)? + after.len()..];
+        rest.split('`').next().map(str::to_owned)
+    };
+    if let Some(name) = quoted("missing field `") {
+        return format!("Add the {name} field.");
+    }
+    if let Some(name) = quoted("unknown field `") {
+        return format!("There's no field named {name}.");
+    }
+    if let Some(value) = quoted("unknown variant `") {
+        return format!("\"{value}\" isn't a value it takes.");
+    }
+    if text.contains("Content-Type") {
+        return "Send the body as JSON, with Content-Type: application/json.".to_owned();
+    }
+    if text.starts_with("Failed to parse") || text.contains("EOF while parsing") {
+        return "The body isn't valid JSON.".to_owned();
+    }
+    // "…target type: cpus: invalid type: …": the field it's about.
+    if let Some(rest) = text.split_once("target type: ").map(|(_, r)| r)
+        && let Some((path, _)) = rest.split_once(": ")
+        && !path.contains(' ')
+        && path != "."
+    {
+        return format!("The {path} field isn't valid.");
+    }
+    if text.contains("length limit") {
+        return "The body is too large.".to_owned();
+    }
+    "The body isn't valid.".to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +264,56 @@ mod tests {
             query_message("Failed to deserialize query string: invalid digit found in string"),
             "A parameter in the address isn't valid."
         );
+    }
+
+    #[test]
+    fn body_errors_in_plain_words() {
+        let t = "Failed to deserialize the JSON body into the target type: ";
+        assert_eq!(
+            json_message(&format!("{t}missing field `template` at line 1 column 2")),
+            "Add the template field."
+        );
+        assert_eq!(
+            json_message(&format!(
+                "{t}unknown field `x`, expected one of `a`, `b` at line 1 column 4"
+            )),
+            "There's no field named x."
+        );
+        assert_eq!(
+            json_message(&format!(
+                "{t}cpus: invalid type: string \"a\", expected u32 at line 1 column 11"
+            )),
+            "The cpus field isn't valid."
+        );
+        assert_eq!(
+            json_message(
+                "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1"
+            ),
+            "The body isn't valid JSON."
+        );
+        assert_eq!(
+            json_message("Expected request with `Content-Type: application/json`"),
+            "Send the body as JSON, with Content-Type: application/json."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_it_cant_read_is_a_plain_400() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct B {
+            template: String,
+        }
+        let req = axum::http::Request::post("/x")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap();
+        let e = <Json<B> as axum::extract::FromRequest<()>>::from_request(req, &())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, StatusCode::BAD_REQUEST);
+        assert_eq!(e.message, "Add the template field.");
     }
 
     #[tokio::test]

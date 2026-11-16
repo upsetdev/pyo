@@ -6,8 +6,9 @@
 //! The token is the only credential, so it's long and random; the dashboard
 //! reveals it only to developers of the team.
 
+use crate::error::Json;
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     http::StatusCode,
     routing::post,

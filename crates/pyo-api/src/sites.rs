@@ -14,10 +14,11 @@
 //! - The newest [`KEEP`] folders of each service stay for rollbacks; older
 //!   ones, and those of deleted services, are removed by [`sweeper`].
 
+use crate::error::Json;
 use std::time::Duration;
 
 use axum::{
-    Json, Router,
+    Router,
     body::Body,
     extract::{FromRequestParts, Path, State},
     http::{HeaderMap, StatusCode, request::Parts},

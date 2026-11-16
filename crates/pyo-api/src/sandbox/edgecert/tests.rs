@@ -3,10 +3,11 @@
 //! wildcard record against the same fake. Nothing here reaches Let's
 //! Encrypt or Cloudflare.
 
+use crate::error::Json;
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},

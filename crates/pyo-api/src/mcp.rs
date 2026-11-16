@@ -13,9 +13,10 @@
 //! same handlers and `/ops` code with the same checks. Only the tools the
 //! connection's access allows are listed.
 
+use crate::error::Json;
 use crate::error::Query;
 use axum::{
-    Json, Router,
+    Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},

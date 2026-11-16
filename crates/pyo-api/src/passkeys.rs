@@ -19,8 +19,9 @@
 //! password, so removing passkeys never locks anyone out, and needs only the
 //! session.
 
+use crate::error::Json;
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     routing::{patch, post},

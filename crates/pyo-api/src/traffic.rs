@@ -7,16 +7,14 @@
 //! it's answered by the gateway on the server it reached; from there it goes
 //! to a replica on that server, else one in that server's region, else any.
 
+use crate::error::Json;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
 
-use axum::{
-    Json,
-    extract::{Path, State},
-};
+use axum::extract::{Path, State};
 use serde_json::{Value, json};
 
 use crate::{

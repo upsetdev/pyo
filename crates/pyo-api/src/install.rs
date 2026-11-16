@@ -765,10 +765,10 @@ pub struct ThisMachineQuery {
 pub async fn this_machine(
     State(s): State<AppState>,
     Query(q): Query<ThisMachineQuery>,
-) -> ApiResult<axum::Json<serde_json::Value>> {
+) -> ApiResult<crate::error::Json<serde_json::Value>> {
     use serde_json::json;
     let key = bootstrap_key(&q.key)?;
-    Ok(axum::Json(match hand_over(&s.db, &key).await? {
+    Ok(crate::error::Json(match hand_over(&s.db, &key).await? {
         Handover::Connected => json!({ "state": "connected" }),
         Handover::Waiting => json!({ "state": "waiting" }),
         Handover::Connect { cluster_id, token } => {
@@ -804,10 +804,12 @@ fn bootstrap_key(given: &str) -> ApiResult<String> {
 pub async fn first_sign_in(
     State(s): State<AppState>,
     Query(q): Query<ThisMachineQuery>,
-) -> ApiResult<axum::Json<serde_json::Value>> {
+) -> ApiResult<crate::error::Json<serde_json::Value>> {
     bootstrap_key(&q.key)?;
     let pending = first_admin_pending(&s.db).await?;
-    Ok(axum::Json(serde_json::json!({ "pending": pending })))
+    Ok(crate::error::Json(
+        serde_json::json!({ "pending": pending }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -827,7 +829,7 @@ pub struct ResetLogin {
 pub async fn reset_login(
     State(s): State<AppState>,
     axum::Form(f): axum::Form<ResetLogin>,
-) -> ApiResult<axum::Json<serde_json::Value>> {
+) -> ApiResult<crate::error::Json<serde_json::Value>> {
     bootstrap_key(&f.key)?;
     let email = f.email.trim().to_lowercase();
     let mut conn = s.db.acquire().await?;
@@ -861,7 +863,7 @@ pub async fn reset_login(
     };
     let token = crate::recovery::new_link(&mut conn, &id).await?;
     tracing::info!(user = %id, "sign-in link made on the host");
-    Ok(axum::Json(serde_json::json!({
+    Ok(crate::error::Json(serde_json::json!({
         "email": email,
         "path": crate::recovery::link_path(&token),
         "minutes": crate::recovery::LINK_MINUTES,
@@ -899,12 +901,12 @@ pub struct ThisMachineTailnet {
 pub async fn this_machine_tailnet(
     State(s): State<AppState>,
     axum::Form(f): axum::Form<ThisMachineTailnet>,
-) -> ApiResult<axum::Json<serde_json::Value>> {
+) -> ApiResult<crate::error::Json<serde_json::Value>> {
     let key = std::env::var("PYO_BOOTSTRAP_KEY").unwrap_or_default();
     if key.len() < 32 || !crate::util::constant_time_eq(key.as_bytes(), f.key.as_bytes()) {
         return Err(ApiError::not_found("Install key"));
     }
-    Ok(axum::Json(
+    Ok(crate::error::Json(
         crate::tailscale::host_report(&s, &f.ip, &f.name, &f.k3s, &f.error).await?,
     ))
 }

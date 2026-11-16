@@ -97,7 +97,7 @@ pub fn router(state: AppState) -> Router {
 fn errors(status: StatusCode, code: &str, message: &str) -> Response {
     let mut r = (
         status,
-        axum::Json(json!({ "errors": [{ "code": code, "message": message }] })),
+        crate::error::Json(json!({ "errors": [{ "code": code, "message": message }] })),
     )
         .into_response();
     r.headers_mut().insert(

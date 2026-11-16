@@ -17,9 +17,10 @@
 //! Using it sets the new password, ends the account's sessions and signs
 //! this browser in.
 
+use crate::error::Json;
 use crate::error::Query;
 use axum::{
-    Json, Router,
+    Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     routing::{get, post},

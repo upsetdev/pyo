@@ -5,11 +5,12 @@
 //! build-only server that joined it. It dials out here with its own token: heartbeats, a long-poll for build jobs, build logs and the
 //! result. See deploy.rs for what happens to a finished build.
 
+use crate::error::Json;
 use crate::error::Query;
 use std::time::Duration;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{FromRequestParts, Path, State},
     http::{StatusCode, request::Parts},
     routing::{get, post},

@@ -1653,8 +1653,8 @@ pub struct RepoInput {
 pub async fn preview(
     axum::extract::State(s): axum::extract::State<crate::AppState>,
     crate::auth::SessionUser(user): crate::auth::SessionUser,
-    axum::Json(b): axum::Json<PreviewBody>,
-) -> crate::error::ApiResult<axum::Json<ComposePlan>> {
+    crate::error::Json(b): crate::error::Json<PreviewBody>,
+) -> crate::error::ApiResult<crate::error::Json<ComposePlan>> {
     use crate::error::ApiError;
     let mut tx = s.db.begin().await?;
     crate::ops::require_role(&mut tx, &user, &b.team_id, crate::ops::Role::Viewer).await?;
@@ -1769,7 +1769,7 @@ pub async fn preview(
         domain_base,
     })
     .map_err(ApiError::bad_request)?;
-    Ok(axum::Json(plan))
+    Ok(crate::error::Json(plan))
 }
 
 #[cfg(test)]

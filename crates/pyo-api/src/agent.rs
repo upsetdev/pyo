@@ -1,11 +1,12 @@
 //! Endpoints the in-cluster agent dials out to: heartbeats with what it sees,
 //! a long-poll for commands, and reports on commands and rollouts.
 
+use crate::error::Json;
 use crate::error::Query;
 use std::time::Duration;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{FromRequestParts, Path, State},
     http::{StatusCode, request::Parts},
     routing::{get, post},

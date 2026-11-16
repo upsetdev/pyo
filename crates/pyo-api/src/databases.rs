@@ -16,11 +16,9 @@
 //!   `revealDatabasePassword` (owners and admins).
 //! - **Status:** the controller's, as each heartbeat reports it.
 
+use crate::error::Json;
 use crate::error::Query;
-use axum::{
-    Json,
-    extract::{Path, State},
-};
+use axum::extract::{Path, State};
 use pyo_proto::{Command, DatabaseReport, DatabaseSpec, EnvVar, NamedSecret};
 use serde::Deserialize;
 use serde_json::{Value, json};

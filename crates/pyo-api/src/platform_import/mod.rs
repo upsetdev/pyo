@@ -35,12 +35,13 @@ mod links;
 mod railway;
 mod vercel;
 
+use crate::error::Json;
 use crate::error::Query;
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     http::StatusCode,
     routing::{get, post},

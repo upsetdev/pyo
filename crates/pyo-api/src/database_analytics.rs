@@ -6,13 +6,11 @@
 //! they become series for the dashboard. Team members can read it, like
 //! service metrics, and it's an MCP tool like them.
 
+use crate::error::Json;
 use crate::error::Query;
 use std::collections::BTreeMap;
 
-use axum::{
-    Json,
-    extract::{Path, State},
-};
+use axum::extract::{Path, State};
 use serde::Deserialize;
 use serde_json::{Value, json};
 

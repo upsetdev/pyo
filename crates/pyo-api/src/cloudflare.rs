@@ -20,10 +20,11 @@
 //! - A proxied record suggests the service's "Behind Cloudflare" firewall
 //!   switch (the dashboard's DNS record line), until it's on.
 
+use crate::error::Json;
 use crate::error::Query;
 use std::{collections::HashMap, time::Duration};
 
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{extract::State, http::StatusCode};
 use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

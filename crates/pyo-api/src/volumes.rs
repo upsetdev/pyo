@@ -732,7 +732,7 @@ pub(crate) async fn snapshots(
     axum::extract::State(s): axum::extract::State<AppState>,
     SessionUser(user): SessionUser,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> ApiResult<axum::Json<Value>> {
+) -> ApiResult<crate::error::Json<Value>> {
     let mut tx = s.db.begin().await?;
     let team_id = team_of(&mut tx, "volumes", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Developer).await?;
@@ -765,7 +765,7 @@ pub(crate) async fn snapshots(
         .data
         .and_then(|d| serde_json::from_value(d["snapshots"].clone()).ok())
         .unwrap_or_default();
-    Ok(axum::Json(json!({ "snapshots": list })))
+    Ok(crate::error::Json(json!({ "snapshots": list })))
 }
 
 /// Wait for a command the API waits on (a short Job on the cluster): its
@@ -828,7 +828,7 @@ pub(crate) async fn delete_snapshot(
     axum::extract::State(s): axum::extract::State<AppState>,
     SessionUser(user): SessionUser,
     axum::extract::Path((id, snapshot_id)): axum::extract::Path<(String, String)>,
-) -> ApiResult<axum::Json<Value>> {
+) -> ApiResult<crate::error::Json<Value>> {
     if user
         .key
         .as_ref()
@@ -888,7 +888,9 @@ pub(crate) async fn delete_snapshot(
     )
     .await?;
     tx.commit().await?;
-    Ok(axum::Json(json!({ "ok": true, "message": r.message })))
+    Ok(crate::error::Json(
+        json!({ "ok": true, "message": r.message }),
+    ))
 }
 
 /// Why a volume on storage class `class` (as its cluster reports it) can't

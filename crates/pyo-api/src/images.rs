@@ -3,10 +3,11 @@
 //! them. Images Pyo built live in its registry, which also gives their size.
 
 use crate::error::ApiResult;
+use crate::error::Json;
 use crate::error::Query;
 use crate::ops::{Role, require_role};
 use crate::{AppState, auth::SessionUser, deploy};
-use axum::{Json, extract::State};
+use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;

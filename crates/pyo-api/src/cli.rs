@@ -8,7 +8,8 @@
 //! good for a year unless `pyo login --expires` says otherwise (`pyo login`
 //! again makes a new one). Only hashes are stored; codes last 5 minutes and work once.
 
-use axum::{Json, Router, extract::State, routing::post};
+use crate::error::Json;
+use axum::{Router, extract::State, routing::post};
 use serde::Deserialize;
 use serde_json::{Value, json};
 

@@ -4,12 +4,13 @@
 //! sha256. Every browser request that changes something must also carry
 //! `x-pyo-csrf: 1`, which a cross-site form or image can't add.
 
+use crate::error::Json;
 use argon2::{
     Argon2,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use axum::{
-    Json, Router,
+    Router,
     extract::{FromRequestParts, State},
     http::{HeaderMap, StatusCode, request::Parts},
     routing::{get, post},

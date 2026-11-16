@@ -5,10 +5,11 @@
 //! The dashboard makes ids itself so it can update optimistically; they're
 //! validated here and the database decides uniqueness.
 
+use crate::error::Json;
 use std::time::Duration;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     routing::{get, post},
 };
