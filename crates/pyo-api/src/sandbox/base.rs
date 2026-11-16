@@ -526,6 +526,27 @@ mod tests {
         assert_eq!(views[0]["name"], "base");
         assert_eq!(views[0]["builtin"], true);
         assert_eq!(views[0]["source"]["os"], "Debian 13");
+        // desktop right after, listed before it's added. A team's template
+        // named before both still comes after them.
+        sqlx::raw_sql(
+            "INSERT INTO pyo.teams (id, name, slug) VALUES ('tm_any', 'any', 'any');
+             INSERT INTO pyo.sandbox_templates (id, team_id, name, source, state, created_by)
+             VALUES ('stp_alpine', 'tm_any', 'alpine', '{\"kind\": \"image\", \"image\": \"alpine\"}', 'ready', 'x')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let views = super::super::template_views(&db, &["tm_any".into()], None)
+            .await
+            .unwrap();
+        let names: Vec<&str> = views.iter().filter_map(|v| v["name"].as_str()).collect();
+        assert_eq!(names, ["base", "desktop", "alpine"]);
+        assert_eq!(views[1]["id"], DESKTOP.id);
+        assert_eq!(views[1]["builtin"], true);
+        sqlx::query("DELETE FROM pyo.sandbox_templates WHERE id = 'stp_alpine'")
+            .execute(&db)
+            .await
+            .unwrap();
 
         // A new release moves it. The old Pyo, still running, doesn't move it back.
         let new = want(B, "0.4.2");
