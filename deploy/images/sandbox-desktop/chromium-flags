@@ -1,6 +1,0 @@
-# Chromium in a Pyo sandbox, read by Debian's /usr/bin/chromium for every
-# launch: the panel's, an agent's or desktop.py's. It runs as root, so it
-# needs --no-sandbox (the sandbox is the isolation). CDP listens on
-# 127.0.0.1:9223, which desktop.py serves as 9222. No background
-# downloads (component updates, models): they slow its start in a sandbox.
-export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --test-type --no-first-run --no-default-browser-check --disable-dev-shm-usage --password-store=basic --disable-background-networking --disable-component-update --remote-debugging-address=127.0.0.1 --remote-debugging-port=9223 --user-data-dir=/root/.config/chromium"

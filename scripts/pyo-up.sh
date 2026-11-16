@@ -764,7 +764,7 @@ wait_rollout statefulset/pyo-backup-store 300s
 TAGS=$(mktemp)
 CLEANUP+=("$TAGS")
 if [ -n "$NO_BUILD_TAG" ]; then
-  for image in pyo agent builder flows db-controller kv static waf geoip postgres-16 postgres-17 postgres-18 mysql-operator mysql-backup sandbox-desktop; do
+  for image in pyo agent builder flows db-controller kv static waf geoip postgres-16 postgres-17 postgres-18 mysql-operator mysql-backup; do
     echo "$image $NO_BUILD_TAG"
   done >"$TAGS"
 else
@@ -784,26 +784,12 @@ IMAGE_SED=()
 for image in "${!TAG_OF[@]}"; do
   case "$image" in
     postgres-*) IMAGE_SED+=(-e "s|__IMAGES__/postgres:${image#postgres-}-__TAG__|$IMAGES/postgres:${image#postgres-}-${TAG_OF[$image]}|g") ;;
-    sandbox-desktop) ;;
     *) IMAGE_SED+=(-e "s|__IMAGES__/$image:__TAG__|$IMAGES/$image:${TAG_OF[$image]}|g") ;;
   esac
 done
-# The base sandbox template's image isn't built here: Pyo then seeds
-# `base` from the latest release it found (sandbox/base.rs), or waits for
-# one.
-IMAGE_SED+=(-e "s|__IMAGES__/sandbox-base:__TAG__||g")
-# The desktop template's is, pinned by digest as Pyo takes it. Sandbox
-# servers pull it from Pyo's registry over the tailnet. Without it here
-# (--no-build with a tag that has none), Pyo waits for a release's.
-DESKTOP_REF=""
-if [ -n "${TAG_OF[sandbox-desktop]:-}" ]; then
-  digest=$(curl -fsS -m 10 -o /dev/null -D - \
-    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
-    "http://${IMAGES%%/*}/v2/${IMAGES#*/}/sandbox-desktop/manifests/${TAG_OF[sandbox-desktop]}" 2>/dev/null \
-    | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }') || digest=""
-  [ -z "$digest" ] || DESKTOP_REF="$IMAGES/sandbox-desktop:${TAG_OF[sandbox-desktop]}@$digest"
-fi
-IMAGE_SED+=(-e "s|__IMAGES__/sandbox-desktop:__TAG__|$DESKTOP_REF|g")
+# Pyo's built-in sandbox templates take their images from
+# upsetdev/pyo-sandbox-images' images.json (sandbox/images.rs).
+IMAGE_SED+=(-e "s|__SANDBOX_BASE_REF__||g" -e "s|__SANDBOX_DESKTOP_REF__||g")
 PYO_YAML=$(sed "${IMAGE_SED[@]}" -e "s|__IMAGES__|$IMAGES|g" deploy/k8s/pyo.yaml)
 if grep -q "__TAG__" <<<"$PYO_YAML"; then
   echo "pyo-up: deploy/k8s/pyo.yaml has an image scripts/build-images.sh doesn't build:" >&2

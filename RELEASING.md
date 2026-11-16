@@ -19,7 +19,7 @@ A version is one number for everything: `version` in the root `Cargo.toml`.
 
 `.github/workflows/release.yml` then checks that the tag matches `Cargo.toml`,
 runs the tests (the WAF's Go tests in `waf/` too), publishes signed images
-to `ghcr.io/upsetdev/pyo/{pyo,agent,builder,flows,waf,geoip,db-controller,kv,postgres,mysql-operator,mysql-backup,sandbox-base}`
+to `ghcr.io/upsetdev/pyo/{pyo,agent,builder,flows,waf,geoip,db-controller,kv,postgres,mysql-operator,mysql-backup}`
 (all from `deploy/images/`, at the same version. The Rust binaries are
 compiled once, by the `binaries` job, and the Rust images' jobs take them
 from that run's build cache),
@@ -53,13 +53,26 @@ crates/pyo-sandbox/scripts/bundle.sh --arch x86_64 \
 `sandbox.sh --bundle dist/pyo-sandbox-linux-x86_64.tar.gz` installs such a
 build, with `--bundle-sha256 <its sum>` or, unchecked, `--dev`.
 
-`sandbox-base` is Pyo Sandbox's built-in template `base`
-(`deploy/images/sandbox-base.Dockerfile`), built for amd64 and arm64.
-`release.json` pins it as `images.sandboxBase`, and Pyo seeds the template
-from it. Sandbox servers pull it without logging in, so the release checks
-that every image can be pulled anonymously. The first time a new image is
-published, ghcr.io may make its package private: make it public in the
-package's settings, then run the failed job again.
+Installations and sandbox servers pull every image without logging in,
+so the release checks that each can be pulled anonymously. The first
+time a new image is published, ghcr.io may make its package private:
+make it public in the package's settings, then run the failed job again.
+
+Pyo Sandbox's built-in templates `base` and `desktop` aren't built here.
+They come from [upsetdev/pyo-sandbox-images](https://github.com/upsetdev/pyo-sandbox-images),
+whose signed `images.json` Pyo reads itself every hour. Pyo ships the
+`images.json` of when it was built, in
+`crates/pyo-api/assets/sandbox-images/` with its signature (a test checks
+it), for installs that can't reach GitHub. `release.json` names those
+images as `images.sandboxBase` and `images.sandboxDesktop`, as Pyo 0.4
+reads them there. Before a release, take the latest:
+
+```sh
+cd crates/pyo-api/assets/sandbox-images
+curl -fsSLO https://github.com/upsetdev/pyo-sandbox-images/releases/latest/download/images.json
+curl -fsSLO https://github.com/upsetdev/pyo-sandbox-images/releases/latest/download/images.json.sigstore.json
+cargo test -p pyo-api sandbox::images
+```
 
 `release.json` is signed with
 cosign keyless as `release.json.sigstore.json` (the job needs `id-token:

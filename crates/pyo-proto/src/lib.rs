@@ -1137,13 +1137,12 @@ pub struct ReleaseImages {
     pub postgres17: String,
     #[serde(default)]
     pub postgres18: String,
-    /// Pyo Sandbox's built-in template `base`, multi-arch
-    /// (deploy/images/sandbox-base.Dockerfile). Pyo seeds the template
-    /// from it; nothing runs it on a cluster.
+    /// Pyo Sandbox's built-in template `base` this release ships with,
+    /// from upsetdev/pyo-sandbox-images. Pyo itself takes the latest from
+    /// that repo's images.json. Pyo 0.4 reads it here, so releases keep it.
     #[serde(default)]
     pub sandbox_base: String,
-    /// Pyo Sandbox's built-in template `desktop`, multi-arch, built on
-    /// `sandbox_base` (deploy/images/sandbox-desktop.Dockerfile).
+    /// The same for the built-in template `desktop`.
     #[serde(default)]
     pub sandbox_desktop: String,
 }
@@ -1317,8 +1316,9 @@ pub fn image_repo(image: &str) -> &str {
     }
 }
 
-/// The env var Pyo's worker reads the sandbox template `base`'s image from
-/// (pinned to the release's `sandboxBase`).
+/// The env var that overrides the sandbox template `base`'s image, when
+/// it's pinned by digest. Releases leave it empty. When a release sets it,
+/// it must be the release's `sandboxBase`.
 pub const SANDBOX_BASE_ENV: &str = "PYO_SANDBOX_BASE_REF";
 /// The same for the sandbox template `desktop` (the release's
 /// `sandboxDesktop`).
@@ -2620,8 +2620,8 @@ mod release_tests {
                 postgres16: img("postgres-16"),
                 postgres17: img("postgres-17"),
                 postgres18: img("postgres-18"),
-                sandbox_base: img("sandbox-base"),
-                sandbox_desktop: img("sandbox-desktop"),
+                sandbox_base: format!("ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:{D}"),
+                sandbox_desktop: format!("ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:{D}"),
             },
             manifests: ReleaseManifests {
                 platform: vec![
@@ -2630,7 +2630,7 @@ mod release_tests {
                 pyo: vec![
                     json!({ "kind": "Deployment", "spec": { "template": { "spec": { "containers": [{
                     "name": "pyo", "image": img("pyo"),
-                    "env": [{ "name": "PYO_AGENT_IMAGE", "value": img("agent") }, { "name": "PYO_BUILDER_IMAGE", "value": img("builder") }, { "name": SANDBOX_BASE_ENV, "value": img("sandbox-base") }, { "name": SANDBOX_DESKTOP_ENV, "value": img("sandbox-desktop") }],
+                    "env": [{ "name": "PYO_AGENT_IMAGE", "value": img("agent") }, { "name": "PYO_BUILDER_IMAGE", "value": img("builder") }, { "name": SANDBOX_BASE_ENV, "value": "" }, { "name": SANDBOX_DESKTOP_ENV, "value": "" }],
                 }] } } } }),
                 ],
             },
@@ -2776,6 +2776,14 @@ mod release_tests {
             .filter_map(|l| l.split_once(':'))
             .map(|(_, v)| v.trim().trim_end_matches(',').trim_matches('"').to_owned())
             .collect();
+        // The sandbox templates' images, from images.json.
+        for key in ["sandboxBase", "sandboxDesktop"] {
+            assert!(
+                script.contains(&format!("pinned.{key} = sandboxRef(")),
+                "release-manifest.ts sets {key}"
+            );
+            keys.push(key.into());
+        }
         let majors = script
             .split_once("for (const major of [")
             .and_then(|(_, rest)| rest.split_once(']'))
@@ -2844,10 +2852,27 @@ mod release_tests {
     }
 
     #[test]
-    fn the_sandbox_base_ref_is_the_pinned_sandbox_base() {
-        assert!(release().problems().is_empty());
+    fn the_sandbox_refs_are_empty_or_the_pinned_ones() {
+        // Releases leave them empty: Pyo takes images.json's.
+        assert!(
+            release().problems().is_empty(),
+            "{:?}",
+            release().problems()
+        );
+        let env = |r: &mut Release, i: usize, v: String| {
+            r.manifests.pyo[0]["spec"]["template"]["spec"]["containers"][0]["env"][i]["value"] =
+                json!(v);
+        };
+        // When one is set, it's the release's.
         let mut r = release();
-        r.images.sandbox_base = format!("ghcr.io/upsetdev/pyo/sandbox-base:0.2.1@sha256:{D}");
+        let base = r.images.sandbox_base.clone();
+        env(&mut r, 2, base);
+        assert!(r.problems().is_empty(), "{:?}", r.problems());
+        env(
+            &mut r,
+            2,
+            format!("ghcr.io/upsetdev/pyo/sandbox-base:0.2.1@sha256:{D}"),
+        );
         assert!(
             r.problems()
                 .iter()
@@ -2855,18 +2880,27 @@ mod release_tests {
             "{:?}",
             r.problems()
         );
-        // A dev build leaves it empty.
         let mut r = release();
-        r.manifests.pyo[0]["spec"]["template"]["spec"]["containers"][0]["env"][2]["value"] =
-            json!("");
-        assert!(r.problems().is_empty(), "{:?}", r.problems());
-        // The same for desktop's.
-        let mut r = release();
-        r.images.sandbox_desktop = format!("ghcr.io/upsetdev/pyo/sandbox-desktop:0.2.1@sha256:{D}");
+        env(
+            &mut r,
+            3,
+            format!("ghcr.io/upsetdev/pyo/sandbox-desktop:0.2.1@sha256:{D}"),
+        );
         assert!(
             r.problems()
                 .iter()
                 .any(|p| p.starts_with("PYO_SANDBOX_DESKTOP_REF is")),
+            "{:?}",
+            r.problems()
+        );
+        // The images live in another repository than Pyo's own, and must
+        // be pinned all the same: Pyo 0.4 checks that too.
+        let mut r = release();
+        r.images.sandbox_base = "ghcr.io/upsetdev/pyo-sandbox-images/base:24.04".into();
+        assert!(
+            r.problems()
+                .iter()
+                .any(|p| p.contains("sandboxBase image isn't pinned")),
             "{:?}",
             r.problems()
         );
@@ -2918,17 +2952,18 @@ mod release_tests {
                 "{i}: Pyo 0.4.0 would refuse a release that has it. Name its env var otherwise."
             );
         }
-        // The base template's image is still passed, by its own name.
+        // The sandbox templates' overrides keep their names, which releases
+        // leave empty (scripts/release-manifest.ts).
         let mut refs = vec![];
         for d in &docs {
             collect_env(d, SANDBOX_BASE_ENV, &mut refs);
         }
-        assert_eq!(refs, vec!["__IMAGES__/sandbox-base:__TAG__".to_string()]);
+        assert_eq!(refs, vec!["__SANDBOX_BASE_REF__".to_string()]);
         let mut refs = vec![];
         for d in &docs {
             collect_env(d, SANDBOX_DESKTOP_ENV, &mut refs);
         }
-        assert_eq!(refs, vec!["__IMAGES__/sandbox-desktop:__TAG__".to_string()]);
+        assert_eq!(refs, vec!["__SANDBOX_DESKTOP_REF__".to_string()]);
     }
 
     #[test]

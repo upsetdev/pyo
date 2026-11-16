@@ -1,7 +1,0 @@
-#!/bin/sh
-# pyo-envd runs this once when the sandbox boots. It starts only the small
-# listener that starts the desktop on first use (desktop.py). It logs to
-# /var/log/pyo-desktop.log, or nowhere on a read-only disk.
-log=/var/log/pyo-desktop.log
-touch "$log" 2>/dev/null || log=/dev/null
-exec python3 /usr/local/lib/pyo-desktop/desktop.py >>"$log" 2>&1 </dev/null

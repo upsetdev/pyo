@@ -422,9 +422,9 @@ fn t0(t: &TemplateReport) -> u64 {
     pyo_sandbox::now_ms().saturating_sub(t.build.as_ref().map(|b| b.started_at).unwrap_or(0))
 }
 
-/// Pyo's built-in template `base` (deploy/images/sandbox-base.Dockerfile),
-/// from the image named by `PYO_SANDBOX_E2E_BASE_IMAGE`: CI builds it and
-/// pushes it to a registry on 127.0.0.1. Skipped without it.
+/// Pyo's built-in template `base` (upsetdev/pyo-sandbox-images), from the
+/// image named by `PYO_SANDBOX_E2E_BASE_IMAGE`: CI takes the one Pyo ships
+/// with, from ghcr.io. Skipped without it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn makes_the_base_template() {
     if !enabled() {
@@ -479,13 +479,13 @@ async fn makes_the_base_template() {
     assert!(s.from_snapshot);
     for (cmd, want) in [
         ("git --version", "git version 2."),
-        ("python3 --version", "Python 3.13"),
+        ("python3 --version", "Python 3.12"),
         ("uv --version", "uv 0."),
-        ("node --version", "v26."),
+        ("node --version", "v24."),
         ("pnpm --version", "12."),
         ("npm --version", ""),
         ("gcc --version", "gcc"),
-        ("head -1 /etc/os-release", "Debian GNU/Linux 13"),
+        ("head -1 /etc/os-release", "Ubuntu 24.04"),
     ] {
         let out = mgr.exec(&spec.id, &shell(cmd)).await.unwrap();
         println!("base e2e {cmd}: {}", out.stdout.trim());

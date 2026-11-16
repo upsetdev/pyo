@@ -209,12 +209,15 @@ spec:
             - { name: PYO_POSTGRES_IMAGE_18, value: "__IMAGES__/postgres:18-__TAG__" }
             - { name: PYO_MYSQL_OPERATOR_IMAGE, value: "__IMAGES__/mysql-operator:__TAG__" }
             - { name: PYO_MYSQL_BACKUP_IMAGE, value: "__IMAGES__/mysql-backup:__TAG__" }
-            # Pyo Sandbox's built-in templates `base` and `desktop` (sandbox/base.rs). Not
+            # Pyo Sandbox's built-in templates `base` and `desktop` take their
+            # images from upsetdev/pyo-sandbox-images (sandbox/images.rs). An
+            # image pinned by digest here wins over those: releases leave them
+            # empty, scripts/pyo-up.sh fills them when it builds them. Not
             # named *_IMAGE: Pyo 0.4.0 checks every *_IMAGE value against the
             # images it knows, and refuses a release that has another
             # (pyo-proto `collect_images`, and the test that keeps this rule).
-            - { name: PYO_SANDBOX_BASE_REF, value: "__IMAGES__/sandbox-base:__TAG__" }
-            - { name: PYO_SANDBOX_DESKTOP_REF, value: "__IMAGES__/sandbox-desktop:__TAG__" }
+            - { name: PYO_SANDBOX_BASE_REF, value: "__SANDBOX_BASE_REF__" }
+            - { name: PYO_SANDBOX_DESKTOP_REF, value: "__SANDBOX_DESKTOP_REF__" }
             - { name: RUST_LOG, value: "pyo_api=info" }
             - { name: CLICKHOUSE_URL, value: "http://pyo-clickhouse.pyo-system.svc:8123" }
             - { name: CLICKHOUSE_USER, value: pyo }

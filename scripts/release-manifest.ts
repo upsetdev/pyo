@@ -7,14 +7,14 @@
 //     --images ghcr.io/upsetdev/pyo \
 //     --pyo sha256:… --agent sha256:… --builder sha256:… --flows sha256:… --waf sha256:… --geoip sha256:… \
 //     --db-controller sha256:… --kv sha256:… --static sha256:… --mysql-operator sha256:… --mysql-backup sha256:… \
-//     --sandbox-base sha256:… --sandbox-desktop sha256:… \
 //     --postgres-16 sha256:… --postgres-17 sha256:… --postgres-18 sha256:… \
 //     --agent-access "$(pyo-agent access-hash)" \
 //     --sandbox-x86_64 <sha256> --sandbox-aarch64 <sha256> \
 //     --sandbox-gvisor-x86_64 <sha256> --sandbox-gvisor-aarch64 <sha256> > release.json
 //
 // Images are pinned by digest. deploy/k8s/{platform,pyo}.yaml become JSON
-// objects. Notices for this release come from
+// objects. The sandbox templates' images (sandboxBase, sandboxDesktop) are
+// the ones Pyo ships with, from crates/pyo-api/assets/sandbox-images/. Notices for this release come from
 // deploy/release-notices.json when its "version" is this one; the k3s a
 // fresh install gets, from deploy/k3s.env. `agentAccess` is the hash of the
 // roles the release's agent is installed with (`pyo-agent access-hash`):
@@ -66,14 +66,27 @@ const names = {
   // (deploy/images/moco).
   "mysql-operator": "mysqlOperator",
   "mysql-backup": "mysqlBackup",
-  // Pyo Sandbox's built-in template `base` (multi-arch). Pyo reads it
-  // from PYO_SANDBOX_BASE_REF and seeds the template from it.
-  "sandbox-base": "sandboxBase",
-  // And `desktop`, built on it (PYO_SANDBOX_DESKTOP_REF).
-  "sandbox-desktop": "sandboxDesktop",
 } as const;
 const byName: Record<string, string> = Object.fromEntries(Object.keys(names).map((n) => [n, ref(n)]));
 const pinned: Record<string, string> = Object.fromEntries(Object.entries(names).map(([n, key]) => [key, byName[n]]));
+// Pyo Sandbox's built-in templates `base` and `desktop` come from
+// upsetdev/pyo-sandbox-images, whose signed images.json Pyo reads itself
+// (crates/pyo-api/src/sandbox/images.rs). release.json still names the
+// ones this release ships with, as Pyo 0.4 reads them there. The manifests
+// leave PYO_SANDBOX_BASE_REF and PYO_SANDBOX_DESKTOP_REF empty: they'd win
+// over images.json.
+const sandboxImages = JSON.parse(readFileSync("crates/pyo-api/assets/sandbox-images/images.json", "utf8"));
+const sandboxRef = (name: string) => {
+  const r: unknown = sandboxImages.images?.[name]?.ref;
+  if (typeof r !== "string" || !/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(r)) {
+    fail(`crates/pyo-api/assets/sandbox-images/images.json has no pinned ${name} image`);
+  }
+  return r as string;
+};
+pinned.sandboxBase = sandboxRef("base");
+pinned.sandboxDesktop = sandboxRef("desktop");
+const leftEmpty = ["__SANDBOX_BASE_REF__", "__SANDBOX_DESKTOP_REF__"];
+
 // Pyo's Postgres: one repository, a tag per version that starts with it
 // (postgres:18-<version>; CloudNativePG reads the version from the tag).
 const postgres: Record<string, string> = {};
@@ -92,7 +105,10 @@ function manifests(file: string) {
   for (const [placeholder, image] of Object.entries(postgres)) {
     text = text.replaceAll(placeholder, image);
   }
-  for (const left of ["__IMAGES__", "__TAG__"]) {
+  for (const placeholder of leftEmpty) {
+    text = text.replaceAll(placeholder, "");
+  }
+  for (const left of ["__IMAGES__", "__TAG__", "__SANDBOX_"]) {
     if (text.includes(left)) fail(`${file} still has ${left} after pinning Pyo's images`);
   }
   const docs = Bun.YAML.parse(text);

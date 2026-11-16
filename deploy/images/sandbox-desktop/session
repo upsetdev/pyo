@@ -1,6 +1,0 @@
-#!/bin/sh
-# The desktop session on the screen desktop.py starts: a plain background,
-# the tint2 panel and Openbox.
-xsetroot -solid '#2b3038' 2>/dev/null || true
-tint2 >/dev/null 2>&1 &
-exec openbox
