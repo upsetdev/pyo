@@ -3,6 +3,7 @@ import {
   CubeIcon,
   DotsThreeIcon,
   HardDrivesIcon,
+  MonitorIcon,
   PauseIcon,
   PlayIcon,
   TerminalWindowIcon,
@@ -49,6 +50,8 @@ import {
   type SandboxInUse,
   type SandboxLimits,
   type SandboxTemplate,
+  isDesktop,
+  openDesktop,
 } from "~/lib/pyo/sandbox";
 import { roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import type { SandboxServer } from "~/lib/pyo/sandbox";
@@ -360,6 +363,19 @@ function SandboxTable({
             <Td className="max-w-40 truncate text-muted-foreground">{x.createdBy ?? "—"}</Td>
             <Td>
               <div className="flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
+                {canUse && x.state === "running" && isDesktop(templateOf(x, templates)) ? (
+                  <Tooltip content="Desktop" focusable={false}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      aria-label={`Desktop for ${x.name}`}
+                      onClick={() => void openDesktop(x.id)}
+                    >
+                      <MonitorIcon size={16} />
+                    </Button>
+                  </Tooltip>
+                ) : null}
                 {canUse && x.state === "running" ? (
                   <Tooltip content="Terminal" focusable={false}>
                     <Button

@@ -44,10 +44,9 @@ import {
   NO_LIFETIME,
   connectionFor,
   daemonApi,
-  desktopUrl,
+  openDesktop,
   ended,
   isDesktop,
-  OFF_TAILNET,
   lifetimeAllowed,
   rememberConnection,
   sandboxApi,
@@ -211,22 +210,6 @@ function SandboxPage() {
       />
     </Page>
   );
-}
-
-/** The desktop's screen in a new tab, through the sandbox server's daemon
- * on the tailnet. The tab opens at once, so browsers don't block it. */
-async function openDesktop(id: string) {
-  const tab = window.open("about:blank", "_blank");
-  if (tab) tab.opener = null;
-  try {
-    const c = await connectionFor(id);
-    const url = desktopUrl(c.url, id, c.token);
-    if (tab) tab.location.href = url;
-    else window.location.href = url;
-  } catch (e) {
-    tab?.close();
-    toast.error("Couldn't open the desktop", { description: (e as Error).message || OFF_TAILNET });
-  }
 }
 
 /** The sandbox's name, edited in place. Enter or leaving the field saves,
