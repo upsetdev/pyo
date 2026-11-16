@@ -7,7 +7,6 @@ import { Badge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import { Field, Input, SecretInput, Select } from "~/components/ui/Field";
-import { Panel } from "~/components/ui/Panel";
 import { timeAgo } from "~/lib/pyo/format";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
@@ -45,20 +44,14 @@ const PRESETS = [
 
 const preset = (host: string) => PRESETS.find((p) => p.host === host);
 
-export function RegistryLoginsPanel() {
+/** Integrations › Registries: the built-in registry and the team's logins. */
+export function RegistryLoginsSettings() {
   const s = usePyo();
   const logins = s.registryLogins.filter((l) => l.teamId === s.currentTeamId);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<RegistryLogin | null>(null);
   return (
-    <Panel
-      title="Container registries"
-      actions={
-        <Button size="xs" variant="secondary" onClick={() => setAdding(true)}>
-          <PlusIcon size={12} weight="bold" /> Add login
-        </Button>
-      }
-    >
+    <>
       <ul className="list-rows">
         <li className="flex flex-wrap items-center gap-3 px-4 py-3">
           <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
@@ -117,10 +110,15 @@ export function RegistryLoginsPanel() {
           })}
         </ul>
       ) : (
-        <p className="px-4 py-6 text-center text-[13px] text-muted-foreground">
+        <p className="border-t border-border px-4 py-6 text-center text-[13px] text-muted-foreground">
           No logins yet. Public images don't need one.
         </p>
       )}
+      <div className="border-t border-border px-4 py-3">
+        <Button size="xs" variant="secondary" onClick={() => setAdding(true)}>
+          <PlusIcon size={12} weight="bold" /> Add login
+        </Button>
+      </div>
       <AddLoginDialog open={adding} onClose={() => setAdding(false)} />
       <ConfirmDialog
         open={!!removing}
@@ -133,11 +131,11 @@ export function RegistryLoginsPanel() {
             toast({ title: `Removed the login for ${removing.host}` });
         }}
       />
-    </Panel>
+    </>
   );
 }
 
-function AddLoginDialog({
+export function AddLoginDialog({
   open,
   onClose,
 }: {

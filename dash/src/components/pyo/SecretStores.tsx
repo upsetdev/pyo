@@ -1,5 +1,6 @@
 import { KeyIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { Badge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import { Field, Input, Select, Textarea } from "~/components/ui/Field";
@@ -114,7 +115,7 @@ function optionsOf(f: Form): Record<string, string> {
 }
 
 /** Connect a store, or change one. Its credential is never shown again. */
-function StoreDialog({
+export function StoreDialog({
   store,
   onClose,
 }: {
@@ -321,8 +322,8 @@ function StoreDialog({
   );
 }
 
-/** Integrations: the team's stores. */
-export function SecretStoresPanel() {
+/** Integrations › Secret stores: the default, then the team's stores. */
+export function SecretStoresSettings() {
   const s = usePyo();
   const stores = s.secretStores.filter((x) => x.teamId === s.currentTeamId);
   const [adding, setAdding] = useState(false);
@@ -333,16 +334,23 @@ export function SecretStoresPanel() {
       a.secretImports?.some((i) => i.storeId === store.id),
     ).length;
   return (
-    <Panel
-      title="Secret stores"
-      actions={
-        <Button size="xs" variant="secondary" onClick={() => setAdding(true)}>
-          <PlusIcon size={12} weight="bold" /> Connect
-        </Button>
-      }
-    >
+    <>
+      <ul className="list-rows">
+        <li className="flex items-center gap-3 px-4 py-3">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
+            <KeyIcon size={15} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-medium">Cluster Secrets</p>
+            <p className="text-[12px] text-muted-foreground">
+              Default. Stored in the target cluster.
+            </p>
+          </div>
+          <Badge tone="success">Active</Badge>
+        </li>
+      </ul>
       {stores.length ? (
-        <ul className="list-rows">
+        <ul className="list-rows border-t border-border">
           {stores.map((store) => {
             const used = uses(store);
             return (
@@ -383,10 +391,15 @@ export function SecretStoresPanel() {
           })}
         </ul>
       ) : (
-        <p className="px-4 py-3 text-[13px] text-muted-foreground">
+        <p className="border-t border-border px-4 py-3 text-[13px] text-muted-foreground">
           Vault, AWS, GCP, Azure, Doppler and more.
         </p>
       )}
+      <div className="border-t border-border px-4 py-3">
+        <Button size="xs" variant="secondary" onClick={() => setAdding(true)}>
+          <PlusIcon size={12} weight="bold" /> Connect
+        </Button>
+      </div>
       {adding ? <StoreDialog onClose={() => setAdding(false)} /> : null}
       {editing ? (
         <StoreDialog store={editing} onClose={() => setEditing(null)} />
@@ -401,7 +414,7 @@ export function SecretStoresPanel() {
           if (removing) void api.removeSecretStore(removing.id);
         }}
       />
-    </Panel>
+    </>
   );
 }
 

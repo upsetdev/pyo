@@ -10,7 +10,7 @@ import { Badge, type Tone } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Input, Select, Textarea } from "~/components/ui/Field";
-import { Callout, Panel } from "~/components/ui/Panel";
+import { Callout } from "~/components/ui/Panel";
 import { StatusNote } from "~/components/ui/StatusNote";
 import { CopyButton } from "~/components/ui/Table";
 import { site } from "~/config/site";
@@ -111,7 +111,7 @@ export function DeleteCloudServerDialog({
 }
 
 /** Integrations › Hetzner: the team's project token, and the servers Pyo made. */
-export function HetznerPanel() {
+export function HetznerSettings() {
   const s = usePyo();
   const admin = useTeamAdmin();
   const conn = hetznerOf(s);
@@ -123,8 +123,6 @@ export function HetznerPanel() {
   const [removing, setRemoving] = useState(false);
   const [deleting, setDeleting] = useState<CloudServer | null>(null);
   const servers = s.cloudServers.filter((c) => c.teamId === s.currentTeamId);
-  const title = "Hetzner";
-  const description = "For this team. Pyo makes servers in your Hetzner project.";
   const save = async () => {
     setBusy(true);
     setError("");
@@ -143,7 +141,7 @@ export function HetznerPanel() {
     else setSeen(r.data.locations.map((l) => l.city).join(", "));
   };
   return (
-    <Panel title={title} description={description}>
+    <>
       <ul className="list-rows">
         <li className="space-y-3 px-4 py-3">
           {!s.tailscale ? (
@@ -259,7 +257,7 @@ export function HetznerPanel() {
         confirmLabel="Remove"
       />
       <DeleteCloudServerDialog server={deleting} onClose={() => setDeleting(null)} />
-    </Panel>
+    </>
   );
 }
 
