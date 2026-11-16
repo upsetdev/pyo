@@ -19,7 +19,6 @@ export type IntegrationCardProps = {
   /** One real figure, connected only. */
   stat?: { label: string; value: ReactNode } | null;
   /** What it enables, not connected only. */
-  tags?: string[];
   /** How it stands, connected only. */
   status?: { tone: Tone; label: string } | null;
   /** The docs page (pyo.dev/docs/<page>). */
@@ -43,7 +42,6 @@ export function IntegrationCard({
   description,
   connected,
   stat,
-  tags,
   status,
   docs,
   action,
@@ -109,18 +107,6 @@ export function IntegrationCard({
                 {stat.value}
               </span>
             </p>
-          ) : null}
-          {!connected && tags?.length ? (
-            <ul className="flex flex-wrap gap-1.5">
-              {tags.map((t) => (
-                <li
-                  key={t}
-                  className="rounded-md bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground"
-                >
-                  {t}
-                </li>
-              ))}
-            </ul>
           ) : null}
         </div>
         <footer className="flex min-h-[34px] items-center gap-2 border-t border-divider pb-0.5 text-[12px] text-muted-foreground">

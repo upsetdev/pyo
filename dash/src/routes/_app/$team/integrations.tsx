@@ -173,7 +173,6 @@ function Integrations() {
       description: "Servers join your tailnet with it.",
       connected: !!ts,
       stat: ts?.suffix ? { label: "Tailnet", value: <span className="font-mono text-[12px]">{ts.suffix}</span> } : null,
-      tags: ["Join servers", "Private dashboard"],
       status: tsStatus(),
       docs: "tailscale",
       action: s.user.isAdmin ? connect("Connect", () => setOpen("tailscale")) : askAdmin,
@@ -198,7 +197,6 @@ function Integrations() {
       description: "Pyo makes servers in your Hetzner project.",
       connected: !!hetzner,
       stat: hetzner ? { label: "Servers made", value: cloudServers.length } : null,
-      tags: ["New servers", "Clusters"],
       status: hetzner
         ? failedServers
           ? { tone: "danger", label: `${plural(failedServers, "server")} failed` }
@@ -227,7 +225,6 @@ function Integrations() {
       description: "Private repos, and a deploy on every push.",
       connected: !!s.github && installs.length > 0,
       stat: { label: "Repos linked", value: reposLinked(s, (src) => installs.some((g) => g.id === src.installationId)) },
-      tags: ["Private repos", "Deploy on push"],
       status: installs.length
         ? { tone: "success", label: `Connected ${timeAgo(oldest(installs))}` }
         : null,
@@ -250,7 +247,6 @@ function Integrations() {
       stat: gitlabProjects
         ? { label: "Projects", value: gitlabProjects }
         : { label: "Repos linked", value: reposLinked(s, (src) => gitlab.some((c) => c.id === src.gitConnectionId)) },
-      tags: ["Private repos", "Deploy on push", "Self-hosted"],
       status: gitlab.length
         ? gitlabProblems
           ? { tone: "warning", label: "Needs attention" }
@@ -273,7 +269,6 @@ function Integrations() {
       description: "Creates DNS records for domains in your zones.",
       connected: !!cf,
       stat: cf ? { label: "Zones", value: cf.zones.length - cfLacking } : null,
-      tags: ["DNS records", "Proxy"],
       status: cf
         ? cfLacking
           ? { tone: "warning", label: `${plural(cfLacking, "zone")} lack access` }
@@ -302,7 +297,6 @@ function Integrations() {
       description: "Logins for private images. Services pull with them.",
       connected: logins.length > 0,
       stat: { label: "Logins", value: logins.length },
-      tags: ["Private images", "Docker Hub", "ghcr.io"],
       status: logins.length
         ? lastUsed
           ? { tone: "success", label: `Used ${timeAgo(lastUsed)}` }
@@ -325,7 +319,6 @@ function Integrations() {
       description: "Services import secrets from your store on each deploy.",
       connected: stores.length > 0,
       stat: { label: "Services importing", value: storeUses },
-      tags: ["Vault", "AWS", "Doppler"],
       status: stores.length
         ? { tone: "success", label: `Connected ${timeAgo(oldest(stores))}` }
         : null,
@@ -349,7 +342,7 @@ function Integrations() {
     (x) =>
       (filter === "all" || (filter === "connected" ? x.connected : x.category === filter)) &&
       (!needle ||
-        [x.name, x.category, x.description, ...(x.tags ?? [])].some((t) => t.toLowerCase().includes(needle))),
+        [x.name, x.category, x.description].some((t) => t.toLowerCase().includes(needle))),
   );
 
   // "/integrations#tailscale": show the card, ring it, open its settings.
