@@ -497,6 +497,13 @@ async function attempt<T>(
 /** Slugs a team can't take because a top-level route already owns them. */
 const RESERVED_SLUGS = new Set([
   "profile",
+  "settings",
+  // The installation's settings pages (SETTINGS_PAGES in paths.ts).
+  "backups",
+  "email",
+  "github",
+  "observability",
+  "updates",
   "login",
   "signup",
   "forgot-password",
