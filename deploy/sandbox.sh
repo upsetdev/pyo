@@ -720,7 +720,7 @@ uninstall() {
   done
   # gVisor's sandboxes, their disks and network namespaces.
   if [ -x "$LIB/runsc" ]; then
-    for c in $("$LIB/runsc" --root="$DATA/runsc" list -q 2>/dev/null || true); do
+    for c in $("$LIB/runsc" --root="$DATA/runsc" list --quiet 2>/dev/null || true); do
       "$LIB/runsc" --root="$DATA/runsc" delete --force "$c" >/dev/null 2>&1 || true
     done
   fi
