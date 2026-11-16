@@ -29,7 +29,9 @@ export function PageHeader({
       <div className="flex min-w-0 items-start gap-3">
         {icon}
         <div className="min-w-0">
-          <h1 className="truncate text-[24px] font-semibold tracking-tight text-foreground">
+          {/* The extra room on the left keeps a title's hover background, which reaches past
+              its text, from being cut. */}
+          <h1 className="-ml-2 truncate pl-2 text-[24px] font-semibold tracking-tight text-foreground">
             {title}
           </h1>
           {description ? (
