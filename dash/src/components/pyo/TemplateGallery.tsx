@@ -46,7 +46,7 @@ export function TemplateCard({
   action?: string;
 }) {
   return (
-    <article className={`group relative flex flex-col rounded-[14px] border border-card-border bg-card p-4 ${CARD_HOVER} has-[button:focus-visible]:ring-2 has-[button:focus-visible]:ring-primary/40`}>
+    <article className={`group relative flex flex-col rounded-[14px] border border-card-border bg-card p-5 min-h-[150px] ${CARD_HOVER} has-[button:focus-visible]:ring-2 has-[button:focus-visible]:ring-primary/40`}>
       {/* The whole card is the target; the Details button sits above it. */}
       <button
         type="button"
@@ -72,7 +72,7 @@ export function TemplateCard({
           </button>
         ) : null}
       </div>
-      <p className="mt-3 line-clamp-2 text-[12.5px] leading-[1.15rem] text-muted-foreground">
+      <p className="mt-3.5 line-clamp-2 min-h-[2.3rem] text-[12.5px] leading-[1.15rem] text-muted-foreground">
         {t.description}
       </p>
     </article>
