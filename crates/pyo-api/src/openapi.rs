@@ -77,6 +77,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::sandbox::api::list,
         crate::sandbox::api::create,
         crate::sandbox::api::get_one,
+        crate::sandbox::api::rename,
         crate::sandbox::api::delete,
         crate::sandbox::api::pause,
         crate::sandbox::api::resume,
@@ -463,6 +464,7 @@ fn common_responses(spec: &mut Spec) {
             &mut item.get,
             &mut item.post,
             &mut item.put,
+            &mut item.patch,
             &mut item.delete,
         ]
         .into_iter()

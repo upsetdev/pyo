@@ -24,7 +24,7 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sandboxes", get(list).post(create))
-        .route("/sandboxes/{id}", get(get_one).delete(delete))
+        .route("/sandboxes/{id}", get(get_one).patch(rename).delete(delete))
         .route("/sandboxes/{id}/pause", post(pause))
         .route("/sandboxes/{id}/resume", post(resume))
         .route("/sandboxes/{id}/extend", post(extend))
@@ -61,6 +61,9 @@ pub struct ListQuery {
     /// "live" (the default: not stopped or failed) or "all" (the latest 500).
     #[serde(default)]
     state: Option<String>,
+    /// Only sandboxes whose name or id has this text, ignoring case.
+    #[serde(default)]
+    q: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -82,7 +85,7 @@ async fn team_read(s: &AppState, user: &crate::auth::User, team: &str) -> ApiRes
 #[utoipa::path(get, path = "/sandboxes", operation_id = "listSandboxes", tag = "Sandboxes",
     params(ListQuery),
     responses(
-        (status = 200, description = "`sandboxes`, newest first, each with `id`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `preparing` (true while it waits for its server to make its template), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon), `edgeUrl` (its server's edge proxy, or null), `ports` (each `port`, `public` and `url`), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt`, `pausedAt` and `endedAt`. Also `limits` (the team's) and `inUse` (what its sandboxes take now).", body = Object),
+        (status = 200, description = "`sandboxes`, newest first, each with `id`, `name`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `preparing` (true while it waits for its server to make its template), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon), `edgeUrl` (its server's edge proxy, or null), `ports` (each `port`, `public` and `url`), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt`, `pausedAt` and `endedAt`. Also `limits` (the team's) and `inUse` (what its sandboxes take now).", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -102,7 +105,7 @@ pub(crate) async fn list(
     let limits = super::limits::load(&mut c, &q.team).await?;
     let in_use = super::limits::in_use(&mut c, &q.team).await?;
     Ok(Json(json!({
-        "sandboxes": super::sandbox_views(&s.db, &teams, None, live).await?,
+        "sandboxes": super::sandbox_views_matching(&s.db, &teams, None, live, q.q.as_deref()).await?,
         "limits": limits,
         "inUse": in_use,
     })))
@@ -161,6 +164,36 @@ pub(crate) async fn create(
         StatusCode::CREATED,
         Json(super::create(&s, &user, req).await?),
     ))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Rename {
+    /// The new name: up to 63 letters, digits, spaces, dashes, underscores
+    /// and dots. It needn't be unique.
+    name: String,
+}
+
+/// Rename a sandbox
+///
+/// Gives the sandbox another name. Its id stays the same, so scripts that
+/// use it keep working. Works on ended sandboxes too.
+#[utoipa::path(patch, path = "/sandboxes/{id}", operation_id = "renameSandbox", tag = "Sandboxes",
+    params(("id" = String, Path, description = "The sandbox's id.")),
+    request_body(content = Rename),
+    responses(
+        (status = 200, description = "The sandbox, with its new `name`.", body = Object),
+        (status = 400, description = "A name Pyo can't accept. The error says why.", body = ErrorBody),
+        (status = 404, description = "No such sandbox.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("sandboxes"))))]
+pub(crate) async fn rename(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path(id): Path<String>,
+    Json(b): Json<Rename>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(super::rename(&s, &user, &id, &b.name).await?))
 }
 
 /// Delete a sandbox

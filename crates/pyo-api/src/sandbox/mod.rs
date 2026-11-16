@@ -11,6 +11,7 @@
 //! - [`templates`]: which servers make which templates, and their state.
 //!   [`base`]: Pyo's built-in template, kept in step with the release.
 //! - [`limits`]: per-team caps, checked on create.
+//! - [`names`]: sandboxes' names, made up when left out.
 //! - [`daemon`]: Pyo's calls to a daemon over the tailnet.
 //! - [`edgecert`]: the edge proxies' wildcard certificates and DNS records.
 //! - [`runner`]: reads each server's report, keeps the records in step,
@@ -33,6 +34,7 @@ pub mod join;
 pub mod keys;
 pub mod limits;
 pub mod mcp;
+pub mod names;
 pub mod runner;
 pub mod scheduler;
 pub mod templates;
@@ -261,9 +263,24 @@ pub async fn sandbox_views(
     id: Option<&str>,
     live_only: bool,
 ) -> sqlx::Result<Vec<Value>> {
+    sandbox_views_matching(db, team_ids, id, live_only, None).await
+}
+
+/// [`sandbox_views`], only those whose name or id has `q` in it.
+pub async fn sandbox_views_matching(
+    db: &PgPool,
+    team_ids: &[String],
+    id: Option<&str>,
+    live_only: bool,
+    q: Option<&str>,
+) -> sqlx::Result<Vec<Value>> {
+    let q = q
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(str::to_lowercase);
     sqlx::query_scalar(
         "SELECT jsonb_build_object(
-            'id', x.id, 'teamId', x.team_id, 'projectId', x.project_id,
+            'id', x.id, 'name', x.name, 'teamId', x.team_id, 'projectId', x.project_id,
             'serverId', x.server_id, 'server', sv.name,
             'template', coalesce(t.name, x.spec->>'template'), 'templateId', x.template_id,
             'state', x.state, 'runtime', x.runtime,
@@ -284,14 +301,32 @@ pub async fn sandbox_views(
            LEFT JOIN pyo.sandbox_templates t ON t.id = x.template_id
           WHERE x.team_id = ANY($1) AND ($2::text IS NULL OR x.id = $2)
             AND (NOT $3 OR x.state NOT IN ('stopped', 'failed'))
+            AND ($4::text IS NULL OR x.name IS NULL
+                 OR strpos(lower(x.name), $4) > 0 OR strpos(lower(x.id), $4) > 0)
           ORDER BY x.created_at DESC LIMIT 500",
     )
     .bind(team_ids)
     .bind(id)
     .bind(live_only)
+    .bind(&q)
     .fetch_all(db)
     .await
     .map(|mut rows: Vec<Value>| {
+        // A sandbox from before names has the one made from its id.
+        for r in &mut rows {
+            if r["name"].is_null() {
+                r["name"] = json!(names::generated(r["id"].as_str().unwrap_or_default()));
+            }
+        }
+        if let Some(q) = &q {
+            rows.retain(|r| {
+                names::matches(
+                    r["name"].as_str().unwrap_or_default(),
+                    r["id"].as_str().unwrap_or_default(),
+                    q,
+                )
+            });
+        }
         // The server's tailnet address as its daemon's URL, and each open
         // port's URL on its edge proxy.
         for r in &mut rows {
@@ -428,6 +463,12 @@ pub struct CreateSandbox {
     /// (or user) has exactly one team.
     #[serde(default)]
     pub team_id: Option<String>,
+    /// A name to tell it apart, like "checkout tests": up to 63 letters,
+    /// digits, spaces, dashes, underscores and dots. It needn't be unique
+    /// and never addresses the sandbox: its id does. A short one like
+    /// "quiet-river" when omitted.
+    #[serde(default)]
+    pub name: Option<String>,
     /// A sandbox template's name (or id): the team's own, else the
     /// installation's. "base" (Pyo's built-in Debian 13 template) when
     /// omitted. A server that doesn't have "base" yet makes it first, so
@@ -663,6 +704,10 @@ pub(crate) fn only_team(teams: &[String], field: &str) -> Result<String, String>
 /// asks the server. Returns the sandbox and how to reach it.
 pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<Value> {
     let ttl_secs = parse_ttl_value(req.ttl.as_ref())?;
+    let name = match req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => Some(names::check(n).map_err(ApiError::bad_request)?),
+        None => None,
+    };
     let team_id = team_for_create(s, user, req.team_id.as_deref()).await?;
     let asked = template_asked(req.template.as_deref());
     // `base` is listed before it's added: it's added on first use.
@@ -749,8 +794,8 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     // While its server makes the template, its lifetime hasn't started.
     let wait = if build { firstuse::LIMIT.as_secs() } else { 0 };
     sqlx::query(
-        "INSERT INTO pyo.sandboxes (id, team_id, project_id, server_id, template_id, spec, state, created_by, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'creating', $7, now() + make_interval(secs => $8))",
+        "INSERT INTO pyo.sandboxes (id, team_id, project_id, server_id, template_id, spec, state, created_by, expires_at, name)
+         VALUES ($1, $2, $3, $4, $5, $6, 'creating', $7, now() + make_interval(secs => $8), $9)",
     )
     .bind(&spec.id)
     .bind(&team_id)
@@ -760,6 +805,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     .bind(json!(kept))
     .bind(&user.name)
     .bind((ttl_secs + wait) as f64)
+    .bind(name.unwrap_or_else(|| names::generated(&spec.id)))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -948,6 +994,19 @@ pub async fn delete(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
             tracing::warn!(%id, error = %e, "sandbox delete: the server didn't answer, trying again later")
         }
     }
+    view(s, &f).await
+}
+
+/// Gives a sandbox another name. Its id stays, so nothing that uses it
+/// breaks. Also once it has ended.
+pub async fn rename(s: &AppState, user: &User, id: &str, name: &str) -> ApiResult<Value> {
+    let name = names::check(name).map_err(ApiError::bad_request)?;
+    let f = find(s, user, id, Need::Use).await?;
+    sqlx::query("UPDATE pyo.sandboxes SET name = $2 WHERE id = $1")
+        .bind(id)
+        .bind(&name)
+        .execute(&s.db)
+        .await?;
     view(s, &f).await
 }
 
@@ -1696,12 +1755,132 @@ mod tests {
         .unwrap();
         assert_eq!(r.network, Some(NetworkMode::None));
         assert_eq!(r.isolation, Some(Isolation::Vm));
+        assert_eq!(r.name, None);
+        let r: CreateSandbox = serde_json::from_value(json!({ "name": "checkout tests" })).unwrap();
+        assert_eq!(r.name.as_deref(), Some("checkout tests"));
         assert!(
             serde_json::from_value::<CreateSandbox>(
                 json!({ "teamId": "t", "template": "x", "nope": 1 })
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn a_rename_keeps_the_id_and_search_finds_names() {
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let s = e2e::test_state(db.clone());
+        let run = crate::ids::random_string(8);
+        let team = format!("tm_names{run}");
+        let user = User {
+            id: format!("usr_names{run}"),
+            name: "Names".into(),
+            email: format!("{run}@names.test"),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        sqlx::query(
+            "INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'Names', '')",
+        )
+        .bind(&user.id)
+        .bind(&user.email)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, 'Names', $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'developer', 'active')")
+            .bind(format!("mem_names{run}"))
+            .bind(&team)
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&db)
+            .await
+            .unwrap();
+        // One from before names (NULL), one named.
+        let (old, named) = (format!("sbx_old{run}"), format!("sbx_named{run}"));
+        for (id, name) in [(&old, None), (&named, Some("Checkout tests"))] {
+            sqlx::query("INSERT INTO pyo.sandboxes (id, team_id, spec, state, created_by, expires_at, ended_at, name) VALUES ($1, $2, '{}', 'stopped', 'test', now(), now(), $3)")
+                .bind(id)
+                .bind(&team)
+                .bind(name)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let teams = [team.clone()];
+        let all = sandbox_views(&db, &teams, None, false).await.unwrap();
+        let name_of = |id: &str| {
+            all.iter().find(|x| x["id"] == id).unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(name_of(&old), names::generated(&old));
+        assert_eq!(name_of(&named), "Checkout tests");
+
+        let found = |q: &str| {
+            let db = db.clone();
+            let teams = teams.clone();
+            let q = q.to_owned();
+            async move {
+                sandbox_views_matching(&db, &teams, None, false, Some(&q))
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|x| x["id"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(found("CHECKOUT").await, std::slice::from_ref(&named));
+        assert_eq!(
+            found(&names::generated(&old)).await,
+            std::slice::from_ref(&old),
+            "a made-up name is found too"
+        );
+        assert_eq!(
+            found(&format!("old{run}")).await,
+            std::slice::from_ref(&old),
+            "and the id"
+        );
+        assert!(found("nothing like it").await.is_empty());
+
+        // A rename changes the name and keeps the id, also once it ended.
+        let v = rename(&s, &user, &old, "  nightly build ").await.unwrap();
+        assert_eq!(
+            (v["id"].as_str(), v["name"].as_str()),
+            (Some(old.as_str()), Some("nightly build"))
+        );
+        assert_eq!(found("nightly").await, std::slice::from_ref(&old));
+        let e = rename(&s, &user, &old, "a/b").await.unwrap_err();
+        assert_eq!(e.status, StatusCode::BAD_REQUEST);
+        let e = rename(&s, &user, &old, " ").await.unwrap_err();
+        assert_eq!(e.status, StatusCode::BAD_REQUEST);
+        let e = rename(&s, &user, "sbx_nope", "x").await.unwrap_err();
+        assert_eq!(e.status, StatusCode::NOT_FOUND);
+
+        // Viewers can't.
+        sqlx::query("UPDATE pyo.members SET role = 'viewer' WHERE team_id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        let e = rename(&s, &user, &old, "mine").await.unwrap_err();
+        assert_eq!(e.status, StatusCode::FORBIDDEN);
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 
     #[test]
