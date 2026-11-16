@@ -13,6 +13,11 @@
 #   waf geoip                                  deploy/images/<image>.Dockerfile
 #   postgres-16 postgres-17 postgres-18        deploy/images/postgres.Dockerfile
 #   mysql-operator mysql-backup                deploy/images/moco/moco.Dockerfile
+#   sandbox-desktop                            deploy/images/sandbox-desktop.Dockerfile
+#
+# sandbox-desktop is the desktop sandbox template's image, on the
+# published sandbox-base (its Dockerfile's BASE). pyo-up.sh hands it to
+# Pyo pinned by digest, and sandbox servers pull it from Pyo's registry.
 #
 # --only a,b  builds just those images; the others keep their last tag
 #             (built anyway if they have none yet)
@@ -60,7 +65,7 @@ STATE=${PYO_BUILD_STATE:-$HOME/.cache/pyo-up/images.tsv}
 BUILDCTL=${BUILDCTL:-buildctl}
 
 RUST_IMAGES=(pyo agent builder flows db-controller kv static)
-OTHER_IMAGES=(waf geoip postgres-16 postgres-17 postgres-18 mysql-operator mysql-backup)
+OTHER_IMAGES=(waf geoip postgres-16 postgres-17 postgres-18 mysql-operator mysql-backup sandbox-desktop)
 ALL_IMAGES=("${RUST_IMAGES[@]}" "${OTHER_IMAGES[@]}")
 
 declare -A WANTED=()
@@ -120,6 +125,7 @@ input_key() {
     geoip) hash_files deploy/images/geoip.Dockerfile ;;
     postgres-*) hash_text "$1" "$(hash_files deploy/images/postgres.Dockerfile)" ;;
     mysql-*) hash_text "$1" "$(hash_files deploy/images/moco)" ;;
+    sandbox-desktop) hash_files deploy/images/sandbox-desktop.Dockerfile deploy/images/sandbox-desktop ;;
   esac
 }
 
@@ -204,6 +210,9 @@ build_cmd() {
     mysql-*)
       buildctl_build --local context=deploy/images/moco --local dockerfile=deploy/images/moco --opt filename=moco.Dockerfile \
         --opt target="${image#mysql-}" --output "$push" ;;
+    sandbox-desktop)
+      buildctl_build --local context=deploy/images --local dockerfile=deploy/images --opt filename=sandbox-desktop.Dockerfile \
+        --output "$push" ;;
   esac
 }
 
