@@ -82,7 +82,7 @@ async fn team_read(s: &AppState, user: &crate::auth::User, team: &str) -> ApiRes
 #[utoipa::path(get, path = "/sandboxes", operation_id = "listSandboxes", tag = "Sandboxes",
     params(ListQuery),
     responses(
-        (status = 200, description = "`sandboxes`, newest first, each with `id`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `preparing` (true while it waits for its server to make its template), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon), `edgeUrl` (its server's edge proxy, or null), `ports` (each `port`, `public` and `url`), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt`, `pausedAt` and `endedAt`. Also `limits` (the team's) and `inUse` (what its sandboxes take now).", body = Object),
+        (status = 200, description = "`sandboxes`, newest first, each with `id`, `teamId`, `projectId`, `serverId`, `server`, `template`, `templateId`, `state` (\"creating\", \"running\", \"pausing\", \"paused\", \"resuming\", \"stopping\", \"stopped\" or \"failed\"), `preparing` (true while it waits for its server to make its template), `runtime` (\"firecracker\" or \"gvisor\"), `cpus`, `memoryMib`, `diskMib`, `network`, `isolation`, `labels`, `env` (names only), `url` (its server's daemon), `edgeUrl` (its server's edge proxy, or null), `ports` (each `port`, `public` and `url`), `error`, `createdBy`, `createdAt`, `startedAt`, `expiresAt` (null when it runs until it's deleted), `pausedAt` and `endedAt`. Also `limits` (the team's, `maxTtlSecs` null when there's no limit) and `inUse` (what its sandboxes take now).", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -224,20 +224,21 @@ pub(crate) async fn resume(
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Extend {
-    /// The sandbox now ends this long from now, like "30m" or "1h", or
-    /// seconds. Within the team's longest lifetime.
+    /// The sandbox now ends this long from now, like "30m", "1h" or "7d",
+    /// or seconds. "none": it runs until it's deleted. Within the team's
+    /// longest lifetime.
     #[schema(value_type = String)]
     ttl: Value,
 }
 
 /// Extend a sandbox
 ///
-/// Sets when the sandbox ends: `ttl` from now.
+/// Sets when the sandbox ends: `ttl` from now, or never with `"none"`.
 #[utoipa::path(post, path = "/sandboxes/{id}/extend", operation_id = "extendSandbox", tag = "Sandboxes",
     params(("id" = String, Path, description = "The sandbox's id.")),
     request_body(content = Extend),
     responses(
-        (status = 200, description = "The sandbox, with its new `expiresAt`.", body = Object),
+        (status = 200, description = "The sandbox, with its new `expiresAt` (null when it runs until it's deleted).", body = Object),
         (status = 403, description = "Longer than the team's sandboxes may live.", body = ErrorBody),
         (status = 404, description = "No such sandbox.", body = ErrorBody),
     ),

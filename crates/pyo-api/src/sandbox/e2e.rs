@@ -439,7 +439,7 @@ async fn the_control_plane_drives_a_real_daemon() {
         &mut c,
         &team,
         &super::limits::Limits {
-            max_ttl_secs: 600,
+            max_ttl_secs: Some(600),
             ..Default::default()
         },
     )
@@ -447,6 +447,8 @@ async fn the_control_plane_drives_a_real_daemon() {
     .unwrap();
     drop(c);
     let e = super::create(&s, &user, req("1h")).await.unwrap_err();
+    assert_eq!(e.status, axum::http::StatusCode::FORBIDDEN, "{}", e.message);
+    let e = super::create(&s, &user, req("none")).await.unwrap_err();
     assert_eq!(e.status, axum::http::StatusCode::FORBIDDEN, "{}", e.message);
 
     let out = super::create(&s, &user, req("5m")).await.unwrap();

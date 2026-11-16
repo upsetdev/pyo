@@ -22,8 +22,11 @@ pub struct Limits {
     pub max_memory_mib: i32,
     /// Disk of those sandboxes together, in MiB.
     pub max_disk_mib: i32,
-    /// The longest lifetime one sandbox may have, in seconds.
-    pub max_ttl_secs: i32,
+    /// The longest lifetime one sandbox may have, in seconds, up to 365
+    /// days. Null: no limit, and sandboxes may run until they're deleted.
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schema(required = true)]
+    pub max_ttl_secs: Option<i32>,
 }
 
 impl Default for Limits {
@@ -33,7 +36,7 @@ impl Default for Limits {
             max_cpus: 16,
             max_memory_mib: 16 * 1024,
             max_disk_mib: 100 * 1024,
-            max_ttl_secs: 24 * 3600,
+            max_ttl_secs: Some(24 * 3600),
         }
     }
 }
@@ -46,15 +49,18 @@ impl Limits {
             ("CPUs", self.max_cpus),
             ("Memory", self.max_memory_mib),
             ("Disk", self.max_disk_mib),
-            ("Lifetime", self.max_ttl_secs),
+            ("Lifetime", self.max_ttl_secs.unwrap_or(0)),
         ];
         for (name, v) in fields {
             if v < 0 {
                 return Err(format!("{name} can't be below 0."));
             }
         }
-        if self.max_ttl_secs as u64 > pyo_proto::sandbox::MAX_TTL_SECS {
-            return Err("The lifetime can be 24 hours at most.".into());
+        if self
+            .max_ttl_secs
+            .is_some_and(|t| t as u64 > pyo_proto::sandbox::MAX_TTL_SECS)
+        {
+            return Err("The lifetime can be 365 days at most.".into());
         }
         Ok(())
     }
@@ -102,12 +108,16 @@ pub fn check(limits: &Limits, used: &InUse, spec: &SandboxSpec) -> Result<(), St
     check_ttl(l, spec.ttl_secs)
 }
 
-/// Whether a lifetime is within the team's longest.
-pub fn check_ttl(limits: &Limits, ttl_secs: u64) -> Result<(), String> {
-    if ttl_secs > limits.max_ttl_secs as u64 {
+/// Whether a lifetime is within the team's longest. `None` is no
+/// lifetime, which only a team without a limit may have.
+pub fn check_ttl(limits: &Limits, ttl_secs: Option<u64>) -> Result<(), String> {
+    let Some(max) = limits.max_ttl_secs.map(|m| m.max(0) as u64) else {
+        return Ok(());
+    };
+    if ttl_secs.is_none_or(|t| t > max) {
         return Err(format!(
             "Your team's sandboxes can live {} at most.",
-            super::format_ttl(limits.max_ttl_secs as u64)
+            super::format_ttl(max)
         ));
     }
     Ok(())
@@ -163,6 +173,10 @@ mod tests {
     use super::*;
 
     fn spec(cpus: u32, memory_mib: u32, ttl_secs: u64) -> SandboxSpec {
+        spec_for(cpus, memory_mib, Some(ttl_secs))
+    }
+
+    fn spec_for(cpus: u32, memory_mib: u32, ttl_secs: Option<u64>) -> SandboxSpec {
         let mut s = SandboxSpec::new("sbx_abcdefghijklmnop", "tm_one", "node-22");
         s.cpus = cpus;
         s.memory_mib = memory_mib;
@@ -185,7 +199,7 @@ mod tests {
             max_cpus: 4,
             max_memory_mib: 2048,
             max_disk_mib: 4096,
-            max_ttl_secs: 3600,
+            max_ttl_secs: Some(3600),
         };
         let used = InUse {
             sandboxes: 1,
@@ -224,7 +238,11 @@ mod tests {
             check(&l, &used, &spec(1, 128, 3601)).unwrap_err(),
             "Your team's sandboxes can live 1h at most."
         );
-        check_ttl(&l, 3600).unwrap();
+        check_ttl(&l, Some(3600)).unwrap();
+        assert_eq!(
+            check(&l, &used, &spec_for(1, 128, None)).unwrap_err(),
+            "Your team's sandboxes can live 1h at most."
+        );
     }
 
     #[test]
@@ -243,10 +261,73 @@ mod tests {
             ..Limits::default()
         };
         assert!(l.validate().is_err());
+        let year = pyo_proto::sandbox::MAX_TTL_SECS as i32;
+        for ok in [Some(2 * 24 * 3600), Some(year), None] {
+            Limits {
+                max_ttl_secs: ok,
+                ..Limits::default()
+            }
+            .validate()
+            .unwrap();
+        }
         let l = Limits {
-            max_ttl_secs: 2 * 24 * 3600,
+            max_ttl_secs: Some(year + 1),
             ..Limits::default()
         };
-        assert!(l.validate().unwrap_err().contains("24 hours"));
+        assert!(l.validate().unwrap_err().contains("365 days"));
+        let l = Limits {
+            max_ttl_secs: Some(-1),
+            ..Limits::default()
+        };
+        assert!(l.validate().is_err());
+    }
+
+    #[test]
+    fn new_teams_keep_a_day_at_most() {
+        let l = Limits::default();
+        assert_eq!(l.max_ttl_secs, Some(86400));
+        check_ttl(&l, Some(86400)).unwrap();
+        assert!(check_ttl(&l, Some(86401)).is_err());
+        assert_eq!(
+            check_ttl(&l, None).unwrap_err(),
+            "Your team's sandboxes can live 1d at most."
+        );
+    }
+
+    #[test]
+    fn a_team_without_a_limit_takes_any_lifetime() {
+        let l = Limits {
+            max_ttl_secs: None,
+            ..Limits::default()
+        };
+        check_ttl(&l, None).unwrap();
+        check_ttl(&l, Some(pyo_proto::sandbox::MAX_TTL_SECS)).unwrap();
+        check(&l, &InUse::default(), &spec_for(1, 128, None)).unwrap();
+        let year = Limits {
+            max_ttl_secs: Some(pyo_proto::sandbox::MAX_TTL_SECS as i32),
+            ..Limits::default()
+        };
+        check_ttl(&year, Some(pyo_proto::sandbox::MAX_TTL_SECS)).unwrap();
+        assert!(check_ttl(&year, None).is_err());
+    }
+
+    #[test]
+    fn no_limit_is_written_as_null() {
+        let l: Limits = serde_json::from_value(serde_json::json!({
+            "maxRunning": 1, "maxCpus": 1, "maxMemoryMib": 1, "maxDiskMib": 1, "maxTtlSecs": null
+        }))
+        .unwrap();
+        assert_eq!(l.max_ttl_secs, None);
+        assert_eq!(
+            serde_json::to_value(l).unwrap()["maxTtlSecs"],
+            serde_json::Value::Null
+        );
+        // Left out isn't no limit: it's a mistake.
+        assert!(
+            serde_json::from_value::<Limits>(serde_json::json!({
+                "maxRunning": 1, "maxCpus": 1, "maxMemoryMib": 1, "maxDiskMib": 1
+            }))
+            .is_err()
+        );
     }
 }

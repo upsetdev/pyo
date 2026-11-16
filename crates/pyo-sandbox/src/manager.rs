@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use pyo_proto::sandbox::{
     CapabilityReport, CapacityReport, DaemonError, ErrorCode, ExecRequest, ExecResult, Isolation,
-    MAX_TTL_SECS, NetworkMode, OpenPort, Runtime, SANDBOX_PROTOCOL, SandboxSpec, SandboxState,
-    SandboxStatus, ServerReport, TemplateReport, TemplateState,
+    NetworkMode, OpenPort, Runtime, SANDBOX_PROTOCOL, SandboxSpec, SandboxState, SandboxStatus,
+    ServerReport, TemplateReport, TemplateState,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -411,7 +411,7 @@ impl Manager {
             labels: spec.labels.clone(),
             created_at: now,
             started_at: None,
-            expires_at: now + spec.ttl_secs * 1000,
+            expires_at: pyo_proto::sandbox::expiry(now, spec.ttl_secs),
             start_ms: None,
             from_snapshot,
             memory_used: None,
@@ -491,7 +491,7 @@ impl Manager {
                     let now = crate::now_ms();
                     s.state = SandboxState::Running;
                     s.started_at = Some(now);
-                    s.expires_at = now + spec.ttl_secs * 1000;
+                    s.expires_at = pyo_proto::sandbox::expiry(now, spec.ttl_secs);
                     s.start_ms = Some(took.as_millis() as u32);
                 });
                 self.persist(&sbx, Some(pid));
@@ -911,15 +911,18 @@ impl Manager {
         Ok(st)
     }
 
-    pub fn set_ttl(&self, id: &str, ttl_secs: u64) -> Result<SandboxStatus> {
-        if !(1..=MAX_TTL_SECS).contains(&ttl_secs) {
-            return Err(err(
-                ErrorCode::InvalidSpec,
-                "The lifetime must be 1 second to 24 hours.",
-            ));
-        }
+    /// Ends the sandbox `ttl_secs` from now, or never. Saved to its record,
+    /// so a restarted daemon keeps it.
+    pub async fn set_ttl(&self, id: &str, ttl_secs: Option<u64>) -> Result<SandboxStatus> {
+        pyo_proto::sandbox::check_ttl(ttl_secs).map_err(|m| err(ErrorCode::InvalidSpec, m))?;
         let sbx = self.find(id)?;
-        let st = sbx.update(|s| s.expires_at = crate::now_ms() + ttl_secs * 1000);
+        let vm = sbx.vm.lock().await;
+        if sbx.status().state.is_final() {
+            return Err(err(ErrorCode::Conflict, "The sandbox has ended."));
+        }
+        let st =
+            sbx.update(|s| s.expires_at = pyo_proto::sandbox::expiry(crate::now_ms(), ttl_secs));
+        self.persist(&sbx, vm.as_ref().map(Instance::pid));
         Ok(st)
     }
 
@@ -963,7 +966,7 @@ impl Manager {
         let now = crate::now_ms();
         for sbx in self.all() {
             let st = sbx.status();
-            if now >= st.expires_at {
+            if st.expires_at.is_some_and(|t| now >= t) {
                 tracing::info!(id = %st.id, "sandbox lifetime is over");
                 let _ = self.delete(&st.id).await;
                 continue;
@@ -1113,5 +1116,100 @@ impl Manager {
 
     pub fn root(&self) -> PathBuf {
         self.layout.root.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A manager over `root`, with a paused sandbox left there by a
+    /// previous daemon. A paused sandbox has no process, so it's adopted
+    /// without a VM.
+    async fn with_paused(root: &Path, id: &str) -> Manager {
+        let cfg: Config = serde_json::from_value(serde_json::json!({
+            "serverId": "srv1",
+            "listen": "127.0.0.1:0",
+            "firecracker": "/nonexistent/firecracker",
+            "kernel": "/nonexistent/vmlinux",
+            "envd": "/nonexistent/pyo-envd",
+            "keys": [],
+            "root": root,
+        }))
+        .unwrap();
+        let layout = Layout::new(root, false);
+        let fc = Firecracker {
+            firecracker: "/nonexistent/firecracker".into(),
+            kernel: "/nonexistent/vmlinux".into(),
+            jailer: None,
+            cpu_template: None,
+            serial: false,
+        };
+        let capability = CapabilityReport {
+            runtime: Runtime::Firecracker,
+            ..Default::default()
+        };
+        let dir = layout.vm_dir(id);
+        if !dir.join("sandbox.json").exists() {
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut spec = SandboxSpec::new(id, "tm_one", "node-22");
+            spec.ttl_secs = Some(60);
+            let status = SandboxStatus {
+                id: id.into(),
+                team: "tm_one".into(),
+                template: "node-22".into(),
+                state: SandboxState::Paused,
+                runtime: Runtime::Firecracker,
+                cpus: 1,
+                memory_mib: 512,
+                disk_mib: 2048,
+                network: NetworkMode::None,
+                labels: Default::default(),
+                created_at: 1,
+                started_at: Some(1),
+                expires_at: pyo_proto::sandbox::expiry(crate::now_ms(), spec.ttl_secs),
+                start_ms: None,
+                from_snapshot: false,
+                memory_used: None,
+                error: None,
+                ports: Vec::new(),
+            };
+            let rec = Record {
+                spec,
+                status,
+                pid: None,
+                lease: None,
+            };
+            std::fs::write(dir.join("sandbox.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
+        }
+        let mgr = Manager::new(cfg, layout, fc, capability);
+        assert_eq!(mgr.adopt().await, 1);
+        mgr
+    }
+
+    #[tokio::test]
+    async fn a_new_lifetime_outlives_a_daemon_restart() {
+        let root = std::env::temp_dir().join(format!("pyo-sbx-ttl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let id = "sbx_abcdefghijklmnop";
+
+        // A year, then no lifetime at all: each is kept across restarts.
+        let mgr = with_paused(&root, id).await;
+        let year = pyo_proto::sandbox::MAX_TTL_SECS;
+        let st = mgr.set_ttl(id, Some(year)).await.unwrap();
+        let want = st.expires_at.unwrap();
+        assert!(want > crate::now_ms() + (year - 60) * 1000);
+        let mgr = with_paused(&root, id).await;
+        assert_eq!(mgr.status(id).unwrap().expires_at, Some(want));
+
+        assert_eq!(mgr.set_ttl(id, None).await.unwrap().expires_at, None);
+        let mgr = with_paused(&root, id).await;
+        assert_eq!(mgr.status(id).unwrap().expires_at, None);
+        mgr.sweep().await;
+        assert!(mgr.find(id).is_ok(), "no lifetime: the sweeper keeps it");
+
+        assert!(mgr.set_ttl(id, Some(0)).await.is_err());
+        assert!(mgr.set_ttl(id, Some(year + 1)).await.is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -300,7 +300,7 @@ pub async fn run_command(
         DaemonCommand::SetTtl { id, ttl_secs } => {
             st.authorize(token, Some(&id), Scope::Lifecycle)?;
             DaemonResult::Sandbox {
-                sandbox: mgr.set_ttl(&id, ttl_secs)?,
+                sandbox: mgr.set_ttl(&id, ttl_secs).await?,
             }
         }
         DaemonCommand::OpenPort { id, port, public } => {
@@ -512,7 +512,9 @@ async fn close_port(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TtlBody {
-    ttl_secs: u64,
+    /// Null: the sandbox runs until it's deleted.
+    #[serde(deserialize_with = "Option::deserialize")]
+    ttl_secs: Option<u64>,
 }
 
 async fn set_ttl(
