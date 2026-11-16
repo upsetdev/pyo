@@ -2,6 +2,7 @@ import {
   ArrowSquareOutIcon,
   ClockClockwiseIcon,
   CubeIcon,
+  MonitorIcon,
   PauseIcon,
   PencilSimpleIcon,
   PlayIcon,
@@ -43,7 +44,10 @@ import {
   NO_LIFETIME,
   connectionFor,
   daemonApi,
+  desktopUrl,
   ended,
+  isDesktop,
+  OFF_TAILNET,
   lifetimeAllowed,
   rememberConnection,
   sandboxApi,
@@ -108,6 +112,7 @@ function SandboxPage() {
     );
 
   const x = q.data;
+  const template = templateOf(x, tq.status === "success" ? tq.data.templates : []);
   const run = async (what: "pause" | "resume") => {
     setBusy(true);
     await act(what, x);
@@ -119,11 +124,7 @@ function SandboxPage() {
     <Page>
       <PageHeader
         icon={
-          <TemplateMark
-            template={templateOf(x, tq.status === "success" ? tq.data.templates : [])}
-            size="lg"
-            className="mt-1"
-          />
+          <TemplateMark template={template} size="lg" className="mt-1" />
         }
         title={x.name}
         description={<span className="font-mono text-[12px]">{x.id}</span>}
@@ -138,6 +139,11 @@ function SandboxPage() {
         actions={
           canUse ? (
             <>
+              {isDesktop(template) && !ended(x) ? (
+                <Button size="sm" disabled={x.state !== "running"} onClick={() => void openDesktop(x.id)}>
+                  <MonitorIcon size={13} /> Open desktop
+                </Button>
+              ) : null}
               <Button size="sm" variant="secondary" onClick={() => setRenaming(true)}>
                 <PencilSimpleIcon size={13} /> Rename
               </Button>
@@ -210,6 +216,22 @@ function SandboxPage() {
       <RenameDialog x={x} open={renaming} onClose={() => setRenaming(false)} onDone={q.retry} />
     </Page>
   );
+}
+
+/** The desktop's screen in a new tab, through the sandbox server's daemon
+ * on the tailnet. The tab opens at once, so browsers don't block it. */
+async function openDesktop(id: string) {
+  const tab = window.open("about:blank", "_blank");
+  if (tab) tab.opener = null;
+  try {
+    const c = await connectionFor(id);
+    const url = desktopUrl(c.url, id, c.token);
+    if (tab) tab.location.href = url;
+    else window.location.href = url;
+  } catch (e) {
+    tab?.close();
+    toast.error("Couldn't open the desktop", { description: (e as Error).message || OFF_TAILNET });
+  }
 }
 
 /** A new name for the sandbox. Its id stays. */

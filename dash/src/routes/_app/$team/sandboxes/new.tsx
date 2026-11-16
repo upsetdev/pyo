@@ -25,8 +25,11 @@ import {
   freeLabel,
   freeMemory,
   gettingReady,
-  isBase,
+  isDesktop,
+  isPyos,
   LIFETIMES,
+  minSize,
+  pyosFirst,
   lifetimeAllowed,
   lifetimeLabel,
   NO_LIFETIME,
@@ -140,10 +143,14 @@ function NewSandboxForm() {
   const [error, setError] = useState("");
 
   const picked = (template && ready.some((t) => t.name === template && usable(t)) ? template : "") || defaultTemplate(ready);
-  const sz = SIZES.find((x) => x.value === size)!;
+  const pickedT = ready.find((t) => t.name === picked);
+  // The desktop needs room: smaller sizes are off, and it moves up to one.
+  const need = minSize(pickedT);
+  const fits = (x: (typeof SIZES)[number]) => !need || (x.cpus >= need.cpus && x.memoryMib >= need.memoryMib);
+  const sz = [SIZES.find((x) => x.value === size)!].find(fits) ?? SIZES.find(fits)!;
   const refusal = (x: (typeof servers)[number]) => serverRefusal(x, sz.memoryMib, network);
   const pinned = servers.find((x) => x.id === server && !refusal(x));
-  const pickedBase = ready.find((t) => t.name === picked && isBase(t));
+  const firstUse = pickedT && isPyos(pickedT) && !pickedT.servers.length ? pickedT : undefined;
   // While a create waits for its server to make base there.
   const preparing =
     busy && list.status === "success"
@@ -247,7 +254,7 @@ function NewSandboxForm() {
                   </Select>
                 ) : ready.length ? (
                   <Select {...p} value={picked} onChange={(e) => setTemplate(e.target.value)}>
-                    {ready.map((t) => (
+                    {pyosFirst(ready).map((t) => (
                       <option key={t.id} value={t.name} disabled={!usable(t)}>
                         {t.name}
                         {templateImage(t) ? ` · ${templateImage(t)}` : ""}
@@ -281,8 +288,8 @@ function NewSandboxForm() {
               hint={
                 pinned ? (
                   <RuntimeBadge server={pinned} />
-                ) : pickedBase && !pickedBase.servers.length ? (
-                  "The first sandbox from base on a server takes a minute longer."
+                ) : firstUse ? (
+                  `The first sandbox from ${firstUse.name} on a server takes ${isDesktop(firstUse) ? "a few minutes" : "a minute"} longer.`
                 ) : undefined
               }
             >
@@ -306,20 +313,25 @@ function NewSandboxForm() {
             <Field
               label="Size"
               hint={
-                limits && inUse
-                  ? `In use: ${inUse.cpus} of ${limits.maxCpus} CPUs, ${+(inUse.memoryMib / 1024).toFixed(1)} of ${+(limits.maxMemoryMib / 1024).toFixed(1)} GB.`
-                  : undefined
+                [
+                  need ? `The desktop needs ${need.cpus} CPUs.` : "",
+                  limits && inUse
+                    ? `In use: ${inUse.cpus} of ${limits.maxCpus} CPUs, ${+(inUse.memoryMib / 1024).toFixed(1)} of ${+(limits.maxMemoryMib / 1024).toFixed(1)} GB.`
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ") || undefined
               }
             >
               {() => (
                 <Segmented
                   label="Size"
-                  value={size}
+                  value={sz.value}
                   onChange={setSize}
                   options={SIZES.map((x) => ({
                     value: x.value,
                     label: sizeLabel(x.cpus, x.memoryMib),
-                    disabled: tooBig(x.cpus, x.memoryMib),
+                    disabled: tooBig(x.cpus, x.memoryMib) || !fits(x),
                   }))}
                 />
               )}

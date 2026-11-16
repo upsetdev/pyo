@@ -1,4 +1,4 @@
-import { CubeIcon } from "@phosphor-icons/react";
+import { CubeIcon, MonitorIcon } from "@phosphor-icons/react";
 import {
   siAlmalinux,
   siAlpinelinux,
@@ -21,10 +21,18 @@ import {
   type SimpleIcon,
 } from "simple-icons";
 import { BrandMark } from "~/components/pyo/common";
-import { BASE_TEMPLATE, isBase, type Sandbox, type SandboxTemplate } from "~/lib/pyo/sandbox";
+import {
+  BASE_TEMPLATE,
+  DESKTOP_TEMPLATE,
+  isBase,
+  isDesktop,
+  type Sandbox,
+  type SandboxTemplate,
+} from "~/lib/pyo/sandbox";
 
 // A sandbox template's logo, by what its image runs: languages first, since
-// node:22 is Debian underneath but reads as Node. Pyo's base is Debian.
+// node:22 is Debian underneath but reads as Node. Pyo's base is Debian, its
+// desktop a screen.
 
 type TemplateLike = Pick<SandboxTemplate, "name"> &
   Partial<Pick<SandboxTemplate, "builtin" | "source">>;
@@ -60,7 +68,10 @@ export function templateLogo(t: TemplateLike) {
 export function templateOf(x: Pick<Sandbox, "template" | "templateId">, templates: SandboxTemplate[]): TemplateLike {
   return (
     templates.find((t) => t.id === x.templateId) ??
-    templates.find((t) => t.name === x.template) ?? { name: x.template, builtin: x.template === BASE_TEMPLATE }
+    templates.find((t) => t.name === x.template) ?? {
+      name: x.template,
+      builtin: x.template === BASE_TEMPLATE || x.template === DESKTOP_TEMPLATE,
+    }
   );
 }
 
@@ -80,13 +91,15 @@ export function TemplateMark({
   size?: keyof typeof SIZES;
   className?: string;
 }) {
-  const logo = templateLogo(template);
+  const logo = isDesktop(template) ? undefined : templateLogo(template);
   const { box, icon } = SIZES[size];
   return (
     <span
       className={`flex ${box} shrink-0 items-center justify-center border border-frame-border bg-card text-muted-foreground ${className}`}
     >
-      {logo ? (
+      {isDesktop(template) ? (
+        <MonitorIcon size={icon} weight="duotone" className="text-primary" />
+      ) : logo ? (
         <BrandMark icon={logo} size={icon} tone={logo === siDebian ? "brand" : "auto"} />
       ) : (
         <CubeIcon size={icon} />

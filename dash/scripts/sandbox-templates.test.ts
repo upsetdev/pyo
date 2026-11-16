@@ -1,13 +1,16 @@
-// Pyo's built-in sandbox template in the dashboard: how its image reads,
+// Pyo's built-in sandbox templates in the dashboard: how its image reads,
 // that new sandboxes start on it, and the servers a new sandbox can go to.
 // bun test scripts/sandbox-templates.test.ts
 import { expect, test } from "bun:test";
 import {
   defaultTemplate,
+  desktopUrl,
   fieldsSwapped,
   freeLabel,
   gettingReady,
   imageRepo,
+  minSize,
+  pyosFirst,
   serverRefusal,
   templateImage,
   templateStatus,
@@ -88,4 +91,35 @@ test("a server is offered with its room, or why it can't take the sandbox", () =
   const offline = { ...ok, capability: { runtime: "gvisor", network: false } };
   expect(serverRefusal(offline, 512, "internet")).toBe("No networking");
   expect(serverRefusal(offline, 512, "none")).toBe("");
+});
+
+const desktop = {
+  name: "desktop",
+  state: "ready",
+  builtin: true,
+  source: { image: "ghcr.io/upsetdev/pyo/sandbox-desktop:0.4.2@sha256:ab", os: "Debian 13" },
+};
+
+test("desktop comes right after base, made on first use too", () => {
+  const node = { name: "alpine", state: "ready" };
+  expect(pyosFirst([node, desktop, base]).map((t) => t.name)).toEqual(["base", "desktop", "alpine"]);
+  expect(defaultTemplate([desktop, base])).toBe("base");
+  expect(usable({ ...desktop, state: "pending" })).toBe(true);
+  expect(usable({ ...desktop, state: "unavailable" })).toBe(false);
+  expect(templateStatus({ ...desktop, state: "pending" })).toBe("Ready to use");
+  // One named desktop isn't Pyo's.
+  expect(usable({ name: "desktop", state: "building" })).toBe(false);
+  expect(templateImage(desktop)).toBe("Debian 13 · ghcr.io/upsetdev/pyo/sandbox-desktop");
+});
+
+test("the desktop needs room, and opens through the daemon", () => {
+  expect(minSize(desktop)).toEqual({ cpus: 2, memoryMib: 2048 });
+  expect(minSize(base)).toBe(null);
+  expect(minSize(undefined)).toBe(null);
+  const url = new URL(desktopUrl("http://100.64.0.2:7070/", "sbx_abc", "pyosbx1.x.y"));
+  expect(url.origin + url.pathname).toBe("http://100.64.0.2:7070/v1/sandboxes/sbx_abc/web/6080/vnc.html");
+  expect(url.searchParams.get("pyo_token")).toBe("pyosbx1.x.y");
+  expect(url.searchParams.get("autoconnect")).toBe("1");
+  // noVNC finds its WebSocket beside the page.
+  expect(url.searchParams.has("path")).toBe(false);
 });

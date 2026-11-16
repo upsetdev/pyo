@@ -15,7 +15,8 @@ import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
   fieldsSwapped,
-  isBase,
+  isPyos,
+  pyosFirst,
   sandboxApi,
   templateImage,
   templateStatus,
@@ -101,7 +102,7 @@ function TemplatesPage() {
     }
   };
 
-  const templates = q.status === "success" ? q.data.templates : [];
+  const templates = q.status === "success" ? pyosFirst(q.data.templates) : [];
   return (
     <Page width="max-w-3xl">
       <PageHeader title="Sandbox templates" description="What sandboxes start from." />
@@ -274,7 +275,7 @@ function TemplateDetails({ t }: { t: SandboxTemplate }) {
             </span>
           ))}
         </span>
-      ) : isBase(t) ? (
+      ) : isPyos(t) ? (
         <span className="block text-muted-foreground">Made on first use</span>
       ) : null}
       {added || !t.teamId ? (
