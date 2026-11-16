@@ -86,25 +86,22 @@ function SandboxesPage() {
           : x.state === filter) && (!template || x.template === template),
   );
 
-  const newMenu = (
-    <NewButton
-      width="w-48"
-      items={[
-        ...(canUse
-          ? [{ label: "New sandbox", icon: <CubeIcon size={14} />, href: "/sandboxes/new" }]
-          : []),
-        ...(canManage
-          ? [{ label: "Add server", icon: <HardDrivesIcon size={14} />, href: "/sandboxes/servers/new" }]
-          : []),
-      ]}
-    />
-  );
+  // Add server is for owners and admins. A viewer gets no New button.
+  const newItems = [
+    ...(canUse
+      ? [{ label: "New sandbox", icon: <CubeIcon size={14} />, href: "/sandboxes/new" }]
+      : []),
+    ...(canManage
+      ? [{ label: "Add server", icon: <HardDrivesIcon size={14} />, href: "/sandboxes/servers/new" }]
+      : []),
+  ];
+  const newMenu = newItems.length ? <NewButton width="w-48" items={newItems} /> : undefined;
 
   // Nothing yet: the same empty state as the databases'.
   if (!servers.length && (q.status !== "success" || !all.length))
     return (
       <Page>
-        <PageHeader title="Sandboxes" actions={canUse ? newMenu : undefined} />
+        <PageHeader title="Sandboxes" actions={newMenu} />
         <Panel>
           <EmptyState
             icon={CubeIcon}
@@ -124,14 +121,7 @@ function SandboxesPage() {
 
   return (
     <Page>
-      <PageHeader
-        title="Sandboxes"
-        actions={
-          <>
-            {newMenu}
-          </>
-        }
-      />
+      <PageHeader title="Sandboxes" actions={newMenu} />
       {pending.length ? <PendingServers servers={pending} /> : null}
       {q.status === "success" ? (
         <Usage
