@@ -32,15 +32,26 @@ const FULCIO_ROOT: &[u8] = include_bytes!("../assets/sigstore/fulcio-root.der");
 const REKOR_KEY: &[u8] = include_bytes!("../assets/sigstore/rekor.der");
 
 /// Who must have signed: the certificate's SAN (a URI or email) starting
-/// with `identity_prefix`, issued for a token from `issuer`.
+/// with `identity_prefix` (or equal to it when `exact`), issued for a
+/// token from `issuer`.
 pub struct Signer<'a> {
     pub identity_prefix: &'a str,
+    pub exact: bool,
     pub issuer: &'a str,
 }
 
 /// Pyo's release workflow, at a version tag.
 pub const RELEASE_SIGNER: Signer<'static> = Signer {
     identity_prefix: "https://github.com/upsetdev/pyo/.github/workflows/release.yml@refs/tags/v",
+    exact: false,
+    issuer: "https://token.actions.githubusercontent.com",
+};
+
+/// upsetdev/pyo-sandbox-images' release workflow, on main: what signs its
+/// images.json (sandbox/images.rs).
+pub const SANDBOX_IMAGES_SIGNER: Signer<'static> = Signer {
+    identity_prefix: "https://github.com/upsetdev/pyo-sandbox-images/.github/workflows/release.yml@refs/heads/main",
+    exact: true,
     issuer: "https://token.actions.githubusercontent.com",
 };
 
@@ -156,10 +167,15 @@ pub fn verify(blob: &[u8], bundle: &str, signer: &Signer) -> anyhow::Result<()> 
         })
         .unwrap_or_default();
     ensure!(
-        names.iter().any(|n| n.starts_with(signer.identity_prefix)),
-        "signed by {}, not {}…",
+        names.iter().any(|n| if signer.exact {
+            n == signer.identity_prefix
+        } else {
+            n.starts_with(signer.identity_prefix)
+        }),
+        "signed by {}, not {}{}",
         names.join(", "),
-        signer.identity_prefix
+        signer.identity_prefix,
+        if signer.exact { "" } else { "…" }
     );
     let issuer = leaf
         .extensions()
@@ -294,6 +310,7 @@ mod tests {
     /// cosign's own release (v3.1.4), signed keyless by its release account.
     const COSIGN: Signer<'static> = Signer {
         identity_prefix: "keyless@projectsigstore.iam.gserviceaccount.com",
+        exact: true,
         issuer: "https://accounts.google.com",
     };
 
@@ -323,6 +340,23 @@ mod tests {
             )
             .is_err(),
             "another issuer"
+        );
+        let start = Signer {
+            identity_prefix: "keyless@projectsigstore",
+            ..COSIGN
+        };
+        assert!(verify(BLOB, BUNDLE, &start).is_err(), "exact: not a prefix");
+        assert!(
+            verify(
+                BLOB,
+                BUNDLE,
+                &Signer {
+                    exact: false,
+                    ..start
+                }
+            )
+            .is_ok(),
+            "a prefix"
         );
         // Rekor's promise, changed.
         let mut b: Value = serde_json::from_str(BUNDLE).unwrap();

@@ -609,7 +609,8 @@ async fn the_control_plane_drives_a_real_daemon() {
     }
 
     // ── The built-in template `base`: the default, and how a release moves it ──
-    // Two small public images stand in for two releases' sandbox-base.
+    // Two small public images stand in for two releases' base, of Pyos
+    // newer than this one, so the rounds below leave them as they are.
     use super::base;
     sqlx::query("DELETE FROM pyo.sandbox_templates WHERE id = $1")
         .bind(base::BASE.id)
@@ -620,13 +621,15 @@ async fn the_control_plane_drives_a_real_daemon() {
         image:
             "alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab"
                 .into(),
-        release: "0.0.1".into(),
+        release: "99.0.1".into(),
+        ..Default::default()
     };
     let new = base::Wanted {
         image:
             "alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"
                 .into(),
-        release: "0.0.2".into(),
+        release: "99.0.2".into(),
+        ..Default::default()
     };
     let rev = |w: &base::Wanted| {
         super::templates::server_name(base::BASE.id, base::revision(&w.image).as_deref())

@@ -1,52 +1,51 @@
-//! Pyo's built-in sandbox templates ([`ALL`]):
-//! - `base`: Debian 13 with the common tools
-//!   (deploy/images/sandbox-base.Dockerfile). A sandbox created without a
-//!   template starts from it.
-//! - `desktop`: `base` with a desktop, noVNC on port 6080 and Chromium with
-//!   CDP on port 9222, started on first use
-//!   (deploy/images/sandbox-desktop.Dockerfile). Its sandboxes get 2 CPUs
-//!   and 2 GiB unless the create says otherwise.
+//! Pyo's built-in sandbox templates ([`ALL`]), from upsetdev/pyo-sandbox-images
+//! ([`super::images`]):
+//! - `base`: Ubuntu with the tools coding agents expect. A sandbox created
+//!   without a template starts from it.
+//! - `desktop`: `base` with a desktop, noVNC on port 6080 and a browser with
+//!   CDP on port 9222, started on first use. Its sandboxes get 2 CPUs and
+//!   2 GiB unless the create says otherwise.
 //!
 //! They're the installation's, so every team has them. For each:
-//! - Seeding: when a worker starts, and in every sandbox round, Pyo makes
-//!   sure it exists and points at its release's image (its env var, like
-//!   `PYO_SANDBOX_BASE_REF`, pinned by digest in release.json). It's
-//!   idempotent. It's ready to use from the start, with or without servers.
-//!   Lists show it even before it's added ([`listed`]).
+//! - Its image, in this order: its env var (`PYO_SANDBOX_BASE_REF`,
+//!   `PYO_SANDBOX_DESKTOP_REF`) when that's pinned by digest, for dev
+//!   builds and pinning. Else the newest of the images.json Pyo last read
+//!   and the one it shipped with ([`super::images::current`]).
+//! - Seeding: when a worker starts, in every sandbox round and when Pyo
+//!   reads a newer images.json, Pyo makes sure it exists and points at that
+//!   image. It's idempotent. It's ready to use from the start, with or
+//!   without servers. Lists show it even before it's added ([`listed`]).
 //! - On first use: servers don't make it when they join. The first sandbox
 //!   that needs it on a server has the server make it, then starts
 //!   ([`super::firstuse`]). Later ones there start from that copy.
-//! - On update: a new release has a new image, so it gets a new revision
-//!   (the digest's start). Servers that have an older one make it beside
-//!   it in the background, and [`super::templates`] moves new sandboxes
-//!   over once it's ready and deletes the old one once no sandbox uses it.
-//!   Servers that never used it stay as they are. An older Pyo still
-//!   running during the update never moves it back.
-//! - Dev builds have no image of their own unless scripts/pyo-up.sh gives
-//!   one (it builds `desktop`'s): they use the latest release Pyo found when
-//!   it checked for updates, or wait for one.
+//! - On a new image: it gets a new revision (the digest's start). Servers
+//!   that have an older one make it beside it in the background, and
+//!   [`super::templates`] moves new sandboxes over once it's ready and
+//!   deletes the old one once no sandbox uses it. Servers that never used it
+//!   stay as they are. It only moves forward: an older Pyo still running
+//!   during an update, or an older build of the images, never moves it back
+//!   ([`decide`]).
 //! - Nobody deletes it, and no other template may take its name.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use pyo_proto::{ReleaseImages, parse_version, pinned_image};
+use pyo_proto::{parse_version, pinned_image};
 use serde_json::{Value, json};
 
+use super::images::Images;
 use crate::AppState;
 
 /// One of Pyo's built-in templates.
 #[derive(Debug)]
 pub struct Builtin {
-    /// Its name, which sandboxes ask for.
+    /// Its name, which sandboxes ask for, and its image's in images.json.
     pub name: &'static str,
     /// Its id, the same on every installation.
     pub id: &'static str,
-    /// What it runs, shown beside its image.
+    /// What it runs, when its image comes from its env var.
     pub os: &'static str,
-    /// The env var this release's image comes in.
+    /// The env var that overrides its image.
     pub env: &'static str,
-    /// Its image in a release.json.
-    pub image: fn(&ReleaseImages) -> &str,
     /// The size its sandboxes get when the create gives none.
     pub cpus: u32,
     pub memory_mib: u32,
@@ -55,9 +54,8 @@ pub struct Builtin {
 pub const BASE: Builtin = Builtin {
     name: "base",
     id: "stp_base",
-    os: "Debian 13",
+    os: "Ubuntu 24.04",
     env: pyo_proto::SANDBOX_BASE_ENV,
-    image: |i| &i.sandbox_base,
     cpus: pyo_proto::sandbox::DEFAULT_CPUS,
     memory_mib: pyo_proto::sandbox::DEFAULT_MEMORY_MIB,
 };
@@ -65,10 +63,9 @@ pub const BASE: Builtin = Builtin {
 pub const DESKTOP: Builtin = Builtin {
     name: "desktop",
     id: "stp_desktop",
-    os: "Debian 13",
+    os: "Ubuntu 24.04",
     env: pyo_proto::SANDBOX_DESKTOP_ENV,
-    image: |i| &i.sandbox_desktop,
-    // Chromium and the screen need room.
+    // The browser and the screen need room.
     cpus: 2,
     memory_mib: 2048,
 };
@@ -95,22 +92,39 @@ pub fn on_demand(id: &str) -> bool {
     by_id(id).is_some()
 }
 
-/// The image to seed a built-in template from, and the release it belongs
-/// to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The image to seed a built-in template from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Wanted {
     pub image: String,
+    /// The Pyo that seeds it.
     pub release: String,
+    /// What it runs, like "Ubuntu 24.04".
+    pub os: String,
+    /// The images' build date (YYYYMMDD) when they come from images.json.
+    pub build: Option<String>,
 }
 
-/// This release's image for `b`, from its env var. None for a build that
-/// isn't a release (scripts/pyo-up.sh leaves base's empty).
+/// `b`'s image from its env var, when that's pinned by digest. None
+/// otherwise (scripts/pyo-up.sh leaves it empty unless it built one).
 pub fn from_env(b: &Builtin) -> Option<Wanted> {
     let image = std::env::var(b.env).ok()?;
     let image = image.trim();
     pinned_image(image).then(|| Wanted {
         image: image.to_owned(),
         release: crate::updates::current().to_owned(),
+        os: b.os.to_owned(),
+        build: None,
+    })
+}
+
+/// `b`'s image in images.json.
+pub fn from_images(b: &Builtin, i: &Images) -> Option<Wanted> {
+    let image = i.image(b.name)?;
+    pinned_image(image).then(|| Wanted {
+        image: image.to_owned(),
+        release: crate::updates::current().to_owned(),
+        os: i.os(),
+        build: Some(i.date.clone()),
     })
 }
 
@@ -122,23 +136,27 @@ pub fn revision(image: &str) -> Option<String> {
 }
 
 /// The template's source for an image.
-pub fn source(b: &Builtin, w: &Wanted) -> Value {
-    json!({ "kind": "image", "image": w.image, "os": b.os, "release": w.release })
+pub fn source(w: &Wanted) -> Value {
+    let mut s = json!({ "kind": "image", "image": w.image, "os": w.os, "release": w.release });
+    if let Some(build) = &w.build {
+        s["build"] = json!(build);
+    }
+    s
 }
 
 /// Why `b` can't be used yet, when Pyo has no image for it.
 pub fn unavailable(b: &Builtin) -> String {
     format!(
-        "Pyo has no image for {} yet. It gets one when it checks for updates.",
-        b.name
+        "Pyo has no image for {}. Set {} to an image pinned by digest, or update Pyo.",
+        b.name, b.env
     )
 }
 
 /// `b` as a list shows it before it's added: as it will be, from the image
-/// it would have. Unavailable, with why, when there's none yet.
+/// it would have. Unavailable, with why, when there's none.
 pub fn view(b: &Builtin, want: Option<&Wanted>) -> Value {
     let (source, state, error) = match want {
-        Some(w) => (source(b, w), "ready", None),
+        Some(w) => (source(w), "ready", None),
         None => (
             json!({ "kind": "image", "os": b.os }),
             "unavailable",
@@ -176,6 +194,8 @@ pub enum Seed {
     Keep,
 }
 
+/// Forward only: a newer Pyo's choice stays (an older Pyo still runs
+/// during an update), and so does a newer build of the images.
 pub fn decide(have: Option<&Value>, want: &Wanted) -> Seed {
     let Some(src) = have else {
         return Seed::Insert;
@@ -183,61 +203,44 @@ pub fn decide(have: Option<&Value>, want: &Wanted) -> Seed {
     if src["image"].as_str() == Some(want.image.as_str()) {
         return Seed::Keep;
     }
-    // A newer Pyo already moved it: this one is on its way out.
     let theirs = src["release"].as_str().and_then(parse_version);
-    match (theirs, parse_version(&want.release)) {
-        (Some(a), Some(b)) if a > b => Seed::Keep,
-        _ => Seed::Move,
+    if let (Some(a), Some(b)) = (theirs, parse_version(&want.release))
+        && a > b
+    {
+        return Seed::Keep;
     }
+    if let (Some(a), Some(b)) = (src["build"].as_str(), want.build.as_deref())
+        && a > b
+    {
+        return Seed::Keep;
+    }
+    Seed::Move
 }
 
-/// `b`'s image in what an update check found.
-fn in_checked(b: &Builtin, c: &crate::updates::Checked) -> Option<Wanted> {
-    let found = c.found.as_ref()?;
-    let image = (b.image)(&found.release.images);
-    pinned_image(image).then(|| Wanted {
-        image: image.to_owned(),
-        release: found.release.version.clone(),
-    })
+/// Which image `b` takes: `env`'s (its env var, pinned) over `images`'s.
+pub fn choose(b: &Builtin, env: Option<Wanted>, images: Option<&Images>) -> Option<Wanted> {
+    env.or_else(|| from_images(b, images?))
 }
 
-/// A dev build checks for updates itself, once per process, rather than
-/// wait for the next scheduled check (up to six hours).
-static CHECKED: AtomicBool = AtomicBool::new(false);
-
-/// The image `b` should have now: this release's, else (a dev build) the
-/// latest release found by the update check. When that found none, or
-/// failed, it checks once now.
+/// The image `b` should have now: its env var's, else images.json's.
 pub async fn wanted(db: &sqlx::PgPool, b: &Builtin) -> Option<Wanted> {
     if let Some(w) = from_env(b) {
         return Some(w);
     }
-    let c = crate::updates::checked(db).await.ok()?;
-    let have = in_checked(b, &c);
-    if (have.is_none() || c.error.is_some())
-        && !crate::updates::checks_off_by_env()
-        && !CHECKED.swap(true, Ordering::Relaxed)
-        && let Ok(now) = crate::updates::check(db).await
-    {
-        return in_checked(b, &now).or(have);
-    }
-    have
+    choose(b, None, super::images::current(db).await.as_ref())
 }
 
-/// Which templates' waiting was said (a bit each, by place in [`ALL`]),
-/// once per process, so a dev build doesn't repeat it every round.
-static SAID_WAITING: AtomicU8 = AtomicU8::new(0);
+/// Which templates' missing image was said (a bit each, by place in
+/// [`ALL`]), once per process, so it isn't repeated every round.
+static SAID_MISSING: AtomicU8 = AtomicU8::new(0);
 
 /// Makes sure `b` exists and has the image it should. Tells the servers at
-/// once when that changed. False when there's no image for it yet.
+/// once when that changed. False when there's no image for it.
 pub async fn ensure(s: &AppState, b: &'static Builtin) -> anyhow::Result<bool> {
     let Some(want) = wanted(&s.db, b).await else {
         let bit = 1 << ALL.iter().position(|x| x.id == b.id).unwrap_or(0);
-        if SAID_WAITING.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
-            tracing::info!(
-                "sandbox template {}: this build has no image for it, and no release was found yet, so it's added later",
-                b.name
-            );
+        if SAID_MISSING.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            tracing::warn!("sandbox template {}: {}", b.name, unavailable(b));
         }
         return Ok(false);
     };
@@ -285,7 +288,7 @@ pub async fn seed_from(s: &AppState, b: &Builtin, want: &Wanted) -> anyhow::Resu
             )
             .bind(b.id)
             .bind(b.name)
-            .bind(source(b, &want))
+            .bind(source(&want))
             .bind(&rev)
             .execute(&mut *tx)
             .await;
@@ -308,7 +311,7 @@ pub async fn seed_from(s: &AppState, b: &Builtin, want: &Wanted) -> anyhow::Resu
                   WHERE id = $1",
             )
             .bind(b.id)
-            .bind(source(b, &want))
+            .bind(source(&want))
             .bind(&rev)
             .execute(&mut *tx)
             .await?;
@@ -320,16 +323,17 @@ pub async fn seed_from(s: &AppState, b: &Builtin, want: &Wanted) -> anyhow::Resu
     Ok(seed)
 }
 
-/// On a worker's start: [`ensure_all`], retried while the database is
-/// busy, and every ten minutes while one has no image (a dev build before
-/// an update check finds a release). Sandbox rounds keep them in step
-/// after that, once there's a sandbox server.
+/// On a worker's start: reads the latest images.json once, then
+/// [`ensure_all`], retried while the database is busy. Sandbox rounds and
+/// [`super::images::runner`] keep them in step after that.
 pub async fn seed(s: AppState) {
+    if let Err(e) = super::images::refresh(&s.db).await {
+        tracing::warn!(error = %format!("{e:#}"), "sandbox images: couldn't keep the latest");
+    }
     let mut attempt = 0u64;
     while attempt < 10 && !s.stopping() {
         match ensure_all(&s).await {
-            Ok(true) => return,
-            Ok(false) => tokio::time::sleep(std::time::Duration::from_secs(600)).await,
+            Ok(_) => return,
             Err(e) => {
                 attempt += 1;
                 tracing::warn!(attempt, error = %format!("{e:#}"), "sandbox templates: couldn't add Pyo's, retrying");
@@ -343,36 +347,49 @@ pub async fn seed(s: AppState) {
 mod tests {
     use super::*;
 
-    const A: &str = "ghcr.io/upsetdev/pyo/sandbox-base:0.4.1@sha256:aaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const B: &str = "ghcr.io/upsetdev/pyo/sandbox-base:0.4.2@sha256:cccccccccccc0000000000000000000000000000000000000000000000000000";
+    const A: &str = "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:aaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const B: &str = "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:cccccccccccc0000000000000000000000000000000000000000000000000000";
 
     fn want(image: &str, release: &str) -> Wanted {
         Wanted {
             image: image.into(),
             release: release.into(),
+            os: "Ubuntu 24.04".into(),
+            build: None,
         }
+    }
+
+    fn built(image: &str, release: &str, build: &str) -> Wanted {
+        Wanted {
+            build: Some(build.into()),
+            ..want(image, release)
+        }
+    }
+
+    fn images() -> &'static Images {
+        super::super::images::shipped().unwrap()
     }
 
     #[test]
     fn seeding_is_idempotent() {
         let w = want(A, "0.4.1");
         assert_eq!(decide(None, &w), Seed::Insert);
-        let src = source(&BASE, &w);
+        let src = source(&w);
         assert_eq!(decide(Some(&src), &w), Seed::Keep, "the same image again");
-        assert_eq!(src["os"], "Debian 13");
+        assert_eq!(src["os"], "Ubuntu 24.04");
         assert_eq!(src["kind"], "image");
+        assert!(src.get("build").is_none());
+        let src = source(&built(A, "0.4.1", "20261116"));
+        assert_eq!(src["build"], "20261116");
     }
 
     #[test]
     fn a_new_release_moves_it_forward_only() {
-        let old = source(&BASE, &want(A, "0.4.1"));
+        let old = source(&want(A, "0.4.1"));
         let new = want(B, "0.4.2");
         assert_eq!(decide(Some(&old), &new), Seed::Move);
         // The older Pyo, still running during the update, leaves it.
-        assert_eq!(
-            decide(Some(&source(&BASE, &new)), &want(A, "0.4.1")),
-            Seed::Keep
-        );
+        assert_eq!(decide(Some(&source(&new)), &want(A, "0.4.1")), Seed::Keep);
         // A rebuilt image of the same release moves it too.
         assert_eq!(decide(Some(&old), &want(B, "0.4.1")), Seed::Move);
         // One without a release (made by hand) is taken over.
@@ -383,6 +400,60 @@ mod tests {
             ),
             Seed::Move
         );
+    }
+
+    #[test]
+    fn a_newer_build_of_the_images_moves_it_forward_only() {
+        let old = built(A, "0.5.0", "20261116");
+        let new = built(B, "0.5.0", "20261123");
+        assert_eq!(decide(Some(&source(&old)), &new), Seed::Move);
+        // A replica that hasn't read the newer build yet leaves it.
+        assert_eq!(decide(Some(&source(&new)), &old), Seed::Keep);
+        // A rebuild the same day moves it.
+        assert_eq!(
+            decide(Some(&source(&old)), &built(B, "0.5.0", "20261116")),
+            Seed::Move
+        );
+        // A newer Pyo with an older build (it couldn't reach GitHub) leaves
+        // it too.
+        assert_eq!(
+            decide(Some(&source(&new)), &built(A, "0.5.1", "20261116")),
+            Seed::Keep
+        );
+        // An older Pyo (0.4.x, Debian from release.json) never moves it
+        // back, and the images move it from there.
+        let debian = json!({ "kind": "image", "os": "Debian 13", "release": "0.4.1",
+            "image": "ghcr.io/upsetdev/pyo/sandbox-base:0.4.1@sha256:aaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" });
+        assert_eq!(decide(Some(&debian), &new), Seed::Move);
+        let older_pyo = Wanted {
+            image: debian["image"].as_str().unwrap().into(),
+            release: "0.4.1".into(),
+            os: "Debian 13".into(),
+            build: None,
+        };
+        assert_eq!(decide(Some(&source(&new)), &older_pyo), Seed::Keep);
+        // A pinned image (env var) of the same Pyo moves it, either way.
+        assert_eq!(decide(Some(&source(&new)), &want(A, "0.5.0")), Seed::Move);
+    }
+
+    #[test]
+    fn the_env_var_wins_over_images_json() {
+        let i = images();
+        let from_json = choose(&BASE, None, Some(i)).unwrap();
+        assert_eq!(from_json.image, i.image("base").unwrap());
+        assert_eq!(from_json.os, i.os());
+        assert_eq!(from_json.build.as_deref(), Some(i.date.as_str()));
+        assert_eq!(
+            choose(&DESKTOP, None, Some(i)).unwrap().image,
+            i.image("desktop").unwrap()
+        );
+        let pinned = want(A, "0.5.0");
+        assert_eq!(
+            choose(&BASE, Some(pinned.clone()), Some(i)),
+            Some(pinned.clone())
+        );
+        assert_eq!(choose(&BASE, Some(pinned.clone()), None), Some(pinned));
+        assert_eq!(choose(&BASE, None, None), None);
     }
 
     #[test]
@@ -401,7 +472,7 @@ mod tests {
         assert_eq!(v["state"], "unavailable");
         assert_eq!(
             v["error"],
-            "Pyo has no image for base yet. It gets one when it checks for updates."
+            "Pyo has no image for base. Set PYO_SANDBOX_BASE_REF to an image pinned by digest, or update Pyo."
         );
         assert_eq!(v["source"]["os"], BASE.os);
         assert!(!unavailable(&BASE).contains(';'));
@@ -421,14 +492,8 @@ mod tests {
         assert!(!on_demand("stp_other"));
         assert_eq!(by_name("desktop").map(|b| b.id), Some("stp_desktop"));
         assert!(by_name("node-22").is_none());
-        // desktop's sandboxes get room for Chromium.
+        // desktop's sandboxes get room for the browser.
         const { assert!(DESKTOP.cpus >= 2 && DESKTOP.memory_mib >= 2048) };
-        let images = pyo_proto::ReleaseImages {
-            sandbox_base: A.into(),
-            sandbox_desktop: B.into(),
-            ..Default::default()
-        };
-        assert_eq!(((BASE.image)(&images), (DESKTOP.image)(&images)), (A, B));
         for b in ALL {
             assert!(pyo_proto::sandbox::is_template_name(b.name));
             assert!(
@@ -525,7 +590,7 @@ mod tests {
             .unwrap();
         assert_eq!(views[0]["name"], "base");
         assert_eq!(views[0]["builtin"], true);
-        assert_eq!(views[0]["source"]["os"], "Debian 13");
+        assert_eq!(views[0]["source"]["os"], "Ubuntu 24.04");
         // desktop right after, listed before it's added. A team's template
         // named before both still comes after them.
         sqlx::raw_sql(

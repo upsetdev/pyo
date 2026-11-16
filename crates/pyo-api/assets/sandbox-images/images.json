@@ -1,0 +1,28 @@
+{
+  "contract": 1,
+  "ubuntu": "24.04",
+  "date": "20261116",
+  "commit": "f737c698ea63470a0db849c4b7b1c4b3adb61614",
+  "images": {
+    "base": {
+      "repository": "ghcr.io/upsetdev/pyo-sandbox-images/base",
+      "digest": "sha256:75fc036bbe9507c6e2f043a6e536cb830b419ca7781789510f1f7cec6b2a27ae",
+      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:75fc036bbe9507c6e2f043a6e536cb830b419ca7781789510f1f7cec6b2a27ae",
+      "tags": {
+        "24.04": "sha256:75fc036bbe9507c6e2f043a6e536cb830b419ca7781789510f1f7cec6b2a27ae",
+        "24.04-20261116": "sha256:75fc036bbe9507c6e2f043a6e536cb830b419ca7781789510f1f7cec6b2a27ae",
+        "f737c698ea63470a0db849c4b7b1c4b3adb61614": "sha256:75fc036bbe9507c6e2f043a6e536cb830b419ca7781789510f1f7cec6b2a27ae"
+      }
+    },
+    "desktop": {
+      "repository": "ghcr.io/upsetdev/pyo-sandbox-images/desktop",
+      "digest": "sha256:ad5c59760172645414dafb67d6b8bb8addac10e88674c0c38d0da88d6ad08d0e",
+      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:ad5c59760172645414dafb67d6b8bb8addac10e88674c0c38d0da88d6ad08d0e",
+      "tags": {
+        "24.04": "sha256:ad5c59760172645414dafb67d6b8bb8addac10e88674c0c38d0da88d6ad08d0e",
+        "24.04-20261116": "sha256:ad5c59760172645414dafb67d6b8bb8addac10e88674c0c38d0da88d6ad08d0e",
+        "f737c698ea63470a0db849c4b7b1c4b3adb61614": "sha256:ad5c59760172645414dafb67d6b8bb8addac10e88674c0c38d0da88d6ad08d0e"
+      }
+    }
+  }
+}

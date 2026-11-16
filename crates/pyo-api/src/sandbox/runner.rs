@@ -68,7 +68,7 @@ struct Server {
 /// One round: reports, then lifetimes.
 pub async fn round(s: &AppState) -> anyhow::Result<()> {
     let _ = super::join::prune(&s.db).await;
-    // A dev build's `base` comes once an update check finds a release.
+    // Pyo's own templates, at the images it has now.
     if let Err(e) = super::base::ensure_all(s).await {
         tracing::warn!(error = %format!("{e:#}"), "sandboxes: couldn't keep Pyo's templates");
     }

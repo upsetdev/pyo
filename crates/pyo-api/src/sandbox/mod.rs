@@ -30,6 +30,7 @@ pub mod daemon;
 mod e2e;
 pub mod edgecert;
 pub mod firstuse;
+pub mod images;
 pub mod join;
 pub mod keys;
 pub mod limits;

@@ -296,7 +296,7 @@ fn source() -> String {
     mirror().unwrap_or_else(|| format!("https://api.github.com/repos/{REPO}"))
 }
 
-fn client() -> anyhow::Result<reqwest::Client> {
+pub(crate) fn client() -> anyhow::Result<reqwest::Client> {
     let mirror = std::env::var("PYO_UPDATE_SOURCE")
         .ok()
         .and_then(|s| reqwest::Url::parse(&s).ok())
@@ -323,7 +323,10 @@ fn client() -> anyhow::Result<reqwest::Client> {
         .build()?)
 }
 
-async fn body_limited(mut res: reqwest::Response, max: usize) -> anyhow::Result<Vec<u8>> {
+pub(crate) async fn body_limited(
+    mut res: reqwest::Response,
+    max: usize,
+) -> anyhow::Result<Vec<u8>> {
     let mut out = vec![];
     while let Some(chunk) = res.chunk().await? {
         out.extend_from_slice(&chunk);

@@ -369,6 +369,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tokio::spawn(cdn::keeper(state.clone()));
         tokio::spawn(sandbox::runner::runner(state.clone()));
         tokio::spawn(sandbox::base::seed(state.clone()));
+        tokio::spawn(sandbox::images::runner(state.clone()));
         for task in tasks {
             tokio::spawn(task(state.clone()));
         }
