@@ -85,36 +85,54 @@ pub fn decide(have: Option<&Value>, want: &Wanted) -> Seed {
     }
 }
 
+/// `base`'s image in what an update check found.
+fn in_checked(c: &crate::updates::Checked) -> Option<Wanted> {
+    let found = c.found.as_ref()?;
+    let image = &found.release.images.sandbox_base;
+    pinned_image(image).then(|| Wanted {
+        image: image.clone(),
+        release: found.release.version.clone(),
+    })
+}
+
+/// A dev build checks for updates itself, once per process, rather than
+/// wait for the next scheduled check (up to six hours).
+static CHECKED: AtomicBool = AtomicBool::new(false);
+
 /// The image `base` should have now: this release's, else (a dev build)
-/// the latest release found by the update check.
-async fn wanted(s: &AppState) -> Option<Wanted> {
+/// the latest release found by the update check. When that found none, or
+/// failed, it checks once now.
+pub async fn wanted(db: &sqlx::PgPool) -> Option<Wanted> {
     if let Some(w) = from_env() {
         return Some(w);
     }
-    let found = crate::updates::checked(&s.db).await.ok()?.found?;
-    let image = found.release.images.sandbox_base;
-    let pinned = pinned_image(&image);
-    pinned.then_some(Wanted {
-        image,
-        release: found.release.version,
-    })
+    let c = crate::updates::checked(db).await.ok()?;
+    let have = in_checked(&c);
+    if (have.is_none() || c.error.is_some())
+        && !crate::updates::checks_off_by_env()
+        && !CHECKED.swap(true, Ordering::Relaxed)
+        && let Ok(now) = crate::updates::check(db).await
+    {
+        return in_checked(&now).or(have);
+    }
+    have
 }
 
 /// Said once per process, so a dev build doesn't repeat it every round.
 static SAID_WAITING: AtomicBool = AtomicBool::new(false);
 
 /// Makes sure `base` exists and has the image it should. Tells the servers
-/// at once when that changed.
-pub async fn ensure(s: &AppState) -> anyhow::Result<()> {
-    let Some(want) = wanted(s).await else {
+/// at once when that changed. False when there's no image for it yet.
+pub async fn ensure(s: &AppState) -> anyhow::Result<bool> {
+    let Some(want) = wanted(&s.db).await else {
         if !SAID_WAITING.swap(true, Ordering::Relaxed) {
             tracing::info!(
                 "sandbox template base: this build has no image for it, and no release was found yet, so it's added later"
             );
         }
-        return Ok(());
+        return Ok(false);
     };
-    seed_from(s, &want).await.map(|_| ())
+    seed_from(s, &want).await.map(|_| true)
 }
 
 /// Seeds `base` from `want`, and says what it did.
@@ -172,12 +190,18 @@ pub async fn seed_from(s: &AppState, want: &Wanted) -> anyhow::Result<Seed> {
     Ok(seed)
 }
 
-/// On a worker's start: [`ensure`], retried while the database is busy.
+/// On a worker's start: [`ensure`], retried while the database is busy,
+/// and every ten minutes while there's no image for it (a dev build
+/// before an update check finds a release). Sandbox rounds keep it in
+/// step after that, once there's a sandbox server.
 pub async fn seed(s: AppState) {
-    for attempt in 1..=10u64 {
+    let mut attempt = 0u64;
+    while attempt < 10 && !s.stopping() {
         match ensure(&s).await {
-            Ok(()) => return,
+            Ok(true) => return,
+            Ok(false) => tokio::time::sleep(std::time::Duration::from_secs(600)).await,
             Err(e) => {
+                attempt += 1;
                 tracing::warn!(attempt, error = %format!("{e:#}"), "sandbox template base: couldn't add it, retrying");
                 tokio::time::sleep(std::time::Duration::from_secs(15 * attempt)).await;
             }
