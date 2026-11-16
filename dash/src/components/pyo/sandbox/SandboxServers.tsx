@@ -103,7 +103,7 @@ export function SandboxServers() {
         {servers.map((x) => {
           const use = serverUse(x);
           return (
-            <li key={x.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6 px-5 py-3 md:grid-cols-[minmax(0,1fr)_128px_32px]">
+            <li key={x.id} id={`sandbox-server-${x.id}`} className="scroll-mt-4 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6 px-5 py-3 md:grid-cols-[minmax(0,1fr)_128px_32px]">
               <div className="min-w-0">
                 <div className="flex items-center gap-2.5">
                   <span className="truncate text-[13.5px] font-medium">{x.name}</span>

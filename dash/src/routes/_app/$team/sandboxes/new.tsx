@@ -1,12 +1,12 @@
-import { CaretDownIcon, CodeIcon } from "@phosphor-icons/react";
-import { Navigate, createFileRoute, useNavigate } from "@tanstack/react-router";
+import { CaretDownIcon, CircleNotchIcon, CodeIcon, HardDrivesIcon } from "@phosphor-icons/react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { useSandboxes } from "~/components/pyo/sandbox/common";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { Field, Segmented, Select, Switch, Textarea } from "~/components/ui/Field";
 import { Highlighted } from "~/components/ui/Highlighted";
-import { Callout, Page, PageHeader, Panel } from "~/components/ui/Panel";
+import { Callout, EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { Reveal } from "~/components/ui/Reveal";
 import { CopyButton } from "~/components/ui/Table";
 import { parseEnv } from "~/lib/pyo/dotenv";
@@ -21,7 +21,7 @@ import {
   sizeLabel,
   type CreateSandbox,
 } from "~/lib/pyo/sandbox";
-import { projectsIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
+import { projectsIn, roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import { seo } from "~/lib/seo";
 
 export const Route = createFileRoute("/_app/$team/sandboxes/new")({
@@ -42,10 +42,47 @@ function pairs(text: string) {
 
 function NewSandbox() {
   const s = usePyo();
-  // No sandbox server yet: adding one comes first.
-  if (!sandboxServersIn(s).length)
-    return <Navigate to="/$team/sandboxes/servers/new" params={{ team: currentSlug() }} replace />;
-  return <NewSandboxForm />;
+  const servers = sandboxServersIn(s);
+  if (servers.some((x) => x.state === "ready")) return <NewSandboxForm />;
+  // No server that runs sandboxes yet: the form waits for one.
+  const joining = servers.find((x) => x.state === "joining");
+  const canManage = ["owner", "admin"].includes(roleIn(s) ?? "");
+  return (
+    <Page>
+      <PageHeader title="New sandbox" />
+      <Panel>
+        {joining ? (
+          <EmptyState
+            icon={CircleNotchIcon}
+            title={`${joining.name} is being set up.`}
+            description="You can make sandboxes once it's ready."
+            action={
+              <ButtonLink href={`/clusters#sandbox-server-${joining.id}`} size="sm" variant="secondary">
+                See {joining.name}
+              </ButtonLink>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={HardDrivesIcon}
+            title="Add a sandbox server first."
+            description={
+              canManage
+                ? "Sandboxes run on your sandbox servers."
+                : "Sandboxes run on your sandbox servers. Ask a team owner or admin to add one."
+            }
+            action={
+              canManage ? (
+                <ButtonLink href="/sandboxes/servers/new" size="sm">
+                  Add a sandbox server
+                </ButtonLink>
+              ) : undefined
+            }
+          />
+        )}
+      </Panel>
+    </Page>
+  );
 }
 
 function NewSandboxForm() {
