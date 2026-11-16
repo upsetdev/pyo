@@ -136,9 +136,15 @@ pub fn prepare_command(key: &SigningKey, t: &Template) -> DaemonCommand {
             // The door on the tailnet, as other machines pull from it.
             image: format!("{push}/{path}"),
             plain_http: true,
-            auth: t.team_id.as_ref().map(|team| RegistryAuth {
+            // An installation's template (Pyo's own, like a dev build's
+            // desktop) may pull only Pyo's own images.
+            auth: Some(RegistryAuth {
                 username: crate::registrydoor::SANDBOX_USER.into(),
-                password: keys::registry_token(key, &t.id, team),
+                password: keys::registry_token(
+                    key,
+                    &t.id,
+                    t.team_id.as_deref().unwrap_or(keys::PYO_IMAGES_ONLY),
+                ),
             }),
             max_mib: None,
         },

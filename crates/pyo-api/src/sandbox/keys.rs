@@ -154,9 +154,13 @@ pub fn admin_token(key: &SigningKey, server: &str) -> String {
     .token
 }
 
+/// The team a registry token names for an installation's template: it may
+/// pull Pyo's own images (`pyo/<name>`) and no team's.
+pub const PYO_IMAGES_ONLY: &str = "pyo";
+
 /// A sandbox server's login at Pyo's registry door (password, with the
 /// username [`crate::registrydoor::SANDBOX_USER`]) to pull a template's
-/// image of `team`.
+/// image of `team` (or, with [`PYO_IMAGES_ONLY`], one of Pyo's own).
 pub fn registry_token(key: &SigningKey, template: &str, team: &str) -> String {
     sign(
         key,
@@ -311,6 +315,14 @@ mod tests {
             check_registry_token(&keys, &registry_token(&k, "stp_one", "")),
             None
         );
+        // An installation's template: Pyo's own images, which the door
+        // tells apart from a team's.
+        assert_eq!(
+            check_registry_token(&keys, &registry_token(&k, "stp_desktop", PYO_IMAGES_ONLY))
+                .as_deref(),
+            Some(PYO_IMAGES_ONLY)
+        );
+        assert!(!PYO_IMAGES_ONLY.contains('_'), "never a team's id (prefix_random)");
     }
 
     /// Against a throwaway Postgres: `DATABASE_URL=… cargo test -p pyo-api

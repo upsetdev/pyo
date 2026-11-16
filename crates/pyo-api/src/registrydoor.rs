@@ -10,7 +10,8 @@
 //!   builds (`pyo/services/<id>`), pull its team's images;
 //! - a sandbox server's registry token (username `pyo-sandbox`, signed by
 //!   the sandbox key for an hour): pull its team's images and builds, to
-//!   make a sandbox template from one.
+//!   make a sandbox template from one. An installation's template gets one
+//!   for Pyo's own images only (`pyo/<name>`, like a dev build's desktop).
 //!
 //! It listens beside the API (`PYO_REGISTRY_DOOR_ADDR`, :5006, in the
 //! cluster). Users reach it over HTTPS at the registry's tailnet name
@@ -147,7 +148,7 @@ pub(crate) enum Machine {
     /// A builder: its team's builds too.
     Builder,
     /// A sandbox server making a template: pull only, its team's images
-    /// and builds.
+    /// and builds, or for an installation's template Pyo's own.
     Sandbox,
 }
 
@@ -174,7 +175,8 @@ pub(crate) fn machine_allowed(
         .strip_prefix("pyo/")
         .is_some_and(|n| !n.is_empty() && !n.contains('/'))
     {
-        return read && who == Machine::Cluster;
+        // And an installation's sandbox template (no team: an empty slug).
+        return read && (who == Machine::Cluster || (who == Machine::Sandbox && slug.is_empty()));
     }
     read && parts(name).is_some_and(|(t, _, _)| t == slug)
 }
@@ -412,6 +414,10 @@ async fn machine_door(
                 Err(_) => None,
             };
             match team {
+                // An installation's template: Pyo's own images only.
+                Some(t) if t == crate::sandbox::keys::PYO_IMAGES_ONLY => {
+                    Ok(Some((String::new(), String::new())))
+                }
                 Some(t) => {
                     sqlx::query_as("SELECT id, slug FROM pyo.teams WHERE id = $1")
                         .bind(t)
@@ -799,6 +805,11 @@ mod tests {
             false
         ));
         assert!(!machine_allowed(Sandbox, &get, "pyo/agent", "acme", false));
+        // An installation's template (no team) pulls Pyo's own, and only those.
+        assert!(machine_allowed(Sandbox, &get, "pyo/sandbox-desktop", "", false));
+        assert!(!machine_allowed(Sandbox, &put, "pyo/sandbox-desktop", "", false));
+        assert!(!machine_allowed(Sandbox, &get, "acme/shop/web", "", false));
+        assert!(!machine_allowed(Sandbox, &get, "pyo/services/svc_a", "", false));
         assert!(!machine_allowed(
             Sandbox,
             &put,
