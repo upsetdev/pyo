@@ -728,7 +728,7 @@ pub async fn runner(state: AppState) {
     }
 }
 
-/// Every web process: Pyo's HTTPS names as the runner last saved them.
+/// Every process: Pyo's addresses as the runner last saved them.
 pub async fn addresses_follower(db: PgPool) {
     loop {
         if let Ok(Some(v)) =

@@ -347,8 +347,10 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
     if role.web() {
         tokio::spawn(bg::listen(state.clone()));
         tokio::spawn(geoip::keeper(state.clone()));
-        tokio::spawn(tailscale::addresses_follower(state.db.clone()));
     }
+    // Every process: the worker sends sandbox servers images through the
+    // registry door's tailnet address (sandbox/templates.rs).
+    tokio::spawn(tailscale::addresses_follower(state.db.clone()));
     if role.worker() {
         // Each loop runs on one worker at a time (leader lock); jobs on any.
         tokio::spawn(deploy::sweeper(state.clone()));
