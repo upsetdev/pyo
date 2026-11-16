@@ -171,7 +171,7 @@ function Integrations() {
       id: "tailscale",
       name: "Tailscale",
       category: "Networking",
-      icon: <BrandMark icon={siTailscale} size={17} />,
+      icon: <BrandMark icon={siTailscale} size={20} />,
       description: "Servers join your tailnet with it.",
       connected: !!ts,
       stat: ts?.suffix ? { label: "Tailnet", value: <span className="font-mono text-[12px]">{ts.suffix}</span> } : null,
@@ -196,7 +196,7 @@ function Integrations() {
       id: "hetzner",
       name: "Hetzner",
       category: "Servers",
-      icon: <BrandMark icon={siHetzner} size={17} tone="brand" />,
+      icon: <BrandMark icon={siHetzner} size={20} tone="brand" />,
       description: "Pyo makes servers in your Hetzner project.",
       connected: !!hetzner,
       stat: hetzner ? { label: "Servers made", value: cloudServers.length } : null,
@@ -225,7 +225,7 @@ function Integrations() {
       id: "github",
       name: "GitHub",
       category: "Git",
-      icon: <BrandMark icon={GITHUB_LOGO} size={17} />,
+      icon: <BrandMark icon={GITHUB_LOGO} size={20} />,
       description: "Private repos, and a deploy on every push.",
       connected: !!s.github && installs.length > 0,
       stat: { label: "Repos linked", value: reposLinked(s, (src) => installs.some((g) => g.id === src.installationId)) },
@@ -246,7 +246,7 @@ function Integrations() {
       id: "gitlab",
       name: "GitLab",
       category: "Git",
-      icon: <BrandMark icon={siGitlab} size={17} />,
+      icon: <BrandMark icon={siGitlab} size={20} />,
       description: "gitlab.com or your own GitLab, with an access token.",
       connected: gitlab.length > 0,
       stat: gitlabProjects
@@ -271,7 +271,7 @@ function Integrations() {
       id: "cloudflare",
       name: "Cloudflare",
       category: "DNS",
-      icon: <BrandMark icon={CLOUDFLARE_LOGO} size={17} />,
+      icon: <BrandMark icon={CLOUDFLARE_LOGO} size={20} />,
       description: "Creates DNS records for domains in your zones.",
       connected: !!cf,
       stat: cf ? { label: "Zones", value: cf.zones.length - cfLacking } : null,
@@ -300,7 +300,7 @@ function Integrations() {
       id: "registries",
       name: "Container registries",
       category: "Registries",
-      icon: <BrandMark icon={DOCKER_LOGO} size={17} />,
+      icon: <BrandMark icon={DOCKER_LOGO} size={20} />,
       description: "Logins for private images. Services pull with them.",
       connected: logins.length > 0,
       stat: { label: "Logins", value: logins.length },
@@ -323,7 +323,7 @@ function Integrations() {
       id: "secrets",
       name: "Secret stores",
       category: "Secrets",
-      icon: <BrandMark icon={siVault} size={17} tone="mono" />,
+      icon: <BrandMark icon={siVault} size={20} tone="mono" />,
       description: "Services import secrets from your store on each deploy.",
       connected: stores.length > 0,
       stat: { label: "Services importing", value: storeUses },
@@ -380,7 +380,7 @@ function Integrations() {
   const current = all.find((x) => x.id === open);
 
   return (
-    <Page>
+    <Page width="max-w-[960px]">
       <PageHeader title="Integrations" />
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -410,7 +410,7 @@ function Integrations() {
           </div>
         </div>
         {shown.length ? (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-2">
             {shown.map(({ settings: _settings, ...x }) => (
               <IntegrationCard key={x.id} {...x} highlight={highlight === x.id} />
             ))}
