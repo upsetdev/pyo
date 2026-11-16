@@ -431,20 +431,30 @@ pub async fn template_views(
                    AND (s.team_id IS NULL OR s.team_id = ANY($1))
                    AND (m.e IS NOT NULL OR s.state NOT IN ('joining', 'refused'))
                    -- One made on first use: the servers that have it.
-                   AND (m.e IS NOT NULL OR t.id <> $3)))
+                   AND (m.e IS NOT NULL OR t.id <> ALL($3))))
            FROM pyo.sandbox_templates t
           WHERE (t.team_id IS NULL OR t.team_id = ANY($1)) AND ($2::text IS NULL OR t.id = $2)
           ORDER BY t.team_id NULLS FIRST, t.name",
     )
     .bind(team_ids)
     .bind(id)
-    .bind(base::ID)
+    .bind(base::ALL.map(|b| b.id).as_slice())
     .fetch_all(db)
     .await?;
-    // `base` is listed before it's added, as it will be.
-    if id.is_none_or(|i| i == base::ID) && !rows.iter().any(|r| r["name"] == base::NAME) {
-        rows.insert(0, base::listed(db).await);
+    // Pyo's own are listed before they're added, as they will be.
+    for b in base::ALL {
+        if id.is_none_or(|i| i == b.id) && !rows.iter().any(|r| r["id"] == b.id) {
+            rows.push(base::listed(db, b).await);
+        }
     }
+    // Pyo's own first, in their order.
+    let place = |r: &Value| {
+        base::ALL
+            .iter()
+            .position(|b| r["id"] == b.id && r["builtin"] == true)
+            .unwrap_or(base::ALL.len())
+    };
+    rows.sort_by_key(place);
     // Build errors in plain words.
     let plain = |e: &mut Value| {
         if let Some(raw) = e.as_str() {
@@ -479,18 +489,20 @@ pub struct CreateSandbox {
     pub name: Option<String>,
     /// A sandbox template's name (or id): the team's own, else the
     /// installation's. "base" (Pyo's built-in Debian 13 template) when
-    /// omitted. A server that doesn't have "base" yet makes it first, so
-    /// the first sandbox from it there takes longer.
+    /// omitted. "desktop" is Pyo's built-in desktop with Chromium: CDP on
+    /// port 9222 and the screen (noVNC) on port 6080. A server that doesn't
+    /// have Pyo's template yet makes it first, so the first sandbox from it
+    /// there takes longer.
     #[serde(default)]
     pub template: Option<String>,
     /// The sandbox server to run it on, by id or name: the team's own or
     /// the installation's. Pyo picks one when omitted.
     #[serde(default)]
     pub server: Option<String>,
-    /// 1 when omitted.
+    /// 1 when omitted (2 for "desktop").
     #[serde(default)]
     pub cpus: Option<u32>,
-    /// 512 when omitted.
+    /// 512 when omitted (2048 for "desktop").
     #[serde(default)]
     pub memory_mib: Option<u32>,
     /// The writable disk, sparse. 2048 when omitted.
@@ -575,8 +587,8 @@ async fn template_for(
     .fetch_optional(tx)
     .await?;
     let Some((id, name, state, revision)) = row else {
-        return Err(if name == base::NAME {
-            ApiError::conflict(base::UNAVAILABLE)
+        return Err(if let Some(b) = base::by_name(name) {
+            ApiError::conflict(base::unavailable(b))
         } else {
             ApiError::not_found("Sandbox template")
         });
@@ -719,12 +731,12 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     };
     let team_id = team_for_create(s, user, req.team_id.as_deref()).await?;
     let asked = template_asked(req.template.as_deref());
-    // `base` is listed before it's added: it's added on first use.
-    if asked == base::NAME
-        && !base::added(&s.db).await?
-        && let Err(e) = base::ensure(s).await
+    // Pyo's own are listed before they're added: added on first use.
+    if let Some(b) = base::by_name(asked)
+        && !base::added(&s.db, b).await?
+        && let Err(e) = base::ensure(s, b).await
     {
-        tracing::warn!(error = %format!("{e:#}"), "sandbox template base: couldn't add it");
+        tracing::warn!(error = %format!("{e:#}"), "sandbox template {}: couldn't add it", b.name);
     }
     let mut tx = s.db.begin().await?;
     require(&mut tx, user, &team_id, Need::Use).await?;
@@ -747,8 +759,14 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
         }
     }
     let mut spec = SandboxSpec::new(new_sandbox_id(), &team_id, &template.server_name);
-    spec.cpus = req.cpus.unwrap_or(proto::DEFAULT_CPUS);
-    spec.memory_mib = req.memory_mib.unwrap_or(proto::DEFAULT_MEMORY_MIB);
+    // Pyo's own templates may want more room by default (desktop).
+    let builtin = base::by_id(&template.id);
+    spec.cpus = req
+        .cpus
+        .unwrap_or(builtin.map_or(proto::DEFAULT_CPUS, |b| b.cpus));
+    spec.memory_mib = req
+        .memory_mib
+        .unwrap_or(builtin.map_or(proto::DEFAULT_MEMORY_MIB, |b| b.memory_mib));
     spec.disk_mib = req.disk_mib.unwrap_or(proto::DEFAULT_DISK_MIB);
     spec.ttl_secs = ttl_secs;
     spec.pause_when_idle_secs = req.pause_when_idle_secs;
@@ -1586,10 +1604,11 @@ pub async fn create_template(s: &AppState, user: &User, req: CreateTemplate) -> 
             "A template name is lowercase letters, digits, dashes, dots and underscores, like node-22.",
         ));
     }
-    if req.name == base::NAME {
-        return Err(ApiError::conflict(
-            "base is Pyo's built-in sandbox template. Pick another name.",
-        ));
+    if let Some(b) = base::by_name(&req.name) {
+        return Err(ApiError::conflict(format!(
+            "{} is Pyo's built-in sandbox template. Pick another name.",
+            b.name
+        )));
     }
     let image = req.image.trim();
     if image.is_empty() || image.len() > 512 || image.contains(char::is_whitespace) {

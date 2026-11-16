@@ -612,7 +612,7 @@ async fn the_control_plane_drives_a_real_daemon() {
     // Two small public images stand in for two releases' sandbox-base.
     use super::base;
     sqlx::query("DELETE FROM pyo.sandbox_templates WHERE id = $1")
-        .bind(base::ID)
+        .bind(base::BASE.id)
         .execute(&db)
         .await
         .unwrap();
@@ -629,7 +629,7 @@ async fn the_control_plane_drives_a_real_daemon() {
         release: "0.0.2".into(),
     };
     let rev = |w: &base::Wanted| {
-        super::templates::server_name(base::ID, base::revision(&w.image).as_deref())
+        super::templates::server_name(base::BASE.id, base::revision(&w.image).as_deref())
     };
     let (old_name, new_name) = (rev(&old), rev(&new));
     // Listed, ready to use, before Pyo adds it.
@@ -638,7 +638,7 @@ async fn the_control_plane_drives_a_real_daemon() {
         .unwrap();
     assert_eq!(listed[0]["name"], "base", "{listed:?}");
     assert_eq!(listed[0]["servers"], json!([]));
-    assert_eq!(base::seed_from(&s, &old).await.unwrap(), base::Seed::Insert);
+    assert_eq!(base::seed_from(&s, &base::BASE, &old).await.unwrap(), base::Seed::Insert);
     // The server doesn't make it ahead of use.
     for _ in 0..3 {
         super::runner::round(&s).await.unwrap();
@@ -654,7 +654,7 @@ async fn the_control_plane_drives_a_real_daemon() {
             .all(|t| !t["name"].as_str().unwrap_or("").starts_with("stp_base")),
         "{srv}"
     );
-    let views = super::template_views(&db, std::slice::from_ref(&team), Some(base::ID))
+    let views = super::template_views(&db, std::slice::from_ref(&team), Some(base::BASE.id))
         .await
         .unwrap();
     assert_eq!(views[0]["state"], "ready", "ready to use: {}", views[0]);
@@ -698,7 +698,7 @@ async fn the_control_plane_drives_a_real_daemon() {
         .map(|t| json!({ "name": t.name, "startedAt": t.build.map(|b| b.started_at) }))
         .collect();
     assert_eq!(builds.len(), 1, "{builds:?}");
-    let views = super::template_views(&db, std::slice::from_ref(&team), Some(base::ID))
+    let views = super::template_views(&db, std::slice::from_ref(&team), Some(base::BASE.id))
         .await
         .unwrap();
     assert_eq!(views[0]["servers"][0]["id"], json!(server), "{}", views[0]);
@@ -735,9 +735,9 @@ async fn the_control_plane_drives_a_real_daemon() {
     assert!(r.stdout.starts_with("3.21"), "{r:?}");
 
     // A new release: made beside the old one, new sandboxes move over.
-    assert_eq!(base::seed_from(&s, &new).await.unwrap(), base::Seed::Move);
+    assert_eq!(base::seed_from(&s, &base::BASE, &new).await.unwrap(), base::Seed::Move);
     assert_eq!(
-        base::seed_from(&s, &old).await.unwrap(),
+        base::seed_from(&s, &base::BASE, &old).await.unwrap(),
         base::Seed::Keep,
         "the old Pyo doesn't move it back"
     );
@@ -767,18 +767,18 @@ async fn the_control_plane_drives_a_real_daemon() {
     assert!(r.stdout.starts_with("3.21"), "{r:?}");
     super::delete(&s, &user, &first_id).await.unwrap();
     wait_for(&s, &team, &server, &old_name, true).await;
-    let views = super::template_views(&db, std::slice::from_ref(&team), Some(base::ID))
+    let views = super::template_views(&db, std::slice::from_ref(&team), Some(base::BASE.id))
         .await
         .unwrap();
     assert_eq!(views[0]["state"], "ready", "{}", views[0]);
     println!("e2e base: {}", views[0]["servers"]);
     super::delete(&s, &user, &second_id).await.unwrap();
     sqlx::query("DELETE FROM pyo.sandbox_templates WHERE id = $1")
-        .bind(base::ID)
+        .bind(base::BASE.id)
         .execute(&db)
         .await
         .unwrap();
-    super::templates::forget(s.clone(), base::ID.into()).await;
+    super::templates::forget(s.clone(), base::BASE.id.into()).await;
 
     sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
         .bind(&team)

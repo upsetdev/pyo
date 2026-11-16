@@ -69,8 +69,8 @@ struct Server {
 pub async fn round(s: &AppState) -> anyhow::Result<()> {
     let _ = super::join::prune(&s.db).await;
     // A dev build's `base` comes once an update check finds a release.
-    if let Err(e) = super::base::ensure(s).await {
-        tracing::warn!(error = %format!("{e:#}"), "sandboxes: couldn't keep the base template");
+    if let Err(e) = super::base::ensure_all(s).await {
+        tracing::warn!(error = %format!("{e:#}"), "sandboxes: couldn't keep Pyo's templates");
     }
     let servers: Vec<Server> = sqlx::query_as(
         "SELECT id, team_id, address, state FROM pyo.sandbox_servers WHERE address IS NOT NULL AND state <> 'refused'",

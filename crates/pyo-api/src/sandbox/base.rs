@@ -1,57 +1,112 @@
-//! Pyo's built-in sandbox template `base`: Debian 13 with the common tools
-//! (deploy/images/sandbox-base.Dockerfile). It's the installation's, so
-//! every team has it, and a sandbox created without a template starts
-//! from it.
+//! Pyo's built-in sandbox templates ([`ALL`]):
+//! - `base`: Debian 13 with the common tools
+//!   (deploy/images/sandbox-base.Dockerfile). A sandbox created without a
+//!   template starts from it.
+//! - `desktop`: `base` with a desktop, noVNC on port 6080 and Chromium with
+//!   CDP on port 9222, started on first use
+//!   (deploy/images/sandbox-desktop.Dockerfile). Its sandboxes get 2 CPUs
+//!   and 2 GiB unless the create says otherwise.
 //!
+//! They're the installation's, so every team has them. For each:
 //! - Seeding: when a worker starts, and in every sandbox round, Pyo makes
-//!   sure `base` exists and points at its release's image
-//!   (`PYO_SANDBOX_BASE_REF`, pinned by digest in release.json). It's
+//!   sure it exists and points at its release's image (its env var, like
+//!   `PYO_SANDBOX_BASE_REF`, pinned by digest in release.json). It's
 //!   idempotent. It's ready to use from the start, with or without servers.
 //!   Lists show it even before it's added ([`listed`]).
 //! - On first use: servers don't make it when they join. The first sandbox
 //!   that needs it on a server has the server make it, then starts
 //!   ([`super::firstuse`]). Later ones there start from that copy.
-//! - On update: a new release has a new image, so `base` gets a new
-//!   revision (the digest's start). Servers that have an older one make it
-//!   beside it in the background, and [`super::templates`] moves new
-//!   sandboxes over once it's ready and deletes the old one once no
-//!   sandbox uses it. Servers that never used it stay as they are.
-//!   An older Pyo still running during the update never moves it back.
-//! - Dev builds have no image of their own: they use the latest release
-//!   Pyo found when it checked for updates, or wait for one.
-//! - Nobody deletes it, and no other template may be named `base`.
+//! - On update: a new release has a new image, so it gets a new revision
+//!   (the digest's start). Servers that have an older one make it beside
+//!   it in the background, and [`super::templates`] moves new sandboxes
+//!   over once it's ready and deletes the old one once no sandbox uses it.
+//!   Servers that never used it stay as they are. An older Pyo still
+//!   running during the update never moves it back.
+//! - Dev builds have no image of their own unless scripts/pyo-up.sh gives
+//!   one (it builds `desktop`'s): they use the latest release Pyo found when
+//!   it checked for updates, or wait for one.
+//! - Nobody deletes it, and no other template may take its name.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use pyo_proto::{parse_version, pinned_image};
+use pyo_proto::{ReleaseImages, parse_version, pinned_image};
 use serde_json::{Value, json};
 
 use crate::AppState;
 
-/// Its name, which sandboxes ask for.
-pub const NAME: &str = "base";
-/// Its id, the same on every installation.
-pub const ID: &str = "stp_base";
-/// What it runs, shown beside its image.
-pub const OS: &str = "Debian 13";
-
-/// Whether servers make template `id` on first use instead of when they
-/// join: only `base`.
-pub fn on_demand(id: &str) -> bool {
-    id == ID
+/// One of Pyo's built-in templates.
+#[derive(Debug)]
+pub struct Builtin {
+    /// Its name, which sandboxes ask for.
+    pub name: &'static str,
+    /// Its id, the same on every installation.
+    pub id: &'static str,
+    /// What it runs, shown beside its image.
+    pub os: &'static str,
+    /// The env var this release's image comes in.
+    pub env: &'static str,
+    /// Its image in a release.json.
+    pub image: fn(&ReleaseImages) -> &str,
+    /// The size its sandboxes get when the create gives none.
+    pub cpus: u32,
+    pub memory_mib: u32,
 }
 
-/// The image to seed `base` from, and the release it belongs to.
+pub const BASE: Builtin = Builtin {
+    name: "base",
+    id: "stp_base",
+    os: "Debian 13",
+    env: pyo_proto::SANDBOX_BASE_ENV,
+    image: |i| &i.sandbox_base,
+    cpus: pyo_proto::sandbox::DEFAULT_CPUS,
+    memory_mib: pyo_proto::sandbox::DEFAULT_MEMORY_MIB,
+};
+
+pub const DESKTOP: Builtin = Builtin {
+    name: "desktop",
+    id: "stp_desktop",
+    os: "Debian 13",
+    env: pyo_proto::SANDBOX_DESKTOP_ENV,
+    image: |i| &i.sandbox_desktop,
+    // Chromium and the screen need room.
+    cpus: 2,
+    memory_mib: 2048,
+};
+
+/// Every built-in template, in the order lists show them.
+pub const ALL: [&Builtin; 2] = [&BASE, &DESKTOP];
+
+/// `base`'s name, which a create without a template asks for.
+pub const NAME: &str = BASE.name;
+
+/// The built-in template named `name`.
+pub fn by_name(name: &str) -> Option<&'static Builtin> {
+    ALL.into_iter().find(|b| b.name == name)
+}
+
+/// The built-in template with id `id`.
+pub fn by_id(id: &str) -> Option<&'static Builtin> {
+    ALL.into_iter().find(|b| b.id == id)
+}
+
+/// Whether servers make template `id` on first use instead of when they
+/// join: only the built-in ones.
+pub fn on_demand(id: &str) -> bool {
+    by_id(id).is_some()
+}
+
+/// The image to seed a built-in template from, and the release it belongs
+/// to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wanted {
     pub image: String,
     pub release: String,
 }
 
-/// This release's image, from `PYO_SANDBOX_BASE_REF`. None for a build
-/// that isn't a release (scripts/pyo-up.sh leaves it empty).
-pub fn from_env() -> Option<Wanted> {
-    let image = std::env::var(pyo_proto::SANDBOX_BASE_ENV).ok()?;
+/// This release's image for `b`, from its env var. None for a build that
+/// isn't a release (scripts/pyo-up.sh leaves base's empty).
+pub fn from_env(b: &Builtin) -> Option<Wanted> {
+    let image = std::env::var(b.env).ok()?;
     let image = image.trim();
     pinned_image(image).then(|| Wanted {
         image: image.to_owned(),
@@ -67,48 +122,52 @@ pub fn revision(image: &str) -> Option<String> {
 }
 
 /// The template's source for an image.
-pub fn source(w: &Wanted) -> Value {
-    json!({ "kind": "image", "image": w.image, "os": OS, "release": w.release })
+pub fn source(b: &Builtin, w: &Wanted) -> Value {
+    json!({ "kind": "image", "image": w.image, "os": b.os, "release": w.release })
 }
 
-/// Why `base` can't be used yet, when Pyo has no image for it.
-pub const UNAVAILABLE: &str =
-    "Pyo has no image for base yet. It gets one when it checks for updates.";
+/// Why `b` can't be used yet, when Pyo has no image for it.
+pub fn unavailable(b: &Builtin) -> String {
+    format!(
+        "Pyo has no image for {} yet. It gets one when it checks for updates.",
+        b.name
+    )
+}
 
-/// `base` as a list shows it before it's added: as it will be, from the
-/// image it would have. Unavailable, with why, when there's none yet.
-pub fn view(want: Option<&Wanted>) -> Value {
+/// `b` as a list shows it before it's added: as it will be, from the image
+/// it would have. Unavailable, with why, when there's none yet.
+pub fn view(b: &Builtin, want: Option<&Wanted>) -> Value {
     let (source, state, error) = match want {
-        Some(w) => (source(w), "ready", None),
+        Some(w) => (source(b, w), "ready", None),
         None => (
-            json!({ "kind": "image", "os": OS }),
+            json!({ "kind": "image", "os": b.os }),
             "unavailable",
-            Some(UNAVAILABLE),
+            Some(unavailable(b)),
         ),
     };
     json!({
-        "id": ID, "teamId": null, "name": NAME, "source": source, "state": state,
+        "id": b.id, "teamId": null, "name": b.name, "source": source, "state": state,
         "builtin": true, "revision": want.and_then(|w| revision(&w.image)),
         "snapshots": {}, "error": error, "createdBy": "Pyo",
         "createdAt": null, "updatedAt": null, "servers": [],
     })
 }
 
-/// Whether `base` is in the database yet.
-pub async fn added(db: &sqlx::PgPool) -> sqlx::Result<bool> {
+/// Whether `b` is in the database yet.
+pub async fn added(db: &sqlx::PgPool, b: &Builtin) -> sqlx::Result<bool> {
     sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pyo.sandbox_templates WHERE id = $1)")
-        .bind(ID)
+        .bind(b.id)
         .fetch_one(db)
         .await
 }
 
 /// [`view`] with the image Pyo would add it with now.
-pub async fn listed(db: &sqlx::PgPool) -> Value {
-    view(wanted(db).await.as_ref())
+pub async fn listed(db: &sqlx::PgPool, b: &Builtin) -> Value {
+    view(b, wanted(db, b).await.as_ref())
 }
 
-/// What seeding does, given the template's source now (None: there's no
-/// `base` yet).
+/// What seeding does, given the template's source now (None: it isn't
+/// there yet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Seed {
     Insert,
@@ -132,12 +191,12 @@ pub fn decide(have: Option<&Value>, want: &Wanted) -> Seed {
     }
 }
 
-/// `base`'s image in what an update check found.
-fn in_checked(c: &crate::updates::Checked) -> Option<Wanted> {
+/// `b`'s image in what an update check found.
+fn in_checked(b: &Builtin, c: &crate::updates::Checked) -> Option<Wanted> {
     let found = c.found.as_ref()?;
-    let image = &found.release.images.sandbox_base;
+    let image = (b.image)(&found.release.images);
     pinned_image(image).then(|| Wanted {
-        image: image.clone(),
+        image: image.to_owned(),
         release: found.release.version.clone(),
     })
 }
@@ -146,50 +205,73 @@ fn in_checked(c: &crate::updates::Checked) -> Option<Wanted> {
 /// wait for the next scheduled check (up to six hours).
 static CHECKED: AtomicBool = AtomicBool::new(false);
 
-/// The image `base` should have now: this release's, else (a dev build)
-/// the latest release found by the update check. When that found none, or
+/// The image `b` should have now: this release's, else (a dev build) the
+/// latest release found by the update check. When that found none, or
 /// failed, it checks once now.
-pub async fn wanted(db: &sqlx::PgPool) -> Option<Wanted> {
-    if let Some(w) = from_env() {
+pub async fn wanted(db: &sqlx::PgPool, b: &Builtin) -> Option<Wanted> {
+    if let Some(w) = from_env(b) {
         return Some(w);
     }
     let c = crate::updates::checked(db).await.ok()?;
-    let have = in_checked(&c);
+    let have = in_checked(b, &c);
     if (have.is_none() || c.error.is_some())
         && !crate::updates::checks_off_by_env()
         && !CHECKED.swap(true, Ordering::Relaxed)
         && let Ok(now) = crate::updates::check(db).await
     {
-        return in_checked(&now).or(have);
+        return in_checked(b, &now).or(have);
     }
     have
 }
 
-/// Said once per process, so a dev build doesn't repeat it every round.
-static SAID_WAITING: AtomicBool = AtomicBool::new(false);
+/// Which templates' waiting was said (a bit each, by place in [`ALL`]),
+/// once per process, so a dev build doesn't repeat it every round.
+static SAID_WAITING: AtomicU8 = AtomicU8::new(0);
 
-/// Makes sure `base` exists and has the image it should. Tells the servers
-/// at once when that changed. False when there's no image for it yet.
-pub async fn ensure(s: &AppState) -> anyhow::Result<bool> {
-    let Some(want) = wanted(&s.db).await else {
-        if !SAID_WAITING.swap(true, Ordering::Relaxed) {
+/// Makes sure `b` exists and has the image it should. Tells the servers at
+/// once when that changed. False when there's no image for it yet.
+pub async fn ensure(s: &AppState, b: &'static Builtin) -> anyhow::Result<bool> {
+    let Some(want) = wanted(&s.db, b).await else {
+        let bit = 1 << ALL.iter().position(|x| x.id == b.id).unwrap_or(0);
+        if SAID_WAITING.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
             tracing::info!(
-                "sandbox template base: this build has no image for it, and no release was found yet, so it's added later"
+                "sandbox template {}: this build has no image for it, and no release was found yet, so it's added later",
+                b.name
             );
         }
         return Ok(false);
     };
-    seed_from(s, &want).await.map(|_| true)
+    seed_from(s, b, &want).await.map(|_| true)
 }
 
-/// Seeds `base` from `want`, and says what it did.
-pub async fn seed_from(s: &AppState, want: &Wanted) -> anyhow::Result<Seed> {
+/// [`ensure`] for every built-in template. True once they all have an
+/// image. The first error, after trying them all.
+pub async fn ensure_all(s: &AppState) -> anyhow::Result<bool> {
+    let mut all = true;
+    let mut first = None;
+    for b in ALL {
+        match ensure(s, b).await {
+            Ok(had) => all &= had,
+            Err(e) => {
+                all = false;
+                first.get_or_insert(e);
+            }
+        }
+    }
+    match first {
+        Some(e) => Err(e),
+        None => Ok(all),
+    }
+}
+
+/// Seeds `b` from `want`, and says what it did.
+pub async fn seed_from(s: &AppState, b: &Builtin, want: &Wanted) -> anyhow::Result<Seed> {
     let want = want.clone();
     let rev = revision(&want.image);
     let mut tx = s.db.begin().await?;
     let have: Option<Value> =
         sqlx::query_scalar("SELECT source FROM pyo.sandbox_templates WHERE id = $1 FOR UPDATE")
-            .bind(ID)
+            .bind(b.id)
             .fetch_optional(&mut *tx)
             .await?;
     let seed = decide(have.as_ref(), &want);
@@ -201,22 +283,23 @@ pub async fn seed_from(s: &AppState, want: &Wanted) -> anyhow::Result<Seed> {
                  VALUES ($1, NULL, $2, $3, 'ready', 'Pyo', true, $4)
                  ON CONFLICT (id) DO NOTHING",
             )
-            .bind(ID)
-            .bind(NAME)
-            .bind(source(&want))
+            .bind(b.id)
+            .bind(b.name)
+            .bind(source(b, &want))
             .bind(&rev)
             .execute(&mut *tx)
             .await;
             if let Err(e) = res {
                 if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23505") {
                     tracing::warn!(
-                        "sandbox template base: the installation has another template named base, so Pyo's isn't added"
+                        "sandbox template {0}: the installation has another template named {0}, so Pyo's isn't added",
+                        b.name
                     );
                     return Ok(Seed::Keep);
                 }
                 return Err(e.into());
             }
-            tracing::info!(image = %want.image, "sandbox template base added");
+            tracing::info!(image = %want.image, "sandbox template {} added", b.name);
         }
         Seed::Move => {
             sqlx::query(
@@ -224,32 +307,32 @@ pub async fn seed_from(s: &AppState, want: &Wanted) -> anyhow::Result<Seed> {
                     SET source = $2, revision = $3, builtin = true, error = NULL, updated_at = now()
                   WHERE id = $1",
             )
-            .bind(ID)
-            .bind(source(&want))
+            .bind(b.id)
+            .bind(source(b, &want))
             .bind(&rev)
             .execute(&mut *tx)
             .await?;
-            tracing::info!(image = %want.image, "sandbox template base moved to a new image");
+            tracing::info!(image = %want.image, "sandbox template {} moved to a new image", b.name);
         }
     }
     tx.commit().await?;
-    tokio::spawn(super::templates::push(s.clone(), ID.to_owned()));
+    tokio::spawn(super::templates::push(s.clone(), b.id.to_owned()));
     Ok(seed)
 }
 
-/// On a worker's start: [`ensure`], retried while the database is busy,
-/// and every ten minutes while there's no image for it (a dev build
-/// before an update check finds a release). Sandbox rounds keep it in
-/// step after that, once there's a sandbox server.
+/// On a worker's start: [`ensure_all`], retried while the database is
+/// busy, and every ten minutes while one has no image (a dev build before
+/// an update check finds a release). Sandbox rounds keep them in step
+/// after that, once there's a sandbox server.
 pub async fn seed(s: AppState) {
     let mut attempt = 0u64;
     while attempt < 10 && !s.stopping() {
-        match ensure(&s).await {
+        match ensure_all(&s).await {
             Ok(true) => return,
             Ok(false) => tokio::time::sleep(std::time::Duration::from_secs(600)).await,
             Err(e) => {
                 attempt += 1;
-                tracing::warn!(attempt, error = %format!("{e:#}"), "sandbox template base: couldn't add it, retrying");
+                tracing::warn!(attempt, error = %format!("{e:#}"), "sandbox templates: couldn't add Pyo's, retrying");
                 tokio::time::sleep(std::time::Duration::from_secs(15 * attempt)).await;
             }
         }
@@ -274,7 +357,7 @@ mod tests {
     fn seeding_is_idempotent() {
         let w = want(A, "0.4.1");
         assert_eq!(decide(None, &w), Seed::Insert);
-        let src = source(&w);
+        let src = source(&BASE, &w);
         assert_eq!(decide(Some(&src), &w), Seed::Keep, "the same image again");
         assert_eq!(src["os"], "Debian 13");
         assert_eq!(src["kind"], "image");
@@ -282,11 +365,14 @@ mod tests {
 
     #[test]
     fn a_new_release_moves_it_forward_only() {
-        let old = source(&want(A, "0.4.1"));
+        let old = source(&BASE, &want(A, "0.4.1"));
         let new = want(B, "0.4.2");
         assert_eq!(decide(Some(&old), &new), Seed::Move);
         // The older Pyo, still running during the update, leaves it.
-        assert_eq!(decide(Some(&source(&new)), &want(A, "0.4.1")), Seed::Keep);
+        assert_eq!(
+            decide(Some(&source(&BASE, &new)), &want(A, "0.4.1")),
+            Seed::Keep
+        );
         // A rebuilt image of the same release moves it too.
         assert_eq!(decide(Some(&old), &want(B, "0.4.1")), Seed::Move);
         // One without a release (made by hand) is taken over.
@@ -301,21 +387,52 @@ mod tests {
 
     #[test]
     fn listed_before_it_is_added() {
-        let v = view(Some(&want(A, "0.4.1")));
+        let v = view(&BASE, Some(&want(A, "0.4.1")));
         assert_eq!(
             (v["id"].as_str(), v["name"].as_str(), v["state"].as_str()),
-            (Some(ID), Some(NAME), Some("ready"))
+            (Some(BASE.id), Some(NAME), Some("ready"))
         );
         assert_eq!(v["source"]["image"], A);
         assert_eq!(v["revision"], "aaaaaaaaaaaa");
         assert_eq!(v["builtin"], true);
         assert_eq!(v["servers"], json!([]));
         // No image anywhere: listed, and why it can't be used yet.
-        let v = view(None);
+        let v = view(&BASE, None);
         assert_eq!(v["state"], "unavailable");
-        assert_eq!(v["error"], UNAVAILABLE);
-        assert_eq!(v["source"]["os"], OS);
-        assert!(!UNAVAILABLE.contains(';'));
+        assert_eq!(
+            v["error"],
+            "Pyo has no image for base yet. It gets one when it checks for updates."
+        );
+        assert_eq!(v["source"]["os"], BASE.os);
+        assert!(!unavailable(&BASE).contains(';'));
+        // desktop the same way, by its own name.
+        let v = view(&DESKTOP, None);
+        assert_eq!(
+            (v["id"].as_str(), v["name"].as_str()),
+            (Some("stp_desktop"), Some("desktop"))
+        );
+        assert!(v["error"].as_str().unwrap().contains("image for desktop"));
+    }
+
+    #[test]
+    fn the_builtins() {
+        assert_eq!(ALL.map(|b| b.name), ["base", "desktop"]);
+        assert!(on_demand("stp_base") && on_demand("stp_desktop"));
+        assert!(!on_demand("stp_other"));
+        assert_eq!(by_name("desktop").map(|b| b.id), Some("stp_desktop"));
+        assert!(by_name("node-22").is_none());
+        // desktop's sandboxes get room for Chromium.
+        assert!(DESKTOP.cpus >= 2 && DESKTOP.memory_mib >= 2048);
+        let images = pyo_proto::ReleaseImages {
+            sandbox_base: A.into(),
+            sandbox_desktop: B.into(),
+            ..Default::default()
+        };
+        assert_eq!(((BASE.image)(&images), (DESKTOP.image)(&images)), (A, B));
+        for b in ALL {
+            assert!(pyo_proto::sandbox::is_template_name(b.name));
+            assert!(!b.env.ends_with("_IMAGE"), "older Pyos refuse new *_IMAGE vars");
+        }
     }
 
     #[test]
@@ -323,7 +440,7 @@ mod tests {
         assert_eq!(revision(A).as_deref(), Some("aaaaaaaaaaaa"));
         assert_eq!(revision(B).as_deref(), Some("cccccccccccc"));
         assert_eq!(revision("debian:13"), None);
-        let name = super::super::templates::server_name(ID, revision(A).as_deref());
+        let name = super::super::templates::server_name(BASE.id, revision(A).as_deref());
         assert_eq!(name, "stp_base.aaaaaaaaaaaa");
         assert!(pyo_proto::sandbox::is_template_name(&name));
     }
@@ -332,18 +449,19 @@ mod tests {
     fn only_a_pinned_image_from_the_env_counts() {
         // SAFETY: tests in this module don't read it concurrently.
         unsafe { std::env::set_var("PYO_SANDBOX_BASE_REF", "") };
-        assert_eq!(from_env(), None, "a dev build (pyo-up.sh)");
+        assert_eq!(from_env(&BASE), None, "a dev build (pyo-up.sh)");
         unsafe {
             std::env::set_var(
                 "PYO_SANDBOX_BASE_REF",
                 "127.0.0.1:5005/pyo/sandbox-base:dev",
             )
         };
-        assert_eq!(from_env(), None, "not pinned");
+        assert_eq!(from_env(&BASE), None, "not pinned");
         unsafe { std::env::set_var("PYO_SANDBOX_BASE_REF", A) };
-        assert_eq!(from_env(), Some(want(A, crate::updates::current())));
+        assert_eq!(from_env(&BASE), Some(want(A, crate::updates::current())));
+        assert_eq!(from_env(&DESKTOP), None, "each has its own");
         unsafe { std::env::remove_var("PYO_SANDBOX_BASE_REF") };
-        assert_eq!(from_env(), None);
+        assert_eq!(from_env(&BASE), None);
     }
 
     /// Against a real Postgres (DATABASE_URL, a throwaway one, in a database
@@ -373,15 +491,15 @@ mod tests {
             sqlx::query_as::<_, (String, String, Value, Option<String>, bool, Option<String>)>(
                 "SELECT name, state, source, revision, builtin, team_id FROM pyo.sandbox_templates WHERE id = $1",
             )
-            .bind(ID)
+            .bind(BASE.id)
             .fetch_one(&db)
             .await
             .unwrap()
         };
 
         let old = want(A, "0.4.1");
-        assert_eq!(seed_from(&s, &old).await.unwrap(), Seed::Insert);
-        assert_eq!(seed_from(&s, &old).await.unwrap(), Seed::Keep, "idempotent");
+        assert_eq!(seed_from(&s, &BASE, &old).await.unwrap(), Seed::Insert);
+        assert_eq!(seed_from(&s, &BASE, &old).await.unwrap(), Seed::Keep, "idempotent");
         let (n, state, src, rev, builtin, team) = row().await;
         assert_eq!(
             (n.as_str(), state.as_str(), rev.as_deref(), builtin, team),
@@ -404,8 +522,8 @@ mod tests {
 
         // A new release moves it. The old Pyo, still running, doesn't move it back.
         let new = want(B, "0.4.2");
-        assert_eq!(seed_from(&s, &new).await.unwrap(), Seed::Move);
-        assert_eq!(seed_from(&s, &old).await.unwrap(), Seed::Keep);
+        assert_eq!(seed_from(&s, &BASE, &new).await.unwrap(), Seed::Move);
+        assert_eq!(seed_from(&s, &BASE, &old).await.unwrap(), Seed::Keep);
         let (_, _, src, rev, ..) = row().await;
         assert_eq!(
             (src["image"].as_str(), rev.as_deref()),
@@ -422,7 +540,7 @@ mod tests {
             must_set_up: false,
             key: None,
         };
-        let e = super::super::delete_template(&s, &user, ID)
+        let e = super::super::delete_template(&s, &user, BASE.id)
             .await
             .unwrap_err();
         assert_eq!(e.status, axum::http::StatusCode::CONFLICT, "{}", e.message);

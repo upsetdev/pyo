@@ -23,7 +23,9 @@ pub enum Command {
     Create {
         /// The sandbox template, like node-22 (see pyo sandbox templates ls).
         /// Default base: Debian 13 with git, Python, uv, Node.js and pnpm.
-        /// A server makes base the first time it's used there.
+        /// desktop adds a desktop and Chromium: CDP on port 9222, the screen
+        /// on port 6080. A server makes these the first time they're used
+        /// there.
         template: Option<String>,
         /// A name to tell it apart. Pyo makes up a short one when left out.
         #[arg(long)]
@@ -32,10 +34,10 @@ pub enum Command {
         /// when left out.
         #[arg(long)]
         server: Option<String>,
-        /// CPUs. Default 1.
+        /// CPUs. Default 1 (2 for desktop).
         #[arg(long)]
         cpus: Option<u32>,
-        /// Memory in MiB. Default 512.
+        /// Memory in MiB. Default 512 (2048 for desktop).
         #[arg(long)]
         memory: Option<u32>,
         /// Writable disk in MiB. Default 2048.

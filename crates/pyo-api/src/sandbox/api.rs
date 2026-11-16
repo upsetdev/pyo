@@ -140,9 +140,9 @@ pub(crate) async fn get_one(
 /// `createSandboxToken`. `teamId` may be left out when the API key (or
 /// you) can use only one team. `server` runs it on that server only.
 ///
-/// A server that doesn't have the template `base` yet makes it first:
-/// the first sandbox from `base` there takes a minute or so longer, and
-/// later ones start at once.
+/// A server that doesn't have Pyo's template `base` (or `desktop`) yet
+/// makes it first: the first sandbox from it there takes a minute or so
+/// longer, and later ones start at once.
 #[utoipa::path(post, path = "/sandboxes", operation_id = "createSandbox", tag = "Sandboxes",
     request_body(content = CreateSandbox),
     responses(
@@ -151,8 +151,8 @@ pub(crate) async fn get_one(
         (status = 403, description = "Your role, the API key's access or the team's sandbox limits don't allow it.", body = ErrorBody),
         (status = 404, description = "No such team, template, project or server.", body = ErrorBody),
         (status = 409, description = "No sandbox server can run it: none yet, none with the template, or none with KVM for `isolation: vm`.", body = ErrorBody),
-        (status = 502, description = "The server couldn't make `base`. The error says why.", body = ErrorBody),
-        (status = 503, description = "Every sandbox server is full or down, the server asked for has no room, or `base` is still being made there. Try again soon.", body = ErrorBody),
+        (status = 502, description = "The server couldn't make `base` or `desktop`. The error says why.", body = ErrorBody),
+        (status = 503, description = "Every sandbox server is full or down, the server asked for has no room, or `base` or `desktop` is still being made there. Try again soon.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("sandboxes"))))]
 pub(crate) async fn create(
@@ -532,7 +532,7 @@ pub(crate) async fn create_dns_record(
 #[utoipa::path(get, path = "/sandbox-templates", operation_id = "listSandboxTemplates", tag = "Sandboxes",
     params(TeamQuery),
     responses(
-        (status = 200, description = "`templates`, each with `id`, `teamId` (null for the installation's), `name`, `source` (`kind` and `image`), `state` (\"pending\", \"building\", \"ready\" or \"failed\", from its servers, and \"unavailable\" for `base` while Pyo has no image for it), `builtin`, `servers`, `error` and `createdAt`. `base` is always listed and ready to use: servers make it on first use, so its `servers` are those that have it. Each of the other templates' `servers` is a sandbox server that may use it, with `id`, `name`, `state` (\"pending\", \"building\", \"ready\" or \"failed\"), `phase` while building (\"queued\", \"pulling\", \"unpacking\" or \"snapshotting\"), `pulled` and `imageBytes`, `pullMs`, `unpackMs` and `snapshotMs`, `bytes` (disk it takes there), `snapshots` and `error`.", body = Object),
+        (status = 200, description = "`templates`, each with `id`, `teamId` (null for the installation's), `name`, `source` (`kind` and `image`), `state` (\"pending\", \"building\", \"ready\" or \"failed\", from its servers, and \"unavailable\" for `base` or `desktop` while Pyo has no image for it), `builtin`, `servers`, `error` and `createdAt`. Pyo's own `base` and `desktop` come first, are always listed and are ready to use: servers make them on first use, so their `servers` are those that have them. Each of the other templates' `servers` is a sandbox server that may use it, with `id`, `name`, `state` (\"pending\", \"building\", \"ready\" or \"failed\"), `phase` while building (\"queued\", \"pulling\", \"unpacking\" or \"snapshotting\"), `pulled` and `imageBytes`, `pullMs`, `unpackMs` and `snapshotMs`, `bytes` (disk it takes there), `snapshots` and `error`.", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
