@@ -1,7 +1,6 @@
 import {
   ArrowCircleUpIcon,
   ChartLineUpIcon,
-  CloudArrowUpIcon,
   EnvelopeSimpleIcon,
   type Icon,
 } from "@phosphor-icons/react";
@@ -18,9 +17,9 @@ import { AppShell } from "~/components/shell/AppShell";
 import { Page, PageHeader } from "~/components/ui/Panel";
 import { seo } from "~/lib/seo";
 
-// Settings of this Pyo installation, for every team: backups of its own
-// data, outgoing email, analytics privacy, the GitHub App and updates of Pyo
-// itself, a page each.
+// Settings of this Pyo installation, for every team: outgoing email,
+// analytics privacy, the GitHub App and updates of Pyo itself, a page each.
+// Backups of Pyo's own data are on Backups, in its Pyo tab.
 // Team settings stay under each team (/:team/settings).
 export const Route = createFileRoute("/_app/settings")({
   head: () => ({ meta: seo({ title: "Settings" }) }),
@@ -47,7 +46,6 @@ const TABS: {
   label: string;
   icon: Icon | ComponentType<{ size?: number }>;
 }[] = [
-  { to: "/settings/backups", label: "Backups", icon: CloudArrowUpIcon },
   { to: "/settings/email", label: "Email", icon: EnvelopeSimpleIcon },
   {
     to: "/settings/observability",

@@ -11,7 +11,9 @@ import {
 } from "@phosphor-icons/react";
 import { type ReactNode, useState } from "react";
 import { Badge, type Tone } from "~/components/ui/Badge";
-import { Button, ButtonLink } from "~/components/ui/Button";
+import { Link } from "@tanstack/react-router";
+import { Button, buttonClass } from "~/components/ui/Button";
+import { currentSlug } from "~/lib/pyo/paths";
 import { Dialog } from "~/components/ui/Dialog";
 import { Field, Segmented, Select, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
@@ -670,9 +672,14 @@ function BackupHint({ u }: { u: Updates }) {
           : "Pyo's own data hasn't been backed up yet"
       }
       action={
-        <ButtonLink href="/settings/backups" size="sm" variant="secondary">
+        <Link
+          to="/$team/backups"
+          params={{ team: currentSlug() }}
+          search={{ tab: "pyo" }}
+          className={buttonClass("secondary", "sm")}
+        >
           Backups
-        </ButtonLink>
+        </Link>
       }
     >
       {old
