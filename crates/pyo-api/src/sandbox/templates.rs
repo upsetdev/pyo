@@ -359,6 +359,44 @@ pub fn roll_up(reports: &[TemplateReport], missing: usize) -> (&'static str, Opt
     ("pending", None)
 }
 
+/// A server's build error, as the dashboard shows it: the common ones in
+/// plain words, the others as they are.
+pub fn plain_build_error(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let has = |s: &str| lower.contains(s);
+    // TLS that got something else back: a web server, not a registry.
+    if has("corrupt message") || has("invalidcontenttype") || has("wrong version number") {
+        return "That address isn't a registry.".into();
+    }
+    if has("certificate") && has("tls with") {
+        return "The registry's certificate isn't valid.".into();
+    }
+    if let Some(rest) = raw.split_once("The registry answered ").map(|(_, r)| r) {
+        let status = rest.split_whitespace().next().unwrap_or_default();
+        // Pyo's registry door says what to do itself.
+        if let Some((_, door)) = rest.split_once("Not one of this team's images.") {
+            let door = door.trim();
+            return if door.is_empty() {
+                "Push this image to Pyo's registry with your team's login first.".into()
+            } else {
+                format!("Not one of this team's images. {door}")
+            };
+        }
+        match status {
+            "401" | "403" => return "The registry refused the login for this image.".into(),
+            "404" => return "That image isn't in the registry. Check its name and tag.".into(),
+            _ => {}
+        }
+    }
+    if has("dns error") || has("failed to lookup") || has("name or service not known") {
+        return "That registry's address doesn't resolve.".into();
+    }
+    if has("connecting to") && (has("timed out") || has("refused")) {
+        return "The server couldn't reach that registry.".into();
+    }
+    raw.to_owned()
+}
+
 /// Rolls every template's state up from the servers' latest reports, by
 /// its current revision. While a new revision is made, a template whose
 /// older one is ready on a server stays ready: new sandboxes start from it.
@@ -614,6 +652,43 @@ mod tests {
             None
         );
         assert_eq!(in_pyos_registry("ghcr.io/o/r", &[String::new()]), None);
+    }
+
+    #[test]
+    fn build_errors_in_plain_words() {
+        let p = plain_build_error;
+        assert_eq!(
+            p(
+                "TLS with asus.blue-pancake.ts.net: received corrupt message of type InvalidContentType"
+            ),
+            "That address isn't a registry."
+        );
+        assert_eq!(
+            p(
+                "The registry answered 403 Forbidden for the manifest of frans/sandbox-base: Not one of this team's images."
+            ),
+            "Push this image to Pyo's registry with your team's login first."
+        );
+        assert_eq!(
+            p(
+                "The registry answered 403 Forbidden for the manifest of frans/sandbox-base: Not one of this team's images. Push it as acme/<project>/<name> first."
+            ),
+            "Not one of this team's images. Push it as acme/<project>/<name> first."
+        );
+        assert_eq!(
+            p(
+                "The registry answered 404 Not Found for the manifest of library/nope: manifest unknown"
+            ),
+            "That image isn't in the registry. Check its name and tag."
+        );
+        assert_eq!(
+            p("connecting to 10.0.0.9:443: Connection refused (os error 111)"),
+            "The server couldn't reach that registry."
+        );
+        assert_eq!(
+            p("The image has no linux/arm64 variant."),
+            "The image has no linux/arm64 variant."
+        );
     }
 
     #[test]

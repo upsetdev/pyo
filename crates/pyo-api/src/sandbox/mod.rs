@@ -360,7 +360,7 @@ pub async fn template_views(
     team_ids: &[String],
     id: Option<&str>,
 ) -> sqlx::Result<Vec<Value>> {
-    sqlx::query_scalar(
+    let mut rows: Vec<Value> = sqlx::query_scalar(
         "SELECT jsonb_build_object(
             'id', t.id, 'teamId', t.team_id, 'name', t.name, 'source', t.source, 'state', t.state,
             'builtin', t.builtin, 'revision', t.revision,
@@ -387,7 +387,20 @@ pub async fn template_views(
     .bind(team_ids)
     .bind(id)
     .fetch_all(db)
-    .await
+    .await?;
+    // Build errors in plain words.
+    let plain = |e: &mut Value| {
+        if let Some(raw) = e.as_str() {
+            *e = json!(templates::plain_build_error(raw));
+        }
+    };
+    for r in &mut rows {
+        plain(&mut r["error"]);
+        for s in r["servers"].as_array_mut().into_iter().flatten() {
+            plain(&mut s["error"]);
+        }
+    }
+    Ok(rows)
 }
 
 // ── Create ─────────────────────────────────────────────────────────────────
