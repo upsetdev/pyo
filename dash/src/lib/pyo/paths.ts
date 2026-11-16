@@ -25,6 +25,7 @@ export function teamPath(slug: string, path: string) {
 export const SETTINGS_PAGES = [
   "/backups",
   "/email",
+  "/github",
   "/observability",
   "/updates",
 ] as const;

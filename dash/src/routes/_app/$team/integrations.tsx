@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { siGitlab, siHetzner, siTailscale, siVault } from "simple-icons";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { z } from "zod";
@@ -18,9 +18,7 @@ import { GitlabRows, TokenDialog } from "~/components/pyo/GitConnections";
 import { HetznerSettings, hetznerOf } from "~/components/pyo/Hetzner";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
 import { Badge, type Tone } from "~/components/ui/Badge";
-import { Button } from "~/components/ui/Button";
-import { GithubAppSetup } from "~/components/pyo/GithubSettings";
-import { ManagedOr } from "~/components/pyo/Managed";
+import { Button, buttonClass } from "~/components/ui/Button";
 import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import type { MenuItem } from "~/components/ui/Menu";
 import { Page, PageHeader, NoMatches } from "~/components/ui/Panel";
@@ -480,12 +478,11 @@ const GITHUB_ERRORS: Record<string, string> = {
   taken: "Another team has connected this GitHub account.",
   denied: "Your GitHub account can't access that installation.",
   expired: "That took too long. Try again.",
-  "app-failed": "GitHub didn't create the app.",
 };
 
 /**
- * Back from GitHub (?github=created after creating the app, ?github=connected
- * after installing it): say how it went and open the GitHub card.
+ * Back from GitHub after installing the app (?github=connected, or an
+ * error): say how it went and open the GitHub card.
  */
 function useGithubReturn(open: () => void) {
   useEffect(() => {
@@ -497,8 +494,6 @@ function useGithubReturn(open: () => void) {
         description:
           "Pick a repository in New deploy. Pushes then deploy on their own.",
       });
-    else if (q === "created")
-      toast({ title: "GitHub App created", description: "Connect an account next." });
     else
       toast({
         tone: "error",
@@ -549,23 +544,26 @@ function GithubRows() {
     if (r) window.location.assign(r.url);
     else setBusy(false);
   };
-  // No GitHub App yet: the installation admin creates it right here.
+  // No GitHub App yet: the installation admin creates it in Settings.
   if (!s.github)
-    return s.user.isAdmin ? (
-      <li className="px-5 py-4">
-        <ManagedOr
-          title="GitHub is managed for you"
-          description="Connect repositories when you deploy."
-        >
-          <GithubAppSetup />
-        </ManagedOr>
-      </li>
-    ) : (
+    return (
       <Row
         icon={<BrandMark icon={GITHUB_LOGO} size={15} />}
         title="GitHub"
-        body="An installation admin can set up GitHub."
-        right={<Badge>Not set up</Badge>}
+        body={
+          s.user.isAdmin
+            ? "Set up the GitHub App first."
+            : "Ask an installation admin to set up GitHub."
+        }
+        right={
+          s.user.isAdmin ? (
+            <Link to="/github" className={buttonClass("primary", "xs")}>
+              Set up
+            </Link>
+          ) : (
+            <Badge>Not set up</Badge>
+          )
+        }
       />
     );
   return (
@@ -613,53 +611,6 @@ function GithubRows() {
             {busy ? "Opening GitHub…" : "Connect"}
           </Button>
         }
-      />
-      {s.user.isAdmin ? <GithubAppRow /> : null}
-    </>
-  );
-}
-
-/** The installation's GitHub App, for its admin: where it is, and removing it. */
-function GithubAppRow() {
-  const s = usePyo();
-  const [removing, setRemoving] = useState(false);
-  const app = s.github;
-  if (!app) return null;
-  return (
-    <>
-      <Row
-        icon={<BrandMark icon={GITHUB_LOGO} size={15} />}
-        title={
-          <a
-            href={app.htmlUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="hover:text-primary"
-          >
-            GitHub App · {app.slug}
-          </a>
-        }
-        body={`For every team · owned by ${app.owner} · ${app.webhookActive ? "pushes by webhook" : "pushes checked every minute"}`}
-        right={
-          <Button
-            variant="ghost"
-            size="xs"
-            className="text-destructive"
-            onClick={() => setRemoving(true)}
-          >
-            Remove
-          </Button>
-        }
-      />
-      <ConfirmDialog
-        open={removing}
-        onClose={() => setRemoving(false)}
-        title="Remove the GitHub App?"
-        description="Every team loses private repos and deploy on push."
-        confirmLabel="Remove"
-        onConfirm={async () => {
-          if (await api.removeGithubApp()) toast({ title: "GitHub App removed" });
-        }}
       />
     </>
   );

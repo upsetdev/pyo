@@ -1,12 +1,114 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BrandMark, GITHUB_LOGO } from "~/components/pyo/common";
 import { Button } from "~/components/ui/Button";
+import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Input } from "~/components/ui/Field";
+import { Panel } from "~/components/ui/Panel";
 import { api, usePyo } from "~/lib/pyo/store";
+import { toast } from "~/lib/pyo/toast";
 
-// This installation's GitHub App. The installation admin creates it once
-// with GitHub's manifest flow, in the GitHub card on Integrations. GitHub
-// sends them back to /settings/github?github=created, which opens that card.
+// This installation's GitHub App, on Settings (/github). The installation
+// admin creates it once with GitHub's manifest flow. GitHub sends them back
+// to /github?github=created. Teams then connect their own accounts in the
+// GitHub card on Integrations.
+
+/** Create the app, or see and remove it. */
+export function GithubSettingsSection() {
+  const s = usePyo();
+  // GitHub sends the admin back with ?github=created (or an error).
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get("github");
+    if (!q) return;
+    if (q === "created")
+      toast({
+        title: "GitHub App created",
+        description: "Teams connect GitHub in Integrations.",
+      });
+    else
+      toast({
+        tone: "error",
+        title:
+          q === "expired"
+            ? "That took too long. Try again."
+            : "GitHub didn't create the app.",
+      });
+    window.history.replaceState(null, "", window.location.pathname);
+  }, []);
+  if (!s.user.isAdmin)
+    return (
+      <Panel>
+        <p className="px-4 py-4 text-[13px] text-muted-foreground">
+          Only the installation's admin manages the GitHub App.
+        </p>
+      </Panel>
+    );
+  return (
+    <Panel>
+      {s.github ? (
+        <ul className="list-rows">
+          <GithubAppRow />
+        </ul>
+      ) : (
+        <div className="p-4">
+          <GithubAppSetup />
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/** The installation's GitHub App, for its admin: where it is, and removing it. */
+export function GithubAppRow() {
+  const s = usePyo();
+  const [removing, setRemoving] = useState(false);
+  const app = s.github;
+  if (!app) return null;
+  return (
+    <>
+      <li className="flex flex-wrap items-center gap-3 px-4 py-3">
+        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
+          <BrandMark icon={GITHUB_LOGO} size={15} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-medium">
+            <a
+              href={app.htmlUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="hover:text-primary"
+            >
+              GitHub App · {app.slug}
+            </a>
+          </p>
+          <p className="text-[12px] text-muted-foreground">
+            For every team · owned by {app.owner} ·{" "}
+            {app.webhookActive
+              ? "pushes by webhook"
+              : "pushes checked every minute"}
+          </p>
+        </div>
+        <Button
+          variant="ghost"
+          size="xs"
+          className="text-destructive"
+          onClick={() => setRemoving(true)}
+        >
+          Remove
+        </Button>
+      </li>
+      <ConfirmDialog
+        open={removing}
+        onClose={() => setRemoving(false)}
+        title="Remove the GitHub App?"
+        description="Every team loses private repos and deploy on push."
+        confirmLabel="Remove"
+        onConfirm={async () => {
+          if (await api.removeGithubApp()) toast({ title: "GitHub App removed" });
+        }}
+      />
+    </>
+  );
+}
 
 /** GitHub can only deliver webhooks to a public https address. */
 const publicHttps = (url: string) => {
