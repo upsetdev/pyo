@@ -47,12 +47,10 @@ impl Api {
             .await
             .with_context(|| format!("Can't reach Pyo at {}", self.base))?;
         let status = res.status();
-        let body: Value = res.json().await.unwrap_or(Value::Null);
+        let text = res.text().await.unwrap_or_default();
+        let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if !status.is_success() {
-            let msg = body["error"]
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("Request failed ({status})"));
+            let msg = error_message(status, &body, &text);
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 bail!("{msg}\nSign in again: pyo login");
             }
@@ -105,6 +103,28 @@ impl Api {
     pub async fn me(&self) -> Result<Value> {
         self.get("/api/auth/me").await
     }
+}
+
+/// What a failed request says: the JSON `error`, else the body's text
+/// (an older Pyo answers some bad requests in plain text), else the status.
+fn error_message(status: reqwest::StatusCode, body: &Value, text: &str) -> String {
+    let mut msg = match body["error"].as_str() {
+        Some(e) => e.to_owned(),
+        None => {
+            let t = text.trim();
+            if t.is_empty() || t.starts_with('<') {
+                format!("Request failed ({status})")
+            } else {
+                t.chars().take(300).collect()
+            }
+        }
+    };
+    // Pyo answers a request it can't read with a 400. A 422 is an older
+    // Pyo's, for something this CLI sends that it doesn't know.
+    if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        msg.push_str("\nThis Pyo may be older than the CLI. Update it or use an older CLI.");
+    }
+    msg
 }
 
 /// The dashboard's snapshot, with the lookups the CLI needs.
@@ -211,4 +231,39 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn failed_requests_say_why() {
+        let m = |s, body: &str| {
+            error_message(s, &serde_json::from_str(body).unwrap_or(Value::Null), body)
+        };
+        assert_eq!(
+            m(
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"Add the team parameter."}"#
+            ),
+            "Add the team parameter."
+        );
+        assert_eq!(
+            m(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Failed to deserialize the JSON body into the target type: missing field `template`\n"
+            ),
+            "Failed to deserialize the JSON body into the target type: missing field `template`\nThis Pyo may be older than the CLI. Update it or use an older CLI."
+        );
+        assert_eq!(
+            m(StatusCode::BAD_GATEWAY, ""),
+            "Request failed (502 Bad Gateway)"
+        );
+        assert_eq!(
+            m(StatusCode::BAD_GATEWAY, "<html>"),
+            "Request failed (502 Bad Gateway)"
+        );
+    }
 }
