@@ -1137,13 +1137,18 @@ pub struct ReleaseImages {
     pub postgres17: String,
     #[serde(default)]
     pub postgres18: String,
+    /// Pyo Sandbox's built-in template `base`, multi-arch
+    /// (deploy/images/sandbox-base.Dockerfile). Pyo seeds the template
+    /// from it; nothing runs it on a cluster.
+    #[serde(default)]
+    pub sandbox_base: String,
 }
 
 impl ReleaseImages {
     /// Every image, by its key in release.json. A release pins each image
     /// scripts/release-manifest.ts writes; adding one there means adding
     /// it here (a test compares the two).
-    pub fn all(&self) -> [(&'static str, &str); 14] {
+    pub fn all(&self) -> [(&'static str, &str); 15] {
         [
             ("pyo", &self.pyo),
             ("agent", &self.agent),
@@ -1159,6 +1164,7 @@ impl ReleaseImages {
             ("postgres16", &self.postgres16),
             ("postgres17", &self.postgres17),
             ("postgres18", &self.postgres18),
+            ("sandboxBase", &self.sandbox_base),
         ]
     }
 }
@@ -2563,6 +2569,7 @@ mod release_tests {
                 postgres16: img("postgres-16"),
                 postgres17: img("postgres-17"),
                 postgres18: img("postgres-18"),
+                sandbox_base: img("sandbox-base"),
             },
             manifests: ReleaseManifests {
                 platform: vec![
@@ -2674,10 +2681,10 @@ mod release_tests {
         images
             .as_object_mut()
             .unwrap()
-            .retain(|k, v| !(k == "static" && v == ""));
+            .retain(|k, v| !(matches!(k.as_str(), "static" | "sandboxBase") && v == ""));
         assert_eq!(images, raw["images"]);
         for (name, image) in r.images.all() {
-            if name == "static" && image.is_empty() {
+            if matches!(name, "static" | "sandboxBase") && image.is_empty() {
                 continue;
             }
             assert!(pinned_image(image), "{name}: {image}");

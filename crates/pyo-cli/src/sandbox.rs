@@ -22,7 +22,8 @@ pub enum Command {
     /// Make a sandbox from a sandbox template and print its id.
     Create {
         /// The sandbox template, like node-22 (see pyo sandbox templates ls).
-        template: String,
+        /// Default base: Debian 13 with git, Python, uv, Node.js and pnpm.
+        template: Option<String>,
         /// CPUs. Default 1.
         #[arg(long)]
         cpus: Option<u32>,
@@ -262,7 +263,7 @@ pub async fn run(api: &Api, team: Option<&str>, cmd: Command) -> Result<()> {
             let team = team_id(api, team).await?;
             let body = create_body(CreateArgs {
                 team: &team,
-                template: &template,
+                template: template.as_deref(),
                 cpus,
                 memory,
                 disk,
@@ -409,7 +410,7 @@ async fn lifecycle(api: &Api, id: &str, what: &str, done: &str) -> Result<()> {
 
 pub struct CreateArgs<'a> {
     pub team: &'a str,
-    pub template: &'a str,
+    pub template: Option<&'a str>,
     pub cpus: Option<u32>,
     pub memory: Option<u32>,
     pub disk: Option<u32>,
@@ -424,12 +425,13 @@ pub struct CreateArgs<'a> {
 
 /// The createSandbox body. Left-out values take the API's defaults.
 pub fn create_body(a: CreateArgs) -> Result<Value> {
-    let mut b = json!({ "teamId": a.team, "template": a.template });
+    let mut b = json!({ "teamId": a.team });
     let mut set = |k: &str, v: Value| {
         if !v.is_null() {
             b[k] = v;
         }
     };
+    set("template", json!(a.template));
     set("cpus", json!(a.cpus));
     set("memoryMib", json!(a.memory));
     set("diskMib", json!(a.disk));
@@ -484,7 +486,7 @@ fn size(v: &Value) -> String {
 fn print_sandboxes(list: &Value) {
     let list = list.as_array().map(Vec::as_slice).unwrap_or(&[]);
     if list.is_empty() {
-        println!("No sandboxes. Make one: pyo sandbox create <template>");
+        println!("No sandboxes. Make one: pyo sandbox create");
         return;
     }
     let now = crate::api::now_ms();
@@ -772,6 +774,18 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
     }
 }
 
+/// A template's image as the list shows it. Pyo's built-in one says what
+/// it runs and leaves out its version: Debian 13 · ghcr.io/upsetdev/pyo/sandbox-base.
+fn template_image(t: &Value) -> String {
+    let image = t["source"]["image"].as_str().unwrap_or("-");
+    match t["source"]["os"].as_str() {
+        Some(os) if t["builtin"] == true => {
+            format!("{os} · {}", pyo_proto::image_repo(image))
+        }
+        _ => image.to_owned(),
+    }
+}
+
 async fn templates(api: &Api, team: Option<&str>, cmd: TemplatesCommand) -> Result<()> {
     let team = team_id(api, team).await?;
     match cmd {
@@ -795,7 +809,7 @@ async fn templates(api: &Api, team: Option<&str>, cmd: TemplatesCommand) -> Resu
                 .map(|t| {
                     [
                         t["name"].as_str().unwrap_or("").to_owned(),
-                        t["source"]["image"].as_str().unwrap_or("-").to_owned(),
+                        template_image(t),
                         t["state"].as_str().unwrap_or("").to_owned(),
                     ]
                 })
@@ -1098,7 +1112,7 @@ mod tests {
         let env = vec!["A=1".to_owned(), "B=x=y".to_owned()];
         let b = create_body(CreateArgs {
             team: "tm_1",
-            template: "node-22",
+            template: Some("node-22"),
             cpus: Some(2),
             memory: None,
             disk: None,
@@ -1125,11 +1139,42 @@ mod tests {
     }
 
     #[test]
+    fn no_template_leaves_it_to_pyo() {
+        let b = create_body(CreateArgs {
+            team: "tm_1",
+            template: None,
+            cpus: None,
+            memory: None,
+            disk: None,
+            ttl: None,
+            pause_when_idle: None,
+            env: &[],
+            labels: &[],
+            network: None,
+            isolation: None,
+            project: None,
+        })
+        .unwrap();
+        assert_eq!(b, json!({ "teamId": "tm_1" }), "Pyo uses base");
+    }
+
+    #[test]
+    fn the_builtin_template_shows_what_it_runs() {
+        let base = json!({ "builtin": true, "source": { "image": "ghcr.io/upsetdev/pyo/sandbox-base:0.4.1@sha256:ab", "os": "Debian 13" } });
+        assert_eq!(
+            template_image(&base),
+            "Debian 13 · ghcr.io/upsetdev/pyo/sandbox-base"
+        );
+        let own = json!({ "builtin": false, "source": { "image": "node:22" } });
+        assert_eq!(template_image(&own), "node:22");
+    }
+
+    #[test]
     fn env_and_labels_need_a_key() {
         let bad = vec!["=1".to_owned()];
         let e = create_body(CreateArgs {
             team: "t",
-            template: "x",
+            template: Some("x"),
             cpus: None,
             memory: None,
             disk: None,

@@ -604,6 +604,101 @@ async fn the_control_plane_drives_a_real_daemon() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
+    // ── The built-in template `base`: the default, and how a release moves it ──
+    // Two small public images stand in for two releases' sandbox-base.
+    use super::base;
+    sqlx::query("DELETE FROM pyo.sandbox_templates WHERE id = $1")
+        .bind(base::ID)
+        .execute(&db)
+        .await
+        .unwrap();
+    let old = base::Wanted {
+        image:
+            "alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab"
+                .into(),
+        release: "0.0.1".into(),
+    };
+    let new = base::Wanted {
+        image:
+            "alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"
+                .into(),
+        release: "0.0.2".into(),
+    };
+    let rev = |w: &base::Wanted| {
+        super::templates::server_name(base::ID, base::revision(&w.image).as_deref())
+    };
+    let (old_name, new_name) = (rev(&old), rev(&new));
+    assert_eq!(base::seed_from(&s, &old).await.unwrap(), base::Seed::Insert);
+    wait_for(&s, &team, &server, &old_name, false).await;
+    // No template: base.
+    let no_template: super::CreateSandbox =
+        serde_json::from_value(json!({ "teamId": team, "network": "none", "ttl": "5m" })).unwrap();
+    let first = super::create(&s, &user, no_template.clone()).await.unwrap();
+    assert_eq!(first["sandbox"]["template"], "base", "{first}");
+    let first_id = first["sandbox"]["id"].as_str().unwrap().to_owned();
+    let on: String =
+        sqlx::query_scalar("SELECT spec->>'template' FROM pyo.sandboxes WHERE id = $1")
+            .bind(&first_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(on, old_name);
+    let r = Daemon::new(&address)
+        .exec(
+            first["connection"]["token"].as_str().unwrap(),
+            &first_id,
+            &exec_req("cat /etc/alpine-release"),
+        )
+        .await
+        .unwrap();
+    assert!(r.stdout.starts_with("3.21"), "{r:?}");
+
+    // A new release: made beside the old one, new sandboxes move over.
+    assert_eq!(base::seed_from(&s, &new).await.unwrap(), base::Seed::Move);
+    assert_eq!(
+        base::seed_from(&s, &old).await.unwrap(),
+        base::Seed::Keep,
+        "the old Pyo doesn't move it back"
+    );
+    wait_for(&s, &team, &server, &new_name, false).await;
+    let second = super::create(&s, &user, no_template).await.unwrap();
+    let second_id = second["sandbox"]["id"].as_str().unwrap().to_owned();
+    let r = Daemon::new(&address)
+        .exec(
+            second["connection"]["token"].as_str().unwrap(),
+            &second_id,
+            &exec_req("cat /etc/alpine-release"),
+        )
+        .await
+        .unwrap();
+    assert!(r.stdout.starts_with("3.22"), "{r:?}");
+    // The running sandbox keeps the old disk, which goes once it ends.
+    super::runner::round(&s).await.unwrap();
+    assert!(ready_on(&db, &team, &server).await.contains(&old_name));
+    let r = Daemon::new(&address)
+        .exec(
+            first["connection"]["token"].as_str().unwrap(),
+            &first_id,
+            &exec_req("cat /etc/alpine-release"),
+        )
+        .await
+        .unwrap();
+    assert!(r.stdout.starts_with("3.21"), "{r:?}");
+    super::delete(&s, &user, &first_id).await.unwrap();
+    wait_for(&s, &team, &server, &old_name, true).await;
+    let views = super::template_views(&db, std::slice::from_ref(&team), Some(base::ID))
+        .await
+        .unwrap();
+    assert_eq!(views[0]["state"], "ready", "{}", views[0]);
+    println!("e2e base: {}", views[0]["servers"]);
+    super::delete(&s, &user, &second_id).await.unwrap();
+    sqlx::query("DELETE FROM pyo.sandbox_templates WHERE id = $1")
+        .bind(base::ID)
+        .execute(&db)
+        .await
+        .unwrap();
+    super::templates::forget(s.clone(), base::ID.into()).await;
+
     sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
         .bind(&team)
         .execute(&db)
@@ -617,7 +712,38 @@ async fn the_control_plane_drives_a_real_daemon() {
     keys::reset_cache();
 }
 
-fn test_state(db: PgPool) -> crate::AppState {
+/// The templates a server reports ready, by the names it keeps them under.
+async fn ready_on(db: &PgPool, team: &str, server: &str) -> Vec<String> {
+    let srv = &super::server_views(db, &[team.to_owned()], Some(server))
+        .await
+        .unwrap()[0];
+    srv["templates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["state"] == "ready" || t["state"].is_null())
+        .filter_map(|t| t["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Runs the runner until the server has `name` ready, or (`gone`) no longer has it.
+async fn wait_for(s: &crate::AppState, team: &str, server: &str, name: &str, gone: bool) {
+    let t0 = std::time::Instant::now();
+    loop {
+        super::runner::round(s).await.unwrap();
+        let names = ready_on(&s.db, team, server).await;
+        if names.iter().any(|n| n == name) != gone {
+            return;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(300),
+            "{name} gone={gone}: {names:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+pub(super) fn test_state(db: PgPool) -> crate::AppState {
     let config = crate::Config {
         agent_api_url: String::new(),
         agent_image: String::new(),

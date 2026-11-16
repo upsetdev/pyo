@@ -112,11 +112,16 @@ fn shell(cmd: &str) -> ExecRequest {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn makes_a_template_from_a_public_image() {
-    if !enabled() {
-        return;
-    }
+/// A daemon in dev mode on this machine, its files under `.cache`.
+struct Rig {
+    mgr: Arc<Manager>,
+    st: AppState,
+    token: String,
+    layout: Layout,
+    _cleanup: Cleanup,
+}
+
+async fn rig(name: &str) -> Rig {
     let root = repo_root();
     let cache = root.join(".cache/sandbox-e2e");
     let target = root.join(
@@ -137,11 +142,9 @@ async fn makes_a_template_from_a_public_image() {
             p.display()
         );
     }
-    let image = std::env::var("PYO_SANDBOX_E2E_IMAGE").unwrap_or("python:3.13-alpine".into());
-    let python = image.starts_with("python");
 
-    let run = input("PYO_SANDBOX_E2E_RUN", cache.clone())
-        .join(format!("tmpl-run-{}", std::process::id()));
+    let run =
+        input("PYO_SANDBOX_E2E_RUN", cache.clone()).join(format!("{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&run);
     let _cleanup = Cleanup(run.clone());
     let key = SigningKey::generate("e2e");
@@ -190,6 +193,29 @@ async fn makes_a_template_from_a_public_image() {
         server_id: SERVER.into(),
     };
     let token = admin(&key);
+    Rig {
+        mgr,
+        st,
+        token,
+        layout,
+        _cleanup,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn makes_a_template_from_a_public_image() {
+    if !enabled() {
+        return;
+    }
+    let image = std::env::var("PYO_SANDBOX_E2E_IMAGE").unwrap_or("python:3.13-alpine".into());
+    let python = image.starts_with("python");
+    let Rig {
+        mgr,
+        st,
+        token,
+        layout,
+        _cleanup,
+    } = rig("tmpl-run").await;
     let mut summary = serde_json::Map::new();
     let mut note = |k: &str, v: serde_json::Value| {
         println!("template e2e {k}: {v}");
@@ -394,4 +420,79 @@ fn t_start(t: &TemplateReport) -> Instant {
 
 fn t0(t: &TemplateReport) -> u64 {
     pyo_sandbox::now_ms().saturating_sub(t.build.as_ref().map(|b| b.started_at).unwrap_or(0))
+}
+
+/// Pyo's built-in template `base` (deploy/images/sandbox-base.Dockerfile),
+/// from the image named by `PYO_SANDBOX_E2E_BASE_IMAGE`: CI builds it and
+/// pushes it to a registry on 127.0.0.1. Skipped without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn makes_the_base_template() {
+    if !enabled() {
+        return;
+    }
+    let Ok(image) = std::env::var("PYO_SANDBOX_E2E_BASE_IMAGE") else {
+        eprintln!("skipping: set PYO_SANDBOX_E2E_BASE_IMAGE to the base image to make");
+        return;
+    };
+    let plain_http = image.starts_with("127.0.0.1:") || image.starts_with("localhost:");
+    let Rig {
+        mgr,
+        layout,
+        _cleanup,
+        ..
+    } = rig("base-run").await;
+    let name = "stp_base.e2e";
+    mgr.prepare_template(name, &image, plain_http, None, None)
+        .unwrap();
+    let done = loop {
+        let t = mgr
+            .template_report(name)
+            .expect("the template is in the report");
+        if t.state != TemplateState::Building {
+            break t;
+        }
+        assert!(
+            Instant::now().duration_since(t_start(&t)) < Duration::from_secs(900),
+            "the build took too long"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let b = done.build.clone().unwrap();
+    assert_eq!(done.state, TemplateState::Ready, "{:?}", b.error);
+    println!(
+        "base e2e: image {} MiB, root disk {} MiB, pull {:?} ms, unpack {:?} ms, snapshot {:?} ms",
+        b.image_bytes >> 20,
+        b.rootfs_bytes >> 20,
+        b.pull_ms,
+        b.unpack_ms,
+        b.snapshot_ms
+    );
+    assert!(
+        done.has_snapshot(NetworkMode::None, 1, 512, 2048),
+        "{done:?}"
+    );
+
+    // A sandbox from it has the tools, as root, with no network.
+    let mut spec = SandboxSpec::new(sandbox_id_from([9; 16]), TEAM, name);
+    spec.network = NetworkMode::None;
+    let s = mgr.create(spec.clone()).await.unwrap();
+    assert!(s.from_snapshot);
+    for (cmd, want) in [
+        ("git --version", "git version 2."),
+        ("python3 --version", "Python 3.13"),
+        ("uv --version", "uv 0."),
+        ("node --version", "v26."),
+        ("pnpm --version", "12."),
+        ("npm --version", ""),
+        ("gcc --version", "gcc"),
+        ("head -1 /etc/os-release", "Debian GNU/Linux 13"),
+    ] {
+        let out = mgr.exec(&spec.id, &shell(cmd)).await.unwrap();
+        println!("base e2e {cmd}: {}", out.stdout.trim());
+        assert_eq!(out.exit_code, Some(0), "{cmd}: {out:?}");
+        assert!(out.stdout.contains(want), "{cmd}: {}", out.stdout);
+    }
+    mgr.delete(&spec.id).await.unwrap();
+    mgr.delete_template(name).await.unwrap();
+    assert!(!layout.template_dir(name).exists());
 }

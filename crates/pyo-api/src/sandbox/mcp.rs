@@ -39,13 +39,13 @@ pub fn defs() -> Vec<Value> {
     vec![
         json!({ "name": "create_sandbox", "title": "Create sandbox", "description": "Create an isolated machine (a sandbox) on the team's sandbox servers, to run code, commands and files in. It ends after its lifetime (5 minutes when omitted). Returns its id.", "inputSchema": schema(json!({
             "team": team,
-            "template": { "type": "string", "description": "A sandbox template name, like node-22 (list_sandbox_templates shows them)" },
+            "template": { "type": "string", "description": "A sandbox template name, like node-22 (list_sandbox_templates shows them). base when omitted: Debian 13 with git, Python, uv, Node.js and pnpm" },
             "cpus": { "type": "integer", "minimum": 1, "maximum": 32 },
             "memory_mib": { "type": "integer", "minimum": 128 },
             "ttl": { "type": "string", "description": "How long it lives, like 30m or 1h (24h at most)" },
             "env": { "type": "object", "additionalProperties": { "type": "string" } },
             "network": { "type": "string", "enum": ["internet", "none"] },
-        }), &["template"]), "annotations": write }),
+        }), &[]), "annotations": write }),
         json!({ "name": "run_code", "title": "Run code", "description": "Run a piece of code in a sandbox and wait for it: its output and exit code.", "inputSchema": schema(json!({
             "sandbox_id": sandbox,
             "code": { "type": "string" },
@@ -149,8 +149,9 @@ pub async fn run(s: &AppState, user: &User, name: &str, args: &Value) -> Result<
     match name {
         "create_sandbox" => {
             let team = team_id(s, user, args).await?;
-            let mut req = json!({ "teamId": team, "template": arg(args, "template")? });
+            let mut req = json!({ "teamId": team });
             for (from, to) in [
+                ("template", "template"),
                 ("cpus", "cpus"),
                 ("memory_mib", "memoryMib"),
                 ("ttl", "ttl"),

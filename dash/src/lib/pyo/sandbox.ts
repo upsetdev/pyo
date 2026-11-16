@@ -5,7 +5,10 @@
 // ports are served on the server's edge proxy instead.
 
 import { request } from "./backend";
+import { BASE_TEMPLATE } from "./sandboxTemplates";
 import type { CloudServerState } from "./types";
+
+export { BASE_TEMPLATE, defaultTemplate, imageRepo, templateImage } from "./sandboxTemplates";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -203,7 +206,10 @@ export type SandboxTemplate = {
   id: string;
   teamId: string | null;
   name: string;
-  source: { kind: string; image?: string } | null;
+  /** `os` and `release` on Pyo's built-in template. */
+  source: { kind: string; image?: string; os?: string; release?: string } | null;
+  /** Pyo's own (base): kept in step with Pyo's release, never deleted. */
+  builtin?: boolean;
   state: "pending" | "building" | "ready" | "failed";
   /** Each sandbox server that may use it, and how far it got there. */
   servers: SandboxTemplateServer[];
@@ -546,7 +552,9 @@ export const LIFETIMES = [
 
 /** The TypeScript SDK call that makes the same sandbox as the form. */
 export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
-  const lines: string[] = [`  template: ${JSON.stringify(b.template)},`];
+  // base is the default, so it's left out.
+  const lines: string[] =
+    b.template && b.template !== BASE_TEMPLATE ? [`  template: ${JSON.stringify(b.template)},`] : [];
   if (b.cpus) lines.push(`  cpus: ${b.cpus},`);
   if (b.memoryMib) lines.push(`  memoryMib: ${b.memoryMib},`);
   if (b.ttl) lines.push(`  ttl: ${JSON.stringify(b.ttl)},`);

@@ -63,17 +63,23 @@ impl ImageRef {
         if image.is_empty() || image.len() > 512 || image.contains(char::is_whitespace) {
             bail!("{image:?} isn't an image reference.");
         }
+        // A tag's colon comes after the last slash. A colon before it is a
+        // registry port.
+        let untagged = |n: &str| -> (usize, Option<usize>) {
+            let slash = n.rfind('/').map(|i| i + 1).unwrap_or(0);
+            (slash, n[slash..].rfind(':'))
+        };
         let (name, reference) = match image.split_once('@') {
-            Some((n, d)) => (n, d.to_string()),
-            None => {
-                // A tag's colon comes after the last slash. A colon before
-                // it is a registry port.
-                let slash = image.rfind('/').map(|i| i + 1).unwrap_or(0);
-                match image[slash..].rfind(':') {
-                    Some(i) => (&image[..slash + i], image[slash + i + 1..].to_string()),
-                    None => (image, "latest".to_string()),
-                }
-            }
+            // A digest wins over a tag beside it (`repo:1@sha256:…`), as in
+            // Docker. Pyo's release pins its images that way.
+            Some((n, d)) => match untagged(n) {
+                (slash, Some(i)) => (&n[..slash + i], d.to_string()),
+                _ => (n, d.to_string()),
+            },
+            None => match untagged(image) {
+                (slash, Some(i)) => (&image[..slash + i], image[slash + i + 1..].to_string()),
+                _ => (image, "latest".to_string()),
+            },
         };
         let (registry, repository) = match name.split_once('/') {
             Some((first, rest))
@@ -113,6 +119,8 @@ impl ImageRef {
         }
         let ref_ok = if let Some(hex) = reference.strip_prefix("sha256:") {
             hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+        } else if image.contains('@') {
+            false
         } else {
             !reference.is_empty()
                 && reference.len() <= 128
@@ -673,6 +681,19 @@ mod tests {
         assert_eq!(
             ImageRef::parse(&format!("100.64.0.1:5006/acme/app/api@{d}")).unwrap(),
             r("100.64.0.1:5006", "acme/app/api", &d)
+        );
+        // As Pyo's release pins its images: the digest counts, not the tag.
+        assert_eq!(
+            ImageRef::parse(&format!("ghcr.io/upsetdev/pyo/sandbox-base:0.4.1@{d}")).unwrap(),
+            r("ghcr.io", "upsetdev/pyo/sandbox-base", &d)
+        );
+        assert_eq!(
+            ImageRef::parse(&format!("127.0.0.1:5000/pyo/x:e2e@{d}")).unwrap(),
+            r("127.0.0.1:5000", "pyo/x", &d)
+        );
+        assert_eq!(
+            ImageRef::parse(&format!("alpine:3.21@{d}")).unwrap(),
+            r(hub, "library/alpine", &d)
         );
         assert_eq!(
             ImageRef::parse("localhost:5000/x").unwrap(),

@@ -155,6 +155,42 @@ pub fn pick<'a>(servers: &'a [Candidate], spec: &SandboxSpec) -> Result<&'a Cand
         .ok_or(NoServer::Full)
 }
 
+/// [`pick`] for a template that may have revisions (template `id`, kept
+/// as `spec.template` now): a server with the current revision ready,
+/// else one that still has an older one ready, while the new one is made.
+/// Returns the server and the name of the revision it starts from.
+pub fn pick_revision<'a>(
+    servers: &'a [Candidate],
+    spec: &SandboxSpec,
+    id: &str,
+) -> Result<(&'a Candidate, String), NoServer> {
+    let first = match pick(servers, spec) {
+        Ok(c) => return Ok((c, spec.template.clone())),
+        Err(e) => e,
+    };
+    if !matches!(first, NoServer::NoTemplate(_)) {
+        return Err(first);
+    }
+    let mut older: Vec<&str> = servers
+        .iter()
+        .flat_map(|c| super::templates::older_ready(&c.templates, id, &spec.template))
+        .collect();
+    older.sort_unstable();
+    older.dedup();
+    let mut why = first;
+    for name in older {
+        let mut s = spec.clone();
+        s.template = name.to_owned();
+        match pick(servers, &s) {
+            Ok(c) => return Ok((c, s.template)),
+            // Say why the older one can't run it either (full, say).
+            Err(e) if !matches!(e, NoServer::NoTemplate(_)) => why = e,
+            Err(_) => {}
+        }
+    }
+    Err(why)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +335,45 @@ mod tests {
         );
         let ready = server("ready", Runtime::Firecracker, 2);
         assert_eq!(pick_id(&[building, ready], &spec()).unwrap(), "ready");
+    }
+
+    #[test]
+    fn new_sandboxes_move_to_a_new_revision_once_it_is_ready() {
+        let named = |id: &str, name: &str, state: TemplateState| {
+            let mut c = server(id, Runtime::Firecracker, 8);
+            c.templates[0].name = name.into();
+            c.templates[0].state = state;
+            c
+        };
+        let mut s = spec();
+        s.template = "stp_base.new".into();
+        // Only the old one is ready: it's used.
+        let mut a = named("a", "stp_base.old", TemplateState::Ready);
+        a.templates.push(TemplateReport {
+            name: "stp_base.new".into(),
+            state: TemplateState::Building,
+            ..Default::default()
+        });
+        let (c, name) = pick_revision(std::slice::from_ref(&a), &s, "stp_base").unwrap();
+        assert_eq!((c.id.as_str(), name.as_str()), ("a", "stp_base.old"));
+        // Once a server has the new one ready, it's preferred.
+        let b = named("b", "stp_base.new", TemplateState::Ready);
+        let both = [a.clone(), b];
+        let (c, name) = pick_revision(&both, &s, "stp_base").unwrap();
+        assert_eq!((c.id.as_str(), name.as_str()), ("b", "stp_base.new"));
+        // Another template's revisions don't count.
+        let other = named("c", "stp_basement.x", TemplateState::Ready);
+        assert_eq!(
+            pick_revision(&[other], &s, "stp_base").map(|(c, _)| c.id.clone()),
+            Err(NoServer::NoTemplate("stp_base.new".into()))
+        );
+        // The old one's server is full: that's the reason given.
+        let mut full = named("a", "stp_base.old", TemplateState::Ready);
+        full.capacity.memory_available = 0;
+        assert_eq!(
+            pick_revision(&[full], &s, "stp_base").map(|(c, _)| c.id.clone()),
+            Err(NoServer::Full)
+        );
     }
 
     #[test]

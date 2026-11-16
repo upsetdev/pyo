@@ -14,6 +14,11 @@
 //!   could make it failed.
 //! - A template Pyo no longer has is deleted from the servers that made
 //!   it. One put on a server by hand is never touched.
+//! - A template with a revision (Pyo's built-in `base`, see [`super::base`])
+//!   is kept on the servers as `<id>.<revision>`. A new image is a new
+//!   revision: servers make it beside the old one, new sandboxes move to it
+//!   once it's ready there, and the old one is deleted once no sandbox on
+//!   that server uses it (running and paused ones keep their disk).
 //!
 //! TODO(sandbox): templates from a repo or a Dockerfile, through Pyo's
 //! builder. The builder runs as a deployment's build job today (deploy.rs
@@ -39,6 +44,46 @@ pub struct Template {
     pub id: String,
     pub team_id: Option<String>,
     pub source: Value,
+    pub revision: Option<String>,
+}
+
+impl Template {
+    /// The name servers keep it under.
+    pub fn server_name(&self) -> String {
+        server_name(&self.id, self.revision.as_deref())
+    }
+}
+
+/// The name servers keep a template under: its id, and its revision when
+/// it has one.
+pub fn server_name(id: &str, revision: Option<&str>) -> String {
+    match revision {
+        Some(r) => format!("{id}.{r}"),
+        None => id.to_owned(),
+    }
+}
+
+/// Whether `name`, as a server keeps it, is a revision of the template `id`
+/// (the current one or an older one).
+pub fn is_revision_of(name: &str, id: &str) -> bool {
+    name == id
+        || name
+            .strip_prefix(id)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// Revisions of template `id` a server has ready, other than `current`.
+pub fn older_ready<'a>(
+    reports: &'a [TemplateReport],
+    id: &'a str,
+    current: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    reports
+        .iter()
+        .filter(move |r| {
+            r.name != current && is_revision_of(&r.name, id) && r.state == TemplateState::Ready
+        })
+        .map(|r| r.name.as_str())
 }
 
 /// Whether a server may use a template: an installation's server takes
@@ -69,7 +114,7 @@ pub fn prepare_command(key: &SigningKey, t: &Template) -> DaemonCommand {
         .collect();
     match (in_pyos_registry(image, &doors), push.is_empty()) {
         (Some(path), false) => DaemonCommand::PrepareTemplate {
-            template: t.id.clone(),
+            template: t.server_name(),
             // The door on the tailnet, as other machines pull from it.
             image: format!("{push}/{path}"),
             plain_http: true,
@@ -80,7 +125,7 @@ pub fn prepare_command(key: &SigningKey, t: &Template) -> DaemonCommand {
             max_mib: None,
         },
         _ => DaemonCommand::PrepareTemplate {
-            template: t.id.clone(),
+            template: t.server_name(),
             image: image.to_owned(),
             plain_http: false,
             auth: None,
@@ -90,16 +135,31 @@ pub fn prepare_command(key: &SigningKey, t: &Template) -> DaemonCommand {
 }
 
 /// What to tell a server after its report: templates to prepare, and
-/// templates it made that Pyo no longer has (or that aren't for it).
+/// templates it made that Pyo no longer has (or that aren't for it). Both
+/// by the name the server keeps them under. An older revision stays until
+/// the current one is ready there, so new sandboxes have one to start from.
 pub fn plan(
     server_team: Option<&str>,
     report: &ServerReport,
     templates: &[Template],
 ) -> (Vec<String>, Vec<String>) {
-    let wanted: HashSet<&str> = templates
+    let mine: Vec<&Template> = templates
         .iter()
         .filter(|t| eligible(server_team, t.team_id.as_deref()))
-        .map(|t| t.id.as_str())
+        .collect();
+    let names: Vec<String> = mine.iter().map(|t| t.server_name()).collect();
+    let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
+    // Templates whose current revision isn't ready here yet.
+    let waiting: Vec<&str> = mine
+        .iter()
+        .zip(&names)
+        .filter(|(_, n)| {
+            !report
+                .templates
+                .iter()
+                .any(|r| &r.name == *n && r.state == TemplateState::Ready)
+        })
+        .map(|(t, _)| t.id.as_str())
         .collect();
     let has: HashSet<&str> = report.templates.iter().map(|t| t.name.as_str()).collect();
     // Firecracker servers boot and snapshot a template. gVisor servers make
@@ -119,6 +179,7 @@ pub fn plan(
         .iter()
         // Only what the server made for Pyo: one put there by hand stays.
         .filter(|t| t.build.is_some() && !wanted.contains(t.name.as_str()))
+        .filter(|t| !waiting.iter().any(|id| is_revision_of(&t.name, id)))
         .map(|t| t.name.clone())
         .collect();
     stale.sort();
@@ -126,7 +187,7 @@ pub fn plan(
 }
 
 pub async fn all(db: &PgPool) -> sqlx::Result<Vec<Template>> {
-    sqlx::query_as("SELECT id, team_id, source FROM pyo.sandbox_templates")
+    sqlx::query_as("SELECT id, team_id, source, revision FROM pyo.sandbox_templates")
         .fetch_all(db)
         .await
 }
@@ -149,7 +210,7 @@ pub async fn sync_server(
     let d = Daemon::new(address);
     let token = keys::admin_token(key, server_id);
     for id in prepare {
-        let Some(t) = templates.iter().find(|t| t.id == id) else {
+        let Some(t) = templates.iter().find(|t| t.server_name() == id) else {
             continue;
         };
         match d.command(&token, &prepare_command(key, t)).await {
@@ -189,7 +250,7 @@ pub async fn sync_server(
 pub async fn push(s: AppState, template_id: String) {
     let res = async {
         let Some(t) = sqlx::query_as::<_, Template>(
-            "SELECT id, team_id, source FROM pyo.sandbox_templates WHERE id = $1",
+            "SELECT id, team_id, source, revision FROM pyo.sandbox_templates WHERE id = $1",
         )
         .bind(&template_id)
         .fetch_optional(&s.db)
@@ -204,6 +265,10 @@ pub async fn push(s: AppState, template_id: String) {
         )
         .fetch_all(&s.db)
         .await?;
+        // No server yet: each makes it once it joins.
+        if servers.is_empty() {
+            return anyhow::Ok(());
+        }
         let key = keys::signing_key(&s.db, &s.sealer)
             .await
             .map_err(|e| anyhow::anyhow!(e.message))?;
@@ -227,14 +292,12 @@ pub async fn push(s: AppState, template_id: String) {
     }
 }
 
-/// Tells the servers that have a deleted template to delete it. The runner
-/// catches the ones that don't answer now.
+/// Tells the servers that have a deleted template to delete it, every
+/// revision of it. The runner catches the ones that don't answer now.
 pub async fn forget(s: AppState, template_id: String) {
-    let servers: Vec<(String, String)> = match sqlx::query_as(
-        "SELECT id, address FROM pyo.sandbox_servers
-          WHERE address IS NOT NULL AND templates @> jsonb_build_array(jsonb_build_object('name', $1::text))",
+    let servers: Vec<(String, String, Value)> = match sqlx::query_as(
+        "SELECT id, address, templates FROM pyo.sandbox_servers WHERE address IS NOT NULL",
     )
-    .bind(&template_id)
     .fetch_all(&s.db)
     .await
     {
@@ -247,16 +310,22 @@ pub async fn forget(s: AppState, template_id: String) {
     let Ok(key) = keys::signing_key(&s.db, &s.sealer).await else {
         return;
     };
-    for (id, address) in servers {
+    for (id, address, templates) in servers {
+        let reports: Vec<TemplateReport> = serde_json::from_value(templates).unwrap_or_default();
         let token = keys::admin_token(&key, &id);
-        let _ = Daemon::new(&address)
-            .command(
-                &token,
-                &DaemonCommand::DeleteTemplate {
-                    template: template_id.clone(),
-                },
-            )
-            .await;
+        for r in reports
+            .iter()
+            .filter(|r| is_revision_of(&r.name, &template_id))
+        {
+            let _ = Daemon::new(&address)
+                .command(
+                    &token,
+                    &DaemonCommand::DeleteTemplate {
+                        template: r.name.clone(),
+                    },
+                )
+                .await;
+        }
     }
 }
 
@@ -280,25 +349,36 @@ pub fn roll_up(reports: &[TemplateReport], missing: usize) -> (&'static str, Opt
     ("pending", None)
 }
 
-/// Rolls every template's state up from the servers' latest reports.
+/// Rolls every template's state up from the servers' latest reports, by
+/// its current revision. While a new revision is made, a template whose
+/// older one is ready on a server stays ready: new sandboxes start from it.
 pub async fn update_states(db: &PgPool) -> sqlx::Result<()> {
-    let rows: Vec<(String, String, Option<String>, Value, i64)> = sqlx::query_as(
+    let rows: Vec<(String, String, Option<String>, Value, i64, bool)> = sqlx::query_as(
         "SELECT t.id, t.state, t.error,
                 coalesce(jsonb_agg(m.e) FILTER (WHERE m.e IS NOT NULL), '[]'),
                 count(s.id) FILTER (WHERE m.e IS NULL AND s.state = 'ready' AND s.enabled
-                                      AND s.capability->>'runtime' IN ('firecracker', 'gvisor'))
+                                      AND s.capability->>'runtime' IN ('firecracker', 'gvisor')),
+                coalesce(bool_or(o.ready), false)
            FROM pyo.sandbox_templates t
            LEFT JOIN pyo.sandbox_servers s
              ON s.team_id IS NULL OR t.team_id IS NULL OR s.team_id = t.team_id
            LEFT JOIN LATERAL (SELECT x AS e FROM jsonb_array_elements(s.templates) x
-                               WHERE x->>'name' = t.id LIMIT 1) m ON true
+                               WHERE x->>'name' = t.id || coalesce('.' || t.revision, '') LIMIT 1) m ON true
+           LEFT JOIN LATERAL (SELECT true AS ready FROM jsonb_array_elements(s.templates) x
+                               WHERE t.revision IS NOT NULL AND starts_with(x->>'name', t.id || '.')
+                                 AND x->>'name' <> t.id || '.' || t.revision
+                                 AND coalesce(x->>'state', 'ready') = 'ready' LIMIT 1) o ON true
           GROUP BY t.id",
     )
     .fetch_all(db)
     .await?;
-    for (id, state, error, reports, missing) in rows {
+    for (id, state, error, reports, missing, older_ready) in rows {
         let reports: Vec<TemplateReport> = serde_json::from_value(reports).unwrap_or_default();
-        let (new, why) = roll_up(&reports, missing.max(0) as usize);
+        let (new, why) = match roll_up(&reports, missing.max(0) as usize) {
+            ("ready", why) => ("ready", why),
+            _ if older_ready => ("ready", None),
+            r => r,
+        };
         if new != state || why != error {
             sqlx::query(
                 "UPDATE pyo.sandbox_templates SET state = $2, error = $3, updated_at = now() WHERE id = $1",
@@ -325,6 +405,7 @@ mod tests {
             id: id.into(),
             team_id: team.map(str::to_owned),
             source: json!({ "kind": "image", "image": "alpine" }),
+            revision: None,
         }
     }
 
@@ -409,6 +490,65 @@ mod tests {
             prepare.is_empty(),
             "a server that runs nothing makes nothing"
         );
+    }
+
+    #[test]
+    fn revisions_are_made_beside_the_old_one() {
+        let mut base = t("stp_base", None);
+        base.revision = Some("bbbb".into());
+        assert_eq!(base.server_name(), "stp_base.bbbb");
+        assert!(is_revision_of("stp_base.aaaa", "stp_base"));
+        assert!(is_revision_of("stp_base", "stp_base"));
+        assert!(!is_revision_of("stp_basement", "stp_base"));
+        let templates = [base];
+        // The new revision is made, the old one kept until it's ready.
+        let r = report(
+            Runtime::Firecracker,
+            vec![made("stp_base.aaaa", TemplateState::Ready, None)],
+        );
+        let (prepare, stale) = plan(None, &r, &templates);
+        assert_eq!(prepare, vec!["stp_base.bbbb"]);
+        assert!(stale.is_empty(), "kept while the new one isn't ready");
+        let r = report(
+            Runtime::Firecracker,
+            vec![
+                made("stp_base.aaaa", TemplateState::Ready, None),
+                made("stp_base.bbbb", TemplateState::Building, None),
+            ],
+        );
+        let (prepare, stale) = plan(None, &r, &templates);
+        assert!(prepare.is_empty() && stale.is_empty());
+        assert_eq!(
+            older_ready(&r.templates, "stp_base", "stp_base.bbbb").collect::<Vec<_>>(),
+            vec!["stp_base.aaaa"],
+            "new sandboxes still start from the old one"
+        );
+        // Once the new one is ready, the old one goes.
+        let r = report(
+            Runtime::Firecracker,
+            vec![
+                made("stp_base.aaaa", TemplateState::Ready, None),
+                made("stp_base.bbbb", TemplateState::Ready, None),
+            ],
+        );
+        let (prepare, stale) = plan(None, &r, &templates);
+        assert!(prepare.is_empty());
+        assert_eq!(stale, vec!["stp_base.aaaa"]);
+        assert_eq!(
+            older_ready(&r.templates, "stp_base", "stp_base.bbbb").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_revision_is_prepared_under_its_name() {
+        let key = SigningKey::generate("sbk_t");
+        let mut base = t("stp_base", None);
+        base.revision = Some("bbbb".into());
+        let DaemonCommand::PrepareTemplate { template, .. } = prepare_command(&key, &base) else {
+            panic!("not a prepare");
+        };
+        assert_eq!(template, "stp_base.bbbb");
     }
 
     #[test]
