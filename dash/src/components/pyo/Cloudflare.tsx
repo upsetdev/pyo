@@ -6,7 +6,6 @@ import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { SecretInput, Switch } from "~/components/ui/Field";
-import { Panel } from "~/components/ui/Panel";
 import { timeAgo } from "~/lib/pyo/format";
 import { isFreeDomain } from "~/lib/pyo/freeDomain";
 import {
@@ -26,7 +25,7 @@ import type { Application, Domain } from "~/lib/pyo/types";
 const isAdmin = (role?: string) => role === "owner" || role === "admin";
 
 /** Integrations › Cloudflare: connect, test, replace and remove the token. */
-export function CloudflarePanel() {
+export function CloudflareSettings() {
   const s = usePyo();
   const account = cloudflareIn(s);
   const admin = isAdmin(roleIn(s));
@@ -100,10 +99,7 @@ export function CloudflarePanel() {
   );
 
   return (
-    <Panel
-      title="Cloudflare"
-      description="Creates DNS records for domains in your zones."
-    >
+    <>
       <ul className="list-rows">
         <li className="flex flex-wrap items-center gap-3 px-4 py-3">
           <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted">
@@ -198,7 +194,7 @@ export function CloudflarePanel() {
           toast({ title: "Cloudflare token removed" });
         }}
       />
-    </Panel>
+    </>
   );
 }
 

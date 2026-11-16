@@ -5,7 +5,7 @@ import { Badge } from "~/components/ui/Badge";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Input, Switch } from "~/components/ui/Field";
-import { Callout, Panel } from "~/components/ui/Panel";
+import { Callout } from "~/components/ui/Panel";
 import { site } from "~/config/site";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
@@ -28,7 +28,7 @@ export function NeedsTailscale() {
       Servers join over your tailnet. Set up Tailscale first.{" "}
       {s.user.isAdmin ? (
         <ButtonLink
-          href="/integrations"
+          href="/integrations#tailscale"
           size="xs"
           variant="secondary"
           onClick={() => {
@@ -245,31 +245,27 @@ function HostMove() {
 }
 
 /** Integrations › Tailscale: the OAuth client for the whole Pyo (admins). */
-export function TailscalePanel() {
+export function TailscaleSettings() {
   const s = usePyo();
   const ts = s.tailscale;
   const [replacing, setReplacing] = useState(false);
   const [checks, setChecks] = useState<TailscaleCheck[]>([]);
   const [testing, setTesting] = useState(false);
   const [removing, setRemoving] = useState(false);
-  const title = "Tailscale";
-  const description = "For the whole Pyo. Servers join your tailnet with it.";
   if (!s.user.isAdmin)
     return (
-      <Panel title={title} description={description}>
-        <ul className="list-rows">
-          <li className="flex items-center gap-3 px-4 py-3 text-[12.5px] text-muted-foreground">
-            <span className="flex-1">
-              {ts ? `On ${ts.suffix ?? "your tailnet"}` : "An installation admin can set it up."}
-            </span>
-            {ts ? <Badge tone="success">Set up</Badge> : <Badge>Not set up</Badge>}
-          </li>
-          <HostMove />
-        </ul>
-      </Panel>
+      <ul className="list-rows">
+        <li className="flex items-center gap-3 px-4 py-3 text-[12.5px] text-muted-foreground">
+          <span className="flex-1">
+            {ts ? `On ${ts.suffix ?? "your tailnet"}` : "An installation admin can set it up."}
+          </span>
+          {ts ? <Badge tone="success">Set up</Badge> : <Badge>Not set up</Badge>}
+        </li>
+        <HostMove />
+      </ul>
     );
   return (
-    <Panel title={title} description={description}>
+    <>
       <ul className="list-rows">
         <li className="space-y-3 px-4 py-3">
           {!ts || replacing ? (
@@ -337,6 +333,6 @@ export function TailscalePanel() {
         description="Pyo's names on your tailnet are deleted. Servers stay on it. The public dashboard opens again."
         confirmLabel="Remove"
       />
-    </Panel>
+    </>
   );
 }

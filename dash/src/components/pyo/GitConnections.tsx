@@ -21,7 +21,7 @@ const host = (url: string) => {
 };
 
 /** Add a connection, or replace one's token. */
-function TokenDialog({
+export function TokenDialog({
   connection,
   onClose,
 }: {
