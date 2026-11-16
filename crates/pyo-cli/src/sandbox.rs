@@ -25,6 +25,9 @@ pub enum Command {
         /// Default base: Debian 13 with git, Python, uv, Node.js and pnpm.
         /// A server makes base the first time it's used there.
         template: Option<String>,
+        /// A name to tell it apart. Pyo makes up a short one when left out.
+        #[arg(long)]
+        name: Option<String>,
         /// The sandbox server to run it on, by name or id. Pyo picks one
         /// when left out.
         #[arg(long)]
@@ -79,6 +82,13 @@ pub enum Command {
         /// Print it as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Give a sandbox another name. Its id stays the same.
+    Rename {
+        /// The sandbox's id, sbx_….
+        id: String,
+        /// The new name.
+        name: String,
     },
     /// Delete a sandbox and its files.
     Rm {
@@ -253,6 +263,7 @@ pub async fn run(api: &Api, team: Option<&str>, cmd: Command) -> Result<()> {
     match cmd {
         Command::Create {
             template,
+            name,
             server,
             cpus,
             memory,
@@ -270,6 +281,7 @@ pub async fn run(api: &Api, team: Option<&str>, cmd: Command) -> Result<()> {
             let body = create_body(CreateArgs {
                 team: &team,
                 template: template.as_deref(),
+                name: name.as_deref(),
                 server: server.as_deref(),
                 cpus,
                 memory,
@@ -310,6 +322,19 @@ pub async fn run(api: &Api, team: Option<&str>, cmd: Command) -> Result<()> {
             } else {
                 print_sandbox(&r);
             }
+            Ok(())
+        }
+        Command::Rename { id, name } => {
+            let r = api
+                .patch(
+                    &format!("/api/v1/sandboxes/{}", seg(&id)),
+                    &json!({ "name": name }),
+                )
+                .await?;
+            ui::ok(&format!(
+                "{id} is now {}.",
+                r["name"].as_str().unwrap_or(&name)
+            ));
             Ok(())
         }
         Command::Rm { id } => {
@@ -418,6 +443,7 @@ async fn lifecycle(api: &Api, id: &str, what: &str, done: &str) -> Result<()> {
 pub struct CreateArgs<'a> {
     pub team: &'a str,
     pub template: Option<&'a str>,
+    pub name: Option<&'a str>,
     pub server: Option<&'a str>,
     pub cpus: Option<u32>,
     pub memory: Option<u32>,
@@ -440,6 +466,7 @@ pub fn create_body(a: CreateArgs) -> Result<Value> {
         }
     };
     set("template", json!(a.template));
+    set("name", json!(a.name));
     set("server", json!(a.server));
     set("cpus", json!(a.cpus));
     set("memoryMib", json!(a.memory));
@@ -499,13 +526,14 @@ fn print_sandboxes(list: &Value) {
         return;
     }
     let now = crate::api::now_ms();
-    let rows: Vec<[String; 6]> = list
+    let rows: Vec<[String; 7]> = list
         .iter()
         .map(|x| {
             let s = |k: &str| x[k].as_str().unwrap_or("").to_owned();
             let ended = matches!(x["state"].as_str(), Some("stopped" | "failed"));
             [
                 s("id"),
+                s("name"),
                 s("template"),
                 s("state"),
                 size(x),
@@ -519,7 +547,7 @@ fn print_sandboxes(list: &Value) {
         })
         .collect();
     table(
-        &["ID", "TEMPLATE", "STATE", "SIZE", "LEFT", "CREATED"],
+        &["ID", "NAME", "TEMPLATE", "STATE", "SIZE", "LEFT", "CREATED"],
         &rows,
     );
 }
@@ -564,6 +592,7 @@ fn print_sandbox(x: &Value) {
         .collect();
     let rows = [
         ("id", s("id")),
+        ("name", s("name")),
         ("state", s("state")),
         ("template", s("template")),
         ("size", size(x)),
@@ -1123,6 +1152,7 @@ mod tests {
         let b = create_body(CreateArgs {
             team: "tm_1",
             template: Some("node-22"),
+            name: Some("checkout tests"),
             server: Some("sandbox-1"),
             cpus: Some(2),
             memory: None,
@@ -1141,6 +1171,7 @@ mod tests {
             json!({
                 "teamId": "tm_1",
                 "template": "node-22",
+                "name": "checkout tests",
                 "server": "sandbox-1",
                 "cpus": 2,
                 "ttl": "1h",
@@ -1155,6 +1186,7 @@ mod tests {
         let b = create_body(CreateArgs {
             team: "tm_1",
             template: None,
+            name: None,
             server: None,
             cpus: None,
             memory: None,
@@ -1188,6 +1220,7 @@ mod tests {
         let e = create_body(CreateArgs {
             team: "t",
             template: Some("x"),
+            name: None,
             server: None,
             cpus: None,
             memory: None,
