@@ -142,7 +142,7 @@ export function serverProgress(x: BuildLike): Progress | null {
       return { label: "Waiting", percent: null };
     case "pulling": {
       const percent = x.imageBytes ? (part(x.pulled, x.imageBytes) ?? 0) : null;
-      return { label: percent == null ? "Downloading" : `Downloading ${percent}%`, percent };
+      return { label: percent == null ? "Pulling" : `Pulling ${percent}%`, percent };
     }
     case "unpacking": {
       const percent = part(x.unpacked, x.imageBytes);

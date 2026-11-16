@@ -145,12 +145,12 @@ test("a server making a template says how far it got", () => {
   const b = (phase: string | null, more = {}) => ({ state: "building", phase, imageBytes: 1000, ...more });
   expect(serverProgress({ state: "ready" })).toBe(null);
   expect(serverProgress(b("queued"))).toEqual({ label: "Waiting", percent: null });
-  expect(serverProgress(b("pulling", { pulled: 0 }))).toEqual({ label: "Downloading 0%", percent: 0 });
-  expect(serverProgress(b("pulling", { pulled: 425 }))).toEqual({ label: "Downloading 42%", percent: 42 });
+  expect(serverProgress(b("pulling", { pulled: 0 }))).toEqual({ label: "Pulling 0%", percent: 0 });
+  expect(serverProgress(b("pulling", { pulled: 425 }))).toEqual({ label: "Pulling 42%", percent: 42 });
   // Never 100 while it still runs.
   expect(serverProgress(b("pulling", { pulled: 1000 }))?.percent).toBe(99);
   // Before the manifest says the size: no end known.
-  expect(serverProgress(b("pulling", { imageBytes: 0 }))).toEqual({ label: "Downloading", percent: null });
+  expect(serverProgress(b("pulling", { imageBytes: 0 }))).toEqual({ label: "Pulling", percent: null });
   expect(serverProgress(b("unpacking", { unpacked: 800 }))).toEqual({ label: "Unpacking 80%", percent: 80 });
   // A server too old to count what it unpacked.
   expect(serverProgress(b("unpacking", { unpacked: 0 }))).toEqual({ label: "Unpacking", percent: null });

@@ -21,7 +21,7 @@ export const STAGE_LABEL: Record<DeploymentStatus, string> = {
   waiting_database: "Waiting for database",
   applying: "Applying settings",
   scheduling: "Finding a server",
-  pulling: "Downloading image",
+  pulling: "Pulling image",
   starting: "Starting",
   waiting_ready: "Running health check",
   rolling_back: "Rolling back",
