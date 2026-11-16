@@ -145,15 +145,21 @@ impl Drop for Cleanup {
     fn drop(&mut self) {
         let state = self.root.join("runsc");
         let _ = sh(&format!(
-            "for c in $({r} --root={s} list -q 2>/dev/null); do {r} --root={s} delete --force $c; done",
+            "for c in $({r} --root={s} list --quiet 2>/dev/null); do {r} --root={s} delete --force $c; done",
             r = self.runsc.display(),
             s = state.display()
         ));
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(gvisor::unmount_below(&self.root));
+        // Its own thread: a failing test drops this inside the test's
+        // runtime, where block_on panics.
+        let root = self.root.clone();
+        let _ = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(gvisor::unmount_below(&root));
+        })
+        .join();
         for ns in netns() {
             let _ = sh(&format!("ip netns del {ns}"));
         }
@@ -368,7 +374,8 @@ async fn gvisor_end_to_end() {
     }
 
     // ── Pause and resume: files and processes stay ──
-    ok(&mgr, &a.id, "nohup sleep 1000 >/dev/null 2>&1 &").await;
+    // No nohup: Ubuntu's busybox-static doesn't have it.
+    ok(&mgr, &a.id, "sleep 1000 >/dev/null 2>&1 &").await;
     let st = mgr.pause(&a.id).await.unwrap();
     assert_eq!(st.state, SandboxState::Paused);
     assert!(
@@ -452,5 +459,12 @@ async fn gvisor_end_to_end() {
     assert!(netns().is_empty(), "{:?}", netns());
     assert!(storage::dir_names(&sandboxes).is_empty());
     mgr.delete_template("busybox").await.unwrap();
-    assert!(mounts_under(&root).is_empty(), "{:?}", mounts_under(&root));
+    // runsc keeps a null-netns mount in its own state directory, for
+    // every sandbox to come. It stays.
+    let state = root.join("runsc");
+    let left: Vec<_> = mounts_under(&root)
+        .into_iter()
+        .filter(|m| !m.starts_with(&state))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }
