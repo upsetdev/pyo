@@ -470,7 +470,7 @@ function Numbers({ t, r }: { t: ServiceTraffic; r: Region }) {
     return (
       <p className="text-[12px] text-muted-foreground">
         Request numbers need observability storage.{" "}
-        <Link to="/settings/observability" className="font-medium text-foreground hover:text-primary">
+        <Link to="/observability" className="font-medium text-foreground hover:text-primary">
           Set it up
         </Link>
       </p>

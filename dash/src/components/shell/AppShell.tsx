@@ -31,7 +31,7 @@ import {
 } from "@phosphor-icons/react";
 import { ProjectIcon } from "~/components/ui/ProjectIcon";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { currentSlug, useTeamPathname, CLUSTER_TABS } from "~/lib/pyo/paths";
+import { currentSlug, useTeamPathname, CLUSTER_TABS, SETTINGS_PAGES } from "~/lib/pyo/paths";
 import { AppLink } from "~/components/ui/AppLink";
 import { UserAvatar } from "~/components/ui/UserAvatar";
 import { Fragment, useEffect, useState, type ReactNode } from "react";
@@ -195,7 +195,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-/** On /profile, /settings, /api-keys and /mcp (outside any team): back to the team, then the account's own pages. */
+/** On /profile, the settings pages (/backups, /email…), /api-keys and /mcp (outside any team): back to the team, then the account's own pages. */
 
 /** The account's sidebar: back to the team, then profile, settings and developer pages. */
 function AccountNav({
@@ -214,7 +214,12 @@ function AccountNav({
     Icon: Icon,
     dot = false,
   ) => {
-    const active = pathname === to || pathname.startsWith(`${to}/`);
+    const active =
+      pathname === to ||
+      pathname.startsWith(`${to}/`) ||
+      // The settings pages sit at the root (/backups, /email).
+      (to === "/settings" &&
+        SETTINGS_PAGES.some((p) => pathname === p || pathname.startsWith(`${p}/`)));
     return (
       <li>
         <Link
@@ -285,7 +290,7 @@ function Sidebar({
   /** In the mobile drawer: the team name stops short of its close button. */
   drawer?: boolean;
 }) {
-  // On pages outside a team (/profile, /settings) no team link is current.
+  // On pages outside a team (/profile, /backups) no team link is current.
   const inTeam = !!(useParams({ strict: false }) as { team?: string }).team;
   const menu = inTeam ? "team" : "account";
   // Going into settings or the account slides in from the right; back out, from the left.
@@ -922,7 +927,7 @@ export function ProfileMenu() {
           ) : undefined,
           onSelect: () =>
             void navigate({
-              to: updateAvailable ? "/settings/updates" : "/settings",
+              to: updateAvailable ? "/updates" : "/settings",
             }),
         },
         {

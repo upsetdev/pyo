@@ -1,6 +1,7 @@
 import {
   ArrowCircleUpIcon,
   ChartLineUpIcon,
+  CloudArrowUpIcon,
   EnvelopeSimpleIcon,
   type Icon,
 } from "@phosphor-icons/react";
@@ -13,26 +14,29 @@ import {
 import { useUpdateAvailable } from "~/components/pyo/UpdateSettings";
 import { AppShell } from "~/components/shell/AppShell";
 import { Page, PageHeader } from "~/components/ui/Panel";
+import type { SETTINGS_PAGES } from "~/lib/pyo/paths";
 import { seo } from "~/lib/seo";
 
-// Settings of this Pyo installation, for every team: outgoing email,
-// analytics privacy and updates of Pyo itself, a page each. Backups of
-// Pyo's own data are on Backups, in its Pyo tab, and the GitHub App is in
-// the GitHub card on Integrations.
+// Settings of this Pyo installation, for every team: backups of its own
+// data, outgoing email, analytics privacy and updates of Pyo itself, a page
+// each. Pathless, so the pages sit at the root like /profile (/backups,
+// /email) and /settings opens the first. The old /settings/<page> URLs
+// redirect here. The GitHub App is in the GitHub card on Integrations.
 // Team settings stay under each team (/:team/settings).
-export const Route = createFileRoute("/_app/settings")({
+export const Route = createFileRoute("/_app/_settings")({
   head: () => ({ meta: seo({ title: "Settings" }) }),
   component: InstallationSettings,
 });
 
-const TABS: { to: string; label: string; icon: Icon }[] = [
-  { to: "/settings/email", label: "Email", icon: EnvelopeSimpleIcon },
-  {
-    to: "/settings/observability",
-    label: "Observability",
-    icon: ChartLineUpIcon,
-  },
-  { to: "/settings/updates", label: "Updates", icon: ArrowCircleUpIcon },
+const TABS: {
+  to: (typeof SETTINGS_PAGES)[number];
+  label: string;
+  icon: Icon;
+}[] = [
+  { to: "/backups", label: "Backups", icon: CloudArrowUpIcon },
+  { to: "/email", label: "Email", icon: EnvelopeSimpleIcon },
+  { to: "/observability", label: "Observability", icon: ChartLineUpIcon },
+  { to: "/updates", label: "Updates", icon: ArrowCircleUpIcon },
 ];
 
 function InstallationSettings() {
@@ -66,7 +70,7 @@ function InstallationSettings() {
                 >
                   <Ico size={14} />
                   {t.label}
-                  {t.to === "/settings/updates" && updateAvailable ? (
+                  {t.to === "/updates" && updateAvailable ? (
                     <span
                       className="h-1.5 w-1.5 rounded-full bg-info"
                       aria-label="Update available"

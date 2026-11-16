@@ -1,9 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { UpdatesSection } from "~/components/pyo/UpdateSettings";
 import { ManagedOr } from "~/components/pyo/Managed";
-import { SettingsSection } from "../settings";
+import { SettingsSection } from "../_settings";
 
-export const Route = createFileRoute("/_app/settings/updates")({
+export const Route = createFileRoute("/_app/_settings/updates")({
   component: () => (
     <SettingsSection description="Version and updates.">
       <ManagedOr

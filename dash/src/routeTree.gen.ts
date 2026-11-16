@@ -13,12 +13,12 @@ import { Route as AppRouteImport } from './routes/_app'
 import { Route as AuthRouteImport } from './routes/_auth'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppTeamRouteImport } from './routes/_app/$team'
+import { Route as AppSettingsRouteImport } from './routes/_app/_settings'
 import { Route as AppApiKeysRouteImport } from './routes/_app/api-keys'
 import { Route as AppCliLoginRouteImport } from './routes/_app/cli-login'
 import { Route as AppInviteRouteImport } from './routes/_app/invite'
 import { Route as AppMcpRouteImport } from './routes/_app/mcp'
 import { Route as AppProfileRouteImport } from './routes/_app/profile'
-import { Route as AppSettingsRouteImport } from './routes/_app/settings'
 import { Route as AuthForgotPasswordRouteImport } from './routes/_auth/forgot-password'
 import { Route as AuthLoginRouteImport } from './routes/_auth/login'
 import { Route as AuthResetPasswordRouteImport } from './routes/_auth/reset-password'
@@ -43,13 +43,14 @@ import { Route as AppTeamRegistryRouteImport } from './routes/_app/$team/registr
 import { Route as AppTeamSecurityRouteImport } from './routes/_app/$team/security'
 import { Route as AppTeamSettingsRouteImport } from './routes/_app/$team/settings'
 import { Route as AppTeamTemplatesRouteImport } from './routes/_app/$team/templates'
+import { Route as AppSettingsBackupsRouteImport } from './routes/_app/_settings/backups'
+import { Route as AppSettingsEmailRouteImport } from './routes/_app/_settings/email'
+import { Route as AppSettingsObservabilityRouteImport } from './routes/_app/_settings/observability'
+import { Route as AppSettingsUpdatesRouteImport } from './routes/_app/_settings/updates'
 import { Route as AppOauthAuthorizeRouteImport } from './routes/_app/oauth/authorize'
 import { Route as AppSettingsIndexRouteImport } from './routes/_app/settings/index'
-import { Route as AppSettingsBackupsRouteImport } from './routes/_app/settings/backups'
-import { Route as AppSettingsEmailRouteImport } from './routes/_app/settings/email'
+import { Route as AppSettingsPageRouteImport } from './routes/_app/settings/$page'
 import { Route as AppSettingsGithubRouteImport } from './routes/_app/settings/github'
-import { Route as AppSettingsObservabilityRouteImport } from './routes/_app/settings/observability'
-import { Route as AppSettingsUpdatesRouteImport } from './routes/_app/settings/updates'
 import { Route as AppTeamProjectIdIndexRouteImport } from './routes/_app/$team/$projectId/index'
 import { Route as AppTeamProjectIdDeploymentsRouteImport } from './routes/_app/$team/$projectId/deployments'
 import { Route as AppTeamProjectIdNetworkingRouteImport } from './routes/_app/$team/$projectId/networking'
@@ -151,6 +152,10 @@ const AppTeamRoute = AppTeamRouteImport.update({
   path: '/$team',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsRoute = AppSettingsRouteImport.update({
+  id: '/_settings',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppApiKeysRoute = AppApiKeysRouteImport.update({
   id: '/api-keys',
   path: '/api-keys',
@@ -174,11 +179,6 @@ const AppMcpRoute = AppMcpRouteImport.update({
 const AppProfileRoute = AppProfileRouteImport.update({
   id: '/profile',
   path: '/profile',
-  getParentRoute: () => AppRoute,
-} as any)
-const AppSettingsRoute = AppSettingsRouteImport.update({
-  id: '/settings',
-  path: '/settings',
   getParentRoute: () => AppRoute,
 } as any)
 const AuthForgotPasswordRoute = AuthForgotPasswordRouteImport.update({
@@ -301,16 +301,6 @@ const AppTeamTemplatesRoute = AppTeamTemplatesRouteImport.update({
   path: '/templates',
   getParentRoute: () => AppTeamRoute,
 } as any)
-const AppOauthAuthorizeRoute = AppOauthAuthorizeRouteImport.update({
-  id: '/oauth/authorize',
-  path: '/oauth/authorize',
-  getParentRoute: () => AppRoute,
-} as any)
-const AppSettingsIndexRoute = AppSettingsIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => AppSettingsRoute,
-} as any)
 const AppSettingsBackupsRoute = AppSettingsBackupsRouteImport.update({
   id: '/backups',
   path: '/backups',
@@ -319,11 +309,6 @@ const AppSettingsBackupsRoute = AppSettingsBackupsRouteImport.update({
 const AppSettingsEmailRoute = AppSettingsEmailRouteImport.update({
   id: '/email',
   path: '/email',
-  getParentRoute: () => AppSettingsRoute,
-} as any)
-const AppSettingsGithubRoute = AppSettingsGithubRouteImport.update({
-  id: '/github',
-  path: '/github',
   getParentRoute: () => AppSettingsRoute,
 } as any)
 const AppSettingsObservabilityRoute =
@@ -336,6 +321,26 @@ const AppSettingsUpdatesRoute = AppSettingsUpdatesRouteImport.update({
   id: '/updates',
   path: '/updates',
   getParentRoute: () => AppSettingsRoute,
+} as any)
+const AppOauthAuthorizeRoute = AppOauthAuthorizeRouteImport.update({
+  id: '/oauth/authorize',
+  path: '/oauth/authorize',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsIndexRoute = AppSettingsIndexRouteImport.update({
+  id: '/settings/',
+  path: '/settings/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsPageRoute = AppSettingsPageRouteImport.update({
+  id: '/settings/$page',
+  path: '/settings/$page',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsGithubRoute = AppSettingsGithubRouteImport.update({
+  id: '/settings/github',
+  path: '/settings/github',
+  getParentRoute: () => AppRoute,
 } as any)
 const AppTeamProjectIdIndexRoute = AppTeamProjectIdIndexRouteImport.update({
   id: '/',
@@ -813,7 +818,6 @@ export interface FileRoutesByFullPath {
   '/invite': typeof AppInviteRoute
   '/mcp': typeof AppMcpRoute
   '/profile': typeof AppProfileRoute
-  '/settings': typeof AppSettingsRouteWithChildren
   '/forgot-password': typeof AuthForgotPasswordRoute
   '/login': typeof AuthLoginRoute
   '/reset-password': typeof AuthResetPasswordRoute
@@ -837,12 +841,13 @@ export interface FileRoutesByFullPath {
   '/$team/security': typeof AppTeamSecurityRoute
   '/$team/settings': typeof AppTeamSettingsRouteWithChildren
   '/$team/templates': typeof AppTeamTemplatesRoute
+  '/backups': typeof AppSettingsBackupsRoute
+  '/email': typeof AppSettingsEmailRoute
+  '/observability': typeof AppSettingsObservabilityRoute
+  '/updates': typeof AppSettingsUpdatesRoute
   '/oauth/authorize': typeof AppOauthAuthorizeRoute
-  '/settings/backups': typeof AppSettingsBackupsRoute
-  '/settings/email': typeof AppSettingsEmailRoute
+  '/settings/$page': typeof AppSettingsPageRoute
   '/settings/github': typeof AppSettingsGithubRoute
-  '/settings/observability': typeof AppSettingsObservabilityRoute
-  '/settings/updates': typeof AppSettingsUpdatesRoute
   '/$team/': typeof AppTeamIndexRoute
   '/settings/': typeof AppSettingsIndexRoute
   '/$team/$projectId/deployments': typeof AppTeamProjectIdDeploymentsRoute
@@ -954,12 +959,13 @@ export interface FileRoutesByTo {
   '/$team/registry': typeof AppTeamRegistryRoute
   '/$team/security': typeof AppTeamSecurityRoute
   '/$team/templates': typeof AppTeamTemplatesRoute
+  '/backups': typeof AppSettingsBackupsRoute
+  '/email': typeof AppSettingsEmailRoute
+  '/observability': typeof AppSettingsObservabilityRoute
+  '/updates': typeof AppSettingsUpdatesRoute
   '/oauth/authorize': typeof AppOauthAuthorizeRoute
-  '/settings/backups': typeof AppSettingsBackupsRoute
-  '/settings/email': typeof AppSettingsEmailRoute
+  '/settings/$page': typeof AppSettingsPageRoute
   '/settings/github': typeof AppSettingsGithubRoute
-  '/settings/observability': typeof AppSettingsObservabilityRoute
-  '/settings/updates': typeof AppSettingsUpdatesRoute
   '/$team': typeof AppTeamIndexRoute
   '/settings': typeof AppSettingsIndexRoute
   '/$team/$projectId/deployments': typeof AppTeamProjectIdDeploymentsRoute
@@ -1045,12 +1051,12 @@ export interface FileRoutesById {
   '/_app': typeof AppRouteWithChildren
   '/_auth': typeof AuthRouteWithChildren
   '/_app/$team': typeof AppTeamRouteWithChildren
+  '/_app/_settings': typeof AppSettingsRouteWithChildren
   '/_app/api-keys': typeof AppApiKeysRoute
   '/_app/cli-login': typeof AppCliLoginRoute
   '/_app/invite': typeof AppInviteRoute
   '/_app/mcp': typeof AppMcpRoute
   '/_app/profile': typeof AppProfileRoute
-  '/_app/settings': typeof AppSettingsRouteWithChildren
   '/_auth/forgot-password': typeof AuthForgotPasswordRoute
   '/_auth/login': typeof AuthLoginRoute
   '/_auth/reset-password': typeof AuthResetPasswordRoute
@@ -1075,12 +1081,13 @@ export interface FileRoutesById {
   '/_app/$team/security': typeof AppTeamSecurityRoute
   '/_app/$team/settings': typeof AppTeamSettingsRouteWithChildren
   '/_app/$team/templates': typeof AppTeamTemplatesRoute
+  '/_app/_settings/backups': typeof AppSettingsBackupsRoute
+  '/_app/_settings/email': typeof AppSettingsEmailRoute
+  '/_app/_settings/observability': typeof AppSettingsObservabilityRoute
+  '/_app/_settings/updates': typeof AppSettingsUpdatesRoute
   '/_app/oauth/authorize': typeof AppOauthAuthorizeRoute
-  '/_app/settings/backups': typeof AppSettingsBackupsRoute
-  '/_app/settings/email': typeof AppSettingsEmailRoute
+  '/_app/settings/$page': typeof AppSettingsPageRoute
   '/_app/settings/github': typeof AppSettingsGithubRoute
-  '/_app/settings/observability': typeof AppSettingsObservabilityRoute
-  '/_app/settings/updates': typeof AppSettingsUpdatesRoute
   '/_app/$team/': typeof AppTeamIndexRoute
   '/_app/settings/': typeof AppSettingsIndexRoute
   '/_app/$team/$projectId/deployments': typeof AppTeamProjectIdDeploymentsRoute
@@ -1176,7 +1183,6 @@ export interface FileRouteTypes {
     | '/invite'
     | '/mcp'
     | '/profile'
-    | '/settings'
     | '/forgot-password'
     | '/login'
     | '/reset-password'
@@ -1200,12 +1206,13 @@ export interface FileRouteTypes {
     | '/$team/security'
     | '/$team/settings'
     | '/$team/templates'
+    | '/backups'
+    | '/email'
+    | '/observability'
+    | '/updates'
     | '/oauth/authorize'
-    | '/settings/backups'
-    | '/settings/email'
+    | '/settings/$page'
     | '/settings/github'
-    | '/settings/observability'
-    | '/settings/updates'
     | '/$team/'
     | '/settings/'
     | '/$team/$projectId/deployments'
@@ -1317,12 +1324,13 @@ export interface FileRouteTypes {
     | '/$team/registry'
     | '/$team/security'
     | '/$team/templates'
+    | '/backups'
+    | '/email'
+    | '/observability'
+    | '/updates'
     | '/oauth/authorize'
-    | '/settings/backups'
-    | '/settings/email'
+    | '/settings/$page'
     | '/settings/github'
-    | '/settings/observability'
-    | '/settings/updates'
     | '/$team'
     | '/settings'
     | '/$team/$projectId/deployments'
@@ -1407,12 +1415,12 @@ export interface FileRouteTypes {
     | '/_app'
     | '/_auth'
     | '/_app/$team'
+    | '/_app/_settings'
     | '/_app/api-keys'
     | '/_app/cli-login'
     | '/_app/invite'
     | '/_app/mcp'
     | '/_app/profile'
-    | '/_app/settings'
     | '/_auth/forgot-password'
     | '/_auth/login'
     | '/_auth/reset-password'
@@ -1437,12 +1445,13 @@ export interface FileRouteTypes {
     | '/_app/$team/security'
     | '/_app/$team/settings'
     | '/_app/$team/templates'
+    | '/_app/_settings/backups'
+    | '/_app/_settings/email'
+    | '/_app/_settings/observability'
+    | '/_app/_settings/updates'
     | '/_app/oauth/authorize'
-    | '/_app/settings/backups'
-    | '/_app/settings/email'
+    | '/_app/settings/$page'
     | '/_app/settings/github'
-    | '/_app/settings/observability'
-    | '/_app/settings/updates'
     | '/_app/$team/'
     | '/_app/settings/'
     | '/_app/$team/$projectId/deployments'
@@ -1564,6 +1573,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/_settings': {
+      id: '/_app/_settings'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof AppSettingsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/api-keys': {
       id: '/_app/api-keys'
       path: '/api-keys'
@@ -1597,13 +1613,6 @@ declare module '@tanstack/react-router' {
       path: '/profile'
       fullPath: '/profile'
       preLoaderRoute: typeof AppProfileRouteImport
-      parentRoute: typeof AppRoute
-    }
-    '/_app/settings': {
-      id: '/_app/settings'
-      path: '/settings'
-      fullPath: '/settings'
-      preLoaderRoute: typeof AppSettingsRouteImport
       parentRoute: typeof AppRoute
     }
     '/_auth/forgot-password': {
@@ -1774,6 +1783,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamTemplatesRouteImport
       parentRoute: typeof AppTeamRoute
     }
+    '/_app/_settings/backups': {
+      id: '/_app/_settings/backups'
+      path: '/backups'
+      fullPath: '/backups'
+      preLoaderRoute: typeof AppSettingsBackupsRouteImport
+      parentRoute: typeof AppSettingsRoute
+    }
+    '/_app/_settings/email': {
+      id: '/_app/_settings/email'
+      path: '/email'
+      fullPath: '/email'
+      preLoaderRoute: typeof AppSettingsEmailRouteImport
+      parentRoute: typeof AppSettingsRoute
+    }
+    '/_app/_settings/observability': {
+      id: '/_app/_settings/observability'
+      path: '/observability'
+      fullPath: '/observability'
+      preLoaderRoute: typeof AppSettingsObservabilityRouteImport
+      parentRoute: typeof AppSettingsRoute
+    }
+    '/_app/_settings/updates': {
+      id: '/_app/_settings/updates'
+      path: '/updates'
+      fullPath: '/updates'
+      preLoaderRoute: typeof AppSettingsUpdatesRouteImport
+      parentRoute: typeof AppSettingsRoute
+    }
     '/_app/oauth/authorize': {
       id: '/_app/oauth/authorize'
       path: '/oauth/authorize'
@@ -1783,45 +1820,24 @@ declare module '@tanstack/react-router' {
     }
     '/_app/settings/': {
       id: '/_app/settings/'
-      path: '/'
+      path: '/settings'
       fullPath: '/settings/'
       preLoaderRoute: typeof AppSettingsIndexRouteImport
-      parentRoute: typeof AppSettingsRoute
+      parentRoute: typeof AppRoute
     }
-    '/_app/settings/backups': {
-      id: '/_app/settings/backups'
-      path: '/backups'
-      fullPath: '/settings/backups'
-      preLoaderRoute: typeof AppSettingsBackupsRouteImport
-      parentRoute: typeof AppSettingsRoute
-    }
-    '/_app/settings/email': {
-      id: '/_app/settings/email'
-      path: '/email'
-      fullPath: '/settings/email'
-      preLoaderRoute: typeof AppSettingsEmailRouteImport
-      parentRoute: typeof AppSettingsRoute
+    '/_app/settings/$page': {
+      id: '/_app/settings/$page'
+      path: '/settings/$page'
+      fullPath: '/settings/$page'
+      preLoaderRoute: typeof AppSettingsPageRouteImport
+      parentRoute: typeof AppRoute
     }
     '/_app/settings/github': {
       id: '/_app/settings/github'
-      path: '/github'
+      path: '/settings/github'
       fullPath: '/settings/github'
       preLoaderRoute: typeof AppSettingsGithubRouteImport
-      parentRoute: typeof AppSettingsRoute
-    }
-    '/_app/settings/observability': {
-      id: '/_app/settings/observability'
-      path: '/observability'
-      fullPath: '/settings/observability'
-      preLoaderRoute: typeof AppSettingsObservabilityRouteImport
-      parentRoute: typeof AppSettingsRoute
-    }
-    '/_app/settings/updates': {
-      id: '/_app/settings/updates'
-      path: '/updates'
-      fullPath: '/settings/updates'
-      preLoaderRoute: typeof AppSettingsUpdatesRouteImport
-      parentRoute: typeof AppSettingsRoute
+      parentRoute: typeof AppRoute
     }
     '/_app/$team/$projectId/': {
       id: '/_app/$team/$projectId/'
@@ -2727,19 +2743,15 @@ const AppTeamRouteWithChildren =
 interface AppSettingsRouteChildren {
   AppSettingsBackupsRoute: typeof AppSettingsBackupsRoute
   AppSettingsEmailRoute: typeof AppSettingsEmailRoute
-  AppSettingsGithubRoute: typeof AppSettingsGithubRoute
   AppSettingsObservabilityRoute: typeof AppSettingsObservabilityRoute
   AppSettingsUpdatesRoute: typeof AppSettingsUpdatesRoute
-  AppSettingsIndexRoute: typeof AppSettingsIndexRoute
 }
 
 const AppSettingsRouteChildren: AppSettingsRouteChildren = {
   AppSettingsBackupsRoute: AppSettingsBackupsRoute,
   AppSettingsEmailRoute: AppSettingsEmailRoute,
-  AppSettingsGithubRoute: AppSettingsGithubRoute,
   AppSettingsObservabilityRoute: AppSettingsObservabilityRoute,
   AppSettingsUpdatesRoute: AppSettingsUpdatesRoute,
-  AppSettingsIndexRoute: AppSettingsIndexRoute,
 }
 
 const AppSettingsRouteWithChildren = AppSettingsRoute._addFileChildren(
@@ -2748,26 +2760,32 @@ const AppSettingsRouteWithChildren = AppSettingsRoute._addFileChildren(
 
 interface AppRouteChildren {
   AppTeamRoute: typeof AppTeamRouteWithChildren
+  AppSettingsRoute: typeof AppSettingsRouteWithChildren
   AppApiKeysRoute: typeof AppApiKeysRoute
   AppCliLoginRoute: typeof AppCliLoginRoute
   AppInviteRoute: typeof AppInviteRoute
   AppMcpRoute: typeof AppMcpRoute
   AppProfileRoute: typeof AppProfileRoute
-  AppSettingsRoute: typeof AppSettingsRouteWithChildren
   AppIndexRoute: typeof AppIndexRoute
   AppOauthAuthorizeRoute: typeof AppOauthAuthorizeRoute
+  AppSettingsPageRoute: typeof AppSettingsPageRoute
+  AppSettingsGithubRoute: typeof AppSettingsGithubRoute
+  AppSettingsIndexRoute: typeof AppSettingsIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppTeamRoute: AppTeamRouteWithChildren,
+  AppSettingsRoute: AppSettingsRouteWithChildren,
   AppApiKeysRoute: AppApiKeysRoute,
   AppCliLoginRoute: AppCliLoginRoute,
   AppInviteRoute: AppInviteRoute,
   AppMcpRoute: AppMcpRoute,
   AppProfileRoute: AppProfileRoute,
-  AppSettingsRoute: AppSettingsRouteWithChildren,
   AppIndexRoute: AppIndexRoute,
   AppOauthAuthorizeRoute: AppOauthAuthorizeRoute,
+  AppSettingsPageRoute: AppSettingsPageRoute,
+  AppSettingsGithubRoute: AppSettingsGithubRoute,
+  AppSettingsIndexRoute: AppSettingsIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
