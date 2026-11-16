@@ -7,6 +7,7 @@
 //     --images ghcr.io/upsetdev/pyo \
 //     --pyo sha256:… --agent sha256:… --builder sha256:… --flows sha256:… --waf sha256:… --geoip sha256:… \
 //     --db-controller sha256:… --kv sha256:… --static sha256:… --mysql-operator sha256:… --mysql-backup sha256:… \
+//     --sandbox-base sha256:… \
 //     --postgres-16 sha256:… --postgres-17 sha256:… --postgres-18 sha256:… \
 //     --agent-access "$(pyo-agent access-hash)" \
 //     --sandbox-x86_64 <sha256> --sandbox-aarch64 <sha256> \
@@ -65,6 +66,9 @@ const names = {
   // (deploy/images/moco).
   "mysql-operator": "mysqlOperator",
   "mysql-backup": "mysqlBackup",
+  // Pyo Sandbox's built-in template `base` (multi-arch). Pyo reads it
+  // from PYO_SANDBOX_BASE_IMAGE and seeds the template from it.
+  "sandbox-base": "sandboxBase",
 } as const;
 const byName: Record<string, string> = Object.fromEntries(Object.keys(names).map((n) => [n, ref(n)]));
 const pinned: Record<string, string> = Object.fromEntries(Object.entries(names).map(([n, key]) => [key, byName[n]]));

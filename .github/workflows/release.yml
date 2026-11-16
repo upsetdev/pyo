@@ -91,7 +91,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        image: [pyo, agent, builder, flows, waf, geoip, db-controller, kv, static]
+        image: [pyo, agent, builder, flows, waf, geoip, db-controller, kv, static, sandbox-base]
         # Pyo's Postgres, one image per version, from one Dockerfile.
         # One repository, tagged <version>-<release>: CloudNativePG reads
         # the version from the tag.
@@ -111,8 +111,13 @@ jobs:
           # (deploy/images/moco), one Dockerfile with a target each.
           - { image: mysql-operator, file: moco/moco, context: deploy/images/moco, target: operator }
           - { image: mysql-backup, file: moco/moco, context: deploy/images/moco, target: backup }
+          # Pyo Sandbox's built-in template `base`. Sandbox servers run on
+          # both architectures, so it's built for both (arm64 under QEMU).
+          - { image: sandbox-base, context: deploy/images, platforms: "linux/amd64,linux/arm64" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: contains(matrix.platforms, 'arm64')
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -128,7 +133,7 @@ jobs:
           file: deploy/images/${{ matrix.file || matrix.image }}.Dockerfile
           build-args: ${{ matrix.args }}
           target: ${{ matrix.target }}
-          platforms: linux/amd64
+          platforms: ${{ matrix.platforms || 'linux/amd64' }}
           cache-from: ${{ matrix.rust && format('type=gha,scope=rust-{0}', github.run_id) || '' }}
           push: true
           tags: ${{ env.IMAGES }}/${{ matrix.repo || matrix.image }}:${{ matrix.tag }}${{ needs.verify.outputs.version }}
@@ -138,6 +143,22 @@ jobs:
         env:
           IMAGE: ${{ env.IMAGES }}/${{ matrix.repo || matrix.image }}@${{ steps.build.outputs.digest }}
         run: cosign sign --yes "$IMAGE"
+      # Installations and sandbox servers pull without logging in. A new
+      # package on ghcr.io may start private: make it public in its
+      # package settings, then run the job again.
+      - name: Anyone can pull it
+        env:
+          REPO: upsetdev/pyo/${{ matrix.repo || matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:$REPO:pull" | jq -r .token)
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json' \
+            "https://ghcr.io/v2/$REPO/manifests/$DIGEST")
+          if [ "$code" != 200 ]; then
+            echo "::error::ghcr.io/$REPO can't be pulled without logging in (HTTP $code). Make the package public in its settings on GitHub, then run this job again."
+            exit 1
+          fi
 
   release:
     name: GitHub release
@@ -188,7 +209,7 @@ jobs:
           tagged() { docker buildx imagetools inspect "$IMAGES/$1:$2$VERSION" --format '{{json .Manifest}}' | jq -r .digest; }
           bun run scripts/release-manifest.ts --version "$VERSION" --images "$IMAGES" \
             --pyo "$(digest pyo)" --agent "$(digest agent)" --builder "$(digest builder)" --flows "$(digest flows)" --waf "$(digest waf)" --geoip "$(digest geoip)" \
-            --db-controller "$(digest db-controller)" --kv "$(digest kv)" --static "$(digest static)" \
+            --db-controller "$(digest db-controller)" --kv "$(digest kv)" --static "$(digest static)" --sandbox-base "$(digest sandbox-base)" \
             --mysql-operator "$(digest mysql-operator)" --mysql-backup "$(digest mysql-backup)" \
             --postgres-16 "$(tagged postgres 16-)" --postgres-17 "$(tagged postgres 17-)" --postgres-18 "$(tagged postgres 18-)" \
             --agent-access "$(docker run --rm "$IMAGES/agent:$VERSION@$(digest agent)" access-hash)" \

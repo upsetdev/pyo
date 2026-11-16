@@ -775,6 +775,9 @@ for image in "${!TAG_OF[@]}"; do
     *) IMAGE_SED+=(-e "s|__IMAGES__/$image:__TAG__|$IMAGES/$image:${TAG_OF[$image]}|g") ;;
   esac
 done
+# The sandbox template image isn't built here: Pyo then seeds `base` from
+# the latest release it found (sandbox/base.rs), or waits for one.
+IMAGE_SED+=(-e "s|__IMAGES__/sandbox-base:__TAG__||g")
 PYO_YAML=$(sed "${IMAGE_SED[@]}" -e "s|__IMAGES__|$IMAGES|g" deploy/k8s/pyo.yaml)
 if grep -q "__TAG__" <<<"$PYO_YAML"; then
   echo "pyo-up: deploy/k8s/pyo.yaml has an image scripts/build-images.sh doesn't build:" >&2
