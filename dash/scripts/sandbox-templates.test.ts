@@ -14,6 +14,7 @@ import {
   serverRefusal,
   templateImage,
   templateStatus,
+  templateTitle,
   usable,
 } from "../src/lib/pyo/sandboxTemplates";
 
@@ -30,14 +31,15 @@ const base = {
   state: "ready",
   builtin: true,
   source: {
-    image: "ghcr.io/upsetdev/pyo/sandbox-base:0.4.1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    os: "Debian 13",
+    image:
+      "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    os: "Ubuntu 24.04",
   },
 };
 
 test("base reads as what it runs and where it comes from", () => {
-  expect(templateImage(base)).toBe("Debian 13 · ghcr.io/upsetdev/pyo/sandbox-base");
-  expect(templateImage({ ...base, source: { os: "Debian 13" } })).toBe("Debian 13");
+  expect(templateImage(base)).toBe("Ubuntu 24.04 · ghcr.io/upsetdev/pyo-sandbox-images/base");
+  expect(templateImage({ ...base, source: { os: "Ubuntu 24.04" } })).toBe("Ubuntu 24.04");
   expect(templateImage({ source: { image: "node:22" } })).toBe("node:22");
   expect(templateImage({ source: null })).toBe("");
 });
@@ -97,7 +99,7 @@ const desktop = {
   name: "desktop",
   state: "ready",
   builtin: true,
-  source: { image: "ghcr.io/upsetdev/pyo/sandbox-desktop:0.4.2@sha256:ab", os: "Debian 13" },
+  source: { image: "ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:ab", os: "Ubuntu 24.04" },
 };
 
 test("desktop comes right after base, made on first use too", () => {
@@ -109,7 +111,16 @@ test("desktop comes right after base, made on first use too", () => {
   expect(templateStatus({ ...desktop, state: "pending" })).toBe("Ready to use");
   // One named desktop isn't Pyo's.
   expect(usable({ name: "desktop", state: "building" })).toBe(false);
-  expect(templateImage(desktop)).toBe("Debian 13 · ghcr.io/upsetdev/pyo/sandbox-desktop");
+  expect(templateImage(desktop)).toBe("Ubuntu 24.04 · ghcr.io/upsetdev/pyo-sandbox-images/desktop");
+});
+
+test("Pyo's own say on hover what they run", () => {
+  expect(templateTitle(base)).toBe("Ubuntu 24.04");
+  expect(templateTitle(desktop)).toBe("Ubuntu 24.04");
+  // A sandbox whose template isn't listed: what Pyo's run.
+  expect(templateTitle({ name: "base", builtin: true })).toBe("Ubuntu 24.04");
+  expect(templateTitle({ name: "node-22", source: { image: "node:22" } })).toBe(undefined);
+  expect(templateTitle({ name: "base", source: { image: "ubuntu" } })).toBe(undefined);
 });
 
 test("the desktop needs room, and opens through the daemon", () => {

@@ -29,6 +29,7 @@ export {
   serverRefusal,
   templateImage,
   templateStatus,
+  templateTitle,
   usable,
 } from "./sandboxTemplates";
 

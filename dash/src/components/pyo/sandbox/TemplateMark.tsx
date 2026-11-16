@@ -28,10 +28,11 @@ import {
   isDesktop,
   type Sandbox,
   type SandboxTemplate,
+  templateTitle,
 } from "~/lib/pyo/sandbox";
 
 // A sandbox template's logo, by what its image runs: languages first, since
-// node:22 is Debian underneath but reads as Node. Pyo's base is Debian, its
+// node:22 is Debian underneath but reads as Node. Pyo's base is Ubuntu, its
 // desktop a screen.
 
 type TemplateLike = Pick<SandboxTemplate, "name"> &
@@ -59,7 +60,7 @@ const LOGOS: [RegExp, SimpleIcon][] = [
 ];
 
 export function templateLogo(t: TemplateLike) {
-  if (isBase(t)) return siDebian;
+  if (isBase(t)) return siUbuntu;
   const text = `${t.source?.image ?? ""} ${t.source?.os ?? ""} ${t.name}`.toLowerCase();
   return LOGOS.find(([re]) => re.test(text))?.[1];
 }
@@ -95,12 +96,13 @@ export function TemplateMark({
   const { box, icon } = SIZES[size];
   return (
     <span
+      title={templateTitle(template)}
       className={`flex ${box} shrink-0 items-center justify-center border border-frame-border bg-card text-muted-foreground ${className}`}
     >
       {isDesktop(template) ? (
         <MonitorIcon size={icon} weight="duotone" className="text-primary" />
       ) : logo ? (
-        <BrandMark icon={logo} size={icon} tone={logo === siDebian ? "brand" : "auto"} />
+        <BrandMark icon={logo} size={icon} tone={logo === siUbuntu ? "brand" : "auto"} />
       ) : (
         <CubeIcon size={icon} />
       )}

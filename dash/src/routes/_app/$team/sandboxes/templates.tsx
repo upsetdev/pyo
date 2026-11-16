@@ -257,7 +257,7 @@ function TemplateDetails({ t }: { t: SandboxTemplate }) {
   const added = t.createdAt ? `Added ${timeAgo(t.createdAt)}${t.createdBy ? ` by ${t.createdBy}` : ""}` : "";
   return (
     <span className="block space-y-1.5 text-left">
-      {/* Base says what it runs ("Debian 13 · ghcr.io/…"): the OS on its own line. */}
+      {/* Base says what it runs ("Ubuntu 24.04 · ghcr.io/…"): the OS on its own line. */}
       {image.split(" · ").map((line, i, all) => (
         <span key={line} className={`block break-all ${all.length > 1 && !i ? "font-medium" : "font-mono text-[11.5px]"}`}>
           {line}

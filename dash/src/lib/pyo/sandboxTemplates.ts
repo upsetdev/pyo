@@ -23,12 +23,23 @@ export function imageRepo(image: string) {
   return i > name.lastIndexOf("/") ? name.slice(0, i) : name;
 }
 
+/** What Pyo's built-in templates run (upsetdev/pyo-sandbox-images), when
+ * the template doesn't say. */
+export const BUILTIN_OS = "Ubuntu 24.04";
+
 /** A template's image as lists show it. Pyo's built-in one says what it
- * runs and leaves out its version: "Debian 13 · ghcr.io/upsetdev/pyo/sandbox-base". */
+ * runs and leaves out its version: "Ubuntu 24.04 · ghcr.io/upsetdev/pyo-sandbox-images/base". */
 export function templateImage(t: TemplateLike) {
   const image = t.source?.image;
   if (t.builtin && t.source?.os) return image ? `${t.source.os} · ${imageRepo(image)}` : t.source.os;
   return image ?? "";
+}
+
+/** What a template's logo says on hover: what Pyo's own run, nothing for
+ * the rest. */
+export function templateTitle(t: TemplateLike) {
+  if (!isPyos(t)) return undefined;
+  return t.source?.os || BUILTIN_OS;
 }
 
 /** The new template form's name and image the wrong way round: an image in
@@ -78,7 +89,7 @@ export function desktopUrl(daemon: string, sandboxId: string, token: string, app
     autoconnect: "1",
     resize: "remote",
     reconnect: "1",
-    // The desktop brings it to the front (deploy/images/sandbox-desktop/desktop.py).
+    // The desktop brings it to the front (pyo-sandbox-images, images/desktop/desktop.py).
     ...(app ? { app } : {}),
     pyo_token: token,
   });
