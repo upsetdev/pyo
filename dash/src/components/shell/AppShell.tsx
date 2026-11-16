@@ -242,7 +242,7 @@ function AccountNav({
   };
   return (
     <nav
-      className={`mt-4 scrollbar-none flex flex-1 flex-col overflow-y-auto px-3 pb-4 ${className}`}
+      className={`mt-4 scrollbar-none flex flex-1 flex-col overflow-y-auto px-3 pb-10 ${className}`}
       aria-label="Account"
     >
       <ul className="flex flex-col gap-1">
@@ -358,7 +358,7 @@ function Sidebar({
         <AccountNav pathname={pathname} className={enter} />
       ) : (
         <nav
-          className={`mt-4 scrollbar-none flex flex-1 flex-col overflow-y-auto px-3 pb-4 ${enter}`}
+          className={`mt-4 scrollbar-none flex flex-1 flex-col overflow-y-auto px-3 pb-10 ${enter}`}
           aria-label="Main"
         >
           <div className="space-y-8">
