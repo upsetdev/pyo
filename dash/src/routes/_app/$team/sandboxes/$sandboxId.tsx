@@ -282,7 +282,6 @@ function NameField({ x, onDone }: { x: Sandbox; onDone: () => void }) {
           className="col-start-1 row-start-1 w-full min-w-0 bg-transparent p-0 font-semibold tracking-tight text-foreground outline-none"
         />
         </span>
-        <PencilSimpleIcon size={16} aria-hidden className="shrink-0 text-foreground" />
       </span>
     );
   return (
