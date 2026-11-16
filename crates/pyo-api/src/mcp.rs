@@ -688,9 +688,12 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "listSandboxServers" => {
             json_of(crate::sandbox::api::list_servers(st(), me(), Query(args_as(args)?)).await)
         }
-        "removeSandboxServer" => {
-            json_of(crate::sandbox::api::remove_server(st(), me(), path_id()?).await)
+        "createCloudSandboxServer" => {
+            json_of(crate::sandbox::api::add_cloud_server(st(), me(), Json(args_as(args)?)).await)
         }
+        "removeSandboxServer" => json_of(
+            crate::sandbox::api::remove_server(st(), me(), path_id()?, Query(args_as(args)?)).await,
+        ),
         "listSandboxTemplates" => {
             json_of(crate::sandbox::api::list_templates(st(), me(), Query(args_as(args)?)).await)
         }

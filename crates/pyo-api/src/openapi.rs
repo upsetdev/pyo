@@ -85,6 +85,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::sandbox::api::close_port,
         crate::sandbox::api::list_servers,
         crate::sandbox::api::add_server,
+        crate::sandbox::api::add_cloud_server,
         crate::sandbox::api::remove_server,
         crate::sandbox::api::issue_certificate,
         crate::sandbox::api::create_dns_record,

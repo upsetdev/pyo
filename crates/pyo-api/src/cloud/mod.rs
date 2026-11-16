@@ -1,5 +1,6 @@
 //! Servers Pyo makes at a cloud provider and joins to a cluster over the
-//! tailnet (Add server › Hetzner, Add cluster › Hetzner).
+//! tailnet (Add server › Hetzner, Add cluster › Hetzner), or sets up as a
+//! sandbox server (Sandboxes › Add server › Cloud provider).
 //!
 //! - **The connection** is a team's (Integrations › Hetzner, team admins):
 //!   clusters belong to a team, and the servers it makes are billed to the
@@ -11,9 +12,10 @@
 //!   single-use Tailscale key and a single-use code ([`user_data`]). On its
 //!   first boot it joins the tailnet, trades the code for its join details
 //!   over the tailnet ([`bootstrap`]), and runs join.sh (or connect.sh for
-//!   a new cluster) with them. The server carries this installation's label
-//!   (`pyo=<install id>`, `pyo-cluster=<cluster>`) and Pyo's firewall: the
-//!   web from anywhere and Tailscale's port, nothing else.
+//!   a new cluster) with them, or sandbox.sh for a sandbox server. The
+//!   server carries this installation's label (`pyo=<install id>`, and
+//!   `pyo-cluster=<cluster>` or `pyo-sandbox-server=<id>`) and Pyo's
+//!   firewall: the web from anywhere and Tailscale's port, nothing else.
 //! - **Following it** ([`tick`]): Creating → Booting → Joining → Ready,
 //!   with the Tailnet Lock sign command when its key waits for a signature.
 //!   After [`TIMEOUT`] it stops waiting and says why.
@@ -50,6 +52,8 @@ use crate::{
 pub const LABEL: &str = "pyo";
 /// The cluster a server was made for.
 pub const CLUSTER_LABEL: &str = "pyo-cluster";
+/// The sandbox server a server was made as.
+pub const SANDBOX_LABEL: &str = "pyo-sandbox-server";
 /// How long Pyo waits for a new server to be ready.
 pub const TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// The providers there are.
@@ -235,19 +239,44 @@ pub trait Provider {
     async fn firewall(&self, install: &str) -> Result<String, CloudError>;
 }
 
+/// What a server is made for: a cluster, or a sandbox server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner<'a> {
+    Cluster(&'a str),
+    Sandbox(&'a str),
+}
+
+impl<'a> Owner<'a> {
+    /// Its label at the provider.
+    pub fn label(self) -> (&'static str, &'a str) {
+        match self {
+            Owner::Cluster(id) => (CLUSTER_LABEL, id),
+            Owner::Sandbox(id) => (SANDBOX_LABEL, id),
+        }
+    }
+
+    pub fn id(self) -> &'a str {
+        self.label().1
+    }
+}
+
 /// The labels a new server carries.
-pub fn labels(install: &str, cluster_id: &str) -> BTreeMap<String, String> {
+pub fn labels(install: &str, owner: Owner) -> BTreeMap<String, String> {
+    let (key, value) = owner.label();
     BTreeMap::from([
         (LABEL.to_owned(), install.to_owned()),
-        (CLUSTER_LABEL.to_owned(), cluster_id.to_owned()),
+        (key.to_owned(), value.to_owned()),
     ])
 }
 
 /// Whether Pyo may delete a server: it carries this installation's label,
-/// and the cluster's when one is given.
-pub fn ours(r: &Remote, install: &str, cluster_id: Option<&str>) -> bool {
+/// and its cluster's or sandbox server's when one is given.
+pub fn ours(r: &Remote, install: &str, owner: Option<Owner>) -> bool {
     r.labels.get(LABEL).map(String::as_str) == Some(install)
-        && cluster_id.is_none_or(|c| r.labels.get(CLUSTER_LABEL).map(String::as_str) == Some(c))
+        && owner.is_none_or(|o| {
+            let (key, value) = o.label();
+            r.labels.get(key).map(String::as_str) == Some(value)
+        })
 }
 
 /// Deletes a server, only when it carries this installation's label
@@ -256,12 +285,12 @@ pub async fn delete<P: Provider>(
     p: &P,
     id: &str,
     install: &str,
-    cluster_id: Option<&str>,
+    owner: Option<Owner<'_>>,
 ) -> Result<(), CloudError> {
     let Some(r) = p.server(id).await? else {
         return Ok(());
     };
-    if !ours(&r, install, cluster_id) {
+    if !ours(&r, install, owner) {
         return Err(CloudError::NotOurs);
     }
     p.delete_unchecked(id).await
@@ -306,6 +335,7 @@ pub struct Boot<'a> {
     pub pyo: &'a str,
     /// Its cloud server ID.
     pub server_id: &'a str,
+    /// Its cluster, or the sandbox server it becomes.
     pub cluster_id: &'a str,
     pub role: bootstrap::Role,
     /// Its name in the cluster and on the tailnet.
@@ -346,7 +376,7 @@ pub fn user_data(b: &Boot, ssh_key: Option<&str>) -> ApiResult<String> {
         ));
     }
     let mut out = String::from(
-        "#cloud-config\n# Made by Pyo: joins this server to a cluster over your tailnet.\nssh_pwauth: false\n",
+        "#cloud-config\n# Made by Pyo: joins this server to Pyo over your tailnet.\nssh_pwauth: false\n",
     );
     if let Some(k) = ssh_key {
         // JSON's quoting is YAML's double-quoted string.
@@ -549,6 +579,7 @@ struct Row {
     id: String,
     team_id: String,
     cluster_id: Option<String>,
+    sandbox_server_id: Option<String>,
     name: String,
     remote_id: String,
     state: String,
@@ -568,6 +599,10 @@ pub struct Seen {
     pub in_cluster: Option<bool>,
     /// Tailnet Lock waits for its key to be signed: the command.
     pub sign: Option<String>,
+    /// It becomes a sandbox server, not a cluster's.
+    pub sandbox: bool,
+    /// The sandbox server can't run sandboxes: why.
+    pub refused: Option<String>,
 }
 
 /// The next state of a server being made, and why it failed, if it did.
@@ -578,6 +613,9 @@ pub fn next_state(seen: &Seen, age: Duration) -> (&'static str, Option<String>) 
     let Some(remote) = seen.remote.as_deref() else {
         return ("failed", Some("It was deleted at Hetzner.".into()));
     };
+    if let Some(why) = &seen.refused {
+        return ("failed", Some(format!("It can't run sandboxes. {why}")));
+    }
     let state = if seen.in_cluster.is_some() || seen.on_tailnet {
         "joining"
     } else if matches!(remote, "running" | "starting") {
@@ -595,6 +633,9 @@ pub fn next_state(seen: &Seen, age: Duration) -> (&'static str, Option<String>) 
         }
         _ if seen.sign.is_some() => {
             "Its key wasn't signed in 15 minutes. Sign it, or delete the server."
+        }
+        _ if seen.sandbox => {
+            "It joined your tailnet but didn't become a sandbox server in 15 minutes. Read /var/log/pyo-join.log on it."
         }
         _ => {
             "It joined your tailnet but not the cluster in 15 minutes. Read /var/log/pyo-join.log on it."
@@ -621,7 +662,7 @@ async fn tailnet_devices(s: &AppState) -> Option<Vec<crate::tailscale::Device>> 
 pub async fn tick(s: &AppState) -> ApiResult<()> {
     bootstrap::prune(&s.db).await?;
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, team_id, cluster_id, name, remote_id, state,
+        "SELECT id, team_id, cluster_id, sandbox_server_id, name, remote_id, state,
                 extract(epoch FROM now() - created_at)::float8 AS age_secs, sign_command, first_server
            FROM pyo.cloud_servers WHERE state IN ('creating', 'booting', 'joining', 'removing')
           ORDER BY created_at",
@@ -691,8 +732,9 @@ async fn follow(
     devices: Option<&[crate::tailscale::Device]>,
 ) -> ApiResult<()> {
     let remote = p.server(&r.remote_id).await?;
-    let in_cluster: Option<bool> = match &r.cluster_id {
-        Some(c) => sqlx::query_scalar(
+    let mut refused = None;
+    let in_cluster: Option<bool> = match (&r.cluster_id, &r.sandbox_server_id) {
+        (Some(c), _) => sqlx::query_scalar(
             "SELECT report->>'status' = 'ready' FROM pyo.servers WHERE cluster_id = $1 AND name = $2",
         )
         .bind(c)
@@ -700,7 +742,26 @@ async fn follow(
         .fetch_optional(&s.db)
         .await?
         .map(|x: Option<bool>| x.unwrap_or(false)),
-        None => None,
+        // A sandbox server counts once sandbox.sh redeemed its code, and is
+        // ready once its daemon reports.
+        (None, Some(sbs)) => {
+            let row: Option<(String, bool, Option<String>)> = sqlx::query_as(
+                "SELECT state, joined_at IS NOT NULL, error FROM pyo.sandbox_servers WHERE id = $1",
+            )
+            .bind(sbs)
+            .fetch_optional(&s.db)
+            .await?;
+            match row {
+                Some((state, _, _)) if state == "ready" => Some(true),
+                Some((state, _, error)) if state == "refused" => {
+                    refused = Some(error.unwrap_or_default());
+                    Some(false)
+                }
+                Some((_, true, _)) => Some(false),
+                _ => None,
+            }
+        }
+        (None, None) => None,
     };
     let mine: Vec<&crate::tailscale::Device> = devices
         .map(|d| device_of(d, &r.name).collect())
@@ -714,6 +775,8 @@ async fn follow(
         on_tailnet: !mine.is_empty(),
         in_cluster,
         sign: sign.clone(),
+        sandbox: r.sandbox_server_id.is_some(),
+        refused,
     };
     let (mut state, error) = next_state(&seen, Duration::from_secs_f64(r.age_secs.max(0.0)));
     // It traded its code over the tailnet: Joining, even when the tailnet's
@@ -836,7 +899,12 @@ async fn finish_removal(
             tracing::warn!(server = %r.name, error = %e, "couldn't take the server off the tailnet");
         }
     }
-    match delete(p, &r.remote_id, install, r.cluster_id.as_deref()).await {
+    let owner = match (&r.cluster_id, &r.sandbox_server_id) {
+        (Some(c), _) => Some(Owner::Cluster(c)),
+        (None, Some(sbs)) => Some(Owner::Sandbox(sbs)),
+        (None, None) => None,
+    };
+    match delete(p, &r.remote_id, install, owner).await {
         Ok(()) => {
             sqlx::query(
                 "UPDATE pyo.cloud_servers SET state = 'deleted', error = NULL, sign_command = NULL, deleted_at = now(), updated_at = now() WHERE id = $1",
@@ -872,7 +940,8 @@ pub async fn snapshot(db: &PgPool, team_ids: &[String]) -> ApiResult<(Value, Val
     .fetch_all(db)
     .await?;
     let servers: Vec<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'provider', provider, 'clusterId', cluster_id, 'name', name,
+        "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'provider', provider, 'clusterId', cluster_id,
+                'sandboxServerId', sandbox_server_id, 'name', name,
                 'firstServer', first_server, 'builder', builder, 'location', location, 'serverType', server_type,
                 'monthly', monthly, 'currency', currency, 'ipv4', ipv4, 'state', state, 'error', error,
                 'signCommand', sign_command, 'createdBy', created_by, 'createdAt', pyo.ms(created_at),
@@ -898,7 +967,7 @@ mod tests {
             location: "fsn1",
             server_type: ty,
             user_data,
-            labels: labels(INSTALL, cluster),
+            labels: labels(INSTALL, Owner::Cluster(cluster)),
             firewall: None,
         }
     }
@@ -968,10 +1037,14 @@ mod tests {
         assert_eq!(h.server(&r.id).await.unwrap().unwrap().id, r.id);
         // The same name again: Hetzner's names are unique in a project.
         assert_eq!(h.create(&c).await.unwrap_err(), CloudError::NameTaken);
-        delete(&h, &r.id, INSTALL, Some("cl_one")).await.unwrap();
+        delete(&h, &r.id, INSTALL, Some(Owner::Cluster("cl_one")))
+            .await
+            .unwrap();
         assert_eq!(h.server(&r.id).await.unwrap(), None);
         // Gone already is fine.
-        delete(&h, &r.id, INSTALL, Some("cl_one")).await.unwrap();
+        delete(&h, &r.id, INSTALL, Some(Owner::Cluster("cl_one")))
+            .await
+            .unwrap();
         // Ids are numbers: anything else is never sent.
         assert_eq!(h.server("1/../../firewalls").await.unwrap(), None);
     }
@@ -985,13 +1058,35 @@ mod tests {
             json!({ "pyo": "ffffffffffffffffffffffffffffffff", "pyo-cluster": "cl_one" }),
         );
         let other_cluster = m.add_server(json!({ "pyo": INSTALL, "pyo-cluster": "cl_two" }));
-        for id in [unlabelled, other_pyo, other_cluster] {
+        let sandbox = m.add_server(json!({ "pyo": INSTALL, "pyo-sandbox-server": "sbs_one" }));
+        for id in [unlabelled, other_pyo, other_cluster, sandbox] {
             assert_eq!(
-                delete(&h, &id.to_string(), INSTALL, Some("cl_one")).await,
+                delete(&h, &id.to_string(), INSTALL, Some(Owner::Cluster("cl_one"))).await,
                 Err(CloudError::NotOurs)
             );
         }
-        assert_eq!(m.0.lock().unwrap().servers.len(), 3);
+        // A sandbox server only by its own label.
+        assert_eq!(
+            delete(
+                &h,
+                &other_cluster.to_string(),
+                INSTALL,
+                Some(Owner::Sandbox("sbs_one"))
+            )
+            .await,
+            Err(CloudError::NotOurs)
+        );
+        assert_eq!(
+            delete(
+                &h,
+                &sandbox.to_string(),
+                INSTALL,
+                Some(Owner::Sandbox("sbs_two"))
+            )
+            .await,
+            Err(CloudError::NotOurs)
+        );
+        assert_eq!(m.0.lock().unwrap().servers.len(), 4);
         assert!(
             !m.0.lock()
                 .unwrap()
@@ -1004,6 +1099,14 @@ mod tests {
         delete(&h, &other_cluster.to_string(), INSTALL, None)
             .await
             .unwrap();
+        delete(
+            &h,
+            &sandbox.to_string(),
+            INSTALL,
+            Some(Owner::Sandbox("sbs_one")),
+        )
+        .await
+        .unwrap();
         assert_eq!(m.0.lock().unwrap().servers.len(), 2);
     }
 
@@ -1243,6 +1346,8 @@ mod tests {
             on_tailnet,
             in_cluster,
             sign: sign.map(str::to_owned),
+            sandbox: false,
+            refused: None,
         };
         let soon = Duration::from_secs(60);
         let late = TIMEOUT + Duration::from_secs(1);
@@ -1282,5 +1387,22 @@ mod tests {
         let (s, why) = next_state(&seen(None, false, None, None), soon);
         assert_eq!(s, "failed");
         assert!(why.unwrap().contains("deleted at Hetzner"));
+
+        // A sandbox server: refused at once, and its own words when late.
+        let sbx = |in_cluster, refused: Option<&str>| Seen {
+            sandbox: true,
+            refused: refused.map(str::to_owned),
+            ..seen(Some("running"), true, in_cluster, None)
+        };
+        assert_eq!(next_state(&sbx(Some(true), None), soon), ("ready", None));
+        let (s, why) = next_state(&sbx(Some(false), Some("runsc isn't installed.")), soon);
+        assert_eq!(s, "failed");
+        assert_eq!(
+            why.unwrap(),
+            "It can't run sandboxes. runsc isn't installed."
+        );
+        let (s, why) = next_state(&sbx(Some(false), None), late);
+        assert_eq!(s, "failed");
+        assert!(why.unwrap().contains("didn't become a sandbox server"));
     }
 }
