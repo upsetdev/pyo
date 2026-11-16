@@ -14,7 +14,7 @@ function TemplatesPage() {
   const s = usePyo();
   const navigate = useNavigate();
   return (
-    <Page>
+    <Page width="max-w-7xl">
       <PageHeader title="Templates" description="Ready-to-run services." />
       <TemplateGallery
         recentIds={s.recentTemplateIds}
