@@ -191,7 +191,7 @@ ips="10.0.2.15 203.0.113.7"
 : >"$asked"
 out=$(pyo_addresses 300)
 check "a public IP: waits five minutes" "$(wc -l <"$asked")" "^1[45][0-9]$" has
-check "a public IP: says it waits, as it goes" "$out" "^Waiting for the HTTPS address \(up to 5 minutes\)… 0:00$" has
+check "a public IP: says it waits, as it goes" "$out" "^Waiting for the HTTPS address \(up to 5 minutes\)…$" has
 check "a public IP: every 20 seconds in a log" "$out" "^Waiting for the HTTPS address \(up to 5 minutes\)… 4:40$" has
 check "a public IP: not more often" "$out" "… 0:1[0-9]$" lacks
 meta='{"publicUrl":"https://pyo.203.0.113.7.nip.io"}'
@@ -204,8 +204,11 @@ unset -f hostname curl
 
 # quietly: the output of what it runs only when that fails.
 out=$(quietly "Doing it…" bash -c 'echo noisy; exit 0' 2>&1)
-check "quietly: progress" "$out" "^Doing it… 0:00$" has
+check "quietly: progress" "$out" "^Doing it…$" has
 check "quietly: no output when it works" "$out" "noisy" lacks
+# Off a terminal, two steps with the same line show it once.
+out=$( (quietly "Fetching…" true; quietly "Fetching…" true) 2>&1)
+check "quietly: a repeated line once" "$(grep -c '^Fetching…$' <<<"$out")" "^1$" has
 out=$(quietly "Doing it…" bash -c 'echo what went wrong; exit 3' 2>&1) && rc=0 || rc=$?
 check "quietly: the output when it fails" "$out" "what went wrong" has
 check "quietly: and its exit code" "$rc" "^3$" has

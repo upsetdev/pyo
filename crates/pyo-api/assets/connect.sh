@@ -52,9 +52,10 @@ become_root() {
 # <<< pyo:become-root
 # >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh, scripts/pyo-up.sh and deploy/sandbox.sh)
 # A long wait shows it's still going. On a terminal, one line ticks
-# ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), the same line comes
-# every 20 seconds. progress_start MESSAGE, then progress_tick as often as
-# it likes, then progress_end.
+# ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), each step's line
+# comes once (not again for a step with the same line), then with its time
+# every 20 seconds while it runs. progress_start MESSAGE, then
+# progress_tick as often as it likes, then progress_end.
 progress_start() {
   PROGRESS_MSG=$1 PROGRESS_T0=$SECONDS PROGRESS_NEXT=0
   progress_tick
@@ -65,8 +66,12 @@ progress_tick() {
   if [ -t 1 ]; then
     printf '\r\033[K%s %d:%02d' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
   elif [ "$t" -ge "$PROGRESS_NEXT" ]; then
-    printf '%s %d:%02d\n' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
-    PROGRESS_NEXT=$((t + 20))
+    if [ "$PROGRESS_NEXT" -gt 0 ]; then
+      printf '%s %d:%02d\n' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+    elif [ "$PROGRESS_MSG" != "${PROGRESS_LAST:-}" ]; then
+      printf '%s\n' "$PROGRESS_MSG"
+    fi
+    PROGRESS_LAST=$PROGRESS_MSG PROGRESS_NEXT=$((t + 20))
   fi
   return 0
 }
