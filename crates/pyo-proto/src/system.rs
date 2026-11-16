@@ -654,6 +654,10 @@ pub fn envoy_proxy(geoip_image: &str, public: bool) -> Value {
                 "type": "Kubernetes",
                 "kubernetes": {
                     "envoyDaemonSet": {
+                        // New before old, like the WAF: a server's new proxy
+                        // is ready before its old one stops. Envoy has no
+                        // host ports, so two fit on one server.
+                        "strategy": { "type": "RollingUpdate", "rollingUpdate": { "maxSurge": 1, "maxUnavailable": 0 } },
                         "pod": {
                             "affinity": gateway_affinity(),
                             "tolerations": [{ "key": crate::GPU_RESOURCE, "operator": "Exists", "effect": "NoSchedule" }],
@@ -674,6 +678,10 @@ pub fn envoy_proxy(geoip_image: &str, public: bool) -> Value {
                     "envoyService": envoy_service(public),
                 },
             },
+            // A stopping proxy drains its connections, then exits. Envoy's
+            // PreStop waits for the shutdown manager, which closes that wait
+            // at 10 s (the EOF it failed with), so the drain ends before.
+            "shutdown": { "drainTimeout": "6s", "minDrainDuration": "3s" },
             // The firewall's country rules place visitors with this.
             "geoIP": { "provider": { "type": "MaxMind", "maxMind": { "countryDbSource": { "local": { "path": GEOIP_PATH } } } } },
             "telemetry": { "accessLog": { "settings": [{
@@ -1479,6 +1487,22 @@ mod tests {
             assert_eq!(kept, [80, 443, 2222, 5353]);
             assert!(TAILNET_PORTS.iter().all(|t| !kept.contains(t)));
         }
+    }
+
+    /// An update never leaves a server without a proxy: the new one starts
+    /// first, and the old one drains within the shutdown manager's 10 s.
+    #[test]
+    fn proxies_update_new_before_old() {
+        let p = envoy_proxy("g", true);
+        let ds = &p["spec"]["provider"]["kubernetes"]["envoyDaemonSet"];
+        assert_eq!(ds["strategy"]["rollingUpdate"]["maxSurge"], 1);
+        assert_eq!(ds["strategy"]["rollingUpdate"]["maxUnavailable"], 0);
+        let secs = |v: &serde_json::Value| -> u64 {
+            v.as_str().unwrap().trim_end_matches('s').parse().unwrap()
+        };
+        let shutdown = &p["spec"]["shutdown"];
+        assert!(secs(&shutdown["minDrainDuration"]) < secs(&shutdown["drainTimeout"]));
+        assert!(secs(&shutdown["drainTimeout"]) + 2 < 10);
     }
 
     /// The tailnet listeners: their own ports, tailnet sources only. Public
