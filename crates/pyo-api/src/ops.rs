@@ -7030,7 +7030,10 @@ async fn apply(
             // It's on the tailnet before it asks: no key in its details.
             let material = crate::cloud::bootstrap::Material::new(
                 format!("{}/join.sh", parts.base),
-                &crate::join::args(&parts.join(&name, builder, false)),
+                &crate::join::pinned(
+                    &parts.base,
+                    crate::join::args(&parts.join(&name, builder, false)),
+                ),
             );
             if builder {
                 let cluster_name: String =
@@ -7136,13 +7139,17 @@ async fn apply(
             let (api, tailscale_key, registry) =
                 reach(tx, s, &id, "Pyo: connect a cluster").await?;
             // It's on the tailnet before it asks: no key in its details.
+            let base = crate::join::scripts_url(Some(&api));
             let material = crate::cloud::bootstrap::Material::new(
-                format!("{}/connect.sh", crate::join::scripts_url(Some(&api))),
-                &crate::join::connect_args(
-                    &api,
-                    &token,
-                    None,
-                    registry.as_ref().map(|(r, t)| (r.as_str(), t.as_str())),
+                format!("{base}/connect.sh"),
+                &crate::join::pinned(
+                    &base,
+                    crate::join::connect_args(
+                        &api,
+                        &token,
+                        None,
+                        registry.as_ref().map(|(r, t)| (r.as_str(), t.as_str())),
+                    ),
                 ),
             );
             let made = make_cloud_server(

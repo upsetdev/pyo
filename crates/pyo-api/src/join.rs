@@ -63,10 +63,9 @@ fn pick_scripts_url(configured: Option<&str>, pyo: &[Option<&str>]) -> String {
 /// its public IP: that address may not be reachable from outside (a server
 /// behind NAT, like Starlink's). So:
 /// 1. `PYO_SCRIPTS_URL`, when set;
-/// 2. else pyo.dev. Its sandbox.sh runs the script of the release
-///    `--version` names. Its join.sh and connect.sh run the latest
-///    release's script, and join.sh's `--k3s` keeps the server on the
-///    cluster's k3s.
+/// 2. else pyo.dev. Its sandbox.sh, join.sh and connect.sh run the script
+///    of the release `--version` names ([`pinned`]), and join.sh's `--k3s`
+///    keeps the server on the cluster's k3s.
 ///
 /// A dev build's version may not be a published release, so pyo.dev has no
 /// sandbox.sh for it and its wrapper fails to download one: dev builds set
@@ -266,8 +265,22 @@ fn quoted(args: &[(&str, Option<String>)]) -> String {
 pub fn command(base: &str, j: &Join) -> String {
     format!(
         "curl -fsSL {base}/join.sh | bash -s -- {}",
-        quoted(&args(j))
+        quoted(&pinned(base, args(j)))
     )
+}
+
+/// A script's arguments for where it's fetched from (`base`). pyo.dev's
+/// join.sh and connect.sh run the script of the release `--version` names,
+/// else the latest one's: fetched from anywhere but a Pyo (whose own are
+/// its release's), they get this Pyo's release. The scripts ignore it.
+pub fn pinned(
+    base: &str,
+    mut args: Vec<(&'static str, Option<String>)>,
+) -> Vec<(&'static str, Option<String>)> {
+    if !base.trim_end_matches('/').ends_with("/install") {
+        args.push(("--version", Some(env!("CARGO_PKG_VERSION").to_owned())));
+    }
+    args
 }
 
 /// Pyo on the machine it runs on: where "This machine"'s installer
@@ -292,7 +305,10 @@ pub fn connect_command(
 ) -> String {
     format!(
         "curl -fsSL {base}/connect.sh | bash -s -- {}",
-        quoted(&connect_args(api, token, tailscale_key, registry))
+        quoted(&pinned(
+            base,
+            connect_args(api, token, tailscale_key, registry)
+        ))
     )
 }
 
@@ -321,7 +337,10 @@ pub fn connect_args(
 /// with Pyo's: connect.sh run on the cluster's first server, which reads
 /// Pyo's address and the token from the agent already there.
 pub fn refresh_command(base: &str) -> String {
-    format!("curl -fsSL {base}/connect.sh | bash")
+    match quoted(&pinned(base, Vec::new())) {
+        a if a.is_empty() => format!("curl -fsSL {base}/connect.sh | bash"),
+        a => format!("curl -fsSL {base}/connect.sh | bash -s -- {a}"),
+    }
 }
 
 /// GET /install/join.sh
@@ -399,6 +418,9 @@ pub async fn serve_host_units() -> impl axum::response::IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pyo.dev's wrappers run this release's scripts.
+    const PIN: &str = concat!(" --version '", env!("CARGO_PKG_VERSION"), "'");
 
     #[test]
     fn host_units_script_is_install_sh_s() {
@@ -745,10 +767,12 @@ mod tests {
         );
         assert_eq!(
             c,
-            "curl -fsSL https://pyo.dev/join.sh | bash -s -- --server '100.64.0.1' --token 'abc123.0123456789abcdef' --name 'sg-1' --k3s 'v1.36.5+k3s1'"
+            format!(
+                "curl -fsSL https://pyo.dev/join.sh | bash -s -- --server '100.64.0.1' --token 'abc123.0123456789abcdef' --name 'sg-1' --k3s 'v1.36.5+k3s1'{PIN}"
+            )
         );
         let c = command(
-            "https://x",
+            "https://x/install",
             &Join {
                 server_ip: "1",
                 token: "t",
@@ -773,11 +797,18 @@ mod tests {
                 None,
                 Some(("100.64.0.1:5005", "def"))
             ),
-            "curl -fsSL https://pyo.dev/connect.sh | bash -s -- --api 'http://100.64.0.1:8000' --token 'abc' --registry '100.64.0.1:5005' --registry-token 'def'"
+            format!(
+                "curl -fsSL https://pyo.dev/connect.sh | bash -s -- --api 'http://100.64.0.1:8000' --token 'abc' --registry '100.64.0.1:5005' --registry-token 'def'{PIN}"
+            )
         );
         assert_eq!(
             refresh_command("https://pyo.dev"),
-            "curl -fsSL https://pyo.dev/connect.sh | bash"
+            format!("curl -fsSL https://pyo.dev/connect.sh | bash -s --{PIN}")
+        );
+        // Pyo's own scripts are its release's.
+        assert_eq!(
+            refresh_command("https://pyo.example/install"),
+            "curl -fsSL https://pyo.example/install/connect.sh | bash"
         );
     }
 
@@ -929,7 +960,9 @@ mod tests {
                     registry: None,
                 },
             ),
-            "curl -fsSL https://pyo.dev/join.sh | bash -s -- --server 'server-1.tail1234.ts.net' --token 't' --name 'server-2' --k3s 'v1.37.2+k3s1' --tailscale-key 'tskey-auth-1'"
+            format!(
+                "curl -fsSL https://pyo.dev/join.sh | bash -s -- --server 'server-1.tail1234.ts.net' --token 't' --name 'server-2' --k3s 'v1.37.2+k3s1' --tailscale-key 'tskey-auth-1'{PIN}"
+            )
         );
         assert_eq!(
             connect_command(
@@ -939,7 +972,9 @@ mod tests {
                 Some("tskey-auth-1"),
                 Some(("pyo-registry.tail1234.ts.net", "def"))
             ),
-            "curl -fsSL https://pyo.dev/connect.sh | bash -s -- --api 'https://pyo.tail1234.ts.net' --token 'abc' --tailscale-key 'tskey-auth-1' --registry 'pyo-registry.tail1234.ts.net' --registry-token 'def'"
+            format!(
+                "curl -fsSL https://pyo.dev/connect.sh | bash -s -- --api 'https://pyo.tail1234.ts.net' --token 'abc' --tailscale-key 'tskey-auth-1' --registry 'pyo-registry.tail1234.ts.net' --registry-token 'def'{PIN}"
+            )
         );
         // A mirror the operator set.
         assert!(
