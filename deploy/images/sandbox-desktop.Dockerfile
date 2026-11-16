@@ -39,7 +39,7 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
       chromium dbus-x11 fonts-dejavu-core fonts-droid-fallback \
       fonts-liberation fonts-noto-color-emoji openbox \
-      tigervnc-standalone-server tint2 \
+      tigervnc-standalone-server tint2 wmctrl \
       x11-xserver-utils xfce4-terminal; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
       /usr/share/doc/* /usr/share/man/*; \

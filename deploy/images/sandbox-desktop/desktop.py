@@ -8,6 +8,8 @@
   (Xvnc) and the session in the background, so they're up by the time
   noVNC connects. A WebSocket waits only for the screen. Chromium starts
   once the screen is up, and nothing waits for it.
+  The page asked as `vnc.html?app=chromium` also brings Chromium to the
+  front, maximized: started when it isn't running, raised when it is.
 - 9222, Chromium's CDP: starts the screen and Chromium (CDP on 9223) when
   Chromium isn't running, then passes the connection to it.
 
@@ -128,6 +130,36 @@ async def desktop() -> None:
         await browser()
 
 
+async def wmctrl(*args: str) -> bool:
+    p = await asyncio.create_subprocess_exec(
+        "wmctrl", *args, env=env(),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return await p.wait() == 0
+
+
+async def front(app: str) -> None:
+    """Brings an app to the front of the screen, maximized. Only Chromium."""
+    if app != "chromium":
+        return
+    await browser()
+    t = time.monotonic()
+    # Its window, once a Chromium that just started shows it. A new one in
+    # the running Chromium when it has none.
+    opened = False
+    while not await wmctrl("-x", "-a", "chromium"):
+        waited = time.monotonic() - t
+        if waited > 15:
+            log("Chromium has no window to bring to the front")
+            return
+        if waited > 3 and not opened:
+            spawn("chromium window", ["chromium", "--start-maximized", "about:blank"])
+            opened = True
+        await asyncio.sleep(0.1)
+    await wmctrl("-x", "-r", "chromium", "-b", "add,maximized_vert,maximized_horz")
+    log(f"Chromium is in front in {int((time.monotonic() - t) * 1000)}ms")
+
+
 def start_desktop() -> asyncio.Task:
     """Starts the desktop in the background, once at a time."""
     global starting
@@ -198,6 +230,12 @@ async def handle_screen(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
         path = urllib.parse.unquote(urllib.parse.urlsplit(target).path)
         # Whatever is asked first, the screen starts now.
         task = start_desktop()
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(target).query)
+        page = path in ("", "/", "/vnc.html")
+        if page and "app" in query:
+            asyncio.ensure_future(front(query["app"][0])).add_done_callback(
+                lambda t: t.cancelled() or not t.exception() or log(f"couldn't bring it to the front: {t.exception()}")
+            )
         if path.rstrip("/").endswith("/websockify") or path == "/websockify":
             if headers.get("upgrade", "").lower() != "websocket":
                 reply(w, "400 Bad Request", b"This is noVNC's WebSocket.\n")
@@ -212,7 +250,8 @@ async def handle_screen(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
             reply(w, "404 Not Found", b"Not found.\n")
             return
         body, kind = found
-        reply(w, "200 OK", b"" if method == "HEAD" else body, kind, cache=True)
+        # The page itself isn't cached: each open asks again (app=...).
+        reply(w, "200 OK", b"" if method == "HEAD" else body, kind, cache=not page)
         await w.drain()
     except (OSError, RuntimeError):
         pass
