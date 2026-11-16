@@ -1,6 +1,7 @@
 import { CaretDownIcon, CircleNotchIcon, CodeIcon, HardDrivesIcon } from "@phosphor-icons/react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
+import { z } from "zod";
 import { useSandboxes } from "~/components/pyo/sandbox/common";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button, ButtonLink } from "~/components/ui/Button";
@@ -14,7 +15,10 @@ import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
   defaultTemplate,
+  gettingReady,
+  isBase,
   LIFETIMES,
+  usable,
   SIZES,
   rememberConnection,
   sandboxApi,
@@ -28,6 +32,10 @@ import { seo } from "~/lib/seo";
 
 export const Route = createFileRoute("/_app/$team/sandboxes/new")({
   head: () => ({ meta: seo({ title: "New sandbox" }) }),
+  // From a template's Use button.
+  validateSearch: z.object({
+    template: z.string().optional().catch(undefined),
+  }),
   component: NewSandbox,
 });
 
@@ -94,7 +102,8 @@ function NewSandboxForm() {
   const templates = useQuery(`sandbox-templates:${team}`, () => sandboxApi.templates(team));
   const list = useSandboxes(team);
   const ready = templates.status === "success" ? templates.data.templates : [];
-  const [template, setTemplate] = useState("");
+  const search = Route.useSearch();
+  const [template, setTemplate] = useState(search.template ?? "");
   const [size, setSize] = useState<(typeof SIZES)[number]["value"]>("1");
   const [ttl, setTtl] = useState<(typeof LIFETIMES)[number]["value"]>("1h");
   const [idle, setIdle] = useState(false);
@@ -112,8 +121,14 @@ function NewSandboxForm() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const picked = template || defaultTemplate(ready);
+  const picked = (template && ready.some((t) => t.name === template && usable(t)) ? template : "") || defaultTemplate(ready);
   const sz = SIZES.find((x) => x.value === size)!;
+  const pickedBase = ready.find((t) => t.name === picked && isBase(t));
+  // While a create waits for its server to make base there.
+  const preparing =
+    busy && list.status === "success"
+      ? list.data.sandboxes.find((x) => x.preparing && x.state === "creating" && x.template === picked)
+      : undefined;
   const limits = list.status === "success" ? list.data.limits : null;
   const inUse = list.status === "success" ? list.data.inUse : null;
   const body: CreateSandbox = {
@@ -182,10 +197,10 @@ function NewSandboxForm() {
                 ) : ready.length ? (
                   <Select {...p} value={picked} onChange={(e) => setTemplate(e.target.value)}>
                     {ready.map((t) => (
-                      <option key={t.id} value={t.name} disabled={t.state !== "ready"}>
+                      <option key={t.id} value={t.name} disabled={!usable(t)}>
                         {t.name}
                         {templateImage(t) ? ` · ${templateImage(t)}` : ""}
-                        {t.state !== "ready" ? ` (${t.state})` : ""}
+                        {!usable(t) ? ` (${t.state === "unavailable" ? "not available yet" : t.state})` : ""}
                       </option>
                     ))}
                   </Select>
@@ -210,6 +225,11 @@ function NewSandboxForm() {
                 )
               }
             </Field>
+            {pickedBase && !pickedBase.servers.length ? (
+              <p className="-mt-3 text-[12px] text-muted-foreground">
+                The first sandbox from base on a server takes a minute longer.
+              </p>
+            ) : null}
             <Field
               label="Size"
               hint={
@@ -322,7 +342,7 @@ function NewSandboxForm() {
                 Cancel
               </ButtonLink>
               <Button type="submit" size="sm" disabled={!picked || busy}>
-                {busy ? "Creating…" : "Create sandbox"}
+                {preparing ? gettingReady(picked, preparing.server) : busy ? "Creating…" : "Create sandbox"}
               </Button>
             </div>
           </form>

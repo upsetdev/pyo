@@ -8,7 +8,16 @@ import { request } from "./backend";
 import { BASE_TEMPLATE } from "./sandboxTemplates";
 import type { CloudServerState } from "./types";
 
-export { BASE_TEMPLATE, defaultTemplate, imageRepo, templateImage } from "./sandboxTemplates";
+export {
+  BASE_TEMPLATE,
+  defaultTemplate,
+  gettingReady,
+  imageRepo,
+  isBase,
+  templateImage,
+  templateStatus,
+  usable,
+} from "./sandboxTemplates";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -31,6 +40,8 @@ export type Sandbox = {
   template: string;
   templateId: string | null;
   state: SandboxState;
+  /** While it waits for its server to make its template (base, the first time there). */
+  preparing?: boolean;
   runtime: "firecracker" | "gvisor" | null;
   cpus: number;
   memoryMib: number;
@@ -210,12 +221,15 @@ export type SandboxTemplate = {
   source: { kind: string; image?: string; os?: string; release?: string } | null;
   /** Pyo's own (base): kept in step with Pyo's release, never deleted. */
   builtin?: boolean;
-  state: "pending" | "building" | "ready" | "failed";
-  /** Each sandbox server that may use it, and how far it got there. */
+  /** "unavailable": base, while Pyo has no image for it (`error` says why). */
+  state: "pending" | "building" | "ready" | "failed" | "unavailable";
+  /** Each sandbox server that may use it, and how far it got there. For
+   * base, the servers that have it: they make it on first use. */
   servers: SandboxTemplateServer[];
   error: string | null;
   createdBy: string | null;
-  createdAt: number;
+  /** Null for base before Pyo adds it. */
+  createdAt: number | null;
 };
 
 export type SandboxTemplateServer = {

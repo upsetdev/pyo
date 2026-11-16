@@ -23,13 +23,29 @@ export function imageRepo(image: string) {
  * runs and leaves out its version: "Debian 13 · ghcr.io/upsetdev/pyo/sandbox-base". */
 export function templateImage(t: TemplateLike) {
   const image = t.source?.image;
-  if (!image) return "";
-  return t.builtin && t.source?.os ? `${t.source.os} · ${imageRepo(image)}` : image;
+  if (t.builtin && t.source?.os) return image ? `${t.source.os} · ${imageRepo(image)}` : t.source.os;
+  return image ?? "";
 }
 
-/** The template a new sandbox form starts on: base once it's ready, else
- * the first ready one. */
+/** Pyo's built-in base, which servers make the first time it's used there. */
+export const isBase = (t: TemplateLike) => !!t.builtin && t.name === BASE_TEMPLATE;
+
+/** Whether a new sandbox can start from it now: base unless Pyo has no
+ * image for it yet, others once ready. */
+export const usable = (t: TemplateLike) => (isBase(t) ? t.state !== "unavailable" : t.state === "ready");
+
+/** The template a new sandbox form starts on: base, else the first usable one. */
 export function defaultTemplate(list: TemplateLike[]) {
-  const ready = list.filter((t) => t.state === "ready");
-  return (ready.find((t) => t.builtin && t.name === BASE_TEMPLATE) ?? ready[0])?.name ?? "";
+  const ok = list.filter(usable);
+  return (ok.find(isBase) ?? ok[0])?.name ?? "";
 }
+
+/** A template's status as the templates page says it. */
+export function templateStatus(t: TemplateLike) {
+  if (isBase(t)) return t.state === "unavailable" ? "Not available yet" : "Ready to use";
+  return { pending: "Pending", building: "Building", ready: "Ready", failed: "Failed" }[t.state ?? ""] ?? t.state ?? "";
+}
+
+/** What a sandbox waiting for its server to make its template shows. */
+export const gettingReady = (template: string, server: string | null) =>
+  server ? `Getting ${template} ready on ${server}…` : `Getting ${template} ready…`;

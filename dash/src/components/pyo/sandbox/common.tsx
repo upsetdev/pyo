@@ -13,6 +13,7 @@ import {
   RUNTIME_LABEL,
   SANDBOX_STATE,
   SERVER_STATE,
+  gettingReady,
   sandboxApi,
   type Sandbox,
   type SandboxServer,
@@ -32,12 +33,14 @@ export function useNow(ms = 15_000) {
   return now;
 }
 
-export function SandboxStatus({ state }: { state: SandboxState }) {
+export function SandboxStatus({ state, sandbox }: { state: SandboxState; sandbox?: Sandbox }) {
   const st = SANDBOX_STATE[state];
+  const label =
+    state === "creating" && sandbox?.preparing ? gettingReady(sandbox.template, sandbox.server) : st.label;
   return (
     <span className={`inline-flex items-center gap-1.5 text-[12.5px] ${st.tone === "danger" ? "text-destructive" : ""}`}>
       <Dot tone={st.tone} className="h-2 w-2" />
-      {st.label}
+      {label}
     </span>
   );
 }
