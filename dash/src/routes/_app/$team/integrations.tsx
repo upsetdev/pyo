@@ -1,6 +1,7 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { siGitlab, siHetzner, siTailscale, siVault } from "simple-icons";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { z } from "zod";
 import {
   IntegrationCard,
   docsUrl,
@@ -17,7 +18,9 @@ import { GitlabRows, TokenDialog } from "~/components/pyo/GitConnections";
 import { HetznerSettings, hetznerOf } from "~/components/pyo/Hetzner";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
 import { Badge, type Tone } from "~/components/ui/Badge";
-import { Button, ButtonLink } from "~/components/ui/Button";
+import { Button } from "~/components/ui/Button";
+import { GithubAppSetup } from "~/components/pyo/GithubSettings";
+import { ManagedOr } from "~/components/pyo/Managed";
 import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import type { MenuItem } from "~/components/ui/Menu";
 import { Page, PageHeader, NoMatches } from "~/components/ui/Panel";
@@ -39,6 +42,8 @@ import { BrandMark, CLOUDFLARE_LOGO, DOCKER_LOGO, GITHUB_LOGO } from "~/componen
 // each card's settings in a dialog. "/integrations#<id>" scrolls to a card
 // and opens its settings. Notification channels live in Settings.
 export const Route = createFileRoute("/_app/$team/integrations")({
+  // ?github=: back from GitHub (see useGithubReturn).
+  validateSearch: z.object({ github: z.string().optional().catch(undefined) }),
   head: () => ({ meta: seo({ title: "Integrations" }) }),
   component: Integrations,
 });
@@ -87,9 +92,8 @@ function Integrations() {
   const [adding, setAdding] = useState<"gitlab" | "registries" | "secrets" | null>(null);
   const [removing, setRemoving] = useState<Removing>(null);
   const [highlight, setHighlight] = useState<string | null>(null);
-  const [githubBusy, setGithubBusy] = useState(false);
 
-  useGithubReturn();
+  useGithubReturn(() => setOpen("github"));
 
   const team = s.currentTeamId;
   const ts = s.tailscale;
@@ -100,13 +104,6 @@ function Integrations() {
   const cf = cloudflareIn(s);
   const logins = s.registryLogins.filter((l) => l.teamId === team);
   const stores = s.secretStores.filter((x) => x.teamId === team);
-
-  const connectGithub = async () => {
-    setGithubBusy(true);
-    const r = await api.githubInstallUrl();
-    if (r) window.location.assign(r.url);
-    else setGithubBusy(false);
-  };
 
   const connect = (label = "Connect", onClick?: () => void, disabled = false) => (
     <Button size="xs" variant="secondary" disabled={disabled} onClick={onClick}>
@@ -237,20 +234,12 @@ function Integrations() {
         ? { tone: "success", label: `Connected ${timeAgo(oldest(installs))}` }
         : null,
       docs: "github",
-      action: s.github ? (
-        connect(githubBusy ? "Opening GitHub…" : "Connect", () => void connectGithub(), githubBusy)
-      ) : s.user.isAdmin ? (
-        <ButtonLink href="/settings/github" size="xs" variant="secondary">
-          Set up
-        </ButtonLink>
-      ) : (
-        askAdmin
-      ),
-      menu: [
-        settingsItem("github", "Accounts"),
-        { label: "Connect another account", onSelect: () => void connectGithub() },
-        guideItem("github"),
-      ],
+      action: s.github
+        ? connect("Connect", () => setOpen("github"))
+        : s.user.isAdmin
+          ? connect("Set up", () => setOpen("github"))
+          : askAdmin,
+      menu: [settingsItem("github", "Accounts"), guideItem("github")],
       settings: { title: "GitHub", body: <ul className="list-rows"><GithubRows /></ul> },
     },
     {
@@ -326,7 +315,6 @@ function Integrations() {
       menu: [
         settingsItem("registries", "Logins"),
         { label: "Add login", onSelect: () => setAdding("registries") },
-        { label: "Pyo registry", href: "/registry" },
         guideItem("registries"),
       ],
       settings: { title: "Container registries", body: <RegistryLoginsSettings /> },
@@ -488,8 +476,18 @@ function Integrations() {
   );
 }
 
-/** Back from installing the GitHub App: say how it went. */
-function useGithubReturn() {
+const GITHUB_ERRORS: Record<string, string> = {
+  taken: "Another team has connected this GitHub account.",
+  denied: "Your GitHub account can't access that installation.",
+  expired: "That took too long. Try again.",
+  "app-failed": "GitHub didn't create the app.",
+};
+
+/**
+ * Back from GitHub (?github=created after creating the app, ?github=connected
+ * after installing it): say how it went and open the GitHub card.
+ */
+function useGithubReturn(open: () => void) {
   useEffect(() => {
     const q = new URLSearchParams(window.location.search).get("github");
     if (!q) return;
@@ -499,17 +497,17 @@ function useGithubReturn() {
         description:
           "Pick a repository in New deploy. Pushes then deploy on their own.",
       });
+    else if (q === "created")
+      toast({ title: "GitHub App created", description: "Connect an account next." });
     else
       toast({
         tone: "error",
-        title:
-          q === "taken"
-            ? "Another team has connected this GitHub account."
-            : q === "denied"
-              ? "Your GitHub account can't access that installation."
-              : "GitHub didn't connect. Try again.",
+        title: GITHUB_ERRORS[q] ?? "GitHub didn't connect. Try again.",
       });
     window.history.replaceState(null, "", window.location.pathname);
+    open();
+    // Once, on arrival.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }
 
@@ -551,28 +549,23 @@ function GithubRows() {
     if (r) window.location.assign(r.url);
     else setBusy(false);
   };
+  // No GitHub App yet: the installation admin creates it right here.
   if (!s.github)
-    return (
+    return s.user.isAdmin ? (
+      <li className="px-5 py-4">
+        <ManagedOr
+          title="GitHub is managed for you"
+          description="Connect repositories when you deploy."
+        >
+          <GithubAppSetup />
+        </ManagedOr>
+      </li>
+    ) : (
       <Row
         icon={<BrandMark icon={GITHUB_LOGO} size={15} />}
         title="GitHub"
-        body={
-          s.user.isAdmin
-            ? "Set up the GitHub App for private repos and deploy on push."
-            : "An installation admin can set up GitHub."
-        }
-        right={
-          s.user.isAdmin ? (
-            <Link
-              to="/settings/github"
-              className="text-[12.5px] font-medium text-primary hover:text-primary/80"
-            >
-              Set up in Settings
-            </Link>
-          ) : (
-            <Badge>Not set up</Badge>
-          )
-        }
+        body="An installation admin can set up GitHub."
+        right={<Badge>Not set up</Badge>}
       />
     );
   return (
@@ -620,6 +613,53 @@ function GithubRows() {
             {busy ? "Opening GitHub…" : "Connect"}
           </Button>
         }
+      />
+      {s.user.isAdmin ? <GithubAppRow /> : null}
+    </>
+  );
+}
+
+/** The installation's GitHub App, for its admin: where it is, and removing it. */
+function GithubAppRow() {
+  const s = usePyo();
+  const [removing, setRemoving] = useState(false);
+  const app = s.github;
+  if (!app) return null;
+  return (
+    <>
+      <Row
+        icon={<BrandMark icon={GITHUB_LOGO} size={15} />}
+        title={
+          <a
+            href={app.htmlUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="hover:text-primary"
+          >
+            GitHub App · {app.slug}
+          </a>
+        }
+        body={`For every team · owned by ${app.owner} · ${app.webhookActive ? "pushes by webhook" : "pushes checked every minute"}`}
+        right={
+          <Button
+            variant="ghost"
+            size="xs"
+            className="text-destructive"
+            onClick={() => setRemoving(true)}
+          >
+            Remove
+          </Button>
+        }
+      />
+      <ConfirmDialog
+        open={removing}
+        onClose={() => setRemoving(false)}
+        title="Remove the GitHub App?"
+        description="Every team loses private repos and deploy on push."
+        confirmLabel="Remove"
+        onConfirm={async () => {
+          if (await api.removeGithubApp()) toast({ title: "GitHub App removed" });
+        }}
       />
     </>
   );

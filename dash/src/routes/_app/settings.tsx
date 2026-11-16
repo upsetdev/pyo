@@ -4,8 +4,6 @@ import {
   EnvelopeSimpleIcon,
   type Icon,
 } from "@phosphor-icons/react";
-import { siGithub } from "simple-icons";
-import type { ComponentType } from "react";
 import {
   createFileRoute,
   Link,
@@ -18,41 +16,22 @@ import { Page, PageHeader } from "~/components/ui/Panel";
 import { seo } from "~/lib/seo";
 
 // Settings of this Pyo installation, for every team: outgoing email,
-// analytics privacy, the GitHub App and updates of Pyo itself, a page each.
-// Backups of Pyo's own data are on Backups, in its Pyo tab.
+// analytics privacy and updates of Pyo itself, a page each. Backups of
+// Pyo's own data are on Backups, in its Pyo tab, and the GitHub App is in
+// the GitHub card on Integrations.
 // Team settings stay under each team (/:team/settings).
 export const Route = createFileRoute("/_app/settings")({
   head: () => ({ meta: seo({ title: "Settings" }) }),
   component: InstallationSettings,
 });
 
-/** GitHub's current mark (Phosphor's is the older Octocat), in the text color. */
-function GithubIcon({ size = 14 }: { size?: number }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width={size}
-      height={size}
-      fill="currentColor"
-      aria-hidden
-    >
-      <path d={siGithub.path} />
-    </svg>
-  );
-}
-
-const TABS: {
-  to: string;
-  label: string;
-  icon: Icon | ComponentType<{ size?: number }>;
-}[] = [
+const TABS: { to: string; label: string; icon: Icon }[] = [
   { to: "/settings/email", label: "Email", icon: EnvelopeSimpleIcon },
   {
     to: "/settings/observability",
     label: "Observability",
     icon: ChartLineUpIcon,
   },
-  { to: "/settings/github", label: "GitHub", icon: GithubIcon },
   { to: "/settings/updates", label: "Updates", icon: ArrowCircleUpIcon },
 ];
 

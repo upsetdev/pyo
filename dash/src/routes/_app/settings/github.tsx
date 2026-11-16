@@ -1,17 +1,22 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { GithubSettingsSection } from "~/components/pyo/GithubSettings";
-import { ManagedOr } from "~/components/pyo/Managed";
-import { SettingsSection } from "../settings";
+import { createFileRoute, redirect } from "@tanstack/react-router";
+import { z } from "zod";
+import { currentTeam, getState } from "~/lib/pyo/store";
 
+// The GitHub App lives in the GitHub card on Integrations. GitHub sends the
+// admin back here after creating it (?github=created), so this opens that
+// card with the result.
 export const Route = createFileRoute("/_app/settings/github")({
-  component: () => (
-    <SettingsSection description="Private repositories and deploys on push.">
-      <ManagedOr
-        title="GitHub is managed for you"
-        description="Connect repositories when you deploy."
-      >
-        <GithubSettingsSection />
-      </ManagedOr>
-    </SettingsSection>
-  ),
+  validateSearch: z.object({ github: z.string().optional().catch(undefined) }),
+  beforeLoad: ({ search }) => {
+    const team = currentTeam(getState());
+    if (team)
+      throw redirect({
+        to: "/$team/integrations",
+        params: { team: team.slug },
+        search: { github: search.github },
+        hash: "github",
+        replace: true,
+      });
+    throw redirect({ to: "/profile", replace: true });
+  },
 });
