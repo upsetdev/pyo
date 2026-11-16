@@ -15,6 +15,7 @@
 #   --builder        a build-only server: only Pyo's builder runs on it
 #   --registry       Pyo's registry door, for images Pyo builds
 #   --registry-token the cluster's login there (pull only)
+#   --version        the Pyo release, for pyo.dev to run its script (ignored here)
 # >>> pyo:become-root (the same in connect.sh and join.sh)
 # Root, through sudo when it isn't: the script runs again as root, with
 # the same arguments and Tailscale key. Run from a file, sudo runs that
@@ -119,6 +120,8 @@ while [ $# -gt 0 ]; do
     --builder) BUILDER=1; shift ;;
     --registry) REGISTRY="$2"; shift 2 ;;
     --registry-token) REGISTRY_TOKEN="$2"; shift 2 ;;
+    # The release pyo.dev's wrapper ran this script from. Nothing to do here.
+    --version) shift 2 || shift ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done

@@ -11,6 +11,7 @@
 #   --tailscale-key  joins your tailnet first (a single-use key from Pyo)
 #   --registry       Pyo's registry door, for images Pyo builds
 #   --registry-token this cluster's login there (pull only)
+#   --version        the Pyo release, for pyo.dev to run its script (ignored here)
 #
 # Or only joins this machine to the tailnet (Pyo's own machine does this
 # once Tailscale is set up in Pyo): --tailnet-only, with TS_AUTHKEY.
@@ -135,6 +136,8 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1; shift ;;
     # install.sh --uninstall on a k3s Pyo didn't install: Pyo itself goes too.
     --with-pyo) WITH_PYO=1; shift ;;
+    # The release pyo.dev's wrapper ran this script from. Nothing to do here.
+    --version) shift 2 || shift ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
