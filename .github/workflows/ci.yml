@@ -164,6 +164,66 @@ jobs:
           sudo nft list ruleset | head -80 || true
           ls -la .cache/sandbox-e2e || true
 
+  # Pyo Sandbox on gVisor, end to end: runsc as root, as on a server
+  # without KVM (Hetzner Cloud). Firecracker is left out, so detection
+  # falls back to gVisor although the runner has KVM. It mounts disks and
+  # changes the host's network, which the runner is for.
+  gvisor:
+    name: Sandbox on gVisor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYO_SANDBOX_ENVD: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/pyo-envd
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends busybox-static e2fsprogs nftables musl-tools zstd
+      # runsc, the release pinned in gvisor.env, checked against its sha512.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: runsc
+        with:
+          path: .cache/sandbox-gvisor
+          key: sandbox-gvisor-${{ hashFiles('crates/pyo-sandbox/scripts/gvisor.env', 'crates/pyo-sandbox/scripts/gvisor-assets.sh') }}
+      - name: runsc
+        run: |
+          set -euo pipefail
+          crates/pyo-sandbox/scripts/gvisor-assets.sh | tee -a "$GITHUB_ENV"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.runsc.outputs.cache-hit != 'true'
+        with:
+          path: .cache/sandbox-gvisor
+          key: ${{ steps.runsc.outputs.cache-primary-key }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.1
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: sandbox-gvisor
+      - name: Build pyo-envd (musl)
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked -p pyo-envd --target x86_64-unknown-linux-musl
+      # As root. cargo isn't on root's PATH, so the runner user builds the
+      # test binary and sudo -E runs only it.
+      - name: gVisor e2e (root)
+        env:
+          PYO_SANDBOX_GVISOR_E2E: "1"
+        run: |
+          set -euo pipefail
+          bin=$(cargo test --locked -p pyo-sandbox --test gvisor_e2e --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "gvisor_e2e" and .executable != null) | .executable')
+          [ -x "$bin" ] || { echo "::error::No gvisor_e2e test binary."; exit 1; }
+          sudo -E "$bin" --nocapture
+      - name: What went wrong
+        if: failure()
+        run: |
+          sudo find /tmp -name runsc.log -path '*pyo-gvisor-e2e*' -exec tail -n 40 {} \; || true
+          sudo nft list ruleset | head -80 || true
+          ip netns list || true
+
   waf:
     name: WAF
     runs-on: ubuntu-24.04
