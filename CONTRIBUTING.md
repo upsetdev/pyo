@@ -50,6 +50,8 @@ Read the script before you run it. It changes the machine:
 
 To undo it, run `/usr/local/bin/k3s-uninstall.sh`.
 
+If you skip this step, `scripts/pyo-up.sh` asks to run it for you.
+
 **2. Build and deploy (as your normal user):**
 
 ```bash

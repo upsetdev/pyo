@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build Pyo's images with the in-cluster BuildKit and (re)deploy Pyo into
-# k3s. Run as your normal user after scripts/setup-host.sh:
+# k3s. Run as your normal user. On a machine without k3s it offers to run
+# scripts/setup-host.sh first:
 #
 #   scripts/pyo-up.sh                  # build what changed and deploy
 #   scripts/pyo-up.sh --only pyo,agent # build just these images
@@ -274,9 +275,21 @@ as_root() {
 
 # k3s (and its kubectl) come from the one-time root setup.
 if ! command -v kubectl >/dev/null || [ ! -r "$KUBECONFIG" ]; then
-  echo "k3s isn't installed yet. Run the one-time host setup first:" >&2
-  echo "  sudo bash scripts/setup-host.sh" >&2
-  exit 1
+  answer=""
+  if [ -t 0 ]; then
+    read -r -p "This machine isn't set up for Pyo yet. Set it up now? [y/N] " answer || answer=""
+  fi
+  case "$answer" in
+    [yY] | [yY][eE][sS]) sudo bash scripts/setup-host.sh ;;
+    *)
+      echo "Set up this machine first: sudo bash scripts/setup-host.sh" >&2
+      exit 1
+      ;;
+  esac
+  if ! command -v kubectl >/dev/null || [ ! -r "$KUBECONFIG" ]; then
+    echo "The setup didn't finish. Run it again: sudo bash scripts/setup-host.sh" >&2
+    exit 1
+  fi
 fi
 if ! kubectl get nodes >/dev/null 2>&1; then
   echo "k3s is installed but its API isn't answering. Check: sudo systemctl status k3s" >&2
