@@ -422,6 +422,10 @@ pub struct CreateSandbox {
     /// the first sandbox from it there takes longer.
     #[serde(default)]
     pub template: Option<String>,
+    /// The sandbox server to run it on, by id or name: the team's own or
+    /// the installation's. Pyo picks one when omitted.
+    #[serde(default)]
+    pub server: Option<String>,
     /// 1 when omitted.
     #[serde(default)]
     pub cpus: Option<u32>,
@@ -536,6 +540,7 @@ pub async fn candidates(
     struct Row {
         id: String,
         name: String,
+        team_id: Option<String>,
         address: Option<String>,
         state: String,
         enabled: bool,
@@ -546,7 +551,7 @@ pub async fn candidates(
         pending_mib: i64,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT s.id, s.name, s.address, s.state, s.enabled, s.capability, s.capacity, s.templates,
+        "SELECT s.id, s.name, s.team_id, s.address, s.state, s.enabled, s.capability, s.capacity, s.templates,
                 extract(epoch FROM now() - s.last_report_at)::bigint AS age,
                 coalesce((SELECT sum((x.spec->>'memoryMib')::bigint) FROM pyo.sandboxes x
                            WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed', 'paused')
@@ -563,6 +568,7 @@ pub async fn candidates(
             let c = scheduler::Candidate {
                 id: r.id,
                 name: r.name,
+                team_id: r.team_id,
                 enabled: r.enabled,
                 ready: r.state == "ready" && r.address.is_some(),
                 report_age_secs: r.age.unwrap_or(i64::MAX),
@@ -691,15 +697,29 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
     let servers = candidates(&mut tx, &team_id).await?;
     let list: Vec<scheduler::Candidate> = servers.iter().map(|(c, _)| c.clone()).collect();
     let on_demand = base::on_demand(&template.id);
-    let placed = scheduler::place(&list, &spec, &template.id, on_demand).map_err(|n| {
-        let n = match n {
-            scheduler::NoServer::NoTemplate(_) => {
-                scheduler::NoServer::NoTemplate(template.name.clone())
-            }
-            n => n,
-        };
-        ApiError::new(n.status(), n.message())
-    })?;
+    let placed = match req
+        .server
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(asked) => scheduler::place_on(&list, &team_id, asked, &spec, &template.id, on_demand)
+            .map_err(|(status, message)| {
+                ApiError::new(
+                    status,
+                    message.replace(&template.server_name, &template.name),
+                )
+            })?,
+        None => scheduler::place(&list, &spec, &template.id, on_demand).map_err(|n| {
+            let n = match n {
+                scheduler::NoServer::NoTemplate(_) => {
+                    scheduler::NoServer::NoTemplate(template.name.clone())
+                }
+                n => n,
+            };
+            ApiError::new(n.status(), n.message())
+        })?,
+    };
     // The server may still start it from an older revision of the template.
     spec.template = placed.template.clone();
     let build = placed.build;

@@ -28,6 +28,8 @@ pub const FRESH_SECS: i64 = 90;
 pub struct Candidate {
     pub id: String,
     pub name: String,
+    /// None for the installation's, which every team may use.
+    pub team_id: Option<String>,
     pub enabled: bool,
     pub ready: bool,
     /// Seconds since its last report.
@@ -82,12 +84,45 @@ impl NoServer {
         }
     }
 
+    /// Why the one server asked for (`server`, by name) can't take a
+    /// sandbox of `memory_mib`.
+    pub fn message_on(&self, server: &str, memory_mib: u32) -> String {
+        match self {
+            NoServer::None | NoServer::NoneUp => {
+                format!("{server} can't take sandboxes right now. Pick another server.")
+            }
+            NoServer::NoVm => {
+                format!("{server} has no KVM, so isolation \"vm\" can't run there.")
+            }
+            NoServer::NoNetwork => {
+                format!("{server} has no networking. Pick another server, or set network to none.")
+            }
+            NoServer::NoTemplate(t) => {
+                format!("{server} doesn't have the template {t} yet. Pick another server.")
+            }
+            NoServer::Full => format!(
+                "{server} has no room for {}. Pick another server or a smaller size.",
+                size(memory_mib)
+            ),
+        }
+    }
+
     /// 503 for what passes on its own, 409 for what needs a change.
     pub fn status(&self) -> axum::http::StatusCode {
         match self {
             NoServer::Full | NoServer::NoneUp => axum::http::StatusCode::SERVICE_UNAVAILABLE,
             _ => axum::http::StatusCode::CONFLICT,
         }
+    }
+}
+
+/// "512 MB", "2 GB", "1.5 GB".
+fn size(mib: u32) -> String {
+    if mib >= 1024 {
+        let gb = (mib as f64 / 1024.0 * 10.0).round() / 10.0;
+        format!("{gb} GB")
+    } else {
+        format!("{mib} MB")
     }
 }
 
@@ -262,6 +297,31 @@ pub fn place<'a>(
         .ok_or(NoServer::Full)
 }
 
+/// [`place`] on one server the create asked for, by its id or name: one of
+/// `team`'s or the installation's. The error says why it can't, plainly.
+pub fn place_on<'a>(
+    servers: &'a [Candidate],
+    team: &str,
+    asked: &str,
+    spec: &SandboxSpec,
+    id: &str,
+    on_demand: bool,
+) -> Result<Placement<'a>, (axum::http::StatusCode, String)> {
+    let asked = asked.trim();
+    let server = servers
+        .iter()
+        .filter(|c| c.team_id.as_deref().is_none_or(|t| t == team))
+        .find(|c| c.id == asked || c.name == asked)
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("No sandbox server {asked} in this team."),
+            )
+        })?;
+    place(std::slice::from_ref(server), spec, id, on_demand)
+        .map_err(|n| (n.status(), n.message_on(&server.name, spec.memory_mib)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +333,7 @@ mod tests {
         Candidate {
             id: id.into(),
             name: format!("{id}-name"),
+            team_id: None,
             enabled: true,
             ready: true,
             report_age_secs: 5,
@@ -537,6 +598,76 @@ mod tests {
         };
         let p = place(std::slice::from_ref(&failed), &s, "stp_base", true).unwrap();
         assert_eq!((p.server.id.as_str(), p.build), ("failed", true));
+    }
+
+    #[test]
+    fn a_server_asked_for_takes_it_or_says_why() {
+        use axum::http::StatusCode;
+        let mut s = spec();
+        let mut other_team = server("theirs", Runtime::Firecracker, 30);
+        other_team.team_id = Some("tm_two".into());
+        let mut ours = server("ours", Runtime::Firecracker, 2);
+        ours.team_id = Some("tm_one".into());
+        let mut joining = server("joining", Runtime::Firecracker, 30);
+        joining.ready = false;
+        let installation = server("shared", Runtime::Gvisor, 30);
+        let servers = vec![other_team, ours, joining, installation];
+        let on = |asked: &str, s: &SandboxSpec, on_demand: bool| {
+            place_on(&servers, "tm_one", asked, s, "stp_node", on_demand)
+                .map(|p| (p.server.id.clone(), p.build))
+        };
+        // By id or name, the team's own or the installation's, even when
+        // another has more room.
+        assert_eq!(on("ours", &s, false), Ok(("ours".into(), false)));
+        assert_eq!(on("ours-name", &s, false), Ok(("ours".into(), false)));
+        assert_eq!(on(" shared ", &s, false), Ok(("shared".into(), false)));
+        // Another team's is as good as missing.
+        assert_eq!(
+            on("theirs", &s, false),
+            Err((
+                StatusCode::NOT_FOUND,
+                "No sandbox server theirs in this team.".into()
+            ))
+        );
+        // Not ready.
+        assert_eq!(
+            on("joining-name", &s, false),
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "joining-name can't take sandboxes right now. Pick another server.".into()
+            ))
+        );
+        // No room.
+        s.memory_mib = 3072;
+        assert_eq!(
+            on("ours", &s, false),
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ours-name has no room for 3 GB. Pick another server or a smaller size.".into()
+            ))
+        );
+        s.memory_mib = 1024;
+        // No KVM for "vm".
+        let mut vm = s.clone();
+        vm.isolation = Isolation::Vm;
+        assert_eq!(
+            on("shared", &vm, false).unwrap_err().1,
+            "shared-name has no KVM, so isolation \"vm\" can't run there."
+        );
+        // A server without base makes it first. A team template it lacks
+        // is refused.
+        let mut base = s.clone();
+        base.template = "stp_base.new".into();
+        let p = place_on(&servers, "tm_one", "ours", &base, "stp_base", true).unwrap();
+        assert_eq!((p.server.id.as_str(), p.build), ("ours", true));
+        assert_eq!(
+            place_on(&servers, "tm_one", "ours", &base, "stp_base", false)
+                .unwrap_err()
+                .1,
+            "ours-name doesn't have the template stp_base.new yet. Pick another server."
+        );
+        assert_eq!(size(512), "512 MB");
+        assert_eq!(size(1536), "1.5 GB");
     }
 
     #[test]

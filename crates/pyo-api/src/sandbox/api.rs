@@ -133,7 +133,7 @@ pub(crate) async fn get_one(
 /// `connection`: the server's address and a token, valid an hour, for exec,
 /// terminals, files and ports there. Ask for a new token with
 /// `createSandboxToken`. `teamId` may be left out when the API key (or
-/// you) can use only one team.
+/// you) can use only one team. `server` runs it on that server only.
 ///
 /// A server that doesn't have the template `base` yet makes it first:
 /// the first sandbox from `base` there takes a minute or so longer, and
@@ -144,10 +144,10 @@ pub(crate) async fn get_one(
         (status = 201, description = "`sandbox` (as in `listSandboxes`) and `connection`: `url`, `sandboxId`, `token` and `expiresAt`.", body = Object),
         (status = 400, description = "A size, lifetime or other value Pyo can't accept, or no `teamId` when you can use more than one team.", body = ErrorBody),
         (status = 403, description = "Your role, the API key's access or the team's sandbox limits don't allow it.", body = ErrorBody),
-        (status = 404, description = "No such team, template or project.", body = ErrorBody),
+        (status = 404, description = "No such team, template, project or server.", body = ErrorBody),
         (status = 409, description = "No sandbox server can run it: none yet, none with the template, or none with KVM for `isolation: vm`.", body = ErrorBody),
         (status = 502, description = "The server couldn't make `base`. The error says why.", body = ErrorBody),
-        (status = 503, description = "Every sandbox server is full or down, or `base` is still being made there. Try again soon.", body = ErrorBody),
+        (status = 503, description = "Every sandbox server is full or down, the server asked for has no room, or `base` is still being made there. Try again soon.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("sandboxes"))))]
 pub(crate) async fn create(

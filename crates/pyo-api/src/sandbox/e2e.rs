@@ -250,6 +250,7 @@ async fn pyo_drives_a_real_daemon() {
     let candidate = scheduler::Candidate {
         id: server.into(),
         name: "e2e".into(),
+        team_id: Some(team.into()),
         enabled: true,
         ready: true,
         report_age_secs: 0,
@@ -702,6 +703,17 @@ async fn the_control_plane_drives_a_real_daemon() {
     super::delete(&s, &user, other["sandbox"]["id"].as_str().unwrap())
         .await
         .unwrap();
+    // On the server asked for, by name. One the team doesn't have is refused.
+    let mut on_e2e = no_template.clone();
+    on_e2e.server = Some("e2e".into());
+    let pinned = super::create(&s, &user, on_e2e.clone()).await.unwrap();
+    assert_eq!(pinned["sandbox"]["serverId"], json!(server), "{pinned}");
+    super::delete(&s, &user, pinned["sandbox"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    on_e2e.server = Some("nowhere".into());
+    let e = super::create(&s, &user, on_e2e).await.unwrap_err();
+    assert_eq!(e.status, axum::http::StatusCode::NOT_FOUND, "{}", e.message);
     let first_id = first["sandbox"]["id"].as_str().unwrap().to_owned();
     let on: String =
         sqlx::query_scalar("SELECT spec->>'template' FROM pyo.sandboxes WHERE id = $1")
