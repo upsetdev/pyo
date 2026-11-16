@@ -15,6 +15,9 @@ export default defineConfig(({ mode }) => {
   return {
     server: {
       port: 5173,
+      // Reachable from the tailnet too, at http://<machine>.<tailnet>.ts.net:5173.
+      host: true,
+      allowedHosts: [".ts.net"],
       proxy: {
         // Only /api and /api/*: /api-keys is a dashboard page.
         "^/api(/|$)": { target: api, changeOrigin: false, ws: true },
