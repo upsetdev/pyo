@@ -65,7 +65,9 @@
 //! above holds as it is. The other end is `eth0` in the network namespace
 //! `pyosbx<n>`, with the guest address and the default route already set.
 //! runsc's netstack takes them from there (`--network=sandbox`), so nothing
-//! is set inside the sandbox. The namespace goes with the lease.
+//! is set inside the sandbox. runsc moves them out of the namespace as it
+//! takes them, so a restore puts them back first (`readdress`). The
+//! namespace goes with the lease.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -431,6 +433,31 @@ impl Network {
         let host = format!("{}/30", lease.host);
         run("ip", &["addr", "add", &host, "dev", &lease.tap]).await?;
         run("ip", &["link", "set", &lease.tap, "up"]).await
+    }
+
+    /// Gives the namespace's `eth0` its address and default route back.
+    /// runsc takes them out of the namespace when it starts a sandbox, and
+    /// `runsc restore` skips an `eth0` without an address, so a resumed
+    /// sandbox would have no network. Run before each restore.
+    pub async fn readdress(&self, lease: &Lease) -> anyhow::Result<()> {
+        if self.link != LinkKind::Veth {
+            return Ok(());
+        }
+        let ns = lease.tap.as_str();
+        let guest = format!("{}/30", lease.guest);
+        let gw = lease.host.to_string();
+        let steps: [&[&str]; 2] = [
+            &["addr", "replace", &guest, "dev", GUEST_IFACE],
+            &["route", "replace", "default", "via", &gw],
+        ];
+        for step in steps {
+            let mut args = vec!["-n", ns];
+            args.extend_from_slice(step);
+            run("ip", &args)
+                .await
+                .context("giving the sandbox its address back")?;
+        }
+        Ok(())
     }
 
     /// The lease's namespace with `eth0` in it, and the host end of the

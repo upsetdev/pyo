@@ -549,6 +549,9 @@ impl Manager {
             cgroup_parent: &gv.cgroup_parent,
         };
         if resume {
+            if let (Some(l), Some(n)) = (lease, &self.net) {
+                n.readdress(l).await?;
+            }
             gv.restore(&m, BOOT_TIMEOUT).await
         } else {
             gv.start(&m, BOOT_TIMEOUT).await
