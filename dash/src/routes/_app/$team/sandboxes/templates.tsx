@@ -1,6 +1,28 @@
-import { DotsThreeIcon, SquaresFourIcon, TrashIcon } from "@phosphor-icons/react";
+import { CubeIcon, DotsThreeIcon, SquaresFourIcon, TrashIcon } from "@phosphor-icons/react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
+import {
+  siAlmalinux,
+  siAlpinelinux,
+  siArchlinux,
+  siBun,
+  siCentos,
+  siDebian,
+  siDeno,
+  siDocker,
+  siFedora,
+  siGo,
+  siNodedotjs,
+  siOpenjdk,
+  siPhp,
+  siPython,
+  siRockylinux,
+  siRuby,
+  siRust,
+  siUbuntu,
+  type SimpleIcon,
+} from "simple-icons";
+import { BrandMark } from "~/components/pyo/common";
 import { Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
@@ -8,6 +30,7 @@ import { Field, Input } from "~/components/ui/Field";
 import { Menu } from "~/components/ui/Menu";
 import { EmptyState, ErrorState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
+import { Tooltip } from "~/components/ui/Tooltip";
 import { megabytes, timeAgo } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
@@ -101,7 +124,7 @@ function TemplatesPage() {
 
   const templates = q.status === "success" ? q.data.templates : [];
   return (
-    <Page width="max-w-4xl">
+    <Page width="max-w-3xl">
       <PageHeader title="Sandbox templates" description="What sandboxes start from." />
       {q.status === "error" ? (
         <Panel>
@@ -109,99 +132,65 @@ function TemplatesPage() {
         </Panel>
       ) : templates.length ? (
         <Panel>
-          <Table>
+          <Table fluid>
             <thead>
               <tr>
                 <Th>Template</Th>
-                <Th>Status</Th>
-                <Th>Servers</Th>
-                <Th>Added</Th>
+                <Th className="w-40">Status</Th>
                 <Th className="w-px">
                   <span className="sr-only">Actions</span>
                 </Th>
               </tr>
             </thead>
             <tbody>
-              {templates.map((t) => {
-                const image = templateImage(t);
-                return (
-                  <Tr key={t.id}>
-                    <Td className="max-w-[18rem]">
-                      <div className="flex items-baseline gap-2">
+              {templates.map((t) => (
+                <Tr key={t.id}>
+                  <Td>
+                    <Tooltip content={<TemplateDetails t={t} />}>
+                      <span className="flex min-w-0 items-center gap-3">
+                        <TemplateLogo t={t} />
                         <span className="truncate text-[13px] font-medium">{t.name}</span>
-                        {t.teamId ? null : <span className="shrink-0 text-[11.5px] text-muted-foreground">Installation</span>}
-                      </div>
-                      {image ? (
-                        <div className="mt-0.5 truncate font-mono text-[11.5px] text-muted-foreground" title={image}>
-                          {image}
-                        </div>
-                      ) : null}
-                    </Td>
-                    <Td>
-                      <span
-                        className={`inline-flex items-center gap-1.5 whitespace-nowrap ${t.state === "failed" ? "text-destructive" : ""}`}
-                        title={t.error ?? undefined}
-                      >
-                        <Dot tone={STATE[t.state]?.tone ?? "neutral"} className="h-2 w-2" />
-                        {templateStatus(t)}
                       </span>
-                    </Td>
-                    <Td className="text-[12px]">
-                      {t.servers.length ? (
-                        <ul className="space-y-1">
-                          {t.servers.map((x) => (
-                            <li key={x.id} className="flex items-center gap-1.5 whitespace-nowrap" title={x.error ?? undefined}>
-                              <Dot tone={STATE[x.state]?.tone ?? "neutral"} />
-                              <span className="max-w-[10rem] truncate">{x.name}</span>
-                              <span className={`tabular-nums ${x.state === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
-                                {serverLabel(x)}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <span className="text-muted-foreground">{isBase(t) ? "Made on first use" : "—"}</span>
-                      )}
-                    </Td>
-                    <Td className="whitespace-nowrap text-[12px] text-muted-foreground">
-                      {t.createdAt ? timeAgo(t.createdAt) : "—"}
-                    </Td>
-                    <Td>
-                      <div className="flex items-center justify-end gap-1">
-                        {canUse && usable(t) ? (
-                          <Button
-                            size="xs"
-                            variant="secondary"
-                            onClick={() =>
-                              void navigate({
-                                to: "/$team/sandboxes/new",
-                                params: { team: currentSlug() },
-                                search: { template: t.name },
-                              })
-                            }
-                          >
-                            Use
-                          </Button>
+                    </Tooltip>
+                  </Td>
+                  <Td>
+                    <TemplateState t={t} />
+                  </Td>
+                  <Td>
+                    <div className="flex items-center justify-end gap-1">
+                      {canUse && usable(t) ? (
+                        <Button
+                          size="xs"
+                          variant="secondary"
+                          onClick={() =>
+                            void navigate({
+                              to: "/$team/sandboxes/new",
+                              params: { team: currentSlug() },
+                              search: { template: t.name },
+                            })
+                          }
+                        >
+                          Use
+                        </Button>
+                      ) : null}
+                      {/* The menu keeps its slot, so Use lines up on every row. */}
+                      <div className="w-7">
+                        {canRemove(t) ? (
+                          <Menu
+                            label={`Actions for ${t.name}`}
+                            items={[{ label: "Delete", icon: <TrashIcon size={14} />, danger: true, onSelect: () => setRemoving(t) }]}
+                            trigger={(p) => (
+                              <Button {...p} variant="ghost" size="icon" className="h-7 w-7">
+                                <DotsThreeIcon size={16} weight="bold" />
+                              </Button>
+                            )}
+                          />
                         ) : null}
-                        {/* The menu keeps its slot, so Use lines up on every row. */}
-                        <div className="w-7">
-                          {canRemove(t) ? (
-                            <Menu
-                              label={`Actions for ${t.name}`}
-                              items={[{ label: "Delete", icon: <TrashIcon size={14} />, danger: true, onSelect: () => setRemoving(t) }]}
-                              trigger={(p) => (
-                                <Button {...p} variant="ghost" size="icon" className="h-7 w-7">
-                                  <DotsThreeIcon size={16} weight="bold" />
-                                </Button>
-                              )}
-                            />
-                          ) : null}
-                        </div>
                       </div>
-                    </Td>
-                  </Tr>
-                );
-              })}
+                    </div>
+                  </Td>
+                </Tr>
+              ))}
             </tbody>
           </Table>
         </Panel>
@@ -267,5 +256,89 @@ function TemplatesPage() {
         }}
       />
     </Page>
+  );
+}
+
+// Logos by what the image runs: languages first, since node:22 is Debian
+// underneath but reads as Node.
+const LOGOS: [RegExp, SimpleIcon][] = [
+  [/\bnode(js)?\b/, siNodedotjs],
+  [/\bpython\b/, siPython],
+  [/\bbun\b/, siBun],
+  [/\bdeno\b/, siDeno],
+  [/\bgolang\b|(^|\/)go(:|$)/, siGo],
+  [/\brust\b/, siRust],
+  [/\bruby\b/, siRuby],
+  [/\bphp\b/, siPhp],
+  [/\b(openjdk|java|temurin)\b/, siOpenjdk],
+  [/\bubuntu\b/, siUbuntu],
+  [/\bdebian\b/, siDebian],
+  [/\balpine\b/, siAlpinelinux],
+  [/\bfedora\b/, siFedora],
+  [/\barch(linux)?\b/, siArchlinux],
+  [/\bcentos\b/, siCentos],
+  [/\brocky(linux)?\b/, siRockylinux],
+  [/\balma(linux)?\b/, siAlmalinux],
+  [/\bdocker\b/, siDocker],
+];
+
+function logoFor(t: SandboxTemplate) {
+  if (isBase(t)) return siDebian;
+  const text = `${t.source?.image ?? ""} ${t.source?.os ?? ""} ${t.name}`.toLowerCase();
+  return LOGOS.find(([re]) => re.test(text))?.[1];
+}
+
+function TemplateLogo({ t }: { t: SandboxTemplate }) {
+  const logo = logoFor(t);
+  return (
+    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-frame-border bg-card text-muted-foreground">
+      {logo ? <BrandMark icon={logo} size={16} tone={logo === siDebian ? "brand" : "auto"} /> : <CubeIcon size={16} />}
+    </span>
+  );
+}
+
+/** The status, with its error on hover when there is one. */
+function TemplateState({ t }: { t: SandboxTemplate }) {
+  const label = (
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap ${t.state === "failed" ? "text-destructive" : ""}`}>
+      <Dot tone={STATE[t.state]?.tone ?? "neutral"} className="h-2 w-2" />
+      {templateStatus(t)}
+    </span>
+  );
+  const error = t.error ?? t.servers.find((x) => x.error)?.error;
+  return error ? <Tooltip content={error}>{label}</Tooltip> : label;
+}
+
+/** What hovering a template shows: its image, its servers and when it was added. */
+function TemplateDetails({ t }: { t: SandboxTemplate }) {
+  const image = templateImage(t);
+  const added = t.createdAt ? `Added ${timeAgo(t.createdAt)}${t.createdBy ? ` by ${t.createdBy}` : ""}` : "";
+  return (
+    <span className="block space-y-1.5 text-left">
+      {/* Base says what it runs ("Debian 13 · ghcr.io/…"): the OS on its own line. */}
+      {image.split(" · ").map((line, i, all) => (
+        <span key={line} className={`block break-all ${all.length > 1 && !i ? "font-medium" : "font-mono text-[11.5px]"}`}>
+          {line}
+        </span>
+      ))}
+      {t.servers.length ? (
+        <span className="block">
+          {t.servers.map((x) => (
+            <span key={x.id} className="flex items-center gap-1.5">
+              <Dot tone={STATE[x.state]?.tone ?? "neutral"} />
+              <span className="truncate">{x.name}</span>
+              <span className={`ml-auto pl-3 tabular-nums ${x.state === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
+                {serverLabel(x)}
+              </span>
+            </span>
+          ))}
+        </span>
+      ) : isBase(t) ? (
+        <span className="block text-muted-foreground">Made on first use</span>
+      ) : null}
+      {added || !t.teamId ? (
+        <span className="block text-muted-foreground">{[t.teamId ? "" : "Installation", added].filter(Boolean).join(" · ")}</span>
+      ) : null}
+    </span>
   );
 }
