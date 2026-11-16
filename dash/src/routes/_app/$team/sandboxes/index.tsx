@@ -5,6 +5,7 @@ import {
   HardDrivesIcon,
   PauseIcon,
   PlayIcon,
+  TerminalWindowIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -35,6 +36,7 @@ import {
   Panel,
 } from "~/components/ui/Panel";
 import { SearchInput, Table, Td, Th, Tr } from "~/components/ui/Table";
+import { Tooltip } from "~/components/ui/Tooltip";
 import { plural, timeAgo } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
@@ -312,8 +314,12 @@ function SandboxTable({
   onDelete: (x: Sandbox) => void;
 }) {
   const navigate = useNavigate();
-  const open = (x: Sandbox) =>
-    void navigate({ to: "/$team/sandboxes/$sandboxId", params: { team: currentSlug(), sandboxId: x.id } });
+  const open = (x: Sandbox, tab?: "terminal") =>
+    void navigate({
+      to: "/$team/sandboxes/$sandboxId",
+      params: { team: currentSlug(), sandboxId: x.id },
+      search: tab ? { tab } : {},
+    });
   return (
     <Table>
       <thead>
@@ -353,7 +359,20 @@ function SandboxTable({
             </Td>
             <Td className="max-w-40 truncate text-muted-foreground">{x.createdBy ?? "—"}</Td>
             <Td>
-              <div onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
+                {canUse && x.state === "running" ? (
+                  <Tooltip content="Terminal" focusable={false}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      aria-label={`Terminal for ${x.name}`}
+                      onClick={() => open(x, "terminal")}
+                    >
+                      <TerminalWindowIcon size={16} />
+                    </Button>
+                  </Tooltip>
+                ) : null}
                 <Menu
                   label={`Actions for ${x.name}`}
                   items={[
