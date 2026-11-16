@@ -22,10 +22,11 @@ pub enum Command {
     /// Make a sandbox from a sandbox template and print its id.
     Create {
         /// The sandbox template, like node-22 (see pyo sandbox templates ls).
-        /// Default base: Debian 13 with git, Python, uv, Node.js and pnpm.
-        /// desktop adds a desktop and Chromium: CDP on port 9222, the screen
-        /// on port 6080. A server makes these the first time they're used
-        /// there.
+        /// Default base: Ubuntu 24.04 with git, Python, uv, Node.js, pnpm,
+        /// Bun, Deno, the GitHub and Docker CLIs, Claude Code, Codex and
+        /// opencode. desktop adds a desktop and a browser: CDP on port 9222,
+        /// the screen on port 6080. A server makes these the first time
+        /// they're used there.
         template: Option<String>,
         /// A name to tell it apart. Pyo makes up a short one when left out.
         #[arg(long)]
@@ -826,7 +827,7 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
 }
 
 /// A template's image as the list shows it. Pyo's built-in one says what
-/// it runs and leaves out its version: Debian 13 · ghcr.io/upsetdev/pyo/sandbox-base.
+/// it runs and leaves out its version: Ubuntu 24.04 · ghcr.io/upsetdev/pyo-sandbox-images/base.
 fn template_image(t: &Value) -> String {
     let image = t["source"]["image"].as_str();
     match (t["source"]["os"].as_str(), image) {
@@ -1218,10 +1219,10 @@ mod tests {
 
     #[test]
     fn the_builtin_template_shows_what_it_runs() {
-        let base = json!({ "builtin": true, "source": { "image": "ghcr.io/upsetdev/pyo/sandbox-base:0.4.1@sha256:ab", "os": "Debian 13" } });
+        let base = json!({ "builtin": true, "source": { "image": "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:ab", "os": "Ubuntu 24.04" } });
         assert_eq!(
             template_image(&base),
-            "Debian 13 · ghcr.io/upsetdev/pyo/sandbox-base"
+            "Ubuntu 24.04 · ghcr.io/upsetdev/pyo-sandbox-images/base"
         );
         let own = json!({ "builtin": false, "source": { "image": "node:22" } });
         assert_eq!(template_image(&own), "node:22");

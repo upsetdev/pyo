@@ -379,12 +379,12 @@ function SandboxTable({
                   </Tooltip>
                 ) : null}
                 {canUse && x.state === "running" && isDesktop(templateOf(x, templates)) ? (
-                  <Tooltip content="Chromium" focusable={false}>
+                  <Tooltip content="Browser" focusable={false}>
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7"
-                      aria-label={`Chromium in ${x.name}`}
+                      aria-label={`Browser in ${x.name}`}
                       onClick={() => void openDesktop(x.id, { app: "chromium" })}
                     >
                       <BrandMark icon={siGooglechrome} size={15} tone="mono" />

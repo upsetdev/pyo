@@ -12,7 +12,7 @@ type TemplateLike = {
 
 /** The template a sandbox starts from when none is given. */
 export const BASE_TEMPLATE = "base";
-/** Pyo's desktop: the screen in noVNC on DESKTOP_PORT, Chromium's CDP on 9222. */
+/** Pyo's desktop: the screen in noVNC on DESKTOP_PORT, the browser's CDP on 9222. */
 export const DESKTOP_TEMPLATE = "desktop";
 export const DESKTOP_PORT = 6080;
 
