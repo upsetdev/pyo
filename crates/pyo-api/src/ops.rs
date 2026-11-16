@@ -2076,7 +2076,7 @@ pub(crate) enum Op {
     CreateApiToken {
         id: String,
         name: String,
-        /// "read", "deploy" or "full" (the default).
+        /// "read", "deploy", "sandboxes" or "full" (the default).
         access: Option<String>,
         /// Only these teams; all of yours when omitted.
         team_ids: Option<Vec<String>>,
