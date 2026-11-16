@@ -112,7 +112,7 @@ pub async fn disconnect(api: &Api, team_ref: Option<&str>, yes: bool) -> Result<
     Ok(())
 }
 
-fn yes_to(q: &str) -> Result<bool> {
+pub(crate) fn yes_to(q: &str) -> Result<bool> {
     Ok(matches!(
         ui::ask(q)?.trim().to_lowercase().as_str(),
         "y" | "yes"
@@ -281,7 +281,7 @@ pub async fn create(api: &Api, n: New<'_>) -> Result<()> {
 }
 
 /// Follows a new server to ready, saying each step.
-async fn follow(api: &Api, id: &str) -> Result<()> {
+pub(crate) async fn follow(api: &Api, id: &str) -> Result<()> {
     let mut last = String::new();
     let mut sign_shown = false;
     loop {

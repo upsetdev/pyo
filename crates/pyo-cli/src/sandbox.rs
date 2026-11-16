@@ -186,6 +186,30 @@ pub enum ServersCommand {
         #[arg(long, value_name = "DOMAIN")]
         edge_domain: Option<String>,
     },
+    /// Buy a sandbox server at Hetzner. Pyo sets it up over your tailnet,
+    /// and it runs sandboxes on gVisor. Owners and admins.
+    Create {
+        /// Its name, lowercase letters, digits and dashes.
+        name: String,
+        /// A location, e.g. fsn1 (see pyo server types).
+        #[arg(long)]
+        location: String,
+        /// A server type, e.g. cx22 (see pyo server types).
+        #[arg(long = "type")]
+        server_type: String,
+        /// Serve sandbox ports at <port>-<sandbox>.DOMAIN. Point *.DOMAIN at the server.
+        #[arg(long, value_name = "DOMAIN")]
+        edge_domain: Option<String>,
+        /// Your SSH public key file, to sign in over your tailnet.
+        #[arg(long, value_name = "FILE")]
+        ssh_key: Option<PathBuf>,
+        /// Don't ask to confirm the price.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Start it and exit, without following it.
+        #[arg(long)]
+        detach: bool,
+    },
     /// The sandbox servers the team can use.
     Ls {
         /// Print it as JSON.
@@ -619,6 +643,52 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
             println!("{}", r["command"].as_str().unwrap_or(""));
             Ok(())
         }
+        ServersCommand::Create {
+            name,
+            location,
+            server_type,
+            edge_domain,
+            ssh_key,
+            yes,
+            detach,
+        } => {
+            let ssh_key = match ssh_key {
+                Some(p) => Some(
+                    std::fs::read_to_string(&p)
+                        .with_context(|| format!("Can't read {}", p.display()))?
+                        .trim()
+                        .to_owned(),
+                ),
+                None => None,
+            };
+            let mut body = json!({
+                "teamId": team, "name": name, "location": location,
+                "serverType": server_type, "sshKey": ssh_key,
+            });
+            if let Some(d) = edge_domain {
+                body["edgeDomain"] = json!(d);
+            }
+            let path = "/api/v1/sandbox-servers/cloud";
+            let r = match api.post(path, &body).await {
+                Err(e) if e.downcast_ref::<crate::api::NeedsConfirm>().is_some() => {
+                    println!("{e}");
+                    if !yes && !crate::server::yes_to("Go ahead? [y/N] ")? {
+                        bail!("Nothing was changed.");
+                    }
+                    body["confirm"] = json!(true);
+                    api.post(path, &body).await?
+                }
+                r => r?,
+            };
+            ui::ok(&format!(
+                "Creating {name} at Hetzner. It runs sandboxes on gVisor."
+            ));
+            if detach {
+                return Ok(());
+            }
+            let id = r["cloudServer"]["id"].as_str().unwrap_or("").to_owned();
+            crate::server::follow(api, &id).await
+        }
         ServersCommand::Ls { json } => {
             let r = api
                 .get(&format!("/api/v1/sandbox-servers?team={team}"))
@@ -636,10 +706,19 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
                 .iter()
                 .map(|x| {
                     let c = &x["capability"];
+                    // A server Pyo is still making at Hetzner says how far it is.
+                    let state = match x["cloud"]["state"].as_str() {
+                        Some(cs) if cs != "ready" => format!("{cs} (Hetzner)"),
+                        _ => x["state"].as_str().unwrap_or("").to_owned(),
+                    };
                     [
                         x["name"].as_str().unwrap_or("").to_owned(),
-                        x["state"].as_str().unwrap_or("").to_owned(),
-                        c["runtime"].as_str().unwrap_or("-").to_owned(),
+                        state,
+                        x["runtime"]
+                            .as_str()
+                            .or(c["runtime"].as_str())
+                            .unwrap_or("-")
+                            .to_owned(),
                         match (c["cpus"].as_u64(), c["memory"].as_u64()) {
                             (Some(cpu), Some(m)) => format!("{cpu} CPU, {} GB", m >> 30),
                             _ => "-".into(),
@@ -670,11 +749,24 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
                 }
             }
             let id = x["id"].as_str().unwrap_or("");
-            api.delete(&format!("/api/v1/sandbox-servers/{}", seg(id)))
-                .await?;
-            ui::ok(&format!(
-                "Removed {name}. Run sandbox.sh --uninstall on it to take Pyo off."
-            ));
+            let path = format!("/api/v1/sandbox-servers/{}", seg(id));
+            // One Pyo made at Hetzner is deleted there: its price first.
+            match api.delete(&path).await {
+                Err(e) if e.downcast_ref::<crate::api::NeedsConfirm>().is_some() => {
+                    println!("{e}");
+                    if !yes && !crate::server::yes_to("Go ahead? [y/N] ")? {
+                        bail!("Nothing was changed.");
+                    }
+                    api.delete(&format!("{path}?confirm=true")).await?;
+                    ui::ok(&format!("Deleting {name} at Hetzner."));
+                }
+                r => {
+                    r?;
+                    ui::ok(&format!(
+                        "Removed {name}. Run sandbox.sh --uninstall on it to take Pyo off."
+                    ));
+                }
+            }
             Ok(())
         }
     }
