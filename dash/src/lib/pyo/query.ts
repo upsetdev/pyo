@@ -67,7 +67,7 @@ export function useQuery<T>(
     const age = hit ? Date.now() - hit.at : Infinity;
     if (forced || age >= FRESH_MS) void load();
     else if (opts.refreshMs)
-      timer = setTimeout(() => void load(), FRESH_MS - age);
+      timer = setTimeout(() => void load(), Math.min(FRESH_MS, opts.refreshMs) - age);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
