@@ -10,7 +10,7 @@ import { EmptyState, ErrorState, Page, PageHeader, Panel } from "~/components/ui
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
 import { megabytes, timeAgo } from "~/lib/pyo/format";
 import { useQuery } from "~/lib/pyo/query";
-import { sandboxApi, type SandboxTemplate, type SandboxTemplateServer } from "~/lib/pyo/sandbox";
+import { sandboxApi, templateImage, type SandboxTemplate, type SandboxTemplateServer } from "~/lib/pyo/sandbox";
 import { roleIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { seo } from "~/lib/seo";
@@ -60,7 +60,7 @@ function TemplatesPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [removing, setRemoving] = useState<SandboxTemplate | null>(null);
-  const canRemove = (t: SandboxTemplate) => (t.teamId ? canCreate : !!s.user.isAdmin);
+  const canRemove = (t: SandboxTemplate) => !t.builtin && (t.teamId ? canCreate : !!s.user.isAdmin);
   const nameError = name && !NAME.test(name) ? "Lowercase letters, digits, dashes, dots and underscores." : "";
 
   const create = async () => {
@@ -108,7 +108,7 @@ function TemplatesPage() {
                     {t.name}
                     {t.teamId ? null : <span className="ml-2 text-[11.5px] font-normal text-muted-foreground">Installation</span>}
                   </Td>
-                  <Td className="font-mono text-[12px] text-muted-foreground">{t.source?.image ?? "—"}</Td>
+                  <Td className="font-mono text-[12px] text-muted-foreground">{templateImage(t) || "—"}</Td>
                   <Td>
                     <span className={`inline-flex items-center gap-1.5 ${t.state === "failed" ? "text-destructive" : ""}`} title={t.error ?? undefined}>
                       <Dot tone={STATE[t.state]?.tone ?? "neutral"} className="h-2 w-2" />

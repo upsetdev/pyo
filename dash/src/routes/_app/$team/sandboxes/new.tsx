@@ -13,12 +13,14 @@ import { parseEnv } from "~/lib/pyo/dotenv";
 import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
+  defaultTemplate,
   LIFETIMES,
   SIZES,
   rememberConnection,
   sandboxApi,
   sdkSnippet,
   sizeLabel,
+  templateImage,
   type CreateSandbox,
 } from "~/lib/pyo/sandbox";
 import { projectsIn, roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
@@ -110,7 +112,7 @@ function NewSandboxForm() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const picked = template || ready.find((t) => t.state === "ready")?.name || "";
+  const picked = template || defaultTemplate(ready);
   const sz = SIZES.find((x) => x.value === size)!;
   const limits = list.status === "success" ? list.data.limits : null;
   const inUse = list.status === "success" ? list.data.inUse : null;
@@ -182,7 +184,7 @@ function NewSandboxForm() {
                     {ready.map((t) => (
                       <option key={t.id} value={t.name} disabled={t.state !== "ready"}>
                         {t.name}
-                        {t.source?.image ? ` · ${t.source.image}` : ""}
+                        {templateImage(t) ? ` · ${templateImage(t)}` : ""}
                         {t.state !== "ready" ? ` (${t.state})` : ""}
                       </option>
                     ))}
