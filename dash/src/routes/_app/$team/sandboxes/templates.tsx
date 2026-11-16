@@ -112,72 +112,96 @@ function TemplatesPage() {
           <Table>
             <thead>
               <tr>
-                <Th>Name</Th>
-                <Th>Image</Th>
+                <Th>Template</Th>
                 <Th>Status</Th>
                 <Th>Servers</Th>
                 <Th>Added</Th>
-                <Th />
+                <Th className="w-px">
+                  <span className="sr-only">Actions</span>
+                </Th>
               </tr>
             </thead>
             <tbody>
-              {templates.map((t) => (
-                <Tr key={t.id}>
-                  <Td className="font-medium">
-                    {t.name}
-                    {t.teamId ? null : <span className="ml-2 text-[11.5px] font-normal text-muted-foreground">Installation</span>}
-                  </Td>
-                  <Td className="font-mono text-[12px] text-muted-foreground">{templateImage(t) || "—"}</Td>
-                  <Td>
-                    <span className={`inline-flex items-center gap-1.5 ${t.state === "failed" ? "text-destructive" : ""}`} title={t.error ?? undefined}>
-                      <Dot tone={STATE[t.state]?.tone ?? "neutral"} className="h-2 w-2" />
-                      {templateStatus(t)}
-                    </span>
-                  </Td>
-                  <Td className="text-[12.5px]">
-                    {t.servers.length
-                      ? t.servers.map((x) => (
-                          <div key={x.id} className="flex items-center gap-1.5 whitespace-nowrap" title={x.error ?? undefined}>
-                            <Dot tone={STATE[x.state]?.tone ?? "neutral"} className="h-1.5 w-1.5" />
-                            <span className="truncate">{x.name}</span>
-                            <span className={x.state === "failed" ? "text-destructive" : "text-muted-foreground"}>{serverLabel(x)}</span>
-                          </div>
-                        ))
-                      : <span className="text-muted-foreground">{isBase(t) ? "Made on first use" : "—"}</span>}
-                  </Td>
-                  <Td className="text-muted-foreground">{t.createdAt ? timeAgo(t.createdAt) : "—"}</Td>
-                  <Td className="text-right">
-                    <div className="flex items-center justify-end gap-1">
-                    {canUse && usable(t) ? (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        onClick={() =>
-                          void navigate({
-                            to: "/$team/sandboxes/new",
-                            params: { team: currentSlug() },
-                            search: { template: t.name },
-                          })
-                        }
+              {templates.map((t) => {
+                const image = templateImage(t);
+                return (
+                  <Tr key={t.id}>
+                    <Td className="max-w-[18rem]">
+                      <div className="flex items-baseline gap-2">
+                        <span className="truncate text-[13px] font-medium">{t.name}</span>
+                        {t.teamId ? null : <span className="shrink-0 text-[11.5px] text-muted-foreground">Installation</span>}
+                      </div>
+                      {image ? (
+                        <div className="mt-0.5 truncate font-mono text-[11.5px] text-muted-foreground" title={image}>
+                          {image}
+                        </div>
+                      ) : null}
+                    </Td>
+                    <Td>
+                      <span
+                        className={`inline-flex items-center gap-1.5 whitespace-nowrap ${t.state === "failed" ? "text-destructive" : ""}`}
+                        title={t.error ?? undefined}
                       >
-                        Use
-                      </Button>
-                    ) : null}
-                    {canRemove(t) ? (
-                      <Menu
-                        label={`Actions for ${t.name}`}
-                        items={[{ label: "Delete template", icon: <TrashIcon size={14} />, danger: true, onSelect: () => setRemoving(t) }]}
-                        trigger={(p) => (
-                          <Button {...p} variant="ghost" size="icon" className="h-7 w-7">
-                            <DotsThreeIcon size={16} weight="bold" />
+                        <Dot tone={STATE[t.state]?.tone ?? "neutral"} className="h-2 w-2" />
+                        {templateStatus(t)}
+                      </span>
+                    </Td>
+                    <Td className="text-[12px]">
+                      {t.servers.length ? (
+                        <ul className="space-y-1">
+                          {t.servers.map((x) => (
+                            <li key={x.id} className="flex items-center gap-1.5 whitespace-nowrap" title={x.error ?? undefined}>
+                              <Dot tone={STATE[x.state]?.tone ?? "neutral"} />
+                              <span className="max-w-[10rem] truncate">{x.name}</span>
+                              <span className={`tabular-nums ${x.state === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
+                                {serverLabel(x)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="text-muted-foreground">{isBase(t) ? "Made on first use" : "—"}</span>
+                      )}
+                    </Td>
+                    <Td className="whitespace-nowrap text-[12px] text-muted-foreground">
+                      {t.createdAt ? timeAgo(t.createdAt) : "—"}
+                    </Td>
+                    <Td>
+                      <div className="flex items-center justify-end gap-1">
+                        {canUse && usable(t) ? (
+                          <Button
+                            size="xs"
+                            variant="secondary"
+                            onClick={() =>
+                              void navigate({
+                                to: "/$team/sandboxes/new",
+                                params: { team: currentSlug() },
+                                search: { template: t.name },
+                              })
+                            }
+                          >
+                            Use
                           </Button>
-                        )}
-                      />
-                    ) : null}
-                    </div>
-                  </Td>
-                </Tr>
-              ))}
+                        ) : null}
+                        {/* The menu keeps its slot, so Use lines up on every row. */}
+                        <div className="w-7">
+                          {canRemove(t) ? (
+                            <Menu
+                              label={`Actions for ${t.name}`}
+                              items={[{ label: "Delete", icon: <TrashIcon size={14} />, danger: true, onSelect: () => setRemoving(t) }]}
+                              trigger={(p) => (
+                                <Button {...p} variant="ghost" size="icon" className="h-7 w-7">
+                                  <DotsThreeIcon size={16} weight="bold" />
+                                </Button>
+                              )}
+                            />
+                          ) : null}
+                        </div>
+                      </div>
+                    </Td>
+                  </Tr>
+                );
+              })}
             </tbody>
           </Table>
         </Panel>
