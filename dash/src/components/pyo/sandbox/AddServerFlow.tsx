@@ -1,8 +1,7 @@
-import { CheckCircleIcon, CircleNotchIcon, CloudIcon, TerminalWindowIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon, CircleNotchIcon, TerminalWindowIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { siHetzner } from "simple-icons";
 import { BrandMark } from "~/components/pyo/common";
-import { Choice, Choices, GroupLabel } from "~/components/pyo/Databases";
 import {
   CloudProgress,
   CloudServerFields,
@@ -19,15 +18,15 @@ import { Field, Input } from "~/components/ui/Field";
 import { OptionTile, OptionTiles } from "~/components/ui/OptionTile";
 import { Callout, Panel } from "~/components/ui/Panel";
 import { DNS_LABEL } from "~/lib/pyo/format";
-import { CLOUD_PROVIDERS, sandboxApi, type CloudProvider } from "~/lib/pyo/sandbox";
+import { sandboxApi } from "~/lib/pyo/sandbox";
 import { refresh, roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import { AddSandboxServer, RuntimeBadge } from "./common";
 
-// Add a sandbox server: two square tiles first. "Cloud provider" has Pyo
-// buy the server and set it up. "Command line" is the one-line sandbox.sh
-// for a server you have.
+// Add a sandbox server: two square tiles first. "Hetzner" has Pyo buy the
+// server and set it up (or connects Hetzner first). "Command line" is the
+// one-line sandbox.sh for a server you have.
 
-type How = "cloud" | "command";
+type How = "hetzner" | "command";
 
 /** What sandbox.sh takes for --edge-domain. */
 const EDGE_DOMAIN = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
@@ -41,11 +40,11 @@ export function AddSandboxServerFlow() {
     <div className="space-y-5">
       <OptionTiles label="How">
         <OptionTile
-          icon={CloudIcon}
-          label="Cloud provider"
+          mark={<BrandMark icon={siHetzner} size={22} tone="brand" />}
+          label="Hetzner"
           detail="Pyo buys a server and sets it up."
-          selected={how === "cloud"}
-          onSelect={() => setHow("cloud")}
+          selected={how === "hetzner"}
+          onSelect={() => setHow("hetzner")}
         />
         <OptionTile
           icon={TerminalWindowIcon}
@@ -55,7 +54,7 @@ export function AddSandboxServerFlow() {
           onSelect={() => setHow("command")}
         />
       </OptionTiles>
-      {how === "cloud" ? (
+      {how === "hetzner" ? (
         <CloudServer onMade={setMade} />
       ) : how === "command" ? (
         <Panel>
@@ -79,7 +78,6 @@ function CloudServer({ onMade }: { onMade: (m: { id: string; name: string }) => 
   const canManage = role === "owner" || role === "admin";
   const servers = sandboxServersIn(s);
   const [suggested] = useState(() => freeName(servers.map((x) => x.name)));
-  const [provider, setProvider] = useState<CloudProvider>("hetzner");
   const [name, setName] = useState("");
   const [edge, setEdge] = useState("");
   const [choice, setChoice] = useState<CloudChoice>({ location: "", serverType: "", sshKey: "" });
@@ -113,7 +111,7 @@ function CloudServer({ onMade }: { onMade: (m: { id: string; name: string }) => 
       const r = await sandboxApi.addCloudServer({
         teamId: s.currentTeamId,
         name: value,
-        provider,
+        provider: "hetzner",
         location: choice.location,
         serverType: choice.serverType,
         ...(edgeDomain ? { edgeDomain } : {}),
@@ -132,25 +130,9 @@ function CloudServer({ onMade }: { onMade: (m: { id: string; name: string }) => 
   return (
     <Panel>
       <div className="space-y-5 p-5">
-        <div>
-          <GroupLabel>Provider</GroupLabel>
-          <Choices label="Provider" cols="sm:grid-cols-2">
-            {CLOUD_PROVIDERS.map((p) => (
-              <Choice
-                key={p.value}
-                mark={p.value === "hetzner" ? <BrandMark icon={siHetzner} size={16} tone="brand" /> : undefined}
-                icon={CloudIcon}
-                label={p.label}
-                detail={p.detail}
-                selected={provider === p.value}
-                onSelect={() => setProvider(p.value)}
-              />
-            ))}
-          </Choices>
-        </div>
         <NeedsTailscale />
         {s.tailscale && !connected ? (
-          <div className="space-y-2 rounded-lg border border-border p-4">
+          <div className="space-y-2">
             <p className="text-[13px] font-medium">Connect Hetzner</p>
             <HetznerConnectForm />
           </div>
