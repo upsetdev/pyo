@@ -160,9 +160,66 @@ jobs:
             exit 1
           fi
 
+  # Pyo Sandbox's built-in template `desktop`, on the `base` just pushed
+  # (pinned by digest), so it waits for the images.
+  sandbox-desktop:
+    name: Image sandbox-desktop
+    needs: [verify, images]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # Signing: proves the image came from this workflow.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: The base it's built on
+        id: base
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          digest=$(docker buildx imagetools inspect "$IMAGES/sandbox-base:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "ref=$IMAGES/sandbox-base:$VERSION@$digest" >> "$GITHUB_OUTPUT"
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: deploy/images
+          file: deploy/images/sandbox-desktop.Dockerfile
+          build-args: BASE=${{ steps.base.outputs.ref }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGES }}/sandbox-desktop:${{ needs.verify.outputs.version }}
+          provenance: mode=max
+          sbom: true
+      - name: Sign
+        env:
+          IMAGE: ${{ env.IMAGES }}/sandbox-desktop@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
+      - name: Anyone can pull it
+        env:
+          REPO: upsetdev/pyo/sandbox-desktop
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:$REPO:pull" | jq -r .token)
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json' \
+            "https://ghcr.io/v2/$REPO/manifests/$DIGEST")
+          if [ "$code" != 200 ]; then
+            echo "::error::ghcr.io/$REPO can't be pulled without logging in (HTTP $code). Make the package public in its settings on GitHub, then run this job again."
+            exit 1
+          fi
+
   release:
     name: GitHub release
-    needs: [verify, images, cli, sandbox]
+    needs: [verify, images, sandbox-desktop, cli, sandbox]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -209,7 +266,7 @@ jobs:
           tagged() { docker buildx imagetools inspect "$IMAGES/$1:$2$VERSION" --format '{{json .Manifest}}' | jq -r .digest; }
           bun run scripts/release-manifest.ts --version "$VERSION" --images "$IMAGES" \
             --pyo "$(digest pyo)" --agent "$(digest agent)" --builder "$(digest builder)" --flows "$(digest flows)" --waf "$(digest waf)" --geoip "$(digest geoip)" \
-            --db-controller "$(digest db-controller)" --kv "$(digest kv)" --static "$(digest static)" --sandbox-base "$(digest sandbox-base)" \
+            --db-controller "$(digest db-controller)" --kv "$(digest kv)" --static "$(digest static)" --sandbox-base "$(digest sandbox-base)" --sandbox-desktop "$(digest sandbox-desktop)" \
             --mysql-operator "$(digest mysql-operator)" --mysql-backup "$(digest mysql-backup)" \
             --postgres-16 "$(tagged postgres 16-)" --postgres-17 "$(tagged postgres 17-)" --postgres-18 "$(tagged postgres 18-)" \
             --agent-access "$(docker run --rm "$IMAGES/agent:$VERSION@$(digest agent)" access-hash)" \

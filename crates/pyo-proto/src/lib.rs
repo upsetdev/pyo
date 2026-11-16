@@ -1142,13 +1142,17 @@ pub struct ReleaseImages {
     /// from it; nothing runs it on a cluster.
     #[serde(default)]
     pub sandbox_base: String,
+    /// Pyo Sandbox's built-in template `desktop`, multi-arch, built on
+    /// `sandbox_base` (deploy/images/sandbox-desktop.Dockerfile).
+    #[serde(default)]
+    pub sandbox_desktop: String,
 }
 
 impl ReleaseImages {
     /// Every image, by its key in release.json. A release pins each image
     /// scripts/release-manifest.ts writes; adding one there means adding
     /// it here (a test compares the two).
-    pub fn all(&self) -> [(&'static str, &str); 15] {
+    pub fn all(&self) -> [(&'static str, &str); 16] {
         [
             ("pyo", &self.pyo),
             ("agent", &self.agent),
@@ -1165,6 +1169,7 @@ impl ReleaseImages {
             ("postgres17", &self.postgres17),
             ("postgres18", &self.postgres18),
             ("sandboxBase", &self.sandbox_base),
+            ("sandboxDesktop", &self.sandbox_desktop),
         ]
     }
 }
@@ -1264,13 +1269,20 @@ impl Release {
                     ));
                 }
             }
-            let mut refs = vec![];
-            collect_env(o, SANDBOX_BASE_ENV, &mut refs);
-            for r in refs {
-                if !r.is_empty() && r != self.images.sandbox_base {
-                    out.push(format!(
-                        "{SANDBOX_BASE_ENV} is {r}, not the release's sandboxBase image."
-                    ));
+            for (env, key, pinned) in [
+                (SANDBOX_BASE_ENV, "sandboxBase", &self.images.sandbox_base),
+                (
+                    SANDBOX_DESKTOP_ENV,
+                    "sandboxDesktop",
+                    &self.images.sandbox_desktop,
+                ),
+            ] {
+                let mut refs = vec![];
+                collect_env(o, env, &mut refs);
+                for r in refs {
+                    if !r.is_empty() && &r != pinned {
+                        out.push(format!("{env} is {r}, not the release's {key} image."));
+                    }
                 }
             }
         }
@@ -1308,6 +1320,9 @@ pub fn image_repo(image: &str) -> &str {
 /// The env var Pyo's worker reads the sandbox template `base`'s image from
 /// (pinned to the release's `sandboxBase`).
 pub const SANDBOX_BASE_ENV: &str = "PYO_SANDBOX_BASE_REF";
+/// The same for the sandbox template `desktop` (the release's
+/// `sandboxDesktop`).
+pub const SANDBOX_DESKTOP_ENV: &str = "PYO_SANDBOX_DESKTOP_REF";
 
 /// The values of env vars named `name` in a Kubernetes object.
 pub fn collect_env(v: &serde_json::Value, name: &str, out: &mut Vec<String>) {
@@ -2606,6 +2621,7 @@ mod release_tests {
                 postgres17: img("postgres-17"),
                 postgres18: img("postgres-18"),
                 sandbox_base: img("sandbox-base"),
+                sandbox_desktop: img("sandbox-desktop"),
             },
             manifests: ReleaseManifests {
                 platform: vec![
@@ -2614,7 +2630,7 @@ mod release_tests {
                 pyo: vec![
                     json!({ "kind": "Deployment", "spec": { "template": { "spec": { "containers": [{
                     "name": "pyo", "image": img("pyo"),
-                    "env": [{ "name": "PYO_AGENT_IMAGE", "value": img("agent") }, { "name": "PYO_BUILDER_IMAGE", "value": img("builder") }, { "name": SANDBOX_BASE_ENV, "value": img("sandbox-base") }],
+                    "env": [{ "name": "PYO_AGENT_IMAGE", "value": img("agent") }, { "name": "PYO_BUILDER_IMAGE", "value": img("builder") }, { "name": SANDBOX_BASE_ENV, "value": img("sandbox-base") }, { "name": SANDBOX_DESKTOP_ENV, "value": img("sandbox-desktop") }],
                 }] } } } }),
                 ],
             },
@@ -2717,10 +2733,10 @@ mod release_tests {
         images
             .as_object_mut()
             .unwrap()
-            .retain(|k, v| !(matches!(k.as_str(), "static" | "sandboxBase") && v == ""));
+            .retain(|k, v| !(matches!(k.as_str(), "static" | "sandboxBase" | "sandboxDesktop") && v == ""));
         assert_eq!(images, raw["images"]);
         for (name, image) in r.images.all() {
-            if matches!(name, "static" | "sandboxBase") && image.is_empty() {
+            if matches!(name, "static" | "sandboxBase" | "sandboxDesktop") && image.is_empty() {
                 continue;
             }
             assert!(pinned_image(image), "{name}: {image}");
@@ -2845,6 +2861,17 @@ mod release_tests {
         r.manifests.pyo[0]["spec"]["template"]["spec"]["containers"][0]["env"][2]["value"] =
             json!("");
         assert!(r.problems().is_empty(), "{:?}", r.problems());
+        // The same for desktop's.
+        let mut r = release();
+        r.images.sandbox_desktop =
+            format!("ghcr.io/upsetdev/pyo/sandbox-desktop:0.2.1@sha256:{D}");
+        assert!(
+            r.problems()
+                .iter()
+                .any(|p| p.starts_with("PYO_SANDBOX_DESKTOP_REF is")),
+            "{:?}",
+            r.problems()
+        );
     }
 
     /// Before updating, an older Pyo checks the new release with its own
@@ -2899,6 +2926,11 @@ mod release_tests {
             collect_env(d, SANDBOX_BASE_ENV, &mut refs);
         }
         assert_eq!(refs, vec!["__IMAGES__/sandbox-base:__TAG__".to_string()]);
+        let mut refs = vec![];
+        for d in &docs {
+            collect_env(d, SANDBOX_DESKTOP_ENV, &mut refs);
+        }
+        assert_eq!(refs, vec!["__IMAGES__/sandbox-desktop:__TAG__".to_string()]);
     }
 
     #[test]
