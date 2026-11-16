@@ -143,6 +143,7 @@ export function Choices({
 /** One pick-one card: an optional icon, a name and a line under it. */
 export function Choice({
   icon: IconCmp,
+  mark,
   label,
   detail,
   selected,
@@ -150,6 +151,8 @@ export function Choice({
   disabled = false,
 }: {
   icon?: Icon;
+  /** A brand logo in place of `icon`, drawn in its own colours. */
+  mark?: ReactNode;
   label: string;
   detail: ReactNode;
   selected: boolean;
@@ -167,7 +170,14 @@ export function Choice({
       onClick={onSelect}
       className={`${optionClass({ selected })} flex w-full min-w-0 items-center gap-3 px-3 py-2.5 disabled:cursor-not-allowed disabled:opacity-50`}
     >
-      {IconCmp ? (
+      {mark ? (
+        <span
+          aria-hidden
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-card text-foreground"
+        >
+          {mark}
+        </span>
+      ) : IconCmp ? (
         <span
           aria-hidden
           className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border ${selected ? "border-primary/30 bg-primary/10 text-primary" : "border-border bg-muted text-muted-foreground"}`}

@@ -1,5 +1,7 @@
 import { CheckCircleIcon, CircleNotchIcon, CloudIcon, TerminalWindowIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { siHetzner } from "simple-icons";
+import { BrandMark } from "~/components/pyo/common";
 import { Choice, Choices, GroupLabel } from "~/components/pyo/Databases";
 import {
   CloudProgress,
@@ -136,6 +138,7 @@ function CloudServer({ onMade }: { onMade: (m: { id: string; name: string }) => 
             {CLOUD_PROVIDERS.map((p) => (
               <Choice
                 key={p.value}
+                mark={p.value === "hetzner" ? <BrandMark icon={siHetzner} size={16} tone="brand" /> : undefined}
                 icon={CloudIcon}
                 label={p.label}
                 detail={p.detail}
