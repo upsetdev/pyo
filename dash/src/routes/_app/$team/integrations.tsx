@@ -380,7 +380,7 @@ function Integrations() {
   const current = all.find((x) => x.id === open);
 
   return (
-    <Page width="max-w-[960px]">
+    <Page width="max-w-7xl">
       <PageHeader title="Integrations" />
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -410,7 +410,7 @@ function Integrations() {
           </div>
         </div>
         {shown.length ? (
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
             {shown.map(({ settings: _settings, ...x }) => (
               <IntegrationCard key={x.id} {...x} highlight={highlight === x.id} />
             ))}
