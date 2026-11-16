@@ -9,8 +9,9 @@ use pyo_sandbox::config::Config;
 use pyo_sandbox::detect::{self, Inputs};
 use pyo_sandbox::edge::Edge;
 use pyo_sandbox::firecracker::{Firecracker, Jailer};
+use pyo_sandbox::gvisor::Gvisor;
 use pyo_sandbox::manager::Manager;
-use pyo_sandbox::network::Network;
+use pyo_sandbox::network::{LinkKind, Network};
 use pyo_sandbox::storage::Layout;
 
 #[derive(Parser)]
@@ -85,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
                 fc: &s.fc,
                 layout: &s.layout,
                 envd: &s.cfg.envd,
+                runsc: &s.cfg.runsc,
             })
             .await;
             // Only checks. `serve` puts the table in place, and reports
@@ -101,19 +103,17 @@ async fn main() -> anyhow::Result<()> {
 
 /// Sandbox networking, when this server can have it, and the check for the
 /// report. Taps belong to the jail user, so Firecracker can open them after
-/// dropping root.
+/// dropping root. gVisor sandboxes get a veth pair in a namespace instead.
 async fn open_network(s: &Setup, runtime: Runtime) -> (Option<Network>, Check) {
-    let res = if runtime != Runtime::Firecracker {
-        Err(anyhow::anyhow!(
-            "Sandbox networking needs Firecracker for now."
-        ))
-    } else {
-        let (uid, gid) = match &s.fc.jailer {
-            Some(j) => (j.uid, j.gid),
-            // SAFETY: plain getters.
-            None => unsafe { (libc::geteuid(), libc::getegid()) },
-        };
-        Network::open(s.cfg.network.clone(), uid, gid).await
+    let (uid, gid) = match &s.fc.jailer {
+        Some(j) => (j.uid, j.gid),
+        // SAFETY: plain getters.
+        None => unsafe { (libc::geteuid(), libc::getegid()) },
+    };
+    let res = match runtime {
+        Runtime::Firecracker => Network::open(s.cfg.network.clone(), LinkKind::Tap, uid, gid).await,
+        Runtime::Gvisor => Network::open(s.cfg.network.clone(), LinkKind::Veth, uid, gid).await,
+        Runtime::None => Err(anyhow::anyhow!("This server can't run sandboxes.")),
     };
     match res {
         Ok(n) => {
@@ -146,6 +146,7 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
         fc: &s.fc,
         layout: &s.layout,
         envd: &s.cfg.envd,
+        runsc: &s.cfg.runsc,
     })
     .await;
     let (net, check) = open_network(&s, capability.runtime).await;
@@ -158,7 +159,24 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
     let server_id = s.cfg.server_id.clone();
     let listen = s.cfg.listen;
     let edge_cfg = s.cfg.edge.clone();
-    let mgr = Arc::new(Manager::new(s.cfg, s.layout, s.fc, capability).with_network(net));
+    // gVisor sandboxes live in the plain sandboxes directory: no jail.
+    let gvisor = (capability.runtime == Runtime::Gvisor).then(|| {
+        Gvisor::new(
+            s.cfg.runsc.clone(),
+            s.cfg.root.join("runsc"),
+            s.cfg.cgroup_parent.clone(),
+        )
+    });
+    let mut layout = s.layout;
+    if gvisor.is_some() {
+        layout.jailed = false;
+        layout.create().await?;
+    }
+    let mgr = Arc::new(
+        Manager::new(s.cfg, layout, s.fc, capability)
+            .with_network(net)
+            .with_gvisor(gvisor),
+    );
     let adopted = mgr.adopt().await;
     if adopted > 0 {
         tracing::info!(adopted, "took over sandboxes from before the restart");

@@ -38,7 +38,7 @@ use pyo_sandbox::detect::{self, Inputs};
 use pyo_sandbox::firecracker::{Firecracker, Jailer};
 use pyo_sandbox::manager::Manager;
 use pyo_sandbox::network::{
-    Network, NetworkConfig, RULE_COMMENT, TABLE, TAP_PREFIX, forward_drops, tagged_rules,
+    LinkKind, Network, NetworkConfig, RULE_COMMENT, TABLE, TAP_PREFIX, forward_drops, tagged_rules,
 };
 use pyo_sandbox::storage::{self, Layout};
 
@@ -278,6 +278,7 @@ impl Env {
             fc: &self.fc,
             layout: &self.layout,
             envd: &self.envd,
+            runsc: &self.cfg.runsc,
         })
         .await;
         assert_eq!(cap.runtime, Runtime::Firecracker, "{}", cap.summary());
@@ -285,7 +286,7 @@ impl Env {
             Some(j) => (j.uid, j.gid),
             None => (0, 0),
         };
-        let net = Network::open(self.cfg.network.clone(), uid, gid)
+        let net = Network::open(self.cfg.network.clone(), LinkKind::Tap, uid, gid)
             .await
             .expect("networking opens");
         cap.network = false;
@@ -395,6 +396,7 @@ async fn sandbox_networking() {
         jailer: jailer.clone(),
         kernel: kernel.clone(),
         envd: envd.clone(),
+        runsc: "runsc".into(),
         keys: vec![],
         host_reserve_mib: Some(512),
         memory_overcommit: 1.0,

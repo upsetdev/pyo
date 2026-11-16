@@ -791,6 +791,7 @@ async fn boots_real_microvms() {
         jailer: None,
         kernel: kernel.clone(),
         envd: envd.clone(),
+        runsc: "runsc".into(),
         keys: vec![keys.key.verifying_key()],
         host_reserve_mib: Some(1024),
         memory_overcommit: 1.0,
@@ -823,6 +824,7 @@ async fn boots_real_microvms() {
         fc: &fc,
         layout: &layout,
         envd: &envd,
+        runsc: std::path::Path::new("runsc"),
     })
     .await;
     note("detect_total_ms", (t.elapsed().as_millis() as u64).into());

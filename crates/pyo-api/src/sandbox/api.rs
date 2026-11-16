@@ -12,7 +12,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{AddServer, Connection, CreateSandbox, CreateTemplate, Need};
+use super::{AddCloudServer, AddServer, Connection, CreateSandbox, CreateTemplate, Need};
 use crate::{
     AppState,
     auth::SessionUser,
@@ -33,6 +33,7 @@ pub fn routes() -> Router<AppState> {
             axum::routing::delete(close_port),
         )
         .route("/sandbox-servers", get(list_servers).post(add_server))
+        .route("/sandbox-servers/cloud", post(add_cloud_server))
         .route(
             "/sandbox-servers/{id}",
             axum::routing::delete(remove_server),
@@ -328,7 +329,7 @@ pub(crate) async fn token(
 #[utoipa::path(get, path = "/sandbox-servers", operation_id = "listSandboxServers", tag = "Sandboxes",
     params(TeamQuery),
     responses(
-        (status = 200, description = "`servers`, each with `id`, `teamId` (null for the installation's), `name`, `address`, `state` (\"joining\", \"ready\", \"unreachable\" or \"refused\"), `enabled`, `capability` (`runtime`, `kvm`, `bootMs`, `arch`, `cpus`, `memory`, `disk` and the checks), `summary` (one line about it), `capacity`, `templates`, `daemonVersion`, `lastReportAt`, `error`, `sandboxes` (how many run there), `createdAt`, `edgeDomain` and, with an edge domain, `edge`: its `domain`, `https` (whether it serves HTTPS), `cert` (`state`: \"none\", \"issuing\", \"ready\" or \"failed\", `notAfter`, `issuedAt`, `error`, `served`), `cloudflare` (the connected zone that covers it: `teamId`, `zone`, `canEdit`, or null) and `dns` (`name`, the `records` to point it at the server, and what Pyo `made`).", body = Object),
+        (status = 200, description = "`servers`, each with `id`, `teamId` (null for the installation's), `name`, `address`, `state` (\"joining\", \"ready\", \"unreachable\" or \"refused\"), `enabled`, `runtime` (\"firecracker\" or \"gvisor\", what runs its sandboxes, null until it reports), `capability` (`runtime`, `kvm`, `bootMs`, `arch`, `cpus`, `memory`, `disk`, `gvisorVersion` and the checks), `summary` (one line about it), `capacity`, `templates`, `daemonVersion`, `lastReportAt`, `error`, `sandboxes` (how many run there), `createdAt`, `edgeDomain` and, with an edge domain, `edge`: its `domain`, `https` (whether it serves HTTPS), `cert` (`state`: \"none\", \"issuing\", \"ready\" or \"failed\", `notAfter`, `issuedAt`, `error`, `served`), `cloudflare` (the connected zone that covers it: `teamId`, `zone`, `canEdit`, or null) and `dns` (`name`, the `records` to point it at the server, and what Pyo `made`).", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -367,23 +368,64 @@ pub(crate) async fn add_server(
     Ok(Json(super::add_server(&s, &user, req).await?))
 }
 
+/// Buy a sandbox server at a cloud provider
+///
+/// Makes a server in the team's Hetzner project and sets it up as a sandbox
+/// server, the way Pyo makes a cluster's servers there. Read the locations,
+/// server types and prices with getCloudOptions first. On its first boot it
+/// joins your tailnet and runs sandbox.sh with a one-time code. Hetzner
+/// Cloud servers have no KVM, so it runs sandboxes on gVisor. Follow it in
+/// the server's `cloud` (creating, booting, joining, ready) and `state`.
+/// Without `confirm` it answers 409 with the monthly price. Confirm that
+/// with the user, then send it again with `confirm: true`. Team owners and
+/// admins. Needs Tailscale and the team's Hetzner connection.
+#[utoipa::path(post, path = "/sandbox-servers/cloud", operation_id = "createCloudSandboxServer", tag = "Sandboxes",
+    request_body(content = AddCloudServer),
+    responses(
+        (status = 200, description = "`server` (as listSandboxServers shows it) and `cloudServer` (`id`, `name`, `state`, `monthly`, `currency`).", body = Object),
+        (status = 400, description = "A bad name, location or server type, or Tailscale or Hetzner isn't set up.", body = ErrorBody),
+        (status = 409, description = "`needsConfirm` with the monthly price, a name in use, a type Hetzner can't make now, or Pyo isn't on the tailnet yet.", body = ErrorBody),
+        (status = 502, description = "Hetzner failed.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("full"))))]
+pub(crate) async fn add_cloud_server(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Json(req): Json<AddCloudServer>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(super::add_cloud_server(&s, &user, req).await?))
+}
+
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RemoveQuery {
+    /// Delete a server Pyo made at a cloud provider: without it the answer
+    /// is 409 with the monthly cost that stops.
+    #[serde(default)]
+    confirm: bool,
+}
+
 /// Remove a sandbox server
 ///
 /// Deletes its sandboxes where it still answers, and forgets it. To take the
-/// daemon off the server, run `sandbox.sh --uninstall` there.
+/// daemon off the server, run `sandbox.sh --uninstall` there. A server Pyo
+/// made at a cloud provider leaves your tailnet and is deleted there, which
+/// takes `confirm`.
 #[utoipa::path(delete, path = "/sandbox-servers/{id}", operation_id = "removeSandboxServer", tag = "Sandboxes",
-    params(("id" = String, Path, description = "The sandbox server's id, `sbs_…`.")),
+    params(("id" = String, Path, description = "The sandbox server's id, `sbs_…`."), RemoveQuery),
     responses(
-        (status = 200, description = "`ok`, and `stopped`: how many sandboxes ended.", body = Object),
+        (status = 200, description = "`ok`, `stopped` (how many sandboxes ended) and `deleting` (whether it's being deleted at the provider).", body = Object),
         (status = 404, description = "No such sandbox server.", body = ErrorBody),
+        (status = 409, description = "`needsConfirm`: it's deleted at the provider, with the monthly cost that stops.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("full"))))]
 pub(crate) async fn remove_server(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
     Path(id): Path<String>,
+    Query(q): Query<RemoveQuery>,
 ) -> ApiResult<Json<Value>> {
-    Ok(Json(super::remove_server(&s, &user, &id).await?))
+    Ok(Json(super::remove_server(&s, &user, &id, q.confirm).await?))
 }
 
 /// Get a sandbox server's certificate
@@ -468,8 +510,9 @@ pub(crate) async fn list_templates(
 /// Create a sandbox template
 ///
 /// A template made from an OCI image, like "node:22", or an image in Pyo's
-/// registry. Every sandbox server that may use it pulls the image, makes a
-/// root disk from it, boots it once and snapshots it. The template is
+/// registry. Every sandbox server that may use it pulls the image and makes
+/// a root disk from it. A Firecracker server boots it once and snapshots
+/// it, and a gVisor server starts sandboxes from the disk. The template is
 /// ready once one server has it.
 #[utoipa::path(post, path = "/sandbox-templates", operation_id = "createSandboxTemplate", tag = "Sandboxes",
     request_body(content = CreateTemplate),

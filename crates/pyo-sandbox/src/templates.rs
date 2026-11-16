@@ -2,7 +2,9 @@
 //!
 //! A build pulls the image ([`crate::oci`]), unpacks its layers into a root
 //! disk with `pyo-envd` at `/sbin/pyo-envd` ([`crate::rootfs`]), then boots
-//! it once and snapshots it per network mode at the default size. Pyo only
+//! it once and snapshots it per network mode at the default size. gVisor
+//! servers make the same disk and stop there: their sandboxes start cold
+//! from it, mounted read-only (see `gvisor`). Pyo only
 //! says which image and gives a registry login. It reads the progress from
 //! the report:
 //!
@@ -208,10 +210,10 @@ impl Manager {
         }
         let image_ref =
             ImageRef::parse(image).map_err(|e| err(ErrorCode::InvalidSpec, format!("{e:#}")))?;
-        if self.capability().runtime != Runtime::Firecracker {
+        if self.capability().runtime == Runtime::None {
             return Err(err(
                 ErrorCode::Unsupported,
-                "This server can't make templates: it needs Firecracker for now.",
+                "This server can't run sandboxes, so it makes no templates.",
             ));
         }
         if let Some(r) = self.template_report(name) {
@@ -407,6 +409,11 @@ impl Manager {
             r.rootfs_bytes = rootfs_bytes;
         });
 
+        // gVisor starts every sandbox cold from the disk: nothing to snapshot.
+        if self.capability().runtime == Runtime::Gvisor {
+            return Ok(());
+        }
+
         // Boot it once per network mode and snapshot it.
         stopped()?;
         b.set(|r| r.phase = Some("snapshotting".into()));
@@ -475,6 +482,8 @@ impl Manager {
                 format!("The sandbox template {name} isn't on this server."),
             ));
         }
+        // gVisor servers have its disk mounted.
+        crate::gvisor::unmount_below(&dir).await;
         tokio::fs::remove_dir_all(&dir)
             .await
             .map_err(|e| err(ErrorCode::Internal, e.to_string()))?;

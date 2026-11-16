@@ -139,6 +139,10 @@ pub struct CapabilityReport {
     pub cpu_vendor: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub firecracker_version: String,
+    /// The runsc release on gVisor servers, like `release-20261109.0`.
+    /// Paused sandboxes only resume under the same one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gvisor_version: String,
     /// Whether sandboxes on this server can get a network.
     #[serde(default)]
     pub network: bool,
@@ -766,7 +770,8 @@ pub enum DaemonCommand {
         key: SecretPem,
     },
     /// Makes a template from an OCI image: pulls it, unpacks its layers
-    /// into a root disk with `pyo-envd`, boots it once and snapshots it.
+    /// into a root disk with `pyo-envd`, then on Firecracker boots it once
+    /// and snapshots it.
     /// Answers at once. The report shows how far it got. A template the
     /// server has already is left as it is.
     #[serde(rename_all = "camelCase")]

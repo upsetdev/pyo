@@ -580,6 +580,7 @@ export function crumbsFor(pathname: string, s: PyoState): Crumb[] {
     out.push({ label: "Sandboxes", href: "/sandboxes" });
     if (b === "templates") out.push({ label: "Sandbox templates", href: pathname });
     else if (b === "new") out.push({ label: "New sandbox", href: pathname });
+    else if (b === "servers") out.push({ label: "Add server", href: pathname });
     else if (b) out.push({ label: b, href: pathname });
   } else if (isDbSection(a)) {
     // Postgres / main / Connect.

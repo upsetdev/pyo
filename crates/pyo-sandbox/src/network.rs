@@ -1,6 +1,7 @@
-//! Sandbox networking on Firecracker: a tap device per VM, an address per
-//! VM from a private pool, NAT out of the host's default route, and one
-//! nftables table the daemon owns.
+//! Sandbox networking: a tap device per VM on Firecracker, or a network
+//! namespace with a veth pair per sandbox on gVisor. An address per
+//! sandbox from a private pool, NAT out of the host's default route, and
+//! one nftables table the daemon owns.
 //!
 //! ## Addresses
 //!
@@ -57,8 +58,14 @@
 //!
 //! The daemon also turns on IPv4 forwarding, and turns off IPv6 on taps.
 //!
-//! gVisor servers will get a network namespace per sandbox with a veth
-//! pair, behind the same table (gVisor spike, item 22).
+//! ## gVisor
+//!
+//! On gVisor the lease's link is a veth pair instead of a tap. Its host end
+//! has the tap's name (`pyosbx<n>`) and the host address, so every rule
+//! above holds as it is. The other end is `eth0` in the network namespace
+//! `pyosbx<n>`, with the guest address and the default route already set.
+//! runsc's netstack takes them from there (`--network=sandbox`), so nothing
+//! is set inside the sandbox. The namespace goes with the lease.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -79,6 +86,16 @@ pub const TAP_PREFIX: &str = "pyosbx";
 pub const GUEST_IFACE: &str = "eth0";
 /// The MAC every guest gets. Each tap is its own link, so they can share.
 pub const GUEST_MAC: &str = "06:00:c6:12:00:02";
+
+/// What a lease's link is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    /// A tap Firecracker opens.
+    Tap,
+    /// A veth pair whose other end is in the lease's network namespace
+    /// (gVisor).
+    Veth,
+}
 
 /// Ranges a sandbox never reaches, besides the pool itself.
 pub const ALWAYS_BLOCKED: &[&str] = &[
@@ -258,6 +275,7 @@ impl Lease {
 
 pub struct Network {
     pub cfg: NetworkConfig,
+    pub link: LinkKind,
     /// Who owns the taps: the jail user, so Firecracker can open them after
     /// it dropped root.
     tap_uid: u32,
@@ -269,7 +287,12 @@ impl Network {
     /// Checks the host can do sandbox networking and the pool is free.
     /// Changes nothing on the host. The table and IPv4 forwarding come with
     /// [`Network::sync`].
-    pub async fn open(cfg: NetworkConfig, tap_uid: u32, tap_gid: u32) -> anyhow::Result<Network> {
+    pub async fn open(
+        cfg: NetworkConfig,
+        link: LinkKind,
+        tap_uid: u32,
+        tap_gid: u32,
+    ) -> anyhow::Result<Network> {
         if cfg.disabled {
             bail!("Sandbox networking is turned off in the config.");
         }
@@ -290,7 +313,7 @@ impl Network {
                 bail!("Sandbox networking needs `{tool}`, and it isn't installed.");
             }
         }
-        if !std::path::Path::new("/dev/net/tun").exists() {
+        if link == LinkKind::Tap && !std::path::Path::new("/dev/net/tun").exists() {
             bail!("Sandbox networking needs /dev/net/tun.");
         }
         let routes = run_out("ip", &["-j", "-4", "route", "show", "table", "all"]).await?;
@@ -302,6 +325,7 @@ impl Network {
         }
         Ok(Network {
             cfg,
+            link,
             tap_uid,
             tap_gid,
             used: Mutex::new(BTreeSet::new()),
@@ -326,6 +350,11 @@ impl Network {
 
     pub fn guest_network(&self, lease: &Lease) -> GuestNetwork {
         lease.guest_network(&self.cfg.dns)
+    }
+
+    /// The lease's network namespace on gVisor, as runsc takes it.
+    pub fn netns_path(&self, lease: &Lease) -> Option<String> {
+        (self.link == LinkKind::Veth).then(|| format!("{NETNS_DIR}/{}", lease.tap))
     }
 
     fn used(&self) -> std::sync::MutexGuard<'_, BTreeSet<u32>> {
@@ -372,12 +401,20 @@ impl Network {
         {
             tracing::warn!(tap = %lease.tap, error = %format!("{e:#}"), "can't remove the tap");
         }
+        if netns_exists(&lease.tap)
+            && let Err(e) = run("ip", &["netns", "del", &lease.tap]).await
+        {
+            tracing::warn!(netns = %lease.tap, error = %format!("{e:#}"), "can't remove the network namespace");
+        }
         self.used().remove(&lease.index);
     }
 
     async fn make_tap(&self, lease: &Lease) -> anyhow::Result<()> {
         if tap_exists(&lease.tap) {
             run("ip", &["link", "del", &lease.tap]).await?;
+        }
+        if self.link == LinkKind::Veth {
+            return self.make_veth(lease).await;
         }
         let (uid, gid) = (self.tap_uid.to_string(), self.tap_gid.to_string());
         run(
@@ -394,6 +431,67 @@ impl Network {
         let host = format!("{}/30", lease.host);
         run("ip", &["addr", "add", &host, "dev", &lease.tap]).await?;
         run("ip", &["link", "set", &lease.tap, "up"]).await
+    }
+
+    /// The lease's namespace with `eth0` in it, and the host end of the
+    /// pair named like a tap. See "gVisor" above.
+    async fn make_veth(&self, lease: &Lease) -> anyhow::Result<()> {
+        let ns = lease.tap.as_str();
+        if netns_exists(ns) {
+            run("ip", &["netns", "del", ns]).await?;
+        }
+        run("ip", &["netns", "add", ns]).await?;
+        let made = async {
+            run(
+                "ip",
+                &[
+                    "link",
+                    "add",
+                    &lease.tap,
+                    "type",
+                    "veth",
+                    "peer",
+                    "name",
+                    GUEST_IFACE,
+                    "netns",
+                    ns,
+                ],
+            )
+            .await?;
+            let _ = std::fs::write(
+                format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", lease.tap),
+                "1",
+            );
+            let host = format!("{}/30", lease.host);
+            let guest = format!("{}/30", lease.guest);
+            let gw = lease.host.to_string();
+            run("ip", &["addr", "add", &host, "dev", &lease.tap]).await?;
+            run("ip", &["link", "set", &lease.tap, "up"]).await?;
+            let steps: [&[&str]; 5] = [
+                &["sysctl", "-qw", "net.ipv6.conf.all.disable_ipv6=1"],
+                &["ip", "addr", "add", &guest, "dev", GUEST_IFACE],
+                &["ip", "link", "set", GUEST_IFACE, "address", GUEST_MAC, "up"],
+                &["ip", "link", "set", "lo", "up"],
+                &["ip", "route", "add", "default", "via", &gw],
+            ];
+            for step in steps {
+                let mut args = vec!["netns", "exec", ns];
+                args.extend_from_slice(step);
+                // sysctl may be missing. The rest may not fail.
+                if let Err(e) = run("ip", &args).await
+                    && step[0] != "sysctl"
+                {
+                    return Err(e);
+                }
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        if made.is_err() {
+            let _ = run("ip", &["link", "del", &lease.tap]).await;
+            let _ = run("ip", &["netns", "del", ns]).await;
+        }
+        made
     }
 
     /// Puts the table in place for the sandboxes a restarted daemon kept,
@@ -423,6 +521,10 @@ impl Network {
         for tap in stray_taps(&links, &ls)? {
             tracing::info!(%tap, "removing a tap no sandbox owns");
             let _ = run("ip", &["link", "del", &tap]).await;
+        }
+        for ns in stray_netns(&dir_entries(NETNS_DIR), &ls) {
+            tracing::info!(%ns, "removing a network namespace no sandbox owns");
+            let _ = run("ip", &["netns", "del", &ns]).await;
         }
         Ok(())
     }
@@ -734,6 +836,35 @@ fn tap_exists(tap: &str) -> bool {
     std::path::Path::new("/sys/class/net").join(tap).exists()
 }
 
+/// Where `ip netns` keeps named namespaces.
+pub const NETNS_DIR: &str = "/var/run/netns";
+
+fn netns_exists(name: &str) -> bool {
+    std::path::Path::new(NETNS_DIR).join(name).exists()
+}
+
+fn dir_entries(dir: &str) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Namespaces named like the daemon's that no lease owns.
+pub fn stray_netns(names: &[String], leases: &[Lease]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|n| {
+            n.strip_prefix(TAP_PREFIX)
+                .is_some_and(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .filter(|n| !leases.iter().any(|l| &l.tap == *n))
+        .cloned()
+        .collect()
+}
+
 async fn nft(script: &str) -> anyhow::Result<()> {
     let mut child = Command::new("nft")
         .args(["-f", "-"])
@@ -780,6 +911,7 @@ mod tests {
     fn net() -> Network {
         Network {
             cfg: NetworkConfig::default(),
+            link: LinkKind::Tap,
             tap_uid: 1,
             tap_gid: 1,
             used: Mutex::new(BTreeSet::new()),
@@ -849,6 +981,21 @@ mod tests {
         assert_eq!(
             stray_taps(links, &[n.lease_at(0)]).unwrap(),
             vec!["pyosbx7".to_string()]
+        );
+        let names: Vec<String> = ["pyosbx0", "pyosbx3", "pyosbxx", "cni-1"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(stray_netns(&names, &[n.lease_at(0)]), vec!["pyosbx3"]);
+    }
+
+    #[test]
+    fn gvisor_leases_get_a_namespace() {
+        let mut n = net();
+        assert_eq!(n.netns_path(&n.lease_at(4)), None, "taps have none");
+        n.link = LinkKind::Veth;
+        assert_eq!(
+            n.netns_path(&n.lease_at(4)).as_deref(),
+            Some("/var/run/netns/pyosbx4")
         );
     }
 

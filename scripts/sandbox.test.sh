@@ -148,10 +148,56 @@ out=$( (fetch_bundle) 2>&1)
 check "a release without the checksums is refused" "$out" "doesn't list the sandbox files' checksum" has
 unset -f curl cosign
 
+# gVisor's files, for servers without KVM: checked against release.json's
+# "sandboxGvisor" like the sandbox files against "sandbox".
+mkdir -p "$tmp/g/gvisor-bin"
+echo runsc >"$tmp/g/runsc" && echo sentry >"$tmp/g/gvisor-bin/gvisor_sentry"
+tar -czf "$tmp/gvisor.tar.gz" -C "$tmp/g" runsc gvisor-bin
+gv_good=$(sha256sum "$tmp/gvisor.tar.gz" | cut -d' ' -f1)
+curl() {
+  local a o="" url=""
+  for a in "$@"; do case "$a" in http*) url=$a ;; esac; done
+  echo "$url" >>"$tmp/urls"
+  for a in "$@"; do
+    if [ "$o" = 1 ]; then
+      case "$url" in
+        */release.json) printf '{\n  "version": "0.4.0",\n  "sandbox": {\n    "x86_64": "%s"\n  },\n  "sandboxGvisor": {\n    "x86_64": "%s",\n    "aarch64": "%s"\n  }\n}\n' "$(printf '%064d' 3)" "$gv_sum" "$(printf '%064d' 4)" >"$a" ;;
+        *.sigstore.json) echo '{}' >"$a" ;;
+        *) cp "$tmp/gvisor.tar.gz" "$a" ;;
+      esac
+      o=""
+    fi
+    [ "$a" = -o ] && o=1
+  done
+  return 0
+}
+cosign() { :; }
+defaults
+ARCH=x86_64 VERSION=0.4.0 LIB=$tmp/lib WORK=$tmp/work-gv1 gv_sum=$gv_good
+mkdir -p "$WORK"
+out=$( (add_gvisor && ls "$LIB" "$LIB/gvisor-bin") 2>&1)
+check "gVisor comes from the release" "$(cat "$tmp/urls")" "/v0.4.0/pyo-sandbox-gvisor-linux-x86_64.tar.gz$" has
+check "and is installed next to its gvisor-bin" "$out" "gvisor_sentry" has
+check "with runsc" "$(cat "$LIB/runsc")" "^runsc$" has
+check "release_sum reads sandboxGvisor" "$(release_sum sandboxGvisor)" "^$gv_good$" has
+check "and still sandbox by default" "$(release_sum)" "^0{63}3$" has
+WORK=$tmp/work-gv2 gv_sum=$(printf '%064d' 5)
+mkdir -p "$WORK"
+out=$( (add_gvisor && echo "went on") 2>&1)
+check "gVisor that doesn't match is refused" "$out" "gVisor's files don't match their checksum" has
+check "and goes no further" "$out" "went on" lacks
+WORK=$tmp/work-gv3 VERSION="" DEV=""
+mkdir -p "$WORK"
+out=$( (fetch_gvisor) 2>&1)
+check "unchecked gVisor needs --dev" "$out" "give --version X, or --dev" has
+unset -f curl cosign
+rm -f "$tmp/urls"
+
 # ── Detection ──
 defaults
-WORK=$tmp/work3 JAIL_UID=998 JAIL_GID=997 BIN=$tmp/pyo-sandbox
+WORK=$tmp/work3 JAIL_UID=998 JAIL_GID=997 BIN=$tmp/pyo-sandbox LIB=$tmp/lib-detect
 mkdir -p "$WORK"
+add_gvisor() { echo "Adding gVisor"; }
 fake_detect() { # the daemon's `detect`, printing $1
   printf '#!/bin/sh\ncat <<JSON\n%s\nJSON\n' "$1" >"$BIN"
   chmod +x "$BIN"
@@ -189,7 +235,13 @@ fake_detect '{
   "kvm": "none",
   "arch": "x86_64"
 }'
-check "gVisor is reported" "$( (detect) 2>&1)" "gVisor, because this server has no usable KVM" has
+out=$( (detect) 2>&1)
+check "gVisor is reported" "$out" "gVisor, because this server has no usable KVM" has
+check "a server without KVM gets gVisor first" "$out" "^Adding gVisor$" has
+check "the detection gets runsc's path" "$(detect_config)" '"runsc": "[^"]*/runsc"' has
+mkdir -p "$LIB" && touch "$LIB/runsc" && chmod +x "$LIB/runsc"
+check "gVisor once is enough" "$( (detect) 2>&1)" "Adding gVisor" lacks
+rm -rf "$LIB"
 printf '#!/bin/sh\necho "kvm: permission denied" >&2\nexit 1\n' >"$BIN"
 out=$( (detect && echo "went on") 2>&1)
 check "a failed detection shows why" "$out" "kvm: permission denied" has

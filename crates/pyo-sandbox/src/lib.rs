@@ -1,5 +1,6 @@
 //! The Pyo Sandbox daemon. It runs on dedicated sandbox servers, outside
-//! clusters, and turns Pyo's commands into Firecracker microVMs. Clients
+//! clusters, and turns Pyo's commands into Firecracker microVMs, or gVisor
+//! sandboxes on servers without KVM. Clients
 //! talk to it directly with short-lived tokens Pyo signs, so Pyo isn't in
 //! the hot path.
 

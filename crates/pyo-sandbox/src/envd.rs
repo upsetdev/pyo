@@ -3,8 +3,13 @@
 //! Firecracker exposes the guest's vsock as a Unix socket on the host. The
 //! host connects to it, writes `CONNECT <port>\n` and gets `OK <n>\n`. From
 //! there on the bytes are the guest's. envd's first frame is `Hello`.
+//!
+//! On gVisor envd dials the daemon instead (see `gvisor`). Those
+//! connections carry a [`Guard`], so the daemon can cut them all before a
+//! checkpoint.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
@@ -23,11 +28,27 @@ pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
 const PORT_LINGER: Duration = Duration::from_secs(30);
 
 pub struct Conn {
+    /// Dropped before the halves, so a guard never outlives its socket.
+    guard: Option<Arc<Guard>>,
     r: OwnedReadHalf,
     w: OwnedWriteHalf,
     dec: Decoder,
     pub hello: Hello,
     next_stream: u32,
+}
+
+/// A second handle on a connection's socket, to shut it down from outside
+/// while someone else uses it. It goes when the connection does.
+#[derive(Debug)]
+pub struct Guard(std::os::fd::OwnedFd);
+
+impl Guard {
+    /// Ends the connection both ways. Its user reads EOF.
+    pub fn shutdown(&self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: shutdown on a socket fd we own.
+        unsafe { libc::shutdown(self.0.as_raw_fd(), libc::SHUT_RDWR) };
+    }
 }
 
 impl Conn {
@@ -80,11 +101,24 @@ impl Conn {
         Self::start(s, &[]).await
     }
 
+    /// A connection envd dialed, with a guard that can cut it.
+    pub async fn dialed(s: UnixStream) -> anyhow::Result<(Conn, Arc<Guard>)> {
+        let fd = {
+            use std::os::fd::AsFd;
+            s.as_fd().try_clone_to_owned()?
+        };
+        let guard = Arc::new(Guard(fd));
+        let mut c = Self::start(s, &[]).await?;
+        c.guard = Some(guard.clone());
+        Ok((c, guard))
+    }
+
     async fn start(s: UnixStream, already: &[u8]) -> anyhow::Result<Conn> {
         let (r, w) = s.into_split();
         let mut dec = Decoder::default();
         dec.push(already);
         let mut c = Conn {
+            guard: None,
             r,
             w,
             dec,
@@ -103,9 +137,12 @@ impl Conn {
         Ok(c)
     }
 
+    /// The guard stays with the reader, which lives as long as the
+    /// connection is used.
     pub fn into_split(self) -> (FrameReader, OwnedWriteHalf) {
         (
             FrameReader {
+                _guard: self.guard,
                 r: self.r,
                 dec: self.dec,
             },
@@ -415,6 +452,7 @@ impl Conn {
 }
 
 pub struct FrameReader {
+    _guard: Option<Arc<Guard>>,
     r: OwnedReadHalf,
     dec: Decoder,
 }

@@ -982,7 +982,7 @@ fn cloud_ssh_key(k: Option<String>) -> ApiResult<Option<String>> {
 }
 
 /// A price as people read it: "€4.29".
-fn money(currency: &str, amount: f64) -> String {
+pub(crate) fn money(currency: &str, amount: f64) -> String {
     match currency {
         "EUR" => format!("€{amount:.2}"),
         "USD" => format!("${amount:.2}"),
@@ -1013,31 +1013,32 @@ async fn cloud_name_free(
 }
 
 /// A server to make at the provider.
-struct CloudNew<'a> {
-    id: &'a str,
-    team_id: &'a str,
-    cluster_id: &'a str,
-    name: &'a str,
-    location: &'a str,
-    server_type: &'a str,
-    monthly: f64,
-    currency: &'a str,
+pub(crate) struct CloudNew<'a> {
+    pub id: &'a str,
+    pub team_id: &'a str,
+    /// Its cluster, or the sandbox server it becomes.
+    pub owner: crate::cloud::Owner<'a>,
+    pub name: &'a str,
+    pub location: &'a str,
+    pub server_type: &'a str,
+    pub monthly: f64,
+    pub currency: &'a str,
     /// The cluster's first server (connect.sh).
-    first: bool,
-    builder: bool,
+    pub first: bool,
+    pub builder: bool,
     /// Single-use, for its user data.
-    tailscale_key: &'a str,
-    /// What its code opens: join.sh's or connect.sh's details.
-    material: crate::cloud::bootstrap::Material,
-    ssh_key: Option<&'a str>,
-    by: &'a str,
+    pub tailscale_key: &'a str,
+    /// What its code opens: join.sh's, connect.sh's or sandbox.sh's details.
+    pub material: crate::cloud::bootstrap::Material,
+    pub ssh_key: Option<&'a str>,
+    pub by: &'a str,
 }
 
 /// Makes the server at the provider, labelled as this installation's and
 /// behind its firewall, with user data that holds only its Tailscale key
 /// and a single-use code (cloud/bootstrap.rs), and keeps it to follow
 /// (cloud/mod.rs `tick`). The last step before the operation commits.
-async fn make_cloud_server<P: crate::cloud::Provider>(
+pub(crate) async fn make_cloud_server<P: crate::cloud::Provider>(
     s: &AppState,
     p: &P,
     n: CloudNew<'_>,
@@ -1050,10 +1051,15 @@ async fn make_cloud_server<P: crate::cloud::Provider>(
             "Pyo's server isn't on your tailnet yet. Try again in a minute.",
         ));
     }
-    let role = if n.first {
-        bootstrap::Role::Connect
-    } else {
-        bootstrap::Role::Join
+    use crate::cloud::Owner;
+    let role = match n.owner {
+        Owner::Sandbox(_) => bootstrap::Role::Sandbox,
+        Owner::Cluster(_) if n.first => bootstrap::Role::Connect,
+        Owner::Cluster(_) => bootstrap::Role::Join,
+    };
+    let (cluster_id, sandbox_server_id) = match n.owner {
+        Owner::Cluster(c) => (Some(c), None),
+        Owner::Sandbox(x) => (None, Some(x)),
     };
     // Checked before anything is made: its details are kept sealed.
     n.material.render()?;
@@ -1068,7 +1074,7 @@ async fn make_cloud_server<P: crate::cloud::Provider>(
         &crate::cloud::Boot {
             pyo: &format!("http://{door}"),
             server_id: n.id,
-            cluster_id: n.cluster_id,
+            cluster_id: n.owner.id(),
             role,
             name: n.name,
             tailscale_key: n.tailscale_key,
@@ -1084,7 +1090,7 @@ async fn make_cloud_server<P: crate::cloud::Provider>(
             location: n.location,
             server_type: n.server_type,
             user_data: &user_data,
-            labels: crate::cloud::labels(&install, n.cluster_id),
+            labels: crate::cloud::labels(&install, n.owner),
             firewall: Some(&firewall),
         })
         .await?;
@@ -1094,12 +1100,13 @@ async fn make_cloud_server<P: crate::cloud::Provider>(
         "cloud server created"
     );
     sqlx::query(
-        "INSERT INTO pyo.cloud_servers (id, team_id, provider, cluster_id, name, first_server, builder, location, server_type, monthly, currency, remote_id, ipv4, state, created_by)
-         VALUES ($1, $2, 'hetzner', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'creating', $13)",
+        "INSERT INTO pyo.cloud_servers (id, team_id, provider, cluster_id, sandbox_server_id, name, first_server, builder, location, server_type, monthly, currency, remote_id, ipv4, state, created_by)
+         VALUES ($1, $2, 'hetzner', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'creating', $14)",
     )
     .bind(n.id)
     .bind(n.team_id)
-    .bind(n.cluster_id)
+    .bind(cluster_id)
+    .bind(sandbox_server_id)
     .bind(n.name)
     .bind(n.first)
     .bind(n.builder)
@@ -1112,10 +1119,10 @@ async fn make_cloud_server<P: crate::cloud::Provider>(
     .bind(n.by)
     .execute(&mut **tx)
     .await?;
-    bootstrap::keep(tx, &s.sealer, &code, n.id, n.cluster_id, role, &n.material).await?;
+    bootstrap::keep(tx, &s.sealer, &code, n.id, n.owner.id(), role, &n.material).await?;
     Ok(json!({
-        "ok": true, "id": n.id, "clusterId": n.cluster_id, "name": n.name, "state": "creating",
-        "monthly": n.monthly, "currency": n.currency,
+        "ok": true, "id": n.id, "clusterId": cluster_id, "sandboxServerId": sandbox_server_id,
+        "name": n.name, "state": "creating", "monthly": n.monthly, "currency": n.currency,
     }))
 }
 
@@ -1130,8 +1137,9 @@ async fn delete_cloud_server(
     confirm: bool,
     wake: &mut Vec<String>,
 ) -> ApiResult<Value> {
-    let (team_id, cluster_id, name, first, state, monthly, currency): (
+    let (team_id, cluster_id, sandbox_server_id, name, first, state, monthly, currency): (
         String,
+        Option<String>,
         Option<String>,
         String,
         bool,
@@ -1139,7 +1147,7 @@ async fn delete_cloud_server(
         f64,
         String,
     ) = sqlx::query_as(
-        "SELECT team_id, cluster_id, name, first_server, state, monthly, currency FROM pyo.cloud_servers WHERE id = $1 AND state <> 'deleted'",
+        "SELECT team_id, cluster_id, sandbox_server_id, name, first_server, state, monthly, currency FROM pyo.cloud_servers WHERE id = $1 AND state <> 'deleted'",
     )
     .bind(id)
     .fetch_optional(&mut **tx)
@@ -1191,6 +1199,11 @@ async fn delete_cloud_server(
             let online = report["status"] == json!("ready");
             remove_node(tx, user, &server_id, !online, wake).await?;
         }
+    }
+    // A sandbox server goes with it: its sandboxes end with the server.
+    if let Some(sbs) = &sandbox_server_id {
+        crate::sandbox::forget_server(tx, sbs, "Its sandbox server was deleted at Hetzner.")
+            .await?;
     }
     sqlx::query("UPDATE pyo.cloud_servers SET state = 'removing', error = NULL, sign_command = NULL, updated_at = now() WHERE id = $1")
         .bind(id)
@@ -7039,7 +7052,7 @@ async fn apply(
                 CloudNew {
                     id: &id,
                     team_id: &team_id,
-                    cluster_id: &cluster_id,
+                    owner: crate::cloud::Owner::Cluster(&cluster_id),
                     name: &name,
                     location: &location,
                     server_type: &server_type,
@@ -7132,7 +7145,7 @@ async fn apply(
                 CloudNew {
                     id: &server_id,
                     team_id: &team_id,
-                    cluster_id: &id,
+                    owner: crate::cloud::Owner::Cluster(&id),
                     name: &server,
                     location: &location,
                     server_type: &server_type,

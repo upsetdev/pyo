@@ -1,5 +1,5 @@
 import { CaretDownIcon, CodeIcon } from "@phosphor-icons/react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { Navigate, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { useSandboxes } from "~/components/pyo/sandbox/common";
 import { AppLink } from "~/components/ui/AppLink";
@@ -41,6 +41,14 @@ function pairs(text: string) {
 }
 
 function NewSandbox() {
+  const s = usePyo();
+  // No sandbox server yet: adding one comes first.
+  if (!sandboxServersIn(s).length)
+    return <Navigate to="/$team/sandboxes/servers/new" params={{ team: currentSlug() }} replace />;
+  return <NewSandboxForm />;
+}
+
+function NewSandboxForm() {
   const s = usePyo();
   const navigate = useNavigate();
   const team = s.currentTeamId;

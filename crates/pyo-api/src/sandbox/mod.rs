@@ -5,6 +5,8 @@
 //!
 //! - [`keys`]: the installation's signing key and the tokens.
 //! - [`join`]: a sandbox server's one-time join code and sandbox.sh.
+//!   [`add_cloud_server`] makes one at a cloud provider instead, which runs
+//!   sandbox.sh from its first boot (cloud/bootstrap.rs).
 //! - [`scheduler`]: which server a new sandbox runs on.
 //! - [`templates`]: which servers make which templates, and their state.
 //! - [`limits`]: per-team caps, checked on create.
@@ -325,7 +327,13 @@ pub async fn server_views(
             'daemonVersion', s.daemon_version, 'lastReportAt', pyo.ms(s.last_report_at),
             'error', s.error, 'createdBy', s.created_by, 'createdAt', pyo.ms(s.created_at),
             'joinedAt', pyo.ms(s.joined_at), 'edgeDomain', s.edge_domain,
-            'sandboxes', (SELECT count(*) FROM pyo.sandboxes x WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed')))
+            'sandboxes', (SELECT count(*) FROM pyo.sandboxes x WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed')),
+            'cloud', (SELECT jsonb_build_object('id', c.id, 'provider', c.provider, 'location', c.location,
+                        'serverType', c.server_type, 'monthly', c.monthly, 'currency', c.currency, 'ipv4', c.ipv4,
+                        'state', c.state, 'error', c.error, 'signCommand', c.sign_command,
+                        'createdAt', pyo.ms(c.created_at), 'deadlineAt', pyo.ms(c.created_at + interval '15 minutes'))
+                        FROM pyo.cloud_servers c WHERE c.sandbox_server_id = s.id AND c.state <> 'deleted'
+                        ORDER BY c.created_at DESC LIMIT 1))
            FROM pyo.sandbox_servers s
           WHERE (s.team_id IS NULL OR s.team_id = ANY($1)) AND ($2::text IS NULL OR s.id = $2)
           ORDER BY s.team_id NULLS FIRST, s.name",
@@ -335,10 +343,11 @@ pub async fn server_views(
     .fetch_all(db)
     .await?;
     for r in &mut rows {
-        let summary = serde_json::from_value::<proto::CapabilityReport>(r["capability"].clone())
-            .ok()
-            .map(|c| c.summary());
-        r["summary"] = json!(summary);
+        let cap = serde_json::from_value::<proto::CapabilityReport>(r["capability"].clone()).ok();
+        r["summary"] = json!(cap.as_ref().map(|c| c.summary()));
+        // What runs its sandboxes: "firecracker" or "gvisor", null until it
+        // reports (or when it can run neither).
+        r["runtime"] = json!(cap.and_then(|c| runtime_name(c.runtime)));
     }
     edgecert::attach(db, team_ids, &mut rows).await?;
     Ok(rows)
@@ -1091,10 +1100,36 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
     }))
 }
 
+/// Ends a sandbox server's sandboxes in Pyo's records and forgets the
+/// server. Its daemon isn't told: see [`remove_server`]. The number of
+/// sandboxes that ended.
+pub async fn forget_server(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    why: &str,
+) -> sqlx::Result<usize> {
+    let live: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM pyo.sandboxes WHERE server_id = $1 AND state NOT IN ('stopped', 'failed')",
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for x in &live {
+        end(tx, x, "stopped", Some(why)).await?;
+    }
+    sqlx::query("DELETE FROM pyo.sandbox_servers WHERE id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(live.len())
+}
+
 /// Removes a sandbox server: its sandboxes are deleted where it still
 /// answers, and Pyo forgets it. The daemon stays installed on the server
-/// until `sandbox.sh --uninstall` runs there.
-pub async fn remove_server(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
+/// until `sandbox.sh --uninstall` runs there. One Pyo made at a cloud
+/// provider is deleted there too, which takes `confirm` (409 with the
+/// monthly cost that stops until then).
+pub async fn remove_server(s: &AppState, user: &User, id: &str, confirm: bool) -> ApiResult<Value> {
     let row: Option<(Option<String>, Option<String>, String)> =
         sqlx::query_as("SELECT team_id, address, name FROM pyo.sandbox_servers WHERE id = $1")
             .bind(id)
@@ -1105,6 +1140,21 @@ pub async fn remove_server(s: &AppState, user: &User, id: &str) -> ApiResult<Val
     match &team_id {
         Some(t) => require(&mut tx, user, t, Need::Manage).await?,
         None => require_install_admin(user)?,
+    }
+    let cloud: Option<(String, f64, String)> = sqlx::query_as(
+        "SELECT id, monthly, currency FROM pyo.cloud_servers
+          WHERE sandbox_server_id = $1 AND state NOT IN ('deleted', 'removing') ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((_, monthly, currency)) = &cloud
+        && !confirm
+    {
+        return Err(ApiError::needs_confirm(format!(
+            "Deletes {name} at Hetzner. {} a month stops.",
+            crate::ops::money(currency, *monthly)
+        )));
     }
     let live: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM pyo.sandboxes WHERE server_id = $1 AND state NOT IN ('stopped', 'failed')",
@@ -1127,34 +1177,197 @@ pub async fn remove_server(s: &AppState, user: &User, id: &str) -> ApiResult<Val
             }
         }
     }
-    for x in &live {
-        end(
-            &mut tx,
-            x,
-            "stopped",
-            Some("Its sandbox server was removed."),
-        )
-        .await?;
+    let stopped = forget_server(&mut tx, id, "Its sandbox server was removed.").await?;
+    // Off the tailnet and deleted at the provider by cloud/mod.rs `tick`.
+    if let Some((cloud_id, _, _)) = &cloud {
+        sqlx::query("UPDATE pyo.cloud_servers SET state = 'removing', error = NULL, sign_command = NULL, updated_at = now() WHERE id = $1")
+            .bind(cloud_id)
+            .execute(&mut *tx)
+            .await?;
+        crate::cloud::bootstrap::forget(&mut tx, cloud_id).await?;
     }
-    sqlx::query("DELETE FROM pyo.sandbox_servers WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
     if let Some(t) = &team_id {
+        let title = if cloud.is_some() {
+            format!("Deleting the sandbox server {name} at Hetzner")
+        } else {
+            format!("Removed the sandbox server {name}")
+        };
         crate::ops::log_activity(
             &mut tx,
             t,
             &user.name,
             "sandbox.server",
             "info",
-            &format!("Removed the sandbox server {name}"),
+            &title,
             json!({ "kind": "sandboxServer", "id": id, "label": name }),
             json!({}),
         )
         .await?;
     }
     tx.commit().await?;
-    Ok(json!({ "ok": true, "stopped": live.len() }))
+    Ok(json!({ "ok": true, "stopped": stopped, "deleting": cloud.is_some() }))
+}
+
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddCloudServer {
+    /// The team whose server it is: its cloud provider connection pays.
+    pub team_id: String,
+    /// Its name in Pyo, on your tailnet and at the provider: lowercase
+    /// letters, digits and dashes.
+    pub name: String,
+    /// "hetzner" (the default).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// A location's `name` from getCloudOptions ("fsn1").
+    pub location: String,
+    /// A server type's `name` from getCloudOptions ("cx22").
+    pub server_type: String,
+    /// A domain whose wildcard points at the server, as for
+    /// `addSandboxServer`.
+    #[serde(default)]
+    pub edge_domain: Option<String>,
+    /// Your OpenSSH public key, to sign in to it over your tailnet.
+    #[serde(default)]
+    pub ssh_key: Option<String>,
+    /// Without it the answer is 409 with the monthly price.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// Makes a sandbox server at a cloud provider: its row (joining), and the
+/// server, which joins the tailnet on its first boot and runs sandbox.sh
+/// with a one-time code. Cloud servers have no KVM, so it runs gVisor.
+pub async fn add_cloud_server(s: &AppState, user: &User, req: AddCloudServer) -> ApiResult<Value> {
+    crate::util::require_dns_label(&req.name, "Server name")?;
+    let edge = edge_domain(req.edge_domain.as_deref())?;
+    if !matches!(req.provider.as_deref(), None | Some("hetzner")) {
+        return Err(ApiError::bad_request("The provider is \"hetzner\"."));
+    }
+    let ssh_key = match req
+        .ssh_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        Some(k) if crate::cloud::valid_ssh_key(k) => Some(k.to_owned()),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "Paste an OpenSSH public key on one line, like the contents of ~/.ssh/id_ed25519.pub.",
+            ));
+        }
+        None => None,
+    };
+    let mut tx = s.db.begin().await?;
+    require(&mut tx, user, &req.team_id, Need::Manage).await?;
+    crate::cloud::needs_tailscale(&s.db).await?;
+    let door = crate::deploy::registry_push();
+    let api = crate::web::tailnet_api_url();
+    let (false, Some(api)) = (door.is_empty(), api) else {
+        return Err(ApiError::conflict(
+            "Pyo's server isn't on your tailnet yet. Try again in a minute.",
+        ));
+    };
+    if !s.sealer.enabled() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This installation has no PYO_SECRET_KEY, so it can't sign sandbox tokens.",
+        ));
+    }
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.sandbox_servers WHERE team_id = $1 AND name = $2)",
+    )
+    .bind(&req.team_id)
+    .bind(&req.name)
+    .fetch_one(&mut *tx)
+    .await?;
+    if taken {
+        return Err(ApiError::conflict(
+            "A sandbox server has that name already.",
+        ));
+    }
+    let p = crate::cloud::provider(&s.db, &req.team_id).await?;
+    let catalog = crate::cloud::catalog(&s.db, &req.team_id).await?;
+    let monthly = catalog.pick(&req.location, &req.server_type)?;
+    let price = crate::ops::money(&catalog.currency, monthly);
+    if !req.confirm {
+        return Err(ApiError::needs_confirm(format!(
+            "{} costs {price} a month at Hetzner ({} in {}, before VAT).",
+            req.name, req.server_type, req.location
+        )));
+    }
+    let id = crate::ids::new_id("sbs");
+    sqlx::query("INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain) VALUES ($1, $2, $3, 'joining', $4, $5)")
+        .bind(&id)
+        .bind(&req.team_id)
+        .bind(&req.name)
+        .bind(&user.name)
+        .bind(&edge)
+        .execute(&mut *tx)
+        .await?;
+    let ts_key = crate::tailscale::join_key(
+        s,
+        &format!("Pyo: sandbox server {}", req.name),
+        "a sandbox server",
+    )
+    .await?;
+    // It's on the tailnet before it asks. Its join code comes with the
+    // details, made when it asks (cloud/bootstrap.rs).
+    let base = crate::join::scripts_url(Some(&crate::join::friendly(&api)));
+    let door = crate::join::friendly(&door);
+    let mut args: Vec<(&str, Option<String>)> = vec![
+        ("--pyo", Some(door)),
+        ("--server", Some(id.clone())),
+        ("--name", Some(req.name.clone())),
+        ("--version", Some(env!("CARGO_PKG_VERSION").into())),
+    ];
+    if let Some(d) = &edge {
+        args.push(("--edge-domain", Some(d.clone())));
+    }
+    let material = crate::cloud::bootstrap::Material::new(format!("{base}/sandbox.sh"), &args);
+    let cloud_id = crate::ids::new_id("cs");
+    let made = crate::ops::make_cloud_server(
+        s,
+        &p,
+        crate::ops::CloudNew {
+            id: &cloud_id,
+            team_id: &req.team_id,
+            owner: crate::cloud::Owner::Sandbox(&id),
+            name: &req.name,
+            location: &req.location,
+            server_type: &req.server_type,
+            monthly,
+            currency: &catalog.currency,
+            first: false,
+            builder: false,
+            tailscale_key: &ts_key,
+            material,
+            ssh_key: ssh_key.as_deref(),
+            by: &user.name,
+        },
+        &mut tx,
+    )
+    .await?;
+    crate::ops::log_activity(
+        &mut tx,
+        &req.team_id,
+        &user.name,
+        "sandbox.server",
+        "info",
+        &format!(
+            "Creating the sandbox server {} at Hetzner ({}, {price} a month)",
+            req.name, req.server_type
+        ),
+        json!({ "kind": "sandboxServer", "id": id, "label": req.name }),
+        json!({ "cloudServerId": cloud_id }),
+    )
+    .await?;
+    tx.commit().await?;
+    let server = server_views(&s.db, std::slice::from_ref(&req.team_id), Some(&id))
+        .await?
+        .into_iter()
+        .next();
+    Ok(json!({ "server": server, "cloudServer": made }))
 }
 
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]

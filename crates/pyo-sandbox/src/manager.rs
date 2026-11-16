@@ -1,5 +1,6 @@
 //! Sandboxes on this server: create, delete, pause, resume, lifetimes and
-//! the report Pyo reads.
+//! the report Pyo reads. Each runs as a Firecracker VM or, on servers
+//! without KVM, under gVisor ([`Instance`]).
 //!
 //! The daemon enforces lifetimes itself, so sandboxes still end on time
 //! while Pyo restarts. Each sandbox's record is written to `sandbox.json`
@@ -22,7 +23,8 @@ use tokio::sync::Mutex;
 use crate::capacity::{self, MemorySource};
 use crate::config::Config;
 use crate::envd;
-use crate::firecracker::{Firecracker, Machine, Nic, SCRATCH, Vm};
+use crate::firecracker::{DirHandle, Firecracker, Machine, Nic, SCRATCH, Vm};
+use crate::gvisor::{self, Container, Gvisor};
 use crate::network::{Lease, Network};
 use crate::storage::{self, Layout, snapshot_key};
 
@@ -43,10 +45,46 @@ fn runtime(e: anyhow::Error) -> DaemonError {
     err(ErrorCode::Runtime, format!("{e:#}"))
 }
 
+/// What runs a sandbox.
+#[derive(Debug)]
+pub enum Instance {
+    Vm(Vm),
+    Gvisor(Container),
+}
+
+impl Instance {
+    pub fn pid(&self) -> u32 {
+        match self {
+            Instance::Vm(v) => v.pid,
+            Instance::Gvisor(c) => c.pid,
+        }
+    }
+
+    pub fn exited(&mut self) -> bool {
+        match self {
+            Instance::Vm(v) => v.exited(),
+            Instance::Gvisor(c) => c.exited(),
+        }
+    }
+
+    pub async fn kill(&mut self) {
+        match self {
+            Instance::Vm(v) => v.kill().await,
+            Instance::Gvisor(c) => c.kill().await,
+        }
+    }
+}
+
+/// How to reach a sandbox's envd, taken while holding its lock.
+enum Dial {
+    Vsock(DirHandle, PathBuf),
+    Door(Arc<gvisor::Door>),
+}
+
 pub struct Sandbox {
     pub spec: SandboxSpec,
     status: StdMutex<SandboxStatus>,
-    vm: Mutex<Option<Vm>>,
+    vm: Mutex<Option<Instance>>,
     /// The tap and addresses of a sandbox with network. Kept while paused.
     pub lease: Option<Lease>,
 }
@@ -81,6 +119,8 @@ pub struct Manager {
     pub cfg: Config,
     pub layout: Layout,
     pub fc: Firecracker,
+    /// runsc, on gVisor servers.
+    pub gv: Option<Gvisor>,
     capability: StdMutex<CapabilityReport>,
     sandboxes: StdMutex<HashMap<String, Arc<Sandbox>>>,
     net: Option<Arc<Network>>,
@@ -103,6 +143,7 @@ impl Manager {
             cfg,
             layout,
             fc,
+            gv: None,
             capability: StdMutex::new(capability),
             sandboxes: StdMutex::new(HashMap::new()),
             net: None,
@@ -110,6 +151,12 @@ impl Manager {
             builds: StdMutex::new(HashMap::new()),
             build_gate: tokio::sync::Semaphore::new(1),
         }
+    }
+
+    /// runsc, which a gVisor server runs its sandboxes with.
+    pub fn with_gvisor(mut self, gv: Option<Gvisor>) -> Manager {
+        self.gv = gv;
+        self
     }
 
     /// Sandbox networking. `adopt` puts its table in place, and the
@@ -178,8 +225,16 @@ impl Manager {
             })
     }
 
-    fn memory_source(&self, id: &str, pid: u32) -> MemorySource {
-        MemorySource::for_vm(self.layout.jailed, &self.cfg.cgroup_parent, id, pid)
+    fn memory_source(&self, id: &str, inst: &Instance) -> MemorySource {
+        match inst {
+            Instance::Vm(vm) => {
+                MemorySource::for_vm(self.layout.jailed, &self.cfg.cgroup_parent, id, vm.pid)
+            }
+            // runsc puts the sentry and the gofer in the sandbox's cgroup.
+            Instance::Gvisor(c) => {
+                MemorySource::for_vm(true, &self.cfg.cgroup_parent, &c.id, c.pid)
+            }
+        }
     }
 
     pub fn status(&self, id: &str) -> Result<SandboxStatus> {
@@ -188,7 +243,7 @@ impl Manager {
         if let Ok(vm) = s.vm.try_lock()
             && let Some(vm) = vm.as_ref()
         {
-            st.memory_used = self.memory_source(id, vm.pid).read();
+            st.memory_used = self.memory_source(id, vm).read();
         }
         Ok(st)
     }
@@ -268,11 +323,11 @@ impl Manager {
             };
             return Err(err(ErrorCode::Unsupported, msg));
         }
-        if cap.runtime == Runtime::Gvisor {
-            // TODO(gvisor): run the sandbox under runsc. See gvisor.rs.
+        let on_gvisor = cap.runtime == Runtime::Gvisor;
+        if on_gvisor && self.gv.is_none() {
             return Err(err(
                 ErrorCode::Unsupported,
-                "gVisor sandboxes aren't available on this server yet.",
+                "This server has no runsc, so it can't run gVisor sandboxes.",
             ));
         }
         let net = match spec.network {
@@ -308,7 +363,8 @@ impl Manager {
         }
         let key = self.snapshot_key(net.is_some(), spec.cpus, spec.memory_mib, spec.disk_mib);
         let snap_dir = self.layout.template_snapshot(&spec.template, &key);
-        let from_snapshot = snap_dir.join("vm.snap").exists();
+        // gVisor starts cold: its restores cost more and share no pages.
+        let from_snapshot = !on_gvisor && snap_dir.join("vm.snap").exists();
         if self
             .sandboxes
             .lock()
@@ -340,7 +396,11 @@ impl Manager {
             team: spec.team.clone(),
             template: spec.template.clone(),
             state: SandboxState::Creating,
-            runtime: Runtime::Firecracker,
+            runtime: if on_gvisor {
+                Runtime::Gvisor
+            } else {
+                Runtime::Firecracker
+            },
             cpus: spec.cpus,
             memory_mib: spec.memory_mib,
             disk_mib: spec.disk_mib,
@@ -407,15 +467,22 @@ impl Manager {
         });
 
         let dir = self.layout.vm_dir(&spec.id);
-        let started = if from_snapshot {
+        let started = if on_gvisor {
+            self.gvisor_start(&spec, &dir, &rootfs, lease.as_ref(), false)
+                .await
+                .map(|(c, took)| (Instance::Gvisor(c), took))
+        } else if from_snapshot {
             self.start_from_snapshot(&spec, &dir, &rootfs, &snap_dir, nic)
                 .await
+                .map(|(vm, took)| (Instance::Vm(vm), took))
         } else {
-            self.cold_start(&spec, &dir, &rootfs, nic).await
+            self.cold_start(&spec, &dir, &rootfs, nic)
+                .await
+                .map(|(vm, took)| (Instance::Vm(vm), took))
         };
         match started {
             Ok((vm, took)) => {
-                let pid = vm.pid;
+                let pid = vm.pid();
                 *vm_slot = Some(vm);
                 let st = sbx.update(|s| {
                     let now = crate::now_ms();
@@ -433,12 +500,69 @@ impl Manager {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .remove(&spec.id);
-                let _ = tokio::fs::remove_dir_all(self.layout.sandbox_top(&spec.id)).await;
+                self.remove_files(&spec.id).await;
                 give_back(lease).await;
                 tracing::warn!(id = %spec.id, error = %format!("{e:#}"), "sandbox didn't start");
                 Err(runtime(e))
             }
         }
+    }
+
+    /// Starts, or with `resume` restores, a sandbox under runsc.
+    async fn gvisor_start(
+        &self,
+        spec: &SandboxSpec,
+        dir: &Path,
+        rootfs: &Path,
+        lease: Option<&Lease>,
+        resume: bool,
+    ) -> anyhow::Result<(Container, Duration)> {
+        let gv = self
+            .gv
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("this server has no runsc"))?;
+        tokio::fs::create_dir_all(dir).await?;
+        let template_root = gv.template_root(rootfs).await?;
+        let scratch = if resume {
+            None
+        } else {
+            Some(storage::empty_ext4(&self.layout.cache(), spec.disk_mib).await?)
+        };
+        let netns = lease
+            .zip(self.net.as_ref())
+            .and_then(|(l, n)| n.netns_path(l));
+        let dns = self
+            .net
+            .as_ref()
+            .map(|n| n.cfg.dns.clone())
+            .unwrap_or_default();
+        let id = storage::instance_id(&spec.id);
+        let m = gvisor::Machine {
+            id: &id,
+            dir,
+            template_root: &template_root,
+            scratch: scratch.as_deref(),
+            cpus: spec.cpus,
+            memory_mib: spec.memory_mib,
+            netns: netns.as_deref(),
+            dns: &dns,
+            cgroup_parent: &gv.cgroup_parent,
+        };
+        if resume {
+            gv.restore(&m, BOOT_TIMEOUT).await
+        } else {
+            gv.start(&m, BOOT_TIMEOUT).await
+        }
+    }
+
+    /// Removes a sandbox's directory. On gVisor its container and mounts go
+    /// first, so nothing reaches into the template's disk.
+    async fn remove_files(&self, id: &str) {
+        let top = self.layout.sandbox_top(id);
+        if let Some(gv) = &self.gv {
+            gv.teardown(&storage::instance_id(id), &top).await;
+        }
+        let _ = tokio::fs::remove_dir_all(top).await;
     }
 
     pub fn snapshot_key(&self, network: bool, cpus: u32, memory_mib: u32, disk_mib: u32) -> String {
@@ -603,6 +727,8 @@ impl Manager {
         if let Some(mut v) = vm.take() {
             v.kill().await;
         }
+        // Its mounts and runsc state go before its network namespace.
+        self.remove_files(id).await;
         if let (Some(l), Some(n)) = (&sbx.lease, &self.net) {
             n.release(l).await;
         }
@@ -611,7 +737,6 @@ impl Manager {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(id);
-        let _ = tokio::fs::remove_dir_all(self.layout.sandbox_top(id)).await;
         tracing::info!(id, "sandbox deleted");
         Ok(())
     }
@@ -631,14 +756,31 @@ impl Manager {
                 "Only a running sandbox can be paused.",
             ));
         }
-        let Some(mut vm) = slot.take() else {
+        let Some(inst) = slot.take() else {
             return Err(err(ErrorCode::Conflict, "The sandbox has no VM."));
         };
         sbx.update(|s| s.state = SandboxState::Pausing);
+        let mut vm = match inst {
+            Instance::Vm(vm) => vm,
+            Instance::Gvisor(mut c) => {
+                return match c.checkpoint().await {
+                    Ok(()) => {
+                        let st = sbx.update(|s| s.state = SandboxState::Paused);
+                        self.persist(&sbx, None);
+                        Ok(st)
+                    }
+                    Err(e) => {
+                        *slot = Some(Instance::Gvisor(c));
+                        sbx.update(|s| s.state = SandboxState::Running);
+                        Err(runtime(e))
+                    }
+                };
+            }
+        };
         let snap = vm.snapshot(PAUSE).await;
         if let Err(e) = snap {
             let _ = vm.resume().await;
-            *slot = Some(vm);
+            *slot = Some(Instance::Vm(vm));
             sbx.update(|s| s.state = SandboxState::Running);
             return Err(runtime(e));
         }
@@ -661,6 +803,27 @@ impl Manager {
         sbx.update(|s| s.state = SandboxState::Resuming);
         let dir = self.layout.vm_dir(id);
         let rootfs = self.layout.template_rootfs(&sbx.spec.template);
+        if sbx.status().runtime == Runtime::Gvisor {
+            return match self
+                .gvisor_start(&sbx.spec, &dir, &rootfs, sbx.lease.as_ref(), true)
+                .await
+            {
+                Ok((c, took)) => {
+                    let pid = c.pid;
+                    *slot = Some(Instance::Gvisor(c));
+                    let st = sbx.update(|s| {
+                        s.state = SandboxState::Running;
+                        s.start_ms = Some(took.as_millis() as u32);
+                    });
+                    self.persist(&sbx, Some(pid));
+                    Ok(st)
+                }
+                Err(e) => {
+                    sbx.update(|s| s.state = SandboxState::Paused);
+                    Err(runtime(e))
+                }
+            };
+        }
         let guest = match (&sbx.lease, &self.net) {
             (Some(l), Some(n)) => Some(n.guest_network(l)),
             _ => None,
@@ -681,7 +844,7 @@ impl Manager {
         match self.fc.restore(&m, PAUSE, BOOT_TIMEOUT).await {
             Ok((vm, took)) => {
                 let pid = vm.pid;
-                *slot = Some(vm);
+                *slot = Some(Instance::Vm(vm));
                 // The restored VM has the memory file mapped, so it can go.
                 for ext in ["snap", "mem"] {
                     let _ = tokio::fs::remove_file(dir.join(format!("{PAUSE}.{ext}"))).await;
@@ -738,7 +901,7 @@ impl Manager {
             return Err(err(ErrorCode::Conflict, "The sandbox has ended."));
         }
         let st = sbx.update(|s| f(&mut s.ports));
-        self.persist(&sbx, vm.as_ref().map(|v| v.pid));
+        self.persist(&sbx, vm.as_ref().map(Instance::pid));
         Ok(st)
     }
 
@@ -757,10 +920,14 @@ impl Manager {
     /// A new connection to the sandbox's envd.
     pub async fn envd(&self, id: &str) -> Result<(Arc<Sandbox>, envd::Conn)> {
         let sbx = self.find(id)?;
-        let (_pin, vsock) = {
+        let dial = {
             let vm = sbx.vm.lock().await;
             match (sbx.status().state, vm.as_ref()) {
-                (SandboxState::Running, Some(vm)) => vm.vsock_pinned().map_err(runtime)?,
+                (SandboxState::Running, Some(Instance::Vm(vm))) => {
+                    let (pin, path) = vm.vsock_pinned().map_err(runtime)?;
+                    Dial::Vsock(pin, path)
+                }
+                (SandboxState::Running, Some(Instance::Gvisor(c))) => Dial::Door(c.door.clone()),
                 (SandboxState::Paused, _) => {
                     return Err(err(
                         ErrorCode::Conflict,
@@ -770,9 +937,11 @@ impl Manager {
                 _ => return Err(err(ErrorCode::Conflict, "The sandbox isn't running.")),
             }
         };
-        let conn = envd::Conn::connect(&vsock, ENVD_TIMEOUT)
-            .await
-            .map_err(runtime)?;
+        let conn = match dial {
+            Dial::Vsock(_pin, vsock) => envd::Conn::connect(&vsock, ENVD_TIMEOUT).await,
+            Dial::Door(door) => door.accept(ENVD_TIMEOUT).await,
+        }
+        .map_err(runtime)?;
         Ok((sbx, conn))
     }
 
@@ -878,11 +1047,23 @@ impl Manager {
             let rec: Option<Record> = std::fs::read(dir.join("sandbox.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok());
+            // A sandbox of the other runtime can't be kept: KVM came or went.
+            let runtime_now = self.capability().runtime;
             let keep = match &rec {
+                Some(r) if r.status.runtime != runtime_now => None,
                 Some(r) if r.status.state == SandboxState::Paused => Some(None),
+                Some(r) if runtime_now == Runtime::Gvisor => match &self.gv {
+                    Some(gv) => gv
+                        .adopt(&name, &dir, r.lease.is_some())
+                        .await
+                        .map(|c| Some(Instance::Gvisor(c))),
+                    None => None,
+                },
                 Some(r) => match r.pid {
                     Some(pid) if crate::firecracker::is_firecracker(pid) => {
-                        Vm::adopt(&r.spec.id, &dir, pid).ok().map(Some)
+                        Vm::adopt(&r.spec.id, &dir, pid)
+                            .ok()
+                            .map(|vm| Some(Instance::Vm(vm)))
                     }
                     _ => None,
                 },
@@ -907,6 +1088,9 @@ impl Manager {
                     adopted += 1;
                 }
                 _ => {
+                    if let Some(gv) = &self.gv {
+                        gv.teardown(&name, &self.layout.sandbox_top(&name)).await;
+                    }
                     let _ = tokio::fs::remove_dir_all(self.layout.sandbox_top(&name)).await;
                 }
             }

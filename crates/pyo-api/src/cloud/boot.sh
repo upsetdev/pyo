@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Made by Pyo: joins this server to a cluster over your tailnet.
+# Made by Pyo: joins this server to Pyo over your tailnet.
 #
 #   boot.sh PYO SERVER CLUSTER ROLE NAME
 #
 # 1. Joins your tailnet with a single-use Tailscale key.
 # 2. Trades a single-use code for this server's join details at Pyo, over
 #    the tailnet (PYO: Pyo's tailnet door).
-# 3. Runs join.sh, or connect.sh for a new cluster (ROLE), with them.
+# 3. Runs join.sh, connect.sh for a new cluster, or sandbox.sh for a
+#    sandbox server (ROLE), with them. For a sandbox server CLUSTER is the
+#    sandbox server's ID.
 #
 # The key and the code are the only secrets in this server's user data.
 # They're in /run/pyo-boot (root only, in memory) and deleted once used.
@@ -64,7 +66,7 @@ done < <(printf '%s\n' "$body")
 unset out body
 # <<< parse
 case "$ROLE:$script" in
-  join:http*/join.sh | connect:http*/connect.sh) ;;
+  join:http*/join.sh | connect:http*/connect.sh | sandbox:http*/sandbox.sh) ;;
   *) fail "Pyo's answer has no $ROLE script." ;;
 esac
 

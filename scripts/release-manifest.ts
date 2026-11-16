@@ -9,7 +9,8 @@
 //     --db-controller sha256:… --kv sha256:… --static sha256:… --mysql-operator sha256:… --mysql-backup sha256:… \
 //     --postgres-16 sha256:… --postgres-17 sha256:… --postgres-18 sha256:… \
 //     --agent-access "$(pyo-agent access-hash)" \
-//     --sandbox-x86_64 <sha256> --sandbox-aarch64 <sha256> > release.json
+//     --sandbox-x86_64 <sha256> --sandbox-aarch64 <sha256> \
+//     --sandbox-gvisor-x86_64 <sha256> --sandbox-gvisor-aarch64 <sha256> > release.json
 //
 // Images are pinned by digest. deploy/k8s/{platform,pyo}.yaml become JSON
 // objects. Notices for this release come from
@@ -18,9 +19,10 @@
 // roles the release's agent is installed with (`pyo-agent access-hash`):
 // installations on other roles tell their admin, before updating, to run
 // each cluster's connect command afterwards. `sandbox` lists the SHA-256 of
-// each architecture's sandbox server files (pyo-sandbox-linux-<arch>.tar.gz):
-// deploy/sandbox.sh checks them against it once release.json's signature
-// checks out.
+// each architecture's sandbox server files (pyo-sandbox-linux-<arch>.tar.gz),
+// and `sandboxGvisor` those of runsc (pyo-sandbox-gvisor-linux-<arch>.tar.gz)
+// for servers without KVM: deploy/sandbox.sh checks them against it once
+// release.json's signature checks out.
 
 import { readdirSync, readFileSync } from "node:fs";
 
@@ -128,13 +130,16 @@ const k3s = {
 };
 
 // The sandbox server files' SHA-256, by architecture (sandbox.sh's ARCH).
-const sandbox = Object.fromEntries(
-  ["x86_64", "aarch64"].map((arch) => {
-    const sum = need(`sandbox-${arch}`).toLowerCase();
-    if (!sha256.test(sum)) fail(`--sandbox-${arch} isn't a sha256: ${sum}`);
-    return [arch, sum];
-  }),
-);
+const sums = (flag: string) =>
+  Object.fromEntries(
+    ["x86_64", "aarch64"].map((arch) => {
+      const sum = need(`${flag}-${arch}`).toLowerCase();
+      if (!sha256.test(sum)) fail(`--${flag}-${arch} isn't a sha256: ${sum}`);
+      return [arch, sum];
+    }),
+  );
+const sandbox = sums("sandbox");
+const sandboxGvisor = sums("sandbox-gvisor");
 
 const release = {
   version,
@@ -152,6 +157,7 @@ const release = {
   beforeYouUpdate: forThis ? (notices.beforeYouUpdate ?? []) : [],
   agentAccess,
   sandbox,
+  sandboxGvisor,
 };
 // Pretty-printed, two spaces: deploy/install.sh reads it with sed.
 console.log(JSON.stringify(release, null, 2));

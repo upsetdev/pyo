@@ -5,7 +5,6 @@ import { AppLink } from "~/components/ui/AppLink";
 import { LiveCommand } from "~/components/pyo/LiveCommand";
 import { Badge, Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
-import { Dialog } from "~/components/ui/Dialog";
 import { Field, Input } from "~/components/ui/Field";
 import { Callout } from "~/components/ui/Panel";
 import { Tooltip } from "~/components/ui/Tooltip";
@@ -235,18 +234,6 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
         </form>
       )}
     </div>
-  );
-}
-
-export function AddSandboxServerDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  return (
-    <Dialog open={open} onClose={onClose} width="max-w-2xl" title="Add a sandbox server">
-      {open ? (
-        <div className="p-4">
-          <AddSandboxServer onDone={onClose} />
-        </div>
-      ) : null}
-    </Dialog>
   );
 }
 

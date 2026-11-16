@@ -3,9 +3,11 @@
 //! The user data holds two one-time values ([`super::user_data`]): a
 //! single-use Tailscale key and a single-use code made here ([`new_code`]).
 //! The code is random, kept only as its hash, expires after [`CODE_TTL`],
-//! and is bound to the cloud server, its cluster and its role (join.sh or
-//! connect.sh). Its join details wait here sealed until then
-//! ([`keep`]).
+//! and is bound to the cloud server, its cluster (or the sandbox server it
+//! becomes) and its role (join.sh, connect.sh or sandbox.sh). Its join
+//! details wait here sealed until then ([`keep`]). A sandbox server's
+//! details get a fresh sandbox join code when they're handed over
+//! (`sandbox::join`), so its 15 minutes start then.
 //!
 //! On its first boot the server joins the tailnet with the key, then asks
 //! Pyo's tailnet door (pyo-forward's :5006, which admits tailnet peers
@@ -68,6 +70,8 @@ pub enum Role {
     Join,
     /// connect.sh: a new cluster's first server.
     Connect,
+    /// sandbox.sh: a sandbox server.
+    Sandbox,
 }
 
 impl Role {
@@ -75,6 +79,7 @@ impl Role {
         match self {
             Role::Join => "join",
             Role::Connect => "connect",
+            Role::Sandbox => "sandbox",
         }
     }
 }
@@ -121,23 +126,29 @@ pub fn new_code() -> String {
 
 /// Keeps a code (its hash) and the details it opens, sealed, for
 /// [`CODE_TTL`]. After the cloud server's row, in the same transaction.
+/// `owner` is its cluster, or the sandbox server it becomes.
 pub async fn keep(
     tx: &mut Transaction<'_, Postgres>,
     sealer: &Sealer,
     code: &str,
     cloud_server_id: &str,
-    cluster_id: &str,
+    owner: &str,
     role: Role,
     material: &Material,
 ) -> ApiResult<()> {
     let sealed = sealer.seal(&material.render()?)?;
+    let (cluster, sandbox) = match role {
+        Role::Sandbox => (None, Some(owner)),
+        Role::Join | Role::Connect => (Some(owner), None),
+    };
     sqlx::query(
-        "INSERT INTO pyo.cloud_bootstrap (code_hash, cloud_server_id, cluster_id, role, material_sealed, expires_at)
-         VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))",
+        "INSERT INTO pyo.cloud_bootstrap (code_hash, cloud_server_id, cluster_id, sandbox_server_id, role, material_sealed, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(secs => $7))",
     )
     .bind(sha256_hex(code))
     .bind(cloud_server_id)
-    .bind(cluster_id)
+    .bind(cluster)
+    .bind(sandbox)
     .bind(role.as_str())
     .bind(sealed)
     .bind(CODE_TTL.as_secs_f64())
@@ -236,6 +247,7 @@ impl Refusal {
 pub struct Ask {
     /// Its cloud server ID ("cs_…").
     pub server: String,
+    /// Its cluster, or the sandbox server it becomes ("sbs_…").
     pub cluster: String,
     pub role: Role,
 }
@@ -285,7 +297,8 @@ async fn claim(db: &PgPool, code: &str) -> sqlx::Result<Result<Claimed, Refusal>
          UPDATE pyo.cloud_bootstrap c SET used_at = now(), material_sealed = NULL
            FROM prev
           WHERE c.code_hash = prev.code_hash
-         RETURNING c.cloud_server_id, c.cluster_id, c.role, c.expires_at <= now() AS expired,
+         RETURNING c.cloud_server_id, coalesce(c.cluster_id, c.sandbox_server_id, '') AS cluster_id,
+                   c.role, c.expires_at <= now() AS expired,
                    prev.material_sealed,
                    (SELECT state FROM pyo.cloud_servers WHERE id = c.cloud_server_id) AS state",
     )
@@ -369,7 +382,7 @@ pub async fn answer(
             return text(StatusCode::FORBIDDEN, r.message());
         }
     };
-    let material = match sealer.open(&sealed) {
+    let mut material = match sealer.open(&sealed) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(server = %ask.server, error = %e, "cloud server setup: couldn't open its details");
@@ -379,6 +392,20 @@ pub async fn answer(
             );
         }
     };
+    // A sandbox server's join code is made now, so sandbox.sh has its full
+    // 15 minutes from here.
+    if ask.role == Role::Sandbox {
+        match sandbox_code(db, &ask.cluster).await {
+            Ok(code) => material.push_str(&format!("arg=--code\narg={code}\n")),
+            Err(e) => {
+                tracing::warn!(server = %ask.server, error = %e.message, "cloud server setup: couldn't make a sandbox join code");
+                return text(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Pyo couldn't make this server's join code. Delete it and make a new one.",
+                );
+            }
+        }
+    }
     if let Err(e) = sqlx::query(
         "UPDATE pyo.cloud_servers SET state = 'joining', error = NULL, updated_at = now() WHERE id = $1 AND state IN ('creating', 'booting')",
     )
@@ -392,8 +419,17 @@ pub async fn answer(
     text(StatusCode::OK, material)
 }
 
-/// POST /cloud/bootstrap?server=…&cluster=…&role=join|connect on Pyo's
-/// tailnet door, with the code as the body.
+/// A new sandbox join code for a sandbox server Pyo made.
+async fn sandbox_code(db: &PgPool, sandbox_server: &str) -> ApiResult<String> {
+    let code = crate::sandbox::join::new_code();
+    let mut tx = db.begin().await?;
+    crate::sandbox::join::keep(&mut tx, sandbox_server, &code).await?;
+    tx.commit().await?;
+    Ok(code)
+}
+
+/// POST /cloud/bootstrap?server=…&cluster=…&role=join|connect|sandbox on
+/// Pyo's tailnet door, with the code as the body.
 pub async fn handle(
     State(s): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -719,6 +755,101 @@ mod tests {
             .unwrap();
         let (st, _) = answer(&db, &sealer, tailnet, &a, &code).await;
         assert_eq!(st, StatusCode::OK);
+
+        // A sandbox server: its details come with a fresh sandbox join code,
+        // made as they're handed over, which sandbox.sh then redeems.
+        let sbs = format!("sbs_boot{run}");
+        sqlx::query("INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by) VALUES ($1, $2, $1, 'joining', 'test')")
+            .bind(&sbs)
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        let seven = format!("cs_seven{run}");
+        sqlx::query(
+            "INSERT INTO pyo.cloud_servers (id, team_id, provider, sandbox_server_id, name, location, server_type, monthly, remote_id, state, created_by)
+             VALUES ($1, $2, 'hetzner', $3, $1, 'fsn1', 'cx22', 4.29, '7', 'booting', 'test')",
+        )
+        .bind(&seven)
+        .bind(&team)
+        .bind(&sbs)
+        .execute(&db)
+        .await
+        .unwrap();
+        let sandbox_material = Material::new(
+            "https://pyo.tail1234.ts.net/install/sandbox.sh".into(),
+            &[
+                ("--server", Some(sbs.clone())),
+                ("--version", Some("0.4.0".into())),
+            ],
+        );
+        let code = new_code();
+        let mut tx = db.begin().await.unwrap();
+        keep(
+            &mut tx,
+            &sealer,
+            &code,
+            &seven,
+            &sbs,
+            Role::Sandbox,
+            &sandbox_material,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let (st, body) = answer(
+            &db,
+            &sealer,
+            tailnet,
+            &ask(&seven, &cluster, Role::Sandbox),
+            &code,
+        )
+        .await;
+        assert_eq!(
+            (st, body.as_str()),
+            (StatusCode::FORBIDDEN, "This code is for another server."),
+            "a cluster's ID isn't the sandbox server's"
+        );
+        let code = new_code();
+        let mut tx = db.begin().await.unwrap();
+        keep(
+            &mut tx,
+            &sealer,
+            &code,
+            &seven,
+            &sbs,
+            Role::Sandbox,
+            &sandbox_material,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let (st, body) = answer(
+            &db,
+            &sealer,
+            tailnet,
+            &ask(&seven, &sbs, Role::Sandbox),
+            &code,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let base = sandbox_material.render().unwrap();
+        assert!(body.starts_with(&base), "{body}");
+        let join_code = body[base.len()..]
+            .strip_prefix("arg=--code\narg=")
+            .and_then(|r| r.strip_suffix('\n'))
+            .unwrap_or_else(|| panic!("no join code in {body}"));
+        assert_eq!(join_code.len(), 64);
+        let live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pyo.sandbox_join_codes WHERE server_id = $1 AND used_at IS NULL AND code_hash = $2",
+        )
+        .bind(&sbs)
+        .bind(sha256_hex(join_code))
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(live, 1, "sandbox.sh can redeem it");
+        assert_eq!(state(&seven).await, "joining");
 
         // Expired details go at once, their rows a day later.
         prune(&db).await.unwrap();

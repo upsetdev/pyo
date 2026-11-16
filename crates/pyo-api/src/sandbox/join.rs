@@ -221,6 +221,8 @@ pub fn daemon_config(
         "jailer": format!("{LIB_DIR}/jailer"),
         "kernel": format!("{LIB_DIR}/vmlinux"),
         "envd": format!("{LIB_DIR}/pyo-envd"),
+        // sandbox.sh puts gVisor's runsc there on servers without KVM.
+        "runsc": format!("{LIB_DIR}/runsc"),
         "keys": keys,
         "jailUid": jail_uid,
         "jailGid": jail_gid,
@@ -468,6 +470,7 @@ mod tests {
         assert_eq!(v["listen"], "100.64.0.7:7070");
         assert_eq!(v["keys"][0]["publicKey"], "AAAA");
         assert_eq!(v["jailUid"], 998);
+        assert_eq!(v["runsc"], "/usr/local/lib/pyo-sandbox/runsc");
         assert_eq!(
             daemon_config("s", "fd7a:115c:a1e0::9", 1, 1, &keys)["listen"],
             "[fd7a:115c:a1e0::9]:7070"
