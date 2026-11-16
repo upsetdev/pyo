@@ -638,7 +638,10 @@ async fn the_control_plane_drives_a_real_daemon() {
         .unwrap();
     assert_eq!(listed[0]["name"], "base", "{listed:?}");
     assert_eq!(listed[0]["servers"], json!([]));
-    assert_eq!(base::seed_from(&s, &base::BASE, &old).await.unwrap(), base::Seed::Insert);
+    assert_eq!(
+        base::seed_from(&s, &base::BASE, &old).await.unwrap(),
+        base::Seed::Insert
+    );
     // The server doesn't make it ahead of use.
     for _ in 0..3 {
         super::runner::round(&s).await.unwrap();
@@ -735,7 +738,10 @@ async fn the_control_plane_drives_a_real_daemon() {
     assert!(r.stdout.starts_with("3.21"), "{r:?}");
 
     // A new release: made beside the old one, new sandboxes move over.
-    assert_eq!(base::seed_from(&s, &base::BASE, &new).await.unwrap(), base::Seed::Move);
+    assert_eq!(
+        base::seed_from(&s, &base::BASE, &new).await.unwrap(),
+        base::Seed::Move
+    );
     assert_eq!(
         base::seed_from(&s, &base::BASE, &old).await.unwrap(),
         base::Seed::Keep,

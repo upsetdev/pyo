@@ -806,10 +806,28 @@ mod tests {
         ));
         assert!(!machine_allowed(Sandbox, &get, "pyo/agent", "acme", false));
         // An installation's template (no team) pulls Pyo's own, and only those.
-        assert!(machine_allowed(Sandbox, &get, "pyo/sandbox-desktop", "", false));
-        assert!(!machine_allowed(Sandbox, &put, "pyo/sandbox-desktop", "", false));
+        assert!(machine_allowed(
+            Sandbox,
+            &get,
+            "pyo/sandbox-desktop",
+            "",
+            false
+        ));
+        assert!(!machine_allowed(
+            Sandbox,
+            &put,
+            "pyo/sandbox-desktop",
+            "",
+            false
+        ));
         assert!(!machine_allowed(Sandbox, &get, "acme/shop/web", "", false));
-        assert!(!machine_allowed(Sandbox, &get, "pyo/services/svc_a", "", false));
+        assert!(!machine_allowed(
+            Sandbox,
+            &get,
+            "pyo/services/svc_a",
+            "",
+            false
+        ));
         assert!(!machine_allowed(
             Sandbox,
             &put,

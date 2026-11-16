@@ -431,7 +431,10 @@ mod tests {
         assert_eq!(((BASE.image)(&images), (DESKTOP.image)(&images)), (A, B));
         for b in ALL {
             assert!(pyo_proto::sandbox::is_template_name(b.name));
-            assert!(!b.env.ends_with("_IMAGE"), "older Pyos refuse new *_IMAGE vars");
+            assert!(
+                !b.env.ends_with("_IMAGE"),
+                "older Pyos refuse new *_IMAGE vars"
+            );
         }
     }
 
@@ -499,7 +502,11 @@ mod tests {
 
         let old = want(A, "0.4.1");
         assert_eq!(seed_from(&s, &BASE, &old).await.unwrap(), Seed::Insert);
-        assert_eq!(seed_from(&s, &BASE, &old).await.unwrap(), Seed::Keep, "idempotent");
+        assert_eq!(
+            seed_from(&s, &BASE, &old).await.unwrap(),
+            Seed::Keep,
+            "idempotent"
+        );
         let (n, state, src, rev, builtin, team) = row().await;
         assert_eq!(
             (n.as_str(), state.as_str(), rev.as_deref(), builtin, team),

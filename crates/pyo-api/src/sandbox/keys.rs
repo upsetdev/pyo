@@ -322,7 +322,10 @@ mod tests {
                 .as_deref(),
             Some(PYO_IMAGES_ONLY)
         );
-        assert!(!PYO_IMAGES_ONLY.contains('_'), "never a team's id (prefix_random)");
+        assert!(
+            !PYO_IMAGES_ONLY.contains('_'),
+            "never a team's id (prefix_random)"
+        );
     }
 
     /// Against a throwaway Postgres: `DATABASE_URL=… cargo test -p pyo-api

@@ -2730,10 +2730,9 @@ mod release_tests {
         // Each of its images is a field here, with the same value (an
         // image added since, pyo-static's, is empty).
         let mut images = serde_json::to_value(&r.images).unwrap();
-        images
-            .as_object_mut()
-            .unwrap()
-            .retain(|k, v| !(matches!(k.as_str(), "static" | "sandboxBase" | "sandboxDesktop") && v == ""));
+        images.as_object_mut().unwrap().retain(|k, v| {
+            !(matches!(k.as_str(), "static" | "sandboxBase" | "sandboxDesktop") && v == "")
+        });
         assert_eq!(images, raw["images"]);
         for (name, image) in r.images.all() {
             if matches!(name, "static" | "sandboxBase" | "sandboxDesktop") && image.is_empty() {
@@ -2863,8 +2862,7 @@ mod release_tests {
         assert!(r.problems().is_empty(), "{:?}", r.problems());
         // The same for desktop's.
         let mut r = release();
-        r.images.sandbox_desktop =
-            format!("ghcr.io/upsetdev/pyo/sandbox-desktop:0.2.1@sha256:{D}");
+        r.images.sandbox_desktop = format!("ghcr.io/upsetdev/pyo/sandbox-desktop:0.2.1@sha256:{D}");
         assert!(
             r.problems()
                 .iter()

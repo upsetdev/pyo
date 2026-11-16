@@ -378,7 +378,10 @@ async fn edge_proxy(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &str) {
     );
     assert_eq!(call(&app, "GET", &web, None, Body::empty()).await.0, 401);
     let admin = keys.admin();
-    assert_eq!(call(&app, "GET", &web, Some(&admin), Body::empty()).await.0, 401);
+    assert_eq!(
+        call(&app, "GET", &web, Some(&admin), Body::empty()).await.0,
+        401
+    );
     let res = app
         .clone()
         .oneshot(
