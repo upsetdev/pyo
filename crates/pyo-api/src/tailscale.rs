@@ -1008,17 +1008,23 @@ pub async fn wanted_for(
 
 /// Tailscale made no auth key: the details go to the log, the user gets one
 /// plain sentence and where to look.
-fn no_auth_key(e: anyhow::Error) -> ApiError {
-    tracing::warn!(error = %format!("{e:#}"), "Tailscale made no auth key");
-    ApiError::bad_request("Tailscale made no auth key. Check the Tailscale setup in Integrations.")
+/// `server` names what is being added, e.g. "a sandbox server".
+fn no_auth_key(server: &'static str) -> impl FnOnce(anyhow::Error) -> ApiError {
+    move |e| {
+        tracing::warn!(error = %format!("{e:#}"), "Tailscale made no auth key");
+        ApiError::bad_request(format!("Set up Tailscale in Integrations to add {server}."))
+    }
 }
 
 /// A join command's auth key: single-use, preauthorized, tag:pyo, an hour.
-pub async fn join_key(s: &AppState, what: &str) -> ApiResult<String> {
+pub async fn join_key(s: &AppState, what: &str, server: &'static str) -> ApiResult<String> {
     let Some((_, c)) = saved_client(s).await? else {
         return Err(ApiError::bad_request(NEEDED));
     };
-    c.auth_key(what).await.map(|(_, k)| k).map_err(no_auth_key)
+    c.auth_key(what)
+        .await
+        .map(|(_, k)| k)
+        .map_err(no_auth_key(server))
 }
 
 /// Whether a tailnet domain someone typed can be had: Pyo's reserved names
@@ -1335,7 +1341,7 @@ pub async fn host_report(
     let (_, key) = c
         .auth_key("Pyo: its own server")
         .await
-        .map_err(no_auth_key)?;
+        .map_err(no_auth_key("this server"))?;
     tracing::info!("this machine: joining the tailnet");
     Ok(json!({ "state": "join", "authKey": key }))
 }

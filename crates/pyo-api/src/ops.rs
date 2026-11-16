@@ -742,7 +742,7 @@ async fn reach(
     let api = crate::web::tailnet_api_url().ok_or_else(|| {
         ApiError::conflict("Pyo's server isn't on your tailnet yet. Try again in a minute.")
     })?;
-    let key = crate::tailscale::join_key(s, what).await?;
+    let key = crate::tailscale::join_key(s, what, "this server").await?;
     let door = crate::join::friendly(&deploy::registry_push());
     let registry = if door.is_empty() {
         None

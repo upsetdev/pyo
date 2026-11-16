@@ -1046,8 +1046,12 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
     };
     let code = join::new_code();
     join::keep(&mut tx, &id, &code).await?;
-    let ts_key =
-        crate::tailscale::join_key(s, &format!("Pyo: sandbox server {}", req.name)).await?;
+    let ts_key = crate::tailscale::join_key(
+        s,
+        &format!("Pyo: sandbox server {}", req.name),
+        "a sandbox server",
+    )
+    .await?;
     if let Some(t) = &req.team_id {
         crate::ops::log_activity(
             &mut tx,
