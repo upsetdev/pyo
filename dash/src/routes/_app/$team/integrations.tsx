@@ -152,7 +152,7 @@ function Integrations() {
     if (ts.dashboardError || ts.registryError) return { tone: "warning", label: "Needs attention" };
     if (!ts.onTailnet) return { tone: "progress", label: "Joining tailnet" };
     if (ts.dashboardName && !ts.dashboard) return { tone: "progress", label: "Getting certificate" };
-    return { tone: "success", label: "On your tailnet" };
+    return null;
   };
 
   const failedServers = cloudServers.filter((c) => c.state === "failed").length;
@@ -200,7 +200,7 @@ function Integrations() {
       status: hetzner
         ? failedServers
           ? { tone: "danger", label: `${plural(failedServers, "server")} failed` }
-          : { tone: "success", label: `Connected ${timeAgo(hetzner.createdAt)}` }
+          : { tone: "success", label: `Added ${timeAgo(hetzner.createdAt)}` }
         : null,
       docs: "hetzner",
       action: teamAdmin ? connect("Connect", () => setOpen("hetzner")) : askAdmin,
@@ -226,7 +226,7 @@ function Integrations() {
       connected: !!s.github && installs.length > 0,
       stat: { label: "Repos linked", value: reposLinked(s, (src) => installs.some((g) => g.id === src.installationId)) },
       status: installs.length
-        ? { tone: "success", label: `Connected ${timeAgo(oldest(installs))}` }
+        ? { tone: "success", label: `Added ${timeAgo(oldest(installs))}` }
         : null,
       docs: "github",
       action: s.github
@@ -250,7 +250,7 @@ function Integrations() {
       status: gitlab.length
         ? gitlabProblems
           ? { tone: "warning", label: "Needs attention" }
-          : { tone: "success", label: `Connected ${timeAgo(oldest(gitlab))}` }
+          : { tone: "success", label: `Added ${timeAgo(oldest(gitlab))}` }
         : null,
       docs: "gitlab",
       action: connect("Connect", () => setAdding("gitlab")),
@@ -320,7 +320,7 @@ function Integrations() {
       connected: stores.length > 0,
       stat: { label: "Services importing", value: storeUses },
       status: stores.length
-        ? { tone: "success", label: `Connected ${timeAgo(oldest(stores))}` }
+        ? { tone: "success", label: `Added ${timeAgo(oldest(stores))}` }
         : null,
       docs: "external-secrets",
       action: connect("Connect", () => setAdding("secrets")),

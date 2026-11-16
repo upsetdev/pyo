@@ -116,16 +116,13 @@ export function IntegrationCard({
           {connected ? (
             status ? (
               <>
-                <Dot tone={status.tone} className="h-1.5 w-1.5" />
+                {/* The header's pill already says connected: a dot only when
+                    something needs a look or is under way. */}
+                {status.tone !== "success" ? <Dot tone={status.tone} className="h-1.5 w-1.5" /> : null}
                 <span className="truncate">{status.label}</span>
               </>
             ) : null
-          ) : (
-            <>
-              <Dot tone="neutral" className="h-1.5 w-1.5" />
-              <span className="truncate">Not connected</span>
-            </>
-          )}
+          ) : null}
           {!connected && docs ? (
             <a
               href={docsUrl(docs)}
