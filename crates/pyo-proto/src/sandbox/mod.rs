@@ -54,6 +54,34 @@ pub const MAX_LABELS: usize = 32;
 /// otherwise when it asks a server to prepare one.
 pub const DEFAULT_TEMPLATE_MAX_MIB: u32 = 10 * 1024;
 
+// ── Image contract ─────────────────────────────────────────────────────────
+
+/// The label an image made for Pyo sandboxes carries: the contract it was
+/// made for (upsetdev/pyo-sandbox-images). Images without it are anyone's
+/// and are taken as they are.
+pub const CONTRACT_LABEL: &str = "dev.pyo.sandbox.contract";
+
+/// The image contracts this Pyo runs. Contract 1: pyo-envd runs commands as
+/// root in /root with its own PATH, and runs /etc/pyo/start once at boot
+/// when it's there.
+pub const CONTRACTS: &[u32] = &[1];
+
+/// Why an image whose [`CONTRACT_LABEL`] is `label` can't be used, or None
+/// when it can.
+pub fn contract_refusal(label: &str) -> Option<String> {
+    let label = label.trim();
+    match label.parse::<u32>() {
+        Ok(n) if CONTRACTS.contains(&n) => None,
+        Ok(n) => Some(format!(
+            "The image is made for Pyo sandbox contract {n}, and this server runs contract {}. Update Pyo and the server first.",
+            CONTRACTS.iter().max().copied().unwrap_or(1)
+        )),
+        Err(_) => Some(format!(
+            "The image's {CONTRACT_LABEL} label is \"{label}\", which isn't a contract number."
+        )),
+    }
+}
+
 // ── Runtime detection ──────────────────────────────────────────────────────
 
 /// Boot args of every sandbox VM, the detection test boot included. They
@@ -1014,6 +1042,22 @@ pub struct ExecResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_contracts() {
+        assert_eq!(contract_refusal("1"), None);
+        assert_eq!(contract_refusal(" 1\n"), None);
+        let two = contract_refusal("2").unwrap();
+        assert!(
+            two.contains("contract 2") && two.contains("runs contract 1"),
+            "{two}"
+        );
+        let bad = contract_refusal("one").unwrap();
+        assert!(bad.contains("isn't a contract number"), "{bad}");
+        for m in [two, bad] {
+            assert!(!m.contains(';'), "{m}");
+        }
+    }
 
     fn spec() -> SandboxSpec {
         SandboxSpec::new("sbx_abcdefghijklmnop", "team1", "node-22")

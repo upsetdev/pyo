@@ -154,6 +154,8 @@ pub struct Image {
     /// The platform manifest's digest.
     pub digest: String,
     pub layers: Vec<Layer>,
+    /// The image's config blob, when the manifest names one.
+    pub config: Option<Layer>,
 }
 
 #[derive(Deserialize)]
@@ -165,6 +167,27 @@ struct Manifest {
     manifests: Option<Vec<IndexEntry>>,
     #[serde(default)]
     layers: Option<Vec<Layer>>,
+    #[serde(default)]
+    config: Option<Layer>,
+}
+
+/// The part of an image's config Pyo reads: its labels.
+#[derive(Deserialize, Default)]
+struct ImageConfig {
+    #[serde(default)]
+    config: Option<ImageConfigInner>,
+}
+
+#[derive(Deserialize, Default)]
+struct ImageConfigInner {
+    #[serde(default, rename = "Labels")]
+    labels: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// An image config's labels (none when it has none).
+pub fn config_labels(body: &[u8]) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let c: ImageConfig = serde_json::from_slice(body).context("reading the image config")?;
+    Ok(c.config.and_then(|c| c.labels).unwrap_or_default())
 }
 
 #[derive(Deserialize)]
@@ -265,7 +288,40 @@ impl Client {
                 bail!("The image has a foreign layer ({}).", l.media_type);
             }
         }
-        Ok(Image { digest, layers })
+        Ok(Image {
+            digest,
+            layers,
+            config: m.config,
+        })
+    }
+
+    /// The image's labels, from its config blob (a few KB), checked
+    /// against its digest. None when the manifest names no config.
+    pub async fn labels(
+        &mut self,
+        img: &Image,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+        let Some(c) = &img.config else {
+            return Ok(Default::default());
+        };
+        if c.size as usize > MAX_SMALL_BODY {
+            bail!("The image config is too big.");
+        }
+        let res = self
+            .get(&self.url(&format!("blobs/{}", c.digest)), None)
+            .await?;
+        let status = res.status();
+        let body = read_small(res).await?;
+        if !status.is_success() {
+            bail!(
+                "The registry answered {status} for the image config: {}",
+                error_text(&body)
+            );
+        }
+        if format!("sha256:{}", hex(&Sha256::digest(&body))) != c.digest {
+            bail!("The image config doesn't match its digest.");
+        }
+        config_labels(&body)
     }
 
     /// A manifest's body and digest. A digest reference is checked.
@@ -710,6 +766,30 @@ mod tests {
         ] {
             assert!(ImageRef::parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn labels_from_the_config() {
+        let l = config_labels(
+            br#"{"architecture":"amd64","config":{"Env":["PATH=/bin"],"Labels":{"dev.pyo.sandbox.contract":"1","org.opencontainers.image.version":"24.04"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            l.get("dev.pyo.sandbox.contract").map(String::as_str),
+            Some("1")
+        );
+        // No labels, or no config at all.
+        assert!(
+            config_labels(br#"{"config":{"Labels":null}}"#)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            config_labels(br#"{"architecture":"arm64"}"#)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(config_labels(b"not json").is_err());
     }
 
     #[test]

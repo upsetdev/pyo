@@ -342,6 +342,15 @@ impl Manager {
         let t0 = Instant::now();
         let mut client = oci::Client::new(image, plain_http, auth);
         let img = client.resolve().await?;
+        // An image made for Pyo says which contract it was made for. One
+        // this server doesn't run would start but not work.
+        let labels = client.labels(&img).await?;
+        if let Some(why) = labels
+            .get(pyo_proto::sandbox::CONTRACT_LABEL)
+            .and_then(|l| pyo_proto::sandbox::contract_refusal(l))
+        {
+            bail!(why);
+        }
         let total: u64 = img.layers.iter().map(|l| l.size).sum();
         b.set(|r| {
             r.digest = Some(img.digest.clone());
