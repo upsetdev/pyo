@@ -510,8 +510,9 @@ pub(crate) async fn list_templates(
 /// Create a sandbox template
 ///
 /// A template made from an OCI image, like "node:22", or an image in Pyo's
-/// registry. Every sandbox server that may use it pulls the image, makes a
-/// root disk from it, boots it once and snapshots it. The template is
+/// registry. Every sandbox server that may use it pulls the image and makes
+/// a root disk from it. A Firecracker server boots it once and snapshots
+/// it, and a gVisor server starts sandboxes from the disk. The template is
 /// ready once one server has it.
 #[utoipa::path(post, path = "/sandbox-templates", operation_id = "createSandboxTemplate", tag = "Sandboxes",
     request_body(content = CreateTemplate),
