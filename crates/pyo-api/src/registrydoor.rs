@@ -179,6 +179,13 @@ pub(crate) fn machine_allowed(
     read && parts(name).is_some_and(|(t, _, _)| t == slug)
 }
 
+/// The door's 403 for an image that isn't the team's: what to do instead.
+pub(crate) fn not_theirs(slug: &str) -> String {
+    format!(
+        "Not one of this team's images. Push it as {slug}/<project>/<name> first. The Registry page shows how."
+    )
+}
+
 /// What a request asks for: the repository it names (None for /v2/ itself)
 /// and whether it writes.
 #[derive(Debug, PartialEq)]
@@ -456,11 +463,7 @@ async fn machine_door(
         &slug,
         service_team.as_deref() == Some(team_id.as_str()),
     ) {
-        return errors(
-            StatusCode::FORBIDDEN,
-            "DENIED",
-            "Not one of this team's images.",
-        );
+        return errors(StatusCode::FORBIDDEN, "DENIED", &not_theirs(&slug));
     }
     // A team's own repository: only one it pushed first.
     if self::parts(&name).is_some() {
