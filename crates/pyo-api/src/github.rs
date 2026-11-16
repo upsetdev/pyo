@@ -1,6 +1,6 @@
 //! GitHub, through a GitHub App that belongs to this Pyo installation.
 //!
-//! - An admin creates the app from Integrations with GitHub's manifest flow:
+//! - An admin creates the app from Settings with GitHub's manifest flow:
 //!   Pyo submits a manifest, GitHub creates the app and hands back its id
 //!   and keys, which are sealed and kept in `pyo.settings` ('github').
 //! - A team installs the app on a GitHub account or organization (choosing
@@ -210,7 +210,7 @@ async fn created(
         webhook,
     }) = take(&q.state).await
     else {
-        return Ok(Redirect::to("/settings/github?github=expired"));
+        return Ok(Redirect::to("/github?github=expired"));
     };
     if user_id != user.id || !user.is_admin {
         return Err(ApiError::forbidden(
@@ -225,7 +225,7 @@ async fn created(
         .map_err(anyhow::Error::from)?;
     if !res.status().is_success() {
         tracing::warn!(status = %res.status(), "GitHub app conversion failed");
-        return Ok(Redirect::to("/settings/github?github=app-failed"));
+        return Ok(Redirect::to("/github?github=app-failed"));
     }
     let v: Value = res.json().await.map_err(anyhow::Error::from)?;
     let seal = |k: &str| s.sealer.seal(v[k].as_str().unwrap_or(""));
@@ -246,8 +246,8 @@ async fn created(
         .bind(serde_json::to_value(&app).map_err(anyhow::Error::from)?)
         .execute(&s.db)
         .await?;
-    // The dashboard sends /settings/github on to the GitHub card on Integrations.
-    Ok(Redirect::to("/settings/github?github=created"))
+    // Back to GitHub in Settings, which says how it went.
+    Ok(Redirect::to("/github?github=created"))
 }
 
 // ── Installations (teams) ────────────────────────────────────────────────────
@@ -256,7 +256,7 @@ async fn created(
 pub async fn install_url(s: &AppState, user_id: &str, team_id: &str) -> ApiResult<String> {
     let app = app(&s.db).await?.ok_or_else(|| {
         ApiError::bad_request(
-            "GitHub isn't set up on this installation yet. An admin can set it up in Integrations.",
+            "GitHub isn't set up on this installation yet. An admin can set it up in Settings.",
         )
     })?;
     let state = remember(Pending::Install {
@@ -305,7 +305,8 @@ async fn installed(
                     .fetch_optional(&s.db)
                     .await?;
             let Some(t) = linked else {
-                return Ok(Redirect::to("/settings/github?github=expired"));
+                // The dashboard opens the current team's GitHub card (/?github=).
+                return Ok(Redirect::to("/?github=expired"));
             };
             let mut tx = s.db.begin().await?;
             let member = require_role(&mut tx, &user, &t, Role::Viewer).await.is_ok();
@@ -373,10 +374,10 @@ async fn authorized(
         installation_id: id,
     }) = pending
     else {
-        return Ok(Redirect::to("/settings/github?github=expired"));
+        return Ok(Redirect::to("/?github=expired"));
     };
     if user_id != user.id {
-        return Ok(Redirect::to("/settings/github?github=expired"));
+        return Ok(Redirect::to("/?github=expired"));
     }
     let slug = team_slug(&s, &team_id).await?;
     let back = |result: &str| Redirect::to(&format!("/{slug}/integrations?github={result}"));

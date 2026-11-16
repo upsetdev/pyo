@@ -17,6 +17,27 @@ export function teamPath(slug: string, path: string) {
       : `/${slug}${path}`;
 }
 
+/**
+ * The installation's settings pages, at the root like /profile (/backups,
+ * /email). They show inside the Settings layout, the first is where
+ * /settings opens. Team slugs can't take these (RESERVED_SLUGS in the API).
+ */
+export const SETTINGS_PAGES = [
+  "/backups",
+  "/email",
+  "/github",
+  "/observability",
+  "/updates",
+] as const;
+
+/** For an old /settings/<page> URL: the same page at the root, query and hash kept. */
+export function movedSettingsHref(
+  page: (typeof SETTINGS_PAGES)[number],
+  location: { searchStr: string; hash: string },
+) {
+  return `${page}${location.searchStr}${location.hash ? `#${location.hash}` : ""}`;
+}
+
 /** The team in the URL, or the last-used team on pages outside one. */
 export function useTeamSlug(): string {
   const params = useParams({ strict: false }) as { team?: string };

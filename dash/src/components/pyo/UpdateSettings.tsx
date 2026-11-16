@@ -13,7 +13,6 @@ import { type ReactNode, useState } from "react";
 import { Badge, type Tone } from "~/components/ui/Badge";
 import { Link } from "@tanstack/react-router";
 import { Button, buttonClass } from "~/components/ui/Button";
-import { currentSlug } from "~/lib/pyo/paths";
 import { Dialog } from "~/components/ui/Dialog";
 import { Field, Segmented, Select, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
@@ -673,9 +672,7 @@ function BackupHint({ u }: { u: Updates }) {
       }
       action={
         <Link
-          to="/$team/backups"
-          params={{ team: currentSlug() }}
-          search={{ tab: "pyo" }}
+          to="/backups"
           className={buttonClass("secondary", "sm")}
         >
           Backups

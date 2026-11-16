@@ -11,11 +11,8 @@ import {
   ArrowCounterClockwiseIcon,
   GearSixIcon,
 } from "@phosphor-icons/react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
-import { z } from "zod";
-import { ManagedOr } from "~/components/pyo/Managed";
-import { Tabs } from "~/components/ui/Tabs";
 import { AppLink } from "~/components/ui/AppLink";
 import { Badge, Dot, type Tone } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -25,10 +22,7 @@ import { Menu } from "~/components/ui/Menu";
 import { EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { seo } from "~/lib/seo";
 import { BackupHeatmap, formatBytes } from "~/components/pyo/BackupHeatmap";
-import {
-  BackupForm,
-  ControlBackupSection,
-} from "~/components/pyo/ControlBackupSettings";
+import { BackupForm } from "~/components/pyo/ControlBackupSettings";
 import {
   AddDatabaseDialog,
   DatabaseRow,
@@ -43,12 +37,13 @@ import type { Database, TeamBackupRun, TeamBackups } from "~/lib/pyo/types";
 // The team's backups on one screen: how things stand (with every database's
 // backups in one graph), the databases, the volumes, and what ran lately.
 // Adding goes through "Add backup"; restoring and where backups go have
-// their own buttons beside it. The installation admin also gets a "Pyo"
-// tab (?tab=pyo) with backups of Pyo's own data, for every team.
+// their own buttons beside it. Backups of Pyo's own data are on /backups,
+// and the old ?tab=pyo link goes there.
 export const Route = createFileRoute("/_app/$team/backups")({
-  validateSearch: z.object({
-    tab: z.enum(["pyo"]).optional().catch(undefined),
-  }),
+  beforeLoad: ({ search }) => {
+    if ((search as { tab?: unknown }).tab === "pyo")
+      throw redirect({ to: "/backups", replace: true });
+  },
   head: () => ({ meta: seo({ title: "Backups" }) }),
   component: () => (
     <Page width="max-w-4xl">
@@ -81,21 +76,14 @@ function Backups() {
   const canRun = admin || role === "developer";
   const [adding, setAdding] = useState<"database" | "volume" | null>(null);
   const [panel, setPanel] = useState<"destination" | "restore" | null>(null);
-  const navigate = useNavigate({ from: Route.fullPath });
-  // Pyo's own backups are the installation admin's.
-  const tab = Route.useSearch().tab === "pyo" && s.user.isAdmin ? "pyo" : "team";
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="Backups"
-        description={
-          tab === "pyo"
-            ? "Encrypted copies of Pyo's own data, for every team."
-            : "Backups of your databases and volumes."
-        }
+        description="Backups of your databases and volumes."
         actions={
-          tab === "team" && tb?.settings ? (
+          tb?.settings ? (
             <>
               <Button
                 variant="secondary"
@@ -145,33 +133,7 @@ function Backups() {
         }
       />
 
-      {s.user.isAdmin ? (
-        <Tabs
-          variant="underline"
-          label="Backups"
-          value={tab}
-          onChange={(v) =>
-            void navigate({
-              to: ".",
-              search: { tab: v === "pyo" ? "pyo" : undefined },
-              replace: true,
-            })
-          }
-          items={[
-            { value: "team", label: "Team" },
-            { value: "pyo", label: "Pyo" },
-          ]}
-        />
-      ) : null}
-
-      {tab === "pyo" ? (
-        <ManagedOr
-          title="Backups are managed for you"
-          description="Pyo's own data."
-        >
-          <ControlBackupSection />
-        </ManagedOr>
-      ) : !tb?.settings ? (
+      {!tb?.settings ? (
         <Panel>
           <EmptyState
             icon={ClockCounterClockwiseIcon}

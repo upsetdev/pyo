@@ -1,9 +1,12 @@
 import {
   ArrowCircleUpIcon,
   ChartLineUpIcon,
+  CloudArrowUpIcon,
   EnvelopeSimpleIcon,
   type Icon,
 } from "@phosphor-icons/react";
+import { siGithub } from "simple-icons";
+import type { ComponentType } from "react";
 import {
   createFileRoute,
   Link,
@@ -13,26 +16,45 @@ import {
 import { useUpdateAvailable } from "~/components/pyo/UpdateSettings";
 import { AppShell } from "~/components/shell/AppShell";
 import { Page, PageHeader } from "~/components/ui/Panel";
+import type { SETTINGS_PAGES } from "~/lib/pyo/paths";
 import { seo } from "~/lib/seo";
 
-// Settings of this Pyo installation, for every team: outgoing email,
-// analytics privacy and updates of Pyo itself, a page each. Backups of
-// Pyo's own data are on Backups, in its Pyo tab, and the GitHub App is in
-// the GitHub card on Integrations.
+// Settings of this Pyo installation, for every team: backups of its own
+// data, outgoing email, the GitHub App, analytics privacy and updates of Pyo
+// itself, a page each. Pathless, so the pages sit at the root like /profile
+// (/backups, /email) and /settings opens the first. The old
+// /settings/<page> URLs redirect here.
 // Team settings stay under each team (/:team/settings).
-export const Route = createFileRoute("/_app/settings")({
+export const Route = createFileRoute("/_app/_settings")({
   head: () => ({ meta: seo({ title: "Settings" }) }),
   component: InstallationSettings,
 });
 
-const TABS: { to: string; label: string; icon: Icon }[] = [
-  { to: "/settings/email", label: "Email", icon: EnvelopeSimpleIcon },
-  {
-    to: "/settings/observability",
-    label: "Observability",
-    icon: ChartLineUpIcon,
-  },
-  { to: "/settings/updates", label: "Updates", icon: ArrowCircleUpIcon },
+/** GitHub's current mark (Phosphor's is the older Octocat), in the text color. */
+function GithubIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      aria-hidden
+    >
+      <path d={siGithub.path} />
+    </svg>
+  );
+}
+
+const TABS: {
+  to: (typeof SETTINGS_PAGES)[number];
+  label: string;
+  icon: Icon | ComponentType<{ size?: number }>;
+}[] = [
+  { to: "/backups", label: "Backups", icon: CloudArrowUpIcon },
+  { to: "/email", label: "Email", icon: EnvelopeSimpleIcon },
+  { to: "/github", label: "GitHub", icon: GithubIcon },
+  { to: "/observability", label: "Observability", icon: ChartLineUpIcon },
+  { to: "/updates", label: "Updates", icon: ArrowCircleUpIcon },
 ];
 
 function InstallationSettings() {
@@ -66,7 +88,7 @@ function InstallationSettings() {
                 >
                   <Ico size={14} />
                   {t.label}
-                  {t.to === "/settings/updates" && updateAvailable ? (
+                  {t.to === "/updates" && updateAvailable ? (
                     <span
                       className="h-1.5 w-1.5 rounded-full bg-info"
                       aria-label="Update available"

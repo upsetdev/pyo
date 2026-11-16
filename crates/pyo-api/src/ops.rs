@@ -330,9 +330,16 @@ pub async fn team_of(
 
 /// Top-level paths the dashboard owns can't be team slugs.
 // "pyo": Pyo registry keeps Pyo's own builds under pyo/.
-const RESERVED_SLUGS: [&str; 18] = [
+// "backups" to "updates": the installation's settings pages
+// (SETTINGS_PAGES in dash/src/lib/pyo/paths.ts).
+const RESERVED_SLUGS: [&str; 23] = [
     "profile",
     "settings",
+    "backups",
+    "email",
+    "github",
+    "observability",
+    "updates",
     "oauth",
     "api-keys",
     "mcp",
