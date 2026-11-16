@@ -14,6 +14,15 @@
 #                                      # needs cosign, or
 #                                      # --insecure-skip-verify after it
 #
+# Pyo's built-in sandbox templates (base and desktop) take the images
+# upsetdev/pyo-sandbox-images publishes, which Pyo finds itself.
+# PYO_UP_SANDBOX_IMAGES=local builds them instead, from a checkout of that
+# repo beside this one (../pyo-sandbox-images), into the local registry
+# (desktop on that base), and pins Pyo to them. That's about 8 GB of
+# layers, so it's only done when asked:
+#
+#   PYO_UP_SANDBOX_IMAGES=local scripts/pyo-up.sh
+#
 # The dashboard ends up on http://localhost:8000. While it waits (for the
 # builds, a rollout, ...), it shows what for and for how long; a pod that
 # can't start (image pull, crash) is shown with its last log lines.
@@ -35,6 +44,23 @@ if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
   [ -n "${NO_COLOR:-}" ] || BOLD=$'\033[1m' RED=$'\033[31m' RESET=$'\033[0m'
 fi
 log() { printf '%s==> %s%s\n' "$BOLD" "$*" "$RESET"; }
+
+# The sandbox templates' images: published (the default) or built here.
+SANDBOX_SRC=""
+case "${PYO_UP_SANDBOX_IMAGES:-published}" in
+  published) ;;
+  local)
+    SANDBOX_SRC=$(cd .. && pwd)/pyo-sandbox-images
+    if [ ! -f "$SANDBOX_SRC/images/base/Dockerfile" ] || [ ! -f "$SANDBOX_SRC/images/desktop/Dockerfile" ]; then
+      echo "pyo-up: PYO_UP_SANDBOX_IMAGES=local builds from $SANDBOX_SRC, which isn't a pyo-sandbox-images checkout." >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "pyo-up: PYO_UP_SANDBOX_IMAGES is local or published, not $PYO_UP_SANDBOX_IMAGES." >&2
+    exit 2
+    ;;
+esac
 
 # A published release goes in the way every install and update does: its
 # release.json, images pinned by digest, applied by its own upgrader. Its
@@ -108,7 +134,7 @@ if [ -n "$NO_BUILD_TAG" ] && { [ "${#BUILD_ARGS[@]}" -gt 0 ] || [ -n "$DRY_RUN" 
   exit 2
 fi
 if [ -n "$DRY_RUN" ]; then
-  exec env PYO_IMAGES="$IMAGES" scripts/build-images.sh --dry-run "${BUILD_ARGS[@]}"
+  exec env PYO_IMAGES="$IMAGES" PYO_SANDBOX_IMAGES_SRC="$SANDBOX_SRC" scripts/build-images.sh --dry-run "${BUILD_ARGS[@]}"
 fi
 
 # ── Progress ───────────────────────────────────────────────────────────────
@@ -768,7 +794,7 @@ if [ -n "$NO_BUILD_TAG" ]; then
     echo "$image $NO_BUILD_TAG"
   done >"$TAGS"
 else
-  BUILDCTL="$BUILDCTL" PYO_IMAGES="$IMAGES" PYO_BUILDKIT_ADDR=tcp://127.0.0.1:1234 \
+  BUILDCTL="$BUILDCTL" PYO_IMAGES="$IMAGES" PYO_BUILDKIT_ADDR=tcp://127.0.0.1:1234 PYO_SANDBOX_IMAGES_SRC="$SANDBOX_SRC" \
     scripts/build-images.sh --tag "$(date +%Y%m%d%H%M%S)" --out "$TAGS" "${BUILD_ARGS[@]}" "${VERBOSE[@]}"
   kubectl -n "$NS" scale deployment/buildkitd --replicas=0 >/dev/null
   BUILDKIT_UP=""
@@ -788,8 +814,24 @@ for image in "${!TAG_OF[@]}"; do
   esac
 done
 # Pyo's built-in sandbox templates take their images from
-# upsetdev/pyo-sandbox-images' images.json (sandbox/images.rs).
-IMAGE_SED+=(-e "s|__SANDBOX_BASE_REF__||g" -e "s|__SANDBOX_DESKTOP_REF__||g")
+# upsetdev/pyo-sandbox-images' images.json (sandbox/images.rs). Built here
+# (PYO_UP_SANDBOX_IMAGES=local), Pyo is pinned to them by digest instead,
+# and sandbox servers pull them from Pyo's registry over the tailnet.
+pinned_ref() {
+  local digest
+  digest=$(curl -fsS -m 10 -o /dev/null -D - \
+    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+    "http://${IMAGES%%/*}/v2/${IMAGES#*/}/$1/manifests/$2" 2>/dev/null \
+    | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }') || digest=""
+  [ -z "$digest" ] || echo "$IMAGES/$1:$2@$digest"
+}
+SANDBOX_BASE_REF="" SANDBOX_DESKTOP_REF=""
+if [ -n "$SANDBOX_SRC" ] && [ -n "${TAG_OF[sandbox-base]:-}" ] && [ -n "${TAG_OF[sandbox-desktop]:-}" ]; then
+  SANDBOX_BASE_REF=$(pinned_ref sandbox-base "${TAG_OF[sandbox-base]}")
+  SANDBOX_DESKTOP_REF=$(pinned_ref sandbox-desktop "${TAG_OF[sandbox-desktop]}")
+  log "Sandbox templates: base and desktop from $SANDBOX_SRC"
+fi
+IMAGE_SED+=(-e "s|__SANDBOX_BASE_REF__|$SANDBOX_BASE_REF|g" -e "s|__SANDBOX_DESKTOP_REF__|$SANDBOX_DESKTOP_REF|g")
 PYO_YAML=$(sed "${IMAGE_SED[@]}" -e "s|__IMAGES__|$IMAGES|g" deploy/k8s/pyo.yaml)
 if grep -q "__TAG__" <<<"$PYO_YAML"; then
   echo "pyo-up: deploy/k8s/pyo.yaml has an image scripts/build-images.sh doesn't build:" >&2

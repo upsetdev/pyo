@@ -13,6 +13,13 @@
 #   waf geoip                                  deploy/images/<image>.Dockerfile
 #   postgres-16 postgres-17 postgres-18        deploy/images/postgres.Dockerfile
 #   mysql-operator mysql-backup                deploy/images/moco/moco.Dockerfile
+#   sandbox-base sandbox-desktop               $PYO_SANDBOX_IMAGES_SRC/images/{base,desktop}
+#
+# sandbox-base and sandbox-desktop are the sandbox templates' images, only
+# built when PYO_SANDBOX_IMAGES_SRC names a checkout of
+# upsetdev/pyo-sandbox-images (pyo-up.sh's PYO_UP_SANDBOX_IMAGES=local).
+# sandbox-desktop is built on the sandbox-base built here, so it waits for
+# it.
 #
 # --only a,b  builds just those images; the others keep their last tag
 #             (built anyway if they have none yet)
@@ -33,7 +40,8 @@
 # Environment: PYO_BUILDKIT_ADDR (tcp://127.0.0.1:1234), PYO_IMAGES
 # (127.0.0.1:5005/pyo, a plain-HTTP registry), PYO_CARGO_PROFILE
 # (dev-release; releases build with `release`), PYO_BUILD_JOBS (4),
-# PYO_BUILD_STATE (~/.cache/pyo-up/images.tsv), BUILDCTL (buildctl).
+# PYO_BUILD_STATE (~/.cache/pyo-up/images.tsv), BUILDCTL (buildctl),
+# PYO_SANDBOX_IMAGES_SRC (none).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -61,7 +69,10 @@ BUILDCTL=${BUILDCTL:-buildctl}
 
 RUST_IMAGES=(pyo agent builder flows db-controller kv static)
 OTHER_IMAGES=(waf geoip postgres-16 postgres-17 postgres-18 mysql-operator mysql-backup)
-ALL_IMAGES=("${RUST_IMAGES[@]}" "${OTHER_IMAGES[@]}")
+SANDBOX_SRC=${PYO_SANDBOX_IMAGES_SRC:-}
+SANDBOX_IMAGES=()
+[ -z "$SANDBOX_SRC" ] || SANDBOX_IMAGES=(sandbox-base sandbox-desktop)
+ALL_IMAGES=("${RUST_IMAGES[@]}" "${OTHER_IMAGES[@]}" "${SANDBOX_IMAGES[@]}")
 
 declare -A WANTED=()
 if [ -n "$ONLY" ]; then
@@ -120,6 +131,9 @@ input_key() {
     geoip) hash_files deploy/images/geoip.Dockerfile ;;
     postgres-*) hash_text "$1" "$(hash_files deploy/images/postgres.Dockerfile)" ;;
     mysql-*) hash_text "$1" "$(hash_files deploy/images/moco)" ;;
+    sandbox-base) hash_files "$SANDBOX_SRC/images/base" ;;
+    # On the base built here: a new base is a new desktop.
+    sandbox-desktop) hash_text "${KEY[sandbox-base]}" "$(hash_files "$SANDBOX_SRC/images/desktop")" ;;
   esac
 }
 
@@ -204,6 +218,12 @@ build_cmd() {
     mysql-*)
       buildctl_build --local context=deploy/images/moco --local dockerfile=deploy/images/moco --opt filename=moco.Dockerfile \
         --opt target="${image#mysql-}" --output "$push" ;;
+    sandbox-base)
+      buildctl_build --local context="$SANDBOX_SRC/images/base" --local dockerfile="$SANDBOX_SRC/images/base" \
+        --output "$push" ;;
+    sandbox-desktop)
+      buildctl_build --local context="$SANDBOX_SRC/images/desktop" --local dockerfile="$SANDBOX_SRC/images/desktop" \
+        --opt build-arg:BASE="$(ref sandbox-base "${RESULT[sandbox-base]}")" --output "$push" ;;
   esac
 }
 
@@ -392,14 +412,33 @@ finished() {
   case "$job" in
     bins) queue_rust ;;
     web) ;;
+    sandbox-base) RESULT[$job]=$TAG; queue_desktop ;;
     *) RESULT[$job]=$TAG ;;
   esac
+}
+
+# The desktop sandbox image, once its base has a tag.
+queue_desktop() {
+  if reusable sandbox-desktop; then
+    RESULT[sandbox-desktop]=${LAST_TAG[sandbox-desktop]} ST[sandbox-desktop]=reused DETAIL[sandbox-desktop]="kept ${LAST_TAG[sandbox-desktop]}"
+    [ -n "$BOARD" ] || printf '    %s unchanged, keeps %s\n' sandbox-desktop "${LAST_TAG[sandbox-desktop]}"
+  else
+    QUEUE+=(sandbox-desktop) DETAIL[sandbox-desktop]=""
+  fi
 }
 
 for image in "${ALL_IMAGES[@]}"; do KEY[$image]=$(input_key "$image"); done
 for image in "${OTHER_IMAGES[@]}"; do
   if reusable "$image"; then RESULT[$image]=${LAST_TAG[$image]}; else QUEUE+=("$image"); fi
 done
+if [ -n "$SANDBOX_SRC" ]; then
+  if reusable sandbox-base; then
+    RESULT[sandbox-base]=${LAST_TAG[sandbox-base]}
+    if reusable sandbox-desktop; then RESULT[sandbox-desktop]=${LAST_TAG[sandbox-desktop]}; else QUEUE+=(sandbox-desktop); fi
+  else
+    QUEUE+=(sandbox-base)
+  fi
+fi
 # The Rust binaries first: the longest build, which the Rust images wait
 # for. With --only, the Rust images not asked for keep their last tag
 # (if the registry has it); when that's all of them, the binaries aren't
@@ -445,7 +484,11 @@ for image in "${ALL_IMAGES[@]}"; do
     ST[$image]=reused DETAIL[$image]="kept ${RESULT[$image]}"
   else
     ST[$image]=queued
-    [[ " ${QUEUE[*]} " == *" $image "* ]] || DETAIL[$image]="waiting for the Rust binaries"
+    if [ "$image" = sandbox-desktop ]; then
+      [[ " ${QUEUE[*]} " == *" $image "* ]] || DETAIL[$image]="waiting for sandbox-base"
+    else
+      [[ " ${QUEUE[*]} " == *" $image "* ]] || DETAIL[$image]="waiting for the Rust binaries"
+    fi
   fi
 done
 for job in bins web; do [ -n "${ST[$job]:-}" ] || ST[$job]=queued; done
