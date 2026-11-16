@@ -1,0 +1,4 @@
+#!/bin/sh
+# pyo-envd runs this once when the sandbox boots. It starts only the small
+# listener that starts the desktop on first use (desktop.py).
+exec python3 /usr/local/lib/pyo-desktop/desktop.py >>/var/log/pyo-desktop.log 2>&1 </dev/null
