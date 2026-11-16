@@ -12,10 +12,10 @@
 #
 # Nothing runs until it's used. pyo-envd runs /etc/pyo/start at boot,
 # which starts only a small listener on 6080 and 9222
-# (sandbox-desktop/desktop.py). The first connection to either starts the
-# screen (TigerVNC's Xvnc), Openbox with a tint2 panel, and Chromium, then
-# passes the connection on. Chromium's CDP is on 9223 behind 9222, noVNC's
-# websockify on 6081 behind 6080, VNC on 5901, all on 127.0.0.1 only.
+# (sandbox-desktop/desktop.py). It serves noVNC's files and WebSocket on
+# 6080 itself. The first use of either port starts the screen (TigerVNC's
+# Xvnc) with Openbox and a tint2 panel, then Chromium. Chromium's CDP is
+# on 9223 behind 9222, VNC on 5901, all on 127.0.0.1 only.
 #
 # Everything runs as root, like the rest of the sandbox (see
 # sandbox-base.Dockerfile), so Chromium runs with --no-sandbox: the
@@ -39,7 +39,7 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
       chromium dbus-x11 fonts-dejavu-core fonts-droid-fallback \
       fonts-liberation fonts-noto-color-emoji openbox \
-      python3-websockify tigervnc-standalone-server tint2 \
+      tigervnc-standalone-server tint2 \
       x11-xserver-utils xfce4-terminal; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
       /usr/share/doc/* /usr/share/man/*; \
