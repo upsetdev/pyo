@@ -1,6 +1,7 @@
 import { CheckCircleIcon, CircleNotchIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { NeedsTailscale } from "~/components/pyo/Tailscale";
+import { AppLink } from "~/components/ui/AppLink";
 import { LiveCommand } from "~/components/pyo/LiveCommand";
 import { Badge, Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -84,6 +85,9 @@ export function serverUse(x: SandboxServer) {
   const usable = Math.max(1, c.memoryTotal - c.memoryReserved);
   return { used: Math.min(usable, c.memoryCommitted), total: usable };
 }
+
+/** How Pyo's "set up Tailscale" errors start: the word Tailscale links to its card. */
+const TAILSCALE = "Set up Tailscale";
 
 /** What sandbox.sh takes for --edge-domain. */
 const EDGE_DOMAIN = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
@@ -210,7 +214,21 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
               )}
             </Field>
           </div>
-          {error ? <Callout tone="danger">{error}</Callout> : null}
+          {error ? (
+            <Callout tone="danger">
+              {error.startsWith(TAILSCALE) ? (
+                <>
+                  Set up{" "}
+                  <AppLink href="/integrations#tailscale" className="font-medium underline">
+                    Tailscale
+                  </AppLink>
+                  {error.slice(TAILSCALE.length)}
+                </>
+              ) : (
+                error
+              )}
+            </Callout>
+          ) : null}
           <Button type="submit" size="sm" disabled={busy || !!nameError || !!edgeError || !s.tailscale}>
             {busy ? "Preparing…" : "Get the command"}
           </Button>
