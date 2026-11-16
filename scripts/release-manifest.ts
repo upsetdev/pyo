@@ -67,7 +67,7 @@ const names = {
   "mysql-operator": "mysqlOperator",
   "mysql-backup": "mysqlBackup",
   // Pyo Sandbox's built-in template `base` (multi-arch). Pyo reads it
-  // from PYO_SANDBOX_BASE_IMAGE and seeds the template from it.
+  // from PYO_SANDBOX_BASE_REF and seeds the template from it.
   "sandbox-base": "sandboxBase",
 } as const;
 const byName: Record<string, string> = Object.fromEntries(Object.keys(names).map((n) => [n, ref(n)]));

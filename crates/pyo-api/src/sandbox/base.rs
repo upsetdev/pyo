@@ -5,7 +5,7 @@
 //!
 //! - Seeding: when a worker starts, and in every sandbox round, Pyo makes
 //!   sure `base` exists and points at its release's image
-//!   (`PYO_SANDBOX_BASE_IMAGE`, pinned by digest in release.json). It's
+//!   (`PYO_SANDBOX_BASE_REF`, pinned by digest in release.json). It's
 //!   idempotent.
 //! - On update: a new release has a new image, so `base` gets a new
 //!   revision (the digest's start). Servers make it beside the old one in
@@ -37,10 +37,10 @@ pub struct Wanted {
     pub release: String,
 }
 
-/// This release's image, from `PYO_SANDBOX_BASE_IMAGE`. None for a build
+/// This release's image, from `PYO_SANDBOX_BASE_REF`. None for a build
 /// that isn't a release (scripts/pyo-up.sh leaves it empty).
 pub fn from_env() -> Option<Wanted> {
-    let image = std::env::var("PYO_SANDBOX_BASE_IMAGE").ok()?;
+    let image = std::env::var(pyo_proto::SANDBOX_BASE_ENV).ok()?;
     let image = image.trim();
     pinned_image(image).then(|| Wanted {
         image: image.to_owned(),
@@ -241,18 +241,18 @@ mod tests {
     #[test]
     fn only_a_pinned_image_from_the_env_counts() {
         // SAFETY: tests in this module don't read it concurrently.
-        unsafe { std::env::set_var("PYO_SANDBOX_BASE_IMAGE", "") };
+        unsafe { std::env::set_var("PYO_SANDBOX_BASE_REF", "") };
         assert_eq!(from_env(), None, "a dev build (pyo-up.sh)");
         unsafe {
             std::env::set_var(
-                "PYO_SANDBOX_BASE_IMAGE",
+                "PYO_SANDBOX_BASE_REF",
                 "127.0.0.1:5005/pyo/sandbox-base:dev",
             )
         };
         assert_eq!(from_env(), None, "not pinned");
-        unsafe { std::env::set_var("PYO_SANDBOX_BASE_IMAGE", A) };
+        unsafe { std::env::set_var("PYO_SANDBOX_BASE_REF", A) };
         assert_eq!(from_env(), Some(want(A, crate::updates::current())));
-        unsafe { std::env::remove_var("PYO_SANDBOX_BASE_IMAGE") };
+        unsafe { std::env::remove_var("PYO_SANDBOX_BASE_REF") };
         assert_eq!(from_env(), None);
     }
 
