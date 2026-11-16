@@ -97,17 +97,20 @@ export function IntegrationCard({
       </header>
       <div className="flex flex-1 flex-col rounded-xl border border-frame-border bg-card px-3">
         <div className="flex-1 space-y-2.5 pb-4 pt-3">
-          <p className="line-clamp-2 text-[13px] leading-5 text-foreground">
+          {/* Two lines for the description and one for the stat, always,
+              so every card is the same height. */}
+          <p className="line-clamp-2 min-h-10 text-[13px] leading-5 text-foreground">
             {description}
           </p>
-          {connected && stat ? (
-            <p className="flex items-baseline justify-between gap-3 text-[13px] leading-5">
-              <span className="text-muted-foreground">{stat.label}</span>
-              <span className="min-w-0 truncate font-semibold tabular-nums">
-                {stat.value}
-              </span>
-            </p>
-          ) : null}
+          <p
+            aria-hidden={connected && stat ? undefined : true}
+            className={`flex items-baseline justify-between gap-3 text-[13px] leading-5 ${connected && stat ? "" : "invisible"}`}
+          >
+            <span className="text-muted-foreground">{connected && stat ? stat.label : "\u00a0"}</span>
+            <span className="min-w-0 truncate font-semibold tabular-nums">
+              {connected && stat ? stat.value : null}
+            </span>
+          </p>
         </div>
         <footer className="flex min-h-[34px] items-center gap-2 border-t border-divider pb-0.5 text-[12px] text-muted-foreground">
           {connected ? (
