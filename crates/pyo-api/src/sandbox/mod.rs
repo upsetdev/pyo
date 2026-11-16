@@ -34,6 +34,7 @@ pub mod images;
 pub mod join;
 pub mod keys;
 pub mod limits;
+mod live;
 pub mod mcp;
 pub mod names;
 pub mod runner;
@@ -403,7 +404,34 @@ pub async fn server_views(
     Ok(rows)
 }
 
+/// The templates as the last reports have them, for tests.
+#[cfg(test)]
 pub async fn template_views(
+    db: &PgPool,
+    team_ids: &[String],
+    id: Option<&str>,
+) -> sqlx::Result<Vec<Value>> {
+    let mut rows = template_rows(db, team_ids, id).await?;
+    finish_template_views(&mut rows);
+    Ok(rows)
+}
+
+/// The templates a team can use, with how far each server got asked of
+/// the servers still making one, for pages that follow it live.
+pub async fn template_views_live(
+    s: &AppState,
+    team_ids: &[String],
+    id: Option<&str>,
+) -> sqlx::Result<Vec<Value>> {
+    let mut rows = template_rows(&s.db, team_ids, id).await?;
+    live::overlay(s, &mut rows).await;
+    finish_template_views(&mut rows);
+    Ok(rows)
+}
+
+/// The template views as Pyo has them, each server's with the `key` the
+/// server keeps the template under.
+async fn template_rows(
     db: &PgPool,
     team_ids: &[String],
     id: Option<&str>,
@@ -415,10 +443,11 @@ pub async fn template_views(
             'snapshots', t.snapshots, 'error', t.error, 'createdBy', t.created_by,
             'createdAt', pyo.ms(t.created_at), 'updatedAt', pyo.ms(t.updated_at),
             'servers', (SELECT coalesce(jsonb_agg(jsonb_build_object(
-                    'id', s.id, 'name', s.name,
+                    'id', s.id, 'name', s.name, 'key', m.e->>'name',
                     'state', CASE WHEN m.e IS NULL THEN 'pending' ELSE coalesce(m.e->>'state', 'ready') END,
                     'phase', m.e->'build'->'phase', 'error', m.e->'build'->'error',
-                    'pulled', m.e->'build'->'pulled', 'imageBytes', m.e->'build'->'imageBytes',
+                    'pulled', m.e->'build'->'pulled', 'unpacked', m.e->'build'->'unpacked',
+                    'imageBytes', m.e->'build'->'imageBytes',
                     'pullMs', m.e->'build'->'pullMs', 'unpackMs', m.e->'build'->'unpackMs',
                     'snapshotMs', m.e->'build'->'snapshotMs',
                     'bytes', m.e->'bytes', 'snapshots', coalesce(m.e->'snapshots', '[]')) ORDER BY s.name), '[]')
@@ -456,19 +485,25 @@ pub async fn template_views(
             .unwrap_or(base::ALL.len())
     };
     rows.sort_by_key(place);
-    // Build errors in plain words.
+    Ok(rows)
+}
+
+/// Build errors in plain words, and without the servers' `key`.
+fn finish_template_views(rows: &mut [Value]) {
     let plain = |e: &mut Value| {
         if let Some(raw) = e.as_str() {
             *e = json!(templates::plain_build_error(raw));
         }
     };
-    for r in &mut rows {
+    for r in rows {
         plain(&mut r["error"]);
         for s in r["servers"].as_array_mut().into_iter().flatten() {
             plain(&mut s["error"]);
+            if let Some(o) = s.as_object_mut() {
+                o.remove("key");
+            }
         }
     }
-    Ok(rows)
 }
 
 // ── Create ─────────────────────────────────────────────────────────────────
@@ -1638,7 +1673,7 @@ pub async fn create_template(s: &AppState, user: &User, req: CreateTemplate) -> 
     tx.commit().await?;
     tokio::spawn(templates::push(s.clone(), id.clone()));
     let teams: Vec<String> = req.team_id.iter().cloned().collect();
-    Ok(template_views(&s.db, &teams, Some(&id))
+    Ok(template_views_live(s, &teams, Some(&id))
         .await?
         .into_iter()
         .next()

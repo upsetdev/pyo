@@ -129,24 +129,8 @@ struct Server<'a> {
 }
 
 impl Server<'_> {
-    /// Keeps what the server said in its report, in place of what it said
-    /// of this template before.
     async fn save(&self, r: Option<&TemplateReport>) {
-        let res = sqlx::query(
-            "UPDATE pyo.sandbox_servers
-                SET templates = coalesce((SELECT jsonb_agg(x) FROM jsonb_array_elements(templates) x
-                                           WHERE x->>'name' <> $2), '[]'::jsonb)
-                                || coalesce($3::jsonb, '[]'::jsonb)
-              WHERE id = $1",
-        )
-        .bind(self.id)
-        .bind(&self.name)
-        .bind(r.map(|r| serde_json::json!([r])))
-        .execute(self.db)
-        .await;
-        if let Err(e) = res {
-            tracing::warn!(server = %self.id, template = %self.name, error = %e, "couldn't save how far the template got");
-        }
+        templates::save_report(self.db, self.id, &self.name, r).await;
     }
 }
 

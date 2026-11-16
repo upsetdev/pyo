@@ -31,7 +31,8 @@ use std::collections::HashSet;
 
 use pyo_proto::sandbox::token::SigningKey;
 use pyo_proto::sandbox::{
-    DaemonCommand, ErrorCode, RegistryAuth, Runtime, ServerReport, TemplateReport, TemplateState,
+    DaemonCommand, DaemonResult, ErrorCode, RegistryAuth, Runtime, ServerReport, TemplateReport,
+    TemplateState,
 };
 use serde_json::Value;
 use sqlx::PgPool;
@@ -343,9 +344,16 @@ pub async fn push(s: AppState, template_id: String) {
                 continue;
             };
             let token = keys::admin_token(&key, &id);
-            if let Err(e) = Daemon::new(&address).command(&token, &cmd).await
-            {
-                tracing::warn!(server = %id, template = %t.id, error = %e, "the sandbox server didn't take a template");
+            match Daemon::new(&address).command(&token, &cmd).await {
+                // Saved at once, so the list shows it building before
+                // the next round.
+                Ok(DaemonResult::Template { template }) => {
+                    save_report(&s.db, &id, &t.server_name(), Some(&template)).await;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(server = %id, template = %t.id, error = %e, "the sandbox server didn't take a template");
+                }
             }
         }
         anyhow::Ok(())
@@ -353,6 +361,26 @@ pub async fn push(s: AppState, template_id: String) {
     .await;
     if let Err(e) = res {
         tracing::warn!(template = %template_id, error = %format!("{e:#}"), "couldn't send a template to the sandbox servers");
+    }
+}
+
+/// Keeps what a server said of a template in its report, in place of
+/// what it said of it before. None: it has none.
+pub async fn save_report(db: &PgPool, server_id: &str, name: &str, r: Option<&TemplateReport>) {
+    let res = sqlx::query(
+        "UPDATE pyo.sandbox_servers
+            SET templates = coalesce((SELECT jsonb_agg(x) FROM jsonb_array_elements(templates) x
+                                       WHERE x->>'name' <> $2), '[]'::jsonb)
+                            || coalesce($3::jsonb, '[]'::jsonb)
+          WHERE id = $1",
+    )
+    .bind(server_id)
+    .bind(name)
+    .bind(r.map(|r| serde_json::json!([r])))
+    .execute(db)
+    .await;
+    if let Err(e) = res {
+        tracing::warn!(server = %server_id, template = %name, error = %e, "couldn't save how far the template got");
     }
 }
 

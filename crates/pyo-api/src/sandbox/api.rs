@@ -532,7 +532,7 @@ pub(crate) async fn create_dns_record(
 #[utoipa::path(get, path = "/sandbox-templates", operation_id = "listSandboxTemplates", tag = "Sandboxes",
     params(TeamQuery),
     responses(
-        (status = 200, description = "`templates`, each with `id`, `teamId` (null for the installation's), `name`, `source` (`kind` and `image`), `state` (\"pending\", \"building\", \"ready\" or \"failed\", from its servers, and \"unavailable\" for `base` or `desktop` while Pyo has no image for it), `builtin`, `servers`, `error` and `createdAt`. Pyo's own `base` and `desktop` come first, are always listed and are ready to use: servers make them on first use, so their `servers` are those that have them. Each of the other templates' `servers` is a sandbox server that may use it, with `id`, `name`, `state` (\"pending\", \"building\", \"ready\" or \"failed\"), `phase` while building (\"queued\", \"pulling\", \"unpacking\" or \"snapshotting\"), `pulled` and `imageBytes`, `pullMs`, `unpackMs` and `snapshotMs`, `bytes` (disk it takes there), `snapshots` and `error`.", body = Object),
+        (status = 200, description = "`templates`, each with `id`, `teamId` (null for the installation's), `name`, `source` (`kind` and `image`), `state` (\"pending\", \"building\", \"ready\" or \"failed\", from its servers, and \"unavailable\" for `base` or `desktop` while Pyo has no image for it), `builtin`, `servers`, `error` and `createdAt`. Pyo's own `base` and `desktop` come first, are always listed and are ready to use: servers make them on first use, so their `servers` are those that have them. Each of the other templates' `servers` is a sandbox server that may use it, with `id`, `name`, `state` (\"pending\", \"building\", \"ready\" or \"failed\"), `phase` while building (\"queued\", \"pulling\", \"unpacking\" or \"snapshotting\"), `pulled` and `unpacked` of `imageBytes` (asked of the server as the list is read, while it builds), `pullMs`, `unpackMs` and `snapshotMs`, `bytes` (disk it takes there), `snapshots` and `error`.", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -544,7 +544,7 @@ pub(crate) async fn list_templates(
     team_read(&s, &user, &q.team).await?;
     let teams = [q.team];
     Ok(Json(
-        json!({ "templates": super::template_views(&s.db, &teams, None).await? }),
+        json!({ "templates": super::template_views_live(&s, &teams, None).await? }),
     ))
 }
 
