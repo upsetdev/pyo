@@ -96,12 +96,22 @@ pub fn eligible(server_team: Option<&str>, template_team: Option<&str>) -> bool 
 }
 
 /// The repository path of an image in Pyo's registry, by any of the
-/// addresses it's known by. None for any other registry.
-pub fn in_pyos_registry<'a>(image: &'a str, doors: &[String]) -> Option<&'a str> {
-    doors
+/// addresses it's known by: its doors, and its names on Pyo's own machine
+/// (`127.0.0.1:5005`, `localhost:5005`, in the cluster). None for any other
+/// registry.
+pub fn in_pyos_registry(image: &str, doors: &[String]) -> Option<String> {
+    if let Some(path) = doors
         .iter()
         .filter(|d| !d.is_empty())
         .find_map(|d| image.strip_prefix(d.as_str())?.strip_prefix('/'))
+    {
+        return Some(path.to_owned());
+    }
+    let pulled = crate::deploy::pyo_registry_image(image)?.ok()?;
+    pulled
+        .strip_prefix(crate::deploy::registry().pull.as_str())?
+        .strip_prefix('/')
+        .map(str::to_owned)
 }
 
 /// The command that has a server prepare `t`.
@@ -579,14 +589,25 @@ mod tests {
             "registry.tail1.ts.net".to_string(),
             "100.64.0.1:5006".to_string(),
         ];
+        let path = |p: &str| Some(p.to_owned());
         assert_eq!(
             in_pyos_registry("registry.tail1.ts.net/acme/app/api:1", &doors),
-            Some("acme/app/api:1")
+            path("acme/app/api:1")
         );
         assert_eq!(
             in_pyos_registry("100.64.0.1:5006/acme/app/api@sha256:abc", &doors),
-            Some("acme/app/api@sha256:abc")
+            path("acme/app/api@sha256:abc")
         );
+        // Its names on Pyo's own machine, which a server can't reach.
+        assert_eq!(
+            in_pyos_registry("127.0.0.1:5005/frans/sandbox-base:1", &doors),
+            path("frans/sandbox-base:1")
+        );
+        assert_eq!(
+            in_pyos_registry("localhost:5005/frans/sandbox-base", &doors),
+            path("frans/sandbox-base")
+        );
+        assert_eq!(in_pyos_registry("localhost:8000/x", &doors), None);
         assert_eq!(in_pyos_registry("python:3.13", &doors), None);
         assert_eq!(
             in_pyos_registry("registry.tail1.ts.net.evil.com/x", &doors),
