@@ -10,7 +10,13 @@ import { EmptyState, ErrorState, Page, PageHeader, Panel } from "~/components/ui
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
 import { megabytes, timeAgo } from "~/lib/pyo/format";
 import { useQuery } from "~/lib/pyo/query";
-import { sandboxApi, templateImage, type SandboxTemplate, type SandboxTemplateServer } from "~/lib/pyo/sandbox";
+import {
+  fieldsSwapped,
+  sandboxApi,
+  templateImage,
+  type SandboxTemplate,
+  type SandboxTemplateServer,
+} from "~/lib/pyo/sandbox";
 import { roleIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { seo } from "~/lib/seo";
@@ -61,7 +67,12 @@ function TemplatesPage() {
   const [error, setError] = useState("");
   const [removing, setRemoving] = useState<SandboxTemplate | null>(null);
   const canRemove = (t: SandboxTemplate) => !t.builtin && (t.teamId ? canCreate : !!s.user.isAdmin);
-  const nameError = name && !NAME.test(name) ? "Lowercase letters, digits, dashes, dots and underscores." : "";
+  const swapped = fieldsSwapped(name, image);
+  const nameError = swapped
+    ? "This looks like the image. Swap the name and image."
+    : name && !NAME.test(name)
+      ? "Lowercase letters, digits, dashes, dots and underscores."
+      : "";
 
   const create = async () => {
     if (!name || !image.trim() || nameError || busy) return;
@@ -164,7 +175,24 @@ function TemplatesPage() {
                 <Input {...p} mono placeholder="node-22" value={name} onChange={(e) => setName(e.target.value.toLowerCase())} />
               )}
             </Field>
-            <Field label="Image" error={error || undefined}>
+            <Field
+              label="Image"
+              error={error || undefined}
+              hint={
+                swapped ? (
+                  <button
+                    type="button"
+                    className="font-medium text-foreground underline underline-offset-2"
+                    onClick={() => {
+                      setName(image.trim().toLowerCase());
+                      setImage(name);
+                    }}
+                  >
+                    Swap them
+                  </button>
+                ) : undefined
+              }
+            >
               {(p) => <Input {...p} mono placeholder="node:22" value={image} onChange={(e) => setImage(e.target.value)} />}
             </Field>
             <Button type="submit" size="sm" className="sm:mt-[22px]" disabled={busy || !name || !image.trim() || !!nameError}>

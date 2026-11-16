@@ -8,7 +8,7 @@ import { request } from "./backend";
 import { BASE_TEMPLATE } from "./sandboxTemplates";
 import type { CloudServerState } from "./types";
 
-export { BASE_TEMPLATE, defaultTemplate, imageRepo, templateImage } from "./sandboxTemplates";
+export { BASE_TEMPLATE, defaultTemplate, fieldsSwapped, imageRepo, templateImage } from "./sandboxTemplates";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

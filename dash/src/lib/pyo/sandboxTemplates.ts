@@ -27,6 +27,14 @@ export function templateImage(t: TemplateLike) {
   return t.builtin && t.source?.os ? `${t.source.os} · ${imageRepo(image)}` : image;
 }
 
+/** The new template form's name and image the wrong way round: an image in
+ * the name (it has a "/", ":" or "@", which names can't) and a bare word in
+ * the image. */
+export function fieldsSwapped(name: string, image: string) {
+  const imageLike = (s: string) => /[/:@]/.test(s.trim());
+  return imageLike(name) && !!image.trim() && !imageLike(image);
+}
+
 /** The template a new sandbox form starts on: base once it's ready, else
  * the first ready one. */
 export function defaultTemplate(list: TemplateLike[]) {

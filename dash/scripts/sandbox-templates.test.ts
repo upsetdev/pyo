@@ -2,7 +2,15 @@
 // and that new sandboxes start on it.
 // bun test scripts/sandbox-templates.test.ts
 import { expect, test } from "bun:test";
-import { defaultTemplate, imageRepo, templateImage } from "../src/lib/pyo/sandboxTemplates";
+import { defaultTemplate, fieldsSwapped, imageRepo, templateImage } from "../src/lib/pyo/sandboxTemplates";
+
+test("the new template form notices a swapped name and image", () => {
+  expect(fieldsSwapped("frans/sandbox-base", "sandbox-base")).toBe(true);
+  expect(fieldsSwapped("node:22", "node")).toBe(true);
+  expect(fieldsSwapped("node-22", "node:22")).toBe(false);
+  expect(fieldsSwapped("base", "frans/sandbox-base")).toBe(false);
+  expect(fieldsSwapped("node:22", "")).toBe(false);
+});
 
 const base = {
   name: "base",
