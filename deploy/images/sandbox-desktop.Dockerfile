@@ -51,11 +51,17 @@ RUN set -eux; \
     curl -fsSLo /tmp/novnc.tar.gz "https://github.com/novnc/noVNC/archive/refs/tags/v$NOVNC_VERSION.tar.gz"; \
     echo "$NOVNC_SHA256  /tmp/novnc.tar.gz" | sha256sum -c -; \
     mkdir -p /usr/share/novnc; \
-    tar -xzf /tmp/novnc.tar.gz -C /usr/share/novnc --strip-components=1 --no-same-owner \
-      --exclude='*/docs' --exclude='*/tests' --exclude='*/snap' --exclude='*/utils' --exclude='*/po'; \
+    tar -xzf /tmp/novnc.tar.gz -C /usr/share/novnc --strip-components=1 --no-same-owner; \
     rm /tmp/novnc.tar.gz; \
+    # Its own tooling and tests only. Not vendor/pako/lib/utils, which the
+    # page imports.
+    cd /usr/share/novnc; \
+    rm -rf docs tests snap utils po .github; \
     # noVNC at / as well as /vnc.html.
-    ln -sf vnc.html /usr/share/novnc/index.html
+    ln -sf vnc.html index.html
+
+COPY sandbox-desktop/check-novnc.py /tmp/check-novnc.py
+RUN python3 /tmp/check-novnc.py /usr/share/novnc && rm /tmp/check-novnc.py
 
 COPY sandbox-desktop/start /etc/pyo/start
 COPY sandbox-desktop/desktop.py /usr/local/lib/pyo-desktop/desktop.py
