@@ -11,9 +11,12 @@ import type { CloudServerState } from "./types";
 export {
   BASE_TEMPLATE,
   defaultTemplate,
+  freeLabel,
+  freeMemory,
   gettingReady,
   imageRepo,
   isBase,
+  serverRefusal,
   templateImage,
   templateStatus,
   usable,
@@ -246,6 +249,8 @@ export type SandboxTemplateServer = {
 export type CreateSandbox = {
   teamId: string;
   template: string;
+  /** A sandbox server's id: Pyo picks one when left out. */
+  server?: string;
   cpus?: number;
   memoryMib?: number;
   diskMib?: number;
@@ -569,6 +574,7 @@ export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
   // base is the default, so it's left out.
   const lines: string[] =
     b.template && b.template !== BASE_TEMPLATE ? [`  template: ${JSON.stringify(b.template)},`] : [];
+  if (b.server) lines.push(`  server: ${JSON.stringify(b.server)},`);
   if (b.cpus) lines.push(`  cpus: ${b.cpus},`);
   if (b.memoryMib) lines.push(`  memoryMib: ${b.memoryMib},`);
   if (b.ttl) lines.push(`  ttl: ${JSON.stringify(b.ttl)},`);

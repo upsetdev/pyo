@@ -1,6 +1,6 @@
 // Sandbox templates as the dashboard shows them: Pyo's built-in `base`
-// (crates/pyo-api/src/sandbox/base.rs) and the rest. No imports, so
-// dash/scripts tests them as they are.
+// (crates/pyo-api/src/sandbox/base.rs) and the rest, and the servers a new
+// sandbox can go to. No imports, so dash/scripts tests them as they are.
 
 type TemplateLike = {
   name?: string;
@@ -49,3 +49,30 @@ export function templateStatus(t: TemplateLike) {
 /** What a sandbox waiting for its server to make its template shows. */
 export const gettingReady = (template: string, server: string | null) =>
   server ? `Getting ${template} ready on ${server}…` : `Getting ${template} ready…`;
+
+type ServerLike = {
+  state: string;
+  enabled: boolean;
+  capability: { runtime: string; network?: boolean } | null;
+  capacity: { memoryAvailable: number; memoryReserved: number } | null;
+};
+
+/** Bytes a server can still give sandboxes. */
+export const freeMemory = (x: ServerLike) =>
+  x.capacity ? Math.max(0, x.capacity.memoryAvailable - x.capacity.memoryReserved) : 0;
+
+/** "6.2 GB free", "512 MB free". */
+export function freeLabel(bytes: number) {
+  const mb = bytes / 1024 ** 2;
+  return mb >= 1024 ? `${+(mb / 1024).toFixed(1)} GB free` : `${Math.floor(mb)} MB free`;
+}
+
+/** Why a server can't take a sandbox of this size, or "" when it can. */
+export function serverRefusal(x: ServerLike, memoryMib: number, network: "internet" | "none") {
+  if (x.state !== "ready") return x.state === "joining" ? "Setting up" : "Not reachable";
+  if (!x.enabled) return "Turned off";
+  if (!x.capability || x.capability.runtime === "none") return "Can't run sandboxes";
+  if (network === "internet" && !x.capability.network) return "No networking";
+  if (freeMemory(x) < memoryMib * 1024 ** 2) return "No room";
+  return "";
+}

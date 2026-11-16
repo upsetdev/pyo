@@ -1,11 +1,13 @@
 // Pyo's built-in sandbox template in the dashboard: how its image reads,
-// and that new sandboxes start on it.
+// that new sandboxes start on it, and the servers a new sandbox can go to.
 // bun test scripts/sandbox-templates.test.ts
 import { expect, test } from "bun:test";
 import {
   defaultTemplate,
+  freeLabel,
   gettingReady,
   imageRepo,
+  serverRefusal,
   templateImage,
   templateStatus,
   usable,
@@ -57,4 +59,24 @@ test("base's status says it's ready to use", () => {
   expect(templateStatus({ name: "node-22", state: "pending" })).toBe("Pending");
   expect(gettingReady("base", "sandbox-1")).toBe("Getting base ready on sandbox-1…");
   expect(gettingReady("base", null)).toBe("Getting base ready…");
+});
+
+test("a server is offered with its room, or why it can't take the sandbox", () => {
+  const GB = 1024 ** 3;
+  const ok = {
+    state: "ready",
+    enabled: true,
+    capability: { runtime: "firecracker", network: true },
+    capacity: { memoryAvailable: 7.2 * GB, memoryReserved: GB },
+  };
+  expect(serverRefusal(ok, 2048, "internet")).toBe("");
+  expect(freeLabel(6.2 * GB)).toBe("6.2 GB free");
+  expect(freeLabel(512 * 1024 ** 2)).toBe("512 MB free");
+  expect(serverRefusal(ok, 8192, "internet")).toBe("No room");
+  expect(serverRefusal({ ...ok, state: "joining" }, 512, "none")).toBe("Setting up");
+  expect(serverRefusal({ ...ok, state: "unreachable" }, 512, "none")).toBe("Not reachable");
+  expect(serverRefusal({ ...ok, enabled: false }, 512, "none")).toBe("Turned off");
+  const offline = { ...ok, capability: { runtime: "gvisor", network: false } };
+  expect(serverRefusal(offline, 512, "internet")).toBe("No networking");
+  expect(serverRefusal(offline, 512, "none")).toBe("");
 });

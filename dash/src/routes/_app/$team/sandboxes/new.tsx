@@ -2,7 +2,7 @@ import { CaretDownIcon, CircleNotchIcon, CodeIcon, HardDrivesIcon } from "@phosp
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { z } from "zod";
-import { useSandboxes } from "~/components/pyo/sandbox/common";
+import { RuntimeBadge, useSandboxes } from "~/components/pyo/sandbox/common";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { Field, Segmented, Select, Switch, Textarea } from "~/components/ui/Field";
@@ -15,9 +15,13 @@ import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
   defaultTemplate,
+  freeLabel,
+  freeMemory,
   gettingReady,
   isBase,
   LIFETIMES,
+  RUNTIME_LABEL,
+  serverRefusal,
   usable,
   SIZES,
   rememberConnection,
@@ -104,6 +108,8 @@ function NewSandboxForm() {
   const ready = templates.status === "success" ? templates.data.templates : [];
   const search = Route.useSearch();
   const [template, setTemplate] = useState(search.template ?? "");
+  const servers = sandboxServersIn(s);
+  const [server, setServer] = useState("");
   const [size, setSize] = useState<(typeof SIZES)[number]["value"]>("1");
   const [ttl, setTtl] = useState<(typeof LIFETIMES)[number]["value"]>("1h");
   const [idle, setIdle] = useState(false);
@@ -123,6 +129,8 @@ function NewSandboxForm() {
 
   const picked = (template && ready.some((t) => t.name === template && usable(t)) ? template : "") || defaultTemplate(ready);
   const sz = SIZES.find((x) => x.value === size)!;
+  const refusal = (x: (typeof servers)[number]) => serverRefusal(x, sz.memoryMib, network);
+  const pinned = servers.find((x) => x.id === server && !refusal(x));
   const pickedBase = ready.find((t) => t.name === picked && isBase(t));
   // While a create waits for its server to make base there.
   const preparing =
@@ -134,6 +142,7 @@ function NewSandboxForm() {
   const body: CreateSandbox = {
     teamId: team,
     template: picked,
+    ...(pinned ? { server: pinned.id } : {}),
     cpus: sz.cpus,
     memoryMib: sz.memoryMib,
     ttl,
@@ -225,11 +234,33 @@ function NewSandboxForm() {
                 )
               }
             </Field>
-            {pickedBase && !pickedBase.servers.length ? (
-              <p className="-mt-3 text-[12px] text-muted-foreground">
-                The first sandbox from base on a server takes a minute longer.
-              </p>
-            ) : null}
+            <Field
+              label="Server"
+              hint={
+                pinned ? (
+                  <RuntimeBadge server={pinned} />
+                ) : pickedBase && !pickedBase.servers.length ? (
+                  "The first sandbox from base on a server takes a minute longer."
+                ) : undefined
+              }
+            >
+              {(p) => (
+                <Select {...p} value={pinned?.id ?? ""} onChange={(e) => setServer(e.target.value)}>
+                  <option value="">Any server</option>
+                  {servers.map((x) => {
+                    const why = refusal(x);
+                    const runtime = x.capability?.runtime;
+                    return (
+                      <option key={x.id} value={x.id} disabled={!!why}>
+                        {x.name}
+                        {runtime && runtime !== "none" ? ` · ${RUNTIME_LABEL[runtime]}` : ""}
+                        {` · ${why || freeLabel(freeMemory(x))}`}
+                      </option>
+                    );
+                  })}
+                </Select>
+              )}
+            </Field>
             <Field
               label="Size"
               hint={
