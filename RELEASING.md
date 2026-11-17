@@ -362,6 +362,12 @@ To remove or rename something, split it across releases:
 CI rejects a contract whose tag doesn't exist yet, because that release has to
 have shipped first.
 
+A migration that an installation already ran can't get that line, because
+sqlx checksums the file. Its contract goes in `scripts/migration-contracts.json`
+instead, keyed by the file name, with the same `since` and reason and the
+file's SHA-256. It covers only that exact file. Use the line in the migration
+whenever you can.
+
 Never edit a migration that has been merged. sqlx checksums applied migrations,
 and Pyo refuses to start if one has changed.
 
