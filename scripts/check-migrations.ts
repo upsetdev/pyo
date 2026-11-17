@@ -13,13 +13,24 @@
 //
 // The tag has to exist: the release has to have shipped first.
 //
+// A migration that can't carry that line any more, because an installation
+// already ran it and sqlx checksums the file, gets the same contract in
+// scripts/migration-contracts.json instead, keyed by its file name, with the
+// file's SHA-256 so it covers only the SQL that was reviewed:
+//
+//   { "0018_x.sql": { "since": "v0.4.2", "reason": "...", "sha256": "..." } }
+//
+// The line in the migration stays the way for new ones.
+//
 // Until the first release is tagged no installation depends on the
 // migrations, so they may still be edited, merged or removed.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 
 const DIR = "crates/pyo-api/migrations";
+const CONTRACTS = "scripts/migration-contracts.json";
 
 /** What would break the previous release, and why. */
 const RULES: [RegExp, string][] = [
@@ -64,6 +75,22 @@ function addsRequiredColumn(statement: string) {
 
 export type Contract = { since: string; reason: string };
 
+/** A contract kept outside its migration, for the SQL whose SHA-256 it names. */
+export type ListedContract = Contract & { sha256: string };
+
+const sha256 = (sql: string) => createHash("sha256").update(sql).digest("hex");
+
+/** What's wrong with scripts/migration-contracts.json's entries. */
+export function listProblems(list: Record<string, ListedContract>, files: string[]) {
+  const problems: string[] = [];
+  for (const [file, c] of Object.entries(list)) {
+    if (!files.includes(file)) problems.push(`${CONTRACTS}: ${file} isn't a migration.`);
+    if (!/^v\S+$/.test(c?.since ?? "") || !c?.reason?.trim() || !/^[0-9a-f]{64}$/.test(c?.sha256 ?? ""))
+      problems.push(`${CONTRACTS}: ${file} needs "since" (a version tag), a "reason" and the file's "sha256".`);
+  }
+  return problems;
+}
+
 export function contractOf(sql: string): Contract | null {
   const m = sql.match(/^[ \t]*--[ \t]*pyo:contract[ \t]+since=(v\S+)[ \t]+(\S.*)$/m);
   return m ? { since: m[1], reason: m[2].trim() } : null;
@@ -87,10 +114,12 @@ export type Repo = {
   /** The migrations on the base branch. */
   existing: string[];
   tags: string[];
+  /** scripts/migration-contracts.json, by file name. */
+  listed?: Record<string, ListedContract>;
 };
 
 /** The problems with a set of migration changes. */
-export function check(changes: Change[], { existing, tags }: Repo) {
+export function check(changes: Change[], { existing, tags, listed = {} }: Repo) {
   const problems: string[] = [];
   const number = (f: string) => Number(f.split("_")[0]);
   // Nothing released yet: no installation has run them.
@@ -117,11 +146,15 @@ export function check(changes: Change[], { existing, tags }: Repo) {
 
     const unsafe = unsafeChanges(sql);
     if (!unsafe.length) continue;
-    const contract = contractOf(sql);
+    const entry = Object.hasOwn(listed, file) ? listed[file] : undefined;
+    const changed = !!entry && entry.sha256 !== sha256(sql);
+    const contract = contractOf(sql) ?? (entry && !changed ? entry : null);
     if (contract && tags.includes(contract.since)) continue;
     const fix = contract
       ? `${contract.since} isn't a released tag, so the code that stopped depending on this hasn't shipped.`
-      : "Ship the code that stops depending on this first, then add `-- pyo:contract since=<that tag> <why it's safe>`.";
+      : changed
+        ? `It changed since its entry in ${CONTRACTS} was reviewed (its sha256 differs). Review it again.`
+        : "Ship the code that stops depending on this first, then add `-- pyo:contract since=<that tag> <why it's safe>`.";
     for (const why of unsafe) problems.push(`${file}: ${why}. ${fix}`);
   }
   return problems;
@@ -154,10 +187,16 @@ function main() {
     sql: status === "D" ? "" : readFileSync(path, "utf8"),
   }));
   const existing = lines(git("ls-tree", "--name-only", base, `${DIR}/`)).map(name);
-  const problems = check(changes, { existing, tags: lines(git("tag", "--list", "v*")) });
+  const listed: Record<string, ListedContract> = existsSync(CONTRACTS) ? JSON.parse(readFileSync(CONTRACTS, "utf8")) : {};
+  const files = lines(git("ls-files", "--cached", "--others", "--exclude-standard", "--", DIR)).map(name);
+  const problems = [
+    ...listProblems(listed, files),
+    ...check(changes, { existing, tags: lines(git("tag", "--list", "v*")), listed }),
+  ];
   for (const c of changes) {
-    const contract = contractOf(c.sql);
-    if (contract) console.log(`${c.file}: contract since ${contract.since}: ${contract.reason}`);
+    const inFile = contractOf(c.sql);
+    const contract = inFile ?? (Object.hasOwn(listed, c.file) ? listed[c.file] : null);
+    if (contract) console.log(`${c.file}: contract since ${contract.since}${inFile ? "" : ` (${CONTRACTS})`}: ${contract.reason}`);
   }
   if (problems.length) {
     console.error(problems.map((p) => `✗ ${p}`).join("\n"));

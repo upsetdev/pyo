@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { check, contractOf, unsafeChanges } from "./check-migrations";
+import { createHash } from "node:crypto";
+import { check, contractOf, listProblems, unsafeChanges } from "./check-migrations";
 
 const added = (file: string, sql: string) => ({ status: "A", file, sql });
 const repo = { existing: ["0001_init.sql", "0033_x.sql"], tags: ["v0.3.0"] };
@@ -59,6 +60,37 @@ describe("contracts", () => {
   test("a removal naming an unreleased version fails", () => {
     const sql = `-- pyo:contract since=v9.9.9 nothing reads it\n${drop}`;
     expect(check([added("0034_a.sql", sql)], repo)[0]).toContain("isn't a released tag");
+  });
+});
+
+describe("contracts kept in scripts/migration-contracts.json", () => {
+  const sql = "ALTER TABLE pyo.t ADD CONSTRAINT t_kind_check CHECK (kind IN ('a', 'b'));";
+  const sha256 = createHash("sha256").update(sql).digest("hex");
+  const entry = (since: string, hash = sha256) => ({ "0034_a.sql": { since, reason: "the check only widens", sha256: hash } });
+
+  test("an entry for the reviewed SQL passes", () => {
+    expect(check([added("0034_a.sql", sql)], { ...repo, listed: entry("v0.3.0") })).toEqual([]);
+  });
+
+  test("an entry naming an unreleased version fails", () => {
+    expect(check([added("0034_a.sql", sql)], { ...repo, listed: entry("v9.9.9") })[0]).toContain("isn't a released tag");
+  });
+
+  test("an entry for other SQL fails", () => {
+    const problems = check([added("0034_a.sql", `${sql}\nDROP TABLE pyo.t;`)], { ...repo, listed: entry("v0.3.0") });
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems[0]).toContain("sha256 differs");
+  });
+
+  test("an entry covers only its own file", () => {
+    expect(check([added("0035_b.sql", sql)], { ...repo, listed: entry("v0.3.0") })).toHaveLength(1);
+  });
+
+  test("an entry has to name a migration and say since, why and its sha256", () => {
+    expect(listProblems(entry("v0.3.0"), ["0034_a.sql"])).toEqual([]);
+    expect(listProblems(entry("v0.3.0"), ["0001_init.sql"])[0]).toContain("isn't a migration");
+    expect(listProblems(entry("v0.3.0", "abc"), ["0034_a.sql"])).toHaveLength(1);
+    expect(listProblems({ "0034_a.sql": { since: "v0.3.0", reason: " ", sha256 } }, ["0034_a.sql"])).toHaveLength(1);
   });
 });
 

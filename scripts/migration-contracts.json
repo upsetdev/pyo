@@ -1,0 +1,7 @@
+{
+  "0018_tailnet_sandboxes.sql": {
+    "since": "v0.4.2",
+    "reason": "the kind check only widens, so every row a release writes still fits",
+    "sha256": "82ec7bfeb6421709c3dd73397e2ad1d76715979160a74fec8b127e0649f33208"
+  }
+}
