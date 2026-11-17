@@ -40,6 +40,9 @@ become_root() {
   exit 1
 }
 # <<< pyo:become-root
+# Before anything else is defined: piped in, the root shell reads on
+# from here, without what came before.
+become_root "$@"
 # >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh, scripts/pyo-up.sh and deploy/sandbox.sh)
 # A long wait shows it's still going. On a terminal, one line ticks
 # ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), each step's line
@@ -110,7 +113,6 @@ quietly() {
   return "$rc"
 }
 # <<< pyo:progress
-become_root "$@"
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
