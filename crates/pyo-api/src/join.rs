@@ -430,7 +430,7 @@ mod tests {
         assert!(s.contains("/usr/local/bin/pyo-reset-login"));
         assert!(s.contains("tee /usr/local/lib/pyo/addresses.sh"));
         assert!(s.contains("http://127.0.0.1:8000/install/host-units.sh"));
-        assert!(s.contains("systemctl enable --now pyo-connect.timer pyo-tailnet.timer"));
+        assert!(s.contains("systemctl -q enable --now pyo-connect.timer pyo-tailnet.timer"));
     }
 
     /// connect.sh, join.sh and install.sh carry the AppArmor workaround's

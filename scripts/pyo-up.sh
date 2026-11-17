@@ -984,7 +984,7 @@ OnUnitActiveSec=1min
 WantedBy=timers.target
 UNIT
   "${sudo[@]}" systemctl daemon-reload
-  "${sudo[@]}" systemctl enable --now pyo-connect.timer pyo-tailnet.timer >/dev/null
+  "${sudo[@]}" systemctl -q enable --now pyo-connect.timer pyo-tailnet.timer
 }
 # The key the host proves itself with to connect this machine (Pyo reads it
 # from the pyo-bootstrap Secret). Made once.
