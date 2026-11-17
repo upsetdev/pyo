@@ -36,7 +36,9 @@ pub fn certificate_resource() -> ApiResource {
 /// retried until its CRDs appear.
 pub async fn ensure(client: Client) {
     let mut refusals = 0;
+    let mut tries = 0u32;
     loop {
+        tries += 1;
         match ensure_once(&client).await {
             Ok(()) => {
                 tracing::info!("HTTPS ready: cert-manager and issuers in place");
@@ -51,10 +53,17 @@ pub async fn ensure(client: Client) {
             }
             Err(e) => {
                 tracing::info!(error = %format!("{e:#}"), "HTTPS not ready yet; retrying");
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                tokio::time::sleep(retry_after(tries)).await;
             }
         }
     }
+}
+
+/// How long before the next look for cert-manager: every 5 seconds for
+/// the first two minutes (a new install, where Pyo's dashboard on the
+/// public IP waits for the issuers), then every 30.
+fn retry_after(tries: u32) -> Duration {
+    Duration::from_secs(if tries <= 24 { 5 } else { 30 })
 }
 
 async fn ensure_once(client: &Client) -> anyhow::Result<()> {
@@ -158,6 +167,13 @@ mod tests {
         );
         assert!(!s.ready && s.failed);
         assert!(s.failure.contains("rateLimited"));
+    }
+
+    #[test]
+    fn cert_manager_is_looked_for_often_at_first() {
+        assert_eq!(retry_after(1), Duration::from_secs(5));
+        assert_eq!(retry_after(24), Duration::from_secs(5));
+        assert_eq!(retry_after(25), Duration::from_secs(30));
     }
 
     #[test]
