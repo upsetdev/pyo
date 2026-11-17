@@ -1,4 +1,4 @@
-import { ArrowSquareOutIcon, CreditCardIcon, QrCodeIcon } from "@phosphor-icons/react";
+import { ArrowSquareOutIcon, CreditCardIcon, FlaskIcon, QrCodeIcon } from "@phosphor-icons/react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { Button } from "~/components/ui/Button";
@@ -74,7 +74,7 @@ function Billing({ b, team }: { b: CloudBilling; team: string }) {
           <Row k="Servers" v={`${b.servers}`} hint="Each connected machine counts once." />
           <Row k="Price" v={`${usd(b.pricePerServerUsd)} per server / month`} />
           <Row k="Per month" v={<span className="font-semibold">{usd(b.totalUsd)}</span>} />
-          {b.provider ? <Row k="Paid with" v={b.provider === "polar" ? "Card (Polar)" : "Midtrans"} /> : null}
+          {b.provider ? <Row k="Paid with" v={b.provider === "polar" ? "Card (Polar)" : b.provider === "test" ? "Test payment" : "Midtrans"} /> : null}
           {b.periodEnd ? <Row k={b.status === "canceled" ? "Ends" : "Renews"} v={date(b.periodEnd)} /> : null}
         </dl>
         {b.status === "past_due" && b.graceUntil ? (
@@ -139,6 +139,29 @@ function Billing({ b, team }: { b: CloudBilling; team: string }) {
                   onClick={() => go("midtrans", () => cloudBilling.midtransCheckout(team, b.midtrans!.topUpServers ? "topup" : "month"))}
                 >
                   {busy === "midtrans" ? "Opening…" : b.midtrans.topUpServers ? "Pay for new servers" : "Pay this month"}
+                </Button>
+              }
+            />
+          ) : null}
+          {b.testPayments ? (
+            <Option
+              icon={<FlaskIcon size={16} />}
+              title="Test payment"
+              sub="Development only. No money moves."
+              action={
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy !== null || (b.provider === "test" && b.status === "active")}
+                  onClick={() =>
+                    go("test", async () => {
+                      await cloudBilling.testPay(team);
+                      window.location.reload();
+                      return {};
+                    })
+                  }
+                >
+                  {busy === "test" ? "Paying…" : "Pay (test)"}
                 </Button>
               }
             />

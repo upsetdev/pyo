@@ -832,7 +832,7 @@ export type CloudBilling = {
   pricePerServerUsd: number;
   totalUsd: number;
   status: "none" | "active" | "past_due" | "paused" | "canceled";
-  provider: "polar" | "midtrans" | null;
+  provider: "polar" | "midtrans" | "test" | null;
   seats: number;
   periodEnd: number | null;
   graceUntil: number | null;
@@ -847,6 +847,8 @@ export type CloudBilling = {
     topUpServers: number;
     topUpIdr: number;
   } | null;
+  /** A development build's payments without a provider (no money moves). */
+  testPayments?: boolean;
 };
 export const cloudBilling = {
   get: (team: string) => request<CloudBilling>(`/api/cloud/billing?${new URLSearchParams({ team })}`),
@@ -854,4 +856,5 @@ export const cloudBilling = {
   polarPortal: (team: string) => request<{ url: string }>("/api/cloud/billing/polar/portal", { method: "POST", body: { team } }),
   midtransCheckout: (team: string, kind: "month" | "topup") =>
     request<{ token: string; redirectUrl: string }>("/api/cloud/billing/midtrans/checkout", { method: "POST", body: { team, kind } }),
+  testPay: (team: string) => request<{ ok: boolean }>("/api/cloud/billing/test/pay", { method: "POST", body: { team } }),
 };
