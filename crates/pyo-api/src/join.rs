@@ -1349,7 +1349,7 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
             );
         }
         assert!(CONNECT_SCRIPT.contains(
-            "if [ -n \"$REGISTRY\" ] || [ -n \"$GPU_TOOLKIT_NEW\" ] || [ -n \"$K3S_MEMORY_CHANGED\" ]; then systemctl restart k3s"
+            "if [ -n \"$REGISTRY\" ] || [ -n \"$LOCAL_REGISTRY_NEW\" ] || [ -n \"$GPU_TOOLKIT_NEW\" ] || [ -n \"$K3S_MEMORY_CHANGED\" ]; then systemctl restart k3s"
         ));
     }
 
