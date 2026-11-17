@@ -1621,6 +1621,105 @@ pub async fn set_tailnet_web(client: &Client, on: bool) {
     }
 }
 
+/// The public IPs behind the cloud's NAT: every server's that runs a proxy
+/// (all but build-only ones) and has one its cloud maps to it (locate.rs),
+/// unless it's on its own network card too. Sorted, once each.
+pub fn public_nat_ips(nodes: &[k8s_openapi::api::core::v1::Node]) -> Vec<String> {
+    let mut ips: Vec<String> = nodes
+        .iter()
+        .filter(|n| {
+            n.labels()
+                .get(pyo_proto::BUILDER_NODE_LABEL)
+                .map(String::as_str)
+                != Some("true")
+        })
+        .filter_map(|n| {
+            let a = n.annotations();
+            let ip = a.get(pyo_proto::CLOUD_PUBLIC_IPV4_ANNOTATION)?;
+            let on_card = a
+                .get(pyo_proto::NIC_PUBLIC_IPV4_ANNOTATION)
+                .is_some_and(|v| v.split(',').any(|c| c.trim() == ip));
+            (crate::locate::public_v4(ip) && !on_card).then(|| ip.clone())
+        })
+        .collect();
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
+/// The NAT Service was refused (said once).
+static PUBLIC_NAT_REFUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The cluster's own requests to the public IPs behind the cloud's NAT go
+/// to the proxies (system.rs `PUBLIC_NAT_SERVICE`), while it takes public
+/// traffic (from each heartbeat's reply): the Service written or removed
+/// when that differs.
+pub async fn set_public_nat(client: &Client, on: bool) {
+    let services: Api<k8s_openapi::api::core::v1::Service> =
+        Api::namespaced(client.clone(), GATEWAY_NS);
+    let wanted = if on {
+        match Api::<k8s_openapi::api::core::v1::Node>::all(client.clone())
+            .list(&ListParams::default())
+            .await
+        {
+            Ok(l) => public_nat_ips(&l.items),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't list servers for the public IPs behind NAT");
+                return;
+            }
+        }
+    } else {
+        vec![]
+    };
+    let current = match services.get_opt(system::PUBLIC_NAT_SERVICE).await {
+        Ok(s) => s.map(|s| {
+            let spec = s.spec.unwrap_or_default();
+            let mut ips = spec.external_ips.unwrap_or_default();
+            ips.sort();
+            let ports = serde_json::to_value(spec.ports.unwrap_or_default()).unwrap_or_default();
+            (ips, ports)
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't read the public NAT Service");
+            return;
+        }
+    };
+    // The same rule as the tailnet websites' Service: on, with addresses.
+    match tailnet_web_change(on, wanted, current) {
+        None => {}
+        Some(None) => match services
+            .delete(system::PUBLIC_NAT_SERVICE, &DeleteParams::default())
+            .await
+        {
+            Ok(_) => tracing::info!("no public IPs behind NAT"),
+            Err(e) => tracing::warn!(error = %e, "couldn't remove the public NAT Service"),
+        },
+        Some(Some(ips)) => match services
+            .patch(
+                system::PUBLIC_NAT_SERVICE,
+                &pp(),
+                &Patch::Apply(system::public_nat_service(&ips)),
+            )
+            .await
+        {
+            Ok(_) => {
+                PUBLIC_NAT_REFUSED.store(false, Ordering::Relaxed);
+                tracing::info!(
+                    ?ips,
+                    "public IPs behind NAT reach the proxies from within the cluster"
+                )
+            }
+            Err(kube::Error::Api(e)) if e.code == 403 => {
+                if !PUBLIC_NAT_REFUSED.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(error = %e, "couldn't write the public NAT Service (run the cluster's connect command)");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "couldn't write the public NAT Service"),
+        },
+    }
+}
+
 async fn ensure_once(client: &Client) -> anyhow::Result<()> {
     let proxies = envoy_proxies(client);
     let current = proxies
@@ -1920,6 +2019,64 @@ mod tests {
         );
         assert_eq!(tailnet_web_change(false, vec![], None), None);
         assert_eq!(tailnet_web_change(true, vec![], None), None);
+    }
+
+    /// The public IPs behind the cloud's NAT: those the cloud maps to the
+    /// servers that run a proxy, not ones on their own cards, nor anything
+    /// that isn't a public IPv4 address.
+    #[test]
+    fn public_ips_behind_nat() {
+        let node = |name: &str, labels: Value, annotations: Value| {
+            serde_json::from_value::<k8s_openapi::api::core::v1::Node>(json!({
+                "metadata": { "name": name, "labels": labels, "annotations": annotations },
+            }))
+            .unwrap()
+        };
+        let nodes = [
+            node(
+                "a",
+                json!({}),
+                json!({ "pyo/cloud-public-ipv4": "43.156.1.2", "pyo/nic-public-ipv4": "" }),
+            ),
+            node(
+                "b",
+                json!({}),
+                json!({ "pyo/cloud-public-ipv4": "3.120.1.2" }),
+            ),
+            // On its card: the internet and the cluster reach it directly.
+            node(
+                "c",
+                json!({}),
+                json!({ "pyo/cloud-public-ipv4": "203.0.113.7", "pyo/nic-public-ipv4": "203.0.113.7" }),
+            ),
+            // Build-only: no proxy there.
+            node(
+                "d",
+                json!({ "pyo/builder": "true" }),
+                json!({ "pyo/cloud-public-ipv4": "34.72.1.2" }),
+            ),
+            // None, or not a public address.
+            node("e", json!({}), json!({ "pyo/cloud-public-ipv4": "" })),
+            node(
+                "f",
+                json!({}),
+                json!({ "pyo/cloud-public-ipv4": "10.3.8.13" }),
+            ),
+            node("g", json!({}), json!({})),
+            node(
+                "h",
+                json!({}),
+                json!({ "pyo/cloud-public-ipv4": "43.156.1.2" }),
+            ),
+        ];
+        assert_eq!(public_nat_ips(&nodes), ["3.120.1.2", "43.156.1.2"]);
+        let svc = system::public_nat_service(&public_nat_ips(&nodes));
+        assert_eq!(svc["spec"]["ports"], system::tailnet_web_ports());
+        assert_eq!(svc["spec"]["externalTrafficPolicy"], "Local");
+        assert_eq!(
+            svc["spec"]["externalIPs"],
+            json!(["3.120.1.2", "43.156.1.2"])
+        );
     }
 
     #[test]

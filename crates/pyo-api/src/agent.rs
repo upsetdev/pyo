@@ -436,6 +436,12 @@ async fn heartbeat(
     }
     // Volumes: their state, deletions confirmed, claims Pyo has no volume for.
     crate::volumes::reported(&mut tx, &cluster.id, &hb.volumes).await?;
+    // Let's Encrypt's word on Pyo's dashboard on the public IP: issued
+    // there, the IP behind the cloud's NAT is reached from outside, and its
+    // free domains may go there (freedomain.rs).
+    if same_cluster {
+        crate::publicdash::reported(&mut tx, hb.public_dashboard.as_ref()).await?;
+    }
     // Free domains on another of its addresses (a private one, one it no
     // longer has, the other mode's) follow its free-domain address, live.
     let rehomed = crate::freedomain::rehome(&mut tx, &cluster.id).await?;

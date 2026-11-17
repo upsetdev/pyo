@@ -466,6 +466,11 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
                     .annotations()
                     .get(pyo_proto::PUBLIC_COUNTRY_ANNOTATION)
                     .cloned(),
+                cloud_public_ip: n
+                    .annotations()
+                    .get(pyo_proto::CLOUD_PUBLIC_IPV4_ANNOTATION)
+                    .filter(|ip| !ip.is_empty())
+                    .cloned(),
                 nic_public_ips: n
                     .annotations()
                     .get(pyo_proto::NIC_PUBLIC_IPV4_ANNOTATION)
@@ -787,6 +792,7 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
         )
         .await,
         certificates: crate::tls::report(client).await,
+        public_dashboard: crate::publicdash::report(client).await,
         host_proof: None,
         updates: pyo_proto::UPDATES_VERSION,
         scope: None,

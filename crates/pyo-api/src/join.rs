@@ -445,8 +445,9 @@ mod tests {
         assert!(s.starts_with("#!/usr/bin/env bash\nset -euo pipefail\nhost_units() {\n"));
         assert!(s.ends_with("\n}\nhost_units\n"));
         assert!(s.contains("/usr/local/bin/pyo-reset-login"));
+        assert!(s.contains("tee /usr/local/lib/pyo/addresses.sh"));
         assert!(s.contains("http://127.0.0.1:8000/install/host-units.sh"));
-        assert!(s.contains("systemctl enable --now pyo-connect.timer pyo-tailnet.timer"));
+        assert!(s.contains("systemctl -q enable --now pyo-connect.timer pyo-tailnet.timer"));
     }
 
     /// connect.sh, join.sh and install.sh carry the AppArmor workaround's
@@ -744,7 +745,8 @@ mod tests {
     }
 
     /// install.sh and scripts/pyo-up.sh set up the machine Pyo runs on the
-    /// same way: its timers, bootstrap key and where Pyo is.
+    /// same way: its timers, bootstrap key and where Pyo is (host_units
+    /// writes addresses.sh).
     #[test]
     fn install_and_pyo_up_share_the_host_setup() {
         let function = |file: &str, script: &str, name: &str| -> String {
@@ -758,13 +760,7 @@ mod tests {
         };
         let install = include_str!("../../../deploy/install.sh");
         let pyo_up = include_str!("../../../scripts/pyo-up.sh");
-        for name in [
-            "host_units",
-            "bootstrap_key",
-            "nic_public_ip",
-            "pyo_https_url",
-            "pyo_addresses",
-        ] {
+        for name in ["host_units", "bootstrap_key", "pyo_addresses"] {
             assert_eq!(
                 function("deploy/install.sh", install, name),
                 function("scripts/pyo-up.sh", pyo_up, name),
@@ -1229,15 +1225,12 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
         let (code, out, err) = apply_agent(&version_json("37", "37"), 3);
         assert_eq!(code, 0, "{err}");
         assert!(out.trim().ends_with("ok after 4"), "{out}");
-        // What it's doing, then its progress line once and with the time
-        // every 20 seconds off a terminal, and no Kubernetes errors or tries.
-        assert!(out.starts_with("Installing the Pyo agent…"));
-        assert!(out.contains("\nStill installing the Pyo agent…\n"), "{out}");
+        // The step once, then with the time every 20 seconds off a
+        // terminal, then done, and no Kubernetes errors or tries.
+        assert!(out.starts_with("→ Installing the Pyo agent…\n"), "{out}");
         assert!(!out.contains("agent… 0:00"), "{out}");
-        assert!(
-            out.contains("Still installing the Pyo agent… 0:20"),
-            "{out}"
-        );
+        assert!(out.contains("→ Installing the Pyo agent… 0:20"), "{out}");
+        assert!(out.contains("\n✓ Installed the Pyo agent "), "{out}");
         assert!(!out.contains("try ") && !err.contains("try "), "{out}{err}");
     }
 
@@ -1268,6 +1261,7 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
             assert_eq!(code, 0, "{err}");
             let last = out.trim().lines().last().unwrap();
             assert!(last.starts_with("failed after "), "{out}");
+            assert!(out.contains("\n✗ Installing the Pyo agent\n"), "{out}");
             let tries: u32 = last["failed after ".len()..].parse().unwrap();
             assert!((10..=14).contains(&tries), "{tries} tries");
             assert!(!out.contains("older than") && !err.contains("older than"));

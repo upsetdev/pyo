@@ -1,16 +1,25 @@
-//! Where each server is: its public address as the internet sees it, and
-//! its Tailscale address.
+//! Where each server is: its public address as the internet sees it, the
+//! one its cloud maps to it, and its Tailscale address.
 //!
 //! Node addresses are often private or tailnet IPs, which say nothing about
-//! location. So, for each ready server not checked lately, the agent runs a
-//! one-off pod on it (host network) that asks Cloudflare's trace endpoint
-//! for the server's public IP and country, once over IPv4 and once over
-//! IPv6 (a server can have one of each), and lists the server's own IPv4
-//! addresses (its Tailscale one, and any public one on a network card,
-//! among them), and keeps the answers as node annotations. The heartbeat
-//! reports them; the API looks the IP up (GeoIP) for the city, and points
-//! the cluster's free domains at the public or the Tailscale address (a
-//! server behind NAT has only a private address on its network card).
+//! location. So, for each ready server not checked lately (or started
+//! again since), the agent runs a one-off pod on it (host network) that
+//! asks Cloudflare's trace endpoint for the server's public IP and country,
+//! once over IPv4 and once over IPv6 (a server can have one of each), asks
+//! the cloud's metadata service for the public IP the cloud maps to it,
+//! and lists the server's own IPv4 addresses (its Tailscale one, and any
+//! public one on a network card, among them), and keeps the answers as
+//! node annotations. The heartbeat reports them; the API looks the IP up
+//! (GeoIP) for the city, and points the cluster's free domains at the
+//! public or the Tailscale address.
+//!
+//! A cloud server often has only a private address on its network card:
+//! AWS, Google Cloud, Azure, Alibaba Cloud and Tencent Cloud map its public
+//! IP to it (1:1 NAT). Their metadata says which IP that is, so Pyo tries
+//! it (pyo-api's publicdash.rs). What the trace sees isn't proof of that:
+//! it can be a home router's or a shared NAT gateway's, which don't lead
+//! back to the server. Oracle Cloud's metadata has no public IP: there the
+//! trace's counts, as nothing else leads out of the server.
 //!
 //! Cloudflare's trace answers over HTTPS from a nearby anycast address, on
 //! both families (cloudflare.com has A and AAAA records), with the country
@@ -27,9 +36,9 @@ use kube::{
     api::{DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams},
 };
 use pyo_proto::{
-    LOCATED_AT_ANNOTATION, NIC_PUBLIC_IPV4_ANNOTATION, PUBLIC_COUNTRY_ANNOTATION,
-    PUBLIC_IP_ANNOTATION, PUBLIC_IPV4_ANNOTATION, PUBLIC_IPV6_ANNOTATION, TAILNET_IPV4_ANNOTATION,
-    now_ms,
+    CLOUD_PUBLIC_IPV4_ANNOTATION, LOCATED_AT_ANNOTATION, LOCATED_BOOT_ANNOTATION,
+    NIC_PUBLIC_IPV4_ANNOTATION, PUBLIC_COUNTRY_ANNOTATION, PUBLIC_IP_ANNOTATION,
+    PUBLIC_IPV4_ANNOTATION, PUBLIC_IPV6_ANNOTATION, TAILNET_IPV4_ANNOTATION, now_ms,
 };
 use serde_json::json;
 
@@ -42,6 +51,31 @@ const LOOKUP: &str = "https://cloudflare.com/cdn-cgi/trace";
 const LOOKUP_ENV: &str = "PYO_PUBLIC_IP_LOOKUP";
 /// How often a server is checked again (its address can change).
 const EVERY: Duration = Duration::from_secs(24 * 3600);
+
+/// What the pod runs (`$1`: the lookup URL, empty for none): the server's
+/// own IPv4 addresses ("a " lines); the public IP its cloud's metadata
+/// service names ("c " lines, each service asked at once, a second at
+/// most: AWS (IMDSv2, else v1, and clouds that answer like it), Google
+/// Cloud, Azure, Alibaba Cloud, Tencent Cloud, Scaleway; "c oracle" on
+/// Oracle Cloud, whose metadata has none); then the lookup once per
+/// family, each answer's lines prefixed with it (a family the server lacks
+/// just fails). The URL is an argument, never part of the script.
+const SCRIPT: &str = r#"ip -4 -o addr show 2>/dev/null | sed "s/^/a /"
+m=169.254.169.254
+c() { x=$(curl -fsS -m 1 "$@" 2>/dev/null) && [ -n "$x" ] && echo "c $x"; }
+(t=$(curl -fsS -m 1 -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" "http://$m/latest/api/token" 2>/dev/null)
+ if [ -n "$t" ]; then c -H "X-aws-ec2-metadata-token: $t" "http://$m/latest/meta-data/public-ipv4"; else c "http://$m/latest/meta-data/public-ipv4"; fi) &
+c -H "Metadata-Flavor: Google" "http://$m/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip" &
+c -H "Metadata: true" "http://$m/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text" &
+(t=$(curl -fsS -m 1 -X PUT -H "X-aliyun-ecs-metadata-token-ttl-seconds: 60" http://100.100.100.200/latest/api/token 2>/dev/null)
+ h="X-aliyun-ecs-metadata-token: $t"
+ c -H "$h" http://100.100.100.200/latest/meta-data/eipv4 || c -H "$h" http://100.100.100.200/latest/meta-data/public-ipv4) &
+c http://169.254.0.23/latest/meta-data/public-ipv4 &
+(x=$(curl -fsS -m 1 http://169.254.42.42/conf 2>/dev/null | sed -n "s/^PUBLIC_IP_ADDRESS=//p") && [ -n "$x" ] && echo "c $x") &
+(curl -fsS -m 1 -H "Authorization: Bearer Oracle" "http://$m/opc/v2/instance/id" >/dev/null 2>&1 && echo "c oracle") &
+wait
+[ -z "$1" ] || for f in 4 6; do curl -$f -s -m 8 "$1" | sed "s/^/v$f /"; done
+exit 0"#;
 
 /// The lookup URL, or None when it's off.
 fn lookup_url(env: Option<&str>) -> Option<String> {
@@ -89,11 +123,24 @@ async fn locate_all(client: &Client, url: Option<&str>) -> anyhow::Result<()> {
             .get(LOCATED_AT_ANNOTATION)
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
-        // Never looked for its Tailscale address or its network cards' public
-        // ones: now (an agent that didn't yet).
-        let tailnet_known = n.annotations().contains_key(TAILNET_IPV4_ANNOTATION)
-            && n.annotations().contains_key(NIC_PUBLIC_IPV4_ANNOTATION);
-        if !ready || (tailnet_known && now_ms() - checked < EVERY.as_millis() as i64) {
+        // Never looked for its Tailscale address, its network cards' public
+        // ones or its cloud's: now (an agent that didn't yet).
+        let all_known = [
+            TAILNET_IPV4_ANNOTATION,
+            NIC_PUBLIC_IPV4_ANNOTATION,
+            CLOUD_PUBLIC_IPV4_ANNOTATION,
+        ]
+        .iter()
+        .all(|a| n.annotations().contains_key(*a));
+        // Started again since: a cloud may have given it another public IP.
+        let boot = n
+            .status
+            .as_ref()
+            .and_then(|s| s.node_info.as_ref())
+            .map(|i| i.boot_id.clone())
+            .unwrap_or_default();
+        let same_boot = n.annotations().get(LOCATED_BOOT_ANNOTATION) == Some(&boot);
+        if !ready || (all_known && same_boot && now_ms() - checked < EVERY.as_millis() as i64) {
             continue;
         }
         let name = n.name_any();
@@ -112,6 +159,8 @@ async fn locate_all(client: &Client, url: Option<&str>) -> anyhow::Result<()> {
                 let mut annotations = json!({
                     TAILNET_IPV4_ANNOTATION: tailnet, LOCATED_AT_ANNOTATION: now_ms().to_string(),
                     NIC_PUBLIC_IPV4_ANNOTATION: found.nic_public.join(","),
+                    CLOUD_PUBLIC_IPV4_ANNOTATION: found.cloud.clone().unwrap_or_default(),
+                    LOCATED_BOOT_ANNOTATION: boot,
                 });
                 if url.is_some() {
                     annotations[PUBLIC_IP_ANNOTATION] = json!(ip);
@@ -123,7 +172,7 @@ async fn locate_all(client: &Client, url: Option<&str>) -> anyhow::Result<()> {
                 nodes
                     .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
                     .await?;
-                tracing::info!(node = %name, %ip, %country, %tailnet, "located server");
+                tracing::info!(node = %name, %ip, %country, %tailnet, cloud = ?found.cloud, "located server");
             }
             Err(e) => tracing::warn!(node = %name, error = %e, "couldn't locate server"),
         }
@@ -141,6 +190,8 @@ struct Found {
     tailnet: Option<String>,
     /// Public IPv4 addresses on its own network cards.
     nic_public: Vec<String>,
+    /// The public IPv4 address its cloud maps to it.
+    cloud: Option<String>,
 }
 
 /// Public IPs, country code and Tailscale address of one server.
@@ -164,11 +215,7 @@ async fn locate(client: &Client, node: &str, url: Option<&str>) -> anyhow::Resul
             "tolerations": [{ "operator": "Exists" }],
             "containers": [{
                 "name": "locate", "image": IMAGE,
-                // The server's own IPv4 addresses ("a " lines); then the
-                // lookup once per family, each answer's lines prefixed with
-                // it (a family the server lacks just fails). The URL is an
-                // argument, never part of the script; empty: no lookup.
-                "command": ["sh", "-c", "ip -4 -o addr show 2>/dev/null | sed \"s/^/a /\"; [ -z \"$1\" ] || for f in 4 6; do curl -$f -s -m 8 \"$1\" | sed \"s/^/v$f /\"; done; exit 0", "locate", url.unwrap_or("")],
+                "command": ["sh", "-c", SCRIPT, "locate", url.unwrap_or("")],
                 "resources": { "limits": { "cpu": "100m", "memory": "32Mi" } },
                 "securityContext": { "runAsNonRoot": true, "runAsUser": 65534, "runAsGroup": 65534, "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": { "drop": ["ALL"] } },
             }],
@@ -247,7 +294,9 @@ fn parse_trace(out: &str) -> Option<Found> {
     let (v4, v6) = (ip("v4", false), ip("v6", true));
     let tailnet = tailnet_of(out);
     let nic_public = nic_public_of(out);
-    if v4.is_none() && v6.is_none() && tailnet.is_none() && nic_public.is_empty() {
+    let cloud = cloud_of(out, v4.as_deref());
+    if v4.is_none() && v6.is_none() && tailnet.is_none() && nic_public.is_empty() && cloud.is_none()
+    {
         return None;
     }
     let country = field("v4", "loc")
@@ -260,7 +309,46 @@ fn parse_trace(out: &str) -> Option<Found> {
         country,
         tailnet,
         nic_public,
+        cloud,
     })
+}
+
+/// A public IPv4 address: not private, tailnet/CGNAT, loopback,
+/// link-local, unspecified, broadcast or multicast.
+pub fn public_v4(ip: &str) -> bool {
+    ip.parse::<std::net::Ipv4Addr>().is_ok_and(|a| {
+        let [x, y, ..] = a.octets();
+        !(a.is_private()
+            || a.is_loopback()
+            || a.is_link_local()
+            || a.is_unspecified()
+            || a.is_broadcast()
+            || a.is_multicast()
+            || x >= 240
+            || x == 0
+            || (x == 100 && (64..=127).contains(&y)))
+    })
+}
+
+/// The public IPv4 address the cloud's metadata named ("c " lines), or on
+/// Oracle Cloud ("c oracle", its metadata has none) the one the lookup
+/// found over IPv4 (`v4`).
+fn cloud_of(out: &str, v4: Option<&str>) -> Option<String> {
+    let said: Vec<&str> = out
+        .lines()
+        .filter_map(|l| l.strip_prefix("c "))
+        .map(str::trim)
+        .collect();
+    said.iter()
+        .find(|ip| public_v4(ip))
+        .map(|ip| (*ip).to_owned())
+        .or_else(|| {
+            said.contains(&"oracle")
+                .then_some(v4)
+                .flatten()
+                .filter(|ip| public_v4(ip))
+                .map(str::to_owned)
+        })
 }
 
 /// The server's own IPv4 addresses ("a " lines of `ip -4 -o addr`), each
@@ -281,18 +369,7 @@ fn own_addresses(out: &str) -> impl Iterator<Item = (&str, String)> {
 fn nic_public_of(out: &str) -> Vec<String> {
     let mut ips: Vec<String> = own_addresses(out)
         .map(|(_, ip)| ip)
-        .filter(|ip| {
-            ip.parse::<std::net::Ipv4Addr>().is_ok_and(|a| {
-                let [x, y, ..] = a.octets();
-                !(a.is_private()
-                    || a.is_loopback()
-                    || a.is_link_local()
-                    || a.is_unspecified()
-                    || a.is_broadcast()
-                    || a.is_multicast()
-                    || (x == 100 && (64..=127).contains(&y)))
-            })
-        })
+        .filter(|ip| public_v4(ip))
         .collect();
     ips.dedup();
     ips
@@ -325,7 +402,8 @@ mod tests {
                 v6: Some("2001:db8::7".into()),
                 country: "DE".into(),
                 tailnet: None,
-                nic_public: vec![]
+                nic_public: vec![],
+                cloud: None
             })
         );
         let v6_only = "v6 ip=2001:db8::7\nv6 loc=SG\n";
@@ -336,7 +414,8 @@ mod tests {
                 v6: Some("2001:db8::7".into()),
                 country: "SG".into(),
                 tailnet: None,
-                nic_public: vec![]
+                nic_public: vec![],
+                cloud: None
             })
         );
         assert_eq!(parse_trace("nope"), None);
@@ -348,7 +427,8 @@ mod tests {
                 v6: None,
                 country: "SG".into(),
                 tailnet: None,
-                nic_public: vec![]
+                nic_public: vec![],
+                cloud: None
             })
         );
         // A lookup answering with just the address.
@@ -359,7 +439,8 @@ mod tests {
                 v6: None,
                 country: String::new(),
                 tailnet: None,
-                nic_public: vec![]
+                nic_public: vec![],
+                cloud: None
             })
         );
         // An IPv4 answer over IPv6 (no IPv6 route, a proxy) isn't an IPv6 address.
@@ -381,7 +462,8 @@ mod tests {
                 v6: None,
                 country: "SG".into(),
                 tailnet: Some("100.101.67.2".into()),
-                nic_public: vec![]
+                nic_public: vec![],
+                cloud: None
             })
         );
         // No internet (or the lookup off): the Tailscale address alone.
@@ -415,6 +497,132 @@ mod tests {
             Some("100.64.0.9")
         );
         assert!(tailnet_v4("100.127.0.1") && !tailnet_v4("100.128.0.1") && !tailnet_v4("10.0.0.1"));
+    }
+
+    /// What the pod printed on cloud servers behind 1:1 NAT.
+    #[test]
+    fn the_clouds_public_ip() {
+        // Tencent Cloud: a private card, the metadata names the public IP.
+        let tencent = "a 2: eth0    inet 10.3.8.13/22 brd 10.3.11.255 scope global eth0\n\
+                       c 43.156.1.2\nv4 ip=43.156.1.2\nv4 loc=SG\n";
+        let f = parse_trace(tencent).unwrap();
+        assert_eq!(f.cloud.as_deref(), Some("43.156.1.2"));
+        assert!(f.nic_public.is_empty());
+        // Even with the lookup off: the metadata is the cloud's own.
+        assert_eq!(
+            parse_trace("a 2: ens5    inet 172.31.5.10/20 scope global ens5\nc 3.120.1.2\n")
+                .unwrap()
+                .cloud
+                .as_deref(),
+            Some("3.120.1.2")
+        );
+        // A home server: only the trace, no cloud IP (that's the router's).
+        assert_eq!(
+            parse_trace("a 2: eth0    inet 192.168.1.5/24 scope global eth0\nv4 ip=81.2.69.160\n")
+                .unwrap()
+                .cloud,
+            None
+        );
+        // Oracle Cloud: its metadata has no public IP, the trace's counts.
+        let oracle =
+            "a 2: enp0s6    inet 10.0.0.37/24 scope global enp0s6\nc oracle\nv4 ip=129.146.1.2\n";
+        assert_eq!(
+            parse_trace(oracle).unwrap().cloud.as_deref(),
+            Some("129.146.1.2")
+        );
+        assert_eq!(parse_trace("c oracle\n"), None);
+        // An error page, a private or a reserved address isn't one.
+        for junk in [
+            "c <html>",
+            "c 10.3.8.13",
+            "c 100.101.67.2",
+            "c 999.1.2.3",
+            "c 250.1.2.3",
+        ] {
+            assert_eq!(cloud_of(junk, None), None, "{junk}");
+        }
+    }
+
+    /// The pod's script asks every cloud for a second at most, and never
+    /// has the lookup URL in it.
+    #[test]
+    fn the_script_asks_the_clouds_briefly() {
+        for host in [
+            "m=169.254.169.254",
+            "/latest/meta-data/public-ipv4",
+            "computeMetadata",
+            "Metadata: true",
+            "100.100.100.200",
+            "169.254.0.23",
+            "169.254.42.42",
+            "Bearer Oracle",
+        ] {
+            assert!(SCRIPT.contains(host), "{host}");
+        }
+        let asks = SCRIPT.matches("curl -fsS").count();
+        assert_eq!(asks, SCRIPT.matches("curl -fsS -m 1 ").count());
+        assert!(!SCRIPT.contains("cloudflare"));
+    }
+
+    /// The script itself (sh), with the server's commands stubbed: `ip`,
+    /// and `curl` answering as Tencent Cloud's metadata does (no other
+    /// cloud's), then as Oracle Cloud's.
+    #[test]
+    fn the_script_finds_the_clouds_public_ip() {
+        let dir = std::env::temp_dir().join(format!("pyo-locate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        stub(
+            "ip",
+            "echo '2: eth0    inet 10.3.8.13/22 brd 10.3.11.255 scope global eth0'",
+        );
+        let run = |cloud: &str| {
+            stub(
+                "curl",
+                &format!(
+                    r#"for a; do url=$a; done
+case "{cloud}:$url" in
+  tencent:http://169.254.0.23/latest/meta-data/public-ipv4) printf 43.156.1.2 ;;
+  oracle:http://169.254.169.254/opc/v2/instance/id) printf ocid1.instance ;;
+  *:https://trace.example/) printf 'ip=129.146.1.2\nloc=US\n' ;;
+  *) exit 7 ;;
+esac"#
+                ),
+            );
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(SCRIPT)
+                .arg("locate")
+                .arg(if cloud == "oracle" {
+                    "https://trace.example/"
+                } else {
+                    ""
+                })
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let out = run("tencent");
+        assert!(out.contains("\nc 43.156.1.2\n"), "{out}");
+        let f = parse_trace(&out).unwrap();
+        assert_eq!(f.cloud.as_deref(), Some("43.156.1.2"));
+        assert_eq!(f.v4, None);
+        let out = run("oracle");
+        assert_eq!(
+            parse_trace(&out).unwrap().cloud.as_deref(),
+            Some("129.146.1.2"),
+            "{out}"
+        );
+        // Nowhere: no cloud IP.
+        let out = run("none");
+        assert_eq!(parse_trace(&out), None, "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

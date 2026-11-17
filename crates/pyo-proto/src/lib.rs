@@ -45,6 +45,13 @@ pub struct Heartbeat {
     /// TLS certificates of service domains (cert-manager).
     #[serde(default)]
     pub certificates: Vec<CertificateReport>,
+    /// The certificate of Pyo's dashboard on the public IP
+    /// ([`system::public_dashboard_objects`]), while there is one: on the
+    /// cluster Pyo runs on. Its `hostname` is "pyo.<public IP>.nip.io";
+    /// Let's Encrypt issuing it shows the internet reaches that IP on
+    /// port 80.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_dashboard: Option<CertificateReport>,
     /// Proof that this is the cluster Pyo runs on ("This machine"): what
     /// [`host_proof`] makes of the host's bootstrap key (its
     /// pyo-system/pyo-bootstrap Secret, only there) and this agent's token.
@@ -549,6 +556,12 @@ pub struct ServerReport {
     /// it there directly (not behind NAT).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nic_public_ips: Vec<String>,
+    /// The public IPv4 address its cloud maps to it (1:1 NAT, as on AWS,
+    /// Google Cloud, Azure, Alibaba Cloud, Tencent Cloud), from the cloud's
+    /// metadata: its own, unlike what the internet sees of its requests
+    /// (that can be a router's or a shared gateway's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_public_ip: Option<String>,
     /// NVIDIA GPUs Kubernetes can hand out here (allocatable nvidia.com/gpu).
     #[serde(default)]
     pub gpus: u32,
@@ -644,6 +657,13 @@ pub const LOCATED_AT_ANNOTATION: &str = "pyo/located-at";
 pub const TAILNET_IPV4_ANNOTATION: &str = "pyo/tailnet-ipv4";
 /// Public IPv4 addresses on its own network cards, comma-separated ("" for none).
 pub const NIC_PUBLIC_IPV4_ANNOTATION: &str = "pyo/nic-public-ipv4";
+/// The public IPv4 address its cloud maps to it (1:1 NAT), from the cloud's
+/// metadata ("" for none: not on a cloud, or no public IP there).
+pub const CLOUD_PUBLIC_IPV4_ANNOTATION: &str = "pyo/cloud-public-ipv4";
+/// The boot it was last looked at in (its node's boot ID): a server that
+/// started again is looked at again, as a cloud may give it another public
+/// IP then.
+pub const LOCATED_BOOT_ANNOTATION: &str = "pyo/located-boot";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

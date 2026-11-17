@@ -80,11 +80,33 @@ become_root() {
 # from here, without what came before.
 become_root "$@"
 # >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh, scripts/pyo-up.sh and deploy/sandbox.sh)
-# A long wait shows it's still going. On a terminal, one line ticks
-# ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), each step's line
-# comes once (not again for a step with the same line), then with its time
-# every 20 seconds while it runs. progress_start MESSAGE, then
-# progress_tick as often as it likes, then progress_end.
+# Steps, as a checklist. On a terminal, the step that runs ticks on one
+# line ("→ Downloading k3s… 0:12"), then stays: done ("✓ Downloaded k3s
+# 0:12", the time once it took a while), failed ("✗ Downloading k3s") or
+# still going on its own ("● Starting the dashboard"), in color unless
+# NO_COLOR is set. Elsewhere (piped, a CI log), no colors and no line
+# drawn over: each step's line comes once (not again for a step with the
+# same line), then with its time every 20 seconds while it runs, then how
+# it ended (once for steps alike). progress_start MESSAGE, then
+# progress_tick as often as it likes, then progress_end [ok|fail|wait]
+# [WHAT IT DID]. And: say TEXT, a heading. ok_line TEXT, the last line
+# once all went well. dot_line green|yellow|red|dim TEXT, how something
+# is (running, starting, failed, stopped).
+progress_color() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }
+# progress_paint SGR TEXT: TEXT in that color, when there are colors (it
+# prints itself: in $(...) there's never a terminal).
+progress_paint() {
+  if progress_color; then printf '\033[%sm%s\033[0m' "$1" "$2"; else printf '%s' "$2"; fi
+}
+progress_time() { printf '%d:%02d' $(($1 / 60)) $(($1 % 60)); }
+say() { progress_paint 1 "→ $*"; echo; }
+ok_line() { progress_paint '1;32' "✓ $*"; echo; }
+dot_line() {
+  local c=2
+  case $1 in green) c=32 ;; yellow) c=33 ;; red) c=31 ;; esac
+  progress_paint "$c" ●
+  printf ' %s\n' "$2"
+}
 progress_start() {
   PROGRESS_MSG=$1 PROGRESS_T0=$SECONDS PROGRESS_NEXT=0
   progress_tick
@@ -93,33 +115,82 @@ progress_tick() {
   [ -n "${PROGRESS_MSG:-}" ] || return 0
   local t=$((SECONDS - PROGRESS_T0))
   if [ -t 1 ]; then
-    printf '\r\033[K%s %d:%02d' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+    printf '\r\033[K'
+    progress_paint 36 →
+    printf ' %s ' "$PROGRESS_MSG"
+    progress_paint 2 "$(progress_time "$t")"
   elif [ "$t" -ge "$PROGRESS_NEXT" ]; then
     if [ "$PROGRESS_NEXT" -gt 0 ]; then
-      printf '%s %d:%02d\n' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+      printf '→ %s %s\n' "$PROGRESS_MSG" "$(progress_time "$t")"
     elif [ "$PROGRESS_MSG" != "${PROGRESS_LAST:-}" ]; then
-      printf '%s\n' "$PROGRESS_MSG"
+      printf '→ %s\n' "$PROGRESS_MSG"
     fi
     PROGRESS_LAST=$PROGRESS_MSG PROGRESS_NEXT=$((t + 20))
   fi
   return 0
 }
+# What a step did, from what it was doing: "Downloading k3s…" is
+# "Downloaded k3s".
+progress_done() {
+  local m=${1%…} w
+  w=${m%% *}
+  case $w in
+    Applying) w=Applied ;; Building) w=Built ;; Checking) w=Checked ;;
+    Connecting) w=Connected ;; Copying) w=Copied ;; Creating) w=Created ;;
+    Deleting) w=Deleted ;; Downloading) w=Downloaded ;; Getting) w=Got ;;
+    Installing) w=Installed ;; Joining) w=Joined ;; Moving) w=Moved ;;
+    Removing) w=Removed ;; Restarting) w=Restarted ;; Setting) w=Set ;;
+    Starting) w=Started ;; Stopping) w=Stopped ;; Updating) w=Updated ;;
+    Waiting) w=Waited ;;
+  esac
+  printf '%s%s' "$w" "${m#"${m%% *}"}"
+}
 progress_end() {
   [ -n "${PROGRESS_MSG:-}" ] || return 0
+  local t=$((SECONDS - PROGRESS_T0)) done=""
   [ ! -t 1 ] || printf '\r\033[K'
+  [ "${1:-ok}" != ok ] || done=${2:-$(progress_done "$PROGRESS_MSG")}
+  # The same step again (a file each): said once.
+  if [ -n "$done" ] && [ "$done" = "${PROGRESS_DONE:-}" ]; then
+    PROGRESS_MSG=""
+    return 0
+  fi
+  PROGRESS_DONE=$done
+  case ${1:-ok} in
+    ok)
+      progress_paint 32 ✓
+      printf ' %s' "$done"
+      ;;
+    fail)
+      progress_paint 31 "✗ ${PROGRESS_MSG%…}"
+      t=0
+      ;;
+    *)
+      progress_paint 33 ●
+      printf ' %s' "${2:-${PROGRESS_MSG%…}}"
+      ;;
+  esac
+  if [ "$t" -ge 5 ]; then
+    printf ' '
+    progress_paint 2 "$(progress_time "$t")"
+  fi
+  echo
   PROGRESS_MSG=""
 }
-# wait_until MESSAGE SECONDS COMMAND...: COMMAND every 2 seconds until it
-# succeeds, or a failure once SECONDS have passed. Nothing to show when it
+# wait_until [-f] MESSAGE SECONDS COMMAND...: COMMAND every 2 seconds
+# until it succeeds, or a failure once SECONDS have passed: the step goes
+# on by itself ("●"), or with -f it failed ("✗"). Nothing to show when it
 # succeeds at once.
 wait_until() {
+  local end=wait
+  [ "$1" != -f ] || { end=fail; shift; }
   local msg=$1 limit=$2 t0=$SECONDS
   shift 2
   "$@" && return 0
   progress_start "$msg"
   until "$@"; do
     if [ $((SECONDS - t0)) -ge "$limit" ]; then
-      progress_end
+      progress_end "$end"
       return 1
     fi
     sleep 1
@@ -143,7 +214,7 @@ quietly() {
     progress_tick
   done
   wait "$pid" || rc=$?
-  progress_end
+  if [ "$rc" = 0 ]; then progress_end; else progress_end fail; fi
   [ "$rc" = 0 ] || cat "$log" >&2
   rm -f "$log"
   return "$rc"
@@ -740,7 +811,7 @@ export K3S_URL="https://$SERVER_IP:6443" K3S_TOKEN
 quietly "Installing k3s and joining the cluster…" k3s_install "$K3S_DIR" agent ||
   { echo "k3s didn't install. Run the same command again." >&2; exit 1; }
 if [ -n "$BUILDER" ]; then
-  echo "Joined as $NODE_NAME, for builds only. The builder starts on it in a minute."
+  ok_line "Joined as $NODE_NAME, for builds only. The builder starts on it in a minute."
 else
-  echo "Joined as $NODE_NAME. It shows up in Pyo in a few seconds."
+  ok_line "Joined as $NODE_NAME. It shows up in Pyo in a few seconds."
 fi

@@ -92,7 +92,7 @@ if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
     YELLOW=$'\033[33m' CYAN=$'\033[36m' RESET=$'\033[0m'
   fi
 fi
-log() { printf '%s==> %s%s\n' "$BOLD" "$*" "$RESET"; }
+log() { printf '%s→ %s%s\n' "$BOLD" "$*" "$RESET"; }
 
 WORK=$(mktemp -d)
 DRAWN=0 INTERRUPTED=""
