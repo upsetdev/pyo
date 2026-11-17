@@ -38,12 +38,12 @@ IMAGES=127.0.0.1:5005/pyo
 RELEASE_IMAGES=ghcr.io/upsetdev/pyo
 RELEASE_SIGNER='^https://github\.com/upsetdev/pyo/\.github/workflows/release\.yml@refs/tags/v'
 
-TTY="" BOLD="" RED="" RESET=""
+TTY="" BOLD="" RED="" GREEN="" CYAN="" DIM="" RESET=""
 if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
   TTY=1
-  [ -n "${NO_COLOR:-}" ] || BOLD=$'\033[1m' RED=$'\033[31m' RESET=$'\033[0m'
+  [ -n "${NO_COLOR:-}" ] || BOLD=$'\033[1m' RED=$'\033[31m' GREEN=$'\033[32m' CYAN=$'\033[36m' DIM=$'\033[2m' RESET=$'\033[0m'
 fi
-log() { printf '%s==> %s%s\n' "$BOLD" "$*" "$RESET"; }
+log() { printf '%s→ %s%s\n' "$BOLD" "$*" "$RESET"; }
 
 # The sandbox templates' images: published (the default) or built here.
 SANDBOX_SRC=""
@@ -159,31 +159,37 @@ trap 'exit 130' INT TERM
 
 fmt_time() { printf '%d:%02d' "$(($1 / 60))" "$(($1 % 60))"; }
 
+# A step as the install script shows one (pyo:progress): "→ label 0:12"
+# while it runs, then "✓ label 0:12" or "✗ label".
 SPIN_LABEL="" SPIN_T0=0 SPIN_N=0 SPIN_NEXT=0
 spin_start() {
   SPIN_LABEL=$1 SPIN_T0=$SECONDS SPIN_N=0 SPIN_NEXT=$((SECONDS + 15)) SPINNING=1
-  if [ -n "$TTY" ]; then printf '\033[?25l'; else printf '    %s ...\n' "$SPIN_LABEL"; fi
+  if [ -n "$TTY" ]; then printf '\033[?25l'; else printf '→ %s\n' "$SPIN_LABEL"; fi
 }
 spin_tick() {
-  local el=$((SECONDS - SPIN_T0)) line cols chars='|/-'"\\"
+  local el=$((SECONDS - SPIN_T0)) line cols
   if [ -n "$TTY" ]; then
     cols=$(tput cols 2>/dev/null) || cols=80
     [[ "$cols" =~ ^[0-9]+$ ]] && [ "$cols" -ge 20 ] || cols=80
-    line="${chars:$((SPIN_N % 4)):1} $SPIN_LABEL $(fmt_time "$el")"
-    printf '\r\033[2K%s' "${line:0:$((cols - 1))}"
+    line="$SPIN_LABEL $(fmt_time "$el")"
+    printf '\r\033[2K%s→%s %s' "$CYAN" "$RESET" "${line:0:$((cols - 3))}"
   elif [ "$SECONDS" -ge "$SPIN_NEXT" ]; then
-    printf '    %s %s\n' "$SPIN_LABEL" "$(fmt_time "$el")"
+    printf '→ %s %s\n' "$SPIN_LABEL" "$(fmt_time "$el")"
     SPIN_NEXT=$((SECONDS + 15))
   fi
   SPIN_N=$((SPIN_N + 1))
 }
 # Clears the spinner's line, to print something else.
 spin_clear() { if [ -n "$TTY" ]; then printf '\r\033[2K'; fi; }
-spin_stop() { # what to say, e.g. "pyo ready"
+spin_stop() { # ok|fail, what to say, e.g. "pyo ready"
   spin_clear
   if [ -n "$TTY" ]; then printf '\033[?25h'; fi
   SPINNING=""
-  printf '    %s (%s)\n' "$1" "$(fmt_time "$((SECONDS - SPIN_T0))")"
+  if [ "$1" = ok ]; then
+    printf '%s✓%s %s %s%s%s\n' "$GREEN" "$RESET" "$2" "$DIM" "$(fmt_time "$((SECONDS - SPIN_T0))")" "$RESET"
+  else
+    printf '%s✗ %s%s\n' "$RED" "$2" "$RESET"
+  fi
 }
 # Ticks until process $1 ends, calling function $2 (if any) every 3 s;
 # returns the process's exit status.
@@ -212,7 +218,7 @@ run_step() { # label command...
   spin_start "$label"
   "$@" >"$STEP_OUT" 2>&1 &
   spin_while "$!" || rc=$?
-  if [ "$rc" -eq 0 ]; then spin_stop "$label: done"; else spin_stop "$label: failed"; fi
+  if [ "$rc" -eq 0 ]; then spin_stop ok "$label"; else spin_stop fail "$label"; fi
   return "$rc"
 }
 
@@ -283,10 +289,10 @@ wait_rollout() { # kind/name timeout
   kubectl -n "$NS" rollout status "$1" --timeout="$2" >"$out" 2>&1 &
   spin_while "$!" rollout_hook || rc=$?
   if [ "$rc" -eq 0 ]; then
-    spin_stop "${1#*/} ready"
+    spin_stop ok "${1#*/} ready"
     return 0
   fi
-  spin_stop "${RED}${1#*/} isn't ready${RESET} after $2"
+  spin_stop fail "${1#*/} isn't ready after $2"
   sed 's/^/    | /' "$out" >&2
   [ -z "$WAIT_SELECTOR" ] || kubectl -n "$NS" get pods -l "$WAIT_SELECTOR" -o wide 2>&1 | sed 's/^/    | /' >&2 || true
   return "$rc"
@@ -360,11 +366,33 @@ fi
 # joins the tailnet by itself and Pyo is also https://pyo.<tailnet>.ts.net.
 
 # >>> pyo:progress (the same in deploy/install.sh, connect.sh, join.sh, scripts/pyo-up.sh and deploy/sandbox.sh)
-# A long wait shows it's still going. On a terminal, one line ticks
-# ("Starting Pyo… 0:42"). Elsewhere (piped, a CI log), each step's line
-# comes once (not again for a step with the same line), then with its time
-# every 20 seconds while it runs. progress_start MESSAGE, then
-# progress_tick as often as it likes, then progress_end.
+# Steps, as a checklist. On a terminal, the step that runs ticks on one
+# line ("→ Downloading k3s… 0:12"), then stays: done ("✓ Downloaded k3s
+# 0:12", the time once it took a while), failed ("✗ Downloading k3s") or
+# still going on its own ("● Starting the dashboard"), in color unless
+# NO_COLOR is set. Elsewhere (piped, a CI log), no colors and no line
+# drawn over: each step's line comes once (not again for a step with the
+# same line), then with its time every 20 seconds while it runs, then how
+# it ended (once for steps alike). progress_start MESSAGE, then
+# progress_tick as often as it likes, then progress_end [ok|fail|wait]
+# [WHAT IT DID]. And: say TEXT, a heading. ok_line TEXT, the last line
+# once all went well. dot_line green|yellow|red|dim TEXT, how something
+# is (running, starting, failed, stopped).
+progress_color() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }
+# progress_paint SGR TEXT: TEXT in that color, when there are colors (it
+# prints itself: in $(...) there's never a terminal).
+progress_paint() {
+  if progress_color; then printf '\033[%sm%s\033[0m' "$1" "$2"; else printf '%s' "$2"; fi
+}
+progress_time() { printf '%d:%02d' $(($1 / 60)) $(($1 % 60)); }
+say() { progress_paint 1 "→ $*"; echo; }
+ok_line() { progress_paint '1;32' "✓ $*"; echo; }
+dot_line() {
+  local c=2
+  case $1 in green) c=32 ;; yellow) c=33 ;; red) c=31 ;; esac
+  progress_paint "$c" ●
+  printf ' %s\n' "$2"
+}
 progress_start() {
   PROGRESS_MSG=$1 PROGRESS_T0=$SECONDS PROGRESS_NEXT=0
   progress_tick
@@ -373,33 +401,82 @@ progress_tick() {
   [ -n "${PROGRESS_MSG:-}" ] || return 0
   local t=$((SECONDS - PROGRESS_T0))
   if [ -t 1 ]; then
-    printf '\r\033[K%s %d:%02d' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+    printf '\r\033[K'
+    progress_paint 36 →
+    printf ' %s ' "$PROGRESS_MSG"
+    progress_paint 2 "$(progress_time "$t")"
   elif [ "$t" -ge "$PROGRESS_NEXT" ]; then
     if [ "$PROGRESS_NEXT" -gt 0 ]; then
-      printf '%s %d:%02d\n' "$PROGRESS_MSG" $((t / 60)) $((t % 60))
+      printf '→ %s %s\n' "$PROGRESS_MSG" "$(progress_time "$t")"
     elif [ "$PROGRESS_MSG" != "${PROGRESS_LAST:-}" ]; then
-      printf '%s\n' "$PROGRESS_MSG"
+      printf '→ %s\n' "$PROGRESS_MSG"
     fi
     PROGRESS_LAST=$PROGRESS_MSG PROGRESS_NEXT=$((t + 20))
   fi
   return 0
 }
+# What a step did, from what it was doing: "Downloading k3s…" is
+# "Downloaded k3s".
+progress_done() {
+  local m=${1%…} w
+  w=${m%% *}
+  case $w in
+    Applying) w=Applied ;; Building) w=Built ;; Checking) w=Checked ;;
+    Connecting) w=Connected ;; Copying) w=Copied ;; Creating) w=Created ;;
+    Deleting) w=Deleted ;; Downloading) w=Downloaded ;; Getting) w=Got ;;
+    Installing) w=Installed ;; Joining) w=Joined ;; Moving) w=Moved ;;
+    Removing) w=Removed ;; Restarting) w=Restarted ;; Setting) w=Set ;;
+    Starting) w=Started ;; Stopping) w=Stopped ;; Updating) w=Updated ;;
+    Waiting) w=Waited ;;
+  esac
+  printf '%s%s' "$w" "${m#"${m%% *}"}"
+}
 progress_end() {
   [ -n "${PROGRESS_MSG:-}" ] || return 0
+  local t=$((SECONDS - PROGRESS_T0)) done=""
   [ ! -t 1 ] || printf '\r\033[K'
+  [ "${1:-ok}" != ok ] || done=${2:-$(progress_done "$PROGRESS_MSG")}
+  # The same step again (a file each): said once.
+  if [ -n "$done" ] && [ "$done" = "${PROGRESS_DONE:-}" ]; then
+    PROGRESS_MSG=""
+    return 0
+  fi
+  PROGRESS_DONE=$done
+  case ${1:-ok} in
+    ok)
+      progress_paint 32 ✓
+      printf ' %s' "$done"
+      ;;
+    fail)
+      progress_paint 31 "✗ ${PROGRESS_MSG%…}"
+      t=0
+      ;;
+    *)
+      progress_paint 33 ●
+      printf ' %s' "${2:-${PROGRESS_MSG%…}}"
+      ;;
+  esac
+  if [ "$t" -ge 5 ]; then
+    printf ' '
+    progress_paint 2 "$(progress_time "$t")"
+  fi
+  echo
   PROGRESS_MSG=""
 }
-# wait_until MESSAGE SECONDS COMMAND...: COMMAND every 2 seconds until it
-# succeeds, or a failure once SECONDS have passed. Nothing to show when it
+# wait_until [-f] MESSAGE SECONDS COMMAND...: COMMAND every 2 seconds
+# until it succeeds, or a failure once SECONDS have passed: the step goes
+# on by itself ("●"), or with -f it failed ("✗"). Nothing to show when it
 # succeeds at once.
 wait_until() {
+  local end=wait
+  [ "$1" != -f ] || { end=fail; shift; }
   local msg=$1 limit=$2 t0=$SECONDS
   shift 2
   "$@" && return 0
   progress_start "$msg"
   until "$@"; do
     if [ $((SECONDS - t0)) -ge "$limit" ]; then
-      progress_end
+      progress_end "$end"
       return 1
     fi
     sleep 1
@@ -423,7 +500,7 @@ quietly() {
     progress_tick
   done
   wait "$pid" || rc=$?
-  progress_end
+  if [ "$rc" = 0 ]; then progress_end; else progress_end fail; fi
   [ "$rc" = 0 ] || cat "$log" >&2
   rm -f "$log"
   return "$rc"
@@ -913,7 +990,7 @@ run_step "Connecting this machine to Pyo" "${SUDO[@]}" /usr/local/lib/pyo/connec
 sed 's/^/    | /' "$STEP_OUT"
 
 echo
-echo "Pyo $TAG is up."
+ok_line "Pyo $TAG is up"
 pyo_addresses 120
 if [ -n "$ADMIN_PASSWORD" ]; then
   echo

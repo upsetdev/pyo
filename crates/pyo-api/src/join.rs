@@ -1127,15 +1127,12 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
         let (code, out, err) = apply_agent(&version_json("37", "37"), 3);
         assert_eq!(code, 0, "{err}");
         assert!(out.trim().ends_with("ok after 4"), "{out}");
-        // What it's doing, then its progress line once and with the time
-        // every 20 seconds off a terminal, and no Kubernetes errors or tries.
-        assert!(out.starts_with("Installing the Pyo agent…"));
-        assert!(out.contains("\nStill installing the Pyo agent…\n"), "{out}");
+        // The step once, then with the time every 20 seconds off a
+        // terminal, then done, and no Kubernetes errors or tries.
+        assert!(out.starts_with("→ Installing the Pyo agent…\n"), "{out}");
         assert!(!out.contains("agent… 0:00"), "{out}");
-        assert!(
-            out.contains("Still installing the Pyo agent… 0:20"),
-            "{out}"
-        );
+        assert!(out.contains("→ Installing the Pyo agent… 0:20"), "{out}");
+        assert!(out.contains("\n✓ Installed the Pyo agent "), "{out}");
         assert!(!out.contains("try ") && !err.contains("try "), "{out}{err}");
     }
 
@@ -1166,6 +1163,7 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
             assert_eq!(code, 0, "{err}");
             let last = out.trim().lines().last().unwrap();
             assert!(last.starts_with("failed after "), "{out}");
+            assert!(out.contains("\n✗ Installing the Pyo agent\n"), "{out}");
             let tries: u32 = last["failed after ".len()..].parse().unwrap();
             assert!((10..=14).contains(&tries), "{tries} tries");
             assert!(!out.contains("older than") && !err.contains("older than"));

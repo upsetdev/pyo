@@ -98,12 +98,12 @@ curl() { echo "curl: (6) Could not resolve host" >&2; return 6; }
 WORK=$tmp/work2b BUNDLE="" DEV="" BUNDLE_SHA256=""
 mkdir -p "$WORK"
 out=$( (fetch_bundle) 2>&1)
-check "the release's checksums come first" "$out" "^Downloading the release's checksums…$" has
+check "the release's checksums come first" "$out" "^→ Downloading the release's checksums…$" has
 check "a failed download says to run it again" "$out" "Couldn't download release.json of Pyo 0.4.0.*run the same command again\.$" has
 WORK=$tmp/work2b2 BUNDLE_SHA256=$(printf '%064d' 0)
 mkdir -p "$WORK"
 out=$( (fetch_bundle) 2>&1)
-check "the download shows progress" "$out" "^Downloading the sandbox files…$" has
+check "the download shows progress" "$out" "^→ Downloading the sandbox files…$" has
 check "and its failure says to run it again" "$out" "Couldn't download the sandbox files from https://github.com/.*run the same command again\.$" has
 # The release: release.json lists the files' checksums, and its signature
 # is checked with cosign first.
@@ -129,7 +129,7 @@ cosign() { echo "$*" >"$tmp/cosign-args"; [ -z "${cosign_fails:-}" ] || { echo "
 WORK=$tmp/work2c BUNDLE_SHA256="" fake_sum=$good
 mkdir -p "$WORK"
 out=$( (fetch_bundle && ls "$WORK/bundle") 2>&1)
-check "the release's signature is checked" "$out" "^Checking the release's signature…$" has
+check "the release's signature is checked" "$out" "^→ Checking the release's signature…$" has
 check "with cosign, as install.sh does" "$(cat "$tmp/cosign-args")" "verify-blob --bundle .*release.json.sigstore.json --certificate-identity-regexp \^https://github\\\\.com/upsetdev/pyo/.*--certificate-oidc-issuer https://token.actions.githubusercontent.com .*release.json$" has
 check "a release's files that match are used" "$out" "vmlinux" has
 WORK=$tmp/work2d fake_sum=$(printf '%064d' 2)
@@ -217,8 +217,8 @@ fake_detect '{
   ]
 }'
 out=$( (detect) 2>&1)
-check "Firecracker on KVM is reported" "$out" "Firecracker on KVM. A test VM booted in 73 ms." has
-check "the detection shows progress" "$out" "^Checking what this server can run…$" has
+check "Firecracker on KVM is reported" "$out" "^● Firecracker on KVM. A test VM booted in 73 ms." has
+check "the detection shows progress" "$out" "^→ Checking what this server can run…$" has
 check "and no raw JSON" "$out" '"runtime"|[{}]' lacks
 check "the detection gets this server's jail user" "$(detect_config)" '"jailUid": 998, "jailGid": 997' has
 fake_detect '{
@@ -262,7 +262,7 @@ tailscale() {
 }
 rm -f "$tmp/ts-up"
 out=$( (join_tailnet && echo "ip=$TS_IP pyo=$PYO") 2>&1)
-check "joining the tailnet shows progress" "$out" "^Joining your tailnet…$" has
+check "joining the tailnet shows progress" "$out" "^→ Joining your tailnet…$" has
 check "and hides Tailscale's own output" "$out" "advertising" lacks
 check "and gets this server's address" "$out" "^ip=100.64.0.9 pyo=100.64.0.1:5006$" has
 rm -f "$tmp/ts-up"
@@ -303,14 +303,16 @@ out=$( (redeem) 2>&1)
 check "another server's config is refused" "$out" "isn't this server's config" has
 fake_body='{"serverId":"sbs_abc123"}' fake_code=200
 out=$( (redeem) 2>&1)
-check "joining Pyo shows progress" "$out" "^Joining Pyo as sbx-1…$" has
+check "joining Pyo shows progress" "$out" "^→ Joining Pyo as sbx-1…$" has
+check "then that it joined" "$out" "^✓ Joined Pyo as sbx-1$" has
 # Pyo out of reach: the wait ends after 10 minutes, without curl's words.
 sleep() { SECONDS=$((SECONDS + ${1%.*})); }
 fake_body='curl: (7) Failed to connect' fake_code=000
 out=$( (redeem) 2>&1)
 check "an unreachable Pyo says what to do" "$out" "didn't answer over your tailnet in 10 minutes. Check that Pyo is running, then run the same command again\.$" has
 check "and not curl's error" "$out" "curl:" lacks
-check "the wait shows every 20 seconds in a log" "$out" "^Joining Pyo as sbx-1… 0:20$" has
+check "the wait shows every 20 seconds in a log" "$out" "^→ Joining Pyo as sbx-1… 0:20$" has
+check "then that it failed" "$out" $'^✗ Joining Pyo as sbx-1\nError: Pyo didn\'t answer' has
 unset -f curl sleep
 
 # ── Starting the daemon ──
@@ -326,7 +328,8 @@ check "a daemon that's up at once: nothing but done" "$out" "^started$" has
 check "and no log" "$out" "bad config" lacks
 rm -f "$tmp/up"
 out=$( (start_daemon && echo started) 2>&1)
-check "a daemon that won't start shows progress" "$out" "^Starting the sandbox daemon…$" has
+check "a daemon that won't start shows progress" "$out" "^→ Starting the sandbox daemon…$" has
+check "and that it failed" "$out" "^✗ Starting the sandbox daemon$" has
 check "and its log" "$out" "pyo-sandbox: bad config" has
 check "and says to run it again" "$out" "didn't start. Its last log lines are above. Run the same command again\.$" has
 check "and doesn't go on" "$out" "started$" lacks

@@ -191,8 +191,8 @@ ips="10.0.2.15 203.0.113.7"
 : >"$asked"
 out=$(pyo_addresses 300)
 check "a public IP: waits five minutes" "$(wc -l <"$asked")" "^1[45][0-9]$" has
-check "a public IP: says it waits, as it goes" "$out" "^Waiting for the HTTPS address \(up to 5 minutes\)…$" has
-check "a public IP: every 20 seconds in a log" "$out" "^Waiting for the HTTPS address \(up to 5 minutes\)… 4:40$" has
+check "a public IP: says it waits, as it goes" "$out" "^→ Waiting for the HTTPS address \(up to 5 minutes\)…$" has
+check "a public IP: every 20 seconds in a log" "$out" "^→ Waiting for the HTTPS address \(up to 5 minutes\)… 4:40$" has
 check "a public IP: not more often" "$out" "… 0:1[0-9]$" lacks
 meta='{"publicUrl":"https://pyo.203.0.113.7.nip.io"}'
 : >"$asked"
@@ -200,22 +200,57 @@ out=$(pyo_addresses 300)
 check "an HTTPS address: no wait" "$out" "Waiting" lacks
 check "an HTTPS address: shown" "$out" "https://pyo\.203\.0\.113\.7\.nip\.io" has
 check "an HTTPS address: no Tailscale hint" "$out" "Tailscale" lacks
-unset -f hostname curl
+unset -f hostname curl sleep
 
 # quietly: the output of what it runs only when that fails.
-out=$(quietly "Doing it…" bash -c 'echo noisy; exit 0' 2>&1)
-check "quietly: progress" "$out" "^Doing it…$" has
+out=$(quietly "Downloading it…" bash -c 'echo noisy; exit 0' 2>&1)
+check "quietly: progress" "$out" "^→ Downloading it…$" has
+check "quietly: done, as done" "$out" "^✓ Downloaded it$" has
 check "quietly: no output when it works" "$out" "noisy" lacks
 # Off a terminal, two steps with the same line show it once.
 out=$( (quietly "Fetching…" true; quietly "Fetching…" true) 2>&1)
-check "quietly: a repeated line once" "$(grep -c '^Fetching…$' <<<"$out")" "^1$" has
+check "quietly: a repeated line once" "$(grep -c '^→ Fetching…$' <<<"$out")" "^1$" has
 out=$(quietly "Doing it…" bash -c 'echo what went wrong; exit 3' 2>&1) && rc=0 || rc=$?
 check "quietly: the output when it fails" "$out" "what went wrong" has
+check "quietly: the step failed" "$out" "^✗ Doing it$" has
 check "quietly: and its exit code" "$rc" "^3$" has
 # A failure ends the progress line first.
 out=$( (progress_start "Working…"; fail "Broke.") 2>&1 || true)
 check "fail after progress" "$out" "Error: Broke\." has
+check "fail: the step failed first" "$out" $'^✗ Working\nError: Broke\.$' has
+
+# Off a terminal: no colors, nothing drawn over.
+out=$( (say "Installing Pyo 9.9.9"; ok_line "Pyo 9.9.9 is installed"; dot_line green "Running"; quietly "Starting k3s…" true) 2>&1)
+check "no terminal: no escapes" "$out" $'\033|\r' lacks
+check "no terminal: a heading" "$out" "^→ Installing Pyo 9\.9\.9$" has
+check "no terminal: the last line" "$out" "^✓ Pyo 9\.9\.9 is installed$" has
+check "no terminal: a status" "$out" "^● Running$" has
+check "no terminal: a step done" "$out" "^✓ Started k3s$" has
+# A step's time, once it took a while.
+sleep() { SECONDS=$((SECONDS + ${1%.*})); }
+out=$( (progress_start "Downloading k3s…"; sleep 12; progress_end) 2>&1)
+check "a long step: its time" "$out" "^✓ Downloaded k3s 0:12$" has
+out=$( (progress_start "Starting Pyo 9.9.9 (a few minutes the first time)…"; progress_end ok "Started Pyo 9.9.9") 2>&1)
+check "a step's own words when done" "$out" "^✓ Started Pyo 9\.9\.9$" has
 unset -f sleep
+# On a terminal (script(1) gives one): the step ticks on its line, then
+# stays as a checklist, in color. NO_COLOR: the same, without colors.
+if command -v script >/dev/null; then
+  blk=$(mktemp)
+  sed -n '/^# >>> pyo:progress/,/^# <<< pyo:progress/p' deploy/install.sh >"$blk"
+  tty_run() { script -qec "bash -c '. $blk; $1'" /dev/null 2>/dev/null | tr -d '\r' || true; }
+  out=$(tty_run 'say Installing; quietly "Downloading k3s…" sleep 1; quietly "Checking it…" false; ok_line Done; dot_line yellow Starting')
+  check "terminal: a bold heading" "$out" $'\033\\[1m→ Installing\033\\[0m' has
+  check "terminal: a ticking step in cyan" "$out" $'\033\\[36m→\033\\[0m Downloading k3s…' has
+  check "terminal: a green check" "$out" $'\033\\[32m✓\033\\[0m Downloaded k3s' has
+  check "terminal: a red cross" "$out" $'\033\\[31m✗ Checking it\033\\[0m' has
+  check "terminal: the last line in green" "$out" $'\033\\[1;32m✓ Done\033\\[0m' has
+  check "terminal: a yellow dot" "$out" $'\033\\[33m●\033\\[0m Starting' has
+  out=$(NO_COLOR=1 tty_run 'say Installing; quietly "Downloading k3s…" true')
+  check "NO_COLOR: no colors on a terminal" "$out" $'\033\\[[0-9;]*m' lacks
+  check "NO_COLOR: the checklist still" "$out" "✓ Downloaded k3s" has
+  rm -f "$blk"
+fi
 
 [ "$failed" = 0 ] && echo "install.sh: all checks passed"
 exit "$failed"
