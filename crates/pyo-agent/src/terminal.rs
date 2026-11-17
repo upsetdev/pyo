@@ -134,8 +134,13 @@ where
             s.await;
         }
     });
+    // A ping every 30 seconds keeps a quiet session open through proxies
+    // that close idle connections (Cloudflare: after 100 seconds).
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
+    keepalive.tick().await;
     loop {
         tokio::select! {
+            _ = keepalive.tick() => ws.send(Message::Ping(Default::default())).await?,
             n = stdout.read(&mut buf) => match n {
                 Ok(0) | Err(_) => break,
                 Ok(n) => ws.send(Message::binary(buf[..n].to_vec())).await?,
