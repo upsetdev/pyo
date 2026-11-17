@@ -253,6 +253,10 @@ fn server_config(ca: &Ca, names: &[String]) -> anyhow::Result<rustls::ServerConf
         .with_client_cert_verifier(verifier)
         .with_single_cert(chain, key)?;
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // No resumption: a resumed session keeps the client certificate (or
+    // none) of the one it came from, past a renewal or a revocation.
+    cfg.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    cfg.send_tls13_tickets = 0;
     Ok(cfg)
 }
 

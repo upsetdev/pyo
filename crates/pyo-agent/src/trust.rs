@@ -70,6 +70,9 @@ pub fn client_config(ca_pem: &str, slot: Arc<CertSlot>) -> anyhow::Result<rustls
         .with_root_certificates(roots)
         .with_client_cert_resolver(slot);
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // Every connection proves who it is anew: a resumed session would carry
+    // the identity it started with (none, for the one that enrolled).
+    cfg.resumption = rustls::client::Resumption::disabled();
     Ok(cfg)
 }
 
