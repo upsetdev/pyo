@@ -754,7 +754,7 @@ async fn poll(
                 }
             }
             if let Some(signer) = crate::command_signer() {
-                sign_all(&s, signer.as_ref(), &cluster.id, &mut out).await?;
+                out = sign_all(&s, signer.as_ref(), &cluster.id, out).await?;
             }
             return Ok(Json(out));
         }
@@ -770,14 +770,15 @@ async fn poll(
 
 /// Has the signer sign each command for this cluster, in order. When it
 /// can't, the commands go back to the queue and the agent asks again.
+/// A command the signer refuses fails, with its reason; the rest go out.
 async fn sign_all(
     s: &AppState,
     signer: &dyn crate::CommandSigner,
     cluster_id: &str,
-    out: &mut [CommandEnvelope],
-) -> ApiResult<()> {
+    out: Vec<CommandEnvelope>,
+) -> ApiResult<Vec<CommandEnvelope>> {
     if out.is_empty() {
-        return Ok(());
+        return Ok(out);
     }
     let mut items = Vec::with_capacity(out.len());
     let mut jsons = Vec::with_capacity(out.len());
@@ -796,15 +797,23 @@ async fn sign_all(
     }
     match signer.sign(cluster_id, &items).await {
         Ok(sigs) if sigs.len() == out.len() => {
-            for ((e, sig), json) in out.iter_mut().zip(sigs).zip(jsons) {
+            let mut signed = Vec::with_capacity(out.len());
+            for ((mut e, sig), json) in out.into_iter().zip(sigs).zip(jsons) {
+                if let Some(why) = sig.refused {
+                    tracing::warn!(cluster = %cluster_id, id = %e.id, %why, "the signer refused a command");
+                    let command: Value = serde_json::from_str(&json).unwrap_or(Value::Null);
+                    undeliverable(s, &e.id, &command, &format!("Pyo's signer refused it: {why}")).await;
+                    continue;
+                }
                 e.signed = Some(pyo_proto::SignedCommandWire {
                     claims: sig.claims,
                     sig: sig.sig,
                     kid: sig.kid,
                     command: json,
                 });
+                signed.push(e);
             }
-            Ok(())
+            Ok(signed)
         }
         other => {
             let why = match other {

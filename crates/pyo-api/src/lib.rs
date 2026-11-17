@@ -192,19 +192,26 @@ pub struct ToSign {
     pub sha256: String,
 }
 
-/// A signature over a command's claims (pyo-proto `signing`).
-#[derive(Debug, Clone, serde::Deserialize)]
+/// A signature over a command's claims (pyo-proto `signing`), or why the
+/// signer won't sign that command (`refused`).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Signature {
+    #[serde(default)]
     pub claims: String,
+    #[serde(default)]
     pub sig: String,
+    #[serde(default)]
     pub kid: String,
+    #[serde(default)]
+    pub refused: Option<String>,
 }
 
 /// Where commands get signed (pyo-proto `signing`). The signer picks each
 /// command's sequence number and expiry.
 pub trait CommandSigner: Send + Sync {
-    /// Signs commands for one cluster, in this order.
+    /// Signs commands for one cluster, in this order: one [`Signature`]
+    /// each, or its refusal.
     fn sign<'a>(
         &'a self,
         cluster_id: &'a str,
