@@ -42,6 +42,23 @@ export function templateTitle(t: TemplateLike) {
   return t.source?.os || BUILTIN_OS;
 }
 
+/** What a template runs, when known: Pyo's own say, others when they tell. */
+export function templateOs(t: TemplateLike) {
+  return t.source?.os || (isPyos(t) ? BUILTIN_OS : "");
+}
+
+/** An image ref with its digest cut to 12 characters:
+ * "ghcr.io/a/b@sha256:ad5c5976…". Tags and short refs stay as they are. */
+export function shortImage(image: string) {
+  return image.replace(/sha256:([0-9a-f]{12})[0-9a-f]{4,}/, "sha256:$1…");
+}
+
+/** An image ref in parts that end at "/", ":" and "@", so a long one
+ * wraps there instead of anywhere. */
+export function imageParts(image: string) {
+  return image.match(/[^/:@]*[/:@]?/g)?.filter(Boolean) ?? [];
+}
+
 /** The new template form's name and image the wrong way round: an image in
  * the name (it has a "/", ":" or "@", which names can't) and a bare word in
  * the image. */

@@ -8,13 +8,16 @@ import {
   fieldsSwapped,
   freeLabel,
   gettingReady,
+  imageParts,
   imageRepo,
   minSize,
   overallPercent,
   pyosFirst,
   serverProgress,
   serverRefusal,
+  shortImage,
   templateImage,
+  templateOs,
   templateProgress,
   templateStatus,
   templateTitle,
@@ -124,6 +127,20 @@ test("Pyo's own say on hover what they run", () => {
   expect(templateTitle({ name: "base", builtin: true })).toBe("Ubuntu 24.04");
   expect(templateTitle({ name: "node-22", source: { image: "node:22" } })).toBe(undefined);
   expect(templateTitle({ name: "base", source: { image: "ubuntu" } })).toBe(undefined);
+});
+
+test("the template tooltip says what it runs and a short image", () => {
+  expect(templateOs(base)).toBe("Ubuntu 24.04");
+  expect(templateOs({ name: "base", builtin: true })).toBe("Ubuntu 24.04");
+  expect(templateOs({ name: "node-22", source: { image: "node:22" } })).toBe("");
+  const digest = `sha256:ad5c5976${"0".repeat(56)}`;
+  expect(shortImage(`ghcr.io/upsetdev/pyo-sandbox-images/desktop@${digest}`)).toBe(
+    "ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:ad5c59760000…",
+  );
+  expect(shortImage("node:22")).toBe("node:22");
+  expect(imageParts("ghcr.io/a/b:1@sha256:ab")).toEqual(["ghcr.io/", "a/", "b:", "1@", "sha256:", "ab"]);
+  expect(imageParts("node")).toEqual(["node"]);
+  expect(imageParts("")).toEqual([]);
 });
 
 test("the desktop needs room, and opens through the daemon", () => {

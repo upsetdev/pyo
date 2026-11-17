@@ -1,4 +1,5 @@
 import { CubeIcon, MonitorIcon } from "@phosphor-icons/react";
+import { Fragment } from "react";
 import {
   siAlmalinux,
   siAlpinelinux,
@@ -24,10 +25,13 @@ import { BrandMark } from "~/components/pyo/common";
 import {
   BASE_TEMPLATE,
   DESKTOP_TEMPLATE,
+  imageParts,
   isBase,
   isDesktop,
   type Sandbox,
   type SandboxTemplate,
+  shortImage,
+  templateOs,
   templateTitle,
 } from "~/lib/pyo/sandbox";
 
@@ -106,6 +110,29 @@ export function TemplateMark({
       ) : (
         <CubeIcon size={icon} />
       )}
+    </span>
+  );
+}
+
+/** A template on hover: its name, what it runs and its image. A long image
+ * wraps at its "/", ":" and "@", its digest cut short. */
+export function TemplateTip({ template }: { template: TemplateLike }) {
+  const os = templateOs(template);
+  const image = template.source?.image;
+  return (
+    <span className="block text-left">
+      <span className="block font-medium">{template.name}</span>
+      {os ? <span className="block text-muted-foreground">{os}</span> : null}
+      {image ? (
+        <span className="mt-1 block font-mono text-[11px] leading-4 text-muted-foreground [overflow-wrap:anywhere]">
+          {imageParts(shortImage(image)).map((part, i) => (
+            <Fragment key={i}>
+              {part}
+              <wbr />
+            </Fragment>
+          ))}
+        </span>
+      ) : null}
     </span>
   );
 }

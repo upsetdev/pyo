@@ -1,7 +1,7 @@
 import { DotsThreeIcon, SquaresFourIcon, TrashIcon } from "@phosphor-icons/react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { TemplateMark } from "~/components/pyo/sandbox/TemplateMark";
+import { TemplateMark, TemplateTip } from "~/components/pyo/sandbox/TemplateMark";
 import { Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
@@ -10,21 +10,16 @@ import { Menu } from "~/components/ui/Menu";
 import { EmptyState, ErrorState, Page, PageHeader, Panel, Progress } from "~/components/ui/Panel";
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
 import { Tooltip } from "~/components/ui/Tooltip";
-import { megabytes, timeAgo } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
   fieldsSwapped,
-  isPyos,
   pyosFirst,
   sandboxApi,
-  serverProgress,
-  templateImage,
   templateProgress,
   templateStatus,
   usable,
   type SandboxTemplate,
-  type SandboxTemplateServer,
 } from "~/lib/pyo/sandbox";
 import { roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
@@ -48,14 +43,6 @@ const STATE: Record<SandboxTemplate["state"], { label: string; tone: "success" |
 };
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
-
-/** How far one server got with a template. */
-function serverLabel(x: SandboxTemplateServer) {
-  const p = serverProgress(x);
-  if (p) return p.label;
-  if (x.state === "ready" && x.bytes) return `Ready · ${megabytes(x.bytes / 1024 ** 2)}`;
-  return STATE[x.state]?.label ?? x.state;
-}
 
 function TemplatesPage() {
   const s = usePyo();
@@ -123,7 +110,7 @@ function TemplatesPage() {
               {templates.map((t) => (
                 <Tr key={t.id}>
                   <Td>
-                    <Tooltip content={<TemplateDetails t={t} />}>
+                    <Tooltip content={<TemplateTip template={t} />}>
                       <span className="flex min-w-0 items-center gap-3">
                         <TemplateMark template={t} />
                         <span className="truncate text-[13px] font-medium">{t.name}</span>
@@ -257,38 +244,4 @@ function TemplateState({ t }: { t: SandboxTemplate }) {
   );
   const error = t.error ?? t.servers.find((x) => x.error)?.error;
   return error ? <Tooltip content={error}>{label}</Tooltip> : label;
-}
-
-/** What hovering a template shows: its image, its servers and when it was added. */
-function TemplateDetails({ t }: { t: SandboxTemplate }) {
-  const image = templateImage(t);
-  const added = t.createdAt ? `Added ${timeAgo(t.createdAt)}${t.createdBy ? ` by ${t.createdBy}` : ""}` : "";
-  return (
-    <span className="block space-y-1.5 text-left">
-      {/* Base says what it runs ("Ubuntu 24.04 · ghcr.io/…"): the OS on its own line. */}
-      {image.split(" · ").map((line, i, all) => (
-        <span key={line} className={`block break-all ${all.length > 1 && !i ? "font-medium" : "font-mono text-[11.5px]"}`}>
-          {line}
-        </span>
-      ))}
-      {t.servers.length ? (
-        <span className="block">
-          {t.servers.map((x) => (
-            <span key={x.id} className="flex items-center gap-1.5">
-              <Dot tone={STATE[x.state]?.tone ?? "neutral"} />
-              <span className="truncate">{x.name}</span>
-              <span className={`ml-auto pl-3 tabular-nums ${x.state === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
-                {serverLabel(x)}
-              </span>
-            </span>
-          ))}
-        </span>
-      ) : isPyos(t) ? (
-        <span className="block text-muted-foreground">Made on first use</span>
-      ) : null}
-      {added || !t.teamId ? (
-        <span className="block text-muted-foreground">{[t.teamId ? "" : "Installation", added].filter(Boolean).join(" · ")}</span>
-      ) : null}
-    </span>
-  );
 }

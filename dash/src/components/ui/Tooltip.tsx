@@ -89,7 +89,7 @@ export function Tooltip({
                   ? { left: place.left, top: place.y }
                   : { left: 0, top: 0, visibility: "hidden" }
               }
-              className="pointer-events-none fixed z-[70] max-w-72 rounded-lg border border-border-strong bg-popover px-2.5 py-1.5 text-center text-[12px] leading-[18px] text-foreground shadow-pop"
+              className="pointer-events-none fixed z-[70] max-w-[min(18rem,calc(100vw-16px))] break-words rounded-lg border border-border-strong bg-popover px-2.5 py-1.5 text-center text-[12px] leading-[18px] text-foreground shadow-pop"
             >
               {content}
               <span
