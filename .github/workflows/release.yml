@@ -42,6 +42,23 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      # The templates this release bundles are pyo-templates' main, as CI
+      # checks.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: upsetdev/pyo-templates
+          ref: main
+          path: .pyo-templates
+          persist-credentials: false
+      - name: Build pyo-templates
+        working-directory: .pyo-templates
+        run: bun install --frozen-lockfile && bun run build
+      - name: catalog.json matches pyo-templates
+        run: |
+          bun dash/scripts/sync-templates.ts .pyo-templates/dist/v1 --check || {
+            echo "::error::dash/src/lib/pyo/catalog.json doesn't match pyo-templates' main. Run \`bun run build\` in pyo-templates, then \`bun scripts/sync-templates.ts\` in dash/, commit catalog.json on dev, and release again."
+            exit 1
+          }
       # The WAF's processor (waf/).
       - name: WAF tests
         run: docker run --rm -v "$PWD/waf:/src" -w /src -e CGO_ENABLED=0 golang:1.26 sh -c 'go vet ./... && go test ./...'

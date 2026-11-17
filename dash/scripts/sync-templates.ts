@@ -58,7 +58,9 @@ const text = `${JSON.stringify({ ...index, logos }, null, 2)}\n`;
 if (check) {
   const current = existsSync(out) ? readFileSync(out, "utf8") : "";
   if (current !== text) {
-    console.error("src/lib/pyo/catalog.json is out of date: run bun scripts/sync-templates.ts");
+    console.error(
+      "src/lib/pyo/catalog.json is out of date. Run `bun run build` in pyo-templates, then `bun scripts/sync-templates.ts` in dash/, and commit catalog.json.",
+    );
     process.exit(1);
   }
   console.log(`catalog.json is up to date (${index.templates.length} templates)`);

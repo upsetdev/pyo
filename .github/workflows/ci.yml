@@ -51,6 +51,32 @@ jobs:
       - run: bun test ./dash/scripts
       - run: bun run build
 
+  # The dashboard bundles pyo-templates' catalog as catalog.json. It has to
+  # match pyo-templates' main, or Pyo ships old templates.
+  templates:
+    name: Template catalog
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: upsetdev/pyo-templates
+          ref: main
+          path: .pyo-templates
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: Build pyo-templates
+        working-directory: .pyo-templates
+        run: bun install --frozen-lockfile && bun run build
+      - name: catalog.json matches pyo-templates
+        run: |
+          bun dash/scripts/sync-templates.ts .pyo-templates/dist/v1 --check || {
+            echo "::error::dash/src/lib/pyo/catalog.json doesn't match pyo-templates' main. Run \`bun run build\` in pyo-templates, then \`bun scripts/sync-templates.ts\` in dash/, and commit catalog.json."
+            exit 1
+          }
+
   rust:
     name: Rust
     runs-on: ubuntu-24.04

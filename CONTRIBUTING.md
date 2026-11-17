@@ -149,7 +149,8 @@ Then run `bun run dev`.
 The template catalog in `dash/src/lib/pyo/catalog.json` comes from
 [pyo-templates](https://github.com/upsetdev/pyo-templates). Don't edit it by
 hand. Run `bun scripts/sync-templates.ts` in `dash/` with pyo-templates built
-next to this repository.
+next to this repository. CI and the release check that it matches
+pyo-templates' `main`.
 
 ## Run the checks
 
