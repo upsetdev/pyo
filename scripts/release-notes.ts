@@ -27,8 +27,12 @@
 //
 // The notices in deploy/release-notices.json at --to (when its "version"
 // is this release's) go first, under "Before you update".
+//
+// --release release.json adds the SHA-256 of each install script it lists
+// (`scripts`), under "Install scripts", after the changes.
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 export const REPO = "upsetdev/pyo";
 export const MAINTAINERS = ["fransallen"];
@@ -103,6 +107,7 @@ export function render(opts: {
   logins?: Map<string, string | null>;
   maintainers?: string[];
   notices?: Notices | null;
+  scripts?: Record<string, string> | null;
 }): string {
   const out: string[] = [];
   const n = opts.notices;
@@ -122,6 +127,19 @@ export function render(opts: {
   for (const [s, title] of SECTIONS) {
     const lines = groups.get(s);
     if (lines?.length) out.push(`### ${title}`, "", ...lines, "");
+  }
+  const scripts = Object.entries(opts.scripts ?? {});
+  if (scripts.length) {
+    out.push(
+      "### 🔏 Install scripts",
+      "",
+      "Each script's SHA-256, as the signed release.json lists it. pyo.dev serves these same files. [How to check one](https://pyo.dev/docs/install#verify-a-script)",
+      "",
+      "| Script | SHA-256 |",
+      "| --- | --- |",
+      ...scripts.map(([name, sum]) => `| \`${name}\` | \`${sum}\` |`),
+      "",
+    );
   }
   if (opts.from) {
     out.push(`**Full Changelog**: https://github.com/${REPO}/compare/${opts.from}...${opts.to}`);
@@ -203,7 +221,13 @@ function main() {
   if (!args.has("offline")) {
     for (const c of listed) if (classify(c)) logins.set(c.sha, login(c.sha));
   }
-  process.stdout.write(render({ from, to, commits: listed, logins, maintainers, notices: notices(to) }));
+  const release = args.get("release");
+  const scripts = release ? JSON.parse(readFileSync(release, "utf8")).scripts : null;
+  if (release && (!scripts || !Object.keys(scripts).length)) {
+    console.error(`release-notes: ${release} lists no scripts`);
+    process.exit(1);
+  }
+  process.stdout.write(render({ from, to, commits: listed, logins, maintainers, notices: notices(to), scripts }));
 }
 
 if (import.meta.main) main();

@@ -78,6 +78,14 @@ describe("notes", () => {
     expect(notes.startsWith("### ⚠️ Before you update\n\n- Postgres restarts once.\n- Update to 0.2.0 first")).toBe(true);
     expect(notes).toContain("- Automatic updates skip this release.");
   });
+  test("the install scripts' sums, after the changes", () => {
+    const sum = "a".repeat(64);
+    const notes = render({ from: "v0.4.2", to: "v0.4.3", commits: [c("fix: f")], scripts: { "install.sh": sum } });
+    expect(notes.indexOf("### 🔏 Install scripts")).toBeGreaterThan(notes.indexOf("### 🐞 Bug Fixes"));
+    expect(notes).toContain(`| \`install.sh\` | \`${sum}\` |`);
+    expect(notes).toEndWith("**Full Changelog**: https://github.com/upsetdev/pyo/compare/v0.4.2...v0.4.3\n");
+    expect(render({ from: "v0.4.2", to: "v0.4.3", commits: [] })).not.toContain("Install scripts");
+  });
   test("the first release", () => {
     const notes = render({ from: null, to: "v0.1.0", commits: [] });
     expect(notes).toBe("Initial release.\n\n**Full Changelog**: https://github.com/upsetdev/pyo/commits/v0.1.0\n");
