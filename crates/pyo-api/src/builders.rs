@@ -276,9 +276,10 @@ fn first_builder_server(nodes: &[pyo_proto::ServerReport]) -> Option<&str> {
         .map(|n| n.name.as_str())
 }
 
-/// The first time the server Pyo runs on connects, a team without builders
-/// gets one there, named after the server: Git deploys work from the start.
-/// Only then, so a builder removed later stays removed. Returns its name.
+/// The first time the server Pyo runs on connects (or, with in-cluster
+/// registries, a team's cluster), a team without builders gets one there,
+/// named after the server: Git deploys work from the start. Only then, so a
+/// builder removed later stays removed. Returns its name.
 pub async fn first_on_this_server(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     config: &crate::Config,

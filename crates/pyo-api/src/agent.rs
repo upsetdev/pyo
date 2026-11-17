@@ -284,9 +284,10 @@ async fn heartbeat(
     .await?;
     name_from_host(&mut tx, &cluster.id, &cluster.team_id, &hb.servers).await?;
     // The server Pyo runs on, connecting for the first time: the team's
-    // first builder goes there.
+    // first builder goes there. Where every cluster keeps its own images
+    // (Pyo Cloud), a team's first cluster to connect gets it.
     let builder_added = was == "pending"
-        && same_cluster
+        && (same_cluster || crate::deploy::in_cluster_registries())
         && crate::builders::first_on_this_server(
             &mut tx,
             &s.config,
