@@ -11,7 +11,7 @@
 #   --tailscale-key  joins your tailnet first (a single-use key from Pyo)
 #   --registry       Pyo's registry door, for images Pyo builds
 #   --registry-token this cluster's login there (pull only)
-#   --version        the Pyo release, for pyo.dev to run its script (ignored here)
+#   --version        runs this Pyo release's connect.sh instead, from pyo.dev
 #
 # Or only joins this machine to the tailnet (Pyo's own machine does this
 # once Tailscale is set up in Pyo): --tailnet-only, with TS_AUTHKEY.
@@ -26,6 +26,42 @@
 #   --yes            don't ask first
 #   --dry-run        only say what it would delete
 # With KUBECONFIG set, it uses kubectl and that cluster instead of k3s's.
+# >>> pyo:release (the same in connect.sh, join.sh and deploy/sandbox.sh)
+# With --version naming another Pyo release, runs that release's own
+# script from pyo.dev, which keeps each release's scripts at
+# https://pyo.dev/v/<version>/. Pyo 0.4.2 and earlier give pyo.dev's latest
+# script their --version. The release workflow writes the release a script
+# belongs to on the line marked pyo:release-version, in the copy it
+# publishes. Pyo's own copy (<pyo>/install/) leaves it empty and never runs
+# another.
+run_release() {
+  local name=$1 want="" prev="" arg dir rc=0
+  local release="" # pyo:release-version
+  shift
+  for arg in "$@"; do
+    [ "$prev" != --version ] || want=${arg#v}
+    prev=$arg
+  done
+  [ -n "$release" ] && [ -n "$want" ] && [ "$want" != "$release" ] || return 0
+  if [[ ! $want =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "--version takes a Pyo release, like $release. \"$want\" isn't one." >&2
+    exit 2
+  fi
+  dir=$(mktemp -d)
+  if ! curl -fsSL --proto '=https' --retry 3 -o "$dir/$name" "https://pyo.dev/v/$want/$name"; then
+    rm -rf "$dir"
+    echo "pyo.dev has no $name for Pyo $want. Copy the command from your Pyo again." >&2
+    exit 1
+  fi
+  # Piped into bash, the rest of this script is still in the pipe. Read it
+  # out, so curl can finish and the other script doesn't take it as input.
+  [ -f "${BASH_SOURCE[1]:-}" ] || [ -t 0 ] || cat >/dev/null
+  bash "$dir/$name" "$@" || rc=$?
+  rm -rf "$dir"
+  exit "$rc"
+}
+# <<< pyo:release
+run_release connect.sh "$@"
 # >>> pyo:become-root (the same in connect.sh and join.sh)
 # Root, through sudo when it isn't: the script runs again as root, with
 # the same arguments and Tailscale key. Run from a file, sudo runs that
@@ -143,7 +179,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1; shift ;;
     # install.sh --uninstall on a k3s Pyo didn't install: Pyo itself goes too.
     --with-pyo) WITH_PYO=1; shift ;;
-    # The release pyo.dev's wrapper ran this script from. Nothing to do here.
+    # run_release (above) handled it.
     --version) shift 2 || shift ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac

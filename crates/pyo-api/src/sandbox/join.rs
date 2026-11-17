@@ -481,8 +481,10 @@ mod tests {
 
     #[test]
     fn the_command_quotes_everything() {
-        // The server isn't on the tailnet yet: pyo.dev.
+        // The server isn't on the tailnet yet: this release's scripts on
+        // pyo.dev.
         let base = crate::join::pick_scripts_url_before_tailnet(None);
+        assert_eq!(base, crate::join::published_scripts_url());
         let c = Command {
             base: &base,
             door: "pyo.tail1234.ts.net:5006",
@@ -495,7 +497,9 @@ mod tests {
         };
         assert_eq!(
             c.render(),
-            "curl -fsSL https://pyo.dev/sandbox.sh | bash -s -- --pyo 'pyo.tail1234.ts.net:5006' --server 'sbs_one' --name 'it'\\''s sbx' --code 'abc' --tailscale-key 'tskey-auth-1' --version '0.4.0'"
+            format!(
+                "curl -fsSL {base}/sandbox.sh | bash -s -- --pyo 'pyo.tail1234.ts.net:5006' --server 'sbs_one' --name 'it'\\''s sbx' --code 'abc' --tailscale-key 'tskey-auth-1' --version '0.4.0'"
+            )
         );
         let c = Command {
             edge_domain: Some("sbx.example.com"),
@@ -530,12 +534,14 @@ mod tests {
             render(&pick(Some("https://mirror.example.com/")))
                 .starts_with("curl -fsSL https://mirror.example.com/sandbox.sh | bash -s -- ")
         );
-        // Else pyo.dev, which runs the sandbox.sh of the --version release.
+        // Else this release's sandbox.sh on pyo.dev.
         for unset in [None, Some(" ")] {
             let c = render(&pick(unset));
             assert!(
-                c.starts_with("curl -fsSL https://pyo.dev/sandbox.sh | bash -s -- ")
-                    && c.contains(" --version '0.4.0'"),
+                c.starts_with(&format!(
+                    "curl -fsSL https://pyo.dev/v/{}/sandbox.sh | bash -s -- ",
+                    env!("CARGO_PKG_VERSION")
+                )) && c.contains(" --version '0.4.0'"),
                 "{c}"
             );
         }

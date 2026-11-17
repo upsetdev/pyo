@@ -14,8 +14,14 @@ pub const CONNECT_SCRIPT: &str = include_str!("../assets/connect.sh");
 pub const SANDBOX_SCRIPT: &str = include_str!("../../../deploy/sandbox.sh");
 
 /// Where the scripts are published, for when this Pyo has no address
-/// another machine can reach.
+/// another machine can reach. pyo.dev serves each release's scripts at
+/// `/v/<version>/`, only as its signed release.json lists them.
 pub const PUBLISHED_SCRIPTS_URL: &str = "https://pyo.dev";
+
+/// This release's scripts on pyo.dev: `https://pyo.dev/v/<version>`.
+pub fn published_scripts_url() -> String {
+    format!("{PUBLISHED_SCRIPTS_URL}/v/{}", env!("CARGO_PKG_VERSION"))
+}
 
 /// Where the commands for other machines fetch their scripts from, first
 /// of:
@@ -25,7 +31,8 @@ pub const PUBLISHED_SCRIPTS_URL: &str = "https://pyo.dev";
 ///    which it has to reach anyway;
 /// 3. Pyo on the tailnet ([`crate::web::tailnet_api_url`]), then its HTTPS
 ///    dashboard;
-/// 4. pyo.dev, when Pyo is only on its own machine or in its cluster.
+/// 4. pyo.dev ([`published_scripts_url`]), when Pyo is only on its own
+///    machine or in its cluster.
 ///
 /// Only for machines already on the tailnet, or told Pyo's public URL. A
 /// command with a Tailscale key uses [`scripts_url_before_tailnet`].
@@ -53,7 +60,7 @@ fn pick_scripts_url(configured: Option<&str>, pyo: &[Option<&str>]) -> String {
         .find(|u| outside(u) && secure_transport(u))
     {
         Some(u) => format!("{u}/install"),
-        None => PUBLISHED_SCRIPTS_URL.to_owned(),
+        None => published_scripts_url(),
     }
 }
 
@@ -63,13 +70,12 @@ fn pick_scripts_url(configured: Option<&str>, pyo: &[Option<&str>]) -> String {
 /// its public IP: that address may not be reachable from outside (a server
 /// behind NAT, like Starlink's). So:
 /// 1. `PYO_SCRIPTS_URL`, when set;
-/// 2. else pyo.dev. Its sandbox.sh, join.sh and connect.sh run the script
-///    of the release `--version` names ([`pinned`]), and join.sh's `--k3s`
-///    keeps the server on the cluster's k3s.
+/// 2. else this release's scripts on pyo.dev ([`published_scripts_url`]),
+///    and join.sh's `--k3s` keeps the server on the cluster's k3s.
 ///
 /// A dev build's version may not be a published release, so pyo.dev has no
-/// sandbox.sh for it and its wrapper fails to download one: dev builds set
-/// `PYO_SCRIPTS_URL` (to a mirror, or a Pyo the new machine can reach).
+/// scripts for it: dev builds set `PYO_SCRIPTS_URL` (to a mirror, or a Pyo
+/// the new machine can reach).
 ///
 /// Commands for machines already on the tailnet use [`scripts_url`].
 pub fn scripts_url_before_tailnet() -> String {
@@ -77,15 +83,23 @@ pub fn scripts_url_before_tailnet() -> String {
 }
 
 pub(crate) fn pick_scripts_url_before_tailnet(configured: Option<&str>) -> String {
-    setting(configured).unwrap_or_else(|| PUBLISHED_SCRIPTS_URL.to_owned())
+    setting(configured).unwrap_or_else(published_scripts_url)
 }
 
-/// `PYO_SCRIPTS_URL`, when it's set to something.
+/// `PYO_SCRIPTS_URL`, when it's set to something. pyo.dev itself means
+/// this release's scripts there.
 fn setting(configured: Option<&str>) -> Option<String> {
     configured
         .map(str::trim)
         .filter(|u| !u.is_empty())
-        .map(|u| u.trim_end_matches('/').to_owned())
+        .map(|u| u.trim_end_matches('/'))
+        .map(|u| {
+            if u == PUBLISHED_SCRIPTS_URL {
+                published_scripts_url()
+            } else {
+                u.to_owned()
+            }
+        })
 }
 
 /// The host of an http(s) URL, lowercase, without brackets or port.
@@ -269,15 +283,16 @@ pub fn command(base: &str, j: &Join) -> String {
     )
 }
 
-/// A script's arguments for where it's fetched from (`base`). pyo.dev's
-/// join.sh and connect.sh run the script of the release `--version` names,
-/// else the latest one's: fetched from anywhere but a Pyo (whose own are
-/// its release's), they get this Pyo's release. The scripts ignore it.
+/// A script's arguments for where it's fetched from (`base`). A Pyo's own
+/// scripts and pyo.dev's `/v/<version>/` are this release's. From anywhere
+/// else (a mirror) they get `--version`: a release's join.sh and connect.sh
+/// then run that release's script from pyo.dev when they're another's.
 pub fn pinned(
     base: &str,
     mut args: Vec<(&'static str, Option<String>)>,
 ) -> Vec<(&'static str, Option<String>)> {
-    if !base.trim_end_matches('/').ends_with("/install") {
+    let base = base.trim_end_matches('/');
+    if !base.ends_with("/install") && !base.starts_with(&format!("{PUBLISHED_SCRIPTS_URL}/v/")) {
         args.push(("--version", Some(env!("CARGO_PKG_VERSION").to_owned())));
     }
     args
@@ -419,7 +434,9 @@ pub async fn serve_host_units() -> impl axum::response::IntoResponse {
 mod tests {
     use super::*;
 
-    /// pyo.dev's wrappers run this release's scripts.
+    /// This release's scripts on pyo.dev.
+    const V: &str = concat!("https://pyo.dev/v/", env!("CARGO_PKG_VERSION"));
+    /// From a mirror, a release's scripts run this release's.
     const PIN: &str = concat!(" --version '", env!("CARGO_PKG_VERSION"), "'");
 
     #[test]
@@ -678,6 +695,27 @@ mod tests {
             block("become-root", "connect.sh", CONNECT_SCRIPT),
             "join.sh's become_root differs from connect.sh's"
         );
+        // How they run the release --version names (release.yml writes
+        // each one's release on its pyo:release-version line).
+        let release = block("release", "connect.sh", CONNECT_SCRIPT);
+        for (file, script) in [("join.sh", SCRIPT), ("deploy/sandbox.sh", SANDBOX_SCRIPT)] {
+            assert_eq!(
+                block("release", file, script),
+                release,
+                "{file}'s run_release differs from connect.sh's"
+            );
+        }
+        for (file, script) in [
+            ("connect.sh", CONNECT_SCRIPT),
+            ("join.sh", SCRIPT),
+            ("deploy/sandbox.sh", SANDBOX_SCRIPT),
+        ] {
+            assert_eq!(
+                script.matches(RELEASE_LINE).count(),
+                1,
+                "{file} needs exactly one {RELEASE_LINE:?} line for release.yml"
+            );
+        }
         // How both find Pyo's (or the control plane's) tailnet name.
         assert_eq!(
             block("tailnet-host", "join.sh", SCRIPT),
@@ -753,8 +791,9 @@ mod tests {
 
     #[test]
     fn builds_command() {
+        assert_eq!(published_scripts_url(), V);
         let c = command(
-            "https://pyo.dev",
+            V,
             &Join {
                 server_ip: "100.64.0.1",
                 token: "abc123.0123456789abcdef",
@@ -768,7 +807,7 @@ mod tests {
         assert_eq!(
             c,
             format!(
-                "curl -fsSL https://pyo.dev/join.sh | bash -s -- --server '100.64.0.1' --token 'abc123.0123456789abcdef' --name 'sg-1' --k3s 'v1.36.5+k3s1'{PIN}"
+                "curl -fsSL {V}/join.sh | bash -s -- --server '100.64.0.1' --token 'abc123.0123456789abcdef' --name 'sg-1' --k3s 'v1.36.5+k3s1'"
             )
         );
         let c = command(
@@ -791,19 +830,24 @@ mod tests {
         );
         assert_eq!(
             connect_command(
-                "https://pyo.dev",
+                V,
                 "http://100.64.0.1:8000",
                 "abc",
                 None,
                 Some(("100.64.0.1:5005", "def"))
             ),
             format!(
-                "curl -fsSL https://pyo.dev/connect.sh | bash -s -- --api 'http://100.64.0.1:8000' --token 'abc' --registry '100.64.0.1:5005' --registry-token 'def'{PIN}"
+                "curl -fsSL {V}/connect.sh | bash -s -- --api 'http://100.64.0.1:8000' --token 'abc' --registry '100.64.0.1:5005' --registry-token 'def'"
             )
         );
         assert_eq!(
-            refresh_command("https://pyo.dev"),
-            format!("curl -fsSL https://pyo.dev/connect.sh | bash -s --{PIN}")
+            refresh_command(V),
+            format!("curl -fsSL {V}/connect.sh | bash")
+        );
+        // A mirror's: --version runs this release's, when they're another's.
+        assert_eq!(
+            refresh_command("https://mirror.example.com"),
+            format!("curl -fsSL https://mirror.example.com/connect.sh | bash -s --{PIN}")
         );
         // Pyo's own scripts are its release's.
         assert_eq!(
@@ -881,11 +925,12 @@ mod tests {
     #[test]
     fn scripts_come_from_the_setting_then_pyo_then_pyo_dev() {
         let tailnet = Some("http://100.64.0.1:8000/");
-        // The setting wins.
+        // The setting wins. pyo.dev there is this release's scripts on it.
         assert_eq!(
             pick_scripts_url(Some(" https://mirror.example.com/ "), &[tailnet]),
             "https://mirror.example.com"
         );
+        assert_eq!(pick_scripts_url(Some("https://pyo.dev/"), &[tailnet]), V);
         // Unset or blank: Pyo, at the first address another machine reaches.
         for unset in [None, Some(""), Some("  ")] {
             assert_eq!(
@@ -919,13 +964,9 @@ mod tests {
             "",
         ];
         for u in local {
-            assert_eq!(
-                pick_scripts_url(None, &[Some(u)]),
-                PUBLISHED_SCRIPTS_URL,
-                "{u}"
-            );
+            assert_eq!(pick_scripts_url(None, &[Some(u)]), V, "{u}");
         }
-        assert_eq!(pick_scripts_url(None, &[None, None]), PUBLISHED_SCRIPTS_URL);
+        assert_eq!(pick_scripts_url(None, &[None, None]), V);
     }
 
     #[test]
@@ -938,15 +979,15 @@ mod tests {
         // Unset or blank: pyo.dev, never Pyo itself (on the tailnet, or on
         // a public IP that may sit behind NAT).
         for unset in [None, Some(""), Some("  ")] {
-            assert_eq!(pick(unset), PUBLISHED_SCRIPTS_URL);
+            assert_eq!(pick(unset), V);
         }
     }
 
     #[test]
     fn commands_with_a_tailscale_key_fetch_their_script_off_the_tailnet() {
         let base = pick_scripts_url_before_tailnet(None);
-        // join.sh: pyo.dev runs the latest release's join.sh, and --k3s keeps
-        // the server on the cluster's k3s.
+        // join.sh: this release's on pyo.dev, and --k3s keeps the server on
+        // the cluster's k3s.
         assert_eq!(
             command(
                 &base,
@@ -961,7 +1002,7 @@ mod tests {
                 },
             ),
             format!(
-                "curl -fsSL https://pyo.dev/join.sh | bash -s -- --server 'server-1.tail1234.ts.net' --token 't' --name 'server-2' --k3s 'v1.37.2+k3s1' --tailscale-key 'tskey-auth-1'{PIN}"
+                "curl -fsSL {V}/join.sh | bash -s -- --server 'server-1.tail1234.ts.net' --token 't' --name 'server-2' --k3s 'v1.37.2+k3s1' --tailscale-key 'tskey-auth-1'"
             )
         );
         assert_eq!(
@@ -973,7 +1014,7 @@ mod tests {
                 Some(("pyo-registry.tail1234.ts.net", "def"))
             ),
             format!(
-                "curl -fsSL https://pyo.dev/connect.sh | bash -s -- --api 'https://pyo.tail1234.ts.net' --token 'abc' --tailscale-key 'tskey-auth-1' --registry 'pyo-registry.tail1234.ts.net' --registry-token 'def'{PIN}"
+                "curl -fsSL {V}/connect.sh | bash -s -- --api 'https://pyo.tail1234.ts.net' --token 'abc' --tailscale-key 'tskey-auth-1' --registry 'pyo-registry.tail1234.ts.net' --registry-token 'def'"
             )
         );
         // A mirror the operator set.
@@ -1026,10 +1067,7 @@ mod tests {
             assert!(!secure_transport(bad), "{bad}");
         }
         // Never a plain-http public address for the scripts either.
-        assert_eq!(
-            pick_scripts_url(None, &[Some("http://pyo.example.com")]),
-            PUBLISHED_SCRIPTS_URL
-        );
+        assert_eq!(pick_scripts_url(None, &[Some("http://pyo.example.com")]), V);
     }
 
     #[test]
@@ -1053,6 +1091,70 @@ mod tests {
             .find(&format!("# <<< pyo:{name}\n"))
             .unwrap_or_else(|| panic!("pyo:{name} has no end"));
         script[start..start + end].to_owned()
+    }
+
+    /// The line release.yml writes a script's release on.
+    const RELEASE_LINE: &str = "\n  local release=\"\" # pyo:release-version\n";
+
+    /// join.sh's run_release, as release.yml publishes it for `release`
+    /// (empty: as Pyo serves it), with `args`. pyo.dev has only 0.4.2's
+    /// join.sh, which prints its arguments and exits with 3.
+    fn run_release(release: &str, args: &str) -> (i32, String, String) {
+        let block = script_block("release", SCRIPT).replace(
+            RELEASE_LINE,
+            &format!("\n  local release=\"{release}\" # pyo:release-version\n"),
+        );
+        bash(&format!(
+            r#"curl() {{
+  local out="" url="" a
+  while [ $# -gt 0 ]; do
+    case "$1" in -o) out=$2; shift 2 ;; --proto | --retry) shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac
+  done
+  [ "$url" = https://pyo.dev/v/0.4.2/join.sh ] || return 22
+  printf '%s\n' 'echo "0.4.2 join.sh: $*"; exit 3' >"$out"
+}}
+{block}
+run_release join.sh {args}
+echo "this one runs"
+"#
+        ))
+    }
+
+    #[test]
+    fn scripts_run_the_release_their_version_names() {
+        // Pyo 0.4.2's commands give pyo.dev's latest script --version 0.4.2.
+        let (code, out, _) = run_release("0.4.3", "--server s --version 0.4.2");
+        assert_eq!(
+            (code, out.as_str()),
+            (3, "0.4.2 join.sh: --server s --version 0.4.2\n")
+        );
+        let (code, out, _) = run_release("0.4.3", "--version v0.4.2");
+        assert_eq!(
+            (code, out.as_str()),
+            (3, "0.4.2 join.sh: --version v0.4.2\n")
+        );
+        // Its own release, no --version, or Pyo's own copy: this script.
+        for (release, args) in [
+            ("0.4.3", "--server s --version 0.4.3"),
+            ("0.4.3", "--server s"),
+            ("", "--version 0.4.2"),
+        ] {
+            assert_eq!(
+                run_release(release, args),
+                (0, "this one runs\n".into(), String::new()),
+                "{release} {args}"
+            );
+        }
+        // A release pyo.dev doesn't have, or not a release at all.
+        let (code, out, err) = run_release("0.4.3", "--version 0.3.0");
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(
+            err.contains("pyo.dev has no join.sh for Pyo 0.3.0."),
+            "{err}"
+        );
+        let (code, _, err) = run_release("0.4.3", "--version '0.4.2;x'");
+        assert_eq!(code, 2);
+        assert!(err.contains("isn't one"), "{err}");
     }
 
     /// Runs `script` with bash: (exit code, stdout, stderr).
