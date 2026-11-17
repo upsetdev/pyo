@@ -474,7 +474,7 @@ async fn edge_proxy(state: &Arc<AppState>, keys: &Keys, run: &Path, id: &str) {
     }
     assert_eq!(echo, b"ping through the edge\n");
 
-    // And through the daemon's API (noVNC's WebSocket on Open desktop).
+    // And through the daemon's API (the desktop's WebSocket on Open desktop).
     let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_port = api.local_addr().unwrap().port();
     tokio::spawn(async move {

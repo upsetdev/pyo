@@ -526,7 +526,7 @@ pub struct CreateSandbox {
     /// A sandbox template's name (or id): the team's own, else the
     /// installation's. "base" (Pyo's built-in Ubuntu 24.04 template) when
     /// omitted. "desktop" is Pyo's built-in desktop with a browser: CDP on
-    /// port 9222 and the screen (noVNC) on port 6080. A server that doesn't
+    /// port 9222 and the screen (voxl) on port 6080. A server that doesn't
     /// have Pyo's template yet makes it first, so the first sandbox from it
     /// there takes longer.
     #[serde(default)]

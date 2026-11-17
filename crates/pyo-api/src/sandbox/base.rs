@@ -2,7 +2,7 @@
 //! ([`super::images`]):
 //! - `base`: Ubuntu with the tools coding agents expect. A sandbox created
 //!   without a template starts from it.
-//! - `desktop`: `base` with a desktop, noVNC on port 6080 and a browser with
+//! - `desktop`: `base` with a desktop, voxl on port 6080 and a browser with
 //!   CDP on port 9222, started on first use. Its sandboxes get 2 CPUs and
 //!   2 GiB unless the create says otherwise.
 //!

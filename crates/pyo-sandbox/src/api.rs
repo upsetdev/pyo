@@ -21,7 +21,7 @@
 //!
 //! `.../web/{port}/` serves a web page on a port of the sandbox to the
 //! browser that opens it, over the tailnet, like the dashboard's Open
-//! desktop (noVNC on 6080). The port needn't be open on the edge. The
+//! desktop (voxl on 6080). The port needn't be open on the edge. The
 //! token comes once as `?pyo_token=`, which sets an HttpOnly cookie for
 //! that sandbox's pages (SameSite=Lax, so other sites can't use it) and
 //! redirects, then in the cookie, or in `Authorization`. The rest of the

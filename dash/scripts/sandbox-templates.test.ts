@@ -144,7 +144,7 @@ test("the desktop needs room, and opens through the daemon", () => {
   expect(url.searchParams.has("app")).toBe(false);
   const chromium = new URL(desktopUrl("http://100.64.0.2:7070", "sbx_abc", "t", "chromium"));
   expect(chromium.searchParams.get("app")).toBe("chromium");
-  // noVNC finds its WebSocket beside the page.
+  // The page finds its WebSocket beside it.
   expect(url.searchParams.has("path")).toBe(false);
 });
 
