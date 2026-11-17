@@ -72,11 +72,23 @@ pub fn registry_push() -> String {
         .unwrap_or_default()
 }
 
+/// Every other cluster keeps the images it builds in its own registry
+/// (`PYO_CLUSTER_REGISTRY=in-cluster`, Pyo Cloud): connect.sh's
+/// `--local-registry` sets it up, and its servers pull them from
+/// 127.0.0.1:5005 as on Pyo's own.
+pub fn in_cluster_registries() -> bool {
+    std::env::var("PYO_CLUSTER_REGISTRY").is_ok_and(|v| v.trim() == "in-cluster")
+}
+
 /// Where a builder on this cluster pushes: the door in the cluster on Pyo's
-/// own, its tailnet address elsewhere (None without one).
+/// own, its own registry with in-cluster registries, else Pyo's door at its
+/// tailnet address (None without one).
 pub fn builder_registry(on_pyos_cluster: bool) -> Option<String> {
     if on_pyos_cluster {
         return Some(DOOR_IN_CLUSTER.into());
+    }
+    if in_cluster_registries() {
+        return Some(INTERNAL_DEFAULT.into());
     }
     let push = registry_push();
     (!push.is_empty()).then_some(push)

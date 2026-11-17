@@ -11,6 +11,8 @@
 #   --tailscale-key  joins your tailnet first (a single-use key from Pyo)
 #   --registry       Pyo's registry door, for images Pyo builds
 #   --registry-token this cluster's login there (pull only)
+#   --local-registry a registry in this cluster for the images it builds,
+#                    instead of Pyo's (Pyo Cloud: images stay on your servers)
 #   --version        runs this Pyo release's connect.sh instead, from pyo.dev
 #
 # Or only joins this machine to the tailnet (Pyo's own machine does this
@@ -234,7 +236,7 @@ quietly() {
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-API="" TOKEN="" TS_AUTHKEY="${TS_AUTHKEY:-}" REGISTRY="" REGISTRY_TOKEN=""
+API="" TOKEN="" TS_AUTHKEY="${TS_AUTHKEY:-}" REGISTRY="" REGISTRY_TOKEN="" LOCAL_REGISTRY=""
 UNINSTALL="" KEEP_DATA="" YES="" DRY_RUN="" WITH_PYO="" TAILNET_ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -243,6 +245,7 @@ while [ $# -gt 0 ]; do
     --tailscale-key) TS_AUTHKEY="$2"; shift 2 ;;
     --registry) REGISTRY="$2"; shift 2 ;;
     --registry-token) REGISTRY_TOKEN="$2"; shift 2 ;;
+    --local-registry) LOCAL_REGISTRY=1; shift ;;
     --tailnet-only) TAILNET_ONLY=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     --keep-data) KEEP_DATA=1; shift ;;
@@ -553,7 +556,7 @@ if [ -z "$TAILNET_ONLY" ] && [ -z "$API" ] && [ -z "$TOKEN" ] && command -v k3s 
   case "$API" in http://*.svc:* | http://*.svc.cluster.local:*) API=http://127.0.0.1:8000 ;; esac
   [ -z "$API" ] || echo "Updating this cluster's Pyo agent."
 fi
-[ -n "$TAILNET_ONLY" ] || { [ -n "$API" ] && [ -n "$TOKEN" ]; } || { echo "Usage: connect.sh --api URL --token TOKEN [--tailscale-key KEY] [--registry HOST:PORT --registry-token TOKEN]" >&2; exit 2; }
+[ -n "$TAILNET_ONLY" ] || { [ -n "$API" ] && [ -n "$TOKEN" ]; } || { echo "Usage: connect.sh --api URL --token TOKEN [--tailscale-key KEY] [--registry HOST:PORT --registry-token TOKEN | --local-registry]" >&2; exit 2; }
 [ -z "$REGISTRY" ] || [ -n "$REGISTRY_TOKEN" ] || { echo "--registry needs --registry-token: copy the full command from Pyo." >&2; exit 2; }
 case "$REGISTRY_TOKEN" in *[!0-9a-fA-F]*) echo "That registry token doesn't look like one from Pyo." >&2; exit 2 ;; esac
 # The agent's token and its commands' secrets travel to --api: plain http
@@ -1191,6 +1194,23 @@ REG
   )
   chmod 600 /etc/rancher/k3s/registries.yaml
 fi
+# Its own registry (--local-registry): this machine pulls the images built
+# here from 127.0.0.1:5005, which pyo-registry-host forwards to the registry.
+LOCAL_REGISTRY_NEW=""
+if [ -n "$LOCAL_REGISTRY" ] && ! grep -qs '"127.0.0.1:5005"' /etc/rancher/k3s/registries.yaml; then
+  if [ -s /etc/rancher/k3s/registries.yaml ]; then
+    echo "/etc/rancher/k3s/registries.yaml has other settings. Add a mirror for 127.0.0.1:5005 (http://127.0.0.1:5005) to it, then run this again." >&2
+    exit 1
+  fi
+  (umask 077 && cat > /etc/rancher/k3s/registries.yaml <<'REG'
+mirrors:
+  "127.0.0.1:5005":
+    endpoint:
+      - "http://127.0.0.1:5005"
+REG
+  )
+  LOCAL_REGISTRY_NEW=1
+fi
 if ! command -v k3s >/dev/null; then
   # Pyo's k3s (deploy/k3s.env), downloaded and checked before it's set up.
   quietly "Downloading k3s…" k3s_fetch "$K3S_DIR" "$PYO_K3S_VERSION" ||
@@ -1217,7 +1237,7 @@ else
   # Its memory reserve brought up to date; k3s restarts below if it changed.
   k3s_memory_refresh later
   # k3s finds a newly installed NVIDIA toolkit only when it starts.
-  if [ -n "$REGISTRY" ] || [ -n "$GPU_TOOLKIT_NEW" ] || [ -n "$K3S_MEMORY_CHANGED" ]; then systemctl restart k3s 2>/dev/null || true; fi
+  if [ -n "$REGISTRY" ] || [ -n "$LOCAL_REGISTRY_NEW" ] || [ -n "$GPU_TOOLKIT_NEW" ] || [ -n "$K3S_MEMORY_CHANGED" ]; then systemctl restart k3s 2>/dev/null || true; fi
 fi
 
 k3s_up() { k3s kubectl get nodes >/dev/null 2>&1; }
@@ -1262,6 +1282,107 @@ gateway_crds() {
   fi
 }
 gateway_crds
+
+# The cluster's own registry (--local-registry): builders here push to it,
+# and every server pulls from it through 127.0.0.1:5005 (loopback only).
+local_registry() {
+  k3s kubectl apply --server-side --force-conflicts --field-manager=pyo -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pyo-system
+  labels: { pyo.dev/managed: "true" }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-data
+  namespace: pyo-system
+  labels: { app.kubernetes.io/part-of: pyo }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyo-registry
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: registry, app.kubernetes.io/part-of: pyo }
+spec:
+  selector: { app.kubernetes.io/name: registry }
+  ports:
+    - { name: registry, port: 5000, targetPort: registry }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: registry, app.kubernetes.io/part-of: pyo }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: registry }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: registry, app.kubernetes.io/part-of: pyo }
+    spec:
+      containers:
+        - name: registry
+          image: registry:3.1.2
+          env:
+            - { name: REGISTRY_HTTP_ADDR, value: "0.0.0.0:5000" }
+            - { name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true" }
+            - { name: OTEL_TRACES_EXPORTER, value: "none" }
+            - { name: REGISTRY_LOG_LEVEL, value: "warn" }
+            - { name: REGISTRY_LOG_ACCESSLOG_DISABLED, value: "true" }
+          ports:
+            - { name: registry, containerPort: 5000 }
+          readinessProbe:
+            httpGet: { path: /v2/, port: registry }
+            periodSeconds: 30
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/registry }
+          resources:
+            requests: { cpu: 10m, memory: 24Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: registry-data }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pyo-registry-host
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-registry-host, app.kubernetes.io/part-of: pyo }
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: pyo-registry-host }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-registry-host, app.kubernetes.io/part-of: pyo }
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - { operator: Exists }
+      containers:
+        - name: forward
+          image: alpine/socat:1.8.1.3
+          args: ["TCP-LISTEN:5005,bind=127.0.0.1,fork,reuseaddr", "TCP:pyo-registry.pyo-system.svc.cluster.local:5000"]
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 64Mi }
+YAML
+}
+if [ -n "$LOCAL_REGISTRY" ]; then
+  quietly "Setting up this cluster's registry…" local_registry || { echo "Couldn't set up this cluster's registry (see above)." >&2; exit 1; }
+fi
 
 # >>> pyo:agent-apply (connect.sh only; join.rs tests it)
 # The Kubernetes minor version the API server reports; empty when it doesn't

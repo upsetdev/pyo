@@ -344,6 +344,8 @@ pub fn connect_args(
     if let Some((r, t)) = registry {
         a.push(("--registry", Some(r.to_owned())));
         a.push(("--registry-token", Some(t.to_owned())));
+    } else if crate::deploy::in_cluster_registries() {
+        a.push(("--local-registry", None));
     }
     a
 }
