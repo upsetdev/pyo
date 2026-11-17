@@ -172,35 +172,308 @@ rm -rf "$WORK"
 check "--version asks GitHub for that release" "$(cat "$asked")" "^https://api.github.com/repos/upsetdev/pyo/releases/tags/v1.2.3" has
 check "once, when it isn't there" "$(wc -l <"$asked")" "^1$" has
 check "and says so" "$out" "There's no release 1.2.3" has
-# The addresses at the end: no wait for an HTTPS address where the machine
-# has no public IP (behind NAT, it never comes), and progress while waiting.
-# Sleeping only moves the clock.
+# ── The addresses at the end (addresses.sh, as host_units writes it) ──
+# The machine is stubbed: its cards (ip), its cloud's metadata and Pyo
+# (curl), Tailscale, and cert-manager's view of the HTTPS address's
+# certificate (k3s kubectl). Sleeping only moves the clock.
+lib=$(mktemp)
+sed -n "/tee \/usr\/local\/lib\/pyo\/addresses.sh >\/dev\/null <<'ADDR'$/,/^ADDR$/p" deploy/install.sh | sed '1d;$d' >"$lib"
+bash -n "$lib"
+check "addresses.sh is in host_units" "$(wc -l <"$lib")" "^[0-9]{3}$" has
+# shellcheck source=/dev/null
+. "$lib"
+PYO_ADDRESSES_SH=$lib
 sleep() { SECONDS=$((SECONDS + ${1%.*})); }
-hostname() { echo "$ips"; }
-curl() { echo x >>"$asked"; [ -z "$meta" ] || echo "$meta"; }
-ips="10.0.2.15 10.42.0.0 172.17.0.1 100.101.67.2 fd7a:115c::1"
-meta='{"version":"9.9.9"}'
-: >"$asked"
+id() { echo 0; }
+hostname() { if [ "${1:-}" = -I ]; then echo "$ips"; else echo VM-1; fi; }
+ip() {
+  case "$*" in
+    "-o -4 addr show") [ -n "$cards" ] && echo "$cards" ;;
+    "-4 route show default") [ -z "$route" ] || echo "default via 10.0.0.1 dev $route proto dhcp src 10.0.0.9 metric 100" ;;
+  esac
+}
+tailscale() { [ "$*" = "ip -4" ] && [ -n "$ts_ip" ] && echo "$ts_ip"; }
+# cloud: which metadata service answers (with cloud_ip); meta: Pyo's
+# /api/v1/meta; ts_answers: Pyo answers on the Tailscale IP.
+curl() {
+  local url=${*: -1}
+  echo "$*" >>"$asked"
+  case "$url" in
+    http://127.0.0.1:8000/api/v1/meta) [ -n "$meta" ] && echo "$meta" ;;
+    http://100.*:8000/api/v1/meta) [ -n "$ts_answers" ] ;;
+    http://169.254.169.254/latest/api/token) [ "$cloud" = aws ] && printf tok ;;
+    http://169.254.169.254/latest/meta-data/public-ipv4) [ "$cloud" = aws ] && [[ $* == *"X-aws-ec2-metadata-token: tok"* ]] && printf '%s' "$cloud_ip" ;;
+    *computeMetadata*) [ "$cloud" = gcp ] && [[ $* == *"Metadata-Flavor: Google"* ]] && printf '%s' "$cloud_ip" ;;
+    *169.254.169.254/metadata/instance*) [ "$cloud" = azure ] && [[ $* == *"Metadata: true"* ]] && printf '%s' "$cloud_ip" ;;
+    http://100.100.100.200/latest/api/token) return 22 ;;
+    http://100.100.100.200/latest/meta-data/eipv4) [ "$cloud" = alibaba ] && printf '%s' "$cloud_ip" ;;
+    http://169.254.0.23/latest/meta-data/public-ipv4) [ "$cloud" = tencent ] && printf '%s' "$cloud_ip" ;;
+    http://169.254.42.42/conf) [ "$cloud" = scaleway ] && printf 'PRIVATE_IP=10.1.2.3\nPUBLIC_IP_ADDRESS=%s\n' "$cloud_ip" ;;
+    *) return 7 ;;
+  esac || return 22
+}
+# cert: the certificate as the jsonpath reads it ("" none); the challenge
+# is turned down from look number $fail_after on (counted in $polls, a
+# file: the reads run in subshells).
+k3s() {
+  shift
+  case "$*" in
+    *"get certificate pyo-tls---dashboard"*)
+      echo x >>"$polls"
+      [ -n "$cert" ] && echo "$cert" ;;
+    *challenges.acme*)
+      # An older try's, turned down: not this certificate's.
+      [ -z "$cert" ] || echo "2026-11-17T08:00:00Z ${cert%% *} invalid"
+      [ -n "$cert" ] && [ "$(wc -l <"$polls")" -ge "${fail_after:-999}" ] && echo "2026-11-17T09:00:01Z ${cert%% *} invalid"
+      return 0 ;;
+    *"delete certificate pyo-tls---dashboard"*)
+      echo deleted >>"$asked"
+      cert="${cert%% *} False- DoesNotExist- 2026-11-17T09:30:00Z " ;;
+    *"get node vm-1"*) echo "$agent_ip" ;;
+  esac
+}
+asked=$(mktemp) polls=$(mktemp)
+reset() {
+  unset ADDR_IP_KNOWN ADDR_IP ADDR_CERT_STATE ADDR_CERT_HOST ADDR_WAITED STARTING
+  cards="" route="" ips="" ts_ip="" ts_answers="" cloud="" cloud_ip="" meta='{"version":"9.9.9"}' cert="" agent_ip="" fail_after="" failed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  : >"$asked"
+  : >"$polls"
+}
+lo='1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever'
+k3s_cards='5: cni0    inet 10.42.0.1/24 brd 10.42.0.255 scope global cni0\       valid_lft forever preferred_lft forever
+6: flannel.1    inet 10.42.0.0/32 scope global flannel.1\       valid_lft forever preferred_lft forever'
+ts_card='3: tailscale0    inet 100.101.67.2/32 scope global tailscale0\       valid_lft forever preferred_lft forever'
+
+# A Tencent Cloud server: a private address on its card, the public IP in
+# front of it (1:1 NAT) from the metadata, on a tailnet already, the HTTPS
+# address issued. The block as the user sees it, lined up.
+reset
+cards="$lo
+2: eth0    inet 10.3.8.13/22 brd 10.3.11.255 scope global eth0\       valid_lft forever preferred_lft forever
+$ts_card
+$k3s_cards"
+route=eth0 cloud=tencent cloud_ip=43.156.1.2 ts_ip=100.101.67.2 ts_answers=1
+cert="pyo.43.156.1.2.nip.io True- Issued- 2026-11-17T09:00:00Z "
 out=$(pyo_addresses 300)
-check "no public IP: one look" "$(wc -l <"$asked")" "^1$" has
-check "no public IP: no wait" "$out" "Waiting" lacks
-check "no public IP: the network address" "$out" "http://10\.0\.2\.15:8000  \(your network\)" has
-check "no public IP: one line on HTTPS" "$out" "^For an HTTPS address, set up Tailscale in Pyo\.$" has
-check "no jargon" "$out" "NAT|curl|api/v1|ports? [0-9]" lacks
-ips="10.0.2.15 203.0.113.7"
-: >"$asked"
+want=$'\nOpen Pyo:\n  ➜  Public:   https://pyo.43.156.1.2.nip.io\n  ➜  Tailnet:  http://100.101.67.2:8000\n  ➜  Network:  http://10.3.8.13:8000\n  ➜  Local:    http://localhost:8000'
+same() { if [ "$1" = "$2" ]; then echo same; else printf '%s\n--- wanted:\n%s\n' "$1" "$2"; fi; }
+check "a cloud server behind NAT: the whole block" "$(same "$out" "$want")" "^same$" has
+check "issued: no wait" "$out" "Waiting" lacks
+check "never plain HTTP on the public IP" "$out" "http://43\.156" lacks
+check "no k3s address" "$out" "10\.42\." lacks
+check "no Tailscale hint with HTTPS" "$out" "set up Tailscale" lacks
+check "no colors off a terminal" "$out" $'\033' lacks
+
+# Let's Encrypt couldn't reach it: the address still, with what to do.
+reset
+cards="$lo
+2: eth0    inet 10.3.8.13/22 brd 10.3.11.255 scope global eth0"
+route=eth0 cloud=tencent cloud_ip=43.156.1.2
+cert="pyo.43.156.1.2.nip.io False- Failed- 2026-11-17T09:00:00Z $failed_at"
 out=$(pyo_addresses 300)
-check "a public IP: waits five minutes" "$(wc -l <"$asked")" "^1[45][0-9]$" has
-check "a public IP: says it waits, as it goes" "$out" "^→ Waiting for the HTTPS address \(up to 5 minutes\)…$" has
-check "a public IP: every 20 seconds in a log" "$out" "^→ Waiting for the HTTPS address \(up to 5 minutes\)… 4:40$" has
-check "a public IP: not more often" "$out" "… 0:1[0-9]$" lacks
-meta='{"publicUrl":"https://pyo.203.0.113.7.nip.io"}'
-: >"$asked"
+check "blocked: the public address and the ports to open" "$out" "^  ➜  Public:   https://pyo\.43\.156\.1\.2\.nip\.io  \(allow ports 80 and 443 in your cloud firewall\)$" has
+check "blocked: failed already, no wait" "$out" "Waiting" lacks
+check "blocked: no Tailscale hint" "$out" "set up Tailscale" lacks
+check "blocked: not on a tailnet, no Tailnet line" "$out" "Tailnet:" lacks
+
+# Run again after opening the ports: a try refused 15 minutes ago or more
+# is made again now, and waited for. Within 15 minutes, not.
+reset
+cards="2: eth0    inet 10.3.8.13/22 scope global eth0"
+route=eth0 cloud=tencent cloud_ip=43.156.1.2
+failed_at=$(date -u -d '-20 minutes' +%Y-%m-%dT%H:%M:%SZ)
+cert="pyo.43.156.1.2.nip.io False- Failed- 2026-11-17T09:00:00Z $failed_at"
 out=$(pyo_addresses 300)
-check "an HTTPS address: no wait" "$out" "Waiting" lacks
-check "an HTTPS address: shown" "$out" "https://pyo\.203\.0\.113\.7\.nip\.io" has
-check "an HTTPS address: no Tailscale hint" "$out" "Tailscale" lacks
-unset -f hostname curl sleep
+check "refused a while ago: tried again" "$(cat "$asked")" "^deleted$" has
+check "and waited for" "$out" "^→ Checking the HTTPS address…$" has
+reset
+cards="2: eth0    inet 10.3.8.13/22 scope global eth0"
+route=eth0 cloud=tencent cloud_ip=43.156.1.2
+failed_at=$(date -u -d '-5 minutes' +%Y-%m-%dT%H:%M:%SZ)
+cert="pyo.43.156.1.2.nip.io False- Failed- 2026-11-17T09:00:00Z $failed_at"
+out=$(pyo_addresses 300)
+check "refused just now: not again" "$(cat "$asked")" "^deleted$" lacks
+check "and not waited for" "$out" "Checking" lacks
+out=$(pyo_addresses)
+check "no wait asked: never tried again" "$(cat "$asked")" "^deleted$" lacks
+
+# A fresh install: the certificate on its way, then Let's Encrypt turns its
+# challenge down. The wait stops right then, well before 90 seconds.
+reset
+cards="$lo
+2: ens5    inet 172.31.5.10/20 brd 172.31.15.255 scope global dynamic ens5
+4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0"
+route=ens5 cloud=aws cloud_ip=3.120.1.2
+cert="pyo.3.120.1.2.nip.io False- DoesNotExist- 2026-11-17T09:00:00Z " fail_after=8
+t0=$SECONDS
+out=$(pyo_addresses 300; echo "took $((SECONDS - t0))")
+check "AWS: the public IP from IMDSv2" "$out" "https://pyo\.3\.120\.1\.2\.nip\.io  \(allow ports 80 and 443" has
+check "turned down: the wait stops at once" "$(sed -n 's/^took //p' <<<"$out")" "^1[0-9]$" has
+check "says it checks" "$out" "^→ Checking the HTTPS address…$" has
+check "and that it did" "$out" "^✓ Checked the HTTPS address 0:1[0-9]$" has
+check "AWS: the private address, not docker's" "$out" "^  ➜  Network:  http://172\.31\.5\.10:8000$" has
+check "no docker bridge" "$out" "172\.17\." lacks
+
+# The certificate isn't there yet after 90 seconds: it comes by itself.
+reset
+cards="$lo
+2: ens4    inet 10.128.0.2/32 scope global dynamic ens4"
+route=ens4 cloud=gcp cloud_ip=34.72.1.2
+t0=$SECONDS
+out=$(pyo_addresses 300; echo "took $((SECONDS - t0))")
+check "Google Cloud: the public IP from the metadata" "$out" "^  ➜  Public:   https://pyo\.34\.72\.1\.2\.nip\.io  \(ready in a few minutes\)$" has
+check "90 seconds at most" "$(sed -n 's/^took //p' <<<"$out")" "^9[0-3]$" has
+check "every 20 seconds in a log" "$out" "^→ Checking the HTTPS address… 1:20$" has
+check "then it goes on by itself" "$out" "^● Checking the HTTPS address 1:3[0-3]$" has
+
+# Issued while it waits.
+reset
+cards="$lo
+2: eth0    inet 10.0.0.4/24 scope global eth0"
+route=eth0 cloud=azure cloud_ip=20.1.2.3
+cert="pyo.20.1.2.3.nip.io False- DoesNotExist- 2026-11-17T09:00:00Z "
+k3s_was=$(declare -f k3s)
+k3s() { shift; case "$*" in *"get certificate"*) echo x >>"$polls"; if [ "$(wc -l <"$polls")" -ge 4 ]; then echo "pyo.20.1.2.3.nip.io True- Issued- 2026-11-17T09:00:00Z "; else echo "$cert"; fi ;; esac; }
+out=$(pyo_addresses 300)
+eval "$k3s_was"
+check "Azure: issued while it waits" "$out" "^  ➜  Public:   https://pyo\.20\.1\.2\.3\.nip\.io$" has
+
+# Alibaba Cloud and Scaleway answer too. Garbage or private answers don't count.
+for c in alibaba:47.88.1.2 scaleway:51.15.1.2; do
+  reset
+  cloud=${c%%:*} cloud_ip=${c#*:}
+  check "$cloud: the public IP from the metadata" "$(addr_cloud_ip)" "^${cloud_ip//./\\.}$" has
+done
+for junk in "<html>404</html>" 999.1.2.3 10.3.8.13 100.101.67.2 ""; do
+  reset
+  cloud=tencent cloud_ip=$junk
+  check "metadata answering \"$junk\" is no public IP" "$(addr_cloud_ip)" "." lacks
+done
+reset
+t0=$SECONDS
+addr_cloud_ip >/dev/null
+check "every cloud asked at once" "$(grep -c 169.254 "$asked")" "^[4-9]$" has
+check "each for a second at most" "$(grep 'curl\|-m' "$asked" | grep -vc -- '-m 1 ')" "^0$" has
+
+# A Hetzner server: the public IP on its own card, and a private network.
+reset
+cards="$lo
+2: eth0    inet 203.0.113.7/32 scope global dynamic eth0
+3: ens10    inet 10.0.0.2/32 brd 10.0.0.2 scope global dynamic ens10
+$k3s_cards"
+route=eth0
+cert="pyo.203.0.113.7.nip.io True- Issued- 2026-11-17T09:00:00Z "
+out=$(pyo_addresses 300)
+check "a public card: its address, no metadata asked" "$(cat "$asked")" "169\.254|100\.100" lacks
+check "a public card: HTTPS on it" "$out" "^  ➜  Public:   https://pyo\.203\.0\.113\.7\.nip\.io$" has
+check "a public card: the private network's address" "$out" "^  ➜  Network:  http://10\.0\.0\.2:8000$" has
+check "a public card: never plain HTTP on it" "$out" "http://203\." lacks
+
+# A laptop with docker, k3s, multipass, libvirt and LXD bridges, on a
+# tailnet where Pyo doesn't answer on :8000: just its Wi-Fi address.
+reset
+cards="$lo
+2: wlp0s20f3    inet 192.168.1.23/24 brd 192.168.1.255 scope global dynamic wlp0s20f3
+4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+7: br-3f2a9c1e    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-3f2a9c1e
+$k3s_cards
+8: mpqemubr0    inet 10.97.0.1/24 brd 10.97.0.255 scope global mpqemubr0
+9: virbr0    inet 192.168.122.1/24 brd 192.168.122.255 scope global virbr0
+10: lxdbr0    inet 10.10.10.1/24 scope global lxdbr0
+11: veth12ab@if10    inet 10.42.0.9/32 scope global veth12ab
+$ts_card"
+route=wlp0s20f3 ts_ip=100.101.67.2
+out=$(pyo_addresses 300)
+want=$'\nOpen Pyo:\n  ➜  Network:  http://192.168.1.23:8000\n  ➜  Local:    http://localhost:8000\nFor an HTTPS address, set up Tailscale in Pyo.'
+check "a laptop: one Network line, the hint" "$(same "$out" "$want")" "^same$" has
+check "a laptop: no wait" "$out" "Waiting" lacks
+check "a laptop: no public line" "$out" "Public" lacks
+# Pyo answers on its Tailscale address.
+ts_answers=1
+out=$(pyo_addresses 300)
+check "a laptop on a tailnet: the Tailnet line" "$out" "^  ➜  Tailnet:  http://100\.101\.67\.2:8000$" has
+check "a laptop on a tailnet: no Tailscale hint" "$out" "set up Tailscale" lacks
+# Pyo's own name on the tailnet comes first.
+meta='{"version":"9.9.9","publicUrl":"https://pyo.tail1234.ts.net"}'
+out=$(pyo_addresses 300)
+check "Pyo's tailnet name" "$out" "^  ➜  Tailnet:  https://pyo\.tail1234\.ts\.net$" has
+check "only one Tailnet line" "$(grep -c Tailnet <<<"$out")" "^1$" has
+
+# No ip command: hostname -I, without k3s's or docker's addresses.
+reset
+ips="10.0.2.15 10.42.0.0 10.42.0.1 172.17.0.1 100.101.67.2 fd7a:115c::1"
+out=$(pyo_addresses 300)
+check "hostname -I: the network address" "$out" "^  ➜  Network:  http://10\.0\.2\.15:8000$" has
+check "hostname -I: one Network line" "$(grep -c Network <<<"$out")" "^1$" has
+
+# Oracle Cloud's metadata doesn't say: what Pyo's agent found does.
+reset
+cards="2: enp0s6    inet 10.0.0.37/24 scope global enp0s6"
+route=enp0s6 agent_ip=129.146.1.2
+cert="pyo.129.146.1.2.nip.io True- Issued- 2026-11-17T09:00:00Z "
+check "the agent's cloud IP" "$(addr_public_ip)" "^129\.146\.1\.2$" has
+
+# Pyo is on the tailnet and an admin closed the public address: no wait,
+# no Public line.
+reset
+cards="2: eth0    inet 10.3.8.13/22 scope global eth0"
+route=eth0 cloud=tencent cloud_ip=43.156.1.2
+meta='{"version":"9.9.9","publicUrl":"https://pyo.tail1234.ts.net"}'
+out=$(pyo_addresses 300)
+check "closed: no wait" "$out" "Waiting" lacks
+check "closed: no Public line" "$out" "Public" lacks
+
+# Run again with nothing to update: no wait, the addresses as they are.
+reset
+cards="2: eth0    inet 10.3.8.13/22 scope global eth0"
+route=eth0 cloud=tencent cloud_ip=43.156.1.2
+cert="pyo.43.156.1.2.nip.io False- DoesNotExist- 2026-11-17T09:00:00Z "
+out=$(pyo_addresses)
+check "no wait asked: none" "$out" "Waiting" lacks
+check "on its way" "$out" "\(ready in a few minutes\)$" has
+
+# Still starting.
+reset
+STARTING=1
+dashboard_up() { return 1; }
+out=$(pyo_addresses)
+check "still starting: said first" "$(sed -n 2p <<<"$out")" "^● Pyo is still starting\. It opens at these addresses in a minute or two\.$" has
+unset -f dashboard_up
+
+# Colors on a terminal: a green arrow, the label in bold, the address in
+# cyan. NO_COLOR or no terminal: plain.
+addr_color_was=$(declare -f addr_color)
+addr_color() { [ -z "${NO_COLOR:-}" ]; }
+out=$(addr_line Public https://pyo.43.156.1.2.nip.io "allow ports 80 and 443 in your cloud firewall")
+check "colors" "$out" $'^  \033\\[32m➜\033\\[0m  \033\\[1mPublic:\033\\[0m   \033\\[36mhttps://pyo\\.43\\.156\\.1\\.2\\.nip\\.io\033\\[0m  \\(allow ports' has
+out=$(NO_COLOR=1 addr_line Local http://localhost:8000)
+check "NO_COLOR" "$out" "^  ➜  Local:    http://localhost:8000$" has
+eval "$addr_color_was"
+out=$(addr_line Tailnet http://100.101.67.2:8000)
+check "no terminal: plain" "$out" $'\033' lacks
+
+# pyo-reset-login's links: only addresses that work now.
+reset
+cards="2: eth0    inet 10.3.8.13/22 scope global eth0"
+route=eth0 cloud=tencent cloud_ip=43.156.1.2
+cert="pyo.43.156.1.2.nip.io False- Failed- 2026-11-17T09:00:00Z $failed_at"
+out=$(addr_print /reset/abc)
+check "links: not the blocked address" "$out" "Public" lacks
+check "links: the network one" "$out" "^  ➜  Network:  http://10\.3\.8\.13:8000/reset/abc$" has
+cert="pyo.43.156.1.2.nip.io True- Issued- 2026-11-17T09:00:00Z "
+unset ADDR_CERT_STATE
+out=$(addr_print /reset/abc)
+check "links: the issued one" "$out" "^  ➜  Public:   https://pyo\.43\.156\.1\.2\.nip\.io/reset/abc$" has
+
+# The steps' last line, before the addresses.
+reset
+cards="2: eth0    inet 10.3.8.13/22 scope global eth0"
+route=eth0
+out=$(pyo_addresses 0 "Pyo 9.9.9 is installed")
+check "the last step line" "$(sed -n 1p <<<"$out")" "^✓ Pyo 9\.9\.9 is installed$" has
+check "then the addresses" "$(sed -n 3p <<<"$out")" "^Open Pyo:$" has
+unset -f curl hostname ip tailscale k3s id sleep
+rm -f "$lib" "$asked" "$polls"
 
 # quietly: the output of what it runs only when that fails.
 out=$(quietly "Downloading it…" bash -c 'echo noisy; exit 0' 2>&1)

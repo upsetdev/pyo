@@ -428,6 +428,7 @@ mod tests {
         assert!(s.starts_with("#!/usr/bin/env bash\nset -euo pipefail\nhost_units() {\n"));
         assert!(s.ends_with("\n}\nhost_units\n"));
         assert!(s.contains("/usr/local/bin/pyo-reset-login"));
+        assert!(s.contains("tee /usr/local/lib/pyo/addresses.sh"));
         assert!(s.contains("http://127.0.0.1:8000/install/host-units.sh"));
         assert!(s.contains("systemctl enable --now pyo-connect.timer pyo-tailnet.timer"));
     }
@@ -706,7 +707,8 @@ mod tests {
     }
 
     /// install.sh and scripts/pyo-up.sh set up the machine Pyo runs on the
-    /// same way: its timers, bootstrap key and where Pyo is.
+    /// same way: its timers, bootstrap key and where Pyo is (host_units
+    /// writes addresses.sh).
     #[test]
     fn install_and_pyo_up_share_the_host_setup() {
         let function = |file: &str, script: &str, name: &str| -> String {
@@ -720,13 +722,7 @@ mod tests {
         };
         let install = include_str!("../../../deploy/install.sh");
         let pyo_up = include_str!("../../../scripts/pyo-up.sh");
-        for name in [
-            "host_units",
-            "bootstrap_key",
-            "nic_public_ip",
-            "pyo_https_url",
-            "pyo_addresses",
-        ] {
+        for name in ["host_units", "bootstrap_key", "pyo_addresses"] {
             assert_eq!(
                 function("deploy/install.sh", install, name),
                 function("scripts/pyo-up.sh", pyo_up, name),

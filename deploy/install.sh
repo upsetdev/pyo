@@ -806,45 +806,41 @@ check_update() {
 # ── Where Pyo is, and this machine's helpers ───────────────────────────────
 # One server needs no Tailscale: Pyo is on this machine's public IP over
 # HTTPS (https://pyo.<public IP>.nip.io, Let's Encrypt) until an admin
-# closes it, and over plain HTTP on :8000 from this machine and its private
-# network. Once Tailscale is set up in Pyo (Integrations), this machine
-# joins the tailnet by itself and Pyo is also https://pyo.<tailnet>.ts.net.
+# closes it, and over plain HTTP on :8000 from this machine, its private
+# network and its tailnet. Once Tailscale is set up in Pyo (Integrations),
+# this machine joins the tailnet by itself and Pyo is also
+# https://pyo.<tailnet>.ts.net. Which addresses there are, and how they're
+# shown, is in addresses.sh (host_units writes it).
 
-# A public IPv4 address on this machine's network cards: not private,
-# tailnet (CGNAT), loopback, link-local or multicast. Pyo puts its HTTPS
-# address on the public IP only when the machine has one itself (the
-# agent's locate.rs, freedomain.rs `direct_public_ip`).
-nic_public_ip() {
-  hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' |
-    grep -vE '^(0|10|127|2(2[4-9]|[3-5][0-9]))\.|^169\.254\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' |
-    head -n1 || true
-}
-
-# Pyo's HTTPS address, into PYO_HTTPS_URL, once it has one.
-pyo_https_url() {
-  PYO_HTTPS_URL=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
-  [ -n "$PYO_HTTPS_URL" ]
-}
-
-# Pyo's addresses. Waits up to $1 seconds for its HTTPS one, when this
-# machine has a public IP for it (else it would never come).
+# Pyo's addresses (addresses.sh). Where this machine has a public IP of its
+# own (on a network card, or the one its cloud maps to it), waits up to $1
+# seconds (90 at most) for the HTTPS address there: until Let's Encrypt
+# issued its certificate, or couldn't reach this machine. $2: the last
+# line of the steps before them ("Pyo 0.4.3 is installed").
 pyo_addresses() {
-  local lan="" wait=${1:-0}
-  [ -n "$(nic_public_ip)" ] || wait=0
-  PYO_HTTPS_URL=""
-  pyo_https_url || [ "$wait" = 0 ] ||
-    wait_until "Waiting for the HTTPS address (up to $((wait / 60)) minutes)…" "$wait" pyo_https_url || true
-  lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
+  local wait=${1:-0}
+  # shellcheck source=/dev/null
+  if ! declare -F addr_print >/dev/null && ! . "${PYO_ADDRESSES_SH:-/usr/local/lib/pyo/addresses.sh}" 2>/dev/null; then
+    [ -z "${2:-}" ] || ok_line "$2"
+    echo
+    echo "Open Pyo at http://localhost:8000"
+    return 0
+  fi
+  [ "$wait" -le 90 ] || wait=90
+  [ "$wait" = 0 ] || addr_wait_wanted || wait=0
+  if [ "$wait" != 0 ]; then
+    ADDR_WAITED=1
+    wait_until "Checking the HTTPS address…" "$wait" addr_public_settled || true
+  fi
+  [ -z "${2:-}" ] || ok_line "$2"
   echo
   # The dashboard didn't answer in time: it still comes up by itself.
   if [ -n "${STARTING:-}" ] && ! dashboard_up; then
-    echo "Pyo is still starting. It opens at these addresses in a minute or two."
+    dot_line yellow "Pyo is still starting. It opens at these addresses in a minute or two."
   fi
   echo "Open Pyo:"
-  [ -z "$PYO_HTTPS_URL" ] || echo "  $PYO_HTTPS_URL"
-  [ -z "$lan" ] || echo "  http://$lan:8000  (your network)"
-  echo "  http://localhost:8000  (this machine)"
-  [ -n "$PYO_HTTPS_URL" ] || echo "For an HTTPS address, set up Tailscale in Pyo."
+  addr_print open
+  [ -n "$ADDR_HTTPS" ] || echo "For an HTTPS address, set up Tailscale in Pyo."
 }
 # The host's own helpers, as systemd timers (root), every minute: connecting
 # this machine as a cluster until it's done, and putting it on the tailnet
@@ -971,6 +967,249 @@ sum=$(sha256sum <<<"$units" | cut -d' ' -f1)
 [ "$sum" != "$(cat /etc/pyo/host-units 2>/dev/null)" ] || exit 0
 exec bash -c "$units"$'\n'"echo $sum > /etc/pyo/host-units"
 SH
+  "${sudo[@]}" tee /usr/local/lib/pyo/addresses.sh >/dev/null <<'ADDR'
+# Where Pyo is, as the install script, scripts/pyo-up.sh and pyo-reset-login
+# show it. Sourced: it only defines functions.
+#
+#   Public   https://pyo.<public IP>.nip.io, with Let's Encrypt's
+#            certificate. The public IP is this machine's own: on a network
+#            card, or the one its cloud maps to it (1:1 NAT), from the
+#            cloud's metadata. Never plain HTTP there: passwords would cross
+#            the internet in the clear.
+#   Tailnet  Pyo's tailnet name, else this machine's Tailscale IP on :8000
+#            when Pyo answers there.
+#   Network  this machine's private address on :8000: its main network
+#            card's. Never a container, VM or k3s bridge's.
+#   Local    http://localhost:8000
+
+# Public IPv4 addresses among the lines on stdin: not private, tailnet
+# (CGNAT), loopback, link-local, multicast or reserved.
+addr_public_v4s() {
+  grep -E '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$' |
+    grep -vE '^(0|10|127|2(2[4-9]|[3-5][0-9]))\.|^169\.254\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' || true
+}
+
+# This machine's IPv4 addresses on its own network cards, "card address" a
+# line. Not loopback, tunnels (Tailscale's comes on its own), or the
+# bridges of containers, VMs and k3s (docker, br-*, cni0, flannel, libvirt,
+# multipass, LXD), nor k3s's pod and service ranges or docker's own.
+addr_own_ipv4s() {
+  local out
+  if out=$(ip -o -4 addr show 2>/dev/null) && [ -n "$out" ]; then
+    awk '{ split($4, a, "/"); sub(/@.*/, "", $2); print $2, a[1] }' <<<"$out"
+  else
+    hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+(\.[0-9]+){3}$' | sed 's/^/- /'
+  fi | grep -vE '^(lo|docker[0-9]*|br-[^ ]*|veth[^ ]*|cni[0-9]*|flannel[^ ]*|cali[^ ]*|vxlan[^ ]*|kube-[^ ]*|cilium[^ ]*|virbr[^ ]*|mpqemubr[^ ]*|lxdbr[^ ]*|lxcbr[^ ]*|podman[^ ]*|tailscale[^ ]*|tun[^ ]*|wg[^ ]*|zt[^ ]*) ' |
+    grep -vE ' (127\.|169\.254\.|10\.4[23]\.|172\.17\.)' || true
+}
+
+# A public IPv4 address on this machine's network cards (as Pyo's agent
+# finds them: locate.rs).
+addr_nic_public_ip() {
+  addr_own_ipv4s | cut -d' ' -f2 | addr_public_v4s | head -n1
+}
+
+# This machine on its private network: an address of the card the default
+# route goes through, else the first private one. One address, or none.
+addr_network_ip() {
+  local all dev
+  all=$(addr_own_ipv4s | grep -E ' (10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' || true)
+  dev=$(ip -4 route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1 || true)
+  { [ -z "$dev" ] || grep "^$dev " <<<"$all" || true; echo "$all"; } | sed -n '1s/^[^ ]* //p'
+}
+
+# One cloud's metadata service: the public IPv4 address it maps to this
+# machine. Each request waits a second at most.
+addr_cloud_ask() {
+  local m=169.254.169.254 t="" h=()
+  case $1 in
+    aws) # AWS (IMDSv2, else v1), and clouds that answer like it
+      t=$(curl -fsS -m 1 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "http://$m/latest/api/token" 2>/dev/null) || t=""
+      [ -z "$t" ] || h=(-H "X-aws-ec2-metadata-token: $t")
+      curl -fsS -m 1 "${h[@]}" "http://$m/latest/meta-data/public-ipv4" ;;
+    gcp) curl -fsS -m 1 -H 'Metadata-Flavor: Google' "http://$m/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip" ;;
+    azure) curl -fsS -m 1 -H 'Metadata: true' "http://$m/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text" ;;
+    alibaba)
+      t=$(curl -fsS -m 1 -X PUT -H 'X-aliyun-ecs-metadata-token-ttl-seconds: 60' http://100.100.100.200/latest/api/token 2>/dev/null) || t=""
+      [ -z "$t" ] || h=(-H "X-aliyun-ecs-metadata-token: $t")
+      curl -fsS -m 1 "${h[@]}" http://100.100.100.200/latest/meta-data/eipv4 ||
+        curl -fsS -m 1 "${h[@]}" http://100.100.100.200/latest/meta-data/public-ipv4 ;;
+    tencent) curl -fsS -m 1 http://169.254.0.23/latest/meta-data/public-ipv4 ;;
+    scaleway) curl -fsS -m 1 http://169.254.42.42/conf | sed -n 's/^PUBLIC_IP_ADDRESS=//p' ;;
+  esac 2>/dev/null
+  echo
+}
+
+# The public IPv4 address this machine's cloud maps to it, from the cloud's
+# metadata: every cloud asked at once, so it takes a second or two. Empty
+# elsewhere (a home network, a laptop, a VM). Never what the internet sees
+# of this machine's own requests: that can be a router's or a shared
+# gateway's address, which doesn't lead back here.
+addr_cloud_ip() {
+  local d c pids=()
+  d=$(mktemp -d)
+  for c in aws gcp azure alibaba tencent scaleway; do
+    addr_cloud_ask "$c" >"$d/$c" &
+    pids+=($!)
+  done
+  wait "${pids[@]}" 2>/dev/null || true
+  cat "$d"/* 2>/dev/null | tr -d '\r ' | addr_public_v4s | head -n1
+  rm -rf "$d"
+}
+
+# Pyo's agent's word for it: the public IP this machine's cloud maps to it,
+# as its locate.rs found it (a cloud whose metadata doesn't say, like
+# Oracle's).
+addr_agent_cloud_ip() {
+  addr_kc get node "$(hostname | tr 'A-Z' 'a-z')" -o jsonpath='{.metadata.annotations.pyo/cloud-public-ipv4}' 2>/dev/null |
+    addr_public_v4s | head -n1
+}
+
+# This machine's own public IPv4 address (looked up once): on a network
+# card, else the one its cloud maps to it. Empty without one.
+addr_public_ip() {
+  if [ -z "${ADDR_IP_KNOWN:-}" ]; then
+    ADDR_IP=$(addr_nic_public_ip)
+    [ -n "$ADDR_IP" ] || ADDR_IP=$(addr_cloud_ip)
+    [ -n "$ADDR_IP" ] || ADDR_IP=$(addr_agent_cloud_ip)
+    ADDR_IP_KNOWN=1
+  fi
+  echo "$ADDR_IP"
+}
+
+addr_kc() {
+  if [ "$(id -u)" = 0 ]; then k3s kubectl "$@"; else kubectl "$@"; fi
+}
+
+# The certificate of Pyo's HTTPS address on the public IP, as cert-manager
+# has it: ADDR_CERT_HOST ("pyo.<public IP>.nip.io", empty when Pyo asked
+# for none) and ADDR_CERT_STATE: ready, failed (Let's Encrypt couldn't
+# reach this machine on port 80), or pending. A challenge or order Let's
+# Encrypt turned down counts as failed at once, before the certificate
+# says so.
+addr_public_cert() {
+  local host ready reason made ns=pyo-gateway
+  ADDR_CERT_HOST="" ADDR_CERT_STATE="" ADDR_CERT_FAILED_AT=""
+  read -r host ready reason made ADDR_CERT_FAILED_AT < <(addr_kc -n "$ns" get certificate pyo-tls---dashboard \
+    -o jsonpath='{.spec.dnsNames[0]} {.status.conditions[?(@.type=="Ready")].status}- {.status.conditions[?(@.type=="Issuing")].reason}- {.metadata.creationTimestamp} {.status.lastFailureTime}' 2>/dev/null || true) || true
+  [ -n "$host" ] || return 0
+  ADDR_CERT_HOST=$host ADDR_CERT_STATE=pending
+  if [ "$ready" = True- ]; then
+    ADDR_CERT_STATE=ready
+  elif [ "$reason" = Failed- ] || [ -n "$ADDR_CERT_FAILED_AT" ] ||
+    addr_kc -n "$ns" get challenges.acme.cert-manager.io,orders.acme.cert-manager.io \
+      -o jsonpath='{range .items[*]}{.metadata.creationTimestamp} {.spec.dnsName}{.spec.dnsNames[0]} {.status.state}{"\n"}{end}' 2>/dev/null |
+    awk -v host="$host" -v made="$made" '$1 >= made && $2 == host && ($3 == "invalid" || $3 == "errored") { found = 1 } END { exit !found }'; then
+    ADDR_CERT_STATE=failed
+  fi
+}
+
+# A certificate Let's Encrypt refused 15 minutes ago or more is asked for
+# again now (Pyo's agent makes it again at once): running the installer
+# again after opening the ports checks them. Not sooner: Let's Encrypt
+# allows 5 failed checks for a name an hour.
+addr_retry_failed() {
+  local at
+  [ "${ADDR_CERT_STATE:-}" = failed ] && [ -n "${ADDR_CERT_FAILED_AT:-}" ] || return 1
+  at=$(date -d "$ADDR_CERT_FAILED_AT" +%s 2>/dev/null) || return 1
+  [ $(($(date +%s) - at)) -ge 900 ] || return 1
+  addr_kc -n pyo-gateway delete certificate pyo-tls---dashboard --wait=false >/dev/null 2>&1 || return 1
+  ADDR_CERT_STATE=pending ADDR_CERT_FAILED_AT=""
+}
+
+# Done waiting for the HTTPS address: its certificate is issued, or Let's
+# Encrypt couldn't reach this machine.
+addr_public_settled() {
+  addr_public_cert
+  [ "$ADDR_CERT_STATE" = ready ] || [ "$ADDR_CERT_STATE" = failed ]
+}
+
+# Worth waiting for the HTTPS address: this machine has a public IP of its
+# own, and the certificate there isn't settled (or was refused a while ago:
+# tried again). Without one asked for yet, not when Pyo is on the tailnet
+# (an admin may have closed it).
+addr_wait_wanted() {
+  ! addr_public_settled || addr_retry_failed || return 1
+  [ -n "$(addr_public_ip)" ] || return 1
+  [ -n "$ADDR_CERT_HOST" ] || [ -z "$(addr_pyo_tailnet)" ]
+}
+
+# Pyo's HTTPS name on the tailnet ("https://pyo.<tailnet>.ts.net"), once it
+# has one.
+addr_pyo_tailnet() {
+  curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null |
+    sed -n 's/.*"publicUrl":"\(https:\/\/[^"]*\.ts\.net\)\/*".*/\1/p' | head -n1 || true
+}
+
+# Pyo on the tailnet: its HTTPS name there, else this machine's Tailscale
+# IP on :8000, when Tailscale is up here and Pyo answers on it.
+addr_tailnet() {
+  local url ip
+  url=$(addr_pyo_tailnet)
+  if [ -n "$url" ]; then
+    echo "$url"
+    return 0
+  fi
+  command -v tailscale >/dev/null 2>&1 || return 0
+  ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+  [ -n "$ip" ] || return 0
+  curl -fsS -m 3 -o /dev/null "http://$ip:8000/api/v1/meta" 2>/dev/null && echo "http://$ip:8000"
+  return 0
+}
+
+# Colors on a terminal, unless NO_COLOR says not to.
+addr_color() { [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; }
+
+# addr_line LABEL URL [NOTE]: "  ➜  Public:   https://…  (note)", the
+# labels lined up. On a terminal: a green arrow, the label in bold, the
+# address in cyan.
+addr_line() {
+  local pad note=""
+  pad=$(printf '%*s' $((9 - ${#1})) '')
+  [ -z "${3:-}" ] || note="  ($3)"
+  if addr_color; then
+    printf '  \033[32m➜\033[0m  \033[1m%s:\033[0m%s\033[36m%s\033[0m%s\n' "$1" "$pad" "$2" "$note"
+  else
+    printf '  ➜  %s:%s%s%s\n' "$1" "$pad" "$2" "$note"
+  fi
+}
+
+# addr_print open|PATH: Pyo's addresses, one line each. "open": for opening
+# Pyo, with the HTTPS address on the public IP also while it's on its way
+# or blocked, and what to do then. A PATH: links to it that work now.
+# ADDR_HTTPS says whether there's a Public or Tailnet line.
+addr_print() {
+  local path="" host="" ip url net note=""
+  [ "${1:-open}" = open ] || path=$1
+  ADDR_HTTPS=""
+  [ -n "${ADDR_CERT_STATE:-}" ] || addr_public_cert
+  host=$ADDR_CERT_HOST
+  # None asked for yet, after a wait for it: it's on its way.
+  if [ -z "$host" ] && [ -n "${ADDR_WAITED:-}" ]; then
+    ip=$(addr_public_ip)
+    [ -z "$ip" ] || host="pyo.$ip.nip.io"
+  fi
+  if [ -n "$host" ]; then
+    case "${ADDR_CERT_STATE:-}" in
+      ready) ;;
+      failed) note="allow ports 80 and 443 in your cloud firewall" ;;
+      *) note="ready in a few minutes" ;;
+    esac
+    if [ -z "$note" ] || [ -z "$path" ]; then
+      addr_line Public "https://$host$path" "$note"
+      ADDR_HTTPS=1
+    fi
+  fi
+  url=$(addr_tailnet)
+  if [ -n "$url" ]; then
+    addr_line Tailnet "$url$path"
+    ADDR_HTTPS=1
+  fi
+  net=$(addr_network_ip)
+  [ -z "$net" ] || addr_line Network "http://$net:8000$path"
+  addr_line Local "http://localhost:8000$path"
+}
+ADDR
   "${sudo[@]}" tee /usr/local/lib/pyo/pyo-reset-login >/dev/null <<'SH'
 #!/usr/bin/env bash
 # Prints a one-time link to choose a new password for a Pyo account, for a
@@ -1005,15 +1244,14 @@ if [ "$status" != 200 ]; then
 fi
 path=$(field path) email=$(field email)
 minutes=$(sed -n 's/.*"minutes":\([0-9]*\).*/\1/p' <<<"$body")
-https=$(curl -fsS -m 5 http://127.0.0.1:8000/api/v1/meta 2>/dev/null | sed -n 's/.*"publicUrl":"\([^"]*\)".*/\1/p' || true)
-lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1 || true)
+# shellcheck source=/dev/null
+. /usr/local/lib/pyo/addresses.sh
 echo "Open one of these links to choose a new password for $email:"
-[ -z "$https" ] || echo "  ${https%/}$path"
-[ -z "$lan" ] || echo "  http://$lan:8000$path  (your network)"
-echo "  http://localhost:8000$path  (this machine)"
+addr_print "$path"
 echo "It works once, for ${minutes:-30} minutes."
 SH
   "${sudo[@]}" chmod 755 /usr/local/lib/pyo/connect-this-machine.sh /usr/local/lib/pyo/tailnet-this-machine.sh /usr/local/lib/pyo/pyo-reset-login
+  "${sudo[@]}" chmod 644 /usr/local/lib/pyo/addresses.sh
   "${sudo[@]}" ln -sfn /usr/local/lib/pyo/pyo-reset-login /usr/local/bin/pyo-reset-login
   "${sudo[@]}" tee /etc/systemd/system/pyo-connect.service >/dev/null <<'UNIT'
 [Unit]
@@ -1652,8 +1890,7 @@ main() {
       # Pyo's scripts on this machine, like pyo-reset-login, as this
       # release has them.
       host_units
-      ok_line "Pyo $R_VERSION is already installed. Nothing to update"
-      pyo_addresses
+      pyo_addresses 0 "Pyo $R_VERSION is already installed. Nothing to update"
       print_sign_in
       return 0
     fi
@@ -1679,7 +1916,11 @@ main() {
   # public IP, which the addresses wait for.
   quietly "Connecting this machine to Pyo…" /usr/local/lib/pyo/connect-this-machine.sh ||
     echo "Couldn't connect this machine to Pyo yet. Pyo tries again every minute."
-  pyo_addresses 300
+  if [ -n "$fresh" ]; then
+    pyo_addresses 300 "Pyo $R_VERSION is installed"
+  else
+    pyo_addresses 300 "Pyo is updated to $R_VERSION"
+  fi
   print_sign_in
 }
 
