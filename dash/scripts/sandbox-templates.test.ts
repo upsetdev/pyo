@@ -20,7 +20,6 @@ import {
   templateOs,
   templateProgress,
   templateStatus,
-  templateTitle,
   usable,
 } from "../src/lib/pyo/sandboxTemplates";
 
@@ -118,15 +117,6 @@ test("desktop comes right after base, made on first use too", () => {
   // One named desktop isn't Pyo's.
   expect(usable({ name: "desktop", state: "building" })).toBe(false);
   expect(templateImage(desktop)).toBe("Ubuntu 24.04 · ghcr.io/upsetdev/pyo-sandbox-images/desktop");
-});
-
-test("Pyo's own say on hover what they run", () => {
-  expect(templateTitle(base)).toBe("Ubuntu 24.04");
-  expect(templateTitle(desktop)).toBe("Ubuntu 24.04");
-  // A sandbox whose template isn't listed: what Pyo's run.
-  expect(templateTitle({ name: "base", builtin: true })).toBe("Ubuntu 24.04");
-  expect(templateTitle({ name: "node-22", source: { image: "node:22" } })).toBe(undefined);
-  expect(templateTitle({ name: "base", source: { image: "ubuntu" } })).toBe(undefined);
 });
 
 test("the template tooltip says what it runs and a short image", () => {
