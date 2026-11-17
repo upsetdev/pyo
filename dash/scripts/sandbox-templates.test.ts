@@ -143,8 +143,12 @@ test("the desktop needs room, and opens over HTTPS on the tailnet", () => {
   expect(url.searchParams.get("pyo_token")).toBe("pyosbx1.x.y");
   expect(url.searchParams.get("autoconnect")).toBe("1");
   expect(url.searchParams.has("app")).toBe(false);
-  const chromium = new URL(desktopUrl("https://sandboxes.tail1234.ts.net", "sbx_abc", "t", "chromium"));
+  expect(url.searchParams.has("name")).toBe(false);
+  const chromium = new URL(desktopUrl("https://sandboxes.tail1234.ts.net", "sbx_abc", "t", { app: "chromium" }));
   expect(chromium.searchParams.get("app")).toBe("chromium");
+  // The sandbox's name, for the tab's title.
+  const named = new URL(desktopUrl("https://sandboxes.tail1234.ts.net", "sbx_abc", "t", { name: "my box" }));
+  expect(named.searchParams.get("name")).toBe("my box");
   // The page finds its WebSocket beside it.
   expect(url.searchParams.has("path")).toBe(false);
 });

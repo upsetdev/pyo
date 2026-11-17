@@ -95,15 +95,22 @@ export type DesktopApp = "chromium";
  * name, which Pyo's API passes on to the daemon's `/web/{port}/`
  * (crates/pyo-api sandbox/pages.rs). It takes the token once and keeps it
  * in a cookie for that sandbox's pages. vnc.html, where noVNC's page was,
- * goes on to voxl's page beside it, which finds its WebSocket there too. */
-export function desktopUrl(web: string, sandboxId: string, token: string, app?: DesktopApp) {
+ * goes on to voxl's page beside it, which finds its WebSocket there too.
+ * `name`, the sandbox's, goes in the tab's title: "Desktop | <name>". */
+export function desktopUrl(
+  web: string,
+  sandboxId: string,
+  token: string,
+  opts: { app?: DesktopApp; name?: string } = {},
+) {
   const prefix = `v1/sandboxes/${encodeURIComponent(sandboxId)}/web/${DESKTOP_PORT}/`;
   const q = new URLSearchParams({
     autoconnect: "1",
     resize: "remote",
     reconnect: "1",
     // The desktop brings it to the front (pyo-sandbox-images, images/desktop/desktop.py).
-    ...(app ? { app } : {}),
+    ...(opts.app ? { app: opts.app } : {}),
+    ...(opts.name ? { name: opts.name } : {}),
     pyo_token: token,
   });
   return `${web.replace(/\/$/, "")}/${prefix}vnc.html?${q}`;

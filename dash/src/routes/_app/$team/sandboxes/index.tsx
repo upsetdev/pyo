@@ -377,7 +377,7 @@ function SandboxTable({
                       className="h-7 w-7"
                       aria-label={`Desktop for ${x.name}`}
                       disabled={!!desktopNote}
-                      onClick={() => void openDesktop(x.id)}
+                      onClick={() => void openDesktop(x.id, { name: x.name })}
                     >
                       <MonitorIcon size={16} />
                     </Button>
@@ -391,7 +391,7 @@ function SandboxTable({
                       className="h-7 w-7"
                       aria-label={`Browser in ${x.name}`}
                       disabled={!!desktopNote}
-                      onClick={() => void openDesktop(x.id, { app: "chromium" })}
+                      onClick={() => void openDesktop(x.id, { app: "chromium", name: x.name })}
                     >
                       <BrandMark icon={siGooglechrome} size={15} tone="mono" />
                     </Button>

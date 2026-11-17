@@ -147,7 +147,7 @@ function SandboxPage() {
                   <Button
                     size="sm"
                     disabled={x.state !== "running" || !!desktopNote}
-                    onClick={() => void openDesktop(x.id)}
+                    onClick={() => void openDesktop(x.id, { name: x.name })}
                   >
                     <MonitorIcon size={13} /> Open desktop
                   </Button>

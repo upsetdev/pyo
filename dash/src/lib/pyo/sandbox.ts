@@ -662,7 +662,7 @@ export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
 /** The desktop's screen in a new tab, over HTTPS on the tailnet: Pyo
  * passes it on to the sandbox server's daemon. The tab opens at once, so
  * browsers don't block it. */
-export async function openDesktop(id: string, opts: { app?: DesktopApp } = {}) {
+export async function openDesktop(id: string, opts: { app?: DesktopApp; name?: string } = {}) {
   const tab = window.open("about:blank", "_blank");
   if (tab) tab.opener = null;
   try {
@@ -673,7 +673,7 @@ export async function openDesktop(id: string, opts: { app?: DesktopApp } = {}) {
       c = await connectionFor(id);
     }
     if (!c.webUrl) throw new Error(desktopBlocked(null) ?? "");
-    const url = desktopUrl(c.webUrl, id, c.token, opts.app);
+    const url = desktopUrl(c.webUrl, id, c.token, opts);
     if (tab) tab.location.href = url;
     else window.location.href = url;
   } catch (e) {
