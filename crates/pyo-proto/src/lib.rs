@@ -17,6 +17,8 @@ pub mod memory;
 pub mod rbac;
 pub mod sandbox;
 #[cfg(feature = "command-signing")]
+pub mod agentauth;
+#[cfg(feature = "command-signing")]
 pub mod signing;
 pub mod site;
 pub mod system;
