@@ -2622,7 +2622,7 @@ pub(crate) enum Op {
     TestTailscale {},
     /// Forget the Tailscale OAuth client. Pyo's names on your tailnet are deleted. Servers stay on it.
     RemoveTailscale {},
-    /// Rename Pyo's own name on your tailnet: `kind` "dashboard" (pyo.<tailnet>.ts.net) or "registry".
+    /// Rename Pyo's own name on your tailnet: `kind` "dashboard" (pyo.<tailnet>.ts.net), "registry" or "sandboxes" (sandboxes' web pages, like the desktop).
     RenameTailscaleName { kind: String, name: String },
     /// Connect a team to Hetzner Cloud (team admins): a project API token with Read & Write, from the project's Security page. Pyo checks it by listing the locations, and keeps it encrypted. Servers join over your tailnet, so Tailscale comes first.
     SaveHetzner { team_id: String, token: String },

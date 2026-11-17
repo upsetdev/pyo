@@ -653,6 +653,7 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
     for ((name, _, _), on) in [
         (system::TAILNET_DASHBOARD, own.dashboard.is_some()),
         (system::TAILNET_REGISTRY, own.registry.is_some()),
+        (system::TAILNET_SANDBOXES, own.sandboxes.is_some()),
     ] {
         if !on {
             for kind in ["HTTPRoute", "Backend"] {
@@ -817,6 +818,7 @@ mod tests {
             own: system::TailnetOwn {
                 dashboard: Some("pyo.tail1234.ts.net".into()),
                 registry: None,
+                sandboxes: None,
             },
         };
         let statuses = vec![

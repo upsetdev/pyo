@@ -5,7 +5,7 @@
 // ports are served on the server's edge proxy instead.
 
 import { request } from "./backend";
-import { BASE_TEMPLATE, desktopUrl, type DesktopApp } from "./sandboxTemplates";
+import { BASE_TEMPLATE, desktopBlocked, desktopUrl, type DesktopApp } from "./sandboxTemplates";
 import { toast } from "./toast";
 import type { CloudServerState } from "./types";
 
@@ -15,6 +15,7 @@ export {
   DESKTOP_PORT,
   DESKTOP_TEMPLATE,
   defaultTemplate,
+  desktopBlocked,
   desktopUrl,
   fieldsSwapped,
   freeLabel,
@@ -115,6 +116,8 @@ export type Connection = {
   token: string;
   /** Milliseconds since 1970. */
   expiresAt: number;
+  /** Sandboxes' web pages over HTTPS on the tailnet, once Tailscale is set up. */
+  webUrl?: string;
 };
 
 export type SandboxCapability = {
@@ -656,14 +659,21 @@ export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
   ].join("\n");
 }
 
-/** The desktop's screen in a new tab, through the sandbox server's daemon
- * on the tailnet. The tab opens at once, so browsers don't block it. */
+/** The desktop's screen in a new tab, over HTTPS on the tailnet: Pyo
+ * passes it on to the sandbox server's daemon. The tab opens at once, so
+ * browsers don't block it. */
 export async function openDesktop(id: string, opts: { app?: DesktopApp } = {}) {
   const tab = window.open("about:blank", "_blank");
   if (tab) tab.opener = null;
   try {
-    const c = await connectionFor(id);
-    const url = desktopUrl(c.url, id, c.token, opts.app);
+    let c = await connectionFor(id);
+    // A token from before the tailnet name was ready: a fresh one has it.
+    if (!c.webUrl) {
+      tokens.delete(id);
+      c = await connectionFor(id);
+    }
+    if (!c.webUrl) throw new Error(desktopBlocked(null) ?? "");
+    const url = desktopUrl(c.webUrl, id, c.token, opts.app);
     if (tab) tab.location.href = url;
     else window.location.href = url;
   } catch (e) {

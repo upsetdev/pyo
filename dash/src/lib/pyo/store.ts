@@ -2498,7 +2498,7 @@ export const api = {
   removeTailscale() {
     return send("removeTailscale", {});
   },
-  renameTailscaleName(kind: "dashboard" | "registry", name: string) {
+  renameTailscaleName(kind: "dashboard" | "registry" | "sandboxes", name: string) {
     return attempt("renameTailscaleName", { kind, name: name.trim() });
   },
   saveHetzner(token: string) {

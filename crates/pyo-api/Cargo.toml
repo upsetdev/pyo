@@ -15,6 +15,8 @@ cookie = "0.18"
 pyo-proto = { version = "0.4.2", path = "../pyo-proto", features = ["openapi", "sandbox-token"] }
 hex = "0.4.3"
 hmac = "0.13.0"
+hyper = { version = "1.12.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
 jiff = "0.2.38"
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "hostname", "tokio1", "tokio1-rustls", "aws-lc-rs", "rustls-native-certs"] }

@@ -131,9 +131,9 @@ input_key() {
     geoip) hash_files deploy/images/geoip.Dockerfile ;;
     postgres-*) hash_text "$1" "$(hash_files deploy/images/postgres.Dockerfile)" ;;
     mysql-*) hash_text "$1" "$(hash_files deploy/images/moco)" ;;
-    sandbox-base) hash_files "$SANDBOX_SRC/images/base" ;;
+    sandbox-base) hash_files "$SANDBOX_SRC/images/base" "$SANDBOX_SRC/THIRD_PARTY_NOTICES.md" ;;
     # On the base built here: a new base is a new desktop.
-    sandbox-desktop) hash_text "${KEY[sandbox-base]}" "$(hash_files "$SANDBOX_SRC/images/desktop")" ;;
+    sandbox-desktop) hash_text "${KEY[sandbox-base]}" "$(hash_files "$SANDBOX_SRC/images/desktop" "$SANDBOX_SRC/THIRD_PARTY_NOTICES.md")" ;;
   esac
 }
 
@@ -218,11 +218,14 @@ build_cmd() {
     mysql-*)
       buildctl_build --local context=deploy/images/moco --local dockerfile=deploy/images/moco --opt filename=moco.Dockerfile \
         --opt target="${image#mysql-}" --output "$push" ;;
+    # Both take the repo's THIRD_PARTY_NOTICES.md as the named context
+    # `notices`.
     sandbox-base)
       buildctl_build --local context="$SANDBOX_SRC/images/base" --local dockerfile="$SANDBOX_SRC/images/base" \
-        --output "$push" ;;
+        --local notices="$SANDBOX_SRC" --opt context:notices=local:notices --output "$push" ;;
     sandbox-desktop)
       buildctl_build --local context="$SANDBOX_SRC/images/desktop" --local dockerfile="$SANDBOX_SRC/images/desktop" \
+        --local notices="$SANDBOX_SRC" --opt context:notices=local:notices \
         --opt build-arg:BASE="$(ref sandbox-base "${RESULT[sandbox-base]}")" --output "$push" ;;
   esac
 }

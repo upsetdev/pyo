@@ -3380,6 +3380,8 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "hyper",
+ "hyper-util",
  "instant-acme",
  "jiff",
  "jsonwebtoken",

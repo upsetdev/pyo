@@ -29,7 +29,7 @@ const API: &str = "https://api.tailscale.com/api/v2";
 /// The tag Pyo's servers and Services carry.
 pub const TAG: &str = "tag:pyo";
 /// Names Pyo keeps for itself: services' domains can't take them.
-pub const RESERVED: [&str; 2] = ["pyo", "registry"];
+pub const RESERVED: [&str; 3] = ["pyo", "registry", "sandboxes"];
 /// Why a join or connect command can't be made yet.
 pub const NEEDED: &str = "Servers join over your tailnet. Set up Tailscale in Integrations first.";
 
@@ -47,6 +47,10 @@ pub struct Settings {
     /// The registry's name ("registry").
     #[serde(default)]
     pub registry_name: Option<String>,
+    /// Sandboxes' web pages' name ("sandboxes"). Picked again by itself
+    /// when someone else has it on the tailnet.
+    #[serde(default)]
+    pub sandboxes_name: Option<String>,
     /// The tailnet's MagicDNS suffix ("tail1234.ts.net"), as last seen.
     #[serde(default)]
     pub suffix: Option<String>,
@@ -616,6 +620,21 @@ pub fn valid_name(n: &str) -> bool {
 }
 
 /// The first free name: `base`, then `base-<more>`, then `base-<more>-2`…
+/// One of Pyo's own names that it keeps up to date: the one it has while
+/// that isn't `taken` (someone else's Service, a machine, or another of
+/// Pyo's names), else the first free one [`pick_name`] finds.
+pub fn own_name(
+    current: Option<&str>,
+    base: &str,
+    more: &str,
+    taken: impl Fn(&str) -> bool,
+) -> String {
+    match current {
+        Some(n) if !n.is_empty() && !taken(n) => n.to_owned(),
+        _ => pick_name(base, more, taken),
+    }
+}
+
 pub fn pick_name(base: &str, more: &str, taken: impl Fn(&str) -> bool) -> String {
     let cut = |x: &str| {
         x.chars()
@@ -740,6 +759,7 @@ pub async fn addresses_follower(db: PgPool) {
             crate::web::set_addresses(crate::web::Addresses {
                 tailnet: s("tailnet"),
                 registry: s("registry"),
+                sandboxes: s("sandboxes"),
                 public: s("public"),
                 host_ip: s("hostIp"),
                 host_name: s("hostName"),
@@ -750,7 +770,7 @@ pub async fn addresses_follower(db: PgPool) {
 }
 
 /// Saves one of Pyo's addresses: its HTTPS names ("tailnet", "registry",
-/// "public") and this machine's on the tailnet ("hostIp", "hostName").
+/// "sandboxes", "public") and this machine's on the tailnet ("hostIp", "hostName").
 pub async fn save_address(db: &PgPool, key: &str, host: Option<&str>) -> ApiResult<()> {
     sqlx::query(
         "INSERT INTO pyo.settings (key, value) VALUES ('addresses', jsonb_build_object($1::text, $2::text))
@@ -818,6 +838,9 @@ async fn wanted(
         if let Some(n) = &cfg.registry_name {
             out.push((n.clone(), "registry", h.clone()));
         }
+        if let Some(n) = &cfg.sandboxes_name {
+            out.push((n.clone(), "sandboxes", h.clone()));
+        }
     }
     let domains: Vec<(String, String)> = sqlx::query_as(
         "SELECT s.cluster_id, lower(d->>'hostname') FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
@@ -844,7 +867,7 @@ static APPROVED: Mutex<BTreeSet<(String, String)>> = Mutex::new(BTreeSet::new())
 
 pub async fn tick(s: &AppState) -> ApiResult<()> {
     let Some((mut cfg, c)) = saved_client(s).await? else {
-        for k in ["tailnet", "registry"] {
+        for k in ["tailnet", "registry", "sandboxes"] {
             save_address(&s.db, k, None).await?;
         }
         return Ok(());
@@ -884,6 +907,29 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
         }
         if cfg.registry_name.is_none() {
             cfg.registry_name = Some(pick_name("registry", &more, |n| taken(n)));
+            changed = true;
+        }
+        // Sandboxes' name: kept while it's Pyo's to have, else the next
+        // free one, so another Pyo's or someone's own "sandboxes" stays as
+        // it is.
+        let domains: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pyo.tailnet_services WHERE kind = 'domain' AND retired_at IS NULL",
+        )
+        .fetch_all(&s.db)
+        .await?;
+        let others = [cfg.dashboard_name.clone(), cfg.registry_name.clone()];
+        let name = own_name(cfg.sandboxes_name.as_deref(), "sandboxes", &more, |n| {
+            taken(n) || others.iter().flatten().any(|o| o == n) || domains.iter().any(|d| d == n)
+        });
+        if cfg.sandboxes_name.as_deref() != Some(name.as_str()) {
+            if let Some(old) = &cfg.sandboxes_name {
+                tracing::info!(
+                    old,
+                    new = name,
+                    "sandboxes' tailnet name is taken; picked another"
+                );
+            }
+            cfg.sandboxes_name = Some(name);
             changed = true;
         }
     }
@@ -1013,6 +1059,7 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
     };
     save_address(&s.db, "tailnet", ready("dashboard").as_deref()).await?;
     save_address(&s.db, "registry", ready("registry").as_deref()).await?;
+    save_address(&s.db, "sandboxes", ready("sandboxes").as_deref()).await?;
 
     // Services' tailnet domains: their certificate as their state.
     for (name, kind, cluster) in &wanted {
@@ -1092,6 +1139,7 @@ pub async fn wanted_for(
             match kind.as_str() {
                 "dashboard" => w.own.dashboard = Some(format!("{name}.{suffix}")),
                 "registry" => w.own.registry = Some(format!("{name}.{suffix}")),
+                "sandboxes" => w.own.sandboxes = Some(format!("{name}.{suffix}")),
                 _ => {}
             }
         }
@@ -1149,6 +1197,7 @@ pub async fn check_domain(s: &AppState, host: &str) -> ApiResult<()> {
     if RESERVED.contains(&label)
         || cfg.dashboard_name.as_deref() == Some(label)
         || cfg.registry_name.as_deref() == Some(label)
+        || cfg.sandboxes_name.as_deref() == Some(label)
     {
         return Err(ApiError::bad_request("Pyo uses this name itself."));
     }
@@ -1225,6 +1274,7 @@ pub async fn save_client(s: &AppState, client_id: &str, secret: Option<&str>) ->
     if cfg.suffix.is_some() && suffix.is_some() && cfg.suffix != suffix {
         cfg.dashboard_name = None;
         cfg.registry_name = None;
+        cfg.sandboxes_name = None;
     }
     cfg.client_id = client_id.to_owned();
     cfg.hint = format!("…{}", &secret[secret.len() - 4..]);
@@ -1272,14 +1322,14 @@ pub async fn remove(s: &AppState) -> ApiResult<()> {
     sqlx::query("DELETE FROM pyo.settings WHERE key = 'public_dashboard'")
         .execute(&s.db)
         .await?;
-    for k in ["tailnet", "registry"] {
+    for k in ["tailnet", "registry", "sandboxes"] {
         save_address(&s.db, k, None).await?;
     }
     Ok(())
 }
 
-/// Renames Pyo's own name on the tailnet ("dashboard" or "registry"). The
-/// old one goes once the new one is made.
+/// Renames Pyo's own name on the tailnet ("dashboard", "registry" or
+/// "sandboxes"). The old one goes once the new one is made.
 pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
     let name = name.trim().to_ascii_lowercase();
     let Some((mut cfg, c)) = saved_client(s).await? else {
@@ -1290,12 +1340,13 @@ pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
             "Use one name: lowercase letters, digits and dashes.",
         ));
     }
-    let other = match kind {
-        "dashboard" => &cfg.registry_name,
-        "registry" => &cfg.dashboard_name,
+    let others = match kind {
+        "dashboard" => [&cfg.registry_name, &cfg.sandboxes_name],
+        "registry" => [&cfg.dashboard_name, &cfg.sandboxes_name],
+        "sandboxes" => [&cfg.dashboard_name, &cfg.registry_name],
         _ => {
             return Err(ApiError::bad_request(
-                "The kind is \"dashboard\" or \"registry\".",
+                "The kind is \"dashboard\", \"registry\" or \"sandboxes\".",
             ));
         }
     };
@@ -1305,7 +1356,7 @@ pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
     .bind(&name)
     .fetch_one(&s.db)
     .await?;
-    if other.as_deref() == Some(name.as_str()) || domain {
+    if others.iter().any(|o| o.as_deref() == Some(name.as_str())) || domain {
         return Err(ApiError::conflict("Pyo uses this name already."));
     }
     let mark = marker(&install_id(&s.db).await?);
@@ -1324,7 +1375,8 @@ pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
     }
     match kind {
         "dashboard" => cfg.dashboard_name = Some(name),
-        _ => cfg.registry_name = Some(name),
+        "registry" => cfg.registry_name = Some(name),
+        _ => cfg.sandboxes_name = Some(name),
     }
     save(&s.db, &cfg).await
 }
@@ -1340,12 +1392,13 @@ pub async fn snapshot(db: &PgPool, admin: bool) -> ApiResult<Value> {
         "suffix": cfg.suffix,
         "dashboard": a.tailnet,
         "registry": a.registry,
+        "sandboxes": a.sandboxes,
         "onTailnet": a.host_ip.is_some(),
         "hostMove": host_move(db).await?,
     });
     if admin {
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-            "SELECT name, error FROM pyo.tailnet_services WHERE kind IN ('dashboard', 'registry') AND retired_at IS NULL",
+            "SELECT name, error FROM pyo.tailnet_services WHERE kind IN ('dashboard', 'registry', 'sandboxes') AND retired_at IS NULL",
         )
         .fetch_all(db)
         .await?;
@@ -1360,6 +1413,8 @@ pub async fn snapshot(db: &PgPool, admin: bool) -> ApiResult<Value> {
         v["dashboardError"] = json!(error(&cfg.dashboard_name));
         v["registryName"] = json!(cfg.registry_name);
         v["registryError"] = json!(error(&cfg.registry_name));
+        v["sandboxesName"] = json!(cfg.sandboxes_name);
+        v["sandboxesError"] = json!(error(&cfg.sandboxes_name));
         v["hostName"] = json!(a.host_name);
     }
     Ok(v)
@@ -1574,5 +1629,82 @@ mod tests {
         let long = "a".repeat(70);
         assert!(pick_name(&long, "x", |_| false).len() <= 63);
         assert_eq!(marker("abc"), "Made by Pyo (abc)");
+    }
+
+    /// Sandboxes' name, as tick picks it from the tailnet's Services
+    /// (name to its comment, the marker of whoever made it) and machines.
+    fn sandboxes(current: Option<&str>, services: &[(&str, &str)], others: &[&str]) -> String {
+        let mark = marker("this");
+        let ours = |n: &str| services.iter().any(|(s, m)| *s == n && *m == mark);
+        let taken = |n: &str| {
+            (services.iter().any(|(s, _)| *s == n) && !ours(n))
+                || n == "laptop"
+                || others.contains(&n)
+        };
+        own_name(current, "sandboxes", "home", taken)
+    }
+
+    #[test]
+    fn sandboxes_name_free() {
+        assert_eq!(sandboxes(None, &[], &["pyo", "registry"]), "sandboxes");
+    }
+
+    #[test]
+    fn sandboxes_name_already_this_pyos() {
+        let mine = marker("this");
+        // A Service this Pyo made before (a restart, an update, the name
+        // picked earlier): kept as it is.
+        assert_eq!(
+            sandboxes(None, &[("sandboxes", mine.as_str())], &[]),
+            "sandboxes"
+        );
+        assert_eq!(
+            sandboxes(Some("sandboxes"), &[("sandboxes", mine.as_str())], &[]),
+            "sandboxes"
+        );
+        assert_eq!(
+            sandboxes(
+                Some("sandboxes-home"),
+                &[
+                    ("sandboxes", "someone's"),
+                    ("sandboxes-home", mine.as_str())
+                ],
+                &[]
+            ),
+            "sandboxes-home"
+        );
+    }
+
+    #[test]
+    fn sandboxes_name_someone_elses() {
+        let other = marker("another Pyo");
+        assert_eq!(
+            sandboxes(None, &[("sandboxes", other.as_str())], &[]),
+            "sandboxes-home"
+        );
+        assert_eq!(sandboxes(None, &[("sandboxes", "")], &[]), "sandboxes-home");
+        assert_eq!(
+            sandboxes(
+                None,
+                &[("sandboxes", other.as_str()), ("sandboxes-home", "")],
+                &[]
+            ),
+            "sandboxes-home-2"
+        );
+    }
+
+    #[test]
+    fn sandboxes_name_moves_on_when_taken() {
+        // Picked, then someone else made it first: the next free one,
+        // never theirs. Pyo's other names and machines count as taken.
+        assert_eq!(
+            sandboxes(Some("sandboxes"), &[("sandboxes", "theirs")], &[]),
+            "sandboxes-home"
+        );
+        assert_eq!(sandboxes(Some("laptop"), &[], &[]), "sandboxes");
+        assert_eq!(
+            sandboxes(Some("registry"), &[("sandboxes", "theirs")], &["registry"]),
+            "sandboxes-home"
+        );
     }
 }

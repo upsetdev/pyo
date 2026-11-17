@@ -45,6 +45,7 @@ import {
   NO_LIFETIME,
   connectionFor,
   daemonApi,
+  desktopBlocked,
   openDesktop,
   ended,
   isDesktop,
@@ -79,6 +80,7 @@ function SandboxPage() {
   const { tab = "overview" } = Route.useSearch();
   const navigate = useNavigate();
   const s = usePyo();
+  const desktopNote = desktopBlocked(s.tailscale);
   const q = useQuery(
     `sandbox:${sandboxId}`,
     () =>
@@ -141,9 +143,15 @@ function SandboxPage() {
           canUse ? (
             <>
               {isDesktop(template) && !ended(x) ? (
-                <Button size="sm" disabled={x.state !== "running"} onClick={() => void openDesktop(x.id)}>
-                  <MonitorIcon size={13} /> Open desktop
-                </Button>
+                <Tooltip content={desktopNote ?? "Open desktop"} focusable={false}>
+                  <Button
+                    size="sm"
+                    disabled={x.state !== "running" || !!desktopNote}
+                    onClick={() => void openDesktop(x.id)}
+                  >
+                    <MonitorIcon size={13} /> Open desktop
+                  </Button>
+                </Tooltip>
               ) : null}
               {ended(x) ? null : x.state === "paused" ? (
                 <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run("resume")}>
