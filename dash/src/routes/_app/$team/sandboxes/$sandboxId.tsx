@@ -13,7 +13,7 @@ import { useState } from "react";
 import { z } from "zod";
 import { SandboxFiles } from "~/components/pyo/sandbox/SandboxFiles";
 import { SandboxTerminal } from "~/components/pyo/sandbox/SandboxTerminal";
-import { TemplateMark, templateOf } from "~/components/pyo/sandbox/TemplateMark";
+import { TemplateMark, templateOf, TemplateTip } from "~/components/pyo/sandbox/TemplateMark";
 import {
   act,
   RuntimeBadge,
@@ -36,6 +36,7 @@ import {
   Panel,
 } from "~/components/ui/Panel";
 import { Tabs } from "~/components/ui/Tabs";
+import { Tooltip } from "~/components/ui/Tooltip";
 import { dateTime, timeAgo } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
@@ -122,7 +123,9 @@ function SandboxPage() {
     <Page>
       <PageHeader
         icon={
-          <TemplateMark template={template} size="lg" className="mt-1" />
+          <Tooltip content={<TemplateTip template={template} />}>
+            <TemplateMark template={template} size="lg" className="mt-1" />
+          </Tooltip>
         }
         title={canUse ? <NameField x={x} onDone={q.retry} /> : x.name}
         description={<span className="font-mono text-[12px]">{x.id}</span>}

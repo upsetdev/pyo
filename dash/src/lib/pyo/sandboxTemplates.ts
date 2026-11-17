@@ -35,13 +35,6 @@ export function templateImage(t: TemplateLike) {
   return image ?? "";
 }
 
-/** What a template's logo says on hover: what Pyo's own run, nothing for
- * the rest. */
-export function templateTitle(t: TemplateLike) {
-  if (!isPyos(t)) return undefined;
-  return t.source?.os || BUILTIN_OS;
-}
-
 /** What a template runs, when known: Pyo's own say, others when they tell. */
 export function templateOs(t: TemplateLike) {
   return t.source?.os || (isPyos(t) ? BUILTIN_OS : "");

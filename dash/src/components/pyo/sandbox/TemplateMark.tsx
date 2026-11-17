@@ -32,7 +32,6 @@ import {
   type SandboxTemplate,
   shortImage,
   templateOs,
-  templateTitle,
 } from "~/lib/pyo/sandbox";
 
 // A sandbox template's logo, by what its image runs: languages first, since
@@ -100,7 +99,6 @@ export function TemplateMark({
   const { box, icon } = SIZES[size];
   return (
     <span
-      title={templateTitle(template)}
       className={`flex ${box} shrink-0 items-center justify-center border border-frame-border bg-card text-muted-foreground ${className}`}
     >
       {isDesktop(template) ? (

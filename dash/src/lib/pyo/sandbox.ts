@@ -35,7 +35,6 @@ export {
   templateOs,
   templateProgress,
   templateStatus,
-  templateTitle,
   usable,
   type Progress,
 } from "./sandboxTemplates";

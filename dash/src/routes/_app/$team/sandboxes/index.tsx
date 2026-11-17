@@ -15,7 +15,7 @@ import { CloudProgress } from "~/components/pyo/Hetzner";
 import { TailnetLockWait } from "~/components/pyo/TailnetLock";
 import { siGooglechrome } from "simple-icons";
 import { BrandMark } from "~/components/pyo/common";
-import { TemplateMark, templateOf } from "~/components/pyo/sandbox/TemplateMark";
+import { TemplateMark, templateOf, TemplateTip } from "~/components/pyo/sandbox/TemplateMark";
 import {
   act,
   SandboxStatus,
@@ -349,10 +349,12 @@ function SandboxTable({
               <span className="block truncate font-mono text-[11.5px] text-muted-foreground">{x.id}</span>
             </Td>
             <Td>
-              <span className="flex items-center gap-2">
-                <TemplateMark template={templateOf(x, templates)} size="sm" />
-                <span className="truncate">{x.template}</span>
-              </span>
+              <Tooltip content={<TemplateTip template={templateOf(x, templates)} />} focusable={false}>
+                <span className="flex min-w-0 cursor-pointer items-center gap-2">
+                  <TemplateMark template={templateOf(x, templates)} size="sm" />
+                  <span className="truncate">{x.template}</span>
+                </span>
+              </Tooltip>
             </Td>
             <Td>
               <SandboxStatus state={x.state} sandbox={x} />
