@@ -265,7 +265,7 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
                 { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::FIREWALL_POLICY] },
                 // Websites on the servers' Tailscale addresses: its own Service.
                 { "apiGroups": [""], "resources": ["services"], "verbs": ["create"] },
-                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE] },
+                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE] },
                 // The Tailscale Services' wanted list, for the servers' tailnet pods.
                 { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WANTED] },
             ]),
@@ -583,6 +583,9 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             (request.resource.resource == 'services' && variables.objName == '{vip_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {tw_keys}) && \
                 object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && object.spec.ports == {vip_ports} && \
                 size(object.spec.externalIPs) >= 1 && size(object.spec.externalIPs) <= 1024 && object.spec.externalIPs.all(ip, ip.matches({tw_v4}) || ip.matches({tw_v6}))))) || \
+            (request.resource.resource == 'services' && variables.objName == '{nat_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {tw_keys}) && \
+                object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && object.spec.ports == {tw_ports} && \
+                size(object.spec.externalIPs) >= 1 && size(object.spec.externalIPs) <= 64 && object.spec.externalIPs.all(ip, ip.matches({nat_v4}) && !ip.matches({nat_private}))))) || \
             (request.resource.resource == 'configmaps' && variables.objName == '{tn_wanted}' && (request.operation == 'DELETE' || (has(object.data) && object.data.all(k, k == '{tn_wanted_key}')))) || \
             (request.resource.resource == 'gateways' && variables.objName != '{tailnet_gw}' && (request.operation == 'DELETE' ? variables.objName != '{http_gw}' : (variables.objName == '{http_gw}' ? object.spec == {http_spec} : \
                 (object.metadata.labels[?'{label}'].orValue('') == 'https' && object.spec.gatewayClassName == 'pyo' && object.spec.listeners.all(l, l.port == 443 && l.protocol == 'HTTPS' && has(l.hostname) && !l.hostname.lowerAscii().endsWith('{tn_suffix}') && l.tls.mode == 'Terminate' && l.tls.certificateRefs.all(c, c.name.startsWith('{tls}') && (!has(c.namespace) || c.namespace == '{gw}') && c.kind == 'Secret') && has(l.allowedRoutes) && l.allowedRoutes.namespaces.from == 'Same')) || \
@@ -646,6 +649,12 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             tw_ports = cel_literal(&system::tailnet_web_ports()),
             tw_v4 = cel_literal(&json!(system::TAILNET_IPV4_RE)),
             tw_v6 = cel_literal(&json!(system::TAILNET_IPV6_RE)),
+            // The cluster's own requests to the public IPs behind the cloud's
+            // NAT (system.rs): this Service only, onto the proxies, the
+            // websites' ports, and public IPv4 addresses alone.
+            nat_svc = system::PUBLIC_NAT_SERVICE,
+            nat_v4 = cel_literal(&json!(system::IPV4_RE)),
+            nat_private = cel_literal(&json!(system::NOT_PUBLIC_IPV4_RE)),
             label = system::GATEWAY_LABEL,
             tls = system::TLS_SECRET_PREFIX,
             pull = system::ORIGIN_PULL_SECRET,
@@ -1317,7 +1326,7 @@ mod tests {
             svc,
             [
                 &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["create"] }),
-                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE] }),
+                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE] }),
             ]
         );
         let policy = admission("w", "g");
@@ -1372,6 +1381,73 @@ mod tests {
             "allocateLoadBalancerNodePorts",
         ] {
             assert!(!clause.contains(k), "{k}");
+        }
+    }
+
+    /// The Service for the public IPs behind the cloud's NAT: pinned like
+    /// the tailnet websites' one, on public IPv4 addresses only.
+    #[test]
+    fn the_public_nat_service_is_pinned() {
+        let policy = admission("w", "g");
+        let all = policy[0]["spec"]["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "gatewayAllowed")
+            .unwrap()["expression"]
+            .as_str()
+            .unwrap();
+        let start = all
+            .find("variables.objName == 'pyo-public-nat'")
+            .expect("the NAT Service's clause");
+        let clause = &all[start..start + all[start..].find(")))) || ").unwrap()];
+        for part in [
+            "object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local'"
+                .to_owned(),
+            format!(
+                "object.spec.selector == {}",
+                cel_literal(&system::proxy_pods()["matchLabels"])
+            ),
+            format!(
+                "object.spec.ports == {}",
+                cel_literal(&system::tailnet_web_ports())
+            ),
+            "size(object.spec.externalIPs) <= 64".to_owned(),
+            format!(
+                "ip.matches({}) && !ip.matches({})",
+                cel_literal(&json!(system::IPV4_RE)),
+                cel_literal(&json!(system::NOT_PUBLIC_IPV4_RE))
+            ),
+        ] {
+            assert!(clause.contains(&part), "{part}\n{clause}");
+        }
+        // The regexes as the policy's RE2 reads them.
+        let v4 = regex::Regex::new(system::IPV4_RE).unwrap();
+        let private = regex::Regex::new(system::NOT_PUBLIC_IPV4_RE).unwrap();
+        for ip in [
+            "43.156.1.2",
+            "3.120.1.2",
+            "203.0.113.7",
+            "100.128.0.1",
+            "172.32.0.1",
+        ] {
+            assert!(v4.is_match(ip) && !private.is_match(ip), "{ip}");
+        }
+        for ip in [
+            "10.3.8.13",
+            "172.17.0.1",
+            "192.168.1.5",
+            "100.101.67.2",
+            "127.0.0.1",
+            "169.254.169.254",
+            "0.1.2.3",
+            "224.0.0.1",
+            "255.255.255.255",
+        ] {
+            assert!(!v4.is_match(ip) || private.is_match(ip), "{ip}");
+        }
+        for ip in ["999.1.2.3", "1.2.3", "1.2.3.4.5", "fd7a:115c:a1e0::1"] {
+            assert!(!v4.is_match(ip), "{ip}");
         }
     }
 

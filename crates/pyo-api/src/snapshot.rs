@@ -143,8 +143,14 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     )
     .await?;
     // Its public and Tailscale addresses, and where its free domains point.
+    let reached = crate::publicdash::reached(db).await?;
     for c in &mut clusters {
         let f = crate::freedomain::Cluster {
+            reached: if c["sameCluster"] == json!(true) {
+                reached
+            } else {
+                None
+            },
             public_traffic: c["publicTraffic"] != json!(false),
             set: c["freeDomainAddressSet"].as_str().map(str::to_owned),
             lb_ips: crate::freedomain::ips(&c["capabilities"], "loadBalancerIPs"),

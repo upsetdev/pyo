@@ -216,6 +216,7 @@ async fn heartbeat_loop(agent: Agent) {
                         gpu::apply_policies(&agent.kube, &reply.gpu_policies).await;
                         if let Some(on) = reply.public_traffic {
                             gateway::set_public_traffic(&agent.kube, on).await;
+                            gateway::set_public_nat(&agent.kube, on).await;
                             if let Err(e) = rollout::set_public_ports(&agent.kube, on).await {
                                 tracing::warn!(error = %format!("{e:#}"), "couldn't change public ports");
                             }

@@ -1158,6 +1158,44 @@ pub fn tailnet_web_service(ips: &[String]) -> Value {
     })
 }
 
+// ── The public IP behind the cloud's NAT ───────────────────────────────────
+//
+// A cloud server whose public IP the cloud maps to it (1:1 NAT, locate.rs)
+// doesn't have that IP itself: a request from the server to it (cert-
+// manager's check of its own HTTP-01 answer before Let's Encrypt is asked,
+// a service calling another's address) would leave for the cloud's NAT and
+// may never come back (clouds don't all send it back in). The agent's
+// `PUBLIC_NAT_SERVICE` puts those IPs' ports 80 and 443 on the proxies
+// within the cluster, as the internet reaches them from outside: kube-proxy
+// takes such a request to a proxy (externalIPs). Nothing from outside
+// carries these addresses (the NAT made them the private ones), so this
+// changes nothing for visitors. The admission policy pins it: this name,
+// the websites' ports, the proxies' pods, and public IPv4 addresses only.
+
+/// The agent's Service for the cluster's own requests to the public IPs
+/// behind the cloud's NAT.
+pub const PUBLIC_NAT_SERVICE: &str = "pyo-public-nat";
+/// An IPv4 address, as the admission policy checks it.
+pub const IPV4_RE: &str = r"^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$";
+/// An IPv4 address that isn't public: this network, private, tailnet
+/// (CGNAT), loopback, link-local, multicast or reserved.
+pub const NOT_PUBLIC_IPV4_RE: &str = r"^(0|10|127|22[4-9]|2[3-5][0-9])\.|^169\.254\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.";
+
+/// The Service, on these public IPs (`ips`, at least one).
+pub fn public_nat_service(ips: &[String]) -> Value {
+    json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": PUBLIC_NAT_SERVICE, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
+        "spec": {
+            "type": "ClusterIP",
+            "externalIPs": ips,
+            "externalTrafficPolicy": "Local",
+            "selector": proxy_pods()["matchLabels"],
+            "ports": tailnet_web_ports(),
+        },
+    })
+}
+
 /// Spec fields the API server may fill in on it, besides those it sets.
 pub const TAILNET_WEB_DEFAULTED: [&str; 6] = [
     "clusterIP",

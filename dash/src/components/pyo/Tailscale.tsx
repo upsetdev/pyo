@@ -216,11 +216,13 @@ function PublicDashboardRow() {
         description={
           !pd.possible
             ? "Off. Ports 80 and 443 don't reach this server."
-            : locked
-              ? "Stays on until Pyo is on your tailnet."
-              : pd.open
-                ? (pd.host ?? "Starting")
-                : undefined
+            : pd.open && !pd.host && pd.blocked
+              ? "Allow ports 80 and 443 in your cloud firewall."
+              : locked
+                ? "Stays on until Pyo is on your tailnet."
+                : pd.open
+                  ? (pd.host ?? "Starting")
+                  : undefined
         }
       />
     </li>

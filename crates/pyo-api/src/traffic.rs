@@ -77,10 +77,10 @@ pub fn entry_server(cluster_public: bool, report: &Value) -> bool {
 }
 
 /// A server's public address of each family, from what its node reports:
-/// its ExternalIP (set on purpose), then the ones the agent found, then the
-/// cluster's own addresses.
+/// its ExternalIP (set on purpose), then the ones the agent found (the one
+/// its cloud maps to it first), then the cluster's own addresses.
 pub fn public_families(r: &Value) -> (Option<String>, Option<String>) {
-    let mut all: Vec<&str> = ["externalIP", "publicIpv4", "publicIpv6"]
+    let mut all: Vec<&str> = ["externalIP", "cloudPublicIp", "publicIpv4", "publicIpv6"]
         .iter()
         .filter_map(|k| r[*k].as_str())
         .collect();

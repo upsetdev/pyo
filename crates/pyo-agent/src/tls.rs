@@ -102,7 +102,7 @@ pub async fn report(client: &Client) -> Vec<CertificateReport> {
 
 /// A Certificate's status as the heartbeat reports it (no service or
 /// hostname yet).
-fn state(status: &serde_json::Value, created: Option<i64>) -> CertificateReport {
+pub(crate) fn state(status: &serde_json::Value, created: Option<i64>) -> CertificateReport {
     let cond = |t: &str| {
         status["conditions"]
             .as_array()

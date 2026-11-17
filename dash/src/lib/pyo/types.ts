@@ -1873,8 +1873,10 @@ export type PublicDashboard = {
   open: boolean;
   /** "pyo.203.0.113.7.nip.io", once it answers over HTTPS. */
   host: string | null;
-  /** It can be open: ports 80 and 443 reach Pyo's server (not behind NAT). */
+  /** It can be open: Pyo's server has a public IP of its own (not behind a router's NAT). */
   possible: boolean;
+  /** Let's Encrypt couldn't reach that IP: ports 80 and 443 are closed in a cloud firewall. */
+  blocked?: boolean;
 };
 
 // ── Integrations ───────────────────────────────────────────────────────────

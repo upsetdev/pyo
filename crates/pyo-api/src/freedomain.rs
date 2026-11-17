@@ -17,10 +17,16 @@
 //!
 //! Unset, a cluster uses its public IP when it takes public traffic and
 //! the server has that address itself (on a network card, or as its
-//! ExternalIP) or a load balancer gives it one. When the public IP is only
-//! what the internet sees (behind NAT: a home router, some providers),
-//! ports 80 and 443 may not reach the server, so Tailscale. Without an
-//! address there's no free domain.
+//! ExternalIP) or a load balancer gives it one. A cloud server often has
+//! only a private address on its card, its public IP mapped to it by the
+//! cloud (1:1 NAT, named by the cloud's metadata: locate.rs): Pyo tries
+//! its dashboard's certificate there (publicdash.rs), and once Let's
+//! Encrypt issued it, the internet reaches that IP, so it counts as the
+//! server's own ([`Cluster::reached`]). When the public IP is only what
+//! the internet sees (behind NAT: a home router, a shared gateway), or
+//! Let's Encrypt can't reach it (a cloud firewall), ports 80 and 443 may
+//! not reach the server, so Tailscale. Without an address there's no free
+//! domain.
 //!
 //! Free domains Pyo made on another of the cluster's addresses (a private
 //! one, the other mode's, one a server no longer has) or in the older
@@ -92,6 +98,10 @@ pub struct Cluster {
     pub tailnet_web: Vec<String>,
     /// Its servers' reports, in a stable order.
     pub servers: Vec<Value>,
+    /// The public IP behind the cloud's NAT that Let's Encrypt reached (it
+    /// issued the dashboard's certificate there): on the cluster Pyo runs
+    /// on (publicdash.rs `reached`).
+    pub reached: Option<Ipv4Addr>,
 }
 
 /// Servers that take public traffic, ready ones first.
@@ -104,6 +114,12 @@ fn entry(servers: &[Value]) -> impl Iterator<Item = &Value> {
     entry()
         .filter(|r| r["status"] == json!("ready"))
         .chain(entry().filter(|r| r["status"] != json!("ready")))
+}
+
+/// The public IPv4 address the server's cloud maps to it (1:1 NAT), from
+/// the cloud's metadata (locate.rs).
+fn cloud_v4(r: &Value) -> Option<Ipv4Addr> {
+    r["cloudPublicIp"].as_str().and_then(public_v4)
 }
 
 /// A public IPv4 address the server has itself: its ExternalIP, a node
@@ -147,8 +163,9 @@ impl Cluster {
 
     /// Its public IPv4 address when the internet reaches it directly: a
     /// public load balancer address, or one a server that takes public
-    /// traffic has itself (on a network card, or as its ExternalIP). Not
-    /// one only the outbound lookup found (behind NAT).
+    /// traffic has itself (on a network card, or as its ExternalIP), or
+    /// the one its cloud maps to it once Let's Encrypt reached it there.
+    /// Not one only the outbound lookup found (behind NAT).
     pub fn direct_public_ip(&self) -> Option<Ipv4Addr> {
         if !self.public_traffic {
             return None;
@@ -157,6 +174,32 @@ impl Cluster {
             .iter()
             .find_map(|i| public_v4(i))
             .or_else(|| entry(&self.servers).find_map(direct_v4))
+            .or_else(|| self.reached.filter(|ip| self.cloud_ip() == Some(*ip)))
+    }
+
+    /// The public IPv4 address the cloud maps to a server that takes
+    /// public traffic (1:1 NAT), from the cloud's metadata.
+    pub fn cloud_ip(&self) -> Option<Ipv4Addr> {
+        if !self.public_traffic {
+            return None;
+        }
+        entry(&self.servers).find_map(cloud_v4)
+    }
+
+    /// Where Pyo's dashboard goes on the public IP (publicdash.rs), while
+    /// it takes public traffic: where its free domains are public, and
+    /// behind the cloud's NAT (the dashboard's certificate is how Pyo
+    /// learns Let's Encrypt reaches it there), unless they were set to
+    /// Tailscale.
+    pub fn dashboard_ip(&self) -> Option<Ipv4Addr> {
+        if !self.public_traffic {
+            return None;
+        }
+        match (self.mode(), self.set.as_deref()) {
+            (Mode::Public, _) => self.public_ip(),
+            (Mode::Tailscale, None) => self.cloud_ip(),
+            (Mode::Tailscale, Some(_)) => None,
+        }
     }
 
     /// Its public IP is known only from what the internet sees: the server
@@ -272,6 +315,7 @@ fn addresses(r: &Value) -> impl Iterator<Item = IpAddr> + '_ {
     [
         "internalIP",
         "externalIP",
+        "cloudPublicIp",
         "publicIp",
         "publicIpv4",
         "publicIpv6",
@@ -305,13 +349,13 @@ pub async fn load(
     tx: &mut Transaction<'_, Postgres>,
     cluster_id: &str,
 ) -> ApiResult<Option<(String, Cluster)>> {
-    let row: Option<(String, bool, Option<String>, Value)> = sqlx::query_as(
-        "SELECT team_id, public_traffic, free_domain_address, capabilities FROM pyo.clusters WHERE id = $1",
+    let row: Option<(String, bool, Option<String>, Value, bool)> = sqlx::query_as(
+        "SELECT team_id, public_traffic, free_domain_address, capabilities, same_cluster FROM pyo.clusters WHERE id = $1",
     )
     .bind(cluster_id)
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((team_id, public_traffic, set, caps)) = row else {
+    let Some((team_id, public_traffic, set, caps, same_cluster)) = row else {
         return Ok(None);
     };
     let servers: Vec<Value> =
@@ -327,6 +371,11 @@ pub async fn load(
             lb_ips: ips(&caps, "loadBalancerIps"),
             tailnet_web: ips(&caps, "tailnetWebIps"),
             servers,
+            reached: if same_cluster {
+                crate::publicdash::reached(&mut **tx).await?
+            } else {
+                None
+            },
         },
     )))
 }
@@ -507,6 +556,7 @@ mod tests {
             },
             tailnet_web: vec![],
             servers,
+            reached: None,
         }
     }
 
@@ -627,6 +677,51 @@ mod tests {
         assert_eq!(
             cluster(true, Some("tailscale"), vec![direct_server()]).mode(),
             Mode::Tailscale
+        );
+    }
+
+    /// A cloud server behind 1:1 NAT: its cloud's metadata names the public
+    /// IP. Pyo tries its dashboard there, and once Let's Encrypt reached it,
+    /// the IP is the server's own: free domains go there too.
+    #[test]
+    fn the_clouds_public_ip_counts_once_reached() {
+        let cloud = json!({ "name": "lighthouse", "status": "ready", "internalIP": "10.3.8.13", "addresses": ["10.3.8.13"],
+                            "cloudPublicIp": "43.156.1.2", "publicIpv4": "43.156.1.2", "tailnetIp": "100.101.67.2" });
+        let mut c = cluster(true, None, vec![cloud.clone()]);
+        assert_eq!((c.mode(), c.behind_nat()), (Mode::Tailscale, true));
+        assert_eq!(c.dashboard_ip(), Some(v4("43.156.1.2")));
+        c.reached = Some(v4("43.156.1.2"));
+        assert_eq!(
+            (c.mode(), c.address(), c.behind_nat()),
+            (Mode::Public, Some(v4("43.156.1.2")), false)
+        );
+        assert_eq!(c.dashboard_ip(), Some(v4("43.156.1.2")));
+        // The cloud gave it another IP since (a restart): tried there again.
+        c.reached = Some(v4("43.156.9.9"));
+        assert_eq!(c.mode(), Mode::Tailscale);
+        assert_eq!(c.dashboard_ip(), Some(v4("43.156.1.2")));
+        // Behind a home router (only what the lookup saw): not tried.
+        assert_eq!(cluster(true, None, vec![nat_server()]).dashboard_ip(), None);
+        // Free domains set to Tailscale, or no public traffic: none.
+        assert_eq!(
+            cluster(true, Some("tailscale"), vec![cloud.clone()]).dashboard_ip(),
+            None
+        );
+        assert_eq!(
+            cluster(false, None, vec![cloud.clone()]).dashboard_ip(),
+            None
+        );
+        // A public card: as ever.
+        assert_eq!(
+            cluster(true, None, vec![direct_server()]).dashboard_ip(),
+            Some(v4("203.0.113.7"))
+        );
+        // The cloud's word comes before the lookup's.
+        let both = json!({ "name": "a", "status": "ready", "internalIP": "10.0.0.5",
+                           "cloudPublicIp": "43.156.1.2", "publicIpv4": "198.51.100.1" });
+        assert_eq!(
+            cluster(true, Some("public"), vec![both]).public_ip(),
+            Some(v4("43.156.1.2"))
         );
     }
 
