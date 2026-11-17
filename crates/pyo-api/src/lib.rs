@@ -171,6 +171,45 @@ pub struct Extensions {
     pub features: Vec<String>,
     /// Checks before a team adds a server or deploys.
     pub entitlements: Option<Arc<dyn Entitlements>>,
+    /// Signs every command before an agent gets it, with a key this
+    /// process doesn't hold. Agents installed from here are given its
+    /// public keys and refuse anything unsigned.
+    pub command_signer: Option<Arc<dyn CommandSigner>>,
+    /// Hostnames need proof of ownership (a DNS TXT record) before a team
+    /// can claim one. For an installation shared by teams that don't trust
+    /// each other.
+    pub verify_domains: bool,
+}
+
+/// A command to sign: its id, its `kind`, and the hex SHA-256 of its JSON.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToSign {
+    pub id: String,
+    pub kind: String,
+    pub sha256: String,
+}
+
+/// A signature over a command's claims (pyo-proto `signing`).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Signature {
+    pub claims: String,
+    pub sig: String,
+    pub kid: String,
+}
+
+/// Where commands get signed (pyo-proto `signing`). The signer picks each
+/// command's sequence number and expiry.
+pub trait CommandSigner: Send + Sync {
+    /// Signs commands for one cluster, in this order.
+    fn sign<'a>(
+        &'a self,
+        cluster_id: &'a str,
+        items: &'a [ToSign],
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<Vec<Signature>>>;
+    /// The public keys agents trust (`PYO_COMMAND_KEY`: base64url, comma separated).
+    fn public_keys(&self) -> String;
 }
 
 /// A background task: given the app state, runs until the process stops.
@@ -197,6 +236,18 @@ pub trait Entitlements: Send + Sync {
 }
 
 static ENTITLEMENTS: std::sync::OnceLock<Arc<dyn Entitlements>> = std::sync::OnceLock::new();
+static SIGNER: std::sync::OnceLock<Arc<dyn CommandSigner>> = std::sync::OnceLock::new();
+static VERIFY_DOMAINS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// The command signer, when this build has one.
+pub(crate) fn command_signer() -> Option<&'static Arc<dyn CommandSigner>> {
+    SIGNER.get()
+}
+
+/// Whether hostnames need proof of ownership (see [`Extensions::verify_domains`]).
+pub(crate) fn verify_domains() -> bool {
+    VERIFY_DOMAINS.get().copied().unwrap_or(false)
+}
 static FEATURES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 /// Fails with 402 and the entitlement's message when a team may not add a server.
@@ -241,8 +292,14 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         migrator: extra_migrator,
         features,
         entitlements,
+        command_signer,
+        verify_domains,
     } = ext;
     let _ = FEATURES.set(features);
+    let _ = VERIFY_DOMAINS.set(verify_domains);
+    if let Some(s) = command_signer {
+        let _ = SIGNER.set(s);
+    }
     if let Some(e) = entitlements {
         let _ = ENTITLEMENTS.set(e);
     }

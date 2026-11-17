@@ -715,13 +715,16 @@ async fn poll(
                     continue;
                 }
                 match serde_json::from_value(command.clone()) {
-                    Ok(command) => out.push(CommandEnvelope { id, command }),
+                    Ok(command) => out.push(CommandEnvelope { id, command, signed: None }),
                     Err(e) => {
                         tracing::error!(%id, error = %e, "unreadable command");
                         undeliverable(&s, &id, &command, &format!("Pyo couldn't read it: {e}"))
                             .await;
                     }
                 }
+            }
+            if let Some(signer) = crate::command_signer() {
+                sign_all(&s, signer.as_ref(), &cluster.id, &mut out).await?;
             }
             return Ok(Json(out));
         }
@@ -732,6 +735,64 @@ async fn poll(
         }
         // Wake on new work, or re-check every few seconds in case another replica queued it.
         let _ = tokio::time::timeout(left.min(Duration::from_secs(5)), notified).await;
+    }
+}
+
+/// Has the signer sign each command for this cluster, in order. When it
+/// can't, the commands go back to the queue and the agent asks again.
+async fn sign_all(
+    s: &AppState,
+    signer: &dyn crate::CommandSigner,
+    cluster_id: &str,
+    out: &mut [CommandEnvelope],
+) -> ApiResult<()> {
+    if out.is_empty() {
+        return Ok(());
+    }
+    let mut items = Vec::with_capacity(out.len());
+    let mut jsons = Vec::with_capacity(out.len());
+    for e in out.iter() {
+        let json = serde_json::to_string(&e.command).map_err(anyhow::Error::from)?;
+        let kind = serde_json::from_str::<Value>(&json)
+            .ok()
+            .and_then(|v| v["kind"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        items.push(crate::ToSign {
+            id: e.id.clone(),
+            kind,
+            sha256: sha256_hex(&json),
+        });
+        jsons.push(json);
+    }
+    match signer.sign(cluster_id, &items).await {
+        Ok(sigs) if sigs.len() == out.len() => {
+            for ((e, sig), json) in out.iter_mut().zip(sigs).zip(jsons) {
+                e.signed = Some(pyo_proto::SignedCommandWire {
+                    claims: sig.claims,
+                    sig: sig.sig,
+                    kid: sig.kid,
+                    command: json,
+                });
+            }
+            Ok(())
+        }
+        other => {
+            let why = match other {
+                Ok(_) => "the signer signed a different number of commands".to_owned(),
+                Err(e) => format!("{e:#}"),
+            };
+            tracing::error!(cluster = %cluster_id, error = %why, "couldn't sign commands; they go back to the queue");
+            let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+            sqlx::query("UPDATE pyo.commands SET status = 'pending', sent_at = NULL, sent_to = NULL WHERE cluster_id = $1 AND id = ANY($2) AND status = 'sent'")
+                .bind(cluster_id)
+                .bind(&ids)
+                .execute(&s.db)
+                .await?;
+            Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Commands can't be signed right now.",
+            ))
+        }
     }
 }
 
