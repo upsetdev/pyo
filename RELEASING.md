@@ -93,6 +93,10 @@ see GitHub's "latest" release). If the job fails before that, run it again:
 it replaces the draft's assets. A release that's published already is left
 as it is. The release's text can still be edited.
 
+Then the `site` job rebuilds pyo.dev (see
+[Install scripts on pyo.dev](#install-scripts-on-pyodev)). If it fails, run
+that job again.
+
 ## Release notes
 
 `scripts/release-notes.ts` writes each release's text from the Conventional
@@ -264,6 +268,10 @@ GitHub releases. For each release, it checks `release.json`'s signature
 its SHA-256 in `release.json`, and fails on any mismatch. Nothing in the
 pyo-web repo can replace them. Releases up to 0.4.2 have no sums in their
 release.json: pyo-web holds a reviewed list of theirs.
+
+The release workflow's `site` job starts that build through a Workers Builds
+deploy hook, so pyo.dev serves a new release within minutes. The hook's
+URL is this repo's secret `PYO_WEB_DEPLOY_HOOK`.
 
 Pyo 0.4.2 and earlier give the latest script `--version <their version>`.
 The scripts' `run_release` (`pyo:release` blocks) then runs that release's

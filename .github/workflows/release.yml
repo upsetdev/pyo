@@ -3,7 +3,8 @@ name: Release
 # Pushing a tag like v0.1.0 publishes that version: signed images at
 # ghcr.io/upsetdev/pyo, and a GitHub release with the CLI for each
 # platform, the sandbox server files, the install scripts and release.json
-# (what the dashboard's updates apply). See RELEASING.md.
+# (what the dashboard's updates apply). Then pyo.dev is rebuilt, to serve
+# the release's install scripts. See RELEASING.md.
 
 on:
   push:
@@ -361,3 +362,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
 
+  # pyo.dev serves the latest release's install scripts, and each release's
+  # at pyo.dev/v/<version>/. Its build takes them from the published
+  # release only when they match the sums in its signed release.json. This
+  # asks Cloudflare's Workers Builds for that build, through a deploy hook
+  # whose URL is the secret PYO_WEB_DEPLOY_HOOK (Cloudflare dashboard >
+  # Workers & Pages > pyo-web > Settings > Builds > Deploy Hooks). When it
+  # fails, run this job again: the release stays as it is.
+  site:
+    name: Rebuild pyo.dev
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Ask Workers Builds to build pyo-web
+        env:
+          HOOK: ${{ secrets.PYO_WEB_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::The secret PYO_WEB_DEPLOY_HOOK isn't set, so pyo.dev wasn't rebuilt and still serves the previous release's scripts. Make a deploy hook for pyo-web in Cloudflare (Workers & Pages > pyo-web > Settings > Builds > Deploy Hooks), save its URL as this repo's PYO_WEB_DEPLOY_HOOK secret, and run this job again."
+            exit 1
+          fi
+          case "$HOOK" in
+            https://api.cloudflare.com/client/v4/workers/builds/deploy_hooks/*) ;;
+            *) echo "::error::PYO_WEB_DEPLOY_HOOK isn't a Workers Builds deploy hook URL."; exit 1 ;;
+          esac
+          out=$(curl -fsS -X POST --retry 3 --max-time 30 "$HOOK") || { echo "::error::The deploy hook didn't answer. Check that it still exists in Cloudflare."; exit 1; }
+          if [ "$(echo "$out" | jq -r '.success // empty' 2>/dev/null)" = false ]; then
+            echo "::error::Cloudflare refused the build: $(echo "$out" | jq -c '.errors')"
+            exit 1
+          fi
+          echo "Build started: $(echo "$out" | jq -r '.result.build_uuid // .build_uuid // "see the Cloudflare dashboard"' 2>/dev/null)"
