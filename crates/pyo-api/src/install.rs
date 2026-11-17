@@ -23,14 +23,33 @@ pub async fn manifest(
     headers: axum::http::HeaderMap,
     Query(q): Query<InstallQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    let known: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pyo.clusters WHERE agent_token_hash = $1)",
-    )
-    .bind(sha256_hex(&q.token))
-    .fetch_one(&s.db)
-    .await?;
-    if !known || !q.token.bytes().all(|b| b.is_ascii_hexdigit()) {
+    let cluster: Option<String> =
+        sqlx::query_scalar("SELECT id FROM pyo.clusters WHERE agent_token_hash = $1")
+            .bind(sha256_hex(&q.token))
+            .fetch_optional(&s.db)
+            .await?;
+    let Some(cluster) = cluster.filter(|_| q.token.bytes().all(|b| b.is_ascii_hexdigit())) else {
         return Err(ApiError::not_found("Install token"));
+    };
+    // Pyo Cloud: the agent dials the mTLS endpoint, trusts only its CA and
+    // runs only commands the signer signed for this cluster (agent_tls.rs,
+    // the agent's trust.rs).
+    if let Some(endpoint) = crate::agent_tls::endpoint() {
+        let mut env = vec![
+            ("PYO_AGENT_CA", crate::agent_tls::ca().map(|c| c.pem().to_owned()).unwrap_or_default()),
+            ("PYO_CLUSTER_ID", cluster.clone()),
+        ];
+        if let Some(signer) = crate::command_signer() {
+            env.push(("PYO_COMMAND_KEY", signer.public_keys()));
+        }
+        let yaml = render_with(&endpoint, &s.config.agent_image, &q.token, &env);
+        return Ok((
+            [
+                (header::CONTENT_TYPE, "application/yaml"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            yaml,
+        ));
     }
     // The agent reaches Pyo the way the installer just did, unless that was
     // localhost (meaningless inside a pod): then the in-cluster address.
@@ -131,6 +150,11 @@ pub fn parts(upgrades: bool) -> &'static pyo_proto::rbac::InstallParts {
 /// The agent's manifest. On the cluster Pyo itself runs on (an in-cluster
 /// API address), its agent also runs Pyo's upgrader.
 pub fn render(api_url: &str, image: &str, token: &str) -> String {
+    render_with(api_url, image, token, &[])
+}
+
+/// [`render`], with more of the agent's env (Pyo Cloud's trust settings).
+pub fn render_with(api_url: &str, image: &str, token: &str, extra_env: &[(&str, String)]) -> String {
     let parts = parts(pyo_proto::in_cluster_url(api_url));
     let docs = |objects: &[serde_json::Value]| {
         objects
@@ -145,10 +169,12 @@ pub fn render(api_url: &str, image: &str, token: &str) -> String {
     let pins: String = parts
         .pins
         .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .chain(extra_env.iter().map(|(k, v)| (*k, v.as_str())))
         .map(|(k, v)| {
             format!(
                 "            - name: {k}\n              value: {}\n",
-                serde_json::Value::from(v.as_str())
+                serde_json::Value::from(v)
             )
         })
         .collect();

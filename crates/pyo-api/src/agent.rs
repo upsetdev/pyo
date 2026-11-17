@@ -47,6 +47,36 @@ impl FromRequestParts<AppState> for AgentCluster {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // Over the mTLS endpoint: the cluster its certificate names, while
+        // that certificate is the cluster's current (or the one before it,
+        // through a renewal). Never from the request.
+        if let Some(peer) = parts.extensions.get::<crate::agent_tls::AgentPeer>()
+            && let Some(cert) = &peer.cert
+        {
+            let id = crate::agent_tls::identity(cert)
+                .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "This certificate names no cluster."))?;
+            let ok: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pyo.clusters WHERE id = $1 AND team_id = $2 AND $3 IN (agent_cert_serial, agent_cert_prev_serial))",
+            )
+            .bind(&id.cluster)
+            .bind(&id.team)
+            .bind(&id.serial)
+            .fetch_one(&state.db)
+            .await?;
+            if !ok {
+                return Err(ApiError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "This certificate was replaced or revoked. Run the cluster's connect command again.",
+                ));
+            }
+            return Ok(AgentCluster { id: id.cluster, team_id: id.team });
+        }
+        if crate::agent_tls::require_cert() {
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "Agents connect with a client certificate here.",
+            ));
+        }
         let token = parts
             .headers
             .get("authorization")

@@ -8,6 +8,7 @@
 //! (see [`Extensions`]); self-hosted Pyo has none of those.
 
 mod agent;
+mod agent_tls;
 mod alerts;
 pub mod auth;
 mod backup;
@@ -461,6 +462,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         .route("/readyz", get(readyz));
     let extra_routes = extra_routes.unwrap_or_default();
     let door_state = state.clone();
+    let door_state_for_agents = state.clone();
     let app = if !role.web() {
         // A worker answers only its probes.
         probes.with_state(state)
@@ -556,6 +558,17 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             }
             Err(e) => tracing::warn!(%door, error = %e, "registry door not listening"),
         }
+    }
+    // Agents over mTLS (agent_tls.rs), when this Pyo has that endpoint.
+    if role.web() {
+        agent_tls::start(
+            door_state_for_agents,
+            agent::routes()
+                .merge(sites::agent_routes())
+                .merge(terminal::agent_routes())
+                .merge(database_imports::agent_routes()),
+        )
+        .await?;
     }
     let addr: SocketAddr = env("LISTEN_ADDR", "0.0.0.0:8000").parse()?;
     tracing::info!(%addr, web = %web_dir.display(), "pyo api listening");

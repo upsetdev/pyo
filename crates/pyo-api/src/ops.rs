@@ -802,6 +802,19 @@ async fn connect_command(
     token: &str,
     public: Option<&str>,
 ) -> ApiResult<(String, bool)> {
+    // Agents over mTLS (Pyo Cloud): machines install from Pyo's public
+    // address (PYO_PUBLIC_API_URL, else the dashboard's), never a tailnet.
+    let configured = crate::agent_tls::endpoint().and_then(|_| {
+        std::env::var("PYO_PUBLIC_API_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty())
+    });
+    let public = configured.as_deref().or(public);
+    if crate::agent_tls::endpoint().is_some() && public.is_none() {
+        return Err(ApiError::bad_request(
+            "Connect from the dashboard's address: Pyo has no public address set.",
+        ));
+    }
     if let Some(url) = public {
         let url = url.trim().trim_end_matches('/');
         if !(url.starts_with("https://") || url.starts_with("http://"))
@@ -6329,7 +6342,8 @@ async fn apply(
             let team_id = team_of(tx, "clusters", &id).await?;
             require_role(tx, user, &team_id, Role::Admin).await?;
             let token = secret_token();
-            sqlx::query("UPDATE pyo.clusters SET agent_token_hash = $2 WHERE id = $1")
+            // The agent's certificates go too: it connects again with the new command.
+            sqlx::query("UPDATE pyo.clusters SET agent_token_hash = $2, agent_cert_serial = NULL, agent_cert_prev_serial = NULL WHERE id = $1")
                 .bind(&id)
                 .bind(sha256_hex(&token))
                 .execute(&mut **tx)
