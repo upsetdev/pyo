@@ -6271,6 +6271,12 @@ async fn apply(
             public_api_url,
         } => {
             let tags = valid_tags(&tags)?;
+            // Agents over mTLS (Pyo Cloud): Pyo's own machine isn't a team's server.
+            if this_machine && crate::agent_tls::endpoint().is_some() {
+                return Err(ApiError::bad_request(
+                    "Connect one of your own servers. Pyo doesn't run on them here.",
+                ));
+            }
             // One agent per machine: a second "This machine" would replace the first.
             if this_machine {
                 let taken: Option<String> = sqlx::query_scalar("SELECT team_id FROM pyo.clusters WHERE same_cluster OR from_host_setup LIMIT 1").fetch_optional(&mut **tx).await?;
@@ -6353,6 +6359,11 @@ async fn apply(
         } => {
             let team_id = team_of(tx, "clusters", &id).await?;
             require_role(tx, user, &team_id, Role::Admin).await?;
+            if this_machine && crate::agent_tls::endpoint().is_some() {
+                return Err(ApiError::bad_request(
+                    "Connect one of your own servers. Pyo doesn't run on them here.",
+                ));
+            }
             let token = secret_token();
             // The agent's certificates go too: it connects again with the new command.
             sqlx::query("UPDATE pyo.clusters SET agent_token_hash = $2, agent_cert_serial = NULL, agent_cert_prev_serial = NULL WHERE id = $1")
