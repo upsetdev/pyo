@@ -355,6 +355,15 @@ addr_cloud_ip >/dev/null
 check "every cloud asked at once" "$(grep -c 169.254 "$asked")" "^[4-9]$" has
 check "each for a second at most" "$(grep 'curl\|-m' "$asked" | grep -vc -- '-m 1 ')" "^0$" has
 
+# Not on a cloud: the token requests get no answer at all, so nothing more
+# is asked there (a second at most).
+reset
+curl_was=$(declare -f curl)
+curl() { echo "$*" >>"$asked"; return 28; }
+addr_cloud_ip >/dev/null
+check "no metadata service: no second request" "$(grep -cE '(169\.254\.169\.254|100\.100\.100\.200)/latest/meta-data' "$asked")" "^0$" has
+eval "$curl_was"
+
 # A Hetzner server: the public IP on its own card, and a private network.
 reset
 cards="$lo

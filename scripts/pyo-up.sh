@@ -717,16 +717,19 @@ addr_network_ip() {
 # One cloud's metadata service: the public IPv4 address it maps to this
 # machine. Each request waits a second at most.
 addr_cloud_ask() {
-  local m=169.254.169.254 t="" h=()
+  local m=169.254.169.254 t="" h=() rc=0
   case $1 in
-    aws) # AWS (IMDSv2, else v1), and clouds that answer like it
-      t=$(curl -fsS -m 1 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "http://$m/latest/api/token" 2>/dev/null) || t=""
+    aws) # AWS (IMDSv2, else v1), and clouds that answer like it. No answer
+      # at all (not a cloud): no second request.
+      t=$(curl -fsS -m 1 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "http://$m/latest/api/token" 2>/dev/null) || rc=$?
+      [ "$rc" = 0 ] || [ "$rc" = 22 ] || return 0
       [ -z "$t" ] || h=(-H "X-aws-ec2-metadata-token: $t")
       curl -fsS -m 1 "${h[@]}" "http://$m/latest/meta-data/public-ipv4" ;;
     gcp) curl -fsS -m 1 -H 'Metadata-Flavor: Google' "http://$m/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip" ;;
     azure) curl -fsS -m 1 -H 'Metadata: true' "http://$m/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text" ;;
     alibaba)
-      t=$(curl -fsS -m 1 -X PUT -H 'X-aliyun-ecs-metadata-token-ttl-seconds: 60' http://100.100.100.200/latest/api/token 2>/dev/null) || t=""
+      t=$(curl -fsS -m 1 -X PUT -H 'X-aliyun-ecs-metadata-token-ttl-seconds: 60' http://100.100.100.200/latest/api/token 2>/dev/null) || rc=$?
+      [ "$rc" = 0 ] || [ "$rc" = 22 ] || return 0
       [ -z "$t" ] || h=(-H "X-aliyun-ecs-metadata-token: $t")
       curl -fsS -m 1 "${h[@]}" http://100.100.100.200/latest/meta-data/eipv4 ||
         curl -fsS -m 1 "${h[@]}" http://100.100.100.200/latest/meta-data/public-ipv4 ;;
