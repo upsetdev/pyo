@@ -131,15 +131,15 @@ function ClientForm({ onDone, saved }: { onDone: () => void; saved?: string }) {
   );
 }
 
-function NameRow({ kind, label }: { kind: "dashboard" | "registry"; label: string }) {
+function NameRow({ kind, label }: { kind: "dashboard" | "registry" | "sandboxes"; label: string }) {
   const ts = usePyo().tailscale;
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   if (!ts?.suffix) return null;
-  const current = kind === "dashboard" ? ts.dashboardName : ts.registryName;
-  const problem = kind === "dashboard" ? ts.dashboardError : ts.registryError;
-  const ready = kind === "dashboard" ? ts.dashboard : ts.registry;
+  const current = { dashboard: ts.dashboardName, registry: ts.registryName, sandboxes: ts.sandboxesName }[kind];
+  const problem = { dashboard: ts.dashboardError, registry: ts.registryError, sandboxes: ts.sandboxesError }[kind];
+  const ready = { dashboard: ts.dashboard, registry: ts.registry, sandboxes: ts.sandboxes }[kind];
   if (!current) return null;
   return (
     <li className="flex flex-wrap items-center gap-3 px-4 py-3">
@@ -317,6 +317,7 @@ export function TailscaleSettings() {
           <>
             <NameRow kind="dashboard" label="Dashboard" />
             <NameRow kind="registry" label="Registry" />
+            <NameRow kind="sandboxes" label="Sandboxes" />
           </>
         ) : null}
         <HostMove />

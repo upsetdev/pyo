@@ -4,6 +4,7 @@
 import { expect, test } from "bun:test";
 import {
   defaultTemplate,
+  desktopBlocked,
   desktopUrl,
   fieldsSwapped,
   freeLabel,
@@ -133,19 +134,26 @@ test("the template tooltip says what it runs and a short image", () => {
   expect(imageParts("")).toEqual([]);
 });
 
-test("the desktop needs room, and opens through the daemon", () => {
+test("the desktop needs room, and opens over HTTPS on the tailnet", () => {
   expect(minSize(desktop)).toEqual({ cpus: 2, memoryMib: 2048 });
   expect(minSize(base)).toBe(null);
   expect(minSize(undefined)).toBe(null);
-  const url = new URL(desktopUrl("http://100.64.0.2:7070/", "sbx_abc", "pyosbx1.x.y"));
-  expect(url.origin + url.pathname).toBe("http://100.64.0.2:7070/v1/sandboxes/sbx_abc/web/6080/vnc.html");
+  const url = new URL(desktopUrl("https://sandboxes.tail1234.ts.net/", "sbx_abc", "pyosbx1.x.y"));
+  expect(url.origin + url.pathname).toBe("https://sandboxes.tail1234.ts.net/v1/sandboxes/sbx_abc/web/6080/vnc.html");
   expect(url.searchParams.get("pyo_token")).toBe("pyosbx1.x.y");
   expect(url.searchParams.get("autoconnect")).toBe("1");
   expect(url.searchParams.has("app")).toBe(false);
-  const chromium = new URL(desktopUrl("http://100.64.0.2:7070", "sbx_abc", "t", "chromium"));
+  const chromium = new URL(desktopUrl("https://sandboxes.tail1234.ts.net", "sbx_abc", "t", "chromium"));
   expect(chromium.searchParams.get("app")).toBe("chromium");
   // The page finds its WebSocket beside it.
   expect(url.searchParams.has("path")).toBe(false);
+});
+
+test("the desktop waits for its name on the tailnet", () => {
+  expect(desktopBlocked(null)).toContain("Set up Tailscale");
+  expect(desktopBlocked({ suffix: null })).toContain("Set up Tailscale");
+  expect(desktopBlocked({ suffix: "tail1234.ts.net", sandboxes: null })).toContain("isn't ready");
+  expect(desktopBlocked({ suffix: "tail1234.ts.net", sandboxes: "sandboxes.tail1234.ts.net" })).toBe(null);
 });
 
 test("a server making a template says how far it got", () => {

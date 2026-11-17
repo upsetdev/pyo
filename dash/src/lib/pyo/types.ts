@@ -1773,6 +1773,8 @@ export type TailscaleInfo = {
   dashboard: string | null;
   /** The registry on the tailnet, once it answers. */
   registry: string | null;
+  /** Sandboxes' web pages on the tailnet, like the desktop, once it answers. */
+  sandboxes?: string | null;
   /** Pyo's own server is on the tailnet. */
   onTailnet: boolean;
   /** Pyo's own server moving k3s onto the tailnet: while it happens, or why it failed. */
@@ -1784,6 +1786,8 @@ export type TailscaleInfo = {
   dashboardError?: string | null;
   registryName?: string | null;
   registryError?: string | null;
+  sandboxesName?: string | null;
+  sandboxesError?: string | null;
   hostName?: string | null;
 };
 

@@ -893,8 +893,21 @@ pub const TAILNET_REGISTRY: (&str, &str, i32) = (
     "pyo-registry-door.pyo-system.svc.cluster.local",
     5006,
 );
+/// Sandboxes' web pages ("sandboxes.<tailnet>.ts.net"): Pyo's API too,
+/// which passes them on to each sandbox server's daemon. A name of their
+/// own keeps sandboxes' pages off the dashboard's origin.
+pub const TAILNET_SANDBOXES: (&str, &str, i32) =
+    ("pyo-sandboxes", "pyo.pyo-system.svc.cluster.local", 8000);
+/// Pyo's own routes on the tailnet Gateway.
+pub const TAILNET_OWN_ROUTES: [(&str, &str, i32); 3] =
+    [TAILNET_DASHBOARD, TAILNET_REGISTRY, TAILNET_SANDBOXES];
 /// Names of the objects the Gateway's fixed part uses.
-pub const TAILNET_NAMES: [&str; 3] = [TAILNET_DASHBOARD.0, TAILNET_REGISTRY.0, TAILNET_REDIRECT];
+pub const TAILNET_NAMES: [&str; 4] = [
+    TAILNET_DASHBOARD.0,
+    TAILNET_REGISTRY.0,
+    TAILNET_SANDBOXES.0,
+    TAILNET_REDIRECT,
+];
 
 /// A Backend's spec as the API server keeps it: with the `type` Envoy
 /// Gateway's schema fills in, so the admission policy can compare the
@@ -1013,6 +1026,9 @@ pub struct TailnetOwn {
     /// "registry.tail1234.ts.net": the registry's door.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry: Option<String>,
+    /// "sandboxes.tail1234.ts.net": sandboxes' web pages, through the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandboxes: Option<String>,
 }
 
 /// The Gateway's fixed objects, in pyo-gateway (`servers`:
@@ -1029,6 +1045,7 @@ pub fn tailnet_objects(servers: &[String], certs: &[String], own: &TailnetOwn) -
     for ((name, host, port), hostname) in [
         (TAILNET_DASHBOARD, own.dashboard.as_deref()),
         (TAILNET_REGISTRY, own.registry.as_deref()),
+        (TAILNET_SANDBOXES, own.sandboxes.as_deref()),
     ] {
         let Some(hostname) = hostname else { continue };
         out.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "Backend", "metadata": meta(name), "spec": tailnet_backend_spec(host, port) }));
@@ -1515,6 +1532,7 @@ mod tests {
         let own = TailnetOwn {
             dashboard: Some("pyo.tail1234.ts.net".into()),
             registry: Some("registry.tail1234.ts.net".into()),
+            sandboxes: Some("sandboxes.tail1234.ts.net".into()),
         };
         let certs = vec![tailnet_tls_secret("blog"), tailnet_tls_secret("pyo")];
         let objs = tailnet_objects(&[], &certs, &own);
@@ -1556,7 +1574,7 @@ mod tests {
         );
         // Pyo's own routes, each on its tailnet name; the redirect on HTTP.
         let routes: Vec<&Value> = objs.iter().filter(|o| o["kind"] == "HTTPRoute").collect();
-        assert_eq!(routes.len(), 3);
+        assert_eq!(routes.len(), 4);
         for r in &routes {
             assert_eq!(r["spec"]["parentRefs"][0]["name"], TAILNET_GATEWAY);
         }
@@ -1565,6 +1583,20 @@ mod tests {
             .find(|r| r["metadata"]["name"] == TAILNET_DASHBOARD.0)
             .unwrap();
         assert_eq!(dash["spec"]["hostnames"], json!(["pyo.tail1234.ts.net"]));
+        // Sandboxes' pages: a name of their own, to the API too.
+        let pages = routes
+            .iter()
+            .find(|r| r["metadata"]["name"] == TAILNET_SANDBOXES.0)
+            .unwrap();
+        assert_eq!(
+            pages["spec"]["hostnames"],
+            json!(["sandboxes.tail1234.ts.net"])
+        );
+        assert_eq!(pages["spec"]["rules"][0]["timeouts"]["request"], "0s");
+        assert_eq!(
+            (TAILNET_SANDBOXES.1, TAILNET_SANDBOXES.2),
+            (TAILNET_DASHBOARD.1, TAILNET_DASHBOARD.2)
+        );
         assert_eq!(
             dash["spec"]["parentRefs"][0]["sectionName"],
             TAILNET_HTTPS_SECTION
@@ -1763,7 +1795,7 @@ mod tests {
     /// exactly must carry it, or the agent's own writes are refused.
     #[test]
     fn pinned_backends_carry_what_the_api_server_fills_in() {
-        for (_, host, port) in [TAILNET_DASHBOARD, TAILNET_REGISTRY] {
+        for (_, host, port) in TAILNET_OWN_ROUTES {
             assert_eq!(tailnet_backend_spec(host, port)["type"], "Endpoints");
         }
         assert_eq!(waf_backend_spec()["type"], "Endpoints");
@@ -1927,11 +1959,12 @@ mod tests {
         // No firewall policy may replace the Gateway's on a tailnet route.
         assert!(policy.contains("variables.ownRoute && !variables.objName.startsWith('tn--')"));
         assert!(policy.contains("variables.objName == 'pyo-dashboard'"));
+        assert!(policy.contains("variables.objName == 'pyo-sandboxes'"));
         assert!(policy.contains("pyo.pyo-system.svc.cluster.local"));
         // Other Backends still can't point into Pyo's namespaces.
         assert!(
             policy.contains(
-                "!(variables.objName in [dyn('pyo-dashboard'), dyn('pyo-registry-door'), dyn('pyo-tailnet-redirect')])"
+                "!(variables.objName in [dyn('pyo-dashboard'), dyn('pyo-registry-door'), dyn('pyo-sandboxes'), dyn('pyo-tailnet-redirect')])"
             )
         );
     }
@@ -2015,6 +2048,7 @@ mod tests {
                 &TailnetOwn {
                     dashboard: Some("pyo.tail1234.ts.net".into()),
                     registry: None,
+                    sandboxes: Some("sandboxes.tail1234.ts.net".into()),
                 },
             )
             .into_iter()

@@ -613,7 +613,7 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             server_v4 = cel_literal(&json!(system::TAILNET_SERVER_CIDR_V4)),
             server_v6 = cel_literal(&json!(system::TAILNET_SERVER_CIDR_V6)),
             tailnet_names = cel_literal(&json!(system::TAILNET_NAMES)),
-            tailnet_routes = [system::TAILNET_DASHBOARD, system::TAILNET_REGISTRY].iter().map(|(name, host, port)| format!(
+            tailnet_routes = system::TAILNET_OWN_ROUTES.iter().map(|(name, host, port)| format!(
                 "(request.resource.resource == 'backends' && variables.objName == '{name}' && (request.operation == 'DELETE' || object.spec == {spec})) || \
                  (request.resource.resource == 'httproutes' && variables.objName == '{name}' && (request.operation == 'DELETE' || (has(object.spec.hostnames) && size(object.spec.hostnames) == 1 && object.spec.hostnames.all(h, h.matches({host_re})) && \
                     size(object.spec.parentRefs) == 1 && object.spec.parentRefs[0].name == '{gw}' && object.spec.parentRefs[0].sectionName == '{section}' && (!has(object.spec.parentRefs[0].namespace) || object.spec.parentRefs[0].namespace == '{ns}') && \

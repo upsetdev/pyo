@@ -146,6 +146,9 @@ pub struct Addresses {
     pub tailnet: Option<String>,
     /// The registry on the tailnet.
     pub registry: Option<String>,
+    /// Sandboxes' web pages on the tailnet ("sandboxes.tail1234.ts.net"),
+    /// which the API passes on to the sandbox servers (sandbox/pages.rs).
+    pub sandboxes: Option<String>,
     /// The dashboard on the public IP, while it's open.
     pub public: Option<String>,
     /// This machine's Tailscale IPv4 address.
@@ -157,6 +160,7 @@ pub struct Addresses {
 static ADDRESSES: std::sync::RwLock<Addresses> = std::sync::RwLock::new(Addresses {
     tailnet: None,
     registry: None,
+    sandboxes: None,
     public: None,
     host_ip: None,
     host_name: None,
@@ -198,7 +202,7 @@ pub fn is_https_host(host: &str) -> bool {
         .map_or(host, |(h, _)| h)
         .to_ascii_lowercase();
     let a = addresses();
-    [a.tailnet, a.public, a.registry]
+    [a.tailnet, a.public, a.registry, a.sandboxes]
         .into_iter()
         .flatten()
         .any(|h| h == name)
@@ -229,6 +233,7 @@ mod tests {
         super::set_addresses(super::Addresses {
             tailnet: Some("pyo.tail1234.ts.net".into()),
             registry: Some("registry.tail1234.ts.net".into()),
+            sandboxes: Some("sandboxes.tail1234.ts.net".into()),
             public: Some("pyo.203.0.113.7.nip.io".into()),
             host_ip: Some("100.64.0.7".into()),
             host_name: None,
@@ -239,6 +244,7 @@ mod tests {
         );
         assert!(super::is_https_host("PYO.tail1234.ts.net"));
         assert!(super::is_https_host("pyo.203.0.113.7.nip.io:443"));
+        assert!(super::is_https_host("sandboxes.tail1234.ts.net"));
         assert!(!super::is_https_host("192.168.1.5:8000"));
         assert!(!super::is_https_host("localhost:8000"));
         assert_eq!(

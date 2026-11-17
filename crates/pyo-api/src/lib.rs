@@ -464,6 +464,13 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             ))
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
             .layer(TraceLayer::new_for_http())
+            // Sandboxes' pages on their own tailnet name, before anything
+            // else: nothing of the API or dashboard answers there, and
+            // their requests aren't traced (the first carries a token).
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                sandbox::pages::gate,
+            ))
             .with_state(state)
     };
 

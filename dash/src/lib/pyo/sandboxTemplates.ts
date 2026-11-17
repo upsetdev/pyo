@@ -89,13 +89,14 @@ export const minSize = (t: TemplateLike | undefined) => (t && isDesktop(t) ? DES
 /** An app the desktop can bring to the front when its screen opens. */
 export type DesktopApp = "chromium";
 
-/** The desktop's screen in a browser: voxl through the daemon's
- * `/web/{port}/` (crates/pyo-sandbox api.rs), which takes the token once
- * and keeps it in a cookie for that sandbox's pages. vnc.html, where
- * noVNC's page was, goes on to voxl's page beside it, which finds its
- * WebSocket there too. voxl decodes video with WebCodecs, which browsers
- * offer only on HTTPS pages and localhost. */
-export function desktopUrl(daemon: string, sandboxId: string, token: string, app?: DesktopApp) {
+/** The desktop's screen in a browser, over HTTPS: voxl decodes video with
+ * WebCodecs, which browsers offer only on HTTPS pages (and localhost).
+ * `web` is the connection's webUrl, sandboxes' pages on their own tailnet
+ * name, which Pyo's API passes on to the daemon's `/web/{port}/`
+ * (crates/pyo-api sandbox/pages.rs). It takes the token once and keeps it
+ * in a cookie for that sandbox's pages. vnc.html, where noVNC's page was,
+ * goes on to voxl's page beside it, which finds its WebSocket there too. */
+export function desktopUrl(web: string, sandboxId: string, token: string, app?: DesktopApp) {
   const prefix = `v1/sandboxes/${encodeURIComponent(sandboxId)}/web/${DESKTOP_PORT}/`;
   const q = new URLSearchParams({
     autoconnect: "1",
@@ -105,7 +106,17 @@ export function desktopUrl(daemon: string, sandboxId: string, token: string, app
     ...(app ? { app } : {}),
     pyo_token: token,
   });
-  return `${daemon.replace(/\/$/, "")}/${prefix}vnc.html?${q}`;
+  return `${web.replace(/\/$/, "")}/${prefix}vnc.html?${q}`;
+}
+
+type TailscaleLike = { suffix?: string | null; sandboxes?: string | null } | null | undefined;
+
+/** Why the desktop can't open yet, or null when it can: it opens over
+ * HTTPS on the tailnet only, at sandboxes' own name there. */
+export function desktopBlocked(ts: TailscaleLike) {
+  if (ts?.sandboxes) return null;
+  if (!ts?.suffix) return "Opens over your tailnet. Set up Tailscale in Integrations first.";
+  return "Its address on your tailnet isn't ready yet.";
 }
 
 /** The template a new sandbox form starts on: base, else the first usable one. */

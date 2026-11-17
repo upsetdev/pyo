@@ -37,6 +37,7 @@ pub mod limits;
 mod live;
 pub mod mcp;
 pub mod names;
+pub mod pages;
 pub mod runner;
 pub mod scheduler;
 pub mod templates;
@@ -717,6 +718,12 @@ pub struct Connection {
     /// When the token runs out (epoch milliseconds). Ask for a new one with
     /// `createSandboxToken` before.
     pub expires_at: u64,
+    /// Where its ports' web pages open over HTTPS on your tailnet, like the
+    /// desktop's screen: `<webUrl>/v1/sandboxes/{id}/web/{port}/`, with the
+    /// token once as `?pyo_token=`. Missing until Tailscale is set up and
+    /// that name is ready.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
 }
 
 async fn connection(
@@ -733,6 +740,9 @@ async fn connection(
         sandbox_id: sandbox.to_owned(),
         token: t.token,
         expires_at: t.expires_at,
+        web_url: crate::web::addresses()
+            .sandboxes
+            .map(|h| format!("https://{h}")),
     })
 }
 
