@@ -23,7 +23,8 @@ to `ghcr.io/upsetdev/pyo/{pyo,agent,builder,flows,waf,geoip,db-controller,kv,pos
 (all from `deploy/images/`, at the same version. The Rust binaries are
 compiled once, by the `binaries` job, and the Rust images' jobs take them
 from that run's build cache),
-and creates a GitHub release with the CLI and `release.json`. The CLI is
+and creates a GitHub release with the CLI, the install scripts and
+`release.json`. The CLI is
 `pyo-linux-x86_64`, `pyo-linux-aarch64`, `pyo-macos-aarch64`,
 `pyo-macos-x86_64` and `pyo-windows-x86_64.exe`, each with its `.sha256`,
 plus its installer `deploy/cli.sh`. Linux x86-64's comes from the Rust
@@ -84,8 +85,13 @@ The release's text lists the changes since the previous release (see
 
 Don't move or reuse a tag. If a release is bad, publish the next version.
 
-Publish releases as stable releases (not drafts or pre-releases): installations
-only see GitHub's "latest" release.
+The repo has GitHub's immutable releases on: once a release is published,
+its assets and its tag can't change. So the workflow uploads the release
+as a draft with every asset, checks the install scripts in it, and only
+then publishes it, as a stable release marked latest (installations only
+see GitHub's "latest" release). If the job fails before that, run it again:
+it replaces the draft's assets. A release that's published already is left
+as it is. The release's text can still be edited.
 
 ## Release notes
 
@@ -168,6 +174,12 @@ release carries it as an asset. Installations find it in **Settings › Updates*
 - `sandbox`: the SHA-256 of each architecture's sandbox server files.
   `deploy/sandbox.sh` checks release.json's signature with cosign, as
   `install.sh` does, then the files against these.
+- `scripts`: the SHA-256 of each install script the release publishes
+  (`install.sh`, `cli.sh`, `connect.sh`, `join.sh`, `sandbox.sh`). The
+  script writes them to `--scripts <dir>`, with this version on the
+  `pyo:release-version` line of `connect.sh`, `join.sh` and `sandbox.sh`,
+  and the release uploads them from there. pyo.dev serves only scripts
+  that match these sums. The release notes list them too.
 
 To try it before tagging:
 
@@ -178,7 +190,9 @@ bun run scripts/release-manifest.ts --version 0.1.0 --images ghcr.io/upsetdev/py
   --mysql-operator sha256:<64 hex> --mysql-backup sha256:<64 hex> \
   --postgres-16 sha256:<64 hex> --postgres-17 sha256:<64 hex> --postgres-18 sha256:<64 hex> \
   --agent-access "$(cargo run -q -p pyo-agent -- access-hash)" \
-  --sandbox-x86_64 <64 hex> --sandbox-aarch64 <64 hex>
+  --sandbox-x86_64 <64 hex> --sandbox-aarch64 <64 hex> \
+  --sandbox-gvisor-x86_64 <64 hex> --sandbox-gvisor-aarch64 <64 hex> \
+  --scripts /tmp/release-scripts
 ```
 
 ### Notices
@@ -234,10 +248,31 @@ certificates are valid to 2031), `install.sh` with cosign (the machine's, or
 a pinned download checked by SHA-256). The images' own signatures aren't
 verified in the cluster. `pyo-up.sh --release` checks them.
 
+## Install scripts on pyo.dev
+
+pyo.dev serves the scripts each release publishes, as they are:
+
+- `https://pyo.dev/<script>`: the latest release's (`install.sh`,
+  `cli.sh`, `connect.sh`, `join.sh`, `sandbox.sh`), never cached for long.
+- `https://pyo.dev/v/<version>/<script>`: each release's, which never
+  change. Pyo's commands for other machines use these when they fetch
+  scripts from pyo.dev (`crates/pyo-api/src/join.rs`).
+
+pyo-web's build (`scripts/release-scripts/` there) takes them from the
+GitHub releases. For each release, it checks `release.json`'s signature
+(this workflow at that tag, in this repository), then each script against
+its SHA-256 in `release.json`, and fails on any mismatch. Nothing in the
+pyo-web repo can replace them. Releases up to 0.4.2 have no sums in their
+release.json: pyo-web holds a reviewed list of theirs.
+
+Pyo 0.4.2 and earlier give the latest script `--version <their version>`.
+The scripts' `run_release` (`pyo:release` blocks) then runs that release's
+own script from `pyo.dev/v/<version>/`.
+
 ## Install or update a release
 
 The release workflow attaches `deploy/install.sh` as `install.sh`, and
-`https://pyo.dev/install.sh` runs the one from the latest stable release:
+`https://pyo.dev/install.sh` is the one from the latest stable release:
 
 ```bash
 curl -fsSL https://pyo.dev/install.sh | bash                          # install, or update to the latest

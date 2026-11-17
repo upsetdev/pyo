@@ -2,8 +2,8 @@ name: Release
 
 # Pushing a tag like v0.1.0 publishes that version: signed images at
 # ghcr.io/upsetdev/pyo, and a GitHub release with the CLI for each
-# platform, the sandbox server files and release.json (what the
-# dashboard's updates apply). See RELEASING.md.
+# platform, the sandbox server files, the install scripts and release.json
+# (what the dashboard's updates apply). See RELEASING.md.
 
 on:
   push:
@@ -215,6 +215,10 @@ jobs:
           done
       # What Pyo needs to update itself from the dashboard: the images
       # pinned by the digests that were just signed, and the manifests.
+      # Also the install scripts as the release publishes them, written to
+      # release-scripts/ (connect.sh, join.sh and sandbox.sh with this
+      # version on their pyo:release-version line), and their SHA-256:
+      # pyo.dev serves only scripts that match these signed sums.
       - name: Write release.json
         env:
           VERSION: ${{ needs.verify.outputs.version }}
@@ -230,8 +234,9 @@ jobs:
             --sandbox-x86_64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-x86_64.tar.gz.sha256)" \
             --sandbox-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-aarch64.tar.gz.sha256)" \
             --sandbox-gvisor-x86_64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-x86_64.tar.gz.sha256)" \
-            --sandbox-gvisor-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-aarch64.tar.gz.sha256)" > release.json
-          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, sandbox, sandboxGvisor, migrations: (.migrations | length)}' release.json
+            --sandbox-gvisor-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-aarch64.tar.gz.sha256)" \
+            --scripts release-scripts > release.json
+          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, sandbox, sandboxGvisor, scripts, migrations: (.migrations | length)}' release.json
       # The release's own upgrader reads it before it's signed: an image
       # it doesn't accept, or an agentAccess that isn't its agent's roles,
       # fails the release here, not on installations.
@@ -280,19 +285,23 @@ jobs:
       - name: Write the release notes
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bun run scripts/release-notes.ts --to "$GITHUB_REF_NAME" > release-notes.md && cat release-notes.md
-      # install.sh goes out as an asset named exactly that: pyo.dev/install.sh
-      # fetches releases/latest/download/install.sh (stable releases only).
-      # connect.sh beside it: install.sh --uninstall runs its own release's.
-      # pyo.dev/connect.sh and pyo.dev/join.sh fetch connect.sh and join.sh
-      # the same way (Pyo's commands use them when it has no address other
-      # machines can reach). pyo.dev/cli.sh fetches cli.sh, the CLI's
-      # installer. pyo.dev/sandbox.sh fetches sandbox.sh, which sets up
-      # sandbox servers with the pyo-sandbox-linux-<arch>.tar.gz beside it.
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          body_path: release-notes.md
-          files: |
+        run: bun run scripts/release-notes.ts --to "$GITHUB_REF_NAME" --release release.json > release-notes.md && cat release-notes.md
+      # The release goes up as a draft with every asset, and is published
+      # once they're all there: with immutable releases (on for this repo),
+      # a published release's assets and tag can't change. Run again after
+      # a failure, this job replaces the draft's assets. A release that's
+      # published already is left as it is.
+      #
+      # The install scripts are release-scripts/'s: install.sh (pyo.dev/install.sh
+      # is the latest release's), connect.sh (also for install.sh --uninstall),
+      # join.sh, sandbox.sh (beside the sandbox files it installs) and cli.sh,
+      # the CLI's installer.
+      - name: Upload the release as a draft
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=(
             pyo-linux-x86_64
             pyo-linux-x86_64.sha256
             cli-platforms/pyo-linux-aarch64
@@ -305,11 +314,11 @@ jobs:
             cli-platforms/pyo-windows-x86_64.exe.sha256
             release.json
             release.json.sigstore.json
-            deploy/install.sh
-            deploy/cli.sh
-            crates/pyo-api/assets/connect.sh
-            crates/pyo-api/assets/join.sh
-            deploy/sandbox.sh
+            release-scripts/install.sh
+            release-scripts/cli.sh
+            release-scripts/connect.sh
+            release-scripts/join.sh
+            release-scripts/sandbox.sh
             sandbox/pyo-sandbox-linux-x86_64.tar.gz
             sandbox/pyo-sandbox-linux-x86_64.tar.gz.sha256
             sandbox/pyo-sandbox-linux-aarch64.tar.gz
@@ -318,3 +327,37 @@ jobs:
             sandbox/pyo-sandbox-gvisor-linux-x86_64.tar.gz.sha256
             sandbox/pyo-sandbox-gvisor-linux-aarch64.tar.gz
             sandbox/pyo-sandbox-gvisor-linux-aarch64.tar.gz.sha256
+          )
+          if ! draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>&1); then
+            grep -q "release not found" <<<"$draft" || { echo "$draft"; exit 1; }
+            draft=none
+          fi
+          case "$draft" in
+            false)
+              echo "::notice::$GITHUB_REF_NAME is published already, so its assets stay as they are."
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            true)
+              gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md
+              gh release upload "$GITHUB_REF_NAME" --clobber "${files[@]}"
+              ;;
+            none)
+              gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" \
+                --notes-file release-notes.md "${files[@]}"
+              ;;
+          esac
+      # What the draft holds now: each install script as release.json lists it.
+      - name: Check the draft's install scripts
+        if: steps.draft.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --pattern '*.sh' --dir uploaded
+          jq -r '.scripts | to_entries[] | "\(.value)  uploaded/\(.key)"' release.json | sha256sum -c
+          [ "$(ls uploaded | wc -l)" = "$(jq '.scripts | length' release.json)" ]
+      - name: Publish the release
+        if: steps.draft.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+

@@ -10,7 +10,8 @@
 //     --postgres-16 sha256:… --postgres-17 sha256:… --postgres-18 sha256:… \
 //     --agent-access "$(pyo-agent access-hash)" \
 //     --sandbox-x86_64 <sha256> --sandbox-aarch64 <sha256> \
-//     --sandbox-gvisor-x86_64 <sha256> --sandbox-gvisor-aarch64 <sha256> > release.json
+//     --sandbox-gvisor-x86_64 <sha256> --sandbox-gvisor-aarch64 <sha256> \
+//     --scripts release-scripts > release.json
 //
 // Images are pinned by digest. deploy/k8s/{platform,pyo}.yaml become JSON
 // objects. The sandbox templates' images (sandboxBase, sandboxDesktop) are
@@ -24,8 +25,18 @@
 // and `sandboxGvisor` those of runsc (pyo-sandbox-gvisor-linux-<arch>.tar.gz)
 // for servers without KVM: deploy/sandbox.sh checks them against it once
 // release.json's signature checks out.
+//
+// `scripts` lists the SHA-256 of the release's install scripts, which
+// --scripts <dir> gets: install.sh, cli.sh, connect.sh, join.sh and
+// sandbox.sh, as the release publishes them. connect.sh, join.sh and
+// sandbox.sh get this version on their pyo:release-version line, so they
+// know their release (run_release). pyo.dev serves these files only when
+// they match this list, at /<script> for the latest release and at
+// /v/<version>/<script> for each one.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const args = new Map<string, string>();
 for (let i = 2; i < process.argv.length; i += 2) {
@@ -163,6 +174,28 @@ const sums = (flag: string) =>
 const sandbox = sums("sandbox");
 const sandboxGvisor = sums("sandbox-gvisor");
 
+// The install scripts as the release publishes them, written to --scripts.
+const RELEASE_LINE = '\n  local release="" # pyo:release-version\n';
+const SCRIPTS: [string, string, boolean][] = [
+  ["install.sh", "deploy/install.sh", false],
+  ["cli.sh", "deploy/cli.sh", false],
+  ["connect.sh", "crates/pyo-api/assets/connect.sh", true],
+  ["join.sh", "crates/pyo-api/assets/join.sh", true],
+  ["sandbox.sh", "deploy/sandbox.sh", true],
+];
+const scriptsDir = need("scripts");
+mkdirSync(scriptsDir, { recursive: true });
+const scripts: Record<string, string> = {};
+for (const [name, source, stamped] of SCRIPTS) {
+  let text = readFileSync(source, "utf8");
+  if (stamped) {
+    if (text.split(RELEASE_LINE).length !== 2) fail(`${source} needs exactly one pyo:release-version line`);
+    text = text.replace(RELEASE_LINE, `\n  local release="${version}" # pyo:release-version\n`);
+  }
+  writeFileSync(join(scriptsDir, name), text);
+  scripts[name] = createHash("sha256").update(text).digest("hex");
+}
+
 const release = {
   version,
   images: pinned,
@@ -180,6 +213,7 @@ const release = {
   agentAccess,
   sandbox,
   sandboxGvisor,
+  scripts,
 };
 // Pretty-printed, two spaces: deploy/install.sh reads it with sed.
 console.log(JSON.stringify(release, null, 2));
