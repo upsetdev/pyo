@@ -8,8 +8,8 @@
 //! token, which works once, and renews at `/renew` with the certificate it
 //! has. The cluster comes from the certificate, never the request.
 //!
-//! With `PYO_AGENT_REQUIRE_CERT=true` the agent routes refuse a bearer
-//! token alone, on this listener and the main one.
+//! With `PYO_AGENT_AUTH=mtls` the agent routes refuse a bearer token
+//! alone, on this listener and the main one (agent_auth.rs).
 //!
 //! The CA's key is a file here (`PYO_AGENT_CA_DIR`, made on first start);
 //! a hosted build moves it to a KMS.
@@ -42,24 +42,24 @@ use crate::{
 /// A client certificate's lifetime.
 pub const CERT_HOURS: i64 = 24;
 
-/// Whether bearer tokens alone are refused on agent routes.
-pub fn require_cert() -> bool {
-    static R: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *R.get_or_init(|| {
-        std::env::var("PYO_AGENT_REQUIRE_CERT").is_ok_and(|v| matches!(v.trim(), "1" | "true"))
-    })
-}
-
 /// The agent CA, when this Pyo runs the mTLS endpoint.
 pub fn ca() -> Option<&'static Ca> {
     CA.get()
 }
 static CA: std::sync::OnceLock<Ca> = std::sync::OnceLock::new();
 
-/// Where agents reach the mTLS endpoint (`PYO_AGENT_ENDPOINT`), for the
-/// install manifest. None without one.
+/// Where agents reach Pyo (`PYO_AGENT_ENDPOINT`), for the install manifest:
+/// the mTLS listener, or (signed requests) Pyo's agent address behind its
+/// proxy. None when agents use tokens.
 pub fn endpoint() -> Option<String> {
-    ca()?;
+    use crate::agent_auth::{Mode, mode};
+    match mode() {
+        Mode::Token => return None,
+        Mode::Mtls => {
+            ca()?;
+        }
+        Mode::Signed => {}
+    }
     std::env::var("PYO_AGENT_ENDPOINT")
         .ok()
         .map(|v| v.trim().trim_end_matches('/').to_owned())

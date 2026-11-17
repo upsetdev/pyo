@@ -8,6 +8,7 @@
 //! (see [`Extensions`]); self-hosted Pyo has none of those.
 
 mod agent;
+mod agent_auth;
 mod agent_tls;
 mod alerts;
 pub mod auth;
@@ -440,6 +441,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tokio::spawn(sandbox::runner::runner(state.clone()));
         tokio::spawn(sandbox::base::seed(state.clone()));
         tokio::spawn(sandbox::images::runner(state.clone()));
+        tokio::spawn(agent_auth::sweeper(state.db.clone()));
         for task in tasks {
             tokio::spawn(task(state.clone()));
         }
@@ -506,7 +508,13 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 agent::routes()
                     .merge(sites::agent_routes())
                     .merge(terminal::agent_routes())
-                    .merge(database_imports::agent_routes()),
+                    .merge(database_imports::agent_routes())
+                    .merge(agent_auth::routes())
+                    // Signed requests (agent_auth.rs): who sent it, from its key.
+                    .layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        agent_auth::signed,
+                    )),
             )
             .nest(
                 "/api/builder/v1",

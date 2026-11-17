@@ -35,10 +35,25 @@ pub async fn manifest(
     // runs only commands the signer signed for this cluster (agent_tls.rs,
     // the agent's trust.rs).
     if let Some(endpoint) = crate::agent_tls::endpoint() {
+        let signed = crate::agent_auth::mode() == crate::agent_auth::Mode::Signed;
+        // mTLS: Pyo's agent CA. Signed requests: the CA of the endpoint's
+        // certificate only when it isn't a public one (PYO_AGENT_ENDPOINT_CA_FILE).
+        let ca = if signed {
+            std::env::var("PYO_AGENT_ENDPOINT_CA_FILE")
+                .ok()
+                .filter(|f| !f.trim().is_empty())
+                .and_then(|f| std::fs::read_to_string(f.trim()).ok())
+                .unwrap_or_default()
+        } else {
+            crate::agent_tls::ca().map(|c| c.pem().to_owned()).unwrap_or_default()
+        };
         let mut env = vec![
-            ("PYO_AGENT_CA", crate::agent_tls::ca().map(|c| c.pem().to_owned()).unwrap_or_default()),
+            ("PYO_AGENT_AUTH", if signed { "signed" } else { "mtls" }.to_owned()),
             ("PYO_CLUSTER_ID", cluster.clone()),
         ];
+        if !ca.is_empty() {
+            env.push(("PYO_AGENT_CA", ca));
+        }
         if let Some(signer) = crate::command_signer() {
             env.push(("PYO_COMMAND_KEY", signer.public_keys()));
         }

@@ -47,6 +47,10 @@ impl FromRequestParts<AppState> for AgentCluster {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // A signed request (agent_auth.rs): the cluster its key belongs to.
+        if let Some(v) = parts.extensions.get::<crate::agent_auth::VerifiedAgent>() {
+            return Ok(AgentCluster { id: v.cluster_id.clone(), team_id: v.team_id.clone() });
+        }
         // Over the mTLS endpoint: the cluster its certificate names, while
         // that certificate is the cluster's current (or the one before it,
         // through a renewal). Never from the request.
@@ -71,10 +75,13 @@ impl FromRequestParts<AppState> for AgentCluster {
             }
             return Ok(AgentCluster { id: id.cluster, team_id: id.team });
         }
-        if crate::agent_tls::require_cert() {
+        if crate::agent_auth::refuse_tokens() {
             return Err(ApiError::new(
                 StatusCode::UNAUTHORIZED,
-                "Agents connect with a client certificate here.",
+                match crate::agent_auth::mode() {
+                    crate::agent_auth::Mode::Signed => "Agents sign their requests here.",
+                    _ => "Agents connect with a client certificate here.",
+                },
             ));
         }
         let token = parts
