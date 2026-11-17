@@ -219,13 +219,15 @@ build_cmd() {
       buildctl_build --local context=deploy/images/moco --local dockerfile=deploy/images/moco --opt filename=moco.Dockerfile \
         --opt target="${image#mysql-}" --output "$push" ;;
     # Both take the repo's THIRD_PARTY_NOTICES.md as the named context
-    # `notices`.
+    # `notices`. desktop compiles voxl with at most PYO_UP_CARGO_JOBS
+    # jobs (6), so it fits in a laptop's memory.
     sandbox-base)
       buildctl_build --local context="$SANDBOX_SRC/images/base" --local dockerfile="$SANDBOX_SRC/images/base" \
         --local notices="$SANDBOX_SRC" --opt context:notices=local:notices --output "$push" ;;
     sandbox-desktop)
       buildctl_build --local context="$SANDBOX_SRC/images/desktop" --local dockerfile="$SANDBOX_SRC/images/desktop" \
         --local notices="$SANDBOX_SRC" --opt context:notices=local:notices \
+        --opt build-arg:CARGO_BUILD_JOBS="${PYO_UP_CARGO_JOBS:-6}" \
         --opt build-arg:BASE="$(ref sandbox-base "${RESULT[sandbox-base]}")" --output "$push" ;;
   esac
 }
