@@ -149,6 +149,10 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "pyo_agent=info".into()),
         )
         .init();
+    // `pyo-agent sign-request …`: signed request headers, for tests (trust.rs).
+    if args.get(1).map(String::as_str) == Some("sign-request") {
+        return trust::sign_request_cli(&args[2..]).await;
+    }
     // A server's tailnet pod (tailnet.rs).
     if args.get(1).map(String::as_str) == Some("tailnet") {
         return tailnet::run_pod().await;
@@ -171,19 +175,28 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("PYO_AGENT_TOKEN is required"))?;
     let kube = kube::Client::try_default().await?;
     let policy = scope::read_policy(&kube).await;
-    // Pyo Cloud: a client certificate, and signed commands only (trust.rs).
-    let identity = trust::Identity::from_env(&url, &token, &kube)?.map(Arc::new);
+    // Pyo Cloud: requests signed with the agent's key, or a client
+    // certificate, and signed commands only (trust.rs).
+    let key = trust::KeyIdentity::from_env(&url, &token, &kube)?.map(Arc::new);
+    let identity = match &key {
+        Some(_) => None,
+        None => trust::Identity::from_env(&url, &token, &kube)?.map(Arc::new),
+    };
+    if let Some(k) = &key {
+        k.ensure().await;
+        tokio::spawn(k.clone().renew_loop());
+    }
     if let Some(id) = &identity {
         id.ensure().await;
         tokio::spawn(id.clone().renew_loop());
     }
     let verifier = trust::Verifier::from_env(&kube).await?.map(Arc::new);
-    let api = api::PyoApi::with_trust(
-        &url,
-        &token,
-        identity.as_ref().map(|i| i.tls.clone()),
-        verifier,
-    )?;
+    let tls = match (&key, &identity) {
+        (Some(k), _) => k.tls.clone(),
+        (None, Some(i)) => Some(i.tls.clone()),
+        _ => None,
+    };
+    let api = api::PyoApi::with_trust(&url, &token, tls, verifier, key)?;
     let agent = Agent {
         kube,
         api,

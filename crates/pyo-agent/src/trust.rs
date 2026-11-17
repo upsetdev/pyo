@@ -307,3 +307,203 @@ impl Verifier {
         (ok, refused)
     }
 }
+
+// ── Signed requests ─────────────────────────────────────────────────────────
+
+/// The agent's request key (`PYO_AGENT_AUTH=signed`): made here, its public
+/// half enrolled with the connect command's token, renewed at half its day.
+/// Every request to Pyo is signed with it (pyo-proto `agentauth`), so who
+/// the agent is survives a proxy that ends TLS. Kept in pyo-agent-identity.
+pub struct KeyIdentity {
+    key: RwLock<Option<(String, Arc<pyo_proto::agentauth::RequestKey>)>>,
+    /// Pyo's endpoint certificate's CA, when it isn't a public one.
+    pub tls: Option<rustls::ClientConfig>,
+    base: String,
+    token: String,
+    kube: kube::Client,
+}
+
+fn b64(b: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(b)
+}
+
+fn unb64(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(s.trim()).ok()
+}
+
+struct StoredKey {
+    pkcs8: Vec<u8>,
+    key_id: String,
+    not_after: u64,
+    token_sha: String,
+}
+
+async fn load_key(kube: &kube::Client) -> Option<StoredKey> {
+    let api = kube::Api::<Secret>::namespaced(kube.clone(), pyo_proto::rbac::NS);
+    let s = api.get_opt(IDENTITY_SECRET).await.ok()??;
+    let d = s.data?;
+    let get = |k: &str| d.get(k).and_then(|v| String::from_utf8(v.0.clone()).ok()).unwrap_or_default();
+    let pkcs8 = unb64(&get("request-key"))?;
+    let key_id = get("key-id");
+    (!key_id.is_empty()).then(|| StoredKey {
+        pkcs8,
+        key_id,
+        not_after: get("key-not-after").trim().parse().unwrap_or(0),
+        token_sha: get("key-token"),
+    })
+}
+
+impl KeyIdentity {
+    /// From `PYO_AGENT_AUTH=signed`; None otherwise.
+    pub fn from_env(base: &str, token: &str, kube: &kube::Client) -> anyhow::Result<Option<Self>> {
+        if std::env::var("PYO_AGENT_AUTH").ok().as_deref().map(str::trim) != Some("signed") {
+            return Ok(None);
+        }
+        let tls = match std::env::var("PYO_AGENT_CA").ok().filter(|v| !v.trim().is_empty()) {
+            Some(ca) => Some(client_config(&ca, Arc::new(CertSlot::default()))?),
+            None => None,
+        };
+        Ok(Some(Self {
+            key: RwLock::new(None),
+            tls,
+            base: base.trim_end_matches('/').to_owned(),
+            token: token.to_owned(),
+            kube: kube.clone(),
+        }))
+    }
+
+    /// The headers that sign a request (`path` with its query).
+    pub fn headers(&self, method: &str, path: &str, body: &[u8]) -> Vec<(&'static str, String)> {
+        let Some((id, key)) = self.key.read().ok().and_then(|k| k.clone()) else {
+            return vec![];
+        };
+        key.sign(&id, method, path, body, pyo_proto::now_ms() / 1000).to_vec()
+    }
+
+    fn http(&self) -> anyhow::Result<reqwest::Client> {
+        let mut b = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30));
+        if let Some(tls) = &self.tls {
+            b = b.use_preconfigured_tls(tls.clone());
+        }
+        Ok(b.build()?)
+    }
+
+    /// A key to start with: the stored one while it has more than an hour
+    /// left and came from this token, else a new one. Retries until it has one.
+    pub async fn ensure(&self) {
+        let mut wait = Duration::from_secs(2);
+        loop {
+            match self.try_ensure().await {
+                Ok(()) => return,
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), retry_in = ?wait, "no request key yet");
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(Duration::from_secs(60));
+                }
+            }
+        }
+    }
+
+    async fn try_ensure(&self) -> anyhow::Result<()> {
+        if let Some(s) = load_key(&self.kube).await
+            && s.token_sha == pyo_proto::token_hash(&self.token)
+            && s.not_after > pyo_proto::now_ms() as u64 + 3_600_000
+        {
+            let key = pyo_proto::agentauth::RequestKey::from_pkcs8(&s.pkcs8).map_err(anyhow::Error::msg)?;
+            *self.key.write().map_err(|_| anyhow::anyhow!("lock"))? = Some((s.key_id.clone(), Arc::new(key)));
+            tracing::info!(key = %s.key_id, "using the stored request key");
+            return Ok(());
+        }
+        self.request(true).await
+    }
+
+    /// A new key, enrolled with the token (`first`) or swapped in with the current one.
+    async fn request(&self, first: bool) -> anyhow::Result<()> {
+        let pkcs8 = pyo_proto::agentauth::RequestKey::generate_pkcs8().map_err(anyhow::Error::msg)?;
+        let key = pyo_proto::agentauth::RequestKey::from_pkcs8(&pkcs8).map_err(anyhow::Error::msg)?;
+        let (path, body) = if first {
+            ("/api/agent/v1/enroll-key", json!({ "token": self.token, "publicKey": key.public_key() }))
+        } else {
+            ("/api/agent/v1/renew-key", json!({ "publicKey": key.public_key() }))
+        };
+        let body = serde_json::to_vec(&body)?;
+        let url = format!("{}{path}", self.base);
+        let mut req = self.http()?.post(&url).header("content-type", "application/json");
+        if !first {
+            let signed_path = reqwest::Url::parse(&url)?.path().to_owned();
+            for (k, v) in self.headers("POST", &signed_path, &body) {
+                req = req.header(k, v);
+            }
+        }
+        let res = req.body(body).send().await?;
+        let status = res.status();
+        let v: Value = res.json().await.unwrap_or_default();
+        anyhow::ensure!(status.is_success(), "{status}: {}", v["error"].as_str().unwrap_or(""));
+        let key_id = v["keyId"].as_str().unwrap_or("").to_owned();
+        let not_after = v["notAfter"].as_u64().unwrap_or(0);
+        anyhow::ensure!(!key_id.is_empty(), "Pyo sent no key id");
+        save(
+            &self.kube,
+            "pyo-agent-key",
+            json!({
+                "request-key": b64(&pkcs8),
+                "key-id": key_id,
+                "key-not-after": not_after.to_string(),
+                "key-token": pyo_proto::token_hash(&self.token),
+            }),
+        )
+        .await?;
+        *self.key.write().map_err(|_| anyhow::anyhow!("lock"))? = Some((key_id.clone(), Arc::new(key)));
+        tracing::info!(key = %key_id, first, not_after, "got a request key");
+        Ok(())
+    }
+
+    /// Swaps in a new key at half the current one's day, while the agent runs.
+    pub async fn renew_loop(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            let left = load_key(&self.kube)
+                .await
+                .map(|s| s.not_after.saturating_sub(pyo_proto::now_ms() as u64))
+                .unwrap_or(0);
+            if left > 12 * 3_600_000 {
+                continue;
+            }
+            if let Err(e) = self.request(false).await {
+                tracing::warn!(error = %format!("{e:#}"), left_ms = left, "couldn't renew the request key");
+            }
+        }
+    }
+}
+
+/// `pyo-agent sign-request METHOD PATH [--at UNIX_SECONDS] [--key-id ID]`:
+/// the two headers that sign a request with this agent's stored key, empty
+/// body. For tests of the API's checks (a replay, a stale time, a key id
+/// that isn't this key's).
+pub async fn sign_request_cli(args: &[String]) -> anyhow::Result<()> {
+    let (Some(method), Some(path)) = (args.first(), args.get(1)) else {
+        anyhow::bail!("usage: pyo-agent sign-request METHOD PATH [--at UNIX_SECONDS] [--key-id ID]");
+    };
+    let mut at = pyo_proto::now_ms() / 1000;
+    let mut key_id = None;
+    let mut i = 2;
+    while i < args.len() {
+        match (args[i].as_str(), args.get(i + 1)) {
+            ("--at", Some(v)) => at = v.parse()?,
+            ("--key-id", Some(v)) => key_id = Some(v.clone()),
+            _ => anyhow::bail!("unknown option {}", args[i]),
+        }
+        i += 2;
+    }
+    let kube = kube::Client::try_default().await?;
+    let s = load_key(&kube).await.context("no request key here")?;
+    let key = pyo_proto::agentauth::RequestKey::from_pkcs8(&s.pkcs8).map_err(anyhow::Error::msg)?;
+    for (k, v) in key.sign(key_id.as_deref().unwrap_or(&s.key_id), method, path, b"", at) {
+        println!("{k}: {v}");
+    }
+    Ok(())
+}

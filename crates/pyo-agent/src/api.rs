@@ -18,6 +18,8 @@ pub struct PyoApi {
     tls: Option<std::sync::Arc<rustls::ClientConfig>>,
     /// Signed commands only (trust.rs).
     verifier: Option<std::sync::Arc<crate::trust::Verifier>>,
+    /// Every request signed with the agent's key (trust.rs `KeyIdentity`).
+    signer: Option<std::sync::Arc<crate::trust::KeyIdentity>>,
 }
 
 impl PyoApi {
@@ -46,7 +48,7 @@ impl PyoApi {
     }
 
     pub fn new(url: &str, token: &str) -> anyhow::Result<Self> {
-        Self::with_trust(url, token, None, None)
+        Self::with_trust(url, token, None, None, None)
     }
 
     /// With Pyo Cloud's TLS (a pinned CA and a client certificate) and its
@@ -56,6 +58,7 @@ impl PyoApi {
         token: &str,
         tls: Option<rustls::ClientConfig>,
         verifier: Option<std::sync::Arc<crate::trust::Verifier>>,
+        signer: Option<std::sync::Arc<crate::trust::KeyIdentity>>,
     ) -> anyhow::Result<Self> {
         let mut headers = HeaderMap::new();
         let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
@@ -80,7 +83,41 @@ impl PyoApi {
             token: token.to_owned(),
             tls: tls.map(std::sync::Arc::new),
             verifier,
+            signer,
         })
+    }
+
+    /// A request to `path` (with its query) under the agent routes, signed
+    /// when the agent signs its requests.
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+        timeout: Duration,
+    ) -> reqwest::Result<reqwest::Response> {
+        let url = format!("{}{path}", self.base);
+        let mut req = self.http.request(method.clone(), &url).timeout(timeout);
+        let bytes = body.unwrap_or_default();
+        if let Some(signer) = &self.signer {
+            let signed_path = reqwest::Url::parse(&url)
+                .map(|u| match u.query() {
+                    Some(q) => format!("{}?{q}", u.path()),
+                    None => u.path().to_owned(),
+                })
+                .unwrap_or_default();
+            for (k, v) in signer.headers(method.as_str(), &signed_path, &bytes) {
+                req = req.header(k, v);
+            }
+        }
+        if !bytes.is_empty() {
+            req = req.header(reqwest::header::CONTENT_TYPE, "application/json").body(bytes);
+        }
+        req.send().await
+    }
+
+    fn json<T: serde::Serialize>(v: &T) -> Option<Vec<u8>> {
+        Some(serde_json::to_vec(v).unwrap_or_default())
     }
 
     async fn check(res: reqwest::Response) -> anyhow::Result<reqwest::Response> {
@@ -95,21 +132,19 @@ impl PyoApi {
     /// Report the cluster; the reply carries what the API wants applied (node location labels).
     pub async fn heartbeat(&self, hb: &Heartbeat) -> anyhow::Result<pyo_proto::HeartbeatReply> {
         let res = self
-            .http
-            .post(format!("{}/heartbeat", self.base))
-            .timeout(Duration::from_secs(20))
-            .json(hb)
-            .send()
+            .send(reqwest::Method::POST, "/heartbeat", Self::json(hb), Duration::from_secs(20))
             .await?;
         Ok(Self::check(res).await?.json().await.unwrap_or_default())
     }
 
     pub async fn poll(&self, wait_secs: u64) -> anyhow::Result<Vec<CommandEnvelope>> {
         let res = self
-            .http
-            .get(format!("{}/commands?wait={wait_secs}", self.base))
-            .timeout(Duration::from_secs(wait_secs + 15))
-            .send()
+            .send(
+                reqwest::Method::GET,
+                &format!("/commands?wait={wait_secs}"),
+                None,
+                Duration::from_secs(wait_secs + 15),
+            )
             .await?;
         let mut items: Vec<serde_json::Value> = Self::check(res).await?.json().await?;
         if let Some(v) = &self.verifier {
@@ -140,11 +175,7 @@ impl PyoApi {
 
     pub async fn command_result(&self, id: &str, r: &CommandResult) -> anyhow::Result<()> {
         let res = self
-            .http
-            .post(format!("{}/commands/{id}", self.base))
-            .timeout(Duration::from_secs(20))
-            .json(r)
-            .send()
+            .send(reqwest::Method::POST, &format!("/commands/{id}"), Self::json(r), Duration::from_secs(20))
             .await?;
         Self::check(res).await?;
         Ok(())
@@ -166,6 +197,12 @@ impl PyoApi {
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", self.token))?,
         );
+        if let Some(signer) = &self.signer {
+            let path = req.uri().path().to_owned();
+            for (k, v) in signer.headers("GET", &path, b"") {
+                req.headers_mut().insert(k, HeaderValue::from_str(&v)?);
+            }
+        }
         let connector = self
             .tls
             .clone()
@@ -182,10 +219,7 @@ impl PyoApi {
     /// A private registry's login, for a service's pull secret.
     pub async fn registry_login(&self, id: &str) -> anyhow::Result<RegistryLogin> {
         let res = self
-            .http
-            .get(format!("{}/registry-logins/{id}", self.base))
-            .timeout(Duration::from_secs(20))
-            .send()
+            .send(reqwest::Method::GET, &format!("/registry-logins/{id}"), None, Duration::from_secs(20))
             .await?;
         Ok(Self::check(res).await?.json().await?)
     }
@@ -194,10 +228,7 @@ impl PyoApi {
     /// cluster's pyo-static, which reads static sites' folders with it.
     pub async fn static_login(&self) -> anyhow::Result<(String, String)> {
         let res = self
-            .http
-            .get(format!("{}/static-login", self.base))
-            .timeout(Duration::from_secs(20))
-            .send()
+            .send(reqwest::Method::GET, "/static-login", None, Duration::from_secs(20))
             .await?;
         let v: serde_json::Value = Self::check(res).await?.json().await?;
         let token = v["token"].as_str().unwrap_or("").to_owned();
@@ -209,10 +240,7 @@ impl PyoApi {
     /// An uploaded certificate and its key, for a domain using it.
     pub async fn certificate(&self, id: &str) -> anyhow::Result<TlsCertificate> {
         let res = self
-            .http
-            .get(format!("{}/certificates/{id}", self.base))
-            .timeout(Duration::from_secs(20))
-            .send()
+            .send(reqwest::Method::GET, &format!("/certificates/{id}"), None, Duration::from_secs(20))
             .await?;
         Ok(Self::check(res).await?.json().await?)
     }
@@ -226,14 +254,12 @@ impl PyoApi {
         let mut last = None;
         for attempt in 0..4 {
             let sent = self
-                .http
-                .post(format!(
-                    "{}/deployments/{deployment_id}/progress",
-                    self.base
-                ))
-                .timeout(Duration::from_secs(20))
-                .json(p)
-                .send()
+                .send(
+                    reqwest::Method::POST,
+                    &format!("/deployments/{deployment_id}/progress"),
+                    Self::json(p),
+                    Duration::from_secs(20),
+                )
                 .await;
             match sent {
                 Ok(res) => match Self::check(res).await {
