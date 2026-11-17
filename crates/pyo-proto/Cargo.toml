@@ -24,3 +24,4 @@ regex = "1.13.1"
 openapi = ["dep:utoipa"]
 # Signing and checking sandbox tokens (pyo-api and pyo-sandbox).
 sandbox-token = ["dep:ring", "dep:base64"]
+command-signing = ["dep:ring", "dep:base64"]

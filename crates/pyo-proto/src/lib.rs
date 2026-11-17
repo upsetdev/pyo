@@ -16,6 +16,8 @@ pub mod flows;
 pub mod memory;
 pub mod rbac;
 pub mod sandbox;
+#[cfg(feature = "command-signing")]
+pub mod signing;
 pub mod site;
 pub mod system;
 
@@ -872,6 +874,22 @@ pub struct VolumeReport {
 pub struct CommandEnvelope {
     pub id: String,
     pub command: Command,
+    /// The signer's signature over this command, when the API has a signer
+    /// (Pyo Cloud). An agent given `PYO_COMMAND_KEY` runs only signed
+    /// commands, and runs the signed JSON, not `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed: Option<SignedCommandWire>,
+}
+
+/// [`signing::SignedCommand`] on the wire (pyo-proto's signing code is
+/// behind the `command-signing` feature; the shape isn't).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedCommandWire {
+    pub claims: String,
+    pub sig: String,
+    pub kid: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
