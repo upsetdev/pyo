@@ -117,11 +117,12 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
             .filter_map(|v| v.to_str().ok())
             .collect::<Vec<_>>()
             .join(",");
-        Ok(ClientIp(ip_key(&request_ip(
-            &peer,
-            &xff,
-            trusted_proxies(),
-        ))))
+        let cf = parts
+            .headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        Ok(ClientIp(ip_key(&visitor_ip(&peer, cf, &xff, trusted_proxies()))))
     }
 }
 
@@ -234,6 +235,20 @@ pub fn request_ip(peer: &str, forwarded_for: &str, proxies: &[Cidr]) -> String {
         }
     }
     ip.to_string()
+}
+
+/// The visitor's address behind Cloudflare: its `CF-Connecting-IP`, but
+/// only when the connection comes from a trusted proxy (Cloudflare's
+/// ranges, or cloudflared on this machine, in `PYO_TRUSTED_PROXIES`):
+/// anyone else could send that header. Otherwise as [`request_ip`].
+pub fn visitor_ip(peer: &str, cf_connecting_ip: &str, forwarded_for: &str, proxies: &[Cidr]) -> String {
+    let parsed = |s: &str| s.trim().trim_matches(['[', ']']).parse::<IpAddr>().ok().map(|a| a.to_canonical());
+    if let (Some(p), Some(cf)) = (parsed(peer), parsed(cf_connecting_ip))
+        && (trusted(&p, proxies) || (p.is_loopback() && proxies.iter().any(|c| c.contains(&p))))
+    {
+        return cf.to_string();
+    }
+    request_ip(peer, forwarded_for, proxies)
 }
 
 pub fn ip_key(ip: &str) -> String {
@@ -569,5 +584,14 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn cloudflare_s_header_counts_only_from_a_trusted_proxy() {
+        let cf = [Cidr::parse("173.245.48.0/20").unwrap(), Cidr::parse("127.0.0.1/32").unwrap()];
+        assert_eq!(visitor_ip("173.245.48.9", "203.0.113.7", "", &cf), "203.0.113.7");
+        assert_eq!(visitor_ip("127.0.0.1", "203.0.113.7", "", &cf), "203.0.113.7");
+        assert_eq!(visitor_ip("198.51.100.4", "203.0.113.7", "", &cf), "198.51.100.4");
+        assert_eq!(visitor_ip("173.245.48.9", "", "", &cf), "173.245.48.9");
     }
 }
