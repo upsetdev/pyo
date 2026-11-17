@@ -30,6 +30,7 @@ mod database_imports;
 mod database_logs;
 mod databases;
 mod deploy;
+mod domainproof;
 pub mod error;
 mod firewall;
 mod freedomain;
@@ -298,6 +299,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
     } = ext;
     let _ = FEATURES.set(features);
     let _ = VERIFY_DOMAINS.set(verify_domains);
+    let dev_txt = std::env::var("PYO_DEV_TXT_FILE").is_ok_and(|v| !v.trim().is_empty());
     if let Some(s) = command_signer {
         let _ = SIGNER.set(s);
     }
@@ -449,6 +451,9 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         });
     }
     tracing::info!(role = ?role, version = env!("CARGO_PKG_VERSION"), "pyo starting");
+    if dev_txt {
+        tracing::warn!("PYO_DEV_TXT_FILE is set: domain proofs come from that file, not DNS. For tests only");
+    }
 
     let web_dir = PathBuf::from(env("PYO_WEB_DIR", "dash/dist/client"));
     // Unknown paths are dashboard routes: hand them the app shell.

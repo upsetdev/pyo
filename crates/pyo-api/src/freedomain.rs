@@ -240,7 +240,7 @@ impl Cluster {
     }
 
     /// Every address of its own: where a free domain Pyo made could point.
-    fn known(&self) -> Vec<IpAddr> {
+    pub(crate) fn known(&self) -> Vec<IpAddr> {
         let mut known: Vec<IpAddr> = self.servers.iter().flat_map(addresses).collect();
         known.extend(
             self.lb_ips

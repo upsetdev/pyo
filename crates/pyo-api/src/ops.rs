@@ -717,6 +717,18 @@ async fn domains_unique(
     if hosts.is_empty() {
         return Ok(());
     }
+    // Teams that don't trust each other (Pyo Cloud): a new hostname needs
+    // proof of owning it, and one held without proof is taken over.
+    if crate::verify_domains() {
+        let current: Vec<String> = sqlx::query_scalar(
+            "SELECT lower(d->>'hostname') FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d WHERE a.id = $1",
+        )
+        .bind(service_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        let new: Vec<String> = hosts.iter().filter(|h| !current.contains(h)).cloned().collect();
+        crate::domainproof::check_claims(tx, team_id, service_id, &new).await?;
+    }
     let taken: Option<(String, String, String)> = sqlx::query_as(
         "SELECT lower(d->>'hostname'), a.team_id, a.name FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
           WHERE a.id <> $1 AND NOT a.deleting AND lower(d->>'hostname') = ANY($2) LIMIT 1",
