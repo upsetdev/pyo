@@ -39,6 +39,7 @@ mod sites;
 mod tailnet;
 mod terminal;
 mod tls;
+mod trust;
 mod upgrade;
 mod volumes;
 mod waf;
@@ -170,9 +171,22 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("PYO_AGENT_TOKEN is required"))?;
     let kube = kube::Client::try_default().await?;
     let policy = scope::read_policy(&kube).await;
+    // Pyo Cloud: a client certificate, and signed commands only (trust.rs).
+    let identity = trust::Identity::from_env(&url, &token, &kube)?.map(Arc::new);
+    if let Some(id) = &identity {
+        id.ensure().await;
+        tokio::spawn(id.clone().renew_loop());
+    }
+    let verifier = trust::Verifier::from_env(&kube).await?.map(Arc::new);
+    let api = api::PyoApi::with_trust(
+        &url,
+        &token,
+        identity.as_ref().map(|i| i.tls.clone()),
+        verifier,
+    )?;
     let agent = Agent {
         kube,
-        api: api::PyoApi::new(&url, &token)?,
+        api,
         cancels: Default::default(),
         deploying: Default::default(),
         routes: Default::default(),
@@ -404,7 +418,7 @@ impl Ordered {
 }
 
 async fn run_command(agent: Agent, envelope: CommandEnvelope) {
-    let CommandEnvelope { id, command } = envelope;
+    let CommandEnvelope { id, command, .. } = envelope;
     tracing::info!(%id, kind = command_kind(&command), "command");
     // The customer's policy first: refused commands do nothing.
     let refused = scope::refusal(

@@ -14,6 +14,10 @@ pub struct PyoApi {
     base: String,
     http: reqwest::Client,
     token: String,
+    /// With a client certificate (trust.rs): the same TLS for terminals.
+    tls: Option<std::sync::Arc<rustls::ClientConfig>>,
+    /// Signed commands only (trust.rs).
+    verifier: Option<std::sync::Arc<crate::trust::Verifier>>,
 }
 
 impl PyoApi {
@@ -42,6 +46,17 @@ impl PyoApi {
     }
 
     pub fn new(url: &str, token: &str) -> anyhow::Result<Self> {
+        Self::with_trust(url, token, None, None)
+    }
+
+    /// With Pyo Cloud's TLS (a pinned CA and a client certificate) and its
+    /// command signatures, when the install sets them (trust.rs).
+    pub fn with_trust(
+        url: &str,
+        token: &str,
+        tls: Option<rustls::ClientConfig>,
+        verifier: Option<std::sync::Arc<crate::trust::Verifier>>,
+    ) -> anyhow::Result<Self> {
         let mut headers = HeaderMap::new();
         let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
             .context("token has invalid characters")?;
@@ -53,14 +68,18 @@ impl PyoApi {
         );
         let instance = format!("{:x}{:x}", std::process::id(), pyo_proto::now_ms());
         headers.insert(AGENT_INSTANCE_HEADER, HeaderValue::from_str(&instance)?);
-        let http = reqwest::Client::builder()
+        let mut http = reqwest::Client::builder()
             .default_headers(headers)
-            .connect_timeout(Duration::from_secs(10))
-            .build()?;
+            .connect_timeout(Duration::from_secs(10));
+        if let Some(tls) = &tls {
+            http = http.use_preconfigured_tls(tls.clone());
+        }
         Ok(Self {
             base: format!("{}/api/agent/v1", url.trim_end_matches('/')),
-            http,
+            http: http.build()?,
             token: token.to_owned(),
+            tls: tls.map(std::sync::Arc::new),
+            verifier,
         })
     }
 
@@ -92,7 +111,20 @@ impl PyoApi {
             .timeout(Duration::from_secs(wait_secs + 15))
             .send()
             .await?;
-        let items: Vec<serde_json::Value> = Self::check(res).await?.json().await?;
+        let mut items: Vec<serde_json::Value> = Self::check(res).await?.json().await?;
+        if let Some(v) = &self.verifier {
+            let (ok, refused) = v.check(items).await;
+            items = ok;
+            for (id, why) in refused {
+                tracing::warn!(%id, %why, "refused a command");
+                let result = crate::failed(format!(
+                    "Refused: {why}. This cluster runs only commands Pyo's signer signed for it."
+                ));
+                if let Err(e) = self.command_result(&id, &result).await {
+                    tracing::warn!(%id, error = %e, "couldn't report a refused command");
+                }
+            }
+        }
         let (commands, unreadable) = read_commands(items);
         for (id, why) in unreadable {
             tracing::warn!(%id, error = %why, "got a command this agent can't read; is it out of date?");
@@ -134,9 +166,13 @@ impl PyoApi {
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", self.token))?,
         );
+        let connector = self
+            .tls
+            .clone()
+            .map(tokio_tungstenite::Connector::Rustls);
         let (ws, _) = tokio::time::timeout(
             Duration::from_secs(15),
-            tokio_tungstenite::connect_async(req),
+            tokio_tungstenite::connect_async_tls_with_config(req, None, false, connector),
         )
         .await
         .context("timed out")??;
