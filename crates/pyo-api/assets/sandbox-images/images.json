@@ -1,27 +1,27 @@
 {
   "contract": 1,
   "ubuntu": "24.04",
-  "date": "20261116",
-  "commit": "89639c4a0c6b24b3626824de45bf5968cd459d59",
+  "date": "20261118",
+  "commit": "99c10c2d273e2f6cf083ec3168ac688caaf71b6b",
   "images": {
     "base": {
       "repository": "ghcr.io/upsetdev/pyo-sandbox-images/base",
-      "digest": "sha256:8aec579b223e818cb6e44146658ea4164212b9ea3250acf025329dfcdbaec520",
-      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:8aec579b223e818cb6e44146658ea4164212b9ea3250acf025329dfcdbaec520",
+      "digest": "sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f",
+      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f",
       "tags": {
-        "24.04": "sha256:8aec579b223e818cb6e44146658ea4164212b9ea3250acf025329dfcdbaec520",
-        "24.04-20261116": "sha256:8aec579b223e818cb6e44146658ea4164212b9ea3250acf025329dfcdbaec520",
-        "89639c4a0c6b24b3626824de45bf5968cd459d59": "sha256:8aec579b223e818cb6e44146658ea4164212b9ea3250acf025329dfcdbaec520"
+        "24.04": "sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f",
+        "24.04-20261118": "sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f",
+        "99c10c2d273e2f6cf083ec3168ac688caaf71b6b": "sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f"
       }
     },
     "desktop": {
       "repository": "ghcr.io/upsetdev/pyo-sandbox-images/desktop",
-      "digest": "sha256:f86cd4701ae7f89978fa22ca9421776a90ad0312df431b95c5159c791dfb9335",
-      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:f86cd4701ae7f89978fa22ca9421776a90ad0312df431b95c5159c791dfb9335",
+      "digest": "sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df",
+      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df",
       "tags": {
-        "24.04": "sha256:f86cd4701ae7f89978fa22ca9421776a90ad0312df431b95c5159c791dfb9335",
-        "24.04-20261116": "sha256:f86cd4701ae7f89978fa22ca9421776a90ad0312df431b95c5159c791dfb9335",
-        "89639c4a0c6b24b3626824de45bf5968cd459d59": "sha256:f86cd4701ae7f89978fa22ca9421776a90ad0312df431b95c5159c791dfb9335"
+        "24.04": "sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df",
+        "24.04-20261118": "sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df",
+        "99c10c2d273e2f6cf083ec3168ac688caaf71b6b": "sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df"
       }
     }
   }
