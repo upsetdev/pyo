@@ -2412,6 +2412,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonc-parser"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ecded084f9b9a718d39668a42657c32253663d1f6afb3fbb9134f0305f73f48"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "jsonpath-rust"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3441,11 +3450,14 @@ dependencies = [
  "crossterm",
  "futures",
  "hex",
+ "jsonc-parser",
  "pyo-proto",
  "rand 0.10.3",
  "reqwest",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2 0.11.1",
  "tokio",
  "tokio-tungstenite",

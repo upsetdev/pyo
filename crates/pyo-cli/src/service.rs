@@ -1,5 +1,5 @@
 //! Commands on one service: which one comes from `--service`, else the
-//! nearest pyo.toml. Changes save the service's whole configuration the
+//! nearest pyo.jsonc. Changes save the service's whole configuration the
 //! way the dashboard does (`saveService`); secrets' values never come back
 //! from the API, and the API keeps them when they're sent back blank.
 
@@ -14,7 +14,7 @@ use crate::{
     ui,
 };
 
-/// The service a command acts on, with the pyo.toml that named it.
+/// The service a command acts on, with the pyo.jsonc that named it.
 pub struct Target {
     pub state: State,
     pub id: String,
@@ -28,7 +28,7 @@ impl Target {
 }
 
 pub async fn target(api: &Api, service: Option<&str>) -> Result<Target> {
-    let file = match config::find() {
+    let file = match config::find()? {
         Some(p) => Some((p.clone(), config::load(&p)?)),
         None => None,
     };
@@ -92,7 +92,16 @@ pub async fn link(api: &Api, service: Option<String>) -> Result<()> {
     };
     let service = state.service(&id)?;
     let label = state.path_of(service);
-    let path = config::write_service(config::find().as_deref(), &id, &label)?;
+    // The nearest pyo.jsonc, or one next to a pyo.toml found instead.
+    let path = match std::env::current_dir()
+        .ok()
+        .and_then(|d| config::find_from(&d))
+    {
+        Some(config::Found::File(p)) => Some(p),
+        Some(config::Found::Old(p)) => Some(p.with_file_name(config::FILE)),
+        None => None,
+    };
+    let path = config::write_service(path.as_deref(), &id)?;
     ui::ok(&format!(
         "Linked {} in {}",
         ui::bold(&label),
@@ -254,7 +263,7 @@ fn print_line(l: &Value) {
     println!("{at} {msg}");
 }
 
-/// Put pyo.toml's settings on the service; what it changed, in words.
+/// Put pyo.jsonc's settings on the service; what it changed, in words.
 pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
     let mut changes = vec![];
     let kind = service["source"]["type"].as_str().unwrap_or("").to_owned();
@@ -262,7 +271,7 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
     if let Some(image) = &f.image {
         if kind != "image" {
             bail!(
-                "pyo.toml: `image` is for services deployed from an image. This one is from {kind}."
+                "pyo.jsonc: image is for services deployed from an image. This one is from {kind}."
             );
         }
         let (name, reference) = split_image(image);
@@ -280,9 +289,13 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
         );
     }
     let b = &f.build;
-    if b.branch.is_some() || b.dockerfile.is_some() || b.context.is_some() || !b.args.is_empty() {
+    if b.branch.is_some()
+        || b.dockerfile_path.is_some()
+        || b.context.is_some()
+        || !b.args.is_empty()
+    {
         if kind != "git" {
-            bail!("pyo.toml: [build] is for services built from Git. This one is from {kind}.");
+            bail!("pyo.jsonc: build is for services built from Git. This one is from {kind}.");
         }
         if let Some(v) = &b.branch {
             set(
@@ -292,7 +305,7 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
                 format!("branch {v}"),
             );
         }
-        if let Some(v) = &b.dockerfile {
+        if let Some(v) = &b.dockerfile_path {
             set(
                 &mut changes,
                 &mut service["source"]["dockerfilePath"],
@@ -310,14 +323,12 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
         }
         for (key, v) in &b.args {
             let value = match v {
-                toml::Value::String(s) => s.clone(),
-                toml::Value::Integer(_) | toml::Value::Float(_) | toml::Value::Boolean(_) => {
-                    v.to_string()
-                }
-                _ => bail!("pyo.toml: build argument {key} must be text, a number or true/false."),
+                Value::String(s) => s.clone(),
+                Value::Number(_) | Value::Bool(_) => v.to_string(),
+                _ => bail!("pyo.jsonc: build argument {key} must be text, a number or true/false."),
             };
             if key.is_empty() || key.contains(['=', ' ']) {
-                bail!("pyo.toml: build argument {key:?} isn't a name.");
+                bail!("pyo.jsonc: build argument {key:?} isn't a name.");
             }
             let src = &mut service["source"];
             if !src["buildArgs"].is_array() {
@@ -344,11 +355,11 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
     let d = &f.deploy;
     if let Some(n) = d.replicas {
         if n < 0 {
-            bail!("pyo.toml: replicas can't be below 0.");
+            bail!("pyo.jsonc: replicas can't be below 0.");
         }
         if n > i64::from(i32::MAX) {
             bail!(
-                "pyo.toml: that's more replicas than Kubernetes can count. The most is 2147483647."
+                "pyo.jsonc: that's more replicas than Kubernetes can count. The most is 2147483647."
             );
         }
         set(
@@ -360,7 +371,7 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
     }
     if let Some(port) = d.port {
         if !(1..=65535).contains(&port) {
-            bail!("pyo.toml: port is 1 to 65535.");
+            bail!("pyo.jsonc: port is 1 to 65535.");
         }
         let ports = service["ports"]
             .as_array_mut()
@@ -382,7 +393,7 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
         let kind = match path.as_str() {
             "tcp" | "none" => path.as_str(),
             p if p.starts_with('/') => "http",
-            _ => bail!("pyo.toml: health is a path like \"/healthz\", or \"tcp\" or \"none\"."),
+            _ => bail!("pyo.jsonc: health is a path like \"/healthz\", or \"tcp\" or \"none\"."),
         };
         let port = d
             .port
@@ -402,9 +413,9 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
         });
         set(&mut changes, h, new, format!("health check {path}"));
     }
-    if let Some(serve) = &d.serve {
+    if let Some(serve) = &d.serve_as {
         if !matches!(serve.as_str(), "static" | "service") {
-            bail!("pyo.toml: serve is \"static\" (a static site's files) or \"service\".");
+            bail!("pyo.jsonc: serveAs is \"static\" (a static site's files) or \"service\".");
         }
         set(
             &mut changes,
@@ -454,11 +465,9 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
 
     for (key, v) in &f.env {
         let value = match v {
-            toml::Value::String(s) => s.clone(),
-            toml::Value::Integer(_) | toml::Value::Float(_) | toml::Value::Boolean(_) => {
-                v.to_string()
-            }
-            _ => bail!("pyo.toml: env {key} must be text, a number or true/false."),
+            Value::String(s) => s.clone(),
+            Value::Number(_) | Value::Bool(_) => v.to_string(),
+            _ => bail!("pyo.jsonc: env {key} must be text, a number or true/false."),
         };
         let env = service["env"]
             .as_array_mut()
@@ -466,7 +475,7 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
         match env.iter_mut().find(|e| e["key"] == json!(key)) {
             Some(e) if e["secret"] == json!(true) => {
                 eprintln!(
-                    "{} {key} is a secret in Pyo, so pyo.toml doesn't change it.",
+                    "{} {key} is a secret in Pyo, so pyo.jsonc doesn't change it.",
                     ui::yellow("!")
                 );
             }
@@ -1016,6 +1025,10 @@ mod tests {
         })
     }
 
+    fn file(text: &str) -> ServiceFile {
+        config::parse(text).unwrap()
+    }
+
     #[test]
     fn stages_in_words() {
         assert_eq!(stage_label("waiting_ready"), "Running health check");
@@ -1026,13 +1039,16 @@ mod tests {
     #[test]
     fn applies_only_whats_set() {
         let mut a = service();
-        let f: ServiceFile = toml::from_str("[deploy]\nreplicas = 1\n").unwrap();
+        let f = file(r#"{ "deploy": { "replicas": 1 } }"#);
         assert!(apply(&mut a, &f).unwrap().is_empty());
 
-        let f: ServiceFile = toml::from_str(
-            "[deploy]\nreplicas = 3\nport = 8080\nhealth = \"/healthz\"\n[resources]\nmemory = \"128Mi\"\n[env]\nTOKEN = \"x\"\nLOG = \"info\"\n",
-        )
-        .unwrap();
+        let f = file(
+            r#"{
+              "deploy": { "replicas": 3, "port": 8080, "health": "/healthz" },
+              "resources": { "memory": "128Mi" },
+              "env": { "TOKEN": "x", "LOG": "info" },
+            }"#,
+        );
         let c = apply(&mut a, &f).unwrap();
         assert_eq!(a["replicas"], json!(3));
         assert_eq!(a["ports"][0]["containerPort"], json!(8080));
@@ -1049,24 +1065,24 @@ mod tests {
     fn health_can_be_tcp_or_none() {
         let mut a = service();
         a["healthCheck"]["auto"] = json!("static");
-        let f: ServiceFile = toml::from_str("[deploy]\nhealth = \"tcp\"\n").unwrap();
+        let f = file(r#"{ "deploy": { "health": "tcp" } }"#);
         apply(&mut a, &f).unwrap();
         assert_eq!(a["healthCheck"]["type"], json!("tcp"));
         assert_eq!(a["healthCheck"]["port"], json!(3000));
         assert!(a["healthCheck"].get("auto").is_none());
-        let f: ServiceFile = toml::from_str("[deploy]\nhealth = \"none\"\n").unwrap();
+        let f = file(r#"{ "deploy": { "health": "none" } }"#);
         apply(&mut a, &f).unwrap();
         assert_eq!(a["healthCheck"]["type"], json!("none"));
-        let f: ServiceFile = toml::from_str("[deploy]\nhealth = \"healthz\"\n").unwrap();
+        let f = file(r#"{ "deploy": { "health": "healthz" } }"#);
         assert!(apply(&mut a, &f).is_err());
     }
 
     #[test]
     fn sets_build_arguments() {
         let mut a = service();
-        let f: ServiceFile =
-            toml::from_str("[build.args]\nRAILPACK_SPA_OUTPUT_DIR = \"dist\"\nNODE_VERSION = 22\n")
-                .unwrap();
+        let f = file(
+            r#"{ "build": { "args": { "RAILPACK_SPA_OUTPUT_DIR": "dist", "NODE_VERSION": 22 } } }"#,
+        );
         let c = apply(&mut a, &f).unwrap();
         assert_eq!(c.len(), 2);
         assert_eq!(
@@ -1093,23 +1109,23 @@ mod tests {
     #[test]
     fn replicas_have_no_cap_but_kubernetes_limit() {
         let mut a = service();
-        let f: ServiceFile = toml::from_str("[deploy]\nreplicas = 500\n").unwrap();
+        let f = file(r#"{ "deploy": { "replicas": 500 } }"#);
         apply(&mut a, &f).unwrap();
         assert_eq!(a["replicas"], json!(500));
-        let f: ServiceFile = toml::from_str("[deploy]\nreplicas = -1\n").unwrap();
+        let f = file(r#"{ "deploy": { "replicas": -1 } }"#);
         assert!(apply(&mut a, &f).is_err());
-        let f: ServiceFile = toml::from_str("[deploy]\nreplicas = 3000000000\n").unwrap();
+        let f = file(r#"{ "deploy": { "replicas": 3000000000 } }"#);
         assert!(apply(&mut a, &f).is_err());
     }
 
     #[test]
     fn a_static_build_is_served_as_files_or_runs_as_a_service() {
         let mut a = service();
-        let f: ServiceFile = toml::from_str("[deploy]\nserve = \"service\"\n").unwrap();
+        let f = file(r#"{ "deploy": { "serveAs": "service" } }"#);
         assert_eq!(apply(&mut a, &f).unwrap(), ["serve as service"]);
         assert_eq!(a["serveAs"], json!("service"));
         assert!(apply(&mut a, &f).unwrap().is_empty());
-        let f: ServiceFile = toml::from_str("[deploy]\nserve = \"files\"\n").unwrap();
+        let f = file(r#"{ "deploy": { "serveAs": "files" } }"#);
         assert!(apply(&mut a, &f).is_err());
     }
 

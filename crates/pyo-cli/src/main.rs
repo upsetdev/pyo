@@ -1,6 +1,6 @@
 //! `pyo`, the command line for Pyo: link a folder to a service, then
 //! deploy, follow logs, manage its environment and roll back from a
-//! terminal or CI. Settings live in pyo.toml (see config.rs).
+//! terminal or CI. Settings live in pyo.jsonc (see config.rs).
 
 mod api;
 mod backup;
@@ -51,7 +51,7 @@ struct Cli {
 
 #[derive(Args)]
 struct Which {
-    /// The service: a name ("api", "shop/api") or id. Default: pyo.toml's.
+    /// The service: a name ("api", "shop/api") or id. Default: pyo.jsonc's.
     // Global: taken before or after a subcommand (`pyo env -s api set`,
     // `pyo env set -s api`).
     #[arg(long, short, global = true)]
@@ -86,12 +86,12 @@ enum Command {
         #[arg(value_parser = ["on", "off"])]
         state: Option<String>,
     },
-    /// Link this folder to a service (writes pyo.toml).
+    /// Link this folder to a service (writes pyo.jsonc).
     Link {
         /// "api", "shop/api" or "team/shop/api". Without it, pick from a list.
         service: Option<String>,
     },
-    /// Apply pyo.toml and deploy, then follow it to the end. With -f, import
+    /// Apply pyo.jsonc and deploy, then follow it to the end. With -f, import
     /// a Docker Compose file instead: see what it makes, then deploy it.
     Deploy {
         #[command(flatten)]
@@ -110,7 +110,7 @@ enum Command {
         #[arg(long)]
         cluster: Option<String>,
         /// Don't ask: import the Compose file, or go ahead with a very
-        /// large replica change from pyo.toml.
+        /// large replica change from pyo.jsonc.
         #[arg(long, short = 'y')]
         yes: bool,
     },
