@@ -216,6 +216,13 @@ Some pages are generated from the code, so don't edit them by hand:
 - **MCP tools and CLI commands:** these come from `crates/pyo-api/src/mcp.rs`
   and the CLI's help. Run `cargo build -p pyo-cli` here, then
   `bun run generate` in `pyo-docs`.
+- **pyo.jsonc schema:** the JSON Schema editors use for `pyo.jsonc` comes
+  from the config types in `crates/pyo-cli/src/config.rs`, and their doc
+  comments are its descriptions. Regenerate it with
+  `PYO_WRITE_SCHEMA=1 cargo test -p pyo-cli schema`, which writes it to
+  `../pyo-docs/schema/pyo.json`. pyo.dev serves it at
+  `https://pyo.dev/schema/pyo.json`. Like the API reference, `cargo test`
+  fails if that copy is out of date.
 
 See [RELEASING.md](RELEASING.md#api-reference) for details.
 
