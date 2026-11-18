@@ -4,12 +4,22 @@ import {
   TrashIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { siHetzner } from "simple-icons";
+import { BrandMark } from "~/components/pyo/common";
+import {
+  Busy,
+  ConfirmNote,
+  DialogSection,
+  ExternalLink,
+  IntegrationDialog,
+  Summary,
+} from "~/components/pyo/IntegrationDialog";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
 import { Badge, type Tone } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
-import { Field, Input, Select, Textarea } from "~/components/ui/Field";
+import { Field, SecretInput, Select, Textarea } from "~/components/ui/Field";
 import { Callout } from "~/components/ui/Panel";
 import { StatusNote } from "~/components/ui/StatusNote";
 import { TailnetLockSign } from "~/components/pyo/TailnetLock";
@@ -100,34 +110,19 @@ export function DeleteCloudServerDialog({
           toast({ title: `Deleting ${server.name}` });
       }}
       title={server ? `Delete ${server.name} at Hetzner?` : ""}
-      description={
-        server
-          ? server.sandboxServerId
-            ? `Its sandboxes end. Then it leaves your tailnet, and Hetzner deletes it. ${money(server.currency, server.monthly)} a month stops.`
-            : `Its services move off it first. Then it leaves the cluster and your tailnet, and Hetzner deletes it. ${money(server.currency, server.monthly)} a month stops.`
-          : ""
-      }
+      description={server ? deleteText(server) : ""}
       confirmLabel="Delete server"
     />
   );
 }
 
-/**
- * The team's Hetzner project token: paste, check and save. In Integrations,
- * and inline where a server is bought before Hetzner is connected.
- */
-export function HetznerConnectForm({
-  onSaved,
-  onCancel,
-}: {
-  onSaved?: () => void;
-  onCancel?: () => void;
-}) {
-  const s = usePyo();
+/** Paste, check and save the team's Hetzner project token. */
+function useHetznerToken(onSaved?: () => void) {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const save = async () => {
+    if (busy || !token.trim()) return;
     setBusy(true);
     setError("");
     const r = await api.saveHetzner(token);
@@ -137,34 +132,34 @@ export function HetznerConnectForm({
     toast({ title: "Hetzner connected" });
     onSaved?.();
   };
+  return { token, setToken, busy, error, save };
+}
+
+/**
+ * The team's Hetzner project token, inline where a server is bought before
+ * Hetzner is connected.
+ */
+export function HetznerConnectForm({
+  onSaved,
+  onCancel,
+}: {
+  onSaved?: () => void;
+  onCancel?: () => void;
+}) {
+  const s = usePyo();
+  const { token, setToken, busy, error, save } = useHetznerToken(onSaved);
   return (
     <form
-      className="space-y-2"
+      className="space-y-3"
       onSubmit={(e) => {
         e.preventDefault();
         void save();
       }}
     >
-      <p className="text-[12px] text-muted-foreground">
-        A project API token with Read & Write.{" "}
-        <a href={DOCS} target="_blank" rel="noreferrer" className="font-medium text-primary hover:text-primary/80">
-          How to make one
-        </a>
-      </p>
-      <Input
-        type="password"
-        value={token}
-        onChange={(e) => setToken(e.target.value)}
-        placeholder="API token"
-        aria-label="API token"
-        autoComplete="off"
-        className="h-8"
-        disabled={!s.tailscale}
-      />
-      {error ? <p className="text-[12px] text-destructive">{error}</p> : null}
+      <TokenField token={token} setToken={setToken} error={error} disabled={!s.tailscale} />
       <div className="flex gap-2">
         <Button type="submit" size="xs" disabled={busy || !token.trim() || !s.tailscale}>
-          {busy ? "Checking…" : "Save"}
+          {busy ? <Busy>Checking…</Busy> : "Save"}
         </Button>
         {onCancel ? (
           <Button type="button" size="xs" variant="ghost" onClick={onCancel}>
@@ -176,112 +171,224 @@ export function HetznerConnectForm({
   );
 }
 
+function TokenField({
+  token,
+  setToken,
+  error,
+  disabled,
+}: {
+  token: string;
+  setToken: (t: string) => void;
+  error: string;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      <Field label="API token" hint="A project API token with Read & Write." error={error || undefined}>
+        {(p) => (
+          <SecretInput
+            {...p}
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            onPasteText={setToken}
+            autoComplete="off"
+            disabled={disabled}
+          />
+        )}
+      </Field>
+      <p className="text-[12px]">
+        <ExternalLink href={DOCS}>How to make one</ExternalLink>
+      </p>
+    </div>
+  );
+}
+
+/** One line about a server Pyo made. */
+const serverMeta = (s: PyoState, c: CloudServer) =>
+  `${c.sandboxServerId ? "Sandbox server" : (s.clusters.find((x) => x.id === c.clusterId)?.name ?? "Cluster removed")} · ${c.serverType} · ${c.location} · ${money(c.currency, c.monthly)}/mo`;
+
+/** What deleting a server Pyo made does, with the cost that stops. */
+const deleteText = (server: CloudServer) =>
+  server.sandboxServerId
+    ? `Its sandboxes end. Then it leaves your tailnet, and Hetzner deletes it. ${money(server.currency, server.monthly)} a month stops.`
+    : `Its services move off it first. Then it leaves the cluster and your tailnet, and Hetzner deletes it. ${money(server.currency, server.monthly)} a month stops.`;
+
+const ICON = <BrandMark icon={siHetzner} size={15} tone="brand" />;
+
 /** Integrations › Hetzner: the team's project token, and the servers Pyo made. */
-export function HetznerSettings() {
+export function HetznerDialog({ onClose }: { onClose: () => void }) {
   const s = usePyo();
   const admin = useTeamAdmin();
   const conn = hetznerOf(s);
   const [replacing, setReplacing] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const form = useHetznerToken(() => setReplacing(false));
+  const [testing, setTesting] = useState(false);
   const [seen, setSeen] = useState("");
-  const [removing, setRemoving] = useState(false);
-  const [deleting, setDeleting] = useState<CloudServer | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const servers = s.cloudServers.filter((c) => c.teamId === s.currentTeamId);
   const test = async () => {
-    setBusy(true);
+    setTesting(true);
     const r = await api.testHetzner();
-    setBusy(false);
+    setTesting(false);
     if ("error" in r) toast({ tone: "error", title: r.error });
     else setSeen(r.data.locations.map((l) => l.city).join(", "));
   };
-  return (
-    <>
-      <ul className="list-rows">
-        <li className="space-y-3 px-4 py-3">
-          {!s.tailscale ? (
-            <Callout tone="warning">
-              Servers join over your tailnet. Set up{" "}
-              <a href="#tailscale" className="font-medium text-primary hover:text-primary/80">
-                Tailscale
-              </a>{" "}
-              first.
-            </Callout>
-          ) : null}
-          {!admin ? (
-            <div className="flex items-center gap-3 text-[12.5px] text-muted-foreground">
-              <span className="flex-1">
-                {conn ? `Token ${conn.hint}` : "A team admin can connect it."}
-              </span>
-              {conn ? <Badge tone="success">Connected</Badge> : <Badge>Not connected</Badge>}
-            </div>
-          ) : !conn || replacing ? (
-            <HetznerConnectForm
-              onSaved={() => setReplacing(false)}
-              onCancel={conn ? () => setReplacing(false) : undefined}
-            />
-          ) : (
-            <>
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <p className="font-mono text-[12.5px]">Token {conn.hint}</p>
-                  {seen ? (
-                    <p className="text-[12px] text-muted-foreground">{seen}</p>
-                  ) : null}
-                </div>
-                <Button size="xs" variant="secondary" disabled={busy} onClick={() => void test()}>
-                  {busy ? "Testing…" : "Test"}
-                </Button>
-                <Button size="xs" variant="secondary" onClick={() => setReplacing(true)}>
-                  Replace
-                </Button>
-                <Button size="xs" variant="ghost" className="text-destructive" onClick={() => setRemoving(true)}>
-                  Remove
-                </Button>
-              </div>
-            </>
-          )}
-        </li>
-        {servers.map((c) => {
-          const cluster = s.clusters.find((x) => x.id === c.clusterId);
-          return (
-            <li key={c.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+  const needsTailscale = !s.tailscale ? (
+    <Callout tone="warning">
+      Servers join over your tailnet. Set up{" "}
+      <a href="#tailscale" className="font-medium text-primary hover:text-primary/80">
+        Tailscale
+      </a>{" "}
+      first.
+    </Callout>
+  ) : null;
+  const serverList = servers.length ? (
+    <DialogSection title="Servers Pyo made">
+      <ul className="list-rows rounded-lg border border-border">
+        {servers.map((c) => (
+          <li key={c.id} className="space-y-2 px-3 py-2.5">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
               <div className="min-w-0 flex-1">
-                <p className="text-[13px] font-medium">{c.name}</p>
-                <p className="text-[12px] text-muted-foreground">
-                  {c.sandboxServerId ? "Sandbox server" : (cluster?.name ?? "Cluster removed")} ·{" "}
-                  {c.serverType} · {c.location} · {money(c.currency, c.monthly)}/mo
-                </p>
-                {c.error ? <p className="text-[12px] text-destructive">{c.error}</p> : null}
+                <p className="truncate text-[12.5px] font-medium">{c.name}</p>
+                <p className="truncate text-[11.5px] text-muted-foreground">{serverMeta(s, c)}</p>
+                {c.error ? <p className="text-[11.5px] text-destructive">{c.error}</p> : null}
               </div>
               <CloudStateBadge state={c.state} />
-              {admin && c.state !== "removing" ? (
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  className="text-destructive"
-                  onClick={() => setDeleting(c)}
-                >
+              {admin && c.state !== "removing" && deleting !== c.id ? (
+                <Button size="xs" variant="ghost" className="text-destructive! hover:bg-destructive/10" onClick={() => setDeleting(c.id)}>
                   Delete
                 </Button>
               ) : null}
-            </li>
-          );
-        })}
+            </div>
+            {deleting === c.id ? (
+              <ConfirmNote
+                title={`Delete ${c.name} at Hetzner?`}
+                confirmLabel="Delete server"
+                onCancel={() => setDeleting(null)}
+                onConfirm={async () => {
+                  setDeleting(null);
+                  if (await api.deleteCloudServer(c.id)) toast({ title: `Deleting ${c.name}` });
+                }}
+              >
+                {deleteText(c)}
+              </ConfirmNote>
+            ) : null}
+          </li>
+        ))}
       </ul>
-      <ConfirmDialog
-        open={removing}
-        onClose={() => setRemoving(false)}
-        onConfirm={() => {
-          setRemoving(false);
-          void api.removeHetzner();
-        }}
-        title="Remove Hetzner?"
-        description="Servers Pyo made there keep running."
-        confirmLabel="Remove"
-      />
-      <DeleteCloudServerDialog server={deleting} onClose={() => setDeleting(null)} />
-    </>
+    </DialogSection>
+  ) : null;
+  const shell = (p: { body: ReactNode; footer?: ReactNode; onSubmit?: () => void }) => (
+    <IntegrationDialog
+      icon={ICON}
+      name="Hetzner"
+      description="For this team. Pyo makes servers in your Hetzner project."
+      docs="hetzner"
+      onClose={onClose}
+      onSubmit={p.onSubmit}
+      footer={p.footer}
+    >
+      {p.body}
+    </IntegrationDialog>
   );
+
+  if (!admin)
+    return shell({
+      body: (
+        <div className="space-y-4">
+          {needsTailscale}
+          <Summary
+            items={
+              conn
+                ? [
+                    ["Status", <Badge tone="success">Connected</Badge>],
+                    ["Token", <span className="font-mono">{conn.hint}</span>],
+                  ]
+                : [["Status", <Badge>Not connected</Badge>]]
+            }
+          />
+          {conn ? null : <p className="text-[12.5px] text-muted-foreground">A team admin can connect it.</p>}
+          {serverList}
+        </div>
+      ),
+      footer: (
+        <Button size="sm" onClick={onClose}>
+          Done
+        </Button>
+      ),
+    });
+
+  if (!conn || replacing)
+    return shell({
+      onSubmit: () => void form.save(),
+      body: (
+        <div className="space-y-4">
+          {needsTailscale}
+          <TokenField token={form.token} setToken={form.setToken} error={form.error} disabled={!s.tailscale} />
+          {conn ? null : serverList}
+        </div>
+      ),
+      footer: (
+        <>
+          <Button variant="ghost" size="sm" onClick={conn ? () => setReplacing(false) : onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" size="sm" disabled={form.busy || !form.token.trim() || !s.tailscale}>
+            {form.busy ? <Busy>Checking…</Busy> : conn ? "Replace" : "Connect"}
+          </Button>
+        </>
+      ),
+    });
+
+  return shell({
+    body: (
+      <div className="space-y-4">
+        {needsTailscale}
+        <Summary
+          items={[
+            [
+              "Token",
+              <>
+                <span className="font-mono">{conn.hint}</span>
+                <Button size="xs" variant="ghost" className="-my-1 -mr-2" onClick={() => setReplacing(true)}>
+                  Replace
+                </Button>
+              </>,
+            ],
+            ...(seen ? [["Locations", seen] as [string, string]] : []),
+          ]}
+        />
+        {serverList}
+        {confirming ? (
+          <ConfirmNote
+            title="Disconnect Hetzner?"
+            confirmLabel="Disconnect"
+            onCancel={() => setConfirming(false)}
+            onConfirm={() => {
+              setConfirming(false);
+              void api.removeHetzner();
+            }}
+          >
+            Servers Pyo made there keep running.
+          </ConfirmNote>
+        ) : null}
+      </div>
+    ),
+    footer: confirming ? null : (
+      <>
+        <Button variant="ghost" size="sm" className="mr-auto text-destructive! hover:bg-destructive/10" onClick={() => setConfirming(true)}>
+          Disconnect
+        </Button>
+        <Button variant="secondary" size="sm" disabled={testing} onClick={() => void test()}>
+          {testing ? <Busy>Testing…</Busy> : "Test"}
+        </Button>
+        <Button size="sm" onClick={onClose}>
+          Done
+        </Button>
+      </>
+    ),
+  });
 }
 
 /** What a new server at Hetzner is: location, type and an SSH key. */

@@ -1,11 +1,17 @@
-import { ArrowsClockwiseIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { BrandMark, CLOUDFLARE_LOGO } from "~/components/pyo/common";
 import { Badge } from "~/components/ui/Badge";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
-import { ConfirmDialog } from "~/components/ui/Dialog";
-import { SecretInput, Switch } from "~/components/ui/Field";
+import {
+  Busy,
+  ConfirmNote,
+  DialogSection,
+  ExternalLink,
+  IntegrationDialog,
+  Summary,
+} from "~/components/pyo/IntegrationDialog";
+import { Field, SecretInput, Switch } from "~/components/ui/Field";
 import { timeAgo } from "~/lib/pyo/format";
 import { isFreeDomain } from "~/lib/pyo/freeDomain";
 import {
@@ -24,8 +30,11 @@ import type { Application, Domain } from "~/lib/pyo/types";
 
 const isAdmin = (role?: string) => role === "owner" || role === "admin";
 
-/** Integrations › Cloudflare: connect, test, replace and remove the token. */
-export function CloudflareSettings() {
+const ICON = <BrandMark icon={CLOUDFLARE_LOGO} size={15} />;
+const TOKENS = "https://dash.cloudflare.com/profile/api-tokens";
+
+/** Integrations › Cloudflare: connect, test, replace and disconnect the token. */
+export function CloudflareDialog({ onClose }: { onClose: () => void }) {
   const s = usePyo();
   const account = cloudflareIn(s);
   const admin = isAdmin(roleIn(s));
@@ -34,12 +43,12 @@ export function CloudflareSettings() {
   const [busy, setBusy] = useState<"" | "save" | "test">("");
   const [error, setError] = useState("");
   const [problems, setProblems] = useState<string[]>([]);
-  const [removing, setRemoving] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const editable = account?.zones.filter((z) => z.canEdit) ?? [];
   const lacking = account?.zones.filter((z) => !z.canEdit) ?? [];
 
   const save = async () => {
-    if (!token.trim()) return;
+    if (!token.trim() || busy) return;
     setBusy("save");
     setError("");
     const r = await api.connectCloudflare(token.trim());
@@ -62,140 +71,166 @@ export function CloudflareSettings() {
     if (r.ok) toast({ title: "Cloudflare token works" });
   };
 
-  const form = (
-    <form
-      className="flex w-full gap-2 sm:w-auto"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void save();
-      }}
-    >
-      <div className="w-full sm:w-64">
-        <SecretInput
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="API token"
-          aria-label="Cloudflare API token"
-          className="h-8"
-        />
+  const zones = account ? (
+    <DialogSection title={editable.length === 1 ? "1 zone" : `${editable.length} zones`}>
+      <div className="flex flex-wrap gap-1.5">
+        {editable.map((z) => (
+          <Badge key={z.id}>
+            <span className="font-mono">{z.name}</span>
+          </Badge>
+        ))}
+        {lacking.map((z) => (
+          <Badge key={z.id} tone="warning">
+            <span className="font-mono">{z.name}</span>
+            {z.missing ? ` · needs ${z.missing}` : ""}
+          </Badge>
+        ))}
       </div>
-      <Button type="submit" size="xs" disabled={!!busy || !token.trim()}>
-        {busy === "save" ? "Checking…" : account ? "Replace" : "Connect"}
-      </Button>
-      {replacing ? (
-        <Button
-          variant="ghost"
-          size="xs"
-          onClick={() => {
-            setReplacing(false);
-            setToken("");
-            setError("");
-          }}
-        >
-          Cancel
-        </Button>
+      {admin && problems.length ? (
+        <ul className="space-y-0.5 text-[12.5px] text-destructive" role="alert">
+          {problems.map((p) => (
+            <li key={p}>{p}</li>
+          ))}
+        </ul>
       ) : null}
-    </form>
+    </DialogSection>
+  ) : null;
+
+  const shell = (p: { body: ReactNode; footer?: ReactNode; onSubmit?: () => void }) => (
+    <IntegrationDialog
+      icon={ICON}
+      name="Cloudflare"
+      description="Creates DNS records for domains in your zones."
+      docs="cloudflare"
+      onClose={onClose}
+      onSubmit={p.onSubmit}
+      footer={p.footer}
+    >
+      {p.body}
+    </IntegrationDialog>
   );
 
-  return (
-    <>
-      <ul className="list-rows">
-        <li className="flex flex-wrap items-center gap-3 px-4 py-3">
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted">
-            <BrandMark icon={CLOUDFLARE_LOGO} size={15} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="text-[13px] font-medium">Cloudflare API token</p>
-            <p className="text-[12px] text-muted-foreground">
-              {account
-                ? `${account.hint ? `Saved · ${account.hint} · ` : ""}Tested ${timeAgo(account.testedAt)}`
-                : admin
-                  ? "Zone:Read and DNS:Edit, on the zones Pyo may use."
-                  : "An owner or admin can connect Cloudflare."}
-            </p>
-          </div>
-          {!admin ? (
-            account ? (
-              <Badge tone="success">Connected</Badge>
-            ) : (
-              <Badge>Not connected</Badge>
-            )
-          ) : !account || replacing ? (
-            form
-          ) : (
-            <span className="flex items-center gap-1">
-              <Button
-                variant="secondary"
-                size="xs"
-                disabled={!!busy}
-                onClick={() => void test()}
-              >
-                <ArrowsClockwiseIcon size={12} />
-                {busy === "test" ? "Testing…" : "Test"}
-              </Button>
-              <Button
-                variant="ghost"
-                size="xs"
-                onClick={() => setReplacing(true)}
-              >
-                Replace
-              </Button>
-              <Button
-                variant="ghost"
-                size="xs"
-                className="text-destructive"
-                onClick={() => setRemoving(true)}
-              >
-                Remove
-              </Button>
-            </span>
-          )}
-          {error ? (
-            <p className="w-full text-[12px] text-destructive">{error}</p>
-          ) : null}
-        </li>
-        {account ? (
-          <li className="px-4 py-3 text-[12px]">
-            <p className="mb-1.5 text-muted-foreground">
-              {editable.length === 1 ? "1 zone" : `${editable.length} zones`}
-            </p>
-            <div className="flex flex-wrap gap-1.5">
-              {editable.map((z) => (
-                <Badge key={z.id}>
-                  <span className="font-mono">{z.name}</span>
-                </Badge>
-              ))}
-              {lacking.map((z) => (
-                <Badge key={z.id} tone="warning">
-                  <span className="font-mono">{z.name}</span>
-                  {z.missing ? ` · needs ${z.missing}` : ""}
-                </Badge>
-              ))}
-            </div>
-            {admin && problems.length ? (
-              <ul className="mt-2 space-y-0.5 text-destructive">
-                {problems.map((p) => (
-                  <li key={p}>{p}</li>
-                ))}
-              </ul>
-            ) : null}
-          </li>
+  if (!admin)
+    return shell({
+      body: (
+        <div className="space-y-4">
+          <Summary
+            items={
+              account
+                ? [
+                    ["Status", <Badge tone="success">Connected</Badge>],
+                    ["Tested", timeAgo(account.testedAt)],
+                  ]
+                : [["Status", <Badge>Not connected</Badge>]]
+            }
+          />
+          {account ? zones : <p className="text-[12.5px] text-muted-foreground">An owner or admin can connect Cloudflare.</p>}
+        </div>
+      ),
+      footer: (
+        <Button size="sm" onClick={onClose}>
+          Done
+        </Button>
+      ),
+    });
+
+  if (!account || replacing)
+    return shell({
+      onSubmit: () => void save(),
+      body: (
+        <div className="space-y-2">
+          <Field
+            label="API token"
+            hint="Zone:Read and DNS:Edit, on the zones Pyo may use."
+            error={error || undefined}
+          >
+            {(p) => (
+              <SecretInput
+                {...p}
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                onPasteText={setToken}
+                autoComplete="off"
+              />
+            )}
+          </Field>
+          <p className="text-[12px]">
+            <ExternalLink href={TOKENS}>Create a token in Cloudflare</ExternalLink>
+          </p>
+        </div>
+      ),
+      footer: (
+        <>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={
+              account
+                ? () => {
+                    setReplacing(false);
+                    setToken("");
+                    setError("");
+                  }
+                : onClose
+            }
+          >
+            Cancel
+          </Button>
+          <Button type="submit" size="sm" disabled={!!busy || !token.trim()}>
+            {busy === "save" ? <Busy>Checking…</Busy> : account ? "Replace" : "Connect"}
+          </Button>
+        </>
+      ),
+    });
+
+  return shell({
+    body: (
+      <div className="space-y-4">
+        <Summary
+          items={[
+            [
+              "Token",
+              <>
+                <span className="font-mono">{account.hint ?? "Saved"}</span>
+                <Button size="xs" variant="ghost" className="-my-1 -mr-2" onClick={() => setReplacing(true)}>
+                  Replace
+                </Button>
+              </>,
+            ],
+            ["Tested", timeAgo(account.testedAt)],
+          ]}
+        />
+        {zones}
+        {confirming ? (
+          <ConfirmNote
+            title="Disconnect Cloudflare?"
+            confirmLabel="Disconnect"
+            onCancel={() => setConfirming(false)}
+            onConfirm={() => {
+              setConfirming(false);
+              void api.removeCloudflare();
+              toast({ title: "Cloudflare token removed" });
+            }}
+          >
+            Records Pyo made stay in Cloudflare.
+          </ConfirmNote>
         ) : null}
-      </ul>
-      <ConfirmDialog
-        open={removing}
-        onClose={() => setRemoving(false)}
-        title="Remove the Cloudflare token?"
-        description="Records Pyo made stay in Cloudflare."
-        confirmLabel="Remove"
-        onConfirm={() => {
-          void api.removeCloudflare();
-          toast({ title: "Cloudflare token removed" });
-        }}
-      />
-    </>
-  );
+      </div>
+    ),
+    footer: confirming ? null : (
+      <>
+        <Button variant="ghost" size="sm" className="mr-auto text-destructive! hover:bg-destructive/10" onClick={() => setConfirming(true)}>
+          Disconnect
+        </Button>
+        <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => void test()}>
+          {busy === "test" ? <Busy>Testing…</Busy> : "Test"}
+        </Button>
+        <Button size="sm" onClick={onClose}>
+          Done
+        </Button>
+      </>
+    ),
+  });
 }
 
 /** What to do about a new domain's DNS record in Cloudflare. */
@@ -359,7 +394,7 @@ export function DnsRecordLine({ app, d }: { app: Application; d: Domain }) {
         : r.proxy
           ? "· Proxied once the certificate is issued"
           : null}
-      {r.error ? <span className="text-destructive">· {r.error}</span> : null}
+      {r.error ? <span className="text-destructive! hover:bg-destructive/10">· {r.error}</span> : null}
       {(r.proxied || r.proxy) && !app.behindCdn ? (
         <AppLink
           href={servicePath(app.id, "firewall", s)}

@@ -1,51 +1,34 @@
-import { CaretRightIcon, DotsThreeVerticalIcon } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import { Dot, type Tone } from "~/components/ui/Badge";
-import { Button } from "~/components/ui/Button";
-import { Menu, type MenuItem } from "~/components/ui/Menu";
-import { site } from "~/config/site";
+import { Badge, Dot, type Tone } from "~/components/ui/Badge";
+import { LogoTile } from "~/components/pyo/IntegrationDialog";
 
-// One integration on Integrations: a header with its icon, name and
-// category, a body that says what it does, and a footer with how it stands
-// (connected) or its setup guide (not connected).
+// One integration on Integrations, the same size as the rest: its logo,
+// name and what it's for, how it stands, and one action (Set up or Manage).
 
 export type IntegrationCardProps = {
   id: string;
   name: string;
-  category: string;
   icon: ReactNode;
+  /** What it's for, in one short line. */
   description: string;
-  connected: boolean;
-  /** One real figure, connected only. */
-  stat?: { label: string; value: ReactNode } | null;
-  /** What it enables, not connected only. */
-  /** How it stands, connected only. */
-  status?: { tone: Tone; label: string } | null;
-  /** The docs page (pyo.dev/docs/<page>). */
-  docs?: string;
-  /** Not connected: the Connect button (or why there isn't one). */
-  action?: ReactNode;
-  /** Connected: what can be done with it. */
-  menu?: MenuItem[];
+  /** Connected, Not set up, Needs attention, or a step under way. */
+  status: { tone: Tone; label: string };
+  /** One fact beside the action: the tailnet, a count, or what needs a look. */
+  detail?: ReactNode;
+  /** Set up or Manage (or why there's no button). */
+  action: ReactNode;
   /** Just linked to: a ring for a moment. */
   highlight?: boolean;
 };
 
-/** A docs link as a plain anchor. */
-export const docsUrl = (page: string) => `${site.docsUrl}/${page}`;
-
 export function IntegrationCard({
   id,
   name,
-  category,
   icon,
   description,
-  connected,
-  stat,
   status,
-  docs,
+  detail,
   action,
-  menu,
   highlight,
 }: IntegrationCardProps) {
   return (
@@ -54,88 +37,27 @@ export function IntegrationCard({
       aria-labelledby={`${id}-name`}
       className={`flex min-w-0 scroll-mt-4 flex-col rounded-2xl border border-frame-border bg-muted p-[5px] shadow-card transition-shadow duration-500 ${highlight ? "ring-2 ring-ring ring-offset-2 ring-offset-canvas" : ""}`}
     >
-      <header className="flex items-center gap-3 px-2 pb-2.5 pt-1.5">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-frame-border bg-card text-foreground">
-          {icon}
-        </span>
+      <div className="flex flex-1 items-start gap-3 rounded-xl border border-frame-border bg-card px-3 py-3">
+        <LogoTile icon={icon} />
         <div className="min-w-0 flex-1">
-          <h2
-            id={`${id}-name`}
-            className="truncate text-[14px] font-medium leading-5"
-          >
-            {name}
-          </h2>
-          <p className="truncate text-[12px] leading-4 text-muted-foreground">
-            {category}
-          </p>
-        </div>
-        {connected ? (
-          <span className="inline-flex h-[22px] shrink-0 items-center gap-1.5 rounded-md bg-success/12 px-2 text-[12px] font-medium text-success">
-            <Dot tone="success" />
-            Connected
-          </span>
-        ) : (
-          <span className="shrink-0">{action}</span>
-        )}
-        {menu?.length && connected ? (
-          <Menu
-            items={menu}
-            label={`${name} actions`}
-            trigger={(t) => (
-              <Button
-                {...t}
-                aria-label={`${name} actions`}
-                variant="ghost"
-                size="icon"
-                className="-ml-2 h-7 w-7 shrink-0"
-              >
-                <DotsThreeVerticalIcon size={16} weight="bold" />
-              </Button>
-            )}
-          />
-        ) : null}
-      </header>
-      <div className="flex flex-1 flex-col rounded-xl border border-frame-border bg-card px-3">
-        <div className="flex-1 space-y-2.5 pb-4 pt-3">
-          {/* Two lines for the description and one for the stat, always,
-              so every card is the same height. */}
-          <p className="line-clamp-2 min-h-10 text-[13px] leading-5 text-foreground">
+          <div className="flex items-center justify-between gap-2">
+            <h2 id={`${id}-name`} className="truncate text-[14px] font-medium leading-5">
+              {name}
+            </h2>
+            <Badge tone={status.tone}>
+              <Dot tone={status.tone} />
+              {status.label}
+            </Badge>
+          </div>
+          <p className="mt-0.5 line-clamp-2 text-[12.5px] leading-[18px] text-muted-foreground">
             {description}
           </p>
-          <p
-            aria-hidden={connected && stat ? undefined : true}
-            className={`flex items-baseline justify-between gap-3 text-[13px] leading-5 ${connected && stat ? "" : "invisible"}`}
-          >
-            <span className="text-muted-foreground">{connected && stat ? stat.label : "\u00a0"}</span>
-            <span className="min-w-0 truncate font-semibold tabular-nums">
-              {connected && stat ? stat.value : null}
-            </span>
-          </p>
         </div>
-        <footer className="flex min-h-[34px] items-center gap-2 border-t border-divider pb-0.5 text-[12px] text-muted-foreground">
-          {connected ? (
-            status ? (
-              <>
-                {/* The header's pill already says connected: a dot only when
-                    something needs a look or is under way. */}
-                {status.tone !== "success" ? <Dot tone={status.tone} className="h-1.5 w-1.5" /> : null}
-                <span className="truncate">{status.label}</span>
-              </>
-            ) : null
-          ) : null}
-          {!connected && docs ? (
-            <a
-              href={docsUrl(docs)}
-              target="_blank"
-              rel="noreferrer"
-              className="ml-auto inline-flex shrink-0 items-center gap-0.5 font-medium hover:text-foreground"
-            >
-              Setup guide
-              <CaretRightIcon size={10} weight="bold" />
-            </a>
-          ) : null}
-        </footer>
       </div>
+      <footer className="flex min-h-10 items-center gap-3 px-2 pb-0.5 pt-1.5">
+        <span className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">{detail}</span>
+        {action}
+      </footer>
     </section>
   );
 }

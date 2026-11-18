@@ -1,9 +1,17 @@
 import { KeyIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { siVault } from "simple-icons";
+import { BrandMark } from "~/components/pyo/common";
+import {
+  Busy,
+  ConfirmNote,
+  DialogRow,
+  DialogRows,
+  IntegrationDialog,
+} from "~/components/pyo/IntegrationDialog";
 import { Badge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
-import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
-import { Field, Input, Select, Textarea } from "~/components/ui/Field";
+import { Field, Input, SecretInput, Select, Textarea } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
@@ -114,12 +122,19 @@ function optionsOf(f: Form): Record<string, string> {
   }
 }
 
+const ICON = <BrandMark icon={siVault} size={15} tone="mono" />;
+const ABOUT = "Services import secrets from your store on each deploy.";
+
 /** Connect a store, or change one. Its credential is never shown again. */
-export function StoreDialog({
+function StoreForm({
   store,
+  onDone,
+  onCancel,
   onClose,
 }: {
   store?: SecretStore;
+  onDone: () => void;
+  onCancel: () => void;
   onClose: () => void;
 }) {
   const s = usePyo();
@@ -165,24 +180,35 @@ export function StoreDialog({
     extra: { password?: boolean; hint?: string; optional?: boolean } = {},
   ) => (
     <Field label={label} hint={extra.hint} optional={extra.optional}>
-      {(p) => (
-        <Input
-          {...p}
-          type={extra.password ? "password" : "text"}
-          autoComplete="off"
-          value={form[key]}
-          onChange={(e) => set({ [key]: e.target.value })}
-          placeholder={placeholder}
-        />
-      )}
+      {(p) =>
+        extra.password ? (
+          <SecretInput
+            {...p}
+            autoComplete="off"
+            value={form[key]}
+            onChange={(e) => set({ [key]: e.target.value })}
+            onPasteText={(t) => set({ [key]: t })}
+            placeholder={placeholder}
+          />
+        ) : (
+          <Input
+            {...p}
+            autoComplete="off"
+            value={form[key]}
+            onChange={(e) => set({ [key]: e.target.value })}
+            placeholder={placeholder}
+          />
+        )
+      }
     </Field>
   );
   return (
-    <Dialog
-      open
+    <IntegrationDialog
+      icon={ICON}
+      name="Secret stores"
+      description={store ? `Edit ${store.name}. Checked before saving.` : "Checked before saving."}
+      docs="external-secrets"
       onClose={onClose}
-      title={store ? `Edit ${store.name}` : "Connect a secret store"}
-      description="Checked before saving."
       onSubmit={async () => {
         if (!ready || busy) return;
         setBusy(true);
@@ -198,21 +224,21 @@ export function StoreDialog({
         setBusy(false);
         if (!ok) return;
         toast({ title: store ? "Saved" : `Connected ${form.name.trim()}` });
-        onClose();
+        onDone();
       }}
       footer={
         <>
-          <Button variant="ghost" size="sm" onClick={onClose}>
+          <Button variant="ghost" size="sm" onClick={onCancel}>
             Cancel
           </Button>
           <Button type="submit" size="sm" disabled={!ready || busy}>
-            {busy ? "Checking…" : store ? "Save" : "Connect"}
+            {busy ? <Busy>Checking…</Busy> : store ? "Save" : "Connect"}
           </Button>
         </>
       }
     >
       <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Provider">
             {(p) => (
               <Select
@@ -236,7 +262,7 @@ export function StoreDialog({
         {kind === "vault" || kind === "openbao" ? (
           <>
             {text("Address", "addr", "https://vault.example.com")}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-3 sm:grid-cols-2">
               {text("KV v2 mount", "mount", "secret")}
               {text("Namespace", "namespace", "", { optional: true })}
             </div>
@@ -249,7 +275,7 @@ export function StoreDialog({
         {kind === "infisical" ? (
           <>
             {text("Address", "addr", "https://app.infisical.com")}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-3 sm:grid-cols-2">
               {text("Project ID", "projectId", "a1b2c3…")}
               {text("Environment", "environment", "prod")}
             </div>
@@ -264,7 +290,7 @@ export function StoreDialog({
         {kind === "aws" ? (
           <>
             {text("Region", "region", "us-east-1")}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-3 sm:grid-cols-2">
               {text("Access key ID", "accessKeyId", unchanged || "AKIA…")}
               {text("Secret access key", "secretAccessKey", unchanged, {
                 password: true,
@@ -303,7 +329,7 @@ export function StoreDialog({
           <>
             {text("Vault URL", "addr", "https://my-vault.vault.azure.net")}
             {text("Tenant ID", "tenantId", unchanged)}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-3 sm:grid-cols-2">
               {text("Client ID", "clientId", unchanged)}
               {text("Client secret", "clientSecret", unchanged, {
                 password: true,
@@ -318,103 +344,117 @@ export function StoreDialog({
           })
         ) : null}
       </div>
-    </Dialog>
+    </IntegrationDialog>
   );
 }
 
-/** Integrations › Secret stores: the default, then the team's stores. */
-export function SecretStoresSettings() {
+function StoreRow({
+  store,
+  used,
+  onEdit,
+}: {
+  store: SecretStore;
+  used: number;
+  onEdit: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <DialogRow
+      icon={<KeyIcon size={15} />}
+      title={store.name}
+      meta={`${kindLabel(store.kind)} · ${used ? `${used} ${used === 1 ? "service" : "services"}` : "Not used"}`}
+      actions={
+        confirming ? null : (
+          <>
+            <Button size="xs" variant="ghost" onClick={onEdit}>
+              Edit
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7"
+              disabled={used > 0}
+              title={used ? "Services import from this store" : undefined}
+              aria-label={`Remove ${store.name}`}
+              onClick={() => setConfirming(true)}
+            >
+              <TrashIcon size={14} />
+            </Button>
+          </>
+        )
+      }
+    >
+      {confirming ? (
+        <ConfirmNote
+          title={`Remove ${store.name}?`}
+          confirmLabel="Remove"
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => {
+            setConfirming(false);
+            void api.removeSecretStore(store.id);
+          }}
+        >
+          Your store isn't changed.
+        </ConfirmNote>
+      ) : null}
+    </DialogRow>
+  );
+}
+
+/**
+ * Integrations › Secret stores: the default, the team's stores, and a form
+ * to connect or edit one. Opens on the form while there are none.
+ */
+export function SecretStoresDialog({ onClose }: { onClose: () => void }) {
   const s = usePyo();
   const stores = s.secretStores.filter((x) => x.teamId === s.currentTeamId);
-  const [adding, setAdding] = useState(false);
-  const [editing, setEditing] = useState<SecretStore | null>(null);
-  const [removing, setRemoving] = useState<SecretStore | null>(null);
+  const [form, setForm] = useState<"add" | SecretStore | null>(stores.length ? null : "add");
   const uses = (store: SecretStore) =>
     s.services.filter((a) =>
       a.secretImports?.some((i) => i.storeId === store.id),
     ).length;
-  return (
-    <>
-      <ul className="list-rows">
-        <li className="flex items-center gap-3 px-4 py-3">
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
-            <KeyIcon size={15} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="text-[13px] font-medium">Cluster Secrets</p>
-            <p className="text-[12px] text-muted-foreground">
-              Default. Stored in the target cluster.
-            </p>
-          </div>
-          <Badge tone="success">Active</Badge>
-        </li>
-      </ul>
-      {stores.length ? (
-        <ul className="list-rows border-t border-border">
-          {stores.map((store) => {
-            const used = uses(store);
-            return (
-              <li key={store.id} className="flex items-center gap-3 px-4 py-3">
-                <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                  <KeyIcon size={15} />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13px] font-medium">
-                    {store.name}
-                  </p>
-                  <p className="truncate text-[12px] text-muted-foreground">
-                    {kindLabel(store.kind)} ·{" "}
-                    {used
-                      ? `${used} ${used === 1 ? "service" : "services"}`
-                      : "Not used"}
-                  </p>
-                </div>
-                <Button
-                  size="xs"
-                  variant="secondary"
-                  onClick={() => setEditing(store)}
-                >
-                  Edit
-                </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  disabled={used > 0}
-                  title={used ? "Services import from this store" : undefined}
-                  aria-label={`Remove ${store.name}`}
-                  onClick={() => setRemoving(store)}
-                >
-                  <TrashIcon size={14} />
-                </Button>
-              </li>
-            );
-          })}
-        </ul>
-      ) : (
-        <p className="border-t border-border px-4 py-3 text-[13px] text-muted-foreground">
-          Vault, AWS, GCP, Azure, Doppler and more.
-        </p>
-      )}
-      <div className="border-t border-border px-4 py-3">
-        <Button size="xs" variant="secondary" onClick={() => setAdding(true)}>
-          <PlusIcon size={12} weight="bold" /> Connect
-        </Button>
-      </div>
-      {adding ? <StoreDialog onClose={() => setAdding(false)} /> : null}
-      {editing ? (
-        <StoreDialog store={editing} onClose={() => setEditing(null)} />
-      ) : null}
-      <ConfirmDialog
-        open={!!removing}
-        onClose={() => setRemoving(null)}
-        title={`Remove ${removing?.name}?`}
-        description="Your store isn't changed."
-        confirmLabel="Remove"
-        onConfirm={() => {
-          if (removing) void api.removeSecretStore(removing.id);
-        }}
+
+  if (form)
+    return (
+      <StoreForm
+        key={form === "add" ? "add" : form.id}
+        store={form === "add" ? undefined : form}
+        onDone={() => setForm(null)}
+        onCancel={() => (stores.length ? setForm(null) : onClose())}
+        onClose={onClose}
       />
-    </>
+    );
+
+  return (
+    <IntegrationDialog
+      icon={ICON}
+      name="Secret stores"
+      description={ABOUT}
+      docs="external-secrets"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" size="sm" onClick={() => setForm("add")}>
+            <PlusIcon size={12} weight="bold" /> Connect a store
+          </Button>
+          <Button size="sm" onClick={onClose}>
+            Done
+          </Button>
+        </>
+      }
+    >
+      <DialogRows>
+        <DialogRow
+          icon={<KeyIcon size={15} />}
+          title="Cluster Secrets"
+          meta="Default. Stored in the target cluster."
+          badge={<Badge tone="success">Active</Badge>}
+        />
+        {stores.map((store) => (
+          <StoreRow key={store.id} store={store} used={uses(store)} onEdit={() => setForm(store)} />
+        ))}
+      </DialogRows>
+    </IntegrationDialog>
   );
 }
 
