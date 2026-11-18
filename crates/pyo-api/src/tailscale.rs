@@ -25,7 +25,7 @@ use sqlx::PgPool;
 use crate::AppState;
 use crate::error::{ApiError, ApiResult};
 
-const API: &str = "https://api.tailscale.com/api/v2";
+pub(crate) const API: &str = "https://api.tailscale.com/api/v2";
 /// The tag Pyo's servers and Services carry.
 pub const TAG: &str = "tag:pyo";
 /// Names Pyo keeps for itself: services' domains can't take them.
@@ -94,7 +94,7 @@ pub fn marker(install: &str) -> String {
 
 // ── The API ─────────────────────────────────────────────────────────────────
 
-fn http() -> &'static reqwest::Client {
+pub(crate) fn http() -> &'static reqwest::Client {
     static C: OnceLock<reqwest::Client> = OnceLock::new();
     C.get_or_init(|| {
         reqwest::Client::builder()
@@ -202,7 +202,7 @@ impl std::fmt::Display for TsError {
 impl std::error::Error for TsError {}
 
 impl Client {
-    async fn access_token(&self) -> anyhow::Result<String> {
+    pub(crate) async fn access_token(&self) -> anyhow::Result<String> {
         if let Some((t, at)) = self.token.lock().unwrap_or_else(|e| e.into_inner()).clone()
             && at.elapsed() < Duration::from_secs(45 * 60)
         {
@@ -490,7 +490,7 @@ impl Client {
 /// What Tailscale takes as a key's description: letters, digits, spaces,
 /// dashes and underscores, at most 50 characters. "Pyo: join web-1"
 /// becomes "Pyo join web-1".
-fn key_description(s: &str) -> String {
+pub(crate) fn key_description(s: &str) -> String {
     let kept: String = s
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))

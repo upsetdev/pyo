@@ -64,6 +64,7 @@ mod sigstore;
 mod sites;
 mod snapshot;
 mod tailscale;
+mod tailscale_setup;
 mod teambackup;
 mod template_source;
 mod terminal;

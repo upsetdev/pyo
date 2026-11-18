@@ -2618,6 +2618,18 @@ pub(crate) enum Op {
         client_id: String,
         secret: Option<String>,
     },
+    /// See what setting up Tailscale with an API access token would change (admins only). Nothing changes yet.
+    PlanTailscaleSetup {
+        /// An API access token from the Tailscale console's Keys page. Used for this request only and never stored.
+        #[schema(value_type = String)]
+        token: crate::tailscale_setup::Token,
+    },
+    /// Set up Tailscale with an API access token (admins only): MagicDNS, HTTPS certificates, tag:pyo in the tailnet policy, and an OAuth client of Pyo's own. Pyo deletes the token when it's done.
+    SetUpTailscale {
+        /// An API access token from the Tailscale console's Keys page. Used for this request only and never stored.
+        #[schema(value_type = String)]
+        token: crate::tailscale_setup::Token,
+    },
     /// Check the saved Tailscale OAuth client again, scope by scope.
     TestTailscale {},
     /// Forget the Tailscale OAuth client. Pyo's names on your tailnet are deleted. Servers stay on it.
@@ -2847,6 +2859,8 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::GithubManifest { .. }
             | Op::RemoveGithubApp {}
             | Op::SaveTailscale { .. }
+            | Op::PlanTailscaleSetup { .. }
+            | Op::SetUpTailscale { .. }
             | Op::TestTailscale {}
             | Op::RemoveTailscale {}
             | Op::RenameTailscaleName { .. }
@@ -2989,6 +3003,8 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::TestGitConnection { .. }
         | Op::RemoveGitConnection { .. } => ("Git providers", "gitc"),
         Op::SaveTailscale { .. }
+        | Op::PlanTailscaleSetup { .. }
+        | Op::SetUpTailscale { .. }
         | Op::TestTailscale {}
         | Op::RemoveTailscale {}
         | Op::RenameTailscaleName { .. } => ("Integrations", ""),
@@ -7200,6 +7216,24 @@ async fn apply(
             let out = crate::tailscale::save_client(s, &client_id, secret.as_deref()).await?;
             log_setting(tx, user, "tailscale", "Connected Tailscale").await?;
             Ok(out)
+        }
+        Op::PlanTailscaleSetup { token } => {
+            require_admin(user)?;
+            crate::tailscale_setup::plan(s, token).await
+        }
+        Op::SetUpTailscale { token } => {
+            require_admin(user)?;
+            let out = crate::tailscale_setup::apply(s, token).await?;
+            if !out.changed.is_empty() {
+                log_setting(
+                    tx,
+                    user,
+                    "tailscale",
+                    "Set up Tailscale with an access token",
+                )
+                .await?;
+            }
+            Ok(serde_json::to_value(out).map_err(anyhow::Error::from)?)
         }
         Op::TestTailscale {} => {
             require_admin(user)?;
