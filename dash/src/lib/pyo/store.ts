@@ -50,6 +50,8 @@ import type {
   PublicDashboard,
   TailscaleCheck,
   TailscaleInfo,
+  TailscaleSetupOutcome,
+  TailscaleSetupPlan,
   CloudflareAccount,
   GitConnection,
   GitConnectionCheck,
@@ -2491,6 +2493,12 @@ export const api = {
       clientId: clientId.trim(),
       ...(secret?.trim() ? { secret: secret.trim() } : {}),
     });
+  },
+  planTailscaleSetup(token: string) {
+    return attempt<{ plan: TailscaleSetupPlan }>("planTailscaleSetup", { token: token.trim() });
+  },
+  setUpTailscale(token: string) {
+    return attempt<TailscaleSetupOutcome>("setUpTailscale", { token: token.trim() });
   },
   testTailscale() {
     return attempt<{ checks: TailscaleCheck[] }>("testTailscale", {});

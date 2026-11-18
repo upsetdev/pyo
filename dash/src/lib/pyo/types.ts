@@ -1872,6 +1872,26 @@ export type CloudOptions = {
 /** One check of the Tailscale client (Test). */
 export type TailscaleCheck = { name: string; ok: boolean; message: string };
 
+/** What setting up Tailscale with an access token would change (planTailscaleSetup). */
+export type TailscaleSetupPlan = {
+  changes: string[];
+  done: string[];
+  /** Policy lines added ("+ …") or changed ("- …"). */
+  diff: string[];
+  /** Why Pyo can't go on by itself. `diff` then holds the lines to add. */
+  blocked: string | null;
+};
+
+/** What setting up Tailscale with an access token did (setUpTailscale). */
+export type TailscaleSetupOutcome = {
+  ok: boolean;
+  changed: string[];
+  todo: string[];
+  error: string | null;
+  checks: TailscaleCheck[];
+  tokenDeleted: boolean;
+};
+
 /** Pyo on the public IP (admins only). */
 export type PublicDashboard = {
   open: boolean;

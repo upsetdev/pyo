@@ -1,4 +1,4 @@
-import { CheckCircleIcon, XCircleIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon, WarningCircleIcon, XCircleIcon } from "@phosphor-icons/react";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { Badge } from "~/components/ui/Badge";
@@ -9,12 +9,28 @@ import { Callout } from "~/components/ui/Panel";
 import { site } from "~/config/site";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import type { TailscaleCheck } from "~/lib/pyo/types";
+import type { TailscaleCheck, TailscaleSetupOutcome, TailscaleSetupPlan } from "~/lib/pyo/types";
 
 /** Where a flow that needed Tailscale goes back to once it's saved. */
 const BACK = "pyo.tailscaleBack";
 
 const DOCS = `${site.docsUrl}/tailscale`;
+const KEYS = "https://login.tailscale.com/admin/settings/keys";
+
+const LINK = "font-medium text-primary hover:text-primary/80";
+
+/** After saving: back to the flow that needed Tailscale, if one did. */
+function goBack(navigate: ReturnType<typeof useNavigate>): boolean {
+  let back: string | null = null;
+  try {
+    back = sessionStorage.getItem(BACK);
+    sessionStorage.removeItem(BACK);
+  } catch {
+    // Nowhere to go back to.
+  }
+  if (back) void navigate({ to: back as string });
+  return !!back;
+}
 
 /**
  * Shown in connect and add-server flows until Tailscale is set up: servers
@@ -85,15 +101,7 @@ function ClientForm({ onDone, saved }: { onDone: () => void; saved?: string }) {
         setChecks(r.data.checks);
         if (!r.data.ok) return;
         toast({ title: "Tailscale saved" });
-        let back: string | null = null;
-        try {
-          back = sessionStorage.getItem(BACK);
-          sessionStorage.removeItem(BACK);
-        } catch {
-          // Nowhere to go back to.
-        }
-        if (back) void navigate({ to: back as string });
-        else onDone();
+        if (!goBack(navigate)) onDone();
       }}
     >
       <div className="grid gap-2 sm:grid-cols-2">
@@ -121,13 +129,198 @@ function ClientForm({ onDone, saved }: { onDone: () => void; saved?: string }) {
         <Button type="submit" size="xs" disabled={busy || !id.trim() || (!saved && !secret.trim())}>
           {busy ? "Checking…" : "Save"}
         </Button>
-        {saved ? (
-          <Button type="button" size="xs" variant="ghost" onClick={onDone}>
-            Cancel
-          </Button>
-        ) : null}
       </div>
     </form>
+  );
+}
+
+/** A list of short lines, each with its mark. */
+function Lines({ items, tone }: { items: string[]; tone: "done" | "todo" | "plan" }) {
+  if (!items.length) return null;
+  return (
+    <ul className="space-y-1 text-[12px]">
+      {items.map((t) => (
+        <li key={t} className="flex items-start gap-1.5">
+          {tone === "todo" ? (
+            <WarningCircleIcon size={14} weight="fill" className="mt-0.5 shrink-0 text-warning" />
+          ) : tone === "done" ? (
+            <CheckCircleIcon size={14} weight="fill" className="mt-0.5 shrink-0 text-success" />
+          ) : (
+            <span className="mt-[7px] size-1 shrink-0 rounded-full bg-foreground/60" />
+          )}
+          <span className={tone === "done" ? "text-muted-foreground" : ""}>{t}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Diff({ lines }: { lines: string[] }) {
+  if (!lines.length) return null;
+  return (
+    <pre className="max-h-56 overflow-auto rounded-lg border border-border bg-muted/40 px-3 py-2 font-mono text-[11.5px] leading-5">
+      {lines.map((l, i) => (
+        <div key={i} className={l.startsWith("+") ? "text-success" : "text-destructive"}>
+          {l}
+        </div>
+      ))}
+    </pre>
+  );
+}
+
+/** What setting up with a token did, until the card is closed. */
+export function SetupOutcome({ outcome }: { outcome: TailscaleSetupOutcome }) {
+  return (
+    <div className="space-y-2">
+      {outcome.changed.length ? (
+        <Lines items={outcome.changed} tone="done" />
+      ) : outcome.ok ? (
+        <p className="text-[12px] text-muted-foreground">Nothing changed on your tailnet.</p>
+      ) : null}
+      {outcome.tokenDeleted ? <Lines items={["Deleted the token"]} tone="done" /> : null}
+      {outcome.error ? <p className="text-[12px] text-destructive">{outcome.error}</p> : null}
+      <Lines items={outcome.todo} tone="todo" />
+      {outcome.checks.some((c) => !c.ok) ? <Checks checks={outcome.checks} /> : null}
+    </div>
+  );
+}
+
+/** The main way in: one short-lived API access token, and Pyo does the rest. */
+function TokenSetup({ onDone }: { onDone: (outcome: TailscaleSetupOutcome) => void }) {
+  const navigate = useNavigate();
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [plan, setPlan] = useState<TailscaleSetupPlan | null>(null);
+  const [outcome, setOutcome] = useState<TailscaleSetupOutcome | null>(null);
+
+  const check = async () => {
+    setBusy(true);
+    setError("");
+    setOutcome(null);
+    const r = await api.planTailscaleSetup(token);
+    setBusy(false);
+    if ("error" in r) return setError(r.error);
+    setPlan(r.data.plan);
+  };
+  const apply = async () => {
+    setBusy(true);
+    setError("");
+    const r = await api.setUpTailscale(token);
+    setBusy(false);
+    if ("error" in r) return setError(r.error);
+    if (!r.data.ok) {
+      // Stopped partway: what changed stays listed, and the token stays for another try.
+      setPlan(null);
+      return setOutcome(r.data);
+    }
+    setToken("");
+    setPlan(null);
+    toast({ title: "Tailscale set up" });
+    if (!goBack(navigate)) onDone(r.data);
+  };
+  const reset = () => {
+    setPlan(null);
+    setError("");
+  };
+
+  if (plan)
+    return (
+      <div className="space-y-3">
+        {plan.blocked ? (
+          <Callout tone="warning">{plan.blocked}</Callout>
+        ) : plan.changes.length ? (
+          <div className="space-y-1.5">
+            <p className="text-[12px] font-medium">Pyo will</p>
+            <Lines items={plan.changes} tone="plan" />
+          </div>
+        ) : (
+          <p className="text-[12px]">Your tailnet is already set up.</p>
+        )}
+        <Diff lines={plan.diff} />
+        <Lines items={plan.done} tone="done" />
+        {plan.blocked ? null : <p className="text-[12px] text-muted-foreground">Pyo deletes the token when it's done.</p>}
+        {error ? <p className="text-[12px] text-destructive">{error}</p> : null}
+        <div className="flex gap-2">
+          {plan.blocked ? (
+            <Button size="xs" disabled={busy} onClick={() => void check()}>
+              {busy ? "Checking…" : "Check again"}
+            </Button>
+          ) : (
+            <Button size="xs" disabled={busy} onClick={() => void apply()}>
+              {busy ? "Setting up…" : plan.changes.length ? "Set up" : "Finish"}
+            </Button>
+          )}
+          <Button size="xs" variant="ghost" disabled={busy} onClick={reset}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    );
+
+  return (
+    <form
+      className="space-y-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void check();
+      }}
+    >
+      <p className="text-[12px] text-muted-foreground">
+        Generate an API access token that expires in 1 day, and paste it here.{" "}
+        <a href={KEYS} target="_blank" rel="noreferrer" className={LINK}>
+          Open Keys in Tailscale
+        </a>
+      </p>
+      {outcome ? <SetupOutcome outcome={outcome} /> : null}
+      <div className="flex gap-2">
+        <Input
+          type="password"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder="tskey-api-…"
+          aria-label="API access token"
+          autoComplete="off"
+          className="h-8"
+        />
+        <Button type="submit" size="xs" className="h-8" disabled={busy || !token.trim()}>
+          {busy ? "Checking…" : "Check"}
+        </Button>
+      </div>
+      {error ? <p className="text-[12px] text-destructive">{error}</p> : null}
+    </form>
+  );
+}
+
+/** Setting up: with a token, or with an OAuth client made by hand. */
+function Setup({ saved, onDone }: { saved?: string; onDone: (outcome?: TailscaleSetupOutcome) => void }) {
+  const [byClient, setByClient] = useState(false);
+  return (
+    <div className="space-y-3">
+      {byClient ? (
+        <>
+          <p className="text-[12px] text-muted-foreground">
+            An OAuth client with Devices › Core and Auth Keys (both with tag:pyo) and Services.{" "}
+            <a href={`${DOCS}#with-an-oauth-client`} target="_blank" rel="noreferrer" className={LINK}>
+              How to make one
+            </a>
+          </p>
+          <ClientForm saved={saved} onDone={() => onDone()} />
+        </>
+      ) : (
+        <TokenSetup onDone={onDone} />
+      )}
+      <div className="flex gap-3">
+        <button type="button" className={`text-[12px] ${LINK}`} onClick={() => setByClient(!byClient)}>
+          {byClient ? "Set up with an access token instead" : "Set up with an OAuth client instead"}
+        </button>
+        {saved ? (
+          <button type="button" className="text-[12px] text-muted-foreground hover:text-foreground" onClick={() => onDone()}>
+            Cancel
+          </button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -252,6 +445,7 @@ export function TailscaleSettings() {
   const ts = s.tailscale;
   const [replacing, setReplacing] = useState(false);
   const [checks, setChecks] = useState<TailscaleCheck[]>([]);
+  const [outcome, setOutcome] = useState<TailscaleSetupOutcome | null>(null);
   const [testing, setTesting] = useState(false);
   const [removing, setRemoving] = useState(false);
   if (!s.user.isAdmin)
@@ -271,15 +465,13 @@ export function TailscaleSettings() {
       <ul className="list-rows">
         <li className="space-y-3 px-4 py-3">
           {!ts || replacing ? (
-            <>
-              <p className="text-[12px] text-muted-foreground">
-                An OAuth client with Devices › Core and Auth Keys (both with tag:pyo) and Services.{" "}
-                <a href={DOCS} target="_blank" rel="noreferrer" className="font-medium text-primary hover:text-primary/80">
-                  How to make one
-                </a>
-              </p>
-              <ClientForm saved={ts?.clientId} onDone={() => setReplacing(false)} />
-            </>
+            <Setup
+              saved={ts?.clientId}
+              onDone={(o) => {
+                setReplacing(false);
+                setOutcome(o ?? null);
+              }}
+            />
           ) : (
             <>
               <div className="flex flex-wrap items-center gap-3">
@@ -311,6 +503,7 @@ export function TailscaleSettings() {
                   Remove
                 </Button>
               </div>
+              {outcome ? <SetupOutcome outcome={outcome} /> : null}
               {checks.length ? <Checks checks={checks} /> : null}
             </>
           )}
