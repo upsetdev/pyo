@@ -76,7 +76,7 @@ export const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
         icon: PulseIcon,
         children: [
           { label: "Analytics", href: "/observability/analytics", match: ["/observability"] },
-          { label: "Request logs", href: "/observability/logs" },
+          { label: "Logs", href: "/observability/logs" },
           { label: "Activity", href: "/activity" },
         ],
       },

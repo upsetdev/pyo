@@ -47,7 +47,7 @@ export const Route = createFileRoute("/_app/$team/observability/logs")({
     method: z.string().optional(),
     q: z.string().optional(),
   }),
-  head: () => ({ meta: seo({ title: "Request logs" }) }),
+  head: () => ({ meta: seo({ title: "Logs" }) }),
   component: LogsPage,
 });
 
@@ -429,7 +429,7 @@ function Tail({
       <Zoomable
         zoomed={zoomed}
         onClose={() => setZoomed(false)}
-        label="Request logs"
+        label="Logs"
       >
         <div className={zoomed ? "flex min-h-0 flex-1 flex-col" : ""}>
           <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">

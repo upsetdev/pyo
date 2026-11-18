@@ -649,7 +649,7 @@ export function crumbsFor(pathname: string, s: PyoState): Crumb[] {
     // Observability's logs are the gateway's request logs, not a service's.
     if (b)
       out.push({
-        label: a === "observability" && b === "logs" ? "Request logs" : (TAB_LABELS[b] ?? b),
+        label: a === "observability" && b === "logs" ? "Logs" : (TAB_LABELS[b] ?? b),
         href: pathname,
       });
   }
