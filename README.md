@@ -158,6 +158,7 @@ Building from source or contributing? See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [pyo-docs](https://github.com/upsetdev/pyo-docs): the documentation, published at [pyo.dev/docs](https://pyo.dev/docs).
 - [pyo-web](https://github.com/upsetdev/pyo-web): the website, [pyo.dev](https://pyo.dev).
 - [pyo-templates](https://github.com/upsetdev/pyo-templates): the one-click templates.
+- [pyo-sandbox-images](https://github.com/upsetdev/pyo-sandbox-images): the images of the built-in sandbox templates, base and desktop.
 
 ## License
 
