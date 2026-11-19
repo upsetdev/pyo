@@ -177,7 +177,9 @@ function TokenForm({
 export function GitlabDialog({ onClose }: { onClose: () => void }) {
   const s = usePyo();
   const list = s.gitConnections.filter((c) => c.teamId === s.currentTeamId);
-  const [form, setForm] = useState<"add" | GitConnection | null>(list.length ? null : "add");
+  const [picked, setForm] = useState<"add" | GitConnection | null>(null);
+  // With none left, the form to connect one.
+  const form = picked ?? (list.length ? null : "add");
   const [url, setUrl] = useState("https://gitlab.com");
   const [token, setToken] = useState("");
   const [error, setError] = useState("");
