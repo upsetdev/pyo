@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 import { siGitlab, siHetzner, siTailscale, siVault } from "simple-icons";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { z } from "zod";
@@ -21,10 +21,13 @@ import { Tabs } from "~/components/ui/Tabs";
 import { seo } from "~/lib/seo";
 import {
   cloudflareIn,
+  getState,
   roleIn,
+  teamBySlug,
   usePyo,
   type PyoState,
 } from "~/lib/pyo/store";
+import { takeGithubReturn } from "~/lib/pyo/github-return";
 import { toast } from "~/lib/pyo/toast";
 import { BrandMark, CLOUDFLARE_LOGO, DOCKER_LOGO, GITHUB_LOGO } from "~/components/pyo/common";
 
@@ -34,6 +37,16 @@ import { BrandMark, CLOUDFLARE_LOGO, DOCKER_LOGO, GITHUB_LOGO } from "~/componen
 export const Route = createFileRoute("/_app/$team/integrations")({
   // ?github=: back from GitHub (see useGithubReturn).
   validateSearch: z.object({ github: z.string().optional().catch(undefined) }),
+  // Connecting GitHub was started from another page (a deploy link): say
+  // how it went there instead.
+  beforeLoad: ({ search, params, preload }) => {
+    if (preload || !search.github) return;
+    const team = teamBySlug(getState(), params.team);
+    const back = team ? takeGithubReturn(team.id) : null;
+    if (!back) return;
+    githubResultToast(search.github, true);
+    throw redirect({ href: back, replace: true });
+  },
   head: () => ({ meta: seo({ title: "Integrations" }) }),
   component: Integrations,
 });
@@ -332,6 +345,22 @@ const GITHUB_ERRORS: Record<string, string> = {
   expired: "That took too long. Try again.",
 };
 
+/** How connecting GitHub went. Elsewhere than here: no pointer to New deploy. */
+function githubResultToast(q: string, elsewhere = false) {
+  if (q === "connected")
+    toast({
+      title: "GitHub connected",
+      description: elsewhere
+        ? undefined
+        : "Pick a repository in New deploy. Pushes then deploy on their own.",
+    });
+  else
+    toast({
+      tone: "error",
+      title: GITHUB_ERRORS[q] ?? "GitHub didn't connect. Try again.",
+    });
+}
+
 /**
  * Back from GitHub after installing the app (?github=connected, or an
  * error): say how it went and open the GitHub card.
@@ -340,17 +369,7 @@ function useGithubReturn(open: () => void) {
   useEffect(() => {
     const q = new URLSearchParams(window.location.search).get("github");
     if (!q) return;
-    if (q === "connected")
-      toast({
-        title: "GitHub connected",
-        description:
-          "Pick a repository in New deploy. Pushes then deploy on their own.",
-      });
-    else
-      toast({
-        tone: "error",
-        title: GITHUB_ERRORS[q] ?? "GitHub didn't connect. Try again.",
-      });
+    githubResultToast(q);
     window.history.replaceState(null, "", window.location.pathname);
     open();
     // Once, on arrival.
