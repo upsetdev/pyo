@@ -201,6 +201,36 @@ impl std::fmt::Display for TsError {
 
 impl std::error::Error for TsError {}
 
+/// What Tailscale answered: its body, and the ETag when there's one.
+pub(crate) struct Reply {
+    pub text: String,
+    pub etag: Option<String>,
+}
+
+/// Sends a request to Tailscale's API. Anything but a 2xx is a [`TsError`]
+/// with Tailscale's own message, and status 0 when it couldn't be reached.
+pub(crate) async fn send(req: reqwest::RequestBuilder) -> Result<Reply, TsError> {
+    let r = req.send().await.map_err(|e| TsError {
+        status: 0,
+        message: format!("Couldn't reach Tailscale: {}", e.without_url()),
+    })?;
+    let status = r.status().as_u16();
+    let etag = r
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let text = r.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        let message = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v["message"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| text.trim().chars().take(300).collect());
+        return Err(TsError { status, message });
+    }
+    Ok(Reply { text, etag })
+}
+
 impl Client {
     pub(crate) async fn access_token(&self) -> anyhow::Result<String> {
         if let Some((t, at)) = self.token.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -260,16 +290,7 @@ impl Client {
         if let Some(b) = body {
             req = req.json(b);
         }
-        let r = req.send().await?;
-        let status = r.status().as_u16();
-        let text = r.text().await.unwrap_or_default();
-        if !(200..300).contains(&status) {
-            let message = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v["message"].as_str().map(str::to_owned))
-                .unwrap_or_else(|| text.trim().chars().take(300).collect());
-            return Err(TsError { status, message }.into());
-        }
+        let text = send(req).await?.text;
         Ok(if text.trim().is_empty() {
             Value::Null
         } else {

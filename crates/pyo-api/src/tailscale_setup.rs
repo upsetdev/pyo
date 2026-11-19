@@ -6,13 +6,16 @@
 //!
 //! - **MagicDNS** and **HTTPS certificates** on.
 //! - **The policy**: `tag:pyo` in `tagOwners`, a grant to reach it on ports
-//!   80 and 443 when the policy doesn't allow that already, and
+//!   80 and 443 when no one can yet (for the sources the policy already
+//!   lets reach it, so access is never widened), and
 //!   `autoApprovers.services` for it. The policy is HuJSON and is edited in
 //!   place, so its comments and formatting stay. It's validated first and
-//!   written with `If-Match`, so a change made meanwhile is never lost.
+//!   written with `If-Match`, and only as the admin reviewed it: if it
+//!   changed since, nothing is written and the admin reviews it again.
 //! - **Pyo's own OAuth client**, with the scopes the manual path asks for,
 //!   saved and checked like one pasted by hand ([`crate::tailscale::save_client`]).
-//! - **The pasted token is deleted** last, once nothing else needs it.
+//! - **The pasted token is deleted** last, however the setup ends, or left
+//!   to the admin as a todo. It's kept only for a new review.
 //!
 //! The token lives in memory for one request only: it's never stored,
 //! logged or put in an error ([`Token`], [`Api::scrub`]). A tailnet that's
@@ -25,7 +28,7 @@ use zeroize::Zeroize;
 
 use crate::AppState;
 use crate::error::{ApiError, ApiResult};
-use crate::tailscale::{TAG, TsError};
+use crate::tailscale::{Reply, TAG, TsError};
 
 /// The scopes Pyo's own client gets: what the manual path asks for.
 const SCOPES: [&str; 3] = ["devices:core", "auth_keys", "services"];
@@ -96,15 +99,9 @@ enum Body {
     HuJson(String),
 }
 
-struct Reply {
-    text: String,
-    etag: Option<String>,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        serde_json::from_str(&self.text).unwrap_or(Value::Null)
-    }
+/// The answer's body as JSON (Null when it isn't).
+fn json_of(r: &Reply) -> Value {
+    serde_json::from_str(&r.text).unwrap_or(Value::Null)
 }
 
 /// Tailscale's API with the pasted token.
@@ -138,6 +135,8 @@ impl Api {
         out
     }
 
+    /// A request with the token, through the same path as Pyo's own client
+    /// ([`crate::tailscale::send`]), with the token scrubbed from any error.
     async fn send(
         &self,
         method: reqwest::Method,
@@ -158,35 +157,18 @@ impl Api {
                 .header(reqwest::header::CONTENT_TYPE, "application/hujson")
                 .body(t),
         };
-        let r = req.send().await.map_err(|e| TsError {
-            status: 0,
-            message: self.scrub(&format!("Couldn't reach Tailscale: {}", e.without_url())),
-        })?;
-        let status = r.status().as_u16();
-        let etag = r
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let text = r.text().await.unwrap_or_default();
-        if !(200..300).contains(&status) {
-            let message = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v["message"].as_str().map(str::to_owned))
-                .unwrap_or_else(|| text.trim().chars().take(300).collect());
-            return Err(TsError {
-                status,
-                message: self.scrub(&message),
-            });
-        }
-        Ok(Reply { text, etag })
+        crate::tailscale::send(req).await.map_err(|e| TsError {
+            status: e.status,
+            message: self.scrub(&e.message),
+        })
     }
 
     async fn get(&self, path: &str) -> Result<Value, TsError> {
-        Ok(self
-            .send(reqwest::Method::GET, path, Body::None, &[])
-            .await?
-            .json())
+        Ok(json_of(
+            &self
+                .send(reqwest::Method::GET, path, Body::None, &[])
+                .await?,
+        ))
     }
 
     /// The policy file as written, and its ETag.
@@ -247,25 +229,61 @@ fn parse(text: &str) -> Result<Value, String> {
 }
 
 /// What the policy is missing for Pyo.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Needs {
     /// `tag:pyo` in `tagOwners`: needed before anything can carry the tag.
     pub tag_owner: bool,
-    /// A grant to tag:pyo on ports 80 and 443: only when the policy doesn't
-    /// already let the tailnet reach it.
-    pub grant: bool,
+    /// Who the policy lets reach tag:pyo now. Pyo adds a grant on ports 80
+    /// and 443 only when nobody reaches it on both.
+    pub reach: Reach,
     /// `autoApprovers.services` for tag:pyo. Pyo approves its Services'
     /// hosts through the API anyway, so this only adds resilience.
     pub approver: bool,
 }
 
+/// Who the policy lets reach tag:pyo.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub enum Reach {
+    /// Neither `acls` nor `grants`: Pyo doesn't add the first rule there.
+    #[default]
+    NoRules,
+    /// Someone reaches it on ports 80 and 443. Left as it is, whoever that is.
+    Yes,
+    /// Rules reach it, but no one on both ports. Pyo adds the ports for
+    /// exactly these sources, with their posture, and no one else.
+    Partly(Vec<Source>),
+    /// No rule reaches it at all.
+    No,
+}
+
+/// Sources of a rule that reaches tag:pyo, and the posture it asks of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Source {
+    pub src: Vec<String>,
+    pub posture: Vec<String>,
+}
+
+/// Who gets access when no rule reaches tag:pyo at all.
+const MEMBERS: &str = "autogroup:member";
+
 impl Needs {
+    /// The grants to add for tag:pyo on ports 80 and 443, if any.
+    fn grant(&self) -> Option<Vec<Source>> {
+        match &self.reach {
+            Reach::NoRules | Reach::Yes => None,
+            Reach::Partly(s) => Some(s.clone()),
+            Reach::No => Some(vec![Source {
+                src: vec![MEMBERS.into()],
+                posture: vec![],
+            }]),
+        }
+    }
     fn any(&self) -> bool {
-        self.tag_owner || self.grant || self.approver
+        self.tag_owner || self.grant().is_some() || self.approver
     }
     /// Without these the setup can't work.
     fn required(&self) -> bool {
-        self.tag_owner || self.grant
+        self.tag_owner || self.grant().is_some()
     }
 }
 
@@ -276,7 +294,7 @@ fn strs(v: &Value) -> impl Iterator<Item = &str> {
 pub fn needs(p: &Value) -> Needs {
     Needs {
         tag_owner: p["tagOwners"].get(TAG).is_none(),
-        grant: reaches_pyo(p) == Some(false),
+        reach: reach(p),
         approver: !strs(&p["autoApprovers"]["services"][TAG]).any(|s| s == TAG),
     }
 }
@@ -294,46 +312,61 @@ fn ports_cover(ports: &str, port: u16) -> bool {
     })
 }
 
-/// Whether everyone on the tailnet can reach tag:pyo on ports 80 and 443,
-/// by a rule that plainly says so: from "*" or autogroup:member, to "*" or
-/// tag:pyo, with no posture or route conditions. None when the policy has
-/// neither `acls` nor `grants`, so Pyo doesn't add the first rule there.
-pub fn reaches_pyo(p: &Value) -> Option<bool> {
+/// Who the policy lets reach tag:pyo: every accept rule to "*" or tag:pyo
+/// counts, whatever its sources, protocol or posture, so Pyo never gives
+/// anyone access the admin's rules don't already give them on some port.
+/// Rules routed `via` a router don't reach the servers themselves.
+pub fn reach(p: &Value) -> Reach {
     if p.get("acls").is_none() && p.get("grants").is_none() {
-        return None;
+        return Reach::NoRules;
     }
-    let everyone = |v: &Value| strs(v).any(|s| s == "*" || s == "autogroup:member");
-    let plain = |r: &Value| r.get("srcPosture").is_none() && r.get("via").is_none();
-    let mut open = [false, false];
-    let mut take = |ports: &str| {
-        for (i, port) in [80, 443].into_iter().enumerate() {
-            open[i] |= ports_cover(ports, port);
+    // Each rule that reaches tag:pyo, and whether it covers 80 and 443 over TCP.
+    let mut rules: Vec<(Source, [bool; 2])> = vec![];
+    let mut note = |src: Vec<String>, posture: &Value, open: [bool; 2]| {
+        if src.is_empty() {
+            return;
+        }
+        let source = Source {
+            src,
+            posture: strs(posture).map(str::to_owned).collect(),
+        };
+        match rules.iter_mut().find(|(s, _)| *s == source) {
+            Some((_, o)) => *o = [o[0] | open[0], o[1] | open[1]],
+            None => rules.push((source, open)),
         }
     };
+    let covers = |ports: &str| [ports_cover(ports, 80), ports_cover(ports, 443)];
+    let or = |a: [bool; 2], b: [bool; 2]| [a[0] | b[0], a[1] | b[1]];
     for r in p["acls"].as_array().into_iter().flatten() {
+        if r["action"].as_str() != Some("accept") || r.get("via").is_some() {
+            continue;
+        }
         let tcp = match &r["proto"] {
             Value::Null => true,
             v => matches!(v.as_str(), Some("tcp" | "6")),
         };
-        if r["action"].as_str() != Some("accept")
-            || !(everyone(&r["src"]) || everyone(&r["users"]))
-            || !tcp
-            || !plain(r)
-        {
-            continue;
-        }
+        let mut open = None;
         for d in strs(&r["dst"]).chain(strs(&r["ports"])) {
             if let Some((host, ports)) = d.rsplit_once(':')
                 && (host == "*" || host == TAG)
             {
-                take(ports);
+                let o = if tcp { covers(ports) } else { [false, false] };
+                open = Some(or(open.unwrap_or_default(), o));
             }
+        }
+        if let Some(o) = open {
+            let src = strs(&r["src"])
+                .chain(strs(&r["users"]))
+                .map(str::to_owned)
+                .collect();
+            note(src, &r["srcPosture"], o);
         }
     }
     for g in p["grants"].as_array().into_iter().flatten() {
-        if !everyone(&g["src"]) || !plain(g) || !strs(&g["dst"]).any(|d| d == "*" || d == TAG) {
+        if g.get("via").is_some() || !strs(&g["dst"]).any(|d| d == "*" || d == TAG) {
             continue;
         }
+        let mut open = [false, false];
         for ip in strs(&g["ip"]) {
             let (proto, ports) = match ip.split_once(':') {
                 Some(x) => x,
@@ -341,11 +374,32 @@ pub fn reaches_pyo(p: &Value) -> Option<bool> {
                 None => (ip, "*"),
             };
             if matches!(proto, "*" | "tcp" | "6") {
-                take(ports);
+                open = or(open, covers(ports));
+            }
+        }
+        note(
+            strs(&g["src"]).map(str::to_owned).collect(),
+            &g["srcPosture"],
+            open,
+        );
+    }
+    // Any one source on both ports, over all its rules.
+    let mut by_src: Vec<(&str, [bool; 2])> = vec![];
+    for (s, o) in &rules {
+        for src in &s.src {
+            match by_src.iter_mut().find(|(x, _)| x == src) {
+                Some((_, b)) => *b = or(*b, *o),
+                None => by_src.push((src, *o)),
             }
         }
     }
-    Some(open == [true, true])
+    if by_src.iter().any(|(_, o)| *o == [true, true]) {
+        Reach::Yes
+    } else if rules.is_empty() {
+        Reach::No
+    } else {
+        Reach::Partly(rules.into_iter().map(|(s, _)| s).collect())
+    }
 }
 
 fn strings(xs: &[&str]) -> jsonc_parser::cst::CstInputValue {
@@ -369,14 +423,23 @@ pub fn patch(text: &str, needs: &Needs) -> Result<String, String> {
             .ok_or_else(|| cant("tagOwners"))?
             .append(TAG, strings(&[OWNERS]));
     }
-    if needs.grant {
-        obj.array_value_or_create("grants")
-            .ok_or_else(|| "Pyo can't edit your tailnet policy: grants isn't a list.".to_owned())?
-            .append(CstInputValue::Object(vec![
-                ("src".into(), strings(&["autogroup:member"])),
+    if let Some(sources) = needs.grant() {
+        let grants = obj
+            .array_value_or_create("grants")
+            .ok_or_else(|| "Pyo can't edit your tailnet policy: grants isn't a list.".to_owned())?;
+        for s in sources {
+            let src: Vec<&str> = s.src.iter().map(String::as_str).collect();
+            let mut grant = vec![
+                ("src".into(), strings(&src)),
                 ("dst".into(), strings(&[TAG])),
                 ("ip".into(), strings(&["tcp:80", "tcp:443"])),
-            ]));
+            ];
+            if !s.posture.is_empty() {
+                let posture: Vec<&str> = s.posture.iter().map(String::as_str).collect();
+                grant.push(("srcPosture".into(), strings(&posture)));
+            }
+            grants.append(CstInputValue::Object(grant));
+        }
     }
     if needs.approver {
         let services = obj
@@ -490,15 +553,20 @@ fn https_on(settings: &Value) -> Option<bool> {
         })
 }
 
-/// The tailnet as Pyo found it.
-struct Survey {
-    /// The policy is managed outside the console (GitOps, Terraform).
-    gitops: bool,
-    policy: String,
+/// The tailnet policy as Pyo read it, parsed once.
+struct Policy {
+    text: String,
     etag: Option<String>,
     needs: Needs,
     /// The policy with what it needs, when it needs something.
     patched: Option<String>,
+}
+
+/// The tailnet as Pyo found it.
+struct Survey {
+    /// The policy is managed outside the console (GitOps, Terraform).
+    gitops: bool,
+    policy: Policy,
     magic_dns: bool,
     /// None when Tailscale doesn't say.
     https: Option<bool>,
@@ -506,45 +574,54 @@ struct Survey {
     client: bool,
 }
 
-async fn read_policy(api: &Api) -> Result<(String, Option<String>, Needs, Option<String>), String> {
+async fn read_policy(api: &Api) -> Result<Policy, String> {
     let (text, etag) = api
         .policy()
         .await
         .map_err(|e| say(&e, "read your tailnet policy"))?;
-    let needs = needs(&parse(&text)?);
+    let parsed = parse(&text)?;
+    let needs = needs(&parsed);
     let patched = if needs.any() {
         Some(patch(&text, &needs)?)
     } else {
         None
     };
-    Ok((text, etag, needs, patched))
-}
-
-async fn survey(api: &Api, host: &impl Host) -> Result<Survey, String> {
-    let settings = api
-        .get("/tailnet/-/settings")
-        .await
-        .map_err(|e| say(&e, "read your tailnet's settings"))?;
-    let (policy, etag, needs, patched) = read_policy(api).await?;
-    let dns = api
-        .get("/tailnet/-/dns/preferences")
-        .await
-        .map_err(|e| say(&e, "read your tailnet's DNS settings"))?;
-    let client = match host.working_client().await {
-        None => false,
-        // On this tailnet: Tailscale knows it by its ID. A client it can't
-        // show this token still counts, since it signs in.
-        Some(id) => match api.get(&format!("/tailnet/-/keys/{id}")).await {
-            Ok(k) => k["invalid"].as_bool() != Some(true),
-            Err(e) => e.status != 404,
-        },
-    };
-    Ok(Survey {
-        gitops: settings["aclsExternallyManagedOn"].as_bool() == Some(true),
-        policy,
+    Ok(Policy {
+        text,
         etag,
         needs,
         patched,
+    })
+}
+
+async fn survey(api: &Api, host: &impl Host) -> Result<Survey, String> {
+    // Nothing here depends on anything else, so it's all read at once.
+    let settings = async {
+        api.get("/tailnet/-/settings")
+            .await
+            .map_err(|e| say(&e, "read your tailnet's settings"))
+    };
+    let dns = async {
+        api.get("/tailnet/-/dns/preferences")
+            .await
+            .map_err(|e| say(&e, "read your tailnet's DNS settings"))
+    };
+    let client = async {
+        Ok::<_, String>(match host.working_client().await {
+            None => false,
+            // On this tailnet: Tailscale knows it by its ID. A client it can't
+            // show this token still counts, since it signs in.
+            Some(id) => match api.get(&format!("/tailnet/-/keys/{id}")).await {
+                Ok(k) => k["invalid"].as_bool() != Some(true),
+                Err(e) => e.status != 404,
+            },
+        })
+    };
+    let (settings, policy, dns, client) =
+        tokio::try_join!(settings, read_policy(api), dns, client)?;
+    Ok(Survey {
+        gitops: settings["aclsExternallyManagedOn"].as_bool() == Some(true),
+        policy,
         magic_dns: dns["magicDNS"].as_bool() == Some(true),
         https: https_on(&settings),
         client,
@@ -595,9 +672,19 @@ pub struct Plan {
     pub diff: Vec<String>,
     /// Why Pyo can't go on by itself, with `diff` as the lines to add.
     pub blocked: Option<String>,
+    /// The policy as Pyo read it, to hand back to setUpTailscale: if it
+    /// changed since, Pyo changes nothing and asks for a new review.
+    pub version: String,
+}
+
+/// What tells one policy text from another.
+fn version(text: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(text.as_bytes()))
 }
 
 fn plan_of(s: &Survey) -> Plan {
+    let n = &s.policy.needs;
     let mut p = Plan::default();
     let mut step = |todo: bool, t: [&str; 3]| {
         if todo {
@@ -608,24 +695,25 @@ fn plan_of(s: &Survey) -> Plan {
     };
     step(!s.magic_dns, words::MAGIC_DNS);
     step(s.https != Some(true), words::HTTPS);
-    step(s.needs.tag_owner, words::TAG_OWNER);
-    if s.needs.grant || reaches_pyo(&parse(&s.policy).unwrap_or_default()) == Some(true) {
-        step(s.needs.grant, words::GRANT);
+    step(n.tag_owner, words::TAG_OWNER);
+    if n.reach != Reach::NoRules {
+        step(n.grant().is_some(), words::GRANT);
     }
     // A policy in Git that has what's required is left as it is.
-    let writes_policy = !s.gitops || s.needs.required();
-    if writes_policy || !s.needs.approver {
-        step(s.needs.approver, words::APPROVER);
+    let writes_policy = !s.gitops || n.required();
+    if writes_policy || !n.approver {
+        step(n.approver, words::APPROVER);
     }
     step(!s.client, words::CLIENT);
-    if let Some(new) = &s.patched
+    if let Some(new) = &s.policy.patched
         && writes_policy
     {
-        p.diff = diff(&s.policy, new);
+        p.diff = diff(&s.policy.text, new);
     }
-    if s.gitops && s.needs.required() {
+    if s.gitops && n.required() {
         p.blocked = Some(GITOPS.into());
     }
+    p.version = version(&s.policy.text);
     p
 }
 
@@ -666,7 +754,27 @@ pub struct Outcome {
     pub checks: Vec<Value>,
     /// The pasted token was deleted.
     pub token_deleted: bool,
+    /// The tailnet changed since it was reviewed, so Pyo stopped there.
+    /// The token is kept: plan again with it and review the new changes.
+    pub review_again: bool,
 }
+
+/// Why the setup stopped before the end.
+enum Stop {
+    /// It failed. The setup is over, so the token goes.
+    Failed(String),
+    /// The tailnet isn't the one the admin reviewed. The token stays for
+    /// the new review.
+    Review,
+}
+
+impl From<String> for Stop {
+    fn from(e: String) -> Self {
+        Stop::Failed(e)
+    }
+}
+
+const REVIEW_AGAIN: &str = "Your tailnet changed since Pyo checked it. Review the changes again.";
 
 enum Https {
     On,
@@ -688,7 +796,7 @@ async fn turn_on_https(api: &Api) -> Result<Https, TsError> {
             )
             .await
         {
-            Ok(r) if https_on(&r.json()) == Some(true) => return Ok(Https::On),
+            Ok(r) if https_on(&json_of(&r)) == Some(true) => return Ok(Https::On),
             Ok(_) => {
                 if read().await? == Some(true) {
                     return Ok(Https::On);
@@ -717,7 +825,7 @@ async fn validate(api: &Api, text: &str) -> Result<(), String> {
         )
         .await
         .map_err(|e| say(&e, "check the new tailnet policy"))?;
-    let v = r.json();
+    let v = json_of(&r);
     let errors = v["data"]
         .as_array()
         .into_iter()
@@ -737,7 +845,7 @@ async fn validate(api: &Api, text: &str) -> Result<(), String> {
 fn policy_changes(n: &Needs) -> Vec<String> {
     [
         (n.tag_owner, words::TAG_OWNER),
-        (n.grant, words::GRANT),
+        (n.grant().is_some(), words::GRANT),
         (n.approver, words::APPROVER),
     ]
     .into_iter()
@@ -746,49 +854,35 @@ fn policy_changes(n: &Needs) -> Vec<String> {
     .collect()
 }
 
-/// Writes the policy with what it needs. If someone changed it meanwhile
-/// (412), reads it again and plans once more.
-async fn write_policy(api: &Api, s: &Survey) -> Result<Vec<String>, String> {
-    let (mut etag, mut needs, mut patched) = (s.etag.clone(), s.needs, s.patched.clone());
-    for attempt in 0..2 {
-        let Some(text) = patched.as_deref() else {
-            return Ok(vec![]);
-        };
-        // The first one was validated before anything changed.
-        if attempt > 0 {
-            validate(api, text).await?;
-        }
-        let mut headers = vec![("accept", "application/hujson")];
-        if let Some(e) = etag.as_deref() {
-            headers.push(("if-match", e));
-        }
-        match api
-            .send(
-                reqwest::Method::POST,
-                "/tailnet/-/acl",
-                Body::HuJson(text.to_owned()),
-                &headers,
-            )
-            .await
-        {
-            Ok(_) => {
-                tracing::info!("tailnet policy updated");
-                return Ok(policy_changes(&needs));
-            }
-            Err(e) if e.status == 412 && attempt == 0 => {
-                tracing::info!("tailnet policy changed meanwhile, planning again");
-                let (_, e2, n2, p2) = read_policy(api).await?;
-                (etag, needs, patched) = (e2, n2, p2);
-            }
-            Err(e) if e.status == 412 => {
-                return Err(
-                    "Your tailnet policy changed while Pyo was editing it. Check again.".into(),
-                );
-            }
-            Err(e) => return Err(say(&e, "save your tailnet policy")),
-        }
+/// Writes the policy as the admin reviewed it. If someone changed it
+/// meanwhile (412), nothing is written: the admin reviews the new one.
+async fn write_policy(api: &Api, p: &Policy) -> Result<Vec<String>, Stop> {
+    let Some(text) = p.patched.as_deref() else {
+        return Ok(vec![]);
+    };
+    let mut headers = vec![("accept", "application/hujson")];
+    if let Some(e) = p.etag.as_deref() {
+        headers.push(("if-match", e));
     }
-    unreachable!()
+    match api
+        .send(
+            reqwest::Method::POST,
+            "/tailnet/-/acl",
+            Body::HuJson(text.to_owned()),
+            &headers,
+        )
+        .await
+    {
+        Ok(_) => {
+            tracing::info!("tailnet policy updated");
+            Ok(policy_changes(&p.needs))
+        }
+        Err(e) if e.status == 412 => {
+            tracing::info!("tailnet policy changed since it was reviewed");
+            Err(Stop::Review)
+        }
+        Err(e) => Err(Stop::Failed(say(&e, "save your tailnet policy"))),
+    }
 }
 
 /// Makes Pyo's own OAuth client and saves it: (checks).
@@ -810,7 +904,7 @@ async fn make_client(api: &Api, host: &impl Host) -> Result<Vec<Value>, String> 
                 format!("Tailscale didn't let Pyo create its OAuth client.{why} Set up with an OAuth client instead.")
             }
         })?;
-    let v = r.json();
+    let v = json_of(&r);
     let secret = v["key"].as_str().unwrap_or("");
     // The client ID is the key's ID, which its secret carries too.
     let id = v["id"].as_str().map(str::to_owned).or_else(|| {
@@ -842,31 +936,54 @@ async fn make_client(api: &Api, host: &impl Host) -> Result<Vec<Value>, String> 
     }
 }
 
-/// Sets the tailnet up: what [`plan_with`] says, in that order, and the
-/// pasted token deleted last. Fails with nothing changed, or says what
-/// changed before it stopped.
-pub(crate) async fn apply_with(api: &Api, host: &impl Host) -> Result<Outcome, String> {
+/// What became of the pasted token.
+enum Gone {
+    Deleted,
+    /// Tailscale no longer takes it (401) or knows it (404): nothing to delete.
+    Already,
+    /// Still there: the admin deletes it.
+    Left,
+}
+
+async fn delete_token(api: &Api) -> Gone {
+    let Some(id) = api.token.key_id() else {
+        return Gone::Left;
+    };
+    match api
+        .send(
+            reqwest::Method::DELETE,
+            &format!("/tailnet/-/keys/{id}"),
+            Body::None,
+            &[],
+        )
+        .await
+    {
+        Ok(_) => Gone::Deleted,
+        Err(e) if e.status == 401 || e.status == 404 => Gone::Already,
+        Err(_) => Gone::Left,
+    }
+}
+
+/// The changes, in [`plan_with`]'s order, into `out` as they're made.
+async fn set_up(
+    api: &Api,
+    host: &impl Host,
+    reviewed: &str,
+    out: &mut Outcome,
+) -> Result<(), Stop> {
     if !host.can_store() {
-        return Err(NO_KEY.into());
+        return Err(Stop::Failed(NO_KEY.into()));
     }
     let s = survey(api, host).await?;
-    if s.gitops && s.needs.required() {
-        return Err(GITOPS.into());
+    // Only the tailnet the admin reviewed is changed.
+    if version(&s.policy.text) != reviewed || (s.gitops && s.policy.needs.required()) {
+        return Err(Stop::Review);
     }
-    let writes_policy = !s.gitops && s.patched.is_some();
+    let writes_policy = !s.gitops && s.policy.patched.is_some();
     // Before anything changes.
-    if writes_policy && let Some(p) = &s.patched {
+    if writes_policy && let Some(p) = &s.policy.patched {
         validate(api, p).await?;
     }
-    let mut out = Outcome::default();
-    let stop = |mut out: Outcome, e: String| {
-        if out.changed.is_empty() {
-            Err(e)
-        } else {
-            out.error = Some(e);
-            Ok(out)
-        }
-    };
     if !s.magic_dns {
         if let Err(e) = api
             .send(
@@ -881,14 +998,13 @@ pub(crate) async fn apply_with(api: &Api, host: &impl Host) -> Result<Outcome, S
                 .get("/tailnet/-/dns/nameservers")
                 .await
                 .is_ok_and(|v| strs(&v["dns"]).next().is_none());
-            return stop(
-                out,
+            return Err(Stop::Failed(
                 if none && e.status != 401 && e.status != 403 {
                     "MagicDNS needs a DNS nameserver first. Add one under DNS in the Tailscale console, then try again.".into()
                 } else {
                     say(&e, "turn on MagicDNS")
                 },
-            );
+            ));
         }
         out.changed.push(words::MAGIC_DNS[1].into());
     }
@@ -901,47 +1017,55 @@ pub(crate) async fn apply_with(api: &Api, host: &impl Host) -> Result<Outcome, S
             Ok(Https::Unknown) => out.todo.push(
                 "Check that HTTPS Certificates is on under DNS in the Tailscale console.".into(),
             ),
-            Err(e) => return stop(out, say(&e, "turn on HTTPS certificates")),
+            Err(e) => return Err(Stop::Failed(say(&e, "turn on HTTPS certificates"))),
         }
     }
     if writes_policy {
-        match write_policy(api, &s).await {
-            Ok(done) => out.changed.extend(done),
-            Err(e) => return stop(out, e),
-        }
+        let done = write_policy(api, &s.policy).await?;
+        out.changed.extend(done);
     }
     if !s.client {
-        match make_client(api, host).await {
-            Ok(checks) => {
-                out.changed.push(words::CLIENT[1].into());
-                out.checks = checks;
-            }
-            Err(e) => return stop(out, e),
+        out.checks = make_client(api, host).await?;
+        out.changed.push(words::CLIENT[1].into());
+    }
+    Ok(())
+}
+
+/// Sets the tailnet up as reviewed (`reviewed` is the plan's version): what
+/// [`plan_with`] says, in that order. Says what changed, and what stopped
+/// it if something did. However it ends, the pasted token is deleted
+/// last, or left to the admin as a todo, except when the tailnet changed
+/// since the review: then it stays for the new one.
+pub(crate) async fn apply_with(api: &Api, host: &impl Host, reviewed: &str) -> Outcome {
+    let mut out = Outcome::default();
+    let failed = match set_up(api, host, reviewed, &mut out).await {
+        Ok(()) => None,
+        Err(Stop::Failed(e)) => Some(e),
+        Err(Stop::Review) => {
+            out.review_again = true;
+            out.error = Some(REVIEW_AGAIN.into());
+            tracing::info!(
+                changed = out.changed.len(),
+                "tailscale setup stopped for a new review"
+            );
+            return out;
         }
-    }
-    // Last: nothing needs the token after this.
-    out.token_deleted = match api.token.key_id() {
-        Some(id) => api
-            .send(
-                reqwest::Method::DELETE,
-                &format!("/tailnet/-/keys/{id}"),
-                Body::None,
-                &[],
-            )
-            .await
-            .is_ok(),
-        None => false,
     };
-    if !out.token_deleted {
-        out.todo.push(DELETE_TOKEN.into());
+    // Last: nothing needs the token after this.
+    match delete_token(api).await {
+        Gone::Deleted => out.token_deleted = true,
+        Gone::Already => {}
+        Gone::Left => out.todo.push(DELETE_TOKEN.into()),
     }
-    out.ok = true;
+    out.ok = failed.is_none();
+    out.error = failed;
     tracing::info!(
+        ok = out.ok,
         changed = out.changed.len(),
         token_deleted = out.token_deleted,
         "tailscale set up"
     );
-    Ok(out)
+    out
 }
 
 /// planTailscaleSetup.
@@ -953,12 +1077,10 @@ pub async fn plan(s: &AppState, token: Token) -> ApiResult<Value> {
     Ok(json!({ "ok": true, "plan": p }))
 }
 
-/// setUpTailscale.
-pub async fn apply(s: &AppState, token: Token) -> ApiResult<Outcome> {
+/// setUpTailscale: `version` is the reviewed plan's.
+pub async fn apply(s: &AppState, token: Token, version: &str) -> ApiResult<Outcome> {
     check_shape(&token).map_err(ApiError::bad_request)?;
-    apply_with(&Api::new(token), s)
-        .await
-        .map_err(ApiError::bad_request)
+    Ok(apply_with(&Api::new(token), s, version).await)
 }
 
 #[cfg(test)]

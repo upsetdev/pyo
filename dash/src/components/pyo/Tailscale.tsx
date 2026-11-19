@@ -302,7 +302,8 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
   };
   const cancel = ts ? toManage : onClose;
 
-  const check = async () => {
+  // `note` shows on the review, as when the tailnet changed since the last one.
+  const check = async (note = "") => {
     if (!token.trim() || busy) return;
     setBusy(true);
     setError("");
@@ -311,15 +312,19 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
     setBusy(false);
     if ("error" in r) return setError(r.error);
     setPlan(r.data.plan);
+    setError(note);
   };
   const apply = async () => {
+    if (!plan) return;
     setBusy(true);
     setError("");
-    const r = await api.setUpTailscale(token);
+    const r = await api.setUpTailscale(token, plan.version);
     setBusy(false);
     if ("error" in r) return setError(r.error);
+    if (r.data.reviewAgain) return void check(r.data.error ?? "");
     if (!r.data.ok) {
-      // Stopped partway: what changed stays listed, and the token stays for another try.
+      // Stopped: what changed stays listed. The setup is over, so the token is done with.
+      setToken("");
       setPlan(null);
       return setStopped(r.data);
     }
@@ -340,6 +345,14 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
     setSecret("");
     toast({ title: "Tailscale saved" });
     if (!goBack(navigate)) toManage();
+  };
+  // The saved client's secret, pasted again by hand.
+  const replaceSecret = () => {
+    setClientId(ts?.clientId ?? "");
+    setSecret("");
+    setClientChecks([]);
+    setError("");
+    setView("client");
   };
   const test = async () => {
     setTesting(true);
@@ -450,7 +463,11 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
         <div className="space-y-4">
           <Steps steps={STEPS} at={0} />
           {stopped ? (
-            <StatusNote tone="danger" icon={<XCircleIcon size={15} weight="fill" />} title="Setup stopped partway">
+            <StatusNote
+              tone="danger"
+              icon={<XCircleIcon size={15} weight="fill" />}
+              title={stopped.changed.length ? "Setup stopped partway" : "Setup stopped"}
+            >
               <SetupOutcome outcome={stopped} />
             </StatusNote>
           ) : null}
@@ -555,7 +572,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
               "Secret",
               <>
                 <span className="font-mono">{ts.hint}</span>
-                <Button size="xs" variant="ghost" className="-my-1 -mr-2" onClick={() => setView("token")}>
+                <Button size="xs" variant="ghost" className="-my-1 -mr-2" onClick={replaceSecret}>
                   Replace
                 </Button>
               </>,

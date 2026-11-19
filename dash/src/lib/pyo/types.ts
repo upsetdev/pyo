@@ -1880,6 +1880,8 @@ export type TailscaleSetupPlan = {
   diff: string[];
   /** Why Pyo can't go on by itself. `diff` then holds the lines to add. */
   blocked: string | null;
+  /** The policy as read. Handed back to setUpTailscale. */
+  version: string;
 };
 
 /** What setting up Tailscale with an access token did (setUpTailscale). */
@@ -1890,6 +1892,8 @@ export type TailscaleSetupOutcome = {
   error: string | null;
   checks: TailscaleCheck[];
   tokenDeleted: boolean;
+  /** The tailnet changed since the review. The token is kept for a new one. */
+  reviewAgain: boolean;
 };
 
 /** Pyo on the public IP (admins only). */

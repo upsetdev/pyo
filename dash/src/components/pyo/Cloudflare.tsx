@@ -393,7 +393,7 @@ export function DnsRecordLine({ app, d }: { app: Application; d: Domain }) {
         : r.proxy
           ? "· Proxied once the certificate is issued"
           : null}
-      {r.error ? <span className="text-destructive! hover:bg-destructive/10">· {r.error}</span> : null}
+      {r.error ? <span className="text-destructive">· {r.error}</span> : null}
       {(r.proxied || r.proxy) && !app.behindCdn ? (
         <AppLink
           href={servicePath(app.id, "firewall", s)}

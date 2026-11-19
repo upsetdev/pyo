@@ -301,6 +301,12 @@ fn api(base: &str) -> Api {
     Api::at(base, Token::new(TOKEN))
 }
 
+/// Plans, then sets up what was reviewed, as the dashboard does.
+async fn set_up(base: &str, host: &FakeHost) -> Outcome {
+    let p = plan_with(&api(base), host).await.unwrap();
+    apply_with(&api(base), host, &p.version).await
+}
+
 fn fresh() -> Mock {
     Mock {
         policy: DEFAULT_POLICY.into(),
@@ -337,7 +343,7 @@ fn the_patch_keeps_comments_and_formatting() {
         n,
         Needs {
             tag_owner: true,
-            grant: false,
+            reach: Reach::Yes,
             approver: true
         }
     );
@@ -374,7 +380,7 @@ fn the_patch_adds_to_tag_owners_already_there() {
         n,
         Needs {
             tag_owner: true,
-            grant: true,
+            reach: Reach::No,
             approver: true
         }
     );
@@ -394,14 +400,14 @@ fn the_patch_adds_to_tag_owners_already_there() {
         json!([{ "src": ["autogroup:member"], "dst": [TAG], "ip": ["tcp:80", "tcp:443"] }])
     );
     assert_eq!(v["acls"], parse(RESTRICTED_POLICY).unwrap()["acls"]);
-    assert_eq!(reaches_pyo(&v), Some(true));
+    assert_eq!(reach(&v), Reach::Yes);
 }
 
 #[test]
 fn approvers_for_tag_pyo_get_tag_pyo_added() {
     let p = r#"{ "autoApprovers": { "services": { "tag:pyo": ["group:ops"] } }, "tagOwners": { "tag:pyo": [] }, "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"] }] }"#;
     let n = needs(&parse(p).unwrap());
-    assert!(n.approver && !n.tag_owner && !n.grant);
+    assert!(n.approver && !n.tag_owner && n.grant().is_none());
     let v = parse(&patch(p, &n).unwrap()).unwrap();
     assert_eq!(
         v["autoApprovers"]["services"][TAG],
@@ -409,71 +415,102 @@ fn approvers_for_tag_pyo_get_tag_pyo_added() {
     );
 }
 
+fn src(src: &[&str], posture: &[&str]) -> Source {
+    Source {
+        src: src.iter().map(|s| (*s).to_owned()).collect(),
+        posture: posture.iter().map(|s| (*s).to_owned()).collect(),
+    }
+}
+
 #[test]
 fn what_lets_the_tailnet_reach_pyo() {
-    let r = |p: Value| reaches_pyo(&p);
-    assert_eq!(
-        r(json!({ "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"] }] })),
-        Some(true)
-    );
-    assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] })),
-        Some(true)
-    );
-    assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "users": ["*"], "ports": ["*:*"] }] })),
-        Some(true)
-    );
-    assert_eq!(
-        r(
-            json!({ "grants": [{ "src": ["autogroup:member"], "dst": [TAG], "ip": ["tcp:80", "443"] }] })
-        ),
-        Some(true)
-    );
-    assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["tag:pyo:80,443"] }] })),
-        Some(true)
-    );
-    assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["tag:pyo:1-1024"] }] })),
-        Some(true)
-    );
-    // Split over two rules.
-    assert_eq!(
-        r(json!({ "grants": [
+    let r = |p: Value| reach(&p);
+    for yes in [
+        json!({ "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"] }] }),
+        json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] }),
+        json!({ "acls": [{ "action": "accept", "users": ["*"], "ports": ["*:*"] }] }),
+        json!({ "grants": [{ "src": ["autogroup:member"], "dst": [TAG], "ip": ["tcp:80", "443"] }] }),
+        json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["tag:pyo:80,443"] }] }),
+        json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["tag:pyo:1-1024"] }] }),
+        // Split over two rules.
+        json!({ "grants": [
             { "src": ["*"], "dst": [TAG], "ip": ["tcp:80"] },
             { "src": ["*"], "dst": ["*"], "ip": ["tcp:443"] },
-        ] })),
-        Some(true)
-    );
-    // Only some people, a port missing, UDP, posture: not plainly open.
+        ] }),
+        // Only some people, or only with a posture: the admin's choice, kept.
+        json!({ "grants": [{ "src": ["group:eng"], "dst": ["*"], "ip": ["*"] }] }),
+        json!({ "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"], "srcPosture": ["posture:x"] }] }),
+    ] {
+        assert_eq!(r(yes.clone()), Reach::Yes, "{yes}");
+    }
+    // A port missing, or UDP only: those same sources, and no one else.
     assert_eq!(
-        r(json!({ "grants": [{ "src": ["group:eng"], "dst": ["*"], "ip": ["*"] }] })),
-        Some(false)
-    );
-    assert_eq!(
-        r(json!({ "grants": [{ "src": ["*"], "dst": [TAG], "ip": ["tcp:443"] }] })),
-        Some(false)
+        r(json!({ "grants": [{ "src": ["group:eng"], "dst": [TAG], "ip": ["tcp:443"] }] })),
+        Reach::Partly(vec![src(&["group:eng"], &[])])
     );
     assert_eq!(
         r(json!({ "grants": [{ "src": ["*"], "dst": [TAG], "ip": ["udp:*"] }] })),
-        Some(false)
-    );
-    assert_eq!(
-        r(
-            json!({ "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"], "srcPosture": ["posture:x"] }] })
-        ),
-        Some(false)
+        Reach::Partly(vec![src(&["*"], &[])])
     );
     assert_eq!(
         r(
             json!({ "acls": [{ "action": "accept", "src": ["*"], "proto": "udp", "dst": ["*:*"] }] })
         ),
-        Some(false)
+        Reach::Partly(vec![src(&["*"], &[])])
     );
-    assert_eq!(r(json!({ "acls": [] })), Some(false));
-    // No rules at all: Pyo doesn't write the first one.
-    assert_eq!(r(json!({ "tagOwners": {} })), None);
+    assert_eq!(
+        r(
+            json!({ "acls": [{ "action": "accept", "src": ["group:eng"], "srcPosture": ["posture:x"], "dst": ["*:22"] }] })
+        ),
+        Reach::Partly(vec![src(&["group:eng"], &["posture:x"])])
+    );
+    // Nothing reaches tag:pyo, or there are no rules yet.
+    assert_eq!(
+        r(
+            json!({ "acls": [{ "action": "accept", "src": ["group:eng"], "dst": ["tag:prod:22"] }] })
+        ),
+        Reach::No
+    );
+    assert_eq!(r(json!({ "acls": [] })), Reach::No);
+    assert_eq!(r(json!({ "tagOwners": {} })), Reach::NoRules);
+}
+
+#[test]
+fn access_limited_to_a_group_is_never_widened() {
+    // The group reaches everything: nothing to add, and no grant at all.
+    let p = r#"{ "tagOwners": { "tag:pyo": [] }, "grants": [{ "src": ["group:eng"], "dst": ["*"], "ip": ["*"] }] }"#;
+    let n = needs(&parse(p).unwrap());
+    assert_eq!(n.reach, Reach::Yes);
+    let out = patch(
+        p,
+        &Needs {
+            approver: true,
+            ..n
+        },
+    )
+    .unwrap();
+    assert_eq!(parse(&out).unwrap()["grants"], parse(p).unwrap()["grants"]);
+    assert!(!out.contains(MEMBERS), "{out}");
+
+    // The group reaches tag:pyo on 443 only: 80 is added for that group,
+    // with its posture, and never for anyone else.
+    let p = r#"{
+  "tagOwners": { "tag:pyo": [] },
+  "grants": [
+    { "src": ["group:eng"], "dst": ["tag:pyo"], "ip": ["tcp:443"], "srcPosture": ["posture:latest"] },
+  ],
+}"#;
+    let n = needs(&parse(p).unwrap());
+    assert!(n.required());
+    let out = patch(p, &n).unwrap();
+    let v = parse(&out).unwrap();
+    assert_eq!(
+        v["grants"][1],
+        json!({ "src": ["group:eng"], "dst": [TAG], "ip": ["tcp:80", "tcp:443"], "srcPosture": ["posture:latest"] })
+    );
+    assert_eq!(v["grants"].as_array().unwrap().len(), 2);
+    assert!(!out.contains(MEMBERS), "{out}");
+    assert_eq!(reach(&v), Reach::Yes);
 }
 
 #[test]
@@ -493,6 +530,33 @@ fn the_token_shape_is_checked_and_its_id_found() {
     assert_eq!(Token::new(TOKEN).key_id(), Some("kTok1CNTRL"));
     assert_eq!(Token::new("tskey-api-").key_id(), None);
     assert_eq!(format!("{:?}", Token::new(TOKEN)), "Token(•••)");
+}
+
+#[test]
+fn the_plan_uses_the_policy_as_parsed_once() {
+    // plan_of never reads the text again: what the policy reaches comes
+    // from the one parse, so even text it couldn't parse doesn't change it.
+    let s = Survey {
+        gitops: false,
+        policy: Policy {
+            text: "not a policy".into(),
+            etag: None,
+            needs: Needs {
+                reach: Reach::Yes,
+                ..Default::default()
+            },
+            patched: None,
+        },
+        magic_dns: true,
+        https: Some(true),
+        client: true,
+    };
+    let p = plan_of(&s);
+    assert!(p.changes.is_empty(), "{p:?}");
+    assert!(
+        p.done
+            .contains(&"Your tailnet can reach tag:pyo".to_owned())
+    );
 }
 
 // ── Against the mock API ────────────────────────────────────────────────────
@@ -520,7 +584,7 @@ async fn a_fresh_tailnet_with_the_default_policy() {
         "the plan changes nothing"
     );
 
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(out.ok, "{out:?}");
     assert_eq!(
         out.changed,
@@ -581,7 +645,7 @@ async fn a_restricted_policy_with_its_own_tag_owners() {
             "Create the Pyo OAuth client",
         ]
     );
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(out.ok, "{out:?}");
     let m = st.lock().unwrap();
     assert!(
@@ -617,7 +681,7 @@ async fn an_already_set_up_tailnet_changes_nothing() {
     assert!(p.changes.is_empty(), "{p:?}");
     assert!(p.diff.is_empty());
     assert_eq!(p.done.len(), 6);
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(
         out.ok && out.changed.is_empty() && out.token_deleted,
         "{out:?}"
@@ -642,7 +706,7 @@ async fn a_saved_client_from_another_tailnet_is_replaced() {
     };
     let p = plan_with(&api(&base), &host).await.unwrap();
     assert_eq!(p.changes, ["Create the Pyo OAuth client"]);
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(out.ok);
     assert_eq!(st.lock().unwrap().clients.len(), 1);
 }
@@ -663,8 +727,9 @@ async fn a_policy_managed_in_git_is_never_written() {
             .iter()
             .any(|l| l.contains("\"tag:pyo\": [\"autogroup:admin\"]"))
     );
-    let e = apply_with(&api(&base), &host).await.unwrap_err();
-    assert!(e.contains("managed outside"), "{e}");
+    // Set up anyway: nothing is written, and the token stays for a new review.
+    let out = apply_with(&api(&base), &host, &p.version).await;
+    assert!(!out.ok && out.review_again && !out.token_deleted, "{out:?}");
     assert!(writes(&st.lock().unwrap()).is_empty());
 
     // Once Git has the lines, the rest goes on, and the policy is left alone.
@@ -677,50 +742,63 @@ async fn a_policy_managed_in_git_is_never_written() {
     let p = plan_with(&api(&base), &host).await.unwrap();
     assert!(p.blocked.is_none() && p.diff.is_empty(), "{p:?}");
     assert!(!p.changes.iter().any(|c| c.contains("Approve")));
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(out.ok, "{out:?}");
     assert!(st.lock().unwrap().written.is_empty());
 }
 
 #[tokio::test]
-async fn a_policy_changed_meanwhile_is_read_again_once() {
+async fn a_policy_changed_while_setting_up_is_reviewed_again() {
     let _one = ONE.lock().await;
     let (base, st) = serve(Mock {
         races: 1,
-        https: true,
         ..fresh()
     })
     .await;
-    let out = apply_with(&api(&base), &FakeHost::default()).await.unwrap();
-    assert!(out.ok, "{out:?}");
+    let host = FakeHost::default();
+    let p = plan_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
+    // Saving would lose the other edit or save what wasn't reviewed: stop.
+    assert!(!out.ok && out.review_again, "{out:?}");
+    assert_eq!(out.changed, ["Turned on HTTPS certificates"]);
+    assert_eq!(out.error.as_deref(), Some(REVIEW_AGAIN));
+    // The token stays for the new review, and nothing after the policy ran.
+    assert!(!out.token_deleted && out.todo.is_empty());
+    {
+        let m = st.lock().unwrap();
+        assert!(m.written.is_empty() && m.clients.is_empty() && m.deleted.is_empty());
+    }
+
+    // The new review shows the policy as it is now, and sets up from it.
+    let again = plan_with(&api(&base), &host).await.unwrap();
+    assert_ne!(again.version, p.version);
+    assert!(again.done.contains(&"HTTPS certificates are on".to_owned()));
+    let out = apply_with(&api(&base), &host, &again.version).await;
+    assert!(out.ok && out.token_deleted, "{out:?}");
     let m = st.lock().unwrap();
     // The other edit is kept, under Pyo's.
     assert!(m.policy.contains("// edited meanwhile"));
     assert!(parse(&m.policy).unwrap()["tagOwners"].get(TAG).is_some());
-    assert_eq!(
-        m.log.iter().filter(|l| *l == "POST /tailnet/-/acl").count(),
-        2
-    );
+    assert_eq!(m.written.len(), 1);
 }
 
 #[tokio::test]
-async fn a_policy_that_keeps_changing_stops_with_what_was_done() {
+async fn a_policy_changed_after_the_review_changes_nothing() {
     let _one = ONE.lock().await;
-    let (base, st) = serve(Mock {
-        races: 2,
-        ..fresh()
-    })
-    .await;
-    let out = apply_with(&api(&base), &FakeHost::default()).await.unwrap();
-    assert!(!out.ok);
-    assert_eq!(out.changed, ["Turned on HTTPS certificates"]);
+    let (base, st) = serve(fresh()).await;
+    let host = FakeHost::default();
+    let p = plan_with(&api(&base), &host).await.unwrap();
+    {
+        let mut m = st.lock().unwrap();
+        m.policy = m.policy.replacen('{', "{\n  // edited after the review", 1);
+        m.etag += 1;
+    }
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(
-        out.error
-            .unwrap()
-            .contains("changed while Pyo was editing it")
+        !out.ok && out.review_again && out.changed.is_empty(),
+        "{out:?}"
     );
-    let m = st.lock().unwrap();
-    assert!(m.written.is_empty() && m.clients.is_empty() && m.deleted.is_empty());
+    assert!(writes(&st.lock().unwrap()).is_empty(), "nothing changed");
 }
 
 #[tokio::test]
@@ -731,7 +809,7 @@ async fn https_under_its_other_name() {
         ..fresh()
     })
     .await;
-    let out = apply_with(&api(&base), &FakeHost::default()).await.unwrap();
+    let out = set_up(&base, &FakeHost::default()).await;
     assert!(
         out.ok
             && out
@@ -760,7 +838,7 @@ async fn a_refused_client_says_what_changed() {
     })
     .await;
     let host = FakeHost::default();
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = set_up(&base, &host).await;
     assert!(!out.ok);
     assert_eq!(
         out.changed,
@@ -769,15 +847,15 @@ async fn a_refused_client_says_what_changed() {
             "Approved Pyo's Services on tag:pyo servers by policy",
         ]
     );
-    let e = out.error.unwrap();
+    let e = out.error.clone().unwrap();
     assert!(
         e.contains("didn't let Pyo create its OAuth client") && e.contains("not allowed"),
         "{e}"
     );
-    assert!(!out.token_deleted);
     assert!(host.saved.lock().unwrap().is_empty());
-    // The token stays for another try.
-    assert!(st.lock().unwrap().deleted.is_empty());
+    // The setup is over, so the token goes all the same.
+    assert!(out.token_deleted && out.todo.is_empty(), "{out:?}");
+    assert_eq!(st.lock().unwrap().deleted, ["kTok1CNTRL"]);
 }
 
 #[tokio::test]
@@ -793,9 +871,12 @@ async fn a_client_that_cant_be_saved_is_deleted_again() {
         save_fails: true,
         ..Default::default()
     };
-    let e = apply_with(&api(&base), &host).await.unwrap_err();
+    let out = set_up(&base, &host).await;
+    assert!(!out.ok && out.changed.is_empty(), "{out:?}");
+    let e = out.error.clone().unwrap();
     assert!(e.contains("couldn't save its OAuth client"), "{e}");
-    assert_eq!(st.lock().unwrap().deleted, ["kPyo1CNTRL"]);
+    assert!(out.token_deleted);
+    assert_eq!(st.lock().unwrap().deleted, ["kPyo1CNTRL", "kTok1CNTRL"]);
 }
 
 #[tokio::test]
@@ -806,7 +887,7 @@ async fn a_token_that_cant_delete_itself_is_left_to_the_admin() {
         ..fresh()
     })
     .await;
-    let out = apply_with(&api(&base), &FakeHost::default()).await.unwrap();
+    let out = set_up(&base, &FakeHost::default()).await;
     assert!(out.ok && !out.token_deleted);
     assert_eq!(out.todo, [DELETE_TOKEN]);
 }
@@ -823,11 +904,52 @@ async fn magic_dns_without_nameservers_changes_nothing() {
     let host = FakeHost::default();
     let p = plan_with(&api(&base), &host).await.unwrap();
     assert_eq!(p.changes[0], "Turn on MagicDNS");
-    let e = apply_with(&api(&base), &host).await.unwrap_err();
+    let out = apply_with(&api(&base), &host, &p.version).await;
+    assert!(!out.ok && out.changed.is_empty(), "{out:?}");
+    let e = out.error.clone().unwrap();
     assert!(e.contains("needs a DNS nameserver"), "{e}");
+    // Stopped at the start, and the token deleted all the same.
+    assert!(out.token_deleted && out.todo.is_empty());
     assert_eq!(
         writes(&st.lock().unwrap()),
-        ["POST /tailnet/-/dns/preferences"]
+        [
+            "POST /tailnet/-/dns/preferences",
+            "DELETE /tailnet/-/keys/kTok1CNTRL"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_stop_with_a_token_that_cant_delete_itself_says_to_delete_it() {
+    let _one = ONE.lock().await;
+    let (base, _) = serve(Mock {
+        magic_dns: false,
+        nameservers: vec![],
+        refuse_revoke: true,
+        ..fresh()
+    })
+    .await;
+    let out = set_up(&base, &FakeHost::default()).await;
+    assert!(
+        !out.ok && out.error.is_some() && !out.token_deleted,
+        "{out:?}"
+    );
+    assert_eq!(out.todo, [DELETE_TOKEN]);
+}
+
+#[tokio::test]
+async fn a_token_tailscale_no_longer_takes_needs_no_deleting() {
+    let _one = ONE.lock().await;
+    let (base, _) = serve(fresh()).await;
+    let wrong = Api::at(
+        &base,
+        Token::new("tskey-api-kOther1CNTRL-zzzzzzzzzzzzzzzzzzzz"),
+    );
+    let out = apply_with(&wrong, &FakeHost::default(), "").await;
+    assert_eq!(out.error.as_deref(), Some(BAD_TOKEN));
+    assert!(
+        !out.ok && !out.token_deleted && out.todo.is_empty(),
+        "{out:?}"
     );
 }
 
@@ -907,12 +1029,11 @@ async fn the_token_never_shows_in_logs_errors_or_saved_settings() {
         let host = FakeHost::default();
         let p = plan_with(&api(&base), &host).await;
         seen.push(format!("{p:?}"));
+        let reviewed = p.as_ref().map(|p| p.version.clone()).unwrap_or_default();
         seen.push(serde_json::to_string(&p.ok()).unwrap());
-        let out = apply_with(&api(&base), &host).await;
+        let out = apply_with(&api(&base), &host, &reviewed).await;
         seen.push(format!("{out:?}"));
-        if let Ok(o) = &out {
-            seen.push(serde_json::to_string(o).unwrap());
-        }
+        seen.push(serde_json::to_string(&out).unwrap());
         for (id, secret) in host.saved.lock().unwrap().iter() {
             seen.push(format!("{id} {secret}"));
         }
@@ -954,4 +1075,22 @@ async fn the_token_never_shows_in_logs_errors_or_saved_settings() {
         &logs[..logs.len().min(2000)]
     );
     assert!(!leaks(&logs), "the token shows in the logs");
+}
+
+#[tokio::test]
+async fn a_policy_pyo_cant_read_stops_the_plan_with_why() {
+    let _one = ONE.lock().await;
+    let (base, st) = serve(Mock {
+        policy: "{ \"tagOwners\": ".into(),
+        ..fresh()
+    })
+    .await;
+    let e = plan_with(&api(&base), &FakeHost::default())
+        .await
+        .unwrap_err();
+    assert!(
+        e.starts_with("Pyo couldn't read your tailnet policy"),
+        "{e}"
+    );
+    assert!(writes(&st.lock().unwrap()).is_empty());
 }
