@@ -358,37 +358,28 @@ pub fn refresh_command(base: &str) -> String {
     }
 }
 
+/// Pyo's scripts are plain text, so a browser shows one instead of
+/// downloading it (`curl … | bash` doesn't mind). web::headers makes every
+/// response nosniff.
+const SCRIPT_TYPE: &str = "text/plain; charset=utf-8";
+
+fn script(body: &'static str) -> impl axum::response::IntoResponse {
+    ([(axum::http::header::CONTENT_TYPE, SCRIPT_TYPE)], body)
+}
+
 /// GET /install/join.sh
 pub async fn serve() -> impl axum::response::IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/x-shellscript; charset=utf-8",
-        )],
-        SCRIPT,
-    )
+    script(SCRIPT)
 }
 
 /// GET /install/connect.sh
 pub async fn serve_connect() -> impl axum::response::IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/x-shellscript; charset=utf-8",
-        )],
-        CONNECT_SCRIPT,
-    )
+    script(CONNECT_SCRIPT)
 }
 
 /// GET /install/sandbox.sh
 pub async fn serve_sandbox() -> impl axum::response::IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/x-shellscript; charset=utf-8",
-        )],
-        SANDBOX_SCRIPT,
-    )
+    script(SANDBOX_SCRIPT)
 }
 
 /// install.sh's `host_units`: the scripts and timers on the machine Pyo
@@ -421,18 +412,28 @@ static HOST_UNITS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
 
 /// GET /install/host-units.sh
 pub async fn serve_host_units() -> impl axum::response::IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/x-shellscript; charset=utf-8",
-        )],
-        HOST_UNITS.as_str(),
-    )
+    script(HOST_UNITS.as_str())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scripts_are_plain_text() {
+        use axum::response::IntoResponse;
+        for res in [
+            serve().await.into_response(),
+            serve_connect().await.into_response(),
+            serve_sandbox().await.into_response(),
+            serve_host_units().await.into_response(),
+        ] {
+            assert_eq!(
+                res.headers()[axum::http::header::CONTENT_TYPE],
+                "text/plain; charset=utf-8"
+            );
+        }
+    }
 
     /// This release's scripts on pyo.dev.
     const V: &str = concat!("https://pyo.dev/v/", env!("CARGO_PKG_VERSION"));
