@@ -160,6 +160,8 @@ Building from source or contributing? See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [pyo-templates](https://github.com/upsetdev/pyo-templates): the one-click templates.
 - [pyo-sandbox-images](https://github.com/upsetdev/pyo-sandbox-images): the images of the built-in sandbox templates, base and desktop.
 
+Follow Pyo on X at [@pyo_dev](https://x.com/pyo_dev).
+
 ## License
 
 Pyo is open source under the [Apache License 2.0](./LICENSE).
