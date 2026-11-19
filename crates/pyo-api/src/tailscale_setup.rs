@@ -469,15 +469,22 @@ fn https_on(settings: &Value) -> Option<bool> {
         })
 }
 
+/// The tailnet policy as Pyo read it, parsed once.
+struct Policy {
+    text: String,
+    etag: Option<String>,
+    needs: Needs,
+    /// What [`reaches_pyo`] says of it.
+    reaches: Option<bool>,
+    /// The policy with what it needs, when it needs something.
+    patched: Option<String>,
+}
+
 /// The tailnet as Pyo found it.
 struct Survey {
     /// The policy is managed outside the console (GitOps, Terraform).
     gitops: bool,
-    policy: String,
-    etag: Option<String>,
-    needs: Needs,
-    /// The policy with what it needs, when it needs something.
-    patched: Option<String>,
+    policy: Policy,
     magic_dns: bool,
     /// None when Tailscale doesn't say.
     https: Option<bool>,
@@ -485,18 +492,25 @@ struct Survey {
     client: bool,
 }
 
-async fn read_policy(api: &Api) -> Result<(String, Option<String>, Needs, Option<String>), String> {
+async fn read_policy(api: &Api) -> Result<Policy, String> {
     let (text, etag) = api
         .policy()
         .await
         .map_err(|e| say(&e, "read your tailnet policy"))?;
-    let needs = needs(&parse(&text)?);
+    let parsed = parse(&text)?;
+    let needs = needs(&parsed);
     let patched = if needs.any() {
         Some(patch(&text, &needs)?)
     } else {
         None
     };
-    Ok((text, etag, needs, patched))
+    Ok(Policy {
+        reaches: reaches_pyo(&parsed),
+        text,
+        etag,
+        needs,
+        patched,
+    })
 }
 
 async fn survey(api: &Api, host: &impl Host) -> Result<Survey, String> {
@@ -522,14 +536,11 @@ async fn survey(api: &Api, host: &impl Host) -> Result<Survey, String> {
             },
         })
     };
-    let (settings, (policy, etag, needs, patched), dns, client) =
+    let (settings, policy, dns, client) =
         tokio::try_join!(settings, read_policy(api), dns, client)?;
     Ok(Survey {
         gitops: settings["aclsExternallyManagedOn"].as_bool() == Some(true),
         policy,
-        etag,
-        needs,
-        patched,
         magic_dns: dns["magicDNS"].as_bool() == Some(true),
         https: https_on(&settings),
         client,
@@ -583,6 +594,7 @@ pub struct Plan {
 }
 
 fn plan_of(s: &Survey) -> Plan {
+    let n = &s.policy.needs;
     let mut p = Plan::default();
     let mut step = |todo: bool, t: [&str; 3]| {
         if todo {
@@ -593,22 +605,22 @@ fn plan_of(s: &Survey) -> Plan {
     };
     step(!s.magic_dns, words::MAGIC_DNS);
     step(s.https != Some(true), words::HTTPS);
-    step(s.needs.tag_owner, words::TAG_OWNER);
-    if s.needs.grant || reaches_pyo(&parse(&s.policy).unwrap_or_default()) == Some(true) {
-        step(s.needs.grant, words::GRANT);
+    step(n.tag_owner, words::TAG_OWNER);
+    if n.grant || s.policy.reaches == Some(true) {
+        step(n.grant, words::GRANT);
     }
     // A policy in Git that has what's required is left as it is.
-    let writes_policy = !s.gitops || s.needs.required();
-    if writes_policy || !s.needs.approver {
-        step(s.needs.approver, words::APPROVER);
+    let writes_policy = !s.gitops || n.required();
+    if writes_policy || !n.approver {
+        step(n.approver, words::APPROVER);
     }
     step(!s.client, words::CLIENT);
-    if let Some(new) = &s.patched
+    if let Some(new) = &s.policy.patched
         && writes_policy
     {
-        p.diff = diff(&s.policy, new);
+        p.diff = diff(&s.policy.text, new);
     }
-    if s.gitops && s.needs.required() {
+    if s.gitops && n.required() {
         p.blocked = Some(GITOPS.into());
     }
     p
@@ -734,7 +746,11 @@ fn policy_changes(n: &Needs) -> Vec<String> {
 /// Writes the policy with what it needs. If someone changed it meanwhile
 /// (412), reads it again and plans once more.
 async fn write_policy(api: &Api, s: &Survey) -> Result<Vec<String>, String> {
-    let (mut etag, mut needs, mut patched) = (s.etag.clone(), s.needs, s.patched.clone());
+    let (mut etag, mut needs, mut patched) = (
+        s.policy.etag.clone(),
+        s.policy.needs,
+        s.policy.patched.clone(),
+    );
     for attempt in 0..2 {
         let Some(text) = patched.as_deref() else {
             return Ok(vec![]);
@@ -762,8 +778,8 @@ async fn write_policy(api: &Api, s: &Survey) -> Result<Vec<String>, String> {
             }
             Err(e) if e.status == 412 && attempt == 0 => {
                 tracing::info!("tailnet policy changed meanwhile, planning again");
-                let (_, e2, n2, p2) = read_policy(api).await?;
-                (etag, needs, patched) = (e2, n2, p2);
+                let p = read_policy(api).await?;
+                (etag, needs, patched) = (p.etag, p.needs, p.patched);
             }
             Err(e) if e.status == 412 => {
                 return Err(
@@ -835,12 +851,12 @@ pub(crate) async fn apply_with(api: &Api, host: &impl Host) -> Result<Outcome, S
         return Err(NO_KEY.into());
     }
     let s = survey(api, host).await?;
-    if s.gitops && s.needs.required() {
+    if s.gitops && s.policy.needs.required() {
         return Err(GITOPS.into());
     }
-    let writes_policy = !s.gitops && s.patched.is_some();
+    let writes_policy = !s.gitops && s.policy.patched.is_some();
     // Before anything changes.
-    if writes_policy && let Some(p) = &s.patched {
+    if writes_policy && let Some(p) = &s.policy.patched {
         validate(api, p).await?;
     }
     let mut out = Outcome::default();

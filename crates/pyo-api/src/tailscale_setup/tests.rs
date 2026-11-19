@@ -495,6 +495,28 @@ fn the_token_shape_is_checked_and_its_id_found() {
     assert_eq!(format!("{:?}", Token::new(TOKEN)), "Token(•••)");
 }
 
+#[test]
+fn the_plan_uses_the_policy_as_parsed_once() {
+    // plan_of never reads the text again: what the policy reaches comes
+    // from the one parse, so even text it couldn't parse doesn't change it.
+    let s = Survey {
+        gitops: false,
+        policy: Policy {
+            text: "not a policy".into(),
+            etag: None,
+            needs: Needs::default(),
+            reaches: Some(true),
+            patched: None,
+        },
+        magic_dns: true,
+        https: Some(true),
+        client: true,
+    };
+    let p = plan_of(&s);
+    assert!(p.changes.is_empty(), "{p:?}");
+    assert!(p.done.contains(&"Your tailnet can reach tag:pyo".to_owned()));
+}
+
 // ── Against the mock API ────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -954,4 +976,19 @@ async fn the_token_never_shows_in_logs_errors_or_saved_settings() {
         &logs[..logs.len().min(2000)]
     );
     assert!(!leaks(&logs), "the token shows in the logs");
+}
+
+#[tokio::test]
+async fn a_policy_pyo_cant_read_stops_the_plan_with_why() {
+    let _one = ONE.lock().await;
+    let (base, st) = serve(Mock {
+        policy: "{ \"tagOwners\": ".into(),
+        ..fresh()
+    })
+    .await;
+    let e = plan_with(&api(&base), &FakeHost::default())
+        .await
+        .unwrap_err();
+    assert!(e.starts_with("Pyo couldn't read your tailnet policy"), "{e}");
+    assert!(writes(&st.lock().unwrap()).is_empty());
 }
