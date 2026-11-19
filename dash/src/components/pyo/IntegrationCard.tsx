@@ -37,7 +37,7 @@ export function IntegrationCard({
       aria-labelledby={`${id}-name`}
       className={`flex min-w-0 scroll-mt-4 flex-col rounded-2xl border border-frame-border bg-muted p-[5px] shadow-card transition-shadow duration-500 ${highlight ? "ring-2 ring-ring ring-offset-2 ring-offset-canvas" : ""}`}
     >
-      <div className="flex flex-1 items-start gap-3 rounded-xl border border-frame-border bg-card px-3 py-3">
+      <div className="flex flex-1 items-start gap-3 min-h-[112px] rounded-xl border border-frame-border bg-card px-4 py-4">
         <LogoTile icon={icon} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
@@ -54,7 +54,7 @@ export function IntegrationCard({
           </p>
         </div>
       </div>
-      <footer className="flex min-h-10 items-center gap-3 px-2 pb-0.5 pt-1.5">
+      <footer className="flex min-h-12 items-center gap-3 px-3 pb-1 pt-2">
         <span className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">{detail}</span>
         {action}
       </footer>
