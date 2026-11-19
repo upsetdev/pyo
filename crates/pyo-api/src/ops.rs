@@ -2823,6 +2823,13 @@ fn bucket_refused(e: anyhow::Error) -> ApiError {
 async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     key_allows(user, &op)?;
     let s = s.clone();
+    // Long calls to outside services hold no transaction open.
+    if matches!(
+        op,
+        Op::PlanTailscaleSetup { .. } | Op::SetUpTailscale { .. }
+    ) {
+        return outside_tx(&s, user, op).await;
+    }
     let mut tx = s.db.begin().await?;
     // Clusters whose agent should look for new work after this commits.
     let mut wake: Vec<String> = vec![];
@@ -2834,6 +2841,36 @@ async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     // A new deployment may have queued a build.
     s.wake("builders:*").await;
     Ok(out)
+}
+
+/// Operations made of many calls to an outside API run here, before any
+/// transaction: they read through the pool, make their calls, and write
+/// what happened in a short transaction of their own. Every other op goes
+/// through [`apply`].
+async fn outside_tx(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
+    match op {
+        Op::PlanTailscaleSetup { token } => {
+            require_admin(user)?;
+            crate::tailscale_setup::plan(s, token).await
+        }
+        Op::SetUpTailscale { token, version } => {
+            require_admin(user)?;
+            let out = crate::tailscale_setup::apply(s, token, &version).await?;
+            if !out.changed.is_empty() {
+                let mut tx = s.db.begin().await?;
+                log_setting(
+                    &mut tx,
+                    user,
+                    "tailscale",
+                    "Set up Tailscale with an access token",
+                )
+                .await?;
+                tx.commit().await?;
+            }
+            Ok(serde_json::to_value(out).map_err(anyhow::Error::from)?)
+        }
+        _ => Err(anyhow::anyhow!("this operation runs in a transaction").into()),
+    }
 }
 
 /// The least API key access an operation needs, or None when keys can't run
@@ -7219,23 +7256,9 @@ async fn apply(
             log_setting(tx, user, "tailscale", "Connected Tailscale").await?;
             Ok(out)
         }
-        Op::PlanTailscaleSetup { token } => {
-            require_admin(user)?;
-            crate::tailscale_setup::plan(s, token).await
-        }
-        Op::SetUpTailscale { token, version } => {
-            require_admin(user)?;
-            let out = crate::tailscale_setup::apply(s, token, &version).await?;
-            if !out.changed.is_empty() {
-                log_setting(
-                    tx,
-                    user,
-                    "tailscale",
-                    "Set up Tailscale with an access token",
-                )
-                .await?;
-            }
-            Ok(serde_json::to_value(out).map_err(anyhow::Error::from)?)
+        // Run by outside_tx, with no transaction open.
+        Op::PlanTailscaleSetup { .. } | Op::SetUpTailscale { .. } => {
+            Err(anyhow::anyhow!("the tailscale setup runs outside the transaction").into())
         }
         Op::TestTailscale {} => {
             require_admin(user)?;
