@@ -64,7 +64,11 @@ export function LinkedRepoNotes({
       )}
       {connecting ? (
         provider === "github" ? (
-          <GithubDialog onClose={() => setConnecting(false)} />
+          <GithubDialog
+            onClose={() => setConnecting(false)}
+            // Back to this deploy link, with its query, after GitHub.
+            returnTo={`${window.location.pathname}${window.location.search}`}
+          />
         ) : (
           <GitlabDialog onClose={() => setConnecting(false)} />
         )

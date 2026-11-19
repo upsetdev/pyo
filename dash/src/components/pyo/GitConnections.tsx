@@ -17,6 +17,7 @@ import { Field, Input, SecretInput } from "~/components/ui/Field";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { GitConnection, GithubInstallation } from "~/lib/pyo/types";
+import { forgetGithubReturn, rememberGithubReturn } from "~/lib/pyo/github-return";
 
 // Git providers on Integrations. GitHub: the team's accounts, through this
 // installation's GitHub App. GitLab: a team's owner or admin adds an access
@@ -309,15 +310,28 @@ function GithubRow({ g }: { g: GithubInstallation }) {
 }
 
 /** Integrations › GitHub: the team's GitHub accounts, through this installation's GitHub App. */
-export function GithubDialog({ onClose }: { onClose: () => void }) {
+export function GithubDialog({
+  onClose,
+  returnTo,
+}: {
+  onClose: () => void;
+  /** A path on this dashboard to come back to from GitHub, in place of Integrations. */
+  returnTo?: string;
+}) {
   const s = usePyo();
   const [busy, setBusy] = useState(false);
   const installs = s.githubInstallations.filter((g) => g.teamId === s.currentTeamId);
   const connect = async () => {
     setBusy(true);
+    // Started here without one: a way back kept by an earlier try doesn't apply.
+    if (returnTo) rememberGithubReturn(returnTo, s.currentTeamId);
+    else forgetGithubReturn();
     const r = await api.githubInstallUrl();
     if (r) window.location.assign(r.url);
-    else setBusy(false);
+    else {
+      forgetGithubReturn();
+      setBusy(false);
+    }
   };
   const shell = (body: ReactNode, footer: ReactNode) => (
     <IntegrationDialog
