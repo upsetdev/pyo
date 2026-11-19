@@ -149,7 +149,6 @@ export function CloudflareDialog({ onClose }: { onClose: () => void }) {
                 {...p}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
-                onPasteText={setToken}
                 autoComplete="off"
               />
             )}

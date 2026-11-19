@@ -190,7 +190,6 @@ function TokenField({
             {...p}
             value={token}
             onChange={(e) => setToken(e.target.value)}
-            onPasteText={setToken}
             autoComplete="off"
             disabled={disabled}
           />

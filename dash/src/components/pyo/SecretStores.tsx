@@ -187,7 +187,6 @@ function StoreForm({
             autoComplete="off"
             value={form[key]}
             onChange={(e) => set({ [key]: e.target.value })}
-            onPasteText={(t) => set({ [key]: t })}
             placeholder={placeholder}
           />
         ) : (

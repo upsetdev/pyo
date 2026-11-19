@@ -162,7 +162,6 @@ function TokenForm({
             autoComplete="off"
             value={token}
             onChange={(e) => setToken(e.target.value)}
-            onPasteText={setToken}
             placeholder="glpat-…"
           />
         )}

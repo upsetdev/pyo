@@ -1,7 +1,6 @@
 import { Tabs } from "./Tabs";
 import {
   CircleNotchIcon,
-  ClipboardTextIcon,
   EyeIcon,
   EyeSlashIcon,
   MinusIcon,
@@ -129,7 +128,6 @@ export { Select } from "./Select";
  * Masked value with an eye toggle inside. Pass `shown` and `onToggle` to
  * control it (e.g. fetch a stored value first); `busy` spins the eye,
  * `toggleDisabled` disables it with that reason as its title.
- * `onPasteText` adds a paste button, where the browser can read the clipboard.
  */
 export const SecretInput = forwardRef<
   HTMLInputElement,
@@ -138,17 +136,12 @@ export const SecretInput = forwardRef<
     onToggle?: () => void;
     busy?: boolean;
     toggleDisabled?: string;
-    onPasteText?: (text: string) => void;
   }
 >(function SecretInput(
-  { className = "", shown: shownProp, onToggle, busy, toggleDisabled, onPasteText, ...props },
+  { className = "", shown: shownProp, onToggle, busy, toggleDisabled, ...props },
   ref,
 ) {
   const [own, setOwn] = useState(false);
-  const [canPaste, setCanPaste] = useState(false);
-  useEffect(() => {
-    setCanPaste(!!onPasteText && typeof navigator !== "undefined" && !!navigator.clipboard?.readText);
-  }, [onPasteText]);
   const shown = shownProp ?? own;
   return (
     <div className="relative">
@@ -156,26 +149,9 @@ export const SecretInput = forwardRef<
         ref={ref}
         type={shown ? "text" : "password"}
         autoComplete="new-password"
-        className={`${inputClass} ${canPaste ? "pr-16" : "pr-9"} font-mono text-[12px] ${className}`}
+        className={`${inputClass} pr-9 font-mono text-[12px] ${className}`}
         {...props}
       />
-      {canPaste ? (
-        <button
-          type="button"
-          disabled={props.disabled}
-          onClick={() => {
-            navigator.clipboard
-              .readText()
-              .then((t) => onPasteText?.(t.trim()))
-              .catch(() => undefined);
-          }}
-          aria-label="Paste"
-          title="Paste"
-          className="absolute inset-y-0 right-8 flex w-8 items-center justify-center text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-        >
-          <ClipboardTextIcon size={14} />
-        </button>
-      ) : null}
       <button
         type="button"
         onClick={() => {

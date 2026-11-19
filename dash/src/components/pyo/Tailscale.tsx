@@ -465,7 +465,6 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
                   {...p}
                   value={token}
                   onChange={(e) => setToken(e.target.value)}
-                  onPasteText={setToken}
                   placeholder="tskey-api-…"
                   autoComplete="off"
                 />
@@ -514,7 +513,6 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
                   {...p}
                   value={secret}
                   onChange={(e) => setSecret(e.target.value)}
-                  onPasteText={setSecret}
                   placeholder={ts?.clientId ? "Unchanged" : "tskey-client-…"}
                   autoComplete="off"
                 />

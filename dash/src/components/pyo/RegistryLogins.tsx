@@ -193,7 +193,6 @@ export function RegistriesDialog({ onClose }: { onClose: () => void }) {
                 {...f}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                onPasteText={setPassword}
               />
             )}
           </Field>
