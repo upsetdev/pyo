@@ -453,16 +453,22 @@ fn what_lets_the_tailnet_reach_pyo() {
         Reach::Partly(vec![src(&["*"], &[])])
     );
     assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "src": ["*"], "proto": "udp", "dst": ["*:*"] }] })),
+        r(
+            json!({ "acls": [{ "action": "accept", "src": ["*"], "proto": "udp", "dst": ["*:*"] }] })
+        ),
         Reach::Partly(vec![src(&["*"], &[])])
     );
     assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "src": ["group:eng"], "srcPosture": ["posture:x"], "dst": ["*:22"] }] })),
+        r(
+            json!({ "acls": [{ "action": "accept", "src": ["group:eng"], "srcPosture": ["posture:x"], "dst": ["*:22"] }] })
+        ),
         Reach::Partly(vec![src(&["group:eng"], &["posture:x"])])
     );
     // Nothing reaches tag:pyo, or there are no rules yet.
     assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "src": ["group:eng"], "dst": ["tag:prod:22"] }] })),
+        r(
+            json!({ "acls": [{ "action": "accept", "src": ["group:eng"], "dst": ["tag:prod:22"] }] })
+        ),
         Reach::No
     );
     assert_eq!(r(json!({ "acls": [] })), Reach::No);
@@ -475,7 +481,14 @@ fn access_limited_to_a_group_is_never_widened() {
     let p = r#"{ "tagOwners": { "tag:pyo": [] }, "grants": [{ "src": ["group:eng"], "dst": ["*"], "ip": ["*"] }] }"#;
     let n = needs(&parse(p).unwrap());
     assert_eq!(n.reach, Reach::Yes);
-    let out = patch(p, &Needs { approver: true, ..n }).unwrap();
+    let out = patch(
+        p,
+        &Needs {
+            approver: true,
+            ..n
+        },
+    )
+    .unwrap();
     assert_eq!(parse(&out).unwrap()["grants"], parse(p).unwrap()["grants"]);
     assert!(!out.contains(MEMBERS), "{out}");
 
@@ -540,7 +553,10 @@ fn the_plan_uses_the_policy_as_parsed_once() {
     };
     let p = plan_of(&s);
     assert!(p.changes.is_empty(), "{p:?}");
-    assert!(p.done.contains(&"Your tailnet can reach tag:pyo".to_owned()));
+    assert!(
+        p.done
+            .contains(&"Your tailnet can reach tag:pyo".to_owned())
+    );
 }
 
 // ── Against the mock API ────────────────────────────────────────────────────
@@ -778,7 +794,10 @@ async fn a_policy_changed_after_the_review_changes_nothing() {
         m.etag += 1;
     }
     let out = apply_with(&api(&base), &host, &p.version).await;
-    assert!(!out.ok && out.review_again && out.changed.is_empty(), "{out:?}");
+    assert!(
+        !out.ok && out.review_again && out.changed.is_empty(),
+        "{out:?}"
+    );
     assert!(writes(&st.lock().unwrap()).is_empty(), "nothing changed");
 }
 
@@ -911,7 +930,10 @@ async fn a_stop_with_a_token_that_cant_delete_itself_says_to_delete_it() {
     })
     .await;
     let out = set_up(&base, &FakeHost::default()).await;
-    assert!(!out.ok && out.error.is_some() && !out.token_deleted, "{out:?}");
+    assert!(
+        !out.ok && out.error.is_some() && !out.token_deleted,
+        "{out:?}"
+    );
     assert_eq!(out.todo, [DELETE_TOKEN]);
 }
 
@@ -925,7 +947,10 @@ async fn a_token_tailscale_no_longer_takes_needs_no_deleting() {
     );
     let out = apply_with(&wrong, &FakeHost::default(), "").await;
     assert_eq!(out.error.as_deref(), Some(BAD_TOKEN));
-    assert!(!out.ok && !out.token_deleted && out.todo.is_empty(), "{out:?}");
+    assert!(
+        !out.ok && !out.token_deleted && out.todo.is_empty(),
+        "{out:?}"
+    );
 }
 
 #[tokio::test]
@@ -1063,6 +1088,9 @@ async fn a_policy_pyo_cant_read_stops_the_plan_with_why() {
     let e = plan_with(&api(&base), &FakeHost::default())
         .await
         .unwrap_err();
-    assert!(e.starts_with("Pyo couldn't read your tailnet policy"), "{e}");
+    assert!(
+        e.starts_with("Pyo couldn't read your tailnet policy"),
+        "{e}"
+    );
     assert!(writes(&st.lock().unwrap()).is_empty());
 }

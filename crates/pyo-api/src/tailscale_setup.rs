@@ -355,7 +355,10 @@ pub fn reach(p: &Value) -> Reach {
             }
         }
         if let Some(o) = open {
-            let src = strs(&r["src"]).chain(strs(&r["users"])).map(str::to_owned).collect();
+            let src = strs(&r["src"])
+                .chain(strs(&r["users"]))
+                .map(str::to_owned)
+                .collect();
             note(src, &r["srcPosture"], o);
         }
     }
@@ -374,7 +377,11 @@ pub fn reach(p: &Value) -> Reach {
                 open = or(open, covers(ports));
             }
         }
-        note(strs(&g["src"]).map(str::to_owned).collect(), &g["srcPosture"], open);
+        note(
+            strs(&g["src"]).map(str::to_owned).collect(),
+            &g["srcPosture"],
+            open,
+        );
     }
     // Any one source on both ports, over all its rules.
     let mut by_src: Vec<(&str, [bool; 2])> = vec![];
