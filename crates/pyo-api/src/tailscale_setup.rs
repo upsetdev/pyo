@@ -500,24 +500,30 @@ async fn read_policy(api: &Api) -> Result<(String, Option<String>, Needs, Option
 }
 
 async fn survey(api: &Api, host: &impl Host) -> Result<Survey, String> {
-    let settings = api
-        .get("/tailnet/-/settings")
-        .await
-        .map_err(|e| say(&e, "read your tailnet's settings"))?;
-    let (policy, etag, needs, patched) = read_policy(api).await?;
-    let dns = api
-        .get("/tailnet/-/dns/preferences")
-        .await
-        .map_err(|e| say(&e, "read your tailnet's DNS settings"))?;
-    let client = match host.working_client().await {
-        None => false,
-        // On this tailnet: Tailscale knows it by its ID. A client it can't
-        // show this token still counts, since it signs in.
-        Some(id) => match api.get(&format!("/tailnet/-/keys/{id}")).await {
-            Ok(k) => k["invalid"].as_bool() != Some(true),
-            Err(e) => e.status != 404,
-        },
+    // Nothing here depends on anything else, so it's all read at once.
+    let settings = async {
+        api.get("/tailnet/-/settings")
+            .await
+            .map_err(|e| say(&e, "read your tailnet's settings"))
     };
+    let dns = async {
+        api.get("/tailnet/-/dns/preferences")
+            .await
+            .map_err(|e| say(&e, "read your tailnet's DNS settings"))
+    };
+    let client = async {
+        Ok::<_, String>(match host.working_client().await {
+            None => false,
+            // On this tailnet: Tailscale knows it by its ID. A client it can't
+            // show this token still counts, since it signs in.
+            Some(id) => match api.get(&format!("/tailnet/-/keys/{id}")).await {
+                Ok(k) => k["invalid"].as_bool() != Some(true),
+                Err(e) => e.status != 404,
+            },
+        })
+    };
+    let (settings, (policy, etag, needs, patched), dns, client) =
+        tokio::try_join!(settings, read_policy(api), dns, client)?;
     Ok(Survey {
         gitops: settings["aclsExternallyManagedOn"].as_bool() == Some(true),
         policy,
