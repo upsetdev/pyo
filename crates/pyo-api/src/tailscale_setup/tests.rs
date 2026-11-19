@@ -337,7 +337,7 @@ fn the_patch_keeps_comments_and_formatting() {
         n,
         Needs {
             tag_owner: true,
-            grant: false,
+            reach: Reach::Yes,
             approver: true
         }
     );
@@ -374,7 +374,7 @@ fn the_patch_adds_to_tag_owners_already_there() {
         n,
         Needs {
             tag_owner: true,
-            grant: true,
+            reach: Reach::No,
             approver: true
         }
     );
@@ -394,14 +394,14 @@ fn the_patch_adds_to_tag_owners_already_there() {
         json!([{ "src": ["autogroup:member"], "dst": [TAG], "ip": ["tcp:80", "tcp:443"] }])
     );
     assert_eq!(v["acls"], parse(RESTRICTED_POLICY).unwrap()["acls"]);
-    assert_eq!(reaches_pyo(&v), Some(true));
+    assert_eq!(reach(&v), Reach::Yes);
 }
 
 #[test]
 fn approvers_for_tag_pyo_get_tag_pyo_added() {
     let p = r#"{ "autoApprovers": { "services": { "tag:pyo": ["group:ops"] } }, "tagOwners": { "tag:pyo": [] }, "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"] }] }"#;
     let n = needs(&parse(p).unwrap());
-    assert!(n.approver && !n.tag_owner && !n.grant);
+    assert!(n.approver && !n.tag_owner && n.grant().is_none());
     let v = parse(&patch(p, &n).unwrap()).unwrap();
     assert_eq!(
         v["autoApprovers"]["services"][TAG],
@@ -409,71 +409,89 @@ fn approvers_for_tag_pyo_get_tag_pyo_added() {
     );
 }
 
+fn src(src: &[&str], posture: &[&str]) -> Source {
+    Source {
+        src: src.iter().map(|s| (*s).to_owned()).collect(),
+        posture: posture.iter().map(|s| (*s).to_owned()).collect(),
+    }
+}
+
 #[test]
 fn what_lets_the_tailnet_reach_pyo() {
-    let r = |p: Value| reaches_pyo(&p);
-    assert_eq!(
-        r(json!({ "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"] }] })),
-        Some(true)
-    );
-    assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] })),
-        Some(true)
-    );
-    assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "users": ["*"], "ports": ["*:*"] }] })),
-        Some(true)
-    );
-    assert_eq!(
-        r(
-            json!({ "grants": [{ "src": ["autogroup:member"], "dst": [TAG], "ip": ["tcp:80", "443"] }] })
-        ),
-        Some(true)
-    );
-    assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["tag:pyo:80,443"] }] })),
-        Some(true)
-    );
-    assert_eq!(
-        r(json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["tag:pyo:1-1024"] }] })),
-        Some(true)
-    );
-    // Split over two rules.
-    assert_eq!(
-        r(json!({ "grants": [
+    let r = |p: Value| reach(&p);
+    for yes in [
+        json!({ "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"] }] }),
+        json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] }),
+        json!({ "acls": [{ "action": "accept", "users": ["*"], "ports": ["*:*"] }] }),
+        json!({ "grants": [{ "src": ["autogroup:member"], "dst": [TAG], "ip": ["tcp:80", "443"] }] }),
+        json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["tag:pyo:80,443"] }] }),
+        json!({ "acls": [{ "action": "accept", "src": ["*"], "dst": ["tag:pyo:1-1024"] }] }),
+        // Split over two rules.
+        json!({ "grants": [
             { "src": ["*"], "dst": [TAG], "ip": ["tcp:80"] },
             { "src": ["*"], "dst": ["*"], "ip": ["tcp:443"] },
-        ] })),
-        Some(true)
-    );
-    // Only some people, a port missing, UDP, posture: not plainly open.
+        ] }),
+        // Only some people, or only with a posture: the admin's choice, kept.
+        json!({ "grants": [{ "src": ["group:eng"], "dst": ["*"], "ip": ["*"] }] }),
+        json!({ "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"], "srcPosture": ["posture:x"] }] }),
+    ] {
+        assert_eq!(r(yes.clone()), Reach::Yes, "{yes}");
+    }
+    // A port missing, or UDP only: those same sources, and no one else.
     assert_eq!(
-        r(json!({ "grants": [{ "src": ["group:eng"], "dst": ["*"], "ip": ["*"] }] })),
-        Some(false)
-    );
-    assert_eq!(
-        r(json!({ "grants": [{ "src": ["*"], "dst": [TAG], "ip": ["tcp:443"] }] })),
-        Some(false)
+        r(json!({ "grants": [{ "src": ["group:eng"], "dst": [TAG], "ip": ["tcp:443"] }] })),
+        Reach::Partly(vec![src(&["group:eng"], &[])])
     );
     assert_eq!(
         r(json!({ "grants": [{ "src": ["*"], "dst": [TAG], "ip": ["udp:*"] }] })),
-        Some(false)
+        Reach::Partly(vec![src(&["*"], &[])])
     );
     assert_eq!(
-        r(
-            json!({ "grants": [{ "src": ["*"], "dst": ["*"], "ip": ["*"], "srcPosture": ["posture:x"] }] })
-        ),
-        Some(false)
+        r(json!({ "acls": [{ "action": "accept", "src": ["*"], "proto": "udp", "dst": ["*:*"] }] })),
+        Reach::Partly(vec![src(&["*"], &[])])
     );
     assert_eq!(
-        r(
-            json!({ "acls": [{ "action": "accept", "src": ["*"], "proto": "udp", "dst": ["*:*"] }] })
-        ),
-        Some(false)
+        r(json!({ "acls": [{ "action": "accept", "src": ["group:eng"], "srcPosture": ["posture:x"], "dst": ["*:22"] }] })),
+        Reach::Partly(vec![src(&["group:eng"], &["posture:x"])])
     );
-    assert_eq!(r(json!({ "acls": [] })), Some(false));
-    // No rules at all: Pyo doesn't write the first one.
-    assert_eq!(r(json!({ "tagOwners": {} })), None);
+    // Nothing reaches tag:pyo, or there are no rules yet.
+    assert_eq!(
+        r(json!({ "acls": [{ "action": "accept", "src": ["group:eng"], "dst": ["tag:prod:22"] }] })),
+        Reach::No
+    );
+    assert_eq!(r(json!({ "acls": [] })), Reach::No);
+    assert_eq!(r(json!({ "tagOwners": {} })), Reach::NoRules);
+}
+
+#[test]
+fn access_limited_to_a_group_is_never_widened() {
+    // The group reaches everything: nothing to add, and no grant at all.
+    let p = r#"{ "tagOwners": { "tag:pyo": [] }, "grants": [{ "src": ["group:eng"], "dst": ["*"], "ip": ["*"] }] }"#;
+    let n = needs(&parse(p).unwrap());
+    assert_eq!(n.reach, Reach::Yes);
+    let out = patch(p, &Needs { approver: true, ..n }).unwrap();
+    assert_eq!(parse(&out).unwrap()["grants"], parse(p).unwrap()["grants"]);
+    assert!(!out.contains(MEMBERS), "{out}");
+
+    // The group reaches tag:pyo on 443 only: 80 is added for that group,
+    // with its posture, and never for anyone else.
+    let p = r#"{
+  "tagOwners": { "tag:pyo": [] },
+  "grants": [
+    { "src": ["group:eng"], "dst": ["tag:pyo"], "ip": ["tcp:443"], "srcPosture": ["posture:latest"] },
+  ],
+}"#;
+    let n = needs(&parse(p).unwrap());
+    assert!(n.required());
+    let out = patch(p, &n).unwrap();
+    let v = parse(&out).unwrap();
+    assert_eq!(
+        v["grants"][1],
+        json!({ "src": ["group:eng"], "dst": [TAG], "ip": ["tcp:80", "tcp:443"], "srcPosture": ["posture:latest"] })
+    );
+    assert_eq!(v["grants"].as_array().unwrap().len(), 2);
+    assert!(!out.contains(MEMBERS), "{out}");
+    assert_eq!(reach(&v), Reach::Yes);
 }
 
 #[test]
@@ -504,8 +522,10 @@ fn the_plan_uses_the_policy_as_parsed_once() {
         policy: Policy {
             text: "not a policy".into(),
             etag: None,
-            needs: Needs::default(),
-            reaches: Some(true),
+            needs: Needs {
+                reach: Reach::Yes,
+                ..Default::default()
+            },
             patched: None,
         },
         magic_dns: true,

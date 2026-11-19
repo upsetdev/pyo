@@ -6,7 +6,8 @@
 //!
 //! - **MagicDNS** and **HTTPS certificates** on.
 //! - **The policy**: `tag:pyo` in `tagOwners`, a grant to reach it on ports
-//!   80 and 443 when the policy doesn't allow that already, and
+//!   80 and 443 when no one can yet (for the sources the policy already
+//!   lets reach it, so access is never widened), and
 //!   `autoApprovers.services` for it. The policy is HuJSON and is edited in
 //!   place, so its comments and formatting stay. It's validated first and
 //!   written with `If-Match`, so a change made meanwhile is never lost.
@@ -226,25 +227,61 @@ fn parse(text: &str) -> Result<Value, String> {
 }
 
 /// What the policy is missing for Pyo.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Needs {
     /// `tag:pyo` in `tagOwners`: needed before anything can carry the tag.
     pub tag_owner: bool,
-    /// A grant to tag:pyo on ports 80 and 443: only when the policy doesn't
-    /// already let the tailnet reach it.
-    pub grant: bool,
+    /// Who the policy lets reach tag:pyo now. Pyo adds a grant on ports 80
+    /// and 443 only when nobody reaches it on both.
+    pub reach: Reach,
     /// `autoApprovers.services` for tag:pyo. Pyo approves its Services'
     /// hosts through the API anyway, so this only adds resilience.
     pub approver: bool,
 }
 
+/// Who the policy lets reach tag:pyo.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub enum Reach {
+    /// Neither `acls` nor `grants`: Pyo doesn't add the first rule there.
+    #[default]
+    NoRules,
+    /// Someone reaches it on ports 80 and 443. Left as it is, whoever that is.
+    Yes,
+    /// Rules reach it, but no one on both ports. Pyo adds the ports for
+    /// exactly these sources, with their posture, and no one else.
+    Partly(Vec<Source>),
+    /// No rule reaches it at all.
+    No,
+}
+
+/// Sources of a rule that reaches tag:pyo, and the posture it asks of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Source {
+    pub src: Vec<String>,
+    pub posture: Vec<String>,
+}
+
+/// Who gets access when no rule reaches tag:pyo at all.
+const MEMBERS: &str = "autogroup:member";
+
 impl Needs {
+    /// The grants to add for tag:pyo on ports 80 and 443, if any.
+    fn grant(&self) -> Option<Vec<Source>> {
+        match &self.reach {
+            Reach::NoRules | Reach::Yes => None,
+            Reach::Partly(s) => Some(s.clone()),
+            Reach::No => Some(vec![Source {
+                src: vec![MEMBERS.into()],
+                posture: vec![],
+            }]),
+        }
+    }
     fn any(&self) -> bool {
-        self.tag_owner || self.grant || self.approver
+        self.tag_owner || self.grant().is_some() || self.approver
     }
     /// Without these the setup can't work.
     fn required(&self) -> bool {
-        self.tag_owner || self.grant
+        self.tag_owner || self.grant().is_some()
     }
 }
 
@@ -255,7 +292,7 @@ fn strs(v: &Value) -> impl Iterator<Item = &str> {
 pub fn needs(p: &Value) -> Needs {
     Needs {
         tag_owner: p["tagOwners"].get(TAG).is_none(),
-        grant: reaches_pyo(p) == Some(false),
+        reach: reach(p),
         approver: !strs(&p["autoApprovers"]["services"][TAG]).any(|s| s == TAG),
     }
 }
@@ -273,46 +310,58 @@ fn ports_cover(ports: &str, port: u16) -> bool {
     })
 }
 
-/// Whether everyone on the tailnet can reach tag:pyo on ports 80 and 443,
-/// by a rule that plainly says so: from "*" or autogroup:member, to "*" or
-/// tag:pyo, with no posture or route conditions. None when the policy has
-/// neither `acls` nor `grants`, so Pyo doesn't add the first rule there.
-pub fn reaches_pyo(p: &Value) -> Option<bool> {
+/// Who the policy lets reach tag:pyo: every accept rule to "*" or tag:pyo
+/// counts, whatever its sources, protocol or posture, so Pyo never gives
+/// anyone access the admin's rules don't already give them on some port.
+/// Rules routed `via` a router don't reach the servers themselves.
+pub fn reach(p: &Value) -> Reach {
     if p.get("acls").is_none() && p.get("grants").is_none() {
-        return None;
+        return Reach::NoRules;
     }
-    let everyone = |v: &Value| strs(v).any(|s| s == "*" || s == "autogroup:member");
-    let plain = |r: &Value| r.get("srcPosture").is_none() && r.get("via").is_none();
-    let mut open = [false, false];
-    let mut take = |ports: &str| {
-        for (i, port) in [80, 443].into_iter().enumerate() {
-            open[i] |= ports_cover(ports, port);
+    // Each rule that reaches tag:pyo, and whether it covers 80 and 443 over TCP.
+    let mut rules: Vec<(Source, [bool; 2])> = vec![];
+    let mut note = |src: Vec<String>, posture: &Value, open: [bool; 2]| {
+        if src.is_empty() {
+            return;
+        }
+        let source = Source {
+            src,
+            posture: strs(posture).map(str::to_owned).collect(),
+        };
+        match rules.iter_mut().find(|(s, _)| *s == source) {
+            Some((_, o)) => *o = [o[0] | open[0], o[1] | open[1]],
+            None => rules.push((source, open)),
         }
     };
+    let covers = |ports: &str| [ports_cover(ports, 80), ports_cover(ports, 443)];
+    let or = |a: [bool; 2], b: [bool; 2]| [a[0] | b[0], a[1] | b[1]];
     for r in p["acls"].as_array().into_iter().flatten() {
+        if r["action"].as_str() != Some("accept") || r.get("via").is_some() {
+            continue;
+        }
         let tcp = match &r["proto"] {
             Value::Null => true,
             v => matches!(v.as_str(), Some("tcp" | "6")),
         };
-        if r["action"].as_str() != Some("accept")
-            || !(everyone(&r["src"]) || everyone(&r["users"]))
-            || !tcp
-            || !plain(r)
-        {
-            continue;
-        }
+        let mut open = None;
         for d in strs(&r["dst"]).chain(strs(&r["ports"])) {
             if let Some((host, ports)) = d.rsplit_once(':')
                 && (host == "*" || host == TAG)
             {
-                take(ports);
+                let o = if tcp { covers(ports) } else { [false, false] };
+                open = Some(or(open.unwrap_or_default(), o));
             }
+        }
+        if let Some(o) = open {
+            let src = strs(&r["src"]).chain(strs(&r["users"])).map(str::to_owned).collect();
+            note(src, &r["srcPosture"], o);
         }
     }
     for g in p["grants"].as_array().into_iter().flatten() {
-        if !everyone(&g["src"]) || !plain(g) || !strs(&g["dst"]).any(|d| d == "*" || d == TAG) {
+        if g.get("via").is_some() || !strs(&g["dst"]).any(|d| d == "*" || d == TAG) {
             continue;
         }
+        let mut open = [false, false];
         for ip in strs(&g["ip"]) {
             let (proto, ports) = match ip.split_once(':') {
                 Some(x) => x,
@@ -320,11 +369,28 @@ pub fn reaches_pyo(p: &Value) -> Option<bool> {
                 None => (ip, "*"),
             };
             if matches!(proto, "*" | "tcp" | "6") {
-                take(ports);
+                open = or(open, covers(ports));
+            }
+        }
+        note(strs(&g["src"]).map(str::to_owned).collect(), &g["srcPosture"], open);
+    }
+    // Any one source on both ports, over all its rules.
+    let mut by_src: Vec<(&str, [bool; 2])> = vec![];
+    for (s, o) in &rules {
+        for src in &s.src {
+            match by_src.iter_mut().find(|(x, _)| x == src) {
+                Some((_, b)) => *b = or(*b, *o),
+                None => by_src.push((src, *o)),
             }
         }
     }
-    Some(open == [true, true])
+    if by_src.iter().any(|(_, o)| *o == [true, true]) {
+        Reach::Yes
+    } else if rules.is_empty() {
+        Reach::No
+    } else {
+        Reach::Partly(rules.into_iter().map(|(s, _)| s).collect())
+    }
 }
 
 fn strings(xs: &[&str]) -> jsonc_parser::cst::CstInputValue {
@@ -348,14 +414,23 @@ pub fn patch(text: &str, needs: &Needs) -> Result<String, String> {
             .ok_or_else(|| cant("tagOwners"))?
             .append(TAG, strings(&[OWNERS]));
     }
-    if needs.grant {
-        obj.array_value_or_create("grants")
-            .ok_or_else(|| "Pyo can't edit your tailnet policy: grants isn't a list.".to_owned())?
-            .append(CstInputValue::Object(vec![
-                ("src".into(), strings(&["autogroup:member"])),
+    if let Some(sources) = needs.grant() {
+        let grants = obj
+            .array_value_or_create("grants")
+            .ok_or_else(|| "Pyo can't edit your tailnet policy: grants isn't a list.".to_owned())?;
+        for s in sources {
+            let src: Vec<&str> = s.src.iter().map(String::as_str).collect();
+            let mut grant = vec![
+                ("src".into(), strings(&src)),
                 ("dst".into(), strings(&[TAG])),
                 ("ip".into(), strings(&["tcp:80", "tcp:443"])),
-            ]));
+            ];
+            if !s.posture.is_empty() {
+                let posture: Vec<&str> = s.posture.iter().map(String::as_str).collect();
+                grant.push(("srcPosture".into(), strings(&posture)));
+            }
+            grants.append(CstInputValue::Object(grant));
+        }
     }
     if needs.approver {
         let services = obj
@@ -474,8 +549,6 @@ struct Policy {
     text: String,
     etag: Option<String>,
     needs: Needs,
-    /// What [`reaches_pyo`] says of it.
-    reaches: Option<bool>,
     /// The policy with what it needs, when it needs something.
     patched: Option<String>,
 }
@@ -505,7 +578,6 @@ async fn read_policy(api: &Api) -> Result<Policy, String> {
         None
     };
     Ok(Policy {
-        reaches: reaches_pyo(&parsed),
         text,
         etag,
         needs,
@@ -606,8 +678,8 @@ fn plan_of(s: &Survey) -> Plan {
     step(!s.magic_dns, words::MAGIC_DNS);
     step(s.https != Some(true), words::HTTPS);
     step(n.tag_owner, words::TAG_OWNER);
-    if n.grant || s.policy.reaches == Some(true) {
-        step(n.grant, words::GRANT);
+    if n.reach != Reach::NoRules {
+        step(n.grant().is_some(), words::GRANT);
     }
     // A policy in Git that has what's required is left as it is.
     let writes_policy = !s.gitops || n.required();
@@ -734,7 +806,7 @@ async fn validate(api: &Api, text: &str) -> Result<(), String> {
 fn policy_changes(n: &Needs) -> Vec<String> {
     [
         (n.tag_owner, words::TAG_OWNER),
-        (n.grant, words::GRANT),
+        (n.grant().is_some(), words::GRANT),
         (n.approver, words::APPROVER),
     ]
     .into_iter()
@@ -748,7 +820,7 @@ fn policy_changes(n: &Needs) -> Vec<String> {
 async fn write_policy(api: &Api, s: &Survey) -> Result<Vec<String>, String> {
     let (mut etag, mut needs, mut patched) = (
         s.policy.etag.clone(),
-        s.policy.needs,
+        s.policy.needs.clone(),
         s.policy.patched.clone(),
     );
     for attempt in 0..2 {
