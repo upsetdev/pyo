@@ -2497,8 +2497,8 @@ export const api = {
   planTailscaleSetup(token: string) {
     return attempt<{ plan: TailscaleSetupPlan }>("planTailscaleSetup", { token: token.trim() });
   },
-  setUpTailscale(token: string) {
-    return attempt<TailscaleSetupOutcome>("setUpTailscale", { token: token.trim() });
+  setUpTailscale(token: string, version: string) {
+    return attempt<TailscaleSetupOutcome>("setUpTailscale", { token: token.trim(), version });
   },
   testTailscale() {
     return attempt<{ checks: TailscaleCheck[] }>("testTailscale", {});
