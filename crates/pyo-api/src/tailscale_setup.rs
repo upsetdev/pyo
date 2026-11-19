@@ -10,10 +10,12 @@
 //!   lets reach it, so access is never widened), and
 //!   `autoApprovers.services` for it. The policy is HuJSON and is edited in
 //!   place, so its comments and formatting stay. It's validated first and
-//!   written with `If-Match`, so a change made meanwhile is never lost.
+//!   written with `If-Match`, and only as the admin reviewed it: if it
+//!   changed since, nothing is written and the admin reviews it again.
 //! - **Pyo's own OAuth client**, with the scopes the manual path asks for,
 //!   saved and checked like one pasted by hand ([`crate::tailscale::save_client`]).
-//! - **The pasted token is deleted** last, once nothing else needs it.
+//! - **The pasted token is deleted** last, however the setup ends, or left
+//!   to the admin as a todo. It's kept only for a new review.
 //!
 //! The token lives in memory for one request only: it's never stored,
 //! logged or put in an error ([`Token`], [`Api::scrub`]). A tailnet that's
@@ -663,6 +665,15 @@ pub struct Plan {
     pub diff: Vec<String>,
     /// Why Pyo can't go on by itself, with `diff` as the lines to add.
     pub blocked: Option<String>,
+    /// The policy as Pyo read it, to hand back to setUpTailscale: if it
+    /// changed since, Pyo changes nothing and asks for a new review.
+    pub version: String,
+}
+
+/// What tells one policy text from another.
+fn version(text: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(text.as_bytes()))
 }
 
 fn plan_of(s: &Survey) -> Plan {
@@ -695,6 +706,7 @@ fn plan_of(s: &Survey) -> Plan {
     if s.gitops && n.required() {
         p.blocked = Some(GITOPS.into());
     }
+    p.version = version(&s.policy.text);
     p
 }
 
@@ -735,7 +747,27 @@ pub struct Outcome {
     pub checks: Vec<Value>,
     /// The pasted token was deleted.
     pub token_deleted: bool,
+    /// The tailnet changed since it was reviewed, so Pyo stopped there.
+    /// The token is kept: plan again with it and review the new changes.
+    pub review_again: bool,
 }
+
+/// Why the setup stopped before the end.
+enum Stop {
+    /// It failed. The setup is over, so the token goes.
+    Failed(String),
+    /// The tailnet isn't the one the admin reviewed. The token stays for
+    /// the new review.
+    Review,
+}
+
+impl From<String> for Stop {
+    fn from(e: String) -> Self {
+        Stop::Failed(e)
+    }
+}
+
+const REVIEW_AGAIN: &str = "Your tailnet changed since Pyo checked it. Review the changes again.";
 
 enum Https {
     On,
@@ -815,53 +847,35 @@ fn policy_changes(n: &Needs) -> Vec<String> {
     .collect()
 }
 
-/// Writes the policy with what it needs. If someone changed it meanwhile
-/// (412), reads it again and plans once more.
-async fn write_policy(api: &Api, s: &Survey) -> Result<Vec<String>, String> {
-    let (mut etag, mut needs, mut patched) = (
-        s.policy.etag.clone(),
-        s.policy.needs.clone(),
-        s.policy.patched.clone(),
-    );
-    for attempt in 0..2 {
-        let Some(text) = patched.as_deref() else {
-            return Ok(vec![]);
-        };
-        // The first one was validated before anything changed.
-        if attempt > 0 {
-            validate(api, text).await?;
-        }
-        let mut headers = vec![("accept", "application/hujson")];
-        if let Some(e) = etag.as_deref() {
-            headers.push(("if-match", e));
-        }
-        match api
-            .send(
-                reqwest::Method::POST,
-                "/tailnet/-/acl",
-                Body::HuJson(text.to_owned()),
-                &headers,
-            )
-            .await
-        {
-            Ok(_) => {
-                tracing::info!("tailnet policy updated");
-                return Ok(policy_changes(&needs));
-            }
-            Err(e) if e.status == 412 && attempt == 0 => {
-                tracing::info!("tailnet policy changed meanwhile, planning again");
-                let p = read_policy(api).await?;
-                (etag, needs, patched) = (p.etag, p.needs, p.patched);
-            }
-            Err(e) if e.status == 412 => {
-                return Err(
-                    "Your tailnet policy changed while Pyo was editing it. Check again.".into(),
-                );
-            }
-            Err(e) => return Err(say(&e, "save your tailnet policy")),
-        }
+/// Writes the policy as the admin reviewed it. If someone changed it
+/// meanwhile (412), nothing is written: the admin reviews the new one.
+async fn write_policy(api: &Api, p: &Policy) -> Result<Vec<String>, Stop> {
+    let Some(text) = p.patched.as_deref() else {
+        return Ok(vec![]);
+    };
+    let mut headers = vec![("accept", "application/hujson")];
+    if let Some(e) = p.etag.as_deref() {
+        headers.push(("if-match", e));
     }
-    unreachable!()
+    match api
+        .send(
+            reqwest::Method::POST,
+            "/tailnet/-/acl",
+            Body::HuJson(text.to_owned()),
+            &headers,
+        )
+        .await
+    {
+        Ok(_) => {
+            tracing::info!("tailnet policy updated");
+            Ok(policy_changes(&p.needs))
+        }
+        Err(e) if e.status == 412 => {
+            tracing::info!("tailnet policy changed since it was reviewed");
+            Err(Stop::Review)
+        }
+        Err(e) => Err(Stop::Failed(say(&e, "save your tailnet policy"))),
+    }
 }
 
 /// Makes Pyo's own OAuth client and saves it: (checks).
@@ -915,31 +929,54 @@ async fn make_client(api: &Api, host: &impl Host) -> Result<Vec<Value>, String> 
     }
 }
 
-/// Sets the tailnet up: what [`plan_with`] says, in that order, and the
-/// pasted token deleted last. Fails with nothing changed, or says what
-/// changed before it stopped.
-pub(crate) async fn apply_with(api: &Api, host: &impl Host) -> Result<Outcome, String> {
+/// What became of the pasted token.
+enum Gone {
+    Deleted,
+    /// Tailscale no longer takes it (401) or knows it (404): nothing to delete.
+    Already,
+    /// Still there: the admin deletes it.
+    Left,
+}
+
+async fn delete_token(api: &Api) -> Gone {
+    let Some(id) = api.token.key_id() else {
+        return Gone::Left;
+    };
+    match api
+        .send(
+            reqwest::Method::DELETE,
+            &format!("/tailnet/-/keys/{id}"),
+            Body::None,
+            &[],
+        )
+        .await
+    {
+        Ok(_) => Gone::Deleted,
+        Err(e) if e.status == 401 || e.status == 404 => Gone::Already,
+        Err(_) => Gone::Left,
+    }
+}
+
+/// The changes, in [`plan_with`]'s order, into `out` as they're made.
+async fn set_up(
+    api: &Api,
+    host: &impl Host,
+    reviewed: &str,
+    out: &mut Outcome,
+) -> Result<(), Stop> {
     if !host.can_store() {
-        return Err(NO_KEY.into());
+        return Err(Stop::Failed(NO_KEY.into()));
     }
     let s = survey(api, host).await?;
-    if s.gitops && s.policy.needs.required() {
-        return Err(GITOPS.into());
+    // Only the tailnet the admin reviewed is changed.
+    if version(&s.policy.text) != reviewed || (s.gitops && s.policy.needs.required()) {
+        return Err(Stop::Review);
     }
     let writes_policy = !s.gitops && s.policy.patched.is_some();
     // Before anything changes.
     if writes_policy && let Some(p) = &s.policy.patched {
         validate(api, p).await?;
     }
-    let mut out = Outcome::default();
-    let stop = |mut out: Outcome, e: String| {
-        if out.changed.is_empty() {
-            Err(e)
-        } else {
-            out.error = Some(e);
-            Ok(out)
-        }
-    };
     if !s.magic_dns {
         if let Err(e) = api
             .send(
@@ -954,14 +991,13 @@ pub(crate) async fn apply_with(api: &Api, host: &impl Host) -> Result<Outcome, S
                 .get("/tailnet/-/dns/nameservers")
                 .await
                 .is_ok_and(|v| strs(&v["dns"]).next().is_none());
-            return stop(
-                out,
+            return Err(Stop::Failed(
                 if none && e.status != 401 && e.status != 403 {
                     "MagicDNS needs a DNS nameserver first. Add one under DNS in the Tailscale console, then try again.".into()
                 } else {
                     say(&e, "turn on MagicDNS")
                 },
-            );
+            ));
         }
         out.changed.push(words::MAGIC_DNS[1].into());
     }
@@ -974,47 +1010,55 @@ pub(crate) async fn apply_with(api: &Api, host: &impl Host) -> Result<Outcome, S
             Ok(Https::Unknown) => out.todo.push(
                 "Check that HTTPS Certificates is on under DNS in the Tailscale console.".into(),
             ),
-            Err(e) => return stop(out, say(&e, "turn on HTTPS certificates")),
+            Err(e) => return Err(Stop::Failed(say(&e, "turn on HTTPS certificates"))),
         }
     }
     if writes_policy {
-        match write_policy(api, &s).await {
-            Ok(done) => out.changed.extend(done),
-            Err(e) => return stop(out, e),
-        }
+        let done = write_policy(api, &s.policy).await?;
+        out.changed.extend(done);
     }
     if !s.client {
-        match make_client(api, host).await {
-            Ok(checks) => {
-                out.changed.push(words::CLIENT[1].into());
-                out.checks = checks;
-            }
-            Err(e) => return stop(out, e),
+        out.checks = make_client(api, host).await?;
+        out.changed.push(words::CLIENT[1].into());
+    }
+    Ok(())
+}
+
+/// Sets the tailnet up as reviewed (`reviewed` is the plan's version): what
+/// [`plan_with`] says, in that order. Says what changed, and what stopped
+/// it if something did. However it ends, the pasted token is deleted
+/// last, or left to the admin as a todo, except when the tailnet changed
+/// since the review: then it stays for the new one.
+pub(crate) async fn apply_with(api: &Api, host: &impl Host, reviewed: &str) -> Outcome {
+    let mut out = Outcome::default();
+    let failed = match set_up(api, host, reviewed, &mut out).await {
+        Ok(()) => None,
+        Err(Stop::Failed(e)) => Some(e),
+        Err(Stop::Review) => {
+            out.review_again = true;
+            out.error = Some(REVIEW_AGAIN.into());
+            tracing::info!(
+                changed = out.changed.len(),
+                "tailscale setup stopped for a new review"
+            );
+            return out;
         }
-    }
-    // Last: nothing needs the token after this.
-    out.token_deleted = match api.token.key_id() {
-        Some(id) => api
-            .send(
-                reqwest::Method::DELETE,
-                &format!("/tailnet/-/keys/{id}"),
-                Body::None,
-                &[],
-            )
-            .await
-            .is_ok(),
-        None => false,
     };
-    if !out.token_deleted {
-        out.todo.push(DELETE_TOKEN.into());
+    // Last: nothing needs the token after this.
+    match delete_token(api).await {
+        Gone::Deleted => out.token_deleted = true,
+        Gone::Already => {}
+        Gone::Left => out.todo.push(DELETE_TOKEN.into()),
     }
-    out.ok = true;
+    out.ok = failed.is_none();
+    out.error = failed;
     tracing::info!(
+        ok = out.ok,
         changed = out.changed.len(),
         token_deleted = out.token_deleted,
         "tailscale set up"
     );
-    Ok(out)
+    out
 }
 
 /// planTailscaleSetup.
@@ -1026,12 +1070,10 @@ pub async fn plan(s: &AppState, token: Token) -> ApiResult<Value> {
     Ok(json!({ "ok": true, "plan": p }))
 }
 
-/// setUpTailscale.
-pub async fn apply(s: &AppState, token: Token) -> ApiResult<Outcome> {
+/// setUpTailscale: `version` is the reviewed plan's.
+pub async fn apply(s: &AppState, token: Token, version: &str) -> ApiResult<Outcome> {
     check_shape(&token).map_err(ApiError::bad_request)?;
-    apply_with(&Api::new(token), s)
-        .await
-        .map_err(ApiError::bad_request)
+    Ok(apply_with(&Api::new(token), s, version).await)
 }
 
 #[cfg(test)]

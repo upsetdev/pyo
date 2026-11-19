@@ -301,6 +301,12 @@ fn api(base: &str) -> Api {
     Api::at(base, Token::new(TOKEN))
 }
 
+/// Plans, then sets up what was reviewed, as the dashboard does.
+async fn set_up(base: &str, host: &FakeHost) -> Outcome {
+    let p = plan_with(&api(base), host).await.unwrap();
+    apply_with(&api(base), host, &p.version).await
+}
+
 fn fresh() -> Mock {
     Mock {
         policy: DEFAULT_POLICY.into(),
@@ -562,7 +568,7 @@ async fn a_fresh_tailnet_with_the_default_policy() {
         "the plan changes nothing"
     );
 
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(out.ok, "{out:?}");
     assert_eq!(
         out.changed,
@@ -623,7 +629,7 @@ async fn a_restricted_policy_with_its_own_tag_owners() {
             "Create the Pyo OAuth client",
         ]
     );
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(out.ok, "{out:?}");
     let m = st.lock().unwrap();
     assert!(
@@ -659,7 +665,7 @@ async fn an_already_set_up_tailnet_changes_nothing() {
     assert!(p.changes.is_empty(), "{p:?}");
     assert!(p.diff.is_empty());
     assert_eq!(p.done.len(), 6);
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(
         out.ok && out.changed.is_empty() && out.token_deleted,
         "{out:?}"
@@ -684,7 +690,7 @@ async fn a_saved_client_from_another_tailnet_is_replaced() {
     };
     let p = plan_with(&api(&base), &host).await.unwrap();
     assert_eq!(p.changes, ["Create the Pyo OAuth client"]);
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(out.ok);
     assert_eq!(st.lock().unwrap().clients.len(), 1);
 }
@@ -705,8 +711,9 @@ async fn a_policy_managed_in_git_is_never_written() {
             .iter()
             .any(|l| l.contains("\"tag:pyo\": [\"autogroup:admin\"]"))
     );
-    let e = apply_with(&api(&base), &host).await.unwrap_err();
-    assert!(e.contains("managed outside"), "{e}");
+    // Set up anyway: nothing is written, and the token stays for a new review.
+    let out = apply_with(&api(&base), &host, &p.version).await;
+    assert!(!out.ok && out.review_again && !out.token_deleted, "{out:?}");
     assert!(writes(&st.lock().unwrap()).is_empty());
 
     // Once Git has the lines, the rest goes on, and the policy is left alone.
@@ -719,50 +726,60 @@ async fn a_policy_managed_in_git_is_never_written() {
     let p = plan_with(&api(&base), &host).await.unwrap();
     assert!(p.blocked.is_none() && p.diff.is_empty(), "{p:?}");
     assert!(!p.changes.iter().any(|c| c.contains("Approve")));
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
     assert!(out.ok, "{out:?}");
     assert!(st.lock().unwrap().written.is_empty());
 }
 
 #[tokio::test]
-async fn a_policy_changed_meanwhile_is_read_again_once() {
+async fn a_policy_changed_while_setting_up_is_reviewed_again() {
     let _one = ONE.lock().await;
     let (base, st) = serve(Mock {
         races: 1,
-        https: true,
         ..fresh()
     })
     .await;
-    let out = apply_with(&api(&base), &FakeHost::default()).await.unwrap();
-    assert!(out.ok, "{out:?}");
+    let host = FakeHost::default();
+    let p = plan_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version).await;
+    // Saving would lose the other edit or save what wasn't reviewed: stop.
+    assert!(!out.ok && out.review_again, "{out:?}");
+    assert_eq!(out.changed, ["Turned on HTTPS certificates"]);
+    assert_eq!(out.error.as_deref(), Some(REVIEW_AGAIN));
+    // The token stays for the new review, and nothing after the policy ran.
+    assert!(!out.token_deleted && out.todo.is_empty());
+    {
+        let m = st.lock().unwrap();
+        assert!(m.written.is_empty() && m.clients.is_empty() && m.deleted.is_empty());
+    }
+
+    // The new review shows the policy as it is now, and sets up from it.
+    let again = plan_with(&api(&base), &host).await.unwrap();
+    assert_ne!(again.version, p.version);
+    assert!(again.done.contains(&"HTTPS certificates are on".to_owned()));
+    let out = apply_with(&api(&base), &host, &again.version).await;
+    assert!(out.ok && out.token_deleted, "{out:?}");
     let m = st.lock().unwrap();
     // The other edit is kept, under Pyo's.
     assert!(m.policy.contains("// edited meanwhile"));
     assert!(parse(&m.policy).unwrap()["tagOwners"].get(TAG).is_some());
-    assert_eq!(
-        m.log.iter().filter(|l| *l == "POST /tailnet/-/acl").count(),
-        2
-    );
+    assert_eq!(m.written.len(), 1);
 }
 
 #[tokio::test]
-async fn a_policy_that_keeps_changing_stops_with_what_was_done() {
+async fn a_policy_changed_after_the_review_changes_nothing() {
     let _one = ONE.lock().await;
-    let (base, st) = serve(Mock {
-        races: 2,
-        ..fresh()
-    })
-    .await;
-    let out = apply_with(&api(&base), &FakeHost::default()).await.unwrap();
-    assert!(!out.ok);
-    assert_eq!(out.changed, ["Turned on HTTPS certificates"]);
-    assert!(
-        out.error
-            .unwrap()
-            .contains("changed while Pyo was editing it")
-    );
-    let m = st.lock().unwrap();
-    assert!(m.written.is_empty() && m.clients.is_empty() && m.deleted.is_empty());
+    let (base, st) = serve(fresh()).await;
+    let host = FakeHost::default();
+    let p = plan_with(&api(&base), &host).await.unwrap();
+    {
+        let mut m = st.lock().unwrap();
+        m.policy = m.policy.replacen('{', "{\n  // edited after the review", 1);
+        m.etag += 1;
+    }
+    let out = apply_with(&api(&base), &host, &p.version).await;
+    assert!(!out.ok && out.review_again && out.changed.is_empty(), "{out:?}");
+    assert!(writes(&st.lock().unwrap()).is_empty(), "nothing changed");
 }
 
 #[tokio::test]
@@ -773,7 +790,7 @@ async fn https_under_its_other_name() {
         ..fresh()
     })
     .await;
-    let out = apply_with(&api(&base), &FakeHost::default()).await.unwrap();
+    let out = set_up(&base, &FakeHost::default()).await;
     assert!(
         out.ok
             && out
@@ -802,7 +819,7 @@ async fn a_refused_client_says_what_changed() {
     })
     .await;
     let host = FakeHost::default();
-    let out = apply_with(&api(&base), &host).await.unwrap();
+    let out = set_up(&base, &host).await;
     assert!(!out.ok);
     assert_eq!(
         out.changed,
@@ -811,15 +828,15 @@ async fn a_refused_client_says_what_changed() {
             "Approved Pyo's Services on tag:pyo servers by policy",
         ]
     );
-    let e = out.error.unwrap();
+    let e = out.error.clone().unwrap();
     assert!(
         e.contains("didn't let Pyo create its OAuth client") && e.contains("not allowed"),
         "{e}"
     );
-    assert!(!out.token_deleted);
     assert!(host.saved.lock().unwrap().is_empty());
-    // The token stays for another try.
-    assert!(st.lock().unwrap().deleted.is_empty());
+    // The setup is over, so the token goes all the same.
+    assert!(out.token_deleted && out.todo.is_empty(), "{out:?}");
+    assert_eq!(st.lock().unwrap().deleted, ["kTok1CNTRL"]);
 }
 
 #[tokio::test]
@@ -835,9 +852,12 @@ async fn a_client_that_cant_be_saved_is_deleted_again() {
         save_fails: true,
         ..Default::default()
     };
-    let e = apply_with(&api(&base), &host).await.unwrap_err();
+    let out = set_up(&base, &host).await;
+    assert!(!out.ok && out.changed.is_empty(), "{out:?}");
+    let e = out.error.clone().unwrap();
     assert!(e.contains("couldn't save its OAuth client"), "{e}");
-    assert_eq!(st.lock().unwrap().deleted, ["kPyo1CNTRL"]);
+    assert!(out.token_deleted);
+    assert_eq!(st.lock().unwrap().deleted, ["kPyo1CNTRL", "kTok1CNTRL"]);
 }
 
 #[tokio::test]
@@ -848,7 +868,7 @@ async fn a_token_that_cant_delete_itself_is_left_to_the_admin() {
         ..fresh()
     })
     .await;
-    let out = apply_with(&api(&base), &FakeHost::default()).await.unwrap();
+    let out = set_up(&base, &FakeHost::default()).await;
     assert!(out.ok && !out.token_deleted);
     assert_eq!(out.todo, [DELETE_TOKEN]);
 }
@@ -865,12 +885,47 @@ async fn magic_dns_without_nameservers_changes_nothing() {
     let host = FakeHost::default();
     let p = plan_with(&api(&base), &host).await.unwrap();
     assert_eq!(p.changes[0], "Turn on MagicDNS");
-    let e = apply_with(&api(&base), &host).await.unwrap_err();
+    let out = apply_with(&api(&base), &host, &p.version).await;
+    assert!(!out.ok && out.changed.is_empty(), "{out:?}");
+    let e = out.error.clone().unwrap();
     assert!(e.contains("needs a DNS nameserver"), "{e}");
+    // Stopped at the start, and the token deleted all the same.
+    assert!(out.token_deleted && out.todo.is_empty());
     assert_eq!(
         writes(&st.lock().unwrap()),
-        ["POST /tailnet/-/dns/preferences"]
+        [
+            "POST /tailnet/-/dns/preferences",
+            "DELETE /tailnet/-/keys/kTok1CNTRL"
+        ]
     );
+}
+
+#[tokio::test]
+async fn a_stop_with_a_token_that_cant_delete_itself_says_to_delete_it() {
+    let _one = ONE.lock().await;
+    let (base, _) = serve(Mock {
+        magic_dns: false,
+        nameservers: vec![],
+        refuse_revoke: true,
+        ..fresh()
+    })
+    .await;
+    let out = set_up(&base, &FakeHost::default()).await;
+    assert!(!out.ok && out.error.is_some() && !out.token_deleted, "{out:?}");
+    assert_eq!(out.todo, [DELETE_TOKEN]);
+}
+
+#[tokio::test]
+async fn a_token_tailscale_no_longer_takes_needs_no_deleting() {
+    let _one = ONE.lock().await;
+    let (base, _) = serve(fresh()).await;
+    let wrong = Api::at(
+        &base,
+        Token::new("tskey-api-kOther1CNTRL-zzzzzzzzzzzzzzzzzzzz"),
+    );
+    let out = apply_with(&wrong, &FakeHost::default(), "").await;
+    assert_eq!(out.error.as_deref(), Some(BAD_TOKEN));
+    assert!(!out.ok && !out.token_deleted && out.todo.is_empty(), "{out:?}");
 }
 
 #[tokio::test]
@@ -949,12 +1004,11 @@ async fn the_token_never_shows_in_logs_errors_or_saved_settings() {
         let host = FakeHost::default();
         let p = plan_with(&api(&base), &host).await;
         seen.push(format!("{p:?}"));
+        let reviewed = p.as_ref().map(|p| p.version.clone()).unwrap_or_default();
         seen.push(serde_json::to_string(&p.ok()).unwrap());
-        let out = apply_with(&api(&base), &host).await;
+        let out = apply_with(&api(&base), &host, &reviewed).await;
         seen.push(format!("{out:?}"));
-        if let Ok(o) = &out {
-            seen.push(serde_json::to_string(o).unwrap());
-        }
+        seen.push(serde_json::to_string(&out).unwrap());
         for (id, secret) in host.saved.lock().unwrap().iter() {
             seen.push(format!("{id} {secret}"));
         }

@@ -2629,6 +2629,8 @@ pub(crate) enum Op {
         /// An API access token from the Tailscale console's Keys page. Used for this request only and never stored.
         #[schema(value_type = String)]
         token: crate::tailscale_setup::Token,
+        /// The `version` planTailscaleSetup returned. If the tailnet policy changed since, nothing changes and `reviewAgain` comes back.
+        version: String,
     },
     /// Check the saved Tailscale OAuth client again, scope by scope.
     TestTailscale {},
@@ -7221,9 +7223,9 @@ async fn apply(
             require_admin(user)?;
             crate::tailscale_setup::plan(s, token).await
         }
-        Op::SetUpTailscale { token } => {
+        Op::SetUpTailscale { token, version } => {
             require_admin(user)?;
-            let out = crate::tailscale_setup::apply(s, token).await?;
+            let out = crate::tailscale_setup::apply(s, token, &version).await?;
             if !out.changed.is_empty() {
                 log_setting(
                     tx,
