@@ -341,6 +341,14 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
     toast({ title: "Tailscale saved" });
     if (!goBack(navigate)) toManage();
   };
+  // The saved client's secret, pasted again by hand.
+  const replaceSecret = () => {
+    setClientId(ts?.clientId ?? "");
+    setSecret("");
+    setClientChecks([]);
+    setError("");
+    setView("client");
+  };
   const test = async () => {
     setTesting(true);
     const r = await api.testTailscale();
@@ -555,7 +563,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
               "Secret",
               <>
                 <span className="font-mono">{ts.hint}</span>
-                <Button size="xs" variant="ghost" className="-my-1 -mr-2" onClick={() => setView("token")}>
+                <Button size="xs" variant="ghost" className="-my-1 -mr-2" onClick={replaceSecret}>
                   Replace
                 </Button>
               </>,
