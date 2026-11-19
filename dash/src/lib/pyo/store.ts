@@ -32,6 +32,9 @@ import type {
   Database,
   WafSettings,
   SecretStore,
+  AlertChannel,
+  AlertEvent,
+  AlertKind,
   Cluster,
   ClusterServer,
   ControlBackup,
@@ -149,6 +152,8 @@ export type PyoState = {
   databases: Database[];
   /** External secret stores, without their credentials. */
   secretStores: SecretStore[];
+  /** Where the user's teams send alerts, without their tokens or URLs. */
+  alertChannels: AlertChannel[];
   // Per-browser preferences, kept in localStorage.
   currentTeamId: string;
   recentTemplateIds: string[];
@@ -326,6 +331,7 @@ function empty(): PyoState {
     wafRules: [],
     databases: [],
     secretStores: [],
+    alertChannels: [],
     registryLogins: [],
     observabilitySettings: { ipMode: "none", enabled: true, small: null },
     builders: [],
@@ -1524,6 +1530,45 @@ export const api = {
       s.secretStores = s.secretStores.filter((x) => x.id !== id);
     });
     return send("removeSecretStore", { id });
+  },
+  /** A new alert channel. The token or URL is checked, then sealed. */
+  addAlertChannel(input: {
+    kind: AlertKind;
+    name: string;
+    events: AlertEvent[];
+    webhookUrl?: string;
+    token?: string;
+    chatId?: string;
+    secret?: string;
+  }) {
+    return attempt<{ id: string }>("addAlertChannel", {
+      id: newId("alc"),
+      teamId: get().currentTeamId,
+      ...input,
+    });
+  },
+  /** Left out: kept as saved. */
+  updateAlertChannel(
+    id: string,
+    input: {
+      name?: string;
+      events?: AlertEvent[];
+      webhookUrl?: string;
+      token?: string;
+      chatId?: string;
+      secret?: string;
+    },
+  ) {
+    return attempt("updateAlertChannel", { id, ...input });
+  },
+  testAlertChannel(id: string) {
+    return attempt("testAlertChannel", { id });
+  },
+  removeAlertChannel(id: string) {
+    update((s) => {
+      s.alertChannels = s.alertChannels.filter((x) => x.id !== id);
+    });
+    return send("removeAlertChannel", { id });
   },
   /** The key names at a path; never their values. */
   checkSecretImport(storeId: string, path: string) {

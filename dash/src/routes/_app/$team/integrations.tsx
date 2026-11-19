@@ -33,7 +33,7 @@ import { BrandMark, CLOUDFLARE_LOGO, DOCKER_LOGO, GITHUB_LOGO } from "~/componen
 
 // Everything Pyo connects to, as cards: a filter by category, a search, and
 // each card's dialog to set it up or manage it. "/integrations#<id>" scrolls
-// to a card and opens its dialog. Notification channels live in Settings.
+// to a card and opens its dialog. Alert channels live on Notifications.
 export const Route = createFileRoute("/_app/$team/integrations")({
   // ?github=: back from GitHub (see useGithubReturn).
   validateSearch: z.object({ github: z.string().optional().catch(undefined) }),

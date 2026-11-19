@@ -1,18 +1,16 @@
-import {
-  BellIcon,
-  EnvelopeSimpleIcon,
-  SlackLogoIcon,
-} from "@phosphor-icons/react";
+import { BellIcon, EnvelopeSimpleIcon } from "@phosphor-icons/react";
 import { createFileRoute } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { AlertsSection } from "~/components/pyo/Alerts";
 import { Badge } from "~/components/ui/Badge";
 import { Switch } from "~/components/ui/Field";
 import { Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { seo } from "~/lib/seo";
 import { api, isMuted, NOTIFICATION_TOPICS, usePyo } from "~/lib/pyo/store";
 
-// What reaches you, and where. Topics filter the bell in the header; muted
-// events still appear in the activity log.
+// What reaches you, and where. Topics filter the bell in the header (this
+// browser only), and muted events still appear in the activity log. Alerts
+// are the team's: its owners and admins send them to chat apps or a webhook.
 export const Route = createFileRoute("/_app/$team/notifications")({
   head: () => ({ meta: seo({ title: "Notifications" }) }),
   component: () => (
@@ -55,14 +53,9 @@ function Notifications() {
             body={`To ${s.user.email}`}
             right={<Badge>Not yet</Badge>}
           />
-          <Channel
-            icon={<SlackLogoIcon size={15} />}
-            title="Slack and webhooks"
-            body="Post events to a channel."
-            right={<Badge>Not yet</Badge>}
-          />
         </ul>
       </Panel>
+      <AlertsSection />
     </div>
   );
 }

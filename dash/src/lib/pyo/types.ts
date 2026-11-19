@@ -908,6 +908,30 @@ export type SecretStoreKind =
   | "doppler";
 
 /** An external secret store. Its credential never comes back. */
+export type AlertKind = "telegram" | "discord" | "slack" | "webhook";
+
+/** What an alert channel can get, each on or off. */
+export type AlertEvent =
+  | "deploy_failed"
+  | "server_offline"
+  | "backup_failed"
+  | "certificate";
+
+/** Where a team's alerts go. The token or URL never leaves the API: `hint` only. */
+export type AlertChannel = {
+  id: ID;
+  teamId: ID;
+  kind: AlertKind;
+  name: string;
+  /** "Chat -100…", "Webhook …a1b2", or a webhook's host. */
+  hint: string;
+  events: AlertEvent[];
+  lastSentAt: number | null;
+  lastError: string | null;
+  lastErrorAt: number | null;
+  createdAt: number;
+};
+
 export type SecretStore = {
   id: ID;
   teamId: ID;
@@ -1608,8 +1632,14 @@ export type ActivityType =
   | "cluster.registered"
   | "cluster.disconnected"
   | "cluster.degraded"
+  | "cluster.unreachable"
+  | "cluster.reachable"
   | "server.join"
   | "server.removed"
+  | "server.offline"
+  | "server.online"
+  | "backup.failed"
+  | "domain.certificate_failed"
   | "volume.created"
   | "volume.attached"
   | "volume.detached"
