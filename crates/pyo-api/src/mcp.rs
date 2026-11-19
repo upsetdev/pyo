@@ -800,10 +800,12 @@ async fn log_call(
 /// Arguments as logged: environment variable values, passwords, keys and
 /// the like may be secrets.
 fn redacted(args: &Value) -> Value {
-    const SECRET: [&str; 8] = [
+    const SECRET: [&str; 9] = [
         "password",
-        // A Cloudflare or platform API token.
+        // A Cloudflare or platform API token, or a Telegram bot's.
         "token",
+        // Discord's and Slack's carry their token.
+        "webhookUrl",
         "adminPassword",
         "secret",
         "secretKey",

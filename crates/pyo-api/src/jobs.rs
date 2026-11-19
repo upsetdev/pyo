@@ -1,6 +1,6 @@
 //! Durable background jobs in Postgres: things that must happen eventually
 //! even if a process dies mid-way (reporting a commit status to GitHub or GitLab,
-//! deleting an old image, retrying an email). Enqueued in the same
+//! deleting an old image, retrying an email, sending an alert). Enqueued in the same
 //! transaction as what caused them where possible; claimed with
 //! `FOR UPDATE SKIP LOCKED` by any worker; retried with backoff; a job whose
 //! worker vanished is picked up again after a few minutes.
@@ -125,6 +125,7 @@ async fn run(s: &AppState, kind: &str, p: &Value) -> anyhow::Result<()> {
             )
             .await
         }
+        "alert.send" => crate::alerts::run_job(s, p).await,
         other => anyhow::bail!("unknown job kind {other}"),
     }
 }

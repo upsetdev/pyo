@@ -12,7 +12,7 @@ const DEPLOYMENTS_PER_TEAM: i64 = 100;
 const DEPLOYMENTS_WITH_LOGS: i64 = 30;
 const LOG_LINES: i64 = 400;
 
-/// Queries here are constants (one interpolates numeric limits); ids are bound.
+/// Queries here are constants (two interpolate Pyo's own constants); ids are bound.
 async fn values(db: &PgPool, sql: &str, team_ids: &[String]) -> ApiResult<Vec<Value>> {
     Ok(
         sqlx::query_scalar::<_, Value>(sqlx::AssertSqlSafe(sql.to_owned()))
@@ -317,6 +317,25 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         &team_ids,
     )
     .await?;
+    // Where alerts go, without the token or URL: a hint, the events it
+    // gets and how its last send went.
+    let topics = crate::alerts::TOPICS
+        .iter()
+        .map(|t| format!("'{t}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let alert_channels = values(
+        db,
+        &format!(
+            "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'kind', kind, 'name', name, 'hint', hint,
+                                      'events', to_jsonb(ARRAY(SELECT t FROM unnest(ARRAY[{topics}]) t WHERE NOT (t = ANY(muted)))),
+                                      'lastSentAt', pyo.ms(last_sent_at), 'lastError', last_error, 'lastErrorAt', pyo.ms(last_error_at),
+                                      'createdAt', pyo.ms(created_at))
+               FROM pyo.alert_channels WHERE team_id = ANY($1) ORDER BY created_at"
+        ),
+        &team_ids,
+    )
+    .await?;
     let firewall_rules = values(
         db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'serviceId', service_id, 'action', action, 'operator', operator,
@@ -461,6 +480,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "firewallRules": firewall_rules,
         "wafRules": waf_rules,
         "secretStores": secret_stores,
+        "alertChannels": alert_channels,
         // Assistants you connected over OAuth (MCP).
         "oauthGrants": oauth_grants,
         // How teams' values are encrypted; the security overview.

@@ -313,6 +313,7 @@ pub async fn team_of(
         "deployments" => "Deployment",
         "certificates" | "origin_pull_certificates" => "Certificate",
         "secret_stores" => "Secret store",
+        "alert_channels" => "Alert channel",
         "git_connections" => "Git connection",
         "members" => "Member",
         "deploy_hooks" => "Deploy hook",
@@ -489,9 +490,11 @@ pub async fn log_activity(
     sqlx::query("INSERT INTO pyo.activity (id, team_id, data) VALUES ($1, $2, $3)")
         .bind(new_id("evt"))
         .bind(team_id)
-        .bind(data)
+        .bind(&data)
         .execute(&mut **tx)
         .await?;
+    // The important ones go to the team's alert channels too.
+    crate::alerts::on_activity(tx, team_id, kind, &data["target"], &data).await;
     Ok(())
 }
 
@@ -2660,6 +2663,50 @@ pub(crate) enum Op {
     },
     /// Disconnect a secret store.
     RemoveSecretStore { id: String },
+    /// Send the team's alerts somewhere: `kind` "telegram" (a bot `token` and a `chatId`), "discord" or "slack" (the channel's `webhookUrl`), or "webhook" (your `webhookUrl`, and a `secret` to sign each request with). Pyo keeps it encrypted. Team owners and admins.
+    AddAlertChannel {
+        /// A new id you choose: `alc_` then 4 to 40 lowercase letters, digits, dashes or underscores.
+        id: String,
+        team_id: String,
+        /// "telegram", "discord", "slack" or "webhook".
+        kind: String,
+        name: String,
+        /// What it gets: "deploy_failed", "server_offline" (and back online), "backup_failed" and "certificate" (expiring, or couldn't renew). All of them when omitted.
+        #[serde(default)]
+        events: Option<Vec<String>>,
+        /// Discord's or Slack's webhook URL, or your own (https, or http to a private network address).
+        #[serde(default)]
+        webhook_url: Option<String>,
+        /// The Telegram bot's token, from @BotFather.
+        #[serde(default)]
+        token: Option<String>,
+        /// The Telegram chat: its id (negative for groups and channels) or a public channel's @name.
+        #[serde(default)]
+        chat_id: Option<String>,
+        /// A webhook's signing secret: each request then has `X-Pyo-Signature`, HMAC-SHA256 of "<X-Pyo-Timestamp>.<body>" as "sha256=<hex>".
+        #[serde(default)]
+        secret: Option<String>,
+    },
+    /// Change an alert channel. What you leave out stays as it is. An empty `secret` stops signing. Team owners and admins.
+    UpdateAlertChannel {
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        events: Option<Vec<String>>,
+        #[serde(default)]
+        webhook_url: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        chat_id: Option<String>,
+        #[serde(default)]
+        secret: Option<String>,
+    },
+    /// Send a test alert to a channel now. When it doesn't arrive, the error says why. Team owners and admins.
+    TestAlertChannel { id: String },
+    /// Remove an alert channel. Team owners and admins.
+    RemoveAlertChannel { id: String },
     /// The key names at a path of a secret store, to check it before importing. Never values.
     CheckSecretImport { store_id: String, path: String },
     /// Save a login for a private registry, one per host. Pyo checks it with the registry first.
@@ -2826,7 +2873,7 @@ async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     // Long calls to outside services hold no transaction open.
     if matches!(
         op,
-        Op::PlanTailscaleSetup { .. } | Op::SetUpTailscale { .. }
+        Op::PlanTailscaleSetup { .. } | Op::SetUpTailscale { .. } | Op::TestAlertChannel { .. }
     ) {
         return outside_tx(&s, user, op).await;
     }
@@ -2849,6 +2896,14 @@ async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
 /// through [`apply`].
 async fn outside_tx(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     match op {
+        Op::TestAlertChannel { id } => {
+            let mut tx = s.db.begin().await?;
+            let team_id = team_of(&mut tx, "alert_channels", &id).await?;
+            require_role(&mut tx, user, &team_id, Role::Admin).await?;
+            tx.commit().await?;
+            crate::alerts::test(s, &id).await?;
+            Ok(json!({ "ok": true }))
+        }
         Op::PlanTailscaleSetup { token } => {
             require_admin(user)?;
             crate::tailscale_setup::plan(s, token).await
@@ -3071,6 +3126,10 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::CheckForUpdates {}
         | Op::StartUpdate { .. } => ("Settings", ""),
         Op::SetObservability { .. } => ("Observability", ""),
+        Op::AddAlertChannel { .. }
+        | Op::UpdateAlertChannel { .. }
+        | Op::TestAlertChannel { .. }
+        | Op::RemoveAlertChannel { .. } => ("Alerts", "alc"),
     }
 }
 
@@ -6998,6 +7057,99 @@ async fn apply(
             .await?;
             Ok(ok)
         }
+        Op::AddAlertChannel {
+            id,
+            team_id,
+            kind,
+            name,
+            events,
+            webhook_url,
+            token,
+            chat_id,
+            secret,
+        } => {
+            client_id(&id, "alc")?;
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            let given = crate::alerts::Given {
+                webhook_url,
+                token,
+                chat_id,
+                secret,
+            };
+            crate::alerts::add(tx, &id, &team_id, &kind, &name, events.as_deref(), &given).await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "integration.added",
+                "info",
+                &format!("Added alert channel {}", name.trim()),
+                json!({ "kind": "integration", "id": id, "label": name.trim() }),
+                json!({}),
+            )
+            .await?;
+            Ok(json!({ "ok": true, "id": id }))
+        }
+        Op::UpdateAlertChannel {
+            id,
+            name,
+            events,
+            webhook_url,
+            token,
+            chat_id,
+            secret,
+        } => {
+            let team_id = team_of(tx, "alert_channels", &id).await?;
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            let given = crate::alerts::Given {
+                webhook_url,
+                token,
+                chat_id,
+                secret,
+            };
+            let name = crate::alerts::update(
+                tx,
+                &id,
+                &team_id,
+                name.as_deref(),
+                events.as_deref(),
+                &given,
+            )
+            .await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "integration.saved",
+                "info",
+                &format!("Changed alert channel {name}"),
+                json!({ "kind": "integration", "id": id, "label": name }),
+                json!({}),
+            )
+            .await?;
+            Ok(ok)
+        }
+        Op::RemoveAlertChannel { id } => {
+            let team_id = team_of(tx, "alert_channels", &id).await?;
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            let name: String =
+                sqlx::query_scalar("DELETE FROM pyo.alert_channels WHERE id = $1 RETURNING name")
+                    .bind(&id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "integration.removed",
+                "info",
+                &format!("Removed alert channel {name}"),
+                json!({ "kind": "integration", "id": id, "label": name }),
+                json!({}),
+            )
+            .await?;
+            Ok(ok)
+        }
         Op::CheckSecretImport { store_id, path } => {
             let team_id = team_of(tx, "secret_stores", &store_id).await?;
             require_role(tx, user, &team_id, Role::Developer).await?;
@@ -7259,6 +7411,9 @@ async fn apply(
         // Run by outside_tx, with no transaction open.
         Op::PlanTailscaleSetup { .. } | Op::SetUpTailscale { .. } => {
             Err(anyhow::anyhow!("the tailscale setup runs outside the transaction").into())
+        }
+        Op::TestAlertChannel { .. } => {
+            Err(anyhow::anyhow!("an alert test runs outside the transaction").into())
         }
         Op::TestTailscale {} => {
             require_admin(user)?;

@@ -8,6 +8,7 @@
 //! (see [`Extensions`]); self-hosted Pyo has none of those.
 
 mod agent;
+mod alerts;
 pub mod auth;
 mod backup;
 mod backupstore;
