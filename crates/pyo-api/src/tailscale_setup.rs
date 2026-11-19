@@ -25,7 +25,7 @@ use zeroize::Zeroize;
 
 use crate::AppState;
 use crate::error::{ApiError, ApiResult};
-use crate::tailscale::{TAG, TsError};
+use crate::tailscale::{Reply, TAG, TsError};
 
 /// The scopes Pyo's own client gets: what the manual path asks for.
 const SCOPES: [&str; 3] = ["devices:core", "auth_keys", "services"];
@@ -96,15 +96,9 @@ enum Body {
     HuJson(String),
 }
 
-struct Reply {
-    text: String,
-    etag: Option<String>,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        serde_json::from_str(&self.text).unwrap_or(Value::Null)
-    }
+/// The answer's body as JSON (Null when it isn't).
+fn json_of(r: &Reply) -> Value {
+    serde_json::from_str(&r.text).unwrap_or(Value::Null)
 }
 
 /// Tailscale's API with the pasted token.
@@ -138,6 +132,8 @@ impl Api {
         out
     }
 
+    /// A request with the token, through the same path as Pyo's own client
+    /// ([`crate::tailscale::send`]), with the token scrubbed from any error.
     async fn send(
         &self,
         method: reqwest::Method,
@@ -158,35 +154,18 @@ impl Api {
                 .header(reqwest::header::CONTENT_TYPE, "application/hujson")
                 .body(t),
         };
-        let r = req.send().await.map_err(|e| TsError {
-            status: 0,
-            message: self.scrub(&format!("Couldn't reach Tailscale: {}", e.without_url())),
-        })?;
-        let status = r.status().as_u16();
-        let etag = r
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let text = r.text().await.unwrap_or_default();
-        if !(200..300).contains(&status) {
-            let message = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v["message"].as_str().map(str::to_owned))
-                .unwrap_or_else(|| text.trim().chars().take(300).collect());
-            return Err(TsError {
-                status,
-                message: self.scrub(&message),
-            });
-        }
-        Ok(Reply { text, etag })
+        crate::tailscale::send(req).await.map_err(|e| TsError {
+            status: e.status,
+            message: self.scrub(&e.message),
+        })
     }
 
     async fn get(&self, path: &str) -> Result<Value, TsError> {
-        Ok(self
-            .send(reqwest::Method::GET, path, Body::None, &[])
-            .await?
-            .json())
+        Ok(json_of(
+            &self
+                .send(reqwest::Method::GET, path, Body::None, &[])
+                .await?,
+        ))
     }
 
     /// The policy file as written, and its ETag.
@@ -688,7 +667,7 @@ async fn turn_on_https(api: &Api) -> Result<Https, TsError> {
             )
             .await
         {
-            Ok(r) if https_on(&r.json()) == Some(true) => return Ok(Https::On),
+            Ok(r) if https_on(&json_of(&r)) == Some(true) => return Ok(Https::On),
             Ok(_) => {
                 if read().await? == Some(true) {
                     return Ok(Https::On);
@@ -717,7 +696,7 @@ async fn validate(api: &Api, text: &str) -> Result<(), String> {
         )
         .await
         .map_err(|e| say(&e, "check the new tailnet policy"))?;
-    let v = r.json();
+    let v = json_of(&r);
     let errors = v["data"]
         .as_array()
         .into_iter()
@@ -810,7 +789,7 @@ async fn make_client(api: &Api, host: &impl Host) -> Result<Vec<Value>, String> 
                 format!("Tailscale didn't let Pyo create its OAuth client.{why} Set up with an OAuth client instead.")
             }
         })?;
-    let v = r.json();
+    let v = json_of(&r);
     let secret = v["key"].as_str().unwrap_or("");
     // The client ID is the key's ID, which its secret carries too.
     let id = v["id"].as_str().map(str::to_owned).or_else(|| {
