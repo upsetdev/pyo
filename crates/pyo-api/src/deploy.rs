@@ -1546,16 +1546,20 @@ pub async fn delete_image(repo: &str, digest: &str) -> anyhow::Result<()> {
 /// Marks clusters whose agent went quiet as unreachable, and fails rollouts
 /// nobody is reporting on any more.
 pub async fn sweeper(state: AppState) {
+    let started = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     loop {
         tick.tick().await;
         let Some(r) = crate::bg::as_leader(&state.db, crate::bg::LOCK_SWEEPER, || async {
             let _ = crate::jobs::prune(&state).await;
             let _ = crate::certs::warn_expiring(&state).await;
+            if let Err(e) = crate::alerts::flush(&state.db).await {
+                tracing::warn!(error = ?e.message, "sending held alerts failed");
+            }
             if let Err(e) = release_waiting(&state).await {
                 tracing::warn!(error = ?e.message, "releasing rollouts held for databases failed");
             }
-            sweep(&state).await
+            sweep(&state, started.elapsed() > AGENTS_BACK).await
         })
         .await
         else {
@@ -1567,7 +1571,11 @@ pub async fn sweeper(state: AppState) {
     }
 }
 
-async fn sweep(state: &AppState) -> ApiResult<()> {
+/// After Pyo starts, how long agents get to report in before a quiet one
+/// counts as unreachable: they couldn't while Pyo was down.
+const AGENTS_BACK: Duration = Duration::from_secs(90);
+
+async fn sweep(state: &AppState, mark_unreachable: bool) -> ApiResult<()> {
     // A drained server whose machine was uninstalled (it went offline) is
     // deleted from its cluster, finishing its removal.
     let gone: Vec<(String, String)> = sqlx::query_as(
@@ -1591,9 +1599,31 @@ async fn sweep(state: &AppState) -> ApiResult<()> {
         tx.commit().await?;
         state.wake(&cluster_id).await;
     }
-    sqlx::query("UPDATE pyo.clusters SET status = 'unreachable' WHERE status IN ('connected', 'degraded') AND last_seen_at < now() - interval '60 seconds'")
-        .execute(&state.db)
+    let lost: Vec<(String, String, String)> = if mark_unreachable {
+        sqlx::query_as(
+            "UPDATE pyo.clusters SET status = 'unreachable' WHERE status IN ('connected', 'degraded') AND last_seen_at < now() - interval '60 seconds'
+             RETURNING id, team_id, name",
+        )
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        vec![]
+    };
+    for (id, team_id, name) in lost {
+        let mut tx = state.db.begin().await?;
+        log_activity(
+            &mut tx,
+            &team_id,
+            "pyo",
+            "cluster.unreachable",
+            "failure",
+            &format!("{name} is unreachable"),
+            json!({ "kind": "cluster", "id": id, "label": name }),
+            json!({ "clusterId": id }),
+        )
         .await?;
+        tx.commit().await?;
+    }
     // Clusters Add cluster made without a name that never connected: the
     // page opens with one ready, so a visit that goes nowhere leaves it.
     // Gone after a day (a named one stays until it's removed).

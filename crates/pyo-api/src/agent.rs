@@ -292,7 +292,7 @@ async fn heartbeat(
             ("cluster.registered", format!("Connected {name}"), "success")
         } else {
             (
-                "cluster.registered",
+                "cluster.reachable",
                 format!("{name} is reachable again"),
                 "success",
             )
@@ -310,7 +310,45 @@ async fn heartbeat(
         .await?;
     }
 
-    // Servers: upsert what's reported, drop what's gone.
+    // Servers: upsert what's reported, drop what's gone. One that stops
+    // being ready (or is ready again) is in the activity, and alerts.
+    let before: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, coalesce(report->>'status', '') FROM pyo.servers WHERE cluster_id = $1 AND removal IS NULL",
+    )
+    .bind(&cluster.id)
+    .fetch_all(&mut *tx)
+    .await?;
+    for n in &hb.servers {
+        let Some((_, was)) = before.iter().find(|(name, _)| *name == n.name) else {
+            continue;
+        };
+        let (kind, status, title) = match (was == "ready", n.status == "ready") {
+            (true, false) => (
+                "server.offline",
+                "failure",
+                format!("{} is offline", n.name),
+            ),
+            // Back only after it was said to be offline (a new server
+            // isn't ready at first).
+            (false, true) if offline_logged(&mut tx, &cluster, &n.name).await? => (
+                "server.online",
+                "success",
+                format!("{} is back online", n.name),
+            ),
+            _ => continue,
+        };
+        log_activity(
+            &mut tx,
+            &cluster.team_id,
+            "pyo",
+            kind,
+            status,
+            &title,
+            json!({ "kind": "server", "id": n.name, "label": n.name }),
+            json!({ "clusterId": cluster.id }),
+        )
+        .await?;
+    }
     let names: Vec<String> = hb.servers.iter().map(|n| n.name.clone()).collect();
     for n in &hb.servers {
         sqlx::query(
@@ -416,6 +454,21 @@ async fn heartbeat(
         } else {
             "pending"
         };
+        // One that was issued and now fails: it couldn't be renewed.
+        let lost: Option<(String, String)> = if tls == "failed" {
+            sqlx::query_as(
+                "SELECT d->>'id', s.project_id FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
+                  WHERE s.id = $1 AND s.cluster_id = $2 AND NOT s.deleting AND d->>'hostname' = $3 AND d->>'tls' = 'issued'
+                  LIMIT 1",
+            )
+            .bind(&c.service_id)
+            .bind(&cluster.id)
+            .bind(&c.hostname)
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        };
         sqlx::query(
             "UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', (
                SELECT coalesce(jsonb_agg(CASE WHEN d->>'hostname' = $3 AND coalesce(d->>'tlsMode', 'auto') <> 'off'
@@ -433,6 +486,23 @@ async fn heartbeat(
         .bind(&error)
         .execute(&mut *tx)
         .await?;
+        if let Some((domain_id, project_id)) = lost {
+            log_activity(
+                &mut tx,
+                &cluster.team_id,
+                "pyo",
+                "domain.certificate_failed",
+                "failure",
+                &format!(
+                    "Couldn't renew the certificate for {}. {}",
+                    c.hostname,
+                    error.as_deref().unwrap_or("")
+                ),
+                json!({ "kind": "domain", "id": domain_id, "label": c.hostname }),
+                json!({ "serviceId": c.service_id, "projectId": project_id, "clusterId": cluster.id }),
+            )
+            .await?;
+        }
     }
     // Volumes: their state, deletions confirmed, claims Pyo has no volume for.
     crate::volumes::reported(&mut tx, &cluster.id, &hb.volumes).await?;
@@ -923,6 +993,26 @@ async fn undeliverable(s: &AppState, id: &str, command: &Value, why: &str) {
 /// A cluster added without a name is named after its server (the control
 /// plane's hostname) the first time its agent reports one: made a valid
 /// cluster name, and numbered if the team has that name already.
+/// Whether a server's last health entry in the activity says it's offline.
+async fn offline_logged(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cluster: &AgentCluster,
+    server: &str,
+) -> ApiResult<bool> {
+    let last: Option<String> = sqlx::query_scalar(
+        "SELECT data->>'type' FROM pyo.activity
+          WHERE team_id = $1 AND data->>'type' IN ('server.offline', 'server.online')
+            AND data->>'clusterId' = $2 AND data->'target'->>'id' = $3
+          ORDER BY at DESC LIMIT 1",
+    )
+    .bind(&cluster.team_id)
+    .bind(&cluster.id)
+    .bind(server)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(last.as_deref() == Some("server.offline"))
+}
+
 async fn name_from_host(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     cluster_id: &str,

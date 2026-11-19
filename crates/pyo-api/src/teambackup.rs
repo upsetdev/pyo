@@ -386,8 +386,9 @@ pub async fn finished(
 ) -> anyhow::Result<()> {
     let id = command["backupId"].as_str().unwrap_or("");
     let d = r.data.clone().unwrap_or(Value::Null);
-    sqlx::query(
-        "UPDATE pyo.backups SET status = $2, snapshot_id = $3, size_bytes = $4, added_bytes = $5, error = $6, finished_at = now() WHERE id = $1",
+    let failed: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "UPDATE pyo.backups SET status = $2, snapshot_id = $3, size_bytes = $4, added_bytes = $5, error = $6, finished_at = now() WHERE id = $1
+         RETURNING team_id, label, coalesce(volume_id, service_id, database_id)",
     )
     .bind(id)
     .bind(if r.ok { "succeeded" } else { "failed" })
@@ -395,9 +396,35 @@ pub async fn finished(
     .bind(d["bytes"].as_i64())
     .bind(d["added"].as_i64())
     .bind(if r.ok { None } else { r.message.clone() })
-    .execute(&mut **tx)
-    .await?;
+    .fetch_optional(&mut **tx)
+    .await?
+    .filter(|_| !r.ok);
+    if let Some((team_id, label, of)) = failed {
+        log_failed(tx, id, &team_id, &label, of.as_deref()).await?;
+    }
     Ok(())
+}
+
+/// A backup run that failed, in the activity (and alerts).
+async fn log_failed(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    team_id: &str,
+    label: &str,
+    of: Option<&str>,
+) -> anyhow::Result<()> {
+    crate::ops::log_activity(
+        tx,
+        team_id,
+        "pyo",
+        "backup.failed",
+        "failure",
+        &format!("Backup of {label} failed"),
+        json!({ "kind": "backup", "id": id, "label": label }),
+        json!({ "backupOf": of }),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e.message))
 }
 
 /// Backup commands carry the repository password and storage key: sealed
@@ -475,9 +502,17 @@ async fn tick(state: &AppState) -> anyhow::Result<()> {
     if let Err(e) = crate::volumes::sweep(state).await {
         tracing::warn!(error = ?e, "volume restores and moves");
     }
-    sqlx::query("UPDATE pyo.backups SET status = 'failed', error = 'No answer from the cluster', finished_at = now() WHERE status = 'running' AND started_at < now() - interval '2 hours'")
-        .execute(&state.db)
-        .await?;
+    let lost: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "UPDATE pyo.backups SET status = 'failed', error = 'No answer from the cluster', finished_at = now() WHERE status = 'running' AND started_at < now() - interval '2 hours'
+         RETURNING id, team_id, label, coalesce(volume_id, service_id, database_id)",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    for (id, team_id, label, of) in lost {
+        let mut tx = state.db.begin().await?;
+        log_failed(&mut tx, &id, &team_id, &label, of.as_deref()).await?;
+        tx.commit().await?;
+    }
     let teams: Vec<(String, Value)> =
         sqlx::query_as("SELECT team_id, value FROM pyo.team_backup_settings")
             .fetch_all(&state.db)
