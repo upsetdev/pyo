@@ -18,6 +18,7 @@ import { Route as AppApiKeysRouteImport } from './routes/_app/api-keys'
 import { Route as AppCliLoginRouteImport } from './routes/_app/cli-login'
 import { Route as AppInviteRouteImport } from './routes/_app/invite'
 import { Route as AppMcpRouteImport } from './routes/_app/mcp'
+import { Route as AppNewRouteImport } from './routes/_app/new'
 import { Route as AppProfileRouteImport } from './routes/_app/profile'
 import { Route as AuthForgotPasswordRouteImport } from './routes/_auth/forgot-password'
 import { Route as AuthLoginRouteImport } from './routes/_auth/login'
@@ -175,6 +176,11 @@ const AppInviteRoute = AppInviteRouteImport.update({
 const AppMcpRoute = AppMcpRouteImport.update({
   id: '/mcp',
   path: '/mcp',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppNewRoute = AppNewRouteImport.update({
+  id: '/new',
+  path: '/new',
   getParentRoute: () => AppRoute,
 } as any)
 const AppProfileRoute = AppProfileRouteImport.update({
@@ -824,6 +830,7 @@ export interface FileRoutesByFullPath {
   '/cli-login': typeof AppCliLoginRoute
   '/invite': typeof AppInviteRoute
   '/mcp': typeof AppMcpRoute
+  '/new': typeof AppNewRoute
   '/profile': typeof AppProfileRoute
   '/forgot-password': typeof AuthForgotPasswordRoute
   '/login': typeof AuthLoginRoute
@@ -947,6 +954,7 @@ export interface FileRoutesByTo {
   '/cli-login': typeof AppCliLoginRoute
   '/invite': typeof AppInviteRoute
   '/mcp': typeof AppMcpRoute
+  '/new': typeof AppNewRoute
   '/profile': typeof AppProfileRoute
   '/forgot-password': typeof AuthForgotPasswordRoute
   '/login': typeof AuthLoginRoute
@@ -1065,6 +1073,7 @@ export interface FileRoutesById {
   '/_app/cli-login': typeof AppCliLoginRoute
   '/_app/invite': typeof AppInviteRoute
   '/_app/mcp': typeof AppMcpRoute
+  '/_app/new': typeof AppNewRoute
   '/_app/profile': typeof AppProfileRoute
   '/_auth/forgot-password': typeof AuthForgotPasswordRoute
   '/_auth/login': typeof AuthLoginRoute
@@ -1192,6 +1201,7 @@ export interface FileRouteTypes {
     | '/cli-login'
     | '/invite'
     | '/mcp'
+    | '/new'
     | '/profile'
     | '/forgot-password'
     | '/login'
@@ -1315,6 +1325,7 @@ export interface FileRouteTypes {
     | '/cli-login'
     | '/invite'
     | '/mcp'
+    | '/new'
     | '/profile'
     | '/forgot-password'
     | '/login'
@@ -1432,6 +1443,7 @@ export interface FileRouteTypes {
     | '/_app/cli-login'
     | '/_app/invite'
     | '/_app/mcp'
+    | '/_app/new'
     | '/_app/profile'
     | '/_auth/forgot-password'
     | '/_auth/login'
@@ -1619,6 +1631,13 @@ declare module '@tanstack/react-router' {
       path: '/mcp'
       fullPath: '/mcp'
       preLoaderRoute: typeof AppMcpRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/new': {
+      id: '/_app/new'
+      path: '/new'
+      fullPath: '/new'
+      preLoaderRoute: typeof AppNewRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/profile': {
@@ -2789,6 +2808,7 @@ interface AppRouteChildren {
   AppCliLoginRoute: typeof AppCliLoginRoute
   AppInviteRoute: typeof AppInviteRoute
   AppMcpRoute: typeof AppMcpRoute
+  AppNewRoute: typeof AppNewRoute
   AppProfileRoute: typeof AppProfileRoute
   AppIndexRoute: typeof AppIndexRoute
   AppOauthAuthorizeRoute: typeof AppOauthAuthorizeRoute
@@ -2803,6 +2823,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppCliLoginRoute: AppCliLoginRoute,
   AppInviteRoute: AppInviteRoute,
   AppMcpRoute: AppMcpRoute,
+  AppNewRoute: AppNewRoute,
   AppProfileRoute: AppProfileRoute,
   AppIndexRoute: AppIndexRoute,
   AppOauthAuthorizeRoute: AppOauthAuthorizeRoute,

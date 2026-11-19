@@ -96,6 +96,8 @@ import { fetchDatabaseExtensions } from "~/lib/pyo/backend";
 import { providerOfService } from "~/lib/pyo/refs";
 import { Logo } from "~/components/site/Logo";
 import { ComposeImport } from "./ComposeImport";
+import { InvalidLink, LinkedRepoNotes, useConnectedRepo } from "./DeployLink";
+import type { DeployLink } from "~/lib/pyo/deploy-link";
 
 // New deploy in two screens. Start: paste a repository or image, or pick a
 // template. Configure: one page where only name, project and cluster need a
@@ -112,7 +114,14 @@ type Initial = {
   cron?: boolean;
 };
 
-export function DeployWizard({ initial }: { initial: Initial }) {
+export function DeployWizard({
+  initial,
+  link,
+}: {
+  initial: Initial;
+  /** A "Deploy with Pyo" link, checked: it filled `initial` in when valid. */
+  link?: DeployLink | null;
+}) {
   const s = usePyo();
   const ws = currentTeam(s);
   const clusters = clustersIn(s);
@@ -145,6 +154,12 @@ export function DeployWizard({ initial }: { initial: Initial }) {
   // A link with ?repo= or ?image= opens straight on Configure, like pasting it.
   const imported = (patch?: Partial<DeployDraft>) => {
     if (!patch) return null;
+    // A link's tree picks the branch and the folder to build.
+    if (patch.git && link?.kind === "git")
+      patch = {
+        ...patch,
+        git: { ...patch.git, branch: link.branch, buildContext: link.path || "." },
+      };
     const d = { ...base(), ...patch, cron: !!initial.cron };
     return { ...d, name: suggestName(d) };
   };
@@ -179,6 +194,13 @@ export function DeployWizard({ initial }: { initial: Initial }) {
         recentIds={s.recentTemplateIds}
         onKind={(k) => go({ source: k })}
         compose={!initial.cron}
+        notice={
+          link?.kind === "invalid" ? (
+            <InvalidLink title={link.title} message={link.message} />
+          ) : link ? (
+            <InvalidLink message="Pyo can't deploy what it points to." />
+          ) : null
+        }
         onTemplate={(t) => go({ template: t.id })}
         onImport={(patch) =>
           go(
@@ -195,6 +217,7 @@ export function DeployWizard({ initial }: { initial: Initial }) {
     <Configure
       key={draft.sourceType + (draft.templateId ?? "")}
       initial={draft}
+      link={link}
       onBack={() =>
         go({
           source:
@@ -488,6 +511,7 @@ export function ImportPanel({
 
 function StartScreen({
   cron,
+  notice,
   initialKind,
   onKind,
   compose,
@@ -498,6 +522,8 @@ function StartScreen({
   registries,
 }: {
   cron: boolean;
+  /** Above the import, e.g. what's wrong with a deploy link. */
+  notice?: ReactNode;
   initialKind: "git" | "image";
   onKind: (k: "git" | "image" | "compose") => void;
   compose: boolean;
@@ -526,6 +552,8 @@ function StartScreen({
             : "Bring a repository or an image, or start from a template."}
         </p>
       </div>
+
+      {notice}
 
       <ImportPanel
         initialKind={initialKind}
@@ -566,9 +594,12 @@ function StartScreen({
 
 function Configure({
   initial,
+  link,
   onBack,
 }: {
   initial: DeployDraft;
+  /** The "Deploy with Pyo" link it came from. */
+  link?: DeployLink | null;
   onBack: () => void;
 }) {
   const s = usePyo();
@@ -578,6 +609,15 @@ function Configure({
   const formRef = useRef<HTMLDivElement>(null);
   const set = (patch: Partial<DeployDraft>) =>
     setDraft((cur) => ({ ...cur, ...patch }));
+  // A linked repository the team's connection sees: deploy through it.
+  // Not once the repository was changed by hand.
+  useConnectedRepo(link, (git, repoUrl) =>
+    setDraft((cur) =>
+      cur.git.repoUrl !== repoUrl || cur.git.installationId || cur.git.gitConnectionId
+        ? cur
+        : { ...cur, git: { ...cur.git, ...git, branch: cur.git.branch || git.branch || "" } },
+    ),
+  );
 
   // The project's services, so the Environment section can flag a
   // ${{service.VAR}} reference that can't be filled in.
@@ -747,6 +787,10 @@ function Configure({
           </p>
         </div>
       </div>
+
+      {link?.kind === "git" && d.sourceType === "git" ? (
+        <LinkedRepoNotes provider={link.provider} />
+      ) : null}
 
       <div ref={formRef} className="space-y-4">
         <Block
