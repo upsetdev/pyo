@@ -43,6 +43,7 @@ import { NewButton } from "~/components/ui/NewButton";
 import { InviteDialog } from "~/components/pyo/InviteDialog";
 import { NewDomainDialog } from "~/components/pyo/NewDomainDialog";
 import { useUpdateAvailable } from "~/components/pyo/UpdateSettings";
+import { UpdateNotice } from "~/components/pyo/UpdateNotice";
 import { Toaster } from "~/components/ui/Toaster";
 import { timeAgo } from "~/lib/pyo/format";
 import { auth } from "~/lib/pyo/backend";
@@ -371,6 +372,10 @@ function Sidebar({
           </div>
         </nav>
       )}
+      {/* Nothing until the API says whether Pyo is hosted (updates are ours there). */}
+      <UpdateNotice
+        managed={meta.status !== "success" || features.includes("managed")}
+      />
     </>
   );
 }

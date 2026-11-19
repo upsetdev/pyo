@@ -13,6 +13,7 @@ import {
 import { ProjectIcon } from "~/components/ui/ProjectIcon";
 import { useState } from "react";
 import { DeploymentList } from "~/components/pyo/lists";
+import { FirstRunChecklist } from "~/components/pyo/FirstRunChecklist";
 import { RemoteAccessNote } from "~/components/pyo/RemoteAccess";
 import { DomainStatus } from "~/components/pyo/DomainState";
 import { ProjectCard } from "~/components/pyo/ProjectCard";
@@ -247,6 +248,7 @@ function OverviewPage() {
         </div>
 
         <aside className="space-y-5">
+          <FirstRunChecklist s={s} />
           <Layered id="deploys-h" title="Recent deployments" bare>
             <DeploymentList deployments={deployments} s={s} />
           </Layered>
