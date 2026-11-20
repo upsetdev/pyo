@@ -88,8 +88,8 @@ function JoinForm({
   });
   const [name, setName] = useState("");
   const [tags, setTags] = useState<string[]>([]);
-  // Run the command on a machine, or have Pyo make one at Hetzner. A hosted
-  // Pyo has no Tailscale setup, and Hetzner servers join over it.
+  // Run the command on a machine, or have Pyo make one at Hetzner (not on a
+  // hosted Pyo yet).
   const hosted = useHosted();
   const [picked, setHow] = useState<"command" | "hetzner">("command");
   const how = hosted === false ? picked : "command";
@@ -167,7 +167,7 @@ function JoinForm({
             <Field
               label="Server name"
               error={joined ? undefined : error || undefined}
-              hint={hosted === false ? "Also its name on your tailnet." : undefined}
+              hint="Also its name on your tailnet."
             >
               {(p) => (
                 <Input
@@ -229,7 +229,7 @@ function JoinForm({
           </div>
           {how === "hetzner" ? (
             <div className="space-y-4 text-[13px]">
-              <NeedsTailscale />
+              <NeedsTailscale clusterId={clusterId} />
               {!hetzner ? (
                 <Callout tone="warning">
                   Connect Hetzner first.{" "}
@@ -258,7 +258,7 @@ function JoinForm({
                   <Button
                     size="sm"
                     disabled={
-                      !!error || !price || !connected || !s.tailscale || creating
+                      !!error || !price || !connected || !(c.tailscale || s.tailscale) || creating
                     }
                     onClick={() => setConfirming(true)}
                   >
@@ -282,8 +282,15 @@ function JoinForm({
             </div>
           ) : (
           <div className="space-y-2 text-[13px]">
-            <p className="font-medium">Run this on the machine</p>
-            <NeedsTailscale />
+            <NeedsTailscale clusterId={clusterId} />
+            {made?.tailnetFirst ? (
+              <div className="space-y-2">
+                <p className="font-medium">First, run this on {made.tailnetFirst.server}</p>
+                <p className="text-[12px] text-muted-foreground">It joins your tailnet, so new servers reach it there.</p>
+                <LiveCommand command={made.tailnetFirst.command} stale={live.stale} />
+              </div>
+            ) : null}
+            <p className="font-medium">{made?.tailnetFirst ? "Then run this on the new machine" : "Run this on the machine"}</p>
             <LiveCommand
               command={made?.command}
               stale={live.stale}

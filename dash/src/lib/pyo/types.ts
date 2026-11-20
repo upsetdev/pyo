@@ -368,6 +368,8 @@ export type Cluster = {
   tailnetIp?: string | null;
   /** Its tailnet's DNS name, for tailnet domains ("tail1234.ts.net"); null when not on Tailscale. */
   tailnet?: string | null;
+  /** Tailscale on this cluster (its agent keeps the client); null when not set up. */
+  tailscale?: ClusterTailscale | null;
   /** Where its free domains point, as chosen or by default. */
   freeDomainAddress?: FreeDomainAddress;
   /** As chosen in its settings; null: the default. */
@@ -1777,8 +1779,19 @@ export type Builder = {
   lastSeenAt?: Timestamp | null;
 };
 
-/** Tailscale for the whole Pyo (Integrations › Tailscale). The client only for admins. */
+/** Tailscale on one cluster: its client (never the secret) and tailnet. */
+export type ClusterTailscale = {
+  clientId: string;
+  /** The secret's last characters. */
+  hint: string;
+  /** The tailnet ("tail1234.ts.net"), once the cluster has seen it. */
+  suffix: string | null;
+};
+
+/** Tailscale on the cluster Pyo runs on (Integrations › Tailscale). The client only for admins. */
 export type TailscaleInfo = {
+  /** The cluster Pyo runs on. */
+  clusterId?: string;
   /** The tailnet ("tail1234.ts.net"), once Pyo has seen it. */
   suffix: string | null;
   /** Pyo on the tailnet ("pyo.tail1234.ts.net"), once it answers. */

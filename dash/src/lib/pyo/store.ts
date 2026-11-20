@@ -2275,6 +2275,8 @@ export const api = {
       scriptUrl: string;
       expiresAt: number;
       tailscale: boolean;
+      /** The cluster's control-plane server isn't on the tailnet yet: this puts it there first. */
+      tailnetFirst?: { server: string; command: string } | null;
     }>("joinServer", { clusterId, serverName, tags });
   },
   /**
@@ -2546,23 +2548,24 @@ export const api = {
       });
     return res;
   },
-  saveTailscale(clientId: string, secret?: string) {
+  saveTailscale(clientId: string, secret?: string, clusterId?: string) {
     return attempt<{ checks: TailscaleCheck[] }>("saveTailscale", {
+      clusterId,
       clientId: clientId.trim(),
-      ...(secret?.trim() ? { secret: secret.trim() } : {}),
+      secret: secret?.trim() || undefined,
     });
   },
-  planTailscaleSetup(token: string) {
-    return attempt<{ plan: TailscaleSetupPlan }>("planTailscaleSetup", { token: token.trim() });
+  planTailscaleSetup(token: string, clusterId?: string) {
+    return attempt<{ plan: TailscaleSetupPlan }>("planTailscaleSetup", { clusterId, token: token.trim() });
   },
-  setUpTailscale(token: string, version: string) {
-    return attempt<TailscaleSetupOutcome>("setUpTailscale", { token: token.trim(), version });
+  setUpTailscale(token: string, version: string, clusterId?: string) {
+    return attempt<TailscaleSetupOutcome>("setUpTailscale", { clusterId, token: token.trim(), version });
   },
-  testTailscale() {
-    return attempt<{ checks: TailscaleCheck[] }>("testTailscale", {});
+  testTailscale(clusterId?: string) {
+    return attempt<{ checks: TailscaleCheck[] }>("testTailscale", { clusterId });
   },
-  removeTailscale() {
-    return send("removeTailscale", {});
+  removeTailscale(clusterId?: string) {
+    return send("removeTailscale", { clusterId });
   },
   renameTailscaleName(kind: "dashboard" | "registry" | "sandboxes", name: string) {
     return attempt("renameTailscaleName", { kind, name: name.trim() });
