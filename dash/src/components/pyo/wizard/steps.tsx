@@ -1190,12 +1190,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
     : "";
   const tailnet = d.clusterId ? clusterTailnet(s, d.clusterId) : undefined;
   const tailnetFree = tailnet
-    ? tailnetHostname(
-        s,
-        { name: d.name || "app" },
-        project?.namespace ?? "app",
-        tailnet,
-      )
+    ? tailnetHostname(s, { name: d.name || "app" }, tailnet)
     : "";
   const hasPublic = d.domains.some(
     (x) => isFreeDomain(x.hostname) && !isTailnetDomain(x.hostname),

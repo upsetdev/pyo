@@ -26,8 +26,8 @@ import {
 import { HOSTNAME } from "~/lib/pyo/format";
 import {
   clusterTailnet,
-  freeHostname,
-  tailnetHostname,
+  hostnameUsed,
+  unusedHostname,
 } from "~/lib/pyo/freeDomain";
 import { api, servicesIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
@@ -106,9 +106,11 @@ export function AddDomainDialog({
   const suggested =
     !app || k === "own" || missing
       ? ""
-      : (k === "public"
-          ? freeHostname(app, namespace, freeIp!)
-          : tailnetHostname(s, app, namespace, tailnet!)
+      : // The first name nothing uses yet ("web-2" when "web" is).
+        unusedHostname(
+          s,
+          k === "public" ? `${app.name}-${namespace}` : app.name,
+          suffix!,
         ).slice(0, -suffix!.length - 1);
   const name = label ?? suggested;
   const hostname = k === "own" ? ownHost : `${name}.${suffix}`;
@@ -122,9 +124,7 @@ export function AddDomainDialog({
       (!hostname || covers(c, hostname)),
   );
   const cert = matching.find((c) => c.id === certificateId) ?? matching[0];
-  const taken = s.services.some((a) =>
-    a.domains.some((d) => d.hostname === hostname),
-  );
+  const taken = hostnameUsed(s, hostname);
   const error = missing
     ? "Pick another option."
     : k !== "own" && !LABEL.test(name)
@@ -134,7 +134,7 @@ export function AddDomainDialog({
         : !app
           ? "Pick the service it routes to."
           : taken
-            ? "This hostname is already routed to a service."
+            ? `${hostname} is already used.`
             : k !== "tailnet" && tlsMode === "custom" && !cert
               ? `Upload a certificate valid for ${hostname}, or pick another HTTPS option.`
               : "";
