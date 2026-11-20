@@ -14,7 +14,6 @@ import { toast } from "./toast";
 import type { SandboxServer } from "./sandbox";
 import type {
   Autoscale,
-  FreeDomainAddress,
   ActivityEvent,
   ApiKeyAccess,
   ApiToken,
@@ -1469,17 +1468,6 @@ export const api = {
       if (c) c.publicTraffic = on;
     });
     return send("setClusterPublicTraffic", { clusterId, on });
-  },
-  /** Where the cluster's free domains point: its public or its Tailscale IP. */
-  setClusterFreeDomainAddress(clusterId: string, address: FreeDomainAddress) {
-    update((s) => {
-      const c = s.clusters.find((x) => x.id === clusterId);
-      if (c) {
-        c.freeDomainAddress = address;
-        c.freeDomainIp = address === "public" ? c.publicIp : c.tailnetIp;
-      }
-    });
-    return send("setClusterFreeDomainAddress", { clusterId, address });
   },
   setClusterOriginPull(clusterId: string, certificateIds: string[]) {
     update((s) => {
