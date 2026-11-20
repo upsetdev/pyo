@@ -518,14 +518,16 @@ export function Checkbox({
   onChange,
   label,
   disabled,
+  className = "",
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label: ReactNode;
   disabled?: boolean;
+  className?: string;
 }) {
   return (
-    <label className="inline-flex cursor-pointer items-center gap-2 text-[13px] text-foreground">
+    <label className={`inline-flex cursor-pointer items-center gap-2.5 text-[13px] text-foreground ${className}`}>
       <input
         type="checkbox"
         checked={checked}

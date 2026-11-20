@@ -641,8 +641,9 @@ function VolumesDialog({
         {tb.targets.length ? (
           <ul className="list-rows overflow-hidden rounded-xl border border-border">
             {tb.targets.map((t) => (
-              <li key={t.id} className="px-3 py-2.5">
+              <li key={t.id}>
                 <Checkbox
+                  className="flex w-full px-3 py-2.5"
                   checked={picked.has(t.id)}
                   onChange={(on) =>
                     setPicked((p) => {
