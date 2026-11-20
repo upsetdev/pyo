@@ -22,16 +22,19 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use crate::auth::User;
 
 /// Lowers the transaction to the teams `user` may see: the ones they're an
-/// active member of, within an API key's teams. One round trip. Again on a
+/// active member of, within an API key's teams, leaving out the teams that
+/// require two-factor while the account has none (all of them while it
+/// must set it up first: twofactor.rs). One round trip. Again on a
 /// lowered transaction it picks up teams joined since (a new team).
 pub async fn scope(conn: &mut PgConnection, user: &User) -> sqlx::Result<()> {
     let key_teams: Option<Vec<String>> = user.key.as_ref().and_then(|k| k.teams.clone());
     sqlx::query(
-        "SELECT set_config('pyo.team_ids', pyo.member_team_ids($1, $2), true),
+        "SELECT set_config('pyo.team_ids', pyo.member_team_ids($1, $2, $3), true),
                 set_config('role', 'pyo_team', true)",
     )
     .bind(&user.id)
     .bind(key_teams)
+    .bind(crate::hosted())
     .execute(conn)
     .await?;
     Ok(())
@@ -166,6 +169,7 @@ pub(crate) mod tests {
                 "members",
                 "volumes",
                 "activity",
+                "audit_events",
                 "sandboxes",
             ] {
                 assert!(

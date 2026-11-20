@@ -11,6 +11,7 @@ mod agent;
 mod agent_auth;
 mod agent_tls;
 mod alerts;
+mod audit;
 pub mod auth;
 mod backup;
 mod backupstore;
@@ -55,6 +56,9 @@ pub mod openapi;
 pub mod ops;
 mod outbound;
 mod passkeys;
+mod twofactor;
+#[cfg(test)]
+mod teamsec_tests;
 mod placement;
 mod platform_import;
 mod pressure;
@@ -626,6 +630,8 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             .route("/install/sandbox.sh", get(join::serve_sandbox))
             .route("/install/host-units.sh", get(join::serve_host_units))
             .fallback_service(tower_http::compression::Compression::new(spa))
+            // Who a request is for, and from where, for the audit log.
+            .layer(axum::middleware::from_fn(audit::middleware))
             .layer(axum::middleware::from_fn_with_state(
                 state.config.cookie_secure,
                 web::headers,

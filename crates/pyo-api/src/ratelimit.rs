@@ -61,6 +61,23 @@ pub const LOGIN_ACCOUNT: Limit = Limit {
     // owner out for long (a passkey or a sign-in link still works).
     backoff_cap_secs: HOUR,
 };
+/// Wrong two-factor codes per account (signing in, turning it off, new
+/// recovery codes): a stolen password alone can't guess its way through.
+/// The cap is short, like the password's, so a stranger can't keep the
+/// owner out for long (a passkey still works).
+pub const TWO_FACTOR_ACCOUNT: Limit = Limit {
+    scope: "two-factor:account",
+    max: 5,
+    window_secs: MIN15,
+    backoff_cap_secs: HOUR,
+};
+/// And per client address.
+pub const TWO_FACTOR_IP: Limit = Limit {
+    scope: "two-factor:ip",
+    max: 30,
+    window_secs: MIN15,
+    backoff_cap_secs: DAY,
+};
 /// Passkey sign-ins started per address (each one stores a challenge; the
 /// sign-in page starts one on every visit, for autofill).
 pub const PASSKEY_START_IP: Limit = Limit {
@@ -609,6 +626,8 @@ mod tests {
             PASSKEY_START_IP,
             PASSKEY_FINISH_IP,
             PASSKEY_PASSWORD_USER,
+            TWO_FACTOR_ACCOUNT,
+            TWO_FACTOR_IP,
             SIGNUP_IP,
             OAUTH_REGISTER_IP,
             CLI_LOGIN_IP,
@@ -633,6 +652,7 @@ mod tests {
         }
         // An account is guessed at less often than a shared address may fail.
         const { assert!(LOGIN_ACCOUNT.max < LOGIN_IP.max) };
+        const { assert!(TWO_FACTOR_ACCOUNT.max < TWO_FACTOR_IP.max) };
     }
 
     #[tokio::test]

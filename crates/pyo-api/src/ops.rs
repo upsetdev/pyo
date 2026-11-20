@@ -106,6 +106,7 @@ pub fn routes() -> Router<AppState> {
         .route("/compose/preview", post(crate::compose::preview))
         .route("/cloud/options", get(crate::cloud::options))
         .route("/tailnet/lock", get(crate::tailscale::lock))
+        .route("/audit-log", get(crate::audit::list))
 }
 
 /// Everything you can see
@@ -339,13 +340,14 @@ pub async fn team_of(
 // "pyo": Pyo registry keeps Pyo's own builds under pyo/.
 // "backups" to "updates": the installation's settings pages
 // (SETTINGS_PAGES in dash/src/lib/pyo/paths.ts).
-const RESERVED_SLUGS: [&str; 23] = [
+const RESERVED_SLUGS: [&str; 24] = [
     "profile",
     "settings",
     "backups",
     "email",
     "github",
     "observability",
+    "security",
     "updates",
     "oauth",
     "api-keys",
@@ -497,6 +499,8 @@ pub async fn log_activity(
         .bind(&data)
         .execute(&mut **tx)
         .await?;
+    // What a person did goes to the audit log too, with how and from where.
+    crate::audit::from_activity(tx, team_id, actor, kind, title, &data["target"]).await?;
     // The important ones go to the team's alert channels too.
     crate::alerts::on_activity(tx, team_id, kind, &data["target"], &data).await;
     Ok(())
@@ -1474,6 +1478,7 @@ pub(crate) const RESERVED_PROJECT_SLUGS: &[&str] = &[
     "activity",
     "analytics",
     "api-keys",
+    "audit-log",
     "services",
     "backups",
     "builders",
@@ -1941,6 +1946,14 @@ pub(crate) enum Op {
     },
     /// Delete a team and everything in it. Owners only.
     DeleteTeam { id: String },
+    /// A team's security: whether its members must use two-factor authentication, and what its audit log keeps of addresses ("full", "anonymized" or "none"). Owners and admins, from the dashboard.
+    SetTeamSecurity {
+        team_id: String,
+        #[serde(default)]
+        require_two_factor: Option<bool>,
+        #[serde(default)]
+        audit_ips: Option<String>,
+    },
     /// Invite someone to a team by email, as owner, admin, developer or viewer.
     InviteMember {
         /// A new id you choose: `mem_` then 4 to 40 lowercase letters, digits, dashes or underscores.
@@ -2161,6 +2174,11 @@ pub(crate) enum Op {
         analytics_months: u8,
         metrics_days: u16,
         build_log_days: u16,
+    },
+    /// The installation's security: whether everyone must use two-factor authentication, and how long the audit log is kept (90, 180, 365 or 730 days). Only the installation's admin can do this. Pyo Cloud keeps the audit log a year.
+    SaveSecuritySettings {
+        require_two_factor: bool,
+        audit_days: u16,
     },
     /// Turn observability (analytics, request logs, firewall and WAF history, usage history) on or off for the whole installation. Only the installation's admin can do this. Off stops storing and showing history and frees its memory. What was stored is kept for when it's back on. Live logs, current usage, deploys and the firewall keep working.
     SetObservability { enabled: bool },
@@ -3101,6 +3119,7 @@ fn installation_wide(op: &Op) -> bool {
             | Op::SendTestEmail {}
             | Op::SaveObservabilitySettings { .. }
             | Op::SaveRetentionSettings { .. }
+            | Op::SaveSecuritySettings { .. }
             | Op::SaveUpdateSettings { .. }
             | Op::SetSandboxLimits { .. }
             | Op::CheckForUpdates {}
@@ -3246,6 +3265,8 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::RunBackup {}
             | Op::SaveObservabilitySettings { .. }
             | Op::SaveRetentionSettings { .. }
+            | Op::SaveSecuritySettings { .. }
+            | Op::SetTeamSecurity { .. }
             | Op::SaveUpdateSettings { .. }
             | Op::SetSandboxLimits { .. }
             | Op::CheckForUpdates {}
@@ -3296,7 +3317,10 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
 /// be placed here.
 pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
     match op {
-        Op::CreateTeam { .. } | Op::UpdateTeam { .. } | Op::DeleteTeam { .. } => ("Teams", "team"),
+        Op::CreateTeam { .. }
+        | Op::UpdateTeam { .. }
+        | Op::DeleteTeam { .. }
+        | Op::SetTeamSecurity { .. } => ("Teams", "team"),
         Op::InviteMember { .. }
         | Op::ResendInvite { .. }
         | Op::UpdateMemberRole { .. }
@@ -3428,6 +3452,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SendTestEmail {}
         | Op::SaveObservabilitySettings { .. }
         | Op::SaveRetentionSettings { .. }
+        | Op::SaveSecuritySettings { .. }
         | Op::SaveUpdateSettings { .. }
         | Op::SetSandboxLimits { .. }
         | Op::CheckForUpdates {}
@@ -4167,6 +4192,46 @@ async fn apply(
             tokio::spawn(async move { obs.apply_retention(r).await });
             Ok(ok)
         }
+        Op::SaveSecuritySettings {
+            require_two_factor,
+            audit_days,
+        } => {
+            require_admin(user)?;
+            if crate::hosted() {
+                return Err(ApiError::bad_request(
+                    "Pyo Cloud keeps the audit log a year, and its staff always use two-factor.",
+                ));
+            }
+            let before = crate::audit::settings(&mut **tx).await?;
+            let after = crate::audit::SecuritySettings {
+                require_two_factor,
+                audit_days,
+            };
+            if require_two_factor && !before.require_two_factor && !crate::twofactor::enabled(&mut **tx, &user.id).await? {
+                return Err(ApiError::bad_request(
+                    "Turn on two-factor for your own account first, in your profile.",
+                ));
+            }
+            crate::audit::save_settings(tx, &after).await?;
+            if before.require_two_factor != require_two_factor {
+                log_setting(
+                    tx,
+                    user,
+                    "security",
+                    if require_two_factor {
+                        "Required two-factor authentication for everyone"
+                    } else {
+                        "Stopped requiring two-factor authentication for everyone"
+                    },
+                )
+                .await?;
+            }
+            if before.audit_days != audit_days {
+                log_setting(tx, user, "security", &format!("Keeps the audit log {audit_days} days"))
+                    .await?;
+            }
+            Ok(ok)
+        }
         Op::SetObservability { enabled } => {
             require_admin(user)?;
             sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('observability', jsonb_build_object('enabled', $1)) ON CONFLICT (key) DO UPDATE SET value = pyo.settings.value || excluded.value, updated_at = now()")
@@ -4314,11 +4379,22 @@ async fn apply(
         Op::RevealDeployHook { id } => {
             let team_id = team_of(tx, "deploy_hooks", &id).await?;
             require_role(tx, user, &team_id, Role::Developer).await?;
-            let sealed: String =
-                sqlx::query_scalar("SELECT token_sealed FROM pyo.deploy_hooks WHERE id = $1")
+            let (sealed, name): (String, String) =
+                sqlx::query_as("SELECT token_sealed, name FROM pyo.deploy_hooks WHERE id = $1")
                     .bind(&id)
                     .fetch_one(&mut **tx)
                     .await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "secret.revealed",
+                "info",
+                &format!("Revealed deploy hook {name}"),
+                json!({ "kind": "deployHook", "id": id, "label": name }),
+                json!({}),
+            )
+            .await?;
             Ok(
                 json!({ "ok": true, "path": format!("/api/hooks/deploy/{}", crate::vault::get().open_credential(&s.sealer, &sealed).await?) }),
             )
@@ -4367,6 +4443,23 @@ async fn apply(
             .bind(days)
             .execute(&mut **tx)
             .await?;
+            // Each team the key reaches hears of it, and its owner by email.
+            crate::twofactor::notify_teams_in(
+                tx,
+                user,
+                team_ids.as_deref(),
+                "api_key.created",
+                &format!("Made API key {name} ({access} access)"),
+            )
+            .await?;
+            let (to, key_name) = (user.email.clone(), name.clone());
+            let s2 = s.clone();
+            tokio::spawn(async move {
+                crate::twofactor::mail_user(&s2, &to, "/api-keys", |link| {
+                    crate::mail::new_api_key(&key_name, link)
+                })
+                .await;
+            });
             Ok(json!({ "ok": true, "token": token }))
         }
         Op::UploadCertificate {
@@ -5290,11 +5383,23 @@ async fn apply(
             Ok(ok)
         }
         Op::RevokeApiToken { id } => {
-            sqlx::query("DELETE FROM pyo.api_tokens WHERE id = $1 AND user_id = $2")
-                .bind(&id)
-                .bind(&user.id)
-                .execute(&mut **tx)
+            let gone: Option<(String, Option<Vec<String>>)> = sqlx::query_as(
+                "DELETE FROM pyo.api_tokens WHERE id = $1 AND user_id = $2 RETURNING name, team_ids",
+            )
+            .bind(&id)
+            .bind(&user.id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            if let Some((name, team_ids)) = gone {
+                crate::twofactor::notify_teams_in(
+                    tx,
+                    user,
+                    team_ids.as_deref(),
+                    "api_key.revoked",
+                    &format!("Revoked API key {name}"),
+                )
                 .await?;
+            }
             Ok(ok)
         }
         Op::SendTestEmail {} => {
@@ -5307,6 +5412,76 @@ async fn apply(
                 .await
                 .map_err(|e| ApiError::bad_request(format!("Couldn't send: {}", smtp_error(&e))))?;
             Ok(json!({ "ok": true, "to": user.email }))
+        }
+        Op::SetTeamSecurity {
+            team_id,
+            require_two_factor,
+            audit_ips,
+        } => {
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            let (was_required, was_ips): (bool, String) = sqlx::query_as(
+                "SELECT require_two_factor, audit_ips FROM pyo.teams WHERE id = $1",
+            )
+            .bind(&team_id)
+            .fetch_one(&mut **tx)
+            .await?;
+            if let Some(req) = require_two_factor.filter(|r| *r != was_required) {
+                // Whoever turns it on keeps their way in.
+                if req && !crate::twofactor::enabled(&mut **tx, &user.id).await? {
+                    return Err(ApiError::bad_request(
+                        "Turn on two-factor for your own account first, in your profile.",
+                    ));
+                }
+                sqlx::query("UPDATE pyo.teams SET require_two_factor = $2 WHERE id = $1")
+                    .bind(&team_id)
+                    .bind(req)
+                    .execute(&mut **tx)
+                    .await?;
+                log_activity(
+                    tx,
+                    &team_id,
+                    &user.name,
+                    "team.two_factor_required",
+                    "info",
+                    if req {
+                        "Required two-factor authentication for members"
+                    } else {
+                        "Stopped requiring two-factor authentication"
+                    },
+                    json!({ "kind": "team", "id": team_id, "label": "Security" }),
+                    json!({}),
+                )
+                .await?;
+            }
+            if let Some(ips) = audit_ips.filter(|i| *i != was_ips) {
+                let label = match ips.as_str() {
+                    "full" => "full addresses",
+                    "anonymized" => "anonymized addresses",
+                    "none" => "no addresses",
+                    _ => {
+                        return Err(ApiError::bad_request(
+                            "Keep full, anonymized or no addresses.",
+                        ));
+                    }
+                };
+                sqlx::query("UPDATE pyo.teams SET audit_ips = $2 WHERE id = $1")
+                    .bind(&team_id)
+                    .bind(&ips)
+                    .execute(&mut **tx)
+                    .await?;
+                log_activity(
+                    tx,
+                    &team_id,
+                    &user.name,
+                    "team.updated",
+                    "info",
+                    &format!("The audit log keeps {label}"),
+                    json!({ "kind": "team", "id": team_id, "label": "Security" }),
+                    json!({}),
+                )
+                .await?;
+            }
+            Ok(ok)
         }
         Op::UpdateMemberRole { id, role } => {
             let team_id = team_of(tx, "members", &id).await?;
@@ -5326,6 +5501,23 @@ async fn apply(
                 .bind(&role)
                 .execute(&mut **tx)
                 .await?;
+            if current != role {
+                let email: String = sqlx::query_scalar("SELECT email FROM pyo.members WHERE id = $1")
+                    .bind(&id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                log_activity(
+                    tx,
+                    &team_id,
+                    &user.name,
+                    "member.role_changed",
+                    "info",
+                    &format!("Changed the role of {email} from {current} to {role}"),
+                    json!({ "kind": "member", "id": id, "label": email }),
+                    json!({}),
+                )
+                .await?;
+            }
             Ok(ok)
         }
         Op::ResetMemberSignIn { id } => {
@@ -5387,10 +5579,26 @@ async fn apply(
             if role == "owner" {
                 return Err(ApiError::bad_request("The owner can't be removed."));
             }
-            sqlx::query("DELETE FROM pyo.members WHERE id = $1")
-                .bind(&id)
-                .execute(&mut **tx)
-                .await?;
+            let (email, status): (String, String) =
+                sqlx::query_as("DELETE FROM pyo.members WHERE id = $1 RETURNING email, status")
+                    .bind(&id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "member.removed",
+                "warning",
+                &if status == "invited" {
+                    format!("Revoked the invite of {email}")
+                } else {
+                    format!("Removed {email}")
+                },
+                json!({ "kind": "member", "id": id, "label": email }),
+                json!({}),
+            )
+            .await?;
             Ok(ok)
         }
 

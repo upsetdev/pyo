@@ -996,7 +996,8 @@ pub async fn reset_login(
             )));
         }
     };
-    let token = crate::recovery::new_link(&mut conn, &id).await?;
+    // Made on the server: it also turns two-factor off (recovery.rs).
+    let token = crate::recovery::new_host_link(&mut conn, &id).await?;
     tracing::info!(user = %id, "sign-in link made on the host");
     Ok(crate::error::Json(serde_json::json!({
         "email": email,

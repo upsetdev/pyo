@@ -130,6 +130,11 @@ mod tests {
                 "a new cloud server's one-time join material, burned when used or after 15 minutes",
             ),
             (
+                "twofactor.rs",
+                1,
+                "people's authenticator app secrets: they belong to accounts, not to a team",
+            ),
+            (
                 "ops.rs",
                 3,
                 "Pyo's own backup bucket, its SMTP password, and an invite's link in the email retry job",
