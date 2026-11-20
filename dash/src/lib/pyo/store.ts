@@ -67,6 +67,7 @@ import type {
   Project,
   Registry,
   RegistryLogin,
+  Retention,
   Role,
   Team,
   TeamBackups,
@@ -141,7 +142,12 @@ export type PyoState = {
   registryLogins: RegistryLogin[];
   /** Installation-wide analytics settings. */
   /** Installation-wide. `small`: Pyo's server has under 3.5 GB of memory now. */
-  observabilitySettings: { ipMode: IpMode; enabled: boolean; small: boolean | null };
+  observabilitySettings: {
+    ipMode: IpMode;
+    enabled: boolean;
+    small: boolean | null;
+    retention: Retention;
+  };
   /** Uploaded TLS certificates of the user's teams. */
   certificates: Certificate[];
   /** Client certificates for CDNs, without their keys. */
@@ -336,7 +342,12 @@ function empty(): PyoState {
     secretStores: [],
     alertChannels: [],
     registryLogins: [],
-    observabilitySettings: { ipMode: "none", enabled: true, small: null },
+    observabilitySettings: {
+      ipMode: "none",
+      enabled: true,
+      small: null,
+      retention: { analyticsMonths: 12, metricsDays: 30, buildLogDays: 90 },
+    },
     builders: [],
     tailscale: null,
     cloudConnections: [],
@@ -1029,7 +1040,12 @@ export const api = {
     patch: Partial<
       Pick<
         Team,
-        "name" | "description" | "defaultClusterId" | "preferences" | "agentUpdates"
+        | "name"
+        | "description"
+        | "defaultClusterId"
+        | "preferences"
+        | "agentUpdates"
+        | "analyticsMonths"
       >
     >,
   ) {
@@ -1045,6 +1061,9 @@ export const api = {
         "defaultClusterId" in patch
           ? (patch.defaultClusterId ?? "")
           : undefined,
+      // 0: as long as the installation.
+      analyticsMonths:
+        "analyticsMonths" in patch ? (patch.analyticsMonths ?? 0) : undefined,
     });
   },
   deleteTeam(id: string) {
@@ -2492,6 +2511,13 @@ export const api = {
       s.observabilitySettings.ipMode = ipMode;
     });
     return send("saveObservabilitySettings", { ipMode });
+  },
+  /** How long the installation keeps observability data (its admin). */
+  saveRetentionSettings(retention: Retention) {
+    update((s) => {
+      s.observabilitySettings.retention = retention;
+    });
+    return send("saveRetentionSettings", retention);
   },
   /** Observability on or off, for the whole installation (its admin). */
   setObservability(enabled: boolean) {

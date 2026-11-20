@@ -29,6 +29,8 @@ export type Team = {
   };
   /** On a hosted Pyo: its agents update on their own, or when it chooses. */
   agentUpdates?: "auto" | "manual";
+  /** Analytics kept shorter than the installation does (3, 6 or 12 months). Null: as long as the installation. */
+  analyticsMonths?: number | null;
 };
 
 export type User = {
@@ -2055,6 +2057,16 @@ export type PublicDashboard = {
 /** A team's login for a private container registry (the password stays on the server). */
 /** What web analytics keeps of a visitor's IP address (installation-wide). */
 export type IpMode = "none" | "anonymized" | "full";
+
+/** How long this installation keeps observability data. */
+export type Retention = {
+  /** 3, 6, 12 or 24. */
+  analyticsMonths: number;
+  /** 7 to 90. */
+  metricsDays: number;
+  /** 30 to 365. */
+  buildLogDays: number;
+};
 
 export type RegistryLogin = {
   id: ID;

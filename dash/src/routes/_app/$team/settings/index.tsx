@@ -140,6 +140,11 @@ function TeamSettings({ ws }: { ws: Team }) {
         </div>
       </Panel>
       <RequestLogsPanel ws={ws} />
+      <AnalyticsPanel
+        key={`${ws.analyticsMonths}:${s.observabilitySettings.retention.analyticsMonths}`}
+        ws={ws}
+        installation={s.observabilitySettings.retention.analyticsMonths}
+      />
       {hosted ? (
         <Panel title="Agents">
           <div className="p-4">
@@ -268,6 +273,60 @@ function RequestLogsPanel({ ws }: { ws: Team }) {
               preferences: { ...ws.preferences, requestLogs: limits },
             });
             if (res) toast({ title: "Logs saved" });
+          }}
+        >
+          Save changes
+        </Button>
+      </div>
+    </Panel>
+  );
+}
+
+const ANALYTICS_MONTHS = [3, 6, 12];
+
+/** How long the team's analytics are kept: as long as the installation
+ * keeps them, or shorter. */
+function AnalyticsPanel({
+  ws,
+  installation,
+}: {
+  ws: Team;
+  installation: number;
+}) {
+  const saved = Math.min(ws.analyticsMonths ?? installation, installation);
+  const [months, setMonths] = useState(saved);
+  const choices = [
+    ...ANALYTICS_MONTHS.filter((m) => m < installation),
+    installation,
+  ];
+  return (
+    <Panel title="Analytics">
+      <div className="grid gap-4 p-4 sm:grid-cols-2">
+        <Field label="Kept for" hint="Older analytics go each night.">
+          {(p) => (
+            <Select
+              {...p}
+              value={String(months)}
+              onChange={(e) => setMonths(Number(e.target.value))}
+            >
+              {choices.map((m) => (
+                <option key={m} value={m}>
+                  {m} months
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+      </div>
+      <div className="flex justify-end border-t border-border px-4 py-3">
+        <Button
+          size="sm"
+          disabled={months === saved}
+          onClick={async () => {
+            const res = await api.updateTeam(ws.id, {
+              analyticsMonths: months === installation ? null : months,
+            });
+            if (res) toast({ title: "Analytics saved" });
           }}
         >
           Save changes

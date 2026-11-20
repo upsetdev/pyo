@@ -1,12 +1,15 @@
-import { optionClass, Switch } from "~/components/ui/Field";
+import { useState } from "react";
+import { Button } from "~/components/ui/Button";
+import { Field, optionClass, Select, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import type { IpMode } from "~/lib/pyo/types";
+import type { IpMode, Retention } from "~/lib/pyo/types";
 
 // Observability on or off (installation-wide; a new install on a small
-// server starts with it off), and what web analytics keeps of visitors' IP
-// addresses, for every team.
+// server starts with it off), what web analytics keeps of visitors' IP
+// addresses, for every team, and how long analytics, metrics and build
+// logs are kept (a team can keep its analytics shorter in its settings).
 // Countries, cities and unique visitors work in every mode: they're worked
 // out when each request comes in, then the address is dropped or kept.
 
@@ -90,6 +93,102 @@ export function ObservabilitySettingsSection() {
           ))}
         </div>
       </Panel>
+      <RetentionPanel
+        key={JSON.stringify(s.observabilitySettings.retention)}
+        saved={s.observabilitySettings.retention}
+        admin={admin}
+        note={note}
+      />
     </div>
+  );
+}
+
+const ANALYTICS_MONTHS = [3, 6, 12, 24];
+const METRICS_DAYS = [7, 14, 30, 60, 90];
+const BUILD_LOG_DAYS = [30, 60, 90, 180, 365];
+const months = (n: number) => `${n} months`;
+const days = (n: number) => `${n} days`;
+
+/** How long the installation keeps analytics, metrics and build logs. */
+function RetentionPanel({
+  saved,
+  admin,
+  note,
+}: {
+  saved: Retention;
+  admin: boolean;
+  note?: string;
+}) {
+  const [r, setR] = useState(saved);
+  const dirty =
+    r.analyticsMonths !== saved.analyticsMonths ||
+    r.metricsDays !== saved.metricsDays ||
+    r.buildLogDays !== saved.buildLogDays;
+  const field = (
+    label: string,
+    hint: string,
+    key: keyof Retention,
+    choices: number[],
+    text: (n: number) => string,
+  ) => (
+    <Field label={label} hint={hint}>
+      {(p) => (
+        <Select
+          {...p}
+          value={String(r[key])}
+          disabled={!admin}
+          onChange={(e) => setR({ ...r, [key]: Number(e.target.value) })}
+        >
+          {[...new Set([...choices, saved[key]])]
+            .sort((a, b) => a - b)
+            .map((n) => (
+              <option key={n} value={n}>
+                {text(n)}
+              </option>
+            ))}
+        </Select>
+      )}
+    </Field>
+  );
+  return (
+    <Panel title="Retention" description={note}>
+      <div className="grid gap-4 p-4 sm:grid-cols-3">
+        {field(
+          "Analytics",
+          "Teams can keep less.",
+          "analyticsMonths",
+          ANALYTICS_MONTHS,
+          months,
+        )}
+        {field(
+          "Metrics",
+          "Servers, services and databases.",
+          "metricsDays",
+          METRICS_DAYS,
+          days,
+        )}
+        {field(
+          "Build logs",
+          "Builds and deploys.",
+          "buildLogDays",
+          BUILD_LOG_DAYS,
+          days,
+        )}
+      </div>
+      {admin ? (
+        <div className="flex justify-end border-t border-border px-4 py-3">
+          <Button
+            size="sm"
+            disabled={!dirty}
+            onClick={async () => {
+              if (await api.saveRetentionSettings(r))
+                toast({ title: "Retention saved" });
+            }}
+          >
+            Save changes
+          </Button>
+        </div>
+      ) : null}
+    </Panel>
   );
 }
