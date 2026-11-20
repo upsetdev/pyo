@@ -24,6 +24,7 @@ use crate::error::{ApiError, ApiResult};
 const READS: &[&str] = &[
     "fetch_logs",
     "follow_logs",
+    "follow_database_logs",
     "fetch_database_logs",
     "query_traffic",
     "list_snapshots",
@@ -245,6 +246,7 @@ mod tests {
         for k in [
             "fetch_logs",
             "follow_logs",
+            "follow_database_logs",
             "query_traffic",
             "delete_service",
             "remove_server",
