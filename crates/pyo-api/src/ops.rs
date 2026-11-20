@@ -733,6 +733,10 @@ async fn domains_unique_across_teams(
     if hosts.is_empty() {
         return Ok(());
     }
+    // Twice on the service itself.
+    if let Some(host) = hosts.iter().enumerate().find_map(|(i, h)| hosts[..i].contains(h).then_some(h)) {
+        return Err(ApiError::conflict(format!("{host} is already used.")));
+    }
     // Teams that don't trust each other (Pyo Cloud): a new hostname needs
     // proof of owning it, and one held without proof is taken over.
     if crate::verify_domains() {

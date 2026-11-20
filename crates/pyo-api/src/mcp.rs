@@ -1234,7 +1234,7 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
                 .as_array()
                 .is_some_and(|ds| ds.iter().any(|d| d["hostname"] == json!(host)))
             {
-                return Err(format!("{host} is already on this service"));
+                return Err(format!("{host} is already used."));
             }
             let ports = a["ports"]
                 .as_array_mut()
