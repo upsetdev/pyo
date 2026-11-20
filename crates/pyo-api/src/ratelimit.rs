@@ -96,6 +96,13 @@ pub const OAUTH_REGISTER_IP: Limit = Limit {
     window_secs: HOUR,
 };
 
+/// `pyo login` requests per address (unauthenticated, each one a row).
+pub const CLI_LOGIN_IP: Limit = Limit {
+    scope: "cli-login:ip",
+    max: 30,
+    window_secs: MIN15,
+};
+
 /// The client's address as a rate-limit key: the TCP peer, or, when the
 /// peer is Pyo's gateway, the address the gateway added to X-Forwarded-For
 /// ([`request_ip`]); IPv6 cut to its /64, which one client usually has whole.
@@ -396,6 +403,7 @@ mod tests {
             PASSKEY_PASSWORD_USER,
             SIGNUP_IP,
             OAUTH_REGISTER_IP,
+            CLI_LOGIN_IP,
             crate::cloud::bootstrap::WRONG_CODE_SERVER,
             crate::cloud::bootstrap::WRONG_CODE_ALL,
         ];
