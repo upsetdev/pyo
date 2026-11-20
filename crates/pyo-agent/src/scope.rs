@@ -333,6 +333,7 @@ pub fn refusal(policy: &Policy, command: &Command) -> Option<&'static str> {
             command,
             Command::FetchLogs { .. }
                 | Command::FollowLogs { .. }
+                | Command::FollowDatabaseLogs { .. }
                 | Command::FetchDatabaseLogs { .. }
                 | Command::QueryTraffic(_)
                 | Command::Cancel { .. }
@@ -438,6 +439,17 @@ mod tests {
             replica: String::new(),
         };
         assert!(refusal(&ro, &follow).is_none(), "following logs only reads");
+        let db_follow = Command::FollowDatabaseLogs {
+            session_id: "lgf_y".into(),
+            namespace: "pyo-db-team".into(),
+            name: "main".into(),
+            tail_lines: 500,
+            since_seconds: None,
+        };
+        assert!(
+            refusal(&ro, &db_follow).is_none(),
+            "following a database's logs only reads"
+        );
     }
 
     #[test]

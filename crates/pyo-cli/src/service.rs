@@ -1067,7 +1067,8 @@ async fn follow_once(
                     p.print(&lines);
                 }
                 Ok(LogFrame::Error { message }) => bail!(message),
-                Err(_) => {}
+                // A database's pods and events: not a service's.
+                Ok(LogFrame::Pods { .. } | LogFrame::Events { .. }) | Err(_) => {}
             },
             Message::Close(_) => break,
             _ => {}

@@ -1197,6 +1197,20 @@ pub enum Command {
         #[serde(default)]
         since_seconds: Option<i64>,
     },
+    /// Follow a database's output, as [`FollowLogs`](Command::FollowLogs)
+    /// follows a service's: the agent dials back to
+    /// `/api/agent/v1/log-follows/<session_id>` and sends its pods' parts
+    /// ([`LogFrame::Pods`]), the recent lines and events as
+    /// [`FetchDatabaseLogs`](Command::FetchDatabaseLogs) reads them, then new
+    /// lines as they're printed and the pods and events when they change.
+    FollowDatabaseLogs {
+        session_id: String,
+        namespace: String,
+        name: String,
+        tail_lines: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_seconds: Option<i64>,
+    },
     /// Before an import into a database: connect to the source (its
     /// version, extensions and whether every table can be read) and check
     /// the database to import into is empty, from a short Job in the
@@ -1592,6 +1606,12 @@ pub enum LogFrame {
     Lines { lines: Vec<LogLine> },
     /// It couldn't follow, and why.
     Error { message: String },
+    /// A database's pods, each with the labels that tell its part, by name
+    /// ([`Command::FollowDatabaseLogs`]): first, then when they change.
+    Pods { pods: serde_json::Value },
+    /// The cluster's events about a database, all of them: first, then
+    /// when they change.
+    Events { events: Vec<serde_json::Value> },
 }
 
 /// The longest a log follow lasts. Whoever follows longer opens another.
