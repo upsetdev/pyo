@@ -1070,6 +1070,14 @@ pub enum Command {
         /// One of [`TERMINAL_SHELLS`].
         #[serde(default)]
         shell: String,
+        /// A command to run instead of a shell (`pyo exec -- cmd args`),
+        /// started as it is, without a shell.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        command: Vec<String>,
+        /// With a terminal (keys, colors, one output stream). Without one,
+        /// output frames carry their stream ([`TerminalFrame`]).
+        #[serde(default = "yes")]
+        tty: bool,
     },
     /// Only to the agent on the cluster Pyo runs on: update Pyo to a
     /// release. The agent runs the new release's upgrader as a Job in
@@ -1526,19 +1534,32 @@ pub fn collect_images(v: &serde_json::Value, out: &mut Vec<String>) {
 }
 
 /// Control messages on a terminal WebSocket, sent as text frames. Keystrokes
-/// and shell output are binary frames.
+/// and shell output are binary frames. Without a TTY, output frames start
+/// with their stream ([`STREAM_STDOUT`] or [`STREAM_STDERR`]); input frames
+/// are stdin as it is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum TerminalFrame {
     /// Browser to shell: the terminal's size changed.
     Resize { cols: u16, rows: u16 },
+    /// Client to shell: no more input (stdin is closed).
+    StdinEnd,
     /// Shell to browser: connected to this replica.
     Ready { pod: String },
     /// Shell to browser: it couldn't start or broke, and why.
     Error { message: String },
-    /// Shell to browser: the shell exited.
-    Exit,
+    /// Shell to browser: the shell or command exited, with its exit code
+    /// when known.
+    Exit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
+    },
 }
+
+/// The first byte of an output frame without a TTY: standard output.
+pub const STREAM_STDOUT: u8 = 1;
+/// The first byte of an output frame without a TTY: standard error.
+pub const STREAM_STDERR: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1826,6 +1847,10 @@ pub struct WafSettings {
     /// rule set's own (5).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub threshold: u32,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn is_zero(n: &u32) -> bool {

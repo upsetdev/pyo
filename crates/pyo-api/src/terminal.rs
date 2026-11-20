@@ -77,9 +77,36 @@ struct OpenQuery {
     /// One of TERMINAL_SHELLS.
     #[serde(default)]
     shell: String,
+    /// A command to run instead of a shell, as a JSON array of its words
+    /// (`pyo exec -- cmd args`).
+    #[serde(default)]
+    command: String,
+    /// "false": no TTY (separate output streams, for scripts and pipes).
+    #[serde(default)]
+    tty: String,
 }
 
-/// GET /api/v1/services/{id}/terminal?replica=&shell= (WebSocket).
+/// A command's words from the query (a JSON array), checked: at most 256
+/// words and 64 KiB, no NUL bytes. Empty: a shell.
+fn command_words(q: &str) -> ApiResult<Vec<String>> {
+    if q.is_empty() {
+        return Ok(vec![]);
+    }
+    let words: Vec<String> = serde_json::from_str(q)
+        .map_err(|_| ApiError::bad_request("The command is a JSON array of strings."))?;
+    if words.len() > 256
+        || words.iter().map(String::len).sum::<usize>() > 64 * 1024
+        || words.iter().any(|w| w.contains('\0'))
+    {
+        return Err(ApiError::bad_request("That command is too long."));
+    }
+    if words.first().is_some_and(|w| w.is_empty()) {
+        return Err(ApiError::bad_request("Name the command to run."));
+    }
+    Ok(words)
+}
+
+/// GET /api/v1/services/{id}/terminal?replica=&shell=&command=&tty= (WebSocket).
 async fn open(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
@@ -107,19 +134,28 @@ async fn open(
     {
         return Err(ApiError::bad_request("That isn't a replica name."));
     }
+    let command = command_words(&q.command)?;
+    let tty = q.tty != "false";
     if !same_origin(&headers) {
         return Err(ApiError::forbidden(
             "Open the terminal from the Pyo dashboard.",
         ));
     }
-    if user
-        .key
-        .as_ref()
-        .is_some_and(|k| k.access != KeyAccess::Full)
-    {
-        return Err(ApiError::forbidden(
-            "Terminals need an API key with full access.",
-        ));
+    // A shell needs a key with full access. One command (a migration from
+    // CI) also runs with a deploy key.
+    if let Some(k) = &user.key {
+        let ok = match k.access {
+            KeyAccess::Full => true,
+            KeyAccess::Deploy => !command.is_empty(),
+            _ => false,
+        };
+        if !ok {
+            return Err(ApiError::forbidden(if command.is_empty() {
+                "Terminals need an API key with full access."
+            } else {
+                "Running a command needs an API key with deploy or full access."
+            }));
+        }
     }
     let mut tx = s.db.begin().await?;
     let team_id = ops::team_of(&mut tx, "services", &service_id).await?;
@@ -164,13 +200,19 @@ async fn open(
         .bind(&q.replica)
         .execute(&mut *tx)
         .await?;
+    // Not the command's words: they may hold secrets.
+    let what = if command.is_empty() {
+        format!("Opened a terminal in {}", service.name)
+    } else {
+        format!("Ran a command in {}", service.name)
+    };
     ops::log_activity(
         &mut tx,
         &team_id,
         &user.name,
         "service.terminal",
         "info",
-        &format!("Opened a terminal in {}", service.name),
+        &what,
         json!({ "kind": "service", "id": service_id, "label": service.name }),
         json!({ "serviceId": service_id }),
     )
@@ -185,6 +227,8 @@ async fn open(
             service,
             pod: q.replica,
             shell,
+            command,
+            tty,
         },
     )
     .await?;
@@ -339,5 +383,16 @@ mod tests {
         assert!(same_origin(&h(Some("http://localhost:8000"))));
         assert!(same_origin(&h(None)));
         assert!(!same_origin(&h(Some("https://evil.example"))));
+    }
+
+    #[test]
+    fn command_words_are_checked() {
+        assert_eq!(command_words("").unwrap(), Vec::<String>::new());
+        assert_eq!(command_words(r#"["ls","-la"]"#).unwrap(), ["ls", "-la"]);
+        assert!(command_words("ls -la").is_err());
+        assert!(command_words(r#"[""]"#).is_err());
+        assert!(command_words(r#"["a\u0000b"]"#).is_err());
+        let long = serde_json::to_string(&vec!["x"; 300]).unwrap();
+        assert!(command_words(&long).is_err());
     }
 }

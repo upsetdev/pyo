@@ -83,7 +83,7 @@ pub async fn run(
             m = down.next() => match m {
                 Some(Ok(Message::Binary(b))) => { stdout.write_all(&b).await?; stdout.flush().await?; }
                 Some(Ok(Message::Text(t))) => match serde_json::from_str::<TerminalFrame>(t.as_str()) {
-                    Ok(TerminalFrame::Exit) => break,
+                    Ok(TerminalFrame::Exit { .. }) => break,
                     Ok(TerminalFrame::Error { message }) => { drop(_raw); bail!(message); }
                     _ => {}
                 },
