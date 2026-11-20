@@ -149,6 +149,22 @@ enum Command {
         #[command(flatten)]
         which: Which,
     },
+    /// Where the service runs: any server, or only the servers and tags
+    /// given. It moves over right away, without a redeploy. Without
+    /// options, shows where it runs now.
+    Place {
+        #[command(flatten)]
+        which: Which,
+        /// A server to run on, by name (repeatable).
+        #[arg(long = "server")]
+        servers: Vec<String>,
+        /// Run on every server with this tag, tagged now or later (repeatable).
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Run on any server.
+        #[arg(long, conflicts_with_all = ["servers", "tags"])]
+        any: bool,
+    },
     /// A shell in the service.
     Exec {
         #[command(flatten)]
@@ -843,6 +859,21 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
         }
         Command::Restart { which } => {
             service::restart(&config::client(url, token)?, which.service.as_deref()).await
+        }
+        Command::Place {
+            which,
+            servers,
+            tags,
+            any,
+        } => {
+            service::place(
+                &config::client(url, token)?,
+                which.service.as_deref(),
+                servers,
+                tags,
+                any,
+            )
+            .await
         }
         Command::Exec {
             which,
