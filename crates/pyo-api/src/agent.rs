@@ -877,10 +877,12 @@ async fn sign_all(
             .ok()
             .and_then(|v| v["kind"].as_str().map(str::to_owned))
             .unwrap_or_default();
+        let command = crate::SIGNER_CHECKS.contains(&kind.as_str()).then(|| json.clone());
         items.push(crate::ToSign {
             id: e.id.clone(),
             kind,
             sha256: sha256_hex(&json),
+            command,
         });
         jsons.push(json);
     }

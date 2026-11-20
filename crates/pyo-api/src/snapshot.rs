@@ -41,7 +41,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "SELECT jsonb_build_object(
             'id', id, 'name', name, 'slug', slug, 'description', description,
             'createdAt', pyo.ms(created_at), 'defaultClusterId', default_cluster_id,
-            'preferences', preferences)
+            'preferences', preferences, 'agentUpdates', agent_updates)
            FROM pyo.teams WHERE id = ANY($1) ORDER BY created_at",
         &team_ids,
     )
@@ -97,6 +97,10 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'createdAt', pyo.ms(created_at),
             -- Its connect command works until then, unless its agent connected (install.rs).
             'connectExpiresAt', CASE WHEN connect_token_used_at IS NULL THEN pyo.ms(connect_token_expires_at) END,
+            -- Its agent's last update (updates.rs), for a hosted Pyo's cluster page.
+            'agentUpdate', (SELECT jsonb_build_object('status', m.status, 'message', m.result->>'message', 'at', pyo.ms(m.created_at))
+                              FROM pyo.commands m WHERE m.cluster_id = clusters.id AND m.command->>'kind' = 'update_agent'
+                             ORDER BY m.created_at DESC LIMIT 1),
             'lastSeenAt', coalesce(pyo.ms(last_seen_at), 0))
            FROM pyo.clusters WHERE team_id = ANY($1) ORDER BY created_at",
         &team_ids,

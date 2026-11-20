@@ -192,7 +192,15 @@ pub struct ToSign {
     pub id: String,
     pub kind: String,
     pub sha256: String,
+    /// The command's exact JSON, for kinds that carry no secrets and whose
+    /// content the signer checks itself ([`SIGNER_CHECKS`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
+
+/// Kinds a signer sees in full, to hold them to its own policy: an agent
+/// update names the image every customer's agent will run.
+pub const SIGNER_CHECKS: &[&str] = &["update_agent"];
 
 /// A reply to sign (pyo-proto `signing`, `pyoreply1`): for this cluster,
 /// to the request that sent `nonce`, whose JSON hashes to `sha256`.
@@ -461,6 +469,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tokio::spawn(teambackup::runner(state.clone()));
         tokio::spawn(database_imports::runner(state.clone()));
         tokio::spawn(updates::runner(state.clone()));
+        tokio::spawn(updates::hosted_agents(state.clone()));
         tokio::spawn(tailscale::runner(state.clone()));
         tokio::spawn(cdn::keeper(state.clone()));
         tokio::spawn(sandbox::runner::runner(state.clone()));

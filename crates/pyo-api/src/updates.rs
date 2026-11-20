@@ -15,6 +15,12 @@
 //!   every cluster's agent is moved to the new agent image. Each step is a
 //!   row in pyo.updates that the worker moves along, so it carries on across
 //!   the very restarts it causes.
+//! - A hosted Pyo (Pyo Cloud) is updated by whoever runs it, never from
+//!   here. Its agents follow its version ([`hosted_agents`]): each team has
+//!   automatic agent updates (the default), or chooses when, and then
+//!   updates a cluster's agent from the cluster's page
+//!   ([`update_cluster_agent`]). Either way it's the same `UpdateAgent`
+//!   command, signed for the cluster like every other.
 
 use std::time::Duration;
 
@@ -751,6 +757,11 @@ pub async fn start(
     version: &str,
     user: Option<&crate::auth::User>,
 ) -> ApiResult<String> {
+    if crate::hosted() {
+        return Err(ApiError::bad_request(
+            "This Pyo is updated by the people who run it. Its agents follow on their own.",
+        ));
+    }
     // One start at a time, across processes.
     let mut tx = s.db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -822,6 +833,113 @@ pub async fn start(
     Ok(id)
 }
 
+// ── Agents on a hosted Pyo ─────────────────────────────────────────────────
+
+/// A team's agent updates: "auto" (the default) or "manual" (it chooses when).
+pub const AGENT_UPDATE_MODES: [&str; 2] = ["auto", "manual"];
+
+/// Clusters whose agent may be moved to this Pyo's: online, able to update
+/// itself, not on this version, and without an update to this image sent
+/// in the last hour (or failed in the last six). `$1`: this version, `$2`:
+/// the agent image, `$3`: only teams with automatic updates.
+const HOSTED_CANDIDATES: &str = "SELECT c.id, coalesce(c.agent_version, '') FROM pyo.clusters c JOIN pyo.teams t ON t.id = c.team_id
+      WHERE c.status <> 'pending' AND c.last_seen_at > now() - interval '2 minutes'
+        AND coalesce((c.capabilities->>'updates')::int, 0) >= 1
+        AND c.agent_version IS DISTINCT FROM $1
+        AND (NOT $3 OR t.agent_updates = 'auto')
+        AND NOT EXISTS (SELECT 1 FROM pyo.commands m
+                         WHERE m.cluster_id = c.id AND m.command->>'kind' = 'update_agent' AND m.command->>'image' = $2
+                           AND m.created_at > now() - CASE WHEN m.status = 'failed' THEN interval '6 hours' ELSE interval '1 hour' END)";
+
+/// Whether `agent` is older than this Pyo (an agent newer, or of a build
+/// with no version, is left alone).
+fn agent_behind(agent: &str) -> bool {
+    newer(current(), agent)
+}
+
+/// Queues the update of one cluster's agent to this Pyo's image.
+async fn send_update(s: &AppState, cluster_id: &str) -> ApiResult<String> {
+    let mut tx = s.db.begin().await?;
+    let id = crate::deploy::enqueue(
+        &mut tx,
+        cluster_id,
+        Command::UpdateAgent {
+            image: s.config.agent_image.clone(),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    s.wake(cluster_id).await;
+    Ok(id)
+}
+
+/// A hosted Pyo's automatic agent updates: every minute, each cluster of a
+/// team with automatic updates whose agent is behind gets the update.
+pub async fn hosted_agents(s: AppState) {
+    if !crate::hosted() {
+        return;
+    }
+    loop {
+        let st = s.clone();
+        let ran = crate::bg::as_leader(&s.db, crate::bg::LOCK_AGENT_UPDATES, || async move {
+            let due: Vec<(String, String)> = sqlx::query_as(HOSTED_CANDIDATES)
+                .bind(current())
+                .bind(&st.config.agent_image)
+                .bind(true)
+                .fetch_all(&st.db)
+                .await?;
+            for (cluster, agent) in due.into_iter().filter(|(_, a)| agent_behind(a)) {
+                let cmd = send_update(&st, &cluster).await?;
+                tracing::info!(%cluster, from = %agent, to = current(), command = %cmd, "updating a cluster's agent");
+            }
+            ApiResult::Ok(())
+        })
+        .await;
+        if let Some(Err(e)) = ran {
+            tracing::warn!(error = %e.message, "hosted agent updates");
+        }
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
+/// A cluster's agent, updated now to this Pyo's version: for a hosted Pyo
+/// (self-hosted ones update from the Updates page). Fails when it's on it
+/// already, isn't reachable, or an update is on its way.
+pub async fn update_cluster_agent(s: &AppState, cluster_id: &str) -> ApiResult<String> {
+    if !crate::hosted() {
+        return Err(ApiError::bad_request("Update agents from Settings › Updates."));
+    }
+    let row: Option<(Option<String>, bool, i32)> = sqlx::query_as(
+        "SELECT agent_version, coalesce(last_seen_at > now() - interval '2 minutes', false), coalesce((capabilities->>'updates')::int, 0)
+           FROM pyo.clusters WHERE id = $1",
+    )
+    .bind(cluster_id)
+    .fetch_optional(&s.db)
+    .await?;
+    let (agent, online, updates) = row.ok_or_else(|| ApiError::not_found("Cluster"))?;
+    let agent = agent.unwrap_or_default();
+    if !agent_behind(&agent) {
+        return Err(ApiError::bad_request(format!("Its agent is on {} already.", current())));
+    }
+    if !online {
+        return Err(ApiError::bad_request("Its agent isn't reachable. Update it once it's back."));
+    }
+    if updates < 1 {
+        return Err(ApiError::bad_request("Its agent is too old to update itself. Run its connect command again."));
+    }
+    let busy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'update_agent'
+                         AND status IN ('pending', 'sent') AND created_at > now() - interval '10 minutes')",
+    )
+    .bind(cluster_id)
+    .fetch_one(&s.db)
+    .await?;
+    if busy {
+        return Err(ApiError::conflict("Its agent is updating."));
+    }
+    send_update(s, cluster_id).await
+}
+
 // ── Moving an update along (worker) ────────────────────────────────────────
 
 pub async fn runner(state: AppState) {
@@ -838,6 +956,10 @@ pub async fn runner(state: AppState) {
 }
 
 async fn tick(s: &AppState) -> ApiResult<()> {
+    // Updated by whoever runs it: its agents follow (hosted_agents).
+    if crate::hosted() {
+        return Ok(());
+    }
     let cfg = settings(&s.db).await?;
     if cfg.check && !checks_off_by_env() {
         let c = checked(&s.db).await?;
@@ -1646,5 +1768,80 @@ mod tests {
         assert!(
             blockers(&r, &[cluster(true, 1, true)], false)[0].contains("update to 98.0.0 first")
         );
+    }
+}
+
+#[cfg(test)]
+mod hosted_tests {
+    use super::*;
+
+    #[test]
+    fn only_older_agents_are_behind() {
+        let v = current();
+        assert!(!agent_behind(v));
+        assert!(agent_behind("0.0.1"));
+        assert!(!agent_behind("99.0.0"));
+        // A build with no version is left alone.
+        assert!(!agent_behind(""));
+    }
+
+    /// Against a throwaway Postgres: the clusters due an update are those
+    /// online, able to update, behind, of teams with automatic updates (or
+    /// any team, asked for by hand), without an update to this image sent in
+    /// the last hour or failed in the last six.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn agents_of_teams_with_automatic_updates_are_due() {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let run = crate::ids::random_string(8);
+        let (auto, manual) = (format!("team_u{run}"), format!("team_m{run}"));
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&auto).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.teams (id, name, slug, agent_updates) VALUES ($1, $1, $1, 'manual')").bind(&manual).execute(&db).await.unwrap();
+        let image = format!("agent:{run}");
+        let add = |id: &str, team: &str, version: &str, online: bool, updates: i32| {
+            let (db, id, team, version) = (db.clone(), format!("{id}{run}"), team.to_owned(), version.to_owned());
+            async move {
+                sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, agent_version, last_seen_at, capabilities)
+                             VALUES ($1, $2, $1, $1, 'connected', $3, now() - CASE WHEN $4 THEN interval '0' ELSE interval '1 hour' END, $5)")
+                    .bind(&id).bind(&team).bind(&version).bind(online).bind(json!({ "updates": updates })).execute(&db).await.unwrap();
+                id
+            }
+        };
+        let behind = add("cl_b", &auto, "0.0.1", true, 1).await;
+        let theirs = add("cl_m", &manual, "0.0.1", true, 1).await;
+        let current_one = add("cl_c", &auto, current(), true, 1).await;
+        let offline = add("cl_o", &auto, "0.0.1", false, 1).await;
+        let too_old = add("cl_t", &auto, "0.0.1", true, 0).await;
+        let sent = add("cl_s", &auto, "0.0.1", true, 1).await;
+        let failed_long_ago = add("cl_f", &auto, "0.0.1", true, 1).await;
+        let failed_now = add("cl_n", &auto, "0.0.1", true, 1).await;
+        let cmd = |id: &str, cluster: &str, status: &str, age: &str| {
+            let (db, id, cluster, status, age, image) = (db.clone(), format!("{id}{run}"), cluster.to_owned(), status.to_owned(), age.to_owned(), image.clone());
+            async move {
+                sqlx::query("INSERT INTO pyo.commands (id, cluster_id, command, status, created_at) VALUES ($1, $2, $3, $4, now() - $5::interval)")
+                    .bind(&id).bind(&cluster).bind(json!({ "kind": "update_agent", "image": image })).bind(&status).bind(&age).execute(&db).await.unwrap();
+            }
+        };
+        cmd("cmd_s", &sent, "done", "10 minutes").await;
+        cmd("cmd_f", &failed_long_ago, "failed", "7 hours").await;
+        cmd("cmd_n", &failed_now, "failed", "2 hours").await;
+        let due = |only_auto: bool| {
+            let (db, image, run) = (db.clone(), image.clone(), run.clone());
+            async move {
+                let rows: Vec<(String, String)> = sqlx::query_as(HOSTED_CANDIDATES).bind(current()).bind(&image).bind(only_auto).fetch_all(&db).await.unwrap();
+                let mut ids: Vec<String> = rows.into_iter().filter(|(id, a)| id.ends_with(&run) && agent_behind(a)).map(|r| r.0).collect();
+                ids.sort();
+                ids
+            }
+        };
+        let mut want = vec![behind.clone(), failed_long_ago.clone()];
+        want.sort();
+        assert_eq!(due(true).await, want);
+        assert!(due(false).await.contains(&theirs));
+        for not in [&current_one, &offline, &too_old, &sent, &failed_now] {
+            assert!(!due(false).await.contains(not), "{not} isn't due");
+        }
     }
 }

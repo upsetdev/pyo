@@ -74,6 +74,8 @@ pub const LOCK_DNS: i64 = 7_004;
 pub const LOCK_BACKUP: i64 = 7_005;
 pub const LOCK_TEAM_BACKUP: i64 = 7_006;
 pub const LOCK_UPDATES: i64 = 7_007;
+/// A hosted Pyo's agent updates (updates.rs `hosted_agents`).
+pub const LOCK_AGENT_UPDATES: i64 = 7_011;
 pub const LOCK_TAILSCALE: i64 = 7_009;
 /// Not a loop's: the backup store's layout, set up by one process at a time.
 pub const LOCK_BACKUP_STORE: i64 = 7_008;
@@ -262,6 +264,8 @@ mod tests {
             LOCK_BACKUP,
             LOCK_TEAM_BACKUP,
             LOCK_UPDATES,
+            LOCK_AGENT_UPDATES,
+            LOCK_TAILSCALE,
             LOCK_BACKUP_STORE,
             LOCK_DATABASE_IMPORTS,
             crate::geoip::LOCK_GEOIP,

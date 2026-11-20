@@ -1874,6 +1874,9 @@ pub(crate) enum Op {
         /// The team's dashboard preferences, saved as given.
         #[schema(value_type = Option<Object>)]
         preferences: Option<Value>,
+        /// On a hosted Pyo: "auto" updates the team's agents when Pyo has a new version, "manual" leaves it to you.
+        #[serde(default)]
+        agent_updates: Option<String>,
     },
     /// Delete a team and everything in it. Owners only.
     DeleteTeam { id: String },
@@ -2551,6 +2554,8 @@ pub(crate) enum Op {
         #[serde(default)]
         public_api_url: Option<String>,
     },
+    /// On a hosted Pyo: update a cluster's agent to Pyo's version now.
+    UpdateClusterAgent { id: String },
     /// Discard a cluster that was added but never connected.
     DiscardClusterDraft { id: String },
     /// Remove a cluster from Pyo. Its servers keep running.
@@ -3140,6 +3145,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         Op::CreateCluster { .. }
         | Op::UpdateCluster { .. }
         | Op::RotateAgentToken { .. }
+        | Op::UpdateClusterAgent { .. }
         | Op::DiscardClusterDraft { .. }
         | Op::RemoveCluster { .. }
         | Op::SetClusterTrafficMode { .. }
@@ -3297,8 +3303,19 @@ async fn apply(
             description,
             default_cluster_id,
             preferences,
+            agent_updates,
         } => {
             require_role(tx, user, &id, Role::Admin).await?;
+            if let Some(m) = agent_updates {
+                if !crate::updates::AGENT_UPDATE_MODES.contains(&m.as_str()) {
+                    return Err(ApiError::bad_request("Agent updates are \"auto\" or \"manual\"."));
+                }
+                sqlx::query("UPDATE pyo.teams SET agent_updates = $2 WHERE id = $1")
+                    .bind(&id)
+                    .bind(&m)
+                    .execute(&mut **tx)
+                    .await?;
+            }
             let mut slug = None;
             if let Some(n) = name {
                 let n = require_text(&n, "Team name", 60)?;
@@ -6455,6 +6472,27 @@ async fn apply(
             Ok(
                 json!({ "ok": true, "token": token, "command": command, "tailscale": tailnet, "tailnet": tailnet }),
             )
+        }
+        Op::UpdateClusterAgent { id } => {
+            let team_id = team_of(tx, "clusters", &id).await?;
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            let command = crate::updates::update_cluster_agent(s, &id).await?;
+            let name: String = sqlx::query_scalar("SELECT name FROM pyo.clusters WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&mut **tx)
+                .await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "cluster.updated",
+                "info",
+                &format!("Updating the agent of {name} to {}", crate::updates::current()),
+                json!({ "kind": "cluster", "id": id, "label": name }),
+                json!({ "clusterId": id }),
+            )
+            .await?;
+            Ok(json!({ "ok": true, "commandId": command }))
         }
         Op::UpdateCluster {
             id,
