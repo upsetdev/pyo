@@ -675,7 +675,7 @@ async fn waf_changed(
 /// New tailnet domains (`blog.<tailnet>.ts.net`) need Tailscale and a name
 /// nothing else on the tailnet has (tailscale.rs `check_domain`). Ones Pyo
 /// already hosts are left to its loop.
-async fn tailnet_domains_ok(s: &AppState, domains: &Value) -> ApiResult<()> {
+async fn tailnet_domains_ok(s: &AppState, cluster_id: &str, domains: &Value) -> ApiResult<()> {
     let hosts: Vec<String> = domains
         .as_array()
         .into_iter()
@@ -687,13 +687,14 @@ async fn tailnet_domains_ok(s: &AppState, domains: &Value) -> ApiResult<()> {
     for host in hosts {
         let label = host.split('.').next().unwrap_or("");
         let ours: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pyo.tailnet_services WHERE name = $1 AND kind = 'domain' AND retired_at IS NULL AND error IS NULL)",
+            "SELECT EXISTS (SELECT 1 FROM pyo.cluster_tailnet_names WHERE cluster_id = $1 AND name = $2 AND kind = 'domain' AND retired_at IS NULL AND error IS NULL)",
         )
+        .bind(cluster_id)
         .bind(label)
         .fetch_one(&s.db)
         .await?;
         if !ours {
-            crate::tailscale::check_domain(s, &host).await?;
+            crate::tailscale::check_domain(s, cluster_id, &host).await?;
         }
     }
     Ok(())
@@ -773,20 +774,27 @@ async fn reach(
     cluster_id: &str,
     what: &str,
 ) -> ApiResult<(String, String, Option<(String, String)>)> {
-    if crate::tailscale::settings(&s.db).await?.is_none() {
-        return Err(ApiError::bad_request(crate::tailscale::NEEDED));
-    }
+    let keys = crate::tailscale::key_cluster(&s.db, None).await?;
     let api = crate::web::tailnet_api_url().ok_or_else(|| {
         ApiError::conflict("Pyo's server isn't on your tailnet yet. Try again in a minute.")
     })?;
-    let key = crate::tailscale::join_key(s, what, "this server").await?;
-    let door = crate::join::friendly(&deploy::registry_push());
-    let registry = if door.is_empty() {
-        None
-    } else {
-        Some((door, registry_token(tx, s, cluster_id).await?))
-    };
+    let key = crate::tailscale::join_key(s, &keys, what, "this server").await?;
+    let registry = registry_door(tx, s, cluster_id).await?;
     Ok((crate::join::friendly(&api), key, registry))
+}
+
+/// Pyo's registry door for Pyo-built images, with the cluster's pull
+/// token, when Pyo has one on the tailnet.
+async fn registry_door(
+    tx: &mut Transaction<'_, Postgres>,
+    s: &AppState,
+    cluster_id: &str,
+) -> ApiResult<Option<(String, String)>> {
+    let door = crate::join::friendly(&deploy::registry_push());
+    if door.is_empty() || crate::web::tailnet_api_url().is_none() {
+        return Ok(None);
+    }
+    Ok(Some((door, registry_token(tx, s, cluster_id).await?)))
 }
 
 /// The cluster's pull token at Pyo's registry door (its servers'
@@ -893,6 +901,9 @@ struct JoinParts {
     tailscale_key: String,
     registry: Option<(String, String)>,
     ttl: u64,
+    /// The control-plane server isn't on the tailnet yet: its name, and a
+    /// key to put it there first.
+    tailnet_first: Option<(String, String)>,
 }
 
 impl JoinParts {
@@ -930,8 +941,11 @@ async fn join_command(
     // fetches the script off the tailnet.
     let base = crate::join::scripts_url_before_tailnet();
     let command = crate::join::command(&base, &p.join(server_name, builder, true));
+    let first = p.tailnet_first.as_ref().map(|(server, key)| {
+        json!({ "server": server, "command": crate::join::tailnet_only_command(&base, key) })
+    });
     Ok(
-        json!({ "ok": true, "command": command, "scriptUrl": format!("{base}/join.sh"), "expiresAt": now_ms() + p.ttl as i64 * 1000, "tailscale": true }),
+        json!({ "ok": true, "command": command, "scriptUrl": format!("{base}/join.sh"), "expiresAt": now_ms() + p.ttl as i64 * 1000, "tailscale": true, "tailnetFirst": first }),
     )
 }
 
@@ -965,18 +979,43 @@ async fn join_parts(
     }
     // The control plane's address, which new servers join through: its
     // Tailscale address when it has one.
-    let server_ip: Option<String> = sqlx::query_scalar(
-        "SELECT coalesce(nullif(report->>'tailnetIp', ''), report->>'internalIP') FROM pyo.servers WHERE cluster_id = $1 AND report->'roles' ? 'control-plane'
+    let control: Option<(String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT name, coalesce(nullif(report->>'tailnetIp', ''), report->>'internalIP'), coalesce(report->>'tailnetIp', '') <> ''
+           FROM pyo.servers WHERE cluster_id = $1 AND report->'roles' ? 'control-plane'
           ORDER BY (report->>'status' = 'ready') DESC LIMIT 1",
     )
     .bind(cluster_id)
     .fetch_optional(&mut **tx)
     .await?;
-    let server_ip = server_ip.filter(|ip| !ip.is_empty()).ok_or_else(|| {
-        ApiError::conflict("The cluster has no control-plane server reported yet.")
-    })?;
-    let (_, ts_key, registry) =
-        reach(tx, s, cluster_id, &format!("Pyo: join {server_name}")).await?;
+    let (control, server_ip, on_tailnet) = control
+        .and_then(|(n, ip, t)| Some((n, ip.filter(|ip| !ip.is_empty())?, t)))
+        .ok_or_else(|| {
+            ApiError::conflict("The cluster has no control-plane server reported yet.")
+        })?;
+    // The cluster's own tailnet: its agent makes the key.
+    let keys = crate::tailscale::key_cluster(&s.db, Some(cluster_id)).await?;
+    let ts_key = crate::tailscale::join_key(
+        s,
+        &keys,
+        &format!("Pyo: join {server_name}"),
+        "this server",
+    )
+    .await?;
+    let registry = registry_door(tx, s, cluster_id).await?;
+    // A cluster connected without Tailscale (Pyo Cloud): its control-plane
+    // server joins the tailnet first, so new servers can reach it there.
+    let tailnet_first = if on_tailnet {
+        None
+    } else {
+        let key = crate::tailscale::join_key(
+            s,
+            &keys,
+            &format!("Pyo: {control} onto the tailnet"),
+            "this server",
+        )
+        .await?;
+        Some((control, key))
+    };
     let alnum = |n: usize| {
         crate::ids::secret_token()
             .chars()
@@ -1005,6 +1044,7 @@ async fn join_parts(
         tailscale_key: ts_key,
         registry,
         ttl,
+        tailnet_first,
     })
 }
 
@@ -2659,29 +2699,41 @@ pub(crate) enum Op {
     RemoveBuilder { id: String },
     /// A new token for a builder. The old one stops working.
     RotateBuilderToken { id: String },
-    /// Set up Tailscale for this installation (admins only): an OAuth client with the scopes Devices › Core and Auth Keys (both with tag:pyo) and Services. Servers and clusters join your tailnet with it, and Pyo gets names on it. Pyo checks it first and says what it can do. A missing secret keeps the saved one.
+    /// Set up Tailscale on a cluster (the team's admins) with an OAuth client with the scopes Devices › Core and Auth Keys (both with tag:pyo) and Services. The cluster's agent checks it and keeps it. Pyo never stores it. Servers join the cluster's tailnet with it, and Pyo gets names on it. Without `clusterId`, the cluster Pyo runs on.
     SaveTailscale {
+        #[serde(default)]
+        cluster_id: Option<String>,
         client_id: String,
         secret: Option<String>,
     },
-    /// See what setting up Tailscale with an API access token would change (admins only). Nothing changes yet.
+    /// See what setting up Tailscale on a cluster with an API access token would change (the team's admins). Nothing changes yet. Without `clusterId`, the cluster Pyo runs on.
     PlanTailscaleSetup {
-        /// An API access token from the Tailscale console's Keys page. Used for this request only and never stored.
+        #[serde(default)]
+        cluster_id: Option<String>,
+        /// An API access token from the Tailscale console's Keys page. Passed to the cluster's agent and never stored.
         #[schema(value_type = String)]
-        token: crate::tailscale_setup::Token,
+        token: crate::tailscale::Token,
     },
-    /// Set up Tailscale with an API access token (admins only): MagicDNS, HTTPS certificates, tag:pyo in the tailnet policy, and an OAuth client of Pyo's own. Pyo deletes the token when it's done.
+    /// Set up Tailscale on a cluster with an API access token (the team's admins): MagicDNS, HTTPS certificates, tag:pyo in the tailnet policy, and an OAuth client the cluster's agent keeps. The agent deletes the token when it's done. Without `clusterId`, the cluster Pyo runs on.
     SetUpTailscale {
-        /// An API access token from the Tailscale console's Keys page. Used for this request only and never stored.
+        #[serde(default)]
+        cluster_id: Option<String>,
+        /// An API access token from the Tailscale console's Keys page. Passed to the cluster's agent and never stored.
         #[schema(value_type = String)]
-        token: crate::tailscale_setup::Token,
+        token: crate::tailscale::Token,
         /// The `version` planTailscaleSetup returned. If the tailnet policy changed since, nothing changes and `reviewAgain` comes back.
         version: String,
     },
-    /// Check the saved Tailscale OAuth client again, scope by scope.
-    TestTailscale {},
-    /// Forget the Tailscale OAuth client. Pyo's names on your tailnet are deleted. Servers stay on it.
-    RemoveTailscale {},
+    /// Check a cluster's Tailscale OAuth client again, scope by scope. Without `clusterId`, the cluster Pyo runs on.
+    TestTailscale {
+        #[serde(default)]
+        cluster_id: Option<String>,
+    },
+    /// Forget a cluster's Tailscale OAuth client. Pyo's names on its tailnet are deleted. Servers stay on it. Without `clusterId`, the cluster Pyo runs on.
+    RemoveTailscale {
+        #[serde(default)]
+        cluster_id: Option<String>,
+    },
     /// Rename Pyo's own name on your tailnet: `kind` "dashboard" (pyo.<tailnet>.ts.net), "registry" or "sandboxes" (sandboxes' web pages, like the desktop).
     RenameTailscaleName { kind: String, name: String },
     /// Connect a team to Hetzner Cloud (team admins): a project API token with Read & Write, from the project's Security page. Pyo checks it by listing the locations, and keeps it encrypted. Servers join over your tailnet, so Tailscale comes first.
@@ -2916,7 +2968,13 @@ async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     // Long calls to outside services hold no transaction open.
     if matches!(
         op,
-        Op::PlanTailscaleSetup { .. } | Op::SetUpTailscale { .. } | Op::TestAlertChannel { .. }
+        Op::PlanTailscaleSetup { .. }
+            | Op::SetUpTailscale { .. }
+            | Op::SaveTailscale { .. }
+            | Op::TestTailscale { .. }
+            | Op::RemoveTailscale { .. }
+            | Op::RenameTailscaleName { .. }
+            | Op::TestAlertChannel { .. }
     ) {
         return outside_tx(&s, user, op).await;
     }
@@ -2957,23 +3015,48 @@ fn installation_wide(op: &Op) -> bool {
             | Op::StartUpdate { .. }
             | Op::GithubManifest { .. }
             | Op::RemoveGithubApp {}
-            | Op::SaveTailscale { .. }
-            | Op::TestTailscale {}
-            | Op::RemoveTailscale {}
-            | Op::RenameTailscaleName { .. }
             | Op::SetPublicDashboard { .. }
     )
 }
 
-/// Tailscale is set up here, in the API, with the installation's own
-/// credential. A hosted Pyo serves many teams and joins none of their
-/// tailnets, so it has no Tailscale until each cluster's agent sets it up.
-fn tailscale_here() -> ApiResult<()> {
-    if crate::hosted() {
-        return Err(ApiError::bad_request(
-            "Tailscale isn't available on this Pyo yet.",
-        ));
+/// The cluster a Tailscale op is for, and that the user may set it up
+/// there: the team's admins. Without one, the cluster Pyo runs on, for the
+/// installation's admins.
+async fn tailscale_cluster(s: &AppState, user: &User, cluster_id: Option<String>) -> ApiResult<String> {
+    match cluster_id {
+        Some(c) => {
+            crate::tailscale::require_cluster_admin(s, user, &c).await?;
+            Ok(c)
+        }
+        None => {
+            require_admin(user)?;
+            crate::tailscale::host_cluster(&s.db)
+                .await?
+                .ok_or_else(|| ApiError::bad_request("Pick the cluster to set Tailscale up on."))
+        }
     }
+}
+
+/// Logs a Tailscale change on the cluster's team.
+async fn log_tailscale(s: &AppState, user: &User, cluster_id: &str, title: &str) -> ApiResult<()> {
+    let mut tx = s.db.begin().await?;
+    let (team, name): (String, String) =
+        sqlx::query_as("SELECT team_id, name FROM pyo.clusters WHERE id = $1")
+            .bind(cluster_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    log_activity(
+        &mut tx,
+        &team,
+        &user.name,
+        "settings.changed",
+        "info",
+        &format!("{title} on {name}"),
+        json!({ "kind": "cluster", "id": cluster_id, "label": name }),
+        json!({}),
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -2992,27 +3075,63 @@ async fn outside_tx(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
             crate::alerts::test(s, &id).await?;
             Ok(json!({ "ok": true }))
         }
-        Op::PlanTailscaleSetup { token } => {
-            require_admin(user)?;
-            tailscale_here()?;
-            crate::tailscale_setup::plan(s, token).await
+        Op::PlanTailscaleSetup { cluster_id, token } => {
+            let c = tailscale_cluster(s, user, cluster_id).await?;
+            crate::tailscale::plan(s, &c, token.into_inner()).await
         }
-        Op::SetUpTailscale { token, version } => {
-            require_admin(user)?;
-            tailscale_here()?;
-            let out = crate::tailscale_setup::apply(s, token, &version).await?;
-            if !out.changed.is_empty() {
-                let mut tx = s.db.begin().await?;
-                log_setting(
-                    &mut tx,
-                    user,
-                    "tailscale",
-                    "Set up Tailscale with an access token",
-                )
-                .await?;
-                tx.commit().await?;
+        Op::SetUpTailscale {
+            cluster_id,
+            token,
+            version,
+        } => {
+            let c = tailscale_cluster(s, user, cluster_id).await?;
+            let out = crate::tailscale::set_up(s, &c, token.into_inner(), &version).await?;
+            if out["changed"].as_array().is_some_and(|a| !a.is_empty()) {
+                log_tailscale(s, user, &c, "Set up Tailscale with an access token").await?;
             }
-            Ok(serde_json::to_value(out).map_err(anyhow::Error::from)?)
+            Ok(out)
+        }
+        Op::SaveTailscale {
+            cluster_id,
+            client_id,
+            secret,
+        } => {
+            let c = tailscale_cluster(s, user, cluster_id).await?;
+            let out = crate::tailscale::save_client(s, &c, &client_id, secret.as_deref()).await?;
+            log_tailscale(s, user, &c, "Connected Tailscale").await?;
+            Ok(out)
+        }
+        Op::TestTailscale { cluster_id } => {
+            let c = tailscale_cluster(s, user, cluster_id).await?;
+            crate::tailscale::test_saved(s, &c).await
+        }
+        Op::RemoveTailscale { cluster_id } => {
+            let c = tailscale_cluster(s, user, cluster_id).await?;
+            crate::tailscale::remove(s, &c).await?;
+            log_tailscale(s, user, &c, "Removed Tailscale").await?;
+            Ok(json!({ "ok": true }))
+        }
+        Op::RenameTailscaleName { kind, name } => {
+            require_admin(user)?;
+            crate::tailscale::rename(s, &kind, &name).await?;
+            let mut tx = s.db.begin().await?;
+            let what = match kind.as_str() {
+                "registry" => "registry",
+                "sandboxes" => "sandboxes' pages",
+                _ => "dashboard",
+            };
+            log_setting(
+                &mut tx,
+                user,
+                "tailscale",
+                &format!(
+                    "Renamed the {what} on the tailnet to {}",
+                    name.trim().to_ascii_lowercase()
+                ),
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(json!({ "ok": true }))
         }
         _ => Err(anyhow::anyhow!("this operation runs in a transaction").into()),
     }
@@ -3045,8 +3164,8 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::SaveTailscale { .. }
             | Op::PlanTailscaleSetup { .. }
             | Op::SetUpTailscale { .. }
-            | Op::TestTailscale {}
-            | Op::RemoveTailscale {}
+            | Op::TestTailscale { .. }
+            | Op::RemoveTailscale { .. }
             | Op::RenameTailscaleName { .. }
             | Op::SetPublicDashboard { .. }
             | Op::CreateOriginPullCertificate { .. }
@@ -3190,8 +3309,8 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         Op::SaveTailscale { .. }
         | Op::PlanTailscaleSetup { .. }
         | Op::SetUpTailscale { .. }
-        | Op::TestTailscale {}
-        | Op::RemoveTailscale {}
+        | Op::TestTailscale { .. }
+        | Op::RemoveTailscale { .. }
         | Op::RenameTailscaleName { .. } => ("Integrations", ""),
         Op::SetPublicDashboard { .. } => ("Settings", ""),
         Op::ConnectCloudflare { .. }
@@ -5417,7 +5536,12 @@ async fn apply(
             confirm,
         } => {
             let id = service["id"].as_str().unwrap_or("").to_owned();
-            tailnet_domains_ok(s, &service["domains"]).await?;
+            tailnet_domains_ok(
+                s,
+                service["clusterId"].as_str().unwrap_or(""),
+                &service["domains"],
+            )
+            .await?;
             let mut service = service;
             fill_in_source(&mut service).await;
             create_service(
@@ -5519,7 +5643,11 @@ async fn apply(
             crate::git::queue_sync_for(tx, &[&old_spec["source"], &spec["source"]]).await?;
             crate::certs::domains_ok(tx, &team_id, &spec).await?;
             domains_unique(tx, &team_id, &id, &spec).await?;
-            tailnet_domains_ok(s, &spec["domains"]).await?;
+            let on: String = sqlx::query_scalar("SELECT cluster_id FROM pyo.services WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&mut **tx)
+                .await?;
+            tailnet_domains_ok(s, &on, &spec["domains"]).await?;
             let cluster_id: String =
                 sqlx::query_scalar("SELECT cluster_id FROM pyo.services WHERE id = $1")
                     .bind(&id)
@@ -7365,7 +7493,7 @@ async fn apply(
             let tags = valid_tags(&tags)?;
             let ssh_key = cloud_ssh_key(ssh_key)?;
             cloud_name_free(tx, &cluster_id, &name).await?;
-            crate::cloud::needs_tailscale(&s.db).await?;
+            crate::cloud::needs_tailscale(&s.db, Some(&cluster_id)).await?;
             let p = crate::cloud::provider(&s.db, &team_id).await?;
             let catalog = crate::cloud::catalog(&s.db, &team_id).await?;
             let monthly = catalog.pick(&location, &server_type)?;
@@ -7465,7 +7593,7 @@ async fn apply(
             require_dns_label(&server, "Cluster name")?;
             let tags = valid_tags(&tags)?;
             let ssh_key = cloud_ssh_key(ssh_key)?;
-            crate::cloud::needs_tailscale(&s.db).await?;
+            crate::cloud::needs_tailscale(&s.db, None).await?;
             let p = crate::cloud::provider(&s.db, &team_id).await?;
             let catalog = crate::cloud::catalog(&s.db, &team_id).await?;
             let monthly = catalog.pick(&location, &server_type)?;
@@ -7543,44 +7671,18 @@ async fn apply(
         Op::DeleteCloudServer { id, confirm } => {
             delete_cloud_server(tx, user, &id, confirm, wake).await
         }
-        Op::SaveTailscale { client_id, secret } => {
-            require_admin(user)?;
-            tailscale_here()?;
-            let out = crate::tailscale::save_client(s, &client_id, secret.as_deref()).await?;
-            log_setting(tx, user, "tailscale", "Connected Tailscale").await?;
-            Ok(out)
-        }
-        // Run by outside_tx, with no transaction open.
-        Op::PlanTailscaleSetup { .. } | Op::SetUpTailscale { .. } => {
-            Err(anyhow::anyhow!("the tailscale setup runs outside the transaction").into())
+        // Run by outside_tx, with no transaction open: each waits for the
+        // cluster's agent.
+        Op::PlanTailscaleSetup { .. }
+        | Op::SetUpTailscale { .. }
+        | Op::SaveTailscale { .. }
+        | Op::TestTailscale { .. }
+        | Op::RemoveTailscale { .. }
+        | Op::RenameTailscaleName { .. } => {
+            Err(anyhow::anyhow!("tailscale runs outside the transaction").into())
         }
         Op::TestAlertChannel { .. } => {
             Err(anyhow::anyhow!("an alert test runs outside the transaction").into())
-        }
-        Op::TestTailscale {} => {
-            require_admin(user)?;
-            crate::tailscale::test_saved(s).await
-        }
-        Op::RemoveTailscale {} => {
-            require_admin(user)?;
-            crate::tailscale::remove(s).await?;
-            log_setting(tx, user, "tailscale", "Removed Tailscale").await?;
-            Ok(ok)
-        }
-        Op::RenameTailscaleName { kind, name } => {
-            require_admin(user)?;
-            crate::tailscale::rename(s, &kind, &name).await?;
-            let title = format!(
-                "Renamed the {} on the tailnet to {}",
-                if kind == "registry" {
-                    "registry"
-                } else {
-                    "dashboard"
-                },
-                name.trim().to_ascii_lowercase()
-            );
-            log_setting(tx, user, "tailscale", &title).await?;
-            Ok(ok)
         }
         Op::SetPublicDashboard { open } => {
             require_admin(user)?;

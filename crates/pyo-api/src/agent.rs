@@ -953,6 +953,20 @@ async fn command_result(
     if command["kind"] == json!("backup") {
         crate::teambackup::finished(&mut tx, &command, &r).await?;
     }
+    // A Tailscale token or client secret, or a sandbox call's token: no
+    // more use for it, so it isn't kept, even sealed.
+    let mut wiped = command.clone();
+    if crate::teambackup::wipe_command(&mut wiped) {
+        sqlx::query("UPDATE pyo.commands SET command = $3 WHERE id = $1 AND cluster_id = $2")
+            .bind(&id)
+            .bind(&cluster.id)
+            .bind(&wiped)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if command["kind"] == json!("tailscale_sync") {
+        crate::tailscale::synced(&mut tx, &cluster.id, &id, &r).await?;
+    }
     if command["kind"] == json!("refresh_install") {
         crate::install::answered(&mut tx, &id, &cluster.id).await?;
     }

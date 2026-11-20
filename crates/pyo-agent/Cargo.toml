@@ -29,3 +29,12 @@ woothee = "0.13"
 flate2 = "1"
 sha2 = "0.11.1"
 jiff = "0.2.38"
+# The one-token Tailscale setup (tailscale/setup.rs): the policy is HuJSON,
+# and the pasted token is wiped once used.
+jsonc-parser = { version = "0.34.0", features = ["cst", "serde"] }
+zeroize = "1"
+hex = "0.4.3"
+
+[dev-dependencies]
+# A mock Tailscale API in tests.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }

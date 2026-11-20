@@ -24,6 +24,7 @@ pub mod agentauth;
 pub mod signing;
 pub mod site;
 pub mod system;
+pub mod tailscale;
 pub mod traffic;
 
 /// Bumped on breaking changes; the API rejects agents it doesn't speak.
@@ -1162,6 +1163,51 @@ pub enum Command {
     /// traffic store, newest first (traffic.rs). `data` is a
     /// [`traffic::TrafficAnswer`].
     QueryTraffic(Box<traffic::TrafficQuery>),
+    /// Set the cluster's tailnet up from a pasted Tailscale API access
+    /// token (tailscale.rs). Without `version`: only read the tailnet and
+    /// say what would change (`data` is the plan). With the plan's
+    /// `version`: make those changes, create the cluster's OAuth client
+    /// and keep it in pyo-system, and delete the token (`data` is what
+    /// happened). Nothing secret comes back.
+    TailscaleSetup {
+        token: String,
+        #[serde(default)]
+        version: Option<String>,
+    },
+    /// Use this OAuth client from now on, once it signs in: pasted by hand,
+    /// or the one Pyo kept before clusters kept their own. `data` is a
+    /// [`tailscale::ClientState`].
+    TailscaleClient {
+        client_id: String,
+        secret: String,
+    },
+    /// Check the cluster's OAuth client again, scope by scope. `data` is a
+    /// [`tailscale::ClientState`].
+    TailscaleTest {},
+    /// Keep the cluster's names on its tailnet as Pyo wants them. `data` is
+    /// a [`tailscale::TailnetSynced`].
+    TailscaleSync(Box<tailscale::TailnetSync>),
+    /// A single-use, preauthorized auth key with tag:pyo, for an hour, for
+    /// a machine joining the tailnet. `data` has it as
+    /// [`tailscale::KEY_FIELD`].
+    TailscaleKey {
+        description: String,
+    },
+    /// Whether a name is free on the cluster's tailnet, Pyo's (one of
+    /// `marks`) or someone else's. `data` is a [`tailscale::NameCheck`].
+    TailscaleCheckName {
+        name: String,
+        marks: Vec<String>,
+    },
+    /// Delete these names on the tailnet (only those marked with one of
+    /// `marks`), then forget the cluster's OAuth client.
+    TailscaleRemove {
+        names: Vec<String>,
+        marks: Vec<String>,
+    },
+    /// Call a sandbox server's daemon on the cluster's tailnet. `data` is a
+    /// [`tailscale::SandboxAnswer`].
+    SandboxCall(Box<tailscale::SandboxCall>),
 }
 
 // ── Releases and updates ───────────────────────────────────────────────────

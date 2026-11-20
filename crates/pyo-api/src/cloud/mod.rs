@@ -436,12 +436,10 @@ pub async fn provider(db: &PgPool, team_id: &str) -> ApiResult<hetzner::Hetzner>
     Ok(hetzner::Hetzner::new(&t)?)
 }
 
-/// Servers join over the tailnet: Tailscale comes first.
-pub async fn needs_tailscale(db: &PgPool) -> ApiResult<()> {
-    if crate::tailscale::settings(db).await?.is_none() {
-        return Err(ApiError::bad_request(crate::tailscale::NEEDED));
-    }
-    Ok(())
+/// Servers join over the tailnet: Tailscale comes first, on the cluster
+/// they join (or, for a new cluster, the one Pyo runs on).
+pub async fn needs_tailscale(db: &PgPool, cluster_id: Option<&str>) -> ApiResult<()> {
+    crate::tailscale::key_cluster(db, cluster_id).await.map(|_| ())
 }
 
 /// Saves a team's token once Hetzner accepts it (it lists the locations).
@@ -452,7 +450,6 @@ pub async fn save(s: &AppState, team_id: &str, token: &str) -> ApiResult<Value> 
             "Paste the API token from your Hetzner project's Security page. It's 64 letters and digits.",
         ));
     }
-    needs_tailscale(&s.db).await?;
     let locations = hetzner::Hetzner::new(token)?.locations().await?;
     let sealed = crate::vault::get().seal(team_id, token).await?;
     if !crate::vault::Vault::is_sealed(&sealed) {
@@ -643,17 +640,28 @@ pub fn next_state(seen: &Seen, age: Duration) -> (&'static str, Option<String>) 
     ("failed", Some(why.into()))
 }
 
-/// The tailnet's machines as the loop needs them, or None without
-/// Tailscale.
-async fn tailnet_devices(s: &AppState) -> Option<Vec<crate::tailscale::Device>> {
-    let (_, c) = crate::tailscale::saved_client(s).await.ok().flatten()?;
-    match c.device_details().await {
-        Ok(d) => Some(d),
-        Err(e) => {
-            tracing::warn!(error = %e, "cloud servers: couldn't read the tailnet");
-            None
-        }
-    }
+/// The cluster whose tailnet a server joins: its own cluster's, a sandbox
+/// server's cluster, or the one Pyo runs on.
+async fn tailnet_of(db: &PgPool, r: &Row) -> ApiResult<Option<String>> {
+    let via: Option<String> = match (&r.cluster_id, &r.sandbox_server_id) {
+        (Some(c), _) => Some(c.clone()),
+        (None, Some(sbs)) => sqlx::query_scalar::<_, Option<String>>(
+            "SELECT via_cluster FROM pyo.sandbox_servers WHERE id = $1",
+        )
+        .bind(sbs)
+        .fetch_optional(db)
+        .await?
+        .flatten(),
+        (None, None) => None,
+    };
+    Ok(crate::tailscale::key_cluster(db, via.as_deref()).await.ok())
+}
+
+/// Pyo's machines on a cluster's tailnet, as its last sync saw them, or
+/// None without Tailscale there.
+async fn tailnet_devices(db: &PgPool, cluster: Option<&str>) -> Option<Vec<pyo_proto::tailscale::Machine>> {
+    let t = crate::tailscale::of(db, cluster?).await.ok().flatten()?;
+    Some(t.machines)
 }
 
 /// One pass: new servers move on, deleted ones go. Run by the Tailscale
@@ -672,7 +680,6 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
         return Ok(());
     }
     let install = crate::tailscale::install_id(&s.db).await?;
-    let devices = tailnet_devices(s).await;
     let mut providers: BTreeMap<String, Option<hetzner::Hetzner>> = BTreeMap::new();
     for r in rows {
         if !providers.contains_key(&r.team_id) {
@@ -691,8 +698,10 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
             .await?;
             continue;
         };
+        let tailnet = tailnet_of(&s.db, &r).await?;
+        let devices = tailnet_devices(&s.db, tailnet.as_deref()).await;
         let result = if r.state == "removing" {
-            finish_removal(s, p, &r, &install, devices.as_deref()).await
+            finish_removal(s, p, &r, &install, tailnet.as_deref(), devices.as_deref()).await
         } else {
             follow(s, p, &r, devices.as_deref()).await
         };
@@ -713,22 +722,22 @@ async fn set_error(db: &PgPool, id: &str, error: Option<&str>) -> ApiResult<()> 
     Ok(())
 }
 
-/// The machine on the tailnet that is this server: tagged tag:pyo, by its
-/// hostname.
+/// The machine on the tailnet that is this server (Pyo's machines are
+/// tagged tag:pyo), by its hostname.
 fn device_of<'a>(
-    devices: &'a [crate::tailscale::Device],
+    devices: &'a [pyo_proto::tailscale::Machine],
     name: &str,
-) -> impl Iterator<Item = &'a crate::tailscale::Device> {
-    devices.iter().filter(move |d| {
-        d.hostname.eq_ignore_ascii_case(name) && d.tags.iter().any(|t| t == crate::tailscale::TAG)
-    })
+) -> impl Iterator<Item = &'a pyo_proto::tailscale::Machine> {
+    devices
+        .iter()
+        .filter(move |d| d.hostname.eq_ignore_ascii_case(name))
 }
 
 async fn follow(
     s: &AppState,
     p: &hetzner::Hetzner,
     r: &Row,
-    devices: Option<&[crate::tailscale::Device]>,
+    devices: Option<&[pyo_proto::tailscale::Machine]>,
 ) -> ApiResult<()> {
     let remote = p.server(&r.remote_id).await?;
     let mut refused = None;
@@ -762,13 +771,10 @@ async fn follow(
         }
         (None, None) => None,
     };
-    let mine: Vec<&crate::tailscale::Device> = devices
+    let mine: Vec<&pyo_proto::tailscale::Machine> = devices
         .map(|d| device_of(d, &r.name).collect())
         .unwrap_or_default();
-    let sign = mine
-        .iter()
-        .find(|d| !d.lock_error.is_empty() && !d.node_key.is_empty())
-        .map(|d| format!("tailscale lock sign {}", d.node_key));
+    let sign = mine.iter().find_map(|d| d.sign_command.clone());
     let seen = Seen {
         remote: remote.as_ref().map(|x| x.status.clone()),
         on_tailnet: !mine.is_empty(),
@@ -812,7 +818,8 @@ async fn finish_removal(
     p: &hetzner::Hetzner,
     r: &Row,
     install: &str,
-    devices: Option<&[crate::tailscale::Device]>,
+    tailnet: Option<&str>,
+    devices: Option<&[pyo_proto::tailscale::Machine]>,
 ) -> ApiResult<()> {
     let joined: Option<(Option<String>, Option<String>)> = match &r.cluster_id {
         Some(c) => sqlx::query_as(
@@ -871,8 +878,9 @@ async fn finish_removal(
         }
         _ => {}
     }
-    // Off the tailnet: by the node ID its cluster reported, else by name.
-    if let Some((_, c)) = crate::tailscale::saved_client(s).await? {
+    // Off the tailnet (with the cluster's next sync): by the node ID its
+    // cluster reported, else by name.
+    if let Some(tailnet) = tailnet {
         let reported: Option<String> = match &r.cluster_id {
             Some(cl) => sqlx::query_scalar(
                 "SELECT t->>'nodeId' FROM pyo.clusters, jsonb_array_elements(coalesce(capabilities->'tailnet', '[]')) t
@@ -893,9 +901,9 @@ async fn finish_removal(
             None
         });
         if let Some(node) = node
-            && let Err(e) = c.delete_device(&node).await
+            && let Err(e) = crate::tailscale::forget_machine(&s.db, tailnet, &node).await
         {
-            tracing::warn!(server = %r.name, error = %e, "couldn't take the server off the tailnet");
+            tracing::warn!(server = %r.name, error = %e.message, "couldn't take the server off the tailnet");
         }
     }
     let owner = match (&r.cluster_id, &r.sandbox_server_id) {

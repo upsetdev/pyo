@@ -283,6 +283,22 @@ pub fn command(base: &str, j: &Join) -> String {
     )
 }
 
+/// Puts a cluster's server on the cluster's tailnet and moves its k3s there
+/// (connect.sh --tailnet-only): a cluster connected without Tailscale does
+/// this on its control-plane server before more servers join it.
+pub fn tailnet_only_command(base: &str, key: &str) -> String {
+    format!(
+        "curl -fsSL {base}/connect.sh | bash -s -- {}",
+        quoted(&pinned(
+            base,
+            vec![
+                ("--tailnet-only", None),
+                ("--tailscale-key", Some(key.to_owned())),
+            ]
+        ))
+    )
+}
+
 /// A script's arguments for where it's fetched from (`base`). A Pyo's own
 /// scripts and pyo.dev's `/v/<version>/` are this release's. From anywhere
 /// else (a mirror) they get `--version`: a release's join.sh and connect.sh

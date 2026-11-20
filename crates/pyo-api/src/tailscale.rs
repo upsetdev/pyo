@@ -1,23 +1,34 @@
-//! Tailscale: the installation's OAuth client (Integrations › Tailscale) and
-//! what Pyo does with it.
+//! Tailscale, through each cluster's agent (pyo-proto's tailscale.rs).
 //!
-//! - **The client** is installation-wide, set by an admin, kept sealed in
-//!   `pyo.settings` ('tailscale'). Only this process uses it. Scopes:
-//!   `devices:core` and `auth_keys` (both with `tag:pyo`), and `services`.
-//! - **Joining**: each join command carries a fresh auth key from it:
-//!   single-use, preauthorized, `tag:pyo`, for an hour ([`join_key`]).
+//! Every cluster keeps its own OAuth client, as a Secret in its pyo-system.
+//! Pyo never holds a Tailscale credential: it passes a pasted token or
+//! client to the cluster's agent in a signed command, and keeps only what
+//! isn't secret (`pyo.clusters.tailscale`: the client's ID and hint, the
+//! tailnet's suffix, Pyo's own names there, what the last sync said).
+//!
+//! - **Setup** ([`plan`], [`set_up`], [`save_client`]): the agent sets
+//!   the tailnet up and keeps the client. One per cluster: a cluster added
+//!   later gets its own from a freshly pasted token.
+//! - **Joining** ([`join_key`]): the cluster's agent makes a single-use,
+//!   short-lived key. Pyo puts it into the join command and wipes it.
 //! - **Names on the tailnet** are Tailscale Services ("svc:blog" is
-//!   "blog.<tailnet>.ts.net"): Pyo's own (`pyo`, `registry`) on the cluster
-//!   it runs on, and services' tailnet domains on theirs. [`tick`] keeps
-//!   them as the domains say: makes each (marked with this installation's
-//!   ID, [`marker`]), approves the cluster's servers as its hosts, deletes
-//!   the ones no longer used, and never touches one it didn't make. The
-//!   servers do the rest (the agent's tailnet.rs).
+//!   "blog.<tailnet>.ts.net"): Pyo's own (`pyo`, `registry`, `sandboxes`)
+//!   on the cluster it runs on, and services' tailnet domains on theirs.
+//!   [`tick`] sends each cluster what it should have
+//!   ([`pyo_proto::Command::TailscaleSync`]) when that changes, and
+//!   [`synced`] keeps what came back. The servers do the rest (the agent's
+//!   tailnet.rs).
+//! - **Before this** the installation kept one client in `pyo.settings`.
+//!   [`hand_over`] passes it to the agent of the cluster Pyo runs on once,
+//!   then deletes it.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::collections::BTreeSet;
+use std::time::Duration;
 
+use pyo_proto::tailscale::{
+    self as ts, LockWaiting, OwnName, SyncServer, TailnetSync, TailnetSynced,
+};
+use pyo_proto::{Command, CommandResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -25,55 +36,109 @@ use sqlx::PgPool;
 use crate::AppState;
 use crate::error::{ApiError, ApiResult};
 
-pub(crate) const API: &str = "https://api.tailscale.com/api/v2";
-/// The tag Pyo's servers and Services carry.
-pub const TAG: &str = "tag:pyo";
-/// Names Pyo keeps for itself: services' domains can't take them.
-pub const RESERVED: [&str; 3] = ["pyo", "registry", "sandboxes"];
-/// Why a join or connect command can't be made yet.
-pub const NEEDED: &str = "Servers join over your tailnet. Set up Tailscale in Integrations first.";
+pub use ts::RESERVED;
 
-/// The saved client, and Pyo's own names on the tailnet.
+/// Why a join or connect command can't be made yet.
+pub const NEEDED: &str = "Servers join over your tailnet. Set up Tailscale on the cluster first.";
+
+/// A pasted API access token: never printed, and passed on to the
+/// cluster's agent as it is.
+#[derive(Deserialize)]
+#[serde(transparent)]
+pub struct Token(String);
+
+impl Token {
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(•••)")
+    }
+}
+
+/// A cluster's Tailscale, as Pyo keeps it (`pyo.clusters.tailscale`).
+/// Nothing in it is secret.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Settings {
+pub struct Tailnet {
     pub client_id: String,
-    pub secret_sealed: String,
     /// The secret's last characters, to tell it apart.
+    #[serde(default)]
     pub hint: String,
-    /// The dashboard's name ("pyo"), once picked or set.
-    #[serde(default)]
-    pub dashboard_name: Option<String>,
-    /// The registry's name ("registry").
-    #[serde(default)]
-    pub registry_name: Option<String>,
-    /// Sandboxes' web pages' name ("sandboxes"). Picked again by itself
-    /// when someone else has it on the tailnet.
-    #[serde(default)]
-    pub sandboxes_name: Option<String>,
     /// The tailnet's MagicDNS suffix ("tail1234.ts.net"), as last seen.
     #[serde(default)]
     pub suffix: Option<String>,
+    /// Pyo's own names, on the cluster Pyo runs on.
+    #[serde(default)]
+    pub dashboard_name: Option<String>,
+    #[serde(default)]
+    pub registry_name: Option<String>,
+    #[serde(default)]
+    pub sandboxes_name: Option<String>,
+    #[serde(default)]
+    pub lock_waiting: Vec<LockWaiting>,
+    /// Pyo's machines on the tailnet, as last seen.
+    #[serde(default)]
+    pub machines: Vec<ts::Machine>,
+    /// Machines to take off the tailnet with the next sync.
+    #[serde(default)]
+    pub forget: Vec<String>,
+    /// Older marks that are this cluster's too ([`hand_over`]).
+    #[serde(default)]
+    pub adopt: Vec<String>,
+    /// What the last sync asked for (its hash), and when (ms).
+    #[serde(default)]
+    pub sent: String,
+    #[serde(default)]
+    pub sent_at: i64,
 }
 
-pub async fn settings(db: &PgPool) -> ApiResult<Option<Settings>> {
-    let v: Option<Value> =
-        sqlx::query_scalar("SELECT value FROM pyo.settings WHERE key = 'tailscale'")
+/// A cluster's Tailscale, when it has one.
+pub async fn of<'e>(db: impl sqlx::PgExecutor<'e>, cluster_id: &str) -> ApiResult<Option<Tailnet>> {
+    let v: Option<Option<Value>> =
+        sqlx::query_scalar("SELECT tailscale FROM pyo.clusters WHERE id = $1")
+            .bind(cluster_id)
             .fetch_optional(db)
             .await?;
-    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
+    Ok(v.flatten().and_then(|v| serde_json::from_value(v).ok()))
 }
 
-pub async fn save(db: &PgPool, s: &Settings) -> ApiResult<()> {
-    sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('tailscale', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()")
-        .bind(serde_json::to_value(s).map_err(anyhow::Error::from)?)
+/// Merges `fields` into a cluster's Tailscale, when it has one.
+async fn patch<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    cluster_id: &str,
+    fields: Value,
+) -> ApiResult<()> {
+    sqlx::query("UPDATE pyo.clusters SET tailscale = tailscale || $2::jsonb WHERE id = $1 AND tailscale IS NOT NULL")
+        .bind(cluster_id)
+        .bind(fields)
         .execute(db)
         .await?;
     Ok(())
 }
 
+/// The cluster Pyo runs on (self-hosted).
+pub async fn host_cluster(db: &PgPool) -> ApiResult<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM pyo.clusters WHERE same_cluster ORDER BY created_at LIMIT 1",
+    )
+    .fetch_optional(db)
+    .await?)
+}
+
+/// The Tailscale of the cluster Pyo runs on: the installation's tailnet.
+pub async fn host(db: &PgPool) -> ApiResult<Option<(String, Tailnet)>> {
+    let Some(id) = host_cluster(db).await? else {
+        return Ok(None);
+    };
+    Ok(of(db, &id).await?.map(|t| (id, t)))
+}
+
 /// This installation's ID (made once, kept with Pyo's data, so a restore
-/// keeps it): what marks the Services it made.
+/// keeps it): part of what marks the Services Pyo made.
 pub async fn install_id(db: &PgPool) -> ApiResult<String> {
     let id = format!("{:032x}", rand::random::<u128>());
     sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('install', jsonb_build_object('id', $1::text)) ON CONFLICT (key) DO NOTHING")
@@ -87,672 +152,520 @@ pub async fn install_id(db: &PgPool) -> ApiResult<String> {
     Ok(v)
 }
 
-/// What a Service Pyo made says about itself (its comment).
-pub fn marker(install: &str) -> String {
-    format!("Made by Pyo ({install})")
+/// What marks the Services a cluster makes, and the older marks it counts
+/// as its own too.
+async fn marks(db: &PgPool, cluster_id: &str, t: &Tailnet) -> ApiResult<Vec<String>> {
+    let install = install_id(db).await?;
+    let mut out = vec![ts::marker(&install, cluster_id)];
+    out.extend(t.adopt.iter().cloned());
+    Ok(out)
 }
 
-// ── The API ─────────────────────────────────────────────────────────────────
+// ── Asking the agent ────────────────────────────────────────────────────────
 
-pub(crate) fn http() -> &'static reqwest::Client {
-    static C: OnceLock<reqwest::Client> = OnceLock::new();
-    C.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent("pyo")
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("http client")
-    })
-}
-
-/// The OAuth client, with its access token while it lasts.
-pub struct Client {
-    /// The API ("https://api.tailscale.com/api/v2"; a mock in tests).
-    base: String,
-    id: String,
-    secret: String,
-    token: Mutex<Option<(String, Instant)>>,
-}
-
-/// One per client ID and secret, so tokens are reused.
-pub fn client(id: &str, secret: &str) -> std::sync::Arc<Client> {
-    static C: Mutex<Option<std::sync::Arc<Client>>> = Mutex::new(None);
-    let mut g = C.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(c) = g.as_ref().filter(|c| c.id == id && c.secret == secret) {
-        return c.clone();
-    }
-    let c = std::sync::Arc::new(Client {
-        id: id.to_owned(),
-        secret: secret.to_owned(),
-        token: Mutex::new(None),
-        base: API.to_owned(),
-    });
-    *g = Some(c.clone());
-    c
-}
-
-#[cfg(test)]
-fn test_client(base: &str) -> Client {
-    Client {
-        base: base.to_owned(),
-        id: "id".into(),
-        secret: "secret".into(),
-        token: Mutex::new(None),
-    }
-}
-
-/// What a wanted name is on the tailnet.
-#[derive(Debug, PartialEq)]
-pub enum Claim {
-    /// Pyo's (made by this installation): its addresses.
-    Ours(Vec<String>),
-    /// Someone else's, or one Pyo can't read.
-    Taken,
-}
-
-/// A wanted name: Pyo's own Service, made now if there's none by that name
-/// at all. Read directly first, whatever the list said: a name that
-/// exists and isn't marked as this installation's is never written.
-pub async fn claim(c: &Client, name: &str, mark: &str) -> anyhow::Result<Claim> {
-    match c.service(name).await? {
-        Some((comment, addrs)) if comment == mark => Ok(Claim::Ours(addrs)),
-        Some(_) => Ok(Claim::Taken),
-        None => {
-            let addrs = c.create_service(name, mark).await?;
-            tracing::info!(name, "tailnet name made");
-            Ok(Claim::Ours(addrs))
-        }
-    }
-}
-
-/// Deletes a Service only if its own record has this installation's mark.
-pub async fn delete_if_ours(c: &Client, name: &str, mark: &str) -> anyhow::Result<bool> {
-    match c.service(name).await? {
-        Some((comment, _)) if comment == mark => {
-            c.delete_service(name).await?;
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
-}
-
-/// The saved client, opened.
-pub async fn saved_client(s: &AppState) -> ApiResult<Option<(Settings, std::sync::Arc<Client>)>> {
-    let Some(cfg) = settings(&s.db).await? else {
-        return Ok(None);
-    };
-    let secret = s.sealer.open(&cfg.secret_sealed)?;
-    let c = client(&cfg.client_id, &secret);
-    Ok(Some((cfg, c)))
-}
-
-/// What Tailscale said, as people read it.
-#[derive(Debug)]
-pub struct TsError {
-    pub status: u16,
-    pub message: String,
-}
-
-impl std::fmt::Display for TsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Tailscale answered {}: {}", self.status, self.message)
-    }
-}
-
-impl std::error::Error for TsError {}
-
-/// What Tailscale answered: its body, and the ETag when there's one.
-pub(crate) struct Reply {
-    pub text: String,
-    pub etag: Option<String>,
-}
-
-/// Sends a request to Tailscale's API. Anything but a 2xx is a [`TsError`]
-/// with Tailscale's own message, and status 0 when it couldn't be reached.
-pub(crate) async fn send(req: reqwest::RequestBuilder) -> Result<Reply, TsError> {
-    let r = req.send().await.map_err(|e| TsError {
-        status: 0,
-        message: format!("Couldn't reach Tailscale: {}", e.without_url()),
-    })?;
-    let status = r.status().as_u16();
-    let etag = r
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    let text = r.text().await.unwrap_or_default();
-    if !(200..300).contains(&status) {
-        let message = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|v| v["message"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| text.trim().chars().take(300).collect());
-        return Err(TsError { status, message });
-    }
-    Ok(Reply { text, etag })
-}
-
-impl Client {
-    pub(crate) async fn access_token(&self) -> anyhow::Result<String> {
-        if let Some((t, at)) = self.token.lock().unwrap_or_else(|e| e.into_inner()).clone()
-            && at.elapsed() < Duration::from_secs(45 * 60)
-        {
-            return Ok(t);
-        }
-        let r = http()
-            .post(format!("{}/oauth/token", self.base))
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(
-                reqwest::Url::parse_with_params(
-                    "http://form/",
-                    &[
-                        ("client_id", self.id.as_str()),
-                        ("client_secret", self.secret.as_str()),
-                    ],
-                )?
-                .query()
-                .unwrap_or("")
-                .to_owned(),
-            )
-            .send()
+/// Sends a command to a cluster's agent and waits for its answer, up to
+/// `wait`. A command the agent couldn't carry out is a 400 with its words.
+pub(crate) async fn ask(
+    s: &AppState,
+    cluster_id: &str,
+    command: Command,
+    wait: Duration,
+) -> ApiResult<(String, CommandResult)> {
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM pyo.clusters WHERE id = $1")
+            .bind(cluster_id)
+            .fetch_optional(&s.db)
             .await?;
-        let status = r.status().as_u16();
-        let body: Value = r.json().await.unwrap_or(Value::Null);
-        let Some(t) = body["access_token"].as_str().filter(|_| status == 200) else {
-            return Err(TsError {
-                status,
-                message: body["message"]
-                    .as_str()
-                    .or(body["error_description"].as_str())
-                    .or(body["error"].as_str())
-                    .unwrap_or("the client ID or secret isn't right")
-                    .to_owned(),
-            }
-            .into());
-        };
-        *self.token.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((t.to_owned(), Instant::now()));
-        Ok(t.to_owned())
-    }
-
-    async fn call(
-        &self,
-        method: reqwest::Method,
-        path: &str,
-        body: Option<&Value>,
-    ) -> anyhow::Result<Value> {
-        let token = self.access_token().await?;
-        let mut req = http()
-            .request(method, format!("{}{path}", self.base))
-            .bearer_auth(token);
-        if let Some(b) = body {
-            req = req.json(b);
-        }
-        let text = send(req).await?.text;
-        Ok(if text.trim().is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_str(&text)?
-        })
-    }
-
-    /// The tailnet's Services: name ("blog") → (comment, addresses).
-    pub async fn services(&self) -> anyhow::Result<BTreeMap<String, (String, Vec<String>)>> {
-        let v = self
-            .call(reqwest::Method::GET, "/tailnet/-/services", None)
-            .await?;
-        Ok(v["vipServices"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|s| {
-                let name = s["name"].as_str()?.strip_prefix("svc:")?.to_owned();
-                Some((
-                    name,
-                    (
-                        s["comment"].as_str().unwrap_or("").to_owned(),
-                        strings(&s["addrs"]),
-                    ),
-                ))
-            })
-            .collect())
-    }
-
-    /// Make a Service: ports 80 and 443, tagged, marked as Pyo's. Its
-    /// addresses come back.
-    pub async fn create_service(&self, name: &str, comment: &str) -> anyhow::Result<Vec<String>> {
-        let body = json!({ "name": format!("svc:{name}"), "comment": comment, "ports": ["tcp:80", "tcp:443"], "tags": [TAG] });
-        let v = self
-            .call(
-                reqwest::Method::PUT,
-                &format!("/tailnet/-/services/svc:{name}"),
-                Some(&body),
-            )
-            .await?;
-        Ok(strings(&v["addrs"]))
-    }
-
-    /// One Service, read directly: its comment and addresses, or None when
-    /// there's no such Service (404). The list leaves some out (Tailscale's
-    /// API reference: it has the Services of the admin console's
-    /// "Advertised" tab, so not one defined and hosted nowhere). Any other
-    /// answer is an error, 403 included ("access to the Service is
-    /// forbidden"), so a name Pyo can't read is never taken.
-    ///
-    /// There's no create-only write: PUT creates or updates, with no
-    /// If-Match or If-None-Match for Services (only the policy file has
-    /// ETags). So this read is what keeps Pyo off Services it didn't make.
-    pub async fn service(&self, name: &str) -> anyhow::Result<Option<(String, Vec<String>)>> {
-        match self
-            .call(
-                reqwest::Method::GET,
-                &format!("/tailnet/-/services/svc:{name}"),
-                None,
-            )
-            .await
-        {
-            Ok(v) => Ok(Some((
-                v["comment"].as_str().unwrap_or("").to_owned(),
-                strings(&v["addrs"]),
-            ))),
-            Err(e) if e.downcast_ref::<TsError>().is_some_and(|t| t.status == 404) => Ok(None),
-            Err(e) => Err(e),
+    match status.as_deref() {
+        None => return Err(ApiError::not_found("Cluster")),
+        Some("connected" | "degraded") => {}
+        Some(_) => {
+            return Err(ApiError::conflict(
+                "The cluster's agent isn't connected. Check the cluster first.",
+            ));
         }
     }
-
-    pub async fn delete_service(&self, name: &str) -> anyhow::Result<()> {
-        self.call(
-            reqwest::Method::DELETE,
-            &format!("/tailnet/-/services/svc:{name}"),
-            None,
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// A Service's hosts: node ID → approved.
-    pub async fn hosts(&self, name: &str) -> anyhow::Result<BTreeMap<String, bool>> {
-        let v = self
-            .call(
-                reqwest::Method::GET,
-                &format!("/tailnet/-/services/svc:{name}/devices"),
-                None,
-            )
-            .await?;
-        Ok(v["hosts"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|h| {
-                Some((
-                    h["stableNodeID"].as_str()?.to_owned(),
-                    h["approvalLevel"]
-                        .as_str()
-                        .is_some_and(|l| l.starts_with("approved")),
-                ))
-            })
-            .collect())
-    }
-
-    pub async fn approve(&self, name: &str, node: &str) -> anyhow::Result<()> {
-        self.call(
-            reqwest::Method::POST,
-            &format!("/tailnet/-/services/svc:{name}/device/{node}/approved"),
-            Some(&json!({ "approved": true })),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// The tailnet's machines: (node ID, full name, tags).
-    pub async fn devices(&self) -> anyhow::Result<Vec<(String, String, Vec<String>)>> {
-        let v = self
-            .call(reqwest::Method::GET, "/tailnet/-/devices", None)
-            .await?;
-        Ok(v["devices"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|d| {
-                Some((
-                    d["nodeId"].as_str()?.to_owned(),
-                    d["name"]
-                        .as_str()
-                        .unwrap_or("")
-                        .trim_end_matches('.')
-                        .to_owned(),
-                    strings(&d["tags"]),
-                ))
-            })
-            .collect())
-    }
-
-    /// The tailnet's machines with what Pyo's cloud servers need: their
-    /// hostname, and their key while Tailnet Lock waits for its signature.
-    pub async fn device_details(&self) -> anyhow::Result<Vec<Device>> {
-        let v = self
-            .call(
-                reqwest::Method::GET,
-                "/tailnet/-/devices?fields=default",
-                None,
-            )
-            .await?;
-        Ok(v["devices"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|d| {
-                Some(Device {
-                    node_id: d["nodeId"].as_str()?.to_owned(),
-                    hostname: d["hostname"].as_str().unwrap_or("").to_owned(),
-                    tags: strings(&d["tags"]),
-                    node_key: d["nodeKey"].as_str().unwrap_or("").to_owned(),
-                    lock_error: d["tailnetLockError"].as_str().unwrap_or("").to_owned(),
-                })
-            })
-            .collect())
-    }
-
-    /// Takes a machine off the tailnet (only tag:pyo ones: the client's
-    /// Devices › Core scope is for that tag).
-    pub async fn delete_device(&self, node: &str) -> anyhow::Result<()> {
-        if node.is_empty() || !node.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            anyhow::bail!("not a node ID");
-        }
-        match self
-            .call(reqwest::Method::DELETE, &format!("/device/{node}"), None)
-            .await
-        {
-            Err(e) if e.downcast_ref::<TsError>().is_some_and(|t| t.status == 404) => Ok(()),
-            r => r.map(|_| ()),
-        }
-    }
-
-    pub async fn tag(&self, node: &str) -> anyhow::Result<()> {
-        self.call(
-            reqwest::Method::POST,
-            &format!("/device/{node}/tags"),
-            Some(&json!({ "tags": [TAG] })),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// A single-use, preauthorized auth key with `tag:pyo`, for an hour:
-    /// (its ID, the key).
-    pub async fn auth_key(&self, description: &str) -> anyhow::Result<(String, String)> {
-        let body = json!({
-            "capabilities": { "devices": { "create": { "reusable": false, "ephemeral": false, "preauthorized": true, "tags": [TAG] } } },
-            "expirySeconds": 3600,
-            "description": key_description(description),
-        });
-        let v = self
-            .call(reqwest::Method::POST, "/tailnet/-/keys", Some(&body))
-            .await?;
-        match (v["id"].as_str(), v["key"].as_str()) {
-            (Some(id), Some(k)) => Ok((id.to_owned(), k.to_owned())),
-            _ => anyhow::bail!("Tailscale made no key"),
-        }
-    }
-
-    pub async fn delete_key(&self, id: &str) -> anyhow::Result<()> {
-        self.call(
-            reqwest::Method::DELETE,
-            &format!("/tailnet/-/keys/{id}"),
-            None,
-        )
-        .await
-        .map(|_| ())
-    }
-}
-
-/// What Tailscale takes as a key's description: letters, digits, spaces,
-/// dashes and underscores, at most 50 characters. "Pyo: join web-1"
-/// becomes "Pyo join web-1".
-pub(crate) fn key_description(s: &str) -> String {
-    let kept: String = s
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))
-        .collect();
-    let mut out = kept.split_whitespace().collect::<Vec<_>>().join(" ");
-    out.truncate(50);
-    out.trim_end().to_owned()
-}
-
-/// A machine on the tailnet ([`Client::device_details`]).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Device {
-    pub node_id: String,
-    pub hostname: String,
-    pub tags: Vec<String>,
-    /// "nodekey:…"
-    pub node_key: String,
-    /// Set while Tailnet Lock waits for this machine's key to be signed.
-    pub lock_error: String,
-}
-
-/// Pyo's machines (tag:pyo) that Tailnet Lock keeps out until a signing
-/// device signs their key: their hostname, and the command that signs it.
-pub fn lock_waiting(devices: &[Device]) -> Vec<(String, String)> {
-    devices
-        .iter()
-        .filter(|d| {
-            !d.lock_error.is_empty()
-                && d.node_key.starts_with("nodekey:")
-                && d.tags.iter().any(|t| t == TAG)
-        })
-        .map(|d| {
-            (
-                d.hostname.clone(),
-                format!("tailscale lock sign {}", d.node_key),
-            )
-        })
-        .collect()
-}
-
-#[derive(Deserialize, utoipa::IntoParams)]
-#[into_params(parameter_in = Query)]
-pub struct LockQuery {
-    /// The team adding the server (slug or id).
-    team: String,
-}
-
-/// Machines waiting for a Tailnet Lock signature
-///
-/// With Tailnet Lock on, a new server stays off the tailnet until a
-/// signing device signs its key. These are the ones Pyo's commands added
-/// that wait, with the command to run on a signing device. Read from
-/// Tailscale at most every 15 seconds. Empty without Tailscale set up.
-#[utoipa::path(get, path = "/tailnet/lock", operation_id = "getTailnetLock", tag = "Servers",
-    params(LockQuery),
-    responses(
-        (status = 200, description = "`waiting`: each with `name` (the machine's hostname) and `signCommand`.", body = Object),
-        (status = 403, description = "Only owners and admins add servers.", body = crate::error::ErrorBody),
-        (status = 404, description = "No such team, or you aren't in it.", body = crate::error::ErrorBody),
-    ),
-    extensions(("x-pyo-access" = json!("read"))))]
-pub async fn lock(
-    axum::extract::State(s): axum::extract::State<AppState>,
-    crate::auth::SessionUser(user): crate::auth::SessionUser,
-    crate::error::Query(q): crate::error::Query<LockQuery>,
-) -> ApiResult<crate::error::Json<Value>> {
     let mut tx = s.db.begin().await?;
-    crate::ops::require_role(&mut tx, &user, &q.team, crate::ops::Role::Admin).await?;
-    drop(tx);
-    /// When the list was read, and what it said.
-    type Seen = Option<(Instant, Vec<(String, String)>)>;
-    static SEEN: Mutex<Seen> = Mutex::new(None);
-    let fresh = |seen: &Seen| {
-        seen.as_ref()
-            .filter(|(at, _)| at.elapsed() < Duration::from_secs(15))
-            .map(|(_, w)| w.clone())
+    let id = crate::deploy::enqueue(&mut tx, cluster_id, command).await?;
+    tx.commit().await?;
+    s.wake(cluster_id).await;
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let row: Option<(String, Option<Value>)> =
+            sqlx::query_as("SELECT status, result FROM pyo.commands WHERE id = $1")
+                .bind(&id)
+                .fetch_optional(&s.db)
+                .await?;
+        if let Some((status, result)) = row
+            && (status == "done" || status == "failed")
+        {
+            let r: CommandResult = result
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
+            if !r.ok {
+                return Err(ApiError::bad_request(
+                    r.message
+                        .unwrap_or_else(|| "The cluster's agent couldn't do it.".into()),
+                ));
+            }
+            return Ok((id, r));
+        }
+        if tokio::time::Instant::now() > deadline {
+            abandon(&s.db, &id).await;
+            return Err(ApiError::new(
+                axum::http::StatusCode::GATEWAY_TIMEOUT,
+                "The cluster's agent didn't answer in time. Is it connected?",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// A command no one waits for any more: not sent yet, it never is. Sent,
+/// its secrets are blanked in Pyo's copy.
+async fn abandon(db: &PgPool, id: &str) {
+    let r = async {
+        sqlx::query("DELETE FROM pyo.commands WHERE id = $1 AND status = 'pending'")
+            .bind(id)
+            .execute(db)
+            .await?;
+        let cmd: Option<Value> =
+            sqlx::query_scalar("SELECT command FROM pyo.commands WHERE id = $1")
+                .bind(id)
+                .fetch_optional(db)
+                .await?;
+        if let Some(mut cmd) = cmd
+            && crate::teambackup::wipe_command(&mut cmd)
+        {
+            sqlx::query("UPDATE pyo.commands SET command = $2 WHERE id = $1")
+                .bind(id)
+                .bind(cmd)
+                .execute(db)
+                .await?;
+        }
+        Ok::<_, sqlx::Error>(())
     };
-    let cached = fresh(&SEEN.lock().unwrap_or_else(|e| e.into_inner()));
-    let waiting = match cached {
-        Some(w) => w,
-        None => {
-            let w = match saved_client(&s).await? {
-                Some((_, c)) => match c.device_details().await {
-                    Ok(d) => lock_waiting(&d),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "tailnet lock: couldn't read the tailnet");
-                        Vec::new()
-                    }
-                },
-                None => Vec::new(),
-            };
-            *SEEN.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), w.clone()));
-            w
+    if let Err(e) = r.await {
+        tracing::warn!(%id, error = %e, "couldn't drop an unanswered command");
+    }
+}
+
+/// A command whose answer carried something secret (a join key, a sandbox
+/// token): gone once read.
+pub(crate) async fn forget_command(db: &PgPool, id: &str) {
+    if let Err(e) = sqlx::query("DELETE FROM pyo.commands WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await
+    {
+        tracing::warn!(%id, error = %e, "couldn't delete an answered command");
+    }
+}
+
+/// Only the team's admins set Tailscale up on its cluster.
+pub async fn require_cluster_admin(
+    s: &AppState,
+    user: &crate::auth::User,
+    cluster_id: &str,
+) -> ApiResult<()> {
+    let team: String = sqlx::query_scalar("SELECT team_id FROM pyo.clusters WHERE id = $1")
+        .bind(cluster_id)
+        .fetch_optional(&s.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Cluster"))?;
+    let mut tx = s.db.begin().await?;
+    crate::ops::require_role(&mut tx, user, &team, crate::ops::Role::Admin).await?;
+    Ok(())
+}
+
+// ── Setting up ──────────────────────────────────────────────────────────────
+
+/// The setup's commands carry the pasted token: checked for shape here, so
+/// a wrong paste never leaves Pyo.
+fn token_shape(token: &str) -> ApiResult<()> {
+    let s = token.trim();
+    let why = if s.starts_with("tskey-client-") {
+        "That's an OAuth client secret. Paste an API access token, or set up with an OAuth client instead."
+    } else if s.starts_with("tskey-auth-") {
+        "That's an auth key. Paste an API access token. It starts with tskey-api-."
+    } else if !s.starts_with("tskey-api-") || s.len() < 20 || s.contains(char::is_whitespace) {
+        "Paste an API access token. It starts with tskey-api-."
+    } else {
+        return Ok(());
+    };
+    Err(ApiError::bad_request(why))
+}
+
+/// How long the setup may take on the cluster.
+const SETUP_WAIT: Duration = Duration::from_secs(90);
+
+/// planTailscaleSetup: what setting the cluster's tailnet up would change.
+pub async fn plan(s: &AppState, cluster_id: &str, token: String) -> ApiResult<Value> {
+    token_shape(&token)?;
+    let (_, r) = ask(
+        s,
+        cluster_id,
+        Command::TailscaleSetup {
+            token,
+            version: None,
+        },
+        SETUP_WAIT,
+    )
+    .await?;
+    Ok(json!({ "ok": true, "plan": r.data.unwrap_or(Value::Null) }))
+}
+
+/// setUpTailscale: sets the cluster's tailnet up as reviewed. Pyo keeps
+/// the client's ID and hint the agent says it kept.
+pub async fn set_up(
+    s: &AppState,
+    cluster_id: &str,
+    token: String,
+    version: &str,
+) -> ApiResult<Value> {
+    token_shape(&token)?;
+    let (_, r) = ask(
+        s,
+        cluster_id,
+        Command::TailscaleSetup {
+            token,
+            version: Some(version.to_owned()),
+        },
+        SETUP_WAIT,
+    )
+    .await?;
+    let mut out = r.data.unwrap_or(Value::Null);
+    if let Some(c) = out.as_object_mut().and_then(|o| o.remove("client"))
+        && let Some(id) = c["clientId"].as_str()
+    {
+        let hint = c["hint"].as_str().unwrap_or("");
+        keep_client(s, cluster_id, id, hint, None).await?;
+    }
+    Ok(out)
+}
+
+/// Saves the cluster's client as Pyo shows it. Another tailnet: Pyo's
+/// names there are picked again.
+async fn keep_client(
+    s: &AppState,
+    cluster_id: &str,
+    id: &str,
+    hint: &str,
+    suffix: Option<String>,
+) -> ApiResult<()> {
+    let mut t = of(&s.db, cluster_id).await?.unwrap_or_default();
+    if t.suffix.is_some() && suffix.is_some() && t.suffix != suffix {
+        t.dashboard_name = None;
+        t.registry_name = None;
+        t.sandboxes_name = None;
+    }
+    t.client_id = id.to_owned();
+    t.hint = hint.to_owned();
+    t.suffix = suffix.or(t.suffix);
+    // Synced again now.
+    t.sent = String::new();
+    sqlx::query("UPDATE pyo.clusters SET tailscale = $2 WHERE id = $1")
+        .bind(cluster_id)
+        .bind(serde_json::to_value(&t).map_err(anyhow::Error::from)?)
+        .execute(&s.db)
+        .await?;
+    Ok(())
+}
+
+/// saveTailscale: the cluster uses this OAuth client, once it signs in.
+/// The secret goes to the agent sealed and is never kept by Pyo.
+pub async fn save_client(
+    s: &AppState,
+    cluster_id: &str,
+    client_id: &str,
+    secret: Option<&str>,
+) -> ApiResult<Value> {
+    let Some(secret) = secret.map(str::trim).filter(|x| !x.is_empty()) else {
+        return Err(ApiError::bad_request("Paste the client secret too."));
+    };
+    let (_, r) = ask(
+        s,
+        cluster_id,
+        Command::TailscaleClient {
+            client_id: client_id.trim().to_owned(),
+            secret: secret.to_owned(),
+        },
+        SETUP_WAIT,
+    )
+    .await?;
+    let state: ts::ClientState = r
+        .data
+        .and_then(|d| serde_json::from_value(d).ok())
+        .unwrap_or_default();
+    keep_client(
+        s,
+        cluster_id,
+        &state.client_id,
+        &state.hint,
+        state.suffix.clone(),
+    )
+    .await?;
+    Ok(json!({ "ok": state.ok, "checks": state.checks }))
+}
+
+/// The Test button: the cluster's client, check by check.
+pub async fn test_saved(s: &AppState, cluster_id: &str) -> ApiResult<Value> {
+    if of(&s.db, cluster_id).await?.is_none() {
+        return Err(ApiError::bad_request(
+            "Tailscale isn't set up on this cluster.",
+        ));
+    }
+    let (_, r) = ask(s, cluster_id, Command::TailscaleTest {}, SETUP_WAIT).await?;
+    let state: ts::ClientState = r
+        .data
+        .and_then(|d| serde_json::from_value(d).ok())
+        .unwrap_or_default();
+    if let Some(x) = &state.suffix {
+        patch(&s.db, cluster_id, json!({ "suffix": x })).await?;
+    }
+    Ok(json!({ "ok": state.ok, "checks": state.checks }))
+}
+
+/// Forgets the cluster's client: Pyo's names on its tailnet are deleted
+/// while it still can, and its servers take them off. Pyo forgets it even
+/// when the agent can't be reached.
+pub async fn remove(s: &AppState, cluster_id: &str) -> ApiResult<()> {
+    let Some(t) = of(&s.db, cluster_id).await? else {
+        return Ok(());
+    };
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pyo.cluster_tailnet_names WHERE cluster_id = $1")
+            .bind(cluster_id)
+            .fetch_all(&s.db)
+            .await?;
+    let marks = marks(&s.db, cluster_id, &t).await?;
+    if let Err(e) = ask(
+        s,
+        cluster_id,
+        Command::TailscaleRemove { names, marks },
+        SETUP_WAIT,
+    )
+    .await
+    {
+        tracing::warn!(cluster = %cluster_id, error = %e.message, "the agent couldn't remove Tailscale; Pyo forgets it anyway");
+    }
+    sqlx::query("UPDATE pyo.cluster_tailnet_names SET retired_at = coalesce(retired_at, now()), updated_at = now() WHERE cluster_id = $1")
+        .bind(cluster_id)
+        .execute(&s.db)
+        .await?;
+    sqlx::query("UPDATE pyo.clusters SET tailscale = NULL WHERE id = $1")
+        .bind(cluster_id)
+        .execute(&s.db)
+        .await?;
+    if host_cluster(&s.db).await?.as_deref() == Some(cluster_id) {
+        // Without the tailnet, the public dashboard is the way in again.
+        sqlx::query("DELETE FROM pyo.settings WHERE key = 'public_dashboard'")
+            .execute(&s.db)
+            .await?;
+        for k in ["tailnet", "registry", "sandboxes"] {
+            save_address(&s.db, k, None).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Renames Pyo's own name on the tailnet ("dashboard", "registry" or
+/// "sandboxes"), on the cluster Pyo runs on. The old one goes once the new
+/// one is made.
+pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
+    let name = name.trim().to_ascii_lowercase();
+    let Some((cluster_id, mut t)) = host(&s.db).await? else {
+        return Err(ApiError::bad_request("Tailscale isn't set up."));
+    };
+    if !ts::valid_name(&name) {
+        return Err(ApiError::bad_request(
+            "Use one name: lowercase letters, digits and dashes.",
+        ));
+    }
+    let others = match kind {
+        "dashboard" => [&t.registry_name, &t.sandboxes_name],
+        "registry" => [&t.dashboard_name, &t.sandboxes_name],
+        "sandboxes" => [&t.dashboard_name, &t.registry_name],
+        _ => {
+            return Err(ApiError::bad_request(
+                "The kind is \"dashboard\", \"registry\" or \"sandboxes\".",
+            ));
         }
     };
-    let waiting: Vec<Value> = waiting
-        .into_iter()
-        .map(|(name, sign)| json!({ "name": name, "signCommand": sign }))
-        .collect();
-    Ok(crate::error::Json(json!({ "waiting": waiting })))
-}
-
-fn strings(v: &Value) -> Vec<String> {
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// "server-1.tail1234.ts.net" → "tail1234.ts.net".
-pub fn suffix_of(name: &str) -> Option<String> {
-    let (_, rest) = name.trim_end_matches('.').split_once('.')?;
-    rest.ends_with(".ts.net").then(|| rest.to_ascii_lowercase())
-}
-
-/// A name on the tailnet: one DNS label.
-pub fn valid_name(n: &str) -> bool {
-    !n.is_empty()
-        && n.len() <= 63
-        && n.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && !n.starts_with('-')
-        && !n.ends_with('-')
-}
-
-/// The first free name: `base`, then `base-<more>`, then `base-<more>-2`…
-/// One of Pyo's own names that it keeps up to date: the one it has while
-/// that isn't `taken` (someone else's Service, a machine, or another of
-/// Pyo's names), else the first free one [`pick_name`] finds.
-pub fn own_name(
-    current: Option<&str>,
-    base: &str,
-    more: &str,
-    taken: impl Fn(&str) -> bool,
-) -> String {
-    match current {
-        Some(n) if !n.is_empty() && !taken(n) => n.to_owned(),
-        _ => pick_name(base, more, taken),
+    let domain: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.cluster_tailnet_names WHERE cluster_id = $1 AND name = $2 AND kind = 'domain' AND retired_at IS NULL)",
+    )
+    .bind(&cluster_id)
+    .bind(&name)
+    .fetch_one(&s.db)
+    .await?;
+    if others.iter().any(|o| o.as_deref() == Some(name.as_str())) || domain {
+        return Err(ApiError::conflict("Pyo uses this name already."));
     }
+    if peer_names(&s.db, &cluster_id).await?.contains(&name)
+        || check_name(s, &cluster_id, &t, &name).await? == "taken"
+    {
+        return Err(ApiError::conflict("Taken on your tailnet"));
+    }
+    match kind {
+        "dashboard" => t.dashboard_name = Some(name),
+        "registry" => t.registry_name = Some(name),
+        _ => t.sandboxes_name = Some(name),
+    }
+    patch(
+        &s.db,
+        &cluster_id,
+        json!({ "dashboardName": t.dashboard_name, "registryName": t.registry_name, "sandboxesName": t.sandboxes_name, "sent": "" }),
+    )
+    .await
 }
 
-pub fn pick_name(base: &str, more: &str, taken: impl Fn(&str) -> bool) -> String {
-    let cut = |x: &str| {
-        x.chars()
-            .take(63)
-            .collect::<String>()
-            .trim_end_matches('-')
-            .to_owned()
+/// What a name is on the cluster's tailnet: "free", "ours" or "taken".
+async fn check_name(s: &AppState, cluster_id: &str, t: &Tailnet, name: &str) -> ApiResult<String> {
+    let marks = marks(&s.db, cluster_id, t).await?;
+    let unchecked =
+        || ApiError::bad_request("Couldn't check the name on your tailnet. Try again in a minute.");
+    let (_, r) = ask(
+        s,
+        cluster_id,
+        Command::TailscaleCheckName {
+            name: name.to_owned(),
+            marks,
+        },
+        Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e.message, "tailnet name check failed");
+        unchecked()
+    })?;
+    let c: ts::NameCheck = r
+        .data
+        .and_then(|d| serde_json::from_value(d).ok())
+        .ok_or_else(unchecked)?;
+    Ok(c.state)
+}
+
+/// Whether a tailnet domain someone typed for a service on a cluster can be
+/// had: Pyo's reserved names and its own names are refused, and so is a
+/// name something else on the cluster's tailnet has.
+pub async fn check_domain(s: &AppState, cluster_id: &str, host: &str) -> ApiResult<()> {
+    let Some(t) = of(&s.db, cluster_id).await? else {
+        return Err(ApiError::bad_request(
+            "Tailnet domains need Tailscale. Set it up on the cluster.",
+        ));
     };
-    let first = cut(base);
-    if !taken(&first) {
-        return first;
+    let Some(suffix) = t.suffix.as_deref() else {
+        return Err(ApiError::bad_request(
+            "Pyo hasn't seen the cluster's tailnet yet. Try again in a minute.",
+        ));
+    };
+    let host = host.to_ascii_lowercase();
+    let Some(label) = host.strip_suffix(&format!(".{suffix}")) else {
+        return Err(ApiError::bad_request(format!(
+            "A tailnet domain on this cluster ends with .{suffix}."
+        )));
+    };
+    if !ts::valid_name(label) {
+        return Err(ApiError::bad_request(
+            "Use one name: lowercase letters, digits and dashes.",
+        ));
     }
-    let second = cut(&format!("{base}-{more}"));
-    if !taken(&second) {
-        return second;
+    if RESERVED.contains(&label)
+        || t.dashboard_name.as_deref() == Some(label)
+        || t.registry_name.as_deref() == Some(label)
+        || t.sandboxes_name.as_deref() == Some(label)
+    {
+        return Err(ApiError::bad_request("Pyo uses this name itself."));
     }
-    (2..)
-        .map(|i| cut(&format!("{base}-{more}-{i}")))
-        .find(|n| !taken(n))
-        .unwrap_or_default()
+    if peer_names(&s.db, cluster_id).await?.contains(label)
+        || check_name(s, cluster_id, &t, label).await? == "taken"
+    {
+        return Err(ApiError::conflict("Taken on your tailnet"));
+    }
+    Ok(())
 }
 
-// ── Checking the client ─────────────────────────────────────────────────────
+// ── Join keys ───────────────────────────────────────────────────────────────
 
-/// One check of the Test button.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Check {
-    pub name: &'static str,
-    pub ok: bool,
-    pub message: String,
+/// The cluster whose agent makes a key for a machine joining a tailnet:
+/// `cluster_id`, once Tailscale is set up on it. Else the cluster Pyo runs
+/// on (self-hosted: the installation's tailnet).
+pub async fn key_cluster(db: &PgPool, cluster_id: Option<&str>) -> ApiResult<String> {
+    if let Some(c) = cluster_id
+        && of(db, c).await?.is_some()
+    {
+        return Ok(c.to_owned());
+    }
+    match host(db).await? {
+        Some((h, _)) => Ok(h),
+        None => Err(ApiError::bad_request(NEEDED)),
+    }
 }
 
-/// What the client can do, check by check, saying what's missing.
-pub async fn test(c: &Client) -> (Vec<Check>, Option<String>) {
-    let mut out = Vec::new();
-    let mut suffix = None;
-    if let Err(e) = c.access_token().await {
-        out.push(Check {
-            name: "client",
-            ok: false,
-            message: format!("Couldn't sign in with it. {e}"),
-        });
-        return (out, None);
-    }
-    out.push(Check {
-        name: "client",
-        ok: true,
-        message: "Signed in.".into(),
-    });
-    match c.devices().await {
-        Ok(d) => {
-            suffix = d.iter().find_map(|(_, n, _)| suffix_of(n));
-            out.push(Check {
-                name: "devices",
-                ok: true,
-                message: "Can read the tailnet's machines.".into(),
-            });
+/// The cluster whose tailnet a team's new sandbox server joins: one of the
+/// team's clusters with Tailscale (a connected one first), else the
+/// cluster Pyo runs on. The installation's own servers join Pyo's.
+pub async fn team_key_cluster(db: &PgPool, team_id: Option<&str>) -> ApiResult<String> {
+    if let Some(t) = team_id {
+        let c: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM pyo.clusters WHERE team_id = $1 AND tailscale IS NOT NULL
+              ORDER BY status IN ('connected', 'degraded') DESC, created_at LIMIT 1",
+        )
+        .bind(t)
+        .fetch_optional(db)
+        .await?;
+        if let Some(c) = c {
+            return Ok(c);
         }
-        Err(e) => out.push(Check {
-            name: "devices",
-            ok: false,
-            message: format!("Needs the Devices › Core scope with tag:pyo. {e}"),
-        }),
     }
-    match c.services().await {
-        Ok(_) => out.push(Check {
-            name: "services",
-            ok: true,
-            message: "Can manage Services.".into(),
-        }),
-        Err(e) => out.push(Check {
-            name: "services",
-            ok: false,
-            message: format!("Needs the Services scope. {e}"),
-        }),
-    }
-    match c.auth_key("Pyo test").await {
-        Ok((id, _)) => {
-            let _ = c.delete_key(&id).await;
-            out.push(Check { name: "authKeys", ok: true, message: "Can make auth keys with tag:pyo.".into() });
-        }
-        Err(e) => out.push(Check {
-            name: "authKeys",
-            ok: false,
-            message: format!("Needs the Auth Keys scope with tag:pyo, and tag:pyo in the tailnet policy's tagOwners. {e}"),
-        }),
-    }
-    (out, suffix)
+    key_cluster(db, None).await
 }
 
-// ── Keeping the Services ────────────────────────────────────────────────────
+/// A join command's auth key, from the cluster's agent: single-use,
+/// preauthorized, tag:pyo, an hour. Pyo keeps it only to put it in the
+/// command. `server` names what's being added, e.g. "a sandbox server".
+pub async fn join_key(
+    s: &AppState,
+    cluster_id: &str,
+    what: &str,
+    server: &'static str,
+) -> ApiResult<String> {
+    if of(&s.db, cluster_id).await?.is_none() {
+        return Err(ApiError::bad_request(NEEDED));
+    }
+    let (id, r) = ask(
+        s,
+        cluster_id,
+        Command::TailscaleKey {
+            description: what.to_owned(),
+        },
+        Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e.message, "the cluster made no auth key");
+        ApiError::bad_request(format!(
+            "Couldn't get a Tailscale key from the cluster to add {server}. Check Tailscale on it."
+        ))
+    })?;
+    forget_command(&s.db, &id).await;
+    r.data
+        .as_ref()
+        .and_then(|d| d[ts::KEY_FIELD].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| ApiError::bad_request("Tailscale made no auth key."))
+}
+
+// ── Keeping the names ───────────────────────────────────────────────────────
 
 pub async fn runner(state: AppState) {
     loop {
         let st = state.clone();
         crate::bg::as_leader(&state.db, crate::bg::LOCK_TAILSCALE, || async move {
+            if let Err(e) = hand_over(&st).await {
+                tracing::warn!(error = %e.message, "tailscale hand-over");
+            }
             if let Err(e) = tick(&st).await {
                 tracing::warn!(error = %format!("{e:?}"), "tailscale");
             }
@@ -804,340 +717,340 @@ pub async fn save_address(db: &PgPool, key: &str, host: Option<&str>) -> ApiResu
     Ok(())
 }
 
-/// The tailnet's machines as Pyo's servers see them (their tailscaled's
-/// peers): the API's device list only shows what the client's tags allow.
-async fn peer_names(db: &PgPool) -> ApiResult<BTreeSet<String>> {
-    Ok(servers(db)
+/// A cluster's servers' Tailscale, as it last reported them.
+async fn servers(db: &PgPool, cluster_id: &str) -> ApiResult<Vec<pyo_proto::ServerTailnet>> {
+    let v: Option<Value> = sqlx::query_scalar(
+        "SELECT coalesce(capabilities->'tailnet', '[]') FROM pyo.clusters WHERE id = $1",
+    )
+    .bind(cluster_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default())
+}
+
+/// The tailnet's machines as the cluster's servers see them (their
+/// tailscaled's peers): the API's device list only shows what the client's
+/// tags allow.
+async fn peer_names(db: &PgPool, cluster_id: &str) -> ApiResult<BTreeSet<String>> {
+    Ok(servers(db, cluster_id)
         .await?
         .into_iter()
-        .flat_map(|s| s.status.peers)
+        .flat_map(|s| s.peers)
         .collect())
 }
 
-/// A server's Tailscale as its cluster last reported it.
-#[derive(Debug, Clone)]
-struct Server {
-    cluster_id: String,
-    status: pyo_proto::ServerTailnet,
-}
-
-async fn servers(db: &PgPool) -> ApiResult<Vec<Server>> {
-    let rows: Vec<(String, Value)> = sqlx::query_as(
-        "SELECT id, coalesce(capabilities->'tailnet', '[]') FROM pyo.clusters WHERE status <> 'disconnected'",
-    )
-    .fetch_all(db)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .flat_map(|(cluster_id, v)| {
-            serde_json::from_value::<Vec<pyo_proto::ServerTailnet>>(v)
-                .unwrap_or_default()
-                .into_iter()
-                .map(move |status| Server {
-                    cluster_id: cluster_id.clone(),
-                    status,
-                })
-        })
-        .collect())
-}
-
-/// The names on the tailnet Pyo wants: (name, kind, cluster).
-async fn wanted(
+/// What a cluster's names on its tailnet should be.
+async fn sync_for(
     db: &PgPool,
-    cfg: &Settings,
-    suffix: &str,
-) -> ApiResult<Vec<(String, &'static str, String)>> {
-    let mut out = Vec::new();
-    let host: Option<String> =
-        sqlx::query_scalar("SELECT id FROM pyo.clusters WHERE same_cluster LIMIT 1")
-            .fetch_optional(db)
+    install: &str,
+    cluster_id: &str,
+    cluster_name: &str,
+    same_cluster: bool,
+    t: &Tailnet,
+) -> ApiResult<TailnetSync> {
+    let more = crate::util::slugify(cluster_name);
+    let own = if same_cluster {
+        let o = |kind: &str, current: &Option<String>, base: &str, keep: bool| OwnName {
+            kind: kind.into(),
+            current: current.clone(),
+            base: base.into(),
+            more: more.clone(),
+            keep,
+        };
+        vec![
+            o("dashboard", &t.dashboard_name, "pyo", true),
+            o("registry", &t.registry_name, "registry", true),
+            o("sandboxes", &t.sandboxes_name, "sandboxes", false),
+        ]
+    } else {
+        Vec::new()
+    };
+    let mut domains: Vec<String> = match &t.suffix {
+        Some(suffix) => {
+            let hosts: Vec<String> = sqlx::query_scalar(
+                "SELECT lower(d->>'hostname') FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
+                  WHERE s.cluster_id = $1 AND NOT s.deleting AND lower(d->>'hostname') LIKE '%.' || $2",
+            )
+            .bind(cluster_id)
+            .bind(suffix)
+            .fetch_all(db)
             .await?;
-    if let Some(h) = &host {
-        if let Some(n) = &cfg.dashboard_name {
-            out.push((n.clone(), "dashboard", h.clone()));
+            hosts
+                .iter()
+                .filter_map(|h| h.strip_suffix(&format!(".{suffix}")))
+                .filter(|l| ts::valid_name(l) && !RESERVED.contains(l))
+                .map(str::to_owned)
+                .collect()
         }
-        if let Some(n) = &cfg.registry_name {
-            out.push((n.clone(), "registry", h.clone()));
-        }
-        if let Some(n) = &cfg.sandboxes_name {
-            out.push((n.clone(), "sandboxes", h.clone()));
-        }
-    }
-    let domains: Vec<(String, String)> = sqlx::query_as(
-        "SELECT s.cluster_id, lower(d->>'hostname') FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
-          WHERE NOT s.deleting AND lower(d->>'hostname') LIKE '%.' || $1",
+        None => Vec::new(),
+    };
+    domains.sort();
+    domains.dedup();
+    let made: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM pyo.cluster_tailnet_names WHERE cluster_id = $1 ORDER BY name",
     )
-    .bind(suffix)
+    .bind(cluster_id)
     .fetch_all(db)
     .await?;
-    for (cluster, host) in domains {
-        if let Some(label) = host
-            .strip_suffix(&format!(".{suffix}"))
-            .filter(|l| valid_name(l))
-        {
-            out.push((label.to_owned(), "domain", cluster));
-        }
-    }
-    out.sort();
-    out.dedup_by(|a, b| a.0 == b.0);
-    Ok(out)
+    let reported = servers(db, cluster_id).await?;
+    let mut peers: Vec<String> = reported.iter().flat_map(|s| s.peers.clone()).collect();
+    peers.sort();
+    peers.dedup();
+    let mut servers: Vec<SyncServer> = reported
+        .into_iter()
+        .filter(|s| !s.node_id.is_empty())
+        .map(|s| SyncServer {
+            server: s.server,
+            node_id: s.node_id,
+            advertised: s.advertised,
+        })
+        .collect();
+    servers.sort_by(|a, b| a.server.cmp(&b.server));
+    let mut forget = t.forget.clone();
+    forget.sort();
+    forget.dedup();
+    Ok(TailnetSync {
+        mark: ts::marker(install, cluster_id),
+        adopt: t.adopt.clone(),
+        own,
+        domains,
+        made,
+        peers,
+        servers,
+        forget,
+    })
 }
 
-/// Approvals asked for already: (Service, node).
-static APPROVED: Mutex<BTreeSet<(String, String)>> = Mutex::new(BTreeSet::new());
+/// A sync is sent again at least this often, for what changed on the
+/// tailnet itself (a Service someone deleted, a host to approve).
+const RESYNC_MS: i64 = 5 * 60 * 1000;
 
+/// A cluster row as [`tick`] reads it: id, name, same cluster, status, and
+/// its Tailscale.
+type ClusterRow = (String, String, bool, String, Value);
+
+/// One pass: each cluster with Tailscale gets its names synced when what
+/// Pyo wants changed (or a while passed), then Pyo's addresses and the
+/// services' tailnet domains follow what the servers report.
 pub async fn tick(s: &AppState) -> ApiResult<()> {
-    let Some((mut cfg, c)) = saved_client(s).await? else {
-        for k in ["tailnet", "registry", "sandboxes"] {
-            save_address(&s.db, k, None).await?;
-        }
-        return Ok(());
-    };
     let install = install_id(&s.db).await?;
-    let mark = marker(&install);
-    let devices = c.devices().await?;
-    let suffix = devices
-        .iter()
-        .find_map(|(_, n, _)| suffix_of(n))
-        .or(cfg.suffix.clone());
-    let Some(suffix) = suffix else {
-        return Ok(());
-    };
-    let remote = c.services().await?;
-    let ours = |n: &str| remote.get(n).is_some_and(|(cm, _)| *cm == mark);
-    let peers = peer_names(&s.db).await?;
-    let machine = |n: &str| {
-        peers.contains(n)
-            || devices
-                .iter()
-                .any(|(_, full, _)| full.split('.').next() == Some(n))
-    };
-    // Pyo's own names, picked once: "pyo", then "pyo-<cluster>"…
-    let mut changed = cfg.suffix.as_deref() != Some(suffix.as_str());
-    cfg.suffix = Some(suffix.clone());
-    let host_cluster: Option<String> =
-        sqlx::query_scalar("SELECT name FROM pyo.clusters WHERE same_cluster LIMIT 1")
-            .fetch_optional(&s.db)
-            .await?;
-    if let Some(cluster) = &host_cluster {
-        let taken = |n: &str| (remote.contains_key(n) && !ours(n)) || machine(n);
-        let more = crate::util::slugify(cluster);
-        if cfg.dashboard_name.is_none() {
-            cfg.dashboard_name = Some(pick_name("pyo", &more, |n| taken(n)));
-            changed = true;
+    let rows: Vec<ClusterRow> = sqlx::query_as(
+        "SELECT id, name, same_cluster, status, tailscale FROM pyo.clusters WHERE tailscale IS NOT NULL",
+    )
+    .fetch_all(&s.db)
+    .await?;
+    let now = pyo_proto::now_ms() as i64;
+    for (id, name, same, status, v) in &rows {
+        let Ok(t) = serde_json::from_value::<Tailnet>(v.clone()) else {
+            continue;
+        };
+        if !matches!(status.as_str(), "connected" | "degraded") {
+            continue;
         }
-        if cfg.registry_name.is_none() {
-            cfg.registry_name = Some(pick_name("registry", &more, |n| taken(n)));
-            changed = true;
+        let w = sync_for(&s.db, &install, id, name, *same, &t).await?;
+        let key = crate::ids::sha256_hex(&serde_json::to_string(&w).map_err(anyhow::Error::from)?);
+        if key == t.sent && now - t.sent_at < RESYNC_MS {
+            continue;
         }
-        // Sandboxes' name: kept while it's Pyo's to have, else the next
-        // free one, so another Pyo's or someone's own "sandboxes" stays as
-        // it is.
-        let domains: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM pyo.tailnet_services WHERE kind = 'domain' AND retired_at IS NULL",
+        // One at a time: the agent answers each before the next is sent.
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'tailscale_sync'
+                AND status IN ('pending', 'sent') AND created_at > now() - interval '5 minutes')",
         )
-        .fetch_all(&s.db)
+        .bind(id)
+        .fetch_one(&s.db)
         .await?;
-        let others = [cfg.dashboard_name.clone(), cfg.registry_name.clone()];
-        let name = own_name(cfg.sandboxes_name.as_deref(), "sandboxes", &more, |n| {
-            taken(n) || others.iter().flatten().any(|o| o == n) || domains.iter().any(|d| d == n)
-        });
-        if cfg.sandboxes_name.as_deref() != Some(name.as_str()) {
-            if let Some(old) = &cfg.sandboxes_name {
-                tracing::info!(
-                    old,
-                    new = name,
-                    "sandboxes' tailnet name is taken; picked another"
-                );
-            }
-            cfg.sandboxes_name = Some(name);
-            changed = true;
-        }
-    }
-    if changed {
-        save(&s.db, &cfg).await?;
-    }
-    let wanted = wanted(&s.db, &cfg, &suffix).await?;
-    let wanted_names: BTreeSet<&str> = wanted.iter().map(|w| w.0.as_str()).collect();
-    for (name, kind, cluster) in &wanted {
-        let (addrs, error) = match remote.get(name.as_str()) {
-            Some((_, addrs)) if ours(name) => (addrs.clone(), None),
-            Some(_) => (Vec::new(), Some("Taken on your tailnet")),
-            None if machine(name) => (Vec::new(), Some("Taken on your tailnet")),
-            None => match claim(&c, name, &mark).await {
-                Ok(Claim::Ours(a)) => (a, None),
-                Ok(Claim::Taken) => (Vec::new(), Some("Taken on your tailnet")),
-                Err(e) => {
-                    tracing::warn!(name, error = %e, "couldn't make the tailnet name");
-                    (Vec::new(), Some("Couldn't make it on your tailnet"))
-                }
-            },
-        };
-        sqlx::query(
-            "INSERT INTO pyo.tailnet_services (name, kind, cluster_id, addrs, error) VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (name) DO UPDATE SET kind = excluded.kind, cluster_id = excluded.cluster_id, addrs = excluded.addrs, error = excluded.error, retired_at = NULL, updated_at = now()
-             WHERE (pyo.tailnet_services.kind, pyo.tailnet_services.cluster_id, pyo.tailnet_services.addrs, pyo.tailnet_services.error, pyo.tailnet_services.retired_at) IS DISTINCT FROM (excluded.kind, excluded.cluster_id, excluded.addrs, excluded.error, NULL)",
-        )
-        .bind(name)
-        .bind(kind)
-        .bind(cluster)
-        .bind(&addrs)
-        .bind(error)
-        .execute(&s.db)
-        .await?;
-    }
-    // Ours, no longer used: deleted on the tailnet, and its servers take it
-    // off. Only names Pyo made (its own rows), each read again first.
-    let made: BTreeSet<String> = sqlx::query_scalar("SELECT name FROM pyo.tailnet_services")
-        .fetch_all(&s.db)
-        .await?
-        .into_iter()
-        .collect();
-    for name in remote
-        .keys()
-        .filter(|n| ours(n) && made.contains(*n) && !wanted_names.contains(n.as_str()))
-    {
-        match delete_if_ours(&c, name, &mark).await {
-            Ok(true) => tracing::info!(name, "tailnet name deleted"),
-            Ok(false) => tracing::warn!(name, "not deleted: not Pyo's on the tailnet"),
-            Err(e) => tracing::warn!(name, error = %e, "couldn't delete the tailnet name"),
-        }
-    }
-    sqlx::query("UPDATE pyo.tailnet_services SET retired_at = now(), updated_at = now() WHERE retired_at IS NULL AND NOT (name = ANY($1))")
-        .bind(wanted_names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
-        .execute(&s.db)
-        .await?;
-    sqlx::query("DELETE FROM pyo.tailnet_services WHERE retired_at < now() - interval '7 days'")
-        .execute(&s.db)
-        .await?;
-
-    // The servers: tagged, and approved as hosts of their cluster's names.
-    let servers = servers(&s.db).await?;
-    let tagged: BTreeMap<&str, bool> = devices
-        .iter()
-        .map(|(id, _, tags)| (id.as_str(), tags.iter().any(|t| t == TAG)))
-        .collect();
-    for sv in &servers {
-        let id = sv.status.node_id.as_str();
-        if !id.is_empty() && tagged.get(id) == Some(&false) {
-            match c.tag(id).await {
-                Ok(()) => tracing::info!(server = %sv.status.server, "tagged tag:pyo"),
-                Err(e) => {
-                    tracing::warn!(server = %sv.status.server, error = %e, "couldn't tag the server")
-                }
-            }
-        }
-    }
-    for (name, _, cluster) in &wanted {
-        if !ours(name) && !remote.is_empty() && remote.contains_key(name.as_str()) {
+        if waiting {
             continue;
         }
-        let nodes: Vec<&str> = servers
-            .iter()
-            .filter(|sv| {
-                sv.cluster_id == *cluster && sv.status.advertised.iter().any(|a| a == name)
-            })
-            .map(|sv| sv.status.node_id.as_str())
-            .filter(|n| !n.is_empty())
-            .collect();
-        let asked = |n: &str| {
-            APPROVED
-                .lock()
-                .map(|a| a.contains(&(name.clone(), n.to_owned())))
-                .unwrap_or(false)
-        };
-        if nodes.iter().all(|n| asked(n)) {
-            continue;
-        }
-        let Ok(hosts) = c.hosts(name).await else {
-            continue;
-        };
-        for n in nodes {
-            let ok = hosts.get(n) == Some(&true) || c.approve(name, n).await.is_ok();
-            if ok && let Ok(mut a) = APPROVED.lock() {
-                a.insert((name.clone(), n.to_owned()));
-            }
-        }
+        let mut tx = s.db.begin().await?;
+        crate::deploy::enqueue(&mut tx, id, Command::TailscaleSync(Box::new(w))).await?;
+        patch(&mut *tx, id, json!({ "sent": key, "sentAt": now })).await?;
+        tx.commit().await?;
+        s.wake(id).await;
     }
 
     // Pyo's own names, once a server keeps their certificate.
-    let has_cert = |name: &str, cluster: &str| {
-        servers
-            .iter()
-            .any(|sv| sv.cluster_id == cluster && sv.status.certificates.iter().any(|c| c == name))
-    };
-    let host_id: Option<String> =
-        sqlx::query_scalar("SELECT id FROM pyo.clusters WHERE same_cluster LIMIT 1")
-            .fetch_optional(&s.db)
-            .await?;
-    let ready = |kind: &str| {
-        wanted
-            .iter()
-            .find(|(n, k, cl)| {
-                *k == kind && ours(n) && host_id.as_deref() == Some(cl.as_str()) && has_cert(n, cl)
-            })
-            .map(|(n, _, _)| format!("{n}.{suffix}"))
-    };
-    save_address(&s.db, "tailnet", ready("dashboard").as_deref()).await?;
-    save_address(&s.db, "registry", ready("registry").as_deref()).await?;
-    save_address(&s.db, "sandboxes", ready("sandboxes").as_deref()).await?;
+    let mut ready = std::collections::BTreeMap::new();
+    if let Some((id, _, _, _, v)) = rows.iter().find(|r| r.2)
+        && let Some(suffix) = v["suffix"].as_str()
+    {
+        let sv = servers(&s.db, id).await?;
+        let names: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name, kind FROM pyo.cluster_tailnet_names WHERE cluster_id = $1 AND kind <> 'domain'
+                AND retired_at IS NULL AND error IS NULL AND cardinality(addrs) > 0",
+        )
+        .bind(id)
+        .fetch_all(&s.db)
+        .await?;
+        for (name, kind) in names {
+            if sv.iter().any(|x| x.certificates.contains(&name)) {
+                ready.insert(kind, format!("{name}.{suffix}"));
+            }
+        }
+    }
+    for (key, kind) in [
+        ("tailnet", "dashboard"),
+        ("registry", "registry"),
+        ("sandboxes", "sandboxes"),
+    ] {
+        save_address(&s.db, key, ready.get(kind).map(String::as_str)).await?;
+    }
 
     // Services' tailnet domains: their certificate as their state.
-    for (name, kind, cluster) in &wanted {
-        if *kind != "domain" {
+    for (id, _, _, _, v) in &rows {
+        let Some(suffix) = v["suffix"].as_str() else {
             continue;
-        }
-        let host = format!("{name}.{suffix}");
-        let (tls, error) = match remote.get(name.as_str()) {
-            _ if !ours(name) => ("failed", Some("Taken on your tailnet")),
-            _ if has_cert(name, cluster) => ("issued", None),
-            _ => ("pending", None),
         };
-        sqlx::query(
-            "UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', (
-               SELECT coalesce(jsonb_agg(CASE WHEN lower(d->>'hostname') = $2
-                                              THEN (d - 'tlsError') || jsonb_strip_nulls(jsonb_build_object('tls', $3::text, 'tlsError', $4::text))
-                                              ELSE d END), '[]')
-                 FROM jsonb_array_elements(spec->'domains') d))
-              WHERE cluster_id = $1 AND NOT deleting
-                AND EXISTS (SELECT 1 FROM jsonb_array_elements(spec->'domains') d
-                             WHERE lower(d->>'hostname') = $2 AND (coalesce(d->>'tls', '') <> $3 OR coalesce(d->>'tlsError', '') <> coalesce($4, '')))",
+        let sv = servers(&s.db, id).await?;
+        let domains: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT name, error FROM pyo.cluster_tailnet_names WHERE cluster_id = $1 AND kind = 'domain' AND retired_at IS NULL",
         )
-        .bind(cluster)
-        .bind(&host)
-        .bind(tls)
-        .bind(error)
-        .execute(&s.db)
+        .bind(id)
+        .fetch_all(&s.db)
         .await?;
+        for (name, error) in domains {
+            let host = format!("{name}.{suffix}");
+            let (tls, error) = match error {
+                Some(e) => ("failed", Some(e)),
+                None if sv.iter().any(|x| x.certificates.contains(&name)) => ("issued", None),
+                None => ("pending", None),
+            };
+            sqlx::query(
+                "UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', (
+                   SELECT coalesce(jsonb_agg(CASE WHEN lower(d->>'hostname') = $2
+                                                  THEN (d - 'tlsError') || jsonb_strip_nulls(jsonb_build_object('tls', $3::text, 'tlsError', $4::text))
+                                                  ELSE d END), '[]')
+                     FROM jsonb_array_elements(spec->'domains') d))
+                  WHERE cluster_id = $1 AND NOT deleting
+                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(spec->'domains') d
+                                 WHERE lower(d->>'hostname') = $2 AND (coalesce(d->>'tls', '') <> $3 OR coalesce(d->>'tlsError', '') <> coalesce($4, '')))",
+            )
+            .bind(id)
+            .bind(&host)
+            .bind(tls)
+            .bind(&error)
+            .execute(&s.db)
+            .await?;
+        }
     }
     Ok(())
 }
 
-/// A row of `pyo.tailnet_services`: name, kind, cluster, addresses,
-/// error, retired.
-type ServiceRow = (
-    String,
-    String,
-    Option<String>,
-    Vec<String>,
-    Option<String>,
-    bool,
-);
+/// A sync's answer (agent.rs, when the agent reports it): the names as the
+/// agent left them, the suffix, Pyo's own names as picked, and what Tailnet
+/// Lock waits for. Older syncs' commands go.
+pub async fn synced(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cluster_id: &str,
+    command_id: &str,
+    r: &CommandResult,
+) -> ApiResult<()> {
+    sqlx::query("DELETE FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'tailscale_sync' AND id <> $2 AND status IN ('done', 'failed')")
+        .bind(cluster_id)
+        .bind(command_id)
+        .execute(&mut **tx)
+        .await?;
+    if !r.ok {
+        tracing::warn!(cluster = %cluster_id, error = ?r.message, "the cluster couldn't sync its tailnet names");
+        // Tried again with the next pass.
+        return patch(&mut **tx, cluster_id, json!({ "sent": "" })).await;
+    }
+    let Some(done) = r
+        .data
+        .clone()
+        .and_then(|d| serde_json::from_value::<TailnetSynced>(d).ok())
+    else {
+        return Ok(());
+    };
+    let Some(t) = of(&mut **tx, cluster_id).await? else {
+        return Ok(());
+    };
+    for n in &done.names {
+        sqlx::query(
+            "INSERT INTO pyo.cluster_tailnet_names (cluster_id, name, kind, addrs, error) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (cluster_id, name) DO UPDATE SET kind = excluded.kind, addrs = excluded.addrs, error = excluded.error, retired_at = NULL, updated_at = now()
+             WHERE (pyo.cluster_tailnet_names.kind, pyo.cluster_tailnet_names.addrs, pyo.cluster_tailnet_names.error, pyo.cluster_tailnet_names.retired_at)
+                   IS DISTINCT FROM (excluded.kind, excluded.addrs, excluded.error, NULL)",
+        )
+        .bind(cluster_id)
+        .bind(&n.name)
+        .bind(&n.kind)
+        .bind(&n.addrs)
+        .bind(&n.error)
+        .execute(&mut **tx)
+        .await?;
+    }
+    let kept: Vec<String> = done.names.iter().map(|n| n.name.clone()).collect();
+    sqlx::query("UPDATE pyo.cluster_tailnet_names SET retired_at = now(), updated_at = now() WHERE cluster_id = $1 AND retired_at IS NULL AND NOT (name = ANY($2))")
+        .bind(cluster_id)
+        .bind(&kept)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM pyo.cluster_tailnet_names WHERE cluster_id = $1 AND retired_at < now() - interval '7 days'")
+        .bind(cluster_id)
+        .execute(&mut **tx)
+        .await?;
+    let own = |kind: &str| {
+        done.names
+            .iter()
+            .find(|n| n.kind == kind)
+            .map(|n| n.name.clone())
+    };
+    let forget: Vec<&String> = t
+        .forget
+        .iter()
+        .filter(|n| !done.forgotten.contains(n))
+        .collect();
+    patch(
+        &mut **tx,
+        cluster_id,
+        json!({
+            "suffix": done.suffix.clone().or(t.suffix.clone()),
+            "dashboardName": own("dashboard").or(t.dashboard_name.clone()),
+            "registryName": own("registry").or(t.registry_name.clone()),
+            "sandboxesName": own("sandboxes").or(t.sandboxes_name.clone()),
+            "lockWaiting": done.lock_waiting,
+            "machines": done.machines,
+            "forget": forget,
+        }),
+    )
+    .await
+}
+
+/// Takes a machine off a cluster's tailnet with its next sync.
+pub async fn forget_machine(db: &PgPool, cluster_id: &str, node_id: &str) -> ApiResult<()> {
+    sqlx::query(
+        "UPDATE pyo.clusters SET tailscale = jsonb_set(tailscale, '{forget}', coalesce(tailscale->'forget', '[]') || to_jsonb($2::text))
+          WHERE id = $1 AND tailscale IS NOT NULL AND NOT coalesce(tailscale->'forget', '[]') ? $2",
+    )
+    .bind(cluster_id)
+    .bind(node_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// A row of `pyo.cluster_tailnet_names`: name, kind, addresses, error,
+/// retired.
+type NameRow = (String, String, Vec<String>, Option<String>, bool);
 
 /// What a cluster's agent hosts on the tailnet (its heartbeat reply). None
-/// without Tailscale set up.
+/// without Tailscale set up on it, and no names to take off.
 pub async fn wanted_for(
     db: &PgPool,
     cluster_id: &str,
     same_cluster: bool,
 ) -> ApiResult<Option<pyo_proto::TailnetWanted>> {
-    let rows: Vec<ServiceRow> = sqlx::query_as(
-        "SELECT name, kind, cluster_id, addrs, error, retired_at IS NOT NULL FROM pyo.tailnet_services",
+    let rows: Vec<NameRow> = sqlx::query_as(
+        "SELECT name, kind, addrs, error, retired_at IS NOT NULL FROM pyo.cluster_tailnet_names WHERE cluster_id = $1",
     )
+    .bind(cluster_id)
     .fetch_all(db)
     .await?;
-    // Without Tailscale (removed): every server takes Pyo's names off.
-    let suffix = match settings(db).await?.and_then(|c| c.suffix) {
+    // Without Tailscale (removed): the servers take Pyo's names off.
+    let suffix = match of(db, cluster_id).await?.and_then(|t| t.suffix) {
         Some(x) => x,
         None if rows.is_empty() => return Ok(None),
         None => String::new(),
@@ -1146,12 +1059,8 @@ pub async fn wanted_for(
         suffix: suffix.clone(),
         ..Default::default()
     };
-    for (name, kind, cluster, addrs, error, retired) in rows {
-        let here = !suffix.is_empty()
-            && cluster.as_deref() == Some(cluster_id)
-            && !retired
-            && error.is_none()
-            && !addrs.is_empty();
+    for (name, kind, addrs, error, retired) in rows {
+        let here = !suffix.is_empty() && !retired && error.is_none() && !addrs.is_empty();
         if !here {
             w.retired.push(name);
             continue;
@@ -1169,248 +1078,185 @@ pub async fn wanted_for(
     Ok(Some(w))
 }
 
-/// Tailscale made no auth key: the details go to the log, the user gets one
-/// plain sentence and where to look.
-/// `server` names what is being added, e.g. "a sandbox server".
-fn no_auth_key(server: &'static str) -> impl FnOnce(anyhow::Error) -> ApiError {
-    move |e| {
-        tracing::warn!(error = %format!("{e:#}"), "Tailscale made no auth key");
-        ApiError::bad_request(format!("Set up Tailscale in Integrations to add {server}."))
-    }
+// ── The installation's client, before clusters kept their own ──────────────
+
+/// What `pyo.settings` ('tailscale') held before: the installation's
+/// client and Pyo's names on its tailnet.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Before {
+    client_id: String,
+    secret_sealed: String,
+    #[serde(default)]
+    dashboard_name: Option<String>,
+    #[serde(default)]
+    registry_name: Option<String>,
+    #[serde(default)]
+    sandboxes_name: Option<String>,
+    #[serde(default)]
+    suffix: Option<String>,
 }
 
-/// A join command's auth key: single-use, preauthorized, tag:pyo, an hour.
-pub async fn join_key(s: &AppState, what: &str, server: &'static str) -> ApiResult<String> {
-    let Some((_, c)) = saved_client(s).await? else {
-        return Err(ApiError::bad_request(NEEDED));
-    };
-    c.auth_key(what)
-        .await
-        .map(|(_, k)| k)
-        .map_err(no_auth_key(server))
-}
-
-/// Whether a tailnet domain someone typed can be had: Pyo's reserved names
-/// and its own names are refused, and so is a name something else on the
-/// tailnet has.
-pub async fn check_domain(s: &AppState, host: &str) -> ApiResult<()> {
-    let Some((cfg, c)) = saved_client(s).await? else {
-        return Err(ApiError::bad_request(
-            "Tailnet domains need Tailscale. Set it up in Integrations.",
-        ));
-    };
-    let Some(suffix) = cfg.suffix.as_deref() else {
-        return Err(ApiError::bad_request(
-            "Pyo hasn't seen your tailnet yet. Try again in a minute.",
-        ));
-    };
-    let host = host.to_ascii_lowercase();
-    let Some(label) = host.strip_suffix(&format!(".{suffix}")) else {
-        return Err(ApiError::bad_request(format!(
-            "A tailnet domain ends with .{suffix}."
-        )));
-    };
-    if !valid_name(label) {
-        return Err(ApiError::bad_request(
-            "Use one name: lowercase letters, digits and dashes.",
-        ));
-    }
-    if RESERVED.contains(&label)
-        || cfg.dashboard_name.as_deref() == Some(label)
-        || cfg.registry_name.as_deref() == Some(label)
-        || cfg.sandboxes_name.as_deref() == Some(label)
-    {
-        return Err(ApiError::bad_request("Pyo uses this name itself."));
-    }
-    let mark = marker(&install_id(&s.db).await?);
-    let remote = c.services().await?;
-    let mine = remote.get(label).is_some_and(|(cm, _)| *cm == mark);
-    let machine = peer_names(&s.db).await?.contains(label)
-        || c.devices()
-            .await?
-            .iter()
-            .any(|(_, full, _)| full.split('.').next() == Some(label));
-    if (remote.contains_key(label) && !mine) || machine {
-        return Err(ApiError::conflict("Taken on your tailnet"));
-    }
-    // The list can leave some out: the Service itself, read directly.
-    match c.service(label).await {
-        Ok(None) => Ok(()),
-        Ok(Some((comment, _))) if comment == mark => Ok(()),
-        Ok(Some(_)) => Err(ApiError::conflict("Taken on your tailnet")),
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "tailnet name check failed");
-            Err(ApiError::bad_request(
-                "Couldn't check the name on your tailnet. Try again in a minute.",
-            ))
-        }
-    }
-}
-
-// ── Integrations › Tailscale ────────────────────────────────────────────────
-
-/// Saves the OAuth client once it signs in (a missing secret keeps the saved
-/// one), and says what it can do, check by check.
-pub async fn save_client(s: &AppState, client_id: &str, secret: Option<&str>) -> ApiResult<Value> {
-    let client_id = client_id.trim();
-    if client_id.is_empty()
-        || client_id.len() > 100
-        || !client_id.bytes().all(|b| b.is_ascii_alphanumeric())
-    {
-        return Err(ApiError::bad_request(
-            "Paste the client ID from Tailscale's Trust credentials page.",
-        ));
-    }
-    let saved = settings(&s.db).await?;
-    let secret = match secret.map(str::trim).filter(|x| !x.is_empty()) {
-        Some(x)
-            if x.starts_with("tskey-client-")
-                && x.len() > 20
-                && !x.contains(char::is_whitespace) =>
-        {
-            x.to_owned()
-        }
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "A client secret starts with tskey-client-.",
-            ));
-        }
-        None => match &saved {
-            Some(c) if c.client_id == client_id => s.sealer.open(&c.secret_sealed)?,
-            _ => return Err(ApiError::bad_request("Paste the client secret too.")),
-        },
-    };
-    if !s.sealer.enabled() {
-        return Err(ApiError::new(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "This installation has no PYO_SECRET_KEY, so it can't store the secret.",
-        ));
-    }
-    let (checks, suffix) = test(&client(client_id, &secret)).await;
-    if let Some(c) = checks.iter().find(|c| c.name == "client" && !c.ok) {
-        return Err(ApiError::bad_request(c.message.clone()));
-    }
-    let mut cfg = saved.unwrap_or_default();
-    // Another tailnet: Pyo's names there are picked again.
-    if cfg.suffix.is_some() && suffix.is_some() && cfg.suffix != suffix {
-        cfg.dashboard_name = None;
-        cfg.registry_name = None;
-        cfg.sandboxes_name = None;
-    }
-    cfg.client_id = client_id.to_owned();
-    cfg.hint = format!("…{}", &secret[secret.len() - 4..]);
-    cfg.secret_sealed = s.sealer.seal(&secret)?;
-    cfg.suffix = suffix.or(cfg.suffix);
-    save(&s.db, &cfg).await?;
-    Ok(json!({ "ok": checks.iter().all(|c| c.ok), "checks": checks }))
-}
-
-/// The Test button: the saved client's checks.
-pub async fn test_saved(s: &AppState) -> ApiResult<Value> {
-    let Some((mut cfg, c)) = saved_client(s).await? else {
-        return Err(ApiError::bad_request("Tailscale isn't set up."));
-    };
-    let (checks, suffix) = test(&c).await;
-    if suffix.is_some() && cfg.suffix != suffix {
-        cfg.suffix = suffix;
-        save(&s.db, &cfg).await?;
-    }
-    Ok(json!({ "ok": checks.iter().all(|c| c.ok), "checks": checks }))
-}
-
-/// Forgets the client: Pyo's Services on the tailnet are deleted while it
-/// still can, and its servers take them off.
-pub async fn remove(s: &AppState) -> ApiResult<()> {
-    if let Some((_, c)) = saved_client(s).await? {
-        let mark = marker(&install_id(&s.db).await?);
-        // Only names Pyo made (its own rows), and each checked again.
-        let made: Vec<String> = sqlx::query_scalar("SELECT name FROM pyo.tailnet_services")
-            .fetch_all(&s.db)
+/// An installation from before: its client goes, once, in a signed command
+/// (sealed while queued), to the agent of the cluster Pyo runs on, and to
+/// each other connected cluster that already has names or servers on the
+/// tailnet, so nothing there stops working. Each counts the Services Pyo
+/// made before as its own. Once every one keeps it, Pyo deletes its copy.
+pub async fn hand_over(s: &AppState) -> ApiResult<()> {
+    let v: Option<Value> =
+        sqlx::query_scalar("SELECT value FROM pyo.settings WHERE key = 'tailscale'")
+            .fetch_optional(&s.db)
             .await?;
-        for name in &made {
-            if let Err(e) = delete_if_ours(&c, name, &mark).await {
-                tracing::warn!(name, error = %e, "couldn't delete the tailnet name");
-            }
-        }
+    let Some(before) = v.and_then(|v| serde_json::from_value::<Before>(v).ok()) else {
+        return Ok(());
+    };
+    let host = host_cluster(&s.db).await?;
+    let others: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM pyo.clusters c WHERE NOT same_cluster AND status IN ('connected', 'degraded')
+            AND (EXISTS (SELECT 1 FROM pyo.cluster_tailnet_names n WHERE n.cluster_id = c.id AND n.retired_at IS NULL)
+                 OR EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(c.capabilities->'tailnet', '[]')) t WHERE coalesce(t->>'nodeId', '') <> ''))
+          ORDER BY created_at",
+    )
+    .fetch_all(&s.db)
+    .await?;
+    let clusters: Vec<String> = host.iter().cloned().chain(others).collect();
+    if clusters.is_empty() {
+        return Ok(());
     }
-    sqlx::query("UPDATE pyo.tailnet_services SET retired_at = coalesce(retired_at, now()), updated_at = now()")
-        .execute(&s.db)
-        .await?;
-    sqlx::query("DELETE FROM pyo.settings WHERE key = 'tailscale'")
-        .execute(&s.db)
-        .await?;
-    // Without the tailnet, the public dashboard is the way in again.
-    sqlx::query("DELETE FROM pyo.settings WHERE key = 'public_dashboard'")
-        .execute(&s.db)
-        .await?;
-    for k in ["tailnet", "registry", "sandboxes"] {
-        save_address(&s.db, k, None).await?;
+    hand_over_to(s, &clusters, host.as_deref(), &before).await
+}
+
+async fn hand_over_to(
+    s: &AppState,
+    clusters: &[String],
+    host: Option<&str>,
+    before: &Before,
+) -> ApiResult<()> {
+    let install = install_id(&s.db).await?;
+    let mut all = true;
+    for cluster_id in clusters {
+        if of(&s.db, cluster_id).await?.is_some() {
+            continue;
+        }
+        let secret = s.sealer.open(&before.secret_sealed)?;
+        let r = ask(
+            s,
+            cluster_id,
+            Command::TailscaleClient {
+                client_id: before.client_id.clone(),
+                secret,
+            },
+            SETUP_WAIT,
+        )
+        .await;
+        let r = match r {
+            Ok((_, r)) => r,
+            Err(e) => {
+                tracing::warn!(cluster = %cluster_id, error = %e.message, "couldn't hand the Tailscale client over yet");
+                all = false;
+                continue;
+            }
+        };
+        let state: ts::ClientState = r
+            .data
+            .and_then(|d| serde_json::from_value(d).ok())
+            .unwrap_or_default();
+        let own = host == Some(cluster_id.as_str());
+        let t = Tailnet {
+            client_id: state.client_id,
+            hint: state.hint,
+            suffix: state.suffix.or(before.suffix.clone()),
+            dashboard_name: before.dashboard_name.clone().filter(|_| own),
+            registry_name: before.registry_name.clone().filter(|_| own),
+            sandboxes_name: before.sandboxes_name.clone().filter(|_| own),
+            adopt: vec![ts::install_marker(&install)],
+            ..Default::default()
+        };
+        sqlx::query("UPDATE pyo.clusters SET tailscale = $2 WHERE id = $1")
+            .bind(cluster_id)
+            .bind(serde_json::to_value(&t).map_err(anyhow::Error::from)?)
+            .execute(&s.db)
+            .await?;
+        tracing::info!(cluster = %cluster_id, "the installation's Tailscale client now lives in the cluster");
+    }
+    if all {
+        sqlx::query("DELETE FROM pyo.settings WHERE key = 'tailscale'")
+            .execute(&s.db)
+            .await?;
+        tracing::info!("Pyo no longer keeps a Tailscale client");
     }
     Ok(())
 }
 
-/// Renames Pyo's own name on the tailnet ("dashboard", "registry" or
-/// "sandboxes"). The old one goes once the new one is made.
-pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
-    let name = name.trim().to_ascii_lowercase();
-    let Some((mut cfg, c)) = saved_client(s).await? else {
-        return Err(ApiError::bad_request("Tailscale isn't set up."));
-    };
-    if !valid_name(&name) {
-        return Err(ApiError::bad_request(
-            "Use one name: lowercase letters, digits and dashes.",
-        ));
-    }
-    let others = match kind {
-        "dashboard" => [&cfg.registry_name, &cfg.sandboxes_name],
-        "registry" => [&cfg.dashboard_name, &cfg.sandboxes_name],
-        "sandboxes" => [&cfg.dashboard_name, &cfg.registry_name],
-        _ => {
-            return Err(ApiError::bad_request(
-                "The kind is \"dashboard\", \"registry\" or \"sandboxes\".",
-            ));
-        }
-    };
-    let domain: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pyo.tailnet_services WHERE name = $1 AND kind = 'domain' AND retired_at IS NULL)",
-    )
-    .bind(&name)
-    .fetch_one(&s.db)
-    .await?;
-    if others.iter().any(|o| o.as_deref() == Some(name.as_str())) || domain {
-        return Err(ApiError::conflict("Pyo uses this name already."));
-    }
-    let mark = marker(&install_id(&s.db).await?);
-    let remote = c.services().await?;
-    let machine = peer_names(&s.db).await?.contains(&name)
-        || c.devices()
-            .await?
-            .iter()
-            .any(|(_, full, _)| full.split('.').next() == Some(name.as_str()));
-    let direct = c.service(&name).await?;
-    if remote.get(&name).is_some_and(|(cm, _)| *cm != mark)
-        || direct.is_some_and(|(cm, _)| cm != mark)
-        || machine
-    {
-        return Err(ApiError::conflict("Taken on your tailnet"));
-    }
-    match kind {
-        "dashboard" => cfg.dashboard_name = Some(name),
-        "registry" => cfg.registry_name = Some(name),
-        _ => cfg.sandboxes_name = Some(name),
-    }
-    save(&s.db, &cfg).await
+// ── For the dashboard ───────────────────────────────────────────────────────
+
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct LockQuery {
+    /// The team adding the server (slug or id).
+    team: String,
 }
 
-/// For the dashboard: whether Tailscale is set up and Pyo's names on it;
-/// the client (never the secret) only for admins.
+/// Machines waiting for a Tailnet Lock signature
+///
+/// With Tailnet Lock on, a new server stays off the tailnet until a
+/// signing device signs its key. These are the ones on the team's
+/// clusters' tailnets that wait, with the command to run on a signing
+/// device, as each cluster last saw them. Empty without Tailscale set up.
+#[utoipa::path(get, path = "/tailnet/lock", operation_id = "getTailnetLock", tag = "Servers",
+    params(LockQuery),
+    responses(
+        (status = 200, description = "`waiting`: each with `name` (the machine's hostname) and `signCommand`.", body = Object),
+        (status = 403, description = "Only owners and admins add servers.", body = crate::error::ErrorBody),
+        (status = 404, description = "No such team, or you aren't in it.", body = crate::error::ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("read"))))]
+pub async fn lock(
+    axum::extract::State(s): axum::extract::State<AppState>,
+    crate::auth::SessionUser(user): crate::auth::SessionUser,
+    crate::error::Query(q): crate::error::Query<LockQuery>,
+) -> ApiResult<crate::error::Json<Value>> {
+    let mut tx = s.db.begin().await?;
+    crate::ops::require_role(&mut tx, &user, &q.team, crate::ops::Role::Admin).await?;
+    let team_id: String = sqlx::query_scalar("SELECT id FROM pyo.teams WHERE id = $1 OR slug = $1")
+        .bind(&q.team)
+        .fetch_one(&mut *tx)
+        .await?;
+    drop(tx);
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "SELECT tailscale->'lockWaiting' FROM pyo.clusters WHERE (team_id = $1 OR same_cluster) AND tailscale ? 'lockWaiting'",
+    )
+    .bind(&team_id)
+    .fetch_all(&s.db)
+    .await?;
+    let mut waiting: Vec<LockWaiting> = rows
+        .into_iter()
+        .flat_map(|v| serde_json::from_value::<Vec<LockWaiting>>(v).unwrap_or_default())
+        .collect();
+    waiting.sort_by(|a, b| a.name.cmp(&b.name));
+    waiting.dedup();
+    Ok(crate::error::Json(json!({ "waiting": waiting })))
+}
+
+/// A cluster's Tailscale for the dashboard: never a secret.
+pub fn cluster_view(t: &Tailnet) -> Value {
+    json!({
+        "clientId": t.client_id,
+        "hint": t.hint,
+        "suffix": t.suffix,
+    })
+}
+
+/// For the dashboard: the installation's tailnet (the cluster Pyo runs on)
+/// and Pyo's names on it; the client (never the secret) only for admins.
 pub async fn snapshot(db: &PgPool, admin: bool) -> ApiResult<Value> {
-    let Some(cfg) = settings(db).await? else {
+    let Some((cluster_id, t)) = host(db).await? else {
         return Ok(Value::Null);
     };
     let a = crate::web::addresses();
     let mut v = json!({
-        "suffix": cfg.suffix,
+        "clusterId": cluster_id,
+        "suffix": t.suffix,
         "dashboard": a.tailnet,
         "registry": a.registry,
         "sandboxes": a.sandboxes,
@@ -1419,8 +1265,9 @@ pub async fn snapshot(db: &PgPool, admin: bool) -> ApiResult<Value> {
     });
     if admin {
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-            "SELECT name, error FROM pyo.tailnet_services WHERE kind IN ('dashboard', 'registry', 'sandboxes') AND retired_at IS NULL",
+            "SELECT name, error FROM pyo.cluster_tailnet_names WHERE cluster_id = $1 AND kind IN ('dashboard', 'registry', 'sandboxes') AND retired_at IS NULL",
         )
+        .bind(&cluster_id)
         .fetch_all(db)
         .await?;
         let error = |n: &Option<String>| {
@@ -1428,14 +1275,14 @@ pub async fn snapshot(db: &PgPool, admin: bool) -> ApiResult<Value> {
                 .and_then(|n| rows.iter().find(|r| r.0 == *n))
                 .and_then(|r| r.1.clone())
         };
-        v["clientId"] = json!(cfg.client_id);
-        v["hint"] = json!(cfg.hint);
-        v["dashboardName"] = json!(cfg.dashboard_name);
-        v["dashboardError"] = json!(error(&cfg.dashboard_name));
-        v["registryName"] = json!(cfg.registry_name);
-        v["registryError"] = json!(error(&cfg.registry_name));
-        v["sandboxesName"] = json!(cfg.sandboxes_name);
-        v["sandboxesError"] = json!(error(&cfg.sandboxes_name));
+        v["clientId"] = json!(t.client_id);
+        v["hint"] = json!(t.hint);
+        v["dashboardName"] = json!(t.dashboard_name);
+        v["dashboardError"] = json!(error(&t.dashboard_name));
+        v["registryName"] = json!(t.registry_name);
+        v["registryError"] = json!(error(&t.registry_name));
+        v["sandboxesName"] = json!(t.sandboxes_name);
+        v["sandboxesError"] = json!(error(&t.sandboxes_name));
         v["hostName"] = json!(a.host_name);
     }
     Ok(v)
@@ -1458,13 +1305,14 @@ async fn host_move(db: &PgPool) -> ApiResult<Value> {
 }
 
 /// When Pyo's server last got a key to join with: one at a time.
-static HOST_KEY_AT: Mutex<Option<Instant>> = Mutex::new(None);
+static HOST_KEY_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
 /// Pyo's own server, on its timer (install.sh `host_units`): what its
 /// Tailscale says (`ip` and `name`, empty when it's not on a tailnet). Kept
-/// as Pyo's tailnet address. Answers `{"state": "off"}` without Tailscale,
-/// `{"state": "ok"}` once it's on the tailnet, or `{"state": "join",
-/// "authKey"}` to join it (at most one key every ten minutes).
+/// as Pyo's tailnet address. Answers `{"state": "off"}` without Tailscale
+/// on Pyo's cluster, `{"state": "ok"}` once it's on the tailnet, or
+/// `{"state": "join", "authKey"}` to join it (at most one key every ten
+/// minutes, made by the cluster's agent).
 pub async fn host_report(
     s: &AppState,
     ip: &str,
@@ -1488,14 +1336,14 @@ pub async fn host_report(
     let ip = ip.trim();
     let ip = crate::freedomain::tailnet_v4(ip).map(|v| v.to_string());
     let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
-    let name = (ip.is_some() && name.ends_with(".ts.net") && name.split('.').all(valid_name))
+    let name = (ip.is_some() && name.ends_with(".ts.net") && name.split('.').all(ts::valid_name))
         .then_some(name);
     let a = crate::web::addresses();
     if a.host_ip != ip || a.host_name != name {
         save_address(&s.db, "hostIp", ip.as_deref()).await?;
         save_address(&s.db, "hostName", name.as_deref()).await?;
     }
-    let Some((_, c)) = saved_client(s).await? else {
+    let Some((cluster_id, _)) = host(&s.db).await? else {
         return Ok(json!({ "state": "off" }));
     };
     if ip.is_some() {
@@ -1506,226 +1354,320 @@ pub async fn host_report(
         if at.is_some_and(|t| t.elapsed() < Duration::from_secs(600)) {
             return Ok(json!({ "state": "wait" }));
         }
-        *at = Some(Instant::now());
+        *at = Some(std::time::Instant::now());
     }
-    let (_, key) = c
-        .auth_key("Pyo: its own server")
-        .await
-        .map_err(no_auth_key("this server"))?;
+    let key = join_key(s, &cluster_id, "Pyo: its own server", "this server").await?;
     tracing::info!("this machine: joining the tailnet");
     Ok(json!({ "state": "join", "authKey": key }))
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn key_descriptions_are_what_tailscale_takes() {
-        use super::key_description;
-        assert_eq!(key_description("Pyo: join web-1"), "Pyo join web-1");
-        assert_eq!(
-            key_description("Pyo: sandbox server sbx_1"),
-            "Pyo sandbox server sbx_1"
-        );
-        assert_eq!(key_description("Pyo: its own server"), "Pyo its own server");
-        let long = key_description(&format!("Pyo: join {}", "a".repeat(80)));
-        assert_eq!(long.len(), 50);
-    }
-
     use super::*;
 
-    /// A mock Tailscale API: a Service ("docker", someone else's) that the
-    /// list leaves out but a direct read finds. Pyo must refuse the name and
-    /// never write to it.
+    #[test]
+    fn a_tailnet_keeps_nothing_secret() {
+        let t = Tailnet {
+            client_id: "kC1".into(),
+            hint: "…WXYZ".into(),
+            suffix: Some("tail1.ts.net".into()),
+            ..Default::default()
+        };
+        let text = serde_json::to_value(&t).unwrap().to_string();
+        assert!(!text.to_lowercase().contains("secret"), "{text}");
+        assert_eq!(cluster_view(&t)["clientId"], "kC1");
+    }
+
+    #[test]
+    fn tokens_are_checked_before_they_leave_pyo() {
+        assert!(token_shape("tskey-api-kAbc-0123456789abcdef").is_ok());
+        assert!(token_shape("tskey-client-kAbc-0123456789abcdef").is_err());
+        assert!(token_shape("tskey-auth-kAbc-0123456789abcdef").is_err());
+        assert!(token_shape("nope").is_err());
+    }
+
+    #[test]
+    fn credentials_are_wiped_from_answered_commands() {
+        let mut setup =
+            json!({ "kind": "tailscale_setup", "token": "pyo1:sealed", "version": "v1" });
+        assert!(crate::teambackup::wipe_command(&mut setup));
+        assert_eq!(
+            setup,
+            json!({ "kind": "tailscale_setup", "token": "", "version": "v1" })
+        );
+        let mut client =
+            json!({ "kind": "tailscale_client", "clientId": "k1", "secret": "pyo1:sealed" });
+        assert!(crate::teambackup::wipe_command(&mut client));
+        assert_eq!(client["secret"], "");
+        assert_eq!(client["clientId"], "k1");
+        let mut other = json!({ "kind": "backup", "password": "pyo1:sealed" });
+        assert!(!crate::teambackup::wipe_command(&mut other));
+        assert_eq!(other["password"], "pyo1:sealed");
+    }
+
+    // Against a throwaway Postgres (DATABASE_URL), with a stand-in agent
+    // that answers the cluster's commands.
+
+    async fn db() -> (AppState, String) {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        crate::migrate::run(&pool).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(
+            pool.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let run = crate::ids::new_id("t");
+        let (team, cluster) = (format!("team_{run}"), format!("cl_{run}"));
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status) VALUES ($1, $2, $1, $1, 'connected')")
+            .bind(&cluster)
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+        (crate::sandbox::e2e::test_state(pool), cluster)
+    }
+
+    /// The agent: takes the cluster's next command of `kind`, opened as it
+    /// would get it, and answers it with `data`.
+    async fn agent_answers(db: PgPool, cluster: String, kind: &str, data: Value) -> Value {
+        loop {
+            let row: Option<(String, Value)> = sqlx::query_as(
+                "SELECT id, command FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = $2 AND status = 'pending' ORDER BY created_at LIMIT 1",
+            )
+            .bind(&cluster)
+            .bind(kind)
+            .fetch_optional(&db)
+            .await
+            .unwrap();
+            if let Some((id, mut cmd)) = row {
+                crate::vault::get().open_env(&mut cmd).await.unwrap();
+                crate::teambackup::open_command(&mut cmd).await.unwrap();
+                let r = CommandResult {
+                    ok: true,
+                    message: None,
+                    logs: vec![],
+                    data: Some(data),
+                };
+                sqlx::query("UPDATE pyo.commands SET status = 'done', result = $2, done_at = now() WHERE id = $1")
+                    .bind(&id)
+                    .bind(serde_json::to_value(&r).unwrap())
+                    .execute(&db)
+                    .await
+                    .unwrap();
+                return cmd;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn commands(db: &PgPool, cluster: &str, kind: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = $2",
+        )
+        .bind(cluster)
+        .bind(kind)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    /// An installation from before: its client goes to its cluster's agent
+    /// once, and Pyo keeps nothing of it but the ID and hint.
     #[tokio::test]
-    async fn a_service_the_list_leaves_out_is_never_written() {
-        use axum::{
-            Json, Router,
-            extract::Path,
-            routing::{get, post},
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn the_installations_client_goes_to_its_cluster_once() {
+        let (s, cluster) = db().await;
+        let secret = "tskey-client-kAbc-SECRETSECRET1234";
+        let before = Before {
+            client_id: "kAbc".into(),
+            secret_sealed: s.sealer.seal(secret).unwrap(),
+            dashboard_name: Some("pyo".into()),
+            registry_name: Some("registry".into()),
+            suffix: Some("tail1.ts.net".into()),
+            ..Default::default()
         };
-        use std::sync::Arc;
-        let writes: Arc<Mutex<Vec<String>>> = Arc::default();
-        let w = writes.clone();
-        let app = Router::new()
-            .route("/oauth/token", post(|| async { Json(json!({ "access_token": "t" })) }))
-            .route("/tailnet/-/services", get(|| async { Json(json!({ "vipServices": [] })) }))
-            .route(
-                "/tailnet/-/services/{svc}",
-                get(|Path(svc): Path<String>| async move {
-                    match svc.as_str() {
-                        "svc:docker" => (axum::http::StatusCode::OK, Json(json!({ "name": "svc:docker", "comment": "the user's", "addrs": ["100.100.1.1"] }))),
-                        "svc:mine" => (axum::http::StatusCode::OK, Json(json!({ "name": "svc:mine", "comment": "Made by Pyo (abc)", "addrs": ["100.100.1.2"] }))),
-                        _ => (axum::http::StatusCode::NOT_FOUND, Json(json!({ "message": "not found" }))),
-                    }
-                })
-                .put({
-                    let w = w.clone();
-                    move |Path(svc): Path<String>| {
-                        let w = w.clone();
-                        async move {
-                            w.lock().unwrap().push(format!("PUT {svc}"));
-                            Json(json!({ "addrs": ["100.100.1.3"] }))
-                        }
-                    }
-                })
-                .delete(move |Path(svc): Path<String>| {
-                    let w = w.clone();
-                    async move {
-                        w.lock().unwrap().push(format!("DELETE {svc}"));
-                        Json(json!({}))
-                    }
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let c = test_client(&format!("http://{addr}"));
-        let mark = marker("abc");
+        let agent = tokio::spawn(agent_answers(
+            s.db.clone(),
+            cluster.clone(),
+            "tailscale_client",
+            json!({ "ok": true, "checks": [], "clientId": "kAbc", "hint": "…1234", "suffix": "tail1.ts.net" }),
+        ));
+        hand_over_to(&s, std::slice::from_ref(&cluster), Some(&cluster), &before)
+            .await
+            .unwrap();
+        let sent = agent.await.unwrap();
+        assert_eq!(sent["client_id"], "kAbc");
+        assert_eq!(sent["secret"], secret, "the agent gets the secret");
+        let t = of(&s.db, &cluster).await.unwrap().unwrap();
+        assert_eq!((t.client_id.as_str(), t.hint.as_str()), ("kAbc", "…1234"));
+        assert_eq!(t.dashboard_name.as_deref(), Some("pyo"));
+        let install = install_id(&s.db).await.unwrap();
+        assert_eq!(t.adopt, [ts::install_marker(&install)]);
+        let kept: Option<Value> =
+            sqlx::query_scalar("SELECT value FROM pyo.settings WHERE key = 'tailscale'")
+                .fetch_optional(&s.db)
+                .await
+                .unwrap();
+        assert_eq!(kept, None, "Pyo's copy is deleted");
+        let leaked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pyo.clusters WHERE tailscale::text LIKE '%SECRETSECRET%'",
+        )
+        .fetch_one(&s.db)
+        .await
+        .unwrap();
+        assert_eq!(leaked, 0);
+    }
+
+    /// A join key comes from the cluster's agent, and its command (with the
+    /// key in its answer) is gone once read.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn a_join_key_comes_from_the_cluster_and_is_not_kept() {
+        let (s, cluster) = db().await;
         assert!(
-            c.services().await.unwrap().is_empty(),
-            "the list leaves it out"
+            join_key(&s, &cluster, "Pyo: join web-2", "this server")
+                .await
+                .is_err(),
+            "no Tailscale on it yet"
         );
-        assert_eq!(claim(&c, "docker", &mark).await.unwrap(), Claim::Taken);
-        assert!(!delete_if_ours(&c, "docker", &mark).await.unwrap());
-        assert_eq!(
-            claim(&c, "mine", &mark).await.unwrap(),
-            Claim::Ours(vec!["100.100.1.2".into()])
-        );
-        assert_eq!(
-            claim(&c, "blog", &mark).await.unwrap(),
-            Claim::Ours(vec!["100.100.1.3".into()])
-        );
-        assert!(delete_if_ours(&c, "mine", &mark).await.unwrap());
-        assert_eq!(*writes.lock().unwrap(), ["PUT svc:blog", "DELETE svc:mine"]);
+        sqlx::query("UPDATE pyo.clusters SET tailscale = '{\"clientId\": \"k1\"}' WHERE id = $1")
+            .bind(&cluster)
+            .execute(&s.db)
+            .await
+            .unwrap();
+        let agent = tokio::spawn(agent_answers(
+            s.db.clone(),
+            cluster.clone(),
+            "tailscale_key",
+            json!({ ts::KEY_FIELD: "tskey-auth-k9-SECRET" }),
+        ));
+        let key = join_key(&s, &cluster, "Pyo: join web-2", "this server")
+            .await
+            .unwrap();
+        assert_eq!(key, "tskey-auth-k9-SECRET");
+        assert_eq!(agent.await.unwrap()["description"], "Pyo: join web-2");
+        assert_eq!(commands(&s.db, &cluster, "tailscale_key").await, 0);
+        assert_eq!(key_cluster(&s.db, Some(&cluster)).await.unwrap(), cluster);
     }
 
-    #[test]
-    fn machines_waiting_for_a_signature() {
-        let d = |host: &str, tag: &str, key: &str, err: &str| Device {
-            node_id: "n".into(),
-            hostname: host.into(),
-            tags: vec![tag.into()],
-            node_key: key.into(),
-            lock_error: err.into(),
+    /// Pyo's calls to a sandbox server that joined through a cluster go
+    /// through that cluster's agent, and leave nothing behind.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn sandbox_calls_go_through_the_cluster() {
+        let (s, cluster) = db().await;
+        crate::sandbox::daemon::init(s.clone());
+        let address = format!(
+            "100.64.{}.{}",
+            rand::random::<u8>() % 64,
+            1 + rand::random::<u8>() % 250
+        );
+        sqlx::query("INSERT INTO pyo.sandbox_servers (id, name, state, created_by, address, via_cluster) VALUES ($1, $1, 'ready', 'test', $2, $3)")
+            .bind(crate::ids::new_id("sbs"))
+            .bind(&address)
+            .bind(&cluster)
+            .execute(&s.db)
+            .await
+            .unwrap();
+        let agent = tokio::spawn(agent_answers(
+            s.db.clone(),
+            cluster.clone(),
+            "sandbox_call",
+            // Bytes both ways: the agent answers in base64 too.
+            json!({ "status": 200, "body": "eyJieXRlcyI6IDV9" }),
+        ));
+        let d = crate::sandbox::daemon::Daemon::new(&address);
+        let n = d
+            .write_file("tok", "sbx_1", "/a b", b"hello".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(n, 5);
+        let sent = agent.await.unwrap();
+        assert_eq!(sent["address"], json!(address));
+        assert_eq!(sent["method"], "PUT");
+        assert_eq!(sent["path"], "/v1/sandboxes/sbx_1/files?path=%2Fa+b");
+        assert_eq!(sent["token"], "tok");
+        assert_eq!(sent["raw"], true);
+        assert_eq!(sent["body"], "aGVsbG8=");
+        assert_eq!(commands(&s.db, &cluster, "sandbox_call").await, 0);
+    }
+
+    /// A sync's answer: names kept, the rest retired, machines taken off
+    /// forgotten, and the servers told what to host.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn a_sync_answer_is_kept() {
+        let (s, cluster) = db().await;
+        sqlx::query("UPDATE pyo.clusters SET tailscale = '{\"clientId\": \"k1\", \"forget\": [\"n1\", \"n2\"]}' WHERE id = $1")
+            .bind(&cluster)
+            .execute(&s.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pyo.cluster_tailnet_names (cluster_id, name, kind, addrs) VALUES ($1, 'old', 'domain', '{100.100.1.1}')")
+            .bind(&cluster)
+            .execute(&s.db)
+            .await
+            .unwrap();
+        let done = TailnetSynced {
+            suffix: Some("tail1.ts.net".into()),
+            names: vec![
+                ts::NameState {
+                    name: "blog".into(),
+                    kind: "domain".into(),
+                    addrs: vec!["100.100.1.2".into()],
+                    error: None,
+                },
+                ts::NameState {
+                    name: "shop".into(),
+                    kind: "domain".into(),
+                    addrs: vec![],
+                    error: Some("Taken on your tailnet".into()),
+                },
+            ],
+            forgotten: vec!["n1".into()],
+            ..Default::default()
         };
-        let waiting = lock_waiting(&[
-            d(
-                "sbx-1",
-                TAG,
-                "nodekey:ab12",
-                "tailnet lock: node key not signed",
-            ),
-            d("laptop", "tag:other", "nodekey:cd34", "not signed"),
-            d("web-1", TAG, "nodekey:ef56", ""),
-        ]);
-        assert_eq!(
-            waiting,
-            [(
-                "sbx-1".to_owned(),
-                "tailscale lock sign nodekey:ab12".to_owned()
-            )]
-        );
-    }
-
-    #[test]
-    fn names() {
-        assert_eq!(
-            suffix_of("server-1.tail1234.ts.net."),
-            Some("tail1234.ts.net".into())
-        );
-        assert_eq!(suffix_of("example.com"), None);
-        assert!(
-            valid_name("blog-2") && !valid_name("Blog") && !valid_name("-a") && !valid_name("a.b")
-        );
-        let taken = ["pyo", "pyo-home"];
-        assert_eq!(
-            pick_name("pyo", "home", |n| taken.contains(&n)),
-            "pyo-home-2"
-        );
-        assert_eq!(
-            pick_name("registry", "home", |n| taken.contains(&n)),
-            "registry"
-        );
-        assert_eq!(pick_name("pyo", "home", |n| n == "pyo"), "pyo-home");
-        let long = "a".repeat(70);
-        assert!(pick_name(&long, "x", |_| false).len() <= 63);
-        assert_eq!(marker("abc"), "Made by Pyo (abc)");
-    }
-
-    /// Sandboxes' name, as tick picks it from the tailnet's Services
-    /// (name to its comment, the marker of whoever made it) and machines.
-    fn sandboxes(current: Option<&str>, services: &[(&str, &str)], others: &[&str]) -> String {
-        let mark = marker("this");
-        let ours = |n: &str| services.iter().any(|(s, m)| *s == n && *m == mark);
-        let taken = |n: &str| {
-            (services.iter().any(|(s, _)| *s == n) && !ours(n))
-                || n == "laptop"
-                || others.contains(&n)
+        let r = CommandResult {
+            ok: true,
+            message: None,
+            logs: vec![],
+            data: Some(serde_json::to_value(&done).unwrap()),
         };
-        own_name(current, "sandboxes", "home", taken)
+        let mut tx = s.db.begin().await.unwrap();
+        synced(&mut tx, &cluster, "cmd_x", &r).await.unwrap();
+        tx.commit().await.unwrap();
+        let t = of(&s.db, &cluster).await.unwrap().unwrap();
+        assert_eq!(t.suffix.as_deref(), Some("tail1.ts.net"));
+        assert_eq!(t.forget, ["n2"]);
+        let w = wanted_for(&s.db, &cluster, false).await.unwrap().unwrap();
+        assert_eq!(w.suffix, "tail1.ts.net");
+        assert_eq!(
+            w.services
+                .iter()
+                .map(|x| x.name.as_str())
+                .collect::<Vec<_>>(),
+            ["blog"]
+        );
+        let mut retired = w.retired.clone();
+        retired.sort();
+        assert_eq!(retired, ["old", "shop"]);
     }
 
     #[test]
-    fn sandboxes_name_free() {
-        assert_eq!(sandboxes(None, &[], &["pyo", "registry"]), "sandboxes");
-    }
-
-    #[test]
-    fn sandboxes_name_already_this_pyos() {
-        let mine = marker("this");
-        // A Service this Pyo made before (a restart, an update, the name
-        // picked earlier): kept as it is.
-        assert_eq!(
-            sandboxes(None, &[("sandboxes", mine.as_str())], &[]),
-            "sandboxes"
-        );
-        assert_eq!(
-            sandboxes(Some("sandboxes"), &[("sandboxes", mine.as_str())], &[]),
-            "sandboxes"
-        );
-        assert_eq!(
-            sandboxes(
-                Some("sandboxes-home"),
-                &[
-                    ("sandboxes", "someone's"),
-                    ("sandboxes-home", mine.as_str())
-                ],
-                &[]
-            ),
-            "sandboxes-home"
-        );
-    }
-
-    #[test]
-    fn sandboxes_name_someone_elses() {
-        let other = marker("another Pyo");
-        assert_eq!(
-            sandboxes(None, &[("sandboxes", other.as_str())], &[]),
-            "sandboxes-home"
-        );
-        assert_eq!(sandboxes(None, &[("sandboxes", "")], &[]), "sandboxes-home");
-        assert_eq!(
-            sandboxes(
-                None,
-                &[("sandboxes", other.as_str()), ("sandboxes-home", "")],
-                &[]
-            ),
-            "sandboxes-home-2"
-        );
-    }
-
-    #[test]
-    fn sandboxes_name_moves_on_when_taken() {
-        // Picked, then someone else made it first: the next free one,
-        // never theirs. Pyo's other names and machines count as taken.
-        assert_eq!(
-            sandboxes(Some("sandboxes"), &[("sandboxes", "theirs")], &[]),
-            "sandboxes-home"
-        );
-        assert_eq!(sandboxes(Some("laptop"), &[], &[]), "sandboxes");
-        assert_eq!(
-            sandboxes(Some("registry"), &[("sandboxes", "theirs")], &["registry"]),
-            "sandboxes-home"
-        );
+    fn the_old_settings_are_read_for_the_hand_over() {
+        let v = json!({
+            "clientId": "kC1", "secretSealed": "v1:abc", "hint": "…WXYZ",
+            "dashboardName": "pyo", "registryName": "registry", "suffix": "tail1.ts.net"
+        });
+        let b: Before = serde_json::from_value(v).unwrap();
+        assert_eq!(b.client_id, "kC1");
+        assert_eq!(b.secret_sealed, "v1:abc");
+        assert_eq!(b.dashboard_name.as_deref(), Some("pyo"));
+        assert_eq!(b.sandboxes_name, None);
     }
 }

@@ -833,7 +833,7 @@ async fn wait_for(s: &crate::AppState, team: &str, server: &str, name: &str, gon
     }
 }
 
-pub(super) fn test_state(db: PgPool) -> crate::AppState {
+pub(crate) fn test_state(db: PgPool) -> crate::AppState {
     let config = crate::Config {
         agent_api_url: String::new(),
         agent_image: String::new(),

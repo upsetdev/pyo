@@ -428,8 +428,10 @@ async fn log_failed(
 }
 
 /// Backup commands carry the repository password and storage key: sealed
-/// while queued, opened for the agent.
-/// The secret fields of backup and database-setup commands.
+/// while queued, opened for the agent. So do Tailscale's (a pasted API
+/// access token, an OAuth client's secret) and a sandbox server call's
+/// token, which are wiped once the agent answers ([`wipe_command`]).
+/// The secret fields of these commands.
 fn secret_fields(cmd: &mut Value) -> Vec<&mut Value> {
     let kind = cmd["kind"].as_str().unwrap_or("").to_owned();
     let Some(o) = cmd.as_object_mut() else {
@@ -445,6 +447,9 @@ fn secret_fields(cmd: &mut Value) -> Vec<&mut Value> {
             | ("backup" | "list_snapshots" | "forget_snapshot" | "restore_volume", "secretKey") => {
                 out.push(v)
             }
+            ("tailscale_setup", "token")
+            | ("tailscale_client", "secret")
+            | ("sandbox_call", "token") => out.push(v),
             ("backup", "connection") | ("db_setup", "admin") => {
                 if let Some(p) = v.get_mut("password") {
                     out.push(p);
@@ -467,6 +472,20 @@ pub async fn seal_command(team_id: &str, cmd: &mut Value) -> anyhow::Result<()> 
         }
     }
     Ok(())
+}
+
+/// A command whose secret fields are of no more use once it's answered
+/// (Tailscale's token and client secret): blanked, so Pyo's database keeps
+/// no Tailscale credential, not even sealed.
+pub fn wipe_command(cmd: &mut Value) -> bool {
+    let kind = cmd["kind"].as_str().unwrap_or("").to_owned();
+    if !matches!(kind.as_str(), "tailscale_setup" | "tailscale_client" | "sandbox_call") {
+        return false;
+    }
+    for v in secret_fields(cmd) {
+        *v = json!("");
+    }
+    true
 }
 
 pub async fn open_command(cmd: &mut Value) -> anyhow::Result<()> {
