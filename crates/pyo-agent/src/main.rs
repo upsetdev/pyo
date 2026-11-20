@@ -31,6 +31,7 @@ mod operators;
 mod pods;
 mod publicdash;
 mod refused;
+mod relay;
 mod rollout;
 mod room;
 mod runs;
@@ -215,6 +216,10 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(gpu::run(agent.kube.clone()));
         tokio::spawn(gateway::collect_loop(agent.clone()));
         tokio::spawn(operators::run(agent.kube.clone()));
+        // pyo-static's key, when the one it has was revoked (trust.rs).
+        tokio::spawn(sites::renew_login(agent.clone()));
+        // Vector's data goes to Pyo through this agent (relay.rs).
+        tokio::spawn(relay::serve(agent.clone()));
     }
     // Checks the policy each run: a cluster made read only later is left be.
     tokio::spawn(cleanup::run(agent.clone()));

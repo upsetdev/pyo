@@ -3357,6 +3357,7 @@ name = "pyo-agent"
 version = "0.4.5"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.23.1",
  "futures",
  "http",

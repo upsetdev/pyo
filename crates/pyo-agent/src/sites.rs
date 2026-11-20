@@ -1,8 +1,10 @@
 //! Pyo Static on this cluster: the static sites `pyo-static` serves
 //! (pyo-proto's site.rs).
 //!
-//! - Its bundle's login Secret gets Pyo's address and the cluster's token
-//!   when the bundle is applied ([`fill_login`]).
+//! - Its bundle's login Secret gets Pyo's address and a key of its own,
+//!   made here and registered with Pyo, when the bundle is applied
+//!   ([`fill_login`]), and a new key when the one there was revoked (a new
+//!   connect command), at the agent's start ([`renew_login`]).
 //! - A static deploy has `pyo-static` fetch its folder first ([`warm`]),
 //!   then moves the site's routes there (gateway.rs sends them to
 //!   `pyo-static` with the folder in a header), and only then removes the
@@ -37,11 +39,25 @@ pub fn marker_name(service: &str) -> String {
     format!("{service}-site")
 }
 
-/// Puts Pyo's address and the cluster's token into the bundle's login
-/// Secret (only its name is pinned). Without them `pyo-static` serves
-/// only what it has cached, so a failure is logged, not fatal.
+/// pyo-static's login: Pyo's address and a new key of its own (registered
+/// with Pyo), or, from a Pyo that gives none (older), the cluster's token.
+async fn login(agent: &Agent) -> anyhow::Result<serde_json::Value> {
+    let url = agent.api.base_url();
+    match crate::trust::component_key(&agent.api, "static", None).await {
+        Ok((key_id, key)) => Ok(json!({ "url": url, "key-id": key_id, "key": key })),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "couldn't register pyo-static's key; asking for a token");
+            let (url, token) = agent.api.static_login().await?;
+            Ok(json!({ "url": url, "token": token }))
+        }
+    }
+}
+
+/// Puts Pyo's address and pyo-static's key into the bundle's login Secret
+/// (only its name is pinned). Without them `pyo-static` serves only what it
+/// has cached, so a failure is logged, not fatal.
 pub async fn fill_login(agent: &Agent, bundle: &mut SystemBundle) {
-    let login = match agent.api.static_login().await {
+    let login = match login(agent).await {
         Ok(l) => l,
         Err(e) => {
             tracing::warn!(error = %format!("{e:#}"), "couldn't get pyo-static's login");
@@ -50,8 +66,47 @@ pub async fn fill_login(agent: &Agent, bundle: &mut SystemBundle) {
     };
     for o in &mut bundle.objects {
         if o["kind"] == "Secret" && o["metadata"]["name"] == STATIC_LOGIN {
-            o["stringData"] = json!({ "url": login.0, "token": login.1 });
+            o["stringData"] = login.clone();
         }
+    }
+}
+
+/// At the agent's start: a new login for pyo-static, when it's installed
+/// and its key is no longer one Pyo knows (revoked with the cluster's
+/// earlier keys), or it still reads with a token.
+pub async fn renew_login(agent: Agent) {
+    let api = Api::<Secret>::namespaced(agent.kube.clone(), STATIC_NS);
+    let Ok(Some(secret)) = api.get_opt(STATIC_LOGIN).await else {
+        return;
+    };
+    let get = |k: &str| {
+        secret
+            .data
+            .as_ref()
+            .and_then(|d| d.get(k))
+            .and_then(|v| String::from_utf8(v.0.clone()).ok())
+            .unwrap_or_default()
+    };
+    let key_id = get("key-id");
+    if !key_id.is_empty() && agent.api.component_key_live(&key_id).await.unwrap_or(true) {
+        return;
+    }
+    let login = match login(&agent).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "couldn't renew pyo-static's login");
+            return;
+        }
+    };
+    // A login with a key takes the old token away.
+    let patch = if login.get("token").is_none() {
+        json!({ "stringData": login, "data": { "token": null } })
+    } else {
+        json!({ "stringData": login })
+    };
+    match api.patch(STATIC_LOGIN, &PatchParams::default(), &Patch::Merge(&patch)).await {
+        Ok(_) => tracing::info!("renewed pyo-static's login"),
+        Err(e) => tracing::warn!(error = %format!("{e:#}"), "couldn't save pyo-static's login"),
     }
 }
 

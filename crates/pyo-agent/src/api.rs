@@ -265,8 +265,49 @@ impl PyoApi {
         let v: serde_json::Value = Self::check(res).await?.json().await?;
         let token = v["token"].as_str().unwrap_or("").to_owned();
         anyhow::ensure!(!token.is_empty(), "Pyo sent no token");
-        let url = self.base.trim_end_matches("/api/agent/v1").to_owned();
-        Ok((url, token))
+        Ok((self.base_url(), token))
+    }
+
+    /// Vector's batch, sent on as this agent's own request (relay.rs): Pyo's
+    /// status and answer.
+    pub async fn relay(&self, path: &str, body: Vec<u8>) -> anyhow::Result<(u16, String)> {
+        let res = self.send(reqwest::Method::POST, path, Some(body), Duration::from_secs(30)).await?;
+        let status = res.status().as_u16();
+        Ok((status, res.text().await.unwrap_or_default()))
+    }
+
+    /// Pyo's address, as this agent reaches it (for its components).
+    pub fn base_url(&self) -> String {
+        self.base.trim_end_matches("/api/agent/v1").to_owned()
+    }
+
+    /// Whether a component's key is still one Pyo knows for this cluster.
+    pub async fn component_key_live(&self, key_id: &str) -> anyhow::Result<bool> {
+        let res = self
+            .send(reqwest::Method::GET, &format!("/component-keys/{key_id}"), None, Duration::from_secs(20))
+            .await?;
+        match res.status() {
+            s if s.is_success() => Ok(true),
+            reqwest::StatusCode::NOT_FOUND => Ok(false),
+            _ => Err(Self::check(res).await.err().unwrap_or_else(|| anyhow::anyhow!("unexpected answer"))),
+        }
+    }
+
+    /// Registers a component's public key (trust.rs `component_key`): its key id.
+    pub async fn register_component_key(
+        &self,
+        component: &str,
+        builder_id: Option<&str>,
+        public_key: &str,
+    ) -> anyhow::Result<String> {
+        let body = serde_json::json!({ "component": component, "builderId": builder_id, "publicKey": public_key });
+        let res = self
+            .send(reqwest::Method::POST, "/component-keys", Self::json(&body), Duration::from_secs(20))
+            .await?;
+        let v: serde_json::Value = Self::check(res).await?.json().await?;
+        let id = v["keyId"].as_str().unwrap_or("").to_owned();
+        anyhow::ensure!(!id.is_empty(), "Pyo sent no key id");
+        Ok(id)
     }
 
     /// An uploaded certificate and its key, for a domain using it.

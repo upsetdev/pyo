@@ -494,6 +494,23 @@ impl KeyIdentity {
     }
 }
 
+// ── Components' keys ────────────────────────────────────────────────────────
+
+/// A new key for one of the cluster's components (a builder, pyo-static),
+/// made here and registered with Pyo by this agent: its key id and its
+/// PKCS#8 document (standard base64), for the component's Secret. The
+/// private half never leaves the cluster.
+pub async fn component_key(
+    api: &crate::api::PyoApi,
+    component: &str,
+    builder_id: Option<&str>,
+) -> anyhow::Result<(String, String)> {
+    let pkcs8 = pyo_proto::agentauth::RequestKey::generate_pkcs8().map_err(anyhow::Error::msg)?;
+    let key = pyo_proto::agentauth::RequestKey::from_pkcs8(&pkcs8).map_err(anyhow::Error::msg)?;
+    let key_id = api.register_component_key(component, builder_id, &key.public_key()).await?;
+    Ok((key_id, b64(&pkcs8)))
+}
+
 /// `pyo-agent sign-request METHOD PATH [--at UNIX_SECONDS] [--key-id ID]`:
 /// the two headers that sign a request with this agent's stored key, empty
 /// body. For tests of the API's checks (a replay, a stale time, a key id

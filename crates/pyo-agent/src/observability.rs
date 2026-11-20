@@ -1,7 +1,7 @@
 //! Website analytics and server metrics on this cluster: the gateway
 //! (Envoy) writes a JSON access log, and a Vector DaemonSet forwards those lines, plus each
-//! server's own load, disk I/O and network (Vector's host_metrics), to the
-//! Pyo API with this agent's token.
+//! server's own load, disk I/O and network (Vector's host_metrics), to Pyo
+//! through this agent (relay.rs): Vector holds no credential to Pyo.
 //!
 //! Observability is an installation-wide setting, sent with each heartbeat
 //! reply. On: the agent (re)applies Vector at its first reply, so upgrading
@@ -92,7 +92,7 @@ sinks:
   pyo_metrics:
     type: http
     inputs: [host_kept]
-    uri: "__API_URL__/api/agent/v1/host-metrics"
+    uri: "__RELAY__/host-metrics"
     method: post
     encoding:
       codec: json
@@ -109,7 +109,7 @@ sinks:
   pyo:
     type: http
     inputs: [access]
-    uri: "__API_URL__/api/agent/v1/access-logs"
+    uri: "__RELAY__/access-logs"
     method: post
     encoding:
       codec: json
@@ -195,14 +195,12 @@ async fn vector(client: &Client) -> anyhow::Result<()> {
         .patch("pyo-vector", &pp(), &Patch::Apply(json!({ "apiVersion": "v1", "kind": "ServiceAccount", "metadata": { "name": "pyo-vector", "labels": labels } })))
         .await?;
     // Vector won't expand env vars in the sink URI, so the config carries the
-    // URL and token itself, and lives in a Secret.
-    let url = std::env::var("PYO_API_URL")?
-        .trim_end_matches('/')
-        .to_owned();
-    let token = std::env::var("PYO_AGENT_TOKEN")?;
+    // relay's address and token itself, and lives in a Secret. Both are this
+    // agent process's: a new agent writes them anew.
+    let relay = crate::relay::endpoint(client).await?;
     let config = VECTOR_CONFIG
-        .replace("__API_URL__", &url)
-        .replace("__TOKEN__", &token);
+        .replace("__RELAY__", &relay)
+        .replace("__TOKEN__", crate::relay::token());
     Api::<Secret>::namespaced(client.clone(), NS)
         .patch(
             "pyo-vector",

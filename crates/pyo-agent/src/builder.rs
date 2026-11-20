@@ -72,13 +72,34 @@ pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String>
     let pp = PatchParams::apply(MANAGER).force();
     let labels = json!({ "app.kubernetes.io/name": "pyo-builder", "app.kubernetes.io/managed-by": MANAGER, "pyo/builder-id": spec.builder_id });
 
+    // Its own key, made here and registered with Pyo: it signs its
+    // requests with it. The token is only its registry door login.
+    let mut env = serde_json::Map::new();
+    env.insert("PYO_API_URL".into(), json!(spec.api_url));
+    if !spec.token.is_empty() {
+        env.insert("PYO_BUILDER_TOKEN".into(), json!(spec.token));
+    }
+    match crate::trust::component_key(&agent.api, "builder", Some(&spec.builder_id)).await {
+        Ok((key_id, pkcs8)) => {
+            env.insert("PYO_BUILDER_KEY_ID".into(), json!(key_id));
+            env.insert("PYO_BUILDER_KEY".into(), json!(pkcs8));
+        }
+        Err(e) => tracing::warn!(builder = %spec.builder_id, error = %format!("{e:#}"), "couldn't register the builder's key"),
+    }
+    // Restarted on a new login: it reads them at start.
+    let login_stamp = pyo_proto::token_hash(&format!(
+        "{}\n{}",
+        env.get("PYO_BUILDER_KEY_ID").and_then(|v| v.as_str()).unwrap_or(""),
+        pyo_proto::token_hash(&spec.token)
+    ))[..16]
+        .to_owned();
     Api::<Secret>::namespaced(c.clone(), NS)
         .patch(
             &name,
             &pp,
             &Patch::Apply(json!({
                 "apiVersion": "v1", "kind": "Secret", "metadata": { "name": name, "labels": labels }, "type": "Opaque",
-                "stringData": { "PYO_API_URL": spec.api_url, "PYO_BUILDER_TOKEN": spec.token },
+                "stringData": env,
             })),
         )
         .await?;
@@ -106,7 +127,7 @@ pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String>
                     "strategy": { "type": "Recreate" },
                     "selector": { "matchLabels": { "pyo/builder-id": spec.builder_id } },
                     "template": {
-                        "metadata": { "labels": labels },
+                        "metadata": { "labels": labels, "annotations": { "pyo.dev/login": login_stamp } },
                         "spec": {
                             "nodeSelector": { "kubernetes.io/hostname": spec.server },
                             // Build-only servers (join.sh --builder) are tainted for everything else.

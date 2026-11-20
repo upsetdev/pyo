@@ -871,6 +871,7 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
         public_dashboard: crate::publicdash::report(client).await,
         host_proof: None,
         updates: pyo_proto::UPDATES_VERSION,
+        component_keys: true,
         scope: None,
         bundles: crate::bundles::report(client, &bundle_namespaces).await,
         databases,
