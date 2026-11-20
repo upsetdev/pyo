@@ -6375,24 +6375,26 @@ async fn apply(
                 reserved_cluster_name(&name)?;
                 name
             };
-            let token = secret_token();
             // Detected per server from its public address; a cluster-wide one is optional.
             let location = if location.trim().is_empty() {
                 String::new()
             } else {
                 require_location(&location)?
             };
+            // The agent's token is made when the connect command first
+            // fetches its manifest (install.rs): none works before.
             sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, description, location, agent_token_hash, tags, name_from_host) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
                 .bind(&id)
                 .bind(&team_id)
                 .bind(&name)
                 .bind(description.trim())
                 .bind(&location)
-                .bind(sha256_hex(&token))
+                .bind(sha256_hex(&secret_token()))
                 .bind(&tags)
                 .bind(from_host)
                 .execute(&mut **tx)
                 .await?;
+            let token = crate::install::new_connect_token(tx, &id, &team_id).await?;
             sqlx::query("UPDATE pyo.teams SET default_cluster_id = coalesce(default_cluster_id, $2) WHERE id = $1").bind(&team_id).bind(&id).execute(&mut **tx).await?;
             // Run on this machine, the installer reaches Pyo at localhost,
             // so the agent is given the in-cluster address (install.rs).
@@ -6426,14 +6428,15 @@ async fn apply(
                     "Connect one of your own servers. Pyo doesn't run on them here.",
                 ));
             }
-            let token = secret_token();
-            // The agent's certificates go too: it connects again with the new command.
+            // The agent's token, keys and certificates go: it connects again
+            // with the new command, whose connect token makes its new token.
             crate::agent_auth::revoke(tx, &id).await?;
             sqlx::query("UPDATE pyo.clusters SET agent_token_hash = $2, agent_cert_serial = NULL, agent_cert_prev_serial = NULL WHERE id = $1")
                 .bind(&id)
-                .bind(sha256_hex(&token))
+                .bind(sha256_hex(&secret_token()))
                 .execute(&mut **tx)
                 .await?;
+            let token = crate::install::new_connect_token(tx, &id, &team_id).await?;
             // As in CreateCluster: run where Pyo runs, the agent dials the in-cluster address.
             let (command, tailnet) = if this_machine {
                 (

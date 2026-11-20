@@ -95,6 +95,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'podCidr', coalesce(capabilities->>'podCidr', ''),
             'serviceCidr', coalesce(capabilities->>'serviceCidr', ''),
             'createdAt', pyo.ms(created_at),
+            -- Its connect command works until then, unless its agent connected (install.rs).
+            'connectExpiresAt', CASE WHEN connect_token_used_at IS NULL THEN pyo.ms(connect_token_expires_at) END,
             'lastSeenAt', coalesce(pyo.ms(last_seen_at), 0))
            FROM pyo.clusters WHERE team_id = ANY($1) ORDER BY created_at",
         &team_ids,

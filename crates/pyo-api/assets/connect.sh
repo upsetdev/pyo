@@ -7,7 +7,7 @@
 #     [--registry server-1.tail1234.ts.net:5006 --registry-token 9b1c...]
 #
 #   --api            where the agent reaches Pyo
-#   --token          the cluster's agent token (shown once in Pyo)
+#   --token          the connect token (works once, within an hour)
 #   --tailscale-key  joins your tailnet first (a single-use key from Pyo)
 #   --registry       Pyo's registry door, for images Pyo builds
 #   --registry-token this cluster's login there (pull only)
@@ -1012,6 +1012,8 @@ code=$(curl -sS -o "$MANIFEST" -w '%{http_code}' --max-time 30 "$API/install/age
 case "$code" in
   200) ;;
   404) echo "Pyo at $API doesn't know this token. Was the cluster removed, or the token rotated? Copy a fresh command from Pyo." >&2; exit 1 ;;
+  409) echo "This command was used already. Get a new one in Pyo: open the cluster and show its install command." >&2; exit 1 ;;
+  410) echo "This command expired. Get a new one in Pyo: open the cluster and show its install command." >&2; exit 1 ;;
   000) echo "Can't reach Pyo at $API from this machine. Is it on the same network (or tailnet), and is port ${API##*:} open?" >&2; exit 1 ;;
   *) echo "Pyo at $API answered $code for the agent manifest." >&2; exit 1 ;;
 esac

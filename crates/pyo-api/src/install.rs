@@ -1,7 +1,12 @@
 //! The agent's install manifest: `kubectl apply -f <api>/install/agent.yaml?token=…`.
 //!
-//! The token is the cluster's agent credential; it's only valid for the
-//! cluster it was issued to and can be rotated from the dashboard.
+//! The token in a connect command is a connect token ([`new_connect_token`]):
+//! one cluster's, made for its team, good for an hour and for one agent.
+//! Fetching the manifest with it makes the agent's own token, which goes
+//! only into the manifest (a command run again within the hour, after a
+//! failed try, makes another). Once that agent reports in, the connect
+//! token is used up. The agent's own token also fetches the manifest
+//! again, unchanged: the refresh command reads it from the agent there.
 
 use crate::error::Query;
 use axum::{extract::State, http::header, response::IntoResponse};
@@ -18,19 +23,107 @@ pub struct InstallQuery {
     token: String,
 }
 
+/// How long a connect command works.
+pub const CONNECT_TOKEN_HOURS: i32 = 1;
+
+/// Said when a connect command ran after its hour.
+pub const CONNECT_EXPIRED: &str =
+    "This connect command expired. Get a new one in Pyo: open the cluster and show its install command.";
+/// Said when its agent already connected with it.
+pub const CONNECT_USED: &str =
+    "This connect command was used already. Get a new one in Pyo: open the cluster and show its install command.";
+
+/// A new connect command's token for a cluster of `team_id`: good for
+/// [`CONNECT_TOKEN_HOURS`], once. One before it stops working.
+pub async fn new_connect_token(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cluster_id: &str,
+    team_id: &str,
+) -> ApiResult<String> {
+    let token = crate::ids::secret_token();
+    sqlx::query(
+        "UPDATE pyo.clusters SET connect_token_hash = $2, connect_token_team = $3,
+                connect_token_expires_at = now() + make_interval(hours => $4), connect_token_used_at = NULL
+          WHERE id = $1",
+    )
+    .bind(cluster_id)
+    .bind(sha256_hex(&token))
+    .bind(team_id)
+    .bind(CONNECT_TOKEN_HOURS)
+    .execute(&mut **tx)
+    .await?;
+    Ok(token)
+}
+
+/// The cluster's agent reported in: its connect command is used up. (The
+/// agent before it was cut off when that command was made.)
+pub async fn agent_reported(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cluster_id: &str,
+) -> ApiResult<()> {
+    sqlx::query(
+        "UPDATE pyo.clusters SET connect_token_used_at = now()
+          WHERE id = $1 AND connect_token_hash IS NOT NULL AND connect_token_used_at IS NULL",
+    )
+    .bind(cluster_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Which cluster a manifest fetch is for, and the agent token its manifest
+/// carries: a new one for a connect token, the same one for the agent's own.
+async fn token_for_manifest(db: &sqlx::PgPool, token: &str) -> ApiResult<(String, String)> {
+    if !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiError::not_found("Install token"));
+    }
+    let hash = sha256_hex(token);
+    let mut tx = db.begin().await?;
+    let row: Option<(String, bool, bool, bool, bool)> = sqlx::query_as(
+        "SELECT id, agent_token_hash = $1, coalesce(connect_token_team = team_id, false),
+                coalesce(connect_token_expires_at > now(), false), connect_token_used_at IS NOT NULL
+           FROM pyo.clusters WHERE agent_token_hash = $1 OR connect_token_hash = $1 FOR UPDATE",
+    )
+    .bind(&hash)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((cluster, agent_token, same_team, fresh, used)) = row else {
+        return Err(ApiError::not_found("Install token"));
+    };
+    if agent_token {
+        return Ok((cluster, token.to_owned()));
+    }
+    // A connect token, bound to the team it was made for.
+    if !same_team {
+        return Err(ApiError::not_found("Install token"));
+    }
+    if used {
+        return Err(ApiError::conflict(CONNECT_USED));
+    }
+    if !fresh {
+        return Err(ApiError::new(axum::http::StatusCode::GONE, CONNECT_EXPIRED));
+    }
+    // The agent's own token, shown nowhere. Its keys and certificate come
+    // with it (enrolled once, with this token).
+    let agent = crate::ids::secret_token();
+    sqlx::query(
+        "UPDATE pyo.clusters SET agent_token_hash = $2, agent_token_used_hash = NULL WHERE id = $1",
+    )
+    .bind(&cluster)
+    .bind(sha256_hex(&agent))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    tracing::info!(%cluster, "connect command fetched the agent's manifest");
+    Ok((cluster, agent))
+}
+
 pub async fn manifest(
     State(s): State<AppState>,
     headers: axum::http::HeaderMap,
     Query(q): Query<InstallQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    let cluster: Option<String> =
-        sqlx::query_scalar("SELECT id FROM pyo.clusters WHERE agent_token_hash = $1")
-            .bind(sha256_hex(&q.token))
-            .fetch_optional(&s.db)
-            .await?;
-    let Some(cluster) = cluster.filter(|_| q.token.bytes().all(|b| b.is_ascii_hexdigit())) else {
-        return Err(ApiError::not_found("Install token"));
-    };
+    let (cluster, token) = token_for_manifest(&s.db, q.token.trim()).await?;
     // Pyo Cloud: the agent dials the mTLS endpoint, trusts only its CA and
     // runs only commands the signer signed for this cluster (agent_tls.rs,
     // the agent's trust.rs).
@@ -57,7 +150,7 @@ pub async fn manifest(
         if let Some(signer) = crate::command_signer() {
             env.push(("PYO_COMMAND_KEY", signer.public_keys()));
         }
-        let yaml = render_with(&endpoint, &s.config.agent_image, &q.token, &env);
+        let yaml = render_with(&endpoint, &s.config.agent_image, &token, &env);
         return Ok((
             [
                 (header::CONTENT_TYPE, "application/yaml"),
@@ -75,7 +168,7 @@ pub async fn manifest(
     } else {
         base
     };
-    let yaml = render(&api, &s.config.agent_image, &q.token);
+    let yaml = render(&api, &s.config.agent_image, &token);
     Ok((
         [
             (header::CONTENT_TYPE, "application/yaml"),
@@ -1352,5 +1445,77 @@ mod gateway_crds_tests {
         );
         let both = docs(&gateway_crds_yaml(true));
         assert_eq!(both.len(), envoy_only.len() + docs(GATEWAY_API_CRDS).len());
+    }
+}
+
+#[cfg(test)]
+mod connect_token_tests {
+    use super::*;
+
+    /// Against a throwaway Postgres: a connect command's token fetches the
+    /// manifest (with an agent token of its own) until its agent reports
+    /// in or its hour is over; another team's, or a used or expired one,
+    /// gets nothing. The agent's own token fetches the same manifest again.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn connect_tokens_work_once_within_the_hour() {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let run = crate::ids::random_string(8);
+        let (team, other, cl) = (format!("team_c{run}"), format!("team_x{run}"), format!("cl_c{run}"));
+        for t in [&team, &other] {
+            sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(t).execute(&db).await.unwrap();
+        }
+        sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $3)")
+            .bind(&cl)
+            .bind(&team)
+            .bind(sha256_hex(&crate::ids::secret_token()))
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut tx = db.begin().await.unwrap();
+        let connect = new_connect_token(&mut tx, &cl, &team).await.unwrap();
+        tx.commit().await.unwrap();
+        let agent_hash = || async {
+            sqlx::query_scalar::<_, String>("SELECT agent_token_hash FROM pyo.clusters WHERE id = $1").bind(&cl).fetch_one(&db).await.unwrap()
+        };
+
+        // Its manifest carries an agent token of its own, never the connect token.
+        let (c, first) = token_for_manifest(&db, &connect).await.unwrap();
+        assert_eq!(c, cl);
+        assert_ne!(first, connect);
+        assert_eq!(agent_hash().await, sha256_hex(&first));
+        // Run again before the agent reports in (a failed try): another one.
+        let (_, second) = token_for_manifest(&db, &connect).await.unwrap();
+        assert_ne!(second, first);
+        assert_eq!(agent_hash().await, sha256_hex(&second));
+        // The agent's own token: the same manifest again (the refresh command).
+        assert_eq!(token_for_manifest(&db, &second).await.unwrap().1, second);
+        assert!(token_for_manifest(&db, &first).await.is_err());
+
+        // Its agent reports in: the command is used up.
+        let mut tx = db.begin().await.unwrap();
+        agent_reported(&mut tx, &cl).await.unwrap();
+        tx.commit().await.unwrap();
+        let used = token_for_manifest(&db, &connect).await.unwrap_err();
+        assert_eq!((used.status, used.message.as_str()), (axum::http::StatusCode::CONFLICT, CONNECT_USED));
+        assert_eq!(token_for_manifest(&db, &second).await.unwrap().1, second);
+
+        // A new command, after its hour.
+        let mut tx = db.begin().await.unwrap();
+        let late = new_connect_token(&mut tx, &cl, &team).await.unwrap();
+        tx.commit().await.unwrap();
+        assert!(token_for_manifest(&db, &connect).await.is_err(), "the command before it stops working");
+        sqlx::query("UPDATE pyo.clusters SET connect_token_expires_at = now() - interval '1 minute' WHERE id = $1").bind(&cl).execute(&db).await.unwrap();
+        let expired = token_for_manifest(&db, &late).await.unwrap_err();
+        assert_eq!((expired.status, expired.message.as_str()), (axum::http::StatusCode::GONE, CONNECT_EXPIRED));
+
+        // Made for another team (the cluster isn't its): nothing.
+        let mut tx = db.begin().await.unwrap();
+        let foreign = new_connect_token(&mut tx, &cl, &other).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(token_for_manifest(&db, &foreign).await.unwrap_err().status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(token_for_manifest(&db, "not-hex").await.unwrap_err().status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(agent_hash().await, sha256_hex(&second), "nothing above changed the agent's token");
     }
 }

@@ -358,6 +358,7 @@ async fn heartbeat(
             .bind(&cluster.id)
             .fetch_one(&mut *tx)
             .await?;
+    crate::install::agent_reported(&mut tx, &cluster.id).await?;
     sqlx::query(
         "UPDATE pyo.clusters SET status = $2, version = $3, agent_version = $4, capabilities = $5, workloads = $6, same_cluster = $7, last_seen_at = now() WHERE id = $1",
     )
