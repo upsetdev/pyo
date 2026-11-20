@@ -28,8 +28,8 @@ export function Command({ value }: { value: string }) {
 
 /**
  * The one command that sets up a cluster: it installs k3s on the machine if
- * it isn't there, then the Pyo agent. The token in it is the agent's
- * credential and is only shown here, once.
+ * it isn't there, then the Pyo agent. The token in it works once, for an
+ * hour: the agent gets a credential of its own.
  */
 export function AgentInstall({
   token,
@@ -49,7 +49,7 @@ export function AgentInstall({
     <div className="space-y-2">
       <LiveCommand command={command} stale={stale} />
       <p className="text-[12px] leading-relaxed text-muted-foreground">
-        Token shown once
+        Works once, for an hour
         {thisMachine ? null : " · "}
         {thisMachine ? null : (
           <button

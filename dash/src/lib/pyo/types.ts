@@ -390,6 +390,8 @@ export type Cluster = {
     apiEndpoint: string;
     agentVersion?: string;
   };
+  /** Until then its install command works, while its agent hasn't connected. */
+  connectExpiresAt?: Timestamp | null;
   capabilities: {
     /** The gateway: "envoy", or "none" until it answers. */
     ingressController: "envoy" | "none";

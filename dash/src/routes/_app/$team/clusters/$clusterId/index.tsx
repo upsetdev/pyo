@@ -66,12 +66,15 @@ function ClusterOverview() {
               variant="secondary"
               onClick={() => setShowCommand(true)}
             >
-              Show install command
+              {c.connectExpiresAt && c.connectExpiresAt < Date.now()
+                ? "New command"
+                : "Show install command"}
             </Button>
           }
         >
-          Waiting for the agent&apos;s first report. Run the install command on
-          the machine to connect it.
+          {c.connectExpiresAt && c.connectExpiresAt < Date.now()
+            ? "The install command expired. Get a new one and run it on the machine."
+            : "Waiting for the agent\u2019s first report. Run the install command on the machine to connect it."}
         </StatusNote>
       ) : c.status === "unreachable" ? (
         <Callout tone="danger" title="Cluster unreachable">
