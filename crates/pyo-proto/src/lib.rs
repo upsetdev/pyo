@@ -1005,6 +1005,12 @@ pub enum Command {
     FetchLogs {
         service: ServiceRef,
         tail_lines: i64,
+        /// Only lines from the last this many seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_seconds: Option<i64>,
+        /// Only this replica (pod), by name.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        replica: String,
     },
     /// Stop watching a rollout and report it cancelled.
     Cancel {

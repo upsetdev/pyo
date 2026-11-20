@@ -1025,7 +1025,9 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
         }
         "get_service_logs" => {
             let id = service_id(args)?;
-            let v = ops::fetch_service_logs(s, user, id).await.map_err(err)?;
+            let v = ops::fetch_service_logs(s, user, id, Default::default())
+                .await
+                .map_err(err)?;
             let lines: Vec<String> = v["logs"]
                 .as_array()
                 .cloned()

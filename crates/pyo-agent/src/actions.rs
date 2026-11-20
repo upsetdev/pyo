@@ -50,7 +50,9 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         Command::FetchLogs {
             service,
             tail_lines,
-        } => return logs(agent, &service, tail_lines).await,
+            since_seconds,
+            replica,
+        } => return logs(agent, &service, tail_lines, since_seconds, &replica).await,
         Command::EnsureBuilder(spec) => crate::builder::ensure(agent, &spec).await,
         Command::RemoveBuilder { builder_id } => crate::builder::remove(agent, &builder_id).await,
         Command::RemoveServer { server, force } => {
@@ -681,15 +683,27 @@ async fn cordon(
     ))
 }
 
-async fn logs(agent: &Agent, service: &ServiceRef, tail_lines: i64) -> CommandResult {
+async fn logs(
+    agent: &Agent,
+    service: &ServiceRef,
+    tail_lines: i64,
+    since_seconds: Option<i64>,
+    replica: &str,
+) -> CommandResult {
     let pods = Api::<Pod>::namespaced(agent.kube.clone(), &service.namespace);
-    let list = match pods
+    let mut list = match pods
         .list(&ListParams::default().labels(&format!("{SERVICE_LABEL}={}", service.service_id)))
         .await
     {
         Ok(l) => l.items,
         Err(e) => return failed(format!("Couldn't list pods: {e}")),
     };
+    if !replica.is_empty() {
+        list.retain(|p| p.name_any() == replica);
+        if list.is_empty() {
+            return failed(format!("{} has no replica {replica}.", service.name));
+        }
+    }
     // A static site: its requests, from pyo-static's output.
     if list.is_empty()
         && crate::sites::marked(&agent.kube, service)
@@ -713,6 +727,7 @@ async fn logs(agent: &Agent, service: &ServiceRef, tail_lines: i64) -> CommandRe
         let name = p.name_any();
         let lp = LogParams {
             tail_lines: Some(tail_lines.clamp(1, 2000)),
+            since_seconds: since_seconds.filter(|s| *s > 0),
             timestamps: true,
             ..Default::default()
         };
