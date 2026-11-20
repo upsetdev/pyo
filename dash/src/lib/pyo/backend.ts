@@ -826,23 +826,42 @@ export type Meta = {
 };
 export const fetchMeta = () => request<Meta>("/api/v1/meta");
 
+/** How often a Pyo Cloud plan is paid. */
+export type BillingInterval = "month" | "year";
+
 /** A team's Pyo Cloud billing (only on a hosted build: see Meta.features). */
 export type CloudBilling = {
   servers: number;
   pricePerServerUsd: number;
+  pricePerServerYearUsd: number;
   totalUsd: number;
+  totalYearUsd: number;
   status: "none" | "active" | "past_due" | "paused" | "canceled";
   provider: "polar" | "midtrans" | "test" | null;
+  interval: BillingInterval;
+  /** Servers paid for this period. */
   seats: number;
   periodEnd: number | null;
+  /** Cancelled: it ends at periodEnd. */
+  cancelAtPeriodEnd: boolean;
+  /** Past due: when deploys pause. */
   graceUntil: number | null;
+  /** Paused or ended: when the team's data is deleted. */
+  retainUntil: number | null;
+  /** Days data is kept after a team is paused or ended. Not served yet by
+   * cloud-api (PYO_CLOUD_RETAIN_DAYS), so the page assumes 30 without it. */
+  retainDays?: number;
+  /** The request allowance (shown, never enforced). `used` is null until it's counted. */
+  requests: { perServer: number; included: number; used: number | null } | null;
   country: string;
-  polar: { configured: boolean; portal: boolean };
+  polar: { configured: boolean; yearly: boolean; portal: boolean };
   /** Present only for visitors in Indonesia. */
   midtrans: {
     configured: boolean;
     pricePerServerIdr: number;
+    pricePerServerYearIdr: number;
     totalIdr: number;
+    totalYearIdr: number;
     /** Servers beyond what's paid this period, payable now (prorated). */
     topUpServers: number;
     topUpIdr: number;
@@ -850,11 +869,48 @@ export type CloudBilling = {
   /** A development build's payments without a provider (no money moves). */
   testPayments?: boolean;
 };
+
+/** A payment or a refund, from what Polar and Midtrans told Pyo Cloud. */
+export type BillingPayment = {
+  id: string;
+  provider: "polar" | "midtrans" | "test";
+  kind: "payment" | "refund";
+  at: number;
+  /** Cents for USD, whole rupiah for IDR. Tax included. */
+  amount: number;
+  currency: "usd" | "idr";
+  /** What it paid for ("3 servers, 1 month"). */
+  description: string;
+  status: "paid" | "refunded" | "partially_refunded" | "failed" | "pending";
+  /** A Polar order: its receipt opens through cloudBilling.receipt. */
+  order: string | null;
+};
+
 export const cloudBilling = {
   get: (team: string) => request<CloudBilling>(`/api/cloud/billing?${new URLSearchParams({ team })}`),
-  polarCheckout: (team: string) => request<{ url: string }>("/api/cloud/billing/polar/checkout", { method: "POST", body: { team } }),
+  polarCheckout: (team: string, interval: BillingInterval) =>
+    request<{ url: string }>("/api/cloud/billing/polar/checkout", { method: "POST", body: { team, interval } }),
   polarPortal: (team: string) => request<{ url: string }>("/api/cloud/billing/polar/portal", { method: "POST", body: { team } }),
-  midtransCheckout: (team: string, kind: "month" | "topup") =>
+  midtransCheckout: (team: string, kind: BillingInterval | "topup") =>
     request<{ token: string; redirectUrl: string }>("/api/cloud/billing/midtrans/checkout", { method: "POST", body: { team, kind } }),
   testPay: (team: string) => request<{ ok: boolean }>("/api/cloud/billing/test/pay", { method: "POST", body: { team } }),
+
+  // Not in cloud-api yet (billing.rs): the page calls these, and shows the
+  // error until they exist.
+
+  /** Payments and refunds, newest first. Read from cloud.billing_events. */
+  history: (team: string) =>
+    request<{ payments: BillingPayment[] }>(`/api/cloud/billing/history?${new URLSearchParams({ team })}`),
+  /** A Polar order's receipt (Polar's invoice URL, made on demand). */
+  receipt: (team: string, order: string) =>
+    request<{ url: string }>("/api/cloud/billing/polar/receipt", { method: "POST", body: { team, order } }),
+  /** Moves a Polar subscription to the monthly or yearly product, now, prorated. */
+  setInterval: (team: string, interval: BillingInterval) =>
+    request<{ interval: BillingInterval }>("/api/cloud/billing/interval", { method: "POST", body: { team, interval } }),
+  /** Cancels a Polar subscription at the period's end. */
+  cancel: (team: string) =>
+    request<{ cancelAtPeriodEnd: boolean; periodEnd: number | null }>("/api/cloud/billing/cancel", { method: "POST", body: { team } }),
+  /** Undoes cancelling, while the period lasts. */
+  resume: (team: string) =>
+    request<{ cancelAtPeriodEnd: boolean }>("/api/cloud/billing/resume", { method: "POST", body: { team } }),
 };
