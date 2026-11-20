@@ -17,6 +17,23 @@ export function useHosted(): boolean | undefined {
   return meta.status === "success" && meta.data.features.includes("managed");
 }
 
+/** This Pyo's version, once the API has said. */
+export function usePyoVersion(): string | undefined {
+  const meta = useQuery("meta", fetchMeta);
+  return meta.status === "success" ? meta.data.version : undefined;
+}
+
+/** Whether version `a` is older than `b` ("0.4.5" < "0.5.0"). Unknown: no. */
+export function olderVersion(a: string | undefined, b: string | undefined) {
+  const parse = (v?: string) =>
+    /^v?(\d+)\.(\d+)\.(\d+)/.exec(v ?? "")?.slice(1).map(Number);
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
+}
+
 /**
  * On a hosted Pyo (the API lists the "managed" feature), installation
  * settings the Pyo team runs show a note instead of their controls.

@@ -1016,7 +1016,10 @@ export const api = {
   updateTeam(
     id: string,
     patch: Partial<
-      Pick<Team, "name" | "description" | "defaultClusterId" | "preferences">
+      Pick<
+        Team,
+        "name" | "description" | "defaultClusterId" | "preferences" | "agentUpdates"
+      >
     >,
   ) {
     update((s) => {
@@ -2300,6 +2303,16 @@ export const api = {
       { id, thisMachine },
     );
     return res ? { token: res.token, command: res.command } : null;
+  },
+  /** On a hosted Pyo: moves the cluster's agent to Pyo's version now. */
+  async updateClusterAgent(id: string) {
+    const res = await send<{ commandId: string }>("updateClusterAgent", { id });
+    if (res)
+      update((s) => {
+        const c = s.clusters.find((x) => x.id === id);
+        if (c) c.agentUpdate = { status: "pending", at: Date.now() };
+      });
+    return res;
   },
   updateCluster(
     id: string,

@@ -13,6 +13,7 @@ import {
   usePyo,
 } from "~/lib/pyo/store";
 import { SandboxLimitsPanel } from "~/components/pyo/sandbox/SandboxLimits";
+import { useHosted } from "~/components/pyo/Managed";
 import { toast } from "~/lib/pyo/toast";
 import type { Team } from "~/lib/pyo/types";
 import { CopyButton } from "~/components/ui/Table";
@@ -49,6 +50,7 @@ function TeamSettings({ ws }: { ws: Team }) {
   );
   const [prefs, setPrefs] = useState(ws.preferences);
   const [deleting, setDeleting] = useState(false);
+  const hosted = useHosted();
   const dirty =
     name !== ws.name ||
     description !== ws.description ||
@@ -137,6 +139,29 @@ function TeamSettings({ ws }: { ws: Team }) {
           </Button>
         </div>
       </Panel>
+      {hosted ? (
+        <Panel title="Agents">
+          <div className="p-4">
+            <Switch
+              checked={(ws.agentUpdates ?? "auto") === "auto"}
+              onChange={(v) => {
+                void api
+                  .updateTeam(ws.id, { agentUpdates: v ? "auto" : "manual" })
+                  .then((r) => {
+                    if (r)
+                      toast({
+                        title: v
+                          ? "Agents update automatically"
+                          : "You choose when agents update",
+                      });
+                  });
+              }}
+              label="Update agents automatically"
+              description="Off: update each cluster from its settings."
+            />
+          </div>
+        </Panel>
+      ) : null}
       {s.user.isAdmin && sandboxServersIn(s, ws.id).length ? (
         <SandboxLimitsPanel teamId={ws.id} />
       ) : null}

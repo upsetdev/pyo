@@ -25,6 +25,8 @@ export type Team = {
     autoDeployOnPush: boolean;
     retainDeployments: number;
   };
+  /** On a hosted Pyo: its agents update on their own, or when it chooses. */
+  agentUpdates?: "auto" | "manual";
 };
 
 export type User = {
@@ -392,6 +394,12 @@ export type Cluster = {
   };
   /** Until then its install command works, while its agent hasn't connected. */
   connectExpiresAt?: Timestamp | null;
+  /** Its agent's last update (a hosted Pyo's cluster page). */
+  agentUpdate?: {
+    status: "pending" | "sent" | "done" | "failed";
+    message?: string | null;
+    at: Timestamp;
+  } | null;
   capabilities: {
     /** The gateway: "envoy", or "none" until it answers. */
     ingressController: "envoy" | "none";

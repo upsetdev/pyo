@@ -4,6 +4,11 @@ import { useState } from "react";
 import { RESERVED_CLUSTER_NAMES } from "~/lib/pyo/location";
 import { AgentInstall, Command } from "~/components/pyo/AgentInstall";
 import { ClusterMtls } from "~/components/pyo/Mtls";
+import {
+  olderVersion,
+  useHosted,
+  usePyoVersion,
+} from "~/components/pyo/Managed";
 import { ClusterPublicTraffic, ClusterTrafficMode } from "~/components/pyo/TrafficMode";
 import { Badge, ClusterStatusBadge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -43,6 +48,13 @@ function ClusterSettings({ c }: { c: Cluster }) {
   // Gone for 10 minutes: removable with its services (as the API allows).
   const gone = Date.now() - c.lastSeenAt >= 10 * 60_000;
   const install = c.capabilities.agentInstall;
+  // A hosted Pyo's agents follow its version (automatic, or when the team says).
+  const hosted = useHosted();
+  const pyoVersion = usePyoVersion();
+  const agentBehind =
+    hosted === true && olderVersion(c.connection.agentVersion, pyoVersion);
+  const agentUpdating =
+    c.agentUpdate?.status === "pending" || c.agentUpdate?.status === "sent";
   const dirty = name !== c.name || tags.join() !== (c.tags ?? []).join();
   // The name is the cluster's URL, so it follows the same rules as on creation.
   const nameError = !DNS_LABEL.test(name)
@@ -175,6 +187,38 @@ function ClusterSettings({ c }: { c: Cluster }) {
               "Agent",
               <span className="inline-flex flex-wrap items-center gap-2">
                 {c.connection.agentVersion ?? "—"}
+                {agentBehind ? (
+                  agentUpdating ? (
+                    <Badge tone="progress">Updating</Badge>
+                  ) : (
+                    <>
+                      <Badge tone="info">
+                        <span
+                          title={
+                            c.agentUpdate?.status === "failed"
+                              ? (c.agentUpdate.message ?? undefined)
+                              : undefined
+                          }
+                        >
+                          {c.agentUpdate?.status === "failed"
+                            ? "Update failed"
+                            : "Update available"}
+                        </span>
+                      </Badge>
+                      <Button
+                        size="xs"
+                        variant="secondary"
+                        onClick={() =>
+                          void api.updateClusterAgent(c.id).then((r) => {
+                            if (r) toast({ title: `Updating to ${pyoVersion}` });
+                          })
+                        }
+                      >
+                        Update
+                      </Button>
+                    </>
+                  )
+                ) : null}
                 {install?.state === "updating" ? (
                   <Badge tone="progress">Updating</Badge>
                 ) : install?.state === "outdated" ? (
