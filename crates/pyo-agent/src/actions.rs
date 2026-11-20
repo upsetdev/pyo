@@ -577,7 +577,8 @@ pub async fn wait_let_go(
     let pods = Api::<Pod>::namespaced(client.clone(), ns);
     let deadline = tokio::time::Instant::now() + wait;
     loop {
-        let users = claim_users(&pods.list(&ListParams::default()).await?.items, claim);
+        let live = ListParams::default().fields(crate::pods::LIVE);
+        let users = claim_users(&crate::pods::list_pods(&pods, &live).await?, claim);
         if users.is_empty() {
             return Ok(None);
         }
@@ -730,11 +731,10 @@ pub async fn read_logs(
     replica: &str,
 ) -> Result<RecentLogs, String> {
     let pods = Api::<Pod>::namespaced(agent.kube.clone(), &service.namespace);
-    let mut list = pods
-        .list(&ListParams::default().labels(&format!("{SERVICE_LABEL}={}", service.service_id)))
-        .await
-        .map_err(|e| format!("Couldn't list pods: {e}"))?
-        .items;
+    let mut list =
+        crate::pods::service_pods(&pods, &format!("{SERVICE_LABEL}={}", service.service_id))
+            .await
+            .map_err(|e| format!("Couldn't list pods: {e}"))?;
     if !replica.is_empty() {
         list.retain(|p| p.name_any() == replica);
         if list.is_empty() {

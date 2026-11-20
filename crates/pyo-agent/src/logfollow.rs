@@ -15,10 +15,7 @@ use std::time::Duration;
 
 use futures::{AsyncBufReadExt, SinkExt, StreamExt};
 use k8s_openapi::api::core::v1::Pod;
-use kube::{
-    Api, ResourceExt,
-    api::{ListParams, LogParams},
-};
+use kube::{Api, ResourceExt, api::LogParams};
 use pyo_proto::{LOG_FOLLOW_SECS, LogFrame, LogLine, ServiceRef};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_tungstenite::tungstenite::Message;
@@ -290,10 +287,9 @@ async fn replicas(
     let mut streams = Streams::default();
     loop {
         streams.ended(&mut newest);
-        match pods.list(&ListParams::default().labels(&labels)).await {
+        match crate::pods::service_pods(&pods, &labels).await {
             Ok(list) => {
                 let names: HashSet<String> = list
-                    .items
                     .iter()
                     .map(|p| p.name_any())
                     .filter(|n| replica.is_empty() || *n == replica)

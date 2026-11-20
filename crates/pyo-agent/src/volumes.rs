@@ -74,7 +74,8 @@ async fn wait_unmounted(
     let pods = Api::<Pod>::namespaced(client.clone(), ns);
     let deadline = tokio::time::Instant::now() + wait;
     loop {
-        let users = claim_users(&pods.list(&ListParams::default()).await?.items, claim);
+        let live = ListParams::default().fields(crate::pods::LIVE);
+        let users = claim_users(&crate::pods::list_pods(&pods, &live).await?, claim);
         if users.is_empty() {
             return Ok(());
         }

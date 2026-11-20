@@ -61,6 +61,28 @@ pub async fn list_pods(api: &Api<Pod>, lp: &ListParams) -> kube::Result<Vec<Pod>
     list(api, lp, |p| Some(slim_pod(p))).await
 }
 
+/// The two lists of a service's pods (`selector`): those that haven't
+/// ended, and the ended ones of its Jobs (a cron task's output stays
+/// readable). Never its other ended pods: an evicted replica has no output
+/// left, and a full disk leaves thousands of them.
+pub fn service_lists(selector: &str) -> [ListParams; 2] {
+    [
+        ListParams::default().labels(selector).fields(LIVE),
+        ListParams::default()
+            .labels(&format!("{selector},{}", crate::runs::JOB_LABEL))
+            .fields(ENDED),
+    ]
+}
+
+/// A service's pods as [`service_lists`] picks them, slim, a page at a time.
+pub async fn service_pods(api: &Api<Pod>, selector: &str) -> kube::Result<Vec<Pod>> {
+    let mut pods = vec![];
+    for lp in service_lists(selector) {
+        pods.extend(list_pods(api, &lp).await?);
+    }
+    Ok(pods)
+}
+
 /// A pod with what the agent reads of it: its name, labels, owners and
 /// times; where it runs; what its containers ask for, their ports and
 /// security settings; the claims it mounts; and its status. Not its
@@ -107,6 +129,19 @@ fn slim_container(c: Container) -> Container {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_services_pods_leave_out_ended_replicas() {
+        let [live, ended] = service_lists("pyo/service-id=svc_1");
+        assert_eq!(live.label_selector.as_deref(), Some("pyo/service-id=svc_1"));
+        assert_eq!(live.field_selector.as_deref(), Some(LIVE));
+        // Ended ones only of its Jobs.
+        assert_eq!(
+            ended.label_selector.as_deref(),
+            Some("pyo/service-id=svc_1,batch.kubernetes.io/job-name")
+        );
+        assert_eq!(ended.field_selector.as_deref(), Some(ENDED));
+    }
 
     #[test]
     fn a_slim_pod_keeps_what_is_read() {
