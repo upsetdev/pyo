@@ -47,20 +47,41 @@ impl TeamSettings {
     }
 }
 
-pub async fn settings(db: &PgPool, team_id: &str) -> anyhow::Result<Option<TeamSettings>> {
+pub async fn settings(
+    db: &mut sqlx::PgConnection,
+    team_id: &str,
+) -> anyhow::Result<Option<TeamSettings>> {
     let v: Option<Value> =
         sqlx::query_scalar("SELECT value FROM pyo.team_backup_settings WHERE team_id = $1")
             .bind(team_id)
-            .fetch_optional(db)
+            .fetch_optional(&mut *db)
             .await?;
     Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
+/// Whether teams may keep backups in Pyo's own store, and do by default:
+/// a self-hosted Pyo with one. A hosted Pyo's store is outside every
+/// team's cluster, so its teams back up to S3 buckets only.
+pub fn store_on_pyo() -> bool {
+    team_store(crate::hosted(), backup::local_store().is_some())
+}
+
+fn team_store(hosted: bool, store: bool) -> bool {
+    !hosted && store
+}
+
+/// What a team without a backup store is told.
+pub const NO_STORE: &str = "Add an S3 bucket for the team's backups first (Backups).";
+
 /// The team's settings, or the default: this server's store, volumes off,
-/// with a repository password made (and saved) on first use.
-pub async fn effective(db: &PgPool, team_id: &str) -> anyhow::Result<TeamSettings> {
-    if let Some(s) = settings(db, team_id).await? {
+/// with a repository password made (and saved) on first use. None to
+/// default to: refused until the team adds a bucket.
+pub async fn effective(db: &PgPool, team_id: &str) -> ApiResult<TeamSettings> {
+    if let Some(s) = settings(&mut *db.acquire().await?, team_id).await? {
         return Ok(s);
+    }
+    if !store_on_pyo() {
+        return Err(crate::error::ApiError::conflict(NO_STORE));
     }
     let s = TeamSettings {
         base: backup::Settings::local_default(false),
@@ -146,7 +167,7 @@ pub struct Target {
     pub namespace: Option<String>,
 }
 
-pub async fn targets(db: &PgPool, team_id: &str) -> anyhow::Result<Vec<Target>> {
+pub async fn targets(db: &mut sqlx::PgConnection, team_id: &str) -> anyhow::Result<Vec<Target>> {
     // Labelled "project / service": the same name can be in two projects.
     let services: Vec<(String, String, String, Value, bool)> = sqlx::query_as(
         "SELECT a.id, a.cluster_id, p.name || ' / ' || a.name, a.spec, a.current_deployment_id IS NOT NULL
@@ -154,12 +175,12 @@ pub async fn targets(db: &PgPool, team_id: &str) -> anyhow::Result<Vec<Target>> 
           WHERE a.team_id = $1 AND NOT a.deleting ORDER BY p.name, a.name",
     )
     .bind(team_id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let volumes: Vec<(String, Option<String>, String)> =
         sqlx::query_as("SELECT id, service_id, coalesce(data->>'name', id) FROM pyo.volumes WHERE team_id = $1 AND service_id IS NOT NULL AND NOT deleting ORDER BY data->>'name'")
             .bind(team_id)
-            .fetch_all(db)
+            .fetch_all(&mut *db)
             .await?;
     let mut out = Vec::new();
     for (id, cluster, name, spec, deployed) in &services {
@@ -194,7 +215,7 @@ pub async fn targets(db: &PgPool, team_id: &str) -> anyhow::Result<Vec<Target>> 
           ORDER BY v.data->>'name'",
     )
     .bind(team_id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     for (vid, cluster, project, ns, vname) in detached {
         out.push(Target {
@@ -248,13 +269,22 @@ pub async fn destination(
 ) -> anyhow::Result<(backup::Settings, String, String)> {
     let mut r = cfg.base.resolved()?;
     if cfg.base.is_local() {
+        anyhow::ensure!(store_on_pyo(), NO_STORE);
         let (key, secret) = backup::team_login(&state.db, team_id).await?;
         r.bucket = backup::team_bucket(team_id);
         r.access_key = key.clone();
         return Ok((r, key, secret));
     }
-    let (key, secret) = backup::credentials(state, &r, None)?;
-    Ok((r, key, secret))
+    // The team's own bucket key, sealed with the team's data key (or with
+    // the installation's by a release before 0.5).
+    let sealed = r
+        .secret_sealed
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Enter the secret key."))?;
+    let secret = crate::vault::get()
+        .open_credential(&state.sealer, sealed)
+        .await?;
+    Ok((r.clone(), r.access_key.clone(), secret))
 }
 
 /// The region a backup signs with: Garage's own for the store on Pyo's
@@ -300,7 +330,7 @@ pub async fn queue(
     let password = crate::vault::get().open(&cfg.repo_password_sealed).await?;
     let (_, access_key, secret) = destination(state, team_id, &cfg).await?;
     let mut n = 0;
-    for t in targets(&state.db, team_id).await? {
+    for t in targets(&mut *state.db.acquire().await?, team_id).await? {
         // One asked for by name runs; otherwise only what the team picked.
         match only {
             Some(o) if o != t.id => continue,
@@ -565,7 +595,7 @@ async fn tick(state: &AppState) -> anyhow::Result<()> {
 /// backup would use, this server's store. None: nowhere to back up to.
 fn shown_settings(saved: Option<TeamSettings>) -> Option<TeamSettings> {
     saved.or_else(|| {
-        backup::local_store().map(|_| TeamSettings {
+        store_on_pyo().then(|| TeamSettings {
             base: backup::Settings::local_default(false),
             repo_password_sealed: String::new(),
             mode: all(),
@@ -623,11 +653,11 @@ pub fn volume_status(
 
 /// Each of a team's volumes' `backup` (see [`volume_status`]), by id.
 pub async fn volume_statuses(
-    db: &PgPool,
+    db: &mut sqlx::PgConnection,
     team_id: &str,
 ) -> anyhow::Result<std::collections::HashMap<String, Value>> {
-    let cfg = shown_settings(settings(db, team_id).await?);
-    let targets: std::collections::HashSet<String> = targets(db, team_id)
+    let cfg = shown_settings(settings(&mut *db, team_id).await?);
+    let targets: std::collections::HashSet<String> = targets(&mut *db, team_id)
         .await?
         .into_iter()
         .filter_map(|t| t.volume_id)
@@ -637,17 +667,17 @@ pub async fn volume_statuses(
            FROM pyo.backups WHERE team_id = $1 AND volume_id IS NOT NULL ORDER BY volume_id, created_at DESC",
     )
     .bind(team_id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let good: Vec<(String, i64)> = sqlx::query_as(
         "SELECT volume_id, pyo.ms(max(coalesce(finished_at, created_at))) FROM pyo.backups WHERE team_id = $1 AND volume_id IS NOT NULL AND status = 'succeeded' GROUP BY volume_id",
     )
     .bind(team_id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM pyo.volumes WHERE team_id = $1")
         .bind(team_id)
-        .fetch_all(db)
+        .fetch_all(&mut *db)
         .await?;
     Ok(ids
         .into_iter()
@@ -664,11 +694,11 @@ pub async fn volume_statuses(
 }
 
 /// The dashboard's view: each of the user's teams' settings, targets and runs.
-pub async fn snapshot(db: &PgPool, team_ids: &[String]) -> ApiResult<Vec<Value>> {
+pub async fn snapshot(db: &mut sqlx::PgConnection, team_ids: &[String]) -> ApiResult<Vec<Value>> {
     let mut out = Vec::new();
     for team in team_ids {
         // Nothing saved: what a backup would use (this server's store).
-        let cfg = shown_settings(settings(db, team).await?);
+        let cfg = shown_settings(settings(&mut *db, team).await?);
         let history: Vec<Value> = sqlx::query_scalar(
             "SELECT jsonb_build_object('id', id, 'serviceId', service_id, 'volumeId', volume_id, 'kind', kind, 'status', status, 'trigger', trigger,
                                       'label', label, 'snapshotId', snapshot_id, 'sizeBytes', size_bytes, 'addedBytes', added_bytes,
@@ -676,19 +706,21 @@ pub async fn snapshot(db: &PgPool, team_ids: &[String]) -> ApiResult<Vec<Value>>
                FROM pyo.backups WHERE team_id = $1 ORDER BY created_at DESC LIMIT 40",
         )
         .bind(team)
-        .fetch_all(db)
+        .fetch_all(&mut *db)
         .await?;
         out.push(json!({
             "teamId": team,
             "settings": cfg.as_ref().map(|c| {
                 let mut p = c.base.public();
+                // This server's store, for the team: none on a hosted Pyo.
+                p["localAvailable"] = json!(store_on_pyo());
                 p["repository"] = json!(repository(&c.base, team));
                 p["mode"] = json!(c.mode);
                 p["exceptions"] = json!(c.exceptions);
                 p
             }),
-            "databases": crate::database_backups::snapshot(db, team).await?,
-            "targets": targets(db, team).await.context("targets").map_err(crate::error::ApiError::from)?.into_iter().map(|t| {
+            "databases": crate::database_backups::snapshot(&mut *db, team).await?,
+            "targets": targets(&mut *db, team).await.context("targets").map_err(crate::error::ApiError::from)?.into_iter().map(|t| {
                 let included = cfg.as_ref().is_none_or(|c| c.includes(&t.id));
                 let mut v = serde_json::to_value(&t).unwrap_or(Value::Null);
                 v["included"] = json!(included);
@@ -703,6 +735,112 @@ pub async fn snapshot(db: &PgPool, team_ids: &[String]) -> ApiResult<Vec<Value>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hosted_pyo_keeps_no_teams_backups() {
+        assert!(team_store(false, true));
+        assert!(!team_store(true, true), "hosted: S3 buckets only");
+        assert!(!team_store(false, false));
+        assert!(!team_store(true, false));
+    }
+
+    /// Against a throwaway Postgres, on a Pyo without a store of its own
+    /// (as a hosted one is to its teams): nothing to default to, so the
+    /// team has no backup settings, a backup is refused with what to do,
+    /// and "this server" can't be picked.
+    #[test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    fn without_a_store_on_pyo_teams_add_a_bucket() {
+        if backup::local_store().is_some() {
+            eprintln!("PYO_BACKUP_STORE_* is set: skipped");
+            return;
+        }
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(without_a_store())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn without_a_store() {
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(
+            db.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let run = new_id("t");
+        let (team, user_id) = (format!("team_{run}"), format!("usr_{run}"));
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@b.test', $1, '')").bind(&user_id).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $3 || '@b.test', 'owner', 'active')").bind(format!("mem_{run}")).bind(&team).bind(&user_id).execute(&db).await.unwrap();
+        let shown = snapshot(
+            &mut db.acquire().await.unwrap(),
+            std::slice::from_ref(&team),
+        )
+        .await
+        .unwrap();
+        assert!(shown[0]["settings"].is_null(), "no default store");
+        let e = effective(&db, &team).await.unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(e.message, NO_STORE);
+        let user = crate::auth::User {
+            id: user_id.clone(),
+            name: "b".into(),
+            email: format!("{user_id}@b.test"),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        let s = crate::rls::tests::state(db.clone());
+        let e = crate::ops::run_json(&s, &user, json!({ "op": "runTeamBackup", "teamId": team }))
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::CONFLICT, "{}", e.message);
+        let e = crate::ops::run_json(
+            &s,
+            &user,
+            json!({
+                "op": "saveTeamBackupSettings", "teamId": team, "destination": "local",
+                "enabled": true, "schedule": "daily", "hour": 2, "keep": 14,
+                "endpoint": "", "region": "", "bucket": "", "prefix": "", "accessKey": "",
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(e.message.ends_with("Add an S3 bucket."), "{}", e.message);
+        assert!(
+            settings(&mut db.acquire().await.unwrap(), &team)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM pyo.users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
 
     /// `volume.backup` worked out from a real database: DATABASE_URL=<a
     /// throwaway Postgres> cargo test -p pyo-api -- --ignored volume_backup_status
@@ -765,7 +903,9 @@ mod tests {
             .unwrap();
         // Nowhere to back up to (no settings, no store of Pyo's): unsupported.
         if backup::local_store().is_none() {
-            let all = volume_statuses(&pool, &team).await.unwrap();
+            let all = volume_statuses(&mut pool.acquire().await.unwrap(), &team)
+                .await
+                .unwrap();
             assert!(
                 all.values().all(|v| v["status"] == "unsupported"),
                 "{all:?}"
@@ -782,7 +922,9 @@ mod tests {
             exceptions: vec![off.clone()],
         };
         save(&pool, &team, &cfg).await.unwrap();
-        let all = volume_statuses(&pool, &team).await.unwrap();
+        let all = volume_statuses(&mut pool.acquire().await.unwrap(), &team)
+            .await
+            .unwrap();
         assert_eq!(all[&used]["status"], "enabled");
         assert_eq!(all[&used]["schedule"], "daily");
         assert_eq!(all[&off]["status"], "disabled");
@@ -792,7 +934,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let v = &volume_statuses(&pool, &team).await.unwrap()[&used];
+        let v = &volume_statuses(&mut pool.acquire().await.unwrap(), &team)
+            .await
+            .unwrap()[&used];
         assert_eq!(v["status"], "failed");
         assert!(v["lastAt"].as_i64().unwrap() < v["failedAt"].as_i64().unwrap());
         // A good one after it: enabled again.
@@ -801,7 +945,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            volume_statuses(&pool, &team).await.unwrap()[&used]["status"],
+            volume_statuses(&mut pool.acquire().await.unwrap(), &team)
+                .await
+                .unwrap()[&used]["status"],
             "enabled"
         );
         sqlx::query("DELETE FROM pyo.teams WHERE id = $1")

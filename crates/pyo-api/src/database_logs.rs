@@ -64,7 +64,7 @@ pub async fn logs(
             ));
         }
     };
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "databases", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     let (cluster_id, namespace, name, status): (String, String, String, Value) = sqlx::query_as(
@@ -142,11 +142,12 @@ pub async fn logs(
             json!({ "at": e["at"], "type": kind, "reason": reason, "source": "cluster", "object": e["object"], "message": message, "count": e["count"] })
         })
         .collect();
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let recorded: Vec<(i64, String, String, String)> = sqlx::query_as(
         "SELECT pyo.ms(at), type, reason, message FROM pyo.database_events WHERE database_id = $1 AND at > now() - interval '30 days' ORDER BY at DESC LIMIT 200",
     )
     .bind(&id)
-    .fetch_all(&s.db)
+    .fetch_all(&mut *tx)
     .await?;
     events.extend(recorded.into_iter().map(|(at, t, reason, message)| json!({ "at": at, "type": t, "reason": reason, "source": "pyo", "message": message })));
     let changes: Vec<(i64, Value)> = sqlx::query_as(
@@ -154,8 +155,9 @@ pub async fn logs(
     )
     .bind(&team_id)
     .bind(&id)
-    .fetch_all(&s.db)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
     events.extend(changes.into_iter().map(|(at, d)| {
         json!({
             "at": at,

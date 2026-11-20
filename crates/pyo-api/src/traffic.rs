@@ -279,7 +279,7 @@ pub async fn get(
     SessionUser(user): SessionUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team = team_of(&mut tx, "services", &id).await?;
     require_role(&mut tx, &user, &team, Role::Viewer).await?;
     let (cluster_id, spec, runtime): (String, Value, Value) =

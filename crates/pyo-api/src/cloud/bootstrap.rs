@@ -54,6 +54,7 @@ pub const WRONG_CODE_SERVER: Limit = Limit {
     scope: "cloud-bootstrap:server",
     max: 10,
     window_secs: 15 * 60,
+    backoff_cap_secs: 0,
 };
 /// Wrong codes from anywhere: every ask comes through pyo-forward, so
 /// there's no address to tell askers apart.
@@ -61,6 +62,7 @@ pub const WRONG_CODE_ALL: Limit = Limit {
     scope: "cloud-bootstrap:all",
     max: 60,
     window_secs: 15 * 60,
+    backoff_cap_secs: 0,
 };
 
 /// What the server runs once it has its details.

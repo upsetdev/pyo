@@ -139,7 +139,39 @@ function Backups() {
             icon={ClockCounterClockwiseIcon}
             title="No backup store"
             description="Add an S3 bucket."
+            action={
+              admin && teamId ? (
+                <Button size="sm" onClick={() => setPanel("destination")}>
+                  <PlusIcon size={13} weight="bold" /> Add bucket
+                </Button>
+              ) : undefined
+            }
           />
+          {teamId ? (
+            <Dialog
+              open={panel === "destination"}
+              onClose={() => setPanel(null)}
+              width="max-w-2xl"
+              title="Add bucket"
+            >
+              <BackupForm
+                saved={null}
+                local={false}
+                canEdit={admin}
+                hideSchedule
+                bare
+                title="Destination"
+                encryption="Encrypted before it leaves the server, except Postgres and MySQL databases Pyo runs."
+                onSave={async (input) => {
+                  const res = await api.saveTeamBackupSettings(teamId, input);
+                  if (res?.ok) setPanel(null);
+                  return res;
+                }}
+                onRun={() => undefined}
+                onRemove={() => undefined}
+              />
+            </Dialog>
+          ) : null}
         </Panel>
       ) : (
         <>

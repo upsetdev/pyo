@@ -17,6 +17,7 @@ pub mod firewall;
 pub mod flows;
 pub mod memory;
 pub mod rbac;
+pub mod registry_door;
 pub mod sandbox;
 #[cfg(feature = "command-signing")]
 pub mod agentauth;
@@ -1234,6 +1235,9 @@ pub enum Command {
     /// Call a sandbox server's daemon on the cluster's tailnet. `data` is a
     /// [`tailscale::SandboxAnswer`].
     SandboxCall(Box<tailscale::SandboxCall>),
+    /// The team's registry tokens (their hashes) for the door of the
+    /// cluster's own registry: these, and no others, from now on.
+    SyncRegistryTokens(Box<registry_door::RegistryTokens>),
 }
 
 // ── Releases and updates ───────────────────────────────────────────────────

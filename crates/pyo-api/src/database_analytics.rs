@@ -59,7 +59,7 @@ pub async fn analytics(
     Path(id): Path<String>,
     Query(q): Query<AnalyticsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "databases", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     let engine: String = sqlx::query_scalar("SELECT engine FROM pyo.databases WHERE id = $1")

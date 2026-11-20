@@ -238,7 +238,7 @@ pub async fn part(
     Path((id, n)): Path<(String, u64)>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let (size, _, state) = mine(&mut tx, &user, &id).await?;
     if state != "uploading" {
         return Err(ApiError::conflict("This upload is complete already."));
@@ -290,7 +290,7 @@ pub async fn status(
     SessionUser(user): SessionUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let (size, _, state) = mine(&mut tx, &user, &id).await?;
     let have = received(&mut *tx, &id).await?;
     tx.commit().await?;

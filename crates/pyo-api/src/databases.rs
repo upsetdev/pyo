@@ -22,7 +22,7 @@ use axum::extract::{Path, State};
 use pyo_proto::{Command, DatabaseReport, DatabaseSpec, EnvVar, NamedSecret};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Postgres, Transaction};
 
 use crate::{
     AppState,
@@ -397,7 +397,7 @@ async fn destination(
     team_id: &str,
     cluster_id: &str,
 ) -> ApiResult<Dest> {
-    let Some(t) = crate::teambackup::settings(&s.db, team_id).await? else {
+    let Some(t) = crate::teambackup::settings(tx, team_id).await? else {
         return Err(ApiError::conflict(
             "Set where the team's backups go first (Backups).",
         ));
@@ -1482,13 +1482,13 @@ async fn set_kv_backups(
 }
 
 /// A KV database's backups, as Backups has them; null until first turned on.
-async fn kv_backup(pool: &PgPool, id: &str) -> ApiResult<Value> {
+async fn kv_backup(db: &mut sqlx::PgConnection, id: &str) -> ApiResult<Value> {
     Ok(sqlx::query_scalar(
         "SELECT jsonb_build_object('enabled', enabled, 'schedule', schedule, 'hour', hour, 'keep', keep, 'backupDatabaseId', id)
            FROM pyo.backup_databases WHERE database_id = $1",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(db)
     .await?
     .unwrap_or(Value::Null))
 }
@@ -2270,22 +2270,26 @@ pub async fn finished(
 }
 
 /// The databases of these teams, as listed (never logins).
-pub async fn listing(db: &PgPool, team_ids: &[String], id: Option<&str>) -> ApiResult<Vec<Value>> {
+pub async fn listing(
+    db: &mut sqlx::PgConnection,
+    team_ids: &[String],
+    id: Option<&str>,
+) -> ApiResult<Vec<Value>> {
     let rows: Vec<Db> = sqlx::query_as::<_, Db>(
         "SELECT id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, pooler, rest, deletion_protection, namespace, password, token, readonly_token, state, backup, restore, restored_from, read_replicas, cpu_millis, memory_mi, extensions
            FROM pyo.databases WHERE team_id = ANY($1) AND ($2::text IS NULL OR id = $2) ORDER BY created_at",
     )
     .bind(team_ids)
     .bind(id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     // Where the databases system is on their clusters: "setting up" while
     // it's being installed there (a first database waits for it).
     let clusters: Vec<String> = rows.iter().map(|d| d.cluster_id.clone()).collect();
-    let systems = crate::bundles::databases_state(db, &clusters).await?;
-    let workloads = crate::bundles::workloads(db, &clusters).await?;
+    let systems = crate::bundles::databases_state(&mut *db, &clusters).await?;
+    let workloads = crate::bundles::workloads(&mut *db, &clusters).await?;
     let imports = crate::database_imports::listing(
-        db,
+        &mut *db,
         &rows.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
     )
     .await?;
@@ -2304,7 +2308,7 @@ pub async fn listing(db: &PgPool, team_ids: &[String], id: Option<&str>) -> ApiR
                FROM pyo.databases m WHERE m.id = $1",
         )
         .bind(&d.id)
-        .fetch_one(db)
+        .fetch_one(&mut *db)
         .await?;
         // Being made while its operator starts (stopped while the cluster
         // had no databases of its engine).
@@ -2337,7 +2341,7 @@ pub async fn listing(db: &PgPool, team_ids: &[String], id: Option<&str>) -> ApiR
             "size": d.size, "cpu": cpu, "memory": memory, "storageGi": d.storage_gi, "instances": d.instances,
             "pooler": d.pooler, "rest": d.rest, "deletionProtection": d.deletion_protection, "state": d.state,
             "status": status, "members": members, "createdAt": created_at, "connections": links,
-            "backup": if point_in_time(&d.engine) { json!({ "enabled": d.backup["enabled"].as_bool().unwrap_or(false), "retentionDays": d.backup["retentionDays"].as_i64().unwrap_or(7), "hour": d.backup["hour"].as_i64().unwrap_or(3) }) } else { kv_backup(db, &d.id).await? },
+            "backup": if point_in_time(&d.engine) { json!({ "enabled": d.backup["enabled"].as_bool().unwrap_or(false), "retentionDays": d.backup["retentionDays"].as_i64().unwrap_or(7), "hour": d.backup["hour"].as_i64().unwrap_or(3) }) } else { kv_backup(&mut *db, &d.id).await? },
             "restoredFrom": d.restored_from,
             "import": imports.get(&d.id).cloned().unwrap_or(Value::Null),
             "readReplicas": read_replicas_of(&d, &status),
@@ -2378,12 +2382,11 @@ pub(crate) async fn list(
     SessionUser(user): SessionUser,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
+    let databases = listing(&mut tx, &[q.team], None).await?;
     tx.commit().await?;
-    Ok(Json(
-        json!({ "databases": listing(&s.db, &[q.team], None).await? }),
-    ))
+    Ok(Json(json!({ "databases": databases })))
 }
 
 /// A database
@@ -2401,12 +2404,12 @@ pub(crate) async fn get(
     SessionUser(user): SessionUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "databases", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
+    let db = listing(&mut tx, &[team_id], Some(&id)).await?;
     tx.commit().await?;
-    let db = listing(&s.db, &[team_id], Some(&id))
-        .await?
+    let db = db
         .into_iter()
         .next()
         .ok_or_else(|| ApiError::not_found("Database"))?;
@@ -3051,7 +3054,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
     async fn deletions_are_retried_and_orphans_cleaned_up() {
-        let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
             .await
             .unwrap();
         crate::migrate::run(&pool).await.unwrap();

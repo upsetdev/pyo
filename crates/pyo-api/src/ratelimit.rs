@@ -1,10 +1,17 @@
-//! Rate limits for signing in, shared by every replica through Postgres.
+//! Rate and abuse limits (signing in, sign-ups, API keys, invites,
+//! webhooks, operations), shared by every replica through Postgres.
 //!
 //! One fixed window per (scope, key) in `pyo.rate_limits`. An attempt takes
 //! a slot first, atomically (one upsert), so parallel requests can't slip
 //! past the limit; credential checks give the slot back when they succeed,
-//! so only failures count. Keys are client addresses (IPv6 by /64) or
-//! accounts, stored as sha256. Blocked: 429 with Retry-After.
+//! so only failures count. Keys are client addresses (IPv6 by /64),
+//! accounts, teams or keys, stored as sha256. Blocked: 429 with
+//! Retry-After.
+//!
+//! A limit with a backoff cap locks out for longer each time its window is
+//! used up again within a day (twice the last time, up to the cap). Each
+//! replica also remembers, for a minute at most, what Postgres refused, so
+//! a client that keeps trying once it's blocked costs no queries.
 
 use std::{
     convert::Infallible,
@@ -22,28 +29,37 @@ use crate::{
     ids::sha256_hex,
 };
 
-/// At most `max` attempts per `window_secs`.
+/// At most `max` attempts per `window_secs`. With `backoff_cap_secs`, a
+/// used-up window locks out until `window_secs` × 2^n after it started (n:
+/// the times it was used up within a day before), at most that long.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limit {
     pub scope: &'static str,
     pub max: i32,
     pub window_secs: i64,
+    pub backoff_cap_secs: i64,
 }
 
+const MINUTE: i64 = 60;
 const MIN15: i64 = 15 * 60;
 const HOUR: i64 = 60 * 60;
+const DAY: i64 = 24 * HOUR;
 
 /// Failed password sign-ins per client address (password spraying).
 pub const LOGIN_IP: Limit = Limit {
     scope: "login:ip",
     max: 30,
     window_secs: MIN15,
+    backoff_cap_secs: DAY,
 };
 /// Failed password sign-ins per email, existing or not (targeted guessing).
 pub const LOGIN_ACCOUNT: Limit = Limit {
     scope: "login:account",
     max: 10,
     window_secs: MIN15,
+    // Short enough that someone else's wrong passwords can't keep the
+    // owner out for long (a passkey or a sign-in link still works).
+    backoff_cap_secs: HOUR,
 };
 /// Passkey sign-ins started per address (each one stores a challenge; the
 /// sign-in page starts one on every visit, for autofill).
@@ -51,18 +67,21 @@ pub const PASSKEY_START_IP: Limit = Limit {
     scope: "passkey-start:ip",
     max: 60,
     window_secs: MIN15,
+    backoff_cap_secs: 0,
 };
 /// Failed passkey sign-ins per address.
 pub const PASSKEY_FINISH_IP: Limit = Limit {
     scope: "passkey-finish:ip",
     max: 30,
     window_secs: MIN15,
+    backoff_cap_secs: 0,
 };
 /// Wrong passwords before adding a passkey, per signed-in user.
 pub const PASSKEY_PASSWORD_USER: Limit = Limit {
     scope: "passkey-password:user",
     max: 10,
     window_secs: MIN15,
+    backoff_cap_secs: 0,
 };
 /// Sign-ups per address (each hashes a password, makes an account, and
 /// says whether an email is taken).
@@ -70,30 +89,35 @@ pub const SIGNUP_IP: Limit = Limit {
     scope: "signup:ip",
     max: 20,
     window_secs: HOUR,
+    backoff_cap_secs: 0,
 };
 /// "Forgot password?" emails asked for per address.
 pub const FORGOT_IP: Limit = Limit {
     scope: "forgot:ip",
     max: 10,
     window_secs: HOUR,
+    backoff_cap_secs: 0,
 };
 /// And per email, existing or not (so a mailbox can't be flooded).
 pub const FORGOT_ACCOUNT: Limit = Limit {
     scope: "forgot:account",
     max: 3,
     window_secs: HOUR,
+    backoff_cap_secs: 0,
 };
 /// Sign-in links tried per address (wrong or used ones count).
 pub const SIGN_IN_LINK_IP: Limit = Limit {
     scope: "sign-in-link:ip",
     max: 30,
     window_secs: MIN15,
+    backoff_cap_secs: 0,
 };
 /// MCP client registrations per address (unauthenticated, each one a row).
 pub const OAUTH_REGISTER_IP: Limit = Limit {
     scope: "oauth-register:ip",
     max: 30,
     window_secs: HOUR,
+    backoff_cap_secs: 0,
 };
 
 /// `pyo login` requests per address (unauthenticated, each one a row).
@@ -101,6 +125,73 @@ pub const CLI_LOGIN_IP: Limit = Limit {
     scope: "cli-login:ip",
     max: 30,
     window_secs: MIN15,
+    backoff_cap_secs: 0,
+};
+
+/// Wrong API keys per address (each one a lookup, and a guess).
+pub const API_KEY_WRONG_IP: Limit = Limit {
+    scope: "api-key-wrong:ip",
+    max: 30,
+    window_secs: MIN15,
+    backoff_cap_secs: DAY,
+};
+/// Requests per API key (and per assistant's MCP token).
+pub const API_KEY_REQUESTS: Limit = Limit {
+    scope: "api-key:key",
+    max: 600,
+    window_secs: MINUTE,
+    backoff_cap_secs: 0,
+};
+/// Operations (changes) per account, from the dashboard, the API or MCP.
+pub const OPS_USER: Limit = Limit {
+    scope: "ops:user",
+    max: 300,
+    window_secs: MINUTE,
+    backoff_cap_secs: 0,
+};
+/// Operations per team, all its members and keys together.
+pub const OPS_TEAM: Limit = Limit {
+    scope: "ops:team",
+    max: 600,
+    window_secs: MINUTE,
+    backoff_cap_secs: 0,
+};
+/// Invites sent (and sent again) per team: each one may be an email.
+pub const INVITES_TEAM: Limit = Limit {
+    scope: "invite:team",
+    max: 30,
+    window_secs: HOUR,
+    backoff_cap_secs: 0,
+};
+/// Deploy hook calls with a token that isn't one, per address.
+pub const DEPLOY_HOOK_WRONG_IP: Limit = Limit {
+    scope: "deploy-hook-wrong:ip",
+    max: 30,
+    window_secs: MIN15,
+    backoff_cap_secs: DAY,
+};
+/// Deploys started through one deploy hook.
+pub const DEPLOY_HOOK_CALLS: Limit = Limit {
+    scope: "deploy-hook:hook",
+    max: 60,
+    window_secs: HOUR,
+    backoff_cap_secs: 0,
+};
+/// Git webhook deliveries (GitHub, GitLab) whose signature or secret is
+/// wrong, per address.
+pub const GIT_WEBHOOK_WRONG_IP: Limit = Limit {
+    scope: "git-webhook-wrong:ip",
+    max: 30,
+    window_secs: MIN15,
+    backoff_cap_secs: DAY,
+};
+/// Signed Git webhook deliveries per GitHub App installation or GitLab
+/// connection: a push storm can't queue builds without end.
+pub const GIT_WEBHOOK_CALLS: Limit = Limit {
+    scope: "git-webhook:source",
+    max: 600,
+    window_secs: HOUR,
+    backoff_cap_secs: 0,
 };
 
 /// The client's address as a rate-limit key: the TCP peer, or, when the
@@ -269,16 +360,75 @@ pub fn ip_key(ip: &str) -> String {
     }
 }
 
-/// "Too many attempts. Try again in N minutes."
-pub fn too_many(retry_secs: i64) -> ApiError {
+/// The 429 for `limit`: what there were too many of, and when to try again.
+pub fn too_many_for(limit: &Limit, retry_secs: i64) -> ApiError {
+    let what = match limit.scope {
+        "api-key:key" | "ops:user" | "ops:team" | "deploy-hook:hook" | "git-webhook:source" => {
+            "requests"
+        }
+        "invite:team" => "invites",
+        "signup:ip" => "sign-ups",
+        _ => "attempts",
+    };
+    too_many_of(what, retry_secs)
+}
+
+fn too_many_of(what: &str, retry_secs: i64) -> ApiError {
     let secs = retry_secs.max(1);
     let mins = (secs + 59) / 60;
-    let msg = if mins == 1 {
-        "Too many attempts. Try again in 1 minute.".to_owned()
+    let msg = if secs < 60 {
+        format!("Too many {what}. Try again in {secs} seconds.")
+    } else if mins == 1 {
+        format!("Too many {what}. Try again in 1 minute.")
+    } else if mins < 120 {
+        format!("Too many {what}. Try again in {mins} minutes.")
     } else {
-        format!("Too many attempts. Try again in {mins} minutes.")
+        format!("Too many {what}. Try again in {} hours.", (mins + 59) / 60)
     };
     ApiError::new(StatusCode::TOO_MANY_REQUESTS, msg).with_retry_after(secs as u64)
+}
+
+type Blocked = std::collections::HashMap<(&'static str, String), std::time::Instant>;
+
+/// What this replica saw Postgres refuse, by (scope, key hash): blocked
+/// until then. Kept a minute at most, so a key started over elsewhere
+/// (its owner signed in) counts here again soon.
+static BLOCKED: std::sync::Mutex<Option<Blocked>> = std::sync::Mutex::new(None);
+const BLOCKED_KEEP: std::time::Duration = std::time::Duration::from_secs(60);
+const BLOCKED_MAX: usize = 50_000;
+
+fn blocked_here(scope: &'static str, hash: &str) -> Option<i64> {
+    let mut g = BLOCKED.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.as_mut()?;
+    let key = (scope, hash.to_owned());
+    let until = *map.get(&key)?;
+    let now = std::time::Instant::now();
+    if until <= now {
+        map.remove(&key);
+        return None;
+    }
+    Some((until - now).as_secs() as i64 + 1)
+}
+
+fn remember_blocked(scope: &'static str, hash: &str, retry_secs: i64) {
+    let mut g = BLOCKED.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(Default::default);
+    let now = std::time::Instant::now();
+    if map.len() >= BLOCKED_MAX {
+        map.retain(|_, until| *until > now);
+        if map.len() >= BLOCKED_MAX {
+            return;
+        }
+    }
+    let keep = std::time::Duration::from_secs(retry_secs.max(1) as u64).min(BLOCKED_KEEP);
+    map.insert((scope, hash.to_owned()), now + keep);
+}
+
+fn forget_blocked(scope: &'static str, hash: &str) {
+    let mut g = BLOCKED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = g.as_mut() {
+        map.remove(&(scope, hash.to_owned()));
+    }
 }
 
 /// Take one slot from each limit, in order; if any is used up, give back
@@ -289,7 +439,7 @@ pub async fn take(db: &PgPool, limits: &[(Limit, &str)]) -> ApiResult<()> {
             for (l, k) in &limits[..i] {
                 forgive(db, l, k).await?;
             }
-            return Err(too_many(retry));
+            return Err(too_many_for(limit, retry));
         }
     }
     Ok(())
@@ -298,13 +448,20 @@ pub async fn take(db: &PgPool, limits: &[(Limit, &str)]) -> ApiResult<()> {
 /// None: taken. Some(seconds): used up until then.
 async fn take_one(db: &PgPool, limit: &Limit, key: &str) -> sqlx::Result<Option<i64>> {
     let key = sha256_hex(key);
-    // A window that ended starts over; otherwise count up while under max.
+    if let Some(retry) = blocked_here(limit.scope, &key) {
+        return Ok(Some(retry));
+    }
+    // A window that ended starts over; otherwise count up while under max,
+    // and never while locked out. A window that starts a day after the
+    // last one forgets the lockouts before.
     let taken: Option<i32> = sqlx::query_scalar(
         "INSERT INTO pyo.rate_limits AS r (scope, key, window_start, count) VALUES ($1, $2, now(), 1)
          ON CONFLICT (scope, key) DO UPDATE SET
+           strikes = CASE WHEN r.window_start <= now() - interval '1 day' THEN 0 ELSE r.strikes END,
            count = CASE WHEN r.window_start <= now() - make_interval(secs => $3) THEN 1 ELSE r.count + 1 END,
            window_start = CASE WHEN r.window_start <= now() - make_interval(secs => $3) THEN now() ELSE r.window_start END
-         WHERE r.window_start <= now() - make_interval(secs => $3) OR r.count < $4
+         WHERE coalesce(r.blocked_until <= now(), true)
+           AND (r.window_start <= now() - make_interval(secs => $3) OR r.count < $4)
          RETURNING count",
     )
     .bind(limit.scope)
@@ -316,24 +473,72 @@ async fn take_one(db: &PgPool, limit: &Limit, key: &str) -> sqlx::Result<Option<
     if taken.is_some() {
         return Ok(None);
     }
-    let retry: Option<f64> = sqlx::query_scalar("SELECT extract(epoch FROM window_start + make_interval(secs => $3) - now())::float8 FROM pyo.rate_limits WHERE scope = $1 AND key = $2")
-        .bind(limit.scope)
-        .bind(&key)
-        .bind(limit.window_secs as f64)
-        .fetch_optional(db)
-        .await?;
-    Ok(Some(
-        retry.map_or(limit.window_secs, |s| s.ceil() as i64).max(1),
-    ))
+    // Used up. With a backoff, the window's first refusal locks out for
+    // twice as long as the time before (the first time: to its end).
+    let retry: Option<f64> = sqlx::query_scalar(
+        "UPDATE pyo.rate_limits SET
+           strikes = CASE WHEN $4 > 0 AND coalesce(blocked_until <= now(), true) THEN strikes + 1 ELSE strikes END,
+           blocked_until = CASE WHEN $4 > 0 AND coalesce(blocked_until <= now(), true)
+                                THEN window_start + make_interval(secs => least($3 * power(2, strikes), greatest($4, $3)))
+                                ELSE blocked_until END
+         WHERE scope = $1 AND key = $2
+         RETURNING extract(epoch FROM greatest(coalesce(blocked_until, window_start), window_start + make_interval(secs => $3)) - now())::float8",
+    )
+    .bind(limit.scope)
+    .bind(&key)
+    .bind(limit.window_secs as f64)
+    .bind(limit.backoff_cap_secs as f64)
+    .fetch_optional(db)
+    .await?;
+    let retry = retry.map_or(limit.window_secs, |s| s.ceil() as i64).max(1);
+    remember_blocked(limit.scope, &key, retry);
+    Ok(Some(retry))
+}
+
+/// Whether `key` used up `limit`, without taking a slot: the seconds until
+/// it may try again. For a check made in a transaction that shouldn't
+/// write (an operation's team, which [`take_after`] counts once it's done).
+pub async fn used_up(
+    conn: &mut sqlx::PgConnection,
+    limit: &Limit,
+    key: &str,
+) -> sqlx::Result<Option<i64>> {
+    let key = sha256_hex(key);
+    if let Some(retry) = blocked_here(limit.scope, &key) {
+        return Ok(Some(retry));
+    }
+    let retry: Option<f64> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM greatest(coalesce(blocked_until, window_start), window_start + make_interval(secs => $3)) - now())::float8
+           FROM pyo.rate_limits
+          WHERE scope = $1 AND key = $2
+            AND (blocked_until > now() OR (window_start > now() - make_interval(secs => $3) AND count >= $4))",
+    )
+    .bind(limit.scope)
+    .bind(&key)
+    .bind(limit.window_secs as f64)
+    .bind(limit.max)
+    .fetch_optional(conn)
+    .await?;
+    Ok(retry.map(|s| (s.ceil() as i64).max(1)))
+}
+
+/// Counts something already done against `limit`: the next one waits when
+/// this used it up.
+pub async fn take_after(db: &PgPool, limit: &Limit, key: &str) {
+    if let Err(e) = take_one(db, limit, key).await {
+        tracing::warn!(scope = limit.scope, error = %e, "rate limit not counted");
+    }
 }
 
 /// Give back one slot: the attempt succeeded, or wasn't made.
 pub async fn forgive(db: &PgPool, limit: &Limit, key: &str) -> sqlx::Result<()> {
+    let hash = sha256_hex(key);
+    forget_blocked(limit.scope, &hash);
     sqlx::query(
         "UPDATE pyo.rate_limits SET count = greatest(count - 1, 0) WHERE scope = $1 AND key = $2",
     )
     .bind(limit.scope)
-    .bind(sha256_hex(key))
+    .bind(&hash)
     .execute(db)
     .await?;
     Ok(())
@@ -341,17 +546,20 @@ pub async fn forgive(db: &PgPool, limit: &Limit, key: &str) -> sqlx::Result<()> 
 
 /// Start over: e.g. the account's owner signed in.
 pub async fn reset(db: &PgPool, limit: &Limit, key: &str) -> sqlx::Result<()> {
+    let hash = sha256_hex(key);
+    forget_blocked(limit.scope, &hash);
     sqlx::query("DELETE FROM pyo.rate_limits WHERE scope = $1 AND key = $2")
         .bind(limit.scope)
-        .bind(sha256_hex(key))
+        .bind(&hash)
         .execute(db)
         .await?;
     Ok(())
 }
 
-/// Windows that ended long ago (the longest is an hour).
+/// Windows that ended long ago (the longest is an hour) and lockouts over
+/// for a day.
 pub async fn prune(db: &PgPool) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM pyo.rate_limits WHERE window_start < now() - interval '1 day'")
+    sqlx::query("DELETE FROM pyo.rate_limits WHERE window_start < now() - interval '1 day' AND coalesce(blocked_until < now() - interval '1 day', true)")
         .execute(db)
         .await?;
     Ok(())
@@ -375,20 +583,20 @@ mod tests {
 
     #[test]
     fn message_and_retry_after() {
-        let e = too_many(30);
+        let e = too_many_of("attempts", 30);
         assert_eq!(e.status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(e.message, "Too many attempts. Try again in 1 minute.");
+        assert_eq!(e.message, "Too many attempts. Try again in 30 seconds.");
         assert_eq!(e.retry_after, Some(30));
         assert_eq!(
-            too_many(61).message,
+            too_many_of("attempts", 61).message,
             "Too many attempts. Try again in 2 minutes."
         );
         assert_eq!(
-            too_many(900).message,
+            too_many_of("attempts", 900).message,
             "Too many attempts. Try again in 15 minutes."
         );
-        assert_eq!(too_many(0).retry_after, Some(1));
-        let r = axum::response::IntoResponse::into_response(too_many(120));
+        assert_eq!(too_many_of("attempts", 0).retry_after, Some(1));
+        let r = axum::response::IntoResponse::into_response(too_many_of("attempts", 120));
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(r.headers()["retry-after"], "120");
     }
@@ -406,6 +614,15 @@ mod tests {
             CLI_LOGIN_IP,
             crate::cloud::bootstrap::WRONG_CODE_SERVER,
             crate::cloud::bootstrap::WRONG_CODE_ALL,
+            API_KEY_WRONG_IP,
+            API_KEY_REQUESTS,
+            OPS_USER,
+            OPS_TEAM,
+            INVITES_TEAM,
+            DEPLOY_HOOK_WRONG_IP,
+            DEPLOY_HOOK_CALLS,
+            GIT_WEBHOOK_WRONG_IP,
+            GIT_WEBHOOK_CALLS,
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(
@@ -504,11 +721,13 @@ mod tests {
             scope: "test:a",
             max: 3,
             window_secs: 60,
+            backoff_cap_secs: 0,
         };
         let other = Limit {
             scope: "test:b",
             max: 1,
             window_secs: 60,
+            backoff_cap_secs: 0,
         };
         let key = format!("k{}", crate::ids::secret_token());
         sqlx::query("DELETE FROM pyo.rate_limits WHERE scope LIKE 'test:%'")
@@ -560,6 +779,8 @@ mod tests {
 
         // An ended window starts over.
         sqlx::query("UPDATE pyo.rate_limits SET window_start = now() - interval '2 minutes' WHERE scope = 'test:b'").execute(&db).await.unwrap();
+        // (This replica remembers the refusal for up to a minute.)
+        forget_blocked(other.scope, &sha256_hex(&key));
         take(&db, &[(other, &key)]).await.unwrap();
 
         // Parallel attempts (other replicas) never exceed the limit.
@@ -567,6 +788,7 @@ mod tests {
             scope: "test:c",
             max: 5,
             window_secs: 60,
+            backoff_cap_secs: 0,
         };
         let tasks: Vec<_> = (0..20)
             .map(|_| {
@@ -601,5 +823,304 @@ mod tests {
         assert_eq!(visitor_ip("127.0.0.1", "203.0.113.7", "", &cf), "203.0.113.7");
         assert_eq!(visitor_ip("198.51.100.4", "203.0.113.7", "", &cf), "198.51.100.4");
         assert_eq!(visitor_ip("173.245.48.9", "", "", &cf), "173.245.48.9");
+    }
+
+    #[test]
+    fn plain_messages_for_each_kind() {
+        assert_eq!(
+            too_many_for(&OPS_TEAM, 20).message,
+            "Too many requests. Try again in 20 seconds."
+        );
+        assert_eq!(
+            too_many_for(&INVITES_TEAM, 3600).message,
+            "Too many invites. Try again in 60 minutes."
+        );
+        assert_eq!(
+            too_many_for(&LOGIN_IP, 4 * 3600).message,
+            "Too many attempts. Try again in 4 hours."
+        );
+        assert_eq!(too_many_for(&API_KEY_REQUESTS, 5).retry_after, Some(5));
+    }
+
+    async fn test_db() -> PgPool {
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        db
+    }
+
+    /// Against a throwaway Postgres: a lockout doubles each time, up to its
+    /// cap, a success starts over, and a quiet day forgets.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn lockouts_back_off_and_start_over() {
+        let db = test_db().await;
+        let l = Limit {
+            scope: "test-backoff:a",
+            max: 2,
+            window_secs: 60,
+            backoff_cap_secs: 200,
+        };
+        let key = format!("k{}", crate::ids::secret_token());
+        let hash = sha256_hex(&key);
+        // The window (and its lockout) ended: what Postgres says from now.
+        let end_window = || async {
+            forget_blocked(l.scope, &hash);
+            sqlx::query("UPDATE pyo.rate_limits SET window_start = now() - interval '10 minutes', blocked_until = now() - interval '1 second' WHERE scope = $1 AND key = $2")
+                .bind(l.scope)
+                .bind(&hash)
+                .execute(&db)
+                .await
+                .unwrap();
+        };
+        let retry = |e: ApiError| e.retry_after.unwrap() as i64;
+        for _ in 0..2 {
+            take(&db, &[(l, &key)]).await.unwrap();
+        }
+        let first = retry(take(&db, &[(l, &key)]).await.unwrap_err());
+        assert!((55..=60).contains(&first), "{first}");
+        // Refused again here without asking Postgres.
+        assert!(blocked_here(l.scope, &hash).is_some());
+        end_window().await;
+        for _ in 0..2 {
+            take(&db, &[(l, &key)]).await.unwrap();
+        }
+        let second = retry(take(&db, &[(l, &key)]).await.unwrap_err());
+        assert!((115..=120).contains(&second), "twice as long: {second}");
+        // Still locked out, though the window's minute is over.
+        forget_blocked(l.scope, &hash);
+        sqlx::query("UPDATE pyo.rate_limits SET window_start = window_start - interval '61 seconds', blocked_until = blocked_until - interval '61 seconds' WHERE scope = $1 AND key = $2")
+            .bind(l.scope)
+            .bind(&hash)
+            .execute(&db)
+            .await
+            .unwrap();
+        let left = retry(take(&db, &[(l, &key)]).await.unwrap_err());
+        assert!((50..=60).contains(&left), "{left}");
+        end_window().await;
+        for _ in 0..2 {
+            take(&db, &[(l, &key)]).await.unwrap();
+        }
+        let third = retry(take(&db, &[(l, &key)]).await.unwrap_err());
+        assert!((195..=200).contains(&third), "up to the cap: {third}");
+        // The owner signed in: back to the start.
+        reset(&db, &l, &key).await.unwrap();
+        take(&db, &[(l, &key)]).await.unwrap();
+        // A day after the last window, earlier lockouts are forgotten.
+        sqlx::query("UPDATE pyo.rate_limits SET strikes = 5, window_start = now() - interval '25 hours' WHERE scope = $1 AND key = $2")
+            .bind(l.scope)
+            .bind(&hash)
+            .execute(&db)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            take(&db, &[(l, &key)]).await.unwrap();
+        }
+        let fresh = retry(take(&db, &[(l, &key)]).await.unwrap_err());
+        assert!((55..=60).contains(&fresh), "{fresh}");
+        // Without a backoff, a used-up window only lasts its time.
+        let plain = Limit {
+            scope: "test-backoff:b",
+            backoff_cap_secs: 0,
+            ..l
+        };
+        for _ in 0..2 {
+            take(&db, &[(plain, &key)]).await.unwrap();
+        }
+        assert!(take(&db, &[(plain, &key)]).await.is_err());
+        let blocked: Option<i64> = sqlx::query_scalar(
+            "SELECT pyo.ms(blocked_until) FROM pyo.rate_limits WHERE scope = $1 AND key = $2",
+        )
+        .bind(plain.scope)
+        .bind(&hash)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(blocked.is_none());
+        let mut c = db.acquire().await.unwrap();
+        assert!(used_up(&mut c, &plain, &key).await.unwrap().is_some());
+        assert!(
+            used_up(&mut c, &plain, "someone else")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // (Its own scopes: shared_windows_in_postgres clears test:*.)
+        sqlx::query("DELETE FROM pyo.rate_limits WHERE scope LIKE 'test-backoff:%'")
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    /// Against a throwaway Postgres: wrong API keys, a key's requests, a
+    /// team's operations and invites trip their limits with a plain 429,
+    /// and work again once the window is over.
+    #[test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    fn api_limits_trip_and_reset() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(api_limits())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn api_limits() {
+        use serde_json::json;
+        let db = test_db().await;
+        crate::vault::init(crate::vault::Vault::new(
+            db.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let run = crate::ids::random_string(8).to_lowercase();
+        let (user_id, team) = (format!("usr_rl{run}"), format!("team_rl{run}"));
+        let email = format!("rl{run}@limits.test");
+        sqlx::query(
+            "INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, $1, '')",
+        )
+        .bind(&user_id)
+        .bind(&email)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'active')")
+            .bind(format!("mem_rl{run}"))
+            .bind(&team)
+            .bind(&user_id)
+            .bind(&email)
+            .execute(&db)
+            .await
+            .unwrap();
+        let user = crate::auth::User {
+            id: user_id.clone(),
+            name: "rl".into(),
+            email: email.clone(),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        let s = crate::rls::tests::state(db.clone());
+        // Fill a window as if it had been used up already.
+        let used = |limit: Limit, key: String| {
+            let db = db.clone();
+            async move {
+                sqlx::query("INSERT INTO pyo.rate_limits (scope, key, window_start, count) VALUES ($1, $2, now(), $3)
+                             ON CONFLICT (scope, key) DO UPDATE SET window_start = now(), count = $3, blocked_until = NULL")
+                    .bind(limit.scope)
+                    .bind(sha256_hex(&key))
+                    .bind(limit.max)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+        };
+
+        // Wrong API keys from one address: a 429 once used up.
+        let ip = format!("198.51.100.{}", run.len());
+        reset(&db, &API_KEY_WRONG_IP, &ip).await.unwrap();
+        for _ in 0..API_KEY_WRONG_IP.max {
+            let e = crate::auth::key_user_from(&db, "pyo_wrong", &ip)
+                .await
+                .unwrap_err();
+            assert_eq!(e.status, StatusCode::UNAUTHORIZED);
+        }
+        let e = crate::auth::key_user_from(&db, "pyo_wrong", &ip)
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(e.message.starts_with("Too many attempts."), "{}", e.message);
+        reset(&db, &API_KEY_WRONG_IP, &ip).await.unwrap();
+
+        // A key's requests.
+        let token = format!("pyo_{}", crate::ids::secret_token());
+        sqlx::query("INSERT INTO pyo.api_tokens (id, user_id, name, prefix, token_hash, access) VALUES ($1, $2, 'k', 'pyo_', $3, 'full')")
+            .bind(format!("tok_rl{run}"))
+            .bind(&user_id)
+            .bind(sha256_hex(&token))
+            .execute(&db)
+            .await
+            .unwrap();
+        crate::auth::key_user_from(&db, &token, &ip).await.unwrap();
+        used(API_KEY_REQUESTS, sha256_hex(&token)).await;
+        let e = crate::auth::key_user_from(&db, &token, &ip)
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(e.message.starts_with("Too many requests."), "{}", e.message);
+        reset(&db, &API_KEY_REQUESTS, &sha256_hex(&token))
+            .await
+            .unwrap();
+        crate::auth::key_user_from(&db, &token, &ip).await.unwrap();
+
+        // A team's operations: counted once each is done, refused once the
+        // team used its minute up, and fine again after.
+        let project = |n: u32| json!({ "op": "createProject", "id": format!("prj_rl{run}{n}"), "teamId": team, "name": format!("p{n}"), "namespace": format!("p{n}-{run}") });
+        crate::ops::run_json(&s, &user, project(1)).await.unwrap();
+        let counted: i32 =
+            sqlx::query_scalar("SELECT count FROM pyo.rate_limits WHERE scope = $1 AND key = $2")
+                .bind(OPS_TEAM.scope)
+                .bind(sha256_hex(&team))
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(counted >= 1);
+        used(OPS_TEAM, team.clone()).await;
+        let e = crate::ops::run_json(&s, &user, project(2))
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(e.message.starts_with("Too many requests."), "{}", e.message);
+        reset(&db, &OPS_TEAM, &team).await.unwrap();
+        crate::ops::run_json(&s, &user, project(2)).await.unwrap();
+
+        // Invites per team.
+        let invite = |n: u32| json!({ "op": "inviteMember", "id": format!("mem_rl{run}i{n}"), "teamId": team, "email": format!("i{n}{run}@limits.test"), "role": "developer" });
+        crate::ops::run_json(&s, &user, invite(1)).await.unwrap();
+        used(INVITES_TEAM, team.clone()).await;
+        let e = crate::ops::run_json(&s, &user, invite(2))
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(e.message.starts_with("Too many invites."), "{}", e.message);
+        reset(&db, &INVITES_TEAM, &team).await.unwrap();
+        crate::ops::run_json(&s, &user, invite(2)).await.unwrap();
+
+        // An account's operations, in every team.
+        used(OPS_USER, user_id.clone()).await;
+        let e = crate::ops::run_json(&s, &user, project(3))
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::TOO_MANY_REQUESTS);
+        reset(&db, &OPS_USER, &user_id).await.unwrap();
+
+        for k in [&team, &user_id] {
+            for l in [OPS_TEAM, OPS_USER, INVITES_TEAM] {
+                reset(&db, &l, k).await.unwrap();
+            }
+        }
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM pyo.users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }

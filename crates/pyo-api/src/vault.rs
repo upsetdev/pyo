@@ -352,6 +352,31 @@ impl Vault {
         ))
     }
 
+    /// Seals a team's credential (a token, password or private key) with
+    /// the team's data key. Never stored in the clear: refused when there's
+    /// no key to seal with.
+    pub async fn seal_credential(&self, team_id: &str, plain: &str) -> anyhow::Result<String> {
+        ensure!(
+            self.provider.is_some(),
+            "this installation has no secret key (PYO_SECRET_KEY) to seal it with"
+        );
+        self.seal(team_id, plain).await
+    }
+
+    /// Opens a team's credential: sealed with the team's data key, or with
+    /// the installation's key by a release before 0.5.
+    pub async fn open_credential(
+        &self,
+        sealer: &crate::secrets::Sealer,
+        value: &str,
+    ) -> anyhow::Result<String> {
+        if value.starts_with(crate::secrets::PREFIX) {
+            return sealer.open(value);
+        }
+        ensure!(Self::is_sealed(value), "a credential that isn't sealed");
+        self.open(value).await
+    }
+
     /// Open a sealed value; anything else is returned as it is.
     pub async fn open(&self, value: &str) -> anyhow::Result<String> {
         let Some(rest) = value.strip_prefix(PREFIX) else {
@@ -661,5 +686,165 @@ mod tests {
         let mut seen = vec![];
         visit_env(&mut doc, &mut |v| seen.push(v.as_str().unwrap().to_owned()));
         assert_eq!(seen, ["1", "2"]);
+    }
+
+    /// Against a throwaway Postgres, with PYO_SECRET_KEY set: the
+    /// credentials a team stores (deploy hook tokens, certificate keys,
+    /// its cluster's registry token) are sealed with that team's data key,
+    /// and ones an older release sealed with the installation's key open.
+    #[test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
+    fn team_credentials_are_sealed_with_the_teams_key() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(team_credentials())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn team_credentials() {
+        std::env::var("PYO_SECRET_KEY").expect("PYO_SECRET_KEY");
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        init(Vault::new(db.clone(), Provider::from_env()));
+        let v = get();
+        let run = crate::ids::random_string(8).to_lowercase();
+        let (user_id, team, other) = (
+            format!("usr_v{run}"),
+            format!("team_v{run}"),
+            format!("team_w{run}"),
+        );
+        let (cluster, project) = (format!("cl_v{run}"), format!("prj_v{run}"));
+        for t in [&team, &other] {
+            sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(t)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@vault.test', $1, '')").bind(&user_id).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $3 || '@vault.test', 'owner', 'active')").bind(format!("mem_v{run}")).bind(&team).bind(&user_id).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'p', $1)",
+        )
+        .bind(&project)
+        .bind(&team)
+        .execute(&db)
+        .await
+        .unwrap();
+        let user = crate::auth::User {
+            id: user_id.clone(),
+            name: "v".into(),
+            email: format!("{user_id}@vault.test"),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        let s = crate::rls::tests::state(db.clone());
+        // Sealed with this team's key: another team's can't take it as its own.
+        let the_teams = |sealed: String| {
+            let team = team.clone();
+            let other = other.clone();
+            async move {
+                assert!(sealed.starts_with(PREFIX), "{sealed}");
+                v.check_owner(&team, &sealed).await.unwrap();
+                assert!(v.check_owner(&other, &sealed).await.is_err());
+            }
+        };
+
+        // A deploy hook's token.
+        let hook = format!("hook_v{run}");
+        let made = crate::ops::run_json(
+            &s,
+            &user,
+            json!({ "op": "createDeployHook", "id": hook, "projectId": project, "name": "ci" }),
+        )
+        .await
+        .unwrap();
+        let sealed: String =
+            sqlx::query_scalar("SELECT token_sealed FROM pyo.deploy_hooks WHERE id = $1")
+                .bind(&hook)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        the_teams(sealed).await;
+        let shown =
+            crate::ops::run_json(&s, &user, json!({ "op": "revealDeployHook", "id": hook }))
+                .await
+                .unwrap();
+        assert_eq!(shown["path"], made["path"]);
+
+        // An uploaded certificate's key.
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec![format!("v{run}.example.com")])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let crt = format!("crt_v{run}");
+        crate::ops::run_json(&s, &user, json!({ "op": "uploadCertificate", "id": crt, "teamId": team, "name": "", "certificate": cert.pem(), "privateKey": key.serialize_pem() })).await.unwrap();
+        let sealed: String =
+            sqlx::query_scalar("SELECT key_sealed FROM pyo.certificates WHERE id = $1")
+                .bind(&crt)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            v.open_credential(&s.sealer, &sealed).await.unwrap(),
+            key.serialize_pem()
+        );
+        the_teams(sealed).await;
+
+        // The cluster's registry token: made once, the same after.
+        let mut tx = db.begin().await.unwrap();
+        let token = crate::ops::registry_token(&mut tx, &s, &cluster)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::ops::registry_token(&mut tx, &s, &cluster)
+                .await
+                .unwrap(),
+            token
+        );
+        tx.commit().await.unwrap();
+        let sealed: String =
+            sqlx::query_scalar("SELECT registry_token_sealed FROM pyo.clusters WHERE id = $1")
+                .bind(&cluster)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        the_teams(sealed).await;
+
+        // From a release before 0.5: sealed with the installation's key.
+        let old = s.sealer.seal("an old token").unwrap();
+        assert_eq!(
+            v.open_credential(&s.sealer, &old).await.unwrap(),
+            "an old token"
+        );
+        // Never a credential stored in the clear.
+        assert!(v.open_credential(&s.sealer, "in the clear").await.is_err());
+
+        for t in [&team, &other] {
+            sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+                .bind(t)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM pyo.users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }

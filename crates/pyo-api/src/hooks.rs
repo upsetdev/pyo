@@ -21,6 +21,7 @@ use crate::{
     error::{ApiError, ApiResult},
     ids::{new_id, sha256_hex},
     ops::log_activity,
+    ratelimit::{self, ClientIp},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -29,13 +30,19 @@ pub fn routes() -> Router<AppState> {
 
 async fn trigger(
     State(s): State<AppState>,
+    ClientIp(ip): ClientIp,
     Path(token): Path<String>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
+    // Guessing tokens: wrong ones count per address, a right one is given back.
+    ratelimit::take(&s.db, &[(ratelimit::DEPLOY_HOOK_WRONG_IP, &ip)]).await?;
     let hook: Option<(String, String, String, Option<String>, String)> =
         sqlx::query_as("SELECT id, team_id, project_id, service_id, name FROM pyo.deploy_hooks WHERE token_hash = $1").bind(sha256_hex(&token)).fetch_optional(&s.db).await?;
     let Some((hook_id, team_id, project_id, service_id, name)) = hook else {
         return Err(ApiError::not_found("Deploy hook"));
     };
+    ratelimit::forgive(&s.db, &ratelimit::DEPLOY_HOOK_WRONG_IP, &ip).await?;
+    // A runaway pipeline can't queue deploys without end.
+    ratelimit::take(&s.db, &[(ratelimit::DEPLOY_HOOK_CALLS, &hook_id)]).await?;
     let services: Vec<(String, String, String)> = match &service_id {
         Some(a) => sqlx::query_as("SELECT id, name, status FROM pyo.services WHERE id = $1 AND NOT deleting").bind(a).fetch_all(&s.db).await?,
         None => sqlx::query_as("SELECT id, name, status FROM pyo.services WHERE project_id = $1 AND NOT deleting ORDER BY created_at").bind(&project_id).fetch_all(&s.db).await?,

@@ -1,32 +1,33 @@
-//! Row security on team_id (migration 0022), behind the API's own team
-//! checks: a check the code forgot still can't read or change another
-//! team's secrets, services, deployments, domains or credentials.
+//! Row security on team_id (migrations 0022 and 0032), behind the API's
+//! own team checks: a check the code forgot still can't read or change
+//! another team's rows.
 //!
 //! Pyo connects as its tables' owner, which row security doesn't hold back.
 //! That is the bypass, and it stays the default: migrations, the agents'
 //! and builders' endpoints, webhooks, background jobs and anything an
 //! operator runs see every row. A request made for a person or an API key
-//! lowers its transaction ([`scope`]) to the `pyo_team` role, with the
-//! teams it may see in `pyo.team_ids`. There the policies show and accept
-//! only those teams' rows of the tables 0022 lists. Work that crosses teams
-//! on purpose (a hostname is one team's across the installation) lifts the
-//! transaction back for that part ([`lift`], then [`Lifted::lower`]).
+//! lowers its transaction ([`scope`], [`begin`]) to the `pyo_team` role,
+//! with the teams it may see in `pyo.team_ids`. There the policies show and
+//! accept only those teams' rows: operations, the dashboard's `/state`
+//! (and the MCP tools that read it), and the REST reads. Work that crosses
+//! teams on purpose (a hostname is one team's across the installation, a
+//! hosted build's billing tables) lifts the transaction back for that part
+//! ([`lift`], then [`Lifted::lower`]).
 //!
 //! Both settings are local to the transaction: its connection goes back
 //! to the pool as the owner. Self-hosted and hosted run the same policies.
 
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::auth::User;
 
 /// Lowers the transaction to the teams `user` may see: the ones they're an
-/// active member of, within an API key's teams. One round trip.
+/// active member of, within an API key's teams. One round trip. Again on a
+/// lowered transaction it picks up teams joined since (a new team).
 pub async fn scope(conn: &mut PgConnection, user: &User) -> sqlx::Result<()> {
     let key_teams: Option<Vec<String>> = user.key.as_ref().and_then(|k| k.teams.clone());
     sqlx::query(
-        "SELECT set_config('pyo.team_ids', coalesce((
-                  SELECT string_agg(team_id, ',') FROM pyo.members
-                   WHERE user_id = $1 AND status = 'active' AND ($2::text[] IS NULL OR team_id = ANY($2))), ''), true),
+        "SELECT set_config('pyo.team_ids', pyo.member_team_ids($1, $2), true),
                 set_config('role', 'pyo_team', true)",
     )
     .bind(&user.id)
@@ -34,6 +35,26 @@ pub async fn scope(conn: &mut PgConnection, user: &User) -> sqlx::Result<()> {
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// A transaction for a person's or API key's request, lowered to their
+/// teams ([`scope`]). Reads go through it too, so a query that forgot its
+/// team check still sees only theirs. Hold it only for the request's own
+/// queries: anything that takes another connection from the pool meanwhile
+/// waits on a pool this request already holds one of.
+pub async fn begin(db: &PgPool, user: &User) -> sqlx::Result<Transaction<'static, Postgres>> {
+    let mut tx = db.begin().await?;
+    scope(&mut tx, user).await?;
+    Ok(tx)
+}
+
+/// The teams a lowered transaction may see ([`scope`]): what its queries'
+/// `team_id = ANY($1)` bind. Empty when it isn't lowered.
+pub async fn team_ids(conn: &mut PgConnection) -> sqlx::Result<Vec<String>> {
+    let ids: Option<Vec<String>> = sqlx::query_scalar("SELECT pyo.team_scope()")
+        .fetch_one(conn)
+        .await?;
+    Ok(ids.unwrap_or_default())
 }
 
 /// A transaction lifted out of its team scope by [`lift`].
@@ -71,38 +92,16 @@ impl Lifted {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::http::StatusCode;
     use serde_json::{Value, json};
     use sqlx::PgPool;
 
-    /// Tables with a team_id that row security doesn't cover yet. A new
-    /// team-owned table gets a policy in its migration, or a place here.
-    const NOT_COVERED: &[&str] = &[
-        "activity",
-        "alert_state",
-        "backups",
-        "builders",
-        "cloud_servers",
-        "clusters",
-        "database_import_uploads",
-        "database_imports",
-        "firewall_rules",
-        "members",
-        "platform_imports",
-        "projects",
-        "registry_repos",
-        "sandbox_limits",
-        "sandbox_servers",
-        "sandbox_templates",
-        "sandbox_usage",
-        "sandboxes",
-        "static_sites",
-        "terminal_sessions",
-        "volumes",
-        "waf_rules",
-    ];
+    /// Tables with a team_id that row security doesn't cover, each with
+    /// why. A new team-owned table gets a policy in its migration, or a
+    /// place here with its reason.
+    const NOT_COVERED: &[(&str, &str)] = &[];
 
     fn run_big<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
         std::thread::Builder::new()
@@ -149,7 +148,7 @@ mod tests {
                 .filter(|(_, rls)| !rls)
                 .map(|(t, _)| t.as_str())
                 .collect();
-            let mut listed = NOT_COVERED.to_vec();
+            let mut listed: Vec<&str> = NOT_COVERED.iter().map(|(t, _)| *t).collect();
             open.sort();
             listed.sort();
             assert_eq!(open, listed);
@@ -162,6 +161,12 @@ mod tests {
                 "git_connections",
                 "alert_channels",
                 "secret_stores",
+                "clusters",
+                "projects",
+                "members",
+                "volumes",
+                "activity",
+                "sandboxes",
             ] {
                 assert!(
                     rows.iter().any(|(n, r)| n == t && *r),
@@ -234,6 +239,17 @@ mod tests {
                 q("INSERT INTO pyo.deploy_hooks (id, team_id, project_id, name, token_hash, token_sealed, created_by) VALUES ($1, $2, $3, 'h', $1, 'sealed', 'x')").bind(id("hook", t)).bind(&team).bind(&project).execute(&db).await.unwrap();
                 q("INSERT INTO pyo.agent_keys (id, cluster_id, public_key, expires_at) VALUES ($1, $2, 'pk', now() + interval '1 day')").bind(id("ak", t)).bind(&cluster).execute(&db).await.unwrap();
                 q("INSERT INTO pyo.commands (id, cluster_id, command) VALUES ($1, $2, '{\"kind\":\"deploy\",\"env\":[]}')").bind(id("cmd", t)).bind(&cluster).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.activity (id, team_id, data) VALUES ($1, $2, '{}')")
+                    .bind(id("act", t))
+                    .bind(&team)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+                q("INSERT INTO pyo.servers (id, cluster_id, name, report) VALUES ($1, $2, $1, '{}')").bind(id("srv", t)).bind(&cluster).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.builders (id, team_id, name, kind, cluster_id, token_hash) VALUES ($1, $2, $1, 'cluster', $3, $1)").bind(id("bld", t)).bind(&team).bind(&cluster).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.firewall_rules (id, team_id, service_id, action) VALUES ($1, $2, $3, 'block')").bind(id("fw", t)).bind(&team).bind(id("svc", t)).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, data) VALUES ($1, $2, $3, $4, '{\"name\":\"data\"}')").bind(id("vol", t)).bind(&team).bind(&cluster).bind(&project).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.backups (id, team_id, cluster_id, kind, trigger, label) VALUES ($1, $2, $3, 'volume', 'manual', 'x')").bind(id("bak", t)).bind(&team).bind(&cluster).execute(&db).await.unwrap();
                 users.push(user);
             }
             let (a, b) = (&users[0], &users[1]);
@@ -253,6 +269,15 @@ mod tests {
                 ("deploy_hooks", "id", "hook"),
                 ("agent_keys", "id", "ak"),
                 ("commands", "id", "cmd"),
+                ("clusters", "id", "cl"),
+                ("projects", "id", "prj"),
+                ("members", "id", "mem"),
+                ("activity", "id", "act"),
+                ("servers", "id", "srv"),
+                ("builders", "id", "bld"),
+                ("firewall_rules", "id", "fw"),
+                ("volumes", "id", "vol"),
+                ("backups", "id", "bak"),
             ];
             let count = |table: &str, col: &str| {
                 sqlx::AssertSqlSafe(format!("SELECT count(*) FROM pyo.{table} WHERE {col} = $1"))
@@ -380,6 +405,116 @@ mod tests {
             crate::ops::run_json(&s, a, json!({ "op": "saveService", "service": svc("a", &format!("a2-{run}.example.com")) })).await.unwrap();
             let _ = b;
 
+            // The dashboard's snapshot (and MCP's reads, made from it) has
+            // all of a's and nothing of b's.
+            let snap = crate::snapshot::build(&db, a, "").await.unwrap();
+            let shown = snap.to_string();
+            for p in ["svc", "cl", "prj", "dpl", "srv", "bld", "vol", "act", "fw"] {
+                assert!(shown.contains(&id(p, "a")), "a's {p} in /state");
+            }
+            assert!(
+                !shown.contains(&format!("b{run}")),
+                "nothing of b's in /state"
+            );
+            // Its parts read only a's teams' rows even when handed b's team.
+            let mut tx = crate::rls::begin(&db, a).await.unwrap();
+            assert_eq!(team_ids(&mut tx).await.unwrap(), vec![id("team", "a")]);
+            let teams_b = [id("team", "b")];
+            assert!(
+                crate::databases::listing(&mut tx, &teams_b, None)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                crate::teambackup::volume_statuses(&mut tx, &teams_b[0])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let (_, servers) = crate::cloud::snapshot(&mut tx, &teams_b).await.unwrap();
+            assert_eq!(servers, json!([]));
+            assert!(
+                crate::sandbox::server_views(&mut tx, &teams_b, None)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|v| v["teamId"].is_null())
+            );
+            assert!(
+                crate::teambackup::snapshot(&mut tx, &teams_b)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|t| t["history"] == json!([]))
+            );
+            tx.rollback().await.unwrap();
+
+            // REST reads: b's things aren't there for a.
+            use axum::extract::{Path, State};
+            let session = |u: &User| crate::auth::SessionUser(u.clone());
+            let Err(e) =
+                crate::ops::service_preview(State(s.clone()), session(a), Path(id("svc", "b")))
+                    .await
+            else {
+                panic!("b's service preview");
+            };
+            assert_eq!(e.status, StatusCode::NOT_FOUND);
+            let e = crate::ops::fetch_service_logs(&s, a, &id("svc", "b"), Default::default())
+                .await
+                .unwrap_err();
+            assert_eq!(e.status, StatusCode::NOT_FOUND);
+            let e = crate::volumes::snapshots(State(s.clone()), session(a), Path(id("vol", "b")))
+                .await
+                .unwrap_err();
+            assert_eq!(e.status, StatusCode::NOT_FOUND);
+            // The scoped transaction is what hides it: the same lookup as
+            // the owner finds it.
+            let mut tx = crate::rls::begin(&db, a).await.unwrap();
+            let e = crate::ops::team_of(&mut tx, "volumes", &id("vol", "b"))
+                .await
+                .unwrap_err();
+            assert_eq!(e.status, StatusCode::NOT_FOUND);
+            tx.rollback().await.unwrap();
+            let mut tx = db.begin().await.unwrap();
+            assert_eq!(
+                crate::ops::team_of(&mut tx, "volumes", &id("vol", "b"))
+                    .await
+                    .unwrap(),
+                id("team", "b")
+            );
+            tx.rollback().await.unwrap();
+
+            // MCP: a's service is there, b's isn't, and b's team isn't a's.
+            let got = crate::mcp::run_tool(
+                &s,
+                a,
+                "get_service",
+                &json!({ "service_id": id("svc", "a") }),
+            )
+            .await
+            .unwrap();
+            assert!(got.to_string().contains(&id("svc", "a")));
+            assert!(
+                crate::mcp::run_tool(
+                    &s,
+                    a,
+                    "get_service",
+                    &json!({ "service_id": id("svc", "b") })
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                crate::mcp::run_tool(&s, a, "list_services", &json!({ "team": id("team", "b") }))
+                    .await
+                    .is_err()
+            );
+            let listed = crate::mcp::run_tool(&s, a, "list_servers", &json!({}))
+                .await
+                .unwrap();
+            assert!(!listed.to_string().contains(&format!("b{run}")));
+
             for t in ["a", "b"] {
                 sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
                     .bind(id("team", t))
@@ -395,7 +530,7 @@ mod tests {
         });
     }
 
-    fn state(db: PgPool) -> crate::AppState {
+    pub(crate) fn state(db: PgPool) -> crate::AppState {
         let config = crate::Config {
             agent_api_url: String::new(),
             agent_image: String::new(),

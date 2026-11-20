@@ -486,7 +486,9 @@ async fn issued(
             return Ok(());
         }
     };
-    let sealed = s.sealer.seal(&p.key_pem)?;
+    let sealed = crate::vault::get()
+        .seal_credential(team, &p.key_pem)
+        .await?;
     let existing: Option<String> = match pd["certificateId"].as_str() {
         Some(id) => {
             sqlx::query_scalar("SELECT id FROM pyo.certificates WHERE id = $1 AND team_id = $2")

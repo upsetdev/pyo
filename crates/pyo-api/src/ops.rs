@@ -191,6 +191,8 @@ async fn mail_invite(
     role: &str,
     invite: Option<&str>,
 ) -> ApiResult<Value> {
+    // Each invite may be an email: a team sends so many an hour.
+    op_limit(tx, crate::ratelimit::INVITES_TEAM, team_id, true).await?;
     let (team, slug): (String, String) =
         sqlx::query_as("SELECT name, slug FROM pyo.teams WHERE id = $1")
             .bind(team_id)
@@ -274,6 +276,8 @@ pub async fn require_role(
     .fetch_optional(&mut **tx)
     .await?;
     let role = parse_role(&role.ok_or_else(|| ApiError::not_found("Team"))?)?;
+    // A team's operations together, all its members and keys.
+    op_limit(tx, crate::ratelimit::OPS_TEAM, team_id, false).await?;
     if let Some(k) = &user.key {
         if k.teams
             .as_ref()
@@ -806,7 +810,7 @@ async fn registry_door(
 
 /// The cluster's pull token at Pyo's registry door (its servers'
 /// registries.yaml): made on first use, then the same for every server.
-async fn registry_token(
+pub(crate) async fn registry_token(
     tx: &mut Transaction<'_, Postgres>,
     s: &AppState,
     cluster_id: &str,
@@ -817,14 +821,21 @@ async fn registry_token(
             .fetch_optional(&mut **tx)
             .await?
             .flatten();
-    if let Some(t) = sealed.and_then(|x| s.sealer.open(&x).ok()) {
+    let v = crate::vault::get();
+    if let Some(x) = sealed
+        && let Ok(t) = v.open_credential(&s.sealer, &x).await
+    {
         return Ok(t);
     }
+    let team_id: String = sqlx::query_scalar("SELECT team_id FROM pyo.clusters WHERE id = $1")
+        .bind(cluster_id)
+        .fetch_one(&mut **tx)
+        .await?;
     let token = secret_token();
     sqlx::query("UPDATE pyo.clusters SET registry_token_hash = $2, registry_token_sealed = $3 WHERE id = $1")
         .bind(cluster_id)
         .bind(sha256_hex(&token))
-        .bind(s.sealer.seal(&token)?)
+        .bind(v.seal_credential(&team_id, &token).await?)
         .execute(&mut **tx)
         .await?;
     Ok(token)
@@ -2992,8 +3003,58 @@ fn bucket_refused(e: anyhow::Error) -> ApiError {
     ))
 }
 
+tokio::task_local! {
+    /// What an operation counts against rate limits once its transaction
+    /// is over (ratelimit.rs), so the count takes no other connection
+    /// while it's open: (limit, key, counted only when it succeeded).
+    static COUNT_AFTER: std::sync::Mutex<Vec<(crate::ratelimit::Limit, String, bool)>>;
+}
+
+/// Refuses with 429 when `key` used up `limit`, and counts this operation
+/// against it once it's done. Outside an operation it does nothing.
+async fn op_limit(
+    tx: &mut sqlx::PgConnection,
+    limit: crate::ratelimit::Limit,
+    key: &str,
+    only_success: bool,
+) -> ApiResult<()> {
+    let Ok(()) = COUNT_AFTER.try_with(|_| ()) else {
+        return Ok(());
+    };
+    if let Some(retry) = crate::ratelimit::used_up(tx, &limit, key).await? {
+        return Err(crate::ratelimit::too_many_for(&limit, retry));
+    }
+    let _ = COUNT_AFTER.try_with(|c| {
+        let mut c = c.lock().unwrap_or_else(|e| e.into_inner());
+        if !c.iter().any(|(l, k, _)| l.scope == limit.scope && k == key) {
+            c.push((limit, key.to_owned(), only_success));
+        }
+    });
+    Ok(())
+}
+
 async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     key_allows(user, &op)?;
+    crate::ratelimit::take(&s.db, &[(crate::ratelimit::OPS_USER, &user.id)]).await?;
+    let counts = std::sync::Mutex::new(vec![]);
+    let (out, counts) = COUNT_AFTER
+        .scope(counts, async {
+            let out = run_op_counted(s, user, op).await;
+            let counts = COUNT_AFTER
+                .try_with(|c| std::mem::take(&mut *c.lock().unwrap_or_else(|e| e.into_inner())))
+                .unwrap_or_default();
+            (out, counts)
+        })
+        .await;
+    for (limit, key, only_success) in counts {
+        if out.is_ok() || !only_success {
+            crate::ratelimit::take_after(&s.db, &limit, &key).await;
+        }
+    }
+    out
+}
+
+async fn run_op_counted(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     let s = s.clone();
     // Long calls to outside services hold no transaction open.
     if matches!(
@@ -3491,6 +3552,8 @@ async fn apply(
                     .bind(&sl)
                     .execute(&mut **tx)
                     .await?;
+                // Its images' path changed: so did its clusters' doors'.
+                wake.extend(crate::registrydoor::sync_clusters(tx, &id, None).await?);
                 slug = Some(sl);
             }
             if let Some(d) = description {
@@ -3717,12 +3780,20 @@ async fn apply(
                     "Set PYO_SECRET_KEY on the API first: backups are encrypted with it.",
                 ));
             }
-            let saved = crate::teambackup::settings(&s.db, &team_id).await?;
+            let saved = crate::teambackup::settings(tx, &team_id).await?;
             let secret = secret_key
                 .filter(|k| !k.trim().is_empty())
                 .map(|k| k.trim().to_owned());
+            let destination = destination.unwrap_or_else(|| "local".into());
+            if destination == "local" && !crate::teambackup::store_on_pyo() {
+                return Err(ApiError::bad_request(if crate::hosted() {
+                    "Pyo Cloud doesn't keep teams' backups. Add an S3 bucket."
+                } else {
+                    "This installation has no backup store. Add an S3 bucket."
+                }));
+            }
             let base = crate::backup::Settings {
-                destination: destination.unwrap_or_else(|| "local".into()),
+                destination,
                 enabled,
                 schedule,
                 hour,
@@ -3733,7 +3804,7 @@ async fn apply(
                 prefix: prefix.trim().to_owned(),
                 access_key: access_key.trim().to_owned(),
                 secret_sealed: match &secret {
-                    Some(k) => Some(s.sealer.seal(k)?),
+                    Some(k) => Some(crate::vault::get().seal_credential(&team_id, k).await?),
                     None => saved.as_ref().and_then(|x| x.base.secret_sealed.clone()),
                 },
             };
@@ -3750,6 +3821,14 @@ async fn apply(
                         )
                     })?;
             } else {
+                // The key kept from before is the team's, sealed with its data key.
+                let secret = match (&secret, &base.secret_sealed) {
+                    (Some(k), _) => Some(k.clone()),
+                    (None, Some(x)) => {
+                        Some(crate::vault::get().open_credential(&s.sealer, x).await?)
+                    }
+                    (None, None) => None,
+                };
                 crate::backup::probe(s, &base, secret.as_deref(), crate::outbound::Reach::team())
                     .await
                     .map_err(bucket_refused)?;
@@ -3878,7 +3957,7 @@ async fn apply(
         }
         Op::RevealBackupPassword { team_id } => {
             require_role(tx, user, &team_id, Role::Admin).await?;
-            let cfg = crate::teambackup::settings(&s.db, &team_id)
+            let cfg = crate::teambackup::settings(tx, &team_id)
                 .await?
                 .ok_or_else(|| ApiError::not_found("Backup settings"))?;
             let password = crate::vault::get().open(&cfg.repo_password_sealed).await?;
@@ -4226,7 +4305,7 @@ async fn apply(
                 .bind(&service_id)
                 .bind(&name)
                 .bind(sha256_hex(&token))
-                .bind(s.sealer.seal(&token)?)
+                .bind(crate::vault::get().seal_credential(&team_id, &token).await?)
                 .bind(&user.name)
                 .execute(&mut **tx)
                 .await?;
@@ -4241,7 +4320,7 @@ async fn apply(
                     .fetch_one(&mut **tx)
                     .await?;
             Ok(
-                json!({ "ok": true, "path": format!("/api/hooks/deploy/{}", s.sealer.open(&sealed)?) }),
+                json!({ "ok": true, "path": format!("/api/hooks/deploy/{}", crate::vault::get().open_credential(&s.sealer, &sealed).await?) }),
             )
         }
         Op::RemoveDeployHook { id } => {
@@ -4304,9 +4383,12 @@ async fn apply(
                 "" => p.hostnames[0].clone(),
                 n => require_text(n, "Certificate name", 60)?,
             };
-            let sealed = s.sealer.seal(&p.key_pem).map_err(|_| {
-                ApiError::bad_request("Set PYO_SECRET_KEY on the API to store private keys.")
-            })?;
+            let sealed = crate::vault::get()
+                .seal_credential(&team_id, &p.key_pem)
+                .await
+                .map_err(|_| {
+                    ApiError::bad_request("Set PYO_SECRET_KEY on the API to store private keys.")
+                })?;
             sqlx::query(
                 "INSERT INTO pyo.certificates (id, team_id, name, hostnames, issuer, not_before, not_after, fingerprint, chain_pem, key_sealed)
                  VALUES ($1, $2, $3, $4, $5, to_timestamp($6), to_timestamp($7), $8, $9, $10)",
@@ -5135,9 +5217,12 @@ async fn apply(
                     "The new certificate isn't valid for {host}, which uses this one."
                 )));
             }
-            let sealed = s.sealer.seal(&p.key_pem).map_err(|_| {
-                ApiError::bad_request("Set PYO_SECRET_KEY on the API to store private keys.")
-            })?;
+            let sealed = crate::vault::get()
+                .seal_credential(&team_id, &p.key_pem)
+                .await
+                .map_err(|_| {
+                    ApiError::bad_request("Set PYO_SECRET_KEY on the API to store private keys.")
+                })?;
             let name: String = sqlx::query_scalar(
                 "UPDATE pyo.certificates SET hostnames = $2, issuer = $3, not_before = to_timestamp($4), not_after = to_timestamp($5), fingerprint = $6,
                         chain_pem = $7, key_sealed = $8, warned_days = NULL, updated_at = now() WHERE id = $1 RETURNING name",
@@ -6690,6 +6775,8 @@ async fn apply(
                 .await?;
             let token = crate::install::new_connect_token(tx, &id, &team_id).await?;
             sqlx::query("UPDATE pyo.teams SET default_cluster_id = coalesce(default_cluster_id, $2) WHERE id = $1").bind(&team_id).bind(&id).execute(&mut **tx).await?;
+            // Its registry's door gets the team's tokens once its agent is in.
+            crate::registrydoor::sync_clusters(tx, &team_id, Some(&id)).await?;
             // Run on this machine, the installer reaches Pyo at localhost,
             // so the agent is given the in-cluster address (install.rs).
             let (command, tailnet) = if this_machine {
@@ -7242,7 +7329,9 @@ async fn apply(
             let verified = crate::registry::verify(&host, &username, password.trim())
                 .await
                 .map_err(ApiError::bad_request)?;
-            let sealed = s.sealer.seal(password.trim()).map_err(ApiError::from)?;
+            let sealed = crate::vault::get()
+                .seal_credential(&team_id, password.trim())
+                .await?;
             sqlx::query(
                 "INSERT INTO pyo.registry_logins (id, team_id, host, username, secret_sealed, verified) VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT (team_id, host) DO UPDATE SET username = $4, secret_sealed = $5, verified = $6, created_at = now()",
@@ -7321,6 +7410,8 @@ async fn apply(
                 .bind(&team_id)
                 .fetch_one(&mut **tx)
                 .await?;
+            // Each cluster's own registry's door (Pyo Cloud).
+            wake.extend(crate::registrydoor::sync_clusters(tx, &team_id, None).await?);
             log_activity(
                 tx,
                 &team_id,
@@ -7349,6 +7440,7 @@ async fn apply(
                     .bind(&id)
                     .fetch_one(&mut **tx)
                     .await?;
+            wake.extend(crate::registrydoor::sync_clusters(tx, &team_id, None).await?);
             log_activity(
                 tx,
                 &team_id,
@@ -8305,7 +8397,7 @@ pub(crate) async fn service_preview(
     SessionUser(user): SessionUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Preview>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "services", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
@@ -8464,7 +8556,7 @@ pub async fn fetch_service_logs(
         return Err(ApiError::bad_request("That isn't a replica name."));
     }
     let id = id.to_owned();
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, user).await?;
     let team_id = team_of(&mut tx, "services", &id).await?;
     require_role(&mut tx, user, &team_id, Role::Viewer).await?;
     let cluster_id: String =
@@ -8579,7 +8671,7 @@ pub(crate) async fn metrics(
     SessionUser(user): SessionUser,
     crate::error::Query(q): crate::error::Query<MetricsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     tx.commit().await?;
     let cluster = q.cluster.filter(|c| c != "all").unwrap_or_default();
@@ -8690,7 +8782,7 @@ async fn team_hosts(
     site: Option<String>,
     service: Option<String>,
 ) -> ApiResult<Vec<String>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, user).await?;
     require_role(&mut tx, user, team, Role::Viewer).await?;
     let project = filter_value(project);
     let site = filter_value(site);
@@ -8769,7 +8861,7 @@ pub(crate) async fn connections(
     axum::extract::Path(id): axum::extract::Path<String>,
     crate::error::Query(q): crate::error::Query<ConnectionsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "services", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     tx.commit().await?;
@@ -8812,7 +8904,7 @@ pub(crate) async fn firewall_blocked(
     SessionUser(user): SessionUser,
     crate::error::Query(q): crate::error::Query<BlockedQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "services", &q.service).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     tx.commit().await?;
@@ -8847,7 +8939,7 @@ pub(crate) async fn waf_hits(
     SessionUser(user): SessionUser,
     crate::error::Query(q): crate::error::Query<BlockedQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "services", &q.service).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     tx.commit().await?;
@@ -10219,6 +10311,7 @@ mod compose_import_tests {
     #[ignore]
     fn a_compose_import_in_the_database() {
         let rt = tokio::runtime::Builder::new_multi_thread()
+            .thread_stack_size(64 << 20)
             .enable_all()
             .build()
             .unwrap();

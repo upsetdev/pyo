@@ -748,14 +748,26 @@ pub async fn create(
     // pushed first (names stay put when a team, project or service is
     // renamed). Nothing else of Pyo registry's, and nothing else on this
     // machine's own addresses.
+    // Pyo Cloud: an image the team pushed to this cluster's own registry,
+    // by its door's tailnet name. The servers pull it from the registry
+    // itself, and the door only took the team's own.
+    let mut in_this_cluster = false;
+    if let Some(door) = crate::registrydoor::cluster_address(tx, &cluster_id).await?
+        && let Some(rest) = deploy_spec.image.strip_prefix(&format!("{door}/"))
+    {
+        deploy_spec.image = format!("{}/{rest}", registry().pull);
+        in_this_cluster = true;
+    }
     match pyo_registry_image(&deploy_spec.image) {
+        _ if in_this_cluster => {}
         Some(Ok(pulled)) => deploy_spec.image = pulled,
         Some(Err(why)) => return Err(ApiError::forbidden(why)),
         None => {}
     }
-    if let Some(rest) = deploy_spec
-        .image
-        .strip_prefix(&format!("{}/", registry().pull))
+    if !in_this_cluster
+        && let Some(rest) = deploy_spec
+            .image
+            .strip_prefix(&format!("{}/", registry().pull))
     {
         let repo = rest.split('@').next().unwrap_or(rest);
         let repo = repo

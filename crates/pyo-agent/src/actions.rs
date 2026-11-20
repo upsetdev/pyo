@@ -162,7 +162,8 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         | Command::TailscaleKey { .. }
         | Command::TailscaleCheckName { .. }
         | Command::TailscaleRemove { .. }
-        | Command::SandboxCall(_) => {
+        | Command::SandboxCall(_)
+        | Command::SyncRegistryTokens(_) => {
             unreachable!("handled by the command loop")
         }
     };

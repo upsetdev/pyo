@@ -153,7 +153,7 @@ pub async fn list(
     SessionUser(user): SessionUser,
     Query(q): Query<RunsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = crate::ops::team_of(&mut tx, "services", &q.service).await?;
     crate::ops::require_role(&mut tx, &user, &team_id, crate::ops::Role::Viewer).await?;
     let runs: Vec<Value> = sqlx::query_scalar(

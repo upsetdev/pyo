@@ -243,8 +243,24 @@ impl FromRequestParts<AppState> for TokenUser {
                     "Send a Pyo API key: Authorization: Bearer pyo_…",
                 )
             })?;
-        Ok(TokenUser(key_user(&state.db, token).await?))
+        let token = token.to_owned();
+        let Ok(ClientIp(ip)) = ClientIp::from_request_parts(parts, state).await;
+        Ok(TokenUser(key_user_from(&state.db, &token, &ip).await?))
     }
+}
+
+/// [`key_user`] for a request from `ip`: wrong keys count per address
+/// (a used-up address can't try more), and each key's requests per key.
+pub(crate) async fn key_user_from(db: &sqlx::PgPool, token: &str, ip: &str) -> ApiResult<User> {
+    let user = match key_user(db, token).await {
+        Err(e) if e.status == StatusCode::UNAUTHORIZED => {
+            ratelimit::take(db, &[(ratelimit::API_KEY_WRONG_IP, ip)]).await?;
+            return Err(e);
+        }
+        other => other?,
+    };
+    ratelimit::take(db, &[(ratelimit::API_KEY_REQUESTS, &sha256_hex(token))]).await?;
+    Ok(user)
 }
 
 /// The user behind an API key; expired keys are refused. Records when the

@@ -439,7 +439,9 @@ pub async fn provider(db: &PgPool, team_id: &str) -> ApiResult<hetzner::Hetzner>
 /// Servers join over the tailnet: Tailscale comes first, on the cluster
 /// they join (or, for a new cluster, the one Pyo runs on).
 pub async fn needs_tailscale(db: &PgPool, cluster_id: Option<&str>) -> ApiResult<()> {
-    crate::tailscale::key_cluster(db, cluster_id).await.map(|_| ())
+    crate::tailscale::key_cluster(db, cluster_id)
+        .await
+        .map(|_| ())
 }
 
 /// Saves a team's token once Hetzner accepts it (it lists the locations).
@@ -554,7 +556,7 @@ pub async fn options(
     SessionUser(user): SessionUser,
     Query(q): Query<OptionsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     drop(tx);
     let provider = q.provider.as_deref().unwrap_or("hetzner");
@@ -659,7 +661,10 @@ async fn tailnet_of(db: &PgPool, r: &Row) -> ApiResult<Option<String>> {
 
 /// Pyo's machines on a cluster's tailnet, as its last sync saw them, or
 /// None without Tailscale there.
-async fn tailnet_devices(db: &PgPool, cluster: Option<&str>) -> Option<Vec<pyo_proto::tailscale::Machine>> {
+async fn tailnet_devices(
+    db: &PgPool,
+    cluster: Option<&str>,
+) -> Option<Vec<pyo_proto::tailscale::Machine>> {
     let t = crate::tailscale::of(db, cluster?).await.ok().flatten()?;
     Some(t.machines)
 }
@@ -938,13 +943,16 @@ async fn finish_removal(
 
 /// For the dashboard: the team's connections (the token's end only), and
 /// the servers Pyo made.
-pub async fn snapshot(db: &PgPool, team_ids: &[String]) -> ApiResult<(Value, Value)> {
+pub async fn snapshot(
+    db: &mut sqlx::PgConnection,
+    team_ids: &[String],
+) -> ApiResult<(Value, Value)> {
     let connections: Vec<Value> = sqlx::query_scalar(
         "SELECT jsonb_build_object('teamId', team_id, 'provider', kind, 'hint', hint, 'createdAt', pyo.ms(created_at))
            FROM pyo.integrations WHERE team_id = ANY($1) AND kind = 'hetzner'",
     )
     .bind(team_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let servers: Vec<Value> = sqlx::query_scalar(
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'provider', provider, 'clusterId', cluster_id,
@@ -956,7 +964,7 @@ pub async fn snapshot(db: &PgPool, team_ids: &[String]) -> ApiResult<(Value, Val
            FROM pyo.cloud_servers WHERE team_id = ANY($1) AND state <> 'deleted' ORDER BY created_at",
     )
     .bind(team_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     Ok((json!(connections), json!(servers)))
 }

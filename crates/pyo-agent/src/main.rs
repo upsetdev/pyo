@@ -31,6 +31,7 @@ mod operators;
 mod pods;
 mod publicdash;
 mod refused;
+mod registrydoor;
 mod relay;
 mod rollout;
 mod room;
@@ -226,6 +227,11 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(sites::renew_login(agent.clone()));
         // Vector's data goes to Pyo through this agent (relay.rs).
         tokio::spawn(relay::serve(agent.clone()));
+        // The door of the cluster's own registry (registrydoor.rs): not on
+        // the cluster Pyo runs on, which has Pyo's own.
+        if !agent.api.same_cluster() {
+            tokio::spawn(registrydoor::serve(agent.kube.clone()));
+        }
         // The traffic store's totals to Pyo, Pyo's context to it.
         tokio::spawn(traffic::link::run(agent.clone()));
     }
@@ -403,6 +409,7 @@ fn ordered_keys(c: &Command) -> Vec<String> {
         | Command::TailscaleClient { .. }
         | Command::TailscaleSync(_)
         | Command::TailscaleRemove { .. } => vec!["tailscale".to_owned()],
+        Command::SyncRegistryTokens(_) => vec!["registry-tokens".to_owned()],
         _ => vec![],
     };
     keys.sort();
@@ -540,6 +547,10 @@ async fn run_command(agent: Agent, envelope: CommandEnvelope) {
         }
         Command::TailscaleTest {} => tailscale::run_test(&agent.kube).await,
         Command::TailscaleSync(w) => tailscale::run_sync(&agent.kube, &w).await,
+        Command::SyncRegistryTokens(t) => match registrydoor::sync(&agent.kube, &t).await {
+            Ok(m) => ok(&m),
+            Err(e) => failed(e),
+        },
         Command::TailscaleKey { description } => {
             tailscale::run_key(&agent.kube, &description).await
         }
@@ -668,6 +679,7 @@ fn command_kind(c: &Command) -> &'static str {
         Command::TailscaleCheckName { .. } => "tailscale_check_name",
         Command::TailscaleRemove { .. } => "tailscale_remove",
         Command::SandboxCall(_) => "sandbox_call",
+        Command::SyncRegistryTokens(_) => "sync_registry_tokens",
         Command::CheckDatabaseImport(_) => "check_database_import",
         Command::ListSnapshots(_) => "list_snapshots",
         Command::ForgetSnapshot(_) => "forget_snapshot",

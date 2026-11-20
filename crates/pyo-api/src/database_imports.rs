@@ -1169,7 +1169,7 @@ pub(crate) async fn spec_part(
 
 /// The latest import of each of these databases, as listed.
 pub(crate) async fn listing(
-    db: &PgPool,
+    db: &mut sqlx::PgConnection,
     ids: &[String],
 ) -> ApiResult<std::collections::HashMap<String, Value>> {
     let rows: Vec<(String, Value)> = sqlx::query_as(
@@ -1180,7 +1180,7 @@ pub(crate) async fn listing(
            FROM pyo.database_imports WHERE database_id = ANY($1) ORDER BY database_id, created_at DESC",
     )
     .bind(ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     Ok(rows.into_iter().collect())
 }

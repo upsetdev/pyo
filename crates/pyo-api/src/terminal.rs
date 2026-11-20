@@ -157,7 +157,7 @@ async fn open(
             }));
         }
     }
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = ops::team_of(&mut tx, "services", &service_id).await?;
     // A shell can read the service's secrets and change its files: developers and up.
     ops::require_role(&mut tx, &user, &team_id, Role::Developer).await?;

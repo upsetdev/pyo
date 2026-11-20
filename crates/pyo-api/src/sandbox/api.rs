@@ -73,11 +73,6 @@ pub struct TeamQuery {
     team: String,
 }
 
-async fn team_read(s: &AppState, user: &crate::auth::User, team: &str) -> ApiResult<()> {
-    let mut c = s.db.acquire().await?;
-    super::require(&mut c, user, team, Need::Read).await
-}
-
 /// Sandboxes
 ///
 /// A team's sandboxes: their template, size, state, server and lifetime.
@@ -94,18 +89,21 @@ pub(crate) async fn list(
     SessionUser(user): SessionUser,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    team_read(&s, &user, &q.team).await?;
     let live = match q.state.as_deref() {
         None | Some("live") => true,
         Some("all") => false,
         Some(_) => return Err(ApiError::bad_request("state is \"live\" or \"all\".")),
     };
     let teams = [q.team.clone()];
-    let mut c = s.db.acquire().await?;
-    let limits = super::limits::load(&mut c, &q.team).await?;
-    let in_use = super::limits::in_use(&mut c, &q.team).await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
+    super::require(&mut tx, &user, &q.team, Need::Read).await?;
+    let limits = super::limits::load(&mut tx, &q.team).await?;
+    let in_use = super::limits::in_use(&mut tx, &q.team).await?;
+    let sandboxes =
+        super::sandbox_views_matching(&mut *tx, &teams, None, live, q.q.as_deref()).await?;
+    tx.commit().await?;
     Ok(Json(json!({
-        "sandboxes": super::sandbox_views_matching(&s.db, &teams, None, live, q.q.as_deref()).await?,
+        "sandboxes": sandboxes,
         "limits": limits,
         "inUse": in_use,
     })))
@@ -379,11 +377,11 @@ pub(crate) async fn list_servers(
     SessionUser(user): SessionUser,
     Query(q): Query<TeamQuery>,
 ) -> ApiResult<Json<Value>> {
-    team_read(&s, &user, &q.team).await?;
-    let teams = [q.team];
-    Ok(Json(
-        json!({ "servers": super::server_views(&s.db, &teams, None).await? }),
-    ))
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
+    super::require(&mut tx, &user, &q.team, Need::Read).await?;
+    let servers = super::server_views(&mut tx, &[q.team], None).await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "servers": servers })))
 }
 
 /// Add a sandbox server
@@ -541,10 +539,13 @@ pub(crate) async fn list_templates(
     SessionUser(user): SessionUser,
     Query(q): Query<TeamQuery>,
 ) -> ApiResult<Json<Value>> {
-    team_read(&s, &user, &q.team).await?;
-    let teams = [q.team];
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
+    super::require(&mut tx, &user, &q.team, Need::Read).await?;
+    let rows = super::stored_template_rows(&mut *tx, &[q.team], None).await?;
+    tx.commit().await?;
+    let rows = super::with_builtins(&s.db, None, rows).await;
     Ok(Json(
-        json!({ "templates": super::template_views_live(&s, &teams, None).await? }),
+        json!({ "templates": super::live_views(&s, rows).await }),
     ))
 }
 

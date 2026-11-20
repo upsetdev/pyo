@@ -903,7 +903,12 @@ fn structured(tool: &str, v: Value) -> Value {
     json!({ key: v })
 }
 
-async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result<Value, String> {
+pub(crate) async fn run_tool(
+    s: &AppState,
+    user: &User,
+    name: &str,
+    args: &Value,
+) -> Result<Value, String> {
     if crate::sandbox::mcp::TOOLS.contains(&name) {
         return crate::sandbox::mcp::run(s, user, name, args).await;
     }

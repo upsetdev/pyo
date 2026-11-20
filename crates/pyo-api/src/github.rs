@@ -748,7 +748,7 @@ pub(crate) async fn repos(
     SessionUser(user): SessionUser,
     Query(q): Query<TeamQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     let installs: Vec<(i64, String)> = sqlx::query_as(
         "SELECT id, account FROM pyo.github_installations WHERE team_id = $1 ORDER BY account",
@@ -802,7 +802,7 @@ pub(crate) async fn build_file(
     SessionUser(user): SessionUser,
     Query(q): Query<BuildFileQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     tx.commit().await?;
     let repo =
@@ -920,6 +920,7 @@ pub fn signature_ok(secret: &str, body: &[u8], header: &str) -> bool {
 
 async fn webhook(
     State(s): State<AppState>,
+    crate::ratelimit::ClientIp(ip): crate::ratelimit::ClientIp,
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<impl IntoResponse> {
@@ -935,6 +936,7 @@ async fn webhook(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !signature_ok(&secret, &body, sig) {
+        crate::ratelimit::take(&s.db, &[(crate::ratelimit::GIT_WEBHOOK_WRONG_IP, &ip)]).await?;
         return Ok((StatusCode::UNAUTHORIZED, "bad signature"));
     }
     let event = headers
@@ -944,6 +946,9 @@ async fn webhook(
     let Ok(v) = serde_json::from_slice::<Value>(&body) else {
         return Ok((StatusCode::BAD_REQUEST, "not JSON"));
     };
+    // Per installation: a push storm can't queue builds without end.
+    let source = format!("github:{}", v["installation"]["id"].as_i64().unwrap_or(0));
+    crate::ratelimit::take(&s.db, &[(crate::ratelimit::GIT_WEBHOOK_CALLS, &source)]).await?;
     match event {
         "push" => {}
         // Pull requests: their previews (previews/).

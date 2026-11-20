@@ -346,7 +346,11 @@ impl Server {
 /// wildcard record. `team_ids` are the viewer's teams: an installation's
 /// server is offered the first of their connections that covers its
 /// domain.
-pub async fn attach(db: &PgPool, team_ids: &[String], servers: &mut [Value]) -> sqlx::Result<()> {
+pub async fn attach(
+    db: &mut sqlx::PgConnection,
+    team_ids: &[String],
+    servers: &mut [Value],
+) -> sqlx::Result<()> {
     let ids: Vec<String> = servers
         .iter()
         .filter(|v| v["edgeDomain"].is_string())
@@ -364,7 +368,7 @@ pub async fn attach(db: &PgPool, team_ids: &[String], servers: &mut [Value]) -> 
     )
     .bind(&ids)
     .bind(STALE_SECS)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let accounts: Vec<(String, Value)> = sqlx::query_as(
         "SELECT team_id, zones FROM pyo.cloudflare_accounts WHERE team_id = ANY($1)
@@ -373,7 +377,7 @@ pub async fn attach(db: &PgPool, team_ids: &[String], servers: &mut [Value]) -> 
     )
     .bind(team_ids)
     .bind(&ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let zones = |team: &str| -> Vec<Zone> {
         accounts
@@ -686,7 +690,20 @@ pub(crate) fn check(
 /// Checks and keeps an issued certificate, its key sealed.
 async fn save(s: &AppState, id: &str, domain: &str, issued: &Issued) -> Result<(), String> {
     let p = check(issued, domain, pyo_proto::now_ms() / 1000)?;
-    let sealed = s.sealer.seal(&p.key_pem).map_err(|e| e.to_string())?;
+    // A team's own server's key with the team's data key; the
+    // installation's servers' with the installation's key.
+    let team: Option<String> =
+        sqlx::query_scalar("SELECT team_id FROM pyo.sandbox_servers WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&s.db)
+            .await
+            .map_err(|e| e.to_string())?
+            .flatten();
+    let sealed = match &team {
+        Some(t) => crate::vault::get().seal_credential(t, &p.key_pem).await,
+        None => s.sealer.seal(&p.key_pem),
+    }
+    .map_err(|e| e.to_string())?;
     sqlx::query(
         "UPDATE pyo.sandbox_edges SET state = 'ready', domain = $2, cert_pem = $3, key_sealed = $4,
                 fingerprint = $5, not_before = to_timestamp($6), not_after = to_timestamp($7),
@@ -719,9 +736,9 @@ async fn deliver(s: &AppState, id: &str) -> Result<(), String> {
     let Some((Some(address), Some(cert), Some(sealed))) = row else {
         return Err("The server hasn't joined, or there's no certificate.".into());
     };
-    let key = s
-        .sealer
-        .open(&sealed)
+    let key = crate::vault::get()
+        .open_credential(&s.sealer, &sealed)
+        .await
         .map_err(|_| "Pyo can't open the certificate's key.".to_owned())?;
     let signing = keys::signing_key(&s.db, &s.sealer)
         .await

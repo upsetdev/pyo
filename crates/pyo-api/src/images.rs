@@ -84,7 +84,7 @@ pub async fn list(
     SessionUser(user): SessionUser,
     Query(q): Query<ImagesQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     let rows: Vec<DeploymentImage> = sqlx::query_as(
         "SELECT d.spec->>'image', nullif(coalesce(d.data->>'pinnedImage', d.data->>'imageId', ''), ''), coalesce(d.data->>'revisionLabel', ''), d.service_id,
@@ -96,16 +96,16 @@ pub async fn list(
     .bind(&q.team)
     .fetch_all(&mut *tx)
     .await?;
+    let team_repos: Vec<String> =
+        sqlx::query_scalar("SELECT repo FROM pyo.registry_repos WHERE team_id = $1 ORDER BY repo")
+            .bind(&q.team)
+            .fetch_all(&mut *tx)
+            .await?;
     tx.commit().await?;
 
     let ours = format!("{}/pyo/services/", deploy::registry().pull);
     let theirs = format!("{}/", deploy::registry().pull);
     let ours_root = format!("{}/pyo/", deploy::registry().pull);
-    let team_repos: Vec<String> =
-        sqlx::query_scalar("SELECT repo FROM pyo.registry_repos WHERE team_id = $1 ORDER BY repo")
-            .bind(&q.team)
-            .fetch_all(&s.db)
-            .await?;
     let mut images: BTreeMap<String, Image> = BTreeMap::new();
     for (image, pinned, label, service_id, at, live, expired) in rows {
         let digest = pinned
@@ -349,7 +349,7 @@ pub struct RegistryQuery {
 #[utoipa::path(get, path = "/registry", operation_id = "getRegistry", tag = "Images",
     params(RegistryQuery),
     responses(
-        (status = 200, description = "`address` (in the cluster only, where servers pull from), `location` (`clusterId` and `server`, or null), `reachable`, `usedBytes`, `repositories`, `retainDeployments`, `lastCleanupAt`, `pushAddress`, `teamPath` and `tokens`. Each of `repositories` has `repository` (as servers pull it), `tailnetRepository`, `kind` (\"built\" or \"pushed\"), `serviceId`, `tags`, `bytes` and `lastPushAt`. `tailnetRepository` is a pushed repository's name on the team's tailnet, `<pushAddress>/<team>/<project>/<service>`. It's null for one Pyo built, or without a tailnet. `pushAddress` is the registry's address on the team's tailnet, where the team pushes and pulls its own images, or null without a tailnet. Each of `tokens` has `id`, `name`, `scope`, `createdBy`, `createdAt`, `expiresAt` and `lastUsedAt`, but never the token itself.", body = Object),
+        (status = 200, description = "`address` (in the cluster only, where servers pull from), `location` (`clusterId` and `server`, or null), `reachable`, `usedBytes`, `repositories`, `retainDeployments`, `lastCleanupAt`, `pushAddress`, `teamPath` and `tokens`. Each of `repositories` has `repository` (as servers pull it), `tailnetRepository`, `kind` (\"built\" or \"pushed\"), `serviceId`, `tags`, `bytes` and `lastPushAt`. `tailnetRepository` is a pushed repository's name on the team's tailnet, `<pushAddress>/<team>/<project>/<service>`. It's null for one Pyo built, or without a tailnet. `pushAddress` is the registry's address on the team's tailnet, where the team pushes and pulls its own images, or null without a tailnet. On Pyo Cloud each cluster keeps its own registry: `clusterRegistries` lists the team's clusters, each with `clusterId`, `name` and its registry's `pushAddress` on the cluster's tailnet (null until the cluster has Tailscale), and `pushAddress` is the first of them. Each of `tokens` has `id`, `name`, `scope`, `createdBy`, `createdAt`, `expiresAt` and `lastUsedAt`, but never the token itself.", body = Object),
         (status = 400, description = "No `team`.", body = crate::error::ErrorBody),
         (status = 404, description = "No such team, or you aren't in it.", body = crate::error::ErrorBody),
     ),
@@ -359,7 +359,7 @@ pub async fn registry(
     SessionUser(user): SessionUser,
     Query(q): Query<RegistryQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     let pull = deploy::registry().pull.clone();
     // Pyo's own calls go to the registry itself, in the cluster.
@@ -397,6 +397,22 @@ pub async fn registry(
         .bind(&repos)
         .fetch_one(&mut *tx)
         .await?;
+    // Pyo Cloud: each of the team's clusters keeps its own registry, with a
+    // door on the cluster's tailnet (registrydoor.rs).
+    let mut cluster_registries = vec![];
+    if deploy::in_cluster_registries() {
+        let ids: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, name FROM pyo.clusters WHERE team_id = $1 AND NOT same_cluster ORDER BY created_at",
+        )
+        .bind(&q.team)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (id, name) in ids {
+            let address = crate::registrydoor::cluster_address(&mut tx, &id).await?;
+            cluster_registries
+                .push(json!({ "clusterId": id, "name": name, "pushAddress": address }));
+        }
+    }
     // Where it runs: Pyo's own cluster, when it's this team's.
     let location: Option<(String, Value)> = sqlx::query_as(
         "SELECT id, workloads FROM pyo.clusters WHERE team_id = $1 AND same_cluster LIMIT 1",
@@ -499,7 +515,14 @@ pub async fn registry(
         "lastCleanupAt": last_cleanup,
         // Pushing the team's own: where (over the tailnet; null without one),
         // under which path, and its tokens (never the tokens themselves).
-        "pushAddress": crate::registrydoor::address(),
+        // On Pyo Cloud, the first of the team's clusters' (each has its
+        // own, `clusterRegistries`).
+        "pushAddress": if deploy::in_cluster_registries() {
+            cluster_registries.iter().find_map(|c| c["pushAddress"].as_str().map(str::to_owned))
+        } else {
+            crate::registrydoor::address()
+        },
+        "clusterRegistries": cluster_registries,
         "teamPath": crate::registrydoor::team_path(&slug),
         "tokens": tokens,
     })))
