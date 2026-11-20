@@ -58,6 +58,7 @@ mod passkeys;
 mod placement;
 mod platform_import;
 mod pressure;
+mod previews;
 mod publicdash;
 mod ratelimit;
 mod recovery;
@@ -496,6 +497,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tokio::spawn(builders::watcher(state.clone()));
         tokio::spawn(github::poller(state.clone()));
         tokio::spawn(git::poller(state.clone()));
+        tokio::spawn(previews::runner(state.clone()));
         tokio::spawn(jobs::runner(state.clone()));
         tokio::spawn(backupstore::keeper(state.db.clone()));
         tokio::spawn(sites::sweeper(state.db.clone()));

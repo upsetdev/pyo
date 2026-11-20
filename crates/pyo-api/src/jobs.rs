@@ -126,6 +126,12 @@ async fn run(s: &AppState, kind: &str, p: &Value) -> anyhow::Result<()> {
             .await
         }
         "alert.send" => crate::alerts::run_job(s, p).await,
+        // Previews (previews/): the bot, a service's settings, a redeploy.
+        "preview.report" => crate::previews::report(s, &str_of("pullId")).await,
+        "preview.sync" => crate::previews::sync_service(s, &str_of("serviceId")).await,
+        "preview.reconcile" => crate::previews::reconcile(s, &str_of("pullId"))
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.message)),
         other => anyhow::bail!("unknown job kind {other}"),
     }
 }

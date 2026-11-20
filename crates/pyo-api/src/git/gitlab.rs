@@ -399,9 +399,23 @@ impl Gitlab {
         description: &str,
         target_url: &str,
     ) -> Result<()> {
+        self.set_named_status(repo, sha, "Pyo", state, description, target_url)
+            .await
+    }
+
+    /// A commit status of Pyo's under its own name ("Pyo · Preview").
+    pub async fn set_named_status(
+        &self,
+        repo: &str,
+        sha: &str,
+        name: &str,
+        state: &str,
+        description: &str,
+        target_url: &str,
+    ) -> Result<()> {
         let mut body = json!({
             "state": state,
-            "name": "Pyo",
+            "name": name,
             "description": description.chars().take(140).collect::<String>(),
         });
         if !target_url.is_empty() {
@@ -490,7 +504,8 @@ impl Gitlab {
                         "token": secret,
                         "push_events": true,
                         "tag_push_events": false,
-                        "merge_requests_events": false,
+                        // Previews (previews/gitlab.rs).
+                        "merge_requests_events": true,
                         "enable_ssl_verification": url.starts_with("https://"),
                     })),
             )
@@ -509,6 +524,181 @@ impl Gitlab {
             "remove a webhook",
         )
         .await
+    }
+
+    // ── Merge requests (previews) ──
+
+    /// The project's open merge requests, the 100 updated last.
+    pub async fn merge_requests(&self, repo: &str) -> Result<Vec<Value>> {
+        self.list(
+            &["projects", repo, "merge_requests"],
+            &[("state", "opened"), ("order_by", "updated_at")],
+            1,
+            &format!("list the merge requests of {repo}"),
+        )
+        .await
+    }
+
+    pub async fn merge_request(&self, repo: &str, iid: i64) -> Result<Value> {
+        self.get(
+            self.url(&["projects", repo, "merge_requests", &iid.to_string()]),
+            &format!("read merge request {iid}"),
+        )
+        .await
+    }
+
+    /// Posts a note on a merge request, or edits it in place (posting it
+    /// again when it was deleted). Its id.
+    pub async fn note(&self, repo: &str, iid: i64, id: Option<u64>, body: &str) -> Result<u64> {
+        let b = json!({ "body": body });
+        let iid = iid.to_string();
+        if let Some(id) = id {
+            let (status, v) = self
+                .send(
+                    self.http
+                        .put(self.url(&[
+                            "projects",
+                            repo,
+                            "merge_requests",
+                            &iid,
+                            "notes",
+                            &id.to_string(),
+                        ]))
+                        .json(&b),
+                )
+                .await?;
+            if status.is_success() {
+                return Ok(id);
+            }
+            if status != StatusCode::NOT_FOUND {
+                return Err(describe(status, "edit the merge request note", &v));
+            }
+        }
+        let (status, v) = self
+            .send(
+                self.http
+                    .post(self.url(&["projects", repo, "merge_requests", &iid, "notes"]))
+                    .json(&b),
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(describe(status, "comment on the merge request", &v));
+        }
+        v["id"]
+            .as_u64()
+            .ok_or_else(|| error(None, "GitLab gave the note no id."))
+    }
+
+    /// An environment named `name` with `external_url` ("View app"): the
+    /// one Pyo made (`id`), else one of that name, else a new one.
+    pub async fn environment(
+        &self,
+        repo: &str,
+        id: Option<u64>,
+        name: &str,
+        external_url: Option<&str>,
+    ) -> Result<u64> {
+        let mut b = json!({ "name": name });
+        if let Some(u) = external_url {
+            b["external_url"] = json!(u);
+        }
+        if let Some(id) = id {
+            let (status, v) = self
+                .send(
+                    self.http
+                        .put(self.url(&["projects", repo, "environments", &id.to_string()]))
+                        .json(&json!({ "external_url": external_url })),
+                )
+                .await?;
+            if status.is_success() {
+                return Ok(id);
+            }
+            if status != StatusCode::NOT_FOUND {
+                return Err(describe(status, "update the environment", &v));
+            }
+        }
+        let (status, v) = self
+            .send(
+                self.http
+                    .post(self.url(&["projects", repo, "environments"]))
+                    .json(&b),
+            )
+            .await?;
+        if status.is_success() {
+            return v["id"]
+                .as_u64()
+                .ok_or_else(|| error(None, "GitLab gave the environment no id."));
+        }
+        // There already: that one.
+        let mut url = self.url(&["projects", repo, "environments"]);
+        url.query_pairs_mut().append_pair("name", name);
+        let found = self.get(url, "find the environment").await?;
+        found
+            .as_array()
+            .and_then(|a| a.iter().find(|e| e["name"] == json!(name)))
+            .and_then(|e| e["id"].as_u64())
+            .ok_or_else(|| describe(status, "add the environment", &v))
+    }
+
+    /// Stops an environment and deletes it. Gone already is done.
+    pub async fn remove_environment(&self, repo: &str, id: u64) -> Result<()> {
+        let id = id.to_string();
+        let (status, v) = self
+            .send(
+                self.http
+                    .post(self.url(&["projects", repo, "environments", &id, "stop"])),
+            )
+            .await?;
+        if !status.is_success() && status != StatusCode::NOT_FOUND {
+            return Err(describe(status, "stop the environment", &v));
+        }
+        self.delete(
+            self.url(&["projects", repo, "environments", &id]),
+            "delete the environment",
+        )
+        .await
+    }
+
+    /// A deployment of `sha` to the environment `name` in `status`
+    /// ("running", "success", "failed", "canceled"): a new one when `id` is
+    /// None, else that one moved on. Its id.
+    pub async fn deployment(
+        &self,
+        repo: &str,
+        id: Option<u64>,
+        name: &str,
+        sha: &str,
+        git_ref: &str,
+        status: &str,
+    ) -> Result<u64> {
+        if let Some(id) = id {
+            let (st, v) = self
+                .send(
+                    self.http
+                        .put(self.url(&["projects", repo, "deployments", &id.to_string()]))
+                        .json(&json!({ "status": status })),
+                )
+                .await?;
+            if st.is_success() || (st == StatusCode::BAD_REQUEST && same_state(&v)) {
+                return Ok(id);
+            }
+            if st != StatusCode::NOT_FOUND {
+                return Err(describe(st, "update the deployment", &v));
+            }
+        }
+        let (st, v) = self
+            .send(
+                self.http
+                    .post(self.url(&["projects", repo, "deployments"]))
+                    .json(&json!({ "environment": name, "sha": sha, "ref": git_ref, "tag": false, "status": status })),
+            )
+            .await?;
+        if !st.is_success() {
+            return Err(describe(st, "add a deployment", &v));
+        }
+        v["id"]
+            .as_u64()
+            .ok_or_else(|| error(None, "GitLab gave the deployment no id."))
     }
 
     /// Remove several webhooks, carrying on past failures: the ones that

@@ -269,6 +269,7 @@ mod tests {
             LOCK_BACKUP_STORE,
             LOCK_DATABASE_IMPORTS,
             crate::geoip::LOCK_GEOIP,
+            crate::previews::LOCK,
             // updates::start's one-start-at-a-time lock.
             LOCK_UPDATES + 1000,
         ];

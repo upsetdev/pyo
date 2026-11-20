@@ -567,6 +567,7 @@ fn service_spec_from(service: &Value) -> Value {
             "waf",
             "wafState",
             "behindCdn",
+            "previewOf",
             "createdAt",
             "updatedAt",
         ] {
@@ -2406,6 +2407,10 @@ pub(crate) enum Op {
         #[serde(default)]
         delete_volumes: bool,
     },
+    /// Remove a pull request's preview of a service now. The next push to the pull request brings it back.
+    DeletePreview { id: String },
+    /// Deploy a pull request's preview again from its head (a failed one tries again, a removed one comes back).
+    RedeployPreview { id: String },
     /// Isolate a project's network: only its own services and the web server reach them.
     SetProjectIsolation { id: String, isolate: bool },
     /// Give the team a new data key and seal its stored secrets again with it.
@@ -2578,6 +2583,8 @@ pub(crate) enum Op {
         #[serde(default)]
         public_api_url: Option<String>,
     },
+    /// Set the domain previews on a cluster use (`<service>-pr-<n>.<domain>`, a wildcard record pointing at the cluster), or null for nip.io. Admins only.
+    SetClusterPreviewDomain { id: String, domain: Option<String> },
     /// Rename a cluster or change its description, location or tags.
     UpdateCluster {
         id: String,
@@ -3192,6 +3199,7 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
         op,
         Op::Deploy { .. }
             | Op::Cancel { .. }
+            | Op::RedeployPreview { .. }
             | Op::RestartService { .. }
             | Op::StopService { .. }
             | Op::SetAutoscale { .. }
@@ -3231,6 +3239,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SetAutoscale { .. }
         | Op::RevealSecret { .. } => ("Services", "svc"),
         Op::Deploy { .. } | Op::Cancel { .. } => ("Deployments", "dpl"),
+        Op::DeletePreview { .. } | Op::RedeployPreview { .. } => ("Deployments", "pvw"),
         Op::CreateDeployHook { .. } | Op::RevealDeployHook { .. } | Op::RemoveDeployHook { .. } => {
             ("Deployments", "hook")
         }
@@ -3271,6 +3280,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::RevealBackupPassword { .. } => ("Backups", "team"),
         Op::CreateCluster { .. }
         | Op::UpdateCluster { .. }
+        | Op::SetClusterPreviewDomain { .. }
         | Op::RotateAgentToken { .. }
         | Op::UpdateClusterAgent { .. }
         | Op::DiscardClusterDraft { .. }
@@ -5393,6 +5403,11 @@ async fn apply(
             }
             Ok(ok)
         }
+        Op::DeletePreview { id } => crate::previews::delete(tx, user, &id, wake).await,
+        Op::RedeployPreview { id } => crate::previews::redeploy(tx, user, &id).await,
+        Op::SetClusterPreviewDomain { id, domain } => {
+            crate::previews::domain::set(tx, user, &id, domain.as_deref()).await
+        }
         Op::SetProjectIsolation { id, isolate } => {
             let team_id = team_of(tx, "projects", &id).await?;
             require_role(tx, user, &team_id, Role::Admin).await?;
@@ -5462,6 +5477,16 @@ async fn apply(
                     .bind(&id)
                     .fetch_one(&mut **tx)
                     .await?;
+            // Their previews' pull requests say they're removed.
+            let pulls: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT p.pull_id FROM pyo.previews p JOIN pyo.services a ON a.id = p.service_id WHERE a.project_id = $1",
+            )
+            .bind(&id)
+            .fetch_all(&mut **tx)
+            .await?;
+            for p in pulls {
+                crate::jobs::enqueue(&mut **tx, "preview.report", json!({ "pullId": p })).await?;
+            }
             // Its services go first, each on its cluster (the agent runs a
             // namespace's deletions in order: services, volumes, namespace).
             let services: Vec<(String, String)> = sqlx::query_as(
@@ -5578,10 +5603,23 @@ async fn apply(
             require_role(tx, user, &team_id, Role::Developer).await?;
             let (old_name, current, old_spec, pending): (String, Option<String>, Value, bool) =
                 sqlx::query_as("SELECT name, current_deployment_id, spec, pending_changes FROM pyo.services WHERE id = $1").bind(&id).fetch_one(&mut **tx).await?;
+            // A preview's copy follows the service it previews.
+            if crate::previews::is_copy(&mut **tx, &id).await? {
+                return Err(ApiError::conflict(
+                    "This is a preview. Change the service it previews: the next push brings the change here.",
+                ));
+            }
             // The dashboard never gets secret values back, so a secret it
             // sends without one keeps the stored (sealed) value.
             let mut service = service;
-            let unhidden = keep_secret_values(&mut service, &old_spec);
+            let mut unhidden = keep_secret_values(&mut service, &old_spec);
+            // And the same for the previews' variables.
+            if service["previews"].is_object() {
+                unhidden.extend(keep_secret_values(
+                    &mut service["previews"],
+                    &old_spec["previews"],
+                ));
+            }
             if !unhidden.is_empty() {
                 // Same as revealing it, for the whole team: admins, logged.
                 if require_role(tx, user, &team_id, Role::Admin).await.is_err() {
@@ -5637,6 +5675,7 @@ async fn apply(
             }
             crate::placement::normalize(&mut spec)?;
             validate_service_spec(&spec)?;
+            crate::previews::check_settings(&mut spec)?;
             let placed = crate::placement::Placement::of(&spec);
             let placement_changed = placed != crate::placement::Placement::of(&old_spec);
             // Only a change of GPUs is checked against the cluster: a save
@@ -5750,7 +5789,13 @@ async fn apply(
                     json!({ "projectId": project_id, "serviceId": id }),
                 )
                 .await?;
+                // Its previews run where it does.
+                if deployment_id.is_none() {
+                    crate::previews::placement_changed(tx, &id, wake).await?;
+                }
             }
+            // Its previews follow the settings (and the repository).
+            crate::previews::settings_saved(tx, &id, &old_spec, &spec).await?;
             // New domains go live now; with a deploy, they go out with it.
             if domains_changed
                 && let Some(c) = crate::routes::changed(tx, &id, deployment_id.is_none()).await?
@@ -5805,6 +5850,8 @@ async fn apply(
             .await?;
             // Its repository's webhook goes when no other service follows it.
             crate::git::queue_sync_for(tx, &[&source]).await?;
+            // Its previews go with it (or, for a preview's copy, its preview).
+            crate::previews::service_deleted(tx, &id, wake).await?;
             sqlx::query("UPDATE pyo.deployments SET status = 'cancelled', finished_at = now() WHERE service_id = $1 AND status NOT IN ('succeeded', 'failed', 'cancelled')")
                 .bind(&id)
                 .execute(&mut **tx)
@@ -5883,24 +5930,7 @@ async fn apply(
             if deploy::is_final(&status) {
                 return Err(ApiError::conflict("This deployment already finished."));
             }
-            deploy::enqueue(
-                tx,
-                &cluster_id,
-                Command::Cancel {
-                    deployment_id: deployment_id.clone(),
-                },
-            )
-            .await?;
-            // A build that hasn't finished is dropped; its result is ignored.
-            sqlx::query("UPDATE pyo.build_jobs SET status = 'cancelled', finished_at = now() WHERE deployment_id = $1 AND status IN ('queued', 'running')")
-                .bind(&deployment_id)
-                .execute(&mut **tx)
-                .await?;
-            // Queued work the agent hasn't picked up yet is withdrawn here.
-            sqlx::query("UPDATE pyo.commands SET status = 'failed', done_at = now(), result = '{\"ok\":false,\"message\":\"Cancelled\",\"logs\":[]}' WHERE status = 'pending' AND command->>'kind' = 'deploy' AND command->>'deploymentId' = $1")
-                .bind(&deployment_id)
-                .execute(&mut **tx)
-                .await?;
+            deploy::cancel(tx, &deployment_id).await?;
             wake.push(cluster_id);
             Ok(ok)
         }
@@ -8910,6 +8940,7 @@ pub(crate) async fn create_service(
     crate::template_source::scrub_fields(&mut spec);
     crate::placement::normalize(&mut spec)?;
     validate_service_spec(&spec)?;
+    crate::previews::check_settings(&mut spec)?;
     gpu_ok(tx, &cluster_id, &spec).await?;
     crate::placement::check(tx, &cluster_id, None, &spec, true).await?;
     github_source_ok(tx, &team_id, &spec).await?;

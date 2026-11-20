@@ -107,7 +107,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         (name = "Teams", description = "Teams, their members and invites."),
         (name = "Projects", description = "Projects group a team's services."),
         (name = "Services", description = "Create, change, scale and stop services, and read their logs and traffic."),
-        (name = "Deployments", description = "Deploy, roll back and cancel, and manage deploy hooks."),
+        (name = "Deployments", description = "Deploy, roll back and cancel, manage deploy hooks, and remove or redeploy previews."),
         (name = "Cron jobs", description = "Commands a service runs on a schedule, and their runs."),
         (name = "Domains", description = "Domains and their certificates."),
         (name = "Volumes", description = "Persistent storage for services."),

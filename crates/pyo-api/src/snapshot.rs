@@ -92,6 +92,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'freeDomainAddressSet', free_domain_address,
             -- Volumes on it that Pyo has no record of (volumes.rs).
             'strayVolumes', stray_volumes,
+            -- Its preview domain, as stored (shaped below: previews/domain.rs).
+            'previewDomain', preview_domain,
             'podCidr', coalesce(capabilities->>'podCidr', ''),
             'serviceCidr', coalesce(capabilities->>'serviceCidr', ''),
             'createdAt', pyo.ms(created_at),
@@ -170,6 +172,9 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         if let (Some(o), Value::Object(shown)) = (c.as_object_mut(), f.shown()) {
             o.extend(shown);
         }
+        // Its preview domain: the wildcard record to make, at its public IP.
+        let shown = crate::previews::domain::show(&c["previewDomain"], f.public_ip());
+        c["previewDomain"] = shown;
     }
     // The tailnet its tailnet domains are on: Tailscale set up on the
     // cluster, and a server of it on the tailnet. And the cluster's
@@ -214,6 +219,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'name', a.name, 'status', a.status, 'runtime', a.runtime,
             'currentDeploymentId', a.current_deployment_id, 'pendingChanges', a.pending_changes,
             'waf', a.waf, 'behindCdn', a.behind_cdn,
+            -- A preview's copy: the service it previews (previews/).
+            'previewOf', a.preview_of,
             'createdAt', pyo.ms(a.created_at), 'updatedAt', pyo.ms(a.updated_at))
            FROM pyo.services a WHERE a.team_id = ANY($1) AND NOT a.deleting ORDER BY a.created_at",
         &team_ids,
@@ -404,14 +411,19 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         &team_ids,
     )
     .await?;
-    let github_installations = values(
+    let mut github_installations = values(
         db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'account', account, 'accountType', account_type,
-                'repositorySelection', repository_selection, 'createdAt', pyo.ms(created_at))
+                'repositorySelection', repository_selection, 'createdAt', pyo.ms(created_at),
+                'permissions', permissions, 'events', events)
            FROM pyo.github_installations WHERE team_id = ANY($1) ORDER BY account",
         &team_ids,
     )
     .await?;
+    // What previews still need approved on GitHub, and where.
+    for i in github_installations.iter_mut() {
+        crate::previews::github::show_installation(i);
+    }
 
     // Git connections, never their tokens.
     let git_connections = values(
@@ -455,6 +467,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "systemWorkloads": workloads,
         "services": services,
         "deployments": deployments,
+        // Previews of pull requests and merge requests (previews/).
+        "previews": crate::previews::snapshot(db, &team_ids).await?,
         "volumes": volumes,
         "activity": activity,
         "builders": builders,
@@ -535,31 +549,44 @@ fn capabilities(stored: &Value) -> Value {
 /// Env values are sealed at rest. Plain ones are opened for the dashboard;
 /// secret ones never leave the API: blank, with `hasValue` saying one is set.
 async fn for_dashboard(mut services: Vec<Value>) -> ApiResult<Vec<Value>> {
-    let vault = crate::vault::get();
     for service in services.iter_mut() {
         crate::template_source::show(service);
         let service_id = service["id"].clone();
-        let Some(env) = service.get_mut("env").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for e in env.iter_mut() {
-            let value = e["value"].as_str().unwrap_or("").to_owned();
-            if e["secret"] == json!(true) {
-                e["hasValue"] = json!(!value.is_empty());
-                e["value"] = json!("");
-            } else if crate::vault::Vault::is_sealed(&value) {
-                // One unreadable value mustn't take the whole dashboard down.
-                match vault.open(&value).await {
-                    Ok(v) => e["value"] = json!(v),
-                    Err(err) => {
-                        tracing::error!(service = %service_id, key = %e["key"], error = %err, "can't open an environment variable");
-                        e["value"] = json!("");
-                    }
+        // The service's variables, then its previews' (the same rules).
+        if let Some(env) = service.get_mut("env").and_then(Value::as_array_mut) {
+            shown_env(env, &service_id).await;
+        }
+        if let Some(env) = service
+            .get_mut("previews")
+            .and_then(|p| p.get_mut("env"))
+            .and_then(Value::as_array_mut)
+        {
+            shown_env(env, &service_id).await;
+        }
+    }
+    Ok(services)
+}
+
+/// Variables as the dashboard gets them: a secret's value never (only that
+/// it has one), the others opened.
+async fn shown_env(env: &mut [Value], service_id: &Value) {
+    let vault = crate::vault::get();
+    for e in env.iter_mut() {
+        let value = e["value"].as_str().unwrap_or("").to_owned();
+        if e["secret"] == json!(true) {
+            e["hasValue"] = json!(!value.is_empty());
+            e["value"] = json!("");
+        } else if crate::vault::Vault::is_sealed(&value) {
+            // One unreadable value mustn't take the whole dashboard down.
+            match vault.open(&value).await {
+                Ok(v) => e["value"] = json!(v),
+                Err(err) => {
+                    tracing::error!(service = %service_id, key = %e["key"], error = %err, "can't open an environment variable");
+                    e["value"] = json!("");
                 }
             }
         }
     }
-    Ok(services)
 }
 
 #[cfg(test)]

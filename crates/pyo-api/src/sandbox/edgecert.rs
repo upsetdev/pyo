@@ -109,7 +109,11 @@ impl HttpClient for Reqwest {
 
 /// Pyo's ACME account at `directory`: made once and kept sealed in the
 /// settings, one per directory.
-async fn account(s: &AppState, client: reqwest::Client, directory: &str) -> ApiResult<Account> {
+pub(crate) async fn account(
+    s: &AppState,
+    client: reqwest::Client,
+    directory: &str,
+) -> ApiResult<Account> {
     let saved: Option<Value> =
         sqlx::query_scalar("SELECT value FROM pyo.settings WHERE key = 'acme_account'")
             .fetch_optional(&s.db)
@@ -170,7 +174,7 @@ pub(crate) trait Propagation {
 
 /// Asks Cloudflare's resolver over HTTPS until the record shows, for two
 /// minutes at most. The zone is at Cloudflare, so that's quick.
-struct DnsOverHttps(reqwest::Client);
+pub(crate) struct DnsOverHttps(pub(crate) reqwest::Client);
 
 impl Propagation for DnsOverHttps {
     async fn wait(&self, name: &str, value: &str) {

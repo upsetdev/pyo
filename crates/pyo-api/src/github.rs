@@ -42,7 +42,15 @@ use crate::{
     ops::{Role, log_activity, require_role},
 };
 
-const API: &str = "https://api.github.com";
+/// GitHub's REST API: `PYO_GITHUB_API` when set (tests and the e2e run a fake
+/// GitHub there), else api.github.com.
+pub fn api_base() -> String {
+    std::env::var("PYO_GITHUB_API")
+        .ok()
+        .map(|u| u.trim().trim_end_matches('/').to_owned())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "https://api.github.com".to_owned())
+}
 
 /// The app, as saved after the manifest flow. Secrets are sealed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -61,12 +69,20 @@ pub struct GithubApp {
     pub public_url: String,
     /// Whether GitHub sends webhooks (only with a public https URL).
     pub webhook_active: bool,
+    /// What the app may do and the events it gets, as GitHub last said
+    /// (previews/github.rs `check_all`). Null until checked.
+    pub permissions: Value,
+    pub events: Vec<String>,
+    /// "User" or "Organization": where its settings are.
+    pub owner_type: String,
 }
 
 impl GithubApp {
     /// For the dashboard: no keys.
     pub fn public(&self) -> Value {
-        json!({ "slug": self.slug, "name": self.name, "htmlUrl": self.html_url, "owner": self.owner, "publicUrl": self.public_url, "webhookActive": self.webhook_active })
+        json!({ "slug": self.slug, "name": self.name, "htmlUrl": self.html_url, "owner": self.owner, "publicUrl": self.public_url, "webhookActive": self.webhook_active,
+                "missingPermissions": crate::previews::github::missing(&self.permissions, &self.events),
+                "permissionsUrl": crate::previews::github::app_settings_url(self) })
     }
 }
 
@@ -79,7 +95,7 @@ pub async fn app(db: &sqlx::PgPool) -> ApiResult<Option<GithubApp>> {
         .filter(|a: &GithubApp| a.app_id > 0))
 }
 
-fn http() -> &'static reqwest::Client {
+pub(crate) fn http() -> &'static reqwest::Client {
     static C: OnceLock<reqwest::Client> = OnceLock::new();
     C.get_or_init(|| {
         reqwest::Client::builder()
@@ -176,8 +192,8 @@ pub async fn manifest(user_id: &str, public_url: &str, org: Option<&str>) -> Api
         "setup_on_update": true,
         "callback_urls": [format!("{base}/api/github/authorized")],
         "hook_attributes": { "url": format!("{base}/api/github/webhook"), "active": webhook },
-        "default_events": ["push"],
-        "default_permissions": { "contents": "read", "metadata": "read", "statuses": "write" },
+        "default_events": ["push", "pull_request"],
+        "default_permissions": crate::previews::github::manifest_permissions(),
     });
     let state = remember(Pending::Manifest {
         user_id: user_id.to_owned(),
@@ -220,7 +236,11 @@ async fn created(
         ));
     }
     let res = http()
-        .post(format!("{API}/app-manifests/{}/conversions", q.code))
+        .post(format!(
+            "{}/app-manifests/{}/conversions",
+            api_base(),
+            q.code
+        ))
         .header("accept", "application/vnd.github+json")
         .send()
         .await
@@ -243,6 +263,7 @@ async fn created(
         client_secret_sealed: seal("client_secret")?,
         public_url,
         webhook_active: webhook,
+        ..Default::default()
     };
     sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('github', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()")
         .bind(serde_json::to_value(&app).map_err(anyhow::Error::from)?)
@@ -495,7 +516,10 @@ async fn user_installations(s: &AppState, app: &GithubApp, code: &str) -> anyhow
     let mut ids = vec![];
     for page in 1..=10 {
         let res = http()
-            .get(format!("{API}/user/installations?per_page=100&page={page}"))
+            .get(format!(
+                "{}/user/installations?per_page=100&page={page}",
+                api_base()
+            ))
             .bearer_auth(token)
             .header("accept", "application/vnd.github+json")
             .send()
@@ -524,7 +548,7 @@ fn installation_ids(v: &Value) -> Vec<i64> {
 // ── Tokens and API calls ─────────────────────────────────────────────────────
 
 /// A JWT signed with the app's key, for calls as the app itself.
-fn app_jwt(s: &AppState, app: &GithubApp) -> anyhow::Result<String> {
+pub(crate) fn app_jwt(s: &AppState, app: &GithubApp) -> anyhow::Result<String> {
     let pem = s.sealer.open(&app.pem_sealed)?;
     let now = pyo_proto::now_ms() / 1000;
     let claims = json!({ "iat": now - 60, "exp": now + 540, "iss": app.app_id.to_string() });
@@ -536,13 +560,13 @@ fn app_jwt(s: &AppState, app: &GithubApp) -> anyhow::Result<String> {
     )?)
 }
 
-async fn app_get(s: &AppState, path: &str) -> anyhow::Result<Value> {
+pub(crate) async fn app_get(s: &AppState, path: &str) -> anyhow::Result<Value> {
     let app = app(&s.db)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e.message))?
         .ok_or_else(|| anyhow::anyhow!("GitHub isn't set up"))?;
     let res = http()
-        .get(format!("{API}{path}"))
+        .get(format!("{}{path}", api_base()))
         .bearer_auth(app_jwt(s, &app)?)
         .header("accept", "application/vnd.github+json")
         .send()
@@ -571,7 +595,8 @@ pub async fn installation_token(s: &AppState, installation_id: i64) -> anyhow::R
         .ok_or_else(|| anyhow::anyhow!("GitHub isn't set up"))?;
     let res = http()
         .post(format!(
-            "{API}/app/installations/{installation_id}/access_tokens"
+            "{}/app/installations/{installation_id}/access_tokens",
+            api_base()
         ))
         .bearer_auth(app_jwt(s, &app)?)
         .header("accept", "application/vnd.github+json")
@@ -600,7 +625,7 @@ async fn get_as(
 ) -> anyhow::Result<reqwest::Response> {
     let tok = installation_token(s, installation_id).await?;
     Ok(http()
-        .get(format!("{API}{path}"))
+        .get(format!("{}{path}", api_base()))
         .bearer_auth(tok)
         .header("accept", accept)
         .send()
@@ -864,7 +889,7 @@ pub async fn report(
     let state = if state == "running" { "pending" } else { state };
     let tok = installation_token(s, inst).await?;
     let res = http()
-        .post(format!("{API}/repos/{repo}/statuses/{sha}"))
+        .post(format!("{}/repos/{repo}/statuses/{sha}", api_base()))
         .bearer_auth(tok)
         .header("accept", "application/vnd.github+json")
         .json(&json!({ "state": state, "description": description.chars().take(140).collect::<String>(), "context": "Pyo", "target_url": format!("{}/{slug}/deployments/{deployment_id}", app.public_url) }))
@@ -912,10 +937,31 @@ async fn webhook(
     if !signature_ok(&secret, &body, sig) {
         return Ok((StatusCode::UNAUTHORIZED, "bad signature"));
     }
-    if headers.get("x-github-event").and_then(|v| v.to_str().ok()) != Some("push") {
-        return Ok((StatusCode::OK, "ignored"));
+    let event = headers
+        .get("x-github-event")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Ok(v) = serde_json::from_slice::<Value>(&body) else {
+        return Ok((StatusCode::BAD_REQUEST, "not JSON"));
+    };
+    match event {
+        "push" => {}
+        // Pull requests: their previews (previews/).
+        "pull_request" => {
+            return Ok((
+                StatusCode::OK,
+                crate::previews::github::webhook(&s, &v).await?,
+            ));
+        }
+        // Permissions approved (or changed) on GitHub: previews may run now.
+        "installation" | "installation_repositories" => {
+            if let Some(id) = v["installation"]["id"].as_i64() {
+                crate::previews::github::check_installation(&s, id).await;
+            }
+            return Ok((StatusCode::OK, "noted"));
+        }
+        _ => return Ok((StatusCode::OK, "ignored")),
     }
-    let v: Value = serde_json::from_slice(&body).map_err(anyhow::Error::from)?;
     if v["deleted"] == json!(true) {
         return Ok((StatusCode::OK, "branch deleted"));
     }

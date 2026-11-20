@@ -1012,6 +1012,10 @@ pub async fn report(
     let Some((data, slug)) = row else {
         return Ok(());
     };
+    // A preview's deployment: its pull request's bot says it instead.
+    if crate::previews::deployment_changed(s, deployment_id).await? {
+        return Ok(());
+    }
     let src = &data["source"];
     if src["installationId"].is_i64() {
         return crate::github::report(s, &data, &slug, deployment_id, state, description).await;
@@ -1070,7 +1074,7 @@ pub async fn deploy_push(
     };
     let services: Vec<(String, String, Value)> = sqlx::query_as(
         "SELECT a.id, a.team_id, a.spec->'source' FROM pyo.services a
-          WHERE NOT a.deleting AND a.spec->'source'->>'type' = 'git'
+          WHERE NOT a.deleting AND a.preview_of IS NULL AND a.spec->'source'->>'type' = 'git'
             AND CASE WHEN $2::text IS NULL THEN a.spec->'source'->>'installationId' IS NOT NULL
                      ELSE a.spec->'source'->>'gitConnectionId' = $2 END
             AND coalesce(a.spec->'source'->>'branch', 'main') = $1 AND coalesce((a.spec->'source'->>'autoDeploy')::bool, true)
@@ -1176,6 +1180,19 @@ async fn webhook(
     let Ok(v) = serde_json::from_slice::<Value>(&body) else {
         return Ok((StatusCode::BAD_REQUEST, "not JSON"));
     };
+    // A merge request: its previews (previews/gitlab.rs).
+    if let Some(mr) = crate::previews::gitlab::pull_of_hook(header("x-gitlab-event"), &v, &conn) {
+        let team: String =
+            sqlx::query_scalar("SELECT team_id FROM pyo.git_connections WHERE id = $1")
+                .bind(&conn.id)
+                .fetch_one(&s.db)
+                .await?;
+        let followed = crate::previews::pull_event(&s, &team, &mr).await?;
+        return Ok((
+            StatusCode::OK,
+            if followed { "previews" } else { "no previews" },
+        ));
+    }
     let Some(push) = gitlab::push_of(header("x-gitlab-event"), &v) else {
         return Ok((StatusCode::OK, "ignored"));
     };
@@ -1227,11 +1244,20 @@ pub async fn sync_hooks(s: &AppState, id: &str) -> anyhow::Result<()> {
     let mut wanted: Vec<String> = urls.iter().filter_map(|u| conn.repo_of(u)).collect();
     wanted.sort_by_key(|r| r.to_lowercase());
     wanted.dedup_by_key(|r| r.to_lowercase());
+    let rows: Vec<(String, Option<i64>, String, bool)> = sqlx::query_as(
+        "SELECT repo, hook_id, url, merge_requests FROM pyo.git_webhooks WHERE connection_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    // Hooks made before previews send pushes only: they're made again.
+    let old_hooks: Vec<String> = rows
+        .iter()
+        .filter(|r| r.1.is_some() && !r.3)
+        .map(|r| r.0.clone())
+        .collect();
     let have: Vec<(String, Option<i64>, String)> =
-        sqlx::query_as("SELECT repo, hook_id, url FROM pyo.git_webhooks WHERE connection_id = $1")
-            .bind(id)
-            .fetch_all(&mut *tx)
-            .await?;
+        rows.into_iter().map(|(r, h, u, _)| (r, h, u)).collect();
     let api = conn
         .api()
         .await
@@ -1259,6 +1285,7 @@ pub async fn sync_hooks(s: &AppState, id: &str) -> anyhow::Result<()> {
         let saved = have.iter().find(|(r, _, _)| *r == key);
         if let Some((_, Some(_), url)) = saved
             && Some(url) == hook_url.as_ref()
+            && !old_hooks.contains(&key)
         {
             continue;
         }
@@ -1279,8 +1306,8 @@ pub async fn sync_hooks(s: &AppState, id: &str) -> anyhow::Result<()> {
             },
         };
         sqlx::query(
-            "INSERT INTO pyo.git_webhooks (connection_id, repo, hook_id, url, error, updated_at) VALUES ($1, $2, $3, $4, $5, now())
-             ON CONFLICT (connection_id, repo) DO UPDATE SET hook_id = $3, url = $4, error = $5, updated_at = now()",
+            "INSERT INTO pyo.git_webhooks (connection_id, repo, hook_id, url, error, merge_requests, updated_at) VALUES ($1, $2, $3, $4, $5, $3 IS NOT NULL, now())
+             ON CONFLICT (connection_id, repo) DO UPDATE SET hook_id = $3, url = $4, error = $5, merge_requests = $3 IS NOT NULL, updated_at = now()",
         )
         .bind(id)
         .bind(&key)
