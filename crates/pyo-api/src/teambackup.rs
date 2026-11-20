@@ -256,8 +256,16 @@ pub async fn destination(
         r.access_key = key.clone();
         return Ok((r, key, secret));
     }
-    let (key, secret) = backup::credentials(state, &r, None)?;
-    Ok((r, key, secret))
+    // The team's own bucket key, sealed with the team's data key (or with
+    // the installation's by a release before 0.5).
+    let sealed = r
+        .secret_sealed
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Enter the secret key."))?;
+    let secret = crate::vault::get()
+        .open_credential(&state.sealer, sealed)
+        .await?;
+    Ok((r.clone(), r.access_key.clone(), secret))
 }
 
 /// The region a backup signs with: Garage's own for the store on Pyo's

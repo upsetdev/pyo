@@ -504,7 +504,7 @@ pub(crate) async fn account(
     let Some((sealed, zones)) = row else {
         return Ok(None);
     };
-    let token = s.sealer.open(&sealed).map_err(|_| {
+    let token = crate::vault::get().open_credential(&s.sealer, &sealed).await.map_err(|_| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "Pyo can't open the saved Cloudflare token. Connect Cloudflare again.",
@@ -691,7 +691,7 @@ pub async fn connect(
          ON CONFLICT (team_id) DO UPDATE SET token_sealed = $2, hint = $3, zones = $4, created_by = $5, created_at = now(), tested_at = now()",
     )
     .bind(team_id)
-    .bind(s.sealer.seal(token)?)
+    .bind(crate::vault::get().seal_credential(team_id, token).await?)
     .bind(hint(token))
     .bind(json!(zones))
     .bind(&user.name)

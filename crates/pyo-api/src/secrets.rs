@@ -1,13 +1,15 @@
-//! Sealing installation credentials at rest (GitHub app key, registry and
-//! SMTP passwords, Tailscale keys, deploy hook tokens, certificate keys).
-//! XSalsa20-Poly1305 (NaCl secretbox) with PYO_SECRET_KEY (64 hex chars);
-//! each value gets its own random nonce. Stored as `sb1:` + base64(nonce ||
-//! ciphertext). Teams' own values use envelope encryption instead (vault.rs).
+//! Sealing the installation's own credentials at rest (GitHub App key,
+//! SMTP password, Tailscale keys, Pyo's backup store, sandbox signing
+//! keys). XSalsa20-Poly1305 (NaCl secretbox) with PYO_SECRET_KEY (64 hex
+//! chars); each value gets its own random nonce. Stored as `sb1:` +
+//! base64(nonce || ciphertext). Teams' credentials are sealed with each
+//! team's own data key instead (vault.rs `seal_credential`). Releases
+//! before 0.5 sealed some of them here, and they still open.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use crypto_secretbox::{Key as BoxKey, Nonce as BoxNonce, XSalsa20Poly1305};
 
-const PREFIX: &str = "sb1:";
+pub(crate) const PREFIX: &str = "sb1:";
 
 pub struct Sealer {
     secretbox: Option<XSalsa20Poly1305>,
@@ -102,5 +104,72 @@ mod tests {
         // A fresh nonce each time.
         assert_ne!(s.seal("x").unwrap(), s.seal("x").unwrap());
         assert!(s.open("bm90IHNlYWxlZA==").is_err(), "unsealed");
+    }
+
+    /// The installation's key seals only the installation's own
+    /// credentials. A team's (a token, password or key it gave Pyo) is
+    /// sealed with the team's data key: vault.rs `seal_credential`. A new
+    /// use here gets a place in this list with its reason.
+    #[test]
+    fn the_installation_key_seals_only_the_installations_credentials() {
+        let allowed: &[(&str, usize, &str)] = &[
+            ("github.rs", 1, "the installation's GitHub App"),
+            (
+                "sandbox/keys.rs",
+                1,
+                "the installation's sandbox signing keys",
+            ),
+            (
+                "sandbox/edgecert.rs",
+                2,
+                "the installation's ACME account and its own sandbox servers' certificates",
+            ),
+            (
+                "cloud/bootstrap.rs",
+                1,
+                "a new cloud server's one-time join material, burned when used or after 15 minutes",
+            ),
+            (
+                "ops.rs",
+                3,
+                "Pyo's own backup bucket, its SMTP password, and an invite's link in the email retry job",
+            ),
+        ];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: Vec<(String, usize)> = vec![];
+        let mut dirs = vec![src.clone()];
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let path = e.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                // Tests seal what they like.
+                let text = text.split("#[cfg(test)]").next().unwrap_or("");
+                // `s.sealer\n.seal(` too.
+                let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+                let n = squashed.matches("sealer.seal(").count();
+                let name = path
+                    .strip_prefix(&src)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if n > 0 && name != "secrets.rs" {
+                    found.push((name, n));
+                }
+            }
+        }
+        found.sort();
+        let mut want: Vec<(String, usize)> = allowed
+            .iter()
+            .map(|(f, n, _)| (f.to_string(), *n))
+            .collect();
+        want.sort();
+        assert_eq!(
+            found, want,
+            "a team's credential goes through vault.rs seal_credential"
+        );
     }
 }

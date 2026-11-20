@@ -141,7 +141,9 @@ async fn certificate(
         .fetch_optional(&s.db)
         .await?;
     let (certificate, sealed) = row.ok_or_else(|| ApiError::not_found("Certificate"))?;
-    let private_key = s.sealer.open(&sealed).map_err(ApiError::from)?;
+    let private_key = crate::vault::get()
+        .open_credential(&s.sealer, &sealed)
+        .await?;
     let reply = json!(pyo_proto::TlsCertificate {
         certificate,
         private_key,
@@ -163,7 +165,9 @@ async fn registry_login(
         .fetch_optional(&s.db)
         .await?;
     let (host, username, sealed) = row.ok_or_else(|| ApiError::not_found("Registry login"))?;
-    let password = s.sealer.open(&sealed).map_err(ApiError::from)?;
+    let password = crate::vault::get()
+        .open_credential(&s.sealer, &sealed)
+        .await?;
     let reply = json!(pyo_proto::RegistryLogin {
         host,
         username,

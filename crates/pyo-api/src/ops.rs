@@ -810,7 +810,7 @@ async fn registry_door(
 
 /// The cluster's pull token at Pyo's registry door (its servers'
 /// registries.yaml): made on first use, then the same for every server.
-async fn registry_token(
+pub(crate) async fn registry_token(
     tx: &mut Transaction<'_, Postgres>,
     s: &AppState,
     cluster_id: &str,
@@ -821,14 +821,21 @@ async fn registry_token(
             .fetch_optional(&mut **tx)
             .await?
             .flatten();
-    if let Some(t) = sealed.and_then(|x| s.sealer.open(&x).ok()) {
+    let v = crate::vault::get();
+    if let Some(x) = sealed
+        && let Ok(t) = v.open_credential(&s.sealer, &x).await
+    {
         return Ok(t);
     }
+    let team_id: String = sqlx::query_scalar("SELECT team_id FROM pyo.clusters WHERE id = $1")
+        .bind(cluster_id)
+        .fetch_one(&mut **tx)
+        .await?;
     let token = secret_token();
     sqlx::query("UPDATE pyo.clusters SET registry_token_hash = $2, registry_token_sealed = $3 WHERE id = $1")
         .bind(cluster_id)
         .bind(sha256_hex(&token))
-        .bind(s.sealer.seal(&token)?)
+        .bind(v.seal_credential(&team_id, &token).await?)
         .execute(&mut **tx)
         .await?;
     Ok(token)
@@ -3787,7 +3794,7 @@ async fn apply(
                 prefix: prefix.trim().to_owned(),
                 access_key: access_key.trim().to_owned(),
                 secret_sealed: match &secret {
-                    Some(k) => Some(s.sealer.seal(k)?),
+                    Some(k) => Some(crate::vault::get().seal_credential(&team_id, k).await?),
                     None => saved.as_ref().and_then(|x| x.base.secret_sealed.clone()),
                 },
             };
@@ -3804,6 +3811,14 @@ async fn apply(
                         )
                     })?;
             } else {
+                // The key kept from before is the team's, sealed with its data key.
+                let secret = match (&secret, &base.secret_sealed) {
+                    (Some(k), _) => Some(k.clone()),
+                    (None, Some(x)) => {
+                        Some(crate::vault::get().open_credential(&s.sealer, x).await?)
+                    }
+                    (None, None) => None,
+                };
                 crate::backup::probe(s, &base, secret.as_deref(), crate::outbound::Reach::team())
                     .await
                     .map_err(bucket_refused)?;
@@ -4280,7 +4295,7 @@ async fn apply(
                 .bind(&service_id)
                 .bind(&name)
                 .bind(sha256_hex(&token))
-                .bind(s.sealer.seal(&token)?)
+                .bind(crate::vault::get().seal_credential(&team_id, &token).await?)
                 .bind(&user.name)
                 .execute(&mut **tx)
                 .await?;
@@ -4295,7 +4310,7 @@ async fn apply(
                     .fetch_one(&mut **tx)
                     .await?;
             Ok(
-                json!({ "ok": true, "path": format!("/api/hooks/deploy/{}", s.sealer.open(&sealed)?) }),
+                json!({ "ok": true, "path": format!("/api/hooks/deploy/{}", crate::vault::get().open_credential(&s.sealer, &sealed).await?) }),
             )
         }
         Op::RemoveDeployHook { id } => {
@@ -4358,9 +4373,12 @@ async fn apply(
                 "" => p.hostnames[0].clone(),
                 n => require_text(n, "Certificate name", 60)?,
             };
-            let sealed = s.sealer.seal(&p.key_pem).map_err(|_| {
-                ApiError::bad_request("Set PYO_SECRET_KEY on the API to store private keys.")
-            })?;
+            let sealed = crate::vault::get()
+                .seal_credential(&team_id, &p.key_pem)
+                .await
+                .map_err(|_| {
+                    ApiError::bad_request("Set PYO_SECRET_KEY on the API to store private keys.")
+                })?;
             sqlx::query(
                 "INSERT INTO pyo.certificates (id, team_id, name, hostnames, issuer, not_before, not_after, fingerprint, chain_pem, key_sealed)
                  VALUES ($1, $2, $3, $4, $5, to_timestamp($6), to_timestamp($7), $8, $9, $10)",
@@ -5189,9 +5207,12 @@ async fn apply(
                     "The new certificate isn't valid for {host}, which uses this one."
                 )));
             }
-            let sealed = s.sealer.seal(&p.key_pem).map_err(|_| {
-                ApiError::bad_request("Set PYO_SECRET_KEY on the API to store private keys.")
-            })?;
+            let sealed = crate::vault::get()
+                .seal_credential(&team_id, &p.key_pem)
+                .await
+                .map_err(|_| {
+                    ApiError::bad_request("Set PYO_SECRET_KEY on the API to store private keys.")
+                })?;
             let name: String = sqlx::query_scalar(
                 "UPDATE pyo.certificates SET hostnames = $2, issuer = $3, not_before = to_timestamp($4), not_after = to_timestamp($5), fingerprint = $6,
                         chain_pem = $7, key_sealed = $8, warned_days = NULL, updated_at = now() WHERE id = $1 RETURNING name",
@@ -7296,7 +7317,9 @@ async fn apply(
             let verified = crate::registry::verify(&host, &username, password.trim())
                 .await
                 .map_err(ApiError::bad_request)?;
-            let sealed = s.sealer.seal(password.trim()).map_err(ApiError::from)?;
+            let sealed = crate::vault::get()
+                .seal_credential(&team_id, password.trim())
+                .await?;
             sqlx::query(
                 "INSERT INTO pyo.registry_logins (id, team_id, host, username, secret_sealed, verified) VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT (team_id, host) DO UPDATE SET username = $4, secret_sealed = $5, verified = $6, created_at = now()",
