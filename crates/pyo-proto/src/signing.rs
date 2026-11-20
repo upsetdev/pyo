@@ -15,6 +15,19 @@
 //! it expires, and the SHA-256 of the command's exact JSON. The signer never
 //! sees the command itself, so the secrets in it (sealed env values opened
 //! for the agent) never reach it.
+//!
+//! Answers the agent acts on (the heartbeat's reply: labels, taints, public
+//! traffic, observability; a certificate; a registry login) are signed the
+//! same way, under their own prefix so neither passes for the other:
+//!
+//! ```text
+//! sig = Ed25519("pyoreply1." + base64url(reply claims JSON))
+//! ```
+//!
+//! The reply claims name the cluster, the nonce the agent sent with its
+//! request ([`crate::REPLY_NONCE_HEADER`]), when it was signed and when it
+//! expires, and the SHA-256 of the reply's exact JSON. The nonce ties an
+//! answer to one request: an old answer can't be played back for a new one.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -27,6 +40,25 @@ pub const PREFIX: &str = "pyocmd1";
 pub const TTL_MS: u64 = 10 * 60 * 1000;
 /// Clock difference allowed between the signer and the cluster.
 pub const LEEWAY_MS: u64 = 2 * 60 * 1000;
+pub const REPLY_PREFIX: &str = "pyoreply1";
+/// How long a signed reply is good for (it answers a request made now).
+pub const REPLY_TTL_MS: u64 = 60 * 1000;
+
+/// What the signer signs for a reply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyClaims {
+    pub v: u32,
+    /// The cluster it's for.
+    pub cluster: String,
+    /// The nonce of the request it answers.
+    pub nonce: String,
+    /// Signed at, and expires at (ms since the epoch).
+    pub iat: u64,
+    pub exp: u64,
+    /// Hex SHA-256 of [`crate::SignedReplyWire::reply`].
+    pub sha256: String,
+}
 
 /// What the signer signs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,6 +100,17 @@ fn message(claims_b64: &str) -> Vec<u8> {
     format!("{PREFIX}.{claims_b64}").into_bytes()
 }
 
+/// A new reply nonce: 16 random bytes, base64url.
+pub fn new_nonce() -> String {
+    let mut n = [0u8; 16];
+    let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut n);
+    B64.encode(n)
+}
+
+fn reply_message(claims_b64: &str) -> Vec<u8> {
+    format!("{REPLY_PREFIX}.{claims_b64}").into_bytes()
+}
+
 /// A signing key (the signer's), from its PKCS#8 document.
 pub struct Signer {
     key: Ed25519KeyPair,
@@ -105,6 +148,13 @@ impl Signer {
         let sig = self.key.sign(&message(&c));
         (c, B64.encode(sig.as_ref()))
     }
+
+    /// Signs a reply's claims (its JSON hashes to `claims.sha256`).
+    pub fn sign_reply(&self, claims: &ReplyClaims) -> (String, String) {
+        let c = B64.encode(serde_json::to_vec(claims).unwrap_or_default());
+        let sig = self.key.sign(&reply_message(&c));
+        (c, B64.encode(sig.as_ref()))
+    }
 }
 
 /// Why a command was refused.
@@ -120,6 +170,8 @@ pub enum Refused {
     NotYetValid,
     Tampered,
     IdMismatch,
+    /// A reply to another request (its nonce isn't the one sent).
+    OtherRequest,
 }
 
 impl std::fmt::Display for Refused {
@@ -135,6 +187,7 @@ impl std::fmt::Display for Refused {
             Refused::NotYetValid => write!(f, "it's dated in the future"),
             Refused::Tampered => write!(f, "it was changed after it was signed"),
             Refused::IdMismatch => write!(f, "its id doesn't match what was signed"),
+            Refused::OtherRequest => write!(f, "it answers another request"),
         }
     }
 }
@@ -210,6 +263,49 @@ impl TrustedKeys {
         }
         Ok(c)
     }
+
+    /// Checks a signed reply for `cluster`, to the request sent with
+    /// `nonce`. On success, the reply's JSON (what was signed).
+    pub fn verify_reply<'a>(
+        &self,
+        signed: Option<&'a crate::SignedReplyWire>,
+        cluster: &str,
+        nonce: &str,
+        now_ms: u64,
+    ) -> Result<&'a str, Refused> {
+        let s = signed.ok_or(Refused::Unsigned)?;
+        let key = self
+            .0
+            .iter()
+            .find(|(kid, _)| *kid == s.kid)
+            .map(|(_, k)| k)
+            .ok_or(Refused::UnknownKey)?;
+        let sig = B64.decode(&s.sig).map_err(|_| Refused::BadSignature)?;
+        UnparsedPublicKey::new(&ED25519, key)
+            .verify(&reply_message(&s.claims), &sig)
+            .map_err(|_| Refused::BadSignature)?;
+        let raw = B64.decode(&s.claims).map_err(|_| Refused::BadClaims)?;
+        let c: ReplyClaims = serde_json::from_slice(&raw).map_err(|_| Refused::BadClaims)?;
+        if c.v != 1 {
+            return Err(Refused::BadClaims);
+        }
+        if c.cluster != cluster {
+            return Err(Refused::OtherCluster);
+        }
+        if nonce.is_empty() || c.nonce != nonce {
+            return Err(Refused::OtherRequest);
+        }
+        if sha256_hex(s.reply.as_bytes()) != c.sha256 {
+            return Err(Refused::Tampered);
+        }
+        if now_ms > c.exp.saturating_add(LEEWAY_MS) {
+            return Err(Refused::Expired);
+        }
+        if c.iat > now_ms.saturating_add(LEEWAY_MS) {
+            return Err(Refused::NotYetValid);
+        }
+        Ok(&s.reply)
+    }
 }
 
 #[cfg(test)]
@@ -267,5 +363,73 @@ mod tests {
         // Another key's signature under a trusted key id.
         wrong_key.kid = s.kid().into();
         assert_eq!(t.verify(Some(&wrong_key), "cmd_1", "cl_a", 0, now), Err(Refused::BadSignature));
+    }
+
+    fn reply(s: &Signer, cluster: &str, nonce: &str, body: &str, now: u64) -> crate::SignedReplyWire {
+        let claims = ReplyClaims {
+            v: 1,
+            cluster: cluster.into(),
+            nonce: nonce.into(),
+            iat: now,
+            exp: now + REPLY_TTL_MS,
+            sha256: sha256_hex(body.as_bytes()),
+        };
+        let (c, sig) = s.sign_reply(&claims);
+        crate::SignedReplyWire { claims: c, sig, kid: s.kid().into(), reply: body.into() }
+    }
+
+    #[test]
+    fn a_good_reply_passes() {
+        let (s, t) = setup();
+        let now = 1_000_000;
+        let r = reply(&s, "cl_a", "nonce-1234", r#"{"publicTraffic":true}"#, now);
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now + 5_000), Ok(r#"{"publicTraffic":true}"#));
+    }
+
+    #[test]
+    fn bad_replies_are_refused() {
+        let (s, t) = setup();
+        let now = 1_000_000;
+        let r = reply(&s, "cl_a", "nonce-1234", r#"{"publicTraffic":false}"#, now);
+        // Unsigned, where signing is required.
+        assert_eq!(t.verify_reply(None, "cl_a", "nonce-1234", now), Err(Refused::Unsigned));
+        // Another cluster's.
+        assert_eq!(t.verify_reply(Some(&r), "cl_b", "nonce-1234", now), Err(Refused::OtherCluster));
+        // Played back for a later request.
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-5678", now), Err(Refused::OtherRequest));
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "", now), Err(Refused::OtherRequest));
+        // Too old.
+        assert_eq!(
+            t.verify_reply(Some(&r), "cl_a", "nonce-1234", now + REPLY_TTL_MS + LEEWAY_MS + 1),
+            Err(Refused::Expired)
+        );
+        // Dated ahead.
+        let ahead = reply(&s, "cl_a", "nonce-1234", "{}", now + LEEWAY_MS + 60_000);
+        assert_eq!(t.verify_reply(Some(&ahead), "cl_a", "nonce-1234", now), Err(Refused::NotYetValid));
+        // Changed after signing.
+        let mut tampered = r.clone();
+        tampered.reply = r#"{"publicTraffic":true}"#.into();
+        assert_eq!(t.verify_reply(Some(&tampered), "cl_a", "nonce-1234", now), Err(Refused::Tampered));
+        // Signed by a key the cluster doesn't trust.
+        let (other, _) = setup();
+        let mut forged = reply(&other, "cl_a", "nonce-1234", "{}", now);
+        assert_eq!(t.verify_reply(Some(&forged), "cl_a", "nonce-1234", now), Err(Refused::UnknownKey));
+        forged.kid = s.kid().into();
+        assert_eq!(t.verify_reply(Some(&forged), "cl_a", "nonce-1234", now), Err(Refused::BadSignature));
+    }
+
+    #[test]
+    fn a_reply_signature_is_no_command_signature() {
+        let (s, t) = setup();
+        let now = 1_000_000;
+        let body = r#"{"kind":"restart"}"#;
+        // A reply's claims and signature passed off as a command's.
+        let r = reply(&s, "cl_a", "nonce-1234", body, now);
+        let as_command = SignedCommand { claims: r.claims.clone(), sig: r.sig.clone(), kid: r.kid.clone(), command: body.into() };
+        assert_eq!(t.verify(Some(&as_command), "cmd_1", "cl_a", 0, now), Err(Refused::BadSignature));
+        // And a command's as a reply's.
+        let c = signed(&s, "cl_a", 1, body, now);
+        let as_reply = crate::SignedReplyWire { claims: c.claims, sig: c.sig, kid: c.kid, reply: body.into() };
+        assert_eq!(t.verify_reply(Some(&as_reply), "cl_a", "nonce-1234", now), Err(Refused::BadSignature));
     }
 }

@@ -33,6 +33,31 @@ pub const AGENT_VERSION_HEADER: &str = "x-pyo-agent-version";
 /// rollouts the previous process was watching are handed out again.
 pub const AGENT_INSTANCE_HEADER: &str = "x-pyo-agent-instance";
 
+/// A random value the agent sends with each request whose answer it acts
+/// on (the heartbeat, a certificate, a registry login). A Pyo with a
+/// signer signs the answer bound to it ([`SignedReplyWire`]), so an answer
+/// can't be replayed for another request.
+pub const REPLY_NONCE_HEADER: &str = "x-pyo-reply-nonce";
+
+/// Whether a reply nonce looks like one an agent makes: 8 to 64 base64url
+/// characters.
+pub fn valid_reply_nonce(n: &str) -> bool {
+    (8..=64).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// An answer to the agent with the signer's signature (pyo-proto
+/// `signing`, `pyoreply1`), beside the plain fields: `reply` is the exact
+/// JSON that was signed. An agent given `PYO_COMMAND_KEY` acts only on
+/// `reply`, and only once its signature checks out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedReplyWire {
+    pub claims: String,
+    pub sig: String,
+    pub kid: String,
+    pub reply: String,
+}
+
 // ── Heartbeat: what the agent sees ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
