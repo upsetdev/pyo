@@ -26,6 +26,7 @@ import type {
   Updates,
 } from "~/lib/pyo/types";
 import { Arrow } from "~/components/ui/Arrow";
+import { useHosted } from "~/components/pyo/Managed";
 import { MenuPath } from "~/components/ui/MenuPath";
 
 // Updates of Pyo itself: the version it runs, the latest release, how it
@@ -50,10 +51,14 @@ const RUN: Record<UpdateRun["status"], { tone: Tone; label: string }> = {
   failed: { tone: "danger", label: "Failed" },
 };
 
-/** For the admin: whether there's something to update (for a quiet dot). */
+/**
+ * For the admin: whether there's something to update (for a quiet dot).
+ * Never on a hosted Pyo, where the Pyo team updates it.
+ */
 export function useUpdateAvailable() {
   const u = usePyo().updates;
-  return !!u && (u.available || !!u.active);
+  const hosted = useHosted();
+  return hosted === false && !!u && (u.available || !!u.active);
 }
 
 export function UpdatesSection() {
