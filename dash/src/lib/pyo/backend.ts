@@ -947,8 +947,8 @@ export type CloudBilling = {
   graceUntil: number | null;
   /** Paused or ended: when the team's data is deleted. */
   retainUntil: number | null;
-  /** Days data is kept after a team is paused or ended. Not served yet by
-   * cloud-api (PYO_CLOUD_RETAIN_DAYS), so the page assumes 30 without it. */
+  /** Days data is kept after a team is paused or ended. The page assumes 30
+   * without it. */
   retainDays?: number;
   country: string;
   polar: { configured: boolean; yearly: boolean; portal: boolean };
@@ -991,9 +991,6 @@ export const cloudBilling = {
   midtransCheckout: (team: string, kind: BillingInterval | "topup") =>
     request<{ token: string; redirectUrl: string }>("/api/cloud/billing/midtrans/checkout", { method: "POST", body: { team, kind } }),
   testPay: (team: string) => request<{ ok: boolean }>("/api/cloud/billing/test/pay", { method: "POST", body: { team } }),
-
-  // Not in cloud-api yet (billing.rs): the page calls these, and shows the
-  // error until they exist.
 
   /** Payments and refunds, newest first. Read from cloud.billing_events. */
   history: (team: string) =>
