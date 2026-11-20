@@ -8532,7 +8532,7 @@ async fn team_hosts(
 /// Visitors, requests, errors, response times, countries, pages and
 /// referrers for a team's websites: all of them, one project's, one
 /// service's, or one domain. Read from per-minute totals each cluster
-/// sends (kept 13 months), so it works with a cluster offline. Top lists
+/// sends (kept 12 months), so it works with a cluster offline. Top lists
 /// count page views (referrers, pages, devices, browsers) or requests
 /// (paths, countries, query parameters).
 #[utoipa::path(get, path = "/observability", operation_id = "getObservability", tag = "Observability",

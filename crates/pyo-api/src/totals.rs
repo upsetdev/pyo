@@ -4,7 +4,7 @@
 //!
 //! Minutes go into `traffic_1m` and `ports_1m`, kept 3 days (an hour or a
 //! day, and the one before it); a materialized view adds them up per hour
-//! into `traffic_1h` and `ports_1h`, kept 13 months. All four are AggregatingMergeTree tables
+//! into `traffic_1h` and `ports_1h`, kept 12 months. All four are AggregatingMergeTree tables
 //! of simple aggregates: sums, maps that add up (`sumMap`) and
 //! HyperLogLog registers that merge (`maxMap`), so rows for the same key
 //! (a late minute, a part not merged yet) add up when read. A batch is
@@ -125,14 +125,14 @@ pub fn schema() -> Vec<String> {
     };
     vec![
         table("traffic_1m", TRAFFIC_COLUMNS, "team_id, host, ts, service_id", "toYYYYMMDD(ts)", "ts + INTERVAL 3 DAY"),
-        table("traffic_1h", TRAFFIC_COLUMNS, "team_id, host, ts, service_id", "toYYYYMM(ts)", "ts + INTERVAL 13 MONTH"),
+        table("traffic_1h", TRAFFIC_COLUMNS, "team_id, host, ts, service_id", "toYYYYMM(ts)", "ts + INTERVAL 12 MONTH"),
         view("traffic_1h_mv", "traffic_1m", "traffic_1h", TRAFFIC_COLUMNS, "team_id, service_id, host"),
         table("ports_1m", PORT_COLUMNS, "team_id, service_id, port, protocol, ts", "toYYYYMMDD(ts)", "ts + INTERVAL 3 DAY"),
-        table("ports_1h", PORT_COLUMNS, "team_id, service_id, port, protocol, ts", "toYYYYMM(ts)", "ts + INTERVAL 13 MONTH"),
+        table("ports_1h", PORT_COLUMNS, "team_id, service_id, port, protocol, ts", "toYYYYMM(ts)", "ts + INTERVAL 12 MONTH"),
         view("ports_1h_mv", "ports_1m", "ports_1h", PORT_COLUMNS, "team_id, service_id, port, protocol"),
         // The WAF's rule messages, by team (custom rules are the team's own).
         "CREATE TABLE IF NOT EXISTS pyo_observability.waf_rules (team_id LowCardinality(String), rule String, message String, seen DateTime('UTC')) \
-         ENGINE = ReplacingMergeTree(seen) ORDER BY (team_id, rule) TTL seen + INTERVAL 13 MONTH"
+         ENGINE = ReplacingMergeTree(seen) ORDER BY (team_id, rule) TTL seen + INTERVAL 12 MONTH"
             .to_owned(),
     ]
 }
@@ -789,7 +789,7 @@ mod tests {
         // Every aggregate column is in the view, and nothing else but the keys.
         assert_eq!(merges(TRAFFIC_COLUMNS).len(), 29);
         assert_eq!(merges(PORT_COLUMNS).len(), 11);
-        assert!(s[0].contains("TTL ts + INTERVAL 3 DAY") && s[1].contains("TTL ts + INTERVAL 13 MONTH"));
+        assert!(s[0].contains("TTL ts + INTERVAL 3 DAY") && s[1].contains("TTL ts + INTERVAL 12 MONTH"));
     }
 
     #[test]
