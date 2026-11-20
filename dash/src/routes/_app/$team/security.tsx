@@ -208,6 +208,8 @@ function Security() {
         <>
           Sealed with {enc.cipher} and this team's key.
         </>
+      ) : hosted ? (
+        "Not turned on for this Pyo yet."
       ) : (
         <>
           Set <Code>PYO_SECRET_KEY</Code> on the API. <LearnMore page="encryption" />
@@ -243,10 +245,15 @@ function Security() {
     {
       icon: VaultIcon,
       title: "Key storage",
-      tone: enc?.provider === "openbao" ? "success" : "neutral",
-      status: enc?.provider === "openbao" ? "OpenBao" : "On this server",
-      detail:
-        enc?.provider === "openbao" ? (
+      tone: hosted || enc?.provider === "openbao" ? "success" : "neutral",
+      status: hosted
+        ? "Managed for you"
+        : enc?.provider === "openbao"
+          ? "OpenBao"
+          : "On this server",
+      detail: hosted
+        ? "Team keys are wrapped with Pyo Cloud's master key, kept outside its database."
+        : enc?.provider === "openbao" ? (
           <>
             Wrapped by <Code>{enc.kekId}</Code>.
           </>
