@@ -218,9 +218,9 @@ function RequestLogsPanel({ ws }: { ws: Team }) {
   const dirty =
     limits.maxMb !== saved.maxMb || limits.maxDays !== saved.maxDays;
   return (
-    <Panel title="Request logs">
+    <Panel title="Logs">
       <div className="grid gap-4 p-4 sm:grid-cols-2">
-        <Field label="Size" hint="Kept on each cluster.">
+        <Field label="Size" hint="Kept on your servers, per cluster.">
           {(p) => (
             <Select
               {...p}
@@ -267,7 +267,7 @@ function RequestLogsPanel({ ws }: { ws: Team }) {
             const res = await api.updateTeam(ws.id, {
               preferences: { ...ws.preferences, requestLogs: limits },
             });
-            if (res) toast({ title: "Request logs saved" });
+            if (res) toast({ title: "Logs saved" });
           }}
         >
           Save changes
