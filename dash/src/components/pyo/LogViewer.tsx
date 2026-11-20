@@ -5,7 +5,6 @@ import { Button } from "~/components/ui/Button";
 import { ZoomButton, Zoomable } from "~/components/ui/Zoom";
 import { Select } from "~/components/ui/Field";
 import { SearchInput } from "~/components/ui/Table";
-import { fetchServiceLogs } from "~/lib/pyo/backend";
 import { clockMs } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import { usePyo } from "~/lib/pyo/store";
@@ -129,8 +128,8 @@ export function copyLines(entries: LogEntry[]) {
 }
 
 /**
- * Recent container output of a service's pods, read from the cluster by its
- * agent. Re-fetched every few seconds while not paused.
+ * Recent container output of a service's pods, then new lines as they're
+ * printed, followed through the cluster's agent.
  */
 const WRAP_KEY = "pyo.logs.wrap";
 
@@ -182,6 +181,9 @@ export function WrapSwitch({
   );
 }
 
+/** The most lines kept (the footer says so). */
+const MAX_LINES = 300;
+
 export function ServiceLogViewer({ app }: { app: Application }) {
   const running = app.status !== "stopped" && !!app.currentDeploymentId;
   // Never live, and its last deploy failed: that deploy's logs say why.
@@ -203,31 +205,69 @@ export function ServiceLogViewer({ app }: { app: Application }) {
   useEffect(() => {
     if (!running) return;
     let cancelled = false;
-    setLoading(true);
+    let ws: WebSocket | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const load = async () => {
-      try {
-        const res = await fetchServiceLogs(app.id);
-        if (cancelled) return;
-        // Stable ids so a re-fetch keeps selection on the same lines.
-        setEntries(
-          res.logs.map((l, i) => ({ ...l, id: `${l.source}:${l.at}:${i}` })),
-        );
-        setError("");
-      } catch (e) {
-        if (!cancelled)
-          setError(e instanceof Error ? e.message : "Couldn't load logs.");
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-          timer = setTimeout(load, 3000);
+    // One follow at a time (one command for the cluster). It ends after an
+    // hour or when the connection drops, and the next goes on from the
+    // newest line: lines at that time may come again, so they're kept.
+    let newest = 0;
+    let atNewest = new Set<string>();
+    let count = 0;
+    let wait = 3000;
+    setLoading(true);
+    setEntries([]);
+    const open = () => {
+      const floor = newest;
+      const opened = Date.now();
+      const q = floor ? `?since=${floor}` : "";
+      ws = new WebSocket(
+        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/v1/services/${encodeURIComponent(app.id)}/logs/follow${q}`,
+      );
+      ws.onmessage = (ev) => {
+        let f: { type: string; message?: string; lines?: Omit<LogEntry, "id">[] };
+        try {
+          f = JSON.parse(String(ev.data));
+        } catch {
+          return;
         }
-      }
+        if (cancelled) return;
+        if (f.type === "error") {
+          setError(f.message ?? "Couldn't load logs.");
+          setLoading(false);
+          return;
+        }
+        if (f.type !== "lines" || !f.lines) return;
+        setError("");
+        setLoading(false);
+        const fresh: LogEntry[] = [];
+        for (const l of f.lines) {
+          const key = `${l.at}\0${l.source}\0${l.message}`;
+          if (l.at < floor || (l.at === floor && atNewest.has(key))) continue;
+          if (l.at > newest) {
+            newest = l.at;
+            atNewest = new Set();
+          }
+          if (l.at === newest) atNewest.add(key);
+          // Stable ids so selection stays on the same lines.
+          fresh.push({ ...l, id: `${l.source}:${l.at}:${count++}` });
+        }
+        if (fresh.length)
+          setEntries((e) => [...e, ...fresh].slice(-MAX_LINES));
+      };
+      ws.onclose = () => {
+        if (cancelled) return;
+        setLoading(false);
+        // Ended soon after it opened: something's wrong, so wait longer each time.
+        const soon = Date.now() - opened < 10_000;
+        timer = setTimeout(open, soon ? wait : 0);
+        wait = soon ? Math.min(wait * 2, 60_000) : 3000;
+      };
     };
-    void load();
+    open();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      ws?.close();
     };
   }, [app.id, running]);
 

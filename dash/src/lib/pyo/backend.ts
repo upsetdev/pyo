@@ -13,7 +13,6 @@ import type {
   GithubRepo,
   GitBranch,
   GitRepo,
-  LogEntry,
   User,
 } from "./types";
 
@@ -850,11 +849,6 @@ export const fetchDatabaseAnalytics = (id: string, range: string) =>
 export const fetchDatabaseLogs = (id: string, range: string) =>
   request<{ logs: DbLogLine[]; events: DbEvent[]; fetchedAt: number }>(
     `/api/v1/databases/${encodeURIComponent(id)}/logs?range=${encodeURIComponent(range)}`,
-  );
-
-export const fetchServiceLogs = (serviceId: string) =>
-  request<{ logs: Omit<LogEntry, "id">[]; fetchedAt: number }>(
-    `/api/v1/services/${encodeURIComponent(serviceId)}/logs`,
   );
 
 /** A volume's snapshots, newest first (read from its cluster: up to 2 minutes). */
