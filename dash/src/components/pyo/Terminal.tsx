@@ -31,11 +31,56 @@ type Phase =
   | { kind: "open"; pod: string }
   | { kind: "closed"; message: string; error?: boolean };
 
+// ANSI colors per mode. Each one reads at 4.5:1 or more on the page
+// background (#fff light, #000 dark), so "white" is a grey in light mode
+// and "black" a grey in dark mode.
+const LIGHT = {
+  black: "#171717",
+  red: "#c4161c",
+  green: "#18794e",
+  yellow: "#8a5a00",
+  blue: "#0b57d0",
+  magenta: "#9c27b0",
+  cyan: "#0b6e83",
+  white: "#6b6b6b",
+  brightBlack: "#5c5c5c",
+  brightRed: "#d42a2a",
+  brightGreen: "#1a7f37",
+  brightYellow: "#9a6700",
+  brightBlue: "#1f6feb",
+  brightMagenta: "#b0359f",
+  brightCyan: "#0a7c8c",
+  brightWhite: "#757575",
+};
+const DARK = {
+  black: "#767676",
+  red: "#f26b6b",
+  green: "#4cc76f",
+  yellow: "#e5b93e",
+  blue: "#5b9cf6",
+  magenta: "#c58af9",
+  cyan: "#3cc4d6",
+  white: "#d4d4d4",
+  brightBlack: "#8f8f8f",
+  brightRed: "#ff9a9a",
+  brightGreen: "#7ee29b",
+  brightYellow: "#f7d774",
+  brightBlue: "#8ec0ff",
+  brightMagenta: "#ddb3ff",
+  brightCyan: "#7fe3f0",
+  brightWhite: "#ffffff",
+};
+
 /** The app's theme colors, so the terminal matches light and dark mode. */
 export function theme() {
-  const css = getComputedStyle(document.documentElement);
+  const root = document.documentElement;
+  const css = getComputedStyle(root);
   const hsl = (name: string) => `hsl(${css.getPropertyValue(name).trim()})`;
+  const light = root.dataset.theme
+    ? root.dataset.theme === "light"
+    : matchMedia("(prefers-color-scheme: light)").matches;
   return {
+    ...(light ? LIGHT : DARK),
     background: hsl("--background"),
     foreground: hsl("--foreground"),
     cursor: hsl("--foreground"),
@@ -82,6 +127,14 @@ export function openXterm(host: HTMLElement) {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  // Follow theme changes live: ThemeProvider sets data-theme on <html>, also
+  // when the system theme flips while on "system".
+  const watch = new MutationObserver(() => {
+    term.options.theme = theme();
+  });
+  watch.observe(document.documentElement, { attributeFilter: ["data-theme"] });
+  // An addon is disposed with the terminal, so the observer goes with it.
+  term.loadAddon({ activate() {}, dispose: () => watch.disconnect() });
   term.open(host);
   fit.fit();
   term.focus();
