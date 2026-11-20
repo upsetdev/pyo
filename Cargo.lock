@@ -3442,6 +3442,7 @@ version = "0.4.5"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "flate2",
  "futures",
  "hex",
  "pyo-proto",
@@ -3449,6 +3450,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tar",
  "tokio",
  "tokio-util",
  "tracing",

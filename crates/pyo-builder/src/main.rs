@@ -1,4 +1,5 @@
-//! Pyo builder: turns Git sources into images.
+//! Pyo builder: turns Git sources (and folders sent with `pyo deploy`)
+//! into images.
 //!
 //! Runs next to a BuildKit daemon (as a pod pinned to a server) and dials
 //! out to the Pyo API: it long-polls for build jobs, resolves
@@ -15,6 +16,7 @@
 mod git;
 mod site;
 mod source;
+mod upload;
 
 use std::{process::Stdio, time::Duration};
 
@@ -263,6 +265,16 @@ fn line(level: &str, source: &str, message: &str) -> LogLine {
     }
 }
 
+/// A build that failed before it ran, and why.
+fn fail(commit: &str, message: String) -> anyhow::Result<BuildResult> {
+    Ok(BuildResult {
+        ok: false,
+        commit: commit.to_owned(),
+        message: Some(message),
+        ..Default::default()
+    })
+}
+
 impl Builder {
     /// Does BuildKit answer? (`buildctl debug workers`, with a timeout.)
     async fn buildkit_ready(&self) -> bool {
@@ -366,7 +378,64 @@ impl Builder {
         result
     }
 
+    /// A folder sent with `pyo deploy`: fetched from Pyo into `dir`,
+    /// checked, then Pyo is told it can let it go.
+    async fn fetch_upload(
+        &self,
+        job: &BuildJob,
+        up: &pyo_proto::SourceUpload,
+        root: &std::path::Path,
+        dir: &std::path::Path,
+    ) -> anyhow::Result<u64> {
+        use futures::StreamExt;
+        use sha2::Digest;
+        use tokio::io::AsyncWriteExt;
+        let url = format!("{}/jobs/{}/source", self.base, job.id);
+        let req = self.http.get(&url).timeout(Duration::from_secs(1800));
+        let res = self.auth.sign(req, "GET", &url, b"").send().await?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            let why = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| status.to_string());
+            anyhow::bail!(why);
+        }
+        let path = root.join("source.tar.gz");
+        let mut file = tokio::fs::File::create(&path).await?;
+        let mut hash = sha2::Sha256::new();
+        let mut got = 0u64;
+        let mut body = res.bytes_stream();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.context("the download broke off")?;
+            got += chunk.len() as u64;
+            if got > up.size {
+                anyhow::bail!("it's bigger than it should be");
+            }
+            hash.update(&chunk);
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        drop(file);
+        if got != up.size || hex::encode(hash.finalize()) != up.sha256 {
+            anyhow::bail!("it isn't what was uploaded");
+        }
+        // Pyo deletes its copy now; a failure here only leaves it to expire.
+        let req = self.http.delete(&url).timeout(Duration::from_secs(20));
+        if let Err(e) = self.auth.sign(req, "DELETE", &url, b"").send().await {
+            tracing::warn!(job = %job.id, error = %e, "couldn't tell Pyo the upload arrived");
+        }
+        let (path2, dir2) = (path.clone(), dir.to_owned());
+        let files = tokio::task::spawn_blocking(move || upload::extract(&path2, &dir2)).await??;
+        let _ = std::fs::remove_file(&path);
+        Ok(files)
+    }
+
     async fn build_inner(&self, job: &BuildJob) -> anyhow::Result<BuildResult> {
+        if let Some(up) = &job.source_upload {
+            return self.build_upload(job, up).await;
+        }
         let commit = if job.commit.is_empty() {
             match git::resolve(&job.repo_url, &job.branch).await {
                 Ok(c) => c,
@@ -398,14 +467,6 @@ impl Builder {
 
         // A temporary checkout, deleted when `ws` drops at the end of the build.
         let ws = source::Workspace::new(&job.id)?;
-        let fail = |commit: &str, message: String| {
-            Ok(BuildResult {
-                ok: false,
-                commit: commit.to_owned(),
-                message: Some(message),
-                ..Default::default()
-            })
-        };
         if let Err(e) = source::checkout(
             &job.repo_url,
             &job.branch,
@@ -420,16 +481,80 @@ impl Builder {
         {
             return fail(&commit, format!("Couldn't get the code: {e:#}"));
         }
+        let short = short.to_owned();
+        self.build_source(job, &ws, commit, short).await
+    }
+
+    /// A folder sent with `pyo deploy`: fetched, then built like a checkout.
+    async fn build_upload(
+        &self,
+        job: &BuildJob,
+        up: &pyo_proto::SourceUpload,
+    ) -> anyhow::Result<BuildResult> {
+        tracing::info!(job = %job.id, upload = %up.id, size = up.size, "build of an uploaded folder");
+        self.progress(
+            &job.id,
+            BuildProgress {
+                stage: "building".into(),
+                logs: vec![line(
+                    "info",
+                    "builder",
+                    &format!(
+                        "Getting the uploaded folder ({:.1} MB)",
+                        up.size as f64 / 1_000_000.0
+                    ),
+                )],
+                ..Default::default()
+            },
+        )
+        .await;
+        let ws = source::Workspace::new(&job.id)?;
+        match self.fetch_upload(job, up, &ws.root, &ws.src()).await {
+            Ok(files) => {
+                self.progress(
+                    &job.id,
+                    BuildProgress {
+                        logs: vec![line(
+                            "info",
+                            "builder",
+                            &format!("Building the uploaded folder ({files} files)"),
+                        )],
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+            Err(e) => return fail("", format!("Couldn't get the uploaded folder: {e:#}")),
+        }
+        let short = up.sha256.chars().take(12).collect();
+        self.build_source(job, &ws, String::new(), short).await
+    }
+
+    /// Build what's in the workspace (`commit` empty for an upload; `short`
+    /// tags the image).
+    async fn build_source(
+        &self,
+        job: &BuildJob,
+        ws: &source::Workspace,
+        commit: String,
+        short: String,
+    ) -> anyhow::Result<BuildResult> {
+        let short = short.as_str();
         let app_dir = match source::inside(&ws.src(), &job.build_context) {
             Ok(d) if d.is_dir() => d,
             Ok(_) => {
-                return fail(
-                    &commit,
+                let message = if job.source_upload.is_some() {
+                    format!(
+                        "The folder has no {} directory. Check the build context.",
+                        job.build_context
+                    )
+                } else {
                     format!(
                         "The repository has no {} directory at this commit. Check the build context.",
                         job.build_context
-                    ),
-                );
+                    )
+                };
+                return fail(&commit, message);
             }
             Err(e) => return fail(&commit, format!("{e:#}")),
         };
