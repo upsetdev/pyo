@@ -7,7 +7,8 @@
 //! frames ([`pyo_proto::LogFrame`]) to the reader. The agent stops when the
 //! reader goes, or after [`pyo_proto::LOG_FOLLOW_SECS`], when the reader
 //! opens another. With several web replicas the agent's socket is
-//! forwarded to the one holding the reader's, as a terminal's is.
+//! forwarded to the one holding the reader's, as a terminal's is
+//! (terminal.rs `hand_over`).
 
 use std::time::Duration;
 
@@ -134,7 +135,6 @@ async fn open(
 async fn agent_side(
     State(s): State<AppState>,
     cluster: AgentCluster,
-    headers: HeaderMap,
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> ApiResult<Response> {
@@ -149,14 +149,5 @@ async fn agent_side(
     let Some((relay_addr,)) = row else {
         return Err(ApiError::not_found("Log follow"));
     };
-    terminal::hand_over(
-        &s,
-        &headers,
-        &format!("log-follows/{id}"),
-        &id,
-        relay_addr,
-        ws,
-        "Log follow",
-    )
-    .await
+    terminal::hand_over(&s, &id, relay_addr, ws, "Log follow").await
 }

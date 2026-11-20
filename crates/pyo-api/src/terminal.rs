@@ -4,7 +4,7 @@
 //! open a shell and dial back to `/api/agent/v1/terminals/<id>`; this process
 //! relays bytes between the two. With several web replicas the agent may land
 //! on another one, which forwards its socket to the replica holding the
-//! browser (`relay`, its pod address).
+//! browser (`relay`, its pod address) with a relay ticket ([`hand_over`]).
 
 use crate::error::Query;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -39,6 +39,8 @@ use crate::{
 const MAX_SESSION: Duration = Duration::from_secs(4 * 3600);
 /// How long the browser waits for the agent to dial back.
 const AGENT_WAIT: Duration = Duration::from_secs(20);
+/// The header a forwarded agent socket carries its relay ticket in.
+const RELAY_TICKET: &str = "x-pyo-relay-ticket";
 
 /// Sockets waiting for their agent's, by session id: terminals' and log
 /// follows' (logfollow.rs).
@@ -49,7 +51,9 @@ pub fn routes() -> Router<AppState> {
 }
 
 pub fn agent_routes() -> Router<AppState> {
-    Router::new().route("/terminals/{id}", get(agent_side))
+    Router::new()
+        .route("/terminals/{id}", get(agent_side))
+        .route("/relay/{id}", get(relayed))
 }
 
 fn text(f: &TerminalFrame) -> Message {
@@ -264,7 +268,6 @@ async fn open(
 async fn agent_side(
     State(s): State<AppState>,
     cluster: AgentCluster,
-    headers: HeaderMap,
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> ApiResult<Response> {
@@ -279,25 +282,20 @@ async fn agent_side(
     let Some((relay_addr,)) = row else {
         return Err(ApiError::not_found("Terminal session"));
     };
-    hand_over(
-        &s,
-        &headers,
-        &format!("terminals/{id}"),
-        &id,
-        relay_addr,
-        ws,
-        "Terminal session",
-    )
-    .await
+    hand_over(&s, &id, relay_addr, ws, "Terminal session").await
 }
 
 /// The agent's socket for session `id`, to whoever waits for it: on this
 /// replica, or forwarded to `relay_addr`, the replica holding the other
-/// end (at `/api/agent/v1/<path>` there). Terminals and log follows.
+/// end. Terminals and log follows.
+///
+/// Only this replica can check the agent: a signed request's nonce is
+/// spent here, and a client certificate ends here. So the hop carries a
+/// relay ticket instead, a random secret good once for a minute, whose
+/// hash this replica leaves in the database for the other one to take
+/// ([`relayed`]). Whatever the agent sent is never passed on.
 pub(crate) async fn hand_over(
     s: &AppState,
-    headers: &HeaderMap,
-    path: &str,
     id: &str,
     relay_addr: Option<String>,
     ws: WebSocketUpgrade,
@@ -313,19 +311,66 @@ pub(crate) async fn hand_over(
     let Some(addr) = relay_addr.filter(|a| Some(a) != s.config.relay_addr.as_ref()) else {
         return Err(ApiError::not_found(what));
     };
-    let mut req = format!("ws://{addr}/api/agent/v1/{path}")
+    let ticket = crate::ids::random_string(48);
+    sqlx::query("INSERT INTO pyo.relay_tickets (hash, session_id) VALUES ($1, $2)")
+        .bind(crate::ids::sha256_hex(&ticket))
+        .bind(id)
+        .execute(&s.db)
+        .await?;
+    let _ =
+        sqlx::query("DELETE FROM pyo.relay_tickets WHERE created_at < now() - interval '1 minute'")
+            .execute(&s.db)
+            .await;
+    let mut req = format!("ws://{addr}/api/agent/v1/relay/{id}")
         .into_client_request()
         .map_err(anyhow::Error::from)?;
-    if let Some(auth) = headers.get(header::AUTHORIZATION) {
-        req.headers_mut()
-            .insert(header::AUTHORIZATION, auth.clone());
-    }
+    req.headers_mut().insert(
+        RELAY_TICKET,
+        header::HeaderValue::from_str(&ticket).map_err(anyhow::Error::from)?,
+    );
     let (upstream, _) = tokio_tungstenite::connect_async(req).await.map_err(|e| {
         ApiError::from(anyhow::anyhow!(
             "couldn't reach the replica holding this session: {e}"
         ))
     })?;
     Ok(ws.on_upgrade(move |agent| forward(agent, upstream)))
+}
+
+/// GET /api/agent/v1/relay/{id} (WebSocket): an agent's socket another
+/// replica checked and forwarded here ([`hand_over`]), with its ticket.
+/// Handed to whoever waits for it on this replica, never forwarded again.
+async fn relayed(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    ws: WebSocketUpgrade,
+) -> ApiResult<Response> {
+    let ticket = headers
+        .get(RELAY_TICKET)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let taken = !ticket.is_empty()
+        && sqlx::query(
+            "DELETE FROM pyo.relay_tickets WHERE hash = $1 AND session_id = $2 AND created_at > now() - interval '1 minute'",
+        )
+        .bind(crate::ids::sha256_hex(ticket))
+        .bind(&id)
+        .execute(&s.db)
+        .await?
+        .rows_affected()
+            == 1;
+    if !taken {
+        return Err(ApiError::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            "This relay ticket is unknown or was used.",
+        ));
+    }
+    let Some(waiting) = s.terminals.lock().await.remove(&id) else {
+        return Err(ApiError::not_found("Session"));
+    };
+    Ok(ws.on_upgrade(move |agent| async move {
+        let _ = waiting.send(agent);
+    }))
 }
 
 /// Shuttle frames between the browser and the agent until either side closes.
@@ -419,5 +464,134 @@ mod tests {
         assert!(command_words(r#"["a\u0000b"]"#).is_err());
         let long = serde_json::to_string(&vec!["x"; 300]).unwrap();
         assert!(command_words(&long).is_err());
+    }
+
+    /// A web replica on a port of its own, like a pod: the agent's routes
+    /// behind the signed request check.
+    async fn replica(db: &sqlx::PgPool) -> (AppState, String) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let mut s = crate::rls::tests::state(db.clone());
+        let mut config = (*s.config).clone();
+        config.relay_addr = Some(addr.clone());
+        s.config = Arc::new(config);
+        let app = Router::new()
+            .nest(
+                "/api/agent/v1",
+                agent_routes()
+                    .merge(crate::logfollow::agent_routes())
+                    .layer(axum::middleware::from_fn_with_state(
+                        s.clone(),
+                        crate::agent_auth::signed,
+                    )),
+            )
+            .with_state(s.clone());
+        tokio::spawn(async move { axum::serve(l, app).await });
+        (s, addr)
+    }
+
+    /// Against a throwaway Postgres: an agent's signed socket (no bearer
+    /// token, as on Pyo Cloud) lands on another web replica than the one
+    /// holding the reader. It reaches the reader all the same, and the
+    /// hop's ticket works once and can't be made up.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn a_signed_agent_socket_reaches_the_reader_on_another_replica() {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let run = crate::ids::random_string(8);
+        let (team, cluster, project, service) = (
+            format!("team_r{run}"),
+            format!("cl_r{run}"),
+            format!("prj_r{run}"),
+            format!("svc_r{run}"),
+        );
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)")
+            .bind(&project)
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', '{}', 'running')").bind(&service).bind(&team).bind(&project).bind(&cluster).execute(&db).await.unwrap();
+        let key = pyo_proto::agentauth::RequestKey::from_pkcs8(
+            &pyo_proto::agentauth::RequestKey::generate_pkcs8().unwrap(),
+        )
+        .unwrap();
+        let key_id = format!("akey_r{run}");
+        q("INSERT INTO pyo.agent_keys (id, cluster_id, public_key, expires_at) VALUES ($1, $2, $3, now() + interval '1 hour')").bind(&key_id).bind(&cluster).bind(key.public_key()).execute(&db).await.unwrap();
+
+        let (_a, a_addr) = replica(&db).await;
+        let (b, b_addr) = replica(&db).await;
+        // The reader follows on B.
+        let follow = new_id("lgf");
+        q("INSERT INTO pyo.log_follows (id, team_id, service_id, relay) VALUES ($1, $2, $3, $4)")
+            .bind(&follow)
+            .bind(&team)
+            .bind(&service)
+            .bind(&b_addr)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (send, recv) = oneshot::channel();
+        b.terminals.lock().await.insert(follow.clone(), send);
+
+        // The agent dials A.
+        let path = format!("/api/agent/v1/log-follows/{follow}");
+        let mut req = format!("ws://{a_addr}{path}")
+            .into_client_request()
+            .unwrap();
+        for (h, v) in key.sign(&key_id, "GET", &path, b"", pyo_proto::now_ms() / 1000) {
+            req.headers_mut().insert(h, v.parse().unwrap());
+        }
+        let (mut agent, _) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("the agent's socket is taken");
+        let mut reader_end = tokio::time::timeout(Duration::from_secs(5), recv)
+            .await
+            .expect("B gets the agent's socket")
+            .unwrap();
+        let hello = r#"{"type":"lines","lines":[]}"#;
+        agent.send(tungstenite::Message::text(hello)).await.unwrap();
+        match reader_end.recv().await {
+            Some(Ok(Message::Text(t))) => assert_eq!(t.as_str(), hello),
+            other => panic!("the agent's frame, not {other:?}"),
+        }
+
+        // The ticket went with the hop, and one made up gets nothing.
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pyo.relay_tickets WHERE session_id = $1")
+                .bind(&follow)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(left, 0);
+        let (send, _recv) = oneshot::channel();
+        b.terminals.lock().await.insert(follow.clone(), send);
+        let mut forged = format!("ws://{b_addr}/api/agent/v1/relay/{follow}")
+            .into_client_request()
+            .unwrap();
+        forged
+            .headers_mut()
+            .insert(RELAY_TICKET, "made-up".parse().unwrap());
+        assert!(tokio_tungstenite::connect_async(forged).await.is_err());
+        assert!(
+            b.terminals.lock().await.contains_key(&follow),
+            "the reader still waits for its agent"
+        );
+
+        q("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }
