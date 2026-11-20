@@ -235,13 +235,16 @@ async fn check(res: reqwest::Response) -> anyhow::Result<()> {
 /// Uploads the folder through Pyo: its manifest, each file, then done.
 pub async fn upload(
     http: &reqwest::Client,
+    auth: &crate::Auth,
     base: &str,
     job: &str,
     m: &SiteManifest,
     on_disk: &[PathBuf],
 ) -> anyhow::Result<()> {
     let jobs = format!("{base}/jobs/{job}/site");
-    check(http.post(&jobs).json(m).send().await?).await?;
+    let manifest = serde_json::to_vec(m)?;
+    let req = http.post(&jobs).header("content-type", "application/json");
+    check(auth.sign(req, "POST", &jobs, &manifest).body(manifest).send().await?).await?;
     let mut sends = futures::stream::iter(m.files.iter().zip(on_disk))
         .map(|(f, p)| {
             let url = format!("{jobs}/files/{}", encode_path(&f.path));
@@ -252,10 +255,12 @@ pub async fn upload(
                     let file = tokio::fs::File::open(p).await?;
                     let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
                     let r = async {
+                        let req = http
+                            .put(&url)
+                            .header("x-pyo-sha256", &f.sha256)
+                            .header("content-length", f.size);
                         check(
-                            http.put(&url)
-                                .header("x-pyo-sha256", &f.sha256)
-                                .header("content-length", f.size)
+                            auth.sign_hashed(req, "PUT", &url, &f.sha256)
                                 .body(body)
                                 .timeout(std::time::Duration::from_secs(600))
                                 .send()
@@ -278,7 +283,8 @@ pub async fn upload(
     while let Some(r) = sends.next().await {
         r?;
     }
-    check(http.post(format!("{jobs}/done")).send().await?).await
+    let done = format!("{jobs}/done");
+    check(auth.sign(http.post(&done), "POST", &done, b"").send().await?).await
 }
 
 #[cfg(test)]

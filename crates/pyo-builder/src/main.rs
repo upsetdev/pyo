@@ -22,7 +22,7 @@ use anyhow::Context;
 use pyo_proto::{
     AGENT_VERSION_HEADER, BuildJob, BuildProgress, BuildResult, BuilderHeartbeat, LogLine, now_ms,
 };
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderValue};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -32,9 +32,61 @@ use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// How the builder proves who it is to Pyo.
+pub enum Auth {
+    /// Its own key, made by the agent in its cluster: every request signed
+    /// (pyo-proto `agentauth`).
+    Key(String, pyo_proto::agentauth::RequestKey),
+    /// Its token, from an agent that gives builders no key (older).
+    Token(String),
+}
+
+impl Auth {
+    /// From `PYO_BUILDER_KEY_ID` and `PYO_BUILDER_KEY`, else `PYO_BUILDER_TOKEN`.
+    fn from_env() -> anyhow::Result<Self> {
+        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        if let (Some(id), Some(key)) = (var("PYO_BUILDER_KEY_ID"), var("PYO_BUILDER_KEY")) {
+            use base64::Engine as _;
+            let pkcs8 = base64::engine::general_purpose::STANDARD
+                .decode(key.trim())
+                .context("PYO_BUILDER_KEY isn't base64")?;
+            let key = pyo_proto::agentauth::RequestKey::from_pkcs8(&pkcs8).map_err(anyhow::Error::msg)?;
+            return Ok(Self::Key(id, key));
+        }
+        let token = var("PYO_BUILDER_TOKEN").context("PYO_BUILDER_KEY or PYO_BUILDER_TOKEN is required")?;
+        Ok(Self::Token(token))
+    }
+
+    /// `req` to `url`, signed over its body (`body`), or with the token.
+    pub fn sign(&self, req: reqwest::RequestBuilder, method: &str, url: &str, body: &[u8]) -> reqwest::RequestBuilder {
+        self.sign_hashed(req, method, url, &pyo_proto::agentauth::body_sha256(body))
+    }
+
+    /// The same for a streamed body, given by its hex SHA-256 (sent in
+    /// `x-pyo-sha256` too).
+    pub fn sign_hashed(&self, req: reqwest::RequestBuilder, method: &str, url: &str, body_sha256: &str) -> reqwest::RequestBuilder {
+        match self {
+            Auth::Key(id, key) => {
+                let path = reqwest::Url::parse(url)
+                    .map(|u| match u.query() {
+                        Some(q) => format!("{}?{q}", u.path()),
+                        None => u.path().to_owned(),
+                    })
+                    .unwrap_or_default();
+                key.sign_hashed(id, method, &path, body_sha256, now_ms() / 1000)
+                    .into_iter()
+                    .fold(req, |r, (k, v)| r.header(k, v))
+            }
+            Auth::Token(t) => req.bearer_auth(t),
+        }
+    }
+}
+
 struct Builder {
     http: reqwest::Client,
-    /// Its token: also its login at Pyo's registry door (username `pyo-builder`).
+    auth: Auth,
+    /// Its login at Pyo's registry door (username `pyo-builder`), when it
+    /// pushes there; empty for a cluster's own registry.
     token: String,
     base: String,
     buildkit: String,
@@ -54,18 +106,17 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let url = std::env::var("PYO_API_URL").context("PYO_API_URL is required")?;
-    let token = std::env::var("PYO_BUILDER_TOKEN").context("PYO_BUILDER_TOKEN is required")?;
+    let auth = Auth::from_env()?;
+    let token = std::env::var("PYO_BUILDER_TOKEN").unwrap_or_default();
     let mut headers = HeaderMap::new();
-    let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))?;
-    auth.set_sensitive(true);
-    headers.insert(AUTHORIZATION, auth);
     headers.insert(AGENT_VERSION_HEADER, HeaderValue::from_static(VERSION));
     let builder = std::sync::Arc::new(Builder {
         http: reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(10))
             .build()?,
-        token: token.clone(),
+        auth,
+        token,
         base: format!("{}/api/builder/v1", url.trim_end_matches('/')),
         buildkit: std::env::var("BUILDKIT_HOST")
             .unwrap_or_else(|_| "unix:///run/buildkit/buildkitd.sock".into()),
@@ -266,13 +317,14 @@ impl Builder {
     }
 
     async fn post<T: serde::Serialize + ?Sized>(&self, path: &str, body: &T) -> anyhow::Result<()> {
-        let res = self
+        let url = format!("{}{path}", self.base);
+        let bytes = serde_json::to_vec(body)?;
+        let req = self
             .http
-            .post(format!("{}{path}", self.base))
+            .post(&url)
             .timeout(Duration::from_secs(20))
-            .json(body)
-            .send()
-            .await?;
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        let res = self.auth.sign(req, "POST", &url, &bytes).body(bytes).send().await?;
         if !res.status().is_success() {
             anyhow::bail!("{}: {}", res.status(), res.text().await.unwrap_or_default());
         }
@@ -280,12 +332,9 @@ impl Builder {
     }
 
     async fn next_job(&self) -> anyhow::Result<Option<BuildJob>> {
-        let res = self
-            .http
-            .get(format!("{}/jobs?wait=25", self.base))
-            .timeout(Duration::from_secs(40))
-            .send()
-            .await?;
+        let url = format!("{}/jobs?wait=25", self.base);
+        let req = self.http.get(&url).timeout(Duration::from_secs(40));
+        let res = self.auth.sign(req, "GET", &url, b"").send().await?;
         if !res.status().is_success() {
             anyhow::bail!("{}: {}", res.status(), res.text().await.unwrap_or_default());
         }
@@ -790,7 +839,7 @@ impl Builder {
             ),
         )
         .await;
-        match site::upload(&self.http, &self.base, job, &m, &on_disk).await {
+        match site::upload(&self.http, &self.auth, &self.base, job, &m, &on_disk).await {
             Ok(()) => Some(pyo_proto::site::SiteUpload {
                 files: m.files.len() as u64,
                 bytes,
