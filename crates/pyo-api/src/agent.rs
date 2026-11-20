@@ -126,8 +126,9 @@ const CLUSTER_REGISTRY_LOGIN: &str = "UPDATE pyo.registry_logins l SET last_used
 async fn certificate(
     State(s): State<AppState>,
     cluster: AgentCluster,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
-) -> ApiResult<Json<pyo_proto::TlsCertificate>> {
+) -> ApiResult<Json<Value>> {
     let row: Option<(String, String)> = sqlx::query_as(CLUSTER_CERTIFICATE)
         .bind(&id)
         .bind(&cluster.team_id)
@@ -136,18 +137,20 @@ async fn certificate(
         .await?;
     let (certificate, sealed) = row.ok_or_else(|| ApiError::not_found("Certificate"))?;
     let private_key = s.sealer.open(&sealed).map_err(ApiError::from)?;
-    Ok(Json(pyo_proto::TlsCertificate {
+    let reply = json!(pyo_proto::TlsCertificate {
         certificate,
         private_key,
-    }))
+    });
+    Ok(Json(signed_reply(&cluster.id, &headers, reply).await))
 }
 
 /// A registry login with its password, for a cluster that pulls with it.
 async fn registry_login(
     State(s): State<AppState>,
     cluster: AgentCluster,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
-) -> ApiResult<Json<pyo_proto::RegistryLogin>> {
+) -> ApiResult<Json<Value>> {
     let row: Option<(String, String, String)> = sqlx::query_as(CLUSTER_REGISTRY_LOGIN)
         .bind(&id)
         .bind(&cluster.team_id)
@@ -156,11 +159,65 @@ async fn registry_login(
         .await?;
     let (host, username, sealed) = row.ok_or_else(|| ApiError::not_found("Registry login"))?;
     let password = s.sealer.open(&sealed).map_err(ApiError::from)?;
-    Ok(Json(pyo_proto::RegistryLogin {
+    let reply = json!(pyo_proto::RegistryLogin {
         host,
         username,
         password,
-    }))
+    });
+    Ok(Json(signed_reply(&cluster.id, &headers, reply).await))
+}
+
+/// A reply the agent acts on, with the signer's signature when this Pyo
+/// has a signer (pyo-proto `signing`, `pyoreply1`): bound to the cluster
+/// and to the nonce the agent sent with its request. The plain fields stay
+/// beside it. When it can't be signed (no nonce, the signer down) it goes
+/// out as it is, and an agent that requires signatures acts on nothing in it.
+pub(crate) async fn signed_reply(
+    cluster_id: &str,
+    headers: &axum::http::HeaderMap,
+    reply: Value,
+) -> Value {
+    match crate::command_signer() {
+        Some(signer) => sign_reply_with(signer.as_ref(), cluster_id, headers, reply).await,
+        None => reply,
+    }
+}
+
+async fn sign_reply_with(
+    signer: &dyn crate::CommandSigner,
+    cluster_id: &str,
+    headers: &axum::http::HeaderMap,
+    mut reply: Value,
+) -> Value {
+    let Some(nonce) = headers
+        .get(pyo_proto::REPLY_NONCE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|n| pyo_proto::valid_reply_nonce(n))
+    else {
+        return reply;
+    };
+    let json = reply.to_string();
+    let item = crate::ReplyToSign {
+        nonce: nonce.to_owned(),
+        sha256: sha256_hex(&json),
+    };
+    match signer.sign_reply(cluster_id, &item).await {
+        Ok(sig) if sig.refused.is_none() => {
+            reply["signed"] = json!(pyo_proto::SignedReplyWire {
+                claims: sig.claims,
+                sig: sig.sig,
+                kid: sig.kid,
+                reply: json,
+            });
+        }
+        Ok(sig) => {
+            tracing::warn!(cluster = %cluster_id, why = sig.refused.unwrap_or_default(), "the signer refused a reply")
+        }
+        Err(e) => {
+            tracing::warn!(cluster = %cluster_id, error = %format!("{e:#}"), "couldn't sign a reply")
+        }
+    }
+    reply
 }
 
 fn storage_class_json(sc: &pyo_proto::StorageClassReport) -> Value {
@@ -208,6 +265,7 @@ const SERVICE_STATUS: &str = "UPDATE pyo.services SET runtime = $3,
 async fn heartbeat(
     State(s): State<AppState>,
     cluster: AgentCluster,
+    headers: axum::http::HeaderMap,
     Json(hb): Json<Heartbeat>,
 ) -> ApiResult<Json<Value>> {
     if hb.protocol != PROTOCOL_VERSION {
@@ -642,9 +700,8 @@ async fn heartbeat(
     let tailnet = crate::tailscale::wanted_for(&s.db, &cluster.id, same_cluster).await?;
     // Pyo's dashboard on the public IP, while it's open.
     let public_dashboard = crate::publicdash::wanted_for(&s.db, same_cluster).await?;
-    Ok(Json(
-        json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability, "tailnet": tailnet, "publicDashboard": public_dashboard }),
-    ))
+    let reply = json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability, "tailnet": tailnet, "publicDashboard": public_dashboard });
+    Ok(Json(signed_reply(&cluster.id, &headers, reply).await))
 }
 
 /// Which GPU servers are kept for GPU work. A server's own setting wins;
@@ -1803,5 +1860,58 @@ mod lookup_tests {
                 .await
                 .unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+    use pyo_proto::signing::{REPLY_TTL_MS, ReplyClaims, Signer, TrustedKeys};
+
+    /// A signer here, as cloud-signer signs replies.
+    struct Local(Signer);
+
+    impl crate::CommandSigner for Local {
+        fn sign<'a>(&'a self, _: &'a str, _: &'a [crate::ToSign]) -> futures::future::BoxFuture<'a, anyhow::Result<Vec<crate::Signature>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn sign_reply<'a>(&'a self, cluster_id: &'a str, r: &'a crate::ReplyToSign) -> futures::future::BoxFuture<'a, anyhow::Result<crate::Signature>> {
+            Box::pin(async move {
+                let now = pyo_proto::now_ms() as u64;
+                let claims = ReplyClaims { v: 1, cluster: cluster_id.into(), nonce: r.nonce.clone(), iat: now, exp: now + REPLY_TTL_MS, sha256: r.sha256.clone() };
+                let (claims, sig) = self.0.sign_reply(&claims);
+                Ok(crate::Signature { claims, sig, kid: self.0.kid().into(), refused: None })
+            })
+        }
+        fn public_keys(&self) -> String {
+            self.0.public_key()
+        }
+    }
+
+    fn headers(nonce: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(pyo_proto::REPLY_NONCE_HEADER, nonce.parse().unwrap());
+        h
+    }
+
+    #[tokio::test]
+    async fn replies_are_signed_for_the_cluster_and_the_request() {
+        let signer = Local(Signer::from_pkcs8(&Signer::generate_pkcs8().unwrap()).unwrap());
+        let keys = TrustedKeys::parse(&crate::CommandSigner::public_keys(&signer)).unwrap();
+        let reply = json!({ "ok": true, "publicTraffic": true, "serverTags": [{ "server": "s1", "tags": ["web"] }] });
+        let out = sign_reply_with(&signer, "cl_a", &headers("nonce-1234"), reply.clone()).await;
+        // The plain fields stay, for agents that don't check.
+        assert_eq!(out["publicTraffic"], json!(true));
+        let wire: pyo_proto::SignedReplyWire = serde_json::from_value(out["signed"].clone()).unwrap();
+        let now = pyo_proto::now_ms() as u64;
+        let signed = keys.verify_reply(Some(&wire), "cl_a", "nonce-1234", now).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(signed).unwrap(), reply);
+        assert!(keys.verify_reply(Some(&wire), "cl_b", "nonce-1234", now).is_err());
+        assert!(keys.verify_reply(Some(&wire), "cl_a", "nonce-9999", now).is_err());
+        // No nonce, or not one an agent makes: nothing to bind it to, so unsigned.
+        let plain = sign_reply_with(&signer, "cl_a", &axum::http::HeaderMap::new(), reply.clone()).await;
+        assert!(plain.get("signed").is_none());
+        let odd = sign_reply_with(&signer, "cl_a", &headers("short"), reply.clone()).await;
+        assert!(odd.get("signed").is_none());
     }
 }

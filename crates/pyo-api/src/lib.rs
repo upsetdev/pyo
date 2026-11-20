@@ -194,6 +194,15 @@ pub struct ToSign {
     pub sha256: String,
 }
 
+/// A reply to sign (pyo-proto `signing`, `pyoreply1`): for this cluster,
+/// to the request that sent `nonce`, whose JSON hashes to `sha256`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyToSign {
+    pub nonce: String,
+    pub sha256: String,
+}
+
 /// A signature over a command's claims (pyo-proto `signing`), or why the
 /// signer won't sign that command (`refused`).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -219,6 +228,14 @@ pub trait CommandSigner: Send + Sync {
         cluster_id: &'a str,
         items: &'a [ToSign],
     ) -> futures::future::BoxFuture<'a, anyhow::Result<Vec<Signature>>>;
+    /// Signs a reply the agent acts on (the heartbeat's, a certificate, a
+    /// registry login), bound to its request's nonce. The signer picks
+    /// the expiry.
+    fn sign_reply<'a>(
+        &'a self,
+        cluster_id: &'a str,
+        reply: &'a ReplyToSign,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<Signature>>;
     /// The public keys agents trust (`PYO_COMMAND_KEY`: base64url, comma separated).
     fn public_keys(&self) -> String;
 }
