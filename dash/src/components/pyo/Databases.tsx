@@ -9,7 +9,7 @@ import { forwardRef, useId, type ReactNode } from "react";
 import { siMysql } from "simple-icons";
 import type { Tone } from "~/components/ui/Badge";
 import { PostgresLogo } from "~/components/ui/EngineLogo";
-import { Field, Input, optionClass, Select } from "~/components/ui/Field";
+import { Field, Input, optionClass, Select, Stepper } from "~/components/ui/Field";
 import type { Database } from "~/lib/pyo/types";
 
 // Shared by the Databases pages: labels for engines, sizes and states.
@@ -241,20 +241,18 @@ export function AvailabilityField({
         <Field
           label="Replicas"
           hint={`A primary and ${shown} replicas: ${shown + 1} instances.`}
-          className="mt-3 sm:w-1/2 sm:pr-1"
+          className="mt-3"
         >
           {(p) => (
-            <Select
+            <Stepper
               {...p}
+              min={options[0]}
+              max={options[options.length - 1]}
+              step={engine === "mysql" ? 2 : 1}
               value={shown}
-              onChange={(e) => onChange(true, Number(e.target.value))}
-            >
-              {options.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </Select>
+              onChange={(n) => onChange(true, n)}
+              className="w-[140px]"
+            />
           )}
         </Field>
       ) : null}
