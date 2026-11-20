@@ -331,7 +331,10 @@ pub fn refusal(policy: &Policy, command: &Command) -> Option<&'static str> {
     if policy.read_only
         && !matches!(
             command,
-            Command::FetchLogs { .. } | Command::FetchDatabaseLogs { .. } | Command::Cancel { .. }
+            Command::FetchLogs { .. }
+                | Command::FetchDatabaseLogs { .. }
+                | Command::QueryTraffic(_)
+                | Command::Cancel { .. }
         )
     {
         return Some(

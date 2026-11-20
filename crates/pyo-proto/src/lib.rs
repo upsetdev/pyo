@@ -1158,6 +1158,10 @@ pub enum Command {
     /// the database to import into is empty, from a short Job in the
     /// team's databases namespace. `data` has what it found.
     CheckDatabaseImport(Box<dbimport::ImportCheck>),
+    /// Kept requests, connections or WAF findings from the cluster's
+    /// traffic store, newest first (traffic.rs). `data` is a
+    /// [`traffic::TrafficAnswer`].
+    QueryTraffic(Box<traffic::TrafficQuery>),
 }
 
 // ── Releases and updates ───────────────────────────────────────────────────

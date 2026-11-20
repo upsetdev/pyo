@@ -1,17 +1,21 @@
 //! Website analytics and server metrics on this cluster: the gateway
-//! (Envoy) writes a JSON access log, and a Vector DaemonSet forwards those lines, plus each
-//! server's own load, disk I/O and network (Vector's host_metrics), to Pyo
-//! through this agent (relay.rs): Vector holds no credential to Pyo.
+//! (Envoy) writes a JSON access log, and a Vector DaemonSet sends those
+//! lines to the cluster's traffic store (traffic/, the pyo-traffic pod),
+//! which keeps them here and adds them up into totals the agent sends to
+//! Pyo. Each server's own load, disk I/O and network (Vector's
+//! host_metrics) go to Pyo through this agent (relay.rs): Vector holds no
+//! credential to Pyo.
 //!
 //! Observability is an installation-wide setting, sent with each heartbeat
-//! reply. On: the agent (re)applies Vector at its first reply, so upgrading
-//! the agent upgrades the pipeline, and on the cluster Pyo runs on it starts
-//! ClickHouse. Off: Vector is removed and ClickHouse stopped, its volume
-//! (and so the history) kept for when it's back on.
+//! reply. On: the agent (re)applies Vector and the traffic store at its
+//! first reply, so upgrading the agent upgrades the pipeline, and on the
+//! cluster Pyo runs on it starts ClickHouse. Off: Vector and the store are
+//! removed and ClickHouse stopped, their volumes (and so the history) kept
+//! for when it's back on.
 
 use k8s_openapi::api::{
-    apps::v1::{DaemonSet, StatefulSet},
-    core::v1::{Secret, ServiceAccount},
+    apps::v1::{DaemonSet, Deployment, StatefulSet},
+    core::v1::{PersistentVolumeClaim, Secret, Service, ServiceAccount},
 };
 use kube::{
     Api, Client,
@@ -106,10 +110,12 @@ sinks:
       timeout_secs: 30
     request:
       retry_attempts: 3
+  # The gateway's lines stay in the cluster: the traffic store keeps
+  # them and sends Pyo only totals (traffic/).
   pyo:
     type: http
     inputs: [access]
-    uri: "__RELAY__/access-logs"
+    uri: "__STORE__/ingest"
     method: post
     encoding:
       codec: json
@@ -117,7 +123,7 @@ sinks:
       method: newline_delimited
     auth:
       strategy: bearer
-      token: "__TOKEN__"
+      token: "__STORE_TOKEN__"
     batch:
       max_events: 1000
       timeout_secs: 5
@@ -141,9 +147,15 @@ pub async fn set(client: &Client, on: bool, pyo_cluster: bool) -> anyhow::Result
         clickhouse(client, on).await?;
     }
     if on {
-        vector(client).await
+        // Vector either way: a store that can't be applied yet (its image
+        // unknown, the install refusing it) is tried again with the next
+        // heartbeat, and Vector holds its lines meanwhile.
+        let store = traffic_store(client).await;
+        vector(client).await?;
+        store
     } else {
-        remove_vector(client).await
+        remove_vector(client).await?;
+        remove_traffic_store(client).await
     }
 }
 
@@ -200,7 +212,9 @@ async fn vector(client: &Client) -> anyhow::Result<()> {
     let relay = crate::relay::endpoint(client).await?;
     let config = VECTOR_CONFIG
         .replace("__RELAY__", &relay)
-        .replace("__TOKEN__", crate::relay::token());
+        .replace("__TOKEN__", crate::relay::token())
+        .replace("__STORE__", &crate::traffic::url())
+        .replace("__STORE_TOKEN__", crate::traffic::link::token());
     Api::<Secret>::namespaced(client.clone(), NS)
         .patch(
             "pyo-vector",
@@ -267,6 +281,122 @@ async fn vector(client: &Client) -> anyhow::Result<()> {
             })),
         )
         .await?;
+    Ok(())
+}
+
+/// The traffic store's volume: the kept requests. Asked for once, never
+/// resized (the store keeps to the team's limit itself) and kept when
+/// observability is off.
+const TRAFFIC_VOLUME: &str = "2Gi";
+
+/// The cluster's traffic store (traffic/): one pod on the agent's own image,
+/// its volume, and its Service for Vector and the agent.
+async fn traffic_store(client: &Client) -> anyhow::Result<()> {
+    let name = crate::traffic::NAME;
+    let Some(image) = crate::tailnet::own_image(client).await else {
+        anyhow::bail!("can't tell the agent's own image for the traffic store");
+    };
+    let labels = json!({ "app.kubernetes.io/name": name, "app.kubernetes.io/managed-by": MANAGER });
+    let claims = Api::<PersistentVolumeClaim>::namespaced(client.clone(), NS);
+    if claims.get_opt(name).await?.is_none() {
+        claims
+            .create(
+                &Default::default(),
+                &serde_json::from_value(json!({
+                    "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+                    "metadata": { "name": name, "labels": labels },
+                    "spec": { "accessModes": ["ReadWriteOnce"], "resources": { "requests": { "storage": TRAFFIC_VOLUME } } },
+                }))?,
+            )
+            .await?;
+    }
+    let token = crate::traffic::link::token();
+    Api::<Secret>::namespaced(client.clone(), NS)
+        .patch(
+            name,
+            &pp(),
+            &Patch::Apply(json!({ "apiVersion": "v1", "kind": "Secret", "metadata": { "name": name, "labels": labels }, "type": "Opaque", "stringData": { "PYO_TRAFFIC_TOKEN": token } })),
+        )
+        .await?;
+    Api::<Service>::namespaced(client.clone(), NS)
+        .patch(
+            name,
+            &pp(),
+            &Patch::Apply(json!({
+                "apiVersion": "v1", "kind": "Service",
+                "metadata": { "name": name, "labels": labels },
+                "spec": { "selector": { "app.kubernetes.io/name": name }, "ports": [{ "name": "http", "port": crate::traffic::PORT, "targetPort": crate::traffic::PORT }] },
+            })),
+        )
+        .await?;
+    Api::<Deployment>::namespaced(client.clone(), NS)
+        .patch(
+            name,
+            &pp(),
+            &Patch::Apply(json!({
+                "apiVersion": "apps/v1", "kind": "Deployment",
+                "metadata": { "name": name, "labels": labels },
+                "spec": {
+                    "replicas": 1,
+                    // One pod on the volume at a time.
+                    "strategy": { "type": "Recreate" },
+                    "selector": { "matchLabels": { "app.kubernetes.io/name": name } },
+                    "template": {
+                        "metadata": {
+                            "labels": labels,
+                            // A new token (the cluster connected again) restarts it.
+                            "annotations": { "pyo/config-hash": format!("{:x}", fxhash(token)) },
+                        },
+                        "spec": {
+                            "automountServiceAccountToken": false,
+                            "tolerations": [{ "key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule" }],
+                            "securityContext": { "runAsNonRoot": true, "runAsUser": 65532, "runAsGroup": 65532, "fsGroup": 65532, "seccompProfile": { "type": "RuntimeDefault" } },
+                            "containers": [{
+                                "name": "traffic",
+                                "image": image,
+                                "imagePullPolicy": "IfNotPresent",
+                                "args": ["traffic"],
+                                "envFrom": [{ "secretRef": { "name": name } }],
+                                "env": [{ "name": "RUST_LOG", "value": "pyo_agent=info" }],
+                                "ports": [{ "name": "http", "containerPort": crate::traffic::PORT }],
+                                "readinessProbe": { "httpGet": { "path": "/healthz", "port": crate::traffic::PORT }, "periodSeconds": 10 },
+                                // Measured: 5 MiB at rest, 35 to 45 MiB at 1000
+                                // requests a second over 20 sites (and a query),
+                                // 60 MiB at 2000 a second over 300 sites.
+                                "resources": { "requests": { "cpu": "10m", "memory": "32Mi" }, "limits": { "memory": "128Mi" } },
+                                "securityContext": {
+                                    "runAsNonRoot": true, "runAsUser": 65532, "allowPrivilegeEscalation": false,
+                                    "readOnlyRootFilesystem": true, "capabilities": { "drop": ["ALL"] },
+                                },
+                                "volumeMounts": [
+                                    { "name": "data", "mountPath": "/data" },
+                                    { "name": "geoip", "mountPath": "/geoip", "readOnly": true },
+                                ],
+                            }],
+                            "volumes": [
+                                { "name": "data", "persistentVolumeClaim": { "claimName": name } },
+                                // The same GeoLite2 Country image the proxies and the
+                                // WAF mount (pyo-proto's system.rs), as the install pins it.
+                                { "name": "geoip", "image": { "reference": pyo_proto::system::geoip_image_from_env(), "pullPolicy": "IfNotPresent" } },
+                            ],
+                        },
+                    },
+                },
+            })),
+        )
+        .await?;
+    Ok(())
+}
+
+/// The store's pod and Service go; its volume (the kept requests) stays.
+async fn remove_traffic_store(client: &Client) -> anyhow::Result<()> {
+    let name = crate::traffic::NAME;
+    let gone = |r: kube::Result<()>| match r {
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
+        r => r,
+    };
+    gone(Api::<Deployment>::namespaced(client.clone(), NS).delete(name, &DeleteParams::default()).await.map(|_| ()))?;
+    gone(Api::<Service>::namespaced(client.clone(), NS).delete(name, &DeleteParams::default()).await.map(|_| ()))?;
     Ok(())
 }
 

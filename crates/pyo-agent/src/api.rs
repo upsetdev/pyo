@@ -276,6 +276,23 @@ impl PyoApi {
         Ok((status, res.text().await.unwrap_or_default()))
     }
 
+    /// Pyo's view of this cluster's traffic for its traffic store: which
+    /// hosts and ports are services', firewalls, the IP setting and the
+    /// team's limits. Signed like any answer the agent acts on.
+    pub async fn traffic_context(&self) -> anyhow::Result<pyo_proto::traffic::TrafficContext> {
+        let v = self.reply(reqwest::Method::GET, "/traffic-context", None).await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// Finished minutes of traffic totals, sent on from the traffic store.
+    pub async fn traffic_totals(&self, batch: &pyo_proto::traffic::TotalsBatch) -> anyhow::Result<()> {
+        let res = self
+            .send(reqwest::Method::POST, "/traffic-totals", Self::json(batch), Duration::from_secs(30))
+            .await?;
+        Self::check(res).await?;
+        Ok(())
+    }
+
     /// Pyo's address, as this agent reaches it (for its components).
     pub fn base_url(&self) -> String {
         self.base.trim_end_matches("/api/agent/v1").to_owned()

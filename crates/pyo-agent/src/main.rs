@@ -40,6 +40,7 @@ mod sites;
 mod tailnet;
 mod terminal;
 mod tls;
+mod traffic;
 mod trust;
 mod upgrade;
 mod volumes;
@@ -158,6 +159,10 @@ async fn main() -> anyhow::Result<()> {
     if args.get(1).map(String::as_str) == Some("tailnet") {
         return tailnet::run_pod().await;
     }
+    // The cluster's traffic store, the pyo-traffic pod (traffic/).
+    if args.get(1).map(String::as_str) == Some("traffic") {
+        return traffic::run().await;
+    }
     // pyo-host's port forwards on Pyo's machine (forward.rs).
     if args.get(1).map(String::as_str) == Some("forward") {
         return forward::run(&args[2..]).await;
@@ -220,6 +225,8 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(sites::renew_login(agent.clone()));
         // Vector's data goes to Pyo through this agent (relay.rs).
         tokio::spawn(relay::serve(agent.clone()));
+        // The traffic store's totals to Pyo, Pyo's context to it.
+        tokio::spawn(traffic::link::run(agent.clone()));
     }
     // Checks the policy each run: a cluster made read only later is left be.
     tokio::spawn(cleanup::run(agent.clone()));
@@ -617,6 +624,7 @@ fn command_kind(c: &Command) -> &'static str {
         Command::DeleteDatabase { .. } => "delete_database",
         Command::DeleteVolume { .. } => "delete_volume",
         Command::FetchDatabaseLogs { .. } => "fetch_database_logs",
+        Command::QueryTraffic(_) => "query_traffic",
         Command::CheckDatabaseImport(_) => "check_database_import",
         Command::ListSnapshots(_) => "list_snapshots",
         Command::ForgetSnapshot(_) => "forget_snapshot",

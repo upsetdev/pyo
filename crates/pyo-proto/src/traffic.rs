@@ -641,8 +641,9 @@ pub struct WafRow {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TrafficQuery {
-    /// "requests", "connections" or "waf".
-    pub kind: String,
+    /// "requests", "connections" or "waf" (not `kind`: that's the
+    /// command's tag).
+    pub rows: String,
     /// Requests and WAF findings: only these hosts.
     pub hosts: Vec<String>,
     /// Connections: only these port keys.
@@ -953,6 +954,17 @@ mod tests {
         assert_eq!(limits_from(&json!({ "requestLogs": { "maxMb": 2048, "maxDays": 3 } })), (2048, 3));
     }
 
+    /// The query rides in a command tagged by `kind`.
+    #[test]
+    fn a_query_is_a_command() {
+        let q = TrafficQuery { rows: "waf".into(), hosts: vec!["a.example".into()], limit: 5, ..Default::default() };
+        let c = crate::Command::QueryTraffic(Box::new(q.clone()));
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!((v["kind"].as_str(), v["rows"].as_str()), (Some("query_traffic"), Some("waf")));
+        let back: crate::Command = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, crate::Command::QueryTraffic(b) if *b == q));
+    }
+
     #[test]
     fn query_filters() {
         let r = RequestRow {
@@ -964,7 +976,7 @@ mod tests {
             ..Default::default()
         };
         let q = |v: Value| serde_json::from_value::<TrafficQuery>(v).unwrap();
-        assert!(q(json!({ "kind": "requests" })).matches_request(&r));
+        assert!(q(json!({ "rows": "requests" })).matches_request(&r));
         assert!(q(json!({ "hosts": ["shop.example.com"], "status": "5xx", "method": "post", "path": "/api" })).matches_request(&r));
         assert!(!q(json!({ "hosts": ["other.example.com"] })).matches_request(&r));
         assert!(!q(json!({ "status": "2xx" })).matches_request(&r));

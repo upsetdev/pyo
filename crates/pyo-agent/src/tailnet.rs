@@ -699,8 +699,9 @@ pub async fn apply(kube: &Client, wanted: &TailnetWanted, same_cluster: bool) {
 /// What the cluster's install refused last, and that install's stamp.
 static TAILNET_REFUSED: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
 
-/// The agent's own image (its Deployment's), for its tailnet pods.
-async fn own_image(kube: &Client) -> Option<String> {
+/// The agent's own image (its Deployment's), for its tailnet pods and
+/// the traffic store.
+pub(crate) async fn own_image(kube: &Client) -> Option<String> {
     Api::<Deployment>::namespaced(kube.clone(), NS)
         .get_opt("pyo-agent")
         .await

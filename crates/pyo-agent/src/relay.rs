@@ -1,5 +1,6 @@
-//! Vector's data reaches Pyo through this agent: the gateway's access logs
-//! and the servers' figures (observability.rs). Vector can't sign its
+//! Vector's servers' figures reach Pyo through this agent
+//! (observability.rs); the gateway's access logs stay in the cluster, in
+//! the traffic store (traffic/). Vector can't sign its
 //! requests, and it gets no credential to Pyo: it posts here, inside the
 //! cluster, with a token only this agent knows (made at its start), and the
 //! agent sends each batch on as its own signed request.
@@ -85,10 +86,6 @@ async fn forward(agent: &Agent, headers: &HeaderMap, path: &str, body: Bytes) ->
 /// Serves the relay for as long as the agent runs.
 pub async fn serve(agent: Agent) {
     let app = Router::new()
-        .route(
-            "/access-logs",
-            post(|State(a): State<Agent>, h: HeaderMap, b: Bytes| async move { forward(&a, &h, "/access-logs", b).await }),
-        )
         .route(
             "/host-metrics",
             post(|State(a): State<Agent>, h: HeaderMap, b: Bytes| async move { forward(&a, &h, "/host-metrics", b).await }),

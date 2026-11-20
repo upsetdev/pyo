@@ -89,6 +89,17 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         Command::CheckDatabaseImport(spec) => {
             return crate::dbimport::check(&agent.kube, *spec).await;
         }
+        Command::QueryTraffic(q) => {
+            return match crate::traffic::link::query(&q).await {
+                Ok(a) => CommandResult {
+                    ok: true,
+                    message: None,
+                    logs: vec![],
+                    data: serde_json::to_value(a).ok(),
+                },
+                Err(e) => failed(format!("{e:#}")),
+            };
+        }
         Command::SetTrafficMode { mode } => {
             crate::rollout::set_traffic_mode(&agent.kube, &mode).await
         }

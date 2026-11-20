@@ -82,10 +82,11 @@ pub const ACCESS_LOG_FIELDS: [(&str, &str); 20] = [
 pub const ACCESS_LOG_CONTENT_TYPE: (&str, &str) = ("content_type", "%RESP(CONTENT-TYPE)%");
 
 /// The GeoIP country database the proxies place visitors with, for the
-/// firewall's country rules (GeoLite2 Country, as analytics uses GeoLite2
-/// City): an image with just the file (deploy/images/geoip.Dockerfile,
-/// built with each release), mounted read-only as an image volume, so the
-/// proxies need no credentials or downloads for it.
+/// firewall's country rules (GeoLite2 Country): an image with just the file
+/// (deploy/images/geoip.Dockerfile, built with each release), mounted
+/// read-only as an image volume, so the proxies need no credentials or
+/// downloads for it. The WAF and the traffic store (pyo-agent's traffic/,
+/// for analytics' countries) mount the same image: one copy per cluster.
 ///
 /// Its image comes from the installation (`PYO_GEOIP_IMAGE`), like the
 /// WAF's: the agent's install manifest gives it to the agent and pins it in
