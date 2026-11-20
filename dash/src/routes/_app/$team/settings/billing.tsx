@@ -400,14 +400,14 @@ function Notice({
     return (
       <Note tone="warning" title="Payment failed" action={payNow}>
         {b.graceUntil
-          ? `${plural(daysUntil(b.graceUntil), "day")} left to pay. Deploys pause on ${date(b.graceUntil)}. Services keep running.`
-          : "Deploys pause 7 days after the payment failed. Services keep running."}
+          ? `${plural(daysUntil(b.graceUntil), "day")} left to pay. Changes to your servers pause on ${date(b.graceUntil)}. Services keep running.`
+          : "Changes to your servers pause 7 days after the payment failed. Services keep running."}
       </Note>
     );
   if (b.status === "paused")
     return (
-      <Note tone="danger" title="Deploys paused" action={payNow}>
-        {`Services keep running. Paying turns deploys back on at once.${deleted ? ` Unpaid, data is deleted on ${deleted}.` : ""}`}
+      <Note tone="danger" title="Paused" action={payNow}>
+        {`Your servers get no changes. Services keep running. Paying resumes at once.${deleted ? ` Unpaid, data is deleted on ${deleted}.` : ""}`}
       </Note>
     );
   if (b.status === "canceled")
@@ -421,7 +421,7 @@ function Notice({
           </Button>
         }
       >
-        {`Deploys and new servers are paused. Services keep running.${deleted ? ` Data is deleted on ${deleted}.` : ""}`}
+        {`Your servers get no changes. Services keep running.${deleted ? ` Data is deleted on ${deleted}.` : ""}`}
       </Note>
     );
   if (b.status === "active" && b.cancelAtPeriodEnd)
@@ -436,7 +436,7 @@ function Notice({
         }
       >
         {b.periodEnd
-          ? `Deploys and new servers pause then. Data is deleted on ${date(b.periodEnd + retain * DAY_MS)}.`
+          ? `Your servers get no changes after that. Data is deleted on ${date(b.periodEnd + retain * DAY_MS)}.`
           : `Data is deleted ${retain} days after it ends.`}
       </Note>
     );
