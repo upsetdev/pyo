@@ -160,9 +160,9 @@ export function CountrySelect({
       </option>
       {countries.map((c) => (
         <option key={c.code} value={c.code}>
-          <span className="inline-flex items-center gap-2">
+          <span className="flex min-w-0 items-center gap-2">
             <Flag country={c.code} size={16} />
-            {c.name}
+            <span className="truncate">{c.name}</span>
           </span>
         </option>
       ))}

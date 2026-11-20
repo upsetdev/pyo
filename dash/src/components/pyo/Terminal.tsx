@@ -253,7 +253,7 @@ export function ServiceTerminal({ app }: { app: Application }) {
             >
               {SHELLS.map((x) => (
                 <option key={x.value} value={x.value}>
-                  <span className="inline-flex items-center gap-2">
+                  <span className="flex items-center gap-2">
                     {x.icon}
                     {x.label}
                   </span>
@@ -279,7 +279,9 @@ export function ServiceTerminal({ app }: { app: Application }) {
             <div ref={host} className="h-full w-full" />
           </div>
         ) : (
-          <div className="flex flex-col items-center gap-3 px-4 py-14 text-center">
+          <div
+            className={`${zoomed ? "min-h-0 flex-1" : "h-[60vh] min-h-[320px]"} flex flex-col items-center justify-center gap-3 px-4 text-center`}
+          >
             <p className="max-w-sm text-[13px] text-muted-foreground">
               {stopped
                 ? "The service is stopped. Start it to open a terminal."
