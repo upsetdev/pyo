@@ -45,6 +45,93 @@ use serde_json::json;
 
 use crate::{AppState, deploy, ids::sha256_hex};
 
+/// With in-cluster registries (Pyo Cloud), each cluster's own registry
+/// has a door of its own (pyo-agent registrydoor.rs) with the same rules.
+/// It checks the team's tokens by their hashes, which Pyo sends each of the
+/// team's clusters whenever they change ([`sync_clusters`]): the clusters
+/// to wake come back. Nothing to send otherwise.
+pub async fn sync_clusters(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    team_id: &str,
+    only: Option<&str>,
+) -> crate::error::ApiResult<Vec<String>> {
+    if !deploy::in_cluster_registries() {
+        return Ok(vec![]);
+    }
+    let tokens = team_tokens(tx, team_id).await?;
+    let clusters: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM pyo.clusters WHERE team_id = $1 AND NOT same_cluster AND ($2::text IS NULL OR id = $2) ORDER BY created_at",
+    )
+    .bind(team_id)
+    .bind(only)
+    .fetch_all(&mut **tx)
+    .await?;
+    for c in &clusters {
+        deploy::enqueue(
+            tx,
+            c,
+            pyo_proto::Command::SyncRegistryTokens(Box::new(tokens.clone())),
+        )
+        .await?;
+    }
+    Ok(clusters)
+}
+
+/// The team's working registry tokens as a cluster's door gets them: their
+/// hashes, never the tokens.
+pub(crate) async fn team_tokens(
+    conn: &mut sqlx::PgConnection,
+    team_id: &str,
+) -> sqlx::Result<pyo_proto::registry_door::RegistryTokens> {
+    let slug: String = sqlx::query_scalar("SELECT slug FROM pyo.teams WHERE id = $1")
+        .bind(team_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT token_hash, scope, extract(epoch FROM expires_at)::bigint FROM pyo.registry_tokens
+          WHERE team_id = $1 AND (expires_at IS NULL OR expires_at > now()) ORDER BY created_at",
+    )
+    .bind(team_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(pyo_proto::registry_door::RegistryTokens {
+        team_slug: team_path(&slug),
+        tokens: rows
+            .into_iter()
+            .map(
+                |(sha256, scope, expires_at)| pyo_proto::registry_door::RegistryToken {
+                    sha256,
+                    push: scope == "push",
+                    expires_at,
+                },
+            )
+            .collect(),
+    })
+}
+
+/// A cluster's own registry's door by its name on the cluster's tailnet
+/// ("registry.<tailnet>.ts.net"), once the name works there. Pyo Cloud's
+/// clusters only. The name comes with the cluster's Tailscale (made by its
+/// agent, tailscale.rs): none before.
+pub(crate) const CLUSTER_ADDRESS: &str = "SELECT n.name || '.' || (c.tailscale->>'suffix')
+       FROM pyo.clusters c JOIN pyo.cluster_tailnet_names n ON n.cluster_id = c.id
+      WHERE c.id = $1 AND NOT c.same_cluster AND n.kind = 'registry' AND n.retired_at IS NULL
+        AND n.error IS NULL AND cardinality(n.addrs) > 0 AND c.tailscale->>'suffix' IS NOT NULL
+      ORDER BY n.created_at LIMIT 1";
+
+pub async fn cluster_address(
+    conn: &mut sqlx::PgConnection,
+    cluster_id: &str,
+) -> sqlx::Result<Option<String>> {
+    if !deploy::in_cluster_registries() {
+        return Ok(None);
+    }
+    sqlx::query_scalar(CLUSTER_ADDRESS)
+        .bind(cluster_id)
+        .fetch_optional(conn)
+        .await
+}
+
 /// Where users push from: the registry's tailnet name
 /// ("registry.<tailnet>.ts.net"). None until Tailscale is set up.
 pub fn address() -> Option<String> {
@@ -58,15 +145,7 @@ pub fn team_path(slug: &str) -> String {
 
 /// A team's own repository: "<team>/<project>/<service>", its three parts.
 pub(crate) fn parts(name: &str) -> Option<(&str, &str, &str)> {
-    let mut it = name.split('/');
-    let (t, p, s) = (it.next()?, it.next()?, it.next()?);
-    let label = |x: &str| {
-        !x.is_empty()
-            && x.len() <= 63
-            && x.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    };
-    (it.next().is_none() && label(t) && label(p) && label(s) && t != "pyo").then_some((t, p, s))
+    pyo_proto::registry_door::parts(name)
 }
 
 /// A team's own repository as users name it from the tailnet:
@@ -188,93 +267,23 @@ pub(crate) fn not_theirs(slug: &str) -> String {
     )
 }
 
-/// What a request asks for: the repository it names (None for /v2/ itself)
-/// and whether it writes.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Wants {
-    Root,
-    Repo { name: String, write: bool },
-    Other,
-}
+/// What a request asks for (pyo-proto registry_door.rs, the same rules as
+/// a cluster's own registry's door).
+pub(crate) use pyo_proto::registry_door::Wants;
 
 pub(crate) fn wants(method: &Method, path: &str) -> Wants {
-    let Some(rest) = path.strip_prefix("/v2/") else {
-        return Wants::Other;
-    };
-    if rest.is_empty() {
-        return Wants::Root;
-    }
-    let name = ["/manifests/", "/blobs/", "/tags/list"]
-        .iter()
-        .filter_map(|m| rest.find(m))
-        .min()
-        .map(|i| &rest[..i]);
-    match name {
-        Some(n) if !n.is_empty() => Wants::Repo {
-            name: n.to_owned(),
-            write: !matches!(*method, Method::GET | Method::HEAD),
-        },
-        _ => Wants::Other,
-    }
+    pyo_proto::registry_door::wants(method.as_str(), path)
 }
 
 /// Whether a token for `slug` (with `push` or only pull) may do this, by
 /// the path alone (the door then checks the project, service and owner).
 pub(crate) fn allowed(slug: &str, push: bool, method: &Method, name: &str) -> bool {
-    let ours = parts(name).is_some_and(|(t, _, _)| t == slug);
-    match *method {
-        Method::GET | Method::HEAD => ours,
-        // Pushing: uploads, then the manifest. Deleting isn't offered.
-        Method::POST | Method::PUT | Method::PATCH => ours && push,
-        _ => false,
-    }
+    pyo_proto::registry_door::allowed(slug, push, method.as_str(), name)
 }
 
-/// A query without a cross-repository mount from outside the team (the
-/// registry then takes a plain upload instead).
+/// A query without a cross-repository mount from outside the team.
 pub(crate) fn scoped_query(query: &str, slug: &str) -> String {
-    let prefix = format!("{}/", team_path(slug));
-    // (Another repository of its own team is fine to mount from.)
-    let pairs: Vec<(&str, &str)> = query
-        .split('&')
-        .filter(|p| !p.is_empty())
-        .map(|p| p.split_once('=').unwrap_or((p, "")))
-        .collect();
-    let foreign = pairs
-        .iter()
-        .any(|(k, v)| *k == "from" && !decode(v).starts_with(&prefix));
-    pairs
-        .into_iter()
-        .filter(|(k, _)| !(foreign && (*k == "from" || *k == "mount")))
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Percent-decoding of a query value ("+" is a space).
-fn decode(v: &str) -> String {
-    let b = v.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'%' if i + 2 < b.len() => match std::str::from_utf8(&b[i + 1..i + 3])
-                .ok()
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
-            {
-                Some(x) => {
-                    out.push(x);
-                    i += 3;
-                    continue;
-                }
-                None => out.push(b'%'),
-            },
-            b'+' => out.push(b' '),
-            c => out.push(c),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    pyo_proto::registry_door::scoped_query(query, &team_path(slug))
 }
 
 /// One client for every request through the door: no overall timeout (a
@@ -842,5 +851,94 @@ mod tests {
             "acme",
             true
         ));
+    }
+
+    /// Against a throwaway Postgres: a cluster's door gets the team's
+    /// working tokens as hashes with their scope, never a token.
+    #[test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    fn a_clusters_door_gets_hashes_only() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(hashes_only())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn hashes_only() {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(
+            db.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let run = crate::ids::random_string(8).to_lowercase();
+        let (team, user_id) = (format!("team_rd{run}"), format!("usr_rd{run}"));
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $2)")
+            .bind(&team)
+            .bind(format!("acme-{run}"))
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@rd.test', $1, '')").bind(&user_id).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $3 || '@rd.test', 'owner', 'active')").bind(format!("mem_rd{run}")).bind(&team).bind(&user_id).execute(&db).await.unwrap();
+        let user = crate::auth::User {
+            id: user_id.clone(),
+            name: "rd".into(),
+            email: format!("{user_id}@rd.test"),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        let s = crate::rls::tests::state(db.clone());
+        let push = crate::ops::run_json(&s, &user, json!({ "op": "createRegistryToken", "id": format!("rtk_a{run}"), "teamId": team, "name": "ci" })).await.unwrap();
+        let pull = crate::ops::run_json(&s, &user, json!({ "op": "createRegistryToken", "id": format!("rtk_b{run}"), "teamId": team, "name": "ro", "scope": "pull", "expiresInDays": 30 })).await.unwrap();
+        let (push, pull) = (
+            push["token"].as_str().unwrap(),
+            pull["token"].as_str().unwrap(),
+        );
+        let mut c = db.acquire().await.unwrap();
+        let t = team_tokens(&mut c, &team).await.unwrap();
+        assert_eq!(t.team_slug, format!("acme-{run}"));
+        let now = pyo_proto::now_ms() / 1000;
+        assert!(t.find(push, now).unwrap().push);
+        let p = t.find(pull, now).unwrap();
+        assert!(!p.push && p.expires_at.is_some_and(|e| e > now));
+        let sent =
+            serde_json::to_string(&pyo_proto::Command::SyncRegistryTokens(Box::new(t))).unwrap();
+        assert!(
+            !sent.contains(push) && !sent.contains(pull),
+            "never a token"
+        );
+        // Revoked: gone from what the doors get.
+        crate::ops::run_json(
+            &s,
+            &user,
+            json!({ "op": "revokeRegistryToken", "id": format!("rtk_a{run}") }),
+        )
+        .await
+        .unwrap();
+        let t = team_tokens(&mut c, &team).await.unwrap();
+        assert!(t.find(push, now).is_none() && t.find(pull, now).is_some());
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM pyo.users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }

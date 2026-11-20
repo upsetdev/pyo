@@ -1356,6 +1356,19 @@ spec:
         - name: data
           persistentVolumeClaim: { claimName: registry-data }
 ---
+# Its door (the agent's, registrydoor.rs): the team's registry tokens push
+# and pull its own images. The tailnet's registry name routes here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyo-registry-door
+  namespace: pyo-system
+  labels: { app.kubernetes.io/name: pyo-registry-door, app.kubernetes.io/part-of: pyo }
+spec:
+  selector: { app.kubernetes.io/name: pyo-agent }
+  ports:
+    - { name: door, port: 5006, targetPort: 5006 }
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

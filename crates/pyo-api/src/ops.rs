@@ -3552,6 +3552,8 @@ async fn apply(
                     .bind(&sl)
                     .execute(&mut **tx)
                     .await?;
+                // Its images' path changed: so did its clusters' doors'.
+                wake.extend(crate::registrydoor::sync_clusters(tx, &id, None).await?);
                 slug = Some(sl);
             }
             if let Some(d) = description {
@@ -6773,6 +6775,8 @@ async fn apply(
                 .await?;
             let token = crate::install::new_connect_token(tx, &id, &team_id).await?;
             sqlx::query("UPDATE pyo.teams SET default_cluster_id = coalesce(default_cluster_id, $2) WHERE id = $1").bind(&team_id).bind(&id).execute(&mut **tx).await?;
+            // Its registry's door gets the team's tokens once its agent is in.
+            crate::registrydoor::sync_clusters(tx, &team_id, Some(&id)).await?;
             // Run on this machine, the installer reaches Pyo at localhost,
             // so the agent is given the in-cluster address (install.rs).
             let (command, tailnet) = if this_machine {
@@ -7406,6 +7410,8 @@ async fn apply(
                 .bind(&team_id)
                 .fetch_one(&mut **tx)
                 .await?;
+            // Each cluster's own registry's door (Pyo Cloud).
+            wake.extend(crate::registrydoor::sync_clusters(tx, &team_id, None).await?);
             log_activity(
                 tx,
                 &team_id,
@@ -7434,6 +7440,7 @@ async fn apply(
                     .bind(&id)
                     .fetch_one(&mut **tx)
                     .await?;
+            wake.extend(crate::registrydoor::sync_clusters(tx, &team_id, None).await?);
             log_activity(
                 tx,
                 &team_id,
