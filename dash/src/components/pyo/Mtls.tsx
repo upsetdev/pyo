@@ -229,7 +229,7 @@ function CreateCertificateDialog({
 /** Every HTTPS hostname on a cluster, and whether it can sit behind mTLS. */
 function useHttpsDomains(clusterId: string) {
   return usePyo()
-    .services.filter((a) => a.clusterId === clusterId)
+    .services.filter((a) => a.clusterId === clusterId && !a.previewOf)
     .flatMap((a) => a.domains)
     .filter((d) => d.tlsMode !== "off")
     .map((d) => ({

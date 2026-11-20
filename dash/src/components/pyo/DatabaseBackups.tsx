@@ -24,7 +24,7 @@ import { Field, Input, Segmented, Select, Switch } from "~/components/ui/Field";
 import { Menu } from "~/components/ui/Menu";
 import { Panel } from "~/components/ui/Panel";
 import { timeAgo } from "~/lib/pyo/format";
-import { api, databasePath, usePyo } from "~/lib/pyo/store";
+import { api, databasePath, listedServices, usePyo } from "~/lib/pyo/store";
 import type { Application, BackupDatabase, DbEngine } from "~/lib/pyo/types";
 import { BackupHeatmap, formatBytes, formatDuration } from "./BackupHeatmap";
 import { BrandMark } from "./common";
@@ -340,7 +340,7 @@ export function AddDatabaseDialog({
   const set = (p: Partial<typeof f>) => setF((x) => ({ ...x, ...p }));
   const e = engine ? ENGINES[engine] : null;
   const services = engine
-    ? s.services.filter(
+    ? listedServices(s).filter(
         (a) =>
           a.teamId === teamId &&
           engineOf(a) === engine &&
@@ -362,7 +362,7 @@ export function AddDatabaseDialog({
   const pick = (k: DbEngine) => {
     const info = ENGINES[k];
     setEngine(k);
-    const svcs = s.services.filter(
+    const svcs = listedServices(s).filter(
       (a) => a.teamId === teamId && engineOf(a) === k && a.currentDeploymentId,
     );
     setSource(svcs.length ? "service" : "external");

@@ -13,7 +13,7 @@ import {
 import { Button } from "~/components/ui/Button";
 import { KeyValue, Panel } from "~/components/ui/Panel";
 import { dateTime, plural } from "~/lib/pyo/format";
-import { api, usePyo, projectIdOf } from "~/lib/pyo/store";
+import { api, listedServices, usePyo, projectIdOf } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Project } from "~/lib/pyo/types";
 import { currentSlug } from "~/lib/pyo/paths";
@@ -35,7 +35,7 @@ function ProjectSettings({ project }: { project: Project }) {
   const navigate = useNavigate();
   const f = useProjectForm(project);
   const [deleting, setDeleting] = useState(false);
-  const apps = s.services.filter((a) => a.projectId === project.id);
+  const apps = listedServices(s).filter((a) => a.projectId === project.id);
   const clusters = [
     ...new Set(
       apps

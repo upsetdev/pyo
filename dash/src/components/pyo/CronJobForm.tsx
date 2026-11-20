@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Field, Input, Select, Switch } from "~/components/ui/Field";
-import { api, usePyo } from "~/lib/pyo/store";
+import { api, listedServices, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Application, CronTask } from "~/lib/pyo/types";
 
@@ -21,7 +21,7 @@ export function useCronJobForm(edit?: { app: Application; task: CronTask }) {
   const s = usePyo();
   // A cron job runs with its service's image, so the service has to be
   // running and able to share its storage.
-  const targets = s.services.filter(
+  const targets = listedServices(s).filter(
     (a) =>
       a.teamId === s.currentTeamId &&
       a.workloadKind !== "CronJob" &&

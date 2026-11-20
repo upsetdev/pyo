@@ -17,6 +17,7 @@ import {
 } from "@phosphor-icons/react";
 import { ReplicaPicker } from "~/components/pyo/ReplicaPicker";
 import { RoomNote } from "~/components/pyo/RoomNote";
+import { AppLink } from "~/components/ui/AppLink";
 import { bigChange, MAX_REPLICAS, serviceRoomWarning } from "~/lib/pyo/capacity";
 import { copyIdItem } from "~/components/pyo/copyId";
 import {
@@ -87,6 +88,9 @@ function AppLayout() {
     );
 
   const project = s.projects.find((p) => p.id === app.projectId);
+  const parent = app.previewOf
+    ? s.services.find((a) => a.id === app.previewOf)
+    : undefined;
   const cluster = s.clusters.find((c) => c.id === app.clusterId);
   const active = activeDeploymentFor(s, app.id);
   const current = !!app.currentDeploymentId;
@@ -113,7 +117,20 @@ function AppLayout() {
               {app.name}
             </h1>
             <p className="mt-1 text-[13px] text-muted-foreground">
-              Service in{" "}
+              {parent ? (
+                <>
+                  Preview of{" "}
+                  <AppLink
+                    href={servicePath(parent.id, "previews")}
+                    className="text-foreground hover:text-primary"
+                  >
+                    {parent.name}
+                  </AppLink>{" "}
+                  in{" "}
+                </>
+              ) : (
+                <>Service in </>
+              )}
               {project ? (
                 <Link
                   to="/$team/$projectId"

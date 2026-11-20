@@ -58,7 +58,7 @@ import {
   currentTeam,
   draftProject,
   newProjectFor,
-  usePyo,
+  listedServices, usePyo,
 } from "~/lib/pyo/store";
 import { companionService, findTemplate, getTemplate } from "~/lib/pyo/templates";
 import { toast } from "~/lib/pyo/toast";
@@ -623,7 +623,7 @@ function Configure({
   // The project's services, so the Environment section can flag a
   // ${{service.VAR}} reference that can't be filled in.
   const providers = useMemo(
-    () => s.services.filter((a) => a.projectId === d.projectId).map((a) => providerOfService(a)),
+    () => listedServices(s).filter((a) => a.projectId === d.projectId).map((a) => providerOfService(a)),
     [s.services, d.projectId],
   );
   // Services this form made: shown in the store at once, they don't count

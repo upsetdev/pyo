@@ -1,11 +1,14 @@
+import { ArrowSquareOutIcon, WarningIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { BrandMark, GITHUB_LOGO } from "~/components/pyo/common";
-import { Button } from "~/components/ui/Button";
+import { Button, buttonClass } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Input } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
+import { StatusNote } from "~/components/ui/StatusNote";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
+import type { GithubInstallation } from "~/lib/pyo/types";
 
 // This installation's GitHub App, on Settings (/github). The installation
 // admin creates it once with GitHub's manifest flow. GitHub sends them back
@@ -57,6 +60,91 @@ export function GithubSettingsSection() {
   );
 }
 
+/** A button-styled link to a page on GitHub. */
+function GithubLink({ href, children }: { href: string; children: string }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className={buttonClass("secondary", "sm")}
+    >
+      {children} <ArrowSquareOutIcon size={12} aria-hidden />
+    </a>
+  );
+}
+
+/**
+ * GitHub wants new permissions (pull requests, checks, deployments). The
+ * app's owner adds them to the app first, then each account approves them
+ * once. Nothing when all are there.
+ */
+export function GithubPermissionsNote({
+  installs,
+}: {
+  installs: GithubInstallation[];
+}) {
+  const s = usePyo();
+  const app = s.github;
+  if (!app) return null;
+  const icon = <WarningIcon size={14} weight="bold" />;
+  if (app.missingPermissions?.length)
+    return (
+      <StatusNote
+        tone="warning"
+        icon={icon}
+        title="GitHub needs new permissions"
+        action={
+          s.user.isAdmin && app.permissionsUrl ? (
+            <GithubLink href={app.permissionsUrl}>Update app</GithubLink>
+          ) : undefined
+        }
+      >
+        {s.user.isAdmin
+          ? "Add them to the GitHub App, then approve them once."
+          : "An admin adds them to the GitHub App first."}
+      </StatusNote>
+    );
+  const pending = installs.filter(
+    (g) => g.missingPermissions?.length && g.approveUrl,
+  );
+  if (!pending.length) return null;
+  return (
+    <StatusNote
+      tone="warning"
+      icon={icon}
+      title="GitHub needs new permissions approved once"
+      action={
+        pending.length === 1 ? (
+          <GithubLink href={pending[0].approveUrl!}>Approve</GithubLink>
+        ) : undefined
+      }
+    >
+      {pending.length === 1 ? (
+        `For ${pending[0].account}. Previews wait until then.`
+      ) : (
+        <>
+          For{" "}
+          {pending.map((g, i) => (
+            <span key={g.id}>
+              {i ? (i === pending.length - 1 ? " and " : ", ") : ""}
+              <a
+                href={g.approveUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-primary hover:text-primary/80"
+              >
+                {g.account}
+              </a>
+            </span>
+          ))}
+          . Previews wait until then.
+        </>
+      )}
+    </StatusNote>
+  );
+}
+
 /** The installation's GitHub App, for its admin: where it is, and removing it. */
 export function GithubAppRow() {
   const s = usePyo();
@@ -96,6 +184,23 @@ export function GithubAppRow() {
           Remove
         </Button>
       </li>
+      {app.missingPermissions?.length ? (
+        <li className="px-4 py-3">
+          <StatusNote
+            tone="warning"
+            icon={<WarningIcon size={14} weight="bold" />}
+            title="The app needs new permissions"
+            action={
+              app.permissionsUrl ? (
+                <GithubLink href={app.permissionsUrl}>Update app</GithubLink>
+              ) : undefined
+            }
+          >
+            {app.missingPermissions.join(", ")}. Each account then approves
+            them once.
+          </StatusNote>
+        </li>
+      ) : null}
       <ConfirmDialog
         open={removing}
         onClose={() => setRemoving(false)}

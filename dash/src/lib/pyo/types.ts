@@ -390,6 +390,8 @@ export type Cluster = {
   nameFromHost?: boolean;
   /** Volumes on it that Pyo has no record of. */
   strayVolumes?: StrayVolume[];
+  /** Where its previews get their URLs; null: nip.io on its address. */
+  previewDomain?: ClusterPreviewDomain | null;
   connection: {
     method: "agent" | "kubeconfig";
     /** Display only; never a credential. */
@@ -441,6 +443,22 @@ export type Cluster = {
   serviceCidr: string;
   createdAt: Timestamp;
   lastSeenAt: Timestamp;
+};
+
+/** A cluster's wildcard domain for preview URLs. */
+export type ClusterPreviewDomain = {
+  /** "preview.example.com" */
+  domain: string;
+  /** The wildcard record to point at the cluster: "*.preview.example.com". */
+  record: { name: string; type: "A"; content: string | null };
+  /** cloudflare: Pyo makes the record and a wildcard certificate. */
+  dns: "cloudflare" | "manual";
+  certificate: null | {
+    state: "issuing" | "issued" | "failed";
+    notAfter: Timestamp | null;
+    error: string | null;
+  };
+  error: string | null;
 };
 
 export type ClusterGpu = {
@@ -620,6 +638,10 @@ export type GithubAppInfo = {
   owner: string;
   publicUrl: string;
   webhookActive: boolean;
+  /** Permissions and events the app lacks, e.g. "Checks: write"; empty when all there. */
+  missingPermissions?: string[];
+  /** The app's permission settings on GitHub. */
+  permissionsUrl?: string;
 };
 
 /** A GitHub account or organization a team installed the app on. */
@@ -629,6 +651,10 @@ export type GithubInstallation = {
   account: string;
   accountType: "User" | "Organization";
   repositorySelection: "all" | "selected";
+  /** Permissions its owner hasn't approved yet; empty when all there. */
+  missingPermissions?: string[];
+  /** Where its owner approves them on GitHub. */
+  approveUrl?: string;
   createdAt: Timestamp;
 };
 
@@ -1273,6 +1299,68 @@ export type Application = {
   autoRollback?: boolean;
   /** A build detected as a static site: served as static files ("static", the default) or run as a service. */
   serveAs?: "static" | "service";
+  /** A temporary copy for each open pull request (Git services). */
+  previews?: PreviewSettings;
+  /** Set on a preview copy: the service it previews. Hidden from lists. */
+  previewOf?: ID;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+};
+
+/** A service's preview settings. */
+export type PreviewSettings = {
+  enabled: boolean;
+  /** Which pull requests get one. */
+  pulls: "all" | "label";
+  /** When pulls is "label". */
+  label: string;
+  /** At most this many at once (1 to 50). */
+  limit: number;
+  /** Removed after this many days without a push; 0: never. */
+  idleDays: number;
+  /** private: on the cluster's tailnet. */
+  access: "public" | "private";
+  copySecrets: boolean;
+  /** Pull requests from forks: not deployed, without secret variables, or with them. */
+  forks: "off" | "no-secrets" | "secrets";
+  /** Replace the service's variables by key, or add. */
+  env: EnvironmentVariable[];
+};
+
+export type PreviewStatus =
+  | "waiting"
+  | "building"
+  | "ready"
+  | "failed"
+  | "removing"
+  | "removed";
+
+/** A pull request's (merge request's) preview of a service. */
+export type Preview = {
+  id: ID;
+  teamId: ID;
+  /** The service previewed. */
+  serviceId: ID;
+  /** Its copy: a service with previewOf. */
+  previewServiceId: ID | null;
+  provider: "github" | "gitlab";
+  repo: string;
+  number: number;
+  title: string;
+  /** The pull request's web page. */
+  url: string;
+  branch: string;
+  sha: string;
+  author: string;
+  fork: boolean;
+  /** "web-pr-42" */
+  name: string;
+  hostname: string | null;
+  status: PreviewStatus;
+  /** Why it's waiting, failed or removed. */
+  message: string | null;
+  deploymentId: ID | null;
+  pullState: "open" | "closed" | "merged";
   createdAt: Timestamp;
   updatedAt: Timestamp;
 };
@@ -1304,7 +1392,9 @@ export type DeploymentTrigger =
   | "redeploy"
   | "config_change"
   | "retry"
-  | "deploy_hook";
+  | "deploy_hook"
+  /** A pull request's preview (previews). */
+  | "preview";
 
 /** A personal API token (for MCP clients and scripts); the token itself is shown once. */
 /** What a cluster's agent may do there, as it reports. */

@@ -12,7 +12,7 @@ import {
 import { Meter } from "~/components/ui/Panel";
 import { deleteVolumeSnapshot, fetchVolumeSnapshots } from "~/lib/pyo/backend";
 import { dateTime, gib, timeAgo } from "~/lib/pyo/format";
-import { api, usePyo } from "~/lib/pyo/store";
+import { api, listedServices, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type {
   Application,
@@ -67,7 +67,7 @@ export function AttachVolumeDialog({
   const s = usePyo();
   // Services on its cluster, by project: a volume can't change cluster.
   const onCluster = volume
-    ? s.services.filter(
+    ? listedServices(s).filter(
         (a) => a.clusterId === volume.clusterId && a.teamId === volume.teamId,
       )
     : [];

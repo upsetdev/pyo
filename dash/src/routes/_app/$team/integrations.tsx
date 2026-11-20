@@ -10,7 +10,11 @@ import { RegistriesDialog } from "~/components/pyo/RegistryLogins";
 import { SecretStoresDialog } from "~/components/pyo/SecretStores";
 import { CloudflareDialog } from "~/components/pyo/Cloudflare";
 import { TailscaleDialog } from "~/components/pyo/Tailscale";
-import { GithubDialog, GitlabDialog } from "~/components/pyo/GitConnections";
+import {
+  GithubDialog,
+  GitlabDialog,
+  githubPermissionsMissing,
+} from "~/components/pyo/GitConnections";
 import { HetznerDialog, hetznerOf } from "~/components/pyo/Hetzner";
 import { useHosted } from "~/components/pyo/Managed";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
@@ -26,7 +30,7 @@ import {
   getState,
   roleIn,
   teamBySlug,
-  usePyo,
+  listedServices, usePyo,
   type PyoState,
 } from "~/lib/pyo/store";
 import { takeGithubReturn } from "~/lib/pyo/github-return";
@@ -134,7 +138,7 @@ function Integrations() {
   const gitlabProjects = gitlab.reduce((n, c) => n + (c.info.projects ?? 0), 0);
   const gitlabProblems = gitlab.some((c) => c.info.problems?.length);
   const cfLacking = cf?.zones.filter((z) => !z.canEdit).length ?? 0;
-  const storeUses = s.services.filter(
+  const storeUses = listedServices(s).filter(
     (a) => a.teamId === team && a.secretImports?.some((i) => stores.some((x) => x.id === i.storeId)),
   ).length;
   const githubRepos = reposLinked(s, (src) => installs.some((g) => g.id === src.installationId));
@@ -175,6 +179,9 @@ function Integrations() {
       description: "Private repos. Deploys on every push.",
       connected: !!s.github && installs.length > 0,
       detail: `${plural(githubRepos, "repo")} linked`,
+      problem: githubPermissionsMissing(s.github, installs)
+        ? { tone: "warning", label: ATTENTION, detail: "New permissions to approve" }
+        : null,
       canSetUp: !!s.github || !!s.user.isAdmin,
       dialog: (onClose) => <GithubDialog onClose={onClose} />,
     },

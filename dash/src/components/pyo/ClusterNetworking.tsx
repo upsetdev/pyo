@@ -1,9 +1,21 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Layered } from "~/components/ui/Layered";
+import { Status } from "~/components/ui/Badge";
+import { Button } from "~/components/ui/Button";
+import { ConfirmDialog } from "~/components/ui/Dialog";
+import { Input } from "~/components/ui/Field";
 import { EmptyState, Panel } from "~/components/ui/Panel";
-import { Table, Td, Th, Tr } from "~/components/ui/Table";
+import { CopyButton, Table, Td, Th, Tr } from "~/components/ui/Table";
 import { DomainStatus } from "~/components/pyo/DomainState";
-import { usePyo, servicePath } from "~/lib/pyo/store";
+import {
+  api,
+  listedServices,
+  roleIn,
+  usePyo,
+  servicePath,
+} from "~/lib/pyo/store";
+import { dateTime } from "~/lib/pyo/format";
+import { toast } from "~/lib/pyo/toast";
 import type { Cluster } from "~/lib/pyo/types";
 import { CodeText, EntityLink } from "./common";
 import { EndpointTable } from "./tables";
@@ -17,7 +29,7 @@ export function ClusterNetworking({
   titled?: boolean;
 }) {
   const s = usePyo();
-  const apps = s.services.filter((a) => a.clusterId === c.id);
+  const apps = listedServices(s).filter((a) => a.clusterId === c.id);
   const routes = apps.flatMap((a) => a.domains.map((d) => ({ a, d })));
   const lb = c.capabilities.loadBalancer;
   return (
@@ -68,6 +80,7 @@ export function ClusterNetworking({
           ))}
         </div>
       </Layered>
+      <ClusterPreviewDomain cluster={c} />
       <Panel title="HTTP routes">
         {routes.length ? (
           <Table>
@@ -107,5 +120,142 @@ export function ClusterNetworking({
         <EndpointTable apps={apps} s={s} />
       </Panel>
     </div>
+  );
+}
+
+/** A hostname with at least two labels: "preview.example.com". */
+const HOSTNAME =
+  /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+
+/** Where the cluster's previews get their URLs: a wildcard domain, else nip.io. */
+export function ClusterPreviewDomain({ cluster: c }: { cluster: Cluster }) {
+  const s = usePyo();
+  const admin = ["owner", "admin"].includes(roleIn(s, c.teamId) ?? "");
+  const [domain, setDomain] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const pd = c.previewDomain;
+  const typed = domain.trim().toLowerCase().replace(/\.$/, "");
+  const valid = HOSTNAME.test(typed);
+  const cert = pd?.certificate;
+  return (
+    <Panel title="Preview domain">
+      {pd ? (
+        <div className="space-y-3 p-4">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <span className="font-mono text-[13px]">*.{pd.domain}</span>
+            {pd.dns === "cloudflare" ? (
+              <Status
+                tone={
+                  cert?.state === "issued"
+                    ? "success"
+                    : cert?.state === "failed"
+                      ? "danger"
+                      : "progress"
+                }
+                label={
+                  cert?.state === "issued"
+                    ? cert.notAfter
+                      ? `Certificate until ${dateTime(cert.notAfter)}`
+                      : "Certificate issued"
+                    : cert?.state === "failed"
+                      ? "Certificate failed"
+                      : "Getting certificate"
+                }
+              />
+            ) : null}
+            <Button
+              variant="ghost"
+              size="xs"
+              className="ml-auto text-destructive"
+              disabled={!admin}
+              onClick={() => setRemoving(true)}
+            >
+              Remove
+            </Button>
+          </div>
+          {cert?.state === "failed" && cert.error ? (
+            <p className="text-[12px] text-destructive">{cert.error}</p>
+          ) : null}
+          {pd.error ? (
+            <p className="text-[12px] text-destructive">{pd.error}</p>
+          ) : null}
+          {pd.dns === "manual" ? (
+            <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-[12px]">
+              <p className="mb-1.5 text-muted-foreground">
+                Create this DNS record at your DNS provider:
+              </p>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11.5px]">
+                <span>{pd.record.type}</span>
+                <span className="inline-flex items-center gap-1">
+                  {pd.record.name}
+                  <CopyButton value={pd.record.name} label="Copy record name" />
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  {pd.record.content ?? "No public IP found yet"}
+                  {pd.record.content ? (
+                    <CopyButton
+                      value={pd.record.content}
+                      label="Copy record value"
+                    />
+                  ) : null}
+                </span>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <form
+          className="space-y-1.5 p-4"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!valid || busy) return;
+            setBusy(true);
+            const res = await api.setClusterPreviewDomain(c.id, typed);
+            setBusy(false);
+            if (res) {
+              setDomain("");
+              toast({ title: "Preview domain saved", description: c.name });
+            }
+          }}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              mono
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+              placeholder="preview.example.com"
+              aria-label="Preview domain"
+              disabled={!admin}
+              className="min-w-0 flex-1"
+            />
+            <Button
+              type="submit"
+              size="sm"
+              variant="secondary"
+              disabled={!admin || !valid || busy}
+            >
+              {busy ? "Saving…" : "Save"}
+            </Button>
+          </div>
+          <p className="text-[12px] text-muted-foreground">
+            {domain.trim() && !valid
+              ? "Use a hostname like preview.example.com."
+              : "Without one, previews use nip.io."}
+          </p>
+        </form>
+      )}
+      <ConfirmDialog
+        open={removing}
+        onClose={() => setRemoving(false)}
+        title={`Remove ${pd?.domain}?`}
+        description="Previews move to nip.io URLs."
+        confirmLabel="Remove"
+        onConfirm={async () => {
+          if (await api.setClusterPreviewDomain(c.id, null))
+            toast({ title: "Preview domain removed", description: c.name });
+        }}
+      />
+    </Panel>
   );
 }

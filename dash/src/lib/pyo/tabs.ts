@@ -27,6 +27,10 @@ export function serviceTabs(app: App): PageTab[] {
           { label: "Domains", tab: "domains" },
           { label: "Firewall", tab: "firewall" },
         ]),
+    // Git services; a preview copy has none of its own.
+    ...(!cron && app.source.type === "git" && !app.previewOf
+      ? [{ label: "Previews", tab: "previews" }]
+      : []),
     { label: "Settings", tab: "settings", also: ["env", "networking", "resources", "volumes"] },
   ];
 }

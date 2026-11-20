@@ -19,6 +19,7 @@ import {
   serverHref,
   projectPath,
   servicePath,
+  listedServices,
 } from "~/lib/pyo/store";
 import type { ActivityEvent, Deployment } from "~/lib/pyo/types";
 import { SourceSummary, TimeAgo } from "./common";
@@ -285,7 +286,7 @@ export function collectIssues(
   projectId?: string,
 ): Issue[] {
   const out: Issue[] = [];
-  const apps = s.services.filter(
+  const apps = listedServices(s).filter(
     (a) => a.teamId === wsId && (!projectId || a.projectId === projectId),
   );
   for (const a of apps) {

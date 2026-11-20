@@ -13,7 +13,7 @@ import { Badge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { Field, Input, SecretInput, Select, Textarea } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
-import { api, usePyo } from "~/lib/pyo/store";
+import { api, listedServices, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type {
   Application,
@@ -409,7 +409,7 @@ export function SecretStoresDialog({ onClose }: { onClose: () => void }) {
   const stores = s.secretStores.filter((x) => x.teamId === s.currentTeamId);
   const [form, setForm] = useState<"add" | SecretStore | null>(stores.length ? null : "add");
   const uses = (store: SecretStore) =>
-    s.services.filter((a) =>
+    listedServices(s).filter((a) =>
       a.secretImports?.some((i) => i.storeId === store.id),
     ).length;
 

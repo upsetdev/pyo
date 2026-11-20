@@ -283,7 +283,7 @@ function LogsPage() {
             onSearch={setText}
             onStatus={(c) => setFilter({ status: c })}
             serviceOf={(host) =>
-              servicesIn(s).find((a) => a.domains.some((d) => d.hostname === host))
+              s.services.find((a) => a.teamId === s.currentTeamId && a.domains.some((d) => d.hostname === host))
                 ?.name
             }
             empty={

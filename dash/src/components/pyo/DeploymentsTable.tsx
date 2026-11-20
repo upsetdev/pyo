@@ -45,6 +45,7 @@ export const TRIGGER_LABEL: Record<Deployment["trigger"], string> = {
   config_change: "Config change",
   retry: "Retry",
   deploy_hook: "Deploy hook",
+  preview: "Preview",
 };
 
 /**

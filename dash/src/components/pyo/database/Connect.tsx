@@ -6,7 +6,7 @@ import { Highlighted } from "~/components/ui/Highlighted";
 import { Panel } from "~/components/ui/Panel";
 import { CopyButton } from "~/components/ui/Table";
 import { CODE_CLASS } from "~/lib/pyo/highlight";
-import { api, servicePath, usePyo } from "~/lib/pyo/store";
+import { api, servicePath, listedServices, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { useDatabase } from "./DatabaseLayout";
 
@@ -24,7 +24,7 @@ export function DatabaseConnect() {
   const admin = !me || me.role === "owner" || me.role === "admin";
   const connected = new Set(d.connections.map((c) => c.serviceId));
   // Services on its cluster: they reach it inside the cluster.
-  const candidates = s.services.filter((a) => a.clusterId === d.clusterId && !connected.has(a.id) && s.projects.some((p) => p.id === a.projectId && p.teamId === d.teamId));
+  const candidates = listedServices(s).filter((a) => a.clusterId === d.clusterId && !connected.has(a.id) && s.projects.some((p) => p.id === a.projectId && p.teamId === d.teamId));
   const chosen = serviceId || candidates[0]?.id || "";
   const app = (id: string) => s.services.find((a) => a.id === id);
   // Masked values, or with the password once revealed.

@@ -17,7 +17,7 @@ import { Field, Input } from "~/components/ui/Field";
 import { KeyValue, Panel } from "~/components/ui/Panel";
 import { clusterGpuText, dateTime, timeAgo } from "~/lib/pyo/format";
 import { DNS_LABEL } from "~/lib/pyo/format";
-import { api, clusterByRef, clustersIn, usePyo } from "~/lib/pyo/store";
+import { api, clusterByRef, clustersIn, listedServices, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Cluster } from "~/lib/pyo/types";
 import { currentSlug } from "~/lib/pyo/paths";
@@ -44,7 +44,7 @@ function ClusterSettings({ c }: { c: Cluster }) {
     token: string;
     command: string;
   } | null>(null);
-  const apps = s.services.filter((a) => a.clusterId === c.id);
+  const apps = listedServices(s).filter((a) => a.clusterId === c.id);
   // Gone for 10 minutes: removable with its services (as the API allows).
   const gone = Date.now() - c.lastSeenAt >= 10 * 60_000;
   const install = c.capabilities.agentInstall;

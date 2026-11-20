@@ -12,7 +12,7 @@ import { StatusNote } from "~/components/ui/StatusNote";
 import { CopyButton } from "~/components/ui/Table";
 import { cpu, mem, timeAgo } from "~/lib/pyo/format";
 import { parseLocation } from "~/lib/pyo/location";
-import { api, serversOf, usePyo, type PyoState } from "~/lib/pyo/store";
+import { api, serversOf, listedServices, usePyo, type PyoState } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Application, ClusterServer } from "~/lib/pyo/types";
 import { cloudServerOf, money } from "~/components/pyo/Hetzner";
@@ -47,14 +47,14 @@ export function removalCheck(s: PyoState, n: ClusterServer) {
       : undefined;
   const replicasOn = (a: Application) =>
     (a.runtime.replicas ?? []).filter((r) => r.server === n.name).length;
-  const running = s.services.filter(
+  const running = listedServices(s).filter(
     (a) => a.clusterId === n.clusterId && replicasOn(a) > 0,
   );
   const withData = running.filter((a) =>
     s.volumes.some((v) => v.serviceId === a.id),
   );
   const ready = others.filter((x) => x.status === "ready");
-  const pinned = s.services.filter(
+  const pinned = listedServices(s).filter(
     (a) =>
       a.clusterId === n.clusterId &&
       a.location &&

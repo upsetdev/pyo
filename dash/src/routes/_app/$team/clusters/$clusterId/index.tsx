@@ -17,7 +17,7 @@ import {
   clusterByRef,
   clusterSummary,
   serversOf,
-  usePyo,
+  listedServices, usePyo,
 } from "~/lib/pyo/store";
 
 export const Route = createFileRoute("/_app/$team/clusters/$clusterId/")({
@@ -42,7 +42,7 @@ function ClusterOverview() {
   if (!c) return null;
   const sum = clusterSummary(s, c);
   const nodes = serversOf(s, c.id);
-  const services = s.services.filter((a) => a.clusterId === c.id);
+  const services = listedServices(s).filter((a) => a.clusterId === c.id);
   const running = services.filter((a) => a.status === "running").length;
   const places = placesOf(c, s.servers);
   const events = activityIn(s, c.teamId)

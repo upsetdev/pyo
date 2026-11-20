@@ -18,7 +18,7 @@ import { fetchCronRuns, type CronRunRecord } from "~/lib/pyo/backend";
 import { dateTime, timeAgo } from "~/lib/pyo/format";
 import { useQuery } from "~/lib/pyo/query";
 import { currentSlug } from "~/lib/pyo/paths";
-import { api, serviceParams, usePyo } from "~/lib/pyo/store";
+import { api, serviceParams, servicesIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { useCronJobForm } from "~/components/pyo/CronJobForm";
 import { AnsiText } from "~/components/pyo/AnsiText";
@@ -293,7 +293,7 @@ function CronJobDialog({
 function CronJobsPage() {
   const s = usePyo();
   const team = currentSlug();
-  const apps = s.services.filter((a) => a.teamId === s.currentTeamId);
+  const apps = servicesIn(s);
   const rows = rowsOf(apps);
   const [editing, setEditing] = useState<Row | null>(null);
   const [removing, setRemoving] = useState<Row | null>(null);

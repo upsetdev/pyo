@@ -63,6 +63,7 @@ import type {
   IpMode,
   OAuthGrant,
   PortMapping,
+  Preview,
   Project,
   Registry,
   RegistryLogin,
@@ -96,6 +97,8 @@ export type PyoState = {
   /** Every workload the clusters' agents report (system and service). */
   systemWorkloads: Workload[];
   services: Application[];
+  /** Pull requests' previews of services (removed ones for a day). */
+  previews: Preview[];
   deployments: Deployment[];
   volumes: Volume[];
   activity: ActivityEvent[];
@@ -308,6 +311,7 @@ function empty(): PyoState {
     servers: [],
     systemWorkloads: [],
     services: [],
+    previews: [],
     deployments: [],
     volumes: [],
     activity: [],
@@ -578,7 +582,15 @@ export const currentTeam = (s: PyoState) =>
 export const projectsIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.projects.filter((p) => p.teamId === wsId);
 export const servicesIn = (s: PyoState, wsId = s.currentTeamId) =>
-  s.services.filter((a) => a.teamId === wsId);
+  s.services.filter((a) => a.teamId === wsId && !a.previewOf);
+/** Services as lists, counts and pickers show them: without preview copies. */
+export const listedServices = (s: PyoState) =>
+  s.services.filter((a) => !a.previewOf);
+/** A service's previews that aren't removed, newest pull request first. */
+export const previewsOf = (s: PyoState, serviceId: string) =>
+  (s.previews ?? [])
+    .filter((p) => p.serviceId === serviceId && p.status !== "removed")
+    .sort((a, b) => b.number - a.number);
 export const clustersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.clusters.filter((c) => c.teamId === wsId);
 // Clusters and servers are addressed by name in URLs (/acme/clusters/edge-sgp,
@@ -829,7 +841,7 @@ export function clusterSummary(s: PyoState, c: Cluster) {
 }
 
 export function projectStats(s: PyoState, p: Project) {
-  const apps = s.services.filter((a) => a.projectId === p.id);
+  const apps = listedServices(s).filter((a) => a.projectId === p.id);
   const deps = deploymentsWhere(s, { projectId: p.id });
   const lastAct =
     activityIn(s, p.teamId).find((e) => e.projectId === p.id)?.at ??
@@ -1469,6 +1481,15 @@ export const api = {
     });
     return send("setClusterPublicTraffic", { clusterId, on });
   },
+  /** The cluster's preview domain; null removes it. */
+  setClusterPreviewDomain(id: string, domain: string | null) {
+    if (domain === null)
+      update((s) => {
+        const c = s.clusters.find((x) => x.id === id);
+        if (c) c.previewDomain = null;
+      });
+    return send("setClusterPreviewDomain", { id, domain });
+  },
   setClusterOriginPull(clusterId: string, certificateIds: string[]) {
     update((s) => {
       const c = s.clusters.find((x) => x.id === clusterId);
@@ -1906,6 +1927,7 @@ export const api = {
         | "serveAs"
         | "placement"
         | "servers"
+        | "previews"
         | "serverTags"
         | "secretImports"
         | "schedule"
@@ -2008,6 +2030,25 @@ export const api = {
           p.exposure = "internal";
     });
     return saveService(id);
+  },
+  /** Remove a preview now. The next push brings it back. */
+  deletePreview(id: string) {
+    update((s) => {
+      const p = s.previews.find((x) => x.id === id);
+      if (p) p.status = "removing";
+    });
+    return send("deletePreview", { id });
+  },
+  /** Deploy the pull request's head again. */
+  redeployPreview(id: string) {
+    update((s) => {
+      const p = s.previews.find((x) => x.id === id);
+      if (p && p.status !== "waiting") {
+        p.status = "building";
+        p.message = null;
+      }
+    });
+    return send("redeployPreview", { id });
   },
   /** Default-deny networking for a project, on every cluster it runs on. */
   setProjectIsolation(id: string, isolate: boolean) {

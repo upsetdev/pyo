@@ -6,7 +6,7 @@ import {
   databaseHref,
   projectPath,
   servicePath,
-  usePyo,
+  listedServices, usePyo,
   type PyoState,
 } from "~/lib/pyo/store";
 import { databaseTabs, serviceTabs, tabPaths } from "~/lib/pyo/tabs";
@@ -45,7 +45,7 @@ function itemsFor(s: PyoState, sw: Switcher): MenuItem[] {
   }
   if (sw.kind === "service") {
     const projectId = s.services.find((a) => a.id === sw.id)?.projectId;
-    const apps = s.services.filter((a) => a.projectId === projectId);
+    const apps = listedServices(s).filter((a) => a.projectId === projectId);
     return [
       { type: "label", label: "Services" },
       ...apps.map((a) => ({

@@ -13,7 +13,7 @@ import { CopyButton, Table, Td, Th, Tr } from "~/components/ui/Table";
 import { fetchRegistry, type RegistryInfo, type RegistryToken } from "~/lib/pyo/backend";
 import { mem, plural } from "~/lib/pyo/format";
 import { useQuery } from "~/lib/pyo/query";
-import { api, currentTeam, servicePath, usePyo } from "~/lib/pyo/store";
+import { api, currentTeam, servicePath, listedServices, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Team } from "~/lib/pyo/types";
 
@@ -301,7 +301,7 @@ function ConnectDialog({ open, onClose, data, teamId }: { open: boolean; onClose
   const s = usePyo();
   const projects = s.projects.filter((p) => p.teamId === teamId);
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
-  const services = s.services.filter((a) => a.projectId === projectId);
+  const services = listedServices(s).filter((a) => a.projectId === projectId);
   const [serviceId, setServiceId] = useState("");
   const service = services.find((a) => a.id === serviceId) ?? services[0];
   const project = projects.find((p) => p.id === projectId);

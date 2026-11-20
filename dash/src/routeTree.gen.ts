@@ -101,6 +101,7 @@ import { Route as AppTeamProjectIdServiceIdEnvRouteImport } from './routes/_app/
 import { Route as AppTeamProjectIdServiceIdFirewallRouteImport } from './routes/_app/$team/$projectId_/$serviceId/firewall'
 import { Route as AppTeamProjectIdServiceIdLogsRouteImport } from './routes/_app/$team/$projectId_/$serviceId/logs'
 import { Route as AppTeamProjectIdServiceIdNetworkingRouteImport } from './routes/_app/$team/$projectId_/$serviceId/networking'
+import { Route as AppTeamProjectIdServiceIdPreviewsRouteImport } from './routes/_app/$team/$projectId_/$serviceId/previews'
 import { Route as AppTeamProjectIdServiceIdResourcesRouteImport } from './routes/_app/$team/$projectId_/$serviceId/resources'
 import { Route as AppTeamProjectIdServiceIdSettingsRouteImport } from './routes/_app/$team/$projectId_/$serviceId/settings'
 import { Route as AppTeamProjectIdServiceIdTerminalRouteImport } from './routes/_app/$team/$projectId_/$serviceId/terminal'
@@ -619,6 +620,12 @@ const AppTeamProjectIdServiceIdNetworkingRoute =
     path: '/networking',
     getParentRoute: () => AppTeamProjectIdServiceIdRoute,
   } as any)
+const AppTeamProjectIdServiceIdPreviewsRoute =
+  AppTeamProjectIdServiceIdPreviewsRouteImport.update({
+    id: '/previews',
+    path: '/previews',
+    getParentRoute: () => AppTeamProjectIdServiceIdRoute,
+  } as any)
 const AppTeamProjectIdServiceIdResourcesRoute =
   AppTeamProjectIdServiceIdResourcesRouteImport.update({
     id: '/resources',
@@ -912,6 +919,7 @@ export interface FileRoutesByFullPath {
   '/$team/$projectId/$serviceId/firewall': typeof AppTeamProjectIdServiceIdFirewallRoute
   '/$team/$projectId/$serviceId/logs': typeof AppTeamProjectIdServiceIdLogsRoute
   '/$team/$projectId/$serviceId/networking': typeof AppTeamProjectIdServiceIdNetworkingRoute
+  '/$team/$projectId/$serviceId/previews': typeof AppTeamProjectIdServiceIdPreviewsRoute
   '/$team/$projectId/$serviceId/resources': typeof AppTeamProjectIdServiceIdResourcesRoute
   '/$team/$projectId/$serviceId/settings': typeof AppTeamProjectIdServiceIdSettingsRoute
   '/$team/$projectId/$serviceId/terminal': typeof AppTeamProjectIdServiceIdTerminalRoute
@@ -1027,6 +1035,7 @@ export interface FileRoutesByTo {
   '/$team/$projectId/$serviceId/firewall': typeof AppTeamProjectIdServiceIdFirewallRoute
   '/$team/$projectId/$serviceId/logs': typeof AppTeamProjectIdServiceIdLogsRoute
   '/$team/$projectId/$serviceId/networking': typeof AppTeamProjectIdServiceIdNetworkingRoute
+  '/$team/$projectId/$serviceId/previews': typeof AppTeamProjectIdServiceIdPreviewsRoute
   '/$team/$projectId/$serviceId/resources': typeof AppTeamProjectIdServiceIdResourcesRoute
   '/$team/$projectId/$serviceId/settings': typeof AppTeamProjectIdServiceIdSettingsRoute
   '/$team/$projectId/$serviceId/terminal': typeof AppTeamProjectIdServiceIdTerminalRoute
@@ -1156,6 +1165,7 @@ export interface FileRoutesById {
   '/_app/$team/$projectId_/$serviceId/firewall': typeof AppTeamProjectIdServiceIdFirewallRoute
   '/_app/$team/$projectId_/$serviceId/logs': typeof AppTeamProjectIdServiceIdLogsRoute
   '/_app/$team/$projectId_/$serviceId/networking': typeof AppTeamProjectIdServiceIdNetworkingRoute
+  '/_app/$team/$projectId_/$serviceId/previews': typeof AppTeamProjectIdServiceIdPreviewsRoute
   '/_app/$team/$projectId_/$serviceId/resources': typeof AppTeamProjectIdServiceIdResourcesRoute
   '/_app/$team/$projectId_/$serviceId/settings': typeof AppTeamProjectIdServiceIdSettingsRoute
   '/_app/$team/$projectId_/$serviceId/terminal': typeof AppTeamProjectIdServiceIdTerminalRoute
@@ -1283,6 +1293,7 @@ export interface FileRouteTypes {
     | '/$team/$projectId/$serviceId/firewall'
     | '/$team/$projectId/$serviceId/logs'
     | '/$team/$projectId/$serviceId/networking'
+    | '/$team/$projectId/$serviceId/previews'
     | '/$team/$projectId/$serviceId/resources'
     | '/$team/$projectId/$serviceId/settings'
     | '/$team/$projectId/$serviceId/terminal'
@@ -1398,6 +1409,7 @@ export interface FileRouteTypes {
     | '/$team/$projectId/$serviceId/firewall'
     | '/$team/$projectId/$serviceId/logs'
     | '/$team/$projectId/$serviceId/networking'
+    | '/$team/$projectId/$serviceId/previews'
     | '/$team/$projectId/$serviceId/resources'
     | '/$team/$projectId/$serviceId/settings'
     | '/$team/$projectId/$serviceId/terminal'
@@ -1526,6 +1538,7 @@ export interface FileRouteTypes {
     | '/_app/$team/$projectId_/$serviceId/firewall'
     | '/_app/$team/$projectId_/$serviceId/logs'
     | '/_app/$team/$projectId_/$serviceId/networking'
+    | '/_app/$team/$projectId_/$serviceId/previews'
     | '/_app/$team/$projectId_/$serviceId/resources'
     | '/_app/$team/$projectId_/$serviceId/settings'
     | '/_app/$team/$projectId_/$serviceId/terminal'
@@ -2214,6 +2227,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamProjectIdServiceIdNetworkingRouteImport
       parentRoute: typeof AppTeamProjectIdServiceIdRoute
     }
+    '/_app/$team/$projectId_/$serviceId/previews': {
+      id: '/_app/$team/$projectId_/$serviceId/previews'
+      path: '/previews'
+      fullPath: '/$team/$projectId/$serviceId/previews'
+      preLoaderRoute: typeof AppTeamProjectIdServiceIdPreviewsRouteImport
+      parentRoute: typeof AppTeamProjectIdServiceIdRoute
+    }
     '/_app/$team/$projectId_/$serviceId/resources': {
       id: '/_app/$team/$projectId_/$serviceId/resources'
       path: '/resources'
@@ -2524,6 +2544,7 @@ interface AppTeamProjectIdServiceIdRouteChildren {
   AppTeamProjectIdServiceIdFirewallRoute: typeof AppTeamProjectIdServiceIdFirewallRoute
   AppTeamProjectIdServiceIdLogsRoute: typeof AppTeamProjectIdServiceIdLogsRoute
   AppTeamProjectIdServiceIdNetworkingRoute: typeof AppTeamProjectIdServiceIdNetworkingRoute
+  AppTeamProjectIdServiceIdPreviewsRoute: typeof AppTeamProjectIdServiceIdPreviewsRoute
   AppTeamProjectIdServiceIdResourcesRoute: typeof AppTeamProjectIdServiceIdResourcesRoute
   AppTeamProjectIdServiceIdSettingsRoute: typeof AppTeamProjectIdServiceIdSettingsRoute
   AppTeamProjectIdServiceIdTerminalRoute: typeof AppTeamProjectIdServiceIdTerminalRoute
@@ -2545,6 +2566,8 @@ const AppTeamProjectIdServiceIdRouteChildren: AppTeamProjectIdServiceIdRouteChil
     AppTeamProjectIdServiceIdLogsRoute: AppTeamProjectIdServiceIdLogsRoute,
     AppTeamProjectIdServiceIdNetworkingRoute:
       AppTeamProjectIdServiceIdNetworkingRoute,
+    AppTeamProjectIdServiceIdPreviewsRoute:
+      AppTeamProjectIdServiceIdPreviewsRoute,
     AppTeamProjectIdServiceIdResourcesRoute:
       AppTeamProjectIdServiceIdResourcesRoute,
     AppTeamProjectIdServiceIdSettingsRoute:

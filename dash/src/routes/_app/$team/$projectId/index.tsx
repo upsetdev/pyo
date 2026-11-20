@@ -30,7 +30,7 @@ import { Button, ButtonLink } from "~/components/ui/Button";
 import { Select } from "~/components/ui/Field";
 import { Menu, type MenuItem } from "~/components/ui/Menu";
 import { SearchInput } from "~/components/ui/Table";
-import { deploymentsWhere, usePyo, serviceParams, servicePath, projectIdOf } from "~/lib/pyo/store";
+import { deploymentsWhere, listedServices, usePyo, serviceParams, servicePath, projectIdOf } from "~/lib/pyo/store";
 import type { Application } from "~/lib/pyo/types";
 import { currentSlug } from "~/lib/pyo/paths";
 
@@ -61,7 +61,7 @@ function ProjectOverview() {
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return s.services
+    return listedServices(s)
       .filter((a) => a.projectId === projectId)
       .map((a) => ({ a, latest: deploymentsWhere(s, { serviceId: a.id })[0] }))
       .filter(
@@ -83,7 +83,7 @@ function ProjectOverview() {
   }, [projectId, query, s, sort]);
 
   if (!project) return null;
-  const total = s.services.filter((a) => a.projectId === projectId).length;
+  const total = listedServices(s).filter((a) => a.projectId === projectId).length;
   const issues = collectIssues(s, project.teamId, project.id);
 
   if (!total)

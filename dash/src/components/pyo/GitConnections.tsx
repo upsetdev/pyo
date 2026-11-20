@@ -16,8 +16,13 @@ import { Button, buttonClass } from "~/components/ui/Button";
 import { Field, Input, SecretInput } from "~/components/ui/Field";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import type { GitConnection, GithubInstallation } from "~/lib/pyo/types";
+import type {
+  GitConnection,
+  GithubAppInfo,
+  GithubInstallation,
+} from "~/lib/pyo/types";
 import { forgetGithubReturn, rememberGithubReturn } from "~/lib/pyo/github-return";
+import { GithubPermissionsNote } from "~/components/pyo/GithubSettings";
 
 // Git providers on Integrations. GitHub: the team's accounts, through this
 // installation's GitHub App. GitLab: a team's owner or admin adds an access
@@ -311,6 +316,15 @@ function GithubRow({ g }: { g: GithubInstallation }) {
   );
 }
 
+/** GitHub wants new permissions approved: on the app, or on one of these accounts. */
+export const githubPermissionsMissing = (
+  app: GithubAppInfo | null,
+  installs: GithubInstallation[],
+) =>
+  !!app &&
+  (!!app.missingPermissions?.length ||
+    installs.some((g) => g.missingPermissions?.length));
+
 /** Integrations › GitHub: the team's GitHub accounts, through this installation's GitHub App. */
 export function GithubDialog({
   onClose,
@@ -376,6 +390,11 @@ export function GithubDialog({
   return shell(
     installs.length ? (
       <DialogRows>
+        {githubPermissionsMissing(s.github, installs) ? (
+          <li className="px-5 py-3">
+            <GithubPermissionsNote installs={installs} />
+          </li>
+        ) : null}
         {installs.map((g) => (
           <GithubRow key={g.id} g={g} />
         ))}

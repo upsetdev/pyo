@@ -8,7 +8,7 @@ import { EndpointTable } from "~/components/pyo/tables";
 import { EmptyState, Panel } from "~/components/ui/Panel";
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
 import { EntityLink } from "~/components/pyo/common";
-import { usePyo, servicePath, projectIdOf } from "~/lib/pyo/store";
+import { listedServices, usePyo, servicePath, projectIdOf } from "~/lib/pyo/store";
 
 export const Route = createFileRoute("/_app/$team/$projectId/networking")({
   component: () => {
@@ -24,7 +24,7 @@ export const Route = createFileRoute("/_app/$team/$projectId/networking")({
 function ProjectNetworking() {
   const projectId = projectIdOf(Route.useParams());
   const s = usePyo();
-  const apps = s.services.filter((a) => a.projectId === projectId);
+  const apps = listedServices(s).filter((a) => a.projectId === projectId);
   const domains = apps.flatMap((a) => a.domains.map((d) => ({ a, d })));
   return (
     <div className="space-y-4">
