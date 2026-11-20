@@ -31,6 +31,11 @@ export function domainState(
 ): { tone: DomainTone; text: string; hint?: string } {
   if (notDeployed) return { tone: "busy", text: "Live after first deploy" };
   if (d.status !== "active") {
+    // No DNS to wait for: Pyo sets it up on the cluster's tailnet.
+    if (isTailnetDomain(d.hostname))
+      return d.status === "error"
+        ? { tone: "broken", text: "Tailscale failed", hint: d.error }
+        : { tone: "busy", text: "Setting up on Tailscale…" };
     if (isFreeDomain(d.hostname))
       return { tone: "busy", text: "Checking DNS…" };
     return {
