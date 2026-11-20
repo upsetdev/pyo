@@ -147,12 +147,62 @@ pub async fn prune(s: &AppState) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM pyo.platform_imports WHERE created_at < now() - interval '30 days'")
         .execute(&s.db)
         .await?;
+    prune_deployment_logs(&s.db).await?;
     crate::database_logs::prune(&s.db).await?;
     crate::ratelimit::prune(&s.db).await?;
     Ok(())
 }
 
+/// Build and deploy logs are kept 90 days, on Pyo Cloud and self-hosted:
+/// a batch at a time, so a large backlog doesn't hold the table up (this
+/// runs every 15 seconds). Returns the lines deleted.
+pub async fn prune_deployment_logs(db: &sqlx::PgPool) -> sqlx::Result<u64> {
+    Ok(sqlx::query(
+        "DELETE FROM pyo.deployment_logs WHERE id IN (
+           SELECT id FROM pyo.deployment_logs WHERE at < now() - interval '90 days' LIMIT 5000)",
+    )
+    .execute(db)
+    .await?
+    .rows_affected())
+}
+
 /// Payload helpers, so enqueuers and the runner agree on field names.
 pub fn git_status(deployment_id: &str, state: &str, description: &str) -> Value {
     json!({ "deploymentId": deployment_id, "state": state, "description": description })
+}
+
+#[cfg(test)]
+mod log_tests {
+    /// Against a real Postgres (DATABASE_URL, a throwaway one): lines older
+    /// than 90 days go, newer ones stay.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn build_logs_go_after_90_days() {
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        crate::migrate::run(&pool).await.unwrap();
+        let run = crate::ids::new_id("t");
+        let (team, cluster, dpl) = (format!("team_{run}"), format!("cl_{run}"), format!("dpl_{run}"));
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&team).execute(&pool).await.unwrap();
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)").bind(&cluster).bind(&team).execute(&pool).await.unwrap();
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'p', $1)").bind(format!("prj_{run}")).bind(&team).execute(&pool).await.unwrap();
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, 'web', '{}')").bind(format!("svc_{run}")).bind(&team).bind(format!("prj_{run}")).bind(&cluster).execute(&pool).await.unwrap();
+        q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'succeeded', '{}', '{}')").bind(&dpl).bind(&team).bind(format!("prj_{run}")).bind(format!("svc_{run}")).bind(&cluster).execute(&pool).await.unwrap();
+        for days in [120, 91, 89, 1] {
+            q("INSERT INTO pyo.deployment_logs (deployment_id, at, level, source, message) VALUES ($1, now() - make_interval(days => $2), 'info', 'build', 'x')")
+                .bind(&dpl)
+                .bind(days)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        while super::prune_deployment_logs(&pool).await.unwrap() > 0 {}
+        let left: Vec<i32> = sqlx::query_scalar("SELECT extract(day FROM now() - at)::int FROM pyo.deployment_logs WHERE deployment_id = $1 ORDER BY at")
+            .bind(&dpl)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, [89, 1]);
+        q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&pool).await.unwrap();
+    }
 }
