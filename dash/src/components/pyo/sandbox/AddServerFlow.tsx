@@ -11,6 +11,7 @@ import {
   useCloudOptions,
   type CloudChoice,
 } from "~/components/pyo/Hetzner";
+import { useHosted } from "~/components/pyo/Managed";
 import { NeedsTailscale } from "~/components/pyo/Tailscale";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
@@ -24,7 +25,9 @@ import { AddSandboxServer, RuntimeBadge } from "./common";
 
 // Add a sandbox server: two square tiles first. "Hetzner" has Pyo buy the
 // server and set it up (or connects Hetzner first). "Command line" is the
-// one-line sandbox.sh for a server you have.
+// one-line sandbox.sh for a server you have. A hosted Pyo has no Tailscale
+// setup, and Pyo's Hetzner servers join over it, so there only the command
+// shows.
 
 type How = "hetzner" | "command";
 
@@ -35,7 +38,17 @@ export function AddSandboxServerFlow() {
   const [how, setHow] = useState<How | null>(null);
   // Once Pyo is buying one, only its progress shows.
   const [made, setMade] = useState<{ id: string; name: string } | null>(null);
+  const hosted = useHosted();
   if (made) return <CloudSetup id={made.id} name={made.name} />;
+  if (hosted === undefined) return null;
+  if (hosted)
+    return (
+      <Panel>
+        <div className="p-5">
+          <AddSandboxServer />
+        </div>
+      </Panel>
+    );
   return (
     <div className="space-y-5">
       <OptionTiles label="How">

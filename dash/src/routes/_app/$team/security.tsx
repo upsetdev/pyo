@@ -1,3 +1,4 @@
+import { useHosted } from "~/components/pyo/Managed";
 import { LearnMore } from "~/components/ui/LearnMore";
 import { MenuPath } from "~/components/ui/MenuPath";
 import {
@@ -121,6 +122,8 @@ function agentSwitches(sc: AgentScope): string[] {
 function Security() {
   const s = usePyo();
   const [rotating, setRotating] = useState(false);
+  // On a hosted Pyo the Pyo team backs up Pyo's own data.
+  const hosted = useHosted();
   const teamId = s.currentTeamId;
   const role = s.members.find(
     (m) => m.teamId === teamId && m.email === s.user.email,
@@ -309,16 +312,20 @@ function Security() {
       tone: s.controlBackup?.settings ? "success" : "neutral",
       status: s.controlBackup?.settings
         ? "Enabled"
-        : s.user.isAdmin
-          ? "Not set up"
-          : "Admin's setting",
+        : hosted
+          ? "Managed for you"
+          : s.user.isAdmin
+            ? "Not set up"
+            : "Admin's setting",
       detail: s.controlBackup?.settings
         ? "Backed up, encrypted."
-        : (
-          <>
-            Set up in <MenuPath steps={["Settings", "Backups"]} />.
-          </>
-        ),
+        : hosted
+          ? "The Pyo team runs them."
+          : (
+            <>
+              Set up in <MenuPath steps={["Settings", "Backups"]} />.
+            </>
+          ),
     },
     (() => {
       const states = clusters.map((c) => agentAccess(c.capabilities.agentScope));

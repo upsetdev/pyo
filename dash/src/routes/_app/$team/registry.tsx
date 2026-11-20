@@ -2,6 +2,7 @@ import { TrashIcon } from "@phosphor-icons/react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { TimeAgo } from "~/components/pyo/common";
+import { useHosted } from "~/components/pyo/Managed";
 import { AppLink } from "~/components/ui/AppLink";
 import { Status } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -48,13 +49,16 @@ function Registry() {
   const me = s.members.find((m) => m.teamId === s.currentTeamId && m.email === s.user.email);
   const admin = !me || me.role === "owner" || me.role === "admin";
   const [connecting, setConnecting] = useState(false);
+  // Pushing goes over the tailnet, and a hosted Pyo has no Tailscale setup.
+  const hosted = useHosted();
+  const canPush = !!data?.pushAddress || hosted === false;
   return (
     <Page>
       <PageHeader
         title="Registry"
         description="Pyo registry keeps the images Pyo builds from Git, and the ones your team pushes."
         actions={
-          admin && data?.teamPath ? (
+          admin && data?.teamPath && canPush ? (
             <Button size="sm" variant="secondary" onClick={() => setConnecting(true)}>
               Connect
             </Button>
@@ -88,13 +92,15 @@ function Registry() {
                       <span className="shrink-0 text-[12px] text-muted-foreground">Inside the cluster only</span>
                     </span>
                   </div>
-                  <p className="mt-1 text-[12px] text-muted-foreground">
-                    Pushing your own images needs{" "}
-                    <a href={TAILSCALE_DOCS} target="_blank" rel="noreferrer" className="font-medium text-primary hover:text-primary/80">
-                      Tailscale
-                    </a>
-                    .
-                  </p>
+                  {canPush ? (
+                    <p className="mt-1 text-[12px] text-muted-foreground">
+                      Pushing your own images needs{" "}
+                      <a href={TAILSCALE_DOCS} target="_blank" rel="noreferrer" className="font-medium text-primary hover:text-primary/80">
+                        Tailscale
+                      </a>
+                      .
+                    </p>
+                  ) : null}
                 </li>
               )}
               {cluster ? (
