@@ -31,7 +31,9 @@
 //! Free domains Pyo made on another of the cluster's addresses (a private
 //! one, the other mode's, one a server no longer has) or in the older
 //! dashed form ("203-0-113-7.nip.io") follow it: [`rehome`] moves them in
-//! place, with a routes sync (no redeploy).
+//! place, with a routes sync (no redeploy). One on the public IP stays
+//! there while the cluster has one, whatever the mode: the dashboard adds
+//! free domains on the public IP ([`Cluster::home`]).
 
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -239,6 +241,18 @@ impl Cluster {
         }
     }
 
+    /// Where a free domain on `ip` belongs now. One on a public address
+    /// stays on the public IP (chosen when it was added: the dashboard's
+    /// "Free domain"), while the cluster has one. Any other (Tailscale,
+    /// private) follows the free-domain address.
+    pub fn home(&self, ip: Ipv4Addr) -> Option<Ipv4Addr> {
+        if public(&IpAddr::V4(ip)) {
+            self.public_ip().or_else(|| self.address())
+        } else {
+            self.address()
+        }
+    }
+
     /// Every address of its own: where a free domain Pyo made could point.
     pub(crate) fn known(&self) -> Vec<IpAddr> {
         let mut known: Vec<IpAddr> = self.servers.iter().flat_map(addresses).collect();
@@ -302,10 +316,15 @@ fn parts(rest: &str) -> Option<(&str, Ipv4Addr, bool)> {
 }
 
 /// The hostname a free domain moves to: one on another of the cluster's
-/// own addresses (`known`), or in the dashed form, goes to `to`. Any other
-/// hostname stays.
-pub fn moved(host: &str, known: &[IpAddr], to: Ipv4Addr) -> Option<String> {
+/// own addresses (`known`), or in the dashed form, goes to where `to` says
+/// a domain on its address goes. Any other hostname stays.
+pub fn moved(
+    host: &str,
+    known: &[IpAddr],
+    to: impl Fn(Ipv4Addr) -> Option<Ipv4Addr>,
+) -> Option<String> {
     let (label, ip, dashed) = split(host)?;
+    let to = to(ip)?;
     let ours = ip == to || known.contains(&IpAddr::V4(ip));
     (ours && (ip != to || dashed)).then(|| format!("{label}.{to}.nip.io"))
 }
@@ -395,9 +414,6 @@ pub async fn rehome(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> Api
     let Some((team_id, c)) = load(tx, cluster_id).await? else {
         return Ok(false);
     };
-    let Some(to) = c.address() else {
-        return Ok(false);
-    };
     let known = c.known();
     let services: Vec<(String, String, Value)> = sqlx::query_as(
         "SELECT id, name, spec->'domains' FROM pyo.services
@@ -411,7 +427,7 @@ pub async fn rehome(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> Api
         let mut changes = vec![];
         for d in domains.as_array_mut().into_iter().flatten() {
             let host = d["hostname"].as_str().unwrap_or("").to_owned();
-            let Some(new) = moved(&host, &known, to) else {
+            let Some(new) = moved(&host, &known, |ip| c.home(ip)) else {
                 continue;
             };
             if taken(tx, &new).await? {
@@ -777,7 +793,7 @@ mod tests {
             .map(|s| s.parse().unwrap())
             .collect();
         let public = v4("129.226.158.31");
-        let m = |h: &str, to| moved(h, &known, to);
+        let m = |h: &str, to| moved(h, &known, |_| Some(to));
         // The private address, in either form, and the older dashed form.
         assert_eq!(
             m("whoami-web.10-3-8-13.nip.io", public).as_deref(),
@@ -813,6 +829,36 @@ mod tests {
         assert_eq!(m("shop.example.com", public), None);
         assert_eq!(m("10-3-8-13.nip.io", public), None);
         assert_eq!(m("10.3.8.13.nip.io", public), None);
+    }
+
+    #[test]
+    fn a_free_domain_on_the_public_ip_stays_there() {
+        let public = v4("129.226.158.31");
+        let tailnet = v4("100.101.67.2");
+        let private = v4("10.3.8.13");
+        // Behind NAT, so Tailscale: one added on the public IP stays, any
+        // other follows the Tailscale IP.
+        let c = cluster(true, None, vec![nat_server()]);
+        assert_eq!(c.mode(), Mode::Tailscale);
+        assert_eq!(c.home(public), Some(public));
+        assert_eq!(c.home(v4("203.0.113.7")), Some(public));
+        assert_eq!(c.home(private), Some(tailnet));
+        // Public: the Tailscale IP's follow the public IP.
+        let c = cluster(true, Some("public"), vec![nat_server()]);
+        assert_eq!(c.home(tailnet), Some(public));
+        assert_eq!(c.home(public), Some(public));
+        // No public traffic: the public IP's go to the Tailscale IP.
+        let c = cluster(false, None, vec![nat_server()]);
+        assert_eq!(c.home(public), Some(tailnet));
+        // In a rehome.
+        let c = cluster(true, None, vec![nat_server()]);
+        let known = c.known();
+        let m = |h: &str| moved(h, &known, |ip| c.home(ip));
+        assert_eq!(m("app.129.226.158.31.nip.io"), None);
+        assert_eq!(
+            m("app.10.3.8.13.nip.io").as_deref(),
+            Some("app.100.101.67.2.nip.io")
+        );
     }
 
     #[test]
