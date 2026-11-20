@@ -59,11 +59,29 @@ pub async fn settings(
     Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
+/// Whether teams may keep backups in Pyo's own store, and do by default:
+/// a self-hosted Pyo with one. A hosted Pyo's store is outside every
+/// team's cluster, so its teams back up to S3 buckets only.
+pub fn store_on_pyo() -> bool {
+    team_store(crate::hosted(), backup::local_store().is_some())
+}
+
+fn team_store(hosted: bool, store: bool) -> bool {
+    !hosted && store
+}
+
+/// What a team without a backup store is told.
+pub const NO_STORE: &str = "Add an S3 bucket for the team's backups first (Backups).";
+
 /// The team's settings, or the default: this server's store, volumes off,
-/// with a repository password made (and saved) on first use.
-pub async fn effective(db: &PgPool, team_id: &str) -> anyhow::Result<TeamSettings> {
+/// with a repository password made (and saved) on first use. None to
+/// default to: refused until the team adds a bucket.
+pub async fn effective(db: &PgPool, team_id: &str) -> ApiResult<TeamSettings> {
     if let Some(s) = settings(&mut *db.acquire().await?, team_id).await? {
         return Ok(s);
+    }
+    if !store_on_pyo() {
+        return Err(crate::error::ApiError::conflict(NO_STORE));
     }
     let s = TeamSettings {
         base: backup::Settings::local_default(false),
@@ -251,6 +269,7 @@ pub async fn destination(
 ) -> anyhow::Result<(backup::Settings, String, String)> {
     let mut r = cfg.base.resolved()?;
     if cfg.base.is_local() {
+        anyhow::ensure!(store_on_pyo(), NO_STORE);
         let (key, secret) = backup::team_login(&state.db, team_id).await?;
         r.bucket = backup::team_bucket(team_id);
         r.access_key = key.clone();
@@ -576,7 +595,7 @@ async fn tick(state: &AppState) -> anyhow::Result<()> {
 /// backup would use, this server's store. None: nowhere to back up to.
 fn shown_settings(saved: Option<TeamSettings>) -> Option<TeamSettings> {
     saved.or_else(|| {
-        backup::local_store().map(|_| TeamSettings {
+        store_on_pyo().then(|| TeamSettings {
             base: backup::Settings::local_default(false),
             repo_password_sealed: String::new(),
             mode: all(),
@@ -693,6 +712,8 @@ pub async fn snapshot(db: &mut sqlx::PgConnection, team_ids: &[String]) -> ApiRe
             "teamId": team,
             "settings": cfg.as_ref().map(|c| {
                 let mut p = c.base.public();
+                // This server's store, for the team: none on a hosted Pyo.
+                p["localAvailable"] = json!(store_on_pyo());
                 p["repository"] = json!(repository(&c.base, team));
                 p["mode"] = json!(c.mode);
                 p["exceptions"] = json!(c.exceptions);
@@ -714,6 +735,112 @@ pub async fn snapshot(db: &mut sqlx::PgConnection, team_ids: &[String]) -> ApiRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hosted_pyo_keeps_no_teams_backups() {
+        assert!(team_store(false, true));
+        assert!(!team_store(true, true), "hosted: S3 buckets only");
+        assert!(!team_store(false, false));
+        assert!(!team_store(true, false));
+    }
+
+    /// Against a throwaway Postgres, on a Pyo without a store of its own
+    /// (as a hosted one is to its teams): nothing to default to, so the
+    /// team has no backup settings, a backup is refused with what to do,
+    /// and "this server" can't be picked.
+    #[test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    fn without_a_store_on_pyo_teams_add_a_bucket() {
+        if backup::local_store().is_some() {
+            eprintln!("PYO_BACKUP_STORE_* is set: skipped");
+            return;
+        }
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(without_a_store())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn without_a_store() {
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(
+            db.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let run = new_id("t");
+        let (team, user_id) = (format!("team_{run}"), format!("usr_{run}"));
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@b.test', $1, '')").bind(&user_id).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $3 || '@b.test', 'owner', 'active')").bind(format!("mem_{run}")).bind(&team).bind(&user_id).execute(&db).await.unwrap();
+        let shown = snapshot(
+            &mut db.acquire().await.unwrap(),
+            std::slice::from_ref(&team),
+        )
+        .await
+        .unwrap();
+        assert!(shown[0]["settings"].is_null(), "no default store");
+        let e = effective(&db, &team).await.unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(e.message, NO_STORE);
+        let user = crate::auth::User {
+            id: user_id.clone(),
+            name: "b".into(),
+            email: format!("{user_id}@b.test"),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        let s = crate::rls::tests::state(db.clone());
+        let e = crate::ops::run_json(&s, &user, json!({ "op": "runTeamBackup", "teamId": team }))
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::CONFLICT, "{}", e.message);
+        let e = crate::ops::run_json(
+            &s,
+            &user,
+            json!({
+                "op": "saveTeamBackupSettings", "teamId": team, "destination": "local",
+                "enabled": true, "schedule": "daily", "hour": 2, "keep": 14,
+                "endpoint": "", "region": "", "bucket": "", "prefix": "", "accessKey": "",
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(e.message.ends_with("Add an S3 bucket."), "{}", e.message);
+        assert!(
+            settings(&mut db.acquire().await.unwrap(), &team)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM pyo.users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
 
     /// `volume.backup` worked out from a real database: DATABASE_URL=<a
     /// throwaway Postgres> cargo test -p pyo-api -- --ignored volume_backup_status

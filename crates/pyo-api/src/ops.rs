@@ -3782,8 +3782,16 @@ async fn apply(
             let secret = secret_key
                 .filter(|k| !k.trim().is_empty())
                 .map(|k| k.trim().to_owned());
+            let destination = destination.unwrap_or_else(|| "local".into());
+            if destination == "local" && !crate::teambackup::store_on_pyo() {
+                return Err(ApiError::bad_request(if crate::hosted() {
+                    "Pyo Cloud doesn't keep teams' backups. Add an S3 bucket."
+                } else {
+                    "This installation has no backup store. Add an S3 bucket."
+                }));
+            }
             let base = crate::backup::Settings {
-                destination: destination.unwrap_or_else(|| "local".into()),
+                destination,
                 enabled,
                 schedule,
                 hour,
