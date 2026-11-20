@@ -829,6 +829,14 @@ async fn sync_for(
 /// tailnet itself (a Service someone deleted, a host to approve).
 const RESYNC_MS: i64 = 5 * 60 * 1000;
 
+/// The cluster's next [`tick`] sends its sync again, changed or not.
+pub(crate) async fn send_again(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cluster_id: &str,
+) -> ApiResult<()> {
+    patch(&mut **tx, cluster_id, json!({ "sent": "" })).await
+}
+
 /// A cluster row as [`tick`] reads it: id, name, same cluster, status, and
 /// its Tailscale.
 type ClusterRow = (String, String, bool, String, Value);

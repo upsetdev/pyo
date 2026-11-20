@@ -460,70 +460,23 @@ pub async fn logs(
     since_seconds: Option<i64>,
 ) -> CommandResult {
     let pods_api = Api::<Pod>::namespaced(client.clone(), ns);
-    let pods: Vec<Pod> = match pods_api.list(&ListParams::default()).await {
-        Ok(l) => l
-            .items
-            .into_iter()
-            .filter(|p| is_member(p.labels(), name))
-            .collect(),
+    let pods = match member_pods(&pods_api, name).await {
+        Ok(p) => p,
         Err(e) => return crate::failed(format!("Couldn't list pods: {e}")),
     };
     let tail = tail_lines.clamp(1, 5000);
     let mut lines: Vec<LogLine> = vec![];
-    let mut info = serde_json::Map::new();
     for p in &pods {
         let pod = p.name_any();
-        let keep = [
-            "pyo.dev/component",
-            "pyo.dev/role",
-            "cnpg.io/instanceRole",
-            "cnpg.io/cluster",
-            "cnpg.io/poolerName",
-            "moco.cybozu.com/role",
-        ];
-        let labels: serde_json::Map<String, serde_json::Value> = p
-            .labels()
-            .iter()
-            .filter(|(k, _)| keep.contains(&k.as_str()))
-            .map(|(k, v)| (k.clone(), json!(v)))
-            .collect();
-        info.insert(pod.clone(), json!({ "labels": labels, "server": p.spec.as_ref().and_then(|s| s.node_name.clone()) }));
-        // The main container: CloudNativePG's "postgres", MOCO's "mysqld", else the first.
-        let container = p
-            .spec
-            .as_ref()
-            .and_then(|s| {
-                s.containers
-                    .iter()
-                    .find(|c| c.name == "postgres" || c.name == "mysqld")
-                    .or(s.containers.first())
-            })
-            .map(|c| c.name.clone());
         let lp = LogParams {
             tail_lines: Some(tail),
             since_seconds,
             timestamps: true,
-            container,
+            container: main_container(p),
             ..Default::default()
         };
         match pods_api.logs(&pod, &lp).await {
-            Ok(out) => {
-                for l in out.lines() {
-                    let (at, msg) = match l.split_once(' ') {
-                        Some((ts, rest)) => match ts.parse::<k8s_openapi::jiff::Timestamp>() {
-                            Ok(t) => (t.as_millisecond(), rest),
-                            Err(_) => (pyo_proto::now_ms(), l),
-                        },
-                        None => (pyo_proto::now_ms(), l),
-                    };
-                    lines.push(LogLine {
-                        at,
-                        level: String::new(),
-                        source: pod.clone(),
-                        message: msg.chars().take(8000).collect(),
-                    });
-                }
-            }
+            Ok(out) => lines.extend(out.lines().map(|l| log_line(&pod, l))),
             Err(e) => lines.push(LogLine {
                 at: pyo_proto::now_ms(),
                 level: "warn".into(),
@@ -535,10 +488,94 @@ pub async fn logs(
     lines.sort_by_key(|l| l.at);
     let skip = lines.len().saturating_sub(tail as usize);
     let lines: Vec<LogLine> = lines.into_iter().skip(skip).collect();
+    let names: std::collections::HashSet<String> = pods.iter().map(|p| p.name_any()).collect();
+    let events = events(client, ns, name, &names).await;
+    CommandResult {
+        ok: true,
+        message: Some(format!("{} pod(s)", pods.len())),
+        logs: lines,
+        data: Some(json!({ "pods": pods_info(&pods), "events": events })),
+    }
+}
 
-    // Events about the Database, its CloudNativePG objects (cluster,
-    // poolers, backups), its MOCO objects (MySQL) and its pods.
-    let pod_names: std::collections::HashSet<String> = pods.iter().map(|p| p.name_any()).collect();
+/// The database's pods: its instances, poolers, sentinels, jobs.
+pub async fn member_pods(pods: &Api<Pod>, name: &str) -> kube::Result<Vec<Pod>> {
+    Ok(pods
+        .list(&ListParams::default())
+        .await?
+        .items
+        .into_iter()
+        .filter(|p| is_member(p.labels(), name))
+        .collect())
+}
+
+/// Each pod's labels that tell its part, and its server, by name.
+pub fn pods_info(pods: &[Pod]) -> Value {
+    let keep = [
+        "pyo.dev/component",
+        "pyo.dev/role",
+        "cnpg.io/instanceRole",
+        "cnpg.io/cluster",
+        "cnpg.io/poolerName",
+        "moco.cybozu.com/role",
+    ];
+    let mut info = serde_json::Map::new();
+    for p in pods {
+        let labels: serde_json::Map<String, Value> = p
+            .labels()
+            .iter()
+            .filter(|(k, _)| keep.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), json!(v)))
+            .collect();
+        info.insert(
+            p.name_any(),
+            json!({ "labels": labels, "server": p.spec.as_ref().and_then(|s| s.node_name.clone()) }),
+        );
+    }
+    Value::Object(info)
+}
+
+/// A pod's main container: CloudNativePG's "postgres", MOCO's "mysqld",
+/// else the first.
+pub fn main_container(p: &Pod) -> Option<String> {
+    p.spec
+        .as_ref()
+        .and_then(|s| {
+            s.containers
+                .iter()
+                .find(|c| c.name == "postgres" || c.name == "mysqld")
+                .or(s.containers.first())
+        })
+        .map(|c| c.name.clone())
+}
+
+/// One line of a database pod's output read with timestamps, as printed
+/// (the API reads its level and message).
+pub fn log_line(pod: &str, l: &str) -> LogLine {
+    let (at, msg) = match l.split_once(' ') {
+        Some((ts, rest)) => match ts.parse::<k8s_openapi::jiff::Timestamp>() {
+            Ok(t) => (t.as_millisecond(), rest),
+            Err(_) => (pyo_proto::now_ms(), l),
+        },
+        None => (pyo_proto::now_ms(), l),
+    };
+    LogLine {
+        at,
+        level: String::new(),
+        source: pod.to_owned(),
+        message: msg.chars().take(8000).collect(),
+    }
+}
+
+/// Events about the Database, its CloudNativePG objects (cluster,
+/// poolers, backups), its MOCO objects (MySQL) and its pods (`pod_names`),
+/// oldest first.
+pub async fn events(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    pod_names: &std::collections::HashSet<String>,
+) -> Vec<Value> {
     let prefix = format!("{name}-");
     let events = crate::pods::list(
         &Api::<Event>::namespaced(client.clone(), ns),
@@ -568,7 +605,7 @@ pub async fn logs(
         },
     )
     .await;
-    let events: Vec<serde_json::Value> = match events {
+    let mut events: Vec<Value> = match events {
         Ok(l) => l
             .into_iter()
             .map(|e| {
@@ -597,12 +634,15 @@ pub async fn logs(
             .collect(),
         Err(_) => vec![],
     };
-    CommandResult {
-        ok: true,
-        message: Some(format!("{} pod(s)", pods.len())),
-        logs: lines,
-        data: Some(json!({ "pods": info, "events": events })),
-    }
+    // The same order each time, so a follow sends them only when they change.
+    events.sort_by_key(|e| {
+        (
+            e["at"].as_i64().unwrap_or(0),
+            e["object"].to_string(),
+            e["reason"].to_string(),
+        )
+    });
+    events
 }
 
 #[cfg(test)]

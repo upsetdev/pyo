@@ -1750,6 +1750,9 @@ pub async fn sweeper(state: AppState) {
             if let Err(e) = release_waiting(&state).await {
                 tracing::warn!(error = ?e.message, "releasing rollouts held for databases failed");
             }
+            if let Err(e) = crate::gate::resume(&state).await {
+                tracing::warn!(error = ?e.message, "sending held back syncs again failed");
+            }
             sweep(&state, started.elapsed() > AGENTS_BACK).await
         })
         .await

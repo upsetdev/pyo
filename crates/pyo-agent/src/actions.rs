@@ -148,6 +148,7 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         | Command::Cancel { .. }
         | Command::OpenTerminal { .. }
         | Command::FollowLogs { .. }
+        | Command::FollowDatabaseLogs { .. }
         | Command::Backup(_)
         | Command::ListSnapshots(_)
         | Command::ForgetSnapshot(_)

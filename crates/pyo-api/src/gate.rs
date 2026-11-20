@@ -10,6 +10,10 @@
 //! removals, so a team can delete its things and leave.
 //!
 //! Self-hosted Pyo has no entitlements: nothing is held back.
+//!
+//! What was held back isn't lost: the team is marked, and once its plan
+//! allows commands again its clusters get what Pyo wants there sent once
+//! more ([`resume`]).
 
 use axum::http::StatusCode;
 use sqlx::PgConnection;
@@ -20,6 +24,7 @@ use crate::error::{ApiError, ApiResult};
 const READS: &[&str] = &[
     "fetch_logs",
     "follow_logs",
+    "follow_database_logs",
     "fetch_database_logs",
     "query_traffic",
     "list_snapshots",
@@ -105,6 +110,133 @@ pub(crate) async fn held_back(db: &sqlx::PgPool, team_id: &str) -> ApiResult<Opt
     Ok(e.can_command(&mut conn, team_id).await.err())
 }
 
+/// A command of `team_id`'s was held back: [`resume`] sends its clusters
+/// their syncs again once its plan allows it.
+pub(crate) async fn mark_held(db: &sqlx::PgPool, team_id: &str) {
+    let _ = sqlx::query(
+        "UPDATE pyo.teams SET commands_held_at = now() WHERE id = $1 AND commands_held_at IS NULL",
+    )
+    .bind(team_id)
+    .execute(db)
+    .await;
+}
+
+/// From the worker's sweep: each team that had commands held back and may
+/// get commands again has its clusters' syncs queued once more (the
+/// clusters to wake come back). Asks only for marked teams.
+pub async fn resume(s: &crate::AppState) -> ApiResult<()> {
+    let Some(e) = crate::ENTITLEMENTS.get() else {
+        return Ok(());
+    };
+    let teams: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM pyo.teams WHERE commands_held_at IS NOT NULL")
+            .fetch_all(&s.db)
+            .await?;
+    for team in teams {
+        let mut tx = s.db.begin().await?;
+        // Once: whoever takes the mark sends them.
+        let marked: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM pyo.teams WHERE id = $1 AND commands_held_at IS NOT NULL FOR UPDATE SKIP LOCKED",
+        )
+        .bind(&team)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if marked.is_none() || e.can_command(&mut tx, &team).await.is_err() {
+            continue;
+        }
+        sqlx::query("UPDATE pyo.teams SET commands_held_at = NULL WHERE id = $1")
+            .bind(&team)
+            .execute(&mut *tx)
+            .await?;
+        let clusters = resend(&mut tx, &team).await?;
+        tx.commit().await?;
+        tracing::info!(%team, clusters = clusters.len(), "commands allowed again: syncs sent again");
+        for c in clusters {
+            s.wake(&c).await;
+        }
+    }
+    Ok(())
+}
+
+/// What Pyo wants on each of a team's clusters, queued again: each running
+/// service's routes, firewall and WAF (with the WAF's bundle), Pyo Static,
+/// cron jobs, the registry's tokens and the tailnet's names. Deploys and
+/// other changes a person asked for aren't: they were told why they
+/// didn't happen. Gives back the clusters.
+async fn resend(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    team_id: &str,
+) -> ApiResult<Vec<String>> {
+    let clusters: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM pyo.clusters WHERE team_id = $1 ORDER BY created_at")
+            .bind(team_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    for c in &clusters {
+        crate::firewall::sync(tx, c).await?;
+        crate::sites::sync(tx, c).await?;
+        let crons: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT id, spec->'cronJobs' FROM pyo.services
+              WHERE cluster_id = $1 AND current_deployment_id IS NOT NULL AND NOT deleting AND spec ? 'cronJobs'
+              ORDER BY created_at",
+        )
+        .bind(c)
+        .fetch_all(&mut **tx)
+        .await?;
+        for (service_id, jobs) in crons {
+            let service = crate::ops::service_ref(tx, &service_id).await?;
+            let jobs = serde_json::from_value(jobs).unwrap_or_default();
+            crate::deploy::enqueue(tx, c, pyo_proto::Command::SyncCronJobs { service, jobs })
+                .await?;
+        }
+        crate::tailscale::send_again(tx, c).await?;
+    }
+    crate::registrydoor::sync_clusters(tx, team_id, None).await?;
+    Ok(clusters)
+}
+
+/// A hosted build's plans, for tests: teams named `team_ended_…` have an
+/// ended plan, and those in [`test_plans::PAUSED`] a paused one. Deploys
+/// are refused, so commands are too (the default).
+#[cfg(test)]
+pub(crate) mod test_plans {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    pub static PAUSED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+    struct Plans;
+
+    impl crate::Entitlements for Plans {
+        fn can_add_server<'a>(
+            &'a self,
+            _: &'a mut sqlx::PgConnection,
+            _: &'a str,
+        ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn can_deploy<'a>(
+            &'a self,
+            _: &'a mut sqlx::PgConnection,
+            team_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+            let paused = PAUSED.lock().unwrap().contains(team_id);
+            Box::pin(async move {
+                if team_id.starts_with("team_ended_") || paused {
+                    Err("This team's subscription ended.".into())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    /// This test process is a hosted build with these plans.
+    pub fn install() {
+        let _ = crate::ENTITLEMENTS.set(std::sync::Arc::new(Plans));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +246,7 @@ mod tests {
         for k in [
             "fetch_logs",
             "follow_logs",
+            "follow_database_logs",
             "query_traffic",
             "delete_service",
             "remove_server",

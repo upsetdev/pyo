@@ -550,6 +550,26 @@ async fn run_command(agent: Agent, envelope: CommandEnvelope) {
             ));
             ok("Following logs.")
         }
+        Command::FollowDatabaseLogs {
+            session_id,
+            namespace,
+            name,
+            tail_lines,
+            since_seconds,
+        } => {
+            tokio::spawn(logfollow::run_database(
+                agent.clone(),
+                session_id,
+                namespace,
+                name,
+                logfollow::Start {
+                    tail_lines,
+                    since_seconds,
+                    replica: String::new(),
+                },
+            ));
+            ok("Following logs.")
+        }
         Command::Backup(spec) => backup::run(&agent, *spec).await,
         Command::ListSnapshots(spec) => backup::snapshots(&agent.kube, *spec).await,
         Command::ForgetSnapshot(spec) => backup::forget(&agent.kube, *spec).await,
@@ -668,6 +688,7 @@ fn command_kind(c: &Command) -> &'static str {
         Command::SetMaintenance { .. } => "set_maintenance",
         Command::FetchLogs { .. } => "fetch_logs",
         Command::FollowLogs { .. } => "follow_logs",
+        Command::FollowDatabaseLogs { .. } => "follow_database_logs",
         Command::Cancel { .. } => "cancel",
         Command::EnsureBuilder(_) => "ensure_builder",
         Command::RemoveBuilder { .. } => "remove_builder",

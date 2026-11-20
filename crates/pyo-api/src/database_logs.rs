@@ -4,21 +4,26 @@
 //! status the topology uses, so parts follow failovers. Events are the
 //! cluster's about the database, the status changes Pyo saw (recorded in
 //! `reported`) and the team's activity on it. Team members only, like
-//! service logs; not an MCP tool for now.
+//! service logs; not an MCP tool for now. Live, they're followed over one
+//! WebSocket instead ([`follow`], logfollow.rs).
 
 use crate::error::Json;
 use crate::error::Query;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
-use pyo_proto::{Command, CommandResult, now_ms};
+use axum::extract::{
+    Path, State,
+    ws::{Message, WebSocket},
+};
+use futures::{SinkExt, StreamExt};
+use pyo_proto::{Command, CommandResult, LogFrame, LogLine, now_ms};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
 use crate::{
     AppState,
-    auth::SessionUser,
+    auth::{SessionUser, User},
     deploy,
     error::{ApiError, ApiResult, ErrorBody},
     ops::{Role, require_role, team_of},
@@ -37,6 +42,12 @@ pub struct LogsQuery {
 /// `source` (the instance), `role` ("primary", "replica", "read",
 /// "pooler", "read-pooler", "sentinel", "proxy" (KV's endpoint) or "other"), `message`, and
 /// `raw` for structured lines. `events`: what happened to it, newest first.
+/// To follow them live, open the WebSocket at `/databases/{id}/logs/follow`:
+/// it sends the last lines, then new ones as they're printed, each text
+/// frame `{"type":"lines","lines":[…]}`, and all events as
+/// `{"type":"events","events":[…]}` when they change (or
+/// `{"type":"error","message":…}`). It closes after an hour, so open it
+/// again with `since` set to the newest line's time.
 #[utoipa::path(get, path = "/databases/{id}/logs", operation_id = "getDatabaseLogs", tag = "Databases",
     params(("id" = String, Path, description = "The database's id."), LogsQuery),
     responses(
@@ -117,23 +128,37 @@ pub async fn logs(
         ));
     }
     let data = r.data.unwrap_or_default();
-    let pods = &data["pods"];
     let logs: Vec<Value> = r
         .logs
         .iter()
-        .map(|l| {
-            let (level, message, raw) = if l.level.is_empty() { parse_line(&l.message) } else { (l.level.clone(), l.message.clone(), None) };
-            let mut v = json!({ "at": l.at, "level": level, "source": l.source, "role": role_of(&l.source, &name, &status, &pods[&l.source]["labels"]), "message": message });
-            if let Some(raw) = raw {
-                v["raw"] = raw;
-            }
-            v
-        })
+        .map(|l| shown_line(l, &name, &status, &data["pods"]))
         .collect();
+    let mut events = cluster_events(&data["events"]);
+    events.extend(pyo_events(&s, &user, &team_id, &id).await?);
+    newest_first(&mut events);
+    Ok(Json(
+        json!({ "logs": logs, "events": events, "fetchedAt": now_ms() }),
+    ))
+}
 
-    // Events: the cluster's, the status changes Pyo recorded, and the
-    // team's changes to it, newest first.
-    let mut events: Vec<Value> = data["events"]
+/// A line as the logs show it: its level and message read, and its part
+/// from the status and its pod's labels (`pods`, by pod name).
+fn shown_line(l: &LogLine, name: &str, status: &Value, pods: &Value) -> Value {
+    let (level, message, raw) = if l.level.is_empty() {
+        parse_line(&l.message)
+    } else {
+        (l.level.clone(), l.message.clone(), None)
+    };
+    let mut v = json!({ "at": l.at, "level": level, "source": l.source, "role": role_of(&l.source, name, status, &pods[&l.source]["labels"]), "message": message });
+    if let Some(raw) = raw {
+        v["raw"] = raw;
+    }
+    v
+}
+
+/// The cluster's events about it, as the logs show them.
+fn cluster_events(events: &Value) -> Vec<Value> {
+    events
         .as_array()
         .into_iter()
         .flatten()
@@ -141,23 +166,27 @@ pub async fn logs(
             let (kind, reason, message) = plain_event(e["type"].as_str().unwrap_or(""), e["reason"].as_str().unwrap_or(""), e["message"].as_str().unwrap_or(""));
             json!({ "at": e["at"], "type": kind, "reason": reason, "source": "cluster", "object": e["object"], "message": message, "count": e["count"] })
         })
-        .collect();
-    let mut tx = crate::rls::begin(&s.db, &user).await?;
+        .collect()
+}
+
+/// The status changes Pyo recorded and the team's changes to database `id`.
+async fn pyo_events(s: &AppState, user: &User, team_id: &str, id: &str) -> ApiResult<Vec<Value>> {
+    let mut tx = crate::rls::begin(&s.db, user).await?;
     let recorded: Vec<(i64, String, String, String)> = sqlx::query_as(
         "SELECT pyo.ms(at), type, reason, message FROM pyo.database_events WHERE database_id = $1 AND at > now() - interval '30 days' ORDER BY at DESC LIMIT 200",
     )
-    .bind(&id)
+    .bind(id)
     .fetch_all(&mut *tx)
     .await?;
-    events.extend(recorded.into_iter().map(|(at, t, reason, message)| json!({ "at": at, "type": t, "reason": reason, "source": "pyo", "message": message })));
     let changes: Vec<(i64, Value)> = sqlx::query_as(
         "SELECT pyo.ms(at), data FROM pyo.activity WHERE team_id = $1 AND data->'target'->>'id' = $2 AND at > now() - interval '30 days' ORDER BY at DESC LIMIT 100",
     )
-    .bind(&team_id)
-    .bind(&id)
+    .bind(team_id)
+    .bind(id)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
+    let mut events: Vec<Value> = recorded.into_iter().map(|(at, t, reason, message)| json!({ "at": at, "type": t, "reason": reason, "source": "pyo", "message": message })).collect();
     events.extend(changes.into_iter().map(|(at, d)| {
         json!({
             "at": at,
@@ -167,10 +196,107 @@ pub async fn logs(
             "message": format!("{} ({})", d["title"].as_str().unwrap_or(""), d["actor"]["name"].as_str().unwrap_or("")),
         })
     }));
+    Ok(events)
+}
+
+fn newest_first(events: &mut [Value]) {
     events.sort_by_key(|e| std::cmp::Reverse(e["at"].as_i64().unwrap_or(0)));
-    Ok(Json(
-        json!({ "logs": logs, "events": events, "fetchedAt": now_ms() }),
-    ))
+}
+
+/// How often a followed database's status and Pyo's events are read again.
+const FOLLOW_REFRESH: Duration = Duration::from_secs(15);
+
+/// The database a reader follows (logfollow.rs).
+pub(crate) struct Followed {
+    pub id: String,
+    pub team_id: String,
+    pub name: String,
+}
+
+/// Relays a database's follow from its agent (`agent`) to the reader:
+/// lines as [`logs`] shows them, each with its part, and all events again
+/// whenever they change. Until either side closes.
+pub(crate) async fn follow(
+    s: &AppState,
+    user: &User,
+    f: &Followed,
+    reader: WebSocket,
+    agent: WebSocket,
+) {
+    let (mut r_tx, mut r_rx) = reader.split();
+    let (mut a_tx, mut a_rx) = agent.split();
+    let status_of = || async {
+        sqlx::query_scalar::<_, Value>("SELECT status FROM pyo.databases WHERE id = $1")
+            .bind(&f.id)
+            .fetch_optional(&s.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+    let mut status = status_of().await;
+    let mut pods = Value::Null;
+    let mut cluster: Vec<Value> = vec![];
+    let mut sent: Option<Vec<Value>> = None;
+    // All events, when they differ from what the reader has.
+    let events = |cluster: &[Value], sent: &mut Option<Vec<Value>>, mine: Vec<Value>| {
+        let mut all = cluster.to_vec();
+        all.extend(mine);
+        newest_first(&mut all);
+        if sent.as_ref() == Some(&all) {
+            return None;
+        }
+        *sent = Some(all.clone());
+        Some(json!({ "type": "events", "events": all }))
+    };
+    let mut refresh =
+        tokio::time::interval_at(tokio::time::Instant::now() + FOLLOW_REFRESH, FOLLOW_REFRESH);
+    loop {
+        let out = tokio::select! {
+            m = r_rx.next() => match m {
+                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                Some(Ok(_)) => None,
+            },
+            m = a_rx.next() => match m {
+                Some(Ok(Message::Text(t))) => match serde_json::from_str::<LogFrame>(t.as_str()) {
+                    Ok(LogFrame::Lines { lines }) => {
+                        let lines: Vec<Value> = lines.iter().map(|l| shown_line(l, &f.name, &status, &pods)).collect();
+                        Some(json!({ "type": "lines", "lines": lines }))
+                    }
+                    // Its pods changed (a failover, a new replica): the
+                    // status that names their parts too, likely.
+                    Ok(LogFrame::Pods { pods: p }) => {
+                        pods = p;
+                        status = status_of().await;
+                        None
+                    }
+                    Ok(LogFrame::Events { events: e }) => {
+                        cluster = cluster_events(&Value::Array(e));
+                        let mine = pyo_events(s, user, &f.team_id, &f.id).await.unwrap_or_default();
+                        events(&cluster, &mut sent, mine)
+                    }
+                    Ok(LogFrame::Error { message }) => Some(json!({ "type": "error", "message": message })),
+                    Err(_) => None,
+                },
+                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                Some(Ok(_)) => None,
+            },
+            _ = refresh.tick() => {
+                status = status_of().await;
+                match pyo_events(s, user, &f.team_id, &f.id).await {
+                    Ok(mine) => events(&cluster, &mut sent, mine),
+                    Err(_) => None,
+                }
+            }
+        };
+        if let Some(v) = out
+            && r_tx.send(Message::text(v.to_string())).await.is_err()
+        {
+            break;
+        }
+    }
+    let _ = a_tx.close().await;
+    let _ = r_tx.close().await;
 }
 
 /// The controller's event reasons that read better in words: (type,
