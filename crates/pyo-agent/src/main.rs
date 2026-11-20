@@ -383,6 +383,9 @@ fn ordered_keys(c: &Command) -> Vec<String> {
             format!("service/{}", t.service.service_id),
             format!("bundle/{}", pyo_proto::bundles::WAF_ID),
         ],
+        // Two changes of where a service runs land in the order made, and
+        // never put back the objects of a service being deleted.
+        Command::Place { service, .. } => vec![format!("service/{}", service.service_id)],
         // A bundle turned off and on again: its install waits for the
         // removal (which ends once its namespace is gone).
         Command::ApplyBundle { bundle, .. } => vec![format!("bundle/{}", bundle.id)],
@@ -619,6 +622,7 @@ fn command_kind(c: &Command) -> &'static str {
         Command::Stop(_) => "stop",
         Command::Scale { .. } => "scale",
         Command::Autoscale { .. } => "autoscale",
+        Command::Place { .. } => "place",
         Command::SyncCronJobs { .. } => "sync_cron_jobs",
         Command::RunCronJob { .. } => "run_cron_job",
         Command::DeleteService(_) => "delete_service",

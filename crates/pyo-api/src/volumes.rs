@@ -125,30 +125,10 @@ pub fn placement_refusal(
     server_tags: &[String],
     server_location: &str,
 ) -> Option<String> {
-    let servers: Vec<&str> = spec["servers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|s| s.as_str())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if !servers.is_empty() && !servers.contains(&server) {
+    let placement = crate::placement::Placement::of(spec);
+    if !placement.takes(server, server_tags) {
         return Some(format!(
-            "{service} only runs on {}, and this volume's data is on {server}.",
-            servers.join(", ")
-        ));
-    }
-    let missing: Vec<&str> = spec["serverTags"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|t| t.as_str())
-        .filter(|t| !server_tags.iter().any(|s| s == t))
-        .collect();
-    if !missing.is_empty() {
-        return Some(format!(
-            "{service} runs on servers tagged {}, and {server}, where this volume's data is, isn't.",
-            missing.join(", ")
+            "{service} doesn't run on {server}, where this volume's data is. Pick {server} in its Resources first."
         ));
     }
     let want = spec["location"].as_str().unwrap_or("");
@@ -168,7 +148,7 @@ pub fn placement_refusal(
 
 /// The server a volume's data is pinned to: the one it was made on, when
 /// its storage class keeps data on one server's disk (or isn't known).
-async fn pinned_server(
+pub(crate) async fn pinned_server(
     tx: &mut Transaction<'_, Postgres>,
     cluster_id: &str,
     data: &Value,
@@ -1692,7 +1672,7 @@ mod tests {
         assert!(
             placement_refusal("web", &spec(json!({ "servers": ["b"] })), "a", &[], "")
                 .unwrap()
-                .contains("only runs on b")
+                .contains("doesn't run on a")
         );
         assert!(
             placement_refusal(
@@ -1704,6 +1684,7 @@ mod tests {
             )
             .is_none()
         );
+        // Any tag picked will do.
         assert!(
             placement_refusal(
                 "web",
@@ -1712,8 +1693,17 @@ mod tests {
                 &tags,
                 ""
             )
-            .unwrap()
-            .contains("tagged ssd")
+            .is_none()
+        );
+        assert!(
+            placement_refusal(
+                "web",
+                &spec(json!({ "placement": { "servers": ["b"], "tags": ["ssd"] } })),
+                "a",
+                &tags,
+                ""
+            )
+            .is_some()
         );
         assert!(
             placement_refusal(

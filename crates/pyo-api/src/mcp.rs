@@ -151,8 +151,10 @@ fn curated() -> Vec<Value> {
             "free_domain": { "type": "boolean", "description": "Give it a free nip.io domain (no DNS needed)" },
             "domain": { "type": "string", "description": "A custom hostname to serve it on" },
             "region": { "type": "string", "description": "Where to run it: a region of the team's servers (e.g. \"US East\" or \"Singapore, SG\"), a country code (DE, SG) or a city. The team's default cluster when omitted" },
-            "server_tags": { "type": "array", "items": { "type": "string" }, "description": "Run only on servers that have all of these tags (see list_servers)" },
+            "placement": placement_schema(),
+            "server_tags": { "type": "array", "items": { "type": "string" }, "description": "Older form of placement.tags" },
         }), &["name", "image"]), "annotations": write }),
+        json!({ "name": "set_service_placement", "title": "Set service placement", "description": "Choose where a service runs: any server of its cluster (servers and tags both empty), or only the servers named and every server with one of the tags, including servers tagged later (see list_servers). A service with a volume has to keep its volume's server, and one with a GPU needs a GPU server. It changes in place, without a redeploy: its replicas move over with the same image. Refused with the reason when no server picked can run it.", "inputSchema": schema(json!({ "service_id": service, "servers": { "type": "array", "items": { "type": "string" }, "description": "Server names" }, "tags": { "type": "array", "items": { "type": "string" }, "description": "Server tags" } }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain. It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" } }), &["service_id"]), "annotations": write }),
         json!({ "name": "set_static_serving", "title": "Set static serving", "description": "For a service whose build is a static site: serve its build as static files from the cluster's shared static server (\"static\", the default), or run it as a service of its own (\"service\"). Takes effect with the next deploy.", "inputSchema": schema(json!({ "service_id": service, "serve_as": { "type": "string", "enum": ["static", "service"] } }), &["service_id", "serve_as"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "stop_service", "title": "Stop service", "description": "Stop the service (scale to zero). Settings and data are kept.", "inputSchema": schema(json!({ "service_id": service }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
@@ -240,6 +242,7 @@ const CURATED_RUNS: &[(&str, &str)] = &[
     ("create_service", "createService"),
     ("add_domain", "saveService"),
     ("set_static_serving", "saveService"),
+    ("set_service_placement", "saveService"),
     ("create_sandbox", "createSandbox"),
     ("run_code", "createSandboxToken"),
     ("exec", "createSandboxToken"),
@@ -1056,6 +1059,7 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
                         "name": n["name"], "status": n["status"], "ip": n["internalIP"],
                         "cpu": { "cores": n["capacity"]["cpu"], "used": n["usage"]["cpu"] },
                         "memoryGb": { "total": n["capacity"]["memoryGi"], "used": n["usage"]["memoryGi"] },
+                        "tags": n["tags"], "gpu": n["gpuDetected"] == json!(true),
                     })).collect::<Vec<_>>(),
                 }))
                 .collect::<Vec<_>>()))
@@ -1189,7 +1193,7 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
                 "id": service_id, "teamId": team, "projectId": project["id"], "clusterId": cluster["id"],
                 "name": name, "description": "", "kind": "application", "workloadKind": "Deployment",
                 "location": if pin.is_empty() { Value::Null } else { json!(pin) },
-                "serverTags": args["server_tags"].as_array().map(|ts| ts.iter().filter_map(|t| t.as_str().and_then(pyo_proto::valid_tag)).collect::<Vec<_>>()).unwrap_or_default(),
+                "placement": placement_arg(args),
                 "source": { "type": "image", "image": image, "reference": reference, "registryId": "reg_dockerhub", "private": false },
                 "env": env,
                 "ports": [{ "id": new_id("port"), "name": "http", "protocol": "HTTP", "containerPort": port, "exposure": if domains.is_empty() { "internal" } else { "http" } }],
@@ -1301,6 +1305,23 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
             }
             Ok(out)
         }
+        "set_service_placement" => {
+            let id = service_id(args)?;
+            let mut a = find_service(id)?;
+            let placement = placement_arg(args);
+            a["placement"] = placement.clone();
+            if let Some(o) = a.as_object_mut() {
+                o.remove("servers");
+                o.remove("serverTags");
+            }
+            op(json!({ "op": "saveService", "service": a })).await?;
+            let any = placement["servers"].as_array().is_none_or(|v| v.is_empty())
+                && placement["tags"].as_array().is_none_or(|v| v.is_empty());
+            Ok(json!({
+                "placement": if any { Value::Null } else { placement },
+                "next": "Saved. Its replicas move over now, without a redeploy.",
+            }))
+        }
         "set_static_serving" => {
             let id = service_id(args)?;
             let mut a = find_service(id)?;
@@ -1316,6 +1337,44 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
         }
         other => Err(format!("Unknown tool {other}")),
     }
+}
+
+/// The `placement` input: what a tool's arguments pick of servers and
+/// tags. Read from `placement` (`{"servers": [...], "tags": [...]}`), else
+/// `servers` and `tags`, else the older `server_tags`. Nothing picked is
+/// any server.
+fn placement_arg(args: &Value) -> Value {
+    let list = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let (servers, tags) = if args["placement"].is_object() {
+        (
+            list(&args["placement"]["servers"]),
+            list(&args["placement"]["tags"]),
+        )
+    } else if args.get("servers").is_some() || args.get("tags").is_some() {
+        (list(&args["servers"]), list(&args["tags"]))
+    } else {
+        (vec![], list(&args["server_tags"]))
+    };
+    json!({ "servers": servers, "tags": tags })
+}
+
+fn placement_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Where it runs: only the servers named and every server with one of the tags (see list_servers). Any server when omitted",
+        "properties": {
+            "servers": { "type": "array", "items": { "type": "string" }, "description": "Server names" },
+            "tags": { "type": "array", "items": { "type": "string" }, "description": "Server tags" },
+        },
+    })
 }
 
 /// A project with a free namespace, named like the dashboard does.
@@ -1506,6 +1565,30 @@ mod tests {
             split_image("ghcr.io/o/a@sha256:ab"),
             ("ghcr.io/o/a".into(), "sha256:ab".into())
         );
+    }
+
+    #[test]
+    fn placement_input() {
+        let p = |args: Value| placement_arg(&args);
+        assert_eq!(
+            p(json!({ "placement": { "servers": ["server-1"], "tags": ["gpu"] } })),
+            json!({ "servers": ["server-1"], "tags": ["gpu"] })
+        );
+        assert_eq!(
+            p(json!({ "servers": [" gpu-box "], "tags": [] })),
+            json!({ "servers": ["gpu-box"], "tags": [] })
+        );
+        // The older server_tags: its tags, picked.
+        assert_eq!(
+            p(json!({ "server_tags": ["gpu", ""] })),
+            json!({ "servers": [], "tags": ["gpu"] })
+        );
+        // Nothing: any server.
+        assert_eq!(p(json!({})), json!({ "servers": [], "tags": [] }));
+        // The API keeps it as placement, the older form included.
+        let mut spec = json!({ "name": "web", "placement": p(json!({ "server_tags": ["gpu"] })) });
+        crate::placement::normalize(&mut spec).unwrap();
+        assert_eq!(spec["placement"], json!({ "servers": [], "tags": ["gpu"] }));
     }
 
     #[test]

@@ -62,6 +62,7 @@ import {
 import { Callout } from "~/components/ui/Panel";
 import {
   draftId,
+  draftServerTags,
   NEW_PROJECT,
   syncTemplateEnv,
   type DeployDraft,
@@ -944,7 +945,7 @@ export function ResourcesStep({ d, set, errors }: StepProps) {
         0,
         freeRoom(s.servers, d.clusterId, {
           servers: d.placement === "servers" ? d.serverNames : [],
-          serverTags: d.placement === "tags" ? d.serverTags : [],
+          tags: d.placement === "tags" ? draftServerTags(s, d) : [],
           gpu: d.resources.gpu,
         }),
       );
@@ -1602,7 +1603,7 @@ function ServerLine({ n }: { n: ClusterServer }) {
 
 /**
  * Placed by tag: pick from the tags clusters and servers already have. A
- * server matches when it, or its cluster, has every picked tag; the cluster
+ * server matches when it, or its cluster, has a picked tag; the cluster
  * follows the matches.
  */
 function TagPlacement({
@@ -1627,7 +1628,7 @@ function TagPlacement({
   const picked = d.serverTags;
   const matching = (tags: string[]) =>
     tags.length
-      ? nodes.filter((n) => tags.every((t) => tagsOf(n).includes(t)))
+      ? nodes.filter((n) => tags.some((t) => tagsOf(n).includes(t)))
       : [];
   const matches = matching(picked);
   const inClusters = clusters.filter((c) =>
@@ -1694,11 +1695,11 @@ function TagPlacement({
       </div>
       {!picked.length ? (
         <p className="text-[12px] text-muted-foreground">
-          Runs only on servers with every tag you pick.
+          Runs only on servers with a tag you pick.
         </p>
       ) : !matches.length ? (
         <p className="text-[12px] text-warning">
-          No server has all of these tags. Pick fewer.
+          No server has these tags.
         </p>
       ) : (
         <>
@@ -1729,7 +1730,7 @@ function TagPlacement({
               ))}
           </ul>
           <p className="text-[12px] text-muted-foreground">
-            Servers tagged later are used from its next deploy.
+            Servers tagged later are used too.
           </p>
         </>
       )}

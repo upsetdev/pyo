@@ -1002,6 +1002,55 @@ pub async fn restart(api: &Api, service: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Where a service runs, in words: "any server", or its servers and tags.
+fn placement_words(service: &Value) -> String {
+    let list = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    // Services saved before `placement` kept `servers` and `serverTags`.
+    let (servers, tags) = match service.get("placement") {
+        Some(p) => (list(&p["servers"]), list(&p["tags"])),
+        None => (list(&service["servers"]), list(&service["serverTags"])),
+    };
+    let mut parts = servers;
+    parts.extend(tags.iter().map(|t| format!("servers tagged {t}")));
+    match parts.len() {
+        0 => "any server".to_owned(),
+        1 => parts.remove(0),
+        n => format!("{} and {}", parts[..n - 1].join(", "), parts[n - 1]),
+    }
+}
+
+/// Show or change where the service runs. A change goes live right away.
+pub async fn place(
+    api: &Api,
+    service: Option<&str>,
+    servers: Vec<String>,
+    tags: Vec<String>,
+    any: bool,
+) -> Result<()> {
+    let t = target(api, service).await?;
+    let mut s = t.service().clone();
+    let name = s["name"].as_str().unwrap_or("").to_owned();
+    if !any && servers.is_empty() && tags.is_empty() {
+        println!("{name} runs on {}", placement_words(&s));
+        return Ok(());
+    }
+    s["placement"] = json!({ "servers": servers, "tags": tags });
+    if let Some(o) = s.as_object_mut() {
+        o.remove("servers");
+        o.remove("serverTags");
+    }
+    api.op("saveService", json!({ "service": s })).await?;
+    ui::ok(&format!("{name} runs on {}", placement_words(&s)));
+    Ok(())
+}
+
 pub async fn open(api: &Api, service: Option<&str>) -> Result<()> {
     let t = target(api, service).await?;
     let url = t.state.service_url(&api.base, t.service());
@@ -1027,6 +1076,24 @@ mod tests {
 
     fn file(text: &str) -> ServiceFile {
         config::parse(text).unwrap()
+    }
+
+    #[test]
+    fn placement_in_words() {
+        assert_eq!(placement_words(&json!({})), "any server");
+        assert_eq!(
+            placement_words(&json!({ "placement": { "servers": ["server-1"], "tags": ["gpu"] } })),
+            "server-1 and servers tagged gpu"
+        );
+        // Saved before placement: its tags read as tags picked.
+        assert_eq!(
+            placement_words(&json!({ "serverTags": ["gpu", "eu"] })),
+            "servers tagged gpu and servers tagged eu"
+        );
+        assert_eq!(
+            placement_words(&json!({ "placement": { "servers": ["a", "b"], "tags": [] } })),
+            "a and b"
+        );
     }
 
     #[test]

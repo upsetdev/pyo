@@ -21,19 +21,7 @@ pub enum Ask {
 /// pods there ask for. None when no server has reported any.
 pub fn free_for(spec: &Value, servers: &[(String, Value, Vec<String>)]) -> Option<(f64, f64)> {
     let gpu = spec["resources"]["gpu"].as_u64().is_some_and(|g| g > 0);
-    let named: Vec<&str> = spec["servers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|n| n.as_str())
-        .filter(|n| !n.is_empty())
-        .collect();
-    let tags: Vec<&str> = spec["serverTags"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|t| t.as_str())
-        .collect();
+    let placement = crate::placement::Placement::of(spec);
     let mut seen = false;
     let (mut cpu, mut mem) = (0.0, 0.0);
     for (name, r, have) in servers {
@@ -42,8 +30,8 @@ pub fn free_for(spec: &Value, servers: &[(String, Value, Vec<String>)]) -> Optio
             && r["maintenance"] != true
             && r["builder"] != true
             && (gpu || r["gpuDedicated"] != true)
-            && (named.is_empty() || named.contains(&name.as_str()))
-            && tags.iter().all(|t| have.iter().any(|h| h == t));
+            && (!gpu || r["gpuDetected"] == true)
+            && placement.takes(name, have);
         let alloc = (
             r["allocatable"]["cpu"].as_f64().unwrap_or(0.0),
             r["allocatable"]["memoryGi"].as_f64().unwrap_or(0.0),
@@ -284,6 +272,14 @@ mod tests {
         assert_eq!(
             free_for(&json!({ "servers": ["a"] }), &servers),
             Some((3.0, 6.0))
+        );
+        // Servers and tags picked add up.
+        assert_eq!(
+            free_for(
+                &json!({ "placement": { "servers": ["a"], "tags": ["fast"] } }),
+                &servers
+            ),
+            Some((7.0, 14.0))
         );
         assert_eq!(free_for(&json!({}), &[]), None, "nothing reported");
     }

@@ -1213,9 +1213,14 @@ export type Application = {
   resources: Resources;
   /** Pinned to servers in this place ("City, CC" or "CC"); anywhere in its cluster when unset. */
   location?: string;
-  /** Runs only on servers that have every one of these tags. */
+  /**
+   * Runs only on these servers (by name, in its cluster) and on every
+   * server with one of these tags. Absent or null: any server.
+   */
+  placement?: { servers: string[]; tags: string[] } | null;
+  /** How services saved before `placement` kept their tags (read as its tags). */
   serverTags?: string[];
-  /** Runs only on these servers (by name, in its cluster). */
+  /** How services saved before `placement` kept their servers. */
   servers?: string[];
   replicas: number;
   /** Replicas follow CPU use, between min and max. */

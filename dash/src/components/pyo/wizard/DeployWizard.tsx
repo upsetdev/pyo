@@ -37,6 +37,7 @@ import { ENGINE_LABEL } from "~/components/pyo/Databases";
 import {
   companionDraft,
   draftFromTemplate,
+  draftServerTags,
   emptyDraft,
   NEW_PROJECT,
   parseImageInput,
@@ -650,7 +651,7 @@ function Configure({
     ? null
     : freeRoom(s.servers, d.clusterId, {
         servers: d.placement === "servers" ? d.serverNames : [],
-        serverTags: d.placement === "tags" ? d.serverTags : [],
+        tags: d.placement === "tags" ? draftServerTags(s, d) : [],
         gpu: d.resources.gpu,
       });
   const big =

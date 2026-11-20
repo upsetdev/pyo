@@ -2,7 +2,6 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { DeleteServiceDialog } from "~/components/pyo/VolumeDialogs";
 import { servicePath } from "~/lib/pyo/store";
 import { RESERVED_SERVICE_NAMES } from "~/lib/pyo/paths";
-import { TagInput } from "~/components/ui/TagInput";
 import { DeployHooksPanel } from "~/components/pyo/DeployHooks";
 import { serviceSettingsNav, SettingsFrame } from "~/components/pyo/SettingsFrame";
 import { useState } from "react";
@@ -94,24 +93,6 @@ function AppSettings({ app }: { app: Application }) {
   const s = usePyo();
   const navigate = useNavigate();
   const [name, setName] = useState(app.name);
-  const [serverTags, setServerTags] = useState<string[]>(app.serverTags ?? []);
-  const servers = s.servers.filter((n) => n.clusterId === app.clusterId);
-  const knownTags = [...new Set(servers.flatMap((n) => n.tags ?? []))].sort();
-  const matchingServers = servers.filter((n) =>
-    serverTags.every((t) => n.tags?.includes(t)),
-  );
-  const matching = matchingServers.length;
-  const names = (list: typeof servers) =>
-    list.length > 3
-      ? `${list.slice(0, 3).map((n) => n.name).join(", ")} and ${list.length - 3} more`
-      : list.map((n) => n.name).join(", ");
-  const placementHint = serverTags.length
-    ? matching
-      ? `Runs only on servers that have all these tags: ${names(matchingServers)}.`
-      : "No server has all these tags, so it can't run anywhere."
-    : knownTags.length
-      ? "Runs on any server. Add tags to keep it on servers that have all of them."
-      : "Runs on any server. Tag your servers in the cluster to choose where it runs.";
   const [source, setSource] = useState<ServiceSource>(app.source);
   const savedArgs = app.source.type === "git" ? app.source.buildArgs : [];
   const [buildArgs, setBuildArgs] = useState<BuildArg[]>(() =>
@@ -138,8 +119,7 @@ function AppSettings({ app }: { app: Application }) {
       : name !== app.name && RESERVED_SERVICE_NAMES.includes(name)
         ? "A project page uses that name. Pick another."
         : "";
-  const generalDirty =
-    name !== app.name || serverTags.join() !== (app.serverTags ?? []).join();
+  const generalDirty = name !== app.name;
   const sourceDirty =
     JSON.stringify(source) !== JSON.stringify(app.source) ||
     JSON.stringify(argList) !== JSON.stringify(savedArgs ?? []);
@@ -162,23 +142,6 @@ function AppSettings({ app }: { app: Application }) {
               />
             )}
           </Field>
-          <Field
-            label="Run on servers tagged"
-            optional
-            error={serverTags.length && !matching ? placementHint : undefined}
-            hint={placementHint}
-          >
-            {(p) => (
-              <TagInput
-                id={p.id}
-                aria-label="Server tags"
-                value={serverTags}
-                onChange={setServerTags}
-                suggestions={knownTags}
-                placeholder="gpu"
-              />
-            )}
-          </Field>
         </div>
         <div className="flex justify-end border-t border-border px-4 py-3">
           <Button
@@ -187,10 +150,7 @@ function AppSettings({ app }: { app: Application }) {
             onClick={() => {
               api.updateService(
                 app.id,
-                {
-                  name,
-                  serverTags: serverTags.length ? serverTags : undefined,
-                },
+                { name },
                 { requiresRedeploy: true, label: "general settings" },
               );
               toast({ title: "Settings saved" });

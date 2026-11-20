@@ -2420,6 +2420,7 @@ pub(crate) enum Op {
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
         /// Its `serveAs`, for a build Pyo detects as a static site: "static" (the default) serves the build's output as static files from the cluster's shared static server, "service" runs it as a service of its own. Takes effect with the next deploy.
+        /// Its `placement`, where it runs: `{"servers": [...], "tags": [...]}` runs it only on the servers named and on every server with one of the tags, tagged now or later. Absent or null: any server of its cluster. A service with a volume keeps its volume's server, and one with a GPU needs a GPU server. A change goes live without a deploy. The older `serverTags` is read as its tags.
         #[schema(value_type = Object)]
         service: Value,
         /// A new id you choose for its first deployment: `dpl_` then 4 to 40 lowercase letters, digits, dashes or underscores.
@@ -2445,6 +2446,7 @@ pub(crate) enum Op {
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
         /// Its `serveAs`, for a build Pyo detects as a static site: "static" (the default) serves the build's output as static files from the cluster's shared static server, "service" runs it as a service of its own. Takes effect with the next deploy.
+        /// Its `placement`, where it runs: `{"servers": [...], "tags": [...]}` runs it only on the servers named and on every server with one of the tags, tagged now or later. Absent or null: any server of its cluster. A service with a volume keeps its volume's server, and one with a GPU needs a GPU server. A change goes live without a deploy. The older `serverTags` is read as its tags.
         #[schema(value_type = Object)]
         service: Value,
         deployment_id: Option<String>,
@@ -5633,16 +5635,28 @@ async fn apply(
                     }
                 }
             }
+            crate::placement::normalize(&mut spec)?;
             validate_service_spec(&spec)?;
+            let placed = crate::placement::Placement::of(&spec);
+            let placement_changed = placed != crate::placement::Placement::of(&old_spec);
             // Only a change of GPUs is checked against the cluster: a save
             // of anything else shouldn't fail because a server is down.
-            if spec["resources"]["gpu"] != old_spec["resources"]["gpu"] {
+            let gpu_changed = spec["resources"]["gpu"] != old_spec["resources"]["gpu"];
+            if gpu_changed || placement_changed {
                 let cluster_id: String =
                     sqlx::query_scalar("SELECT cluster_id FROM pyo.services WHERE id = $1")
                         .bind(&id)
                         .fetch_one(&mut **tx)
                         .await?;
-                gpu_ok(tx, &cluster_id, &spec).await?;
+                if gpu_changed {
+                    gpu_ok(tx, &cluster_id, &spec).await?;
+                }
+                // Where it runs: a server picked has to be able to run it.
+                // Room counts only when that's what changed.
+                if placement_changed || !placed.any() {
+                    crate::placement::check(tx, &cluster_id, Some(&id), &spec, placement_changed)
+                        .await?;
+                }
             }
             github_source_ok(tx, &team_id, &spec).await?;
             crate::git::source_ok(tx, &team_id, &spec).await?;
@@ -5668,14 +5682,19 @@ async fn apply(
                 ));
             }
             // Settings that don't change what runs need no redeploy, and nor
-            // do domains: they go live in place (routes.rs), and a port's
-            // exposure "http" only says a domain uses it.
+            // do domains and where it runs: they go live in place (routes.rs,
+            // placement.rs), and a port's exposure "http" only says a domain
+            // uses it.
             let rollout = |v: &Value| {
                 let mut v = v.clone();
                 if let Some(o) = v.as_object_mut() {
                     o.remove("description");
                     o.remove("autoRollback");
                     o.remove("domains");
+                    // Where it runs changes in place (placement.rs).
+                    o.remove("placement");
+                    o.remove("servers");
+                    o.remove("serverTags");
                     if let Some(src) = o.get_mut("source").and_then(|x| x.as_object_mut()) {
                         src.remove("autoDeploy");
                     }
@@ -5708,6 +5727,30 @@ async fn apply(
                 .execute(&mut **tx)
                 .await?;
             crate::cloudflare::forget_removed(tx, &id, &spec).await?;
+            // A new placement goes live now; with a deploy, it goes out with it.
+            if placement_changed {
+                if deployment_id.is_none()
+                    && let Some(c) = crate::placement::go_live(tx, &id, &spec).await?
+                {
+                    wake.push(c);
+                }
+                let project_id: String =
+                    sqlx::query_scalar("SELECT project_id FROM pyo.services WHERE id = $1")
+                        .bind(&id)
+                        .fetch_one(&mut **tx)
+                        .await?;
+                log_activity(
+                    tx,
+                    &team_id,
+                    &user.name,
+                    "service.updated",
+                    "info",
+                    &format!("Changed where {name} runs"),
+                    json!({ "kind": "service", "id": id, "label": name }),
+                    json!({ "projectId": project_id, "serviceId": id }),
+                )
+                .await?;
+            }
             // New domains go live now; with a deploy, they go out with it.
             if domains_changed
                 && let Some(c) = crate::routes::changed(tx, &id, deployment_id.is_none()).await?
@@ -8865,8 +8908,10 @@ pub(crate) async fn create_service(
     }
     let mut spec = service_spec_from(&service);
     crate::template_source::scrub_fields(&mut spec);
+    crate::placement::normalize(&mut spec)?;
     validate_service_spec(&spec)?;
     gpu_ok(tx, &cluster_id, &spec).await?;
+    crate::placement::check(tx, &cluster_id, None, &spec, true).await?;
     github_source_ok(tx, &team_id, &spec).await?;
     crate::git::source_ok(tx, &team_id, &spec).await?;
     crate::git::queue_sync_for(tx, &[&spec["source"]]).await?;
