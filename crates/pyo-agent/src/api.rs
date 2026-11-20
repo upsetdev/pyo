@@ -96,8 +96,22 @@ impl PyoApi {
         body: Option<Vec<u8>>,
         timeout: Duration,
     ) -> reqwest::Result<reqwest::Response> {
+        self.send_with(method, path, body, timeout, &[]).await
+    }
+
+    async fn send_with(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+        timeout: Duration,
+        extra: &[(&str, &str)],
+    ) -> reqwest::Result<reqwest::Response> {
         let url = format!("{}{path}", self.base);
         let mut req = self.http.request(method.clone(), &url).timeout(timeout);
+        for (k, v) in extra {
+            req = req.header(*k, *v);
+        }
         let bytes = body.unwrap_or_default();
         if let Some(signer) = &self.signer {
             let signed_path = reqwest::Url::parse(&url)
@@ -129,12 +143,32 @@ impl PyoApi {
         anyhow::bail!("{status}: {body}")
     }
 
+    /// A request whose answer the agent acts on. With signed commands only
+    /// (trust.rs), the answer must be signed for this cluster and this
+    /// request (a fresh nonce): anything else is refused, and none of it used.
+    async fn reply(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let nonce = pyo_proto::signing::new_nonce();
+        let res = self
+            .send_with(method, path, body, Duration::from_secs(20), &[(pyo_proto::REPLY_NONCE_HEADER, &nonce)])
+            .await?;
+        let v: serde_json::Value = Self::check(res).await?.json().await?;
+        match &self.verifier {
+            Some(verifier) => verifier.check_reply(&v, &nonce).map_err(|why| {
+                anyhow::anyhow!("refused Pyo's answer to {path}: {why}. This cluster acts only on answers Pyo's signer signed for it.")
+            }),
+            None => Ok(v),
+        }
+    }
+
     /// Report the cluster; the reply carries what the API wants applied (node location labels).
     pub async fn heartbeat(&self, hb: &Heartbeat) -> anyhow::Result<pyo_proto::HeartbeatReply> {
-        let res = self
-            .send(reqwest::Method::POST, "/heartbeat", Self::json(hb), Duration::from_secs(20))
-            .await?;
-        Ok(Self::check(res).await?.json().await.unwrap_or_default())
+        let v = self.reply(reqwest::Method::POST, "/heartbeat", Self::json(hb)).await?;
+        Ok(serde_json::from_value(v).unwrap_or_default())
     }
 
     pub async fn poll(&self, wait_secs: u64) -> anyhow::Result<Vec<CommandEnvelope>> {
@@ -218,10 +252,8 @@ impl PyoApi {
 
     /// A private registry's login, for a service's pull secret.
     pub async fn registry_login(&self, id: &str) -> anyhow::Result<RegistryLogin> {
-        let res = self
-            .send(reqwest::Method::GET, &format!("/registry-logins/{id}"), None, Duration::from_secs(20))
-            .await?;
-        Ok(Self::check(res).await?.json().await?)
+        let v = self.reply(reqwest::Method::GET, &format!("/registry-logins/{id}"), None).await?;
+        Ok(serde_json::from_value(v)?)
     }
 
     /// Pyo's address (what this agent reaches it at) and a token for this
@@ -239,10 +271,8 @@ impl PyoApi {
 
     /// An uploaded certificate and its key, for a domain using it.
     pub async fn certificate(&self, id: &str) -> anyhow::Result<TlsCertificate> {
-        let res = self
-            .send(reqwest::Method::GET, &format!("/certificates/{id}"), None, Duration::from_secs(20))
-            .await?;
-        Ok(Self::check(res).await?.json().await?)
+        let v = self.reply(reqwest::Method::GET, &format!("/certificates/{id}"), None).await?;
+        Ok(serde_json::from_value(v)?)
     }
 
     /// Retries briefly: a lost stage report leaves the dashboard stale.

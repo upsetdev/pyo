@@ -306,6 +306,20 @@ impl Verifier {
         }
         (ok, refused)
     }
+
+    /// Checks a reply to the request sent with `nonce`: the signed JSON
+    /// in place of the plain fields beside it, or why it's refused.
+    pub fn check_reply(&self, body: &Value, nonce: &str) -> Result<Value, Refused> {
+        check_reply(&self.keys, &self.cluster, body, nonce, pyo_proto::now_ms() as u64)
+    }
+}
+
+/// A reply's signed JSON, when it checks out for `cluster` and the request
+/// sent with `nonce` (the plain fields beside it are never used).
+fn check_reply(keys: &TrustedKeys, cluster: &str, body: &Value, nonce: &str, now_ms: u64) -> Result<Value, Refused> {
+    let signed: Option<pyo_proto::SignedReplyWire> = serde_json::from_value(body["signed"].clone()).ok();
+    let json = keys.verify_reply(signed.as_ref(), cluster, nonce, now_ms)?;
+    serde_json::from_str(json).map_err(|_| Refused::BadClaims)
 }
 
 // ── Signed requests ─────────────────────────────────────────────────────────
@@ -506,4 +520,38 @@ pub async fn sign_request_cli(args: &[String]) -> anyhow::Result<()> {
         println!("{k}: {v}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo_proto::signing::{REPLY_TTL_MS, ReplyClaims, Signer, sha256_hex};
+
+    fn signed(s: &Signer, cluster: &str, nonce: &str, reply: &Value, now: u64) -> Value {
+        let json = reply.to_string();
+        let claims = ReplyClaims { v: 1, cluster: cluster.into(), nonce: nonce.into(), iat: now, exp: now + REPLY_TTL_MS, sha256: sha256_hex(json.as_bytes()) };
+        let (c, sig) = s.sign_reply(&claims);
+        let mut out = reply.clone();
+        out["signed"] = json!({ "claims": c, "sig": sig, "kid": s.kid(), "reply": json });
+        out
+    }
+
+    #[test]
+    fn only_the_signed_reply_is_used() {
+        let s = Signer::from_pkcs8(&Signer::generate_pkcs8().unwrap()).unwrap();
+        let keys = TrustedKeys::parse(&s.public_key()).unwrap();
+        let now = 1_000_000;
+        let reply = json!({ "publicTraffic": true, "serverTags": [] });
+        let mut body = signed(&s, "cl_a", "nonce-1234", &reply, now);
+        // The plain fields beside it are changed on the way: they don't count.
+        body["publicTraffic"] = json!(false);
+        assert_eq!(check_reply(&keys, "cl_a", &body, "nonce-1234", now), Ok(reply.clone()));
+        // A reply without a signature, or for another request or cluster.
+        assert_eq!(check_reply(&keys, "cl_a", &reply, "nonce-1234", now), Err(Refused::Unsigned));
+        assert_eq!(check_reply(&keys, "cl_a", &body, "nonce-0000", now), Err(Refused::OtherRequest));
+        assert_eq!(check_reply(&keys, "cl_b", &body, "nonce-1234", now), Err(Refused::OtherCluster));
+        // Its signed JSON changed.
+        body["signed"]["reply"] = json!(json!({ "publicTraffic": false }).to_string());
+        assert_eq!(check_reply(&keys, "cl_a", &body, "nonce-1234", now), Err(Refused::Tampered));
+    }
 }
