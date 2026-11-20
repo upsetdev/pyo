@@ -962,6 +962,18 @@ pub enum Command {
         service: ServiceRef,
         replicas: i32,
     },
+    /// Change where a service's pods may run, in place: its pods move over
+    /// one at a time with the same image (a rollout, not a deploy). Its
+    /// cron jobs follow.
+    Place {
+        service: ServiceRef,
+        #[serde(default)]
+        server_names: Vec<String>,
+        #[serde(default)]
+        server_tags: Vec<String>,
+        #[serde(default)]
+        cron_jobs: Vec<CronTask>,
+    },
     /// Make a service's cron jobs match this list, built from its live pods.
     SyncCronJobs {
         service: ServiceRef,
@@ -1747,9 +1759,14 @@ pub struct DeploySpec {
     /// `topology.kubernetes.io/region` for a service pinned to a location.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub node_selector: std::collections::BTreeMap<String, String>,
-    /// Servers picked by name: its pods run only on these.
+    /// Servers picked by name. With `server_tags`, its pods run only on
+    /// these servers and on servers with any of those tags. Both empty:
+    /// any server.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub server_names: Vec<String>,
+    /// Tags picked: every server that has one of them, now or later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub server_tags: Vec<String>,
     /// The team's login for the image's registry, when it has one: the
     /// agent fetches it (never stored here) and pulls with it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2538,6 +2555,31 @@ pub struct ServerTags {
 /// which services placed by tag select.
 pub const TAG_LABEL_PREFIX: &str = "pyo/tag-";
 
+/// The node affinity that keeps a service's pods on the servers picked by
+/// name (`kubernetes.io/hostname`) and on servers with any of the tags
+/// picked: one term each, and Kubernetes takes any term. Nothing picked:
+/// any server, said as a term every server matches, so that a rollout
+/// always sets it and takes back what a placement change set in place.
+pub fn placement_affinity(server_names: &[String], server_tags: &[String]) -> serde_json::Value {
+    let mut terms: Vec<serde_json::Value> = vec![];
+    if !server_names.is_empty() {
+        terms.push(serde_json::json!({ "matchExpressions": [
+            { "key": "kubernetes.io/hostname", "operator": "In", "values": server_names }
+        ] }));
+    }
+    for t in server_tags.iter().filter_map(|t| valid_tag(t)) {
+        terms.push(serde_json::json!({ "matchExpressions": [
+            { "key": format!("{TAG_LABEL_PREFIX}{t}"), "operator": "In", "values": ["true"] }
+        ] }));
+    }
+    if terms.is_empty() {
+        terms.push(serde_json::json!({ "matchExpressions": [
+            { "key": "kubernetes.io/hostname", "operator": "Exists" }
+        ] }));
+    }
+    serde_json::json!({ "nodeAffinity": { "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": terms } } })
+}
+
 /// A tag as people type it, if it's one: lowercase letters, digits and
 /// dashes, up to 32 (it ends up in a label name).
 pub fn valid_tag(tag: &str) -> Option<String> {
@@ -2712,6 +2754,37 @@ mod location_tests {
         assert_eq!(valid_tag(&"x".repeat(33)), None);
         // Prefix plus the longest tag is still a valid label name (63 max after the slash).
         assert!(format!("tag-{}", "x".repeat(32)).len() <= 63);
+    }
+
+    #[test]
+    fn placement_is_one_affinity_term_per_pick() {
+        let terms = |names: &[&str], tags: &[&str]| {
+            let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+            let tags: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
+            placement_affinity(&names, &tags)["nodeAffinity"]
+                ["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+                .clone()
+        };
+        // Nothing picked: every server, still said, so a rollout sets it.
+        assert_eq!(
+            terms(&[], &[]),
+            serde_json::json!([{ "matchExpressions": [{ "key": "kubernetes.io/hostname", "operator": "Exists" }] }])
+        );
+        // Servers by name, and each tag on its own: any of them will do.
+        assert_eq!(
+            terms(&["server-1", "gpu-box"], &["gpu", "eu"]),
+            serde_json::json!([
+                { "matchExpressions": [{ "key": "kubernetes.io/hostname", "operator": "In", "values": ["server-1", "gpu-box"] }] },
+                { "matchExpressions": [{ "key": "pyo/tag-gpu", "operator": "In", "values": ["true"] }] },
+                { "matchExpressions": [{ "key": "pyo/tag-eu", "operator": "In", "values": ["true"] }] },
+            ])
+        );
+        // A tag that can't be a label is left out, not sent.
+        assert_eq!(terms(&[], &["a b"]).as_array().unwrap().len(), 1);
+        assert_eq!(
+            terms(&[], &["a b"])[0]["matchExpressions"][0]["operator"],
+            "Exists"
+        );
     }
 
     #[test]

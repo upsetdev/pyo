@@ -878,12 +878,10 @@ fn pod_template(spec: &DeploySpec, secret_name: &str) -> Value {
     if !spec.node_selector.is_empty() {
         pod["nodeSelector"] = json!(spec.node_selector);
     }
-    // Picked servers: a selector can't say "one of these", affinity can.
-    if !spec.server_names.is_empty() {
-        pod["affinity"] = json!({ "nodeAffinity": { "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": [
-            { "matchExpressions": [{ "key": "kubernetes.io/hostname", "operator": "In", "values": spec.server_names }] }
-        ] } } });
-    }
+    // Picked servers and tags: a selector can't say "one of these",
+    // affinity can. Always set, "any server" too, so this rollout takes
+    // back what a placement change patched in place (actions.rs).
+    pod["affinity"] = pyo_proto::placement_affinity(&spec.server_names, &spec.server_tags);
     if !spec.pull_login_id.is_empty() {
         pod["imagePullSecrets"] = json!([{ "name": pull_secret(&spec.service.name) }]);
     }
@@ -2598,7 +2596,7 @@ mod gpu_tests {
         serde_json::from_value(json!({
             "deploymentId": "dpl_1", "image": "ollama/ollama:0.12.0", "replicas": 1, "env": [], "ports": [], "domains": [], "volumes": [],
             "service": { "serviceId": "svc_llm", "name": "ollama", "namespace": "ai", "workloadKind": "Deployment" },
-            "projectId": "prj_1", "timeoutSeconds": 600, "nodeSelector": { "pyo/tag-fast": "true" },
+            "projectId": "prj_1", "timeoutSeconds": 600, "serverTags": ["fast"],
             "resources": { "cpuRequest": 1000, "cpuLimit": 4000, "memoryRequest": 4096, "memoryLimit": 16384, "gpu": gpu },
             "healthCheck": { "type": "none", "path": "/", "port": 11434, "command": "", "initialDelaySeconds": 1, "periodSeconds": 1 },
         }))
@@ -2618,10 +2616,11 @@ mod gpu_tests {
             pod["tolerations"],
             json!([{ "key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule" }])
         );
-        // The service's own server choice stays.
+        // Only GPU servers, among the ones it picked.
+        assert_eq!(pod["nodeSelector"], json!({ "pyo/gpu": "nvidia" }));
         assert_eq!(
-            pod["nodeSelector"],
-            json!({ "pyo/tag-fast": "true", "pyo/gpu": "nvidia" })
+            pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"],
+            json!([{ "matchExpressions": [{ "key": "pyo/tag-fast", "operator": "In", "values": ["true"] }] }])
         );
         // And it's a valid Deployment.
         let d: Deployment = serde_json::from_value(json!({ "metadata": { "name": "x" }, "spec": { "selector": {}, "template": t, "strategy": deployment_strategy(false, 2, 0) } })).unwrap();
@@ -2717,7 +2716,7 @@ mod gpu_tests {
                 .get("nvidia.com/gpu")
                 .is_none()
         );
-        assert_eq!(pod["nodeSelector"], json!({ "pyo/tag-fast": "true" }));
+        assert!(pod.get("nodeSelector").is_none());
         assert_eq!(
             deployment_strategy(false, 0, 0)["rollingUpdate"]["maxSurge"],
             1

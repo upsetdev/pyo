@@ -24,6 +24,12 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         Command::Restart(service) => restart(agent, &service).await,
         Command::Stop(service) => stop(agent, &service).await,
         Command::Scale { service, replicas } => scale(agent, &service, replicas).await,
+        Command::Place {
+            service,
+            server_names,
+            server_tags,
+            cron_jobs,
+        } => place(agent, &service, &server_names, &server_tags, &cron_jobs).await,
         Command::SyncCronJobs { service, jobs } => crate::cron::sync(&agent.kube, &service, &jobs)
             .await
             .map(|n| format!("{n} cron job(s) in place")),
@@ -269,6 +275,104 @@ async fn scale(agent: &Agent, service: &ServiceRef, replicas: i32) -> anyhow::Re
     )
     .await?;
     Ok(format!("Scaled {} to {replicas}", service.name))
+}
+
+/// The merge patch that moves a pod template (`spec.template` of a
+/// Deployment or StatefulSet, or of a CronJob's job) to the servers and tags
+/// picked: its affinity, and no longer the tag labels its node selector may
+/// still ask for from a rollout that placed by tag that way.
+pub fn place_patch(
+    server_names: &[String],
+    server_tags: &[String],
+    selector: Option<&std::collections::BTreeMap<String, String>>,
+) -> serde_json::Value {
+    let mut spec = json!({ "affinity": pyo_proto::placement_affinity(server_names, server_tags) });
+    let stale: serde_json::Map<String, serde_json::Value> = selector
+        .into_iter()
+        .flat_map(|m| m.keys())
+        .filter(|k| k.starts_with(pyo_proto::TAG_LABEL_PREFIX))
+        .map(|k| (k.clone(), serde_json::Value::Null))
+        .collect();
+    if !stale.is_empty() {
+        spec["nodeSelector"] = serde_json::Value::Object(stale);
+    }
+    json!({ "template": { "spec": spec } })
+}
+
+/// Where a service runs, changed in place: Kubernetes replaces its pods
+/// with the same image, on the servers picked. Its cron jobs, made from
+/// its pod template, follow.
+async fn place(
+    agent: &Agent,
+    service: &ServiceRef,
+    server_names: &[String],
+    server_tags: &[String],
+    cron_jobs: &[pyo_proto::CronTask],
+) -> anyhow::Result<String> {
+    let c = agent.kube.clone();
+    let ns = service.namespace.as_str();
+    let pp = PatchParams::default();
+    let found = match service.workload_kind.as_str() {
+        "CronJob" => {
+            let api = Api::<CronJob>::namespaced(c.clone(), ns);
+            match api.get_opt(&service.name).await? {
+                Some(cron) => {
+                    let selector = cron
+                        .spec
+                        .job_template
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.spec.as_ref())
+                        .and_then(|s| s.node_selector.clone());
+                    let body = json!({ "spec": { "jobTemplate": { "spec": place_patch(server_names, server_tags, selector.as_ref()) } } });
+                    api.patch(&service.name, &pp, &merge(body)).await?;
+                    true
+                }
+                None => false,
+            }
+        }
+        "StatefulSet" => {
+            let api = Api::<StatefulSet>::namespaced(c.clone(), ns);
+            match api.get_opt(&service.name).await? {
+                Some(set) => {
+                    let selector = set
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.spec.as_ref())
+                        .and_then(|s| s.node_selector.clone());
+                    let body = json!({ "spec": place_patch(server_names, server_tags, selector.as_ref()) });
+                    api.patch(&service.name, &pp, &merge(body)).await?;
+                    true
+                }
+                None => false,
+            }
+        }
+        _ => {
+            let api = Api::<Deployment>::namespaced(c.clone(), ns);
+            match api.get_opt(&service.name).await? {
+                Some(d) => {
+                    let selector = d
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.spec.as_ref())
+                        .and_then(|s| s.node_selector.clone());
+                    let body = json!({ "spec": place_patch(server_names, server_tags, selector.as_ref()) });
+                    api.patch(&service.name, &pp, &merge(body)).await?;
+                    true
+                }
+                None => false,
+            }
+        }
+    };
+    // Not running anything of its own (a static site, or not out yet): the
+    // next rollout places it.
+    if !found {
+        return Ok(format!("{} has no workload to move", service.name));
+    }
+    if !cron_jobs.is_empty() {
+        crate::cron::sync(&c, service, cron_jobs).await?;
+    }
+    Ok(format!("Moving {} to the servers picked", service.name))
 }
 
 async fn set_autoscale(
@@ -732,6 +836,40 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn a_placement_change_patches_the_affinity_and_drops_old_tag_selectors() {
+        let names = vec!["server-1".to_owned()];
+        let tags = vec!["gpu".to_owned()];
+        // A rollout that placed by tag in its node selector: those labels go,
+        // the rest (location, GPU) stay as they are.
+        let selector = labels(&[
+            ("pyo/tag-fast", "true"),
+            ("pyo/gpu", "nvidia"),
+            ("topology.kubernetes.io/region", "sg"),
+        ]);
+        let p = place_patch(&names, &tags, Some(&selector));
+        assert_eq!(
+            p["template"]["spec"]["affinity"],
+            pyo_proto::placement_affinity(&names, &tags)
+        );
+        assert_eq!(
+            p["template"]["spec"]["nodeSelector"],
+            json!({ "pyo/tag-fast": null })
+        );
+        // Back to any server: the affinity every server matches, and no
+        // node selector change when there's nothing stale.
+        let p = place_patch(&[], &[], Some(&labels(&[("pyo/gpu", "nvidia")])));
+        assert_eq!(
+            p["template"]["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+                ["nodeSelectorTerms"][0]["matchExpressions"][0]["operator"],
+            "Exists"
+        );
+        assert!(p["template"]["spec"].get("nodeSelector").is_none());
+        // It's a valid pod template for Kubernetes.
+        let _: k8s_openapi::api::core::v1::PodTemplateSpec =
+            serde_json::from_value(p["template"].clone()).unwrap();
     }
 
     #[test]

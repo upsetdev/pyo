@@ -55,6 +55,7 @@ pub mod openapi;
 pub mod ops;
 mod outbound;
 mod passkeys;
+mod placement;
 mod platform_import;
 mod pressure;
 mod publicdash;

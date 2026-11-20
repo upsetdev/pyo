@@ -394,14 +394,9 @@ pub fn build_spec(
         firewall: None,
         waf: None,
         site: None,
-        server_names: spec["servers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|n| n.as_str())
-            .filter(|n| !n.is_empty())
-            .map(str::to_owned)
-            .collect(),
+        // Servers and tags picked (placement.rs), set again by `create`.
+        server_names: crate::placement::Placement::of(spec).servers,
+        server_tags: crate::placement::Placement::of(spec).tags,
         node_selector: {
             let mut m: std::collections::BTreeMap<String, String> = Default::default();
             if let Some((region, zone)) = pyo_proto::location_labels(str_at(spec, &["location"])) {
@@ -409,15 +404,6 @@ pub fn build_spec(
                 if let Some(z) = zone {
                     m.insert(pyo_proto::ZONE_LABEL.to_owned(), z);
                 }
-            }
-            // Placed by tag: only on servers carrying every one of them.
-            for t in spec["serverTags"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|t| t.as_str().and_then(pyo_proto::valid_tag))
-            {
-                m.insert(format!("{}{t}", pyo_proto::TAG_LABEL_PREFIX), "true".into());
             }
             m
         },
@@ -607,6 +593,16 @@ pub async fn create(
     // Its volumes as they are now, rollbacks included: a volume detached
     // (or attached) since isn't mounted (or is) by an older version.
     deploy_spec.volumes = volume_specs(&attached_volumes(tx, req.service_id).await?);
+    // Where it runs as set now, rollbacks included: a placement change
+    // went live without a deploy (placement.rs).
+    {
+        let p = crate::placement::Placement::of(&spec);
+        deploy_spec.server_names = p.servers;
+        deploy_spec.server_tags = p.tags;
+        deploy_spec
+            .node_selector
+            .retain(|k, _| !k.starts_with(pyo_proto::TAG_LABEL_PREFIX));
+    }
     // The cluster's traffic mode now, rollbacks included.
     deploy_spec.traffic_mode = sqlx::query_scalar::<_, Option<String>>(
         "SELECT traffic_mode FROM pyo.clusters WHERE id = $1",
