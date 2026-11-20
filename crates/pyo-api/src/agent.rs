@@ -311,15 +311,17 @@ async fn heartbeat(
     }
 
     // Servers: upsert what's reported, drop what's gone. One that stops
-    // being ready (or is ready again) is in the activity, and alerts.
-    let before: Vec<(String, String)> = sqlx::query_as(
-        "SELECT name, coalesce(report->>'status', '') FROM pyo.servers WHERE cluster_id = $1 AND removal IS NULL",
+    // being ready (or is ready again), or is low on disk or memory (or no
+    // longer), is in the activity, and alerts.
+    let before: Vec<(String, String, Value)> = sqlx::query_as(
+        "SELECT name, coalesce(report->>'status', ''), coalesce(report->'conditions', '[]'::jsonb) FROM pyo.servers WHERE cluster_id = $1 AND removal IS NULL",
     )
     .bind(&cluster.id)
     .fetch_all(&mut *tx)
     .await?;
+    crate::pressure::record(&mut tx, &cluster.team_id, &cluster.id, &hb.servers, &before).await?;
     for n in &hb.servers {
-        let Some((_, was)) = before.iter().find(|(name, _)| *name == n.name) else {
+        let Some((_, was, _)) = before.iter().find(|(name, _, _)| *name == n.name) else {
             continue;
         };
         let (kind, status, title) = match (was == "ready", n.status == "ready") {

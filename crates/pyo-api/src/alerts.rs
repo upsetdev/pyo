@@ -68,6 +68,9 @@ pub enum Event {
     DeployFailed,
     ServerOffline,
     ServerOnline,
+    /// Low on disk space or memory (pressure.rs), and no longer.
+    ServerPressure,
+    ServerPressureEnded,
     BackupFailed,
     CertificateExpiring,
     CertificateFailed,
@@ -76,9 +79,10 @@ pub enum Event {
 }
 
 /// What a channel can get, each on or off: the settings `events` takes.
-pub const TOPICS: [&str; 4] = [
+pub const TOPICS: [&str; 5] = [
     "deploy_failed",
     "server_offline",
+    "server_pressure",
     "backup_failed",
     "certificate",
 ];
@@ -89,6 +93,7 @@ impl Event {
         match self {
             Event::DeployFailed => "deploy_failed",
             Event::ServerOffline | Event::ServerOnline => "server_offline",
+            Event::ServerPressure | Event::ServerPressureEnded => "server_pressure",
             Event::BackupFailed => "backup_failed",
             Event::CertificateExpiring | Event::CertificateFailed => "certificate",
             Event::Test => "test",
@@ -101,6 +106,8 @@ impl Event {
             Event::DeployFailed => "deploy_failed",
             Event::ServerOffline => "server_offline",
             Event::ServerOnline => "server_online",
+            Event::ServerPressure => "server_pressure",
+            Event::ServerPressureEnded => "server_pressure_ended",
             Event::BackupFailed => "backup_failed",
             Event::CertificateExpiring => "certificate_expiring",
             Event::CertificateFailed => "certificate_failed",
@@ -110,14 +117,18 @@ impl Event {
 
     /// The event this one ends: "back online" ends "offline".
     fn ends(self) -> Option<Event> {
-        (self == Event::ServerOnline).then_some(Event::ServerOffline)
+        match self {
+            Event::ServerOnline => Some(Event::ServerOffline),
+            Event::ServerPressureEnded => Some(Event::ServerPressure),
+            _ => None,
+        }
     }
 
     /// A state that lasts until another event ends it. One that comes again
     /// within the window after it ended is held, and sent if it still holds
     /// once the window is over.
     fn lasts(self) -> bool {
-        self == Event::ServerOffline
+        matches!(self, Event::ServerOffline | Event::ServerPressure)
     }
 }
 
@@ -129,6 +140,8 @@ pub fn classify(kind: &str, target: &Value) -> Option<Event> {
         "deployment.failed" => Event::DeployFailed,
         "cluster.unreachable" | "server.offline" => Event::ServerOffline,
         "cluster.reachable" | "server.online" => Event::ServerOnline,
+        crate::pressure::STARTED => Event::ServerPressure,
+        crate::pressure::ENDED => Event::ServerPressureEnded,
         "backup.failed" => Event::BackupFailed,
         "domain.certificate_expiring" if target["kind"] == "certificate" => {
             Event::CertificateExpiring
@@ -933,6 +946,34 @@ async fn build(
             alert(
                 format!("server:{cluster_id}/{label}"),
                 title,
+                vec![("Cluster", cluster.clone())],
+                format!("/clusters/{cluster}/{label}"),
+            )
+        }
+        Event::ServerPressure | Event::ServerPressureEnded => {
+            let cluster_id = s(&context["clusterId"]);
+            let Some(cluster): Option<String> =
+                sqlx::query_scalar("SELECT name FROM pyo.clusters WHERE id = $1")
+                    .bind(&cluster_id)
+                    .fetch_optional(&mut **tx)
+                    .await?
+            else {
+                return Ok(None);
+            };
+            let what: Vec<&str> = context["shortOf"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let step = if event == Event::ServerPressure {
+                crate::pressure::Step::Start
+            } else {
+                crate::pressure::Step::End
+            };
+            alert(
+                format!("pressure:{cluster_id}/{label}"),
+                crate::pressure::title(&format!("Server {label}"), &what, step),
                 vec![("Cluster", cluster.clone())],
                 format!("/clusters/{cluster}/{label}"),
             )

@@ -386,7 +386,11 @@ fn every_event_is_on_unless_turned_off() {
     assert_eq!(muted_from(None).unwrap(), Vec::<String>::new());
     assert_eq!(
         muted_from(Some(&["deploy_failed".into(), "certificate".into()][..])).unwrap(),
-        vec!["server_offline".to_owned(), "backup_failed".to_owned()]
+        vec![
+            "server_offline".to_owned(),
+            "server_pressure".to_owned(),
+            "backup_failed".to_owned()
+        ]
     );
     assert!(muted_from(Some(&[][..])).is_err());
     assert!(muted_from(Some(&["everything".into()][..])).is_err());
@@ -415,6 +419,14 @@ fn activity_kinds_map_to_alerts() {
         Some(Event::ServerOffline)
     );
     assert_eq!(
+        classify("server.pressure", &json!({})),
+        Some(Event::ServerPressure)
+    );
+    assert_eq!(
+        classify("server.pressure_ended", &json!({})),
+        Some(Event::ServerPressureEnded)
+    );
+    assert_eq!(
         classify("backup.failed", &json!({})),
         Some(Event::BackupFailed)
     );
@@ -436,6 +448,8 @@ fn activity_kinds_map_to_alerts() {
         Event::DeployFailed,
         Event::ServerOffline,
         Event::ServerOnline,
+        Event::ServerPressure,
+        Event::ServerPressureEnded,
         Event::BackupFailed,
         Event::CertificateExpiring,
         Event::CertificateFailed,
@@ -520,6 +534,20 @@ fn back_online_only_follows_an_offline_that_went_out() {
         simulate(&[(0, Off), (5, On), (30, Off)]),
         vec![(0, Off), (5, On), (30, Off)]
     );
+}
+
+#[test]
+fn pressure_that_comes_and_goes_alerts_once_per_window() {
+    use Event::{ServerPressure as Low, ServerPressureEnded as Fine};
+    let flaps: Vec<(i64, Event)> = (0..10)
+        .map(|m| (m, if m % 2 == 0 { Low } else { Fine }))
+        .collect();
+    assert_eq!(simulate(&flaps), vec![(0, Low), (1, Fine)]);
+    let mut low = flaps.clone();
+    low.push((10, Low));
+    assert_eq!(simulate(&low), vec![(0, Low), (1, Fine), (16, Low)]);
+    // Fine only after a "low" that went out.
+    assert_eq!(simulate(&[(0, Fine)]), vec![]);
 }
 
 #[test]

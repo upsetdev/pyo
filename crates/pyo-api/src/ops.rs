@@ -2671,7 +2671,7 @@ pub(crate) enum Op {
         /// "telegram", "discord", "slack" or "webhook".
         kind: String,
         name: String,
-        /// What it gets: "deploy_failed", "server_offline" (and back online), "backup_failed" and "certificate" (expiring, or couldn't renew). All of them when omitted.
+        /// What it gets: "deploy_failed", "server_offline" (and back online), "server_pressure" (low on disk space or memory, and fine again), "backup_failed" and "certificate" (expiring, or couldn't renew). All of them when omitted.
         #[serde(default)]
         events: Option<Vec<String>>,
         /// Discord's or Slack's webhook URL, or your own (https, or http to a private network address).
