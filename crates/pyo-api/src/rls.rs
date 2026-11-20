@@ -83,6 +83,12 @@ pub async fn lift(conn: &mut PgConnection) -> sqlx::Result<Lifted> {
 }
 
 impl Lifted {
+    /// Whether the transaction was lowered to a person's or API key's
+    /// teams: it's their request.
+    pub fn was_scoped(&self) -> bool {
+        self.was_scoped
+    }
+
     /// Back to the team scope the transaction had before [`lift`].
     pub async fn lower(self, conn: &mut PgConnection) -> sqlx::Result<()> {
         if self.was_scoped {

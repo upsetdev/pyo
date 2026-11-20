@@ -36,6 +36,7 @@ mod domainproof;
 pub mod error;
 mod firewall;
 mod freedomain;
+mod gate;
 mod geoip;
 mod git;
 mod github;
@@ -308,6 +309,21 @@ pub trait Entitlements: Send + Sync {
     ) -> futures::future::BoxFuture<'a, Result<(), String>> {
         let _ = (conn, team_id);
         Box::pin(async { Ok(()) })
+    }
+    /// Whether a team's clusters may get commands now (gate.rs): refused,
+    /// they get only reads and removals. Asked before a request queues a
+    /// command, and when an agent takes its commands. By default refused
+    /// whenever deploys are, with [`gate::STOPPED`] as the message.
+    fn can_command<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        team_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.can_deploy(conn, team_id)
+                .await
+                .map_err(|_| gate::STOPPED.to_owned())
+        })
     }
 }
 
