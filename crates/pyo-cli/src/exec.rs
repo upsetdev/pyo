@@ -86,6 +86,11 @@ pub fn socket_url(base: &str, service_id: &str, o: &Opts, tty: bool) -> Result<S
 
 /// Why Pyo turned the terminal down: its message, else what failed.
 fn refused(e: tokio_tungstenite::tungstenite::Error) -> anyhow::Error {
+    refused_with(e, "Can't open a terminal on the service")
+}
+
+/// Why Pyo turned a WebSocket down: its message, else `what` and what failed.
+pub(crate) fn refused_with(e: tokio_tungstenite::tungstenite::Error, what: &str) -> anyhow::Error {
     use tokio_tungstenite::tungstenite::Error;
     if let Error::Http(res) = &e {
         let msg = res
@@ -97,7 +102,7 @@ fn refused(e: tokio_tungstenite::tungstenite::Error) -> anyhow::Error {
             return anyhow::anyhow!(m);
         }
     }
-    anyhow::Error::from(e).context("Can't open a terminal on the service")
+    anyhow::Error::from(e).context(what.to_owned())
 }
 
 pub async fn run(api: &Api, service: Option<&str>, o: Opts) -> Result<()> {

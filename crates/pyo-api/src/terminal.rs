@@ -40,7 +40,8 @@ const MAX_SESSION: Duration = Duration::from_secs(4 * 3600);
 /// How long the browser waits for the agent to dial back.
 const AGENT_WAIT: Duration = Duration::from_secs(20);
 
-/// Browser sockets waiting for their agent, by session id.
+/// Sockets waiting for their agent's, by session id: terminals' and log
+/// follows' (logfollow.rs).
 pub type Waiting = Arc<Mutex<HashMap<String, oneshot::Sender<WebSocket>>>>;
 
 pub fn routes() -> Router<AppState> {
@@ -57,7 +58,7 @@ fn text(f: &TerminalFrame) -> Message {
 
 /// A page on another site can open WebSockets with the user's cookie, so
 /// browsers must come from this origin.
-fn same_origin(headers: &HeaderMap) -> bool {
+pub(crate) fn same_origin(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return true;
     };
@@ -278,17 +279,41 @@ async fn agent_side(
     let Some((relay_addr,)) = row else {
         return Err(ApiError::not_found("Terminal session"));
     };
-    let local = s.terminals.lock().await.remove(&id);
+    hand_over(
+        &s,
+        &headers,
+        &format!("terminals/{id}"),
+        &id,
+        relay_addr,
+        ws,
+        "Terminal session",
+    )
+    .await
+}
+
+/// The agent's socket for session `id`, to whoever waits for it: on this
+/// replica, or forwarded to `relay_addr`, the replica holding the other
+/// end (at `/api/agent/v1/<path>` there). Terminals and log follows.
+pub(crate) async fn hand_over(
+    s: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    id: &str,
+    relay_addr: Option<String>,
+    ws: WebSocketUpgrade,
+    what: &str,
+) -> ApiResult<Response> {
+    let local = s.terminals.lock().await.remove(id);
     if let Some(waiting) = local {
         return Ok(ws.on_upgrade(move |agent| async move {
             let _ = waiting.send(agent);
         }));
     }
-    // The browser is on another replica: forward this socket there.
+    // The other end is on another replica: forward this socket there.
     let Some(addr) = relay_addr.filter(|a| Some(a) != s.config.relay_addr.as_ref()) else {
-        return Err(ApiError::not_found("Terminal session"));
+        return Err(ApiError::not_found(what));
     };
-    let mut req = format!("ws://{addr}/api/agent/v1/terminals/{id}")
+    let mut req = format!("ws://{addr}/api/agent/v1/{path}")
         .into_client_request()
         .map_err(anyhow::Error::from)?;
     if let Some(auth) = headers.get(header::AUTHORIZATION) {
@@ -297,14 +322,14 @@ async fn agent_side(
     }
     let (upstream, _) = tokio_tungstenite::connect_async(req).await.map_err(|e| {
         ApiError::from(anyhow::anyhow!(
-            "couldn't reach the replica holding this terminal: {e}"
+            "couldn't reach the replica holding this session: {e}"
         ))
     })?;
     Ok(ws.on_upgrade(move |agent| forward(agent, upstream)))
 }
 
 /// Shuttle frames between the browser and the agent until either side closes.
-async fn relay(browser: WebSocket, agent: WebSocket) {
+pub(crate) async fn relay(browser: WebSocket, agent: WebSocket) {
     let (mut b_tx, mut b_rx) = browser.split();
     let (mut a_tx, mut a_rx) = agent.split();
     let up = async {

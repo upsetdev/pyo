@@ -6,6 +6,7 @@
 use std::{collections::HashSet, io::IsTerminal, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use pyo_proto::{LogFrame, LogLine};
 use serde_json::{Value, json};
 
 use crate::{
@@ -897,71 +898,182 @@ pub async fn logs(api: &Api, service: Option<&str>, o: LogsOpts) -> Result<()> {
     // The whole name narrows what the cluster reads; a short one is matched here.
     let exact = o
         .replica
-        .as_deref()
+        .clone()
         .filter(|r| r.starts_with(&format!("{name}-")));
-    let mut last = since.unwrap_or(0);
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut p = LogPrinter {
+        name,
+        replica: o.replica.clone(),
+        last: since.unwrap_or(0),
+        floor: since.unwrap_or(0),
+        seen: HashSet::new(),
+    };
+    if !o.follow {
+        let mut q: Vec<(&str, String)> = vec![];
+        if let Some(r) = &exact {
+            q.push(("replica", r.clone()));
+        }
+        if let Some(s) = since {
+            q.push(("since", s.to_string()));
+        }
+        let r = api
+            .get(&format!("/api/v1/services/{}/logs?{}", t.id, query(&q)))
+            .await?;
+        p.print(&serde_json::from_value::<Vec<LogLine>>(r["logs"].clone()).unwrap_or_default());
+        return Ok(());
+    }
+    follow_logs(api, &t.id, exact.as_deref(), since, &mut p).await
+}
+
+/// `k=v&k=v` (replica names and times need no encoding).
+fn query(q: &[(&str, String)]) -> String {
+    q.iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Prints log lines once each, in the order they come.
+struct LogPrinter {
+    name: String,
+    /// `--replica`: its name, short name or the end of it.
+    replica: Option<String>,
+    /// The newest line's time printed.
+    last: i64,
+    /// Lines before this are old (the start of this read or follow).
+    floor: i64,
+    /// The lines printed at `last`: a follow from there sends them again.
+    seen: HashSet<String>,
+}
+
+impl LogPrinter {
+    /// Whether to print this line: wanted, and not printed before.
+    fn take(&mut self, l: &LogLine) -> bool {
+        if self
+            .replica
+            .as_deref()
+            .is_some_and(|w| !is_replica(&self.name, &l.source, w))
+        {
+            return false;
+        }
+        let key = format!("{}\u{0}{}\u{0}{}", l.at, l.source, l.message);
+        if l.at < self.floor || (l.at == self.floor && self.seen.contains(&key)) {
+            return false;
+        }
+        if l.at > self.last {
+            self.last = l.at;
+            self.seen.clear();
+        }
+        if l.at == self.last {
+            self.seen.insert(key);
+        }
+        true
+    }
+
+    fn print(&mut self, lines: &[LogLine]) {
+        for l in lines {
+            if !self.take(l) {
+                continue;
+            }
+            let msg = ui::log_text(&l.message, &l.level);
+            println!(
+                "{} {} {msg}",
+                ui::dim(&ui::clock(l.at)),
+                ui::replica(short_replica(&self.name, &l.source))
+            );
+        }
+    }
+}
+
+/// A follow that ends sooner than this went wrong: wait before the next.
+const FOLLOW_SHORT: Duration = Duration::from_secs(10);
+
+/// Follows a service's logs over one WebSocket (one signed command for the
+/// cluster), opening another when it ends: the first shows the last 100
+/// lines (or those since `since`), the next ones go on from the newest line.
+async fn follow_logs(
+    api: &Api,
+    service_id: &str,
+    exact: Option<&str>,
+    since: Option<i64>,
+    p: &mut LogPrinter,
+) -> Result<()> {
+    let started = now_ms();
     let mut first = true;
+    let mut wait = Duration::from_secs(3);
     loop {
         let mut q: Vec<(&str, String)> = vec![];
         if let Some(r) = exact {
             q.push(("replica", r.to_owned()));
         }
-        if !first || since.is_some() {
-            q.push(("since", last.to_string()));
-        }
-        if first && since.is_none() && o.follow {
+        if first && since.is_none() {
             q.push(("tail", "100".into()));
+        } else {
+            // Nothing printed yet: from when following began.
+            let from = if p.last > 0 { p.last } else { started };
+            q.push(("since", from.to_string()));
         }
-        let query = q
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("&");
-        let path = format!("/api/v1/services/{}/logs?{query}", t.id);
-        let r = match api.get(&path).await {
-            Ok(r) => r,
-            // A blip while following: try again.
-            Err(e) if !first => {
-                eprintln!("{} {e:#}", ui::yellow("!"));
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
+        p.floor = if first { since.unwrap_or(0) } else { p.last };
+        let opened = tokio::time::Instant::now();
+        let mut got = false;
+        let ended = follow_once(api, service_id, &query(&q), p, &mut got).await;
+        // Lines came: whatever happens next, it's a blip.
+        let was_first = first && !got;
         first = false;
-        for l in r["logs"].as_array().into_iter().flatten() {
-            let at = l["at"].as_i64().unwrap_or(0);
-            let src = l["source"].as_str().unwrap_or("");
-            if o.replica
-                .as_deref()
-                .is_some_and(|w| !is_replica(&name, src, w))
-            {
+        match ended {
+            // The first one fails: say why, as a read would.
+            Err(e) if was_first => return Err(e),
+            Err(e) => eprintln!("{} {e:#}", ui::yellow("!")),
+            // Ended after a while (it lasts an hour at most): go on at once.
+            Ok(()) if opened.elapsed() >= FOLLOW_SHORT => {
+                wait = Duration::from_secs(3);
                 continue;
             }
-            let key = format!("{at}\u{0}{src}\u{0}{}", l["message"]);
-            if at < last || !seen.insert(key) {
-                continue;
-            }
-            last = last.max(at);
-            let msg = ui::log_text(
-                l["message"].as_str().unwrap_or(""),
-                l["level"].as_str().unwrap_or("info"),
-            );
-            println!(
-                "{} {} {msg}",
-                ui::dim(&ui::clock(at)),
-                ui::replica(short_replica(&name, src))
-            );
+            Ok(()) => {}
         }
-        if !o.follow {
-            return Ok(());
-        }
-        // Only lines at the newest time can come again.
-        let newest = format!("{last}\u{0}");
-        seen.retain(|k| k.starts_with(&newest));
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(60));
     }
+}
+
+/// One follow, until Pyo or the cluster closes it. `got`: lines came.
+async fn follow_once(
+    api: &Api,
+    service_id: &str,
+    query: &str,
+    p: &mut LogPrinter,
+    got: &mut bool,
+) -> Result<()> {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
+    let ws_base = api
+        .base
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1);
+    let mut req = format!("{ws_base}/api/v1/services/{service_id}/logs/follow?{query}")
+        .into_client_request()?;
+    req.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {}", api.token()))?,
+    );
+    let (ws, _) = tokio_tungstenite::connect_async(req)
+        .await
+        .map_err(|e| crate::exec::refused_with(e, "Can't follow the service's logs"))?;
+    let (_up, mut down) = ws.split();
+    while let Some(m) = down.next().await {
+        match m.context("The log follow broke")? {
+            Message::Text(t) => match serde_json::from_str::<LogFrame>(&t) {
+                Ok(LogFrame::Lines { lines }) => {
+                    *got = true;
+                    p.print(&lines);
+                }
+                Ok(LogFrame::Error { message }) => bail!(message),
+                Err(_) => {}
+            },
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// The latest deployment's log: the build, then the rollout. Followed to
@@ -1498,6 +1610,38 @@ pub async fn open(api: &Api, service: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn followed_lines_print_once_in_the_order_they_come() {
+        let line = |at: i64, source: &str, message: &str| LogLine {
+            at,
+            level: "info".into(),
+            source: source.into(),
+            message: message.into(),
+        };
+        let mut p = LogPrinter {
+            name: "web".into(),
+            replica: None,
+            last: 0,
+            floor: 0,
+            seen: HashSet::new(),
+        };
+        // Two replicas stream at once: an older line after a newer one still prints.
+        assert!(p.take(&line(20, "web-a", "x")));
+        assert!(p.take(&line(10, "web-b", "y")));
+        assert!(p.take(&line(20, "web-b", "z")));
+        // The next follow goes on from the newest line: those at it come again.
+        p.floor = p.last;
+        assert!(!p.take(&line(10, "web-b", "y")));
+        assert!(!p.take(&line(20, "web-a", "x")));
+        assert!(!p.take(&line(20, "web-b", "z")));
+        assert!(p.take(&line(20, "web-a", "new at the same time")));
+        assert!(p.take(&line(21, "web-a", "w")));
+        // --replica a
+        p.replica = Some("a".into());
+        assert!(!p.take(&line(30, "web-b", "v")));
+        assert!(p.take(&line(30, "web-a", "v")));
+    }
 
     fn service() -> Value {
         json!({

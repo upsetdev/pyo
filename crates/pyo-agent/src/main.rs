@@ -25,6 +25,7 @@ mod gpu;
 mod install;
 mod kubelet;
 mod locate;
+mod logfollow;
 mod observability;
 mod observe;
 mod operators;
@@ -529,6 +530,26 @@ async fn run_command(agent: Agent, envelope: CommandEnvelope) {
             ));
             ok("Opening a terminal.")
         }
+        // Followed in its own task until Pyo closes the socket.
+        Command::FollowLogs {
+            session_id,
+            service,
+            tail_lines,
+            since_seconds,
+            replica,
+        } => {
+            tokio::spawn(logfollow::run(
+                agent.clone(),
+                session_id,
+                service,
+                logfollow::Start {
+                    tail_lines,
+                    since_seconds,
+                    replica,
+                },
+            ));
+            ok("Following logs.")
+        }
         Command::Backup(spec) => backup::run(&agent, *spec).await,
         Command::ListSnapshots(spec) => backup::snapshots(&agent.kube, *spec).await,
         Command::ForgetSnapshot(spec) => backup::forget(&agent.kube, *spec).await,
@@ -646,6 +667,7 @@ fn command_kind(c: &Command) -> &'static str {
         Command::SetSchedulable { .. } => "set_schedulable",
         Command::SetMaintenance { .. } => "set_maintenance",
         Command::FetchLogs { .. } => "fetch_logs",
+        Command::FollowLogs { .. } => "follow_logs",
         Command::Cancel { .. } => "cancel",
         Command::EnsureBuilder(_) => "ensure_builder",
         Command::RemoveBuilder { .. } => "remove_builder",

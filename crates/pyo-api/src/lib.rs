@@ -36,6 +36,7 @@ mod domainproof;
 pub mod error;
 mod firewall;
 mod freedomain;
+mod gate;
 mod geoip;
 mod git;
 mod github;
@@ -45,6 +46,7 @@ mod images;
 mod install;
 mod jobs;
 mod join;
+mod logfollow;
 mod mail;
 mod mcp;
 mod migrate;
@@ -308,6 +310,21 @@ pub trait Entitlements: Send + Sync {
         let _ = (conn, team_id);
         Box::pin(async { Ok(()) })
     }
+    /// Whether a team's clusters may get commands now (gate.rs): refused,
+    /// they get only reads and removals. Asked before a request queues a
+    /// command, and when an agent takes its commands. By default refused
+    /// whenever deploys are, with [`gate::STOPPED`] as the message.
+    fn can_command<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        team_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.can_deploy(conn, team_id)
+                .await
+                .map_err(|_| gate::STOPPED.to_owned())
+        })
+    }
 }
 
 static ENTITLEMENTS: std::sync::OnceLock<Arc<dyn Entitlements>> = std::sync::OnceLock::new();
@@ -559,7 +576,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
     } else {
         probes
             .nest("/api/auth", auth::routes())
-            // JSON is compressed; the terminal's WebSocket isn't (it's not a body).
+            // JSON is compressed; the terminal's and log follow's WebSockets aren't (they're not bodies).
             .nest(
                 "/api/v1",
                 ops::routes()
@@ -569,6 +586,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                     .merge(sandbox::api::routes())
                     .layer(CompressionLayer::new())
                     .merge(terminal::routes())
+                    .merge(logfollow::routes())
                     .merge(database_imports::routes())
                     .merge(source_uploads::routes())
                     .merge(platform_import::routes()),
@@ -585,6 +603,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 agent::routes()
                     .merge(sites::agent_routes())
                     .merge(terminal::agent_routes())
+                    .merge(logfollow::agent_routes())
                     .merge(database_imports::agent_routes())
                     .merge(agent_auth::routes())
                     // Signed requests (agent_auth.rs): who sent it, from its key.
@@ -678,6 +697,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             agent::routes()
                 .merge(sites::agent_routes())
                 .merge(terminal::agent_routes())
+                .merge(logfollow::agent_routes())
                 .merge(database_imports::agent_routes())
                 .merge(agent_auth::component_routes()),
             agent_ca,

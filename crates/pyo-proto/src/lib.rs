@@ -1013,6 +1013,22 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         replica: String,
     },
+    /// Follow the service's pods' output: the agent dials back to
+    /// `/api/agent/v1/log-follows/<session_id>` over a WebSocket, sends the
+    /// recent lines as [`FetchLogs`](Command::FetchLogs) reads them, then
+    /// each new line as it's printed (see [`LogFrame`]). It stops when Pyo
+    /// closes the socket, or after [`LOG_FOLLOW_SECS`].
+    FollowLogs {
+        session_id: String,
+        service: ServiceRef,
+        tail_lines: i64,
+        /// Only lines from the last this many seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_seconds: Option<i64>,
+        /// Only this replica (pod), by name.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        replica: String,
+    },
     /// Stop watching a rollout and report it cancelled.
     Cancel {
         deployment_id: String,
@@ -1565,6 +1581,21 @@ pub enum TerminalFrame {
         code: Option<i32>,
     },
 }
+
+/// What a log follow's WebSocket carries, as text frames, from the agent to
+/// whoever follows ([`Command::FollowLogs`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum LogFrame {
+    /// Lines, each replica's oldest first. Empty now and then while
+    /// nothing is printed, so idle connections stay open.
+    Lines { lines: Vec<LogLine> },
+    /// It couldn't follow, and why.
+    Error { message: String },
+}
+
+/// The longest a log follow lasts. Whoever follows longer opens another.
+pub const LOG_FOLLOW_SECS: u64 = 3600;
 
 /// The first byte of an output frame without a TTY: standard output.
 pub const STREAM_STDOUT: u8 = 1;

@@ -224,8 +224,21 @@ impl PyoApi {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     > {
+        self.socket(&format!("/terminals/{session_id}")).await
+    }
+
+    /// A WebSocket to `path` under the agent's endpoints, signed like its
+    /// other requests: a terminal's, or a log follow's.
+    pub async fn socket(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    > {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        let url = format!("{}/terminals/{session_id}", self.base).replacen("http", "ws", 1);
+        let url = format!("{}{path}", self.base).replacen("http", "ws", 1);
         let mut req = url.into_client_request()?;
         req.headers_mut().insert(
             AUTHORIZATION,

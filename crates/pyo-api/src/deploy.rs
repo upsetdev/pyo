@@ -1203,6 +1203,8 @@ pub async fn enqueue(
         .bind(cluster_id)
         .fetch_one(&mut **tx)
         .await?;
+    // A hosted team's plan paused or ended: no changes (gate.rs).
+    crate::gate::check_queue(tx, &team, stored["kind"].as_str().unwrap_or("")).await?;
     crate::vault::get().seal_env(&team, &mut stored).await?;
     crate::teambackup::seal_command(&team, &mut stored).await?;
     // clock_timestamp(), not now(): commands queued in one transaction keep
