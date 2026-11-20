@@ -14,6 +14,12 @@
 //! it against the key it registered, refuses a time more than
 //! [`MAX_SKEW_SECS`] off and a nonce it has seen, and takes the cluster from
 //! the key: never from anything a proxy could add.
+//!
+//! The cluster's other components sign the same way with keys of their
+//! own (Pyo's builders, pyo-static), which the agent makes in the cluster
+//! and registers. A body too large to hold (a file a builder uploads) is
+//! signed by the hash it declares in [`BODY_SHA256_HEADER`]: Pyo checks the
+//! signature against that, and the body against it as it streams.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -22,6 +28,8 @@ use sha2::{Digest, Sha256};
 
 pub const KEY_HEADER: &str = "pyo-agent-key";
 pub const SIGNATURE_HEADER: &str = "pyo-agent-signature";
+/// The hex SHA-256 of a body signed by its hash ([`RequestKey::sign_hashed`]).
+pub const BODY_SHA256_HEADER: &str = "x-pyo-sha256";
 /// How far a request's time may be from Pyo's clock.
 pub const MAX_SKEW_SECS: i64 = 60;
 const PREFIX: &str = "pyo-agent-req1";
@@ -32,12 +40,22 @@ fn hex(b: &[u8]) -> String {
 
 /// What gets signed.
 pub fn message(key_id: &str, method: &str, path: &str, t: i64, nonce: &str, body: &[u8]) -> Vec<u8> {
+    message_hashed(key_id, method, path, t, nonce, &body_sha256(body))
+}
+
+/// What gets signed, given the body's hex SHA-256.
+pub fn message_hashed(key_id: &str, method: &str, path: &str, t: i64, nonce: &str, body_sha256: &str) -> Vec<u8> {
     format!(
         "{PREFIX}\n{key_id}\n{}\n{path}\n{t}\n{nonce}\n{}",
         method.to_ascii_uppercase(),
-        hex(&Sha256::digest(body))
+        body_sha256.to_ascii_lowercase()
     )
     .into_bytes()
+}
+
+/// A body's hex SHA-256.
+pub fn body_sha256(body: &[u8]) -> String {
+    hex(&Sha256::digest(body))
 }
 
 /// An agent's request key.
@@ -66,10 +84,16 @@ impl RequestKey {
 
     /// The two headers for a request, signed at `t` (unix seconds).
     pub fn sign(&self, key_id: &str, method: &str, path: &str, body: &[u8], t: i64) -> [(&'static str, String); 2] {
+        self.sign_hashed(key_id, method, path, &body_sha256(body), t)
+    }
+
+    /// The same for a body given by its hex SHA-256 (one that's streamed:
+    /// send that hash in [`BODY_SHA256_HEADER`] too).
+    pub fn sign_hashed(&self, key_id: &str, method: &str, path: &str, body_sha256: &str, t: i64) -> [(&'static str, String); 2] {
         let mut n = [0u8; 16];
         let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut n);
         let nonce = B64.encode(n);
-        let sig = self.key.sign(&message(key_id, method, path, t, &nonce, body));
+        let sig = self.key.sign(&message_hashed(key_id, method, path, t, &nonce, body_sha256));
         [
             (KEY_HEADER, key_id.to_owned()),
             (SIGNATURE_HEADER, format!("t={t},n={nonce},s={}", B64.encode(sig.as_ref()))),
@@ -120,13 +144,27 @@ pub fn verify(
     header: &str,
     now: i64,
 ) -> Result<String, Bad> {
+    verify_hashed(public_key, key_id, method, path, &body_sha256(body), header, now)
+}
+
+/// [`verify`], given the body's hex SHA-256 (the caller then checks the
+/// body against it).
+pub fn verify_hashed(
+    public_key: &str,
+    key_id: &str,
+    method: &str,
+    path: &str,
+    body_sha256: &str,
+    header: &str,
+    now: i64,
+) -> Result<String, Bad> {
     let (t, nonce, sig) = parse(header).ok_or(Bad::Malformed)?;
     if (now - t).abs() > MAX_SKEW_SECS {
         return Err(Bad::Stale);
     }
     let key = B64.decode(public_key).map_err(|_| Bad::Signature)?;
     UnparsedPublicKey::new(&ED25519, key)
-        .verify(&message(key_id, method, path, t, &nonce, body), &sig)
+        .verify(&message_hashed(key_id, method, path, t, &nonce, body_sha256), &sig)
         .map_err(|_| Bad::Signature)?;
     Ok(nonce)
 }
@@ -156,5 +194,19 @@ mod tests {
         assert_eq!(verify(&other.public_key(), "key_1", "POST", "/api/agent/v1/heartbeat", b"{}", &sig, now), Err(Bad::Signature));
         assert_eq!(verify(&pk, "key_1", "POST", "/x", b"", "t=1", now), Err(Bad::Malformed));
         assert!(valid_public_key(&pk));
+    }
+
+    #[test]
+    fn a_streamed_body_is_signed_by_its_hash() {
+        let k = RequestKey::from_pkcs8(&RequestKey::generate_pkcs8().unwrap()).unwrap();
+        let pk = k.public_key();
+        let now = 1_800_000_000;
+        let file = b"<h1>hi</h1>";
+        let path = "/api/builder/v1/jobs/j1/site/files/index.html";
+        let [_, (_, sig)] = k.sign_hashed("key_1", "PUT", path, &body_sha256(file), now);
+        assert!(verify_hashed(&pk, "key_1", "PUT", path, &body_sha256(file), &sig, now).is_ok());
+        // The same as signing the body itself.
+        assert!(verify(&pk, "key_1", "PUT", path, file, &sig, now).is_ok());
+        assert_eq!(verify_hashed(&pk, "key_1", "PUT", path, &body_sha256(b"other"), &sig, now), Err(Bad::Signature));
     }
 }
