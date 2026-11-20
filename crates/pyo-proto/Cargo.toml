@@ -14,6 +14,10 @@ serde_json = "1.0.154"
 serde_norway = "0.9.42"
 sha2 = "0.11.1"
 utoipa = { version = "5.5.0", optional = true }
+# The agent CA's certificates (agent_ca.rs).
+rcgen = { version = "0.14", default-features = false, features = ["pem", "x509-parser", "ring"], optional = true }
+time = { version = "0.3", optional = true }
+x509-parser = { version = "0.18", optional = true }
 
 [dev-dependencies]
 # The admission policy's patterns (CEL `matches` is RE2, which this follows).
@@ -25,3 +29,5 @@ openapi = ["dep:utoipa"]
 # Signing and checking sandbox tokens (pyo-api and pyo-sandbox).
 sandbox-token = ["dep:ring", "dep:base64"]
 command-signing = ["dep:ring", "dep:base64"]
+# Issuing the agent CA's certificates (pyo-api, and Pyo Cloud's signer).
+agent-ca = ["dep:rcgen", "dep:time", "dep:x509-parser", "dep:ring"]

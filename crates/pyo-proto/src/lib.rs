@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "agent-ca")]
+pub mod agent_ca;
 pub mod ansi;
 pub mod bundles;
 pub mod database_names;

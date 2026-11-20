@@ -12,7 +12,9 @@
 //! alone, on this listener and the main one (agent_auth.rs).
 //!
 //! The CA's key is a file here (`PYO_AGENT_CA_DIR`, made on first start);
-//! a hosted build moves it to a KMS.
+//! a hosted build passes its own CA ([`crate::AgentCa`]): Pyo Cloud's
+//! signer, with the key in a KMS. Certificates look the same either way
+//! (pyo-proto `agent_ca`).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,10 +26,9 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use rcgen::{
-    CertificateParams, CertificateSigningRequestParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
-};
+use futures::future::BoxFuture;
+use pyo_proto::agent_ca::{self, Issued};
+use rcgen::{Issuer, KeyPair};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -39,14 +40,11 @@ use crate::{
     ids::sha256_hex,
 };
 
-/// A client certificate's lifetime.
-pub const CERT_HOURS: i64 = 24;
-
 /// The agent CA, when this Pyo runs the mTLS endpoint.
-pub fn ca() -> Option<&'static Ca> {
+pub fn ca() -> Option<&'static Arc<dyn crate::AgentCa>> {
     CA.get()
 }
-static CA: std::sync::OnceLock<Ca> = std::sync::OnceLock::new();
+static CA: std::sync::OnceLock<Arc<dyn crate::AgentCa>> = std::sync::OnceLock::new();
 
 /// Where agents reach Pyo (`PYO_AGENT_ENDPOINT`), for the install manifest:
 /// the mTLS listener, or (signed requests) Pyo's agent address behind its
@@ -66,6 +64,7 @@ pub fn endpoint() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Pyo's own agent CA: its key in a file.
 pub struct Ca {
     pem: String,
     key_pem: String,
@@ -83,16 +82,7 @@ impl Ca {
         }
         std::fs::create_dir_all(dir)?;
         let key_pair = KeyPair::generate()?;
-        let mut p = CertificateParams::new(Vec::<String>::new())?;
-        let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, "Pyo agent CA");
-        p.distinguished_name = dn;
-        p.is_ca = IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
-        p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let now = time::OffsetDateTime::now_utc();
-        p.not_before = now - time::Duration::hours(1);
-        p.not_after = now + time::Duration::days(3650);
-        let c = p.self_signed(&key_pair)?;
+        let pem = agent_ca::ca_cert(&key_pair).map_err(anyhow::Error::msg)?;
         let key_pem = key_pair.serialize_pem();
         {
             use std::io::Write;
@@ -104,68 +94,37 @@ impl Ca {
                 .open(&key)?;
             f.write_all(key_pem.as_bytes())?;
         }
-        std::fs::write(&cert, c.pem())?;
+        std::fs::write(&cert, &pem)?;
         tracing::info!(dir = %dir.display(), "made the agent CA");
-        Ok(Self { pem: c.pem(), key_pem })
-    }
-
-    pub fn pem(&self) -> &str {
-        &self.pem
+        Ok(Self { pem, key_pem })
     }
 
     fn issuer(&self) -> anyhow::Result<Issuer<'static, KeyPair>> {
         let key = KeyPair::from_pem(&self.key_pem)?;
-        Ok(Issuer::from_ca_cert_pem(&self.pem, key)?)
+        agent_ca::issuer(&self.pem, key).map_err(anyhow::Error::msg)
+    }
+}
+
+impl crate::AgentCa for Ca {
+    fn pem(&self) -> &str {
+        &self.pem
     }
 
-    /// A client certificate for a cluster's agent from its CSR (the agent's
-    /// own key): its serial (hex), PEM and expiry (ms).
-    pub fn issue(&self, csr_pem: &str, team: &str, cluster: &str) -> anyhow::Result<(String, String, i64)> {
-        let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)?;
-        let mut p = CertificateParams::new(Vec::<String>::new())?;
-        p.subject_alt_names = vec![SanType::URI(
-            format!("pyo://team/{team}/cluster/{cluster}").try_into()?,
-        )];
-        let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, cluster);
-        p.distinguished_name = dn;
-        let now = time::OffsetDateTime::now_utc();
-        p.not_before = now - time::Duration::minutes(5);
-        let not_after = now + time::Duration::hours(CERT_HOURS);
-        p.not_after = not_after;
-        let serial: [u8; 16] = rand::random();
-        // Positive, as X.509 wants.
-        let mut serial = serial.to_vec();
-        serial[0] &= 0x7f;
-        let serial_hex = hex::encode(&serial).trim_start_matches("00").to_owned();
-        p.serial_number = Some(SerialNumber::from(serial));
-        p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        csr.params = p;
-        let cert = csr.signed_by(&self.issuer()?)?;
-        Ok((serial_hex, cert.pem(), (not_after.unix_timestamp_nanos() / 1_000_000) as i64))
+    fn issue<'a>(&'a self, csr_pem: &'a str, team: &'a str, cluster: &'a str) -> BoxFuture<'a, anyhow::Result<Issued>> {
+        Box::pin(async move { agent_ca::issue_client(&self.issuer()?, csr_pem, team, cluster).map_err(anyhow::Error::msg) })
     }
 
-    /// The endpoint's own certificate, for these names (DNS names or IPs).
-    fn server_cert(&self, names: &[String]) -> anyhow::Result<(String, String)> {
-        let key = KeyPair::generate()?;
-        let mut p = CertificateParams::new(Vec::<String>::new())?;
-        for n in names {
-            p.subject_alt_names.push(match n.parse::<std::net::IpAddr>() {
-                Ok(ip) => SanType::IpAddress(ip),
-                Err(_) => SanType::DnsName(n.as_str().try_into()?),
-            });
-        }
-        let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, names.first().map(String::as_str).unwrap_or("pyo-agent-endpoint"));
-        p.distinguished_name = dn;
-        let now = time::OffsetDateTime::now_utc();
-        p.not_before = now - time::Duration::hours(1);
-        p.not_after = now + time::Duration::days(365);
-        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        let c = p.signed_by(&key, &self.issuer()?)?;
-        Ok((c.pem(), key.serialize_pem()))
+    fn issue_server<'a>(&'a self, csr_pem: &'a str, names: &'a [String]) -> BoxFuture<'a, anyhow::Result<String>> {
+        Box::pin(async move { agent_ca::issue_server(&self.issuer()?, csr_pem, names).map_err(anyhow::Error::msg) })
     }
+}
+
+/// The endpoint's own certificate and key (PEM), from the CA.
+async fn server_cert(ca: &dyn crate::AgentCa, names: &[String]) -> anyhow::Result<(String, String)> {
+    let key = KeyPair::generate()?;
+    let csr = agent_ca::csr(&key).map_err(anyhow::Error::msg)?;
+    let cert = ca.issue_server(&csr, names).await?;
+    Ok((cert, key.serialize_pem()))
 }
 
 /// The cluster a client certificate names, and its serial (hex).
@@ -235,17 +194,17 @@ impl axum::serve::Listener for TlsListener {
     }
 }
 
-fn server_config(ca: &Ca, names: &[String]) -> anyhow::Result<rustls::ServerConfig> {
+async fn server_config(ca: &dyn crate::AgentCa, names: &[String]) -> anyhow::Result<rustls::ServerConfig> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut roots = rustls::RootCertStore::empty();
-    for c in CertificateDer::pem_slice_iter(ca.pem.as_bytes()) {
+    for c in CertificateDer::pem_slice_iter(ca.pem().as_bytes()) {
         roots.add(c?)?;
     }
     let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
         // Enrolling agents have no certificate yet; every other route wants one.
         .allow_unauthenticated()
         .build()?;
-    let (cert_pem, key_pem) = ca.server_cert(names)?;
+    let (cert_pem, key_pem) = server_cert(ca, names).await?;
     let chain = CertificateDer::pem_slice_iter(cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
     let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())?;
     let mut cfg = rustls::ServerConfig::builder_with_provider(provider)
@@ -260,14 +219,24 @@ fn server_config(ca: &Ca, names: &[String]) -> anyhow::Result<rustls::ServerConf
     Ok(cfg)
 }
 
-/// Starts the endpoint when `PYO_AGENT_MTLS_ADDR` is set.
-pub async fn start(state: AppState, agent_routes: Router<AppState>) -> anyhow::Result<()> {
+/// Starts the endpoint when `PYO_AGENT_MTLS_ADDR` is set, with the
+/// hosted build's CA or Pyo's own.
+pub async fn start(
+    state: AppState,
+    agent_routes: Router<AppState>,
+    hosted_ca: Option<Arc<dyn crate::AgentCa>>,
+) -> anyhow::Result<()> {
     let Some(addr) = std::env::var("PYO_AGENT_MTLS_ADDR").ok().filter(|v| !v.trim().is_empty()) else {
         return Ok(());
     };
     let addr: SocketAddr = addr.trim().parse()?;
-    let dir = std::env::var("PYO_AGENT_CA_DIR").unwrap_or_else(|_| "/var/lib/pyo/agent-ca".into());
-    let ca = Ca::load_or_create(std::path::Path::new(&dir))?;
+    let ca: Arc<dyn crate::AgentCa> = match hosted_ca {
+        Some(ca) => ca,
+        None => {
+            let dir = std::env::var("PYO_AGENT_CA_DIR").unwrap_or_else(|_| "/var/lib/pyo/agent-ca".into());
+            Arc::new(Ca::load_or_create(std::path::Path::new(&dir))?)
+        }
+    };
     // The names the endpoint answers to: its URL's host, and any extra.
     let mut names: Vec<String> = std::env::var("PYO_AGENT_TLS_NAMES")
         .unwrap_or_default()
@@ -287,7 +256,7 @@ pub async fn start(state: AppState, agent_routes: Router<AppState>) -> anyhow::R
         names.insert(0, host);
     }
     anyhow::ensure!(!names.is_empty(), "PYO_AGENT_MTLS_ADDR needs PYO_AGENT_ENDPOINT or PYO_AGENT_TLS_NAMES");
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config(&ca, &names)?));
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config(ca.as_ref(), &names).await?));
     let _ = CA.set(ca);
     let tcp = tokio::net::TcpListener::bind(addr).await?;
     let local = tcp.local_addr()?;
@@ -379,8 +348,9 @@ async fn enroll(
             "This connect command was used already. Get a new one in the cluster's settings.",
         ));
     }
-    let (serial, pem, not_after) = ca
+    let Issued { serial, pem, not_after_ms: not_after } = ca
         .issue(&b.csr, &team, &cluster)
+        .await
         .map_err(|e| ApiError::bad_request(format!("Couldn't read the request: {e}")))?;
     sqlx::query("UPDATE pyo.clusters SET agent_cert_prev_serial = NULL, agent_cert_serial = $2, agent_token_used_hash = $3 WHERE id = $1")
         .bind(&cluster)
@@ -409,8 +379,9 @@ async fn renew(
     if !peer.is_some_and(|p| p.cert.is_some()) {
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "Renewing needs the current certificate."));
     }
-    let (serial, pem, not_after) = ca
+    let Issued { serial, pem, not_after_ms: not_after } = ca
         .issue(&b.csr, &cluster.team_id, &cluster.id)
+        .await
         .map_err(|e| ApiError::bad_request(format!("Couldn't read the request: {e}")))?;
     sqlx::query("UPDATE pyo.clusters SET agent_cert_prev_serial = agent_cert_serial, agent_cert_serial = $2 WHERE id = $1")
         .bind(&cluster.id)
@@ -424,22 +395,21 @@ async fn renew(
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_cluster_certificate_names_its_cluster() {
+    use crate::AgentCa;
+
+    #[tokio::test]
+    async fn a_cluster_certificate_names_its_cluster() {
         let dir = std::env::temp_dir().join(format!("pyo-ca-test-{}", rand::random::<u32>()));
         let ca = Ca::load_or_create(&dir).unwrap();
         let key = KeyPair::generate().unwrap();
-        let csr = CertificateParams::new(Vec::<String>::new())
-            .unwrap()
-            .serialize_request(&key)
-            .unwrap()
-            .pem()
-            .unwrap();
-        let (serial, pem, _) = ca.issue(&csr, "team_a", "cl_1").unwrap();
+        let csr = agent_ca::csr(&key).unwrap();
+        let Issued { serial, pem, .. } = ca.issue(&csr, "team_a", "cl_1").await.unwrap();
         let der = CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
         let id = identity(&der).unwrap();
         assert_eq!((id.team.as_str(), id.cluster.as_str()), ("team_a", "cl_1"));
         assert_eq!(id.serial, serial);
+        // The endpoint's own certificate, and a TLS config from both.
+        assert!(server_config(&ca, &["agent.pyo.test".into()]).await.is_ok());
         // The same CA again from its files.
         let again = Ca::load_or_create(&dir).unwrap();
         assert_eq!(again.pem(), ca.pem());

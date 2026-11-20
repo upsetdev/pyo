@@ -183,6 +183,32 @@ pub struct Extensions {
     /// can claim one. For an installation shared by teams that don't trust
     /// each other.
     pub verify_domains: bool,
+    /// The agent CA for the mTLS agent endpoint, kept outside this process
+    /// (Pyo Cloud: its signer). Without one, Pyo keeps its own in
+    /// `PYO_AGENT_CA_DIR`.
+    pub agent_ca: Option<Arc<dyn AgentCa>>,
+}
+
+pub use pyo_proto::agent_ca::Issued as IssuedCert;
+
+/// The agent CA behind the mTLS agent endpoint (agent_tls.rs). What it
+/// issues is pyo-proto's `agent_ca`; where its key lives is up to it.
+pub trait AgentCa: Send + Sync {
+    /// The CA certificate agents trust (PEM).
+    fn pem(&self) -> &str;
+    /// A client certificate for a cluster's agent, from its CSR.
+    fn issue<'a>(
+        &'a self,
+        csr_pem: &'a str,
+        team: &'a str,
+        cluster: &'a str,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<IssuedCert>>;
+    /// The endpoint's own certificate for `names` (PEM), from its CSR.
+    fn issue_server<'a>(
+        &'a self,
+        csr_pem: &'a str,
+        names: &'a [String],
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<String>>;
 }
 
 /// A command to sign: its id, its `kind`, and the hex SHA-256 of its JSON.
@@ -341,6 +367,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         entitlements,
         command_signer,
         verify_domains,
+        agent_ca,
     } = ext;
     let _ = FEATURES.set(features);
     let _ = VERIFY_DOMAINS.set(verify_domains);
@@ -638,6 +665,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 .merge(terminal::agent_routes())
                 .merge(database_imports::agent_routes())
                 .merge(agent_auth::component_routes()),
+            agent_ca,
         )
         .await?;
     }
