@@ -299,7 +299,7 @@ function AddBuilder() {
                 </div>
                 <div className="space-y-2 text-[13px]">
                   <p className="font-medium">Run this on the machine</p>
-                  <NeedsTailscale />
+                  <NeedsTailscale clusterId={joinTarget || undefined} />
                   <LiveCommand
                     command={live.data?.command}
                     stale={live.stale}

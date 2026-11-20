@@ -146,7 +146,15 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         | Command::DbSetup { .. }
         | Command::UpgradePyo(_)
         | Command::UpdateAgent { .. }
-        | Command::RefreshInstall(_) => {
+        | Command::RefreshInstall(_)
+        | Command::TailscaleSetup { .. }
+        | Command::TailscaleClient { .. }
+        | Command::TailscaleTest {}
+        | Command::TailscaleSync(_)
+        | Command::TailscaleKey { .. }
+        | Command::TailscaleCheckName { .. }
+        | Command::TailscaleRemove { .. }
+        | Command::SandboxCall(_) => {
             unreachable!("handled by the command loop")
         }
     };

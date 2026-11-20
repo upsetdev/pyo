@@ -22,6 +22,7 @@ import { Tabs } from "~/components/ui/Tabs";
 import { seo } from "~/lib/seo";
 import {
   cloudflareIn,
+  clustersIn,
   getState,
   roleIn,
   teamBySlug,
@@ -94,7 +95,8 @@ function Integrations() {
   const s = usePyo();
   const teamAdmin = useTeamAdmin();
   const cfAdmin = ["owner", "admin"].includes(roleIn(s) ?? "");
-  // A hosted Pyo has no Tailscale setup yet, and Hetzner servers need it.
+  // Hetzner on a hosted Pyo: not yet (new clusters there have no tailnet
+  // to join until their own Tailscale is set up).
   const hosted = useHosted();
   const [filter, setFilter] = useState<string>("all");
   const [q, setQ] = useState("");
@@ -104,7 +106,10 @@ function Integrations() {
   useGithubReturn(() => setOpen("github"));
 
   const team = s.currentTeamId;
+  // Pyo's own (self-hosted), else the first of the team's clusters with it.
+  const teamTailnets = clustersIn(s).flatMap((c) => (c.tailscale ? [c.tailscale] : []));
   const ts = s.tailscale;
+  const tsSuffix = ts?.suffix ?? teamTailnets.find((t) => t.suffix)?.suffix;
   const hetzner = hetznerOf(s);
   const cloudServers = s.cloudServers.filter((c) => c.teamId === team);
   const installs = s.githubInstallations.filter((g) => g.teamId === team);
@@ -142,10 +147,10 @@ function Integrations() {
       category: "Networking",
       icon: <BrandMark icon={siTailscale} size={18} />,
       description: "Servers join your tailnet with it.",
-      connected: !!ts,
-      detail: ts?.suffix ? <span className="font-mono text-[11.5px]">{ts.suffix}</span> : null,
+      connected: !!ts || teamTailnets.length > 0,
+      detail: tsSuffix ? <span className="font-mono text-[11.5px]">{tsSuffix}</span> : null,
       problem: tsProblem(),
-      canSetUp: !!s.user.isAdmin,
+      canSetUp: !!s.user.isAdmin || teamAdmin,
       dialog: (onClose) => <TailscaleDialog onClose={onClose} />,
     },
     {
@@ -222,7 +227,7 @@ function Integrations() {
       dialog: (onClose) => <SecretStoresDialog onClose={onClose} />,
     },
   ];
-  const all = hosted === false ? offered : offered.filter((x) => x.id !== "tailscale" && x.id !== "hetzner");
+  const all = hosted === false ? offered : offered.filter((x) => x.id !== "hetzner");
 
   // Connected first, each group in the order above.
   const cards = [...all.filter((x) => x.connected), ...all.filter((x) => !x.connected)];

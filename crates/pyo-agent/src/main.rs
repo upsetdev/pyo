@@ -38,6 +38,7 @@ mod runs;
 mod scope;
 mod sites;
 mod tailnet;
+mod tailscale;
 mod terminal;
 mod tls;
 mod traffic;
@@ -393,6 +394,12 @@ fn ordered_keys(c: &Command) -> Vec<String> {
         Command::RefreshInstall(_) | Command::UpdateAgent { .. } => {
             vec!["agent/deployment".to_owned()]
         }
+        // The cluster's Tailscale client and names: one change at a time,
+        // in order (a setup, then the names it makes possible).
+        Command::TailscaleSetup { .. }
+        | Command::TailscaleClient { .. }
+        | Command::TailscaleSync(_)
+        | Command::TailscaleRemove { .. } => vec!["tailscale".to_owned()],
         _ => vec![],
     };
     keys.sort();
@@ -516,6 +523,24 @@ async fn run_command(agent: Agent, envelope: CommandEnvelope) {
             password,
         } => backup::setup(&agent, &namespace, &admin, &password).await,
         Command::UpgradePyo(spec) => upgrade::start(&agent, *spec).await,
+        Command::TailscaleSetup { token, version } => {
+            tailscale::run_setup(&agent.kube, token, version).await
+        }
+        Command::TailscaleClient { client_id, secret } => {
+            tailscale::run_client(&agent.kube, &client_id, &secret).await
+        }
+        Command::TailscaleTest {} => tailscale::run_test(&agent.kube).await,
+        Command::TailscaleSync(w) => tailscale::run_sync(&agent.kube, &w).await,
+        Command::TailscaleKey { description } => {
+            tailscale::run_key(&agent.kube, &description).await
+        }
+        Command::TailscaleCheckName { name, marks } => {
+            tailscale::run_check_name(&agent.kube, &name, &marks).await
+        }
+        Command::TailscaleRemove { names, marks } => {
+            tailscale::run_remove(&agent.kube, &names, &marks).await
+        }
+        Command::SandboxCall(c) => tailscale::sandbox::run(&c).await,
         // Answered before switching: the switch stops this process.
         Command::UpdateAgent { image } => {
             let result = match upgrade::check_agent_image(&agent.kube, &image).await {
@@ -625,6 +650,14 @@ fn command_kind(c: &Command) -> &'static str {
         Command::DeleteVolume { .. } => "delete_volume",
         Command::FetchDatabaseLogs { .. } => "fetch_database_logs",
         Command::QueryTraffic(_) => "query_traffic",
+        Command::TailscaleSetup { .. } => "tailscale_setup",
+        Command::TailscaleClient { .. } => "tailscale_client",
+        Command::TailscaleTest {} => "tailscale_test",
+        Command::TailscaleSync(_) => "tailscale_sync",
+        Command::TailscaleKey { .. } => "tailscale_key",
+        Command::TailscaleCheckName { .. } => "tailscale_check_name",
+        Command::TailscaleRemove { .. } => "tailscale_remove",
+        Command::SandboxCall(_) => "sandbox_call",
         Command::CheckDatabaseImport(_) => "check_database_import",
         Command::ListSnapshots(_) => "list_snapshots",
         Command::ForgetSnapshot(_) => "forget_snapshot",

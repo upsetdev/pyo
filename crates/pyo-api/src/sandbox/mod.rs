@@ -27,7 +27,7 @@ pub mod api;
 pub mod base;
 pub mod daemon;
 #[cfg(test)]
-mod e2e;
+pub(crate) mod e2e;
 pub mod edgecert;
 pub mod firstuse;
 pub mod images;
@@ -1307,7 +1307,7 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
         Some(t) => require(&mut tx, user, t, Need::Manage).await?,
         None => require_install_add(user)?,
     }
-    crate::cloud::needs_tailscale(&s.db).await?;
+    let via = crate::tailscale::team_key_cluster(&s.db, req.team_id.as_deref()).await?;
     let door = crate::deploy::registry_push();
     let (false, Some(_)) = (door.is_empty(), crate::web::tailnet_api_url()) else {
         return Err(ApiError::conflict(
@@ -1356,8 +1356,15 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
     };
     let code = join::new_code();
     join::keep(&mut tx, &id, &code).await?;
+    // Pyo reaches it through that cluster's agent.
+    sqlx::query("UPDATE pyo.sandbox_servers SET via_cluster = $2 WHERE id = $1")
+        .bind(&id)
+        .bind(&via)
+        .execute(&mut *tx)
+        .await?;
     let ts_key = crate::tailscale::join_key(
         s,
+        &via,
         &format!("Pyo: sandbox server {}", req.name),
         "a sandbox server",
     )
@@ -1563,7 +1570,7 @@ pub async fn add_cloud_server(s: &AppState, user: &User, req: AddCloudServer) ->
     };
     let mut tx = s.db.begin().await?;
     require(&mut tx, user, &req.team_id, Need::Manage).await?;
-    crate::cloud::needs_tailscale(&s.db).await?;
+    let via = crate::tailscale::team_key_cluster(&s.db, Some(&req.team_id)).await?;
     let door = crate::deploy::registry_push();
     let api = crate::web::tailnet_api_url();
     let (false, Some(api)) = (door.is_empty(), api) else {
@@ -1600,16 +1607,18 @@ pub async fn add_cloud_server(s: &AppState, user: &User, req: AddCloudServer) ->
         )));
     }
     let id = crate::ids::new_id("sbs");
-    sqlx::query("INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain) VALUES ($1, $2, $3, 'joining', $4, $5)")
+    sqlx::query("INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain, via_cluster) VALUES ($1, $2, $3, 'joining', $4, $5, $6)")
         .bind(&id)
         .bind(&req.team_id)
         .bind(&req.name)
         .bind(&user.name)
         .bind(&edge)
+        .bind(&via)
         .execute(&mut *tx)
         .await?;
     let ts_key = crate::tailscale::join_key(
         s,
+        &via,
         &format!("Pyo: sandbox server {}", req.name),
         "a sandbox server",
     )

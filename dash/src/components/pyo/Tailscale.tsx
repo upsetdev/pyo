@@ -16,16 +16,37 @@ import {
 } from "~/components/pyo/IntegrationDialog";
 import { Badge } from "~/components/ui/Badge";
 import { Button, ButtonLink } from "~/components/ui/Button";
-import { Field, Input, SecretInput, Switch } from "~/components/ui/Field";
+import { Field, Input, SecretInput, Select, Switch } from "~/components/ui/Field";
 import { Callout } from "~/components/ui/Panel";
 import { StatusNote } from "~/components/ui/StatusNote";
 import { site } from "~/config/site";
-import { api, usePyo } from "~/lib/pyo/store";
+import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
+import { api, clustersIn, usePyo, type PyoState } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import type { TailscaleCheck, TailscaleSetupOutcome, TailscaleSetupPlan } from "~/lib/pyo/types";
+import type { TailscaleCheck, TailscaleInfo, TailscaleSetupOutcome, TailscaleSetupPlan } from "~/lib/pyo/types";
 
 /** Where a flow that needed Tailscale goes back to once it's saved. */
 const BACK = "pyo.tailscaleBack";
+/** The cluster that flow needed it on. */
+const FOR = "pyo.tailscaleCluster";
+
+/** The cluster Pyo runs on, when it has one (self-hosted). */
+function hostOf(s: PyoState): string | undefined {
+  return s.tailscale?.clusterId ?? s.clusters.find((c) => c.sameCluster)?.id;
+}
+
+/**
+ * A cluster's Tailscale as the dialog shows it: the one Pyo runs on with
+ * Pyo's names there, any other with its client only. Null when not set up.
+ */
+function tailnetOf(s: PyoState, clusterId: string | undefined): TailscaleInfo | null {
+  if (!clusterId) return null;
+  if (s.tailscale && hostOf(s) === clusterId) return s.tailscale;
+  const t = s.clusters.find((c) => c.id === clusterId)?.tailscale;
+  return t
+    ? { suffix: t.suffix, clientId: t.clientId, hint: t.hint, dashboard: null, registry: null, onTailnet: false, hostMove: null }
+    : null;
+}
 
 const DOCS = `${site.docsUrl}/tailscale`;
 const KEYS = "https://login.tailscale.com/admin/settings/keys";
@@ -45,18 +66,23 @@ function goBack(navigate: ReturnType<typeof useNavigate>): boolean {
 
 /**
  * Shown in connect and add-server flows until Tailscale is set up: servers
- * join over the tailnet. Links to the card and comes back after saving.
- * Not on a hosted Pyo.
+ * join over the tailnet. With `clusterId`, the cluster a server joins: its
+ * own Tailscale, or Pyo's when self-hosted. Without, a new cluster: Pyo's
+ * (a hosted Pyo's clusters connect over the internet). Links to the card
+ * and comes back after saving.
  */
-export function NeedsTailscale() {
+export function NeedsTailscale({ clusterId }: { clusterId?: string }) {
   const s = usePyo();
-  // A hosted Pyo has no Tailscale setup yet: its servers connect directly.
   const hosted = useHosted();
-  if (s.tailscale || hosted !== false) return null;
+  const teamAdmin = useTeamAdmin();
+  if (hosted === undefined) return null;
+  const own = clusterId ? s.clusters.find((c) => c.id === clusterId)?.tailscale : null;
+  if (own || (!hosted && s.tailscale) || (hosted && !clusterId)) return null;
+  const can = clusterId && hosted ? teamAdmin : s.user.isAdmin;
   return (
     <Callout tone="warning">
       Servers join over your tailnet. Set up Tailscale first.{" "}
-      {s.user.isAdmin ? (
+      {can ? (
         <ButtonLink
           href="/integrations#tailscale"
           size="xs"
@@ -64,6 +90,7 @@ export function NeedsTailscale() {
           onClick={() => {
             try {
               sessionStorage.setItem(BACK, window.location.pathname);
+              if (clusterId && hosted) sessionStorage.setItem(FOR, clusterId);
             } catch {
               // Private mode: no way back, the card stays.
             }
@@ -71,6 +98,8 @@ export function NeedsTailscale() {
         >
           Set up Tailscale
         </ButtonLink>
+      ) : hosted ? (
+        "Ask a team admin."
       ) : (
         "Ask an installation admin."
       )}
@@ -274,7 +303,27 @@ const STEPS = ["Token", "Review", "Done"];
  */
 export function TailscaleDialog({ onClose }: { onClose: () => void }) {
   const s = usePyo();
-  const ts = s.tailscale;
+  const hosted = useHosted();
+  const teamAdmin = useTeamAdmin();
+  const host = hostOf(s);
+  // Each cluster keeps its own client. The ones here: the team's, and the
+  // one Pyo runs on for its admins.
+  const choices = clustersIn(s).filter((c) => c.id !== host);
+  const hostCluster = s.clusters.find((c) => c.id === host);
+  if (hostCluster && s.user.isAdmin) choices.unshift(hostCluster);
+  const [cid, setCid] = useState<string | undefined>(() => {
+    let wanted: string | null = null;
+    try {
+      wanted = sessionStorage.getItem(FOR);
+      sessionStorage.removeItem(FOR);
+    } catch {
+      // Picked below.
+    }
+    return choices.find((c) => c.id === wanted)?.id ?? choices[0]?.id ?? host;
+  });
+  const ts = tailnetOf(s, cid);
+  const isHost = !!cid && cid === host;
+  const admin = isHost ? !!s.user.isAdmin : teamAdmin;
   const navigate = useNavigate();
   const [view, setView] = useState<"manage" | "token" | "client">(ts ? "manage" : "token");
 
@@ -312,7 +361,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
     setBusy(true);
     setError("");
     setStopped(null);
-    const r = await api.planTailscaleSetup(token);
+    const r = await api.planTailscaleSetup(token, cid);
     setBusy(false);
     if ("error" in r) return setError(r.error);
     setPlan(r.data.plan);
@@ -322,7 +371,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
     if (!plan) return;
     setBusy(true);
     setError("");
-    const r = await api.setUpTailscale(token, plan.version);
+    const r = await api.setUpTailscale(token, plan.version, cid);
     setBusy(false);
     if ("error" in r) return setError(r.error);
     if (r.data.reviewAgain) return void check(r.data.error ?? "");
@@ -338,10 +387,10 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
     if (!goBack(navigate)) setDone(r.data);
   };
   const saveClient = async () => {
-    if (busy || !clientId.trim() || (!ts?.clientId && !secret.trim())) return;
+    if (busy || !clientId.trim() || !secret.trim()) return;
     setBusy(true);
     setError("");
-    const r = await api.saveTailscale(clientId, secret);
+    const r = await api.saveTailscale(clientId, secret, cid);
     setBusy(false);
     if ("error" in r) return setError(r.error);
     setClientChecks(r.data.checks);
@@ -360,12 +409,39 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
   };
   const test = async () => {
     setTesting(true);
-    const r = await api.testTailscale();
+    const r = await api.testTailscale(cid);
     setTesting(false);
     if ("error" in r) toast({ tone: "error", title: r.error });
     else setChecks(r.data.checks);
   };
 
+  // The cluster, when there's a choice: each keeps its own client.
+  const picker =
+    choices.length > 1 || (hosted && choices.length) ? (
+      <Field label="Cluster">
+        {(p) => (
+          <Select
+            {...p}
+            value={cid ?? ""}
+            onChange={(e) => {
+              setCid(e.target.value);
+              setView(tailnetOf(s, e.target.value) ? "manage" : "token");
+              setPlan(null);
+              setError("");
+              setDone(null);
+              setChecks([]);
+              setClientId(tailnetOf(s, e.target.value)?.clientId ?? "");
+            }}
+          >
+            {choices.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+    ) : null;
   const shell = (p: {
     body: ReactNode;
     footer?: ReactNode;
@@ -380,11 +456,20 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
       onSubmit={p.onSubmit}
       footer={p.footer}
     >
-      {p.body}
+      <div className="space-y-4">
+        {done || plan ? null : picker}
+        {p.body}
+      </div>
     </IntegrationDialog>
   );
 
-  if (!s.user.isAdmin)
+  if (!cid)
+    return shell({
+      body: <p className="text-[12.5px] text-muted-foreground">Connect a cluster first.</p>,
+      footer: <Button size="sm" onClick={onClose}>Done</Button>,
+    });
+
+  if (!admin)
     return shell({
       body: (
         <div className="space-y-3">
@@ -398,8 +483,12 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
                 : [["Status", <Badge>Not set up</Badge>]]
             }
           />
-          {ts ? null : <p className="text-[12.5px] text-muted-foreground">An installation admin can set it up.</p>}
-          <HostMove />
+          {ts ? null : (
+            <p className="text-[12.5px] text-muted-foreground">
+              {isHost ? "An installation admin can set it up." : "A team admin can set it up."}
+            </p>
+          )}
+          {isHost ? <HostMove /> : null}
         </div>
       ),
       footer: <Button size="sm" onClick={onClose}>Done</Button>,
@@ -498,7 +587,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
               </TextButton>
             </div>
           </div>
-          {ts ? null : <PublicDashboard />}
+          {ts || !isHost ? null : <PublicDashboard />}
         </div>
       ),
       footer: (
@@ -528,13 +617,13 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
                 <Input {...p} mono value={clientId} onChange={(e) => setClientId(e.target.value)} autoComplete="off" />
               )}
             </Field>
-            <Field label="Client secret" optional={!!ts?.clientId}>
+            <Field label="Client secret">
               {(p) => (
                 <SecretInput
                   {...p}
                   value={secret}
                   onChange={(e) => setSecret(e.target.value)}
-                  placeholder={ts?.clientId ? "Unchanged" : "tskey-client-…"}
+                  placeholder="tskey-client-…"
                   autoComplete="off"
                 />
               )}
@@ -548,7 +637,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
               Set up with an access token instead
             </TextButton>
           </div>
-          {ts ? null : <PublicDashboard />}
+          {ts || !isHost ? null : <PublicDashboard />}
         </div>
       ),
       footer: (
@@ -556,7 +645,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
           <Button variant="ghost" size="sm" onClick={cancel}>
             Cancel
           </Button>
-          <Button type="submit" size="sm" disabled={busy || !clientId.trim() || (!ts?.clientId && !secret.trim())}>
+          <Button type="submit" size="sm" disabled={busy || !clientId.trim() || !secret.trim()}>
             {busy ? <Busy>Checking…</Busy> : "Save"}
           </Button>
         </>
@@ -567,7 +656,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
   return shell({
     body: (
       <div className="space-y-4">
-        <HostMove />
+        {isHost ? <HostMove /> : null}
         <Summary
           items={[
             ["Tailnet", <span className="truncate font-mono">{ts.suffix ?? "Not seen yet"}</span>],
@@ -584,7 +673,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
           ]}
         />
         {checks.length ? <Checks checks={checks} /> : null}
-        {ts.suffix && (ts.dashboardName || ts.registryName || ts.sandboxesName) ? (
+        {isHost && ts.suffix && (ts.dashboardName || ts.registryName || ts.sandboxesName) ? (
           <DialogSection title="Names on your tailnet">
             <ul className="list-rows rounded-lg border border-border">
               <NameRow kind="dashboard" label="Dashboard" />
@@ -593,7 +682,7 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
             </ul>
           </DialogSection>
         ) : null}
-        <PublicDashboard />
+        {isHost ? <PublicDashboard /> : null}
         {confirming ? (
           <ConfirmNote
             title="Disconnect Tailscale?"
@@ -601,10 +690,12 @@ export function TailscaleDialog({ onClose }: { onClose: () => void }) {
             onCancel={() => setConfirming(false)}
             onConfirm={() => {
               setConfirming(false);
-              void api.removeTailscale();
+              void api.removeTailscale(cid);
             }}
           >
-            Pyo's names on your tailnet are deleted. Servers stay on it. The public dashboard opens again.
+            {isHost
+              ? "Pyo's names on your tailnet are deleted. Servers stay on it. The public dashboard opens again."
+              : "Pyo's names on your tailnet are deleted. Servers stay on it."}
           </ConfirmNote>
         ) : null}
       </div>

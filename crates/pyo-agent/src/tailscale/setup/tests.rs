@@ -264,7 +264,7 @@ async fn serve(m: Mock) -> (String, Shared) {
     (format!("http://{addr}"), st)
 }
 
-/// The installation, as the setup sees it.
+/// The cluster, as the setup sees it.
 #[derive(Default)]
 struct FakeHost {
     no_key: bool,

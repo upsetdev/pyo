@@ -1,8 +1,10 @@
-//! Setting up Tailscale from one API access token (Integrations › Tailscale).
+//! Setting up Tailscale from one API access token, in the cluster's agent.
 //!
 //! An admin pastes a short-lived API access token (Settings › Keys in the
-//! Tailscale console). [`plan`] reads the tailnet and says what's missing,
-//! changing nothing. [`apply`] then makes those changes:
+//! Tailscale console) in the dashboard. Pyo passes it to the cluster's
+//! agent in a signed command, and never keeps it. [`plan`] reads the
+//! tailnet and says what's missing, changing nothing. [`apply`] then makes
+//! those changes:
 //!
 //! - **MagicDNS** and **HTTPS certificates** on.
 //! - **The policy**: `tag:pyo` in `tagOwners`, a grant to reach it on ports
@@ -12,13 +14,15 @@
 //!   place, so its comments and formatting stay. It's validated first and
 //!   written with `If-Match`, and only as the admin reviewed it: if it
 //!   changed since, nothing is written and the admin reviews it again.
-//! - **Pyo's own OAuth client**, with the scopes the manual path asks for,
-//!   saved and checked like one pasted by hand ([`crate::tailscale::save_client`]).
+//! - **The cluster's own OAuth client**, with the scopes the manual path
+//!   asks for, checked and kept like one pasted by hand
+//!   ([`super::use_client`]): a Secret in pyo-system.
 //! - **The pasted token is deleted** last, however the setup ends, or left
 //!   to the admin as a todo. It's kept only for a new review.
 //!
-//! The token lives in memory for one request only: it's never stored,
-//! logged or put in an error ([`Token`], [`Api::scrub`]). A tailnet that's
+//! The token lives in memory for one command only: it's never stored,
+//! logged or put in an error ([`Token`], [`Api::scrub`]). Only non-secret
+//! results go back to Pyo. A tailnet that's
 //! already set up gets no changes. A policy managed in Git isn't written:
 //! the lines to add come back instead.
 
@@ -26,9 +30,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeroize::Zeroize;
 
-use crate::AppState;
-use crate::error::{ApiError, ApiResult};
-use crate::tailscale::{Reply, TAG, TsError};
+use pyo_proto::tailscale::TAG;
+
+use super::{Reply, TsError};
 
 /// The scopes Pyo's own client gets: what the manual path asks for.
 const SCOPES: [&str; 3] = ["devices:core", "auth_keys", "services"];
@@ -47,6 +51,12 @@ const DELETE_TOKEN: &str = "Delete the token under Settings › Keys in the Tail
 #[derive(Deserialize)]
 #[serde(transparent)]
 pub struct Token(String);
+
+impl From<String> for Token {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
 
 impl Token {
     #[cfg(test)]
@@ -74,7 +84,7 @@ impl Drop for Token {
 }
 
 /// The token's first check: the shape of an API access token.
-fn check_shape(t: &Token) -> Result<(), String> {
+pub fn check_shape(t: &Token) -> Result<(), String> {
     let s = t.0.trim();
     if s.starts_with("tskey-client-") {
         return Err("That's an OAuth client secret. Paste an API access token, or set up with an OAuth client instead.".into());
@@ -111,11 +121,7 @@ pub struct Api {
 }
 
 impl Api {
-    pub fn new(token: Token) -> Self {
-        Self::at(crate::tailscale::API, token)
-    }
-
-    fn at(base: &str, mut token: Token) -> Self {
+    pub fn at(base: &str, mut token: Token) -> Self {
         let t = token.0.trim().to_owned();
         token.0.zeroize();
         token.0 = t;
@@ -135,8 +141,8 @@ impl Api {
         out
     }
 
-    /// A request with the token, through the same path as Pyo's own client
-    /// ([`crate::tailscale::send`]), with the token scrubbed from any error.
+    /// A request with the token, through the same path as the cluster's
+    /// client ([`super::send`]), with the token scrubbed from any error.
     async fn send(
         &self,
         method: reqwest::Method,
@@ -144,7 +150,7 @@ impl Api {
         body: Body,
         headers: &[(&str, &str)],
     ) -> Result<Reply, TsError> {
-        let mut req = crate::tailscale::http()
+        let mut req = super::http()
             .request(method, format!("{}{path}", self.base))
             .bearer_auth(&self.token.0);
         for (k, v) in headers {
@@ -157,7 +163,7 @@ impl Api {
                 .header(reqwest::header::CONTENT_TYPE, "application/hujson")
                 .body(t),
         };
-        crate::tailscale::send(req).await.map_err(|e| TsError {
+        super::send(req).await.map_err(|e| TsError {
             status: e.status,
             message: self.scrub(&e.message),
         })
@@ -512,32 +518,40 @@ pub fn diff(old: &str, new: &str) -> Vec<String> {
 
 // ── Reading the tailnet ─────────────────────────────────────────────────────
 
-/// What the installation does for the setup: the AppState, or a stand-in
-/// in tests.
+/// What the cluster does for the setup: its agent, or a stand-in in tests.
 pub(crate) trait Host {
-    /// It can seal a client secret (PYO_SECRET_KEY is set).
+    /// It can keep a client secret.
     fn can_store(&self) -> bool;
-    /// The saved OAuth client's ID, when it signs in.
+    /// The kept OAuth client's ID, when it signs in.
     async fn working_client(&self) -> Option<String>;
-    /// Saves a new client like one pasted by hand: `{ ok, checks }`.
+    /// Keeps a new client like one pasted by hand: `{ ok, checks }`.
     async fn save_client(&self, id: &str, secret: &str) -> Result<Value, String>;
 }
 
-impl Host for AppState {
+/// The cluster: its client is a Secret in pyo-system.
+pub struct Cluster {
+    pub kube: kube::Client,
+    /// Tailscale's API.
+    pub base: String,
+}
+
+impl Host for Cluster {
     fn can_store(&self) -> bool {
-        self.sealer.enabled()
+        true
     }
 
     async fn working_client(&self) -> Option<String> {
-        let (cfg, c) = crate::tailscale::saved_client(self).await.ok()??;
-        c.access_token().await.ok()?;
-        Some(cfg.client_id)
+        let (id, secret) = super::stored(&self.kube).await.ok()??;
+        super::Client::at(&self.base, &id, &secret)
+            .access_token()
+            .await
+            .ok()?;
+        Some(id)
     }
 
     async fn save_client(&self, id: &str, secret: &str) -> Result<Value, String> {
-        crate::tailscale::save_client(self, id, Some(secret))
-            .await
-            .map_err(|e| e.message)
+        let state = super::use_client(&self.kube, &self.base, id, secret).await?;
+        Ok(json!({ "ok": state.ok, "checks": state.checks }))
     }
 }
 
@@ -570,7 +584,7 @@ struct Survey {
     magic_dns: bool,
     /// None when Tailscale doesn't say.
     https: Option<bool>,
-    /// Pyo's saved client is on this tailnet and signs in.
+    /// The cluster's kept client is on this tailnet and signs in.
     client: bool,
 }
 
@@ -672,7 +686,7 @@ pub struct Plan {
     pub diff: Vec<String>,
     /// Why Pyo can't go on by itself, with `diff` as the lines to add.
     pub blocked: Option<String>,
-    /// The policy as Pyo read it, to hand back to setUpTailscale: if it
+    /// The policy as Pyo read it, to hand back for the setup: if it
     /// changed since, Pyo changes nothing and asks for a new review.
     pub version: String,
 }
@@ -733,8 +747,7 @@ pub(crate) async fn plan_with(api: &Api, host: &impl Host) -> Result<Plan, Strin
     Ok(p)
 }
 
-const NO_KEY: &str =
-    "This installation has no PYO_SECRET_KEY, so it can't store Pyo's OAuth client.";
+const NO_KEY: &str = "This cluster can't keep Pyo's OAuth client.";
 
 // ── Making the changes ──────────────────────────────────────────────────────
 
@@ -889,7 +902,7 @@ async fn write_policy(api: &Api, p: &Policy) -> Result<Vec<String>, Stop> {
 async fn make_client(api: &Api, host: &impl Host) -> Result<Vec<Value>, String> {
     let body = json!({
         "keyType": "client",
-        "description": crate::tailscale::key_description("Pyo"),
+        "description": pyo_proto::tailscale::key_description("Pyo"),
         "scopes": SCOPES,
         "tags": [TAG],
     });
@@ -1068,19 +1081,21 @@ pub(crate) async fn apply_with(api: &Api, host: &impl Host, reviewed: &str) -> O
     out
 }
 
-/// planTailscaleSetup.
-pub async fn plan(s: &AppState, token: Token) -> ApiResult<Value> {
-    check_shape(&token).map_err(ApiError::bad_request)?;
-    let p = plan_with(&Api::new(token), s)
-        .await
-        .map_err(ApiError::bad_request)?;
-    Ok(json!({ "ok": true, "plan": p }))
+/// The plan, for the token `api` carries.
+pub async fn plan(api: &Api, host: &impl Host) -> Result<Plan, String> {
+    check_shape(&api.token)?;
+    plan_with(api, host).await
 }
 
-/// setUpTailscale: `version` is the reviewed plan's.
-pub async fn apply(s: &AppState, token: Token, version: &str) -> ApiResult<Outcome> {
-    check_shape(&token).map_err(ApiError::bad_request)?;
-    Ok(apply_with(&Api::new(token), s, version).await)
+/// The setup, as reviewed (`version` is the reviewed plan's).
+pub async fn apply(api: &Api, host: &impl Host, version: &str) -> Outcome {
+    if let Err(e) = check_shape(&api.token) {
+        return Outcome {
+            error: Some(e),
+            ..Default::default()
+        };
+    }
+    apply_with(api, host, version).await
 }
 
 #[cfg(test)]

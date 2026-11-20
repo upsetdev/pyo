@@ -72,7 +72,6 @@ mod sigstore;
 mod sites;
 mod snapshot;
 mod tailscale;
-mod tailscale_setup;
 mod teambackup;
 mod template_source;
 mod terminal;
@@ -487,6 +486,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
     }
     // Every process: the worker sends sandbox servers images through the
     // registry door's tailnet address (sandbox/templates.rs).
+    sandbox::daemon::init(state.clone());
     tokio::spawn(tailscale::addresses_follower(state.db.clone()));
     if role.worker() {
         // Each loop runs on one worker at a time (leader lock); jobs on any.

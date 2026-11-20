@@ -3361,8 +3361,10 @@ dependencies = [
  "base64 0.23.1",
  "flate2",
  "futures",
+ "hex",
  "http",
  "jiff",
+ "jsonc-parser",
  "k8s-openapi",
  "kube",
  "maxminddb",
@@ -3378,6 +3380,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "woothee",
+ "zeroize",
 ]
 
 [[package]]

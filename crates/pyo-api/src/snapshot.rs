@@ -171,24 +171,25 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             o.extend(shown);
         }
     }
-    // The tailnet its tailnet domains are on: Tailscale set up, and a server
-    // of the cluster on the tailnet.
-    let suffix = crate::tailscale::settings(db).await?.and_then(|c| c.suffix);
-    let on_tailnet: Vec<String> = match &suffix {
-        Some(_) => sqlx::query_scalar(
-            "SELECT id FROM pyo.clusters WHERE team_id = ANY($1)
-                AND EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(capabilities->'tailnet', '[]')) t WHERE t->>'state' = 'Running')",
-        )
-        .bind(&team_ids)
-        .fetch_all(db)
-        .await?,
-        None => Vec::new(),
-    };
+    // The tailnet its tailnet domains are on: Tailscale set up on the
+    // cluster, and a server of it on the tailnet. And the cluster's
+    // Tailscale as the dashboard shows it (never a secret).
+    let tailnets: Vec<(String, Option<Value>, bool)> = sqlx::query_as(
+        "SELECT id, tailscale,
+                EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(capabilities->'tailnet', '[]')) t WHERE t->>'state' = 'Running')
+           FROM pyo.clusters WHERE team_id = ANY($1)",
+    )
+    .bind(&team_ids)
+    .fetch_all(db)
+    .await?;
     for c in &mut clusters {
-        let on = c["id"]
-            .as_str()
-            .is_some_and(|id| on_tailnet.iter().any(|x| x == id));
-        c["tailnet"] = json!(suffix.as_ref().filter(|_| on));
+        let row = tailnets.iter().find(|r| c["id"] == json!(r.0));
+        let t = row
+            .and_then(|r| r.1.clone())
+            .and_then(|v| serde_json::from_value::<crate::tailscale::Tailnet>(v).ok());
+        let on = row.is_some_and(|r| r.2);
+        c["tailnet"] = json!(t.as_ref().and_then(|t| t.suffix.clone()).filter(|_| on));
+        c["tailscale"] = t.as_ref().map(crate::tailscale::cluster_view).unwrap_or(Value::Null);
     }
 
     // Workloads come from each cluster's last heartbeat.
