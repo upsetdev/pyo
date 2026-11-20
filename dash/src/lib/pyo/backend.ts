@@ -858,8 +858,6 @@ export type CloudBilling = {
   /** Days data is kept after a team is paused or ended. Not served yet by
    * cloud-api (PYO_CLOUD_RETAIN_DAYS), so the page assumes 30 without it. */
   retainDays?: number;
-  /** The request allowance (shown, never enforced). `used` is null until it's counted. */
-  requests: { perServer: number; included: number; used: number | null } | null;
   country: string;
   polar: { configured: boolean; yearly: boolean; portal: boolean };
   /** Present only for visitors in Indonesia. */

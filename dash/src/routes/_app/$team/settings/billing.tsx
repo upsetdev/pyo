@@ -492,7 +492,6 @@ function Note({
 }
 
 function Usage({ b }: { b: CloudBilling }) {
-  const r = b.requests;
   const paid = b.seats > 0 && b.status !== "none" && b.status !== "canceled";
   return (
     <Panel
@@ -526,20 +525,6 @@ function Usage({ b }: { b: CloudBilling }) {
             </>
           )}
         </li>
-        {r ? (
-          <li className="flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 text-[12.5px]">
-            <span className="w-24 shrink-0 text-muted-foreground">Requests</span>
-            {r.used == null ? (
-              <span className="min-w-32 flex-1 text-muted-foreground">Not counted yet</span>
-            ) : (
-              <Meter value={r.used} max={r.included} className="min-w-32 flex-1" label="Requests" />
-            )}
-            <span className="shrink-0 tabular-nums">
-              {r.used == null ? null : <>{r.used.toLocaleString("en-US")} </>}
-              <span className="text-muted-foreground">of {r.included.toLocaleString("en-US")} included</span>
-            </span>
-          </li>
-        ) : null}
       </ul>
     </Panel>
   );
