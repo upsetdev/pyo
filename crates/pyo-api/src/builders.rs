@@ -446,6 +446,8 @@ async fn refresh_cluster_builders(s: &AppState) -> anyhow::Result<()> {
 
 async fn watch_once(s: &AppState) -> anyhow::Result<()> {
     refresh_cluster_builders(s).await?;
+    // Folders sent with `pyo deploy` that were never built in time.
+    crate::source_uploads::sweep(&s.db).await?;
     sqlx::query("UPDATE pyo.builders SET status = 'offline' WHERE status = 'ready' AND last_seen_at < now() - interval '60 seconds'").execute(&s.db).await?;
     // Builds nobody finished (builder gone mid-build) fail after an hour.
     let stale: Vec<(String, String)> = sqlx::query_as(

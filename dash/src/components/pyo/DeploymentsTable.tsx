@@ -35,6 +35,7 @@ import type { Deployment } from "~/lib/pyo/types";
 import { getTemplate } from "~/lib/pyo/templates";
 import { deployStatus } from "./lists";
 import { imageLabel, SourceMark } from "./ProjectCard";
+import { uploadText } from "./common";
 import { currentSlug } from "~/lib/pyo/paths";
 
 export const TRIGGER_LABEL: Record<Deployment["trigger"], string> = {
@@ -225,6 +226,10 @@ function VersionRow({
           {d.source.type === "git" ? (
             <span className="truncate text-muted-foreground">
               on {d.source.branch}
+            </span>
+          ) : d.source.type === "upload" ? (
+            <span className="truncate text-muted-foreground">
+              {uploadText(d.source)}
             </span>
           ) : null}
         </p>
@@ -475,7 +480,9 @@ export function DeploymentsTable({
                       <p className="flex items-center gap-1.5 truncate text-[13px]">
                         <SourceMark source={d.source} />
                         <span className="truncate">
-                          {d.source.image
+                          {d.source.type === "upload"
+                            ? uploadText(d.source)
+                            : d.source.image
                             ? imageLabel(d.source.image)
                             : d.source.type === "template"
                               ? (getTemplate(d.source.templateId)?.name ??

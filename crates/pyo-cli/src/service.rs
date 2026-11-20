@@ -119,55 +119,307 @@ fn confirmed(answer: &str) -> bool {
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
-pub async fn deploy(api: &Api, service: Option<&str>, detach: bool, yes: bool) -> Result<()> {
+/// How `pyo deploy` sends a folder, and what a new service from one is.
+#[derive(Default)]
+pub struct Folder {
+    /// Send the working copy, even for a service built from Git.
+    pub local: bool,
+    /// Send .env files too.
+    pub with_env: bool,
+    /// A new service's name, project, team and cluster.
+    pub name: Option<String>,
+    pub project: Option<String>,
+    pub team: Option<String>,
+    pub cluster: Option<String>,
+}
+
+/// An operation that may ask to confirm a very large replica change:
+/// asked here, or `-y`.
+async fn confirmed_op(api: &Api, name: &str, body: Value, yes: bool) -> Result<Value> {
+    let send = |confirm: bool| {
+        let mut b = body.clone();
+        b["confirm"] = json!(confirm);
+        api.op(name, b)
+    };
+    match send(yes).await {
+        Err(e) if e.downcast_ref::<crate::api::NeedsConfirm>().is_some() => {
+            if !confirmed(&ui::ask(&format!("{e} [y/N] "))?) {
+                bail!("Not deployed.");
+            }
+            send(true).await
+        }
+        r => r,
+    }
+}
+
+/// A folder is built by one of the team's builders: said before it's
+/// packed and sent.
+fn has_builder(state: &State, team_id: &str) -> Result<()> {
+    let ready = state.0["builders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|b| b["teamId"] == json!(team_id) && b["status"] == json!("ready"));
+    if !ready {
+        bail!("Deploying a folder needs a builder. Add one in Builders, then deploy again.");
+    }
+    Ok(())
+}
+
+/// The folder a deploy sends: pyo.jsonc's, else this one.
+fn folder_of(file: Option<&std::path::Path>) -> Result<PathBuf> {
+    match file
+        .and_then(|f| f.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        Some(p) => Ok(p.to_path_buf()),
+        None => Ok(std::env::current_dir()?),
+    }
+}
+
+pub async fn deploy(
+    api: &Api,
+    service: Option<&str>,
+    detach: bool,
+    yes: bool,
+    folder: Folder,
+) -> Result<()> {
+    // A folder that isn't linked yet: a new service from it.
+    if service.is_none() {
+        let file = config::find()?;
+        let linked = match &file {
+            Some(p) => config::load(p)?.service.is_some(),
+            None => false,
+        };
+        if !linked {
+            return create_from_folder(api, file, detach, yes, folder).await;
+        }
+    }
     let t = target(api, service).await?;
     let mut service = t.service().clone();
+    let kind = service["source"]["type"].as_str().unwrap_or("").to_owned();
+    let name = service["name"].as_str().unwrap_or("").to_owned();
+    if folder.local && !matches!(kind.as_str(), "git" | "upload") {
+        bail!("{name} runs an image, so it isn't built from a folder.");
+    }
     let changes = match &t.file {
         Some((_, f)) => apply(&mut service, f)?,
         None => vec![],
     };
+    for c in &changes {
+        println!("{} {c}", ui::dim("·"));
+    }
     let dep = new_id("dpl");
-    let done = if changes.is_empty() {
+    let done = if kind == "upload" || folder.local {
+        let root = folder_of(t.file.as_ref().map(|(p, _)| p.as_path()))?;
+        let team_id = service["teamId"].as_str().unwrap_or("").to_owned();
+        has_builder(&t.state, &team_id)?;
+        let upload = crate::pack::upload(api, &team_id, &root, folder.with_env).await?;
+        if !changes.is_empty() {
+            confirmed_op(api, "saveService", json!({ "service": service }), yes).await?;
+        }
+        api.op(
+            "deploy",
+            json!({ "serviceId": t.id, "deploymentId": dep, "trigger": "manual", "uploadId": upload }),
+        )
+        .await?
+    } else if changes.is_empty() {
         api.op(
             "deploy",
             json!({ "serviceId": t.id, "deploymentId": dep, "trigger": "manual" }),
         )
         .await?
     } else {
-        for c in &changes {
-            println!("{} {c}", ui::dim("·"));
-        }
-        let save = |confirm: bool| {
-            api.op(
-                "saveService",
-                json!({ "service": service, "deploymentId": dep, "trigger": "manual", "confirm": confirm }),
-            )
-        };
-        match save(yes).await {
-            Err(e) if e.downcast_ref::<crate::api::NeedsConfirm>().is_some() => {
-                // A very large replica change: asked here, or -y.
-                if !confirmed(&ui::ask(&format!("{e} [y/N] "))?) {
-                    bail!("Not deployed.");
-                }
-                save(true).await?
-            }
-            r => r?,
-        }
+        confirmed_op(
+            api,
+            "saveService",
+            json!({ "service": service, "deploymentId": dep, "trigger": "manual" }),
+            yes,
+        )
+        .await?
     };
     // Replicas that don't fit on the servers wait for room.
     if let Some(w) = done["warning"].as_str() {
         println!("{}", ui::yellow(w));
     }
     let url = t.state.deployment_url(&api.base, &service, &dep);
-    println!(
-        "Deploying {} {}",
-        ui::bold(service["name"].as_str().unwrap_or("")),
-        ui::dim(&url)
-    );
+    println!("Deploying {} {}", ui::bold(&name), ui::dim(&url));
     if detach {
         return Ok(());
     }
     watch(api, &dep).await
+}
+
+/// A service name from a folder's: lowercase letters, digits and dashes.
+pub fn slug(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.trim().chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    let out: String = out.trim_matches('-').chars().take(40).collect();
+    let out = out.trim_end_matches('-').to_owned();
+    match out.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() => out,
+        Some(_) => format!("app-{out}"),
+        None => "app".into(),
+    }
+}
+
+/// A new service built from a folder, as the dashboard makes one: one
+/// HTTP port (8080 until the build says another), a check that it's open.
+fn new_service(id: &str, team_id: &str, project_id: &str, cluster_id: &str, name: &str) -> Value {
+    json!({
+        "id": id, "teamId": team_id, "projectId": project_id, "clusterId": cluster_id,
+        "name": name, "description": "",
+        "source": { "type": "upload", "dockerfilePath": "Dockerfile", "buildContext": ".", "buildArgs": [] },
+        "env": [],
+        "resources": { "cpuRequest": 100, "cpuLimit": 500, "memoryRequest": 128, "memoryLimit": 256 },
+        "replicas": 1,
+        "healthCheck": { "type": "tcp", "path": "", "port": 8080, "command": "", "initialDelaySeconds": 10, "periodSeconds": 10, "auto": "default" },
+        "ports": [{ "id": new_id("port"), "name": "http", "containerPort": 8080, "protocol": "HTTP", "exposure": "internal" }],
+        "domains": [],
+    })
+}
+
+/// The project a new service goes in: `--project` (made when there's none
+/// by that name), else picked, else the team's only one.
+async fn pick_project(
+    api: &Api,
+    state: &State,
+    team_id: &str,
+    want: Option<&str>,
+    default_name: &str,
+) -> Result<String> {
+    let projects: Vec<&Value> = state.0["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["teamId"] == json!(team_id))
+        .collect();
+    let make = |name: String| async move {
+        let id = new_id("prj");
+        api.op(
+            "createProject",
+            json!({ "id": id, "teamId": team_id, "name": name, "namespace": slug(&name) }),
+        )
+        .await?;
+        ui::ok(&format!("Created project {}", ui::bold(&name)));
+        Ok::<_, anyhow::Error>(id)
+    };
+    if let Some(w) = want {
+        return match projects
+            .iter()
+            .find(|p| p["id"] == json!(w) || p["name"] == json!(w) || p["namespace"] == json!(w))
+        {
+            Some(p) => Ok(p["id"].as_str().unwrap_or("").to_owned()),
+            None => make(w.to_owned()).await,
+        };
+    }
+    if !std::io::stdin().is_terminal() {
+        return match projects.as_slice() {
+            [] => make(default_name.to_owned()).await,
+            [p] => Ok(p["id"].as_str().unwrap_or("").to_owned()),
+            _ => bail!("Say which project with --project."),
+        };
+    }
+    let mut names: Vec<String> = projects
+        .iter()
+        .map(|p| p["name"].as_str().unwrap_or("").to_owned())
+        .collect();
+    names.push("A new project".into());
+    let i = ui::choose("Which project?", &names)?;
+    if i < projects.len() {
+        return Ok(projects[i]["id"].as_str().unwrap_or("").to_owned());
+    }
+    let name = ui::ask(&format!("Project name ({default_name}): "))?;
+    make(if name.is_empty() {
+        default_name.to_owned()
+    } else {
+        name
+    })
+    .await
+}
+
+/// `pyo deploy` in a folder no service is linked to: make one from it,
+/// link the folder, upload it and follow the deploy.
+async fn create_from_folder(
+    api: &Api,
+    file: Option<PathBuf>,
+    detach: bool,
+    yes: bool,
+    f: Folder,
+) -> Result<()> {
+    let root = folder_of(file.as_deref())?;
+    let folder = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (team_id, cluster_id) =
+        crate::compose::team_and_cluster(api, f.team.as_deref(), f.cluster.as_deref()).await?;
+    let state = api.state().await?;
+    has_builder(&state, &team_id)?;
+    let suggested = slug(&folder);
+    let name = match f.name {
+        Some(n) => n,
+        None if std::io::stdin().is_terminal() => {
+            println!(
+                "{}",
+                ui::dim("No service is linked to this folder. Pyo makes one from it.")
+            );
+            let a = ui::ask(&format!("Service name ({suggested}): "))?;
+            if a.is_empty() { suggested.clone() } else { a }
+        }
+        None => suggested.clone(),
+    };
+    if slug(&name) != name {
+        bail!(
+            "\"{name}\" can't be a service name. Try {}: lowercase letters, digits and dashes.",
+            slug(&name)
+        );
+    }
+    let project_id = pick_project(api, &state, &team_id, f.project.as_deref(), &name).await?;
+    let id = new_id("svc");
+    let mut service = new_service(&id, &team_id, &project_id, &cluster_id, &name);
+    if let Some(p) = &file {
+        for c in apply(&mut service, &config::load(p)?)? {
+            println!("{} {c}", ui::dim("·"));
+        }
+    }
+    let upload = crate::pack::upload(api, &team_id, &root, f.with_env).await?;
+    let dep = new_id("dpl");
+    let done = confirmed_op(
+        api,
+        "createService",
+        json!({ "service": service, "deploymentId": dep, "uploadId": upload }),
+        yes,
+    )
+    .await?;
+    let path = config::write_service(file.as_deref(), &id)?;
+    let state = api.state().await?;
+    let label = state
+        .service(&id)
+        .map(|s| state.path_of(s))
+        .unwrap_or(name.clone());
+    ui::ok(&format!(
+        "Created {} and linked it in {}",
+        ui::bold(&label),
+        path.display()
+    ));
+    if let Some(w) = done["warning"].as_str() {
+        println!("{}", ui::yellow(w));
+    }
+    let url = state.deployment_url(&api.base, &service, &dep);
+    println!("Deploying {} {}", ui::bold(&name), ui::dim(&url));
+    if detach {
+        return Ok(());
+    }
+    watch(api, &dep).await?;
+    println!("{}", ui::dim("Give it an address: pyo domain add --free"));
+    Ok(())
 }
 
 /// Follow a deployment to the end: its stages and build log. Fails when it does.
@@ -294,8 +546,10 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
         || b.context.is_some()
         || !b.args.is_empty()
     {
-        if kind != "git" {
-            bail!("pyo.jsonc: build is for services built from Git. This one is from {kind}.");
+        if kind != "git" && kind != "upload" {
+            bail!(
+                "pyo.jsonc: build is for services built from Git or a folder. This one is from {kind}."
+            );
         }
         if let Some(v) = &b.branch {
             set(
@@ -586,33 +840,174 @@ pub async fn status(api: &Api, service: Option<&str>, as_json: bool) -> Result<(
 
 // ── logs ───────────────────────────────────────────────────────────────
 
-pub async fn logs(api: &Api, service: Option<&str>, follow: bool) -> Result<()> {
+/// What `pyo logs` reads.
+#[derive(Default)]
+pub struct LogsOpts {
+    pub follow: bool,
+    /// "10m", "2h", "1d": only lines since then.
+    pub since: Option<String>,
+    /// One replica: its name, or the end of it.
+    pub replica: Option<String>,
+    /// The latest deployment's build and deploy log instead.
+    pub build: bool,
+}
+
+/// "30s", "10m", "2h", "1d" in milliseconds.
+pub fn parse_since(s: &str) -> Result<i64> {
+    let s = s.trim();
+    let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: i64 = n
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+        .with_context(|| format!("--since takes a time like 30s, 10m, 2h or 1d, not {s:?}."))?;
+    let ms = match unit {
+        "s" => 1000,
+        "m" | "" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => bail!("--since takes a time like 30s, 10m, 2h or 1d, not {s:?}."),
+    };
+    Ok(n.saturating_mul(ms).min(7 * 86_400_000))
+}
+
+/// A replica's name, short: without the service's name in front.
+fn short_replica<'a>(service: &str, pod: &'a str) -> &'a str {
+    pod.strip_prefix(service)
+        .and_then(|r| r.strip_prefix('-'))
+        .filter(|r| !r.is_empty())
+        .unwrap_or(pod)
+}
+
+/// Whether `--replica` means this one: its name, short name or its end.
+fn is_replica(service: &str, pod: &str, want: &str) -> bool {
+    pod == want || short_replica(service, pod) == want || pod.ends_with(&format!("-{want}"))
+}
+
+pub async fn logs(api: &Api, service: Option<&str>, o: LogsOpts) -> Result<()> {
     let t = target(api, service).await?;
-    let path = format!("/api/v1/services/{}/logs", t.id);
-    let mut last = 0i64;
+    if o.build {
+        return build_logs(api, &t, o.follow).await;
+    }
+    let name = t.service()["name"].as_str().unwrap_or("").to_owned();
+    let since = match &o.since {
+        Some(s) => Some(now_ms() - parse_since(s)?),
+        None => None,
+    };
+    // The whole name narrows what the cluster reads; a short one is matched here.
+    let exact = o
+        .replica
+        .as_deref()
+        .filter(|r| r.starts_with(&format!("{name}-")));
+    let mut last = since.unwrap_or(0);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut first = true;
     loop {
-        let r = api.get(&path).await?;
+        let mut q: Vec<(&str, String)> = vec![];
+        if let Some(r) = exact {
+            q.push(("replica", r.to_owned()));
+        }
+        if !first || since.is_some() {
+            q.push(("since", last.to_string()));
+        }
+        if first && since.is_none() && o.follow {
+            q.push(("tail", "100".into()));
+        }
+        let query = q
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let path = format!("/api/v1/services/{}/logs?{query}", t.id);
+        let r = match api.get(&path).await {
+            Ok(r) => r,
+            // A blip while following: try again.
+            Err(e) if !first => {
+                eprintln!("{} {e:#}", ui::yellow("!"));
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        first = false;
         for l in r["logs"].as_array().into_iter().flatten() {
             let at = l["at"].as_i64().unwrap_or(0);
-            let key = format!("{at}{}{}", l["source"], l["message"]);
+            let src = l["source"].as_str().unwrap_or("");
+            if o.replica
+                .as_deref()
+                .is_some_and(|w| !is_replica(&name, src, w))
+            {
+                continue;
+            }
+            let key = format!("{at}\u{0}{src}\u{0}{}", l["message"]);
             if at < last || !seen.insert(key) {
                 continue;
             }
             last = last.max(at);
-            let src = l["source"].as_str().unwrap_or("");
             let msg = ui::log_text(
                 l["message"].as_str().unwrap_or(""),
                 l["level"].as_str().unwrap_or("info"),
             );
-            println!("{} {} {msg}", ui::dim(&ui::clock(at)), ui::dim(src));
+            println!(
+                "{} {} {msg}",
+                ui::dim(&ui::clock(at)),
+                ui::replica(short_replica(&name, src))
+            );
         }
-        if !follow {
+        if !o.follow {
             return Ok(());
         }
-        // Only lines at the newest timestamp can repeat.
-        seen.retain(|k| k.starts_with(&last.to_string()));
+        // Only lines at the newest time can come again.
+        let newest = format!("{last}\u{0}");
+        seen.retain(|k| k.starts_with(&newest));
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// The latest deployment's log: the build, then the rollout. Followed to
+/// its end with `follow`; fails when the deployment did.
+async fn build_logs(api: &Api, t: &Target, follow: bool) -> Result<()> {
+    let Some(dep) = t
+        .state
+        .deployments_of(&t.id)
+        .first()
+        .map(|d| d["id"].clone())
+    else {
+        bail!(
+            "{} has no deployments yet.",
+            t.service()["name"].as_str().unwrap_or("")
+        );
+    };
+    let dep = dep.as_str().unwrap_or("").to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut fresh: Option<State> = None;
+    loop {
+        let st = fresh.as_ref().unwrap_or(&t.state);
+        let Some(d) = st.deployment(&dep) else {
+            bail!("That deployment is gone.");
+        };
+        for l in d["logs"].as_array().into_iter().flatten() {
+            let key = l["id"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{}{}", l["at"], l["message"]));
+            if seen.insert(key) {
+                print_line(l);
+            }
+        }
+        let status = d["status"].as_str().unwrap_or("");
+        let done = matches!(status, "succeeded" | "failed" | "cancelled");
+        if done || !follow {
+            if status == "failed" {
+                bail!(
+                    "Deploy failed: {}",
+                    d["failure"]["message"].as_str().unwrap_or("it failed.")
+                );
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        fresh = Some(api.state().await?);
     }
 }
 
@@ -703,42 +1098,83 @@ pub async fn env_unset(
     .await
 }
 
-/// Write the variables to a .env file; secrets are listed, not written.
-pub async fn env_pull(api: &Api, service: Option<&str>, file: &str, force: bool) -> Result<()> {
+/// Write the variables to a .env file. Secrets' values only with
+/// `secrets`, for owners and admins (each one revealed is logged), else
+/// they're listed empty, with a comment.
+pub async fn env_pull(
+    api: &Api,
+    service: Option<&str>,
+    file: &str,
+    force: bool,
+    secrets: bool,
+) -> Result<()> {
     let t = target(api, service).await?;
     if std::path::Path::new(file).exists() && !force {
         bail!("{file} exists. Overwrite it with --force.");
     }
-    let mut out = format!("# From Pyo: {}\n", t.state.path_of(t.service()));
-    let mut secrets = 0;
+    let mut vars: Vec<(String, Option<String>)> = vec![];
+    let mut hidden = 0;
     for e in t.service()["env"].as_array().into_iter().flatten() {
-        let k = e["key"].as_str().unwrap_or("");
-        if e["secret"] == json!(true) {
-            out.push_str(&format!("# {k} is secret\n"));
-            secrets += 1;
+        let k = e["key"].as_str().unwrap_or("").to_owned();
+        if e["secret"] != json!(true) {
+            vars.push((k, Some(e["value"].as_str().unwrap_or("").to_owned())));
+        } else if secrets {
+            let r = api
+                .op(
+                    "revealSecret",
+                    json!({ "serviceId": t.id, "envId": e["id"] }),
+                )
+                .await
+                .map_err(|err| {
+                    if err.to_string().contains("owners and admins") {
+                        anyhow::anyhow!(
+                            "Only team owners and admins can pull secret values. Pull without --secrets."
+                        )
+                    } else {
+                        err
+                    }
+                })?;
+            vars.push((k, Some(r["value"].as_str().unwrap_or("").to_owned())));
         } else {
-            let v = e["value"].as_str().unwrap_or("");
-            let quoted = if v.chars().any(|c| c.is_whitespace() || "#\"'$".contains(c)) {
-                format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-            } else {
-                v.to_owned()
-            };
-            out.push_str(&format!("{k}={quoted}\n"));
+            hidden += 1;
+            vars.push((k, None));
         }
     }
-    std::fs::write(file, out)?;
+    let text = crate::dotenv::write(
+        &format!("From Pyo: {}", t.state.path_of(t.service())),
+        &vars,
+    );
+    write_private(std::path::Path::new(file), &text)
+        .with_context(|| format!("Couldn't write {file}"))?;
     ui::ok(&format!(
-        "Wrote {file}{}",
-        if secrets > 0 {
+        "Wrote {} variable{} to {file}{}",
+        vars.len(),
+        if vars.len() == 1 { "" } else { "s" },
+        if hidden > 0 {
             format!(
-                " ({secrets} secret{} left out)",
-                if secrets == 1 { "" } else { "s" }
+                ". {hidden} secret{} left empty: --secrets pulls {}",
+                if hidden == 1 { "" } else { "s" },
+                if hidden == 1 { "it" } else { "them" }
             )
         } else {
             String::new()
         }
     ));
     Ok(())
+}
+
+/// A file only you can read (on Unix), since it may hold secrets.
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut f = open.open(path)?;
+    f.write_all(text.as_bytes())
 }
 
 /// How `env push` treats keys the service has already.

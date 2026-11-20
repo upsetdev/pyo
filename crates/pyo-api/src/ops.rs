@@ -2441,6 +2441,9 @@ pub(crate) enum Op {
         /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
         #[serde(default)]
         confirm: bool,
+        /// A folder uploaded with `createSourceUpload`, for a service whose `source` is `{"type": "upload"}` (built from a folder with `pyo deploy`): its first deployment builds it.
+        #[serde(default)]
+        upload_id: Option<String>,
     },
     /// Save a service's configuration. With `deploymentId`, roll it out too. Changes to its `domains` go live without a deploy once it has been deployed.
     #[serde(rename = "saveService")]
@@ -2479,6 +2482,9 @@ pub(crate) enum Op {
         rollback_of: Option<String>,
         /// The failed deployment to try again.
         retry_of: Option<String>,
+        /// A folder uploaded with `createSourceUpload` to build and deploy, instead of the service's source. For services built from Git or from a folder.
+        #[serde(default)]
+        upload_id: Option<String>,
     },
     /// Cancel a deployment that hasn't finished.
     Cancel { deployment_id: String },
@@ -5361,6 +5367,7 @@ async fn apply(
                     volumes,
                     vec![],
                     wake,
+                    None,
                 )
                 .await?;
                 made.push(json!({ "name": svc.name, "id": id, "deploymentId": deployment_id }));
@@ -5567,6 +5574,7 @@ async fn apply(
             volumes,
             databases,
             confirm,
+            upload_id,
         } => {
             let id = service["id"].as_str().unwrap_or("").to_owned();
             tailnet_domains_ok(
@@ -5585,6 +5593,7 @@ async fn apply(
                 volumes,
                 databases,
                 wake,
+                upload_id.as_deref(),
             )
             .await?;
             Ok(with_warning(
@@ -5815,6 +5824,7 @@ async fn apply(
                         rollback_of: None,
                         retry_of: None,
                         commit: None,
+                        upload: None,
                     },
                 )
                 .await?;
@@ -5892,8 +5902,14 @@ async fn apply(
             trigger,
             rollback_of,
             retry_of,
+            upload_id,
         } => {
             client_id(&deployment_id, "dpl")?;
+            if upload_id.is_some() && (rollback_of.is_some() || retry_of.is_some()) {
+                return Err(ApiError::bad_request(
+                    "An upload deploys on its own, not with a rollback or retry.",
+                ));
+            }
             let team_id = team_of(tx, "services", &service_id).await?;
             require_role(tx, user, &team_id, Role::Developer).await?;
             let trigger = match trigger.as_str() {
@@ -5910,6 +5926,7 @@ async fn apply(
                     rollback_of: rollback_of.as_deref(),
                     retry_of: retry_of.as_deref(),
                     commit: None,
+                    upload: upload_id.as_deref(),
                 },
             )
             .await?;
@@ -8342,35 +8359,68 @@ pub(crate) async fn service_preview(
 #[derive(serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ServiceLogs {
-    /// The last 300 lines of each replica, oldest first.
+    /// The last lines of each replica (300, or `tail`), oldest first. `source` is the replica.
     logs: Vec<pyo_proto::LogLine>,
     /// When they were read, in milliseconds since 1970.
     fetched_at: i64,
 }
 
+/// Which of a service's lines to read.
+#[derive(Deserialize, Default, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct LogsQuery {
+    /// Only lines since this time, in milliseconds since 1970 (at most a week back).
+    since: Option<i64>,
+    /// Only this replica, by name (a log line's `source`).
+    replica: Option<String>,
+    /// How many lines of each replica, 1 to 2000. 300 by default.
+    tail: Option<i64>,
+}
+
 /// Recent logs
 ///
 /// The last lines each of a service's replicas printed, read from its
-/// cluster on request. Takes up to 15 seconds.
+/// cluster on request. Takes up to 15 seconds. To follow them, ask again
+/// with `since` set to the newest line's time.
 #[utoipa::path(get, path = "/services/{id}/logs", operation_id = "getServiceLogs", tag = "Services",
-    params(("id" = String, Path, description = "The service's id (`svc_…`).")),
+    params(("id" = String, Path, description = "The service's id (`svc_…`)."), LogsQuery),
     responses(
         (status = 200, description = "The lines.", body = ServiceLogs),
+        (status = 400, description = "Not a replica name.", body = ErrorBody),
         (status = 404, description = "No such service, or it isn't yours to see.", body = ErrorBody),
         (status = 502, description = "The cluster couldn't read them.", body = ErrorBody),
         (status = 504, description = "The cluster didn't answer within 15 seconds (is it connected?).", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
-async fn service_logs(
+pub(crate) async fn service_logs(
     State(s): State<AppState>,
     SessionUser(user): SessionUser,
     Path(id): Path<String>,
+    crate::error::Query(q): crate::error::Query<LogsQuery>,
 ) -> ApiResult<Json<Value>> {
-    Ok(Json(fetch_service_logs(&s, &user, &id).await?))
+    Ok(Json(fetch_service_logs(&s, &user, &id, q).await?))
+}
+
+/// Seconds back to read from `since` (ms), rounded up, a week at most.
+fn since_seconds(since: Option<i64>, now: i64) -> Option<i64> {
+    since.map(|t| ((now - t).max(0) / 1000 + 1).min(7 * 86400))
 }
 
 /// Recent output of a service's replicas, read by its cluster's agent.
-pub async fn fetch_service_logs(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
+pub async fn fetch_service_logs(
+    s: &AppState,
+    user: &User,
+    id: &str,
+    q: LogsQuery,
+) -> ApiResult<Value> {
+    let replica = q.replica.unwrap_or_default();
+    if replica.len() > 253
+        || !replica
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+    {
+        return Err(ApiError::bad_request("That isn't a replica name."));
+    }
     let id = id.to_owned();
     let mut tx = s.db.begin().await?;
     let team_id = team_of(&mut tx, "services", &id).await?;
@@ -8386,7 +8436,9 @@ pub async fn fetch_service_logs(s: &AppState, user: &User, id: &str) -> ApiResul
         &cluster_id,
         Command::FetchLogs {
             service,
-            tail_lines: 300,
+            tail_lines: q.tail.unwrap_or(300).clamp(1, 2000),
+            since_seconds: since_seconds(q.since, now_ms()),
+            replica,
         },
     )
     .await?;
@@ -8918,6 +8970,7 @@ async fn fill_in_source(service: &mut Value) {
 /// A new service and its first deployment (createService, and each of a
 /// Compose import's services). Without a deployment id it's only saved,
 /// stopped, until it's deployed (a platform import that doesn't deploy).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_service(
     tx: &mut Transaction<'_, Postgres>,
     user: &User,
@@ -8926,6 +8979,7 @@ pub(crate) async fn create_service(
     volumes: Vec<Value>,
     databases: Vec<ServiceDatabase>,
     wake: &mut Vec<String>,
+    upload: Option<&str>,
 ) -> ApiResult<()> {
     let id = service["id"].as_str().unwrap_or("").to_owned();
     if !crate::ids::valid_client_id(&id, "svc") {
@@ -9047,6 +9101,7 @@ pub(crate) async fn create_service(
             rollback_of: None,
             retry_of: None,
             commit: None,
+            upload,
         },
     )
     .await?;
@@ -9057,6 +9112,15 @@ pub(crate) async fn create_service(
 #[cfg(test)]
 mod op_error_tests {
     use super::*;
+
+    #[test]
+    fn logs_since_a_time_read_back_far_enough() {
+        assert_eq!(since_seconds(None, 10_000), None);
+        // Rounded up: nothing in the last partial second is missed.
+        assert_eq!(since_seconds(Some(8_500), 10_000), Some(2));
+        assert_eq!(since_seconds(Some(20_000), 10_000), Some(1));
+        assert_eq!(since_seconds(Some(0), 30 * 86_400_000), Some(7 * 86400));
+    }
 
     fn err(v: serde_json::Value) -> String {
         op_error(&serde_json::from_value::<Op>(v).err().unwrap().to_string())

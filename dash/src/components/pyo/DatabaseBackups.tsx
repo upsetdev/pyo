@@ -103,7 +103,7 @@ export const ENGINES: Record<DbEngine, EngineInfo> = {
 function engineOf(a: Application): DbEngine | null {
   const t = a.source.type === "template" ? a.source.templateId : "";
   const img =
-    (a.source.type === "git" ? "" : a.source.image)
+    (a.source.type === "git" || a.source.type === "upload" ? "" : a.source.image)
       .toLowerCase()
       .split("/")
       .pop() ?? "";

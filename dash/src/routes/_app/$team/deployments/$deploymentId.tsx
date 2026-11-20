@@ -24,6 +24,7 @@ import {
   useDeploymentActions,
 } from "~/components/pyo/DeploymentsTable";
 import { imageLabel, SourceMark } from "~/components/pyo/ProjectCard";
+import { uploadText } from "~/components/pyo/common";
 import {
   LogLines,
   WrapSwitch,
@@ -336,6 +337,24 @@ function Source({ d }: { d: Deployment }) {
                 : `Built with the repository's ${buildFileOf(src.buildpackLanguage)}`
             }
           >
+            {src.builder === "railpack"
+              ? `${src.buildpackLanguage} · zero config`
+              : buildFileOf(src.buildpackLanguage)}
+          </span>
+        ) : null}
+      </span>
+    );
+  }
+  if (src.type === "upload") {
+    return (
+      <span className="inline-flex min-w-0 items-center gap-1.5">
+        <SourceMark source={src} />
+        <span className="truncate">{uploadText(src)}</span>
+        {d.revisionLabel ? (
+          <span className="font-mono text-[12px]">{d.revisionLabel}</span>
+        ) : null}
+        {src.buildpackLanguage ? (
+          <span className="rounded-md bg-muted px-1.5 py-px text-[11.5px]">
             {src.builder === "railpack"
               ? `${src.buildpackLanguage} · zero config`
               : buildFileOf(src.buildpackLanguage)}

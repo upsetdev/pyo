@@ -63,6 +63,7 @@ async fn trigger(
                 rollback_of: None,
                 retry_of: None,
                 commit: None,
+                upload: None,
             },
         )
         .await

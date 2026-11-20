@@ -14,6 +14,7 @@ mod exec;
 mod firewall;
 mod import;
 mod login;
+mod pack;
 mod registry;
 mod sandbox;
 mod server;
@@ -91,19 +92,35 @@ enum Command {
         /// "api", "shop/api" or "team/shop/api". Without it, pick from a list.
         service: Option<String>,
     },
-    /// Apply pyo.jsonc and deploy, then follow it to the end. With -f, import
-    /// a Docker Compose file instead: see what it makes, then deploy it.
+    /// Apply pyo.jsonc and deploy, then follow it to the end.
+    ///
+    /// A service built from a folder gets this folder, packed and uploaded
+    /// (.gitignore and .pyoignore apply). In a folder no service is linked
+    /// to, it makes one and links it. With -f, import a Docker Compose file
+    /// instead: see what it makes, then deploy it.
     Deploy {
         #[command(flatten)]
         which: Which,
         /// Start it and exit, without following it.
         #[arg(long)]
         detach: bool,
+        /// Send this folder, also for a service built from Git.
+        #[arg(long, conflicts_with = "file")]
+        local: bool,
+        /// Send .env files too (they're left out by default).
+        #[arg(long, conflicts_with = "file")]
+        include_env: bool,
+        /// A new service's name. Defaults to the folder's.
+        #[arg(long, conflicts_with = "file")]
+        name: Option<String>,
+        /// A new service's project (name or id), made when there's none by that name.
+        #[arg(long, conflicts_with = "file")]
+        project: Option<String>,
         /// A Docker Compose file to import as a new project (a .env next to
         /// it is read too).
         #[arg(long, short = 'f')]
         file: Option<std::path::PathBuf>,
-        /// The team to import into (slug or id). Defaults to your first team.
+        /// The team of a new service or Compose import (slug or id). Defaults to your first team.
         #[arg(long)]
         team: Option<String>,
         /// The cluster to run it on (name or id). Defaults to the team's default cluster.
@@ -122,13 +139,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// The service's recent logs.
+    /// The service's logs, from every replica.
     Logs {
         #[command(flatten)]
         which: Which,
         /// Keep printing new lines.
         #[arg(long, short)]
         follow: bool,
+        /// Only lines since then: 30s, 10m, 2h or 1d.
+        #[arg(long)]
+        since: Option<String>,
+        /// One replica, by its name as the lines show it.
+        #[arg(long)]
+        replica: Option<String>,
+        /// The latest deployment's build and deploy log instead.
+        #[arg(long, conflicts_with_all = ["since", "replica"])]
+        build: bool,
     },
     /// Environment variables.
     Env {
@@ -165,7 +191,12 @@ enum Command {
         #[arg(long, conflicts_with_all = ["servers", "tags"])]
         any: bool,
     },
-    /// A shell in the service.
+    /// A shell in the service, or one command: pyo exec -- <command>.
+    ///
+    /// A command runs as it is, without a shell (use sh -c for one). It
+    /// gets a terminal when stdin and stdout are one, else its output and
+    /// errors stay apart, piped input goes to it, and pyo exits with its
+    /// exit code.
     Exec {
         #[command(flatten)]
         which: Which,
@@ -173,8 +204,20 @@ enum Command {
         #[arg(long)]
         replica: Option<String>,
         /// bash, sh, zsh or ash. Defaults to whichever the service has.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "command")]
         shell: Option<String>,
+        /// Give the command a terminal.
+        #[arg(short = 't', long = "tty", conflicts_with = "no_tty")]
+        tty: bool,
+        /// Never give the command a terminal.
+        #[arg(short = 'T', long = "no-tty")]
+        no_tty: bool,
+        /// Send stdin to the command even from a terminal (end it with Ctrl-D).
+        #[arg(short = 'i', long = "interactive")]
+        interactive: bool,
+        /// The command and its arguments, after --.
+        #[arg(last = true, value_name = "COMMAND")]
+        command: Vec<String>,
     },
     /// Open the service on the dashboard.
     Open {
@@ -660,12 +703,22 @@ enum EnvCommand {
         deploy: bool,
     },
     /// Write the variables to a .env file.
+    ///
+    /// Secrets are listed with an empty value, unless --secrets: owners and
+    /// admins get their values.
     Pull {
-        #[arg(default_value = ".env")]
+        /// The file to write.
+        #[arg(default_value = ".env", conflicts_with = "out")]
         file: String,
+        /// The file to write, as an option.
+        #[arg(long = "file", short = 'o', value_name = "FILE")]
+        out: Option<String>,
         /// Overwrite the file.
         #[arg(long)]
         force: bool,
+        /// Write secrets' values too. Owners and admins.
+        #[arg(long)]
+        secrets: bool,
     },
 }
 
@@ -678,14 +731,22 @@ async fn main() {
         _ => upgrade::Check::start(),
     };
     let result = run(cli).await;
-    if let Err(e) = &result {
-        eprintln!("{} {e:#}", ui::red("error:"));
-    }
+    // A command run with pyo exec: its own exit code, nothing more said.
+    let code = match &result {
+        Ok(()) => 0,
+        Err(e) => match e.downcast_ref::<exec::Exited>() {
+            Some(exec::Exited(c)) => *c,
+            None => {
+                eprintln!("{} {e:#}", ui::red("error:"));
+                1
+            }
+        },
+    };
     if let Some(check) = check {
         check.finish();
     }
-    if result.is_err() {
-        std::process::exit(1);
+    if code != 0 {
+        std::process::exit(code);
     }
 }
 
@@ -782,24 +843,52 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
             .await
         }
         Command::Deploy {
-            which, detach, yes, ..
+            which,
+            detach,
+            yes,
+            local,
+            include_env,
+            name,
+            project,
+            team,
+            cluster,
+            ..
         } => {
             service::deploy(
                 &config::client(url, token)?,
                 which.service.as_deref(),
                 detach,
                 yes,
+                service::Folder {
+                    local,
+                    with_env: include_env,
+                    name,
+                    project,
+                    team,
+                    cluster,
+                },
             )
             .await
         }
         Command::Status { which, json } => {
             service::status(&config::client(url, token)?, which.service.as_deref(), json).await
         }
-        Command::Logs { which, follow } => {
+        Command::Logs {
+            which,
+            follow,
+            since,
+            replica,
+            build,
+        } => {
             service::logs(
                 &config::client(url, token)?,
                 which.service.as_deref(),
-                follow,
+                service::LogsOpts {
+                    follow,
+                    since,
+                    replica,
+                    build,
+                },
             )
             .await
         }
@@ -846,7 +935,12 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                     )
                     .await
                 }
-                EnvCommand::Pull { file, force } => service::env_pull(&api, s, &file, force).await,
+                EnvCommand::Pull {
+                    file,
+                    out,
+                    force,
+                    secrets,
+                } => service::env_pull(&api, s, &out.unwrap_or(file), force, secrets).await,
             }
         }
         Command::Rollback { deployment, which } => {
@@ -879,12 +973,27 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
             which,
             replica,
             shell,
+            tty,
+            no_tty,
+            interactive,
+            command,
         } => {
             exec::run(
                 &config::client(url, token)?,
                 which.service.as_deref(),
-                replica,
-                shell,
+                exec::Opts {
+                    replica,
+                    shell,
+                    command,
+                    tty: if tty {
+                        Some(true)
+                    } else if no_tty {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                    stdin: interactive,
+                },
             )
             .await
         }
@@ -1142,6 +1251,69 @@ mod tests {
             }
         }
         walk(&Cli::command(), "pyo");
+    }
+
+    #[test]
+    fn new_commands_parse() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|c| c.command);
+        let Ok(Command::Exec {
+            command,
+            tty,
+            no_tty,
+            ..
+        }) = parse(&["pyo", "exec", "-s", "api", "-T", "--", "ls", "-la", "/app"])
+        else {
+            panic!("exec didn't parse");
+        };
+        assert_eq!(command, ["ls", "-la", "/app"]);
+        assert!(no_tty && !tty);
+        assert!(parse(&["pyo", "exec", "-t", "-T", "--", "ls"]).is_err());
+        assert!(matches!(
+            parse(&["pyo", "exec"]),
+            Ok(Command::Exec { command, .. }) if command.is_empty()
+        ));
+        assert!(matches!(
+            parse(&["pyo", "logs", "-f", "--since", "10m", "--replica", "x2kfp"]),
+            Ok(Command::Logs {
+                follow: true,
+                since: Some(_),
+                replica: Some(_),
+                build: false,
+                ..
+            })
+        ));
+        assert!(parse(&["pyo", "logs", "--build", "--since", "1h"]).is_err());
+        assert!(matches!(
+            parse(&[
+                "pyo",
+                "deploy",
+                "--local",
+                "--name",
+                "web",
+                "--project",
+                "shop"
+            ]),
+            Ok(Command::Deploy {
+                local: true,
+                name: Some(_),
+                project: Some(_),
+                ..
+            })
+        ));
+        assert!(parse(&["pyo", "deploy", "--local", "-f", "compose.yml"]).is_err());
+        let Ok(Command::Env {
+            command: Some(EnvCommand::Pull {
+                file, out, secrets, ..
+            }),
+            ..
+        }) = parse(&["pyo", "env", "pull", "--file", "prod.env", "--secrets"])
+        else {
+            panic!("env pull didn't parse");
+        };
+        assert_eq!(
+            (file.as_str(), out.as_deref(), secrets),
+            (".env", Some("prod.env"), true)
+        );
     }
 
     #[test]

@@ -1122,6 +1122,7 @@ pub async fn deploy_push(
                 rollback_of: None,
                 retry_of: None,
                 commit: Some(sha),
+                upload: None,
             },
         )
         .await

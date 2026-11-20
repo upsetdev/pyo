@@ -55,11 +55,18 @@ fn random_hex(n: usize) -> String {
     hex::encode(b)
 }
 
-fn machine_name() -> String {
+/// This computer's name, as the sign-in and "Uploaded from …" show it.
+pub(crate) fn machine_name() -> String {
     std::fs::read_to_string("/etc/hostname")
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            hostname::get()
+                .ok()
+                .map(|h| h.to_string_lossy().into_owned())
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| std::env::var("HOSTNAME").ok())
         .or_else(|| std::env::var("COMPUTERNAME").ok())
         .unwrap_or_default()

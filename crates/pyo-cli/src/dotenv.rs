@@ -147,8 +147,90 @@ pub fn last_wins(entries: Vec<(String, String)>) -> (Vec<(String, String)>, Vec<
     (out, repeated)
 }
 
+/// `value` as a .env file writes it: as it is when that reads back the
+/// same, else in double quotes with \n \r \t \" \\ escaped.
+pub fn quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value.trim() == value
+        && !value
+            .chars()
+            .any(|c| c.is_whitespace() || "#\"'$\\`".contains(c));
+    if plain || value.is_empty() {
+        return value.to_owned();
+    }
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A .env file of the service's variables. Secrets: their value when
+/// `revealed` has it, else empty, with a comment above.
+pub fn write(header: &str, vars: &[(String, Option<String>)]) -> String {
+    let mut out = format!("# {header}\n");
+    for (k, v) in vars {
+        match v {
+            Some(v) => out.push_str(&format!("{k}={}\n", quote(v))),
+            None => out.push_str(&format!(
+                "# {k} is a secret. Owners and admins can pull it with --secrets.\n{k}=\n"
+            )),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn written_values_read_back_the_same() {
+        let values = [
+            "plain",
+            "",
+            "with space",
+            " lead",
+            "a#b",
+            "quote\"d",
+            "single'q",
+            "$HOME",
+            "back\\slash",
+            "two\nlines",
+            "tab\there",
+            "url://x?a=b&c=d",
+        ];
+        let vars: Vec<(String, Option<String>)> = values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (format!("K{i}"), Some(v.to_string())))
+            .chain([("SECRET".to_string(), None)])
+            .collect();
+        let text = write("From Pyo: acme/shop/api", &vars);
+        let parsed = parse(&text);
+        assert!(parsed.invalid.is_empty(), "{:?}", parsed.invalid);
+        for (i, v) in values.iter().enumerate() {
+            assert_eq!(
+                parsed.entries[i],
+                (format!("K{i}"), v.to_string()),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            parsed.entries.last().unwrap(),
+            &("SECRET".into(), String::new())
+        );
+        assert!(text.contains("# SECRET is a secret."));
+        assert_eq!(quote("plain"), "plain");
+    }
+
     use super::*;
 
     fn e(pairs: &[(&str, &str)]) -> Vec<(String, String)> {

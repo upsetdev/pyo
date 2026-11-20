@@ -199,6 +199,12 @@ const NOT_TOOLS: &[&str] = &[
     "getDatabaseLogs",
     "createDatabaseDumpUpload",
     "uploadDatabaseDump",
+    // A folder for `pyo deploy` goes up in parts of a request body each,
+    // which a tool can't send: assistants deploy what's in Git or an image.
+    "createSourceUpload",
+    "uploadSourcePart",
+    "getSourceUpload",
+    "completeSourceUpload",
     // They take another platform's API token: kept out of assistants.
     "previewPlatformImport",
     "startPlatformImport",
@@ -1025,7 +1031,9 @@ async fn run_tool(s: &AppState, user: &User, name: &str, args: &Value) -> Result
         }
         "get_service_logs" => {
             let id = service_id(args)?;
-            let v = ops::fetch_service_logs(s, user, id).await.map_err(err)?;
+            let v = ops::fetch_service_logs(s, user, id, Default::default())
+                .await
+                .map_err(err)?;
             let lines: Vec<String> = v["logs"]
                 .as_array()
                 .cloned()

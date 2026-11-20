@@ -228,7 +228,8 @@ function BuilderPage() {
             {builds.slice(0, 10).map((d) => {
               const app = s.services.find((a) => a.id === d.serviceId);
               const how =
-                d.source.type === "git" && d.source.buildpackLanguage
+                (d.source.type === "git" || d.source.type === "upload") &&
+                d.source.buildpackLanguage
                   ? d.source.builder === "railpack"
                     ? `${d.source.buildpackLanguage} · zero config`
                     : buildFileOf(d.source.buildpackLanguage)

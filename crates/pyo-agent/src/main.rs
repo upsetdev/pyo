@@ -506,13 +506,19 @@ async fn run_command(agent: Agent, envelope: CommandEnvelope) {
             service,
             pod,
             shell,
+            command,
+            tty,
         } => {
             tokio::spawn(terminal::run(
                 agent.clone(),
                 session_id,
                 service,
-                pod,
-                shell,
+                terminal::Run {
+                    pod,
+                    shell,
+                    command,
+                    tty,
+                },
             ));
             ok("Opening a terminal.")
         }

@@ -37,6 +37,16 @@ pub fn yellow(s: &str) -> String {
     paint("33", s)
 }
 
+/// A replica's name in front of its log lines: a color of its own, so
+/// lines of different replicas tell apart.
+pub fn replica(name: &str) -> String {
+    const CODES: [&str; 5] = ["36", "35", "34", "33", "32"];
+    let h = name
+        .bytes()
+        .fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
+    paint(CODES[h % CODES.len()], name)
+}
+
 /// A log line's text. On a terminal: its own ANSI colors (nothing else
 /// that moves the cursor or retitles the window), else tinted by its
 /// level. Otherwise plain text.
