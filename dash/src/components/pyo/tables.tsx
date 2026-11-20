@@ -447,7 +447,7 @@ export function VolumeTable({
                     {v.storageClass}
                   </span>
                   {sc && !sc.replicated ? (
-                    <p className="text-[11px] text-warning">One server only</p>
+                    <p className="text-[11px] text-muted-foreground">One server only</p>
                   ) : null}
                 </Td>
                 <Td>
