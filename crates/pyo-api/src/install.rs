@@ -163,7 +163,8 @@ pub fn render(api_url: &str, image: &str, token: &str) -> String {
 # - in kube-system, only join tokens, the GPU device plugin and cluster
 #   DNS's scale;
 # - the gateway's routes, certificates and settings in pyo-gateway,
-#   with exactly the content this release writes (never its Secrets' content);
+#   with exactly the content this release writes (never its Secrets' content),
+#   and its failed pods, deleted;
 # - the databases system in pyo-databases (CloudNativePG, the MySQL
 #   operator and pyo-db-controller), once a team makes its first database
 #   here, with exactly the content this release defines;

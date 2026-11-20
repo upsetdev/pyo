@@ -268,6 +268,9 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
                 { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE] },
                 // The Tailscale Services' wanted list, for the servers' tailnet pods.
                 { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WANTED] },
+                // The proxy's failed pods, cleaned up (an eviction on a full
+                // disk leaves one each try).
+                { "apiGroups": [""], "resources": ["pods"], "verbs": ["delete"] },
             ]),
         ),
         role_binding(system::GATEWAY_NS, "pyo-agent", "Role", "pyo-agent"),

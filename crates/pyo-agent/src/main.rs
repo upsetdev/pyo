@@ -11,6 +11,7 @@ mod api;
 mod backup;
 mod builder;
 mod bundles;
+mod cleanup;
 mod cron;
 mod databases;
 mod dbimport;
@@ -188,6 +189,8 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(gateway::collect_loop(agent.clone()));
         tokio::spawn(operators::run(agent.kube.clone()));
     }
+    // Checks the policy each run: a cluster made read only later is left be.
+    tokio::spawn(cleanup::run(agent.clone()));
     // Reads only: runs in read-only clusters too.
     tokio::spawn(dbmetrics::run(agent.kube.clone()));
     tokio::spawn(heartbeat_loop(agent.clone()));
