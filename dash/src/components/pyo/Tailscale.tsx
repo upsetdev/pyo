@@ -14,6 +14,7 @@ import {
   Summary,
   TextButton,
 } from "~/components/pyo/IntegrationDialog";
+import { AppLink } from "~/components/ui/AppLink";
 import { Badge } from "~/components/ui/Badge";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { Field, Input, SecretInput, Select, Switch } from "~/components/ui/Field";
@@ -104,6 +105,29 @@ export function NeedsTailscale({ clusterId }: { clusterId?: string }) {
         "Ask an installation admin."
       )}
     </Callout>
+  );
+}
+
+/**
+ * A link to Integrations › Tailscale for `clusterId`'s Tailscale, that
+ * comes back here once it's saved.
+ */
+export function SetUpTailscaleLink({ clusterId }: { clusterId: string }) {
+  return (
+    <AppLink
+      href="/integrations#tailscale"
+      className="font-medium text-primary hover:text-primary/80"
+      onClick={() => {
+        try {
+          sessionStorage.setItem(BACK, window.location.pathname);
+          sessionStorage.setItem(FOR, clusterId);
+        } catch {
+          // Private mode: no way back, the card stays.
+        }
+      }}
+    >
+      Set up Tailscale
+    </AppLink>
   );
 }
 
