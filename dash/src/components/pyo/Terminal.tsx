@@ -262,14 +262,15 @@ export function ServiceTerminal({ app }: { app: Application }) {
             </Select>
             {phase.kind === "closed" ? (
               <Button
-                size="xs"
+                size="sm"
                 variant="secondary"
+                className="h-9"
                 onClick={() => setSession((n) => n + 1)}
               >
                 <ArrowClockwiseIcon size={12} /> Reconnect
               </Button>
             ) : null}
-            <ZoomButton zoomed={zoomed} onClick={() => setZoomed((z) => !z)} />
+            <ZoomButton zoomed={zoomed} onClick={() => setZoomed((z) => !z)} className="h-9 w-9" />
           </div>
         </div>
         {session ? (

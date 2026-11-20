@@ -82,9 +82,12 @@ export function Zoomable({
 export function ZoomButton({
   zoomed,
   onClick,
+  className,
 }: {
   zoomed: boolean;
   onClick: () => void;
+  /** e.g. to match the height of other controls in a toolbar */
+  className?: string;
 }) {
   const label = zoomed ? "Exit full screen" : "Full screen";
   return (
@@ -94,6 +97,7 @@ export function ZoomButton({
       aria-label={label}
       title={label}
       onClick={onClick}
+      className={className}
     >
       {zoomed ? <ArrowsInIcon size={14} /> : <ArrowsOutIcon size={14} />}
     </Button>
