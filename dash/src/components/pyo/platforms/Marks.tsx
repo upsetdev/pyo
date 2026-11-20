@@ -48,8 +48,7 @@ export function RailwayMark(props: MarkProps) {
 }
 
 // Source: the Vercel symbol, https://vercel.com/geist/brands (via simple-icons,
-// whose path matches it). Black on light backgrounds, white on dark. Vercel
-// asks for its trademark notice wherever the logo appears (VERCEL_TRADEMARK).
+// whose path matches it). Black on light backgrounds, white on dark.
 export function VercelMark(props: MarkProps) {
   return (
     <svg {...base} viewBox="0 0 24 24" fill="currentColor" {...props}>
@@ -57,7 +56,3 @@ export function VercelMark(props: MarkProps) {
     </svg>
   );
 }
-
-/** Vercel's trademark notice, as pyo-web shows it next to its logo. */
-export const VERCEL_TRADEMARK =
-  "Vercel, the Vercel design, Next.js and related marks, designs and logos are trademarks or registered trademarks of Vercel, Inc. or its affiliates in the US and other countries.";

@@ -12,7 +12,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { z } from "zod";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
-import { CoolifyMark, DokployMark, RailwayMark, VERCEL_TRADEMARK, VercelMark } from "~/components/pyo/platforms/Marks";
+import { CoolifyMark, DokployMark, RailwayMark, VercelMark } from "~/components/pyo/platforms/Marks";
 import { GroupLabel } from "~/components/pyo/Databases";
 import { AppLink } from "~/components/ui/AppLink";
 import { Badge, type Tone } from "~/components/ui/Badge";
@@ -306,9 +306,6 @@ function ImportFlow() {
           </div>
         </form>
       </Panel>
-
-      {/* Vercel asks for this wherever its logo appears. */}
-      <p className="px-1 text-[11px] leading-4 text-muted-foreground">{VERCEL_TRADEMARK}</p>
 
       {error ? (
         <Callout tone="danger" icon={WarningIcon} title="Can't import">
