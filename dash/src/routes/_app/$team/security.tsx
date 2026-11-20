@@ -401,7 +401,14 @@ function Security() {
     {
       icon: ArchiveIcon,
       title: "Backups of Pyo",
-      tone: s.controlBackup?.settings ? "success" : "neutral",
+      // Only the installation's admin sees Pyo's backup settings, so for
+      // anyone else on a self-hosted Pyo the state is unknown.
+      tone:
+        s.controlBackup?.settings || hosted
+          ? "success"
+          : s.user.isAdmin
+            ? "warning"
+            : "neutral",
       status: s.controlBackup?.settings
         ? "Enabled"
         : hosted
@@ -523,7 +530,13 @@ function Security() {
     })(),
   ];
 
-  const good = checks.filter((c) => c.tone === "success").length;
+  // A check counts when it's in place (success) or needs a look (warning,
+  // danger). Neutral ones don't count: they don't apply yet (no clusters,
+  // no projects, no key), aren't known, or are optional (local key storage).
+  const counted = checks.filter((c) =>
+    ["success", "warning", "danger"].includes(c.tone),
+  );
+  const good = counted.filter((c) => c.tone === "success").length;
   const byTitle = (t: string) => checks.find((c) => c.title === t)!;
   const groups: { title: string; description: string; items: string[] }[] = [
     {
@@ -547,7 +560,7 @@ function Security() {
       items: ["Backups of Pyo", "Agent access", "Gateway can't read your secrets"],
     },
   ];
-  const issues = checks.filter((c) => c.tone === "warning" || c.tone === "danger").length;
+  const issues = counted.length - good;
 
   return (
     <div className="space-y-5">
@@ -560,7 +573,7 @@ function Security() {
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-[14px] font-semibold">
-              {good} of {checks.length} protections in place
+              {good} of {counted.length} protections in place
             </p>
             <p className="text-[12.5px] text-muted-foreground">
               {issues
@@ -570,10 +583,10 @@ function Security() {
           </div>
           <div className="hidden w-40 shrink-0 sm:block" aria-hidden>
             <div className="flex h-1.5 gap-0.5 overflow-hidden rounded-full">
-              {checks.map((c) => (
+              {counted.map((c) => (
                 <span
                   key={c.title}
-                  className={`flex-1 ${c.tone === "success" ? "bg-success" : c.tone === "danger" ? "bg-destructive" : c.tone === "warning" ? "bg-warning" : "bg-border-strong"}`}
+                  className={`flex-1 ${c.tone === "success" ? "bg-success" : c.tone === "danger" ? "bg-destructive" : "bg-warning"}`}
                 />
               ))}
             </div>
