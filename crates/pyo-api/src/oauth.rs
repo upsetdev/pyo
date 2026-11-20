@@ -583,6 +583,8 @@ impl FromRequestParts<AppState> for OAuthUser {
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, s: &AppState) -> Result<Self, Self::Rejection> {
+        let Ok(crate::ratelimit::ClientIp(ip)) =
+            crate::ratelimit::ClientIp::from_request_parts(parts, s).await;
         // 401 points the client at how to get a token (RFC 9728).
         let challenge = |error: Option<&str>| {
             let meta = format!(
@@ -615,7 +617,8 @@ impl FromRequestParts<AppState> for OAuthUser {
             return Err(challenge(None));
         };
         let hash = sha256_hex(token);
-        let (id, name, email, timezone, is_admin, must_set_up, client, scope): (String, String, String, String, bool, bool, String, String) = sqlx::query_as(
+        type Grant = (String, String, String, String, bool, bool, String, String);
+        let row: Option<Grant> = sqlx::query_as(
             "SELECT u.id, u.name, u.email, u.timezone, u.is_admin, u.must_set_up, c.name, g.scope
                FROM pyo.oauth_grants g JOIN pyo.users u ON u.id = g.user_id JOIN pyo.oauth_clients c ON c.id = g.client_id
               WHERE g.access_hash = $1 AND g.access_expires_at > now()",
@@ -623,8 +626,17 @@ impl FromRequestParts<AppState> for OAuthUser {
         .bind(&hash)
         .fetch_optional(&s.db)
         .await
-        .map_err(|_| challenge(None))?
-        .ok_or_else(|| challenge(Some("invalid_token")))?;
+        .map_err(|_| challenge(None))?;
+        // Wrong tokens count per address; a token's requests per token.
+        let Some((id, name, email, timezone, is_admin, must_set_up, client, scope)) = row else {
+            crate::ratelimit::take(&s.db, &[(crate::ratelimit::API_KEY_WRONG_IP, &ip)])
+                .await
+                .map_err(IntoResponse::into_response)?;
+            return Err(challenge(Some("invalid_token")));
+        };
+        crate::ratelimit::take(&s.db, &[(crate::ratelimit::API_KEY_REQUESTS, &hash)])
+            .await
+            .map_err(IntoResponse::into_response)?;
         // Still on the installer's printed sign-in: nothing works until it's replaced.
         if must_set_up {
             return Err(challenge(Some("invalid_token")));

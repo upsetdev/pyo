@@ -191,6 +191,8 @@ async fn mail_invite(
     role: &str,
     invite: Option<&str>,
 ) -> ApiResult<Value> {
+    // Each invite may be an email: a team sends so many an hour.
+    op_limit(tx, crate::ratelimit::INVITES_TEAM, team_id, true).await?;
     let (team, slug): (String, String) =
         sqlx::query_as("SELECT name, slug FROM pyo.teams WHERE id = $1")
             .bind(team_id)
@@ -274,6 +276,8 @@ pub async fn require_role(
     .fetch_optional(&mut **tx)
     .await?;
     let role = parse_role(&role.ok_or_else(|| ApiError::not_found("Team"))?)?;
+    // A team's operations together, all its members and keys.
+    op_limit(tx, crate::ratelimit::OPS_TEAM, team_id, false).await?;
     if let Some(k) = &user.key {
         if k.teams
             .as_ref()
@@ -2992,8 +2996,58 @@ fn bucket_refused(e: anyhow::Error) -> ApiError {
     ))
 }
 
+tokio::task_local! {
+    /// What an operation counts against rate limits once its transaction
+    /// is over (ratelimit.rs), so the count takes no other connection
+    /// while it's open: (limit, key, counted only when it succeeded).
+    static COUNT_AFTER: std::sync::Mutex<Vec<(crate::ratelimit::Limit, String, bool)>>;
+}
+
+/// Refuses with 429 when `key` used up `limit`, and counts this operation
+/// against it once it's done. Outside an operation it does nothing.
+async fn op_limit(
+    tx: &mut sqlx::PgConnection,
+    limit: crate::ratelimit::Limit,
+    key: &str,
+    only_success: bool,
+) -> ApiResult<()> {
+    let Ok(()) = COUNT_AFTER.try_with(|_| ()) else {
+        return Ok(());
+    };
+    if let Some(retry) = crate::ratelimit::used_up(tx, &limit, key).await? {
+        return Err(crate::ratelimit::too_many_for(&limit, retry));
+    }
+    let _ = COUNT_AFTER.try_with(|c| {
+        let mut c = c.lock().unwrap_or_else(|e| e.into_inner());
+        if !c.iter().any(|(l, k, _)| l.scope == limit.scope && k == key) {
+            c.push((limit, key.to_owned(), only_success));
+        }
+    });
+    Ok(())
+}
+
 async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     key_allows(user, &op)?;
+    crate::ratelimit::take(&s.db, &[(crate::ratelimit::OPS_USER, &user.id)]).await?;
+    let counts = std::sync::Mutex::new(vec![]);
+    let (out, counts) = COUNT_AFTER
+        .scope(counts, async {
+            let out = run_op_counted(s, user, op).await;
+            let counts = COUNT_AFTER
+                .try_with(|c| std::mem::take(&mut *c.lock().unwrap_or_else(|e| e.into_inner())))
+                .unwrap_or_default();
+            (out, counts)
+        })
+        .await;
+    for (limit, key, only_success) in counts {
+        if out.is_ok() || !only_success {
+            crate::ratelimit::take_after(&s.db, &limit, &key).await;
+        }
+    }
+    out
+}
+
+async fn run_op_counted(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     let s = s.clone();
     // Long calls to outside services hold no transaction open.
     if matches!(

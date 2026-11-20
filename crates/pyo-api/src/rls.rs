@@ -92,7 +92,7 @@ impl Lifted {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::http::StatusCode;
     use serde_json::{Value, json};
@@ -530,7 +530,7 @@ mod tests {
         });
     }
 
-    fn state(db: PgPool) -> crate::AppState {
+    pub(crate) fn state(db: PgPool) -> crate::AppState {
         let config = crate::Config {
             agent_api_url: String::new(),
             agent_image: String::new(),

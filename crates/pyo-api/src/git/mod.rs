@@ -1179,21 +1179,33 @@ pub async fn deploy_push(
 /// A connection's webhook: a push deploys the services that follow it.
 async fn webhook(
     State(s): State<AppState>,
+    crate::ratelimit::ClientIp(ip): crate::ratelimit::ClientIp,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<impl IntoResponse> {
+    let wrong = || async {
+        crate::ratelimit::take(&s.db, &[(crate::ratelimit::GIT_WEBHOOK_WRONG_IP, &ip)]).await
+    };
     let conn = match load(&s.db, None, &id).await {
         Ok(c) => c,
         Err(e) if e.status == StatusCode::NOT_FOUND => {
+            wrong().await?;
             return Ok((StatusCode::NOT_FOUND, "no such connection"));
         }
         Err(e) => return Err(e),
     };
     let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
     if !gitlab::token_ok(&conn.webhook_secret, header("x-gitlab-token")) {
+        wrong().await?;
         return Ok((StatusCode::UNAUTHORIZED, "bad token"));
     }
+    // Per connection: a push storm can't queue builds without end.
+    crate::ratelimit::take(
+        &s.db,
+        &[(crate::ratelimit::GIT_WEBHOOK_CALLS, &format!("gitlab:{}", conn.id))],
+    )
+    .await?;
     let Ok(v) = serde_json::from_slice::<Value>(&body) else {
         return Ok((StatusCode::BAD_REQUEST, "not JSON"));
     };

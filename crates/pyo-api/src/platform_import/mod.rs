@@ -75,6 +75,7 @@ const LIMIT: ratelimit::Limit = ratelimit::Limit {
     scope: "platform-import:user",
     max: 30,
     window_secs: 15 * 60,
+    backoff_cap_secs: 0,
 };
 
 /// One request to the platform.

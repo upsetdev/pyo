@@ -58,12 +58,14 @@ pub const WRONG_CODE_SERVER: Limit = Limit {
     scope: "sandbox-join:server",
     max: 10,
     window_secs: 15 * 60,
+    backoff_cap_secs: 0,
 };
 /// Wrong codes from anywhere.
 pub const WRONG_CODE_ALL: Limit = Limit {
     scope: "sandbox-join:all",
     max: 60,
     window_secs: 15 * 60,
+    backoff_cap_secs: 0,
 };
 
 /// A new code: 32 random bytes as hex.
