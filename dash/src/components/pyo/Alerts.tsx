@@ -27,6 +27,7 @@ import type { AlertChannel, AlertEvent, AlertKind } from "~/lib/pyo/types";
 const EVENTS: { id: AlertEvent; label: string }[] = [
   { id: "deploy_failed", label: "Deploy failed" },
   { id: "server_offline", label: "Server offline and back online" },
+  { id: "server_pressure", label: "Server low on disk or memory" },
   { id: "backup_failed", label: "Backup failed" },
   { id: "certificate", label: "Certificate expiring or not renewed" },
 ];

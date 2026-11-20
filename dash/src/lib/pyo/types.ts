@@ -914,6 +914,7 @@ export type AlertKind = "telegram" | "discord" | "slack" | "webhook";
 export type AlertEvent =
   | "deploy_failed"
   | "server_offline"
+  | "server_pressure"
   | "backup_failed"
   | "certificate";
 
@@ -1638,6 +1639,8 @@ export type ActivityType =
   | "server.removed"
   | "server.offline"
   | "server.online"
+  | "server.pressure"
+  | "server.pressure_ended"
   | "backup.failed"
   | "domain.certificate_failed"
   | "volume.created"
