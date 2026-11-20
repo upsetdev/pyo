@@ -5,6 +5,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { useState } from "react";
+import { useHosted } from "~/components/pyo/Managed";
 import { AppLink } from "~/components/ui/AppLink";
 import { Layered } from "~/components/ui/Layered";
 import { isFreeDomain } from "~/lib/pyo/freeDomain";
@@ -23,7 +24,7 @@ const DISMISSED_KEY = "pyo:checklist-dismissed";
 
 type Step = { label: string; href: string; done: boolean };
 
-function steps(s: PyoState): Step[] {
+function steps(s: PyoState, hosted: boolean): Step[] {
   const team = s.currentTeamId;
   const role = roleIn(s);
   const teamAdmin = role === "owner" || role === "admin";
@@ -54,17 +55,20 @@ function steps(s: PyoState): Step[] {
       ),
     },
     // Only where there's a store to back up to, for whoever can turn it on.
+    // A hosted Pyo's own store doesn't reach the team's servers, so there
+    // it's done once backups go to the team's bucket.
     teamAdmin && backups?.settings
       ? {
           label: "Turn on backups",
           href: "/backups",
           done:
-            backups.settings.enabled ||
-            backups.databases.some((d) => d.enabled),
+            (!hosted || backups.settings.destination === "s3") &&
+            (backups.settings.enabled ||
+              backups.databases.some((d) => d.enabled)),
         }
       : null,
-    // Tailscale is the installation's, set up by its admin.
-    s.user.isAdmin
+    // Tailscale is the installation's, set up by its admin. Not on a hosted Pyo.
+    s.user.isAdmin && !hosted
       ? {
           label: "Set up Tailscale",
           href: "/integrations#tailscale",
@@ -85,9 +89,11 @@ function loadDismissed() {
 
 export function FirstRunChecklist({ s }: { s: PyoState }) {
   const [dismissed, setDismissed] = useState(loadDismissed);
-  const list = steps(s);
+  const hosted = useHosted();
+  const list = steps(s, hosted !== false);
   const done = list.filter((x) => x.done).length;
-  if (dismissed || done === list.length) return null;
+  // Nothing until the API says whether Pyo is hosted, so no step flashes.
+  if (hosted === undefined || dismissed || done === list.length) return null;
   const dismiss = () => {
     setDismissed(true);
     try {
