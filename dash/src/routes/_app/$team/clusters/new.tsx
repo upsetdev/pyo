@@ -186,8 +186,8 @@ function AddServers() {
                 />
                 {publicNet ? (
                   <Callout tone="warning">
-                    {window.location.origin} must be reachable from it, and apps
-                    built from Git won't run there.
+                    {window.location.origin} must be reachable from it, and
+                    services built from Git won't run there.
                   </Callout>
                 ) : null}
               </div>
