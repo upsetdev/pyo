@@ -182,10 +182,6 @@ function Volumes({ app }: { app: Application }) {
         <Callout tone="warning">
           Volumes need 1 replica.
         </Callout>
-      ) : volumes.length ? (
-        <Callout tone="neutral">
-          Deploys cause brief downtime.
-        </Callout>
       ) : null}
 
       <ConfirmDialog
