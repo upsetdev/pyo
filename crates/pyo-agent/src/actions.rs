@@ -1,5 +1,5 @@
 //! Commands that aren't rollouts: restart, stop, delete, cordon, maintenance
-//! and on-demand logs.
+//! and on-demand logs (followed in logfollow.rs).
 
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::{
@@ -147,6 +147,7 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         Command::Deploy(_)
         | Command::Cancel { .. }
         | Command::OpenTerminal { .. }
+        | Command::FollowLogs { .. }
         | Command::Backup(_)
         | Command::ListSnapshots(_)
         | Command::ForgetSnapshot(_)
@@ -691,69 +692,89 @@ async fn logs(
     since_seconds: Option<i64>,
     replica: &str,
 ) -> CommandResult {
+    match read_logs(agent, service, tail_lines, since_seconds, replica).await {
+        Ok(r) => CommandResult {
+            ok: true,
+            message: Some(if r.static_site {
+                "Served as static files".into()
+            } else {
+                format!("{} pod(s)", r.pods.len())
+            }),
+            logs: r.lines,
+            data: None,
+        },
+        Err(e) => failed(e),
+    }
+}
+
+/// A service's recent output, as [`read_logs`] found it.
+pub struct RecentLogs {
+    /// Oldest first, the last `tail_lines` of all.
+    pub lines: Vec<LogLine>,
+    /// The replicas read.
+    pub pods: Vec<String>,
+    /// The newest line's time of each replica that had output.
+    pub newest: std::collections::HashMap<String, i64>,
+    /// A static site: its requests, from pyo-static's output.
+    pub static_site: bool,
+}
+
+/// The last `tail_lines` lines of each of the service's replicas (or only
+/// `replica`), and of all of them together.
+pub async fn read_logs(
+    agent: &Agent,
+    service: &ServiceRef,
+    tail_lines: i64,
+    since_seconds: Option<i64>,
+    replica: &str,
+) -> Result<RecentLogs, String> {
     let pods = Api::<Pod>::namespaced(agent.kube.clone(), &service.namespace);
-    let mut list = match pods
+    let mut list = pods
         .list(&ListParams::default().labels(&format!("{SERVICE_LABEL}={}", service.service_id)))
         .await
-    {
-        Ok(l) => l.items,
-        Err(e) => return failed(format!("Couldn't list pods: {e}")),
-    };
+        .map_err(|e| format!("Couldn't list pods: {e}"))?
+        .items;
     if !replica.is_empty() {
         list.retain(|p| p.name_any() == replica);
         if list.is_empty() {
-            return failed(format!("{} has no replica {replica}.", service.name));
+            return Err(format!("{} has no replica {replica}.", service.name));
         }
     }
+    let mut out = RecentLogs {
+        lines: vec![],
+        pods: list.iter().map(|p| p.name_any()).collect(),
+        newest: Default::default(),
+        static_site: false,
+    };
     // A static site: its requests, from pyo-static's output.
     if list.is_empty()
         && crate::sites::marked(&agent.kube, service)
             .await
             .unwrap_or(false)
     {
-        return match crate::sites::logs(&agent.kube, &service.service_id, tail_lines).await {
-            Ok(logs) => CommandResult {
-                ok: true,
-                message: Some("Served as static files".into()),
-                logs,
-                data: None,
-            },
-            Err(e) => failed(format!(
-                "Couldn't read the static file server's output: {e}"
-            )),
-        };
+        out.lines = crate::sites::logs(&agent.kube, &service.service_id, tail_lines)
+            .await
+            .map_err(|e| format!("Couldn't read the static file server's output: {e}"))?;
+        out.static_site = true;
+        return Ok(out);
     }
-    let mut lines: Vec<LogLine> = vec![];
-    for p in &list {
-        let name = p.name_any();
+    for name in &out.pods {
         let lp = LogParams {
             tail_lines: Some(tail_lines.clamp(1, 2000)),
             since_seconds: since_seconds.filter(|s| *s > 0),
             timestamps: true,
             ..Default::default()
         };
-        match pods.logs(&name, &lp).await {
-            Ok(out) => {
-                for l in out.lines() {
-                    // "2026-10-28T10:00:00.123456789Z message"
-                    let (at, msg) = match l.split_once(' ') {
-                        Some((ts, rest)) => match ts.parse::<k8s_openapi::jiff::Timestamp>() {
-                            Ok(t) => (t.as_millisecond(), rest),
-                            Err(_) => (now_ms(), l),
-                        },
-                        None => (now_ms(), l),
-                    };
-                    // Its words, colors aside; the colors stay for the dashboard.
-                    let level = pyo_proto::ansi::level_of(msg);
-                    lines.push(LogLine {
-                        at,
-                        level: level.into(),
-                        source: name.clone(),
-                        message: msg.chars().take(4000).collect(),
-                    });
+        match pods.logs(name, &lp).await {
+            Ok(text) => {
+                for l in text.lines() {
+                    let line = log_line(name, l);
+                    let newest = out.newest.entry(name.clone()).or_insert(line.at);
+                    *newest = (*newest).max(line.at);
+                    out.lines.push(line);
                 }
             }
-            Err(e) => lines.push(LogLine {
+            Err(e) => out.lines.push(LogLine {
                 at: now_ms(),
                 level: "warn".into(),
                 source: name.clone(),
@@ -761,13 +782,29 @@ async fn logs(
             }),
         }
     }
-    lines.sort_by_key(|l| l.at);
-    let skip = lines.len().saturating_sub(tail_lines as usize);
-    CommandResult {
-        ok: true,
-        message: Some(format!("{} pod(s)", list.len())),
-        logs: lines.into_iter().skip(skip).collect(),
-        data: None,
+    out.lines.sort_by_key(|l| l.at);
+    let skip = out.lines.len().saturating_sub(tail_lines as usize);
+    out.lines.drain(..skip);
+    Ok(out)
+}
+
+/// One line of a pod's output read with timestamps
+/// ("2026-10-28T10:00:00.123456789Z message"), as `pod` printed it.
+pub fn log_line(pod: &str, l: &str) -> LogLine {
+    let (at, msg) = match l.split_once(' ') {
+        Some((ts, rest)) => match ts.parse::<k8s_openapi::jiff::Timestamp>() {
+            Ok(t) => (t.as_millisecond(), rest),
+            Err(_) => (now_ms(), l),
+        },
+        None => (now_ms(), l),
+    };
+    // Its words, colors aside; the colors stay for the dashboard.
+    let level = pyo_proto::ansi::level_of(msg);
+    LogLine {
+        at,
+        level: level.into(),
+        source: pod.to_owned(),
+        message: msg.chars().take(4000).collect(),
     }
 }
 

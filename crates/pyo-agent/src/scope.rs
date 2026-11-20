@@ -332,6 +332,7 @@ pub fn refusal(policy: &Policy, command: &Command) -> Option<&'static str> {
         && !matches!(
             command,
             Command::FetchLogs { .. }
+                | Command::FollowLogs { .. }
                 | Command::FetchDatabaseLogs { .. }
                 | Command::QueryTraffic(_)
                 | Command::Cancel { .. }
@@ -424,6 +425,19 @@ mod tests {
             ..Default::default()
         };
         assert!(refusal(&ro, &logs).is_none() && refusal(&ro, &gentle).is_some());
+        let follow = Command::FollowLogs {
+            session_id: "lgf_x".into(),
+            service: pyo_proto::ServiceRef {
+                service_id: "svc_x".into(),
+                name: "web".into(),
+                namespace: "pyo-p".into(),
+                workload_kind: "Deployment".into(),
+            },
+            tail_lines: 100,
+            since_seconds: None,
+            replica: String::new(),
+        };
+        assert!(refusal(&ro, &follow).is_none(), "following logs only reads");
     }
 
     #[test]
