@@ -30,6 +30,8 @@ export type NavLink = {
   match?: string[];
   /** Shown only when the API lists this feature (GET /api/v1/meta). */
   feature?: string;
+  /** Only for the team's owners and admins. */
+  admin?: boolean;
 };
 export type NavItem = NavLink & {
   icon: Icon;
@@ -118,7 +120,7 @@ export const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
       { label: "Members", href: "/members", icon: UsersIcon },
       { label: "Notifications", href: "/notifications", icon: BellIcon },
       { label: "Integrations", href: "/integrations", icon: PlugsConnectedIcon },
-      { label: "Billing", href: "/settings/billing", icon: CreditCardIcon, feature: "billing" },
+      { label: "Billing", href: "/settings/billing", icon: CreditCardIcon, feature: "billing", admin: true },
     ],
   },
 ];
