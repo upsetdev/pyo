@@ -27,6 +27,7 @@ mod locate;
 mod observability;
 mod observe;
 mod operators;
+mod pods;
 mod publicdash;
 mod refused;
 mod rollout;

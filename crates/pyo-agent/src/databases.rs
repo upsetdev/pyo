@@ -540,35 +540,37 @@ pub async fn logs(
     // poolers, backups), its MOCO objects (MySQL) and its pods.
     let pod_names: std::collections::HashSet<String> = pods.iter().map(|p| p.name_any()).collect();
     let prefix = format!("{name}-");
-    let events: Vec<serde_json::Value> = match Api::<Event>::namespaced(client.clone(), ns)
-        .list(&ListParams::default())
-        .await
-    {
+    let events = crate::pods::list(
+        &Api::<Event>::namespaced(client.clone(), ns),
+        &ListParams::default(),
+        |e: Event| {
+            let o = &e.involved_object;
+            let (kind, n) = (
+                o.kind.as_deref().unwrap_or(""),
+                o.name.as_deref().unwrap_or(""),
+            );
+            let about = match kind {
+                "Pod" => pod_names.contains(n),
+                "Database" => n == name,
+                "MySQLCluster" | "BackupPolicy" => n == name || n.starts_with(&prefix),
+                "Cluster"
+                | "Pooler"
+                | "Backup"
+                | "ScheduledBackup"
+                | "StatefulSet"
+                | "Deployment"
+                | "PersistentVolumeClaim"
+                | "CronJob"
+                | "Job" => n == name || n.starts_with(&prefix) || mysql_part(n, name),
+                _ => false,
+            };
+            about.then_some(e)
+        },
+    )
+    .await;
+    let events: Vec<serde_json::Value> = match events {
         Ok(l) => l
-            .items
             .into_iter()
-            .filter(|e| {
-                let o = &e.involved_object;
-                let (kind, n) = (
-                    o.kind.as_deref().unwrap_or(""),
-                    o.name.as_deref().unwrap_or(""),
-                );
-                match kind {
-                    "Pod" => pod_names.contains(n),
-                    "Database" => n == name,
-                    "MySQLCluster" | "BackupPolicy" => n == name || n.starts_with(&prefix),
-                    "Cluster"
-                    | "Pooler"
-                    | "Backup"
-                    | "ScheduledBackup"
-                    | "StatefulSet"
-                    | "Deployment"
-                    | "PersistentVolumeClaim"
-                    | "CronJob"
-                    | "Job" => n == name || n.starts_with(&prefix) || mysql_part(n, name),
-                    _ => false,
-                }
-            })
             .map(|e| {
                 let at = e
                     .last_timestamp

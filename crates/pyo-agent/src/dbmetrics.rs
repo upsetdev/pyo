@@ -675,13 +675,13 @@ pub async fn run(client: Client) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let Ok(pods) = Api::<Pod>::all(client.clone())
-            .list(&ListParams::default().labels(LABEL))
-            .await
-        else {
+        let lp = ListParams::default()
+            .labels(LABEL)
+            .fields(crate::pods::LIVE);
+        let Ok(pods) = crate::pods::list_pods(&Api::<Pod>::all(client.clone()), &lp).await else {
             continue;
         };
-        let pods: Vec<Pod> = pods.items.into_iter().filter(running).collect();
+        let pods: Vec<Pod> = pods.into_iter().filter(running).collect();
         let sizes = claims(&client, &pods).await;
         *CLAIMS.lock().unwrap_or_else(|e| e.into_inner()) = Some(sizes);
         let pages = futures::future::join_all(pods.iter().map(|p| {

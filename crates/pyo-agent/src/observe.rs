@@ -269,25 +269,103 @@ fn matches(selector: &Option<BTreeMap<String, String>>, labels: &BTreeMap<String
     }
 }
 
+/// The pods the heartbeat reads: those that haven't ended, and the ended
+/// ones of Pyo's Jobs (a cron run's outcome is in its pod). Never the rest
+/// of the ended pods, however many a cluster keeps.
+async fn live_pods(client: &Client) -> kube::Result<Vec<Pod>> {
+    let api = Api::<Pod>::all(client.clone());
+    let mut pods =
+        crate::pods::list_pods(&api, &ListParams::default().fields(crate::pods::LIVE)).await?;
+    for owner in [crate::cron::CRON_SERVICE_LABEL, SERVICE_LABEL] {
+        let lp = ListParams::default()
+            .labels(&format!("{owner},{}", crate::runs::JOB_LABEL))
+            .fields(crate::pods::ENDED);
+        pods.extend(crate::pods::list_pods(&api, &lp).await?);
+    }
+    Ok(pods)
+}
+
+/// Pyo's Jobs (a service's cron runs and its cron tasks'), without their
+/// pod templates.
+async fn pyo_jobs(client: &Client) -> kube::Result<Vec<Job>> {
+    let api = Api::<Job>::all(client.clone());
+    let mut jobs = vec![];
+    for owner in [crate::cron::CRON_SERVICE_LABEL, SERVICE_LABEL] {
+        jobs.extend(
+            crate::pods::list(&api, &ListParams::default().labels(owner), |mut j: Job| {
+                j.metadata.managed_fields = None;
+                j.spec = None;
+                Some(j)
+            })
+            .await?,
+        );
+    }
+    Ok(jobs)
+}
+
 pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
     let version = client.apiserver_version().await?.git_version;
+    // Paged and cut down (pods.rs): memory follows what runs, not how many
+    // pods ended.
     let lp = ListParams::default();
-    let nodes = Api::<Node>::all(client.clone()).list(&lp).await?.items;
-    let pods = Api::<Pod>::all(client.clone()).list(&lp).await?.items;
-    let deployments = Api::<Deployment>::all(client.clone())
-        .list(&lp)
-        .await?
-        .items;
-    let statefulsets = Api::<StatefulSet>::all(client.clone())
-        .list(&lp)
-        .await?
-        .items;
-    let daemonsets = Api::<DaemonSet>::all(client.clone()).list(&lp).await?.items;
-    let cronjobs = Api::<CronJob>::all(client.clone()).list(&lp).await?.items;
-    let jobs = Api::<Job>::all(client.clone())
-        .list(&ListParams::default())
-        .await?
-        .items;
+    let nodes = crate::pods::list(&Api::<Node>::all(client.clone()), &lp, |mut n: Node| {
+        n.metadata.managed_fields = None;
+        // Every image on the server: long, and never read.
+        if let Some(s) = n.status.as_mut() {
+            s.images = None;
+        }
+        Some(n)
+    })
+    .await?;
+    let pods = live_pods(client).await?;
+    let deployments = crate::pods::list(
+        &Api::<Deployment>::all(client.clone()),
+        &lp,
+        |mut d: Deployment| {
+            d.metadata.managed_fields = None;
+            if let Some(s) = d.spec.as_mut() {
+                s.template = Default::default();
+            }
+            Some(d)
+        },
+    )
+    .await?;
+    let statefulsets = crate::pods::list(
+        &Api::<StatefulSet>::all(client.clone()),
+        &lp,
+        |mut d: StatefulSet| {
+            d.metadata.managed_fields = None;
+            if let Some(s) = d.spec.as_mut() {
+                s.template = Default::default();
+                s.volume_claim_templates = None;
+            }
+            Some(d)
+        },
+    )
+    .await?;
+    let daemonsets = crate::pods::list(
+        &Api::<DaemonSet>::all(client.clone()),
+        &lp,
+        |mut d: DaemonSet| {
+            d.metadata.managed_fields = None;
+            if let Some(s) = d.spec.as_mut() {
+                s.template = Default::default();
+            }
+            Some(d)
+        },
+    )
+    .await?;
+    let cronjobs = crate::pods::list(
+        &Api::<CronJob>::all(client.clone()),
+        &lp,
+        |mut c: CronJob| {
+            c.metadata.managed_fields = None;
+            c.spec.job_template = Default::default();
+            Some(c)
+        },
+    )
+    .await?;
+    let jobs = pyo_jobs(client).await?;
     let bundle_namespaces = Api::<Namespace>::all(client.clone())
         .list(&ListParams::default().labels(pyo_proto::bundles::BUNDLE_LABEL))
         .await
@@ -298,10 +376,8 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
     // fetched together.
     let names: Vec<String> = nodes.iter().map(|n| n.name_any()).collect();
     // Claims' sizes tell a volume's own space from its server's disk.
-    let claims = Api::<PersistentVolumeClaim>::all(client.clone())
-        .list(&ListParams::default())
-        .await?
-        .items;
+    let claims =
+        crate::pods::list_slim(&Api::<PersistentVolumeClaim>::all(client.clone()), &lp).await?;
     let sizes: HashMap<(String, String), f64> = claims
         .iter()
         .filter_map(|p| Some(((p.namespace()?, p.name_any()), claim_gi(p)?)))
@@ -1016,11 +1092,12 @@ async fn security(client: &Client, nodes: &[Node]) -> pyo_proto::SecurityReport 
         .await
         .map(|l| l.items)
         .unwrap_or_default();
-    let pods = Api::<Pod>::all(client.clone())
-        .list(&lp)
-        .await
-        .map(|l| l.items)
-        .unwrap_or_default();
+    let pods = crate::pods::list_pods(
+        &Api::<Pod>::all(client.clone()),
+        &lp.clone().fields(crate::pods::LIVE),
+    )
+    .await
+    .unwrap_or_default();
     let mut report = pyo_proto::SecurityReport {
         secrets_encryption,
         namespaces: namespaces.len() as u32,

@@ -1676,12 +1676,19 @@ async fn watch_rollout(
 
         // New events about this service's objects.
         let mut fresh = vec![];
-        if let Ok(list) = events_api.list(&ListParams::default()).await {
-            for e in list.items {
+        // Paged, keeping only this service's: a namespace's events can be
+        // many (a server evicting its pods over and over).
+        let mine = crate::pods::list(&events_api, &ListParams::default(), |e: Event| {
+            e.involved_object
+                .name
+                .as_deref()
+                .is_some_and(|n| n.starts_with(&spec.service.name))
+                .then_some(e)
+        })
+        .await;
+        if let Ok(list) = mine {
+            for e in list {
                 let obj = e.involved_object.name.clone().unwrap_or_default();
-                if !obj.starts_with(&spec.service.name) {
-                    continue;
-                }
                 let at = e
                     .last_timestamp
                     .as_ref()

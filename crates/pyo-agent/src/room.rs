@@ -282,11 +282,13 @@ pub async fn no_room(client: &Client, pod: &Pod, message: &str) -> Option<String
         .await
         .ok()?
         .items;
-    let pods = Api::<Pod>::all(client.clone())
-        .list(&ListParams::default())
-        .await
-        .ok()?
-        .items;
+    // What holds room: pods that haven't ended.
+    let pods = crate::pods::list_pods(
+        &Api::<Pod>::all(client.clone()),
+        &ListParams::default().fields(crate::pods::LIVE),
+    )
+    .await
+    .ok()?;
     explain(
         pod_requests(pod),
         memory_short,

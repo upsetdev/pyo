@@ -29,10 +29,15 @@ pub async fn remove(agent: &Agent, node: &str, force: bool) -> anyhow::Result<St
     }
 }
 
-/// The pods scheduled on a server.
-async fn pods_on(agent: &Agent, node: &str) -> anyhow::Result<Vec<Pod>> {
-    let lp = ListParams::default().fields(&format!("spec.nodeName={node}"));
-    Ok(Api::<Pod>::all(agent.kube.clone()).list(&lp).await?.items)
+/// The pods scheduled on a server; only those that haven't ended when
+/// `live` (ended ones hold nothing and go with the server).
+async fn pods_on(agent: &Agent, node: &str, live: bool) -> anyhow::Result<Vec<Pod>> {
+    let mut fields = format!("spec.nodeName={node}");
+    if live {
+        fields = format!("{fields},{}", crate::pods::LIVE);
+    }
+    let lp = ListParams::default().fields(&fields);
+    Ok(crate::pods::list_pods(&Api::<Pod>::all(agent.kube.clone()), &lp).await?)
 }
 
 /// Pods a drain moves: not DaemonSet pods (they run on every server and go
@@ -115,7 +120,7 @@ async fn drain(agent: &Agent, node: &str) -> anyhow::Result<String> {
     let deadline = tokio::time::Instant::now() + DRAIN_TIMEOUT;
     let mut moved = 0usize;
     loop {
-        let left: Vec<Pod> = pods_on(agent, node)
+        let left: Vec<Pod> = pods_on(agent, node, true)
             .await?
             .into_iter()
             .filter(|p| movable(p) && p.name_any() != me)
@@ -150,7 +155,7 @@ async fn drain(agent: &Agent, node: &str) -> anyhow::Result<String> {
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 
-    if pods_on(agent, node)
+    if pods_on(agent, node, true)
         .await?
         .iter()
         .any(|p| p.name_any() == me)
@@ -179,7 +184,7 @@ async fn delete(agent: &Agent, node: &str) -> anyhow::Result<String> {
         grace_period_seconds: Some(0),
         ..Default::default()
     };
-    for p in pods_on(agent, node).await? {
+    for p in pods_on(agent, node, false).await? {
         let pods = Api::<Pod>::namespaced(agent.kube.clone(), &p.namespace().unwrap_or_default());
         let _ = pods.delete(&p.name_any(), &now).await;
     }

@@ -17,7 +17,7 @@ use crate::{
     observe::SERVICE_LABEL,
 };
 
-const JOB_LABEL: &str = "batch.kubernetes.io/job-name";
+pub const JOB_LABEL: &str = "batch.kubernetes.io/job-name";
 /// How long after finishing a run's output is still sent.
 const RECENT_MS: i64 = 3 * 60_000;
 const OUTPUT_LINES: i64 = 60;
