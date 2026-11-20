@@ -105,19 +105,35 @@ impl FromRequestParts<AppState> for AgentCluster {
     }
 }
 
-/// An uploaded certificate with its key, for a cluster of the team that owns it.
+/// An uploaded certificate a domain of a service on this cluster uses, with
+/// its key. Its team has to own the cluster too.
+const CLUSTER_CERTIFICATE: &str = "SELECT c.chain_pem, c.key_sealed FROM pyo.certificates c
+      WHERE c.id = $1 AND c.team_id = $2
+        AND EXISTS (SELECT 1 FROM pyo.clusters k WHERE k.id = $3 AND k.team_id = c.team_id)
+        AND EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(coalesce(a.spec->'domains', '[]')) d
+                     WHERE a.cluster_id = $3 AND a.team_id = c.team_id AND d->>'certificateId' = c.id)";
+
+/// A registry login a deployment on this cluster pulls with, with its
+/// password. Its team has to own the cluster too.
+const CLUSTER_REGISTRY_LOGIN: &str = "UPDATE pyo.registry_logins l SET last_used_at = now()
+      WHERE l.id = $1 AND l.team_id = $2
+        AND EXISTS (SELECT 1 FROM pyo.clusters k WHERE k.id = $3 AND k.team_id = l.team_id)
+        AND EXISTS (SELECT 1 FROM pyo.deployments d
+                     WHERE d.cluster_id = $3 AND d.team_id = l.team_id AND d.spec->>'pullLoginId' = l.id)
+      RETURNING l.host, l.username, l.secret_sealed";
+
+/// An uploaded certificate with its key, for a cluster that uses it.
 async fn certificate(
     State(s): State<AppState>,
     cluster: AgentCluster,
     Path(id): Path<String>,
 ) -> ApiResult<Json<pyo_proto::TlsCertificate>> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT chain_pem, key_sealed FROM pyo.certificates WHERE id = $1 AND team_id = $2",
-    )
-    .bind(&id)
-    .bind(&cluster.team_id)
-    .fetch_optional(&s.db)
-    .await?;
+    let row: Option<(String, String)> = sqlx::query_as(CLUSTER_CERTIFICATE)
+        .bind(&id)
+        .bind(&cluster.team_id)
+        .bind(&cluster.id)
+        .fetch_optional(&s.db)
+        .await?;
     let (certificate, sealed) = row.ok_or_else(|| ApiError::not_found("Certificate"))?;
     let private_key = s.sealer.open(&sealed).map_err(ApiError::from)?;
     Ok(Json(pyo_proto::TlsCertificate {
@@ -126,15 +142,16 @@ async fn certificate(
     }))
 }
 
-/// A registry login with its password, for a cluster of the team that owns it.
+/// A registry login with its password, for a cluster that pulls with it.
 async fn registry_login(
     State(s): State<AppState>,
     cluster: AgentCluster,
     Path(id): Path<String>,
 ) -> ApiResult<Json<pyo_proto::RegistryLogin>> {
-    let row: Option<(String, String, String)> = sqlx::query_as("UPDATE pyo.registry_logins SET last_used_at = now() WHERE id = $1 AND team_id = $2 RETURNING host, username, secret_sealed")
+    let row: Option<(String, String, String)> = sqlx::query_as(CLUSTER_REGISTRY_LOGIN)
         .bind(&id)
         .bind(&cluster.team_id)
+        .bind(&cluster.id)
         .fetch_optional(&s.db)
         .await?;
     let (host, username, sealed) = row.ok_or_else(|| ApiError::not_found("Registry login"))?;
@@ -1686,5 +1703,105 @@ mod name_tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    /// Against a throwaway Postgres: a cluster gets a certificate only when
+    /// a domain of a service on it uses it, and a registry login only when
+    /// a deployment on it pulls with it. Another cluster of the same team
+    /// gets neither, and another team's cluster even less.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn certificates_and_registry_logins_stay_with_their_cluster() {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let run = crate::ids::random_string(8);
+        let (team, other) = (format!("team_l{run}"), format!("team_o{run}"));
+        let (here, there, theirs) = (
+            format!("cl_h{run}"),
+            format!("cl_t{run}"),
+            format!("cl_o{run}"),
+        );
+        let (crt, rgl) = (format!("crt_{run}"), format!("rgl_{run}"));
+        let q = |sql: &'static str| sqlx::query(sql);
+        for t in [&team, &other] {
+            q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(t)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        for (c, t) in [(&here, &team), (&there, &team), (&theirs, &other)] {
+            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)").bind(c).bind(t).execute(&db).await.unwrap();
+        }
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'p', $1)")
+            .bind(format!("prj_{run}"))
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        let spec = json!({ "domains": [{ "id": "dom_1", "hostname": "shop.example.com", "tlsMode": "custom", "certificateId": crt }] });
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, 'web', $5)").bind(format!("svc_{run}")).bind(&team).bind(format!("prj_{run}")).bind(&here).bind(&spec).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'succeeded', '{}', $6)").bind(format!("dpl_{run}")).bind(&team).bind(format!("prj_{run}")).bind(format!("svc_{run}")).bind(&here).bind(json!({ "pullLoginId": rgl })).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.certificates (id, team_id, name, hostnames, issuer, not_before, not_after, fingerprint, chain_pem, key_sealed) VALUES ($1, $2, $1, '{}', 'x', now(), now(), 'f', 'pem', 'key')").bind(&crt).bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.registry_logins (id, team_id, host, username, secret_sealed) VALUES ($1, $2, 'ghcr.io', 'u', 'sealed')").bind(&rgl).bind(&team).execute(&db).await.unwrap();
+
+        let gets = |cluster: &str, cluster_team: &str| {
+            let (db, cluster, cluster_team, crt, rgl) = (
+                db.clone(),
+                cluster.to_owned(),
+                cluster_team.to_owned(),
+                crt.clone(),
+                rgl.clone(),
+            );
+            async move {
+                let cert: Option<(String, String)> = sqlx::query_as(CLUSTER_CERTIFICATE)
+                    .bind(&crt)
+                    .bind(&cluster_team)
+                    .bind(&cluster)
+                    .fetch_optional(&db)
+                    .await
+                    .unwrap();
+                let login: Option<(String, String, String)> =
+                    sqlx::query_as(CLUSTER_REGISTRY_LOGIN)
+                        .bind(&rgl)
+                        .bind(&cluster_team)
+                        .bind(&cluster)
+                        .fetch_optional(&db)
+                        .await
+                        .unwrap();
+                (cert.is_some(), login.is_some())
+            }
+        };
+        assert_eq!(gets(&here, &team).await, (true, true));
+        assert_eq!(
+            gets(&there, &team).await,
+            (false, false),
+            "another cluster of the team"
+        );
+        assert_eq!(
+            gets(&theirs, &other).await,
+            (false, false),
+            "another team's cluster"
+        );
+        assert_eq!(
+            gets(&theirs, &team).await,
+            (false, false),
+            "a cluster the team doesn't own"
+        );
+
+        for t in [&team, &other] {
+            sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+                .bind(t)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
     }
 }
