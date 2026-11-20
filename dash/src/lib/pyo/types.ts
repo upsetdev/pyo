@@ -24,6 +24,8 @@ export type Team = {
     requireDeployApproval: boolean;
     autoDeployOnPush: boolean;
     retainDeployments: number;
+    /** What each of the team's clusters keeps of its requests. */
+    requestLogs?: { maxMb: number; maxDays: number };
   };
   /** On a hosted Pyo: its agents update on their own, or when it chooses. */
   agentUpdates?: "auto" | "manual";
@@ -1708,6 +1710,7 @@ export type TimeRange = "1h" | "24h" | "7d" | "30d";
 export type AnalyticsPoint = {
   at: Timestamp;
   requests: number;
+  pageviews: number;
   visitors: number;
   bandwidthMb: number;
   errors: number;
@@ -1727,51 +1730,17 @@ export type AnalyticsSummary = {
   errorRate: number;
   latency: { p50: number; p95: number; p99: number };
   statusCodes: { code: "2xx" | "3xx" | "4xx" | "5xx"; count: number }[];
-  topPaths: { path: string; requests: number; p95: number }[];
-  referrers: { source: string; visitors: number }[];
-  countries: { code: string; name: string; visitors: number }[];
-  cities: { city: string; country: string; visitors: number }[];
+  topPaths: { path: string; requests: number }[];
+  /** By page views. */
+  referrers: { source: string; views: number }[];
+  /** By requests; "??" when unknown. */
+  countries: { code: string; requests: number }[];
   /** Page views per full URL as requested (query string kept, sensitive values redacted). */
-  pages: {
-    url: string;
-    path: string;
-    views: number;
-    visitors: number;
-    avgMs: number;
-  }[];
-  /** Page views per URL with the query string removed. */
+  pages: { url: string; path: string; views: number }[];
   pageviews: number;
-  devices: { label: string; visitors: number }[];
-  browsers: { label: string; visitors: number }[];
-  queryParams: {
-    key: string;
-    requests: number;
-    distinct: number;
-    redacted: boolean;
-  }[];
-  recentRequests: {
-    id: ID;
-    at: Timestamp;
-    method: string;
-    url: string;
-    path: string;
-    status: number;
-    durationMs: number;
-    bytes: number;
-    country: string;
-    /** Per the analytics IP setting: empty when it's "none". */
-    ip?: string;
-  }[];
-  /** The installation's analytics IP setting, which these IPs follow. */
-  ipMode?: "none" | "anonymized" | "full";
-  /** Busiest client IPs (none when ipMode is "none"). */
-  clientIps?: { ip: string; requests: number; visitors: number }[];
-  ingestion: {
-    status: "healthy" | "lagging" | "unavailable";
-    lagSeconds: number;
-    eventsPerSecond: number;
-    pipeline: string[];
-  };
+  devices: { label: string; views: number }[];
+  browsers: { label: string; views: number }[];
+  queryParams: { key: string; requests: number; redacted: boolean }[];
 };
 
 // ── Builders ───────────────────────────────────────────────────────────────

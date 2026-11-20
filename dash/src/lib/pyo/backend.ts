@@ -327,7 +327,7 @@ export type AnalyticsResponse = {
   series: AnalyticsTimeseries;
   previous: Pick<
     AnalyticsSummary,
-    "estimatedVisitors" | "pageviews" | "errorRate"
+    "requests" | "estimatedVisitors" | "pageviews" | "errorRate"
   >;
 };
 
@@ -357,8 +357,10 @@ export type ConnectionsResponse = {
     unreachable: number;
   }[];
   series: { at: number; connections: number; clients: number; bytes: number }[];
-  countries: { code: string; name: string; clients: number; connections: number }[];
+  countries: { code: string; connections: number }[];
   outcomes: { outcome: string; count: number }[];
+  /** The cluster couldn't say which were the latest. */
+  recentError?: string;
   recent: {
     at: number;
     port: number;
@@ -385,7 +387,8 @@ export type BlockedResponse = {
   /** One point per bucket of the range. */
   series: { at: number; count: number }[];
   rules: { rule: string; count: number }[];
-  sources: { ip: string; country: string; countryName: string; count: number; clients: number }[];
+  /** The busiest among the latest 500, from the cluster. */
+  sources: { ip: string; country: string; count: number }[];
   countries: { country: string; count: number }[];
   /** Websites only. */
   paths: { path: string; count: number }[];
@@ -399,6 +402,8 @@ export type BlockedResponse = {
     rule: string;
   }[];
   ipMode: "none" | "anonymized" | "full";
+  /** The cluster couldn't say which were the latest. */
+  recentError?: string;
 };
 
 export const fetchFirewallBlocked = (service: string, range: string) =>
@@ -434,6 +439,8 @@ export type WafHitsResponse = {
     messages: string[];
     severity: string;
   }[];
+  /** The cluster couldn't say which were the latest. */
+  recentError?: string;
 };
 
 export const fetchWafHits = (service: string, range: string) =>
@@ -459,8 +466,6 @@ export type AccessLog = {
   durationMs: number;
   bytes: number;
   country: string;
-  countryName: string;
-  city: string;
   referrer: string;
   device: string;
   browser: string;
@@ -493,8 +498,10 @@ export const fetchAccessLogs = (q: {
     logs: AccessLog[];
     next: number | null;
     ipMode: string;
-    /** Totals for the filters; on the first page only. */
+    /** Totals for the range; on the first page without filters only. */
     summary: AccessLogSummary | null;
+    /** Clusters that couldn't answer. */
+    unavailable?: { cluster: string; error: string }[];
   }>(
     `/api/v1/access-logs?${new URLSearchParams(
       Object.entries({

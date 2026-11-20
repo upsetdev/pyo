@@ -6,6 +6,7 @@ import { Flag } from "~/components/ui/Flag";
 import { Layered } from "~/components/ui/Layered";
 import { Skeleton } from "~/components/ui/Panel";
 import { fetchConnections } from "~/lib/pyo/backend";
+import { countryName } from "~/lib/pyo/location";
 import { compact, duration } from "~/lib/pyo/format";
 import { useQuery } from "~/lib/pyo/query";
 import type { Application } from "~/lib/pyo/types";
@@ -226,9 +227,9 @@ export function ConnectionsCard({ app }: { app: Application }) {
             {data.countries.slice(0, 8).map((c) => (
               <span key={c.code} className="inline-flex items-center gap-1.5">
                 <Flag country={c.code === "??" ? "" : c.code} size={14} />
-                {c.name}
+                {c.code === "??" ? "Unknown" : countryName(c.code)}
                 <span className="tabular-nums text-muted-foreground">
-                  {compact(c.clients)}
+                  {compact(c.connections)}
                 </span>
               </span>
             ))}

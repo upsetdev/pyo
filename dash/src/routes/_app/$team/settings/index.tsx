@@ -139,6 +139,7 @@ function TeamSettings({ ws }: { ws: Team }) {
           </Button>
         </div>
       </Panel>
+      <RequestLogsPanel ws={ws} />
       {hosted ? (
         <Panel title="Agents">
           <div className="p-4">
@@ -203,5 +204,75 @@ function TeamSettings({ ws }: { ws: Team }) {
         }}
       />
     </div>
+  );
+}
+
+const SIZES = [500, 1024, 2048, 5120, 10240];
+const DAYS = [1, 3, 7, 14, 31];
+const sizeLabel = (mb: number) => (mb < 1024 ? `${mb} MB` : `${mb / 1024} GB`);
+
+/** How much of its requests each of the team's clusters keeps. */
+function RequestLogsPanel({ ws }: { ws: Team }) {
+  const saved = ws.preferences.requestLogs ?? { maxMb: 1024, maxDays: 7 };
+  const [limits, setLimits] = useState(saved);
+  const dirty =
+    limits.maxMb !== saved.maxMb || limits.maxDays !== saved.maxDays;
+  return (
+    <Panel title="Request logs">
+      <div className="grid gap-4 p-4 sm:grid-cols-2">
+        <Field label="Size" hint="Kept on each cluster.">
+          {(p) => (
+            <Select
+              {...p}
+              value={String(limits.maxMb)}
+              onChange={(e) =>
+                setLimits({ ...limits, maxMb: Number(e.target.value) })
+              }
+            >
+              {[...new Set([...SIZES, saved.maxMb])]
+                .sort((a, b) => a - b)
+                .map((mb) => (
+                  <option key={mb} value={mb}>
+                    {sizeLabel(mb)}
+                  </option>
+                ))}
+            </Select>
+          )}
+        </Field>
+        <Field label="Days" hint="The oldest go first.">
+          {(p) => (
+            <Select
+              {...p}
+              value={String(limits.maxDays)}
+              onChange={(e) =>
+                setLimits({ ...limits, maxDays: Number(e.target.value) })
+              }
+            >
+              {[...new Set([...DAYS, saved.maxDays])]
+                .sort((a, b) => a - b)
+                .map((d) => (
+                  <option key={d} value={d}>
+                    {d === 1 ? "1 day" : `${d} days`}
+                  </option>
+                ))}
+            </Select>
+          )}
+        </Field>
+      </div>
+      <div className="flex justify-end border-t border-border px-4 py-3">
+        <Button
+          size="sm"
+          disabled={!dirty}
+          onClick={async () => {
+            const res = await api.updateTeam(ws.id, {
+              preferences: { ...ws.preferences, requestLogs: limits },
+            });
+            if (res) toast({ title: "Request logs saved" });
+          }}
+        >
+          Save changes
+        </Button>
+      </div>
+    </Panel>
   );
 }

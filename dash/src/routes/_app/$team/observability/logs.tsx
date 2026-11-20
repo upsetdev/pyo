@@ -37,6 +37,7 @@ import { servicesIn, usePyo } from "~/lib/pyo/store";
 import type { TimeRange } from "~/lib/pyo/types";
 import { seo } from "~/lib/seo";
 import { copyText } from "~/lib/pyo/clipboard";
+import { countryName } from "~/lib/pyo/location";
 import { stripAnsi } from "~/lib/pyo/ansi";
 
 export const Route = createFileRoute("/_app/$team/observability/logs")({
@@ -96,8 +97,10 @@ function LogsPage() {
   };
   const on = useObservabilityOn();
   const key = on ? JSON.stringify(filter) : "off";
+  // Each refresh asks the clusters: often for a short range (a live
+  // tail), rarely for a long one.
   const q = useQuery(key, () => (on ? fetchAccessLogs(filter) : Promise.resolve(null)), {
-    refreshMs: 10_000,
+    refreshMs: range === "1h" || range === "24h" ? 5_000 : 60_000,
   });
   // The last answer stays on screen while new filters load, so a search
   // doesn't swap the console (zoomed or not) for a placeholder.
@@ -266,6 +269,13 @@ function LogsPage() {
       ) : (
         <>
           <Summary s={data?.summary ?? null} />
+          {data?.unavailable?.length ? (
+            <p className="text-[12.5px] text-warning">
+              Couldn't reach{" "}
+              {data.unavailable.map((u) => u.cluster).join(", ")}. Showing
+              the rest.
+            </p>
+          ) : null}
           <Tail
             logs={logs}
             showIp={showIp}
@@ -553,8 +563,7 @@ function Tail({
                           `time     ${new Date(l.at).toISOString()}`,
                           `url      ${l.host}${pathOf(l)}`,
                           l.ip && `ip       ${l.ip}`,
-                          (l.city || l.countryName) &&
-                            `location ${[l.city, l.countryName].filter(Boolean).join(", ")}`,
+                          l.country && `location ${countryName(l.country)}`,
                           l.referrer && `referrer ${stripAnsi(l.referrer)}`,
                           (l.userAgent || l.browser || l.device) &&
                             `ua       ${stripAnsi(l.userAgent || [l.browser, l.device].filter(Boolean).join(" · "))}`,

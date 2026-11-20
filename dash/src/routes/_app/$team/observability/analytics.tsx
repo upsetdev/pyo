@@ -20,6 +20,7 @@ import { SearchInput } from "~/components/ui/Table";
 import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { fetchAnalytics, type AnalyticsResponse } from "~/lib/pyo/backend";
 import { compact, pct, plural } from "~/lib/pyo/format";
+import { countryName } from "~/lib/pyo/location";
 import { useQuery } from "~/lib/pyo/query";
 import { servicesIn, clustersIn, projectsIn, usePyo } from "~/lib/pyo/store";
 import type { TimeRange } from "~/lib/pyo/types";
@@ -340,13 +341,12 @@ function Loaded({ data }: { data: AnalyticsResponse }) {
         <EmptyState
           icon={ChartLineUpIcon}
           title="No traffic in this range yet"
-          description="Shown within seconds."
+          description="Shown within two minutes."
         />
       </Panel>
     );
   const [metric, setMetric] = useState<MetricId>("visitors");
   const a = now.summary;
-  const viewsPerRequest = a.requests ? a.pageviews / a.requests : 0;
   const metrics: {
     id: MetricId;
     label: ReactNode;
@@ -373,7 +373,7 @@ function Loaded({ data }: { data: AnalyticsResponse }) {
       label: "Page views",
       value: compact(a.pageviews),
       change: change(a.pageviews, prev.summary.pageviews),
-      values: now.series.map((p) => Math.round(p.requests * viewsPerRequest)),
+      values: now.series.map((p) => p.pageviews),
       format: compact,
     },
     {
@@ -514,7 +514,7 @@ function Loaded({ data }: { data: AnalyticsResponse }) {
                 label: "Query params",
                 mono: true,
                 column: "Requests",
-                note: "Redacted values are never stored.",
+                note: "Sensitive values are never kept.",
                 rows: a.queryParams.map((p) => ({
                   key: p.key,
                   label: p.redacted ? (
@@ -539,7 +539,7 @@ function Loaded({ data }: { data: AnalyticsResponse }) {
                 rows: a.referrers.map((r) => ({
                   key: r.source,
                   label: r.source,
-                  value: r.visitors,
+                  value: r.views,
                 })),
               },
             ]}
@@ -550,40 +550,18 @@ function Loaded({ data }: { data: AnalyticsResponse }) {
               {
                 id: "countries",
                 label: "Countries",
-                rows: a.countries.map((c) => ({
-                  key: c.code,
-                  label: `${flag(c.code)} ${c.name}`,
-                  text: c.name,
-                  value: c.visitors,
-                })),
+                column: "Requests",
+                rows: a.countries.map((c) => {
+                  const name =
+                    c.code === "??" ? "Unknown" : countryName(c.code);
+                  return {
+                    key: c.code,
+                    label: `${flag(c.code)} ${name}`,
+                    text: name,
+                    value: c.requests,
+                  };
+                }),
               },
-              {
-                id: "cities",
-                label: "Cities",
-                rows: a.cities.map((c) => ({
-                  key: c.city,
-                  label: `${flag(c.country)} ${c.city}`,
-                  text: c.city,
-                  value: c.visitors,
-                })),
-              },
-              // Client IPs, when the analytics setting keeps them.
-              ...(a.ipMode && a.ipMode !== "none"
-                ? [
-                    {
-                      id: "ips",
-                      label: "IPs",
-                      column: "Requests",
-                      mono: true,
-                      rows: (a.clientIps ?? []).map((r) => ({
-                        key: r.ip,
-                        label: r.ip,
-                        text: r.ip,
-                        value: r.requests,
-                      })),
-                    },
-                  ]
-                : []),
             ]}
           />
           <TopList
@@ -595,7 +573,7 @@ function Loaded({ data }: { data: AnalyticsResponse }) {
                 rows: a.devices.map((d) => ({
                   key: d.label,
                   label: d.label,
-                  value: d.visitors,
+                  value: d.views,
                 })),
               },
               {
@@ -604,7 +582,7 @@ function Loaded({ data }: { data: AnalyticsResponse }) {
                 rows: a.browsers.map((d) => ({
                   key: d.label,
                   label: d.label,
-                  value: d.visitors,
+                  value: d.views,
                 })),
               },
             ]}
@@ -677,7 +655,7 @@ function TopList({ label, tabs }: { label: string; tabs: Tab[] }) {
           ))}
         </div>
         <span className="shrink-0 text-[11.5px] font-medium uppercase tracking-wider text-muted-foreground">
-          {tab.column ?? "Visitors"}
+          {tab.column ?? "Views"}
         </span>
       </div>
 
