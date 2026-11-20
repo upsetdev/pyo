@@ -449,14 +449,18 @@ pub async fn rehome(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> Api
 }
 
 /// Whether a service already has the hostname.
+/// Any team's: row security is lifted for it (rls.rs).
 async fn taken(tx: &mut Transaction<'_, Postgres>, host: &str) -> ApiResult<bool> {
-    Ok(sqlx::query_scalar(
+    let lifted = crate::rls::lift(tx).await?;
+    let taken = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
                          WHERE NOT a.deleting AND d->>'hostname' = $1)",
     )
     .bind(host)
     .fetch_one(&mut **tx)
-    .await?)
+    .await?;
+    lifted.lower(tx).await?;
+    Ok(taken)
 }
 
 /// A domain on its new hostname: its DNS and certificate start over, and

@@ -61,6 +61,7 @@ mod recovery;
 mod refs;
 mod registry;
 mod registrydoor;
+mod rls;
 mod routes;
 mod sandbox;
 mod secrets;
@@ -265,13 +266,14 @@ pub(crate) async fn check_add_server(
     conn: &mut sqlx::PgConnection,
     team_id: &str,
 ) -> error::ApiResult<()> {
-    match ENTITLEMENTS.get() {
-        Some(e) => e
-            .can_add_server(conn, team_id)
-            .await
-            .map_err(|m| error::ApiError::new(axum::http::StatusCode::PAYMENT_REQUIRED, m)),
-        None => Ok(()),
-    }
+    let Some(e) = ENTITLEMENTS.get() else {
+        return Ok(());
+    };
+    // A hosted build's own tables, outside row security (rls.rs).
+    let lifted = rls::lift(conn).await?;
+    let out = e.can_add_server(conn, team_id).await;
+    lifted.lower(conn).await?;
+    out.map_err(|m| error::ApiError::new(axum::http::StatusCode::PAYMENT_REQUIRED, m))
 }
 
 /// Fails with 402 and the entitlement's message when a team may not deploy.
@@ -279,13 +281,13 @@ pub(crate) async fn check_deploy(
     conn: &mut sqlx::PgConnection,
     team_id: &str,
 ) -> error::ApiResult<()> {
-    match ENTITLEMENTS.get() {
-        Some(e) => e
-            .can_deploy(conn, team_id)
-            .await
-            .map_err(|m| error::ApiError::new(axum::http::StatusCode::PAYMENT_REQUIRED, m)),
-        None => Ok(()),
-    }
+    let Some(e) = ENTITLEMENTS.get() else {
+        return Ok(());
+    };
+    let lifted = rls::lift(conn).await?;
+    let out = e.can_deploy(conn, team_id).await;
+    lifted.lower(conn).await?;
+    out.map_err(|m| error::ApiError::new(axum::http::StatusCode::PAYMENT_REQUIRED, m))
 }
 
 /// The dashboard features a hosted build turned on (none when self-hosted).

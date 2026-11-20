@@ -707,6 +707,19 @@ async fn domains_unique(
     service_id: &str,
     spec: &Value,
 ) -> ApiResult<()> {
+    // Other teams' services, and a takeover of a claim they can't prove.
+    let lifted = crate::rls::lift(tx).await?;
+    let out = Box::pin(domains_unique_across_teams(tx, team_id, service_id, spec)).await;
+    lifted.lower(tx).await?;
+    out
+}
+
+async fn domains_unique_across_teams(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    service_id: &str,
+    spec: &Value,
+) -> ApiResult<()> {
     let hosts: Vec<String> = spec["domains"]
         .as_array()
         .into_iter()
@@ -2903,6 +2916,11 @@ async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
         return outside_tx(&s, user, op).await;
     }
     let mut tx = s.db.begin().await?;
+    // Row security: the user's teams only (rls.rs). The installation's own
+    // settings are its admin's, across every team.
+    if !(user.is_admin && installation_wide(&op)) {
+        crate::rls::scope(&mut tx, user).await?;
+    }
     // Clusters whose agent should look for new work after this commits.
     let mut wake: Vec<String> = vec![];
     let out = apply(&s, &mut tx, user, op, &mut wake).await?;
@@ -2915,12 +2933,41 @@ async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     Ok(out)
 }
 
+/// Operations on the installation itself rather than on a team: they go
+/// across every team (an update reaches every cluster), so they run outside
+/// row security, for its admin only.
+fn installation_wide(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::SaveBackupSettings { .. }
+            | Op::RemoveBackupSettings {}
+            | Op::RunBackup {}
+            | Op::SaveEmailSettings { .. }
+            | Op::RemoveEmailSettings {}
+            | Op::SendTestEmail {}
+            | Op::SaveObservabilitySettings { .. }
+            | Op::SaveUpdateSettings { .. }
+            | Op::SetSandboxLimits { .. }
+            | Op::CheckForUpdates {}
+            | Op::StartUpdate { .. }
+            | Op::GithubManifest { .. }
+            | Op::RemoveGithubApp {}
+            | Op::SaveTailscale { .. }
+            | Op::TestTailscale {}
+            | Op::RemoveTailscale {}
+            | Op::RenameTailscaleName { .. }
+            | Op::SetPublicDashboard { .. }
+    )
+}
+
 /// Tailscale is set up here, in the API, with the installation's own
 /// credential. A hosted Pyo serves many teams and joins none of their
 /// tailnets, so it has no Tailscale until each cluster's agent sets it up.
 fn tailscale_here() -> ApiResult<()> {
     if crate::hosted() {
-        return Err(ApiError::bad_request("Tailscale isn't available on this Pyo yet."));
+        return Err(ApiError::bad_request(
+            "Tailscale isn't available on this Pyo yet.",
+        ));
     }
     Ok(())
 }
@@ -2933,6 +2980,7 @@ async fn outside_tx(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     match op {
         Op::TestAlertChannel { id } => {
             let mut tx = s.db.begin().await?;
+            crate::rls::scope(&mut tx, user).await?;
             let team_id = team_of(&mut tx, "alert_channels", &id).await?;
             require_role(&mut tx, user, &team_id, Role::Admin).await?;
             tx.commit().await?;
@@ -3228,6 +3276,8 @@ async fn apply(
                 .bind(&user.email)
                 .execute(&mut **tx)
                 .await?;
+            // The new team is one of theirs now.
+            crate::rls::scope(tx, user).await?;
             log_activity(
                 tx,
                 &id,

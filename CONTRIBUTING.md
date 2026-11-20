@@ -194,6 +194,8 @@ release has to keep working on the new schema.
   with a default.
 - Removing or renaming something takes several releases.
 - Never edit a migration that has been merged.
+- A new table with a `team_id` gets a row security policy like the ones in
+  `0022_row_security.sql`, or a place in `NOT_COVERED` in `rls.rs`.
 
 `scripts/check-migrations.ts` enforces these rules in CI. The full rules are
 in [RELEASING.md](RELEASING.md#change-the-database).
