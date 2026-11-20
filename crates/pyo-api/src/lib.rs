@@ -293,6 +293,12 @@ pub(crate) fn features() -> &'static [String] {
     FEATURES.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
+/// Whether this Pyo is hosted (Pyo Cloud): one Pyo for many teams, outside
+/// their clusters. A hosted build turns dashboard features on.
+pub(crate) fn hosted() -> bool {
+    !features().is_empty()
+}
+
 /// Runs Pyo: migrates, starts the background work, and serves until a
 /// shutdown signal. The `pyo-api` binary is `run(Extensions::default())`.
 pub async fn run(ext: Extensions) -> anyhow::Result<()> {

@@ -468,7 +468,7 @@ async fn check_target(t: &Target, private_allowed: bool) -> Result<(), String> {
 /// Whether a webhook may go to a private network: where the installation
 /// allows it, and never on a hosted Pyo.
 fn private_ok() -> bool {
-    outbound::private_allowed() && crate::features().is_empty()
+    outbound::private_allowed() && !crate::hosted()
 }
 
 // ── Sending ────────────────────────────────────────────────────────────────

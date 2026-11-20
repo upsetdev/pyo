@@ -2915,6 +2915,16 @@ async fn run_op(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
     Ok(out)
 }
 
+/// Tailscale is set up here, in the API, with the installation's own
+/// credential. A hosted Pyo serves many teams and joins none of their
+/// tailnets, so it has no Tailscale until each cluster's agent sets it up.
+fn tailscale_here() -> ApiResult<()> {
+    if crate::hosted() {
+        return Err(ApiError::bad_request("Tailscale isn't available on this Pyo yet."));
+    }
+    Ok(())
+}
+
 /// Operations made of many calls to an outside API run here, before any
 /// transaction: they read through the pool, make their calls, and write
 /// what happened in a short transaction of their own. Every other op goes
@@ -2931,10 +2941,12 @@ async fn outside_tx(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
         }
         Op::PlanTailscaleSetup { token } => {
             require_admin(user)?;
+            tailscale_here()?;
             crate::tailscale_setup::plan(s, token).await
         }
         Op::SetUpTailscale { token, version } => {
             require_admin(user)?;
+            tailscale_here()?;
             let out = crate::tailscale_setup::apply(s, token, &version).await?;
             if !out.changed.is_empty() {
                 let mut tx = s.db.begin().await?;
@@ -7442,6 +7454,7 @@ async fn apply(
         }
         Op::SaveTailscale { client_id, secret } => {
             require_admin(user)?;
+            tailscale_here()?;
             let out = crate::tailscale::save_client(s, &client_id, secret.as_deref()).await?;
             log_setting(tx, user, "tailscale", "Connected Tailscale").await?;
             Ok(out)
