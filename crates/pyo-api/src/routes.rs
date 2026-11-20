@@ -488,8 +488,11 @@ mod lifecycle_tests {
             "still waiting for DNS"
         );
 
-        // old.example.com removed: gone live too.
-        let only_new = service(&live, "web", json!([domain("dom_new", &new_host)]));
+        // old.example.com removed: gone live too. Sent as the dashboard
+        // has the service, with what the API shows of it.
+        let mut only_new = service(&live, "web", json!([domain("dom_new", &new_host)]));
+        only_new["behindCdn"] = json!(null);
+        only_new["wafState"] = json!({ "state": "ready", "message": "" });
         crate::ops::run_json(
             &s,
             &user,
@@ -502,6 +505,7 @@ mod lifecycle_tests {
             (q.len(), q[0]["kind"].as_str(), hosts(&q[0])),
             (1, Some("sync_routes"), vec![new_host.clone()])
         );
+        assert!(!row(&live).await.1, "no pending change");
 
         // A rollback to the first deployment (deployed with old.example.com)
         // keeps today's domains, and so does the version it falls back to.
@@ -546,5 +550,43 @@ mod lifecycle_tests {
         let mut tx = db.begin().await.unwrap();
         finished(&mut tx, &team, &json!({ "kind": "sync_routes", "service": { "serviceId": live }, "routesRevision": 2 }), true, None).await.unwrap();
         tx.commit().await.unwrap();
+
+        // Its redirect to HTTPS turned off: live, no redeploy.
+        let mut plain = service(
+            &live,
+            "web",
+            json!([domain("dom_new", &new_host), domain("dom_old", &old_host)]),
+        );
+        plain["domains"][0]["redirectHttps"] = json!(false);
+        plain["behindCdn"] = json!(null);
+        crate::ops::run_json(&s, &user, json!({ "op": "saveService", "service": plain }))
+            .await
+            .unwrap();
+        let q = queued().await;
+        assert_eq!(
+            (
+                q.len(),
+                q[0]["kind"].as_str(),
+                &q[0]["domains"][0]["redirectHttps"]
+            ),
+            (1, Some("sync_routes"), &json!(false))
+        );
+        assert!(!row(&live).await.1, "no pending change");
+
+        // Every domain removed, so its port is no longer "http": its routes
+        // go now, still no redeploy.
+        crate::ops::run_json(
+            &s,
+            &user,
+            json!({ "op": "saveService", "service": service(&live, "web", json!([])) }),
+        )
+        .await
+        .unwrap();
+        let q = queued().await;
+        assert_eq!(
+            (q.len(), q[0]["kind"].as_str(), hosts(&q[0]).len()),
+            (1, Some("sync_routes"), 0)
+        );
+        assert!(!row(&live).await.1, "no pending change");
     }
 }

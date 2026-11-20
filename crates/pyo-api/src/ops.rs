@@ -565,6 +565,8 @@ fn service_spec_from(service: &Value) -> Value {
             "currentDeploymentId",
             "pendingChanges",
             "waf",
+            "wafState",
+            "behindCdn",
             "createdAt",
             "updatedAt",
         ] {
@@ -5688,7 +5690,8 @@ async fn apply(
             };
             let domains_changed = crate::routes::differ(&spec["domains"], &old_spec["domains"]);
             // Compared in the clear: sealing the same value twice differs.
-            let (mut a, mut b) = (spec.clone(), old_spec.clone());
+            // Only what the user sets counts, never what the API shows.
+            let (mut a, mut b) = (spec.clone(), service_spec_from(&old_spec));
             crate::vault::get().open_env(&mut a).await?;
             crate::vault::get().open_env(&mut b).await?;
             let changed = rollout(&a) != rollout(&b);
@@ -9397,8 +9400,23 @@ mod removal_tests {
 
 #[cfg(test)]
 mod secret_tests {
-    use super::keep_secret_values;
+    use super::{keep_secret_values, service_spec_from};
     use serde_json::json;
+
+    #[test]
+    fn what_the_api_shows_is_never_stored() {
+        let shown = json!({
+            "id": "svc_1", "name": "web", "status": "running", "pendingChanges": false,
+            "waf": { "mode": "block" }, "wafState": { "state": "ready", "message": "" },
+            "behindCdn": "cloudflare", "replicas": 1,
+            "domains": [{ "id": "dom_1", "hostname": "a.example.com", "dnsRecord": { "zone": "example.com" } }],
+        });
+        let spec = service_spec_from(&shown);
+        assert_eq!(
+            spec,
+            json!({ "name": "web", "replicas": 1, "domains": [{ "id": "dom_1", "hostname": "a.example.com" }] })
+        );
+    }
 
     #[test]
     fn a_blank_secret_keeps_its_value() {
