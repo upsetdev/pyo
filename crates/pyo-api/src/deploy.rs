@@ -803,6 +803,36 @@ pub async fn create(
     Ok(cluster_id)
 }
 
+/// Cancels a deployment that hasn't finished: the agent stops watching it
+/// (and settles it cancelled), a build that hasn't finished is dropped, and
+/// a rollout it hasn't picked up yet is withdrawn. Its cluster, to wake.
+pub async fn cancel(tx: &mut Transaction<'_, Postgres>, deployment_id: &str) -> ApiResult<String> {
+    let cluster_id: String =
+        sqlx::query_scalar("SELECT cluster_id FROM pyo.deployments WHERE id = $1")
+            .bind(deployment_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    enqueue(
+        tx,
+        &cluster_id,
+        Command::Cancel {
+            deployment_id: deployment_id.to_owned(),
+        },
+    )
+    .await?;
+    // A build that hasn't finished is dropped; its result is ignored.
+    sqlx::query("UPDATE pyo.build_jobs SET status = 'cancelled', finished_at = now() WHERE deployment_id = $1 AND status IN ('queued', 'running')")
+        .bind(deployment_id)
+        .execute(&mut **tx)
+        .await?;
+    // Queued work the agent hasn't picked up yet is withdrawn here.
+    sqlx::query("UPDATE pyo.commands SET status = 'failed', done_at = now(), result = '{\"ok\":false,\"message\":\"Cancelled\",\"logs\":[]}' WHERE status = 'pending' AND command->>'kind' = 'deploy' AND command->>'deploymentId' = $1")
+        .bind(deployment_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(cluster_id)
+}
+
 /// How long a rollout waits for its service's databases before it fails.
 pub const DATABASE_WAIT_SECS: i64 = 15 * 60;
 
