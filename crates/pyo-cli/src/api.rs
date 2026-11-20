@@ -84,6 +84,18 @@ impl Api {
             .await
     }
 
+    /// Raw bytes, e.g. a part of an upload.
+    pub async fn put_bytes(&self, path: &str, body: Vec<u8>) -> Result<Value> {
+        self.send(
+            self.http
+                .put(format!("{}{path}", self.base))
+                .header("content-type", "application/octet-stream")
+                .timeout(std::time::Duration::from_secs(300))
+                .body(body),
+        )
+        .await
+    }
+
     pub async fn delete(&self, path: &str) -> Result<Value> {
         self.send(self.http.delete(format!("{}{path}", self.base)))
             .await

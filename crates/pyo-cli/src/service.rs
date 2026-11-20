@@ -119,55 +119,307 @@ fn confirmed(answer: &str) -> bool {
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
-pub async fn deploy(api: &Api, service: Option<&str>, detach: bool, yes: bool) -> Result<()> {
+/// How `pyo deploy` sends a folder, and what a new service from one is.
+#[derive(Default)]
+pub struct Folder {
+    /// Send the working copy, even for a service built from Git.
+    pub local: bool,
+    /// Send .env files too.
+    pub with_env: bool,
+    /// A new service's name, project, team and cluster.
+    pub name: Option<String>,
+    pub project: Option<String>,
+    pub team: Option<String>,
+    pub cluster: Option<String>,
+}
+
+/// An operation that may ask to confirm a very large replica change:
+/// asked here, or `-y`.
+async fn confirmed_op(api: &Api, name: &str, body: Value, yes: bool) -> Result<Value> {
+    let send = |confirm: bool| {
+        let mut b = body.clone();
+        b["confirm"] = json!(confirm);
+        api.op(name, b)
+    };
+    match send(yes).await {
+        Err(e) if e.downcast_ref::<crate::api::NeedsConfirm>().is_some() => {
+            if !confirmed(&ui::ask(&format!("{e} [y/N] "))?) {
+                bail!("Not deployed.");
+            }
+            send(true).await
+        }
+        r => r,
+    }
+}
+
+/// A folder is built by one of the team's builders: said before it's
+/// packed and sent.
+fn has_builder(state: &State, team_id: &str) -> Result<()> {
+    let ready = state.0["builders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|b| b["teamId"] == json!(team_id) && b["status"] == json!("ready"));
+    if !ready {
+        bail!("Deploying a folder needs a builder. Add one in Builders, then deploy again.");
+    }
+    Ok(())
+}
+
+/// The folder a deploy sends: pyo.jsonc's, else this one.
+fn folder_of(file: Option<&std::path::Path>) -> Result<PathBuf> {
+    match file
+        .and_then(|f| f.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        Some(p) => Ok(p.to_path_buf()),
+        None => Ok(std::env::current_dir()?),
+    }
+}
+
+pub async fn deploy(
+    api: &Api,
+    service: Option<&str>,
+    detach: bool,
+    yes: bool,
+    folder: Folder,
+) -> Result<()> {
+    // A folder that isn't linked yet: a new service from it.
+    if service.is_none() {
+        let file = config::find()?;
+        let linked = match &file {
+            Some(p) => config::load(p)?.service.is_some(),
+            None => false,
+        };
+        if !linked {
+            return create_from_folder(api, file, detach, yes, folder).await;
+        }
+    }
     let t = target(api, service).await?;
     let mut service = t.service().clone();
+    let kind = service["source"]["type"].as_str().unwrap_or("").to_owned();
+    let name = service["name"].as_str().unwrap_or("").to_owned();
+    if folder.local && !matches!(kind.as_str(), "git" | "upload") {
+        bail!("{name} runs an image, so it isn't built from a folder.");
+    }
     let changes = match &t.file {
         Some((_, f)) => apply(&mut service, f)?,
         None => vec![],
     };
+    for c in &changes {
+        println!("{} {c}", ui::dim("·"));
+    }
     let dep = new_id("dpl");
-    let done = if changes.is_empty() {
+    let done = if kind == "upload" || folder.local {
+        let root = folder_of(t.file.as_ref().map(|(p, _)| p.as_path()))?;
+        let team_id = service["teamId"].as_str().unwrap_or("").to_owned();
+        has_builder(&t.state, &team_id)?;
+        let upload = crate::pack::upload(api, &team_id, &root, folder.with_env).await?;
+        if !changes.is_empty() {
+            confirmed_op(api, "saveService", json!({ "service": service }), yes).await?;
+        }
+        api.op(
+            "deploy",
+            json!({ "serviceId": t.id, "deploymentId": dep, "trigger": "manual", "uploadId": upload }),
+        )
+        .await?
+    } else if changes.is_empty() {
         api.op(
             "deploy",
             json!({ "serviceId": t.id, "deploymentId": dep, "trigger": "manual" }),
         )
         .await?
     } else {
-        for c in &changes {
-            println!("{} {c}", ui::dim("·"));
-        }
-        let save = |confirm: bool| {
-            api.op(
-                "saveService",
-                json!({ "service": service, "deploymentId": dep, "trigger": "manual", "confirm": confirm }),
-            )
-        };
-        match save(yes).await {
-            Err(e) if e.downcast_ref::<crate::api::NeedsConfirm>().is_some() => {
-                // A very large replica change: asked here, or -y.
-                if !confirmed(&ui::ask(&format!("{e} [y/N] "))?) {
-                    bail!("Not deployed.");
-                }
-                save(true).await?
-            }
-            r => r?,
-        }
+        confirmed_op(
+            api,
+            "saveService",
+            json!({ "service": service, "deploymentId": dep, "trigger": "manual" }),
+            yes,
+        )
+        .await?
     };
     // Replicas that don't fit on the servers wait for room.
     if let Some(w) = done["warning"].as_str() {
         println!("{}", ui::yellow(w));
     }
     let url = t.state.deployment_url(&api.base, &service, &dep);
-    println!(
-        "Deploying {} {}",
-        ui::bold(service["name"].as_str().unwrap_or("")),
-        ui::dim(&url)
-    );
+    println!("Deploying {} {}", ui::bold(&name), ui::dim(&url));
     if detach {
         return Ok(());
     }
     watch(api, &dep).await
+}
+
+/// A service name from a folder's: lowercase letters, digits and dashes.
+pub fn slug(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.trim().chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    let out: String = out.trim_matches('-').chars().take(40).collect();
+    let out = out.trim_end_matches('-').to_owned();
+    match out.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() => out,
+        Some(_) => format!("app-{out}"),
+        None => "app".into(),
+    }
+}
+
+/// A new service built from a folder, as the dashboard makes one: one
+/// HTTP port (8080 until the build says another), a check that it's open.
+fn new_service(id: &str, team_id: &str, project_id: &str, cluster_id: &str, name: &str) -> Value {
+    json!({
+        "id": id, "teamId": team_id, "projectId": project_id, "clusterId": cluster_id,
+        "name": name, "description": "",
+        "source": { "type": "upload", "dockerfilePath": "Dockerfile", "buildContext": ".", "buildArgs": [] },
+        "env": [],
+        "resources": { "cpuRequest": 100, "cpuLimit": 500, "memoryRequest": 128, "memoryLimit": 256 },
+        "replicas": 1,
+        "healthCheck": { "type": "tcp", "path": "", "port": 8080, "command": "", "initialDelaySeconds": 10, "periodSeconds": 10, "auto": "default" },
+        "ports": [{ "id": new_id("port"), "name": "http", "containerPort": 8080, "protocol": "HTTP", "exposure": "internal" }],
+        "domains": [],
+    })
+}
+
+/// The project a new service goes in: `--project` (made when there's none
+/// by that name), else picked, else the team's only one.
+async fn pick_project(
+    api: &Api,
+    state: &State,
+    team_id: &str,
+    want: Option<&str>,
+    default_name: &str,
+) -> Result<String> {
+    let projects: Vec<&Value> = state.0["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["teamId"] == json!(team_id))
+        .collect();
+    let make = |name: String| async move {
+        let id = new_id("prj");
+        api.op(
+            "createProject",
+            json!({ "id": id, "teamId": team_id, "name": name, "namespace": slug(&name) }),
+        )
+        .await?;
+        ui::ok(&format!("Created project {}", ui::bold(&name)));
+        Ok::<_, anyhow::Error>(id)
+    };
+    if let Some(w) = want {
+        return match projects
+            .iter()
+            .find(|p| p["id"] == json!(w) || p["name"] == json!(w) || p["namespace"] == json!(w))
+        {
+            Some(p) => Ok(p["id"].as_str().unwrap_or("").to_owned()),
+            None => make(w.to_owned()).await,
+        };
+    }
+    if !std::io::stdin().is_terminal() {
+        return match projects.as_slice() {
+            [] => make(default_name.to_owned()).await,
+            [p] => Ok(p["id"].as_str().unwrap_or("").to_owned()),
+            _ => bail!("Say which project with --project."),
+        };
+    }
+    let mut names: Vec<String> = projects
+        .iter()
+        .map(|p| p["name"].as_str().unwrap_or("").to_owned())
+        .collect();
+    names.push("A new project".into());
+    let i = ui::choose("Which project?", &names)?;
+    if i < projects.len() {
+        return Ok(projects[i]["id"].as_str().unwrap_or("").to_owned());
+    }
+    let name = ui::ask(&format!("Project name ({default_name}): "))?;
+    make(if name.is_empty() {
+        default_name.to_owned()
+    } else {
+        name
+    })
+    .await
+}
+
+/// `pyo deploy` in a folder no service is linked to: make one from it,
+/// link the folder, upload it and follow the deploy.
+async fn create_from_folder(
+    api: &Api,
+    file: Option<PathBuf>,
+    detach: bool,
+    yes: bool,
+    f: Folder,
+) -> Result<()> {
+    let root = folder_of(file.as_deref())?;
+    let folder = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (team_id, cluster_id) =
+        crate::compose::team_and_cluster(api, f.team.as_deref(), f.cluster.as_deref()).await?;
+    let state = api.state().await?;
+    has_builder(&state, &team_id)?;
+    let suggested = slug(&folder);
+    let name = match f.name {
+        Some(n) => n,
+        None if std::io::stdin().is_terminal() => {
+            println!(
+                "{}",
+                ui::dim("No service is linked to this folder. Pyo makes one from it.")
+            );
+            let a = ui::ask(&format!("Service name ({suggested}): "))?;
+            if a.is_empty() { suggested.clone() } else { a }
+        }
+        None => suggested.clone(),
+    };
+    if slug(&name) != name {
+        bail!(
+            "\"{name}\" can't be a service name. Try {}: lowercase letters, digits and dashes.",
+            slug(&name)
+        );
+    }
+    let project_id = pick_project(api, &state, &team_id, f.project.as_deref(), &name).await?;
+    let id = new_id("svc");
+    let mut service = new_service(&id, &team_id, &project_id, &cluster_id, &name);
+    if let Some(p) = &file {
+        for c in apply(&mut service, &config::load(p)?)? {
+            println!("{} {c}", ui::dim("·"));
+        }
+    }
+    let upload = crate::pack::upload(api, &team_id, &root, f.with_env).await?;
+    let dep = new_id("dpl");
+    let done = confirmed_op(
+        api,
+        "createService",
+        json!({ "service": service, "deploymentId": dep, "uploadId": upload }),
+        yes,
+    )
+    .await?;
+    let path = config::write_service(file.as_deref(), &id)?;
+    let state = api.state().await?;
+    let label = state
+        .service(&id)
+        .map(|s| state.path_of(s))
+        .unwrap_or(name.clone());
+    ui::ok(&format!(
+        "Created {} and linked it in {}",
+        ui::bold(&label),
+        path.display()
+    ));
+    if let Some(w) = done["warning"].as_str() {
+        println!("{}", ui::yellow(w));
+    }
+    let url = state.deployment_url(&api.base, &service, &dep);
+    println!("Deploying {} {}", ui::bold(&name), ui::dim(&url));
+    if detach {
+        return Ok(());
+    }
+    watch(api, &dep).await?;
+    println!("{}", ui::dim("Give it an address: pyo domain add --free"));
+    Ok(())
 }
 
 /// Follow a deployment to the end: its stages and build log. Fails when it does.
@@ -294,8 +546,10 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
         || b.context.is_some()
         || !b.args.is_empty()
     {
-        if kind != "git" {
-            bail!("pyo.jsonc: build is for services built from Git. This one is from {kind}.");
+        if kind != "git" && kind != "upload" {
+            bail!(
+                "pyo.jsonc: build is for services built from Git or a folder. This one is from {kind}."
+            );
         }
         if let Some(v) = &b.branch {
             set(

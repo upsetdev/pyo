@@ -14,6 +14,7 @@ mod exec;
 mod firewall;
 mod import;
 mod login;
+mod pack;
 mod registry;
 mod sandbox;
 mod server;
@@ -91,19 +92,35 @@ enum Command {
         /// "api", "shop/api" or "team/shop/api". Without it, pick from a list.
         service: Option<String>,
     },
-    /// Apply pyo.jsonc and deploy, then follow it to the end. With -f, import
-    /// a Docker Compose file instead: see what it makes, then deploy it.
+    /// Apply pyo.jsonc and deploy, then follow it to the end.
+    ///
+    /// A service built from a folder gets this folder, packed and uploaded
+    /// (.gitignore and .pyoignore apply). In a folder no service is linked
+    /// to, it makes one and links it. With -f, import a Docker Compose file
+    /// instead: see what it makes, then deploy it.
     Deploy {
         #[command(flatten)]
         which: Which,
         /// Start it and exit, without following it.
         #[arg(long)]
         detach: bool,
+        /// Send this folder, also for a service built from Git.
+        #[arg(long, conflicts_with = "file")]
+        local: bool,
+        /// Send .env files too (they're left out by default).
+        #[arg(long, conflicts_with = "file")]
+        include_env: bool,
+        /// A new service's name. Defaults to the folder's.
+        #[arg(long, conflicts_with = "file")]
+        name: Option<String>,
+        /// A new service's project (name or id), made when there's none by that name.
+        #[arg(long, conflicts_with = "file")]
+        project: Option<String>,
         /// A Docker Compose file to import as a new project (a .env next to
         /// it is read too).
         #[arg(long, short = 'f')]
         file: Option<std::path::PathBuf>,
-        /// The team to import into (slug or id). Defaults to your first team.
+        /// The team of a new service or Compose import (slug or id). Defaults to your first team.
         #[arg(long)]
         team: Option<String>,
         /// The cluster to run it on (name or id). Defaults to the team's default cluster.
@@ -782,13 +799,30 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
             .await
         }
         Command::Deploy {
-            which, detach, yes, ..
+            which,
+            detach,
+            yes,
+            local,
+            include_env,
+            name,
+            project,
+            team,
+            cluster,
+            ..
         } => {
             service::deploy(
                 &config::client(url, token)?,
                 which.service.as_deref(),
                 detach,
                 yes,
+                service::Folder {
+                    local,
+                    with_env: include_env,
+                    name,
+                    project,
+                    team,
+                    cluster,
+                },
             )
             .await
         }
