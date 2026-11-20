@@ -176,15 +176,23 @@ async fn proxy_scope(client: &Client) -> Option<pyo_proto::rbac::ProxyScope> {
         core::v1::Pod,
     };
     let ns = pyo_proto::system::GATEWAY_NS;
-    let pods =
-        Api::<Pod>::namespaced(client.clone(), ns)
-            .list(&ListParams::default().labels(
-                "app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway",
-            ))
-            .await
-            .ok()?
-            .items;
-    if pods.is_empty() {
+    // Running proxies only, a page at a time, and of each only whether it
+    // carries a token: a server short of disk evicts the proxy over and
+    // over, and thousands of its Failed pods, whole, are more than the
+    // agent's memory.
+    let lp = ListParams::default()
+        .labels("app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway")
+        .fields(crate::pods::LIVE);
+    let tokens: Vec<bool> =
+        crate::pods::list(&Api::<Pod>::namespaced(client.clone(), ns), &lp, |p| {
+            Some(
+                p.spec
+                    .is_none_or(|s| s.automount_service_account_token != Some(false)),
+            )
+        })
+        .await
+        .ok()?;
+    if tokens.is_empty() {
         return None;
     }
     let user = format!("system:serviceaccount:{ns}:envoy-gateway");
@@ -210,14 +218,9 @@ async fn proxy_scope(client: &Client) -> Option<pyo_proto::rbac::ProxyScope> {
         .ok()?
         .status
         .is_some_and(|s| s.allowed);
-    let tokens = pods.iter().any(|p| {
-        p.spec
-            .as_ref()
-            .is_none_or(|s| s.automount_service_account_token != Some(false))
-    });
     Some(pyo_proto::rbac::ProxyScope {
         controller_reads_other_secrets: wide,
-        proxies_have_credentials: tokens,
+        proxies_have_credentials: tokens.contains(&true),
     })
 }
 

@@ -87,9 +87,10 @@ where
 {
     let (want_pod, shell) = (what.pod.as_str(), what.shell.as_str());
     let pods: Api<Pod> = Api::namespaced(agent.kube.clone(), &service.namespace);
-    let list = pods
-        .list(&ListParams::default().labels(&format!("{SERVICE_LABEL}={}", service.service_id)))
-        .await?;
+    let lp = ListParams::default()
+        .labels(&format!("{SERVICE_LABEL}={}", service.service_id))
+        .fields(crate::pods::LIVE);
+    let list = crate::pods::list_pods(&pods, &lp).await?;
     let ready = |p: &Pod| {
         p.metadata.deletion_timestamp.is_none()
             && p.status
@@ -98,14 +99,14 @@ where
                 .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
     };
     let pod = if want_pod.is_empty() {
-        list.items.iter().find(|p| ready(p)).ok_or_else(|| {
+        list.iter().find(|p| ready(p)).ok_or_else(|| {
             anyhow::anyhow!(
                 "{} has no running replica to open a terminal in. Start or deploy it first.",
                 service.name
             )
         })?
     } else {
-        let p = list.items.iter().find(|p| p.name_any() == want_pod).ok_or_else(|| anyhow::anyhow!("Replica {want_pod} is gone (replaced by a deploy or restart). Pick another one."))?;
+        let p = list.iter().find(|p| p.name_any() == want_pod).ok_or_else(|| anyhow::anyhow!("Replica {want_pod} is gone (replaced by a deploy or restart). Pick another one."))?;
         if !ready(p) {
             anyhow::bail!("Replica {want_pod} isn't running right now. Pick another one.");
         }

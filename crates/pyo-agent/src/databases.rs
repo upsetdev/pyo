@@ -499,14 +499,13 @@ pub async fn logs(
 }
 
 /// The database's pods: its instances, poolers, sentinels, jobs.
+/// A page at a time, keeping only its members: the namespace may hold
+/// thousands of other pods that ended.
 pub async fn member_pods(pods: &Api<Pod>, name: &str) -> kube::Result<Vec<Pod>> {
-    Ok(pods
-        .list(&ListParams::default())
-        .await?
-        .items
-        .into_iter()
-        .filter(|p| is_member(p.labels(), name))
-        .collect())
+    crate::pods::list(pods, &ListParams::default(), |p| {
+        is_member(p.labels(), name).then(|| crate::pods::slim_pod(p))
+    })
+    .await
 }
 
 /// Each pod's labels that tell its part, and its server, by name.
