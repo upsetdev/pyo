@@ -354,7 +354,7 @@ export function useDraftSections(
     ? ""
     : d.placement === "tags"
       ? d.serverTags.length
-        ? `servers tagged ${d.serverTags.join(" + ")}`
+        ? `servers tagged ${d.serverTags.join(" or ")}`
         : "tagged servers"
       : d.placement === "servers"
         ? d.serverNames.join(", ") || "picked servers"

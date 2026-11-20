@@ -970,6 +970,7 @@ export function ResourceFields({
   errors = {},
   cluster,
   autoscaled = false,
+  using,
 }: {
   value: Resources;
   onChange: (r: Resources) => void;
@@ -977,8 +978,16 @@ export function ResourceFields({
   /** Where it runs: offers GPUs when it has GPU servers. */
   cluster?: Cluster;
   autoscaled?: boolean;
+  /** What each replica uses now, on average: shown beside the maximums. */
+  using?: { cpuMillis: number; memoryMi: number };
 }) {
   const set = (patch: Partial<Resources>) => onChange({ ...value, ...patch });
+  const now = (used: string, max: string) => (
+    <>
+      {" "}
+      Now using <span className="text-foreground">{used}</span> of {max}.
+    </>
+  );
   return (
     <div className="space-y-4">
     <div className="grid gap-4 sm:grid-cols-2">
@@ -1003,7 +1012,12 @@ export function ResourceFields({
       </Field>
       <Field
         label="Max CPU"
-        hint="Throttled above this."
+        hint={
+          <>
+            Throttled above this.
+            {using ? now(cpu(using.cpuMillis), cpu(value.cpuLimit)) : null}
+          </>
+        }
         error={errors.cpuLimit}
       >
         {(p) => (
@@ -1042,7 +1056,12 @@ export function ResourceFields({
       </Field>
       <Field
         label="Max memory"
-        hint="Restarts if it goes over."
+        hint={
+          <>
+            Restarts if it goes over.
+            {using ? now(mem(using.memoryMi), mem(value.memoryLimit)) : null}
+          </>
+        }
         error={errors.memoryLimit}
       >
         {(p) => (

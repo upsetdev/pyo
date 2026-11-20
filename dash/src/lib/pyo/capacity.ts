@@ -1,6 +1,7 @@
 // Whether a service's replicas fit on its servers. Pyo sets no maximum:
 // replicas that don't fit wait until there's room. Mirrors the API's
 // crates/pyo-api/src/capacity.rs, which says the same on the change.
+import { placementOf, takes, type Placement } from "./placement";
 import type { ClusterServer, Resources } from "./types";
 
 /** Kubernetes counts replicas in 32 bits. */
@@ -16,10 +17,9 @@ type Room = { cpu: number; memoryGi: number };
 export function freeRoom(
   servers: ClusterServer[],
   clusterId: string,
-  placement: { servers?: string[]; serverTags?: string[]; gpu?: number },
+  placement: Partial<Placement> & { gpu?: number },
 ): Room | null {
-  const named = (placement.servers ?? []).filter(Boolean);
-  const tags = placement.serverTags ?? [];
+  const picked = { servers: placement.servers ?? [], tags: placement.tags ?? [] };
   const gpu = (placement.gpu ?? 0) > 0;
   let seen = false;
   const free = { cpu: 0, memoryGi: 0 };
@@ -33,9 +33,8 @@ export function freeRoom(
       n.schedulable &&
       !n.maintenance &&
       !n.builder &&
-      (gpu || !n.gpuDedicated) &&
-      (named.length === 0 || named.includes(n.name)) &&
-      tags.every((t) => (n.tags ?? []).includes(t));
+      (gpu ? !!n.gpuDetected : !n.gpuDedicated) &&
+      takes(picked, n);
     if (!usable) continue;
     free.cpu += Math.max(0, alloc.cpu - (n.requested?.cpu ?? 0));
     free.memoryGi += Math.max(0, alloc.memoryGi - (n.requested?.memoryGi ?? 0));
@@ -93,6 +92,7 @@ export function serviceRoomWarning(
   servers: ClusterServer[],
   app: {
     clusterId: string;
+    placement?: Partial<Placement> | null;
     servers?: string[];
     serverTags?: string[];
     resources: Resources;
@@ -102,11 +102,12 @@ export function serviceRoomWarning(
   replicas: number,
   ask: "run" | "upTo" = "run",
   resources: Resources = app.resources,
+  /** Where it would run, when that's changing too. */
+  placement?: Placement,
 ): string | null {
   if (app.workloadKind === "CronJob") return null;
   const free = freeRoom(servers, app.clusterId, {
-    servers: app.servers,
-    serverTags: app.serverTags,
+    ...(placement ?? placementOf(app)),
     gpu: resources.gpu,
   });
   return roomWarning(ask, replicas, resources, app.runtime.readyReplicas, free);
@@ -148,6 +149,7 @@ export function bigChange(
   servers: ClusterServer[],
   app: {
     clusterId: string;
+    placement?: Partial<Placement> | null;
     servers?: string[];
     serverTags?: string[];
     resources: Resources;
@@ -158,11 +160,11 @@ export function bigChange(
   before: number,
   ask: "run" | "upTo" = "run",
   resources: Resources = app.resources,
+  placement?: Placement,
 ): { title: string; body: string } | null {
   if (app.workloadKind === "CronJob") return null;
   const free = freeRoom(servers, app.clusterId, {
-    servers: app.servers,
-    serverTags: app.serverTags,
+    ...(placement ?? placementOf(app)),
     gpu: resources.gpu,
   });
   const running = app.runtime.readyReplicas;

@@ -6,7 +6,7 @@ import {
   op,
   addDatabaseBackup as addDatabaseBackupRequest,
 } from "./backend";
-import { NEW_PROJECT, type DeployDraft } from "./draft";
+import { draftServerTags, NEW_PROJECT, type DeployDraft } from "./draft";
 import { newId, slugify } from "./format";
 import { isActive, revisionFor } from "./simulation";
 import { generateValue, getTemplate, templateArgs, templateRecord, templateRefs } from "./templates";
@@ -1784,18 +1784,14 @@ export const api = {
         // One way of placing it, whichever was chosen.
         location:
           d.placement === "location" ? d.location || undefined : undefined,
-        // Tags its cluster has are met by being in it; the rest are server tags.
-        serverTags: (() => {
-          if (d.placement !== "tags") return undefined;
-          const ofCluster =
-            get().clusters.find((c) => c.id === d.clusterId)?.tags ?? [];
-          const rest = d.serverTags.filter((t) => !ofCluster.includes(t));
-          return rest.length ? rest : undefined;
-        })(),
-        servers:
+        // Servers picked, or servers with a tag picked (a tag of its
+        // cluster: all of them).
+        placement:
           d.placement === "servers" && d.serverNames.length
-            ? d.serverNames
-            : undefined,
+            ? { servers: d.serverNames, tags: [] }
+            : d.placement === "tags" && draftServerTags(get(), d).length
+              ? { servers: [], tags: draftServerTags(get(), d) }
+              : undefined,
         name: d.name,
         description: d.description,
         kind: t?.kind ?? "application",
@@ -1908,6 +1904,8 @@ export const api = {
         | "clusterId"
         | "autoRollback"
         | "serveAs"
+        | "placement"
+        | "servers"
         | "serverTags"
         | "secretImports"
         | "schedule"

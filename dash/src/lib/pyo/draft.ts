@@ -96,9 +96,9 @@ export type DeployDraft = {
   /** Pin to servers in this place; "" for anywhere in the cluster. */
   location: string;
   /** Where it runs: a place (or anywhere) in a cluster, servers with
-   * every one of some tags, or servers picked by name. */
+   * one of some tags, or servers picked by name. */
   placement: "location" | "tags" | "servers";
-  /** Only on servers with all of these tags. */
+  /** Only on servers with one of these tags (or in a cluster with one). */
   serverTags: string[];
   /** Only on these servers. */
   serverNames: string[];
@@ -703,4 +703,16 @@ export function publicPortError(p: DraftPort): string | undefined {
   )
     return "A connection limit is between 1 and 1,000,000.";
   return undefined;
+}
+
+/**
+ * The server tags a draft placed by tag keeps: none when it picks a tag
+ * its cluster has, since every server there then counts.
+ */
+export function draftServerTags(
+  s: { clusters: Pick<Cluster, "id" | "tags">[] },
+  d: Pick<DeployDraft, "clusterId" | "serverTags">,
+): string[] {
+  const ofCluster = s.clusters.find((c) => c.id === d.clusterId)?.tags ?? [];
+  return d.serverTags.some((t) => ofCluster.includes(t)) ? [] : d.serverTags;
 }
