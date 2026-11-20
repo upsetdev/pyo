@@ -67,6 +67,14 @@ impl Deploy {
     }
 }
 
+/// How pyo-static proves who it is to Pyo.
+enum Login {
+    /// Its key id and PKCS#8 key (standard base64): every request signed.
+    Key(String, String),
+    /// The cluster's token, from an agent that gives it no key (older).
+    Token(String),
+}
+
 pub struct Cache {
     dir: PathBuf,
     login: PathBuf,
@@ -131,17 +139,22 @@ impl Cache {
         })
     }
 
-    /// Pyo's address and the token, from the login Secret (re-read each
-    /// time: it can change while the server runs).
-    fn login(&self) -> anyhow::Result<(String, String)> {
+    /// Pyo's address and how to prove who this is, from the login Secret
+    /// (re-read each time: it can change while the server runs).
+    fn login(&self) -> anyhow::Result<(String, Login)> {
         let read = |k: &str| {
             std::fs::read_to_string(self.login.join(k))
                 .map(|s| s.trim().to_owned())
                 .ok()
                 .filter(|s| !s.is_empty())
         };
-        match (read("url"), read("token")) {
-            (Some(u), Some(t)) => Ok((u.trim_end_matches('/').to_owned(), t)),
+        let Some(url) = read("url") else {
+            bail!("no login to Pyo yet (the pyo-static-login Secret is empty)");
+        };
+        let url = url.trim_end_matches('/').to_owned();
+        match (read("key-id"), read("key"), read("token")) {
+            (Some(id), Some(key), _) => Ok((url, Login::Key(id, key))),
+            (_, _, Some(t)) => Ok((url, Login::Token(t))),
             _ => bail!("no login to Pyo yet (the pyo-static-login Secret is empty)"),
         }
     }
@@ -158,14 +171,30 @@ impl Cache {
     }
 
     async fn get(&self, path: &str) -> anyhow::Result<reqwest::Response> {
-        let (url, token) = self.login()?;
-        let res = self
-            .http
-            .get(format!("{url}/api/static/v1/{path}"))
-            .bearer_auth(token)
-            .timeout(Duration::from_secs(300))
-            .send()
-            .await?;
+        let (url, login) = self.login()?;
+        let full = format!("{url}/api/static/v1/{path}");
+        let mut req = self.http.get(&full).timeout(Duration::from_secs(300));
+        req = match login {
+            // Signed with its own key (pyo-proto `agentauth`), made by the
+            // agent in this cluster.
+            Login::Key(id, key) => {
+                use base64::Engine as _;
+                let pkcs8 = base64::engine::general_purpose::STANDARD
+                    .decode(key)
+                    .map_err(|_| anyhow::anyhow!("the login's key isn't base64"))?;
+                let key = pyo_proto::agentauth::RequestKey::from_pkcs8(&pkcs8).map_err(anyhow::Error::msg)?;
+                let u = reqwest::Url::parse(&full)?;
+                let signed = match u.query() {
+                    Some(q) => format!("{}?{q}", u.path()),
+                    None => u.path().to_owned(),
+                };
+                key.sign(&id, "GET", &signed, b"", pyo_proto::now_ms() / 1000)
+                    .into_iter()
+                    .fold(req, |r, (k, v)| r.header(k, v))
+            }
+            Login::Token(t) => req.bearer_auth(t),
+        };
+        let res = req.send().await?;
         if !res.status().is_success() {
             bail!("Pyo answered {}", res.status());
         }
