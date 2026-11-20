@@ -101,6 +101,7 @@ export function BackupForm({
   canEdit = true,
   hideSchedule = false,
   bare = false,
+  local = true,
 }: {
   saved: ControlBackupSettings | null;
   title: string;
@@ -119,11 +120,13 @@ export function BackupForm({
    * the destination choice shown open rather than folded behind "Change".
    */
   bare?: boolean;
+  /** Whether "This server" is there to pick for a first destination. */
+  local?: boolean;
 }) {
   const [f, setF] = useState<Omit<ControlBackupSettings, "hasSecret">>(
     saved ?? {
-      destination: "local",
-      localAvailable: true,
+      destination: local ? "local" : "s3",
+      localAvailable: local,
       enabled: true,
       schedule: "daily",
       hour: 2,
@@ -252,20 +255,22 @@ export function BackupForm({
           )}
           {where ? (
             <div className={`space-y-3 ${bare ? "" : "mt-3"}`}>
-              <Segmented
-                label="Destination"
-                value={f.destination}
-                onChange={(destination) => set({ destination })}
-                options={[
-                  {
-                    value: "local",
-                    label: "This server",
-                    disabled:
-                      !saved?.localAvailable && f.destination !== "local",
-                  },
-                  { value: "s3", label: "S3-compatible" },
-                ]}
-              />
+              {f.localAvailable || f.destination === "local" ? (
+                <Segmented
+                  label="Destination"
+                  value={f.destination}
+                  onChange={(destination) => set({ destination })}
+                  options={[
+                    {
+                      value: "local",
+                      label: "This server",
+                      disabled:
+                        !f.localAvailable && f.destination !== "local",
+                    },
+                    { value: "s3", label: "S3-compatible" },
+                  ]}
+                />
+              ) : null}
               {f.destination === "local" ? (
                 <p className="text-[12.5px] text-muted-foreground">
                   On this server only. Add an S3 bucket for off-site copies.
