@@ -103,8 +103,34 @@ struct PollQuery {
     wait: Option<u64>,
 }
 
-/// Hand the oldest queued build of the team to this builder, waiting up to
-/// `wait` seconds for one.
+/// Whether a builder may build for another of its team's clusters, one
+/// without a ready builder of its own. Only while every cluster pulls from
+/// Pyo's registry: with in-cluster registries (Pyo Cloud) an image stays in
+/// the cluster that built it, so a build goes to the deploy's own cluster.
+pub fn builds_for_other_clusters() -> bool {
+    !deploy::in_cluster_registries()
+}
+
+/// The oldest queued build this builder may take: one for its own cluster,
+/// or ([`builds_for_other_clusters`]) for a cluster of its team that has no
+/// ready builder. Claims it, and notes on its deployment which builder
+/// built it. ($1 team, $2 builder, $3 its cluster, $4 other clusters too.)
+const CLAIM_BUILD: &str = "WITH j AS (
+       UPDATE pyo.build_jobs SET status = 'running', builder_id = $2, started_at = now()
+        WHERE id = (SELECT q.id FROM pyo.build_jobs q JOIN pyo.deployments d ON d.id = q.deployment_id
+                     WHERE q.team_id = $1 AND q.status = 'queued'
+                       AND (d.cluster_id = $3
+                            OR ($4 AND NOT EXISTS (SELECT 1 FROM pyo.builders o
+                                                    WHERE o.team_id = q.team_id AND o.cluster_id = d.cluster_id AND o.status = 'ready')))
+                     ORDER BY q.created_at LIMIT 1 FOR UPDATE OF q SKIP LOCKED)
+        RETURNING job, deployment_id
+     ), d AS (
+       UPDATE pyo.deployments SET data = data || jsonb_build_object('builderId', $2::text) WHERE id = (SELECT deployment_id FROM j)
+     )
+     SELECT job FROM j";
+
+/// Hand the oldest queued build this builder may take to it, waiting up
+/// to `wait` seconds for one.
 async fn poll(
     State(s): State<AppState>,
     b: BuilderAuth,
@@ -112,33 +138,25 @@ async fn poll(
 ) -> ApiResult<Json<Option<BuildJob>>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait.unwrap_or(25).min(55));
     let waker = s.waker(&format!("builders:{}", b.team_id)).await;
+    let cluster: Option<String> =
+        sqlx::query_scalar("SELECT cluster_id FROM pyo.builders WHERE id = $1")
+            .bind(&b.id)
+            .fetch_one(&s.db)
+            .await?;
     loop {
         let notified = waker.notified();
-        // Claim the job, and note on its deployment which builder built it.
-        let row: Option<(Value,)> = sqlx::query_as(
-            "WITH j AS (
-               UPDATE pyo.build_jobs SET status = 'running', builder_id = $2, started_at = now()
-                WHERE id = (SELECT id FROM pyo.build_jobs WHERE team_id = $1 AND status = 'queued' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
-                RETURNING job, deployment_id
-             ), d AS (
-               UPDATE pyo.deployments SET data = data || jsonb_build_object('builderId', $2::text) WHERE id = (SELECT deployment_id FROM j)
-             )
-             SELECT job FROM j",
-        )
-        .bind(&b.team_id)
-        .bind(&b.id)
-        .fetch_optional(&s.db)
-        .await?;
+        let row: Option<(Value,)> = sqlx::query_as(CLAIM_BUILD)
+            .bind(&b.team_id)
+            .bind(&b.id)
+            .bind(&cluster)
+            .bind(builds_for_other_clusters())
+            .fetch_optional(&s.db)
+            .await?;
         if let Some((job,)) = row {
             let mut job: BuildJob = serde_json::from_value(job).map_err(anyhow::Error::from)?;
             // Pushed through this builder's way to the registry (its door).
-            let cluster: Option<String> =
-                sqlx::query_scalar("SELECT cluster_id FROM pyo.builders WHERE id = $1")
-                    .bind(&b.id)
-                    .fetch_one(&s.db)
-                    .await?;
-            let host = match cluster {
-                Some(c) => registry_for(&s.db, &c).await?,
+            let host = match &cluster {
+                Some(c) => registry_for(&s.db, c).await?,
                 None => String::new(),
             };
             if let Some(rest) = job
@@ -278,8 +296,10 @@ fn first_builder_server(nodes: &[pyo_proto::ServerReport]) -> Option<&str> {
 
 /// The first time the server Pyo runs on connects (or, with in-cluster
 /// registries, a team's cluster), a team without builders gets one there,
-/// named after the server: Git deploys work from the start. Only then, so a
-/// builder removed later stays removed. Returns its name.
+/// named after the server: Git deploys work from the start. With in-cluster
+/// registries each cluster builds its own images, so each cluster without a
+/// builder gets one. Only then, so a builder removed later stays removed.
+/// Returns its name.
 pub async fn first_on_this_server(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     config: &crate::Config,
@@ -290,11 +310,14 @@ pub async fn first_on_this_server(
     let Some(node) = first_builder_server(nodes) else {
         return Ok(None);
     };
-    let have: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pyo.builders WHERE team_id = $1)")
-            .bind(team_id)
-            .fetch_one(&mut **tx)
-            .await?;
+    let have: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.builders WHERE team_id = $1 AND ($3 OR cluster_id = $2))",
+    )
+    .bind(team_id)
+    .bind(cluster_id)
+    .bind(builds_for_other_clusters())
+    .fetch_one(&mut **tx)
+    .await?;
     if have {
         return Ok(None);
     }
@@ -504,6 +527,96 @@ pub(crate) mod first_builder_tests {
         );
         let sent: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'ensure_builder'").bind(&cluster).fetch_one(&pool).await.unwrap();
         assert_eq!(sent, 1);
+
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Against a real Postgres: a build goes to a builder of the deploy's
+    /// own cluster. Another cluster's builder takes it only when images go
+    /// to Pyo's registry and the deploy's cluster has no ready builder.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn builds_go_to_the_deploys_cluster() {
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&pool).await.unwrap();
+        let run = crate::ids::random_string(8);
+        let team = format!("team_b{run}");
+        let (one, two) = (format!("cl_1{run}"), format!("cl_2{run}"));
+        let (b1, b2) = (format!("bld_1{run}"), format!("bld_2{run}"));
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for c in [&one, &two] {
+            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)").bind(c).bind(&team).execute(&pool).await.unwrap();
+        }
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'p', $1)")
+            .bind(format!("prj_{run}"))
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, 'web', '{}')").bind(format!("svc_{run}")).bind(&team).bind(format!("prj_{run}")).bind(&two).execute(&pool).await.unwrap();
+        q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'building', '{}', '{}')").bind(format!("dpl_{run}")).bind(&team).bind(format!("prj_{run}")).bind(format!("svc_{run}")).bind(&two).execute(&pool).await.unwrap();
+        for (b, c) in [(&b1, &one), (&b2, &two)] {
+            q("INSERT INTO pyo.builders (id, team_id, name, kind, cluster_id, server, token_hash, status) VALUES ($1, $2, $1, 'cluster', $3, 's', $1, 'ready')").bind(b).bind(&team).bind(c).execute(&pool).await.unwrap();
+        }
+        let job = format!("bj_{run}");
+        let queue = || async {
+            sqlx::query("DELETE FROM pyo.build_jobs WHERE id = $1")
+                .bind(&job)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO pyo.build_jobs (id, team_id, deployment_id, job) VALUES ($1, $2, $3, '{}')").bind(&job).bind(&team).bind(format!("dpl_{run}")).execute(&pool).await.unwrap();
+        };
+        let claim = |builder: &str, cluster: &str, others: bool| {
+            let (pool, team, builder, cluster) = (
+                pool.clone(),
+                team.clone(),
+                builder.to_owned(),
+                cluster.to_owned(),
+            );
+            async move {
+                sqlx::query_scalar::<_, serde_json::Value>(CLAIM_BUILD)
+                    .bind(&team)
+                    .bind(&builder)
+                    .bind(&cluster)
+                    .bind(others)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap()
+                    .is_some()
+            }
+        };
+
+        // In-cluster registries: cluster one's builder never builds for two.
+        queue().await;
+        assert!(!claim(&b1, &one, false).await);
+        assert!(claim(&b2, &two, false).await);
+        // Pyo's registry: two's own builder first, while it's ready.
+        queue().await;
+        assert!(!claim(&b1, &one, true).await);
+        sqlx::query("UPDATE pyo.builders SET status = 'offline' WHERE id = $1")
+            .bind(&b2)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            claim(&b1, &one, true).await,
+            "two has none ready: one helps out"
+        );
+        // In-cluster registries wait for two's own.
+        queue().await;
+        assert!(!claim(&b1, &one, false).await);
 
         sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
             .bind(&team)

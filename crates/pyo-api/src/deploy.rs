@@ -689,16 +689,23 @@ pub async fn create(
     // No image yet: a Git source that has to be built first.
     let needs_build = deploy_spec.image.is_empty();
     if needs_build {
+        // A builder of the service's cluster builds it (builders.rs), or
+        // one of another cluster when images go to Pyo's registry.
+        let anywhere = crate::builders::builds_for_other_clusters();
         let ready: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pyo.builders WHERE team_id = $1 AND status = 'ready')",
+            "SELECT EXISTS (SELECT 1 FROM pyo.builders WHERE team_id = $1 AND status = 'ready' AND ($3 OR cluster_id = $2))",
         )
         .bind(&team_id)
+        .bind(&cluster_id)
+        .bind(anywhere)
         .fetch_one(&mut **tx)
         .await?;
         if !ready {
-            return Err(ApiError::conflict(
-                "Git deploys need a builder. Add one in Builders, then deploy again.",
-            ));
+            return Err(ApiError::conflict(if anywhere {
+                "Git deploys need a builder. Add one in Builders, then deploy again."
+            } else {
+                "Git deploys need a builder in the service's cluster. Add one in Builders, then deploy again."
+            }));
         }
     }
     let now = now_ms();
