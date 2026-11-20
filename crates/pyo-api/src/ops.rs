@@ -8712,18 +8712,22 @@ pub(crate) struct ServiceLogs {
 #[into_params(parameter_in = Query)]
 pub struct LogsQuery {
     /// Only lines since this time, in milliseconds since 1970 (at most a week back).
-    since: Option<i64>,
+    pub(crate) since: Option<i64>,
     /// Only this replica, by name (a log line's `source`).
-    replica: Option<String>,
+    pub(crate) replica: Option<String>,
     /// How many lines of each replica, 1 to 2000. 300 by default.
-    tail: Option<i64>,
+    pub(crate) tail: Option<i64>,
 }
 
 /// Recent logs
 ///
 /// The last lines each of a service's replicas printed, read from its
-/// cluster on request. Takes up to 15 seconds. To follow them, ask again
-/// with `since` set to the newest line's time.
+/// cluster on request. Takes up to 15 seconds. To follow them, open the
+/// WebSocket at `/services/{id}/logs/follow` with the same query: it sends
+/// these lines, then new ones as they're printed, each text frame
+/// `{"type":"lines","lines":[…]}` (or `{"type":"error","message":…}`). It
+/// closes after an hour, so open it again with `since` set to the newest
+/// line's time.
 #[utoipa::path(get, path = "/services/{id}/logs", operation_id = "getServiceLogs", tag = "Services",
     params(("id" = String, Path, description = "The service's id (`svc_…`)."), LogsQuery),
     responses(
@@ -8744,8 +8748,21 @@ pub(crate) async fn service_logs(
 }
 
 /// Seconds back to read from `since` (ms), rounded up, a week at most.
-fn since_seconds(since: Option<i64>, now: i64) -> Option<i64> {
+pub(crate) fn since_seconds(since: Option<i64>, now: i64) -> Option<i64> {
     since.map(|t| ((now - t).max(0) / 1000 + 1).min(7 * 86400))
+}
+
+/// A replica's name from a query, checked. Empty: all of them.
+pub(crate) fn replica_name(replica: Option<String>) -> ApiResult<String> {
+    let replica = replica.unwrap_or_default();
+    if replica.len() > 253
+        || !replica
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+    {
+        return Err(ApiError::bad_request("That isn't a replica name."));
+    }
+    Ok(replica)
 }
 
 /// Recent output of a service's replicas, read by its cluster's agent.
@@ -8755,14 +8772,7 @@ pub async fn fetch_service_logs(
     id: &str,
     q: LogsQuery,
 ) -> ApiResult<Value> {
-    let replica = q.replica.unwrap_or_default();
-    if replica.len() > 253
-        || !replica
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
-    {
-        return Err(ApiError::bad_request("That isn't a replica name."));
-    }
+    let replica = replica_name(q.replica)?;
     let id = id.to_owned();
     let mut tx = crate::rls::begin(&s.db, user).await?;
     let team_id = team_of(&mut tx, "services", &id).await?;

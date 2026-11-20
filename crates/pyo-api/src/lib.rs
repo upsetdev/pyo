@@ -45,6 +45,7 @@ mod images;
 mod install;
 mod jobs;
 mod join;
+mod logfollow;
 mod mail;
 mod mcp;
 mod migrate;
@@ -559,7 +560,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
     } else {
         probes
             .nest("/api/auth", auth::routes())
-            // JSON is compressed; the terminal's WebSocket isn't (it's not a body).
+            // JSON is compressed; the terminal's and log follow's WebSockets aren't (they're not bodies).
             .nest(
                 "/api/v1",
                 ops::routes()
@@ -569,6 +570,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                     .merge(sandbox::api::routes())
                     .layer(CompressionLayer::new())
                     .merge(terminal::routes())
+                    .merge(logfollow::routes())
                     .merge(database_imports::routes())
                     .merge(source_uploads::routes())
                     .merge(platform_import::routes()),
@@ -585,6 +587,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 agent::routes()
                     .merge(sites::agent_routes())
                     .merge(terminal::agent_routes())
+                    .merge(logfollow::agent_routes())
                     .merge(database_imports::agent_routes())
                     .merge(agent_auth::routes())
                     // Signed requests (agent_auth.rs): who sent it, from its key.
@@ -678,6 +681,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             agent::routes()
                 .merge(sites::agent_routes())
                 .merge(terminal::agent_routes())
+                .merge(logfollow::agent_routes())
                 .merge(database_imports::agent_routes())
                 .merge(agent_auth::component_routes()),
             agent_ca,
