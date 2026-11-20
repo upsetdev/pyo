@@ -94,16 +94,18 @@ pub fn builder_registry(on_pyos_cluster: bool) -> Option<String> {
     (!push.is_empty()).then_some(push)
 }
 
-/// A build job for a deployment's Git source.
+/// A build job for a deployment's Git source, or for a folder uploaded
+/// with `pyo deploy` (source_uploads.rs), built with the same settings.
 fn build_job(
     id: &str,
     deployment_id: &str,
     service_id: &str,
     source: &Value,
     upload_site: bool,
+    upload: Option<pyo_proto::SourceUpload>,
 ) -> pyo_proto::BuildJob {
     let r = registry();
-    pyo_proto::BuildJob {
+    let mut job = pyo_proto::BuildJob {
         id: id.to_owned(),
         deployment_id: deployment_id.to_owned(),
         repo_url: str_at(source, &["repoUrl"]).trim().to_owned(),
@@ -145,7 +147,42 @@ fn build_job(
         clone_token: None,
         clone_username: None,
         upload_site,
+        source_upload: None,
+    };
+    if let Some(u) = upload {
+        // Nothing to clone, and no repository to report a commit status to.
+        job.repo_url = String::new();
+        job.branch = String::new();
+        job.commit = String::new();
+        job.github_installation_id = None;
+        job.git_connection_id = None;
+        job.source_upload = Some(u);
     }
+    job
+}
+
+/// A deployment's source for a folder uploaded with `pyo deploy`: where it
+/// came from, for the dashboard ("Uploaded from …"), and the service's
+/// build settings (a Git service's too, deployed with `--local`).
+fn upload_source(service_source: &Value, u: &crate::source_uploads::Claimed) -> Value {
+    let mut src = json!({
+        "type": "upload",
+        "uploadId": u.job.id,
+        "sha256": u.job.sha256,
+        "size": u.job.size,
+        "files": u.files,
+        "folder": u.folder,
+        "machine": u.machine,
+    });
+    for k in ["dockerfilePath", "buildContext", "buildArgs"] {
+        if !service_source[k].is_null() {
+            src[k] = service_source[k].clone();
+        }
+    }
+    if service_source["type"] == json!("git") {
+        src["fromGit"] = json!(true);
+    }
+    src
 }
 const FINAL: [&str; 3] = ["succeeded", "failed", "cancelled"];
 
@@ -185,6 +222,22 @@ pub fn image_ref(source: &Value) -> ApiResult<String> {
                 r if r.starts_with("sha256:") => format!("{image}@{r}"),
                 r => format!("{image}:{r}"),
             })
+        }
+        // From a folder (`pyo deploy`): each deploy uploads it, or reuses
+        // the image built last.
+        "upload" => {
+            for (k, what) in [
+                ("dockerfilePath", "Dockerfile path"),
+                ("buildContext", "Build context"),
+            ] {
+                let v = str_at(source, &[k]);
+                if v.contains("..") || v.contains(['#', ':', ' ']) {
+                    return Err(ApiError::bad_request(format!(
+                        "{what} can't contain '..', '#', ':' or spaces."
+                    )));
+                }
+            }
+            Ok(String::new())
         }
         // Built by a builder; the image is known once the build finishes.
         "git" => {
@@ -494,6 +547,9 @@ pub struct DeployRequest<'a> {
     pub retry_of: Option<&'a str>,
     /// Build this commit instead of the source's pin or branch head (a push).
     pub commit: Option<&'a str>,
+    /// Build this uploaded folder (source_uploads.rs) instead of the
+    /// service's source.
+    pub upload: Option<&'a str>,
 }
 
 /// What a deployment needs of its service: team, project, cluster, spec,
@@ -538,6 +594,19 @@ pub async fn create(
         ));
     }
 
+    let service_kind = str_at(&spec, &["source", "type"]).to_owned();
+    let upload = match req.upload {
+        Some(id) => {
+            if !matches!(service_kind.as_str(), "git" | "upload") {
+                return Err(ApiError::bad_request(
+                    "This service runs an image, so it isn't built from a folder.",
+                ));
+            }
+            Some(crate::source_uploads::claim(tx, id, &team_id, req.deployment_id).await?)
+        }
+        None => None,
+    };
+
     // Rollbacks and retries reuse the exact spec of an earlier deployment.
     let earlier = req.rollback_of.or(req.retry_of);
     let (mut deploy_spec, source) = if let Some(prev_id) = earlier {
@@ -578,7 +647,53 @@ pub async fn create(
         crate::secretstores::import_env(tx, &team_id, &spec, &mut built.env).await?;
         // `${{postgres.DATABASE_URL}}` and the like, from the project's services.
         crate::refs::resolve(tx, &project_id, &namespace, &mut built.env).await?;
-        (built, spec["source"].clone())
+        match &upload {
+            Some(u) => (built, upload_source(&spec["source"], u)),
+            // A service from a folder deployed again without one: the image
+            // built last, with the settings it has now.
+            None if service_kind == "upload" => {
+                let live: Option<(Value, Value)> = match &live_id {
+                    Some(l) => {
+                        sqlx::query_as("SELECT spec, data FROM pyo.deployments WHERE id = $1")
+                            .bind(l)
+                            .fetch_optional(&mut **tx)
+                            .await?
+                    }
+                    None => None,
+                };
+                let image = live.as_ref().and_then(|(spec, data)| {
+                    data["pinnedImage"]
+                        .as_str()
+                        .or(spec["image"].as_str())
+                        .filter(|i| !i.is_empty())
+                        .map(str::to_owned)
+                });
+                let Some(image) = image else {
+                    return Err(ApiError::conflict(
+                        "This service is built from a folder. Deploy it from there: pyo deploy",
+                    ));
+                };
+                built.image = image;
+                (
+                    built,
+                    live.map(|(_, d)| d["source"].clone()).unwrap_or_default(),
+                )
+            }
+            None => (built, spec["source"].clone()),
+        }
+    };
+    // A retried build of an upload builds the same folder, while Pyo has it.
+    let retried_upload = match (req.retry_of, &source["type"]) {
+        (Some(_), t) if t == "upload" && deploy_spec.image.is_empty() => Some(
+            crate::source_uploads::reclaim(
+                tx,
+                str_at(&source, &["uploadId"]),
+                &team_id,
+                req.deployment_id,
+            )
+            .await?,
+        ),
+        _ => None,
     };
     // A static deploy's folder, when it's still kept and the service still
     // serves static builds as files; else its image runs as a service.
@@ -697,20 +812,33 @@ pub async fn create(
         .fetch_one(&mut **tx)
         .await?;
         if !ready {
-            return Err(ApiError::conflict(if anywhere {
-                "Git deploys need a builder. Add one in Builders, then deploy again."
-            } else {
-                "Git deploys need a builder in the service's cluster. Add one in Builders, then deploy again."
-            }));
+            return Err(ApiError::conflict(
+                match (anywhere, source["type"] == json!("upload")) {
+                    (true, false) => {
+                        "Git deploys need a builder. Add one in Builders, then deploy again."
+                    }
+                    (false, false) => {
+                        "Git deploys need a builder in the service's cluster. Add one in Builders, then deploy again."
+                    }
+                    (true, true) => {
+                        "Deploying a folder needs a builder. Add one in Builders, then deploy again."
+                    }
+                    (false, true) => {
+                        "Deploying a folder needs a builder in the service's cluster. Add one in Builders, then deploy again."
+                    }
+                },
+            ));
         }
     }
     let now = now_ms();
-    let revision_label = if needs_build {
+    let revision_label = if needs_build && source["type"] == json!("upload") {
+        str_at(&source, &["sha256"]).chars().take(7).collect()
+    } else if needs_build {
         match str_at(&source, &["commit"]) {
             "" => str_at(&source, &["branch"]).to_owned(),
             c => c.chars().take(7).collect(),
         }
-    } else if source["type"] == json!("git") {
+    } else if matches!(source["type"].as_str(), Some("git" | "upload")) {
         // A rollback or retry of a build: same image, same commit.
         deploy_spec
             .image
@@ -776,6 +904,7 @@ pub async fn create(
             req.service_id,
             &source,
             crate::sites::serves_static(&spec),
+            upload.map(|u| u.job).or(retried_upload),
         );
         sqlx::query(
             "INSERT INTO pyo.build_jobs (id, team_id, deployment_id, job) VALUES ($1, $2, $3, $4)",
@@ -825,6 +954,7 @@ pub async fn cancel(tx: &mut Transaction<'_, Postgres>, deployment_id: &str) -> 
         .bind(deployment_id)
         .execute(&mut **tx)
         .await?;
+    crate::source_uploads::drop_for(&mut **tx, deployment_id).await?;
     // Queued work the agent hasn't picked up yet is withdrawn here.
     sqlx::query("UPDATE pyo.commands SET status = 'failed', done_at = now(), result = '{\"ok\":false,\"message\":\"Cancelled\",\"logs\":[]}' WHERE status = 'pending' AND command->>'kind' = 'deploy' AND command->>'deploymentId' = $1")
         .bind(deployment_id)
@@ -1730,6 +1860,8 @@ pub async fn finish_build(
         tx.commit().await?;
         return Ok(None);
     };
+    // Built (or not): an uploaded folder isn't needed any more.
+    crate::source_uploads::drop_for(&mut *tx, &deployment_id).await?;
     // The service's id, not the label in the spec: the builder pushed to
     // pyo/services/<id> (build_job).
     let (cluster_id, service_id, status, mut spec, mut data): (String, String, String, Value, Value) =
@@ -1816,9 +1948,12 @@ pub async fn finish_build(
                     .execute(&mut *tx)
                     .await?;
             }
-            data["revision"] = json!(r.commit);
-            data["revisionLabel"] = json!(r.commit.chars().take(7).collect::<String>());
-            data["source"]["commit"] = json!(r.commit);
+            // An uploaded folder has no commit: its label stays the archive's.
+            if !r.commit.is_empty() {
+                data["revision"] = json!(r.commit);
+                data["revisionLabel"] = json!(r.commit.chars().take(7).collect::<String>());
+                data["source"]["commit"] = json!(r.commit);
+            }
             // "Dockerfile" or "Containerfile", or the framework Railpack detected.
             if let Some(how) = &r.detected {
                 data["source"]["builder"] =
@@ -2027,7 +2162,7 @@ mod build_job_tests {
             "type": "git", "repoUrl": "https://github.com/acme/site", "branch": "main",
             "buildArgs": [{ "key": "RAILPACK_SPA_OUTPUT_DIR", "value": "build" }, { "key": "", "value": "dropped" }],
         });
-        let job = super::build_job("bld_1", "dpl_1", "svc_1", &source, true);
+        let job = super::build_job("bld_1", "dpl_1", "svc_1", &source, true, None);
         assert_eq!(job.build_args.len(), 1);
         assert_eq!(
             (
@@ -2036,6 +2171,56 @@ mod build_job_tests {
             ),
             ("RAILPACK_SPA_OUTPUT_DIR", "build")
         );
+        assert!(job.source_upload.is_none());
+    }
+
+    #[test]
+    fn an_upload_builds_with_the_services_settings_and_clones_nothing() {
+        let git = json!({
+            "type": "git", "repoUrl": "https://github.com/acme/site", "branch": "main", "installationId": 7,
+            "dockerfilePath": "docker/Dockerfile", "buildContext": "web",
+            "buildArgs": [{ "key": "A", "value": "1" }],
+        });
+        let claimed = crate::source_uploads::Claimed {
+            job: pyo_proto::SourceUpload {
+                id: "src_1".into(),
+                size: 10,
+                sha256: "ab".repeat(32),
+            },
+            files: 3,
+            folder: "site".into(),
+            machine: "laptop".into(),
+        };
+        let source = super::upload_source(&git, &claimed);
+        assert_eq!(source["type"], "upload");
+        assert_eq!(source["machine"], "laptop");
+        assert_eq!(source["fromGit"], true);
+        assert!(source["repoUrl"].is_null());
+        let job = super::build_job(
+            "bld_1",
+            "dpl_1",
+            "svc_1",
+            &source,
+            false,
+            Some(claimed.job.clone()),
+        );
+        assert_eq!(job.repo_url, "");
+        assert_eq!(job.github_installation_id, None);
+        assert_eq!(
+            (job.dockerfile_path.as_str(), job.build_context.as_str()),
+            ("docker/Dockerfile", "web")
+        );
+        assert_eq!(job.build_args.len(), 1);
+        assert_eq!(
+            job.source_upload.as_ref().map(|u| u.id.as_str()),
+            Some("src_1")
+        );
+        assert!(
+            super::image_ref(&json!({ "type": "upload" }))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(super::image_ref(&json!({ "type": "upload", "buildContext": "../x" })).is_err());
     }
 }
 

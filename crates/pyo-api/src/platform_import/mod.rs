@@ -1762,6 +1762,7 @@ async fn create(
                     volumes,
                     vec![],
                     &mut wake,
+                    None,
                 )
                 .await?;
                 Ok::<_, ApiError>((pid, id))
@@ -1849,6 +1850,7 @@ async fn create(
                         volumes,
                         vec![],
                         &mut wake,
+                        None,
                     )
                     .await?;
                 }
@@ -2182,6 +2184,7 @@ async fn first_deploy(s: &AppState, user: &User, service_id: &str) -> ApiResult<
             rollback_of: None,
             retry_of: None,
             commit: None,
+            upload: None,
         },
     )
     .await?;

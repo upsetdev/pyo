@@ -1648,6 +1648,21 @@ pub struct BuildJob {
     /// uploads it (site.rs). Off for a service set to run as a service.
     #[serde(default)]
     pub upload_site: bool,
+    /// A folder sent with `pyo deploy` to build instead of a Git checkout:
+    /// the builder fetches it from Pyo, which deletes it once it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_upload: Option<SourceUpload>,
+}
+
+/// A folder uploaded to build (a gzipped tar), as a build job names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceUpload {
+    pub id: String,
+    /// In bytes.
+    pub size: u64,
+    /// Hex SHA-256 of the archive.
+    pub sha256: String,
 }
 
 /// A step of a build. `stage` is "building" or "pushing" (or empty for logs only).

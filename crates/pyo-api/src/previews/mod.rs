@@ -970,6 +970,7 @@ async fn start(
             rollback_of: None,
             retry_of: None,
             commit: Some(&pull.head_sha),
+            upload: None,
         },
     )
     .await;

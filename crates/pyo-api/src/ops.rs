@@ -2441,6 +2441,9 @@ pub(crate) enum Op {
         /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
         #[serde(default)]
         confirm: bool,
+        /// A folder uploaded with `createSourceUpload`, for a service whose `source` is `{"type": "upload"}` (built from a folder with `pyo deploy`): its first deployment builds it.
+        #[serde(default)]
+        upload_id: Option<String>,
     },
     /// Save a service's configuration. With `deploymentId`, roll it out too. Changes to its `domains` go live without a deploy once it has been deployed.
     #[serde(rename = "saveService")]
@@ -2479,6 +2482,9 @@ pub(crate) enum Op {
         rollback_of: Option<String>,
         /// The failed deployment to try again.
         retry_of: Option<String>,
+        /// A folder uploaded with `createSourceUpload` to build and deploy, instead of the service's source. For services built from Git or from a folder.
+        #[serde(default)]
+        upload_id: Option<String>,
     },
     /// Cancel a deployment that hasn't finished.
     Cancel { deployment_id: String },
@@ -5361,6 +5367,7 @@ async fn apply(
                     volumes,
                     vec![],
                     wake,
+                    None,
                 )
                 .await?;
                 made.push(json!({ "name": svc.name, "id": id, "deploymentId": deployment_id }));
@@ -5567,6 +5574,7 @@ async fn apply(
             volumes,
             databases,
             confirm,
+            upload_id,
         } => {
             let id = service["id"].as_str().unwrap_or("").to_owned();
             tailnet_domains_ok(
@@ -5585,6 +5593,7 @@ async fn apply(
                 volumes,
                 databases,
                 wake,
+                upload_id.as_deref(),
             )
             .await?;
             Ok(with_warning(
@@ -5815,6 +5824,7 @@ async fn apply(
                         rollback_of: None,
                         retry_of: None,
                         commit: None,
+                        upload: None,
                     },
                 )
                 .await?;
@@ -5892,8 +5902,14 @@ async fn apply(
             trigger,
             rollback_of,
             retry_of,
+            upload_id,
         } => {
             client_id(&deployment_id, "dpl")?;
+            if upload_id.is_some() && (rollback_of.is_some() || retry_of.is_some()) {
+                return Err(ApiError::bad_request(
+                    "An upload deploys on its own, not with a rollback or retry.",
+                ));
+            }
             let team_id = team_of(tx, "services", &service_id).await?;
             require_role(tx, user, &team_id, Role::Developer).await?;
             let trigger = match trigger.as_str() {
@@ -5910,6 +5926,7 @@ async fn apply(
                     rollback_of: rollback_of.as_deref(),
                     retry_of: retry_of.as_deref(),
                     commit: None,
+                    upload: upload_id.as_deref(),
                 },
             )
             .await?;
@@ -8943,6 +8960,7 @@ async fn fill_in_source(service: &mut Value) {
 /// A new service and its first deployment (createService, and each of a
 /// Compose import's services). Without a deployment id it's only saved,
 /// stopped, until it's deployed (a platform import that doesn't deploy).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_service(
     tx: &mut Transaction<'_, Postgres>,
     user: &User,
@@ -8951,6 +8969,7 @@ pub(crate) async fn create_service(
     volumes: Vec<Value>,
     databases: Vec<ServiceDatabase>,
     wake: &mut Vec<String>,
+    upload: Option<&str>,
 ) -> ApiResult<()> {
     let id = service["id"].as_str().unwrap_or("").to_owned();
     if !crate::ids::valid_client_id(&id, "svc") {
@@ -9072,6 +9091,7 @@ pub(crate) async fn create_service(
             rollback_of: None,
             retry_of: None,
             commit: None,
+            upload,
         },
     )
     .await?;

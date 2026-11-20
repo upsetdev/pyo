@@ -73,6 +73,7 @@ mod secretstores;
 mod sigstore;
 mod sites;
 mod snapshot;
+mod source_uploads;
 mod tailscale;
 mod teambackup;
 mod template_source;
@@ -564,6 +565,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                     .layer(CompressionLayer::new())
                     .merge(terminal::routes())
                     .merge(database_imports::routes())
+                    .merge(source_uploads::routes())
                     .merge(platform_import::routes()),
             )
             .nest("/api/cli", cli::public_routes())
@@ -591,6 +593,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 "/api/builder/v1",
                 builders::routes()
                     .merge(sites::builder_routes())
+                    .merge(source_uploads::builder_routes())
                     .layer(axum::middleware::from_fn_with_state(
                         state.clone(),
                         agent_auth::signed,

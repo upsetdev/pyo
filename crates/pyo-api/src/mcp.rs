@@ -199,6 +199,12 @@ const NOT_TOOLS: &[&str] = &[
     "getDatabaseLogs",
     "createDatabaseDumpUpload",
     "uploadDatabaseDump",
+    // A folder for `pyo deploy` goes up in parts of a request body each,
+    // which a tool can't send: assistants deploy what's in Git or an image.
+    "createSourceUpload",
+    "uploadSourcePart",
+    "getSourceUpload",
+    "completeSourceUpload",
     // They take another platform's API token: kept out of assistants.
     "previewPlatformImport",
     "startPlatformImport",
