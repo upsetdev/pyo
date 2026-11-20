@@ -66,6 +66,9 @@ function rolesOf(d: Database): DbRole[] {
 
 type Line = DbLogLine & { id: string };
 
+/** The most lines kept while live. */
+const LIVE_LINES = 500;
+
 function DatabaseLogs({ d }: { d: Database }) {
   const navigate = useNavigate();
   const view = (useSearch({ strict: false }) as z.infer<typeof logsSearch>).view ?? "logs";
@@ -85,29 +88,90 @@ function DatabaseLogs({ d }: { d: Database }) {
 
   useEffect(() => {
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     setLoading(true);
-    const load = async () => {
-      try {
-        const r = await fetchDatabaseLogs(d.id, range);
-        if (cancelled) return;
-        setLines(r.logs.map((l, i) => ({ ...l, id: `${l.source}:${l.at}:${i}` })));
-        setEvents(r.events);
-        setError("");
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Couldn't load logs.");
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-          // Live: keep following. A time range is read once.
-          if (range === "live") timer = setTimeout(load, 4000);
+    // A time range is read once.
+    if (range !== "live") {
+      fetchDatabaseLogs(d.id, range)
+        .then((r) => {
+          if (cancelled) return;
+          setLines(r.logs.map((l, i) => ({ ...l, id: `${l.source}:${l.at}:${i}` })));
+          setEvents(r.events);
+          setError("");
+        })
+        .catch((e) => {
+          if (!cancelled) setError(e instanceof Error ? e.message : "Couldn't load logs.");
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+    // Live: followed over one stream (one command for the cluster). It ends
+    // after an hour or when the connection drops, and the next goes on from
+    // the newest line: lines at that time may come again, so they're kept.
+    let ws: WebSocket | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let newest = 0;
+    let atNewest = new Set<string>();
+    let count = 0;
+    let wait = 3000;
+    setLines([]);
+    const follow = () => {
+      const floor = newest;
+      const opened = Date.now();
+      const q = floor ? `?since=${floor}` : "";
+      ws = new WebSocket(
+        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/v1/databases/${encodeURIComponent(d.id)}/logs/follow${q}`,
+      );
+      ws.onmessage = (ev) => {
+        let f: { type: string; message?: string; lines?: DbLogLine[]; events?: DbEvent[] };
+        try {
+          f = JSON.parse(String(ev.data));
+        } catch {
+          return;
         }
-      }
+        if (cancelled) return;
+        if (f.type === "error") {
+          setError(f.message ?? "Couldn't load logs.");
+          setLoading(false);
+          return;
+        }
+        if (f.type === "events" && f.events) {
+          setEvents(f.events);
+          return;
+        }
+        if (f.type !== "lines" || !f.lines) return;
+        setError("");
+        setLoading(false);
+        const fresh: Line[] = [];
+        for (const l of f.lines) {
+          const key = `${l.at}\0${l.source}\0${l.message}`;
+          if (l.at < floor || (l.at === floor && atNewest.has(key))) continue;
+          if (l.at > newest) {
+            newest = l.at;
+            atNewest = new Set();
+          }
+          if (l.at === newest) atNewest.add(key);
+          fresh.push({ ...l, id: `${l.source}:${l.at}:${count++}` });
+        }
+        if (fresh.length) setLines((ls) => [...ls, ...fresh].slice(-LIVE_LINES));
+      };
+      ws.onclose = () => {
+        if (cancelled) return;
+        setLoading(false);
+        // Ended soon after it opened: something's wrong, so wait longer each time.
+        const soon = Date.now() - opened < 10_000;
+        timer = setTimeout(follow, soon ? wait : 0);
+        wait = soon ? Math.min(wait * 2, 60_000) : 3000;
+      };
     };
-    void load();
+    follow();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      ws?.close();
     };
   }, [d.id, range]);
 
