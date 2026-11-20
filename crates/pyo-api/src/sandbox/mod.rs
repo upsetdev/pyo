@@ -293,8 +293,8 @@ pub async fn end(
 // ── Views ──────────────────────────────────────────────────────────────────
 
 /// Sandboxes as the API shows them. Env values are never kept, only names.
-pub async fn sandbox_views(
-    db: &PgPool,
+pub async fn sandbox_views<'e, E: sqlx::PgExecutor<'e>>(
+    db: E,
     team_ids: &[String],
     id: Option<&str>,
     live_only: bool,
@@ -303,8 +303,8 @@ pub async fn sandbox_views(
 }
 
 /// [`sandbox_views`], only those whose name or id has `q` in it.
-pub async fn sandbox_views_matching(
-    db: &PgPool,
+pub async fn sandbox_views_matching<'e, E: sqlx::PgExecutor<'e>>(
+    db: E,
     team_ids: &[String],
     id: Option<&str>,
     live_only: bool,
@@ -392,7 +392,7 @@ pub async fn sandbox_views_matching(
 /// Sandbox servers as the API shows them, with the one line the dashboard
 /// shows next to the runtime badge.
 pub async fn server_views(
-    db: &PgPool,
+    db: &mut sqlx::PgConnection,
     team_ids: &[String],
     id: Option<&str>,
 ) -> sqlx::Result<Vec<Value>> {
@@ -418,7 +418,7 @@ pub async fn server_views(
     .bind(team_ids)
     .bind(id)
     .bind(shared())
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     for r in &mut rows {
         let cap = serde_json::from_value::<proto::CapabilityReport>(r["capability"].clone()).ok();
@@ -427,7 +427,7 @@ pub async fn server_views(
         // reports (or when it can run neither).
         r["runtime"] = json!(cap.and_then(|c| runtime_name(c.runtime)));
     }
-    edgecert::attach(db, team_ids, &mut rows).await?;
+    edgecert::attach(&mut *db, team_ids, &mut rows).await?;
     Ok(rows)
 }
 
@@ -450,10 +450,16 @@ pub async fn template_views_live(
     team_ids: &[String],
     id: Option<&str>,
 ) -> sqlx::Result<Vec<Value>> {
-    let mut rows = template_rows(&s.db, team_ids, id).await?;
+    let rows = template_rows(&s.db, team_ids, id).await?;
+    Ok(live_views(s, rows).await)
+}
+
+/// Template rows ([`template_rows`]) with how far each server got, asked
+/// of the servers still making one.
+pub(crate) async fn live_views(s: &AppState, mut rows: Vec<Value>) -> Vec<Value> {
     live::overlay(s, &mut rows).await;
     finish_template_views(&mut rows);
-    Ok(rows)
+    rows
 }
 
 /// The template views as Pyo has them, each server's with the `key` the
@@ -463,7 +469,17 @@ async fn template_rows(
     team_ids: &[String],
     id: Option<&str>,
 ) -> sqlx::Result<Vec<Value>> {
-    let mut rows: Vec<Value> = sqlx::query_scalar(
+    let rows = stored_template_rows(db, team_ids, id).await?;
+    Ok(with_builtins(db, id, rows).await)
+}
+
+/// The templates' rows as stored, without Pyo's own ones not added yet.
+pub(crate) async fn stored_template_rows<'e, E: sqlx::PgExecutor<'e>>(
+    db: E,
+    team_ids: &[String],
+    id: Option<&str>,
+) -> sqlx::Result<Vec<Value>> {
+    sqlx::query_scalar(
         "SELECT jsonb_build_object(
             'id', t.id, 'teamId', t.team_id, 'name', t.name, 'source', t.source, 'state', t.state,
             'builtin', t.builtin, 'revision', t.revision,
@@ -498,8 +514,16 @@ async fn template_rows(
     .bind(base::ALL.map(|b| b.id).as_slice())
     .bind(shared())
     .fetch_all(db)
-    .await?;
-    // Pyo's own are listed before they're added, as they will be.
+    .await
+}
+
+/// Pyo's own templates are listed before they're added, as they will be,
+/// and first, in their order.
+pub(crate) async fn with_builtins(
+    db: &PgPool,
+    id: Option<&str>,
+    mut rows: Vec<Value>,
+) -> Vec<Value> {
     for b in base::ALL {
         if id.is_none_or(|i| i == b.id) && !rows.iter().any(|r| r["id"] == b.id) {
             rows.push(base::listed(db, b).await);
@@ -513,7 +537,7 @@ async fn template_rows(
             .unwrap_or(base::ALL.len())
     };
     rows.sort_by_key(place);
-    Ok(rows)
+    rows
 }
 
 /// Build errors in plain words, and without the servers' `key`.
@@ -995,16 +1019,18 @@ pub struct Found {
 }
 
 pub async fn find(s: &AppState, user: &User, id: &str, need: Need) -> ApiResult<Found> {
+    // Within the user's teams only (rls.rs): another team's sandbox isn't there.
+    let mut tx = crate::rls::begin(&s.db, user).await?;
     let row: Option<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
         "SELECT x.team_id, x.server_id, sv.address, x.state FROM pyo.sandboxes x
            LEFT JOIN pyo.sandbox_servers sv ON sv.id = x.server_id WHERE x.id = $1",
     )
     .bind(id)
-    .fetch_optional(&s.db)
+    .fetch_optional(&mut *tx)
     .await?;
     let (team_id, server_id, address, state) = row.ok_or_else(|| ApiError::not_found("Sandbox"))?;
-    let mut c = s.db.acquire().await?;
-    require(&mut c, user, &team_id, need).await?;
+    require(&mut tx, user, &team_id, need).await?;
+    tx.commit().await?;
     Ok(Found {
         id: id.to_owned(),
         team_id,
@@ -1055,7 +1081,7 @@ impl Found {
 /// may use it and it lives. Null otherwise, and `connectionNote` says why.
 pub async fn get(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
     let f = find(s, user, id, Need::Read).await?;
-    let mut v = view(s, &f).await?;
+    let mut v = view(s, user, &f).await?;
     let mut c = s.db.acquire().await?;
     let may_use = require(&mut c, user, &f.team_id, Need::Use).await;
     drop(c);
@@ -1075,11 +1101,12 @@ pub async fn get(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
     Ok(v)
 }
 
-async fn view(s: &AppState, f: &Found) -> ApiResult<Value> {
+async fn view(s: &AppState, user: &User, f: &Found) -> ApiResult<Value> {
     let teams = [f.team_id.clone()];
-    sandbox_views(&s.db, &teams, Some(&f.id), false)
-        .await?
-        .into_iter()
+    let mut tx = crate::rls::begin(&s.db, user).await?;
+    let v = sandbox_views(&mut *tx, &teams, Some(&f.id), false).await?;
+    tx.commit().await?;
+    v.into_iter()
         .next()
         .ok_or_else(|| ApiError::not_found("Sandbox"))
 }
@@ -1090,13 +1117,13 @@ async fn view(s: &AppState, f: &Found) -> ApiResult<Value> {
 pub async fn delete(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
     let f = find(s, user, id, Need::Use).await?;
     if f.is_final() {
-        return view(s, &f).await;
+        return view(s, user, &f).await;
     }
     let mut c = s.db.acquire().await?;
     // Its server was removed: nothing is left to end.
     if f.server_id.is_none() || f.address.is_none() {
         end(&mut c, id, "stopped", None).await?;
-        return view(s, &f).await;
+        return view(s, user, &f).await;
     }
     let (d, token, _) = f.daemon(s).await?;
     sqlx::query("UPDATE pyo.sandboxes SET state = 'stopping' WHERE id = $1 AND state NOT IN ('stopped', 'failed')")
@@ -1113,7 +1140,7 @@ pub async fn delete(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
             tracing::warn!(%id, error = %e, "sandbox delete: the server didn't answer, trying again later")
         }
     }
-    view(s, &f).await
+    view(s, user, &f).await
 }
 
 /// Gives a sandbox another name. Its id stays, so nothing that uses it
@@ -1126,7 +1153,7 @@ pub async fn rename(s: &AppState, user: &User, id: &str, name: &str) -> ApiResul
         .bind(&name)
         .execute(&s.db)
         .await?;
-    view(s, &f).await
+    view(s, user, &f).await
 }
 
 pub async fn pause(s: &AppState, user: &User, id: &str) -> ApiResult<Value> {
@@ -1167,7 +1194,7 @@ async fn lifecycle(
         .map_err(daemon_error)?;
     let mut c = s.db.acquire().await?;
     save_status(&mut c, &st).await?;
-    view(s, &f).await
+    view(s, user, &f).await
 }
 
 /// Opens a sandbox port on its server's edge proxy and returns its URL. A
@@ -1399,7 +1426,7 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
     }
     .render();
     let teams: Vec<String> = req.team_id.iter().cloned().collect();
-    let server = server_views(&s.db, &teams, Some(&id))
+    let server = server_views(&mut *s.db.acquire().await?, &teams, Some(&id))
         .await?
         .into_iter()
         .next();
@@ -1675,10 +1702,14 @@ pub async fn add_cloud_server(s: &AppState, user: &User, req: AddCloudServer) ->
     )
     .await?;
     tx.commit().await?;
-    let server = server_views(&s.db, std::slice::from_ref(&req.team_id), Some(&id))
-        .await?
-        .into_iter()
-        .next();
+    let server = server_views(
+        &mut *s.db.acquire().await?,
+        std::slice::from_ref(&req.team_id),
+        Some(&id),
+    )
+    .await?
+    .into_iter()
+    .next();
     Ok(json!({ "server": server, "cloudServer": made }))
 }
 

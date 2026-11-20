@@ -28,7 +28,7 @@ use axum::{extract::State, http::StatusCode};
 use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Postgres, Transaction};
 
 use crate::{
     AppState,
@@ -565,7 +565,11 @@ fn parse_role(r: &str) -> Role {
 }
 
 /// The teams' connections, for the snapshot.
-pub async fn snapshot(db: &PgPool, user: &User, team_ids: &[String]) -> ApiResult<Vec<Value>> {
+pub async fn snapshot(
+    db: &mut sqlx::PgConnection,
+    user: &User,
+    team_ids: &[String],
+) -> ApiResult<Vec<Value>> {
     let rows: Vec<(Value, String)> = sqlx::query_as(
         "SELECT jsonb_build_object('teamId', c.team_id, 'zones', c.zones, 'hint', c.hint, 'createdBy', c.created_by,
                                   'createdAt', pyo.ms(c.created_at), 'testedAt', pyo.ms(c.tested_at)), m.role
@@ -575,7 +579,7 @@ pub async fn snapshot(db: &PgPool, user: &User, team_ids: &[String]) -> ApiResul
     )
     .bind(team_ids)
     .bind(&user.id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     Ok(rows
         .iter()
@@ -584,7 +588,11 @@ pub async fn snapshot(db: &PgPool, user: &User, team_ids: &[String]) -> ApiResul
 }
 
 /// Each domain's record, as `dnsRecord` on the services' domains.
-pub async fn attach(db: &PgPool, team_ids: &[String], services: &mut [Value]) -> ApiResult<()> {
+pub async fn attach(
+    db: &mut sqlx::PgConnection,
+    team_ids: &[String],
+    services: &mut [Value],
+) -> ApiResult<()> {
     let rows: Vec<(String, String, Value)> = sqlx::query_as(
         "SELECT service_id, domain_id, jsonb_build_object(
                 'zone', zone_name, 'type', type, 'content', content, 'proxied', proxied, 'proxy', proxy,
@@ -593,7 +601,7 @@ pub async fn attach(db: &PgPool, team_ids: &[String], services: &mut [Value]) ->
            FROM pyo.dns_records WHERE team_id = ANY($1)",
     )
     .bind(team_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     if rows.is_empty() {
         return Ok(());
@@ -792,7 +800,7 @@ pub async fn get(
     SessionUser(user): SessionUser,
     Query(q): Query<CloudflareQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let role = require_role(&mut tx, &user, &q.team, role_for(Action::ListZones)).await?;
     let row: Option<Value> = sqlx::query_scalar(
         "SELECT jsonb_build_object('teamId', team_id, 'zones', zones, 'hint', hint, 'createdBy', created_by,

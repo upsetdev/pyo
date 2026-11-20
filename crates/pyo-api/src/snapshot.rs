@@ -2,7 +2,7 @@
 //! own shapes (dash/src/lib/pyo/types.ts). Postgres builds most of the JSON.
 
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use crate::{auth::User, error::ApiResult};
 
@@ -13,7 +13,7 @@ const DEPLOYMENTS_WITH_LOGS: i64 = 30;
 const LOG_LINES: i64 = 400;
 
 /// Queries here are constants (two interpolate Pyo's own constants); ids are bound.
-async fn values(db: &PgPool, sql: &str, team_ids: &[String]) -> ApiResult<Vec<Value>> {
+async fn values(db: &mut PgConnection, sql: &str, team_ids: &[String]) -> ApiResult<Vec<Value>> {
     Ok(
         sqlx::query_scalar::<_, Value>(sqlx::AssertSqlSafe(sql.to_owned()))
             .bind(team_ids)
@@ -23,21 +23,74 @@ async fn values(db: &PgPool, sql: &str, team_ids: &[String]) -> ApiResult<Vec<Va
 }
 
 pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<Value> {
+    // The installation's own settings and the account's keys first, on the
+    // pool: the teams' transaction below takes no other connection while
+    // it's open, so a busy pool can't leave requests waiting on each other.
     let email = crate::mail::settings(db).await?;
     let github = crate::github::app(db).await?;
-    let mut team_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT team_id FROM pyo.members WHERE user_id = $1 AND status = 'active'",
+    let reached = crate::publicdash::reached(db).await?;
+    let public_dashboard = if user.is_admin {
+        crate::publicdash::snapshot(db).await?
+    } else {
+        Value::Null
+    };
+    let control_backup = if user.is_admin {
+        crate::backup::snapshot(db).await?
+    } else {
+        Value::Null
+    };
+    let updates = if user.is_admin {
+        crate::updates::snapshot(db).await?
+    } else {
+        Value::Null
+    };
+
+    let api_tokens: Vec<Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object('id', id, 'name', name, 'prefix', prefix, 'createdAt', pyo.ms(created_at), 'lastUsedAt', pyo.ms(last_used_at),
+                                  'expiresAt', pyo.ms(expires_at), 'access', access, 'teamIds', team_ids)
+           FROM pyo.api_tokens WHERE user_id = $1 AND $2 ORDER BY created_at",
+    )
+    .bind(&user.id)
+    // Keys don't list other keys.
+    .bind(user.key.is_none())
+    .fetch_all(db)
+    .await?;
+    let mut oauth_grants: Vec<Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object('id', g.id, 'client', c.name, 'createdAt', pyo.ms(g.created_at), 'lastUsedAt', pyo.ms(g.last_used_at), 'scope', g.scope)
+           FROM pyo.oauth_grants g JOIN pyo.oauth_clients c ON c.id = g.client_id
+          WHERE g.user_id = $1 AND g.refresh_expires_at > now() ORDER BY g.created_at",
     )
     .bind(&user.id)
     .fetch_all(db)
     .await?;
-    // An API key for some teams sees only those.
-    if let Some(allowed) = user.key.as_ref().and_then(|k| k.teams.as_ref()) {
-        team_ids.retain(|t| allowed.contains(t));
+    // What each may do, in API key terms.
+    for g in &mut oauth_grants {
+        let access = crate::oauth::scope_access(g["scope"].as_str().unwrap_or(""));
+        g["access"] = json!(access.as_str());
+        if let Some(o) = g.as_object_mut() {
+            o.remove("scope");
+        }
     }
+    // Tailscale (Integrations › Tailscale): the client only for admins.
+    let tailscale = crate::tailscale::snapshot(db, user.is_admin).await?;
+    // `small`: the server Pyo runs on has under 3.5 GB of memory now (the
+    // dashboard suggests turning observability off, or on when it isn't).
+    let observability_settings = json!({
+        "ipMode": crate::observability::ip_mode(db).await?,
+        "enabled": crate::observability::setting(db).await?,
+        "retention": crate::retention::load(db).await?,
+        "small": pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
+    });
+
+    // The teams' rows through one transaction lowered to the teams the
+    // user (or the API key) may see (rls.rs): a query here that forgot its
+    // team check still can't show another team's.
+    let mut tx = crate::rls::begin(db, user).await?;
+    let db: &mut PgConnection = &mut tx;
+    let team_ids = crate::rls::team_ids(db).await?;
 
     let teams = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object(
             'id', id, 'name', name, 'slug', slug, 'description', description,
             'createdAt', pyo.ms(created_at), 'defaultClusterId', default_cluster_id,
@@ -49,7 +102,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
 
     let members = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object(
             'id', m.id, 'teamId', m.team_id, 'name', coalesce(u.name, ''), 'email', m.email,
             -- Gravatar's key: sha256 of the trimmed, lowercased email.
@@ -62,7 +115,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
 
     let projects = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object(
             'id', id, 'teamId', team_id, 'name', name, 'namespace', namespace,
             'description', description, 'networkIsolation', network_isolation,
@@ -73,7 +126,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
 
     let mut clusters = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object(
             'id', id, 'teamId', team_id, 'name', name, 'description', description, 'tags', to_jsonb(tags),
             'distribution', 'k3s', 'version', version, 'status', status, 'location', location,
@@ -117,10 +170,10 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         .iter()
         .filter_map(|c| c["id"].as_str().map(str::to_owned))
         .collect();
-    let waf_engines = crate::bundles::waf_state(db, &ids).await?;
+    let waf_engines = crate::bundles::waf_state(&mut *db, &ids).await?;
     let mut waf_rejected: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut waf_active: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let syncing = crate::bundles::syncing_firewall(db, &ids).await?;
+    let syncing = crate::bundles::syncing_firewall(&mut *db, &ids).await?;
     for c in &mut clusters {
         waf_rejected.extend(
             c["capabilities"]["wafRejected"]
@@ -140,7 +193,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     }
 
     let servers = values(
-        db,
+        &mut *db,
         "SELECT n.report || jsonb_build_object('id', n.id, 'clusterId', n.cluster_id,
                                                'location', coalesce(n.location, c.location), 'locationSource', coalesce(n.location_source, 'cluster'),
                                                'removal', n.removal,
@@ -152,7 +205,6 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     )
     .await?;
     // Its public and Tailscale addresses, and where its free domains point.
-    let reached = crate::publicdash::reached(db).await?;
     for c in &mut clusters {
         let f = crate::freedomain::Cluster {
             reached: if c["sameCluster"] == json!(true) {
@@ -186,7 +238,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
            FROM pyo.clusters WHERE team_id = ANY($1)",
     )
     .bind(&team_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     for c in &mut clusters {
         let row = tailnets.iter().find(|r| c["id"] == json!(r.0));
@@ -200,7 +252,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
 
     // Workloads come from each cluster's last heartbeat.
     let workloads = values(
-        db,
+        &mut *db,
         "SELECT w || jsonb_build_object(
             'id', c.id || ':' || (w->>'namespace') || '/' || (w->>'name'),
             'clusterId', c.id,
@@ -214,7 +266,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
 
     let services = values(
-        db,
+        &mut *db,
         "SELECT a.spec || jsonb_build_object(
             'id', a.id, 'teamId', a.team_id, 'projectId', a.project_id, 'clusterId', a.cluster_id,
             'name', a.name, 'status', a.status, 'runtime', a.runtime,
@@ -227,8 +279,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         &team_ids,
     )
     .await?;
-    let mut services = for_dashboard(services).await?;
-    crate::cloudflare::attach(db, &team_ids, &mut services).await?;
+    let mut services = services;
+    crate::cloudflare::attach(&mut *db, &team_ids, &mut services).await?;
     // A service with its WAF on: where it stands ("installing" while the
     // engine starts on its cluster, "ready", "failed" with a message).
     for a in &mut services {
@@ -245,7 +297,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     }
 
     let deployments = values(
-        db,
+        &mut *db,
         &format!(
             "WITH recent AS (
                SELECT d.*, row_number() OVER (PARTITION BY d.team_id ORDER BY d.created_at DESC) AS rn
@@ -268,7 +320,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
 
     let mut volumes = values(
-        db,
+        &mut *db,
         "SELECT data || jsonb_build_object('id', id, 'teamId', team_id, 'clusterId', cluster_id, 'projectId', project_id, 'serviceId', service_id, 'deleting', deleting, 'createdAt', pyo.ms(created_at))
            FROM pyo.volumes WHERE team_id = ANY($1) ORDER BY created_at",
         &team_ids,
@@ -277,7 +329,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // Their backups: from the team's settings and runs.
     let mut backups = std::collections::HashMap::new();
     for team in &team_ids {
-        backups.extend(crate::teambackup::volume_statuses(db, team).await?);
+        backups.extend(crate::teambackup::volume_statuses(&mut *db, team).await?);
     }
     for v in volumes.iter_mut() {
         let id = v["id"].as_str().unwrap_or("");
@@ -287,7 +339,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     }
 
     let activity = values(
-        db,
+        &mut *db,
         "SELECT data || jsonb_build_object('id', id, 'teamId', team_id, 'at', pyo.ms(at))
            FROM (SELECT *, row_number() OVER (PARTITION BY team_id ORDER BY at DESC) rn FROM pyo.activity WHERE team_id = ANY($1)) x
           WHERE rn <= 100 ORDER BY at DESC",
@@ -296,7 +348,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
 
     let builders = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object(
             'id', id, 'teamId', team_id, 'name', name, 'kind', kind, 'clusterId', cluster_id, 'server', server,
             'status', status, 'statusMessage', status_message, 'info', info,
@@ -306,18 +358,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     )
     .await?;
 
-    let api_tokens: Vec<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('id', id, 'name', name, 'prefix', prefix, 'createdAt', pyo.ms(created_at), 'lastUsedAt', pyo.ms(last_used_at),
-                                  'expiresAt', pyo.ms(expires_at), 'access', access, 'teamIds', team_ids)
-           FROM pyo.api_tokens WHERE user_id = $1 AND $2 ORDER BY created_at",
-    )
-    .bind(&user.id)
-    // Keys don't list other keys.
-    .bind(user.key.is_none())
-    .fetch_all(db)
-    .await?;
     let registry_logins = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'host', host, 'username', username, 'verified', verified,
                                   'createdAt', pyo.ms(created_at), 'lastUsedAt', pyo.ms(last_used_at))
            FROM pyo.registry_logins WHERE team_id = ANY($1) ORDER BY host",
@@ -326,7 +368,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
     // Without their credentials.
     let secret_stores = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'kind', kind, 'name', name, 'addr', addr, 'options', options, 'createdAt', pyo.ms(created_at))
            FROM pyo.secret_stores WHERE team_id = ANY($1) ORDER BY created_at",
         &team_ids,
@@ -340,7 +382,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         .collect::<Vec<_>>()
         .join(", ");
     let alert_channels = values(
-        db,
+        &mut *db,
         &format!(
             "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'kind', kind, 'name', name, 'hint', hint,
                                       'events', to_jsonb(ARRAY(SELECT t FROM unnest(ARRAY[{topics}]) t WHERE NOT (t = ANY(muted)))),
@@ -352,7 +394,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     )
     .await?;
     let firewall_rules = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'serviceId', service_id, 'action', action, 'operator', operator,
                                   'sources', to_jsonb(sources), 'requests', requests, 'per', per,
                                   'note', note, 'createdBy', created_by, 'createdAt', pyo.ms(created_at))
@@ -361,7 +403,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     )
     .await?;
     let waf_rules = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'serviceId', service_id, 'number', number, 'name', name,
                                   'enabled', enabled, 'position', position, 'match', matching, 'conditions', conditions, 'action', action,
                                   'createdBy', created_by, 'createdAt', pyo.ms(created_at))
@@ -371,7 +413,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
     // Public material only: the private keys were never kept.
     let origin_pull_certificates = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'name', name, 'commonName', common_name, 'caCertificate', ca_pem,
                                   'fingerprint', fingerprint, 'notAfter', pyo.ms(not_after), 'createdAt', pyo.ms(created_at))
            FROM pyo.origin_pull_certificates WHERE team_id = ANY($1) ORDER BY created_at",
@@ -379,7 +421,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     )
     .await?;
     let certificates = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'name', name, 'hostnames', hostnames, 'issuer', issuer,
                                   'notBefore', pyo.ms(not_before), 'notAfter', pyo.ms(not_after), 'fingerprint', fingerprint,
                                   'createdAt', pyo.ms(created_at), 'updatedAt', pyo.ms(updated_at))
@@ -387,25 +429,9 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         &team_ids,
     )
     .await?;
-    let mut oauth_grants: Vec<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('id', g.id, 'client', c.name, 'createdAt', pyo.ms(g.created_at), 'lastUsedAt', pyo.ms(g.last_used_at), 'scope', g.scope)
-           FROM pyo.oauth_grants g JOIN pyo.oauth_clients c ON c.id = g.client_id
-          WHERE g.user_id = $1 AND g.refresh_expires_at > now() ORDER BY g.created_at",
-    )
-    .bind(&user.id)
-    .fetch_all(db)
-    .await?;
-    // What each may do, in API key terms.
-    for g in &mut oauth_grants {
-        let access = crate::oauth::scope_access(g["scope"].as_str().unwrap_or(""));
-        g["access"] = json!(access.as_str());
-        if let Some(o) = g.as_object_mut() {
-            o.remove("scope");
-        }
-    }
     // Hooks without their tokens; RevealDeployHook gives the URL.
     let deploy_hooks = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'projectId', project_id, 'serviceId', service_id, 'name', name,
                 'createdBy', created_by, 'createdAt', pyo.ms(created_at), 'lastUsedAt', pyo.ms(last_used_at))
            FROM pyo.deploy_hooks WHERE team_id = ANY($1) ORDER BY created_at",
@@ -413,7 +439,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     )
     .await?;
     let mut github_installations = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object('id', id, 'teamId', team_id, 'account', account, 'accountType', account_type,
                 'repositorySelection', repository_selection, 'createdAt', pyo.ms(created_at),
                 'permissions', permissions, 'events', events)
@@ -428,7 +454,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
 
     // Git connections, never their tokens.
     let git_connections = values(
-        db,
+        &mut *db,
         "SELECT jsonb_build_object('id', c.id, 'teamId', c.team_id, 'provider', c.provider, 'url', c.base_url,
                 'account', c.account, 'publicUrl', c.public_url, 'info', c.info, 'createdAt', pyo.ms(c.created_at),
                 'webhooks', coalesce((SELECT jsonb_agg(jsonb_build_object('repo', w.repo, 'active', w.hook_id IS NOT NULL, 'error', w.error) ORDER BY w.repo)
@@ -439,24 +465,28 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     .await?;
 
     // Which keys are saved, never the keys themselves.
-    // Tailscale (Integrations › Tailscale): the client only for admins.
-    let tailscale = crate::tailscale::snapshot(db, user.is_admin).await?;
     // Teams' cloud providers (Integrations › Hetzner, the token's end only)
     // and the servers Pyo made there.
-    let (cloud_connections, cloud_servers) = crate::cloud::snapshot(db, &team_ids).await?;
+    let (cloud_connections, cloud_servers) = crate::cloud::snapshot(&mut *db, &team_ids).await?;
 
     // Gravatar's key for the profile picture: sha256 of the trimmed, lowercased email.
     let mut me = json!(user);
     me["gravatar"] = json!(crate::ids::sha256_hex(&user.email.trim().to_lowercase()));
-    let databases = crate::databases::listing(db, &team_ids, None).await?;
-    // `small`: the server Pyo runs on has under 3.5 GB of memory now (the
-    // dashboard suggests turning observability off, or on when it isn't).
-    let observability_settings = json!({
-        "ipMode": crate::observability::ip_mode(db).await?,
-        "enabled": crate::observability::setting(db).await?,
-        "retention": crate::retention::load(db).await?,
-        "small": pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
-    });
+    let databases = crate::databases::listing(&mut *db, &team_ids, None).await?;
+    let previews = crate::previews::snapshot(&mut *db, &team_ids).await?;
+    // Sandbox servers the teams can use (theirs and the installation's).
+    let sandbox_servers = crate::sandbox::server_views(&mut *db, &team_ids, None).await?;
+    // Cloudflare accounts: their zones, never the token.
+    let cloudflare = crate::cloudflare::snapshot(&mut *db, user, &team_ids).await?;
+    // Each team's backups of its volumes and databases.
+    let team_backups = crate::teambackup::snapshot(&mut *db, &team_ids).await?;
+    tx.commit().await?;
+    // Sealed values open through the vault's own connections, now that
+    // the transaction is done.
+    let services = for_dashboard(services).await?;
+    // How teams' values are encrypted; the security overview.
+    let encryption = crate::vault::get().status(&team_ids).await?;
+
     Ok(json!({
         "user": me,
         "teams": teams,
@@ -470,20 +500,18 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "services": services,
         "deployments": deployments,
         // Previews of pull requests and merge requests (previews/).
-        "previews": crate::previews::snapshot(db, &team_ids).await?,
+        "previews": previews,
         "volumes": volumes,
         "activity": activity,
         "builders": builders,
         "tailscale": tailscale,
         "cloudConnections": cloud_connections,
         "cloudServers": cloud_servers,
-        // Sandbox servers the teams can use (theirs and the installation's).
         // None: the dashboard hides sandboxes.
-        "sandboxServers": crate::sandbox::server_views(db, &team_ids, None).await?,
+        "sandboxServers": sandbox_servers,
         // Pyo's dashboard on the public IP: the installation's admin only.
-        "publicDashboard": if user.is_admin { crate::publicdash::snapshot(db).await? } else { Value::Null },
-        // Cloudflare accounts: their zones, never the token.
-        "cloudflare": crate::cloudflare::snapshot(db, user, &team_ids).await?,
+        "publicDashboard": public_dashboard,
+        "cloudflare": cloudflare,
         "agentApiUrl": agent_api_url,
         // Whether email goes out; the settings themselves only for admins.
         // What analytics keeps of visitors' IPs (installation-wide).
@@ -506,13 +534,11 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "alertChannels": alert_channels,
         // Assistants you connected over OAuth (MCP).
         "oauthGrants": oauth_grants,
-        // How teams' values are encrypted; the security overview.
-        "encryption": crate::vault::get().status(&team_ids).await?,
-        // Each team's backups of its volumes and databases.
-        "teamBackups": crate::teambackup::snapshot(db, &team_ids).await?,
+        "encryption": encryption,
+        "teamBackups": team_backups,
         // Backups of Pyo's own data: the installation's admin only.
-        "controlBackup": if user.is_admin { crate::backup::snapshot(db).await? } else { Value::Null },
-        "updates": if user.is_admin { crate::updates::snapshot(db).await? } else { Value::Null },
+        "controlBackup": control_backup,
+        "updates": updates,
     }))
 }
 

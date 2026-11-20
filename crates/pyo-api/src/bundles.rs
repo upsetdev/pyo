@@ -23,7 +23,7 @@ use pyo_proto::{
     },
 };
 use serde_json::{Value, json};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Postgres, Transaction};
 
 use crate::{deploy, error::ApiResult, ops::log_activity};
 
@@ -123,7 +123,7 @@ pub async fn ready_on(
 /// "ready", "failed" (with a message) or "removing". None where it isn't
 /// installed.
 pub async fn waf_state(
-    db: &PgPool,
+    db: &mut sqlx::PgConnection,
     cluster_ids: &[String],
 ) -> ApiResult<HashMap<String, (String, String)>> {
     let rows: Vec<(String, String, String, Value, Value)> = sqlx::query_as(
@@ -132,7 +132,7 @@ pub async fn waf_state(
     )
     .bind(WAF_ID)
     .bind(cluster_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     Ok(rows
         .into_iter()
@@ -178,12 +178,12 @@ pub fn waf_shown(
 /// Clusters with a firewall sync not done yet (sent or waiting): their
 /// services' routes and WAF policies are about to change.
 pub async fn syncing_firewall(
-    db: &PgPool,
+    db: &mut sqlx::PgConnection,
     cluster_ids: &[String],
 ) -> ApiResult<std::collections::HashSet<String>> {
     let rows: Vec<String> = sqlx::query_scalar("SELECT DISTINCT cluster_id FROM pyo.commands WHERE cluster_id = ANY($1) AND status IN ('pending', 'sent') AND command->>'kind' = 'sync_firewall'")
         .bind(cluster_ids)
-        .fetch_all(db)
+        .fetch_all(&mut *db)
         .await?;
     Ok(rows.into_iter().collect())
 }
@@ -390,7 +390,7 @@ pub async fn sync_databases(
 /// message). Ready once it runs a database there, so an update with Pyo
 /// doesn't count as setting up. None where it was never set up.
 pub async fn databases_state(
-    db: &PgPool,
+    db: &mut sqlx::PgConnection,
     cluster_ids: &[String],
 ) -> ApiResult<HashMap<String, (String, String)>> {
     let rows: Vec<(String, String, String, Value, Value, bool)> = sqlx::query_as(
@@ -399,7 +399,7 @@ pub async fn databases_state(
            FROM pyo.cluster_bundles a JOIN pyo.clusters c ON c.id = a.cluster_id WHERE a.bundle = 'databases' AND a.cluster_id = ANY($1)",
     )
     .bind(cluster_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     Ok(rows
         .into_iter()
@@ -439,11 +439,14 @@ pub fn operator_starting(engine: &str, workloads: &Value) -> Option<String> {
 }
 
 /// Each cluster's workloads, as its last heartbeat reported them.
-pub async fn workloads(db: &PgPool, cluster_ids: &[String]) -> ApiResult<HashMap<String, Value>> {
+pub async fn workloads(
+    db: &mut sqlx::PgConnection,
+    cluster_ids: &[String],
+) -> ApiResult<HashMap<String, Value>> {
     let rows: Vec<(String, Value)> =
         sqlx::query_as("SELECT id, workloads FROM pyo.clusters WHERE id = ANY($1)")
             .bind(cluster_ids)
-            .fetch_all(db)
+            .fetch_all(&mut *db)
             .await?;
     Ok(rows.into_iter().collect())
 }

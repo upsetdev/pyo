@@ -1368,7 +1368,7 @@ fn runs_query(filter: &str) -> String {
     )
 }
 
-async fn load_run(db: &sqlx::PgPool, id: &str) -> ApiResult<Option<ImportRun>> {
+async fn load_run<'e, E: sqlx::PgExecutor<'e>>(db: E, id: &str) -> ApiResult<Option<ImportRun>> {
     let row: Option<RunRow> = sqlx::query_as(sqlx::AssertSqlSafe(runs_query("id = $1")))
         .bind(id)
         .fetch_optional(db)
@@ -1553,10 +1553,10 @@ async fn finish(
 
 /// The run's team, for its owners and admins.
 async fn run_team(s: &AppState, user: &User, id: &str) -> ApiResult<ImportRun> {
-    let run = load_run(&s.db, id)
+    let mut tx = crate::rls::begin(&s.db, user).await?;
+    let run = load_run(&mut *tx, id)
         .await?
         .ok_or_else(|| ApiError::not_found("Import"))?;
-    let mut tx = s.db.begin().await?;
     require_role(&mut tx, user, &run.team_id, Role::Admin).await?;
     tx.commit().await?;
     Ok(run)
@@ -1605,15 +1605,15 @@ pub async fn list_runs(
     SessionUser(user): SessionUser,
     Query(q): Query<RunsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team_id, Role::Admin).await?;
-    tx.commit().await?;
     let rows: Vec<RunRow> = sqlx::query_as(sqlx::AssertSqlSafe(runs_query(
         "team_id = $1 ORDER BY created_at DESC LIMIT 20",
     )))
     .bind(&q.team_id)
-    .fetch_all(&s.db)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
     let runs: Vec<ImportRun> = rows.into_iter().map(Into::into).collect();
     Ok(Json(json!({ "imports": runs })))
 }

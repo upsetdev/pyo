@@ -84,7 +84,7 @@ pub async fn list(
     SessionUser(user): SessionUser,
     Query(q): Query<ImagesQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     let rows: Vec<DeploymentImage> = sqlx::query_as(
         "SELECT d.spec->>'image', nullif(coalesce(d.data->>'pinnedImage', d.data->>'imageId', ''), ''), coalesce(d.data->>'revisionLabel', ''), d.service_id,
@@ -96,16 +96,16 @@ pub async fn list(
     .bind(&q.team)
     .fetch_all(&mut *tx)
     .await?;
+    let team_repos: Vec<String> =
+        sqlx::query_scalar("SELECT repo FROM pyo.registry_repos WHERE team_id = $1 ORDER BY repo")
+            .bind(&q.team)
+            .fetch_all(&mut *tx)
+            .await?;
     tx.commit().await?;
 
     let ours = format!("{}/pyo/services/", deploy::registry().pull);
     let theirs = format!("{}/", deploy::registry().pull);
     let ours_root = format!("{}/pyo/", deploy::registry().pull);
-    let team_repos: Vec<String> =
-        sqlx::query_scalar("SELECT repo FROM pyo.registry_repos WHERE team_id = $1 ORDER BY repo")
-            .bind(&q.team)
-            .fetch_all(&s.db)
-            .await?;
     let mut images: BTreeMap<String, Image> = BTreeMap::new();
     for (image, pinned, label, service_id, at, live, expired) in rows {
         let digest = pinned
@@ -359,7 +359,7 @@ pub async fn registry(
     SessionUser(user): SessionUser,
     Query(q): Query<RegistryQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     let pull = deploy::registry().pull.clone();
     // Pyo's own calls go to the registry itself, in the cluster.

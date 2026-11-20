@@ -346,7 +346,11 @@ impl Server {
 /// wildcard record. `team_ids` are the viewer's teams: an installation's
 /// server is offered the first of their connections that covers its
 /// domain.
-pub async fn attach(db: &PgPool, team_ids: &[String], servers: &mut [Value]) -> sqlx::Result<()> {
+pub async fn attach(
+    db: &mut sqlx::PgConnection,
+    team_ids: &[String],
+    servers: &mut [Value],
+) -> sqlx::Result<()> {
     let ids: Vec<String> = servers
         .iter()
         .filter(|v| v["edgeDomain"].is_string())
@@ -364,7 +368,7 @@ pub async fn attach(db: &PgPool, team_ids: &[String], servers: &mut [Value]) -> 
     )
     .bind(&ids)
     .bind(STALE_SECS)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let accounts: Vec<(String, Value)> = sqlx::query_as(
         "SELECT team_id, zones FROM pyo.cloudflare_accounts WHERE team_id = ANY($1)
@@ -373,7 +377,7 @@ pub async fn attach(db: &PgPool, team_ids: &[String], servers: &mut [Value]) -> 
     )
     .bind(team_ids)
     .bind(&ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let zones = |team: &str| -> Vec<Zone> {
         accounts

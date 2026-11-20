@@ -10,7 +10,7 @@ use axum::extract::State;
 use pyo_proto::{BackupSpec, Command, CommandResult, DbConnection};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Postgres, Transaction};
 
 use crate::{
     AppState,
@@ -362,7 +362,7 @@ pub async fn tick(s: &AppState) -> anyhow::Result<()> {
 }
 
 /// The dashboard's view of a team's databases, with a year of backups each.
-pub async fn snapshot(db: &PgPool, team: &str) -> ApiResult<Vec<Value>> {
+pub async fn snapshot(db: &mut sqlx::PgConnection, team: &str) -> ApiResult<Vec<Value>> {
     Ok(sqlx::query_scalar(
         "SELECT jsonb_build_object(
             'id', d.id, 'clusterId', d.cluster_id, 'serviceId', d.service_id, 'name', d.name, 'engine', d.engine,
@@ -377,6 +377,6 @@ pub async fn snapshot(db: &PgPool, team: &str) -> ApiResult<Vec<Value>> {
            FROM pyo.backup_databases d WHERE d.team_id = $1 ORDER BY d.name",
     )
     .bind(team)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?)
 }

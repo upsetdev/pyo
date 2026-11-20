@@ -492,7 +492,7 @@ async fn repo_for(
     team_id: &str,
     cluster_id: &str,
 ) -> ApiResult<ResticRepo> {
-    let Some(cfg) = crate::teambackup::settings(&s.db, team_id).await? else {
+    let Some(cfg) = crate::teambackup::settings(tx, team_id).await? else {
         return Err(ApiError::conflict(
             "This team has no backups yet. Set them up under Backups.",
         ));
@@ -713,7 +713,7 @@ pub(crate) async fn snapshots(
     SessionUser(user): SessionUser,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<crate::error::Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "volumes", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Developer).await?;
     let (_, cluster_id, _, deleting, data, namespace) = volume_row(&mut tx, &id).await?;
@@ -824,7 +824,7 @@ pub(crate) async fn delete_snapshot(
             "Pick one of the volume's snapshots (its id).",
         ));
     }
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "volumes", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Admin).await?;
     let (_, cluster_id, service_id, deleting, data, namespace) = volume_row(&mut tx, &id).await?;

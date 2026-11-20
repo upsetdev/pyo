@@ -1670,7 +1670,7 @@ async fn poll_source(s: &AppState, team: &str, src: &Value) -> anyhow::Result<()
 
 /// The previews the dashboard shows: those not removed, and those removed
 /// in the last day.
-pub async fn snapshot(db: &sqlx::PgPool, team_ids: &[String]) -> ApiResult<Vec<Value>> {
+pub async fn snapshot(db: &mut sqlx::PgConnection, team_ids: &[String]) -> ApiResult<Vec<Value>> {
     #[derive(sqlx::FromRow)]
     struct Listed {
         #[sqlx(flatten)]
@@ -1705,7 +1705,7 @@ pub async fn snapshot(db: &sqlx::PgPool, team_ids: &[String]) -> ApiResult<Vec<V
             .join(", ")
     )))
     .bind(team_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     Ok(rows
         .into_iter()

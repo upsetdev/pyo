@@ -748,7 +748,7 @@ pub(crate) async fn repos(
     SessionUser(user): SessionUser,
     Query(q): Query<TeamQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     let installs: Vec<(i64, String)> = sqlx::query_as(
         "SELECT id, account FROM pyo.github_installations WHERE team_id = $1 ORDER BY account",
@@ -802,7 +802,7 @@ pub(crate) async fn build_file(
     SessionUser(user): SessionUser,
     Query(q): Query<BuildFileQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     tx.commit().await?;
     let repo =

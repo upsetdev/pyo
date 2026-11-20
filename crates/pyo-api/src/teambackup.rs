@@ -47,11 +47,14 @@ impl TeamSettings {
     }
 }
 
-pub async fn settings(db: &PgPool, team_id: &str) -> anyhow::Result<Option<TeamSettings>> {
+pub async fn settings(
+    db: &mut sqlx::PgConnection,
+    team_id: &str,
+) -> anyhow::Result<Option<TeamSettings>> {
     let v: Option<Value> =
         sqlx::query_scalar("SELECT value FROM pyo.team_backup_settings WHERE team_id = $1")
             .bind(team_id)
-            .fetch_optional(db)
+            .fetch_optional(&mut *db)
             .await?;
     Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
@@ -59,7 +62,7 @@ pub async fn settings(db: &PgPool, team_id: &str) -> anyhow::Result<Option<TeamS
 /// The team's settings, or the default: this server's store, volumes off,
 /// with a repository password made (and saved) on first use.
 pub async fn effective(db: &PgPool, team_id: &str) -> anyhow::Result<TeamSettings> {
-    if let Some(s) = settings(db, team_id).await? {
+    if let Some(s) = settings(&mut *db.acquire().await?, team_id).await? {
         return Ok(s);
     }
     let s = TeamSettings {
@@ -146,7 +149,7 @@ pub struct Target {
     pub namespace: Option<String>,
 }
 
-pub async fn targets(db: &PgPool, team_id: &str) -> anyhow::Result<Vec<Target>> {
+pub async fn targets(db: &mut sqlx::PgConnection, team_id: &str) -> anyhow::Result<Vec<Target>> {
     // Labelled "project / service": the same name can be in two projects.
     let services: Vec<(String, String, String, Value, bool)> = sqlx::query_as(
         "SELECT a.id, a.cluster_id, p.name || ' / ' || a.name, a.spec, a.current_deployment_id IS NOT NULL
@@ -154,12 +157,12 @@ pub async fn targets(db: &PgPool, team_id: &str) -> anyhow::Result<Vec<Target>> 
           WHERE a.team_id = $1 AND NOT a.deleting ORDER BY p.name, a.name",
     )
     .bind(team_id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let volumes: Vec<(String, Option<String>, String)> =
         sqlx::query_as("SELECT id, service_id, coalesce(data->>'name', id) FROM pyo.volumes WHERE team_id = $1 AND service_id IS NOT NULL AND NOT deleting ORDER BY data->>'name'")
             .bind(team_id)
-            .fetch_all(db)
+            .fetch_all(&mut *db)
             .await?;
     let mut out = Vec::new();
     for (id, cluster, name, spec, deployed) in &services {
@@ -194,7 +197,7 @@ pub async fn targets(db: &PgPool, team_id: &str) -> anyhow::Result<Vec<Target>> 
           ORDER BY v.data->>'name'",
     )
     .bind(team_id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     for (vid, cluster, project, ns, vname) in detached {
         out.push(Target {
@@ -300,7 +303,7 @@ pub async fn queue(
     let password = crate::vault::get().open(&cfg.repo_password_sealed).await?;
     let (_, access_key, secret) = destination(state, team_id, &cfg).await?;
     let mut n = 0;
-    for t in targets(&state.db, team_id).await? {
+    for t in targets(&mut *state.db.acquire().await?, team_id).await? {
         // One asked for by name runs; otherwise only what the team picked.
         match only {
             Some(o) if o != t.id => continue,
@@ -623,11 +626,11 @@ pub fn volume_status(
 
 /// Each of a team's volumes' `backup` (see [`volume_status`]), by id.
 pub async fn volume_statuses(
-    db: &PgPool,
+    db: &mut sqlx::PgConnection,
     team_id: &str,
 ) -> anyhow::Result<std::collections::HashMap<String, Value>> {
-    let cfg = shown_settings(settings(db, team_id).await?);
-    let targets: std::collections::HashSet<String> = targets(db, team_id)
+    let cfg = shown_settings(settings(&mut *db, team_id).await?);
+    let targets: std::collections::HashSet<String> = targets(&mut *db, team_id)
         .await?
         .into_iter()
         .filter_map(|t| t.volume_id)
@@ -637,17 +640,17 @@ pub async fn volume_statuses(
            FROM pyo.backups WHERE team_id = $1 AND volume_id IS NOT NULL ORDER BY volume_id, created_at DESC",
     )
     .bind(team_id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let good: Vec<(String, i64)> = sqlx::query_as(
         "SELECT volume_id, pyo.ms(max(coalesce(finished_at, created_at))) FROM pyo.backups WHERE team_id = $1 AND volume_id IS NOT NULL AND status = 'succeeded' GROUP BY volume_id",
     )
     .bind(team_id)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
     let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM pyo.volumes WHERE team_id = $1")
         .bind(team_id)
-        .fetch_all(db)
+        .fetch_all(&mut *db)
         .await?;
     Ok(ids
         .into_iter()
@@ -664,11 +667,11 @@ pub async fn volume_statuses(
 }
 
 /// The dashboard's view: each of the user's teams' settings, targets and runs.
-pub async fn snapshot(db: &PgPool, team_ids: &[String]) -> ApiResult<Vec<Value>> {
+pub async fn snapshot(db: &mut sqlx::PgConnection, team_ids: &[String]) -> ApiResult<Vec<Value>> {
     let mut out = Vec::new();
     for team in team_ids {
         // Nothing saved: what a backup would use (this server's store).
-        let cfg = shown_settings(settings(db, team).await?);
+        let cfg = shown_settings(settings(&mut *db, team).await?);
         let history: Vec<Value> = sqlx::query_scalar(
             "SELECT jsonb_build_object('id', id, 'serviceId', service_id, 'volumeId', volume_id, 'kind', kind, 'status', status, 'trigger', trigger,
                                       'label', label, 'snapshotId', snapshot_id, 'sizeBytes', size_bytes, 'addedBytes', added_bytes,
@@ -676,7 +679,7 @@ pub async fn snapshot(db: &PgPool, team_ids: &[String]) -> ApiResult<Vec<Value>>
                FROM pyo.backups WHERE team_id = $1 ORDER BY created_at DESC LIMIT 40",
         )
         .bind(team)
-        .fetch_all(db)
+        .fetch_all(&mut *db)
         .await?;
         out.push(json!({
             "teamId": team,
@@ -687,8 +690,8 @@ pub async fn snapshot(db: &PgPool, team_ids: &[String]) -> ApiResult<Vec<Value>>
                 p["exceptions"] = json!(c.exceptions);
                 p
             }),
-            "databases": crate::database_backups::snapshot(db, team).await?,
-            "targets": targets(db, team).await.context("targets").map_err(crate::error::ApiError::from)?.into_iter().map(|t| {
+            "databases": crate::database_backups::snapshot(&mut *db, team).await?,
+            "targets": targets(&mut *db, team).await.context("targets").map_err(crate::error::ApiError::from)?.into_iter().map(|t| {
                 let included = cfg.as_ref().is_none_or(|c| c.includes(&t.id));
                 let mut v = serde_json::to_value(&t).unwrap_or(Value::Null);
                 v["included"] = json!(included);
@@ -765,7 +768,9 @@ mod tests {
             .unwrap();
         // Nowhere to back up to (no settings, no store of Pyo's): unsupported.
         if backup::local_store().is_none() {
-            let all = volume_statuses(&pool, &team).await.unwrap();
+            let all = volume_statuses(&mut pool.acquire().await.unwrap(), &team)
+                .await
+                .unwrap();
             assert!(
                 all.values().all(|v| v["status"] == "unsupported"),
                 "{all:?}"
@@ -782,7 +787,9 @@ mod tests {
             exceptions: vec![off.clone()],
         };
         save(&pool, &team, &cfg).await.unwrap();
-        let all = volume_statuses(&pool, &team).await.unwrap();
+        let all = volume_statuses(&mut pool.acquire().await.unwrap(), &team)
+            .await
+            .unwrap();
         assert_eq!(all[&used]["status"], "enabled");
         assert_eq!(all[&used]["schedule"], "daily");
         assert_eq!(all[&off]["status"], "disabled");
@@ -792,7 +799,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let v = &volume_statuses(&pool, &team).await.unwrap()[&used];
+        let v = &volume_statuses(&mut pool.acquire().await.unwrap(), &team)
+            .await
+            .unwrap()[&used];
         assert_eq!(v["status"], "failed");
         assert!(v["lastAt"].as_i64().unwrap() < v["failedAt"].as_i64().unwrap());
         // A good one after it: enabled again.
@@ -801,7 +810,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            volume_statuses(&pool, &team).await.unwrap()[&used]["status"],
+            volume_statuses(&mut pool.acquire().await.unwrap(), &team)
+                .await
+                .unwrap()[&used]["status"],
             "enabled"
         );
         sqlx::query("DELETE FROM pyo.teams WHERE id = $1")

@@ -1331,7 +1331,7 @@ pub async fn lock(
     crate::auth::SessionUser(user): crate::auth::SessionUser,
     crate::error::Query(q): crate::error::Query<LockQuery>,
 ) -> ApiResult<crate::error::Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     crate::ops::require_role(&mut tx, &user, &q.team, crate::ops::Role::Admin).await?;
     let team_id: String = sqlx::query_scalar("SELECT id FROM pyo.teams WHERE id = $1 OR slug = $1")
         .bind(&q.team)

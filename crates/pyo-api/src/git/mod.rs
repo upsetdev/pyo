@@ -137,9 +137,29 @@ impl Connection {
     }
 }
 
+type Row = (String, String, String, String, String, String, String);
+
 /// A connection by id, its secrets opened. `team`: only that team's.
 pub async fn load(db: &sqlx::PgPool, team: Option<&str>, id: &str) -> ApiResult<Connection> {
-    type Row = (String, String, String, String, String, String, String);
+    opened(row(db, team, id).await?).await
+}
+
+/// [`load`] for a person's request: read within their teams (rls.rs), by
+/// a viewer of `team` or more, then its secrets opened.
+pub async fn load_for(
+    db: &sqlx::PgPool,
+    user: &crate::auth::User,
+    team: &str,
+    id: &str,
+) -> ApiResult<Connection> {
+    let mut tx = crate::rls::begin(db, user).await?;
+    crate::ops::require_role(&mut tx, user, team, crate::ops::Role::Viewer).await?;
+    let row = row(&mut *tx, Some(team), id).await?;
+    tx.commit().await?;
+    opened(row).await
+}
+
+async fn row<'e, E: sqlx::PgExecutor<'e>>(db: E, team: Option<&str>, id: &str) -> ApiResult<Row> {
     let row: Option<Row> = sqlx::query_as(
         "SELECT id, provider, base_url, account, public_url, token, webhook_secret
            FROM pyo.git_connections WHERE id = $1 AND ($2::text IS NULL OR team_id = $2)",
@@ -148,9 +168,11 @@ pub async fn load(db: &sqlx::PgPool, team: Option<&str>, id: &str) -> ApiResult<
     .bind(team)
     .fetch_optional(db)
     .await?;
-    let Some((id, provider, base_url, account, public_url, token, secret)) = row else {
-        return Err(ApiError::not_found("Git connection"));
-    };
+    row.ok_or_else(|| ApiError::not_found("Git connection"))
+}
+
+async fn opened(row: Row) -> ApiResult<Connection> {
+    let (id, provider, base_url, account, public_url, token, secret) = row;
     let v = crate::vault::get();
     Ok(Connection {
         id,
@@ -709,18 +731,18 @@ pub(crate) async fn repos(
     SessionUser(user): SessionUser,
     Query(q): Query<ReposQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
-    tx.commit().await?;
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM pyo.git_connections WHERE team_id = $1 ORDER BY created_at",
     )
     .bind(&q.team)
-    .fetch_all(&s.db)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
     let (mut out, mut errors) = (vec![], vec![]);
     for id in ids {
-        let conn = load(&s.db, Some(&q.team), &id).await?;
+        let conn = load_for(&s.db, &user, &q.team, &id).await?;
         let listed = match conn.api().await {
             Ok(api) => api
                 .projects(q.search.as_deref())
@@ -785,10 +807,7 @@ pub(crate) async fn branches(
     SessionUser(user): SessionUser,
     Query(q): Query<BranchesQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
-    require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
-    tx.commit().await?;
-    let conn = load(&s.db, Some(&q.team), &q.connection).await?;
+    let conn = load_for(&s.db, &user, &q.team, &q.connection).await?;
     let repo = repo_arg(&conn, &q.repo)?;
     let list = conn
         .api()
@@ -836,10 +855,7 @@ pub(crate) async fn build_file(
     SessionUser(user): SessionUser,
     Query(q): Query<BuildFileQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
-    require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
-    tx.commit().await?;
-    let conn = load(&s.db, Some(&q.team), &q.connection).await?;
+    let conn = load_for(&s.db, &user, &q.team, &q.connection).await?;
     let repo = repo_arg(&conn, &q.repo)?;
     let dir = crate::github::build_dir(&q.context)
         .ok_or_else(|| ApiError::bad_request("Build context can't contain '..'."))?;

@@ -427,9 +427,13 @@ async fn the_control_plane_drives_a_real_daemon() {
 
     // The runner reads the report: ready.
     super::runner::round(&s).await.unwrap();
-    let srv = &super::server_views(&db, std::slice::from_ref(&team), Some(&server))
-        .await
-        .unwrap()[0];
+    let srv = &super::server_views(
+        &mut db.acquire().await.unwrap(),
+        std::slice::from_ref(&team),
+        Some(&server),
+    )
+    .await
+    .unwrap()[0];
     assert_eq!(srv["state"], "ready", "{srv}");
     assert_eq!(srv["capability"]["runtime"], "firecracker");
 
@@ -588,9 +592,13 @@ async fn the_control_plane_drives_a_real_daemon() {
     let t0 = std::time::Instant::now();
     loop {
         super::runner::round(&s).await.unwrap();
-        let srv = &super::server_views(&db, std::slice::from_ref(&team), Some(&server))
-            .await
-            .unwrap()[0];
+        let srv = &super::server_views(
+            &mut db.acquire().await.unwrap(),
+            std::slice::from_ref(&team),
+            Some(&server),
+        )
+        .await
+        .unwrap()[0];
         let names: Vec<&str> = srv["templates"]
             .as_array()
             .unwrap()
@@ -649,9 +657,13 @@ async fn the_control_plane_drives_a_real_daemon() {
     for _ in 0..3 {
         super::runner::round(&s).await.unwrap();
     }
-    let srv = &super::server_views(&db, std::slice::from_ref(&team), Some(&server))
-        .await
-        .unwrap()[0];
+    let srv = &super::server_views(
+        &mut db.acquire().await.unwrap(),
+        std::slice::from_ref(&team),
+        Some(&server),
+    )
+    .await
+    .unwrap()[0];
     assert!(
         srv["templates"]
             .as_array()
@@ -804,9 +816,13 @@ async fn the_control_plane_drives_a_real_daemon() {
 
 /// The templates a server reports ready, by the names it keeps them under.
 async fn ready_on(db: &PgPool, team: &str, server: &str) -> Vec<String> {
-    let srv = &super::server_views(db, &[team.to_owned()], Some(server))
-        .await
-        .unwrap()[0];
+    let srv = &super::server_views(
+        &mut db.acquire().await.unwrap(),
+        &[team.to_owned()],
+        Some(server),
+    )
+    .await
+    .unwrap()[0];
     srv["templates"]
         .as_array()
         .unwrap()

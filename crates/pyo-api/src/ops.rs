@@ -3717,7 +3717,7 @@ async fn apply(
                     "Set PYO_SECRET_KEY on the API first: backups are encrypted with it.",
                 ));
             }
-            let saved = crate::teambackup::settings(&s.db, &team_id).await?;
+            let saved = crate::teambackup::settings(tx, &team_id).await?;
             let secret = secret_key
                 .filter(|k| !k.trim().is_empty())
                 .map(|k| k.trim().to_owned());
@@ -3878,7 +3878,7 @@ async fn apply(
         }
         Op::RevealBackupPassword { team_id } => {
             require_role(tx, user, &team_id, Role::Admin).await?;
-            let cfg = crate::teambackup::settings(&s.db, &team_id)
+            let cfg = crate::teambackup::settings(tx, &team_id)
                 .await?
                 .ok_or_else(|| ApiError::not_found("Backup settings"))?;
             let password = crate::vault::get().open(&cfg.repo_password_sealed).await?;
@@ -8305,7 +8305,7 @@ pub(crate) async fn service_preview(
     SessionUser(user): SessionUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Preview>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "services", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
@@ -8464,7 +8464,7 @@ pub async fn fetch_service_logs(
         return Err(ApiError::bad_request("That isn't a replica name."));
     }
     let id = id.to_owned();
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, user).await?;
     let team_id = team_of(&mut tx, "services", &id).await?;
     require_role(&mut tx, user, &team_id, Role::Viewer).await?;
     let cluster_id: String =
@@ -8579,7 +8579,7 @@ pub(crate) async fn metrics(
     SessionUser(user): SessionUser,
     crate::error::Query(q): crate::error::Query<MetricsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     require_role(&mut tx, &user, &q.team, Role::Viewer).await?;
     tx.commit().await?;
     let cluster = q.cluster.filter(|c| c != "all").unwrap_or_default();
@@ -8690,7 +8690,7 @@ async fn team_hosts(
     site: Option<String>,
     service: Option<String>,
 ) -> ApiResult<Vec<String>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, user).await?;
     require_role(&mut tx, user, team, Role::Viewer).await?;
     let project = filter_value(project);
     let site = filter_value(site);
@@ -8769,7 +8769,7 @@ pub(crate) async fn connections(
     axum::extract::Path(id): axum::extract::Path<String>,
     crate::error::Query(q): crate::error::Query<ConnectionsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "services", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     tx.commit().await?;
@@ -8812,7 +8812,7 @@ pub(crate) async fn firewall_blocked(
     SessionUser(user): SessionUser,
     crate::error::Query(q): crate::error::Query<BlockedQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "services", &q.service).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     tx.commit().await?;
@@ -8847,7 +8847,7 @@ pub(crate) async fn waf_hits(
     SessionUser(user): SessionUser,
     crate::error::Query(q): crate::error::Query<BlockedQuery>,
 ) -> ApiResult<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "services", &q.service).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
     tx.commit().await?;
@@ -10219,6 +10219,7 @@ mod compose_import_tests {
     #[ignore]
     fn a_compose_import_in_the_database() {
         let rt = tokio::runtime::Builder::new_multi_thread()
+            .thread_stack_size(64 << 20)
             .enable_all()
             .build()
             .unwrap();
