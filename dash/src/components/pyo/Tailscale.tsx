@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { siTailscale } from "simple-icons";
 import { BrandMark } from "~/components/pyo/common";
+import { useHosted } from "~/components/pyo/Managed";
 import {
   Busy,
   ConfirmNote,
@@ -45,10 +46,13 @@ function goBack(navigate: ReturnType<typeof useNavigate>): boolean {
 /**
  * Shown in connect and add-server flows until Tailscale is set up: servers
  * join over the tailnet. Links to the card and comes back after saving.
+ * Not on a hosted Pyo.
  */
 export function NeedsTailscale() {
   const s = usePyo();
-  if (s.tailscale) return null;
+  // A hosted Pyo has no Tailscale setup yet: its servers connect directly.
+  const hosted = useHosted();
+  if (s.tailscale || hosted !== false) return null;
   return (
     <Callout tone="warning">
       Servers join over your tailnet. Set up Tailscale first.{" "}

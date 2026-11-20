@@ -8,6 +8,16 @@ import { useQuery } from "~/lib/pyo/query";
 const SUPPORT = "support@pyo.dev";
 
 /**
+ * Whether this Pyo is hosted (the API lists the "managed" feature).
+ * Undefined until the API has said, so hosted-only changes never flash.
+ */
+export function useHosted(): boolean | undefined {
+  const meta = useQuery("meta", fetchMeta);
+  if (meta.status === "loading") return undefined;
+  return meta.status === "success" && meta.data.features.includes("managed");
+}
+
+/**
  * On a hosted Pyo (the API lists the "managed" feature), installation
  * settings the Pyo team runs show a note instead of their controls.
  * Self-hosted shows `children` as before. Nothing shows until the API has
@@ -22,10 +32,8 @@ export function ManagedOr({
   description: ReactNode;
   children: ReactNode;
 }) {
-  const meta = useQuery("meta", fetchMeta);
-  if (meta.status === "loading") return null;
-  const managed =
-    meta.status === "success" && meta.data.features.includes("managed");
+  const managed = useHosted();
+  if (managed === undefined) return null;
   if (!managed) return <>{children}</>;
   return (
     <Layered>

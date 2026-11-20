@@ -12,6 +12,7 @@ import { CloudflareDialog } from "~/components/pyo/Cloudflare";
 import { TailscaleDialog } from "~/components/pyo/Tailscale";
 import { GithubDialog, GitlabDialog } from "~/components/pyo/GitConnections";
 import { HetznerDialog, hetznerOf } from "~/components/pyo/Hetzner";
+import { useHosted } from "~/components/pyo/Managed";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
 import type { Tone } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -93,6 +94,8 @@ function Integrations() {
   const s = usePyo();
   const teamAdmin = useTeamAdmin();
   const cfAdmin = ["owner", "admin"].includes(roleIn(s) ?? "");
+  // A hosted Pyo has no Tailscale setup yet, and Hetzner servers need it.
+  const hosted = useHosted();
   const [filter, setFilter] = useState<string>("all");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<string | null>(null);
@@ -132,7 +135,7 @@ function Integrations() {
   const githubRepos = reposLinked(s, (src) => installs.some((g) => g.id === src.installationId));
   const gitlabRepos = reposLinked(s, (src) => gitlab.some((c) => c.id === src.gitConnectionId));
 
-  const all: Integration[] = [
+  const offered: Integration[] = [
     {
       id: "tailscale",
       name: "Tailscale",
@@ -219,6 +222,7 @@ function Integrations() {
       dialog: (onClose) => <SecretStoresDialog onClose={onClose} />,
     },
   ];
+  const all = hosted === false ? offered : offered.filter((x) => x.id !== "tailscale" && x.id !== "hetzner");
 
   // Connected first, each group in the order above.
   const cards = [...all.filter((x) => x.connected), ...all.filter((x) => !x.connected)];

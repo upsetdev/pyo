@@ -1,4 +1,5 @@
 import { NeedsTailscale } from "~/components/pyo/Tailscale";
+import { useHosted } from "~/components/pyo/Managed";
 import { ClusterChecklist } from "~/components/pyo/ClusterChecklist";
 import { TagInput } from "~/components/ui/TagInput";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -40,6 +41,8 @@ function AddServers() {
   const [publicNet, setPublicNet] = useState(false);
   // Pyo makes the first server at Hetzner.
   const [hetzner, setHetzner] = useState(false);
+  // A hosted Pyo's agents always connect over the internet.
+  const hosted = useHosted();
   const {
     where,
     setWhere,
@@ -173,7 +176,7 @@ function AddServers() {
                 </div>
               )}
             </div>
-            {!thisMachine && !connected ? (
+            {!thisMachine && !connected && hosted === false ? (
               <div className="space-y-2 border-t border-border p-5">
                 <Switch
                   checked={publicNet}
