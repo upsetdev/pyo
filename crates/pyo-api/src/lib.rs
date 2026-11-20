@@ -224,6 +224,10 @@ pub struct Signature {
     pub kid: String,
     #[serde(default)]
     pub refused: Option<String>,
+    /// When a session key signed it: the trusted key's delegation to it,
+    /// passed on to the agent with the signature.
+    #[serde(default)]
+    pub delegation: Option<pyo_proto::DelegationWire>,
 }
 
 /// Where commands get signed (pyo-proto `signing`). The signer picks each

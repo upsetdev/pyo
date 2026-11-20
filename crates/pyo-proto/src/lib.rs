@@ -56,6 +56,23 @@ pub struct SignedReplyWire {
     pub sig: String,
     pub kid: String,
     pub reply: String,
+    /// When a session key signed it: the trusted key's statement that the
+    /// session key may (`signing`, `pyodel1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegationWire>,
+}
+
+/// A trusted key's statement that a session key may sign for a while
+/// (pyo-proto `signing`, `pyodel1`). Pyo Cloud's signer keeps its key in a
+/// KMS and signs replies with a session key it holds only in memory, so
+/// the KMS signs a few times an hour instead of on every heartbeat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationWire {
+    pub claims: String,
+    pub sig: String,
+    /// The trusted key that signed it.
+    pub kid: String,
 }
 
 // ── Heartbeat: what the agent sees ─────────────────────────────────────────
@@ -922,6 +939,9 @@ pub struct SignedCommandWire {
     pub sig: String,
     pub kid: String,
     pub command: String,
+    /// When a session key signed it ([`DelegationWire`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegationWire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

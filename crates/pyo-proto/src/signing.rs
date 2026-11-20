@@ -28,6 +28,21 @@
 //! request ([`crate::REPLY_NONCE_HEADER`]), when it was signed and when it
 //! expires, and the SHA-256 of the reply's exact JSON. The nonce ties an
 //! answer to one request: an old answer can't be played back for a new one.
+//!
+//! A trusted key may hand signing to a session key for a while (at most
+//! [`MAX_DELEGATION_MS`]), so a key kept in a KMS signs a few times an hour
+//! rather than every heartbeat's reply:
+//!
+//! ```text
+//! sig = Ed25519("pyodel1." + base64url(delegation claims JSON))
+//! ```
+//!
+//! The delegation names the session key, what it may sign ([`PURPOSE_REPLIES`],
+//! [`PURPOSE_COMMANDS`]) and when. A command or reply signed by the session
+//! key carries the delegation; the agent checks the delegation against its
+//! trusted keys, then the signature against the session key, and takes it
+//! only when it was signed and expires inside the delegation's window.
+//! Kinds in [`ROOT_ONLY_KINDS`] are never taken from a session key.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -43,6 +58,71 @@ pub const LEEWAY_MS: u64 = 2 * 60 * 1000;
 pub const REPLY_PREFIX: &str = "pyoreply1";
 /// How long a signed reply is good for (it answers a request made now).
 pub const REPLY_TTL_MS: u64 = 60 * 1000;
+pub const DELEGATION_PREFIX: &str = "pyodel1";
+/// The longest a session key may sign for, from one delegation.
+pub const MAX_DELEGATION_MS: u64 = 2 * 60 * 60 * 1000;
+/// A session key may sign replies.
+pub const PURPOSE_REPLIES: &str = "replies";
+/// A session key may sign commands (but never [`ROOT_ONLY_KINDS`]).
+pub const PURPOSE_COMMANDS: &str = "commands";
+/// Command kinds an agent takes only with a trusted key's own signature:
+/// an agent update names the image every customer's agent will run.
+pub const ROOT_ONLY_KINDS: &[&str] = &["update_agent"];
+
+/// What a trusted key signs to let a session key sign.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationClaims {
+    pub v: u32,
+    /// The session key's public half, base64url.
+    pub key: String,
+    /// What it may sign ([`PURPOSE_REPLIES`], [`PURPOSE_COMMANDS`]).
+    pub purposes: Vec<String>,
+    /// Good from, and until (ms since the epoch). What the session key
+    /// signs must be signed and expire inside this window.
+    pub nbf: u64,
+    pub exp: u64,
+    /// Grows with every delegation the signer makes (for its audit log).
+    pub serial: u64,
+}
+
+impl DelegationClaims {
+    /// The claims as sent (base64url JSON), and the exact bytes signed.
+    pub fn signing_input(&self) -> (String, Vec<u8>) {
+        let c = B64.encode(serde_json::to_vec(self).unwrap_or_default());
+        let m = format!("{DELEGATION_PREFIX}.{c}").into_bytes();
+        (c, m)
+    }
+}
+
+impl Claims {
+    /// The claims as sent (base64url JSON), and the exact bytes signed.
+    /// For signers whose key is elsewhere (a KMS, a session key).
+    pub fn signing_input(&self) -> (String, Vec<u8>) {
+        let c = B64.encode(serde_json::to_vec(self).unwrap_or_default());
+        let m = message(&c);
+        (c, m)
+    }
+}
+
+impl ReplyClaims {
+    /// The claims as sent (base64url JSON), and the exact bytes signed.
+    pub fn signing_input(&self) -> (String, Vec<u8>) {
+        let c = B64.encode(serde_json::to_vec(self).unwrap_or_default());
+        let m = reply_message(&c);
+        (c, m)
+    }
+}
+
+/// Whether `sig` is `public_key`'s Ed25519 signature over `message`.
+pub fn verify_ed25519(public_key: &[u8], message: &[u8], sig: &[u8]) -> bool {
+    UnparsedPublicKey::new(&ED25519, public_key).verify(message, sig).is_ok()
+}
+
+/// A public key's base64url form, as `PYO_COMMAND_KEY` and delegations hold it.
+pub fn encode_key(public_key: &[u8]) -> String {
+    B64.encode(public_key)
+}
 
 /// What the signer signs for a reply.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,19 +221,33 @@ impl Signer {
         &self.kid
     }
 
+    /// The public key's raw bytes.
+    pub fn public_key_bytes(&self) -> &[u8] {
+        self.key.public_key().as_ref()
+    }
+
     /// Signs claims for a command whose JSON hashes to `claims.sha256`.
     /// The command itself is attached by the caller ([`SignedCommand::command`]).
     pub fn sign(&self, claims: &Claims) -> (String, String) {
-        let c = B64.encode(serde_json::to_vec(claims).unwrap_or_default());
-        let sig = self.key.sign(&message(&c));
-        (c, B64.encode(sig.as_ref()))
+        let (c, m) = claims.signing_input();
+        (c, B64.encode(self.key.sign(&m).as_ref()))
     }
 
     /// Signs a reply's claims (its JSON hashes to `claims.sha256`).
     pub fn sign_reply(&self, claims: &ReplyClaims) -> (String, String) {
-        let c = B64.encode(serde_json::to_vec(claims).unwrap_or_default());
-        let sig = self.key.sign(&reply_message(&c));
-        (c, B64.encode(sig.as_ref()))
+        let (c, m) = claims.signing_input();
+        (c, B64.encode(self.key.sign(&m).as_ref()))
+    }
+
+    /// Lets another key sign for a while ([`DelegationClaims`]).
+    pub fn delegate(&self, claims: &DelegationClaims) -> crate::DelegationWire {
+        let (c, m) = claims.signing_input();
+        crate::DelegationWire { claims: c, sig: B64.encode(self.key.sign(&m).as_ref()), kid: self.kid.clone() }
+    }
+
+    /// The raw Ed25519 signature over `message`.
+    pub fn sign_raw(&self, message: &[u8]) -> Vec<u8> {
+        self.key.sign(message).as_ref().to_vec()
     }
 }
 
@@ -172,6 +266,15 @@ pub enum Refused {
     IdMismatch,
     /// A reply to another request (its nonce isn't the one sent).
     OtherRequest,
+    /// Signed by a session key whose delegation isn't a trusted key's (or
+    /// can't be read, or is longer than [`MAX_DELEGATION_MS`]).
+    BadDelegation,
+    /// Signed by a session key whose delegation expired (or isn't good yet).
+    DelegationExpired,
+    /// Signed by a session key outside its delegation's window.
+    OutsideDelegation,
+    /// Signed by a session key that may not sign this.
+    NotDelegated,
 }
 
 impl std::fmt::Display for Refused {
@@ -188,6 +291,10 @@ impl std::fmt::Display for Refused {
             Refused::Tampered => write!(f, "it was changed after it was signed"),
             Refused::IdMismatch => write!(f, "its id doesn't match what was signed"),
             Refused::OtherRequest => write!(f, "it answers another request"),
+            Refused::BadDelegation => write!(f, "its session key wasn't handed over by a key this cluster trusts"),
+            Refused::DelegationExpired => write!(f, "its session key's time is over"),
+            Refused::OutsideDelegation => write!(f, "it was signed outside its session key's time"),
+            Refused::NotDelegated => write!(f, "its session key may not sign it"),
         }
     }
 }
@@ -195,7 +302,25 @@ impl std::fmt::Display for Refused {
 /// The keys an agent trusts, from `PYO_COMMAND_KEY` (base64url public keys,
 /// comma separated, so a new key can be added before the old one goes).
 #[derive(Clone, Debug, Default)]
-pub struct TrustedKeys(Vec<(String, Vec<u8>)>);
+pub struct TrustedKeys {
+    keys: Vec<(String, Vec<u8>)>,
+    /// Delegations already checked against `keys` (the latest few). Their
+    /// windows are still checked on every use.
+    delegations: std::sync::Arc<std::sync::Mutex<Vec<Checked>>>,
+}
+
+/// A delegation checked against a trusted key: its claims and session key.
+type Checked = (crate::DelegationWire, DelegationClaims, Vec<u8>);
+
+/// A signature's checked origin: a trusted key, or a session key it
+/// handed signing to (with that delegation's claims).
+enum Origin {
+    Trusted,
+    Session(DelegationClaims),
+}
+
+/// How many checked delegations an agent keeps.
+const DELEGATION_CACHE: usize = 4;
 
 impl TrustedKeys {
     pub fn parse(v: &str) -> Result<Self, String> {
@@ -210,11 +335,76 @@ impl TrustedKeys {
         if keys.is_empty() {
             return Err("no keys".into());
         }
-        Ok(Self(keys))
+        Ok(Self { keys, delegations: Default::default() })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.keys.is_empty()
+    }
+
+    fn trusted(&self, kid: &str) -> Option<&[u8]> {
+        self.keys.iter().find(|(k, _)| k == kid).map(|(_, k)| k.as_slice())
+    }
+
+    /// A delegation's claims and session key, once it checks out against
+    /// a trusted key (from the cache when it was checked before).
+    fn delegation(&self, d: &crate::DelegationWire) -> Result<(DelegationClaims, Vec<u8>), Refused> {
+        if let Ok(cache) = self.delegations.lock()
+            && let Some((_, c, k)) = cache.iter().find(|(w, _, _)| w == d)
+        {
+            return Ok((c.clone(), k.clone()));
+        }
+        let root = self.trusted(&d.kid).ok_or(Refused::BadDelegation)?;
+        let sig = B64.decode(&d.sig).map_err(|_| Refused::BadDelegation)?;
+        let msg = format!("{DELEGATION_PREFIX}.{}", d.claims).into_bytes();
+        if !verify_ed25519(root, &msg, &sig) {
+            return Err(Refused::BadDelegation);
+        }
+        let raw = B64.decode(&d.claims).map_err(|_| Refused::BadDelegation)?;
+        let c: DelegationClaims = serde_json::from_slice(&raw).map_err(|_| Refused::BadDelegation)?;
+        let key = B64.decode(&c.key).map_err(|_| Refused::BadDelegation)?;
+        if c.v != 1 || key.len() != 32 || c.exp <= c.nbf || c.exp - c.nbf > MAX_DELEGATION_MS {
+            return Err(Refused::BadDelegation);
+        }
+        if let Ok(mut cache) = self.delegations.lock() {
+            if cache.len() >= DELEGATION_CACHE {
+                cache.remove(0);
+            }
+            cache.push((d.clone(), c.clone(), key.clone()));
+        }
+        Ok((c, key))
+    }
+
+    /// Checks `sig` over `msg` from the key `kid`: a trusted key, or a
+    /// session key whose delegation lets it sign for `purpose` now.
+    fn check_signature(
+        &self,
+        kid: &str,
+        delegation: Option<&crate::DelegationWire>,
+        purpose: &str,
+        msg: &[u8],
+        sig: &str,
+        now_ms: u64,
+    ) -> Result<Origin, Refused> {
+        let sig = B64.decode(sig).map_err(|_| Refused::BadSignature)?;
+        let Some(d) = delegation else {
+            let key = self.trusted(kid).ok_or(Refused::UnknownKey)?;
+            return verify_ed25519(key, msg, &sig).then_some(Origin::Trusted).ok_or(Refused::BadSignature);
+        };
+        let (c, key) = self.delegation(d)?;
+        if key_id(&key) != kid {
+            return Err(Refused::UnknownKey);
+        }
+        if !c.purposes.iter().any(|p| p == purpose) {
+            return Err(Refused::NotDelegated);
+        }
+        if now_ms > c.exp.saturating_add(LEEWAY_MS) || c.nbf > now_ms.saturating_add(LEEWAY_MS) {
+            return Err(Refused::DelegationExpired);
+        }
+        if !verify_ed25519(&key, msg, &sig) {
+            return Err(Refused::BadSignature);
+        }
+        Ok(Origin::Session(c))
     }
 
     /// Checks a signed command for `cluster`, given the last sequence number
@@ -228,20 +418,20 @@ impl TrustedKeys {
         now_ms: u64,
     ) -> Result<Claims, Refused> {
         let s = signed.ok_or(Refused::Unsigned)?;
-        let key = self
-            .0
-            .iter()
-            .find(|(kid, _)| *kid == s.kid)
-            .map(|(_, k)| k)
-            .ok_or(Refused::UnknownKey)?;
-        let sig = B64.decode(&s.sig).map_err(|_| Refused::BadSignature)?;
-        UnparsedPublicKey::new(&ED25519, key)
-            .verify(&message(&s.claims), &sig)
-            .map_err(|_| Refused::BadSignature)?;
+        let origin =
+            self.check_signature(&s.kid, s.delegation.as_ref(), PURPOSE_COMMANDS, &message(&s.claims), &s.sig, now_ms)?;
         let raw = B64.decode(&s.claims).map_err(|_| Refused::BadClaims)?;
         let c: Claims = serde_json::from_slice(&raw).map_err(|_| Refused::BadClaims)?;
         if c.v != 1 {
             return Err(Refused::BadClaims);
+        }
+        if let Origin::Session(d) = &origin {
+            if ROOT_ONLY_KINDS.contains(&c.kind.as_str()) {
+                return Err(Refused::NotDelegated);
+            }
+            if c.iat < d.nbf || c.exp > d.exp {
+                return Err(Refused::OutsideDelegation);
+            }
         }
         if c.cluster != cluster {
             return Err(Refused::OtherCluster);
@@ -274,20 +464,17 @@ impl TrustedKeys {
         now_ms: u64,
     ) -> Result<&'a str, Refused> {
         let s = signed.ok_or(Refused::Unsigned)?;
-        let key = self
-            .0
-            .iter()
-            .find(|(kid, _)| *kid == s.kid)
-            .map(|(_, k)| k)
-            .ok_or(Refused::UnknownKey)?;
-        let sig = B64.decode(&s.sig).map_err(|_| Refused::BadSignature)?;
-        UnparsedPublicKey::new(&ED25519, key)
-            .verify(&reply_message(&s.claims), &sig)
-            .map_err(|_| Refused::BadSignature)?;
+        let origin =
+            self.check_signature(&s.kid, s.delegation.as_ref(), PURPOSE_REPLIES, &reply_message(&s.claims), &s.sig, now_ms)?;
         let raw = B64.decode(&s.claims).map_err(|_| Refused::BadClaims)?;
         let c: ReplyClaims = serde_json::from_slice(&raw).map_err(|_| Refused::BadClaims)?;
         if c.v != 1 {
             return Err(Refused::BadClaims);
+        }
+        if let Origin::Session(d) = &origin
+            && (c.iat < d.nbf || c.exp > d.exp)
+        {
+            return Err(Refused::OutsideDelegation);
         }
         if c.cluster != cluster {
             return Err(Refused::OtherCluster);
@@ -330,7 +517,7 @@ mod tests {
             sha256: sha256_hex(command.as_bytes()),
         };
         let (c, sig) = s.sign(&claims);
-        SignedCommand { claims: c, sig, kid: s.kid().into(), command: command.into() }
+        SignedCommand { claims: c, sig, kid: s.kid().into(), command: command.into(), delegation: None }
     }
 
     #[test]
@@ -375,7 +562,7 @@ mod tests {
             sha256: sha256_hex(body.as_bytes()),
         };
         let (c, sig) = s.sign_reply(&claims);
-        crate::SignedReplyWire { claims: c, sig, kid: s.kid().into(), reply: body.into() }
+        crate::SignedReplyWire { claims: c, sig, kid: s.kid().into(), reply: body.into(), delegation: None }
     }
 
     #[test]
@@ -425,11 +612,146 @@ mod tests {
         let body = r#"{"kind":"restart"}"#;
         // A reply's claims and signature passed off as a command's.
         let r = reply(&s, "cl_a", "nonce-1234", body, now);
-        let as_command = SignedCommand { claims: r.claims.clone(), sig: r.sig.clone(), kid: r.kid.clone(), command: body.into() };
+        let as_command = SignedCommand { claims: r.claims.clone(), sig: r.sig.clone(), kid: r.kid.clone(), command: body.into(), delegation: None };
         assert_eq!(t.verify(Some(&as_command), "cmd_1", "cl_a", 0, now), Err(Refused::BadSignature));
         // And a command's as a reply's.
         let c = signed(&s, "cl_a", 1, body, now);
-        let as_reply = crate::SignedReplyWire { claims: c.claims, sig: c.sig, kid: c.kid, reply: body.into() };
+        let as_reply = crate::SignedReplyWire { claims: c.claims, sig: c.sig, kid: c.kid, reply: body.into(), delegation: None };
         assert_eq!(t.verify_reply(Some(&as_reply), "cl_a", "nonce-1234", now), Err(Refused::BadSignature));
+    }
+
+    /// A session key, and the root's delegation to it.
+    fn session(root: &Signer, purposes: &[&str], nbf: u64, exp: u64) -> (Signer, crate::DelegationWire) {
+        let k = Signer::from_pkcs8(&Signer::generate_pkcs8().unwrap()).unwrap();
+        let d = root.delegate(&DelegationClaims {
+            v: 1,
+            key: k.public_key(),
+            purposes: purposes.iter().map(|p| p.to_string()).collect(),
+            nbf,
+            exp,
+            serial: 1,
+        });
+        (k, d)
+    }
+
+    const HOUR: u64 = 60 * 60 * 1000;
+
+    #[test]
+    fn a_session_key_signs_replies_and_commands_it_was_given() {
+        let (root, t) = setup();
+        let now = 10 * HOUR;
+        let (k, d) = session(&root, &[PURPOSE_REPLIES, PURPOSE_COMMANDS], now - 1000, now + HOUR);
+        let mut r = reply(&k, "cl_a", "nonce-1234", "{}", now);
+        r.delegation = Some(d.clone());
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Ok("{}"));
+        // Checked once, then from the cache: the same answer.
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now + 1), Ok("{}"));
+        let mut c = signed(&k, "cl_a", 5, r#"{"kind":"restart"}"#, now);
+        c.delegation = Some(d);
+        assert_eq!(t.verify(Some(&c), "cmd_1", "cl_a", 4, now).map(|c| c.seq), Ok(5));
+        // Without its delegation, the session key is just an unknown key.
+        c.delegation = None;
+        assert_eq!(t.verify(Some(&c), "cmd_1", "cl_a", 4, now), Err(Refused::UnknownKey));
+    }
+
+    #[test]
+    fn an_expired_delegation_is_refused() {
+        let (root, t) = setup();
+        let now = 10 * HOUR;
+        let (k, d) = session(&root, &[PURPOSE_REPLIES], now - 2 * HOUR + 1000, now - HOUR);
+        // Signed while the delegation held, checked after it ended.
+        let mut r = reply(&k, "cl_a", "nonce-1234", "{}", now - HOUR - REPLY_TTL_MS);
+        r.delegation = Some(d.clone());
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Err(Refused::DelegationExpired));
+        // And one that isn't good yet.
+        let (k, d) = session(&root, &[PURPOSE_REPLIES], now + HOUR, now + 2 * HOUR);
+        let mut r = reply(&k, "cl_a", "nonce-1234", "{}", now + HOUR);
+        r.delegation = Some(d);
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Err(Refused::DelegationExpired));
+    }
+
+    #[test]
+    fn a_delegation_not_signed_by_a_trusted_key_is_refused() {
+        let (_, t) = setup();
+        let (other, _) = setup();
+        let now = 10 * HOUR;
+        let (k, d) = session(&other, &[PURPOSE_REPLIES], now - 1000, now + HOUR);
+        let mut r = reply(&k, "cl_a", "nonce-1234", "{}", now);
+        r.delegation = Some(d.clone());
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Err(Refused::BadDelegation));
+        // Under a trusted key's id.
+        let (root, t) = setup();
+        let mut forged = d;
+        forged.kid = root.kid().into();
+        r.delegation = Some(forged.clone());
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Err(Refused::BadDelegation));
+        // A trusted delegation changed after signing (a longer window).
+        let (k, d) = session(&root, &[PURPOSE_REPLIES], now - 1000, now + HOUR);
+        let mut c: DelegationClaims = serde_json::from_slice(&B64.decode(&d.claims).unwrap()).unwrap();
+        c.exp = now + 100 * HOUR;
+        let changed = crate::DelegationWire { claims: c.signing_input().0, ..d };
+        let mut r = reply(&k, "cl_a", "nonce-1234", "{}", now);
+        r.delegation = Some(changed);
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Err(Refused::BadDelegation));
+        // Signed by the root, but longer than an agent accepts.
+        let (k, d) = session(&root, &[PURPOSE_REPLIES], now - 1000, now + MAX_DELEGATION_MS);
+        let mut r = reply(&k, "cl_a", "nonce-1234", "{}", now);
+        r.delegation = Some(d);
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Err(Refused::BadDelegation));
+        // Another session key's signature under this delegation.
+        let (_, d) = session(&root, &[PURPOSE_REPLIES], now - 1000, now + HOUR);
+        let (k2, _) = session(&root, &[PURPOSE_REPLIES], now - 1000, now + HOUR);
+        let mut r = reply(&k2, "cl_a", "nonce-1234", "{}", now);
+        r.delegation = Some(d);
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Err(Refused::UnknownKey));
+    }
+
+    #[test]
+    fn a_session_key_is_refused_outside_its_window() {
+        let (root, t) = setup();
+        let now = 10 * HOUR;
+        let (k, d) = session(&root, &[PURPOSE_REPLIES, PURPOSE_COMMANDS], now, now + HOUR);
+        // Dated before the delegation starts.
+        let mut r = reply(&k, "cl_a", "nonce-1234", "{}", now - 30_000);
+        r.delegation = Some(d.clone());
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Err(Refused::OutsideDelegation));
+        // Good past the delegation's end.
+        let mut c = signed(&k, "cl_a", 1, "{}", now + HOUR - 60_000);
+        c.delegation = Some(d);
+        assert_eq!(t.verify(Some(&c), "cmd_1", "cl_a", 0, now + HOUR - 60_000), Err(Refused::OutsideDelegation));
+    }
+
+    #[test]
+    fn a_session_key_signs_only_what_it_was_given() {
+        let (root, t) = setup();
+        let now = 10 * HOUR;
+        let (k, d) = session(&root, &[PURPOSE_REPLIES], now - 1000, now + HOUR);
+        // Replies only: no commands.
+        let mut c = signed(&k, "cl_a", 1, "{}", now);
+        c.delegation = Some(d);
+        assert_eq!(t.verify(Some(&c), "cmd_1", "cl_a", 0, now), Err(Refused::NotDelegated));
+        // Commands only: no replies.
+        let (k, d) = session(&root, &[PURPOSE_COMMANDS], now - 1000, now + HOUR);
+        let mut r = reply(&k, "cl_a", "nonce-1234", "{}", now);
+        r.delegation = Some(d.clone());
+        assert_eq!(t.verify_reply(Some(&r), "cl_a", "nonce-1234", now), Err(Refused::NotDelegated));
+        // Never an agent update, which only the trusted key signs.
+        let body = r#"{"kind":"update_agent","image":"evil.example/agent:1"}"#;
+        let claims = Claims {
+            v: 1,
+            id: "cmd_1".into(),
+            cluster: "cl_a".into(),
+            seq: 1,
+            iat: now,
+            exp: now + TTL_MS,
+            kind: "update_agent".into(),
+            sha256: sha256_hex(body.as_bytes()),
+        };
+        let (c, sig) = k.sign(&claims);
+        let update = SignedCommand { claims: c, sig, kid: k.kid().into(), command: body.into(), delegation: Some(d) };
+        assert_eq!(t.verify(Some(&update), "cmd_1", "cl_a", 0, now), Err(Refused::NotDelegated));
+        let (c, sig) = root.sign(&claims);
+        let update = SignedCommand { claims: c, sig, kid: root.kid().into(), command: body.into(), delegation: None };
+        assert!(t.verify(Some(&update), "cmd_1", "cl_a", 0, now).is_ok());
     }
 }

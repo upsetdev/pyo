@@ -212,6 +212,7 @@ async fn sign_reply_with(
                 sig: sig.sig,
                 kid: sig.kid,
                 reply: json,
+                delegation: sig.delegation,
             });
         }
         Ok(sig) => {
@@ -901,6 +902,7 @@ async fn sign_all(
                     sig: sig.sig,
                     kid: sig.kid,
                     command: json,
+                    delegation: sig.delegation,
                 });
                 signed.push(e);
             }
@@ -1889,7 +1891,7 @@ mod reply_tests {
                 let now = pyo_proto::now_ms() as u64;
                 let claims = ReplyClaims { v: 1, cluster: cluster_id.into(), nonce: r.nonce.clone(), iat: now, exp: now + REPLY_TTL_MS, sha256: r.sha256.clone() };
                 let (claims, sig) = self.0.sign_reply(&claims);
-                Ok(crate::Signature { claims, sig, kid: self.0.kid().into(), refused: None })
+                Ok(crate::Signature { claims, sig, kid: self.0.kid().into(), refused: None, delegation: None })
             })
         }
         fn public_keys(&self) -> String {
