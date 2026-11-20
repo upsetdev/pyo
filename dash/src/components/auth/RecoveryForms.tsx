@@ -1,10 +1,12 @@
 import { ArrowRightIcon } from "@phosphor-icons/react";
 import { Link } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useState } from "react";
-import { auth } from "~/lib/pyo/backend";
+import { auth, needsCode } from "~/lib/pyo/backend";
+import type { User } from "~/lib/pyo/types";
 import { Alert } from "../ui/Alert";
 import { Button } from "../ui/Button";
 import { inputClass, labelClass } from "./AuthForm";
+import { CodeStep } from "./CodeStep";
 
 function Heading({ title, sub }: { title: string; sub: string }) {
   return (
@@ -94,6 +96,10 @@ export function ForgotForm() {
   );
 }
 
+function signedIn(user: User) {
+  window.location.assign(user.mustSetUp ? "/setup" : "/");
+}
+
 /** A sign-in link: choose a new password, then on into Pyo. */
 export function ResetForm({ token }: { token: string }) {
   const [email, setEmail] = useState<string | null>(null);
@@ -101,6 +107,8 @@ export function ResetForm({ token }: { token: string }) {
   const [error, setError] = useState("");
   const [dead, setDead] = useState("");
   const [loading, setLoading] = useState(false);
+  /** Two-factor is on: the new password is saved, a code signs in. */
+  const [challenge, setChallenge] = useState<string | null>(null);
 
   useEffect(() => {
     if (!token) {
@@ -122,13 +130,24 @@ export function ResetForm({ token }: { token: string }) {
     setLoading(true);
     setError("");
     try {
-      const user = await auth.resetPassword(token, password);
-      window.location.assign(user.mustSetUp ? "/setup" : "/");
+      const res = await auth.resetPassword(token, password);
+      if (needsCode(res)) return setChallenge(res.challenge);
+      signedIn(res);
     } catch (e) {
       setError(e instanceof Error ? e.message : "That didn't work. Try again.");
       setLoading(false);
     }
   }
+
+  if (challenge)
+    return (
+      <CodeStep
+        challenge={challenge}
+        onDone={signedIn}
+        // The password is saved: signing in again uses it.
+        onRestart={() => window.location.assign("/login")}
+      />
+    );
 
   if (dead)
     return (
