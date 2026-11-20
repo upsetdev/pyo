@@ -292,6 +292,8 @@ export type RegistryInfo = {
   lastCleanupAt: number | null;
   /** The registry's address from the team's tailnet (push and pull its own images); null without a tailnet. */
   pushAddress: string | null;
+  /** Pyo Cloud: each of the team's clusters keeps its own registry, pushed to over the cluster's tailnet. */
+  clusterRegistries?: { clusterId: string; name: string; pushAddress: string | null }[];
   /** The team's part of its image paths: "<slug>" (images are <slug>/<project>/<service>). */
   teamPath: string;
   tokens: RegistryToken[];

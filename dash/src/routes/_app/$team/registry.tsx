@@ -49,9 +49,9 @@ function Registry() {
   const me = s.members.find((m) => m.teamId === s.currentTeamId && m.email === s.user.email);
   const admin = !me || me.role === "owner" || me.role === "admin";
   const [connecting, setConnecting] = useState(false);
-  // Pushing goes over the tailnet, and a hosted Pyo has no Tailscale setup.
+  // Pushing goes over the tailnet: Pyo's own, or on Pyo Cloud each cluster's.
   const hosted = useHosted();
-  const canPush = !!data?.pushAddress || hosted === false;
+  const canPush = !!data?.pushAddress || hosted === false || !!data?.clusterRegistries?.length;
   return (
     <Page>
       <PageHeader
@@ -76,7 +76,20 @@ function Registry() {
             <p className="px-4 py-6 text-center text-[12.5px] text-muted-foreground">Couldn't load the registry's details.</p>
           ) : (
             <ul className="list-rows">
-              {data.pushAddress ? (
+              {hosted && data.clusterRegistries?.length ? (
+                data.clusterRegistries.map((c) => (
+                  <Row key={c.clusterId} label={c.name}>
+                    {c.pushAddress ? (
+                      <span className="flex items-center gap-2">
+                        <code className="truncate font-mono text-[12.5px]">{c.pushAddress}</code>
+                        <CopyButton value={c.pushAddress} label="Copy address" />
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">Set up Tailscale on this cluster to push</span>
+                    )}
+                  </Row>
+                ))
+              ) : data.pushAddress ? (
                 <Row label="Address">
                   <span className="flex items-center gap-2">
                     <code className="truncate font-mono text-[12.5px]">{data.pushAddress}</code>
@@ -291,6 +304,7 @@ function Command({ text }: { text: string }) {
 
 /** Push the team's own images: a new token, then docker login, tag and push. */
 function ConnectDialog({ open, onClose, data, teamId }: { open: boolean; onClose: () => void; data: RegistryInfo; teamId: string }) {
+  const hosted = useHosted();
   const [name, setName] = useState("");
   const [scope, setScope] = useState<"push" | "pull">("push");
   const [expiry, setExpiry] = useState<"30" | "90" | "never">("30");
@@ -312,6 +326,14 @@ function ConnectDialog({ open, onClose, data, teamId }: { open: boolean; onClose
     onClose();
   };
   const addr = data.pushAddress;
+  if (!addr && hosted)
+    return (
+      <Dialog open={open} onClose={close} title="Connect" footer={<Button onClick={close}>Close</Button>}>
+        <p className="text-[13px] text-muted-foreground">
+          Each cluster keeps its own registry, reached from its tailnet. Set up Tailscale on a cluster first.
+        </p>
+      </Dialog>
+    );
   if (!addr)
     return (
       <Dialog open={open} onClose={close} title="Connect" footer={<Button onClick={close}>Close</Button>}>
