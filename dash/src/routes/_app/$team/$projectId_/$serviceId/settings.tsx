@@ -97,9 +97,21 @@ function AppSettings({ app }: { app: Application }) {
   const [serverTags, setServerTags] = useState<string[]>(app.serverTags ?? []);
   const servers = s.servers.filter((n) => n.clusterId === app.clusterId);
   const knownTags = [...new Set(servers.flatMap((n) => n.tags ?? []))].sort();
-  const matching = servers.filter((n) =>
+  const matchingServers = servers.filter((n) =>
     serverTags.every((t) => n.tags?.includes(t)),
-  ).length;
+  );
+  const matching = matchingServers.length;
+  const names = (list: typeof servers) =>
+    list.length > 3
+      ? `${list.slice(0, 3).map((n) => n.name).join(", ")} and ${list.length - 3} more`
+      : list.map((n) => n.name).join(", ");
+  const placementHint = serverTags.length
+    ? matching
+      ? `Runs only on servers that have all these tags: ${names(matchingServers)}.`
+      : "No server has all these tags, so it can't run anywhere."
+    : knownTags.length
+      ? "Runs on any server. Add tags to keep it on servers that have all of them."
+      : "Runs on any server. Tag your servers in the cluster to choose where it runs.";
   const [source, setSource] = useState<ServiceSource>(app.source);
   const savedArgs = app.source.type === "git" ? app.source.buildArgs : [];
   const [buildArgs, setBuildArgs] = useState<BuildArg[]>(() =>
@@ -151,15 +163,10 @@ function AppSettings({ app }: { app: Application }) {
             )}
           </Field>
           <Field
-            label="Server tags"
+            label="Run on servers tagged"
             optional
-            hint={
-              serverTags.length
-                ? matching
-                  ? `Runs on ${matching} of ${servers.length} servers.`
-                  : "No server has these tags yet."
-                : "Runs only on servers with these tags."
-            }
+            error={serverTags.length && !matching ? placementHint : undefined}
+            hint={placementHint}
           >
             {(p) => (
               <TagInput
