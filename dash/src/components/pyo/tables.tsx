@@ -3,7 +3,9 @@ import {
   ArrowSquareOutIcon,
   ClockCounterClockwiseIcon,
   CloudArrowUpIcon,
+  DatabaseIcon,
   DotsThreeIcon,
+  LinkBreakIcon,
   LinkSimpleIcon,
   ArrowsOutSimpleIcon,
   ProhibitIcon,
@@ -12,18 +14,18 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   ServiceStatusBadge,
   Badge,
   Status,
-  VolumeStatusBadge,
+  type Tone,
 } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import { Field, Input, Select } from "~/components/ui/Field";
 import { Menu, type MenuItem } from "~/components/ui/Menu";
-import { Callout, EmptyState, Meter } from "~/components/ui/Panel";
+import { Callout, EmptyState } from "~/components/ui/Panel";
 import {
   SearchInput,
   sortBy,
@@ -282,20 +284,33 @@ export function EndpointTable({
 
 // ── Volumes ────────────────────────────────────────────────────────────────
 
+// One row per volume: what it is, where it's mounted, how full it is and how
+// it stands. The rest (class, server, backups) sits in a muted line, the
+// actions in one menu. Columns fold into stacked rows in narrow panels.
+
+const VOLUME_COLS =
+  "@xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1.1fr)_8.5rem_8rem_1.75rem]";
+
 export function VolumeTable({
   volumes,
   s,
   showCluster = true,
   showService = true,
   showProject = false,
+  onDetach,
+  empty = "Created on deploy.",
 }: {
   volumes: Volume[];
   s: PyoState;
   showCluster?: boolean;
-  /** "Open service" in its menu (not on the service's own page). */
+  /** Its service, and "Open service" in its menu (not on the service's own page). */
   showService?: boolean;
   /** Each volume's project (outside a project's pages). */
   showProject?: boolean;
+  /** "Detach" in its menu (on the service's own page). */
+  onDetach?: (v: Volume) => void;
+  /** Under "No volumes". */
+  empty?: string;
 }) {
   const [attaching, setAttaching] = useState<Volume | null>(null);
   const [removing, setRemoving] = useState<Volume | null>(null);
@@ -310,190 +325,153 @@ export function VolumeTable({
     return (
       <EmptyState
         compact
+        icon={DatabaseIcon}
         title="No volumes"
-        description="Created on deploy."
+        description={empty}
       />
     );
+  // The cluster only tells volumes apart when there's more than one.
+  const manyClusters =
+    showCluster && new Set(volumes.map((v) => v.clusterId)).size > 1;
   return (
-    <>
-      <Table>
-        <thead>
-          <tr>
-            <Th>Volume</Th>
-            <Th>Status</Th>
-            <Th>Attached to</Th>
-            {showCluster ? <Th>Cluster</Th> : null}
-            <Th>Class</Th>
-            <Th className="w-40">Usage</Th>
-            <Th>Backup</Th>
-            <Th className="w-10">
-              <span className="sr-only">Actions</span>
-            </Th>
-          </tr>
-        </thead>
-        <tbody>
-          {volumes.map((v) => {
-            const app = s.services.find((a) => a.id === v.serviceId);
-            const cluster = s.clusters.find((c) => c.id === v.clusterId);
-            const sc = cluster?.capabilities.storageClasses.find(
-              (c) => c.name === v.storageClass,
-            );
-            const server = pinnedServer(s, v);
-            const project = s.projects.find((p) => p.id === v.projectId);
-            const backup = volumeBackup(s, v);
-            const busy = !!(v.restore || v.moving);
-            const items =
-              v.deleting || busy
-                ? []
-                : volumeMenu({
-                    v,
-                    app: showService ? app : undefined,
-                    backup,
-                    restorable: !!s.teamBackups.find((t) => t.teamId === v.teamId)
-                      ?.settings,
-                    growable: !resizeRefusal(s, v),
-                    admin,
-                    canRun,
-                    onAttach: () => setAttaching(v),
-                    onRestore: () => setRestoring(v),
-                    onResize: () => setResizing(v),
-                    onDelete: () => setRemoving(v),
-                  });
-            const note = v.deleting
-              ? v.deleteError
-              : v.restoreError
-                ? `Restore failed: ${v.restoreError}`
-                : v.moveError
-                  ? `Move failed: ${v.moveError}`
-                  : v.resizeError
-                    ? `Resize failed: ${v.resizeError}`
-                    : v.statusMessage;
-            return (
-              <Tr key={v.id}>
-                <Td>
-                  <p className="font-mono text-[12px] text-foreground">
-                    {v.name}
-                  </p>
-                  <p className="text-[11.5px] text-muted-foreground">
-                    {v.accessMode} · {gib(v.sizeGi)}
-                    {server ? ` · on ${server}` : ""}
-                  </p>
-                  {showProject ? (
-                    <p className="text-[11.5px] text-muted-foreground">
-                      {project ? project.name : "Deleted project"}
-                    </p>
-                  ) : null}
-                </Td>
-                <Td>
-                  {v.deleting ? (
-                    <Badge tone="warning">Deleting</Badge>
-                  ) : v.restore ? (
-                    <Badge tone="warning">Restoring…</Badge>
-                  ) : v.moving ? (
-                    <Badge tone="warning">Moving…</Badge>
-                  ) : v.resizeTo ? (
-                    <Badge tone="info">Resizing…</Badge>
-                  ) : !v.serviceId &&
-                    v.status !== "error" &&
-                    v.status !== "degraded" ? (
-                    <Status tone="neutral" label="Not attached" />
-                  ) : (
-                    <VolumeStatusBadge status={v.status} />
-                  )}
-                  {v.restore && app ? (
-                    <p className="mt-1 max-w-[220px] text-[11px] leading-4 text-muted-foreground">
-                      {app.name} starts again once it's done.
-                    </p>
-                  ) : v.moving ? (
-                    <p className="mt-1 max-w-[220px] text-[11px] leading-4 text-muted-foreground">
-                      To{" "}
-                      {s.projects.find((p) => p.id === v.moving?.projectId)
-                        ?.name ?? "another project"}
-                    </p>
-                  ) : v.resizeTo ? (
-                    <p className="mt-1 max-w-[220px] text-[11px] leading-4 text-muted-foreground">
-                      To {gib(v.resizeTo)}
-                    </p>
-                  ) : note ? (
-                    <p
-                      className={`mt-1 max-w-[220px] text-[11px] leading-4 ${v.restoreError || v.moveError || v.resizeError ? "text-destructive" : "text-muted-foreground"}`}
-                    >
-                      {note}
-                    </p>
-                  ) : null}
-                </Td>
-                <Td>
-                  {app ? (
-                    <>
-                      <EntityLink to={servicePath(app.id, "resources")}>
-                        {app.name}
-                      </EntityLink>
-                      <p className="font-mono text-[11px] text-muted-foreground">
-                        {v.mountPath}
-                      </p>
-                    </>
-                  ) : (
-                    <span
-                      className="text-muted-foreground"
-                      title={project ? undefined : "Its project was deleted"}
-                    >
-                      —
+    <div className="@container">
+      <div
+        aria-hidden
+        className={`hidden h-10 items-center gap-x-4 border-b border-card-border bg-muted/60 px-4 text-[11.5px] font-medium text-muted-foreground @xl:grid ${VOLUME_COLS}`}
+      >
+        <span>Volume</span>
+        <span>{showService ? "Service" : "Folder"}</span>
+        <span className="text-right">Usage</span>
+        <span>Status</span>
+        <span />
+      </div>
+      <ul className="list-rows">
+        {volumes.map((v) => {
+          const app = s.services.find((a) => a.id === v.serviceId);
+          const cluster = s.clusters.find((c) => c.id === v.clusterId);
+          const sc = cluster?.capabilities.storageClasses.find(
+            (c) => c.name === v.storageClass,
+          );
+          const server = pinnedServer(s, v);
+          const project = s.projects.find((p) => p.id === v.projectId);
+          const backup = volumeBackup(s, v);
+          const busy = !!(v.restore || v.moving);
+          const items =
+            v.deleting || busy
+              ? []
+              : volumeMenu({
+                  v,
+                  app: showService ? app : undefined,
+                  backup,
+                  restorable: !!s.teamBackups.find((t) => t.teamId === v.teamId)
+                    ?.settings,
+                  growable: !resizeRefusal(s, v),
+                  admin,
+                  canRun,
+                  onAttach: () => setAttaching(v),
+                  onDetach: onDetach ? () => onDetach(v) : undefined,
+                  onRestore: () => setRestoring(v),
+                  onResize: () => setResizing(v),
+                  onDelete: () => setRemoving(v),
+                });
+          const details: ReactNode[] = [];
+          if (showProject)
+            details.push(project ? project.name : "Deleted project");
+          if (manyClusters && cluster) details.push(cluster.name);
+          details.push(
+            <span
+              key="class"
+              title={
+                sc && !sc.replicated
+                  ? "Its data stays on one server"
+                  : undefined
+              }
+            >
+              <span className="font-mono text-[11.5px]">{v.storageClass}</span>
+              {server
+                ? ` on ${server}`
+                : sc && !sc.replicated
+                  ? " on one server"
+                  : ""}
+            </span>,
+          );
+          const bk = backupText(v.backup);
+          if (bk) details.push(bk);
+          return (
+            <li
+              key={v.id}
+              className={`grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2.5 px-4 py-3 ${VOLUME_COLS}`}
+            >
+              <div
+                className="min-w-0"
+                title={`${v.accessMode} · created ${timeAgo(v.createdAt)}`}
+              >
+                <p className="truncate font-mono text-[12.5px] text-foreground">
+                  {v.name}
+                </p>
+                <p className="mt-0.5 text-[12px] leading-[18px] text-muted-foreground">
+                  {details.map((d, i) => (
+                    <span key={i}>
+                      {i ? " · " : ""}
+                      {d}
                     </span>
-                  )}
-                </Td>
-                {showCluster ? <Td>{cluster?.name ?? "—"}</Td> : null}
-                <Td>
-                  <span className="font-mono text-[11.5px]">
-                    {v.storageClass}
+                  ))}
+                </p>
+              </div>
+              <div className="col-start-2 row-start-1 justify-self-end @xl:col-start-5">
+                {items.length ? (
+                  <Menu
+                    label={`Actions for ${v.name}`}
+                    items={items}
+                    trigger={(t) => (
+                      <Button
+                        {...t}
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground"
+                      >
+                        <DotsThreeIcon size={16} weight="bold" />
+                      </Button>
+                    )}
+                  />
+                ) : null}
+              </div>
+              <div className="col-start-1 row-start-2 min-w-0 @xl:col-start-2 @xl:row-start-1">
+                {!showService ? (
+                  <p className="truncate font-mono text-[12px] text-foreground">
+                    {v.mountPath ?? "—"}
+                  </p>
+                ) : app ? (
+                  <>
+                    <EntityLink
+                      to={servicePath(app.id, "resources")}
+                      className="block text-[12.5px]"
+                    >
+                      {app.name}
+                    </EntityLink>
+                    <p className="truncate font-mono text-[11.5px] text-muted-foreground">
+                      {v.mountPath}
+                    </p>
+                  </>
+                ) : (
+                  <span
+                    className="hidden text-muted-foreground @xl:inline"
+                    title={project ? undefined : "Its project was deleted"}
+                  >
+                    —
                   </span>
-                  {sc && !sc.replicated ? (
-                    <p className="text-[11px] text-muted-foreground">One server only</p>
-                  ) : null}
-                </Td>
-                <Td>
-                  {v.usedGi !== undefined ? (
-                    <>
-                      <Meter
-                        value={v.usedGi}
-                        max={v.sizeGi}
-                        label={`${v.name} usage`}
-                      />
-                      <p className="text-[11px] text-muted-foreground">
-                        {gib(v.usedGi)} of {gib(v.sizeGi)}
-                      </p>
-                    </>
-                  ) : (
-                    <span className="text-[11.5px] text-muted-foreground">
-                      Not reported
-                    </span>
-                  )}
-                </Td>
-                <Td>
-                  <BackupCell b={v.backup} />
-                </Td>
-                <Td>
-                  {items.length ? (
-                    <Menu
-                      label={`Actions for ${v.name}`}
-                      items={items}
-                      trigger={(t) => (
-                        <Button
-                          {...t}
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                        >
-                          <DotsThreeIcon size={16} weight="bold" />
-                        </Button>
-                      )}
-                    />
-                  ) : null}
-                </Td>
-              </Tr>
-            );
-          })}
-        </tbody>
-      </Table>
+                )}
+              </div>
+              <div className="col-span-2 row-start-3 @xl:col-span-1 @xl:col-start-3 @xl:row-start-1">
+                <VolumeUsage v={v} />
+              </div>
+              <div className="col-start-2 row-start-2 justify-self-end @xl:col-start-4 @xl:row-start-1 @xl:justify-self-stretch">
+                <VolumeState v={v} s={s} app={app} />
+              </div>
+            </li>
+          );
+        })}
+      </ul>
       <AttachVolumeDialog
         volume={attaching}
         onClose={() => setAttaching(null)}
@@ -510,7 +488,105 @@ export function VolumeTable({
         volume={resizing}
         onClose={() => setResizing(null)}
       />
-    </>
+    </div>
+  );
+}
+
+/** "1.2 of 10 GiB" over a slim bar, which turns only when it's nearly full. */
+function VolumeUsage({ v }: { v: Volume }) {
+  if (v.usedGi === undefined)
+    return (
+      <p className="text-[12.5px] tabular-nums text-foreground @xl:text-right">
+        {gib(v.sizeGi)}
+      </p>
+    );
+  const ratio = v.sizeGi > 0 ? Math.min(1, v.usedGi / v.sizeGi) : 0;
+  const bar =
+    ratio > 0.95 ? "bg-destructive" : ratio > 0.85 ? "bg-warning" : "bg-primary";
+  return (
+    <div className="flex items-center gap-3 @xl:block">
+      <p className="order-2 shrink-0 text-[12.5px] tabular-nums text-foreground @xl:text-right">
+        {+v.usedGi.toFixed(1)}
+        <span className="text-muted-foreground"> of {gib(v.sizeGi)}</span>
+      </p>
+      <div
+        className="h-1 flex-1 overflow-hidden rounded-full bg-foreground/10 @xl:mt-1.5"
+        role="meter"
+        aria-label={`${v.name} usage`}
+        aria-valuemin={0}
+        aria-valuemax={v.sizeGi}
+        aria-valuenow={v.usedGi}
+      >
+        <div
+          className={`h-full rounded-full ${bar}`}
+          style={{ width: `${Math.max(ratio * 100, ratio > 0 ? 2 : 0)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+const VOLUME_STATUS: Record<Volume["status"], [Tone, string]> = {
+  bound: ["success", "In use"],
+  pending: ["progress", "Pending"],
+  degraded: ["warning", "Degraded"],
+  error: ["danger", "Error"],
+};
+
+/** How a volume stands, and one short line on what's under way or wrong. */
+function VolumeState({
+  v,
+  s,
+  app,
+}: {
+  v: Volume;
+  s: PyoState;
+  app?: Application;
+}) {
+  const failed = v.restoreError
+    ? `Restore failed: ${v.restoreError}`
+    : v.moveError
+      ? `Move failed: ${v.moveError}`
+      : v.resizeError
+        ? `Resize failed: ${v.resizeError}`
+        : "";
+  const [tone, label]: [Tone, string] = v.deleting
+    ? ["progress", "Deleting"]
+    : v.restore
+      ? ["progress", "Restoring"]
+      : v.moving
+        ? ["progress", "Moving"]
+        : v.resizeTo
+          ? ["progress", "Resizing"]
+          : !v.serviceId && v.status !== "error" && v.status !== "degraded"
+            ? ["neutral", "Not attached"]
+            : VOLUME_STATUS[v.status];
+  const note = v.deleting
+    ? v.deleteError
+    : v.restore
+      ? app
+        ? `${app.name} starts again once it's done.`
+        : undefined
+      : v.moving
+        ? `To ${s.projects.find((p) => p.id === v.moving?.projectId)?.name ?? "another project"}`
+        : v.resizeTo
+          ? `To ${gib(v.resizeTo)}`
+          : failed ||
+            v.statusMessage ||
+            (v.status === "pending" && v.serviceId
+              ? "Created on next deploy"
+              : undefined);
+  return (
+    <div className="text-right @xl:text-left">
+      <Status tone={tone} label={label} className="text-[12.5px]" />
+      {note ? (
+        <p
+          className={`mt-0.5 max-w-[220px] text-[11.5px] leading-4 ${failed ? "text-destructive" : "text-muted-foreground"}`}
+        >
+          {note}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -540,6 +616,7 @@ function volumeMenu({
   admin,
   canRun,
   onAttach,
+  onDetach,
   onRestore,
   onResize,
   onDelete,
@@ -554,6 +631,7 @@ function volumeMenu({
   admin: boolean;
   canRun: boolean;
   onAttach: () => void;
+  onDetach?: () => void;
   onRestore: () => void;
   onResize: () => void;
   onDelete: () => void;
@@ -614,6 +692,14 @@ function volumeMenu({
       onSelect: onResize,
     });
   if (g.length) groups.push(g);
+  if (v.serviceId && onDetach && canRun)
+    groups.push([
+      {
+        label: "Detach",
+        icon: <LinkBreakIcon size={14} />,
+        onSelect: onDetach,
+      },
+    ]);
   if (!v.serviceId) {
     const d: MenuItem[] = [];
     if (canRun)
@@ -636,37 +722,23 @@ function volumeMenu({
   );
 }
 
-/** A volume's backups, as the API works them out. */
-function BackupCell({ b }: { b: Volume["backup"] }) {
-  if (b.status === "unsupported")
-    return <span className="text-[11.5px] text-muted-foreground">—</span>;
-  if (b.status === "disabled")
-    return <span className="text-[11.5px] text-muted-foreground">Off</span>;
+/** A volume's backups in a few words, as the API works them out. */
+function backupText(b: Volume["backup"]): ReactNode {
+  if (b.status === "unsupported") return null;
+  if (b.status === "disabled") return "no backups";
   if (b.status === "failed")
     return (
-      <span className="text-[12px]" title={b.error ?? undefined}>
-        <Badge tone="danger">Failed</Badge>{" "}
-        <span className="text-muted-foreground">
-          {b.failedAt ? timeAgo(b.failedAt) : ""}
-        </span>
+      <span key="backup" className="text-destructive" title={b.error ?? undefined}>
+        backup failed{b.failedAt ? ` ${timeAgo(b.failedAt)}` : ""}
       </span>
     );
-  return (
-    <span className="text-[12px]">
-      <Badge tone="success">On</Badge>{" "}
-      <span className="text-muted-foreground">
-        {b.running
-          ? "backing up"
-          : b.lastAt
-            ? `last ${timeAgo(b.lastAt)}`
-            : b.schedule === "manual"
-              ? "by hand"
-              : b.schedule === "weekly"
-                ? "weekly"
-                : "daily"}
-      </span>
-    </span>
-  );
+  if (b.running) return "backing up";
+  if (b.lastAt) return `backed up ${timeAgo(b.lastAt)}`;
+  return b.schedule === "manual"
+    ? "backups by hand"
+    : b.schedule === "weekly"
+      ? "backs up weekly"
+      : "backs up daily";
 }
 
 export function SearchableServiceTable({

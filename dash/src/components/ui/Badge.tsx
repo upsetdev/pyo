@@ -6,7 +6,6 @@ import type {
   DeploymentStatus,
   ServerStatus,
   TlsStatus,
-  VolumeStatus,
   WorkloadStatus,
 } from "~/lib/pyo/types";
 
@@ -209,22 +208,6 @@ export function WorkloadStatusBadge({ status }: { status: WorkloadStatus }) {
   return (
     <Status
       tone={workloadTone[status]}
-      label={status[0].toUpperCase() + status.slice(1)}
-    />
-  );
-}
-
-export const volumeTone: Record<VolumeStatus, Tone> = {
-  bound: "success",
-  pending: "progress",
-  degraded: "warning",
-  error: "danger",
-};
-
-export function VolumeStatusBadge({ status }: { status: VolumeStatus }) {
-  return (
-    <Status
-      tone={volumeTone[status]}
       label={status[0].toUpperCase() + status.slice(1)}
     />
   );
