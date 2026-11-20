@@ -31,6 +31,46 @@ export type Team = {
   agentUpdates?: "auto" | "manual";
   /** Analytics kept shorter than the installation does (3, 6 or 12 months). Null: as long as the installation. */
   analyticsMonths?: number | null;
+  /** Members must use two-factor authentication to open the team. */
+  requireTwoFactor?: boolean;
+  /** What the audit log keeps of addresses. */
+  auditIps?: AuditIps;
+};
+
+export type AuditIps = "full" | "anonymized" | "none";
+
+/** The account's two-factor authentication (an authenticator app). */
+export type TwoFactorStatus = {
+  enabled: boolean;
+  recoveryCodesLeft: number;
+  /** The installation, or Pyo Cloud's staff rule, requires it of this account. */
+  required: boolean;
+  /** Required and not on yet: only the profile works until it is. */
+  setupNeeded: boolean;
+  /** Teams this account can't open until it's on. */
+  lockedTeams: { id: ID; name: string; slug: string }[];
+};
+
+/** The installation's security settings (its admin). */
+export type SecuritySettings = {
+  requireTwoFactor: boolean;
+  auditDays: number;
+};
+
+/** One entry of a team's audit log. */
+export type AuditEvent = {
+  id: ID;
+  at: Timestamp;
+  action: string;
+  title: string;
+  actor: { id: ID | null; name: string; email: string };
+  via: "dashboard" | "api" | "mcp" | "system";
+  /** The API key's or assistant's name. */
+  key: string | null;
+  ip: string | null;
+  userAgent: string;
+  target: { kind?: string; id?: string; label?: string };
+  outcome: "ok" | "failed";
 };
 
 export type User = {
@@ -44,6 +84,8 @@ export type User = {
   mustSetUp?: boolean;
   /** sha256 of the email, Gravatar's key for the profile picture. */
   gravatar?: string;
+  /** Two-factor authentication (snapshot and /me only). */
+  twoFactor?: TwoFactorStatus;
 };
 
 /** The installation's outgoing email. Non-admins only see `fromEmail`. */
@@ -68,6 +110,8 @@ export type TeamMember = {
   joinedAt: Timestamp;
   /** sha256 of the email, Gravatar's key for the profile picture. */
   gravatar?: string;
+  /** Uses two-factor authentication. */
+  twoFactor?: boolean;
 };
 
 // ── Projects ───────────────────────────────────────────────────────────────

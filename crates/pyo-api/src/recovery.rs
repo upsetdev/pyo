@@ -15,7 +15,11 @@
 //! Only the token's sha256 is kept (pyo.sign_in_links). A link works once,
 //! for [`LINK_MINUTES`], and a new one for the same account replaces it.
 //! Using it sets the new password, ends the account's sessions and signs
-//! this browser in.
+//! this browser in. With two-factor on, a code comes first, as after a
+//! password: a link alone is one factor. Except a link made on the server
+//! itself, which turns two-factor off (whoever has the server has
+//! everything anyway, and it's how someone who lost their app and their
+//! recovery codes gets back in).
 
 use crate::error::Json;
 use crate::error::Query;
@@ -48,15 +52,25 @@ pub fn link_path(token: &str) -> String {
 
 /// A new sign-in link's secret for the account, replacing any earlier one.
 pub async fn new_link(conn: &mut sqlx::PgConnection, user_id: &str) -> ApiResult<String> {
+    link(conn, user_id, false).await
+}
+
+/// [`new_link`] made on the server Pyo runs on: it turns two-factor off.
+pub async fn new_host_link(conn: &mut sqlx::PgConnection, user_id: &str) -> ApiResult<String> {
+    link(conn, user_id, true).await
+}
+
+async fn link(conn: &mut sqlx::PgConnection, user_id: &str, clears_two_factor: bool) -> ApiResult<String> {
     let token = secret_token();
     sqlx::query("DELETE FROM pyo.sign_in_links WHERE user_id = $1 OR expires_at < now()")
         .bind(user_id)
         .execute(&mut *conn)
         .await?;
-    sqlx::query("INSERT INTO pyo.sign_in_links (token_hash, user_id, expires_at) VALUES ($1, $2, now() + make_interval(mins => $3))")
+    sqlx::query("INSERT INTO pyo.sign_in_links (token_hash, user_id, expires_at, clears_two_factor) VALUES ($1, $2, now() + make_interval(mins => $3), $4)")
         .bind(sha256_hex(&token))
         .bind(user_id)
         .bind(LINK_MINUTES)
+        .bind(clears_two_factor)
         .execute(&mut *conn)
         .await?;
     Ok(token)
@@ -156,26 +170,26 @@ struct ResetBody {
 }
 
 /// A link used: the new password, every other session ended, and this
-/// browser signed in.
+/// browser signed in (or, with two-factor on, a code next).
 async fn reset(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<ResetBody>,
-) -> ApiResult<(CookieJar, Json<User>)> {
+) -> ApiResult<(CookieJar, Json<Value>)> {
     crate::auth::require_csrf(&headers)?;
     crate::auth::check_password(&body.password)?;
     ratelimit::take(&state.db, &[(ratelimit::SIGN_IN_LINK_IP, &ip)]).await?;
     let hash = crate::auth::hash_password(&body.password).await?;
     let mut tx = state.db.begin().await?;
-    let user_id: Option<String> = sqlx::query_scalar(
-        "DELETE FROM pyo.sign_in_links WHERE token_hash = $1 AND expires_at > now() RETURNING user_id",
+    let row: Option<(String, bool)> = sqlx::query_as(
+        "DELETE FROM pyo.sign_in_links WHERE token_hash = $1 AND expires_at > now() RETURNING user_id, clears_two_factor",
     )
     .bind(sha256_hex(body.token.trim()))
     .fetch_optional(&mut *tx)
     .await?;
-    let user_id = user_id.ok_or_else(used_or_expired)?;
+    let (user_id, clears_two_factor) = row.ok_or_else(used_or_expired)?;
     let (id, name, email, timezone, is_admin, must_set_up): (String, String, String, String, bool, bool) =
         sqlx::query_as("UPDATE pyo.users SET password_hash = $2 WHERE id = $1 RETURNING id, name, email, timezone, is_admin, must_set_up")
             .bind(&user_id)
@@ -186,23 +200,51 @@ async fn reset(
         .bind(&user_id)
         .execute(&mut *tx)
         .await?;
+    let user = User {
+        id,
+        name,
+        email,
+        timezone,
+        is_admin,
+        must_set_up,
+        key: None,
+    };
+    let had_two_factor = crate::twofactor::enabled(&mut *tx, &user.id).await?;
+    if clears_two_factor && had_two_factor {
+        crate::twofactor::turn_off(&mut tx, &user.id).await?;
+        crate::twofactor::notify_teams(
+            &mut tx,
+            &user,
+            "auth.two_factor_disabled",
+            "Turned off two-factor authentication with a sign-in link from the server",
+        )
+        .await?;
+    }
+    let who = crate::audit::Who::person(&user);
+    crate::audit::account_event_in(
+        &mut tx,
+        &user.id,
+        &who,
+        crate::audit::Entry {
+            action: "auth.password_reset",
+            title: "Chose a new password with a sign-in link",
+            target: json!({}),
+            failed: false,
+        },
+    )
+    .await?;
     tx.commit().await?;
     ratelimit::forgive(&state.db, &ratelimit::SIGN_IN_LINK_IP, &ip).await?;
-    ratelimit::reset(&state.db, &ratelimit::LOGIN_ACCOUNT, &email).await?;
-    tracing::info!(user = %id, "password replaced with a sign-in link");
-    let jar = crate::auth::start_session(&state, jar, &id, &headers).await?;
-    Ok((
-        jar,
-        Json(User {
-            id,
-            name,
-            email,
-            timezone,
-            is_admin,
-            must_set_up,
-            key: None,
-        }),
-    ))
+    ratelimit::reset(&state.db, &ratelimit::LOGIN_ACCOUNT, &user.email).await?;
+    tracing::info!(user = %user.id, "password replaced with a sign-in link");
+    if clears_two_factor && had_two_factor {
+        crate::twofactor::mail_user(&state, &user.email, "/profile", crate::mail::two_factor_off).await;
+    } else if had_two_factor {
+        let challenge = crate::twofactor::start_challenge(&state.db, &user.id, "link").await?;
+        return Ok((jar, Json(crate::twofactor::code_needed(&challenge))));
+    }
+    let jar = crate::auth::start_session(&state, jar, &user.id, &headers).await?;
+    Ok((jar, Json(json!(user))))
 }
 
 /// Can this sign-in link be shown to a team's owner, rather than only

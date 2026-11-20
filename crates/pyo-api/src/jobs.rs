@@ -137,7 +137,8 @@ async fn run(s: &AppState, kind: &str, p: &Value) -> anyhow::Result<()> {
 }
 
 /// Finished jobs older than a week are deleted; failed ones are kept a month.
-/// Also prunes old MCP calls, logs, rate limits and long-expired API keys.
+/// Also prunes old MCP calls, logs, audit entries, rate limits and
+/// long-expired API keys.
 pub async fn prune(s: &AppState) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM pyo.jobs WHERE (status = 'done' AND finished_at < now() - interval '7 days') OR (status = 'failed' AND finished_at < now() - interval '30 days')")
         .execute(&s.db)
@@ -154,6 +155,8 @@ pub async fn prune(s: &AppState) -> sqlx::Result<()> {
         .execute(&s.db)
         .await?;
     prune_deployment_logs(&s.db).await?;
+    // The audit log, as long as the installation keeps it (a year on Pyo Cloud).
+    crate::audit::prune(&s.db).await?;
     crate::database_logs::prune(&s.db).await?;
     crate::ratelimit::prune(&s.db).await?;
     Ok(())

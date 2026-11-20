@@ -23,6 +23,13 @@ export const Route = createFileRoute("/_app")({
       }
     }
     startSync();
+    // Two-factor is required of this account and isn't on yet: only the
+    // profile works, where it's set up.
+    if (
+      getState().user.twoFactor?.setupNeeded &&
+      location.pathname !== "/profile"
+    )
+      throw redirect({ to: "/profile", hash: "two-factor" });
   },
   component: Outlet,
 });

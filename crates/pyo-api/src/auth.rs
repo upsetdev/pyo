@@ -49,6 +49,7 @@ pub fn routes() -> Router<AppState> {
         .route("/invite/accept", post(accept))
         .merge(crate::passkeys::routes())
         .merge(crate::recovery::routes())
+        .merge(crate::twofactor::routes())
 }
 
 /// A Pyo account.
@@ -172,22 +173,25 @@ impl FromRequestParts<AppState> for AnySession {
         {
             return Err(ApiError::forbidden("Missing request header."));
         }
+        crate::audit::set_actor(&user, crate::audit::Via::Dashboard, None);
         Ok(AnySession(user))
     }
 }
 
 /// The user of a session cookie's token, while the session lasts. In use,
 /// its idle limit moves on (at most once an hour, never past the absolute
-/// one).
+/// one). An admin who must set up two-factor first isn't one until then
+/// (twofactor.rs).
 async fn session_user(db: &sqlx::PgPool, token: &str) -> ApiResult<Option<User>> {
     let hash = sha256_hex(token);
     let user = sqlx::query_as::<_, User>(
-        "SELECT u.id, u.name, u.email, u.timezone, u.is_admin, u.must_set_up
+        "SELECT u.id, u.name, u.email, u.timezone, u.is_admin AND NOT pyo.needs_two_factor(u.id, $3) AS is_admin, u.must_set_up
            FROM pyo.sessions s JOIN pyo.users u ON u.id = s.user_id
           WHERE s.token_hash = $1 AND s.expires_at > now() AND s.created_at > now() - make_interval(days => $2)",
     )
     .bind(&hash)
     .bind(SESSION_DAYS as i32)
+    .bind(crate::hosted())
     .fetch_optional(db)
     .await?;
     if user.is_some() {
@@ -205,7 +209,7 @@ async fn session_user(db: &sqlx::PgPool, token: &str) -> ApiResult<Option<User>>
 }
 
 /// An API key's user and scope: id, name, email, timezone, is_admin,
-/// must_set_up, access, team_ids, expired.
+/// must_set_up, access, team_ids, expired, the key's name.
 type KeyRow = (
     String,
     String,
@@ -216,6 +220,7 @@ type KeyRow = (
     String,
     Option<Vec<String>>,
     bool,
+    String,
 );
 
 /// A user acting through an API key (`Authorization: Bearer pyo_…`, made on
@@ -269,15 +274,16 @@ pub(crate) async fn key_user_from(db: &sqlx::PgPool, token: &str, ip: &str) -> A
 pub(crate) async fn key_user(db: &sqlx::PgPool, token: &str) -> ApiResult<User> {
     let hash = sha256_hex(token);
     let row: Option<KeyRow> = sqlx::query_as(
-        "SELECT u.id, u.name, u.email, u.timezone, u.is_admin, u.must_set_up, t.access, t.team_ids,
-                COALESCE(t.expires_at <= now(), false)
+        "SELECT u.id, u.name, u.email, u.timezone, u.is_admin AND NOT pyo.needs_two_factor(u.id, $2), u.must_set_up, t.access, t.team_ids,
+                COALESCE(t.expires_at <= now(), false), t.name
            FROM pyo.api_tokens t JOIN pyo.users u ON u.id = t.user_id
           WHERE t.token_hash = $1",
     )
     .bind(&hash)
+    .bind(crate::hosted())
     .fetch_optional(db)
     .await?;
-    let (id, name, email, timezone, is_admin, must_set_up, access, teams, expired) = row
+    let (id, name, email, timezone, is_admin, must_set_up, access, teams, expired, key_name) = row
         .ok_or_else(|| {
             ApiError::new(
                 StatusCode::UNAUTHORIZED,
@@ -295,7 +301,7 @@ pub(crate) async fn key_user(db: &sqlx::PgPool, token: &str) -> ApiResult<User> 
         .bind(&hash)
         .execute(db)
         .await;
-    Ok(User {
+    let user = User {
         id,
         name,
         email,
@@ -303,7 +309,9 @@ pub(crate) async fn key_user(db: &sqlx::PgPool, token: &str) -> ApiResult<User> 
         is_admin,
         must_set_up,
         key: Some(key),
-    })
+    };
+    crate::audit::set_actor(&user, crate::audit::Via::Api, Some(&key_name));
+    Ok(user)
 }
 
 /// Prefix of every API key (and CLI token) Pyo hands out.
@@ -761,13 +769,15 @@ struct LoginBody {
     password: String,
 }
 
+/// The password's right: signed in, or, with two-factor on, a code next
+/// (twofactor.rs `/login/code`), with no session yet.
 async fn login(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<LoginBody>,
-) -> ApiResult<(CookieJar, Json<User>)> {
+) -> ApiResult<(CookieJar, Json<Value>)> {
     require_csrf(&headers)?;
     let email = body.email.trim().to_lowercase();
     // Before the lookup, keyed by the email as typed: the same for accounts
@@ -801,6 +811,21 @@ async fn login(
     .await
     .map_err(anyhow::Error::from)?;
     if !ok || id.is_empty() {
+        // An account's teams see wrong passwords for it.
+        if !id.is_empty() {
+            crate::audit::account_event(
+                &state.db,
+                &id,
+                &crate::audit::Who::account(&id, &name, &email),
+                crate::audit::Entry {
+                    action: "auth.sign_in_failed",
+                    title: "Wrong password",
+                    target: json!({}),
+                    failed: true,
+                },
+            )
+            .await;
+        }
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "Wrong email or password.",
@@ -808,19 +833,33 @@ async fn login(
     }
     ratelimit::reset(&state.db, &ratelimit::LOGIN_ACCOUNT, &email).await?;
     ratelimit::forgive(&state.db, &ratelimit::LOGIN_IP, &ip).await?;
-    let jar = start_session(&state, jar, &id, &headers).await?;
-    Ok((
-        jar,
-        Json(User {
-            id,
-            name,
-            email,
-            timezone,
-            is_admin,
-            must_set_up,
-            key: None,
-        }),
-    ))
+    if crate::twofactor::enabled(&state.db, &id).await? {
+        let challenge = crate::twofactor::start_challenge(&state.db, &id, "password").await?;
+        return Ok((jar, Json(crate::twofactor::code_needed(&challenge))));
+    }
+    let user = User {
+        id,
+        name,
+        email,
+        timezone,
+        is_admin,
+        must_set_up,
+        key: None,
+    };
+    crate::audit::account_event(
+        &state.db,
+        &user.id,
+        &crate::audit::Who::person(&user),
+        crate::audit::Entry {
+            action: "auth.sign_in",
+            title: "Signed in with a password",
+            target: json!({}),
+            failed: false,
+        },
+    )
+    .await;
+    let jar = start_session(&state, jar, &user.id, &headers).await?;
+    Ok((jar, Json(json!(user))))
 }
 
 /// Is this the account's password? The same check, and the same work, as
@@ -868,8 +907,11 @@ async fn logout(
     ))
 }
 
-async fn me(AnySession(user): AnySession) -> Json<User> {
-    Json(user)
+/// The signed-in account, with its two-factor (twofactor.rs `summary`).
+async fn me(State(state): State<AppState>, AnySession(user): AnySession) -> ApiResult<Json<Value>> {
+    let mut me = json!(user);
+    me["twoFactor"] = crate::twofactor::summary(&state.db, &user.id).await?;
+    Ok(Json(me))
 }
 
 #[derive(Deserialize)]

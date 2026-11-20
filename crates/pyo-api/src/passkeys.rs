@@ -239,6 +239,19 @@ async fn login_finish(
     ratelimit::take(&state.db, &[(ratelimit::PASSKEY_FINISH_IP, &ip)]).await?;
     let user = verify_passkey(&state, body).await?;
     ratelimit::forgive(&state.db, &ratelimit::PASSKEY_FINISH_IP, &ip).await?;
+    // A passkey is two factors on its own: no code after it (twofactor.rs).
+    crate::audit::account_event(
+        &state.db,
+        &user.id,
+        &crate::audit::Who::person(&user),
+        crate::audit::Entry {
+            action: "auth.sign_in",
+            title: "Signed in with a passkey",
+            target: json!({}),
+            failed: false,
+        },
+    )
+    .await;
     let jar = start_session(&state, jar, &user.id, &headers).await?;
     Ok((jar, Json(user)))
 }
@@ -426,6 +439,18 @@ async fn register_finish(
     if added == 0 {
         return Err(ApiError::conflict("This passkey is already added."));
     }
+    crate::audit::account_event(
+        &state.db,
+        &user.id,
+        &crate::audit::Who::person(&user),
+        crate::audit::Entry {
+            action: "auth.passkey_added",
+            title: &format!("Added passkey {name}"),
+            target: json!({ "kind": "passkey", "id": id, "label": name }),
+            failed: false,
+        },
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(json!({ "id": id, "name": name, "rpId": rp.id })),
@@ -483,17 +508,28 @@ async fn remove(
 ) -> ApiResult<StatusCode> {
     browser_only(&user)?;
     // The password stays, so this can't lock anyone out.
-    let n = sqlx::query("DELETE FROM pyo.passkeys WHERE id = $1 AND user_id = $2")
-        .bind(&id)
-        .bind(&user.id)
-        .execute(&state.db)
-        .await?
-        .rows_affected();
-    if n == 0 {
-        Err(ApiError::not_found("Passkey"))
-    } else {
-        Ok(StatusCode::NO_CONTENT)
-    }
+    let name: Option<String> =
+        sqlx::query_scalar("DELETE FROM pyo.passkeys WHERE id = $1 AND user_id = $2 RETURNING name")
+            .bind(&id)
+            .bind(&user.id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some(name) = name else {
+        return Err(ApiError::not_found("Passkey"));
+    };
+    crate::audit::account_event(
+        &state.db,
+        &user.id,
+        &crate::audit::Who::person(&user),
+        crate::audit::Entry {
+            action: "auth.passkey_removed",
+            title: &format!("Removed passkey {name}"),
+            target: json!({ "kind": "passkey", "id": id, "label": name }),
+            failed: false,
+        },
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

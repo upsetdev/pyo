@@ -211,6 +211,32 @@ pub fn sign_in_link(link: &str, minutes: i32) -> (String, String, String) {
     )
 }
 
+/// Two-factor was turned off on the account.
+pub fn two_factor_off(link: &str) -> (String, String, String) {
+    let body = "Two-factor authentication was turned off on your Pyo account. If that wasn't you, sign in, change your password and turn it on again.";
+    let button = "Open your profile";
+    let footer = "You get this email for every change to how you sign in.";
+    (
+        "Two-factor authentication was turned off".into(),
+        format!("{body}\n\n{button}: {link}\n\n{footer}\n"),
+        layout("Two-factor authentication is off", body, button, link, footer),
+    )
+}
+
+/// A new API key was made on the account.
+pub fn new_api_key(name: &str, link: &str) -> (String, String, String) {
+    let body = format!(
+        "A new API key named {name} was made on your Pyo account. If that wasn't you, revoke it and change your password."
+    );
+    let button = "See your API keys";
+    let footer = "You get this email for every new API key.";
+    (
+        "A new Pyo API key was made".into(),
+        format!("{body}\n\n{button}: {link}\n\n{footer}\n"),
+        layout("New API key", &body, button, link, footer),
+    )
+}
+
 fn article(role: &str) -> String {
     match role {
         "admin" => "an admin".into(),

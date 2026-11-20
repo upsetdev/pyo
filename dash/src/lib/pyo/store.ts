@@ -60,6 +60,7 @@ import type {
   CloudConnection,
   CloudLocation,
   CloudServer,
+  AuditIps,
   IpMode,
   OAuthGrant,
   PortMapping,
@@ -68,6 +69,7 @@ import type {
   Registry,
   RegistryLogin,
   Retention,
+  SecuritySettings,
   Role,
   Team,
   TeamBackups,
@@ -140,6 +142,8 @@ export type PyoState = {
   updates: Updates | null;
   /** Logins for private container registries. */
   registryLogins: RegistryLogin[];
+  /** Two-factor for everyone and the audit log's retention; null unless you're the installation's admin. */
+  securitySettings: SecuritySettings | null;
   /** Installation-wide analytics settings. */
   /** Installation-wide. `small`: Pyo's server has under 3.5 GB of memory now. */
   observabilitySettings: {
@@ -342,6 +346,7 @@ function empty(): PyoState {
     secretStores: [],
     alertChannels: [],
     registryLogins: [],
+    securitySettings: null,
     observabilitySettings: {
       ipMode: "none",
       enabled: true,
@@ -2518,6 +2523,27 @@ export const api = {
       s.observabilitySettings.retention = retention;
     });
     return send("saveRetentionSettings", retention);
+  },
+  /** Two-factor for everyone, and how long the audit log is kept (the installation's admin). */
+  saveSecuritySettings(settings: SecuritySettings) {
+    update((s) => {
+      s.securitySettings = settings;
+    });
+    return send("saveSecuritySettings", settings);
+  },
+  /** A team's two-factor requirement and what its audit log keeps of addresses (owners and admins). */
+  setTeamSecurity(
+    teamId: string,
+    change: { requireTwoFactor?: boolean; auditIps?: AuditIps },
+  ) {
+    update((s) => {
+      const t = s.teams.find((x) => x.id === teamId);
+      if (!t) return;
+      if (change.requireTwoFactor !== undefined)
+        t.requireTwoFactor = change.requireTwoFactor;
+      if (change.auditIps) t.auditIps = change.auditIps;
+    });
+    return send("setTeamSecurity", { teamId, ...change });
   },
   /** Observability on or off, for the whole installation (its admin). */
   setObservability(enabled: boolean) {

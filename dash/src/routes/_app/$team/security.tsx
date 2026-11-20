@@ -3,6 +3,8 @@ import { LearnMore } from "~/components/ui/LearnMore";
 import { MenuPath } from "~/components/ui/MenuPath";
 import {
   ArchiveIcon,
+  DeviceMobileIcon,
+  ListMagnifyingGlassIcon,
   CubeIcon,
   DatabaseIcon,
   KeyIcon,
@@ -17,14 +19,25 @@ import {
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { Badge, type Tone } from "~/components/ui/Badge";
-import { Button } from "~/components/ui/Button";
+import { Button, ButtonLink } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
-import { Switch } from "~/components/ui/Field";
+import { Select, Switch } from "~/components/ui/Field";
 import { Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { seo } from "~/lib/seo";
 import { dateTime, plural, timeAgo } from "~/lib/pyo/format";
 import { api, usePyo } from "~/lib/pyo/store";
-import type { AgentScope, Cluster, ClusterSecurity } from "~/lib/pyo/types";
+import type {
+  AgentScope,
+  AuditIps,
+  Cluster,
+  ClusterSecurity,
+} from "~/lib/pyo/types";
+
+const AUDIT_IPS: { value: AuditIps; label: string }[] = [
+  { value: "full", label: "Full addresses" },
+  { value: "anonymized", label: "Anonymized" },
+  { value: "none", label: "No addresses" },
+];
 
 // The team's security at a glance: each protection, whether it's in place,
 // and what to do when it isn't. Clusters report theirs through the agent.
@@ -159,7 +172,79 @@ function Security() {
     reports.length > 0 && datastoreStates.every((d) => d.label === "Encrypted");
   const anyOff = datastoreStates.some((d) => d.label === "Off");
 
+  const team = s.teams.find((t) => t.id === teamId);
+  const people = s.members.filter(
+    (m) => m.teamId === teamId && m.status === "active",
+  );
+  const withTwoFactor = people.filter((m) => m.twoFactor).length;
+  const required = !!team?.requireTwoFactor;
+  const mine = !!s.user.twoFactor?.enabled;
+
   const checks: Check[] = [
+    {
+      icon: DeviceMobileIcon,
+      title: "Two-factor authentication",
+      tone: required
+        ? "success"
+        : withTwoFactor === people.length && people.length
+          ? "success"
+          : "warning",
+      status: required ? "Required" : "Not required",
+      detail: (
+        <>
+          {withTwoFactor} of {plural(people.length, "member")} use it.
+          {required ? " Members without it can't open this team." : ""}
+        </>
+      ),
+      action: admin ? (
+        <Switch
+          checked={required}
+          disabled={!required && !mine}
+          onChange={(on) => {
+            if (team) void api.setTeamSecurity(team.id, { requireTwoFactor: on });
+          }}
+          label="Require for members"
+          description={
+            !required && !mine
+              ? "Turn it on for your own account first, in your profile."
+              : undefined
+          }
+        />
+      ) : undefined,
+    },
+    {
+      icon: ListMagnifyingGlassIcon,
+      title: "Audit log",
+      tone: "success",
+      status:
+        AUDIT_IPS.find((o) => o.value === (team?.auditIps ?? "full"))?.label ??
+        "Full addresses",
+      detail: "Who did what and from where, sign-ins included.",
+      action: admin ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            aria-label="Addresses in the audit log"
+            value={team?.auditIps ?? "full"}
+            onChange={(e) => {
+              if (team)
+                void api.setTeamSecurity(team.id, {
+                  auditIps: e.target.value as AuditIps,
+                });
+            }}
+            className="!h-7 !w-auto text-[12px]"
+          >
+            {AUDIT_IPS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
+          <ButtonLink href="/audit-log" variant="secondary" size="xs">
+            Open audit log
+          </ButtonLink>
+        </div>
+      ) : undefined,
+    },
     {
       icon: DatabaseIcon,
       title: "Secrets on your servers",
@@ -441,6 +526,11 @@ function Security() {
   const good = checks.filter((c) => c.tone === "success").length;
   const byTitle = (t: string) => checks.find((c) => c.title === t)!;
   const groups: { title: string; description: string; items: string[] }[] = [
+    {
+      title: "Access",
+      description: "How members sign in, and what they did.",
+      items: ["Two-factor authentication", "Audit log"],
+    },
     {
       title: "Encryption",
       description: "How secrets and variables are kept.",

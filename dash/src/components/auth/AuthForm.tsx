@@ -3,7 +3,7 @@ import { ArrowRightIcon, FingerprintIcon } from "@phosphor-icons/react";
 import { Link } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { site } from "~/config/site";
-import { auth } from "~/lib/pyo/backend";
+import { auth, needsCode } from "~/lib/pyo/backend";
 import {
   passkeyAutofillSupported,
   passkeyCancelled,
@@ -14,6 +14,7 @@ import type { User } from "~/lib/pyo/types";
 import { safeNextPath } from "~/lib/validation";
 import { Alert } from "../ui/Alert";
 import { Button } from "../ui/Button";
+import { CodeStep } from "./CodeStep";
 
 export const labelClass = "mb-1.5 block text-[12.5px] font-medium text-foreground";
 
@@ -44,6 +45,8 @@ export function AuthForm({
   const [signupOpen, setSignupOpen] = useState(true);
   const [canReset, setCanReset] = useState(false);
   const [canPasskey, setCanPasskey] = useState(false);
+  /** The password was right and two-factor is on: the code comes next. */
+  const [challenge, setChallenge] = useState<string | null>(null);
   const autofill = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -118,15 +121,33 @@ export function AuthForm({
     setLoading(true);
     setError("");
     try {
-      const user = signup
+      const res = signup
         ? await auth.signup(name.trim(), address, password, invite)
         : await auth.login(address, password);
-      done(user);
+      if (needsCode(res)) {
+        setChallenge(res.challenge);
+        setLoading(false);
+        return;
+      }
+      done(res);
     } catch (e) {
       setError(e instanceof Error ? e.message : "That didn't work. Try again.");
       setLoading(false);
     }
   }
+
+  if (challenge)
+    return (
+      <CodeStep
+        challenge={challenge}
+        onDone={done}
+        onRestart={(why) => {
+          setChallenge(null);
+          setPassword("");
+          setError(why);
+        }}
+      />
+    );
 
   return (
     <>

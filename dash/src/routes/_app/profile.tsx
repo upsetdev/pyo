@@ -1,6 +1,7 @@
 import { CaretRightIcon } from "@phosphor-icons/react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PasskeysPanel } from "~/components/pyo/Passkeys";
+import { TwoFactorPanel } from "~/components/pyo/TwoFactor";
 import { AppShell } from "~/components/shell/AppShell";
 import { TeamAvatar } from "~/components/shell/TeamSwitcher";
 import { useTheme } from "~/components/site/ThemeProvider";
@@ -47,6 +48,8 @@ function ProfilePage() {
         />
 
         <AccountPanel />
+
+        <TwoFactorPanel />
 
         <PasskeysPanel />
 

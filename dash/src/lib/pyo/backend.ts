@@ -4,6 +4,8 @@
 // requires on anything that changes state.
 
 import type {
+  AuditEvent,
+  AuditIps,
   CloudOptions,
   DatabaseExtension,
   AnalyticsSummary,
@@ -81,10 +83,17 @@ export const auth = {
       method: "POST",
       body: { invite },
     }),
+  /** Signed in, or (with two-factor on) a code comes next: `loginCode`. */
   login: (email: string, password: string) =>
-    request<User>("/api/auth/login", {
+    request<SignIn>("/api/auth/login", {
       method: "POST",
       body: { email, password },
+    }),
+  /** The code step: a code from the app, or a recovery code. */
+  loginCode: (challenge: string, code: string) =>
+    request<User>("/api/auth/login/code", {
+      method: "POST",
+      body: { challenge, code },
     }),
   signup: (name: string, email: string, password: string, invite?: string) =>
     request<User>("/api/auth/signup", {
@@ -106,12 +115,81 @@ export const auth = {
     request<{ email: string }>(
       `/api/auth/reset?${new URLSearchParams({ token })}`,
     ),
-  /** Use a sign-in link: the new password, and signed in. */
+  /** Use a sign-in link: the new password, and signed in (or a code next). */
   resetPassword: (token: string, password: string) =>
-    request<User>("/api/auth/reset", {
+    request<SignIn>("/api/auth/reset", {
       method: "POST",
       body: { token, password },
     }),
+};
+
+/** What a sign-in answers: the account, or that a code comes next. */
+export type SignIn = User | { twoFactor: true; challenge: string };
+
+export const needsCode = (
+  r: SignIn,
+): r is { twoFactor: true; challenge: string } => "twoFactor" in r && r.twoFactor === true;
+
+/** The signed-in account's two-factor authentication (twofactor.rs). */
+export const twoFactor = {
+  /** Takes the password: a secret to scan, waiting for its first code. */
+  setup: (password: string) =>
+    request<{ secret: string; uri: string; qr: string }>(
+      "/api/auth/two-factor/setup",
+      { method: "POST", body: { password } },
+    ),
+  /** The first code: it's on, and here are the recovery codes, once. */
+  enable: (code: string) =>
+    request<{ recoveryCodes: string[] }>("/api/auth/two-factor/enable", {
+      method: "POST",
+      body: { code },
+    }),
+  disable: (code: string) =>
+    request<{ ok: boolean }>("/api/auth/two-factor/disable", {
+      method: "POST",
+      body: { code },
+    }),
+  recoveryCodes: (code: string) =>
+    request<{ recoveryCodes: string[] }>(
+      "/api/auth/two-factor/recovery-codes",
+      { method: "POST", body: { code } },
+    ),
+};
+
+/** What the audit log page asks for. */
+export type AuditFilter = {
+  person?: string;
+  action?: string;
+  from?: number;
+  to?: number;
+};
+
+export type AuditPage = {
+  events: AuditEvent[];
+  next: string | null;
+  people: { id: string; name: string; email: string }[];
+  ips: AuditIps;
+  days: number;
+};
+
+function auditQuery(team: string, f: AuditFilter, extra: Record<string, string> = {}) {
+  const q = new URLSearchParams({ team, ...extra });
+  if (f.person) q.set("person", f.person);
+  if (f.action) q.set("action", f.action);
+  if (f.from) q.set("from", String(f.from));
+  if (f.to) q.set("to", String(f.to));
+  return q;
+}
+
+/** A team's audit log (audit.rs), for its owners and admins. */
+export const audit = {
+  list: (team: string, f: AuditFilter, cursor?: string) =>
+    request<AuditPage>(
+      `/api/v1/audit-log?${auditQuery(team, f, cursor ? { cursor } : {})}`,
+    ),
+  /** Where the CSV of everything that matches downloads from. */
+  csvHref: (team: string, f: AuditFilter) =>
+    `/api/v1/audit-log?${auditQuery(team, f, { format: "csv" })}`,
 };
 
 /** Options for navigator.credentials, base64url where the browser wants bytes. */

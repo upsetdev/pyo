@@ -28,6 +28,7 @@ import { Route as AuthSignupRouteImport } from './routes/_auth/signup'
 import { Route as AppTeamIndexRouteImport } from './routes/_app/$team/index'
 import { Route as AppTeamProjectIdRouteImport } from './routes/_app/$team/$projectId'
 import { Route as AppTeamActivityRouteImport } from './routes/_app/$team/activity'
+import { Route as AppTeamAuditLogRouteImport } from './routes/_app/$team/audit-log'
 import { Route as AppTeamBackupsRouteImport } from './routes/_app/$team/backups'
 import { Route as AppTeamCertificatesRouteImport } from './routes/_app/$team/certificates'
 import { Route as AppTeamCronJobsRouteImport } from './routes/_app/$team/cron-jobs'
@@ -48,6 +49,7 @@ import { Route as AppSettingsBackupsRouteImport } from './routes/_app/_settings/
 import { Route as AppSettingsEmailRouteImport } from './routes/_app/_settings/email'
 import { Route as AppSettingsGithubRouteImport } from './routes/_app/_settings/github'
 import { Route as AppSettingsObservabilityRouteImport } from './routes/_app/_settings/observability'
+import { Route as AppSettingsSecurityRouteImport } from './routes/_app/_settings/security'
 import { Route as AppSettingsUpdatesRouteImport } from './routes/_app/_settings/updates'
 import { Route as AppOauthAuthorizeRouteImport } from './routes/_app/oauth/authorize'
 import { Route as AppSettingsIndexRouteImport } from './routes/_app/settings/index'
@@ -229,6 +231,11 @@ const AppTeamActivityRoute = AppTeamActivityRouteImport.update({
   path: '/activity',
   getParentRoute: () => AppTeamRoute,
 } as any)
+const AppTeamAuditLogRoute = AppTeamAuditLogRouteImport.update({
+  id: '/audit-log',
+  path: '/audit-log',
+  getParentRoute: () => AppTeamRoute,
+} as any)
 const AppTeamBackupsRoute = AppTeamBackupsRouteImport.update({
   id: '/backups',
   path: '/backups',
@@ -330,6 +337,11 @@ const AppSettingsObservabilityRoute =
     path: '/observability',
     getParentRoute: () => AppSettingsRoute,
   } as any)
+const AppSettingsSecurityRoute = AppSettingsSecurityRouteImport.update({
+  id: '/security',
+  path: '/security',
+  getParentRoute: () => AppSettingsRoute,
+} as any)
 const AppSettingsUpdatesRoute = AppSettingsUpdatesRouteImport.update({
   id: '/updates',
   path: '/updates',
@@ -846,6 +858,7 @@ export interface FileRoutesByFullPath {
   '/signup': typeof AuthSignupRoute
   '/$team/$projectId': typeof AppTeamProjectIdRouteWithChildren
   '/$team/activity': typeof AppTeamActivityRoute
+  '/$team/audit-log': typeof AppTeamAuditLogRoute
   '/$team/backups': typeof AppTeamBackupsRoute
   '/$team/certificates': typeof AppTeamCertificatesRouteWithChildren
   '/$team/cron-jobs': typeof AppTeamCronJobsRoute
@@ -866,6 +879,7 @@ export interface FileRoutesByFullPath {
   '/email': typeof AppSettingsEmailRoute
   '/github': typeof AppSettingsGithubRoute
   '/observability': typeof AppSettingsObservabilityRoute
+  '/security': typeof AppSettingsSecurityRoute
   '/updates': typeof AppSettingsUpdatesRoute
   '/oauth/authorize': typeof AppOauthAuthorizeRoute
   '/settings/$page': typeof AppSettingsPageRoute
@@ -970,6 +984,7 @@ export interface FileRoutesByTo {
   '/setup': typeof AuthSetupRoute
   '/signup': typeof AuthSignupRoute
   '/$team/activity': typeof AppTeamActivityRoute
+  '/$team/audit-log': typeof AppTeamAuditLogRoute
   '/$team/backups': typeof AppTeamBackupsRoute
   '/$team/cron-jobs': typeof AppTeamCronJobsRoute
   '/$team/domains': typeof AppTeamDomainsRoute
@@ -987,6 +1002,7 @@ export interface FileRoutesByTo {
   '/email': typeof AppSettingsEmailRoute
   '/github': typeof AppSettingsGithubRoute
   '/observability': typeof AppSettingsObservabilityRoute
+  '/security': typeof AppSettingsSecurityRoute
   '/updates': typeof AppSettingsUpdatesRoute
   '/oauth/authorize': typeof AppOauthAuthorizeRoute
   '/settings/$page': typeof AppSettingsPageRoute
@@ -1092,6 +1108,7 @@ export interface FileRoutesById {
   '/_app/': typeof AppIndexRoute
   '/_app/$team/$projectId': typeof AppTeamProjectIdRouteWithChildren
   '/_app/$team/activity': typeof AppTeamActivityRoute
+  '/_app/$team/audit-log': typeof AppTeamAuditLogRoute
   '/_app/$team/backups': typeof AppTeamBackupsRoute
   '/_app/$team/certificates': typeof AppTeamCertificatesRouteWithChildren
   '/_app/$team/cron-jobs': typeof AppTeamCronJobsRoute
@@ -1112,6 +1129,7 @@ export interface FileRoutesById {
   '/_app/_settings/email': typeof AppSettingsEmailRoute
   '/_app/_settings/github': typeof AppSettingsGithubRoute
   '/_app/_settings/observability': typeof AppSettingsObservabilityRoute
+  '/_app/_settings/security': typeof AppSettingsSecurityRoute
   '/_app/_settings/updates': typeof AppSettingsUpdatesRoute
   '/_app/oauth/authorize': typeof AppOauthAuthorizeRoute
   '/_app/settings/$page': typeof AppSettingsPageRoute
@@ -1220,6 +1238,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/$team/$projectId'
     | '/$team/activity'
+    | '/$team/audit-log'
     | '/$team/backups'
     | '/$team/certificates'
     | '/$team/cron-jobs'
@@ -1240,6 +1259,7 @@ export interface FileRouteTypes {
     | '/email'
     | '/github'
     | '/observability'
+    | '/security'
     | '/updates'
     | '/oauth/authorize'
     | '/settings/$page'
@@ -1344,6 +1364,7 @@ export interface FileRouteTypes {
     | '/setup'
     | '/signup'
     | '/$team/activity'
+    | '/$team/audit-log'
     | '/$team/backups'
     | '/$team/cron-jobs'
     | '/$team/domains'
@@ -1361,6 +1382,7 @@ export interface FileRouteTypes {
     | '/email'
     | '/github'
     | '/observability'
+    | '/security'
     | '/updates'
     | '/oauth/authorize'
     | '/settings/$page'
@@ -1465,6 +1487,7 @@ export interface FileRouteTypes {
     | '/_app/'
     | '/_app/$team/$projectId'
     | '/_app/$team/activity'
+    | '/_app/$team/audit-log'
     | '/_app/$team/backups'
     | '/_app/$team/certificates'
     | '/_app/$team/cron-jobs'
@@ -1485,6 +1508,7 @@ export interface FileRouteTypes {
     | '/_app/_settings/email'
     | '/_app/_settings/github'
     | '/_app/_settings/observability'
+    | '/_app/_settings/security'
     | '/_app/_settings/updates'
     | '/_app/oauth/authorize'
     | '/_app/settings/$page'
@@ -1716,6 +1740,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamActivityRouteImport
       parentRoute: typeof AppTeamRoute
     }
+    '/_app/$team/audit-log': {
+      id: '/_app/$team/audit-log'
+      path: '/audit-log'
+      fullPath: '/$team/audit-log'
+      preLoaderRoute: typeof AppTeamAuditLogRouteImport
+      parentRoute: typeof AppTeamRoute
+    }
     '/_app/$team/backups': {
       id: '/_app/$team/backups'
       path: '/backups'
@@ -1854,6 +1885,13 @@ declare module '@tanstack/react-router' {
       path: '/observability'
       fullPath: '/observability'
       preLoaderRoute: typeof AppSettingsObservabilityRouteImport
+      parentRoute: typeof AppSettingsRoute
+    }
+    '/_app/_settings/security': {
+      id: '/_app/_settings/security'
+      path: '/security'
+      fullPath: '/security'
+      preLoaderRoute: typeof AppSettingsSecurityRouteImport
       parentRoute: typeof AppSettingsRoute
     }
     '/_app/_settings/updates': {
@@ -2695,6 +2733,7 @@ const AppTeamPostgresDatabaseIdRouteWithChildren =
 interface AppTeamRouteChildren {
   AppTeamProjectIdRoute: typeof AppTeamProjectIdRouteWithChildren
   AppTeamActivityRoute: typeof AppTeamActivityRoute
+  AppTeamAuditLogRoute: typeof AppTeamAuditLogRoute
   AppTeamBackupsRoute: typeof AppTeamBackupsRoute
   AppTeamCertificatesRoute: typeof AppTeamCertificatesRouteWithChildren
   AppTeamCronJobsRoute: typeof AppTeamCronJobsRoute
@@ -2749,6 +2788,7 @@ interface AppTeamRouteChildren {
 const AppTeamRouteChildren: AppTeamRouteChildren = {
   AppTeamProjectIdRoute: AppTeamProjectIdRouteWithChildren,
   AppTeamActivityRoute: AppTeamActivityRoute,
+  AppTeamAuditLogRoute: AppTeamAuditLogRoute,
   AppTeamBackupsRoute: AppTeamBackupsRoute,
   AppTeamCertificatesRoute: AppTeamCertificatesRouteWithChildren,
   AppTeamCronJobsRoute: AppTeamCronJobsRoute,
@@ -2809,6 +2849,7 @@ interface AppSettingsRouteChildren {
   AppSettingsEmailRoute: typeof AppSettingsEmailRoute
   AppSettingsGithubRoute: typeof AppSettingsGithubRoute
   AppSettingsObservabilityRoute: typeof AppSettingsObservabilityRoute
+  AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
   AppSettingsUpdatesRoute: typeof AppSettingsUpdatesRoute
 }
 
@@ -2817,6 +2858,7 @@ const AppSettingsRouteChildren: AppSettingsRouteChildren = {
   AppSettingsEmailRoute: AppSettingsEmailRoute,
   AppSettingsGithubRoute: AppSettingsGithubRoute,
   AppSettingsObservabilityRoute: AppSettingsObservabilityRoute,
+  AppSettingsSecurityRoute: AppSettingsSecurityRoute,
   AppSettingsUpdatesRoute: AppSettingsUpdatesRoute,
 }
 

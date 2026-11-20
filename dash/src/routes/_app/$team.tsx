@@ -1,3 +1,4 @@
+import { ShieldCheckIcon } from "@phosphor-icons/react";
 import { createFileRoute, notFound, Outlet } from "@tanstack/react-router";
 import { AppShell } from "~/components/shell/AppShell";
 import { api, currentTeam, getState, teamBySlug } from "~/lib/pyo/store";
@@ -22,6 +23,11 @@ function TeamNotFound() {
   const { team: slug } = Route.useParams();
   const known = !!teamBySlug(getState(), slug);
   const team = currentTeam(getState());
+  // A team that requires two-factor, which this account hasn't set up.
+  const locked = getState().user.twoFactor?.lockedTeams.find(
+    (t) => t.slug === slug,
+  );
+  if (locked) return <TwoFactorRequired name={locked.name} />;
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center bg-sidebar px-6 text-center">
       <p className="text-[12px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -43,6 +49,28 @@ function TeamNotFound() {
           Go to {known ? "the overview" : team.name}
         </a>
       ) : null}
+    </main>
+  );
+}
+
+function TwoFactorRequired({ name }: { name: string }) {
+  return (
+    <main className="flex min-h-dvh flex-col items-center justify-center bg-sidebar px-6 text-center">
+      <span className="flex h-11 w-11 items-center justify-center rounded-xl border border-border bg-background text-muted-foreground">
+        <ShieldCheckIcon size={20} />
+      </span>
+      <h1 className="mt-4 text-2xl font-semibold tracking-tight">
+        Two-factor required
+      </h1>
+      <p className="mt-2 max-w-md text-[14px] text-muted-foreground">
+        {name} requires two-factor authentication. Set it up to open the team.
+      </p>
+      <a
+        href="/profile#two-factor"
+        className="mt-6 inline-flex h-9 items-center rounded-full bg-primary px-4 text-[13px] font-medium text-primary-foreground transition hover:opacity-90"
+      >
+        Set up two-factor
+      </a>
     </main>
   );
 }

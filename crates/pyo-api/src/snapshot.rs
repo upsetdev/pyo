@@ -71,6 +71,15 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             o.remove("scope");
         }
     }
+    // Two-factor: the account's own, and the teams it can't open until
+    // it's on (twofactor.rs). The installation's security settings for
+    // its admin.
+    let two_factor = crate::twofactor::summary(db, &user.id).await?;
+    let security_settings = if user.is_admin {
+        json!(crate::audit::settings(db).await?)
+    } else {
+        Value::Null
+    };
     // Tailscale (Integrations › Tailscale): the client only for admins.
     let tailscale = crate::tailscale::snapshot(db, user.is_admin).await?;
     // `small`: the server Pyo runs on has under 3.5 GB of memory now (the
@@ -95,7 +104,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'id', id, 'name', name, 'slug', slug, 'description', description,
             'createdAt', pyo.ms(created_at), 'defaultClusterId', default_cluster_id,
             'preferences', preferences, 'agentUpdates', agent_updates,
-            'analyticsMonths', analytics_months)
+            'analyticsMonths', analytics_months,
+            'requireTwoFactor', require_two_factor, 'auditIps', audit_ips)
            FROM pyo.teams WHERE id = ANY($1) ORDER BY created_at",
         &team_ids,
     )
@@ -107,7 +117,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'id', m.id, 'teamId', m.team_id, 'name', coalesce(u.name, ''), 'email', m.email,
             -- Gravatar's key: sha256 of the trimmed, lowercased email.
             'gravatar', encode(sha256(convert_to(lower(trim(m.email)), 'UTF8')), 'hex'),
-            'role', m.role, 'status', m.status, 'joinedAt', pyo.ms(m.joined_at))
+            'role', m.role, 'status', m.status, 'joinedAt', pyo.ms(m.joined_at),
+            'twoFactor', EXISTS (SELECT 1 FROM pyo.user_totp t WHERE t.user_id = m.user_id AND t.enabled_at IS NOT NULL))
            FROM pyo.members m LEFT JOIN pyo.users u ON u.id = m.user_id
           WHERE m.team_id = ANY($1) ORDER BY m.joined_at",
         &team_ids,
@@ -472,6 +483,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // Gravatar's key for the profile picture: sha256 of the trimmed, lowercased email.
     let mut me = json!(user);
     me["gravatar"] = json!(crate::ids::sha256_hex(&user.email.trim().to_lowercase()));
+    me["twoFactor"] = two_factor;
     let databases = crate::databases::listing(&mut *db, &team_ids, None).await?;
     let previews = crate::previews::snapshot(&mut *db, &team_ids).await?;
     // Sandbox servers the teams can use (theirs and the installation's).
@@ -516,6 +528,9 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         // Whether email goes out; the settings themselves only for admins.
         // What analytics keeps of visitors' IPs (installation-wide).
         "observabilitySettings": observability_settings,
+        // Two-factor for everyone, and how long the audit log is kept: the
+        // installation's admin only.
+        "securitySettings": security_settings,
         "email": email.map(|e| if user.is_admin { e.public() } else { json!({ "fromEmail": e.from_email }) }),
         "github": github.map(|g| g.public()),
         "githubInstallations": github_installations,

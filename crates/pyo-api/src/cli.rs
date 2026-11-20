@@ -278,6 +278,13 @@ async fn token(State(s): State<AppState>, Json(b): Json<TokenBody>) -> ApiResult
     Ok(Json(match poll_login(&s.db, &b.id, &b.verifier).await? {
         None => json!({ "status": "pending" }),
         Some((key, user_name, email)) => {
+            let (s2, to) = (s.clone(), email.clone());
+            tokio::spawn(async move {
+                crate::twofactor::mail_user(&s2, &to, "/api-keys", |link| {
+                    crate::mail::new_api_key("CLI", link)
+                })
+                .await;
+            });
             json!({ "token": key, "user": { "name": user_name, "email": email } })
         }
     }))
@@ -339,13 +346,24 @@ async fn poll_login(
         .bind(days)
         .execute(&mut *tx)
         .await?;
-    let (user_name, email): (String, String) =
-        sqlx::query_as("SELECT name, email FROM pyo.users WHERE id = $1")
-            .bind(&user_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let user = sqlx::query_as::<_, crate::auth::User>(
+        "SELECT id, name, email, timezone, is_admin, must_set_up FROM pyo.users WHERE id = $1",
+    )
+    .bind(&user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    // A new key: the account's teams hear of it (and the account by email,
+    // from `token`). It's the account's doing, through the CLI.
+    crate::audit::set_actor(&user, crate::audit::Via::Api, Some(&name));
+    crate::twofactor::notify_teams(
+        &mut tx,
+        &user,
+        "api_key.created",
+        &format!("Made API key {name} (full access) with pyo login"),
+    )
+    .await?;
     tx.commit().await?;
-    Ok(Some((key, user_name, email)))
+    Ok(Some((key, user.name, user.email)))
 }
 
 #[cfg(test)]

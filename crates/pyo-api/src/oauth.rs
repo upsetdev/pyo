@@ -619,11 +619,12 @@ impl FromRequestParts<AppState> for OAuthUser {
         let hash = sha256_hex(token);
         type Grant = (String, String, String, String, bool, bool, String, String);
         let row: Option<Grant> = sqlx::query_as(
-            "SELECT u.id, u.name, u.email, u.timezone, u.is_admin, u.must_set_up, c.name, g.scope
+            "SELECT u.id, u.name, u.email, u.timezone, u.is_admin AND NOT pyo.needs_two_factor(u.id, $2), u.must_set_up, c.name, g.scope
                FROM pyo.oauth_grants g JOIN pyo.users u ON u.id = g.user_id JOIN pyo.oauth_clients c ON c.id = g.client_id
               WHERE g.access_hash = $1 AND g.access_expires_at > now()",
         )
         .bind(&hash)
+        .bind(crate::hosted())
         .fetch_optional(&s.db)
         .await
         .map_err(|_| challenge(None))?;
@@ -656,6 +657,7 @@ impl FromRequestParts<AppState> for OAuthUser {
                 teams: None,
             }),
         };
+        crate::audit::set_actor(&user, crate::audit::Via::Mcp, Some(&client));
         let _ = sqlx::query("UPDATE pyo.oauth_grants SET last_used_at = now() WHERE access_hash = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')")
             .bind(&hash)
             .execute(&s.db)
