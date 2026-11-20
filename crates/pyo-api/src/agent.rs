@@ -47,8 +47,12 @@ impl FromRequestParts<AppState> for AgentCluster {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // A signed request (agent_auth.rs): the cluster its key belongs to.
+        // A signed request (agent_auth.rs): the cluster its key belongs to,
+        // when it's the agent's own key (a builder's or pyo-static's isn't).
         if let Some(v) = parts.extensions.get::<crate::agent_auth::VerifiedAgent>() {
+            if !v.is_agent() {
+                return Err(ApiError::new(StatusCode::FORBIDDEN, "This key isn't the agent's."));
+            }
             return Ok(AgentCluster { id: v.cluster_id.clone(), team_id: v.team_id.clone() });
         }
         // Over the mTLS endpoint: the cluster its certificate names, while
@@ -339,6 +343,8 @@ async fn heartbeat(
         "wafActive": caps.waf_active,
         // Whether this agent can update Pyo and itself (updates.rs).
         "updates": hb.updates,
+        // Its builders and pyo-static sign their requests (agent_auth.rs).
+        "componentKeys": hb.component_keys,
         // What the agent may do there, and the cluster owner's switches.
         "agentScope": hb.scope,
         // Whether its install is this Pyo's (install.rs).

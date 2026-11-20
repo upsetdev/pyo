@@ -91,6 +91,11 @@ pub struct Heartbeat {
     /// (`UpgradePyo`, `UpdateAgent`); 0 from agents older than that.
     #[serde(default)]
     pub updates: u32,
+    /// The agent gives Pyo's builders and pyo-static keys of their own
+    /// (`/component-keys`), and relays Vector's data: their bearer tokens
+    /// can go. False from older agents.
+    #[serde(default)]
+    pub component_keys: bool,
     /// What the agent may do in this cluster, and the customer's switches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<rbac::AgentScope>,
@@ -1458,6 +1463,9 @@ pub struct BuilderSpec {
     pub server: String,
     /// URL the builder dials out to.
     pub api_url: String,
+    /// Its login at Pyo's registry door (username `pyo-builder`), when it
+    /// pushes there; empty for a cluster's own registry. Agents that give
+    /// builders keys sign with those on Pyo's API; older ones send this.
     pub token: String,
     pub image: String,
     /// Registry the builder pushes to over plain HTTP (host:port).

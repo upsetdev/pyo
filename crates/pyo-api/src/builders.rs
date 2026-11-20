@@ -27,8 +27,22 @@ use crate::{
 
 /// Bump when the cluster builder's pod spec changes (the agent builds it from
 /// EnsureBuilder); builders on an older one get it re-sent. 2: unprivileged,
-/// read-only pyo-builder. 3: BuildKit started on demand.
-pub const CLUSTER_BUILDER_SPEC: i32 = 3;
+/// read-only pyo-builder. 3: BuildKit started on demand. 4: a key of its
+/// own from the agent (agent_auth.rs), a token only to push to Pyo's door.
+pub const CLUSTER_BUILDER_SPEC: i32 = 4;
+
+/// The builder's login at Pyo's registry door, when it pushes there (never
+/// sent for a cluster's own registry, which needs none). Only its hash is
+/// kept: a builder without one gets a hash of nothing anyone holds.
+fn door_login(registry_host: &str) -> (String, String) {
+    let token = secret_token();
+    let hash = sha256_hex(&token);
+    if registry_host.is_empty() || registry_host == deploy::INTERNAL_DEFAULT {
+        (String::new(), hash)
+    } else {
+        (token, hash)
+    }
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -38,7 +52,8 @@ pub fn routes() -> Router<AppState> {
         .route("/jobs/{id}/result", post(result))
 }
 
-/// The builder a bearer token belongs to.
+/// The builder a request came from: its key (agent_auth.rs), or its
+/// bearer token while it has no key and agents may use tokens.
 pub struct BuilderAuth {
     pub id: String,
     pub team_id: String,
@@ -51,24 +66,39 @@ impl FromRequestParts<AppState> for BuilderAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        let gone = || ApiError::new(StatusCode::UNAUTHORIZED, "Unknown builder. Was it removed?");
+        if let Some(v) = parts.extensions.get::<crate::agent_auth::VerifiedAgent>() {
+            let Some(id) = v.builder_id.clone().filter(|_| v.component == crate::agent_auth::BUILDER) else {
+                return Err(ApiError::new(StatusCode::FORBIDDEN, "This key isn't a builder's."));
+            };
+            let team_id: Option<String> = sqlx::query_scalar(
+                "SELECT team_id FROM pyo.builders WHERE id = $1 AND cluster_id = $2 AND status <> 'removing'",
+            )
+            .bind(&id)
+            .bind(&v.cluster_id)
+            .fetch_optional(&state.db)
+            .await?;
+            return Ok(BuilderAuth { id, team_id: team_id.ok_or_else(gone)? });
+        }
+        if crate::agent_auth::refuse_tokens() {
+            return Err(ApiError::new(StatusCode::UNAUTHORIZED, "Builders sign their requests here."));
+        }
         let token = parts
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Missing builder token."))?;
+        // A builder with a key no longer counts with its token (which stays
+        // its registry door login).
         let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT id, team_id FROM pyo.builders WHERE token_hash = $1 AND status <> 'removing'",
+            "SELECT b.id, b.team_id FROM pyo.builders b WHERE b.token_hash = $1 AND b.status <> 'removing'
+                AND NOT EXISTS (SELECT 1 FROM pyo.agent_keys k WHERE k.builder_id = b.id AND k.revoked_at IS NULL AND k.expires_at > now())",
         )
         .bind(sha256_hex(token))
         .fetch_optional(&state.db)
         .await?;
-        let (id, team_id) = row.ok_or_else(|| {
-            ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "Unknown builder token. Was the builder removed?",
-            )
-        })?;
+        let (id, team_id) = row.ok_or_else(gone)?;
         Ok(BuilderAuth { id, team_id })
     }
 }
@@ -239,14 +269,15 @@ pub async fn add_on_server(
     cluster_id: &str,
     node: &str,
 ) -> ApiResult<()> {
-    let token = secret_token();
+    let registry_host = registry_for(&mut **tx, cluster_id).await?;
+    let (token, hash) = door_login(&registry_host);
     sqlx::query("INSERT INTO pyo.builders (id, team_id, name, kind, cluster_id, server, token_hash, info) VALUES ($1, $2, $3, 'cluster', $4, $5, $6, jsonb_build_object('specVersion', $7::int, 'image', $8::text))")
         .bind(id)
         .bind(team_id)
         .bind(name)
         .bind(cluster_id)
         .bind(node)
-        .bind(sha256_hex(&token))
+        .bind(hash)
         .bind(CLUSTER_BUILDER_SPEC)
         .bind(&config.builder_image)
         .execute(&mut **tx)
@@ -257,7 +288,7 @@ pub async fn add_on_server(
         api_url: config.agent_api_url.clone(),
         token,
         image: config.builder_image.clone(),
-        registry_host: registry_for(&mut **tx, cluster_id).await?,
+        registry_host,
     };
     deploy::enqueue(
         tx,
@@ -352,34 +383,41 @@ pub async fn watcher(s: AppState) {
     }
 }
 
-/// Re-send the pod spec to cluster builders made with an older one, or with
-/// another builder image (Pyo was updated). Only the token's hash is stored,
-/// so each gets a fresh token with it.
+/// Builders whose pod spec is re-sent: made with an older one, or with
+/// another builder image (Pyo was updated), or without a key of their own
+/// where the agent gives them one (an agent updated since, or keys revoked
+/// by a new connect command). Also builders on a new server, once it has
+/// joined its cluster and is ready (they start at spec version 0). A
+/// builder in the middle of a build moves after it. A keyless builder is
+/// asked again at most every 10 minutes.
+const OUTDATED_BUILDERS: &str = "SELECT b.id, b.cluster_id, b.server FROM pyo.builders b JOIN pyo.clusters c ON c.id = b.cluster_id
+      WHERE b.kind IN ('cluster', 'server') AND b.status <> 'removing' AND b.server IS NOT NULL
+        AND (coalesce((b.info->>'specVersion')::int, 1) < $1
+             OR (b.info->>'image' IS DISTINCT FROM $2 AND b.info->>'busyWith' IS NULL AND b.status = 'ready')
+             OR (coalesce((c.capabilities->>'componentKeys')::bool, false) AND b.info->>'busyWith' IS NULL
+                 AND coalesce((b.info->>'keyAskedAt')::bigint, 0) < pyo.ms(now() - interval '10 minutes')
+                 AND NOT EXISTS (SELECT 1 FROM pyo.agent_keys k WHERE k.builder_id = b.id AND k.revoked_at IS NULL AND k.expires_at > now())))
+        AND (b.kind = 'cluster' OR EXISTS (
+          SELECT 1 FROM pyo.servers n WHERE n.cluster_id = b.cluster_id AND n.name = b.server AND n.report->>'status' = 'ready'))";
+
+/// Re-send the pod spec to builders that need it ([`OUTDATED_BUILDERS`]).
+/// Only the door login's hash is stored, so each gets a fresh one with it.
 async fn refresh_cluster_builders(s: &AppState) -> anyhow::Result<()> {
-    // Also builders on a new server, once it has joined its cluster and
-    // is ready (they start at spec version 0). A builder in the middle of a
-    // build moves to a new image after it.
-    let outdated: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT b.id, b.cluster_id, b.server FROM pyo.builders b
-          WHERE b.kind IN ('cluster', 'server') AND b.status <> 'removing' AND b.cluster_id IS NOT NULL AND b.server IS NOT NULL
-            AND (coalesce((b.info->>'specVersion')::int, 1) < $1
-                 OR (b.info->>'image' IS DISTINCT FROM $2 AND b.info->>'busyWith' IS NULL AND b.status = 'ready'))
-            AND (b.kind = 'cluster' OR EXISTS (
-              SELECT 1 FROM pyo.servers n WHERE n.cluster_id = b.cluster_id AND n.name = b.server AND n.report->>'status' = 'ready'))",
-    )
-    .bind(CLUSTER_BUILDER_SPEC)
-    .bind(&s.config.builder_image)
-    .fetch_all(&s.db)
-    .await?;
+    let outdated: Vec<(String, String, String)> = sqlx::query_as(OUTDATED_BUILDERS)
+        .bind(CLUSTER_BUILDER_SPEC)
+        .bind(&s.config.builder_image)
+        .fetch_all(&s.db)
+        .await?;
     for (id, cluster_id, node) in outdated {
-        let token = secret_token();
         let mut tx = s.db.begin().await?;
+        let registry_host = registry_for(&mut *tx, &cluster_id).await?;
+        let (token, hash) = door_login(&registry_host);
         sqlx::query(
-            "UPDATE pyo.builders SET token_hash = $2, info = info || jsonb_build_object('specVersion', $3::int, 'image', $4::text),
+            "UPDATE pyo.builders SET token_hash = $2, info = info || jsonb_build_object('specVersion', $3::int, 'image', $4::text, 'keyAskedAt', pyo.ms(now())),
                     status_message = CASE WHEN kind = 'server' THEN 'Starting the builder.' ELSE status_message END WHERE id = $1",
         )
             .bind(&id)
-            .bind(sha256_hex(&token))
+            .bind(hash)
             .bind(CLUSTER_BUILDER_SPEC)
             .bind(&s.config.builder_image)
             .execute(&mut *tx)
@@ -390,7 +428,7 @@ async fn refresh_cluster_builders(s: &AppState) -> anyhow::Result<()> {
             api_url: s.config.agent_api_url.clone(),
             token,
             image: s.config.builder_image.clone(),
-            registry_host: registry_for(&mut *tx, &cluster_id).await?,
+            registry_host,
         };
         deploy::enqueue(
             &mut tx,
@@ -623,5 +661,73 @@ pub(crate) mod first_builder_tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_builder_pushing_to_pyos_door_gets_a_login() {
+        let (t, h) = door_login(deploy::DOOR_IN_CLUSTER);
+        assert!(!t.is_empty() && h == sha256_hex(&t));
+        let (t, h) = door_login("100.64.0.1:5006");
+        assert!(!t.is_empty() && h == sha256_hex(&t));
+        // Its cluster's own registry needs none: nothing to send, a hash of nothing anyone holds.
+        let (t, h) = door_login(deploy::INTERNAL_DEFAULT);
+        assert!(t.is_empty() && h.len() == 64);
+        assert!(door_login("").0.is_empty());
+    }
+
+    /// Against a throwaway Postgres: a builder without a key of its own gets
+    /// its spec again once its agent gives builders keys, at most every 10
+    /// minutes, and not mid-build; one with a key, or on an older agent, doesn't.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn builders_without_a_key_get_their_spec_again() {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let run = crate::ids::random_string(8);
+        let team = format!("team_b{run}");
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&team).execute(&db).await.unwrap();
+        let (new_agent, old_agent) = (format!("cl_n{run}"), format!("cl_o{run}"));
+        for (c, keys) in [(&new_agent, true), (&old_agent, false)] {
+            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, capabilities) VALUES ($1, $2, $1, $1, $3)")
+                .bind(c).bind(&team).bind(json!({ "componentKeys": keys })).execute(&db).await.unwrap();
+        }
+        let image = "builder@sha256:00";
+        let add = |id: String, cluster: String, info: Value| {
+            let (db, team) = (db.clone(), team.clone());
+            async move {
+                sqlx::query("INSERT INTO pyo.builders (id, team_id, name, kind, cluster_id, server, token_hash, status, info) VALUES ($1, $2, $1, 'cluster', $3, 's', $1, 'ready', $4)")
+                    .bind(&id).bind(&team).bind(&cluster).bind(info).execute(&db).await.unwrap();
+                id
+            }
+        };
+        let current = json!({ "specVersion": CLUSTER_BUILDER_SPEC, "image": image });
+        let keyless = add(format!("bld_a{run}"), new_agent.clone(), current.clone()).await;
+        let keyed = add(format!("bld_b{run}"), new_agent.clone(), current.clone()).await;
+        let busy = add(format!("bld_c{run}"), new_agent.clone(), json!({ "specVersion": CLUSTER_BUILDER_SPEC, "image": image, "busyWith": "job_1" })).await;
+        let asked = add(format!("bld_d{run}"), new_agent.clone(), json!({ "specVersion": CLUSTER_BUILDER_SPEC, "image": image, "keyAskedAt": pyo_proto::now_ms() })).await;
+        let older = add(format!("bld_e{run}"), old_agent.clone(), current.clone()).await;
+        let old_spec = add(format!("bld_f{run}"), old_agent.clone(), json!({ "specVersion": 3, "image": image })).await;
+        q("INSERT INTO pyo.agent_keys (id, cluster_id, public_key, expires_at, component, builder_id) VALUES ($1, $2, 'k', 'infinity', 'builder', $3)")
+            .bind(format!("akey_{run}")).bind(&new_agent).bind(&keyed).execute(&db).await.unwrap();
+        let due: Vec<String> = sqlx::query_as::<_, (String, String, String)>(OUTDATED_BUILDERS)
+            .bind(CLUSTER_BUILDER_SPEC)
+            .bind(image)
+            .fetch_all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.0)
+            .filter(|id| id.ends_with(&run))
+            .collect();
+        assert!(due.contains(&keyless) && due.contains(&old_spec), "{due:?}");
+        for not in [&keyed, &busy, &asked, &older] {
+            assert!(!due.contains(not), "{not} isn't due: {due:?}");
+        }
     }
 }

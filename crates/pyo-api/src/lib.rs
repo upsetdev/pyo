@@ -541,11 +541,23 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                         agent_auth::signed,
                     )),
             )
+            // Builders and pyo-static sign with keys of their own.
             .nest(
                 "/api/builder/v1",
-                builders::routes().merge(sites::builder_routes()),
+                builders::routes()
+                    .merge(sites::builder_routes())
+                    .layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        agent_auth::signed,
+                    )),
             )
-            .nest("/api/static/v1", sites::routes())
+            .nest(
+                "/api/static/v1",
+                sites::routes().layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    agent_auth::signed,
+                )),
+            )
             .merge(extra_routes)
             .route("/api/{*rest}", get(error::not_found).post(error::not_found))
             .route("/install/agent.yaml", get(install::manifest))
@@ -611,7 +623,8 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             agent::routes()
                 .merge(sites::agent_routes())
                 .merge(terminal::agent_routes())
-                .merge(database_imports::agent_routes()),
+                .merge(database_imports::agent_routes())
+                .merge(agent_auth::component_routes()),
         )
         .await?;
     }

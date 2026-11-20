@@ -438,7 +438,15 @@ fn token_cluster(key: &[u8], token: &str) -> Option<String> {
     (same && !cluster.is_empty()).then(|| cluster.to_owned())
 }
 
+/// A token for an agent that gives pyo-static no key of its own (one older
+/// than component keys), where agents may still use tokens.
 async fn static_login(a: crate::agent::AgentCluster) -> ApiResult<Json<Value>> {
+    if crate::agent_auth::refuse_tokens() {
+        return Err(ApiError::new(
+            StatusCode::GONE,
+            "pyo-static signs its requests with a key from its cluster's agent here.",
+        ));
+    }
     let token = reader_token(&a.id).ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -460,6 +468,16 @@ impl FromRequestParts<AppState> for StaticReader {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // Its key (agent_auth.rs), made by the agent in its cluster.
+        if let Some(v) = parts.extensions.get::<crate::agent_auth::VerifiedAgent>() {
+            if v.component != crate::agent_auth::STATIC {
+                return Err(ApiError::new(StatusCode::FORBIDDEN, "This key isn't pyo-static's."));
+            }
+            return Ok(StaticReader { cluster_id: v.cluster_id.clone() });
+        }
+        if crate::agent_auth::refuse_tokens() {
+            return Err(ApiError::new(StatusCode::UNAUTHORIZED, "pyo-static signs its requests here."));
+        }
         let token = parts
             .headers
             .get("authorization")
@@ -474,7 +492,8 @@ impl FromRequestParts<AppState> for StaticReader {
                 .bind(&cluster)
                 .fetch_one(&state.db)
                 .await?;
-        if !known {
+        // A cluster whose pyo-static has a key no longer reads with a token.
+        if !known || crate::agent_auth::has_key(&state.db, &cluster, crate::agent_auth::STATIC, None).await? {
             return Err(ApiError::new(StatusCode::UNAUTHORIZED, "Unknown token."));
         }
         Ok(StaticReader {

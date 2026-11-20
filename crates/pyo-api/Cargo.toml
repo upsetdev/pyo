@@ -56,5 +56,6 @@ serde_norway = "0.9.42"
 
 [dev-dependencies]
 boon = "0.6.1"
+tower = { version = "0.5", features = ["util"] }
 # The mock ACME server signs the CSRs it gets.
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
