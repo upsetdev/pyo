@@ -192,13 +192,25 @@ export function opOnLeave(name: string, args: Record<string, unknown>) {
   }
 }
 
-/** `pyo login`: a one-time code for the CLI waiting on localhost. */
-export function approveCli(challenge: string, name: string) {
-  return request<{ code: string }>("/api/v1/cli/approve", {
-    method: "POST",
-    body: { challenge, name },
-  });
-}
+/** `pyo login`: the request a CLI made, and the answer to it. */
+export const cliLogin = {
+  get: (id: string) =>
+    request<{
+      name: string;
+      client: string;
+      status: "pending" | "approved" | "denied";
+    }>(`/api/v1/cli/logins/${encodeURIComponent(id)}`),
+  approve: (id: string, code: string) =>
+    request<{ ok: boolean }>(
+      `/api/v1/cli/logins/${encodeURIComponent(id)}/approve`,
+      { method: "POST", body: { code } },
+    ),
+  deny: (id: string) =>
+    request<{ ok: boolean }>(
+      `/api/v1/cli/logins/${encodeURIComponent(id)}/deny`,
+      { method: "POST", body: {} },
+    ),
+};
 
 /** Set up backups of a database: Pyo makes its read-only backup user. */
 export function addDatabaseBackup(body: Record<string, unknown>) {
