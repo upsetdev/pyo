@@ -139,13 +139,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// The service's recent logs.
+    /// The service's logs, from every replica.
     Logs {
         #[command(flatten)]
         which: Which,
         /// Keep printing new lines.
         #[arg(long, short)]
         follow: bool,
+        /// Only lines since then: 30s, 10m, 2h or 1d.
+        #[arg(long)]
+        since: Option<String>,
+        /// One replica, by its name as the lines show it.
+        #[arg(long)]
+        replica: Option<String>,
+        /// The latest deployment's build and deploy log instead.
+        #[arg(long, conflicts_with_all = ["since", "replica"])]
+        build: bool,
     },
     /// Environment variables.
     Env {
@@ -829,11 +838,22 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
         Command::Status { which, json } => {
             service::status(&config::client(url, token)?, which.service.as_deref(), json).await
         }
-        Command::Logs { which, follow } => {
+        Command::Logs {
+            which,
+            follow,
+            since,
+            replica,
+            build,
+        } => {
             service::logs(
                 &config::client(url, token)?,
                 which.service.as_deref(),
-                follow,
+                service::LogsOpts {
+                    follow,
+                    since,
+                    replica,
+                    build,
+                },
             )
             .await
         }

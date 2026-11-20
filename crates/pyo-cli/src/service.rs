@@ -840,33 +840,174 @@ pub async fn status(api: &Api, service: Option<&str>, as_json: bool) -> Result<(
 
 // ── logs ───────────────────────────────────────────────────────────────
 
-pub async fn logs(api: &Api, service: Option<&str>, follow: bool) -> Result<()> {
+/// What `pyo logs` reads.
+#[derive(Default)]
+pub struct LogsOpts {
+    pub follow: bool,
+    /// "10m", "2h", "1d": only lines since then.
+    pub since: Option<String>,
+    /// One replica: its name, or the end of it.
+    pub replica: Option<String>,
+    /// The latest deployment's build and deploy log instead.
+    pub build: bool,
+}
+
+/// "30s", "10m", "2h", "1d" in milliseconds.
+pub fn parse_since(s: &str) -> Result<i64> {
+    let s = s.trim();
+    let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: i64 = n
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+        .with_context(|| format!("--since takes a time like 30s, 10m, 2h or 1d, not {s:?}."))?;
+    let ms = match unit {
+        "s" => 1000,
+        "m" | "" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => bail!("--since takes a time like 30s, 10m, 2h or 1d, not {s:?}."),
+    };
+    Ok(n.saturating_mul(ms).min(7 * 86_400_000))
+}
+
+/// A replica's name, short: without the service's name in front.
+fn short_replica<'a>(service: &str, pod: &'a str) -> &'a str {
+    pod.strip_prefix(service)
+        .and_then(|r| r.strip_prefix('-'))
+        .filter(|r| !r.is_empty())
+        .unwrap_or(pod)
+}
+
+/// Whether `--replica` means this one: its name, short name or its end.
+fn is_replica(service: &str, pod: &str, want: &str) -> bool {
+    pod == want || short_replica(service, pod) == want || pod.ends_with(&format!("-{want}"))
+}
+
+pub async fn logs(api: &Api, service: Option<&str>, o: LogsOpts) -> Result<()> {
     let t = target(api, service).await?;
-    let path = format!("/api/v1/services/{}/logs", t.id);
-    let mut last = 0i64;
+    if o.build {
+        return build_logs(api, &t, o.follow).await;
+    }
+    let name = t.service()["name"].as_str().unwrap_or("").to_owned();
+    let since = match &o.since {
+        Some(s) => Some(now_ms() - parse_since(s)?),
+        None => None,
+    };
+    // The whole name narrows what the cluster reads; a short one is matched here.
+    let exact = o
+        .replica
+        .as_deref()
+        .filter(|r| r.starts_with(&format!("{name}-")));
+    let mut last = since.unwrap_or(0);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut first = true;
     loop {
-        let r = api.get(&path).await?;
+        let mut q: Vec<(&str, String)> = vec![];
+        if let Some(r) = exact {
+            q.push(("replica", r.to_owned()));
+        }
+        if !first || since.is_some() {
+            q.push(("since", last.to_string()));
+        }
+        if first && since.is_none() && o.follow {
+            q.push(("tail", "100".into()));
+        }
+        let query = q
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let path = format!("/api/v1/services/{}/logs?{query}", t.id);
+        let r = match api.get(&path).await {
+            Ok(r) => r,
+            // A blip while following: try again.
+            Err(e) if !first => {
+                eprintln!("{} {e:#}", ui::yellow("!"));
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        first = false;
         for l in r["logs"].as_array().into_iter().flatten() {
             let at = l["at"].as_i64().unwrap_or(0);
-            let key = format!("{at}{}{}", l["source"], l["message"]);
+            let src = l["source"].as_str().unwrap_or("");
+            if o.replica
+                .as_deref()
+                .is_some_and(|w| !is_replica(&name, src, w))
+            {
+                continue;
+            }
+            let key = format!("{at}\u{0}{src}\u{0}{}", l["message"]);
             if at < last || !seen.insert(key) {
                 continue;
             }
             last = last.max(at);
-            let src = l["source"].as_str().unwrap_or("");
             let msg = ui::log_text(
                 l["message"].as_str().unwrap_or(""),
                 l["level"].as_str().unwrap_or("info"),
             );
-            println!("{} {} {msg}", ui::dim(&ui::clock(at)), ui::dim(src));
+            println!(
+                "{} {} {msg}",
+                ui::dim(&ui::clock(at)),
+                ui::replica(short_replica(&name, src))
+            );
         }
-        if !follow {
+        if !o.follow {
             return Ok(());
         }
-        // Only lines at the newest timestamp can repeat.
-        seen.retain(|k| k.starts_with(&last.to_string()));
+        // Only lines at the newest time can come again.
+        let newest = format!("{last}\u{0}");
+        seen.retain(|k| k.starts_with(&newest));
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// The latest deployment's log: the build, then the rollout. Followed to
+/// its end with `follow`; fails when the deployment did.
+async fn build_logs(api: &Api, t: &Target, follow: bool) -> Result<()> {
+    let Some(dep) = t
+        .state
+        .deployments_of(&t.id)
+        .first()
+        .map(|d| d["id"].clone())
+    else {
+        bail!(
+            "{} has no deployments yet.",
+            t.service()["name"].as_str().unwrap_or("")
+        );
+    };
+    let dep = dep.as_str().unwrap_or("").to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut fresh: Option<State> = None;
+    loop {
+        let st = fresh.as_ref().unwrap_or(&t.state);
+        let Some(d) = st.deployment(&dep) else {
+            bail!("That deployment is gone.");
+        };
+        for l in d["logs"].as_array().into_iter().flatten() {
+            let key = l["id"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{}{}", l["at"], l["message"]));
+            if seen.insert(key) {
+                print_line(l);
+            }
+        }
+        let status = d["status"].as_str().unwrap_or("");
+        let done = matches!(status, "succeeded" | "failed" | "cancelled");
+        if done || !follow {
+            if status == "failed" {
+                bail!(
+                    "Deploy failed: {}",
+                    d["failure"]["message"].as_str().unwrap_or("it failed.")
+                );
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        fresh = Some(api.state().await?);
     }
 }
 
