@@ -94,7 +94,10 @@ function AppSettings({ app }: { app: Application }) {
   const navigate = useNavigate();
   const [name, setName] = useState(app.name);
   const [source, setSource] = useState<ServiceSource>(app.source);
-  const savedArgs = app.source.type === "git" ? app.source.buildArgs : [];
+  const savedArgs =
+    app.source.type === "git" || app.source.type === "upload"
+      ? app.source.buildArgs
+      : [];
   const [buildArgs, setBuildArgs] = useState<BuildArg[]>(() =>
     (savedArgs ?? []).map((a) => ({ id: draftId(), ...a })),
   );
@@ -169,7 +172,33 @@ function AppSettings({ app }: { app: Application }) {
 
       <Panel title="Deployment source">
         <div className="grid gap-4 p-4 sm:grid-cols-2">
-          {source.type === "git" ? (
+          {source.type === "upload" ? (
+            <>
+              <Field label="Source" hint="Deploy again with pyo deploy in the folder.">
+                {(p) => <Input {...p} value="A folder" disabled />}
+              </Field>
+              <Field label="Dockerfile">
+                {(p) => (
+                  <Input
+                    {...p}
+                    mono
+                    value={source.dockerfilePath ?? "Dockerfile"}
+                    onChange={(e) =>
+                      setSource({ ...source, dockerfilePath: e.target.value })
+                    }
+                  />
+                )}
+              </Field>
+              <div className="sm:col-span-2">
+                <BuildArgsEditor
+                  value={buildArgs}
+                  onChange={setBuildArgs}
+                  errors={argErrors}
+                  note="Used on the next deploy."
+                />
+              </div>
+            </>
+          ) : source.type === "git" ? (
             <>
               <Field label="Repository" className="sm:col-span-2">
                 {(p) => (
@@ -275,7 +304,7 @@ function AppSettings({ app }: { app: Application }) {
                 app.id,
                 {
                   source:
-                    source.type === "git"
+                    source.type === "git" || source.type === "upload"
                       ? { ...source, buildArgs: argList }
                       : source,
                 },

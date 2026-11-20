@@ -771,7 +771,30 @@ export type TemplateSource = TemplateRecord & {
   reference: string;
 };
 
-export type ServiceSource = GitSource | ImageSource | TemplateSource;
+/**
+ * Built from a folder sent with `pyo deploy`. On a service: its build
+ * settings. On a deployment: also where the folder came from.
+ */
+export type UploadSource = {
+  type: "upload";
+  dockerfilePath?: string;
+  buildContext?: string;
+  buildArgs?: { key: string; value: string }[];
+  /** Dockerfile build, or zero config (Railpack) when there is none. */
+  builder?: "dockerfile" | "buildpacks" | "railpack";
+  /** What the zero-config build detected, e.g. "Next.js" or "Go". */
+  buildpackLanguage?: string;
+  /** Deployments only: the folder's name, the computer it came from, its size. */
+  folder?: string;
+  machine?: string;
+  files?: number;
+  size?: number;
+  sha256?: string;
+  /** A Git service's working copy, sent with `pyo deploy --local`. */
+  fromGit?: boolean;
+};
+
+export type ServiceSource = GitSource | ImageSource | TemplateSource | UploadSource;
 
 export type EnvironmentVariable = {
   id: ID;

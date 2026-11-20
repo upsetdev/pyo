@@ -97,7 +97,7 @@ export function imageRef(
   revision: string,
 ) {
   const s = app.source;
-  if (s.type === "git")
+  if (s.type === "git" || s.type === "upload")
     return `registry.pyo.internal/${app.name}:${revision.slice(0, 12)}`;
   return `${s.image}:${s.reference}`;
 }
@@ -107,6 +107,10 @@ export function revisionFor(source: ServiceSource, seed: string) {
   if (source.type === "git") {
     const sha = source.commit || hex(40, seed);
     return { revision: sha, revisionLabel: shortSha(sha) };
+  }
+  if (source.type === "upload") {
+    const sha = source.sha256 || hex(64, seed);
+    return { revision: "", revisionLabel: sha.slice(0, 7) };
   }
   const digest = `sha256:${hex(64, seed)}`;
   return {

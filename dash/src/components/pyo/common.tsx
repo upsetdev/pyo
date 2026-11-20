@@ -3,6 +3,7 @@ import {
   ChartLineUpIcon,
   DatabaseIcon,
   DotsThreeCircleIcon,
+  FolderIcon,
   GitBranchIcon,
   GlobeSimpleIcon,
   HardDrivesIcon,
@@ -30,6 +31,7 @@ import type {
   ServiceSource,
   Template,
   TemplateCategory,
+  UploadSource,
 } from "~/lib/pyo/types";
 
 /** A template's icon when it has no logo: its category's. */
@@ -135,6 +137,7 @@ export function TemplateLogo({
 export function sourceIcon(source: ServiceSource): Icon {
   if (source.type === "git") return GitBranchIcon;
   if (source.type === "image") return PackageIcon;
+  if (source.type === "upload") return FolderIcon;
   const t = getTemplate(source.templateId);
   return t ? CATEGORY_ICONS[t.category] : SquaresFourIcon;
 }
@@ -155,6 +158,16 @@ export function ServiceIcon({
   ) : (
     <IconTile icon={sourceIcon(app.source)} size={size} />
   );
+}
+
+/**
+ * Where an uploaded folder came from: "Uploaded from laptop · shop", or
+ * "Deployed from a folder" on a service before its first upload.
+ */
+export function uploadText(source: UploadSource) {
+  if (!source.machine && !source.folder) return "Deployed from a folder";
+  const from = source.machine ? `Uploaded from ${source.machine}` : "Uploaded";
+  return source.folder ? `${from} · ${source.folder}` : from;
 }
 
 /** One-line description of where a service's code or image comes from. */
@@ -182,6 +195,14 @@ export function SourceSummary({
             </span>
           ) : null}
         </span>
+      </span>
+    );
+  }
+  if (source.type === "upload") {
+    return (
+      <span className="flex min-w-0 max-w-full items-center gap-1.5">
+        <FolderIcon size={12} className="shrink-0 text-muted-foreground" />
+        <span className="truncate text-[11.5px]">{uploadText(source)}</span>
       </span>
     );
   }

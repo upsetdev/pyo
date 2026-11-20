@@ -1,5 +1,6 @@
 import { Segmented } from "~/components/ui/Field";
 import {
+  FolderIcon,
   ListBulletsIcon,
   PackageIcon,
   SquaresFourIcon,
@@ -75,6 +76,7 @@ import {
   BrandMark,
   GITHUB_LOGO,
   CATEGORY_ICONS,
+  uploadText,
 } from "./common";
 import { currentSlug } from "~/lib/pyo/paths";
 
@@ -229,6 +231,14 @@ export function SourcePill({
   /** "min-w-0" in a row: the pill shrinks and its name truncates. */
   className?: string;
 }) {
+  if (source.type === "upload") {
+    return (
+      <Pill title={uploadText(source)} className={className}>
+        <FolderIcon size={12} className="shrink-0" />
+        <span className="truncate">{uploadText(source)}</span>
+      </Pill>
+    );
+  }
   const t =
     source.type === "template" ? getTemplate(source.templateId) : undefined;
   const label =
@@ -738,6 +748,7 @@ function serviceMark(
   }
   if (src.type === "git")
     return { brand: isGitlab(src) ? siGitlab : siGithub };
+  if (src.type === "upload") return { Icon: FolderIcon };
   if (!src.image) return { Icon: PackageIcon };
   const name = imageLabel(src.image).split("/").pop() ?? "";
   const brand = IMAGES[name] ?? registryIcon(imageHost(src.image));
@@ -759,6 +770,8 @@ export function SourceMark({
         size={size}
       />
     );
+  if (source.type === "upload")
+    return <FolderIcon size={size} className="shrink-0" />;
   const icon = source.image ? registryIcon(imageHost(source.image)) : undefined;
   return icon ? (
     <BrandMark icon={icon} size={size} />
@@ -784,7 +797,9 @@ export function ServiceStack({
   if (!apps.length) return null;
   const built = (a: Application) => {
     const d = deployments.find((x) => x.id === a.currentDeploymentId);
-    return d?.source.type === "git" ? d.source.buildpackLanguage : undefined;
+    return d?.source.type === "git" || d?.source.type === "upload"
+      ? d.source.buildpackLanguage
+      : undefined;
   };
   const shown = apps.slice(0, STACK_MAX);
   const more = apps.length - shown.length;
@@ -832,7 +847,9 @@ export function ServiceLogo({ app }: { app: Application }) {
   const d = deployments.find((x) => x.id === app.currentDeploymentId);
   const m = serviceMark(
     app,
-    d?.source.type === "git" ? d.source.buildpackLanguage : undefined,
+    d?.source.type === "git" || d?.source.type === "upload"
+      ? d.source.buildpackLanguage
+      : undefined,
   );
   return (
     <span
