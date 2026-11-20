@@ -161,8 +161,10 @@ async fn current(db: &PgPool, o: &mut Value) -> anyhow::Result<()> {
 }
 
 /// Its domains route now: each one whose DNS checks out is active, and its
-/// certificate issued (an uploaded one), off, or on its way. With
-/// `revision`, only while the service's domains are still that version.
+/// certificate issued (an uploaded one), off, or on its way. Tailnet
+/// domains keep their state: it follows the cluster's tailnet
+/// (tailscale.rs). With `revision`, only while the service's domains are
+/// still that version.
 pub async fn mark_routed(
     tx: &mut Transaction<'_, Postgres>,
     service_id: &str,
@@ -170,12 +172,12 @@ pub async fn mark_routed(
 ) -> ApiResult<()> {
     sqlx::query(
         "UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', coalesce((
-                  SELECT jsonb_agg(d || jsonb_build_object(
+                  SELECT jsonb_agg(CASE WHEN lower(d->>'hostname') LIKE '%.ts.net' THEN d ELSE d || jsonb_build_object(
                            -- Ones still waiting for DNS stay so until the DNS watcher sees them resolve.
                            'status', CASE WHEN d->>'status' IN ('pending_dns', 'verifying') THEN d->>'status' ELSE 'active' END, 'tls',
                            CASE WHEN coalesce(d->>'tlsMode', 'auto') = 'off' THEN 'disabled'
                                 WHEN d->>'tlsMode' = 'custom' OR d->>'tls' = 'issued' THEN 'issued' ELSE 'pending' END)
-                           - CASE WHEN d->>'status' IN ('pending_dns', 'verifying') THEN '' ELSE 'error' END)
+                           - CASE WHEN d->>'status' IN ('pending_dns', 'verifying') THEN '' ELSE 'error' END END)
                     FROM jsonb_array_elements(spec->'domains') d), '[]'))
           WHERE id = $1 AND ($2::bigint IS NULL OR routes_revision = $2)",
     )

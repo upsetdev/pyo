@@ -94,6 +94,9 @@ pub struct Tailnet {
     pub sent: String,
     #[serde(default)]
     pub sent_at: i64,
+    /// The last sync failed: tailnet domains it didn't make yet say so.
+    #[serde(default)]
+    pub sync_failed: bool,
 }
 
 /// A cluster's Tailscale, when it has one.
@@ -898,41 +901,147 @@ pub async fn tick(s: &AppState) -> ApiResult<()> {
         save_address(&s.db, key, ready.get(kind).map(String::as_str)).await?;
     }
 
-    // Services' tailnet domains: their certificate as their state.
     for (id, _, _, _, v) in &rows {
-        let Some(suffix) = v["suffix"].as_str() else {
+        if let Ok(t) = serde_json::from_value::<Tailnet>(v.clone()) {
+            follow_domains(&s.db, id, &t).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Why a tailnet domain the agent never made isn't live: its last sync
+/// failed.
+pub const SYNC_FAILED: &str = "Couldn't set it up on your tailnet. Check Tailscale on the cluster.";
+
+/// A tailnet domain's state, from what the cluster's agent and servers
+/// report. `status` None: it stays as it is (still being set up, or live).
+#[derive(Debug, PartialEq)]
+pub struct DomainState {
+    pub status: Option<&'static str>,
+    pub tls: &'static str,
+    pub error: Option<String>,
+}
+
+/// `name`: the name as the agent left it (its addresses and error), None
+/// before it made it. `served`: a server of the cluster advertises it.
+/// `certified`: a server keeps its certificate. `sync_failed`: the
+/// cluster's last sync failed.
+pub fn domain_state(
+    name: Option<(&[String], Option<&str>)>,
+    served: bool,
+    certified: bool,
+    sync_failed: bool,
+) -> DomainState {
+    let state = |status, tls, error: Option<&str>| DomainState {
+        status,
+        tls,
+        error: error.map(str::to_owned),
+    };
+    match name {
+        Some((_, Some(e))) => state(Some("error"), "failed", Some(e)),
+        Some(_) if certified => state(Some("active"), "issued", None),
+        Some((addrs, None)) if served && !addrs.is_empty() => {
+            state(Some("active"), "pending", None)
+        }
+        None if sync_failed => state(Some("error"), "pending", Some(SYNC_FAILED)),
+        _ => state(None, "pending", None),
+    }
+}
+
+/// A cluster's services' tailnet domains follow what its agent and servers
+/// report: live once a server serves the name, with its certificate as
+/// their HTTPS. Pyo can't look these names up itself: only devices on the
+/// tailnet resolve them (and Pyo Cloud isn't on the team's tailnet).
+async fn follow_domains(db: &PgPool, cluster_id: &str, t: &Tailnet) -> ApiResult<()> {
+    let Some(suffix) = t.suffix.as_deref() else {
+        return Ok(());
+    };
+    let sv = servers(db, cluster_id).await?;
+    let names: Vec<(String, Vec<String>, Option<String>)> = sqlx::query_as(
+        "SELECT name, addrs, error FROM pyo.cluster_tailnet_names WHERE cluster_id = $1 AND kind = 'domain' AND retired_at IS NULL",
+    )
+    .bind(cluster_id)
+    .fetch_all(db)
+    .await?;
+    let mut hosts: Vec<String> = sqlx::query_scalar(
+        "SELECT lower(d->>'hostname') FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
+          WHERE s.cluster_id = $1 AND NOT s.deleting AND lower(d->>'hostname') LIKE '%.' || $2",
+    )
+    .bind(cluster_id)
+    .bind(suffix)
+    .fetch_all(db)
+    .await?;
+    hosts.sort();
+    hosts.dedup();
+    for host in hosts {
+        let Some(label) = host.strip_suffix(&format!(".{suffix}")) else {
             continue;
         };
-        let sv = servers(&s.db, id).await?;
-        let domains: Vec<(String, Option<String>)> = sqlx::query_as(
-            "SELECT name, error FROM pyo.cluster_tailnet_names WHERE cluster_id = $1 AND kind = 'domain' AND retired_at IS NULL",
-        )
-        .bind(id)
-        .fetch_all(&s.db)
-        .await?;
-        for (name, error) in domains {
-            let host = format!("{name}.{suffix}");
-            let (tls, error) = match error {
-                Some(e) => ("failed", Some(e)),
-                None if sv.iter().any(|x| x.certificates.contains(&name)) => ("issued", None),
-                None => ("pending", None),
-            };
-            sqlx::query(
-                "UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', (
-                   SELECT coalesce(jsonb_agg(CASE WHEN lower(d->>'hostname') = $2
-                                                  THEN (d - 'tlsError') || jsonb_strip_nulls(jsonb_build_object('tls', $3::text, 'tlsError', $4::text))
-                                                  ELSE d END), '[]')
-                     FROM jsonb_array_elements(spec->'domains') d))
-                  WHERE cluster_id = $1 AND NOT deleting
-                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(spec->'domains') d
-                                 WHERE lower(d->>'hostname') = $2 AND (coalesce(d->>'tls', '') <> $3 OR coalesce(d->>'tlsError', '') <> coalesce($4, '')))",
+        let name = names
+            .iter()
+            .find(|(n, _, _)| n == label)
+            .map(|(_, a, e)| (a.as_slice(), e.as_deref()));
+        let st = domain_state(
+            name,
+            sv.iter().any(|x| x.advertised.iter().any(|a| a == label)),
+            sv.iter().any(|x| x.certificates.iter().any(|c| c == label)),
+            t.sync_failed,
+        );
+        // Ones going live now, for the activity log.
+        let live: Vec<(String, String)> = if st.status == Some("active") {
+            sqlx::query_as(
+                "SELECT s.id, s.team_id FROM pyo.services s
+                  WHERE s.cluster_id = $1 AND NOT s.deleting
+                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(s.spec->'domains') d
+                                 WHERE lower(d->>'hostname') = $2 AND d->>'status' IS DISTINCT FROM 'active')",
             )
-            .bind(id)
+            .bind(cluster_id)
             .bind(&host)
-            .bind(tls)
-            .bind(&error)
-            .execute(&s.db)
+            .fetch_all(db)
+            .await?
+        } else {
+            Vec::new()
+        };
+        // Without a status: an error goes once the agent no longer reports it.
+        sqlx::query(
+            "WITH x AS (SELECT $2::text AS host, $3::text AS tls, $4::text AS tls_error, $5::text AS status, $6::text AS error)
+             UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', (
+               SELECT coalesce(jsonb_agg(CASE WHEN lower(d->>'hostname') = x.host
+                        THEN (d - 'tlsError' - 'error') || jsonb_strip_nulls(jsonb_build_object(
+                               'status', coalesce(x.status, CASE WHEN d->>'status' = 'error' THEN 'pending_dns' ELSE d->>'status' END),
+                               'tls', x.tls, 'tlsError', x.tls_error, 'error', x.error))
+                        ELSE d END), '[]')
+                 FROM jsonb_array_elements(spec->'domains') d))
+              FROM x
+              WHERE cluster_id = $1 AND NOT deleting
+                AND EXISTS (SELECT 1 FROM jsonb_array_elements(spec->'domains') d
+                             WHERE lower(d->>'hostname') = x.host
+                               AND (coalesce(d->>'tls', '') <> x.tls OR coalesce(d->>'tlsError', '') <> coalesce(x.tls_error, '')
+                                    OR coalesce(d->>'error', '') <> coalesce(x.error, '')
+                                    OR d->>'status' IS DISTINCT FROM coalesce(x.status, CASE WHEN d->>'status' = 'error' THEN 'pending_dns' ELSE d->>'status' END)))",
+        )
+        .bind(cluster_id)
+        .bind(&host)
+        .bind(st.tls)
+        .bind(st.error.as_ref().filter(|_| st.tls == "failed"))
+        .bind(st.status)
+        .bind(&st.error)
+        .execute(db)
+        .await?;
+        for (service_id, team_id) in live {
+            let mut tx = db.begin().await?;
+            crate::ops::log_activity(
+                &mut tx,
+                &team_id,
+                "pyo",
+                "domain.verified",
+                "success",
+                &format!("{host} is on your tailnet now"),
+                json!({ "kind": "service", "id": service_id, "label": host }),
+                json!({ "serviceId": service_id }),
+            )
             .await?;
+            tx.commit().await?;
         }
     }
     Ok(())
@@ -955,7 +1064,12 @@ pub async fn synced(
     if !r.ok {
         tracing::warn!(cluster = %cluster_id, error = ?r.message, "the cluster couldn't sync its tailnet names");
         // Tried again with the next pass.
-        return patch(&mut **tx, cluster_id, json!({ "sent": "" })).await;
+        return patch(
+            &mut **tx,
+            cluster_id,
+            json!({ "sent": "", "syncFailed": true }),
+        )
+        .await;
     }
     let Some(done) = r
         .data
@@ -1014,6 +1128,7 @@ pub async fn synced(
             "lockWaiting": done.lock_waiting,
             "machines": done.machines,
             "forget": forget,
+            "syncFailed": false,
         }),
     )
     .await
@@ -1656,6 +1771,238 @@ mod tests {
         let mut retired = w.retired.clone();
         retired.sort();
         assert_eq!(retired, ["old", "shop"]);
+    }
+
+    #[test]
+    fn a_tailnet_domain_is_live_once_a_server_serves_it() {
+        let addrs = vec!["100.100.1.2".to_owned()];
+        let made = Some((addrs.as_slice(), None));
+        let st = |name, served, certified, failed| domain_state(name, served, certified, failed);
+        // Not made yet, or made and not served yet: still being set up.
+        assert_eq!(st(None, false, false, false).status, None);
+        assert_eq!(st(made, false, false, false).status, None);
+        assert_eq!(st(Some((&[][..], None)), true, false, false).status, None);
+        // Served: live, its certificate on its way, then issued.
+        assert_eq!(
+            st(made, true, false, false),
+            DomainState {
+                status: Some("active"),
+                tls: "pending",
+                error: None
+            }
+        );
+        assert_eq!(
+            st(made, true, true, false),
+            DomainState {
+                status: Some("active"),
+                tls: "issued",
+                error: None
+            }
+        );
+        assert_eq!(st(made, false, true, false).status, Some("active"));
+        // The agent couldn't make it.
+        assert_eq!(
+            st(
+                Some((&[][..], Some("Taken on your tailnet"))),
+                false,
+                false,
+                false
+            ),
+            DomainState {
+                status: Some("error"),
+                tls: "failed",
+                error: Some("Taken on your tailnet".into())
+            }
+        );
+        // The sync failed: only names it never made say so.
+        assert_eq!(st(None, false, false, true).status, Some("error"));
+        assert_eq!(
+            st(None, false, false, true).error.as_deref(),
+            Some(SYNC_FAILED)
+        );
+        assert_eq!(st(made, false, false, true).status, None);
+        assert_eq!(st(made, true, false, true).status, Some("active"));
+    }
+
+    /// Services' tailnet domains follow the cluster: set up, live once a
+    /// server serves them, an error when the agent reports one, and never
+    /// looked up in DNS.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn tailnet_domains_follow_the_cluster() {
+        let (s, cluster) = db().await;
+        let team: String = sqlx::query_scalar("SELECT team_id FROM pyo.clusters WHERE id = $1")
+            .bind(&cluster)
+            .fetch_one(&s.db)
+            .await
+            .unwrap();
+        let run = crate::ids::new_id("t");
+        let suffix = format!("{}.ts.net", run.to_lowercase().replace('_', "-"));
+        let (project, service) = (format!("prj_{run}"), format!("svc_{run}"));
+        sqlx::query(
+            "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, $1, $1)",
+        )
+        .bind(&project)
+        .bind(&team)
+        .execute(&s.db)
+        .await
+        .unwrap();
+        let domain = |id: &str, host: &str| json!({ "id": id, "hostname": host, "portName": "http", "status": "pending_dns", "tls": "pending", "tlsMode": "auto", "redirectHttps": false, "createdAt": 1 });
+        let (blog, shop, wiki) = (
+            format!("blog.{suffix}"),
+            format!("shop.{suffix}"),
+            format!("wiki.{suffix}"),
+        );
+        let spec = json!({ "domains": [domain("dom_b", &blog), domain("dom_s", &shop), domain("dom_w", &wiki)] });
+        sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, 'web', $5)")
+            .bind(&service)
+            .bind(&team)
+            .bind(&project)
+            .bind(&cluster)
+            .bind(&spec)
+            .execute(&s.db)
+            .await
+            .unwrap();
+        let t = Tailnet {
+            client_id: "k1".into(),
+            suffix: Some(suffix.clone()),
+            ..Default::default()
+        };
+        sqlx::query("UPDATE pyo.clusters SET tailscale = $2 WHERE id = $1")
+            .bind(&cluster)
+            .bind(serde_json::to_value(&t).unwrap())
+            .execute(&s.db)
+            .await
+            .unwrap();
+        let state = || async {
+            let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+                .bind(&service)
+                .fetch_one(&s.db)
+                .await
+                .unwrap();
+            spec["domains"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| {
+                    (
+                        d["status"].as_str().unwrap_or("").to_owned(),
+                        d["tls"].as_str().unwrap_or("").to_owned(),
+                        d["error"].as_str().map(str::to_owned),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let pending = ("pending_dns".to_owned(), "pending".to_owned(), None);
+
+        // The DNS watcher leaves them alone: Pyo can't look them up.
+        crate::deploy::check_pending_dns(&s).await.unwrap();
+        let checked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d WHERE s.id = $1 AND d ? 'dnsCheckedAt'",
+        )
+        .bind(&service)
+        .fetch_one(&s.db)
+        .await
+        .unwrap();
+        assert_eq!(checked, 0);
+
+        // The sync failed before the agent made any: they say so.
+        let failed = CommandResult {
+            ok: false,
+            message: Some("x".into()),
+            logs: vec![],
+            data: None,
+        };
+        let mut tx = s.db.begin().await.unwrap();
+        synced(&mut tx, &cluster, "cmd_1", &failed).await.unwrap();
+        tx.commit().await.unwrap();
+        let t = of(&s.db, &cluster).await.unwrap().unwrap();
+        assert!(t.sync_failed);
+        follow_domains(&s.db, &cluster, &t).await.unwrap();
+        let failing = (
+            "error".to_owned(),
+            "pending".to_owned(),
+            Some(SYNC_FAILED.to_owned()),
+        );
+        assert_eq!(state().await, [failing.clone(), failing.clone(), failing]);
+
+        // The next sync made blog and wiki, and shop is someone else's.
+        let name = |n: &str, error: Option<&str>| ts::NameState {
+            name: n.into(),
+            kind: "domain".into(),
+            addrs: if error.is_some() {
+                vec![]
+            } else {
+                vec!["100.100.1.2".into()]
+            },
+            error: error.map(str::to_owned),
+        };
+        let done = TailnetSynced {
+            suffix: Some(suffix.clone()),
+            names: vec![
+                name("blog", None),
+                name("shop", Some("Taken on your tailnet")),
+                name("wiki", None),
+            ],
+            ..Default::default()
+        };
+        let ok = CommandResult {
+            ok: true,
+            message: None,
+            logs: vec![],
+            data: Some(serde_json::to_value(&done).unwrap()),
+        };
+        let mut tx = s.db.begin().await.unwrap();
+        synced(&mut tx, &cluster, "cmd_2", &ok).await.unwrap();
+        tx.commit().await.unwrap();
+        let t = of(&s.db, &cluster).await.unwrap().unwrap();
+        assert!(!t.sync_failed);
+        follow_domains(&s.db, &cluster, &t).await.unwrap();
+        let taken = (
+            "error".to_owned(),
+            "failed".to_owned(),
+            Some("Taken on your tailnet".to_owned()),
+        );
+        assert_eq!(
+            state().await,
+            [pending.clone(), taken.clone(), pending.clone()]
+        );
+
+        // A server serves blog: live. Then it keeps blog's certificate.
+        let server = |certificates: Vec<String>| json!([{ "server": "web-1", "nodeId": "n1", "advertised": ["blog"], "certificates": certificates }]);
+        let report = |v: Value| {
+            sqlx::query("UPDATE pyo.clusters SET capabilities = jsonb_set(coalesce(capabilities, '{}'), '{tailnet}', $2) WHERE id = $1")
+                .bind(&cluster)
+                .bind(v)
+                .execute(&s.db)
+        };
+        report(server(vec![])).await.unwrap();
+        follow_domains(&s.db, &cluster, &t).await.unwrap();
+        let live = ("active".to_owned(), "pending".to_owned(), None);
+        assert_eq!(state().await, [live, taken.clone(), pending.clone()]);
+        let logged: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pyo.activity WHERE team_id = $1 AND data->>'type' = 'domain.verified'",
+        )
+        .bind(&team)
+        .fetch_one(&s.db)
+        .await
+        .unwrap();
+        assert_eq!(logged, 1);
+        report(server(vec!["blog".into()])).await.unwrap();
+        follow_domains(&s.db, &cluster, &t).await.unwrap();
+        let issued = ("active".to_owned(), "issued".to_owned(), None);
+        assert_eq!(
+            state().await,
+            [issued.clone(), taken.clone(), pending.clone()]
+        );
+
+        // Its routes syncing leaves them as they are.
+        let mut tx = s.db.begin().await.unwrap();
+        crate::routes::mark_routed(&mut tx, &service, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(state().await, [issued, taken, pending]);
     }
 
     #[test]

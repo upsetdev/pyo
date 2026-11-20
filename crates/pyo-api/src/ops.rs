@@ -6530,12 +6530,22 @@ async fn apply(
                 .bind(&service_id)
                 .fetch_one(&mut **tx)
                 .await?;
-            let host = spec["domains"]
+            let d = spec["domains"]
                 .as_array()
                 .and_then(|ds| ds.iter().find(|d| d["id"] == json!(domain_id)))
-                .and_then(|d| d["hostname"].as_str())
-                .ok_or_else(|| ApiError::not_found("Domain"))?
-                .to_owned();
+                .ok_or_else(|| ApiError::not_found("Domain"))?;
+            let host = d["hostname"].as_str().unwrap_or_default().to_owned();
+            // A tailnet domain has no DNS to check: it goes live once the
+            // cluster serves it (tailscale.rs).
+            if pyo_proto::system::is_tailnet_host(&host) {
+                let live = d["status"] == json!("active");
+                let message = (!live).then(|| {
+                    d["error"].as_str().map(str::to_owned).unwrap_or_else(|| {
+                        format!("{host} goes live once the cluster serves it on your tailnet.")
+                    })
+                });
+                return Ok(json!({ "ok": live, "message": message, "addresses": [] }));
+            }
             // The DNS watcher does this on its own; this is the same check, now.
             let resolved = deploy::resolve(&host).await;
             deploy::set_domain_dns(&s.db, &service_id, &domain_id, !resolved.is_empty(), &host)

@@ -2317,6 +2317,8 @@ pub async fn set_domain_dns(
 /// Checks the DNS of domains still waiting for it, so nobody has to press a
 /// button: every 30 seconds for an hour after a domain is added, then every
 /// 5 minutes for a day, then every 30 minutes.
+/// Not tailnet domains: Pyo can't look those up (only devices on the
+/// tailnet can), so they follow the cluster's tailnet (tailscale.rs).
 pub async fn dns_watcher(state: AppState) {
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     loop {
@@ -2333,11 +2335,12 @@ pub async fn dns_watcher(state: AppState) {
     }
 }
 
-async fn check_pending_dns(state: &AppState) -> ApiResult<()> {
+pub(crate) async fn check_pending_dns(state: &AppState) -> ApiResult<()> {
     let due: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT a.id, a.team_id, d->>'id', d->>'hostname'
            FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
           WHERE NOT a.deleting AND d->>'status' IN ('pending_dns', 'verifying')
+            AND lower(d->>'hostname') NOT LIKE '%.ts.net'
             AND pyo.ms(now()) - coalesce((d->>'dnsCheckedAt')::bigint, 0) >=
                 CASE WHEN pyo.ms(now()) - coalesce((d->>'createdAt')::bigint, 0) < 3600000 THEN 30000
                      WHEN pyo.ms(now()) - coalesce((d->>'createdAt')::bigint, 0) < 86400000 THEN 300000
