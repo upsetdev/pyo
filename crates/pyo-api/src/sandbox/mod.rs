@@ -20,8 +20,8 @@
 //!
 //! Sandboxes belong to a team, with an optional project as a label. Sandbox
 //! servers and templates belong to a team, or to the installation (no team),
-//! which every team may use. Nothing here runs or shows until the first
-//! sandbox server exists ([`available`]).
+//! which every team may use on a self-hosted Pyo ([`shared`]). Nothing here
+//! runs or shows until the first sandbox server exists ([`available`]).
 
 pub mod api;
 pub mod base;
@@ -82,13 +82,23 @@ pub fn format_ttl(secs: u64) -> String {
     out
 }
 
+/// Whether the installation's own sandbox servers and templates (no team)
+/// are there for every team: on a self-hosted Pyo only. A hosted Pyo serves
+/// teams that don't trust each other, so there each team has only its own,
+/// and none of the installation's can be added. Pyo's built-in templates
+/// ([`base`]) are the same image everywhere and stay for every team.
+pub fn shared() -> bool {
+    !crate::hosted()
+}
+
 /// Whether any of these teams can use a sandbox server: its own, or the
 /// installation's. Until then the sandbox tools stay hidden.
 pub async fn available(db: &PgPool, team_ids: &[String]) -> sqlx::Result<bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pyo.sandbox_servers WHERE team_id IS NULL OR team_id = ANY($1))",
+        "SELECT EXISTS (SELECT 1 FROM pyo.sandbox_servers WHERE (team_id IS NULL AND $2) OR team_id = ANY($1))",
     )
     .bind(team_ids)
+    .bind(shared())
     .fetch_one(db)
     .await
 }
@@ -185,6 +195,21 @@ fn require_install_admin(user: &User) -> ApiResult<()> {
             "Only the installation's admin can add the installation's own sandbox servers and templates, from the dashboard.",
         ))
     }
+}
+
+/// Adding to the installation's own servers and templates, or changing
+/// them: never on a hosted Pyo ([`shared`]). Removing them stays allowed.
+fn require_install_add(user: &User) -> ApiResult<()> {
+    install_add(user, shared())
+}
+
+fn install_add(user: &User, shared: bool) -> ApiResult<()> {
+    if !shared {
+        return Err(ApiError::forbidden(
+            "Sandbox servers and templates belong to a team here. Pick the team.",
+        ));
+    }
+    require_install_admin(user)
 }
 
 /// A daemon's error as the API's. A token the server refuses is Pyo's
@@ -387,11 +412,12 @@ pub async fn server_views(
                         FROM pyo.cloud_servers c WHERE c.sandbox_server_id = s.id AND c.state <> 'deleted'
                         ORDER BY c.created_at DESC LIMIT 1))
            FROM pyo.sandbox_servers s
-          WHERE (s.team_id IS NULL OR s.team_id = ANY($1)) AND ($2::text IS NULL OR s.id = $2)
+          WHERE ((s.team_id IS NULL AND $3) OR s.team_id = ANY($1)) AND ($2::text IS NULL OR s.id = $2)
           ORDER BY s.team_id NULLS FIRST, s.name",
     )
     .bind(team_ids)
     .bind(id)
+    .bind(shared())
     .fetch_all(db)
     .await?;
     for r in &mut rows {
@@ -459,17 +485,18 @@ async fn template_rows(
                                          OR (t.revision IS NOT NULL AND starts_with(x->>'name', t.id || '.'))
                                       ORDER BY x->>'name' = t.id || coalesce('.' || t.revision, '') DESC LIMIT 1) m ON true
                  WHERE (s.team_id IS NULL OR s.team_id = t.team_id OR t.team_id IS NULL)
-                   AND (s.team_id IS NULL OR s.team_id = ANY($1))
+                   AND ((s.team_id IS NULL AND $4) OR s.team_id = ANY($1))
                    AND (m.e IS NOT NULL OR s.state NOT IN ('joining', 'refused'))
                    -- One made on first use: the servers that have it.
                    AND (m.e IS NOT NULL OR t.id <> ALL($3))))
            FROM pyo.sandbox_templates t
-          WHERE (t.team_id IS NULL OR t.team_id = ANY($1)) AND ($2::text IS NULL OR t.id = $2)
+          WHERE ((t.team_id IS NULL AND (t.builtin OR $4)) OR t.team_id = ANY($1)) AND ($2::text IS NULL OR t.id = $2)
           ORDER BY t.team_id NULLS FIRST, t.name",
     )
     .bind(team_ids)
     .bind(id)
     .bind(base::ALL.map(|b| b.id).as_slice())
+    .bind(shared())
     .fetch_all(db)
     .await?;
     // Pyo's own are listed before they're added, as they will be.
@@ -614,13 +641,23 @@ async fn template_for(
     team_id: &str,
     name: &str,
 ) -> ApiResult<AskedTemplate> {
+    template_on(tx, team_id, name, shared()).await
+}
+
+async fn template_on(
+    tx: &mut PgConnection,
+    team_id: &str,
+    name: &str,
+    shared: bool,
+) -> ApiResult<AskedTemplate> {
     let row: Option<(String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT id, name, state, revision FROM pyo.sandbox_templates
-          WHERE (team_id = $1 OR team_id IS NULL) AND (name = $2 OR id = $2)
+          WHERE (team_id = $1 OR (team_id IS NULL AND (builtin OR $3))) AND (name = $2 OR id = $2)
           ORDER BY team_id NULLS LAST LIMIT 1",
     )
     .bind(team_id)
     .bind(name)
+    .bind(shared)
     .fetch_optional(tx)
     .await?;
     let Some((id, name, state, revision)) = row else {
@@ -647,6 +684,14 @@ pub async fn candidates(
     tx: &mut PgConnection,
     team_id: &str,
 ) -> ApiResult<Vec<(scheduler::Candidate, String)>> {
+    candidates_on(tx, team_id, shared()).await
+}
+
+async fn candidates_on(
+    tx: &mut PgConnection,
+    team_id: &str,
+    shared: bool,
+) -> ApiResult<Vec<(scheduler::Candidate, String)>> {
     #[derive(sqlx::FromRow)]
     struct Row {
         id: String,
@@ -668,9 +713,10 @@ pub async fn candidates(
                            WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed', 'paused')
                              AND (x.state IN ('creating', 'resuming') OR s.last_report_at IS NULL OR x.created_at > s.last_report_at)), 0)::bigint AS pending_mib
            FROM pyo.sandbox_servers s
-          WHERE s.team_id IS NULL OR s.team_id = $1",
+          WHERE (s.team_id IS NULL AND $2) OR s.team_id = $1",
     )
     .bind(team_id)
+    .bind(shared)
     .fetch_all(tx)
     .await?;
     Ok(rows
@@ -1259,7 +1305,7 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
     let mut tx = s.db.begin().await?;
     match &req.team_id {
         Some(t) => require(&mut tx, user, t, Need::Manage).await?,
-        None => require_install_admin(user)?,
+        None => require_install_add(user)?,
     }
     crate::cloud::needs_tailscale(&s.db).await?;
     let door = crate::deploy::registry_push();
@@ -1663,7 +1709,7 @@ pub async fn create_template(s: &AppState, user: &User, req: CreateTemplate) -> 
     let mut tx = s.db.begin().await?;
     match &req.team_id {
         Some(t) => require(&mut tx, user, t, Need::Use).await?,
-        None => require_install_admin(user)?,
+        None => require_install_add(user)?,
     }
     let id = crate::ids::new_id("stp");
     sqlx::query(
@@ -1970,6 +2016,120 @@ mod tests {
             .unwrap();
         let e = rename(&s, &user, &old, "mine").await.unwrap_err();
         assert_eq!(e.status, StatusCode::FORBIDDEN);
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    /// Against a throwaway Postgres: the installation's servers and
+    /// templates are every team's on a self-hosted Pyo, and nobody's on a
+    /// hosted one, where Pyo's built-in templates stay and none of the
+    /// installation's can be added.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn the_installations_servers_and_templates_are_shared_only_when_self_hosted() {
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let run = crate::ids::random_string(8);
+        let team = format!("tm_shared{run}");
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, 'Shared', $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (ours, installs) = (format!("sbs_ours{run}"), format!("sbs_inst{run}"));
+        for (id, owner) in [(&ours, Some(&team)), (&installs, None)] {
+            sqlx::query("INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by) VALUES ($1, $2, $1, 'ready', 'test')")
+                .bind(id)
+                .bind(owner)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let shared_template = format!("shared-{run}");
+        sqlx::query("INSERT INTO pyo.sandbox_templates (id, team_id, name, source, state, created_by) VALUES ($1, NULL, $2, '{}', 'ready', 'test')")
+            .bind(format!("stp_inst{run}"))
+            .bind(&shared_template)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pyo.sandbox_templates (id, team_id, name, source, state, created_by, builtin) VALUES ($1, NULL, $2, '{}', 'ready', 'test', true) ON CONFLICT DO NOTHING")
+            .bind(base::BASE.id)
+            .bind(base::BASE.name)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let mut tx = db.acquire().await.unwrap();
+        let servers = |v: Vec<(scheduler::Candidate, String)>| {
+            let mut ids: Vec<String> = v.into_iter().map(|(c, _)| c.id).collect();
+            ids.retain(|i| i.ends_with(&run));
+            ids.sort();
+            ids
+        };
+        let mut both = vec![installs.clone(), ours.clone()];
+        both.sort();
+        assert_eq!(
+            servers(candidates_on(&mut tx, &team, true).await.unwrap()),
+            both
+        );
+        assert_eq!(
+            servers(candidates_on(&mut tx, &team, false).await.unwrap()),
+            vec![ours.clone()],
+            "hosted: the team's own server only"
+        );
+        assert!(
+            template_on(&mut tx, &team, &shared_template, true)
+                .await
+                .is_ok()
+        );
+        let e = template_on(&mut tx, &team, &shared_template, false)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            e.status,
+            StatusCode::NOT_FOUND,
+            "hosted: not the installation's"
+        );
+        assert!(
+            template_on(&mut tx, &team, base::BASE.name, false)
+                .await
+                .is_ok(),
+            "Pyo's built-in template stays"
+        );
+
+        let admin = User {
+            id: "usr_admin".into(),
+            name: "Admin".into(),
+            email: "admin@shared.test".into(),
+            timezone: "UTC".into(),
+            is_admin: true,
+            must_set_up: false,
+            key: None,
+        };
+        assert!(install_add(&admin, true).is_ok());
+        assert_eq!(
+            install_add(&admin, false).unwrap_err().status,
+            StatusCode::FORBIDDEN,
+            "hosted: none of the installation's can be added"
+        );
+
+        drop(tx);
+        sqlx::query("DELETE FROM pyo.sandbox_servers WHERE id = $1")
+            .bind(&installs)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM pyo.sandbox_templates WHERE id = $1")
+            .bind(format!("stp_inst{run}"))
+            .execute(&db)
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
             .bind(&team)
             .execute(&db)

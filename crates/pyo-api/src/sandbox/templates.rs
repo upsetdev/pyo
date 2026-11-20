@@ -90,9 +90,17 @@ pub fn older_ready<'a>(
 
 /// Whether a server may use a template: an installation's server takes
 /// every template, a team's server its team's and the installation's.
-pub fn eligible(server_team: Option<&str>, template_team: Option<&str>) -> bool {
-    match (server_team, template_team) {
-        (None, _) | (_, None) => true,
+/// Without [`super::shared`] (a hosted Pyo) an installation's server takes
+/// none, and a team's server takes only Pyo's built-in templates of the
+/// installation's.
+pub fn eligible(server_team: Option<&str>, t: &Template) -> bool {
+    eligible_on(super::shared(), server_team, t)
+}
+
+fn eligible_on(shared: bool, server_team: Option<&str>, t: &Template) -> bool {
+    match (server_team, t.team_id.as_deref()) {
+        (None, _) => shared,
+        (_, None) => shared || super::base::on_demand(&t.id),
         (Some(s), Some(t)) => s == t,
     }
 }
@@ -200,7 +208,7 @@ pub fn plan(
 ) -> (Vec<String>, Vec<String>) {
     let mine: Vec<&Template> = templates
         .iter()
-        .filter(|t| eligible(server_team, t.team_id.as_deref()))
+        .filter(|t| eligible(server_team, t))
         .collect();
     let names: Vec<String> = mine.iter().map(|t| t.server_name()).collect();
     let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
@@ -336,7 +344,7 @@ pub async fn push(s: AppState, template_id: String) {
             .map_err(|e| anyhow::anyhow!(e.message))?;
         for (id, team, address, reports) in servers {
             let reports: Vec<TemplateReport> = serde_json::from_value(reports).unwrap_or_default();
-            if !eligible(team.as_deref(), t.team_id.as_deref()) || !made_ahead(&t.id, &reports) {
+            if !eligible(team.as_deref(), &t) || !made_ahead(&t.id, &reports) {
                 continue;
             }
             // The runner sends it once Pyo's registry door has an address.
@@ -491,7 +499,7 @@ pub async fn update_states(db: &PgPool) -> sqlx::Result<()> {
                 coalesce(bool_or(o.ready), false)
            FROM pyo.sandbox_templates t
            LEFT JOIN pyo.sandbox_servers s
-             ON s.team_id IS NULL OR t.team_id IS NULL OR s.team_id = t.team_id
+             ON (s.team_id IS NULL AND $1) OR (t.team_id IS NULL AND (t.builtin OR $1)) OR s.team_id = t.team_id
            LEFT JOIN LATERAL (SELECT x AS e FROM jsonb_array_elements(s.templates) x
                                WHERE x->>'name' = t.id || coalesce('.' || t.revision, '') LIMIT 1) m ON true
            LEFT JOIN LATERAL (SELECT true AS ready FROM jsonb_array_elements(s.templates) x
@@ -500,6 +508,7 @@ pub async fn update_states(db: &PgPool) -> sqlx::Result<()> {
                                  AND coalesce(x->>'state', 'ready') = 'ready' LIMIT 1) o ON true
           GROUP BY t.id",
     )
+    .bind(super::shared())
     .fetch_all(db)
     .await?;
     for (id, state, error, reports, missing, older_ready) in rows {
@@ -607,10 +616,28 @@ mod tests {
 
     #[test]
     fn which_servers_take_which_templates() {
-        assert!(eligible(None, Some("tm_a")), "the installation's server");
-        assert!(eligible(Some("tm_a"), None), "the installation's template");
-        assert!(eligible(Some("tm_a"), Some("tm_a")));
-        assert!(!eligible(Some("tm_a"), Some("tm_b")));
+        let (a, b, i) = (
+            t("stp_a", Some("tm_a")),
+            t("stp_b", Some("tm_b")),
+            t("stp_i", None),
+        );
+        assert!(eligible(None, &a), "the installation's server");
+        assert!(eligible(Some("tm_a"), &i), "the installation's template");
+        assert!(eligible(Some("tm_a"), &a));
+        assert!(!eligible(Some("tm_a"), &b));
+        // A hosted Pyo: no installation's servers or templates, only Pyo's own.
+        let builtin = t(super::super::base::ALL[0].id, None);
+        assert!(!eligible_on(false, None, &a), "the installation's server");
+        assert!(
+            !eligible_on(false, Some("tm_a"), &i),
+            "the installation's template"
+        );
+        assert!(
+            eligible_on(false, Some("tm_a"), &builtin),
+            "Pyo's built-in one"
+        );
+        assert!(eligible_on(false, Some("tm_a"), &a));
+        assert!(!eligible_on(false, Some("tm_a"), &b));
     }
 
     #[test]

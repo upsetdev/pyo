@@ -458,7 +458,7 @@ async fn allowed(s: &AppState, user: &User, srv: &Server, req: &EdgeRequest) -> 
             t.clone()
         }
         None => {
-            super::require_install_admin(user)?;
+            super::require_install_add(user)?;
             let t = req.team_id.clone().ok_or_else(|| {
                 ApiError::bad_request("Pick the team whose Cloudflare connection to use.")
             })?;
