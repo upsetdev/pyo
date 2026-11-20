@@ -63,6 +63,7 @@ mod publicdash;
 mod ratelimit;
 mod recovery;
 mod refs;
+mod retention;
 mod registry;
 mod registrydoor;
 mod rls;

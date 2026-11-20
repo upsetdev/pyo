@@ -159,14 +159,21 @@ pub async fn prune(s: &AppState) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// Build and deploy logs are kept 90 days, on Pyo Cloud and self-hosted:
-/// a batch at a time, so a large backlog doesn't hold the table up (this
-/// runs every 15 seconds). Returns the lines deleted.
+/// Build and deploy logs are kept as long as the installation's retention
+/// says (90 days by default, 30 to 365: Settings › Observability), on Pyo
+/// Cloud and self-hosted: a batch at a time, so a large backlog doesn't
+/// hold the table up (this runs every 15 seconds). Returns the lines
+/// deleted.
 pub async fn prune_deployment_logs(db: &sqlx::PgPool) -> sqlx::Result<u64> {
+    let days = match crate::retention::load(db).await {
+        Ok(r) => r.build_log_days,
+        Err(_) => crate::retention::Retention::default().build_log_days,
+    };
     Ok(sqlx::query(
         "DELETE FROM pyo.deployment_logs WHERE id IN (
-           SELECT id FROM pyo.deployment_logs WHERE at < now() - interval '90 days' LIMIT 5000)",
+           SELECT id FROM pyo.deployment_logs WHERE at < now() - make_interval(days => $1) LIMIT 5000)",
     )
+    .bind(i32::from(days))
     .execute(db)
     .await?
     .rows_affected())
@@ -180,10 +187,11 @@ pub fn git_status(deployment_id: &str, state: &str, description: &str) -> Value 
 #[cfg(test)]
 mod log_tests {
     /// Against a real Postgres (DATABASE_URL, a throwaway one): lines older
-    /// than 90 days go, newer ones stay.
+    /// than 90 days go, newer ones stay; with the setting at 30 days, those
+    /// older than 30 go.
     #[tokio::test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
-    async fn build_logs_go_after_90_days() {
+    async fn build_logs_go_after_the_settings_days() {
         let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
         crate::migrate::run(&pool).await.unwrap();
         let run = crate::ids::new_id("t");
@@ -202,13 +210,25 @@ mod log_tests {
                 .await
                 .unwrap();
         }
+        // The default: 90 days.
+        q("DELETE FROM pyo.settings WHERE key = 'observability'").execute(&pool).await.unwrap();
         while super::prune_deployment_logs(&pool).await.unwrap() > 0 {}
-        let left: Vec<i32> = sqlx::query_scalar("SELECT extract(day FROM now() - at)::int FROM pyo.deployment_logs WHERE deployment_id = $1 ORDER BY at")
-            .bind(&dpl)
-            .fetch_all(&pool)
+        let left = || async {
+            sqlx::query_scalar::<_, i32>("SELECT extract(day FROM now() - at)::int FROM pyo.deployment_logs WHERE deployment_id = $1 ORDER BY at")
+                .bind(&dpl)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        };
+        assert_eq!(left().await, [89, 1]);
+        // The installation keeps them 30 days.
+        q("INSERT INTO pyo.settings (key, value) VALUES ('observability', '{\"retention\": {\"analyticsMonths\": 12, \"metricsDays\": 30, \"buildLogDays\": 30}}')")
+            .execute(&pool)
             .await
             .unwrap();
-        assert_eq!(left, [89, 1]);
+        while super::prune_deployment_logs(&pool).await.unwrap() > 0 {}
+        assert_eq!(left().await, [1]);
+        q("DELETE FROM pyo.settings WHERE key = 'observability'").execute(&pool).await.unwrap();
         q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&pool).await.unwrap();
     }
 }

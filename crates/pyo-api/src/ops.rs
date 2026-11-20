@@ -1924,6 +1924,9 @@ pub(crate) enum Op {
         /// On a hosted Pyo: "auto" updates the team's agents when Pyo has a new version, "manual" leaves it to you.
         #[serde(default)]
         agent_updates: Option<String>,
+        /// Keep the team's analytics 3, 6 or 12 months, at most as long as the installation. 0 keeps them as long as the installation does.
+        #[serde(default)]
+        analytics_months: Option<u8>,
     },
     /// Delete a team and everything in it. Owners only.
     DeleteTeam { id: String },
@@ -2141,6 +2144,12 @@ pub(crate) enum Op {
     /// What analytics keeps of visitors' IP addresses: "none", "anonymized" or "full".
     SaveObservabilitySettings {
         ip_mode: crate::observability::IpMode,
+    },
+    /// How long this installation keeps observability data: analytics 3, 6, 12 or 24 months, server, service and database metrics 7 to 90 days, build and deploy logs 30 to 365 days. A team can keep its analytics shorter (`updateTeam`'s `analyticsMonths`). Raw request logs are each team's own setting.
+    SaveRetentionSettings {
+        analytics_months: u8,
+        metrics_days: u16,
+        build_log_days: u16,
     },
     /// Turn observability (analytics, request logs, firewall and WAF history, usage history) on or off for the whole installation. Only the installation's admin can do this. Off stops storing and showing history and frees its memory. What was stored is kept for when it's back on. Live logs, current usage, deploys and the firewall keep working.
     SetObservability { enabled: bool },
@@ -3030,6 +3039,7 @@ fn installation_wide(op: &Op) -> bool {
             | Op::RemoveEmailSettings {}
             | Op::SendTestEmail {}
             | Op::SaveObservabilitySettings { .. }
+            | Op::SaveRetentionSettings { .. }
             | Op::SaveUpdateSettings { .. }
             | Op::SetSandboxLimits { .. }
             | Op::CheckForUpdates {}
@@ -3174,6 +3184,7 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::RemoveBackupSettings {}
             | Op::RunBackup {}
             | Op::SaveObservabilitySettings { .. }
+            | Op::SaveRetentionSettings { .. }
             | Op::SaveUpdateSettings { .. }
             | Op::SetSandboxLimits { .. }
             | Op::CheckForUpdates {}
@@ -3355,6 +3366,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::RemoveEmailSettings {}
         | Op::SendTestEmail {}
         | Op::SaveObservabilitySettings { .. }
+        | Op::SaveRetentionSettings { .. }
         | Op::SaveUpdateSettings { .. }
         | Op::SetSandboxLimits { .. }
         | Op::CheckForUpdates {}
@@ -3447,8 +3459,18 @@ async fn apply(
             default_cluster_id,
             preferences,
             agent_updates,
+            analytics_months,
         } => {
             require_role(tx, user, &id, Role::Admin).await?;
+            if let Some(m) = analytics_months {
+                let installation = crate::retention::load(&s.db).await?;
+                crate::retention::check_team_months(m, &installation).map_err(ApiError::bad_request)?;
+                sqlx::query("UPDATE pyo.teams SET analytics_months = $2 WHERE id = $1")
+                    .bind(&id)
+                    .bind((m != 0).then_some(i16::from(m)))
+                    .execute(&mut **tx)
+                    .await?;
+            }
             if let Some(m) = agent_updates {
                 if !crate::updates::AGENT_UPDATE_MODES.contains(&m.as_str()) {
                     return Err(ApiError::bad_request("Agent updates are \"auto\" or \"manual\"."));
@@ -4044,6 +4066,26 @@ async fn apply(
                 };
                 log_setting(tx, user, "observability", title).await?;
             }
+            Ok(ok)
+        }
+        Op::SaveRetentionSettings {
+            analytics_months,
+            metrics_days,
+            build_log_days,
+        } => {
+            require_admin(user)?;
+            let r = crate::retention::Retention {
+                analytics_months,
+                metrics_days,
+                build_log_days,
+            };
+            if crate::retention::save(tx, &r).await? {
+                log_setting(tx, user, "observability", "Changed how long observability data is kept")
+                    .await?;
+            }
+            // ClickHouse's tables follow (and again at every start).
+            let obs = s.observability.clone();
+            tokio::spawn(async move { obs.apply_retention(r).await });
             Ok(ok)
         }
         Op::SetObservability { enabled } => {
@@ -8495,13 +8537,14 @@ pub(crate) struct MetricsQuery {
 /// Observability settings
 ///
 /// Whether observability is on for this installation (it's off on a new
-/// install on a server with under 3.5 GB of memory), and what it keeps of
-/// visitors' IP addresses. `small`: the server Pyo runs on has under 3.5 GB
-/// of memory now. The installation's admin turns it on or off with
-/// `setObservability`.
+/// install on a server with under 3.5 GB of memory), what it keeps of
+/// visitors' IP addresses, and how long it keeps data (`retention`:
+/// `analyticsMonths`, `metricsDays`, `buildLogDays`). `small`: the server
+/// Pyo runs on has under 3.5 GB of memory now. The installation's admin
+/// turns it on or off with `setObservability`.
 #[utoipa::path(get, path = "/observability/settings", operation_id = "getObservabilitySettings", tag = "Observability",
     responses(
-        (status = 200, description = "`enabled`, `ipMode` and `small`.", body = Object),
+        (status = 200, description = "`enabled`, `ipMode`, `retention` and `small`.", body = Object),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
 pub(crate) async fn observability_settings(
@@ -8511,6 +8554,7 @@ pub(crate) async fn observability_settings(
     Ok(Json(json!({
         "enabled": crate::observability::setting(&s.db).await?,
         "ipMode": crate::observability::ip_mode(&s.db).await?,
+        "retention": crate::retention::load(&s.db).await?,
         "small": pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
     })))
 }
@@ -8671,9 +8715,9 @@ async fn team_hosts(
 /// Visitors, requests, errors, response times, countries, pages and
 /// referrers for a team's websites: all of them, one project's, one
 /// service's, or one domain. Read from per-minute totals each cluster
-/// sends (kept 12 months), so it works with a cluster offline. Top lists
-/// count page views (referrers, pages, devices, browsers) or requests
-/// (paths, countries, query parameters).
+/// sends (kept 12 months by default), so it works with a cluster offline.
+/// Top lists count page views (referrers, pages, devices, browsers) or
+/// requests (paths, countries, query parameters).
 #[utoipa::path(get, path = "/observability", operation_id = "getObservability", tag = "Observability",
     params(ObservabilityQuery),
     responses(

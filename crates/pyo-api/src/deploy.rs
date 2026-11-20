@@ -1727,6 +1727,8 @@ pub async fn sweeper(state: AppState) {
         tick.tick().await;
         let Some(r) = crate::bg::as_leader(&state.db, crate::bg::LOCK_SWEEPER, || async {
             let _ = crate::jobs::prune(&state).await;
+            // Once a day: teams that keep analytics shorter.
+            crate::retention::nightly(&state).await;
             let _ = crate::certs::warn_expiring(&state).await;
             if let Err(e) = crate::alerts::flush(&state.db).await {
                 tracing::warn!(error = ?e.message, "sending held alerts failed");

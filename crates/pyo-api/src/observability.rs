@@ -9,8 +9,8 @@
 //!
 //! Server metrics live here too: each cluster's heartbeat carries current CPU
 //! and memory per server and per service; one sample a minute goes into
-//! `pyo_observability.metrics` (kept 30 days) and `metrics` reads it back as
-//! time series.
+//! `pyo_observability.metrics` (kept 30 days by default, the installation's
+//! retention: retention.rs) and `metrics` reads it back as time series.
 
 use std::{
     collections::HashMap,
@@ -85,6 +85,12 @@ const DATABASE_METRICS_SCHEMA: &str =
 PARTITION BY toYYYYMM(ts)
 ORDER BY (team_id, database_id, metric, member, ts)
 TTL ts + INTERVAL 30 DAY";
+
+/// The metrics tables' statements, for tests that make them.
+#[cfg(test)]
+pub(crate) fn schema_for_tests() -> [&'static str; 3] {
+    [METRICS_SCHEMA, NODE_METRICS_SCHEMA, DATABASE_METRICS_SCHEMA]
+}
 
 /// One database metrics sample per cluster this often (the agent reads
 /// every member's page every 30s; heartbeats come every 10s).
@@ -630,6 +636,12 @@ impl Observability {
                 for sql in crate::totals::schema() {
                     ch.exec(&sql, None, &[]).await?;
                 }
+                // Tables made with another TTL follow the installation's
+                // retention (Settings › Observability).
+                let retention = crate::retention::load(&self.db)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+                crate::retention::apply(ch, &retention).await?;
                 // Raw requests from before 0.5: Pyo Cloud drops them; a
                 // self-hosted Pyo keeps them read only until they expire
                 // (180 days after they came in).
@@ -754,6 +766,18 @@ impl Observability {
         let mode = ip_mode(&self.db).await.unwrap_or_default();
         *self.ip_mode.write().await = (Instant::now(), mode);
         mode
+    }
+
+    /// After the retention setting changed: the tables' TTLs follow now
+    /// while storage is up, else when it's set up next.
+    pub(crate) async fn apply_retention(&self, r: crate::retention::Retention) {
+        let Some(ch) = self.store().await else { return };
+        if !self.is_ready().await {
+            return;
+        }
+        if let Err(e) = crate::retention::apply(ch, &r).await {
+            tracing::warn!(error = %format!("{e:#}"), "couldn't apply the observability retention; it applies at the next start");
+        }
     }
 
     pub(crate) async fn is_ready(&self) -> bool {

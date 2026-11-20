@@ -4,12 +4,13 @@
 //!
 //! Minutes go into `traffic_1m` and `ports_1m`, kept 3 days (an hour or a
 //! day, and the one before it); a materialized view adds them up per hour
-//! into `traffic_1h` and `ports_1h`, kept 12 months. All four are AggregatingMergeTree tables
-//! of simple aggregates: sums, maps that add up (`sumMap`) and
-//! HyperLogLog registers that merge (`maxMap`), so rows for the same key
-//! (a late minute, a part not merged yet) add up when read. A batch is
-//! stored once, however often the agent sends it (its id is ClickHouse's
-//! insert deduplication token).
+//! into `traffic_1h` and `ports_1h`, kept 12 months by default (the
+//! installation's retention, or a team's shorter one: retention.rs). All
+//! four are AggregatingMergeTree tables of simple aggregates: sums, maps
+//! that add up (`sumMap`) and HyperLogLog registers that merge (`maxMap`),
+//! so rows for the same key (a late minute, a part not merged yet) add up
+//! when read. A batch is stored once, however often the agent sends it
+//! (its id is ClickHouse's insert deduplication token).
 //!
 //! The analytics page, the firewall's and the WAF's pages, port
 //! connections and the per-server figures read only these, so they work

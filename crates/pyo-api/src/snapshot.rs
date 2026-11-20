@@ -41,7 +41,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "SELECT jsonb_build_object(
             'id', id, 'name', name, 'slug', slug, 'description', description,
             'createdAt', pyo.ms(created_at), 'defaultClusterId', default_cluster_id,
-            'preferences', preferences, 'agentUpdates', agent_updates)
+            'preferences', preferences, 'agentUpdates', agent_updates,
+            'analyticsMonths', analytics_months)
            FROM pyo.teams WHERE id = ANY($1) ORDER BY created_at",
         &team_ids,
     )
@@ -453,6 +454,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     let observability_settings = json!({
         "ipMode": crate::observability::ip_mode(db).await?,
         "enabled": crate::observability::setting(db).await?,
+        "retention": crate::retention::load(db).await?,
         "small": pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
     });
     Ok(json!({
