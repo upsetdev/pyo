@@ -3,6 +3,7 @@ import {
   ChartLineUpIcon,
   CloudArrowUpIcon,
   EnvelopeSimpleIcon,
+  ShieldCheckIcon,
   type Icon,
 } from "@phosphor-icons/react";
 import { siGithub } from "simple-icons";
@@ -20,7 +21,8 @@ import type { SETTINGS_PAGES } from "~/lib/pyo/paths";
 import { seo } from "~/lib/seo";
 
 // Settings of this Pyo installation, for every team: backups of its own
-// data, outgoing email, the GitHub App, analytics privacy and updates of Pyo
+// data, outgoing email, the GitHub App, analytics privacy, security (two-
+// factor for everyone, the audit log's retention) and updates of Pyo
 // itself, a page each. Pathless, so the pages sit at the root like /profile
 // (/backups, /email) and /settings opens the first. The old
 // /settings/<page> URLs redirect here.
@@ -54,6 +56,7 @@ const TABS: {
   { to: "/email", label: "Email", icon: EnvelopeSimpleIcon },
   { to: "/github", label: "GitHub", icon: GithubIcon },
   { to: "/observability", label: "Observability", icon: ChartLineUpIcon },
+  { to: "/security", label: "Security", icon: ShieldCheckIcon },
   { to: "/updates", label: "Updates", icon: ArrowCircleUpIcon },
 ];
 

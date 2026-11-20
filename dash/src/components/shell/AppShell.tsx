@@ -541,6 +541,7 @@ const TAB_LABELS: Record<string, string> = {
   members: "Members",
   integrations: "Integrations",
   notifications: "Notifications",
+  "audit-log": "Audit log",
   "api-keys": "API keys",
   mcp: "MCP",
   profile: "Profile",

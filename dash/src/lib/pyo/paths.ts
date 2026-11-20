@@ -27,6 +27,7 @@ export const SETTINGS_PAGES = [
   "/email",
   "/github",
   "/observability",
+  "/security",
   "/updates",
 ] as const;
 
@@ -72,6 +73,7 @@ export const RESERVED_PROJECT_SLUGS = [
   "activity",
   "analytics",
   "api-keys",
+  "audit-log",
   "backups",
   "builders",
   "certificates",
