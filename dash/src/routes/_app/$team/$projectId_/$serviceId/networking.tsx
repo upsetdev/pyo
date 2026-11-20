@@ -1,10 +1,9 @@
-import { InfoIcon } from "@phosphor-icons/react";
 import { createFileRoute } from "@tanstack/react-router";
 import { serviceSettingsNav, SettingsFrame } from "~/components/pyo/SettingsFrame";
 import { useState } from "react";
 import { PortEditor, publicPortError } from "~/components/pyo/editors";
 import { Button } from "~/components/ui/Button";
-import { Callout, KeyValue, Panel } from "~/components/ui/Panel";
+import { KeyValue, Panel } from "~/components/ui/Panel";
 import { CopyButton } from "~/components/ui/Table";
 import type { DraftPort } from "~/lib/pyo/draft";
 import { DNS_LABEL } from "~/lib/pyo/format";
@@ -169,9 +168,6 @@ function Networking({ app }: { app: Application }) {
           />
         </div>
       </Panel>
-      <Callout tone="neutral" icon={InfoIcon}>
-        Domains carry HTTP only. For TCP and UDP, use Public IP.
-      </Callout>
     </div>
   );
 }
