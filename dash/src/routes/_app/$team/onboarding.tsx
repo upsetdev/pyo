@@ -320,18 +320,27 @@ function ConnectServer({ n }: { n: number }) {
         footer="The agent dials out. Nothing is exposed."
       >
         <div className="space-y-4 p-5">
-          <p className="text-[13px] text-muted-foreground">
-            Start with the machine Pyo runs on.
-          </p>
-          <Segmented
-            label="Which machine"
-            value={c.where}
-            onChange={c.setWhere}
-            options={[
-              { value: "local", label: "This machine" },
-              { value: "other", label: "Another machine" },
-            ]}
-          />
+          {/* A hosted Pyo runs on none of the team's machines. */}
+          {c.hosted === false ? (
+            <>
+              <p className="text-[13px] text-muted-foreground">
+                Start with the machine Pyo runs on.
+              </p>
+              <Segmented
+                label="Which machine"
+                value={c.where}
+                onChange={c.setWhere}
+                options={[
+                  { value: "local", label: "This machine" },
+                  { value: "other", label: "Another machine" },
+                ]}
+              />
+            </>
+          ) : c.hosted ? (
+            <p className="text-[13px] text-muted-foreground">
+              Run this on your server.
+            </p>
+          ) : null}
           {!c.showForm && c.otherLocal ? (
             <Callout tone="warning">
               This machine is connected as{" "}

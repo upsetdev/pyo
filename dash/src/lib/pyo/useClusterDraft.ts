@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useHosted } from "~/components/pyo/Managed";
 import { opOnLeave } from "./backend";
 import { DNS_LABEL, newId } from "./format";
 import { RESERVED_CLUSTER_NAMES } from "./location";
@@ -47,11 +48,14 @@ export function useClusterDraft(
   // One request at a time, so a slow create can't be made twice.
   const chain = useRef<Promise<unknown>>(Promise.resolve());
   // "This machine": the one Pyo runs on. First thing to connect for a new team.
-  const local = clustersIn(s).find((c) => c.sameCluster);
+  // A hosted Pyo runs outside every team's servers, so there it's never offered.
+  const hosted = useHosted();
+  const local = hosted ? undefined : clustersIn(s).find((c) => c.sameCluster);
   const otherLocal = local && local.id !== draft?.id ? local : undefined;
-  const [where, setWhere] = useState<"local" | "other">(() =>
+  const [picked, setWhere] = useState<"local" | "other">(() =>
     !local && !clustersIn(s).length ? "local" : "other",
   );
+  const where = hosted ? "other" : picked;
   const thisMachine = where === "local";
 
   // Blank: named after the server's hostname once the agent reports in.
@@ -70,8 +74,9 @@ export function useClusterDraft(
 
   const live = useLiveCommand<ClusterDraft>(
     `${where}|${name}|${tags.join(",")}|${publicNet}`,
-    // Connected: its token isn't to be changed from here.
-    showForm && !nameError && !connected && !paused,
+    // Connected: its token isn't to be changed from here. Nothing until the
+    // API says whether Pyo is hosted, so no "This machine" draft is made there.
+    hosted !== undefined && showForm && !nameError && !connected && !paused,
     () => {
       const next = chain.current.then(async () => {
         const d = draftRef.current;
@@ -113,6 +118,8 @@ export function useClusterDraft(
   );
 
   return {
+    /** On a hosted Pyo "This machine" isn't offered. Undefined until known. */
+    hosted,
     where,
     setWhere,
     thisMachine,

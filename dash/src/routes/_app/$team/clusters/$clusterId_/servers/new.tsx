@@ -1,4 +1,5 @@
 import { NeedsTailscale } from "~/components/pyo/Tailscale";
+import { useHosted } from "~/components/pyo/Managed";
 import { TailnetLockWait } from "~/components/pyo/TailnetLock";
 import { TreeStructureIcon } from "@phosphor-icons/react";
 import { site } from "~/config/site";
@@ -87,8 +88,11 @@ function JoinForm({
   });
   const [name, setName] = useState("");
   const [tags, setTags] = useState<string[]>([]);
-  // Run the command on a machine, or have Pyo make one at Hetzner.
-  const [how, setHow] = useState<"command" | "hetzner">("command");
+  // Run the command on a machine, or have Pyo make one at Hetzner. A hosted
+  // Pyo has no Tailscale setup, and Hetzner servers join over it.
+  const hosted = useHosted();
+  const [picked, setHow] = useState<"command" | "hetzner">("command");
+  const how = hosted === false ? picked : "command";
   const [builder, setBuilder] = useState(false);
   const [choice, setChoice] = useState<CloudChoice>({
     location: "",
@@ -146,22 +150,24 @@ function JoinForm({
         title="Add server"
         description="Join a server to a cluster."
       />
-      <Segmented
-        label="How"
-        value={how}
-        onChange={setHow}
-        options={[
-          { value: "command", label: "Run a command" },
-          { value: "hetzner", label: "Hetzner" },
-        ]}
-      />
+      {hosted === false ? (
+        <Segmented
+          label="How"
+          value={how}
+          onChange={setHow}
+          options={[
+            { value: "command", label: "Run a command" },
+            { value: "hetzner", label: "Hetzner" },
+          ]}
+        />
+      ) : null}
       <Panel>
         <div className="space-y-5 p-5">
           <div className="grid items-start gap-4 sm:grid-cols-2">
             <Field
               label="Server name"
               error={joined ? undefined : error || undefined}
-              hint="Also its name on your tailnet."
+              hint={hosted === false ? "Also its name on your tailnet." : undefined}
             >
               {(p) => (
                 <Input

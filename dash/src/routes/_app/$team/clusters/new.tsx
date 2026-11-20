@@ -41,7 +41,8 @@ function AddServers() {
   const [publicNet, setPublicNet] = useState(false);
   // Pyo makes the first server at Hetzner.
   const [hetzner, setHetzner] = useState(false);
-  // A hosted Pyo's agents always connect over the internet.
+  // A hosted Pyo's agents always connect over the internet, from another
+  // machine. "This machine" and Hetzner aren't offered there.
   const hosted = useHosted();
   const {
     where,
@@ -56,7 +57,7 @@ function AddServers() {
     live,
     keep,
     cancel: discard,
-  } = useClusterDraft(name, tags, publicNet, hetzner);
+  } = useClusterDraft(name, tags, publicNet, hetzner && hosted === false);
   const cancel = async () => {
     await discard();
     void navigate({ to: "/$team/clusters", params: { team: currentSlug() } });
@@ -68,20 +69,22 @@ function AddServers() {
         title="Add cluster"
         description="Connect a server."
       />
-      <Segmented
-        label="Which machine"
-        value={hetzner ? "hetzner" : where}
-        onChange={(v) => {
-          setHetzner(v === "hetzner");
-          if (v !== "hetzner") setWhere(v);
-        }}
-        options={[
-          { value: "local", label: "This machine" },
-          { value: "other", label: "Another machine" },
-          { value: "hetzner", label: "Hetzner" },
-        ]}
-      />
-      {hetzner ? (
+      {hosted === false ? (
+        <Segmented
+          label="Which machine"
+          value={hetzner ? "hetzner" : where}
+          onChange={(v) => {
+            setHetzner(v === "hetzner");
+            if (v !== "hetzner") setWhere(v);
+          }}
+          options={[
+            { value: "local", label: "This machine" },
+            { value: "other", label: "Another machine" },
+            { value: "hetzner", label: "Hetzner" },
+          ]}
+        />
+      ) : null}
+      {hosted === undefined ? null : hetzner && !hosted ? (
         <HetznerCluster
           name={name}
           setName={setName}

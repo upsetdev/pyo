@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { Dialog } from "~/components/ui/Dialog";
 import { Segmented } from "~/components/ui/Field";
+import { useHosted } from "~/components/pyo/Managed";
 import { api, usePyo } from "~/lib/pyo/store";
 import type { Cluster } from "~/lib/pyo/types";
 import { CopyButton } from "~/components/ui/Table";
@@ -87,9 +88,11 @@ export function ClusterCommandDialog({
 }) {
   const s = usePyo();
   // The machine Pyo runs on can be offered while no cluster is it yet.
-  const localFree = !s.clusters.some(
-    (c) => c.sameCluster && c.id !== cluster.id,
-  );
+  // Never on a hosted Pyo: it runs on none of the team's machines.
+  const hosted = useHosted();
+  const localFree =
+    hosted === false &&
+    !s.clusters.some((c) => c.sameCluster && c.id !== cluster.id);
   const [where, setWhere] = useState<"local" | "other">(
     cluster.sameCluster ? "local" : "other",
   );
