@@ -1098,42 +1098,83 @@ pub async fn env_unset(
     .await
 }
 
-/// Write the variables to a .env file; secrets are listed, not written.
-pub async fn env_pull(api: &Api, service: Option<&str>, file: &str, force: bool) -> Result<()> {
+/// Write the variables to a .env file. Secrets' values only with
+/// `secrets`, for owners and admins (each one revealed is logged), else
+/// they're listed empty, with a comment.
+pub async fn env_pull(
+    api: &Api,
+    service: Option<&str>,
+    file: &str,
+    force: bool,
+    secrets: bool,
+) -> Result<()> {
     let t = target(api, service).await?;
     if std::path::Path::new(file).exists() && !force {
         bail!("{file} exists. Overwrite it with --force.");
     }
-    let mut out = format!("# From Pyo: {}\n", t.state.path_of(t.service()));
-    let mut secrets = 0;
+    let mut vars: Vec<(String, Option<String>)> = vec![];
+    let mut hidden = 0;
     for e in t.service()["env"].as_array().into_iter().flatten() {
-        let k = e["key"].as_str().unwrap_or("");
-        if e["secret"] == json!(true) {
-            out.push_str(&format!("# {k} is secret\n"));
-            secrets += 1;
+        let k = e["key"].as_str().unwrap_or("").to_owned();
+        if e["secret"] != json!(true) {
+            vars.push((k, Some(e["value"].as_str().unwrap_or("").to_owned())));
+        } else if secrets {
+            let r = api
+                .op(
+                    "revealSecret",
+                    json!({ "serviceId": t.id, "envId": e["id"] }),
+                )
+                .await
+                .map_err(|err| {
+                    if err.to_string().contains("owners and admins") {
+                        anyhow::anyhow!(
+                            "Only team owners and admins can pull secret values. Pull without --secrets."
+                        )
+                    } else {
+                        err
+                    }
+                })?;
+            vars.push((k, Some(r["value"].as_str().unwrap_or("").to_owned())));
         } else {
-            let v = e["value"].as_str().unwrap_or("");
-            let quoted = if v.chars().any(|c| c.is_whitespace() || "#\"'$".contains(c)) {
-                format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-            } else {
-                v.to_owned()
-            };
-            out.push_str(&format!("{k}={quoted}\n"));
+            hidden += 1;
+            vars.push((k, None));
         }
     }
-    std::fs::write(file, out)?;
+    let text = crate::dotenv::write(
+        &format!("From Pyo: {}", t.state.path_of(t.service())),
+        &vars,
+    );
+    write_private(std::path::Path::new(file), &text)
+        .with_context(|| format!("Couldn't write {file}"))?;
     ui::ok(&format!(
-        "Wrote {file}{}",
-        if secrets > 0 {
+        "Wrote {} variable{} to {file}{}",
+        vars.len(),
+        if vars.len() == 1 { "" } else { "s" },
+        if hidden > 0 {
             format!(
-                " ({secrets} secret{} left out)",
-                if secrets == 1 { "" } else { "s" }
+                ". {hidden} secret{} left empty: --secrets pulls {}",
+                if hidden == 1 { "" } else { "s" },
+                if hidden == 1 { "it" } else { "them" }
             )
         } else {
             String::new()
         }
     ));
     Ok(())
+}
+
+/// A file only you can read (on Unix), since it may hold secrets.
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut f = open.open(path)?;
+    f.write_all(text.as_bytes())
 }
 
 /// How `env push` treats keys the service has already.

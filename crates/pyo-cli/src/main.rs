@@ -703,12 +703,22 @@ enum EnvCommand {
         deploy: bool,
     },
     /// Write the variables to a .env file.
+    ///
+    /// Secrets are listed with an empty value, unless --secrets: owners and
+    /// admins get their values.
     Pull {
-        #[arg(default_value = ".env")]
+        /// The file to write.
+        #[arg(default_value = ".env", conflicts_with = "out")]
         file: String,
+        /// The file to write, as an option.
+        #[arg(long = "file", short = 'o', value_name = "FILE")]
+        out: Option<String>,
         /// Overwrite the file.
         #[arg(long)]
         force: bool,
+        /// Write secrets' values too. Owners and admins.
+        #[arg(long)]
+        secrets: bool,
     },
 }
 
@@ -925,7 +935,12 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                     )
                     .await
                 }
-                EnvCommand::Pull { file, force } => service::env_pull(&api, s, &file, force).await,
+                EnvCommand::Pull {
+                    file,
+                    out,
+                    force,
+                    secrets,
+                } => service::env_pull(&api, s, &out.unwrap_or(file), force, secrets).await,
             }
         }
         Command::Rollback { deployment, which } => {
@@ -1236,6 +1251,69 @@ mod tests {
             }
         }
         walk(&Cli::command(), "pyo");
+    }
+
+    #[test]
+    fn new_commands_parse() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|c| c.command);
+        let Ok(Command::Exec {
+            command,
+            tty,
+            no_tty,
+            ..
+        }) = parse(&["pyo", "exec", "-s", "api", "-T", "--", "ls", "-la", "/app"])
+        else {
+            panic!("exec didn't parse");
+        };
+        assert_eq!(command, ["ls", "-la", "/app"]);
+        assert!(no_tty && !tty);
+        assert!(parse(&["pyo", "exec", "-t", "-T", "--", "ls"]).is_err());
+        assert!(matches!(
+            parse(&["pyo", "exec"]),
+            Ok(Command::Exec { command, .. }) if command.is_empty()
+        ));
+        assert!(matches!(
+            parse(&["pyo", "logs", "-f", "--since", "10m", "--replica", "x2kfp"]),
+            Ok(Command::Logs {
+                follow: true,
+                since: Some(_),
+                replica: Some(_),
+                build: false,
+                ..
+            })
+        ));
+        assert!(parse(&["pyo", "logs", "--build", "--since", "1h"]).is_err());
+        assert!(matches!(
+            parse(&[
+                "pyo",
+                "deploy",
+                "--local",
+                "--name",
+                "web",
+                "--project",
+                "shop"
+            ]),
+            Ok(Command::Deploy {
+                local: true,
+                name: Some(_),
+                project: Some(_),
+                ..
+            })
+        ));
+        assert!(parse(&["pyo", "deploy", "--local", "-f", "compose.yml"]).is_err());
+        let Ok(Command::Env {
+            command: Some(EnvCommand::Pull {
+                file, out, secrets, ..
+            }),
+            ..
+        }) = parse(&["pyo", "env", "pull", "--file", "prod.env", "--secrets"])
+        else {
+            panic!("env pull didn't parse");
+        };
+        assert_eq!(
+            (file.as_str(), out.as_deref(), secrets),
+            (".env", Some("prod.env"), true)
+        );
     }
 
     #[test]
