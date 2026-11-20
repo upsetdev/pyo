@@ -8340,20 +8340,24 @@ pub(crate) struct AccessLogQuery {
     method: Option<String>,
     /// Only requests whose URL or host contains this (any case).
     q: Option<String>,
+    /// Only requests whose path starts with this, such as "/api".
+    path: Option<String>,
 }
 
 /// Request log
 ///
 /// The web server's log of requests to a team's websites, newest first,
-/// filtered like the traffic figures.
+/// filtered like the traffic figures. Requests stay in each website's
+/// cluster (1 GB or 7 days by default, the team's `requestLogs`
+/// preference), which answers within seconds, up to 500 at a time.
 #[utoipa::path(get, path = "/access-logs", operation_id = "getAccessLogs", tag = "Observability",
     params(AccessLogQuery),
     responses(
-        (status = 200, description = "`logs` (newest first: time, method, host, path, status, duration, size, country, device and address as the IP setting allows), `next` (the `before` for the next page, or null), `ipMode`, and on the first page a `summary` of the filtered requests.", body = Object),
+        (status = 200, description = "`logs` (newest first: time, method, host, path, status, duration, size, country, device and address as the IP setting allows), `next` (the `before` for the next page, or null), `ipMode`, `unavailable` (clusters that didn't answer, with why), and on the first page without filters a `summary` of the range.", body = Object),
         (status = 400, description = "No `team`.", body = ErrorBody),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
-        (status = 502, description = "The log storage couldn't be read.", body = ErrorBody),
-        (status = 503, description = "This installation doesn't store request logs.", body = ErrorBody),
+        (status = 503, description = "Observability is off on this installation.", body = ErrorBody),
+        (status = 504, description = "No cluster answered in time.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
 pub(crate) async fn access_logs(
@@ -8374,12 +8378,12 @@ pub(crate) async fn access_logs(
         range: q.range.unwrap_or_else(|| "24h".into()),
         before: q.before,
         limit: q.limit.unwrap_or(100),
-        status: q.status,
-        method: q.method,
+        status: q.status.filter(|v| !v.is_empty()),
+        method: q.method.filter(|v| !v.is_empty()),
         q: q.q,
     };
     Ok(Json(
-        s.observability.access_logs(&q.team, &hosts, &f).await?,
+        crate::requests::access_logs(&s, &q.team, &hosts, &f, q.path).await?,
     ))
 }
 
@@ -8420,13 +8424,16 @@ async fn team_hosts(
 
 /// Website traffic
 ///
-/// Visits, requests, errors, response times, countries, pages and referrers
-/// for a team's websites: all of them, one project's, one service's, or one
-/// domain.
+/// Visitors, requests, errors, response times, countries, pages and
+/// referrers for a team's websites: all of them, one project's, one
+/// service's, or one domain. Read from per-minute totals each cluster
+/// sends (kept 13 months), so it works with a cluster offline. Top lists
+/// count page views (referrers, pages, devices, browsers) or requests
+/// (paths, countries, query parameters).
 #[utoipa::path(get, path = "/observability", operation_id = "getObservability", tag = "Observability",
     params(ObservabilityQuery),
     responses(
-        (status = 200, description = "Totals, series over time and top lists for the range.", body = Object),
+        (status = 200, description = "`summary` (totals and top lists for the range), `series` (over time) and `previous` (the period before).", body = Object),
         (status = 400, description = "No `team`.", body = ErrorBody),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
         (status = 503, description = "This installation doesn't store traffic.", body = ErrorBody),
@@ -8463,7 +8470,7 @@ pub(crate) struct ConnectionsQuery {
 #[utoipa::path(get, path = "/services/{id}/connections", operation_id = "getServiceConnections", tag = "Observability",
     params(("id" = String, Path, description = "The service's id."), ConnectionsQuery),
     responses(
-        (status = 200, description = "`ports`, `series`, `countries`, `outcomes`, `recent` (address as the IP setting allows) and `ipMode`.", body = Object),
+        (status = 200, description = "`ports`, `series`, `countries`, `outcomes`, and from the cluster `recent` (address as the IP setting allows), `ipMode` and `recentError` when it couldn't answer.", body = Object),
         (status = 404, description = "No such service, or you can't see it.", body = ErrorBody),
         (status = 503, description = "This installation doesn't store traffic.", body = ErrorBody),
     ),
@@ -8482,9 +8489,9 @@ pub(crate) async fn connections(
         Some(r @ ("1h" | "24h" | "7d" | "30d")) => r.to_owned(),
         _ => "7d".to_owned(),
     };
-    Ok(Json(
-        s.observability.connections(&team_id, &id, &range).await?,
-    ))
+    let mut out = s.observability.connections(&team_id, &id, &range).await?;
+    crate::requests::connections_recent(&s, &id, &range, &mut out).await?;
+    Ok(Json(out))
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -8507,7 +8514,7 @@ pub(crate) struct BlockedQuery {
 #[utoipa::path(get, path = "/firewall/blocked", operation_id = "getFirewallBlocked", tag = "Firewall",
     params(BlockedQuery),
     responses(
-        (status = 200, description = "`total`, `series`, `rules`, `sources` (address as the IP setting allows), `countries`, `paths`, `recent` and `ipMode`.", body = Object),
+        (status = 200, description = "`total`, `series`, `rules`, `countries`, `paths`, and from the cluster `sources` (among the latest 500, address as the IP setting allows), `recent`, `ipMode` and `recentError` when it couldn't answer.", body = Object),
         (status = 404, description = "No such service, or you can't see it.", body = ErrorBody),
         (status = 503, description = "This installation doesn't store traffic.", body = ErrorBody),
     ),
@@ -8526,9 +8533,9 @@ pub(crate) async fn firewall_blocked(
         Some(r @ ("1h" | "24h" | "7d" | "30d")) => r.to_owned(),
         _ => "24h".to_owned(),
     };
-    Ok(Json(
-        s.observability.blocked(&team_id, &services, &range).await?,
-    ))
+    let mut out = s.observability.blocked(&team_id, &services, &range).await?;
+    crate::requests::blocked_recent(&s, &services[0], &range, &mut out).await?;
+    Ok(Json(out))
 }
 
 /// WAF findings
@@ -8542,7 +8549,7 @@ pub(crate) async fn firewall_blocked(
 #[utoipa::path(get, path = "/waf/hits", operation_id = "getWafHits", tag = "Firewall",
     params(BlockedQuery),
     responses(
-        (status = 200, description = "`blocked`, `logged`, `clients`, `series`, `rules`, `hosts`, `sources`, `countries`, `paths`, `recent`, `custom` and `ipMode`.", body = Object),
+        (status = 200, description = "`blocked`, `logged`, `clients`, `series`, `rules`, `hosts`, `countries`, `paths`, `custom`, and from the cluster `sources` (among the latest 500), `recent`, `ipMode` and `recentError` when it couldn't answer.", body = Object),
         (status = 404, description = "No such service, or you can't see it.", body = ErrorBody),
         (status = 503, description = "This installation doesn't store traffic.", body = ErrorBody),
     ),
@@ -8561,11 +8568,9 @@ pub(crate) async fn waf_hits(
         Some(r @ ("1h" | "24h" | "7d" | "30d")) => r.to_owned(),
         _ => "24h".to_owned(),
     };
-    Ok(Json(
-        s.observability
-            .waf_hits(&team_id, &services, &range)
-            .await?,
-    ))
+    let mut out = s.observability.waf_hits(&team_id, &services, &range).await?;
+    crate::requests::waf_recent(&s, &services[0], &range, &mut out).await?;
+    Ok(Json(out))
 }
 
 /// Your address

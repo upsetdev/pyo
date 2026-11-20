@@ -49,6 +49,8 @@ mod mcp;
 mod migrate;
 mod oauth;
 pub mod observability;
+pub mod requests;
+pub mod totals;
 pub mod openapi;
 pub mod ops;
 mod outbound;

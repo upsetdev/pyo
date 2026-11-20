@@ -1,17 +1,11 @@
-//! Observability: website analytics and server metrics. The gateway's
-//! access logs come in, per-team traffic goes out.
+//! Observability: website analytics and server metrics.
 //!
-//! Each cluster's Vector forwards Envoy's JSON access log lines here (with
-//! the cluster's agent token). This module turns them into rows and stores
-//! them in ClickHouse:
-//! - the hostname decides the team, project and service; other traffic is dropped
-//! - the client IP is looked up in DB-IP Lite (country, city) and then
-//!   discarded unless the IP setting keeps it (anonymized or whole); visitors
-//!   are a hash of IP + user agent + host with a salt that
-//!   changes daily, so they can't be tied back to anyone
-//! - sensitive query parameter values are replaced with "[redacted]"
-//!
-//! The dashboard's analytics page reads aggregates through `query`.
+//! Website and port traffic stays in each cluster: its traffic store
+//! (pyo-agent's traffic/) cleans the gateway's lines there and sends Pyo
+//! per-minute totals, stored and read in totals.rs. The request explorer
+//! asks the cluster for kept requests (requests.rs). Requests Pyo stored
+//! itself before 0.5 stay readable on a self-hosted Pyo until they expire
+//! (`legacy_access_logs`); Pyo Cloud drops them.
 //!
 //! Server metrics live here too: each cluster's heartbeat carries current CPU
 //! and memory per server and per service; one sample a minute goes into
@@ -27,94 +21,10 @@ use std::{
 
 use maxminddb::{Reader, geoip2};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::error::{ApiError, ApiResult};
-
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS pyo_observability.requests (
-    ts DateTime64(3, 'UTC'),
-    team_id LowCardinality(String),
-    project_id LowCardinality(String),
-    service_id LowCardinality(String),
-    host LowCardinality(String),
-    method LowCardinality(String),
-    path String,
-    url String,
-    query_keys Array(String),
-    redacted_keys Array(String),
-    status UInt16,
-    duration_ms Float32,
-    bytes UInt64,
-    pageview UInt8,
-    visitor UInt64,
-    country LowCardinality(String),
-    country_name LowCardinality(String),
-    city String,
-    referrer String,
-    device LowCardinality(String),
-    browser LowCardinality(String),
-    ip String DEFAULT '',
-    user_agent String DEFAULT '',
-    -- The server that answered (traffic per region).
-    node LowCardinality(String) DEFAULT '',
-    -- The firewall's refusals: the rule (or blocked, rate-limit when it
-    -- can't be told) behind a 403 or 429.
-    blocked_by String DEFAULT ''
-) ENGINE = MergeTree
-PARTITION BY toYYYYMM(ts)
-ORDER BY (team_id, host, ts)
-TTL toDateTime(ts) + INTERVAL 180 DAY";
-
-/// Connections to public TCP and UDP ports through the gateway: one
-/// row per connection (per UDP session), written when it ends.
-const CONNECTIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS pyo_observability.connections (
-    ts DateTime64(3, 'UTC'),
-    team_id LowCardinality(String),
-    project_id LowCardinality(String),
-    service_id LowCardinality(String),
-    port UInt16,
-    protocol LowCardinality(String),
-    visitor UInt64,
-    ip String DEFAULT '',
-    country LowCardinality(String),
-    country_name LowCardinality(String),
-    city String,
-    duration_ms Float64,
-    bytes_in UInt64,
-    bytes_out UInt64,
-    outcome LowCardinality(String),
-    node LowCardinality(String) DEFAULT '',
-    rule String DEFAULT ''
-) ENGINE = MergeTree
-PARTITION BY toYYYYMM(ts)
-ORDER BY (team_id, service_id, ts)
-TTL toDateTime(ts) + INTERVAL 180 DAY";
-
-/// The WAF's findings: one row per request where rules matched,
-/// blocked or only logged.
-const WAF_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS pyo_observability.waf_hits (
-    ts DateTime64(3, 'UTC'),
-    team_id LowCardinality(String),
-    project_id LowCardinality(String),
-    service_id LowCardinality(String),
-    host LowCardinality(String),
-    method LowCardinality(String),
-    path String,
-    url String,
-    ip String DEFAULT '',
-    country LowCardinality(String),
-    visitor UInt64,
-    blocked UInt8,
-    rules Array(UInt32),
-    messages Array(String),
-    severity LowCardinality(String),
-    node LowCardinality(String) DEFAULT ''
-) ENGINE = MergeTree
-PARTITION BY toYYYYMM(ts)
-ORDER BY (team_id, host, ts)
-TTL toDateTime(ts) + INTERVAL 180 DAY";
 
 const METRICS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS pyo_observability.metrics (
     ts DateTime('UTC'),
@@ -279,7 +189,7 @@ pub fn bar_steps(range: &str) -> (i64, i64) {
 
 /// Rows with a bucket (`b`, seconds) as one point per bucket of the
 /// range's bar chart, ending with the current one (empty buckets are 0).
-fn bar_series(rows: &[Value], range: &str, point: impl Fn(Option<&Value>) -> Value) -> Vec<Value> {
+pub(crate) fn bar_series(rows: &[Value], range: &str, point: impl Fn(Option<&Value>) -> Value) -> Vec<Value> {
     let (points, step) = bar_steps(range);
     let end = (pyo_proto::now_ms() / 1000 / step + 1) * step;
     let start = end - points * step;
@@ -405,24 +315,8 @@ fn ingress_sample(hb: &pyo_proto::Heartbeat) -> Option<IngressSample> {
 /// One metrics sample per cluster this often; heartbeats come every 10s.
 const SAMPLE_EVERY: Duration = Duration::from_secs(60);
 
-/// Query parameters whose values are never stored.
-const SENSITIVE: [&str; 15] = [
-    "token",
-    "password",
-    "passwd",
-    "secret",
-    "apikey",
-    "api_key",
-    "auth",
-    "session",
-    "signature",
-    "email",
-    "otp",
-    "jwt",
-    "credential",
-    "code",
-    "invite",
-];
+/// Where Pyo kept raw traffic before 0.5.
+const LEGACY_TABLES: [&str; 3] = ["requests", "connections", "waf_hits"];
 
 pub struct ClickHouse {
     http: reqwest::Client,
@@ -432,11 +326,26 @@ pub struct ClickHouse {
 }
 
 impl ClickHouse {
-    async fn exec(
+    pub fn new(url: String, user: String, password: String) -> Self {
+        ClickHouse { http: reqwest::Client::new(), url, user, password }
+    }
+
+    pub(crate) async fn exec(
         &self,
         sql: &str,
         body: Option<String>,
         params: &[(&str, String)],
+    ) -> anyhow::Result<String> {
+        self.exec_with(sql, body, params, &[]).await
+    }
+
+    /// `exec` with ClickHouse settings for this statement.
+    pub(crate) async fn exec_with(
+        &self,
+        sql: &str,
+        body: Option<String>,
+        params: &[(&str, String)],
+        settings: &[(&str, String)],
     ) -> anyhow::Result<String> {
         let mut q: Vec<(String, String)> = vec![
             ("output_format_json_quote_64bit_integers".into(), "0".into()),
@@ -444,6 +353,9 @@ impl ClickHouse {
         ];
         for (k, v) in params {
             q.push((format!("param_{k}"), v.clone()));
+        }
+        for (k, v) in settings {
+            q.push(((*k).to_owned(), v.clone()));
         }
         let req = self
             .http
@@ -470,7 +382,7 @@ impl ClickHouse {
         Ok(text)
     }
 
-    async fn rows(&self, sql: String, params: Vec<(&str, String)>) -> anyhow::Result<Vec<Value>> {
+    pub(crate) async fn rows(&self, sql: String, params: Vec<(&str, String)>) -> anyhow::Result<Vec<Value>> {
         let text = self
             .exec(&format!("{sql} FORMAT JSONEachRow"), None, &params)
             .await?;
@@ -483,21 +395,20 @@ impl ClickHouse {
 }
 
 #[derive(Clone)]
-struct Owner {
-    team_id: String,
-    project_id: String,
-    service_id: String,
-    cluster_id: String,
+pub(crate) struct Owner {
+    pub team_id: String,
+    pub project_id: String,
+    pub service_id: String,
+    pub cluster_id: String,
 }
 
 /// (cluster, a proxied port's route or "<protocol>/<listen port>") -> its
 /// service and public port.
-type PortOwners = HashMap<(String, String), (Owner, u16)>;
+pub(crate) type PortOwners = HashMap<(String, String), (Owner, u16)>;
 
-/// (cluster, service) -> its firewall.
-type Firewalls = HashMap<(String, String), pyo_proto::firewall::Firewall>;
 
-/// Filters for `Observability::access_logs`.
+/// Filters for the request log.
+#[derive(Clone)]
 pub struct LogFilter {
     pub range: String,
     pub before: i64,
@@ -517,10 +428,10 @@ pub struct Observability {
     /// (cluster, proxied port's route, or "<protocol>/<listen port>") ->
     /// owning service and the public port, cached 30s.
     routes: RwLock<(Instant, PortOwners)>,
-    /// Every service's firewall, to name the rule behind a refusal (30s).
-    firewalls: RwLock<(Instant, Firewalls)>,
-    salt: Mutex<(String, String)>,
     ready: RwLock<bool>,
+    /// The requests table from before 0.5 is still there (self-hosted,
+    /// read only until it expires).
+    legacy: RwLock<bool>,
     /// When each cluster's last metrics sample was stored.
     sampled: Mutex<HashMap<String, Instant>>,
     /// And its last database metrics sample.
@@ -558,181 +469,12 @@ pub enum IpMode {
 
 impl IpMode {
     pub fn apply(self, ip: &str) -> String {
-        match (self, ip.parse::<IpAddr>()) {
-            (IpMode::None, _) | (_, Err(_)) => String::new(),
-            (IpMode::Full, Ok(a)) => a.to_string(),
-            (IpMode::Anonymized, Ok(IpAddr::V4(v))) => {
-                let [a, b, c, _] = v.octets();
-                std::net::Ipv4Addr::new(a, b, c, 0).to_string()
-            }
-            (IpMode::Anonymized, Ok(IpAddr::V6(v))) => {
-                let s = v.segments();
-                std::net::Ipv6Addr::new(s[0], s[1], s[2], 0, 0, 0, 0, 0).to_string()
-            }
-        }
-    }
-}
-
-impl AccessLine {
-    /// The visitor: the address the proxy placed them at (a PROXY protocol
-    /// header's, else the connection's), as its firewall and rate limits
-    /// see them; the TCP peer for lines without it. Never X-Forwarded-For
-    /// or X-Real-Ip: whoever reaches the proxy could write any address there
-    /// (pyo-proto's `client_policy_spec`).
-    pub fn visitor_ip(&self) -> &str {
-        if self.remote.is_empty() {
-            &self.peer
-        } else {
-            &self.remote
-        }
-    }
-}
-
-/// One access log line from the gateway (Envoy's JSON, fields in
-/// pyo-proto's system.rs).
-#[derive(Debug, Default, PartialEq)]
-pub struct AccessLine {
-    pub host: String,
-    pub ts_ms: Option<i64>,
-    pub peer: String,
-    pub forwarded_for: String,
-    pub real_ip: String,
-    pub user_agent: String,
-    pub status: u64,
-    pub method: String,
-    pub path: String,
-    pub content_type: String,
-    pub referer: String,
-    pub duration_ms: f64,
-    pub bytes: u64,
-    pub node: String,
-    /// The visitor as the proxy saw them (a PROXY protocol header's address,
-    /// or the peer).
-    pub remote: String,
-    /// TCP and UDP ports: bytes from the visitor, the route
-    /// (`tcproute/pyo-gateway/<route>/rule/0`), Envoy's flags and how the
-    /// connection ended.
-    pub bytes_in: u64,
-    pub upstream: String,
-    pub upstream_host: String,
-    pub local_port: u64,
-    pub flags: String,
-    pub termination: String,
-    /// Why the proxy answered itself (a firewall rule, a rate limit).
-    pub details: String,
-}
-
-/// Which proxied port a connection line is about.
-#[derive(Debug, PartialEq)]
-pub enum PortKey<'a> {
-    /// By its route (TCP connections that reached it).
-    Route(&'a str),
-    /// By where the proxy listens for it (UDP sessions, which don't name
-    /// their route, and TCP connections turned away before one).
-    Listen(u16),
-}
-
-impl AccessLine {
-    pub fn read(l: &Value) -> Self {
-        // Envoy writes null for a header that wasn't there.
-        let s = |k: &str| l[k].as_str().unwrap_or("").to_owned();
-        let n = |k: &str| {
-            l[k].as_u64()
-                .or_else(|| l[k].as_str().and_then(|v| v.parse().ok()))
-                .unwrap_or(0)
+        let mode = match self {
+            IpMode::None => "none",
+            IpMode::Anonymized => "anonymized",
+            IpMode::Full => "full",
         };
-        let ts = |k: &str| {
-            l[k].as_str()
-                .and_then(|t| t.parse::<jiff::Timestamp>().ok())
-                .map(|t| t.as_millisecond())
-        };
-        AccessLine {
-            host: s("host"),
-            ts_ms: ts("start_time"),
-            peer: s("peer"),
-            forwarded_for: s("x_forwarded_for"),
-            real_ip: s("x_real_ip"),
-            user_agent: s("user_agent"),
-            status: n("status"),
-            method: s("method"),
-            path: s("path"),
-            content_type: s("content_type"),
-            referer: s("referer"),
-            duration_ms: l["duration_ms"]
-                .as_f64()
-                .or_else(|| l["duration_ms"].as_str().and_then(|v| v.parse().ok()))
-                .unwrap_or(0.0),
-            bytes: n("bytes"),
-            node: s("PyoNode"),
-            remote: s("remote"),
-            bytes_in: n("bytes_in"),
-            upstream: s("upstream"),
-            upstream_host: s("upstream_host"),
-            local_port: n("local_port"),
-            flags: s("flags"),
-            termination: s("termination"),
-            details: s("details"),
-        }
-    }
-
-    /// A connection to a public TCP or UDP port (no HTTP request in it): its
-    /// protocol and which port. TCP connections name their route
-    /// (`tcproute/pyo-gateway/<route>/rule/<n>`); UDP sessions don't, but go
-    /// somewhere (`upstream_host`); a TCP connection the limit turned away
-    /// has neither.
-    pub fn port_key(&self) -> Option<(&'static str, PortKey<'_>)> {
-        if !self.method.is_empty() || !self.host.is_empty() {
-            return None;
-        }
-        if let Some(rest) = self
-            .upstream
-            .strip_prefix("tcproute/")
-            .or_else(|| self.upstream.strip_prefix("udproute/"))
-        {
-            let proto = if self.upstream.starts_with("tcp") {
-                "TCP"
-            } else {
-                "UDP"
-            };
-            // <namespace>/<route>/rule/<n>
-            let route = rest.split('/').nth(1)?;
-            return Some((proto, PortKey::Route(route)));
-        }
-        let port = u16::try_from(self.local_port).ok().filter(|p| *p > 0)?;
-        if !self.upstream.is_empty() {
-            return None;
-        }
-        Some((
-            if self.upstream_host.is_empty() {
-                "TCP"
-            } else {
-                "UDP"
-            },
-            PortKey::Listen(port),
-        ))
-    }
-
-    /// How a connection went: "ok", "blocked" (an IP rule), "limited" (the
-    /// connection limit) or "unreachable" (the service didn't answer).
-    pub fn outcome(&self) -> &'static str {
-        let t = self.termination.to_ascii_lowercase();
-        let f = self.flags.as_str();
-        if t.contains("rbac") {
-            "blocked"
-        } else if t.contains("limit")
-            || f.contains("UO")
-            || f.contains("OL")
-            || (self.upstream.is_empty() && self.upstream_host.is_empty())
-        {
-            "limited"
-        } else if ["UF", "UH", "URX", "NR", "UMSDR"]
-            .iter()
-            .any(|x| f.split(',').any(|y| y == *x))
-        {
-            "unreachable"
-        } else {
-            "ok"
-        }
+        pyo_proto::traffic::mask_ip(mode, ip)
     }
 }
 
@@ -791,12 +533,18 @@ type Series<'a> = (String, String, Vec<Option<&'a Value>>);
 
 impl Observability {
     pub fn from_env(db: PgPool) -> Arc<Self> {
-        let ch = env("CLICKHOUSE_URL").map(|url| ClickHouse {
-            http: reqwest::Client::new(),
-            url,
-            user: env("CLICKHOUSE_USER").unwrap_or_else(|| "default".into()),
-            password: env("CLICKHOUSE_PASSWORD").unwrap_or_default(),
+        let ch = env("CLICKHOUSE_URL").map(|url| {
+            ClickHouse::new(
+                url,
+                env("CLICKHOUSE_USER").unwrap_or_else(|| "default".into()),
+                env("CLICKHOUSE_PASSWORD").unwrap_or_default(),
+            )
         });
+        Self::with(db, ch)
+    }
+
+    /// With this ClickHouse (or none).
+    pub fn with(db: PgPool, ch: Option<ClickHouse>) -> Arc<Self> {
         // geoip.rs loads the database once it has one.
         let geo: Option<Reader<maxminddb::Mmap>> = None;
         if ch.is_none() {
@@ -808,9 +556,8 @@ impl Observability {
             db,
             hosts: RwLock::new((Instant::now() - Duration::from_secs(3600), HashMap::new())),
             routes: RwLock::new((Instant::now() - Duration::from_secs(3600), HashMap::new())),
-            firewalls: RwLock::new((Instant::now() - Duration::from_secs(3600), HashMap::new())),
-            salt: Mutex::new((String::new(), String::new())),
             ready: RwLock::new(false),
+            legacy: RwLock::new(false),
             sampled: Mutex::new(HashMap::new()),
             db_sampled: Mutex::new(HashMap::new()),
             ip_mode: RwLock::new((Instant::now() - Duration::from_secs(60), IpMode::None)),
@@ -843,7 +590,7 @@ impl Observability {
     }
 
     /// ClickHouse, while observability is on.
-    async fn store(&self) -> Option<&ClickHouse> {
+    pub(crate) async fn store(&self) -> Option<&ClickHouse> {
         if self.enabled().await {
             self.ch.as_ref()
         } else {
@@ -852,7 +599,7 @@ impl Observability {
     }
 
     /// ClickHouse for a reader, or why there's nothing to read.
-    async fn reader(&self) -> ApiResult<&ClickHouse> {
+    pub(crate) async fn reader(&self) -> ApiResult<&ClickHouse> {
         let Some(ch) = &self.ch else {
             return Err(ApiError::new(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -877,16 +624,29 @@ impl Observability {
             let r = async {
                 ch.exec("CREATE DATABASE IF NOT EXISTS pyo_observability", None, &[])
                     .await?;
-                ch.exec(SCHEMA, None, &[]).await?;
-                ch.exec(CONNECTIONS_SCHEMA, None, &[]).await?;
-                ch.exec(WAF_SCHEMA, None, &[]).await?;
                 ch.exec(METRICS_SCHEMA, None, &[]).await?;
                 ch.exec(NODE_METRICS_SCHEMA, None, &[]).await?;
-                ch.exec(DATABASE_METRICS_SCHEMA, None, &[]).await
+                ch.exec(DATABASE_METRICS_SCHEMA, None, &[]).await?;
+                for sql in crate::totals::schema() {
+                    ch.exec(&sql, None, &[]).await?;
+                }
+                // Raw requests from before 0.5: Pyo Cloud drops them; a
+                // self-hosted Pyo keeps them read only until they expire
+                // (180 days after they came in).
+                if crate::hosted() {
+                    for t in LEGACY_TABLES {
+                        ch.exec(&format!("DROP TABLE IF EXISTS pyo_observability.{t}"), None, &[]).await?;
+                    }
+                    anyhow::Ok(false)
+                } else {
+                    let exists = ch.exec("EXISTS TABLE pyo_observability.requests", None, &[]).await?;
+                    anyhow::Ok(exists.trim() == "1")
+                }
             }
             .await;
             match r {
-                Ok(_) => {
+                Ok(legacy) => {
+                    *self.legacy.write().await = legacy;
                     *self.ready.write().await = true;
                     tracing::info!("observability storage ready");
                     return;
@@ -900,7 +660,7 @@ impl Observability {
     }
 
     /// hostname -> owning service, from the domains of every service (cached 30s).
-    async fn owners(&self) -> anyhow::Result<HashMap<String, Owner>> {
+    pub(crate) async fn owners(&self) -> anyhow::Result<HashMap<String, Owner>> {
         {
             let g = self.hosts.read().await;
             if g.0.elapsed() < Duration::from_secs(30) {
@@ -934,7 +694,7 @@ impl Observability {
 
     /// Each proxied TCP and UDP port's route (as the agent names it,
     /// `<namespace>-<service>-tcp-<port>`) -> its service and port.
-    async fn port_routes(&self) -> anyhow::Result<PortOwners> {
+    pub(crate) async fn port_routes(&self) -> anyhow::Result<PortOwners> {
         {
             let g = self.routes.read().await;
             if g.0.elapsed() < Duration::from_secs(30) {
@@ -984,48 +744,7 @@ impl Observability {
         Ok(map)
     }
 
-    /// The rule behind a refusal: behind a CDN, a connection that didn't
-    /// come from it (`peer`, the connection's own address) is the CDN
-    /// check's ("cdn"); else the rule that matches the address (or its
-    /// country), else what the proxy said.
-    async fn refusal_rule(
-        &self,
-        cluster_id: &str,
-        service_id: &str,
-        why: String,
-        ip: &str,
-        peer: &str,
-        country: &str,
-    ) -> String {
-        if why != "blocked" && why != "rate-limit" {
-            return why;
-        }
-        let stale = self.firewalls.read().await.0.elapsed() >= Duration::from_secs(30);
-        if stale && let Ok(all) = crate::firewall::all_firewalls(&self.db).await {
-            *self.firewalls.write().await = (Instant::now(), all);
-        }
-        let g = self.firewalls.read().await;
-        let (Some(f), Ok(addr)) = (
-            g.1.get(&(cluster_id.to_owned(), service_id.to_owned())),
-            ip.parse::<IpAddr>(),
-        ) else {
-            return why;
-        };
-        if why == "blocked"
-            && let Ok(peer) = peer.parse::<IpAddr>()
-            && !pyo_proto::firewall::via_cdn(f, peer)
-        {
-            return pyo_proto::firewall::BEHIND_RULE.to_owned();
-        }
-        let rule = if why == "blocked" {
-            pyo_proto::firewall::blocking_rule(&[f], addr, Some(country).filter(|c| !c.is_empty()))
-        } else {
-            pyo_proto::firewall::rate_limiting_rule(&[f], addr)
-        };
-        rule.map(str::to_owned).unwrap_or(why)
-    }
-
-    async fn current_ip_mode(&self) -> IpMode {
+    pub(crate) async fn current_ip_mode(&self) -> IpMode {
         {
             let g = self.ip_mode.read().await;
             if g.0.elapsed() < Duration::from_secs(30) {
@@ -1037,241 +756,19 @@ impl Observability {
         mode
     }
 
-    /// Today's salt for visitor hashes, shared through Postgres; older ones are deleted.
-    async fn daily_salt(&self, day: &str) -> anyhow::Result<String> {
-        let mut g = self.salt.lock().await;
-        if g.0 == day {
-            return Ok(g.1.clone());
-        }
-        let fresh = crate::ids::secret_token();
-        let salt: String = sqlx::query_scalar(
-            "INSERT INTO pyo.observability_salts (day, salt) VALUES ($1::date, $2)
-             ON CONFLICT (day) DO UPDATE SET day = excluded.day RETURNING salt",
-        )
-        .bind(day)
-        .bind(&fresh)
-        .fetch_one(&self.db)
-        .await?;
-        sqlx::query("DELETE FROM pyo.observability_salts WHERE day < $1::date - 1")
-            .bind(day)
-            .execute(&self.db)
-            .await?;
-        *g = (day.to_owned(), salt.clone());
-        Ok(salt)
+    pub(crate) async fn is_ready(&self) -> bool {
+        *self.ready.read().await
     }
 
-    /// Store a batch of access log lines (the gateway's) from one cluster.
-    pub async fn ingest(&self, cluster_id: &str, lines: Vec<Value>) -> ApiResult<usize> {
-        let Some(ch) = self.store().await else {
-            return Ok(0);
-        };
-        if !*self.ready.read().await {
-            return Err(ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Observability storage is starting.",
-            ));
-        }
-        let owners = self.owners().await?;
-        let ua_parser = woothee::parser::Parser::new();
-        let mut out = String::new();
-        let mut conns = String::new();
-        let mut waf = String::new();
-        let mut n = 0;
-        for l in lines {
-            // The WAF's finding for one request (pyo-waf's line).
-            if l.get("waf").is_some() {
-                let host = l["host"].as_str().unwrap_or("").to_lowercase();
-                let Some(owner) = owners.get(&host).filter(|o| o.cluster_id == cluster_id) else {
-                    continue;
-                };
-                let ts = l["time"]
-                    .as_str()
-                    .and_then(|t| t.parse::<jiff::Timestamp>().ok())
-                    .map(|t| t.as_millisecond())
-                    .unwrap_or_else(pyo_proto::now_ms);
-                let day = jiff::Timestamp::from_millisecond(ts)
-                    .map(|t| t.strftime("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                let salt = self.daily_salt(&day).await?;
-                let ip = l["client"].as_str().unwrap_or("").to_owned();
-                let (country, _, _) = self.locate(&ip);
-                let (path, url, _, _) = split_url(l["uri"].as_str().unwrap_or("/"));
-                let visitor = {
-                    let d = Sha256::digest(format!("{salt}|{ip}|waf|{host}").as_bytes());
-                    u64::from_be_bytes(d[..8].try_into().unwrap_or([0; 8]))
-                };
-                let row = json!({
-                    "ts": ts as f64 / 1000.0,
-                    "team_id": owner.team_id, "project_id": owner.project_id, "service_id": owner.service_id,
-                    "host": host, "method": l["method"].as_str().unwrap_or("").chars().take(16).collect::<String>(),
-                    "path": path, "url": url,
-                    "ip": self.current_ip_mode().await.apply(&ip), "country": country, "visitor": visitor,
-                    "blocked": l["blocked"].as_bool().unwrap_or(false) as u8,
-                    "rules": l["rules"].as_array().into_iter().flatten().filter_map(Value::as_u64).take(50).collect::<Vec<_>>(),
-                    "messages": l["messages"].as_array().into_iter().flatten().filter_map(Value::as_str).take(50).map(|m| m.chars().take(300).collect::<String>()).collect::<Vec<_>>(),
-                    "severity": l["severity"].as_str().unwrap_or("").chars().take(16).collect::<String>(),
-                    "node": l["PyoNode"].as_str().unwrap_or("").chars().take(253).collect::<String>(),
-                });
-                waf.push_str(&row.to_string());
-                waf.push('\n');
-                n += 1;
-                continue;
-            }
-            let l = AccessLine::read(&l);
-            // A connection to a public TCP or UDP port.
-            if let Some((proto, key)) = l.port_key() {
-                let routes = self.port_routes().await?;
-                let key = match key {
-                    PortKey::Route(r) => r.to_owned(),
-                    PortKey::Listen(port) => format!("{proto}/{port}"),
-                };
-                let Some((owner, port)) = routes.get(&(cluster_id.to_owned(), key)) else {
-                    continue;
-                };
-                let ts = l.ts_ms.unwrap_or_else(pyo_proto::now_ms);
-                let day = jiff::Timestamp::from_millisecond(ts)
-                    .map(|t| t.strftime("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                let salt = self.daily_salt(&day).await?;
-                let ip = l.visitor_ip().to_owned();
-                let (country, country_name, city) = self.locate(&ip);
-                let visitor = {
-                    let d = Sha256::digest(
-                        format!("{salt}|{ip}|{}|{port}", owner.service_id).as_bytes(),
-                    );
-                    u64::from_be_bytes(d[..8].try_into().unwrap_or([0; 8]))
-                };
-                let row = json!({
-                    "ts": ts as f64 / 1000.0,
-                    "team_id": owner.team_id, "project_id": owner.project_id, "service_id": owner.service_id,
-                    "port": port, "protocol": proto, "visitor": visitor,
-                    "ip": self.current_ip_mode().await.apply(&ip),
-                    "country": country, "country_name": country_name, "city": city,
-                    "duration_ms": l.duration_ms, "bytes_in": l.bytes_in, "bytes_out": l.bytes,
-                    "outcome": l.outcome(),
-                    "node": l.node.chars().take(253).collect::<String>(),
-                    "rule": self.refusal_rule(cluster_id, &owner.service_id, crate::firewall::refusal("", &l.termination, 0), &ip, "", &country).await,
-                });
-                conns.push_str(&row.to_string());
-                conns.push('\n');
-                n += 1;
-                continue;
-            }
-            let host = l.host.split(':').next().unwrap_or("").to_lowercase();
-            // Only traffic for a domain of a service on this cluster.
-            let Some(owner) = owners.get(&host).filter(|o| o.cluster_id == cluster_id) else {
-                continue;
-            };
-            let ts = l.ts_ms.unwrap_or_else(pyo_proto::now_ms);
-            let day = jiff::Timestamp::from_millisecond(ts)
-                .map(|t| t.strftime("%Y-%m-%d").to_string())
-                .unwrap_or_default();
-            let salt = self.daily_salt(&day).await?;
-            let ip = l.visitor_ip();
-            let ua = l.user_agent.as_str();
-            let status = l.status;
-            let method = if l.method.is_empty() {
-                "GET"
-            } else {
-                l.method.as_str()
-            };
-            let (path, url, keys, redacted) = split_url(if l.path.is_empty() {
-                "/"
-            } else {
-                l.path.as_str()
-            });
-            let ctype = l.content_type.as_str();
+    /// Tests: storage as if its tables were made.
+    #[cfg(test)]
+    pub async fn ensure_ready_for_tests(&self) {
+        *self.ready.write().await = true;
+    }
 
-            let parsed = ua_parser.parse(ua);
-            let crawler = parsed.as_ref().is_some_and(|r| r.category == "crawler");
-            let device = match parsed.as_ref().map(|r| r.category) {
-                Some("pc") => "Desktop",
-                Some("smartphone") | Some("mobilephone") => "Mobile",
-                Some("crawler") => "Bot",
-                Some("appliance") => "Other",
-                _ if ua.is_empty() => "Unknown",
-                _ => "Other",
-            };
-            let browser = parsed
-                .as_ref()
-                .map(|r| r.name)
-                .filter(|n| !n.is_empty() && *n != "UNKNOWN")
-                .unwrap_or(if ua.starts_with("curl/") {
-                    "curl"
-                } else {
-                    "Other"
-                });
-            // A page view: a GET answered with HTML (a 304 has no body, so a path without an extension).
-            let html = ctype.starts_with("text/html")
-                || (status == 304
-                    && ctype.is_empty()
-                    && !path.rsplit('/').next().unwrap_or("").contains('.'));
-            let pageview = method == "GET" && (200..400).contains(&status) && html && !crawler;
-
-            let referrer = Some(l.referer.as_str())
-                .filter(|r| !r.is_empty())
-                .and_then(|r| r.split("://").nth(1))
-                .map(|r| r.split(['/', '?', ':']).next().unwrap_or("").to_lowercase());
-            let referrer = match referrer.as_deref() {
-                None | Some("") => "Direct".to_owned(),
-                Some(r) if r == host => String::new(),
-                Some(r) => r.trim_start_matches("www.").to_owned(),
-            };
-
-            let (country, country_name, city) = self.locate(ip);
-            let stored_ip = self.current_ip_mode().await.apply(ip);
-            let visitor = {
-                let d = Sha256::digest(format!("{salt}|{ip}|{ua}|{host}").as_bytes());
-                u64::from_be_bytes(d[..8].try_into().unwrap_or([0; 8]))
-            };
-
-            let row = json!({
-                "ts": ts as f64 / 1000.0,
-                "team_id": owner.team_id, "project_id": owner.project_id, "service_id": owner.service_id,
-                "host": host, "method": method, "path": path, "url": url,
-                "query_keys": keys, "redacted_keys": redacted,
-                "status": status,
-                "duration_ms": l.duration_ms,
-                "bytes": l.bytes,
-                "pageview": pageview as u8,
-                "visitor": visitor,
-                "country": country, "country_name": country_name, "city": city,
-                "referrer": referrer, "device": device, "browser": browser,
-                "ip": stored_ip,
-                // As sent, for the request log; capped like a header line.
-                "user_agent": ua.chars().take(512).collect::<String>(),
-                "node": l.node.chars().take(253).collect::<String>(),
-                "blocked_by": self.refusal_rule(cluster_id, &owner.service_id, crate::firewall::refusal(&l.details, "", status), ip, &l.peer, &country).await,
-            });
-            out.push_str(&row.to_string());
-            out.push('\n');
-            n += 1;
-        }
-        if !out.is_empty() {
-            ch.exec(
-                "INSERT INTO pyo_observability.requests FORMAT JSONEachRow",
-                Some(out),
-                &[],
-            )
-            .await?;
-        }
-        if !conns.is_empty() {
-            ch.exec(
-                "INSERT INTO pyo_observability.connections FORMAT JSONEachRow",
-                Some(conns),
-                &[],
-            )
-            .await?;
-        }
-        if !waf.is_empty() {
-            ch.exec(
-                "INSERT INTO pyo_observability.waf_hits FORMAT JSONEachRow",
-                Some(waf),
-                &[],
-            )
-            .await?;
-        }
-        Ok(n)
+    /// The requests table from before 0.5 is there to read.
+    pub async fn has_legacy(&self) -> bool {
+        self.ch.is_some() && *self.legacy.read().await
     }
 
     /// Store a heartbeat's CPU and memory figures, at most once a minute per
@@ -1710,81 +1207,11 @@ impl Observability {
         )
     }
 
-    /// The web server's request log for a set of hostnames: newest first,
-    /// `limit` rows before `before` (ms; now when 0). Filters: a status class
-    /// ("2xx"…"5xx"), a method, and text in the host, path or URL. Client IPs
-    /// follow the analytics setting, like the analytics page's.
-    /// Requests, server errors and response times per answering server, for
-    /// some hostnames over the last `hours`. Empty without storage.
-    pub async fn per_server(
-        &self,
-        team_id: &str,
-        hosts: &[String],
-        hours: i64,
-    ) -> ApiResult<Vec<Value>> {
-        let Some(ch) = self.store().await else {
-            return Ok(vec![]);
-        };
-        if hosts.is_empty() {
-            return Ok(vec![]);
-        }
-        let hosts_param = format!(
-            "[{}]",
-            hosts
-                .iter()
-                .map(|h| format!("'{}'", h.replace(['\\', '\''], "")))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let since = pyo_proto::now_ms() - hours * 3_600_000;
-        Ok(ch
-            .rows(
-                "SELECT node, count() AS requests, countIf(status >= 500) AS errors, round(avg(duration_ms), 1) AS avgMs, round(quantile(0.95)(duration_ms), 1) AS p95Ms
-                   FROM pyo_observability.requests
-                  WHERE team_id = {team:String} AND has({hosts:Array(String)}, host) AND ts >= fromUnixTimestamp64Milli({since:Int64})
-                  GROUP BY node"
-                    .into(),
-                vec![("team", team_id.to_owned()), ("hosts", hosts_param), ("since", since.to_string())],
-            )
-            .await?)
-    }
-
-    /// Requests per answering server per hour, for the last `hours`
-    /// (sparklines). Empty without storage.
-    pub async fn per_server_hourly(
-        &self,
-        team_id: &str,
-        hosts: &[String],
-        hours: i64,
-    ) -> ApiResult<Vec<Value>> {
-        let Some(ch) = self.store().await else {
-            return Ok(vec![]);
-        };
-        if hosts.is_empty() {
-            return Ok(vec![]);
-        }
-        let hosts_param = format!(
-            "[{}]",
-            hosts
-                .iter()
-                .map(|h| format!("'{}'", h.replace(['\\', '\''], "")))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let since = pyo_proto::now_ms() - hours * 3_600_000;
-        Ok(ch
-            .rows(
-                "SELECT node, toUnixTimestamp(toStartOfHour(ts)) AS hour, count() AS requests
-                   FROM pyo_observability.requests
-                  WHERE team_id = {team:String} AND has({hosts:Array(String)}, host) AND ts >= fromUnixTimestamp64Milli({since:Int64})
-                  GROUP BY node, hour"
-                    .into(),
-                vec![("team", team_id.to_owned()), ("hosts", hosts_param), ("since", since.to_string())],
-            )
-            .await?)
-    }
-
-    pub async fn access_logs(
+    /// The web server's request log as Pyo kept it before 0.5 (self-hosted,
+    /// until it expires): newest first, `limit` rows before `before` (ms;
+    /// now when 0). Filters: a status class ("2xx"…"5xx"), a method, and
+    /// text in the host, path or URL. Client IPs follow the IP setting.
+    pub async fn legacy_access_logs(
         &self,
         team_id: &str,
         hosts: &[String],
@@ -1895,442 +1322,13 @@ impl Observability {
         Ok(json!({ "logs": logs, "next": next, "ipMode": mode, "summary": summary }))
     }
 
-    /// The analytics page's data for a set of hostnames of one team.
-    pub async fn query(&self, team_id: &str, hosts: &[String], range: &str) -> ApiResult<Value> {
-        let ch = self.reader().await?;
-        let (points, step, start, end) = window(range, pyo_proto::now_ms() / 1000);
-        let prev_start = start - points * step;
-
-        let hosts_param = format!(
-            "[{}]",
-            hosts
-                .iter()
-                .map(|h| format!("'{}'", h.replace(['\\', '\''], "")))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let p = |s: i64, e: i64| -> Vec<(&'static str, String)> {
-            vec![
-                ("team", team_id.to_owned()),
-                ("hosts", hosts_param.clone()),
-                ("start", s.to_string()),
-                ("end", e.to_string()),
-                ("step", step.to_string()),
-            ]
-        };
-        const W: &str = "team_id = {team:String} AND has({hosts:Array(String)}, host) AND ts >= toDateTime64({start:Int64}, 3) AND ts < toDateTime64({end:Int64}, 3)";
-
-        let summary_sql = format!(
-            "SELECT count() AS requests, uniq(visitor) AS visitors, countIf(pageview = 1) AS pageviews,
-                    sum(bytes) / 1e6 AS mb, countIf(status >= 500) AS errors,
-                    quantiles(0.5, 0.95, 0.99)(duration_ms) AS q
-               FROM pyo_observability.requests WHERE {W}"
-        );
-        let (cur, prev, series, statuses, pages, paths, refs, countries, cities, devices, browsers, params, recent, ips) = tokio::try_join!(
-            ch.rows(summary_sql.clone(), p(start, end)),
-            ch.rows(summary_sql.clone(), p(prev_start, start)),
-            ch.rows(
-                format!(
-                    "SELECT toUnixTimestamp(toStartOfInterval(ts, toIntervalSecond({{step:Int64}}))) AS b, count() AS requests, uniq(visitor) AS visitors,
-                            sum(bytes) / 1e6 AS mb, countIf(status >= 500) AS errors, quantiles(0.5, 0.95, 0.99)(duration_ms) AS q
-                       FROM pyo_observability.requests WHERE {W} GROUP BY b ORDER BY b"
-                ),
-                p(start, end)
-            ),
-            ch.rows(format!("SELECT concat(toString(intDiv(status, 100)), 'xx') AS code, count() AS c FROM pyo_observability.requests WHERE {W} AND status >= 200 GROUP BY code"), p(start, end)),
-            ch.rows(format!("SELECT url, any(path) AS path, count() AS views, uniq(visitor) AS visitors, avg(duration_ms) AS ms FROM pyo_observability.requests WHERE {W} AND pageview = 1 GROUP BY url ORDER BY views DESC LIMIT 100"), p(start, end)),
-            ch.rows(format!("SELECT path, count() AS c, quantile(0.95)(duration_ms) AS p95 FROM pyo_observability.requests WHERE {W} GROUP BY path ORDER BY c DESC LIMIT 25"), p(start, end)),
-            ch.rows(format!("SELECT referrer AS k, uniq(visitor) AS v FROM pyo_observability.requests WHERE {W} AND pageview = 1 AND referrer != '' GROUP BY k ORDER BY v DESC LIMIT 25"), p(start, end)),
-            ch.rows(format!("SELECT if(country = '', '??', country) AS code, if(country_name = '', 'Unknown', country_name) AS name, uniq(visitor) AS v FROM pyo_observability.requests WHERE {W} GROUP BY code, name ORDER BY v DESC LIMIT 25"), p(start, end)),
-            ch.rows(format!("SELECT city, any(country) AS country, uniq(visitor) AS v FROM pyo_observability.requests WHERE {W} AND city != '' GROUP BY city ORDER BY v DESC LIMIT 25"), p(start, end)),
-            ch.rows(format!("SELECT device AS k, uniq(visitor) AS v FROM pyo_observability.requests WHERE {W} GROUP BY k ORDER BY v DESC"), p(start, end)),
-            ch.rows(format!("SELECT browser AS k, uniq(visitor) AS v FROM pyo_observability.requests WHERE {W} GROUP BY k ORDER BY v DESC LIMIT 15"), p(start, end)),
-            ch.rows(
-                format!(
-                    "SELECT splitByChar('=', kv)[1] AS k, count() AS c, uniqExact(kv) AS d, max(position(kv, '[redacted]') > 0) AS r
-                       FROM pyo_observability.requests ARRAY JOIN extractURLParameters(url) AS kv WHERE {W} GROUP BY k ORDER BY c DESC LIMIT 30"
-                ),
-                p(start, end)
-            ),
-            ch.rows(format!("SELECT toUnixTimestamp64Milli(ts) AS at, method, url, path, status, duration_ms, bytes, country, ip FROM pyo_observability.requests WHERE {W} ORDER BY ts DESC LIMIT 50"), p(start, end)),
-            ch.rows(format!("SELECT ip AS k, count() AS c, uniq(visitor) AS v FROM pyo_observability.requests WHERE {W} AND ip != '' GROUP BY k ORDER BY c DESC LIMIT 100"), p(start, end)),
-        )?;
-        // Client IPs as the analytics setting says now: hidden when it's
-        // "none", shortened when it's "anonymized" (for rows kept in full
-        // before the setting changed).
-        let mode = self.current_ip_mode().await;
-        let mut by_ip: Vec<(String, f64, f64)> = vec![];
-        for r in &ips {
-            let ip = mode.apply(r["k"].as_str().unwrap_or(""));
-            if ip.is_empty() {
-                continue;
-            }
-            let (c, v) = (
-                r["c"].as_f64().unwrap_or(0.0),
-                r["v"].as_f64().unwrap_or(0.0),
-            );
-            match by_ip.iter_mut().find(|x| x.0 == ip) {
-                Some(x) => {
-                    x.1 += c;
-                    x.2 += v;
-                }
-                None => by_ip.push((ip, c, v)),
-            }
-        }
-        by_ip.sort_by(|a, b| b.1.total_cmp(&a.1));
-        by_ip.truncate(25);
-
-        let num = |v: &Value, k: &str| v[k].as_f64().unwrap_or(0.0);
-        let q = |v: &Value, i: usize| {
-            v["q"][i]
-                .as_f64()
-                .filter(|x| x.is_finite())
-                .unwrap_or(0.0)
-                .round()
-        };
-        let c = cur.first().cloned().unwrap_or_default();
-        let pv = prev.first().cloned().unwrap_or_default();
-        let requests = num(&c, "requests");
-
-        // Every bucket, including empty ones.
-        let by_bucket: HashMap<i64, &Value> = series
-            .iter()
-            .map(|r| (r["b"].as_i64().unwrap_or(0), r))
-            .collect();
-        let series: Vec<Value> = (0..points)
-            .map(|i| {
-                let b = start + i * step;
-                let r = by_bucket.get(&b);
-                let g = |k: &str| r.map(|r| num(r, k)).unwrap_or(0.0);
-                json!({
-                    "at": b * 1000,
-                    "requests": g("requests"), "visitors": g("visitors"), "bandwidthMb": g("mb"), "errors": g("errors"),
-                    "p50": r.map(|r| q(r, 0)).unwrap_or(0.0), "p95": r.map(|r| q(r, 1)).unwrap_or(0.0), "p99": r.map(|r| q(r, 2)).unwrap_or(0.0),
-                })
-            })
-            .collect();
-
-        let status_codes: Vec<Value> = ["2xx", "3xx", "4xx", "5xx"]
-            .iter()
-            .map(|code| json!({ "code": code, "count": statuses.iter().find(|s| s["code"] == json!(code)).map(|s| num(s, "c")).unwrap_or(0.0) }))
-            .collect();
-        let kv = |rows: &[Value], key: &str, label: &str| -> Vec<Value> {
-            rows.iter()
-                .map(|r| json!({ key: r["k"], label: num(r, "v") }))
-                .collect()
-        };
-        let summary = json!({
-            "range": range,
-            "requests": requests,
-            "estimatedVisitors": num(&c, "visitors"),
-            "pageviews": num(&c, "pageviews"),
-            "bandwidthMb": num(&c, "mb"),
-            "errorRate": if requests > 0.0 { num(&c, "errors") / requests } else { 0.0 },
-            "latency": { "p50": q(&c, 0), "p95": q(&c, 1), "p99": q(&c, 2) },
-            "statusCodes": status_codes,
-            "topPaths": paths.iter().map(|r| json!({ "path": r["path"], "requests": num(r, "c"), "p95": num(r, "p95").round() })).collect::<Vec<_>>(),
-            "referrers": kv(&refs, "source", "visitors"),
-            "countries": countries.iter().map(|r| json!({ "code": r["code"], "name": r["name"], "visitors": num(r, "v") })).collect::<Vec<_>>(),
-            "cities": cities.iter().map(|r| json!({ "city": r["city"], "country": r["country"], "visitors": num(r, "v") })).collect::<Vec<_>>(),
-            "pages": pages.iter().map(|r| json!({ "url": r["url"], "path": r["path"], "views": num(r, "views"), "visitors": num(r, "visitors"), "avgMs": num(r, "ms").round() })).collect::<Vec<_>>(),
-            "devices": kv(&devices, "label", "visitors"),
-            "browsers": kv(&browsers, "label", "visitors"),
-            "queryParams": params.iter().map(|r| json!({ "key": r["k"], "requests": num(r, "c"), "distinct": num(r, "d"), "redacted": num(r, "r") > 0.0 })).collect::<Vec<_>>(),
-            "recentRequests": recent.iter().enumerate().map(|(i, r)| json!({ "id": format!("req_{i}"), "at": r["at"], "method": r["method"], "url": r["url"], "path": r["path"], "status": r["status"], "durationMs": num(r, "duration_ms").round(), "bytes": r["bytes"], "country": r["country"], "ip": mode.apply(r["ip"].as_str().unwrap_or("")) })).collect::<Vec<_>>(),
-            "ipMode": mode,
-            "clientIps": by_ip.iter().map(|(ip, c, v)| json!({ "ip": ip, "requests": c, "visitors": v })).collect::<Vec<_>>(),
-        });
-        let prev_requests = num(&pv, "requests");
-        Ok(json!({
-            "summary": summary,
-            "series": series,
-            "previous": {
-                "estimatedVisitors": num(&pv, "visitors"),
-                "pageviews": num(&pv, "pageviews"),
-                "errorRate": if prev_requests > 0.0 { num(&pv, "errors") / prev_requests } else { 0.0 },
-            },
-        }))
-    }
 }
 
 impl Observability {
-    /// A service's connections to its public TCP and UDP ports through the
-    /// gateway: per port, over time, by country and outcome, and the
-    /// latest ones.
-    pub async fn connections(
-        &self,
-        team_id: &str,
-        service_id: &str,
-        range: &str,
-    ) -> ApiResult<Value> {
-        let ch = self.reader().await?;
-        let (points, step) = match range {
-            "1h" => (60i64, 60i64),
-            "24h" => (48, 1800),
-            "30d" => (30, 86400),
-            _ => (42, 14400),
-        };
-        let now = pyo_proto::now_ms() / 1000;
-        let end = (now / step + 1) * step;
-        let start = end - points * step;
-        let p = || -> Vec<(&'static str, String)> {
-            vec![
-                ("team", team_id.to_owned()),
-                ("service", service_id.to_owned()),
-                ("start", start.to_string()),
-                ("end", end.to_string()),
-                ("step", step.to_string()),
-            ]
-        };
-        const W: &str = "team_id = {team:String} AND service_id = {service:String} AND ts >= toDateTime64({start:Int64}, 3) AND ts < toDateTime64({end:Int64}, 3)";
-        let (ports, series, countries, outcomes, recent) = tokio::try_join!(
-            ch.rows(format!("SELECT port, protocol, count() AS c, uniq(visitor) AS v, sum(bytes_in) AS bin, sum(bytes_out) AS bout, quantiles(0.5, 0.95)(duration_ms) AS q, countIf(outcome = 'blocked') AS blocked, countIf(outcome = 'limited') AS limited, countIf(outcome = 'unreachable') AS unreachable FROM pyo_observability.connections WHERE {W} GROUP BY port, protocol ORDER BY port"), p()),
-            ch.rows(format!("SELECT toUnixTimestamp(toStartOfInterval(ts, toIntervalSecond({{step:Int64}}))) AS b, count() AS c, uniq(visitor) AS v, sum(bytes_in + bytes_out) AS bytes FROM pyo_observability.connections WHERE {W} GROUP BY b ORDER BY b"), p()),
-            ch.rows(format!("SELECT if(country = '', '??', country) AS code, if(country_name = '', 'Unknown', country_name) AS name, uniq(visitor) AS v, count() AS c FROM pyo_observability.connections WHERE {W} GROUP BY code, name ORDER BY c DESC LIMIT 25"), p()),
-            ch.rows(format!("SELECT outcome AS k, count() AS c FROM pyo_observability.connections WHERE {W} GROUP BY k"), p()),
-            ch.rows(format!("SELECT toUnixTimestamp64Milli(ts) AS at, port, protocol, ip, country, duration_ms, bytes_in, bytes_out, outcome FROM pyo_observability.connections WHERE {W} ORDER BY ts DESC LIMIT 50"), p()),
-        )?;
-        let mode = self.current_ip_mode().await;
-        let num = |v: &Value, k: &str| v[k].as_f64().unwrap_or(0.0);
-        let q = |v: &Value, i: usize| {
-            v["q"][i]
-                .as_f64()
-                .filter(|x| x.is_finite())
-                .unwrap_or(0.0)
-                .round()
-        };
-        let by_bucket: HashMap<i64, &Value> = series
-            .iter()
-            .map(|r| (r["b"].as_i64().unwrap_or(0), r))
-            .collect();
-        let series: Vec<Value> = (0..points)
-            .map(|i| {
-                let b = start + i * step;
-                let r = by_bucket.get(&b);
-                let g = |k: &str| r.map(|r| num(r, k)).unwrap_or(0.0);
-                json!({ "at": b * 1000, "connections": g("c"), "clients": g("v"), "bytes": g("bytes") })
-            })
-            .collect();
-        Ok(json!({
-            "range": range,
-            "ports": ports.iter().map(|r| json!({
-                "port": r["port"], "protocol": r["protocol"], "connections": num(r, "c"), "clients": num(r, "v"),
-                "bytesIn": num(r, "bin"), "bytesOut": num(r, "bout"), "durationP50Ms": q(r, 0), "durationP95Ms": q(r, 1),
-                "blocked": num(r, "blocked"), "limited": num(r, "limited"), "unreachable": num(r, "unreachable"),
-            })).collect::<Vec<_>>(),
-            "series": series,
-            "countries": countries.iter().map(|r| json!({ "code": r["code"], "name": r["name"], "clients": num(r, "v"), "connections": num(r, "c") })).collect::<Vec<_>>(),
-            "outcomes": outcomes.iter().map(|r| json!({ "outcome": r["k"], "count": num(r, "c") })).collect::<Vec<_>>(),
-            "recent": recent.iter().map(|r| json!({
-                "at": r["at"], "port": r["port"], "protocol": r["protocol"], "ip": mode.apply(r["ip"].as_str().unwrap_or("")), "country": r["country"],
-                "durationMs": num(r, "duration_ms").round(), "bytesIn": r["bytes_in"], "bytesOut": r["bytes_out"], "outcome": r["outcome"],
-            })).collect::<Vec<_>>(),
-            "ipMode": mode,
-        }))
-    }
-}
-
-impl Observability {
-    /// What the firewall turned away for these services: over time, per
-    /// rule, source, country and website path, and the latest, from
-    /// websites (403s and 429s the proxy answered itself) and TCP ports
-    /// through the proxy.
-    pub async fn blocked(
-        &self,
-        team_id: &str,
-        services: &[String],
-        range: &str,
-    ) -> ApiResult<Value> {
-        let ch = self.reader().await?;
-        let secs = match range {
-            "1h" => 3600,
-            "7d" => 7 * 86400,
-            "30d" => 30 * 86400,
-            _ => 86400,
-        };
-        let start = pyo_proto::now_ms() / 1000 - secs;
-        let services_param = format!(
-            "[{}]",
-            services
-                .iter()
-                .map(|a| format!("'{}'", a.replace(['\\', '\''], "")))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let step = bar_steps(range).1;
-        let p = || -> Vec<(&'static str, String)> {
-            vec![
-                ("team", team_id.to_owned()),
-                ("services", services_param.clone()),
-                ("start", start.to_string()),
-                ("step", step.to_string()),
-            ]
-        };
-        // Both tables, as one: a website request or a connection.
-        let both = "(SELECT ts, service_id, 'website' AS kind, host AS target, path, ip, country, country_name, blocked_by AS rule, visitor FROM pyo_observability.requests
-                      WHERE team_id = {team:String} AND has({services:Array(String)}, service_id) AND ts >= toDateTime64({start:Int64}, 3) AND blocked_by != ''
-                     UNION ALL
-                     SELECT ts, service_id, lower(protocol) AS kind, toString(port) AS target, '' AS path, ip, country, country_name, rule, visitor FROM pyo_observability.connections
-                      WHERE team_id = {team:String} AND has({services:Array(String)}, service_id) AND ts >= toDateTime64({start:Int64}, 3) AND outcome = 'blocked')";
-        let (rules, sources, countries, paths, series, recent) = tokio::try_join!(
-            ch.rows(format!("SELECT rule, count() AS c FROM {both} GROUP BY rule ORDER BY c DESC LIMIT 50"), p()),
-            ch.rows(format!("SELECT ip, any(country) AS country, any(country_name) AS name, count() AS c, uniq(visitor) AS v FROM {both} GROUP BY ip ORDER BY c DESC LIMIT 50"), p()),
-            ch.rows(format!("SELECT country, count() AS c FROM {both} GROUP BY country ORDER BY c DESC LIMIT 25"), p()),
-            ch.rows(format!("SELECT path, count() AS c FROM {both} WHERE kind = 'website' GROUP BY path ORDER BY c DESC LIMIT 25"), p()),
-            ch.rows(format!("SELECT toUnixTimestamp(toStartOfInterval(ts, toIntervalSecond({{step:Int64}}))) AS b, count() AS c FROM {both} GROUP BY b"), p()),
-            ch.rows(format!("SELECT toUnixTimestamp64Milli(ts) AS at, service_id, kind, target, ip, country, rule FROM {both} ORDER BY ts DESC LIMIT 50"), p()),
-        )?;
-        let mode = self.current_ip_mode().await;
-        let num = |v: &Value, k: &str| v[k].as_f64().unwrap_or(0.0);
-        Ok(json!({
-            "range": range,
-            "total": rules.iter().map(|r| num(r, "c")).sum::<f64>(),
-            "series": bar_series(&series, range, |r| json!({ "count": r.map(|r| num(r, "c")).unwrap_or(0.0) })),
-            "rules": rules.iter().map(|r| json!({ "rule": r["rule"], "count": num(r, "c") })).collect::<Vec<_>>(),
-            "sources": sources.iter().map(|r| json!({ "ip": mode.apply(r["ip"].as_str().unwrap_or("")), "country": r["country"], "countryName": r["name"], "count": num(r, "c"), "clients": num(r, "v") })).collect::<Vec<_>>(),
-            "countries": countries.iter().map(|r| json!({ "country": r["country"], "count": num(r, "c") })).collect::<Vec<_>>(),
-            "paths": paths.iter().map(|r| json!({ "path": r["path"], "count": num(r, "c") })).collect::<Vec<_>>(),
-            "recent": recent.iter().map(|r| json!({ "at": r["at"], "serviceId": r["service_id"], "kind": r["kind"], "target": r["target"], "ip": mode.apply(r["ip"].as_str().unwrap_or("")), "country": r["country"], "rule": r["rule"] })).collect::<Vec<_>>(),
-            "ipMode": mode,
-        }))
-    }
-
-    /// The WAF's findings for these services: blocked and logged
-    /// requests, over time, per rule, domain, source, country and path, the
-    /// latest 50, and the custom rules' match counts.
-    pub async fn waf_hits(
-        &self,
-        team_id: &str,
-        services: &[String],
-        range: &str,
-    ) -> ApiResult<Value> {
-        let ch = self.reader().await?;
-        let secs = match range {
-            "1h" => 3600,
-            "7d" => 7 * 86400,
-            "30d" => 30 * 86400,
-            _ => 86400,
-        };
-        let start = pyo_proto::now_ms() / 1000 - secs;
-        let services_param = format!(
-            "[{}]",
-            services
-                .iter()
-                .map(|a| format!("'{}'", a.replace(['\\', '\''], "")))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let step = bar_steps(range).1;
-        let p = || -> Vec<(&'static str, String)> {
-            vec![
-                ("team", team_id.to_owned()),
-                ("services", services_param.clone()),
-                ("start", start.to_string()),
-                ("step", step.to_string()),
-            ]
-        };
-        const W: &str = "team_id = {team:String} AND has({services:Array(String)}, service_id) AND ts >= toDateTime64({start:Int64}, 3)";
-        // Custom rules are numbered from 1000000 (pyo_proto::WAF_RULE_IDS);
-        // the Core Rule Set's from 949000 are its scoring, not findings.
-        let (totals, rules, hosts, recent, custom, (series, sources, countries, paths)) = tokio::try_join!(
-            ch.rows(format!("SELECT countIf(blocked = 1) AS nb, countIf(blocked = 0) AS nl, uniq(visitor) AS v FROM pyo_observability.waf_hits WHERE {W}"), p()),
-            ch.rows(format!("SELECT rule, any(msg) AS message, count() AS c FROM pyo_observability.waf_hits ARRAY JOIN rules AS rule, messages AS msg WHERE {W} AND (rule < 949000 OR rule >= 1000000) GROUP BY rule ORDER BY c DESC LIMIT 25"), p()),
-            ch.rows(format!("SELECT host, countIf(blocked = 1) AS nb, countIf(blocked = 0) AS nl FROM pyo_observability.waf_hits WHERE {W} GROUP BY host ORDER BY nb + nl DESC LIMIT 25"), p()),
-            ch.rows(format!("SELECT toUnixTimestamp64Milli(ts) AS at, service_id, host, method, url, ip, country, blocked, rules, messages, severity FROM pyo_observability.waf_hits WHERE {W} ORDER BY ts DESC LIMIT 50"), p()),
-            ch.rows(format!("SELECT rule, count() AS c FROM pyo_observability.waf_hits ARRAY JOIN rules AS rule WHERE {W} AND rule >= 1000000 GROUP BY rule"), p()),
-            async {
-                tokio::try_join!(
-                    ch.rows(format!("SELECT toUnixTimestamp(toStartOfInterval(ts, toIntervalSecond({{step:Int64}}))) AS b, countIf(blocked = 1) AS nb, countIf(blocked = 0) AS nl FROM pyo_observability.waf_hits WHERE {W} GROUP BY b"), p()),
-                    ch.rows(format!("SELECT ip, any(country) AS country, countIf(blocked = 1) AS nb, countIf(blocked = 0) AS nl FROM pyo_observability.waf_hits WHERE {W} GROUP BY ip ORDER BY nb + nl DESC LIMIT 50"), p()),
-                    ch.rows(format!("SELECT country, countIf(blocked = 1) AS nb, countIf(blocked = 0) AS nl FROM pyo_observability.waf_hits WHERE {W} GROUP BY country ORDER BY nb + nl DESC LIMIT 25"), p()),
-                    ch.rows(format!("SELECT path, countIf(blocked = 1) AS nb, countIf(blocked = 0) AS nl FROM pyo_observability.waf_hits WHERE {W} GROUP BY path ORDER BY nb + nl DESC LIMIT 25"), p()),
-                )
-            },
-        )?;
-        let mode = self.current_ip_mode().await;
-        let num = |v: &Value, k: &str| v[k].as_f64().unwrap_or(0.0);
-        let t = totals.first().cloned().unwrap_or_default();
-        Ok(json!({
-            "range": range,
-            "blocked": num(&t, "nb"), "logged": num(&t, "nl"), "clients": num(&t, "v"),
-            "rules": rules.iter().map(|r| json!({ "rule": r["rule"], "message": r["message"], "count": num(r, "c") })).collect::<Vec<_>>(),
-            "hosts": hosts.iter().map(|r| json!({ "host": r["host"], "blocked": num(r, "nb"), "logged": num(r, "nl") })).collect::<Vec<_>>(),
-            "series": bar_series(&series, range, |r| json!({ "blocked": r.map(|r| num(r, "nb")).unwrap_or(0.0), "logged": r.map(|r| num(r, "nl")).unwrap_or(0.0) })),
-            "sources": sources.iter().map(|r| json!({ "ip": mode.apply(r["ip"].as_str().unwrap_or("")), "country": r["country"], "blocked": num(r, "nb"), "logged": num(r, "nl") })).collect::<Vec<_>>(),
-            "countries": countries.iter().map(|r| json!({ "country": r["country"], "blocked": num(r, "nb"), "logged": num(r, "nl") })).collect::<Vec<_>>(),
-            "paths": paths.iter().map(|r| json!({ "path": r["path"], "blocked": num(r, "nb"), "logged": num(r, "nl") })).collect::<Vec<_>>(),
-            // Each custom rule's matches in the range, by its number.
-            "custom": custom.iter().map(|r| json!({ "rule": r["rule"], "count": num(r, "c") })).collect::<Vec<_>>(),
-            "recent": recent.iter().map(|r| json!({
-                "at": r["at"], "serviceId": r["service_id"], "host": r["host"], "method": r["method"], "url": r["url"],
-                "ip": mode.apply(r["ip"].as_str().unwrap_or("")), "country": r["country"], "blocked": num(r, "blocked") > 0.0,
-                "rules": r["rules"], "messages": r["messages"], "severity": r["severity"],
-            })).collect::<Vec<_>>(),
-            "ipMode": mode,
-        }))
-    }
-
     /// An address's country, for the dashboard's lockout check.
     pub fn country_of(&self, ip: &str) -> String {
         self.locate(ip).0
     }
-}
-
-/// "/a?token=x&page=2" -> ("/a", "/a?token=[redacted]&page=2", ["token","page"], ["token"]).
-/// The analytics page's buckets for a range at `now` (Unix seconds): how
-/// many, how long each, and the window's start and end. Buckets start at
-/// whole multiples of the step since the epoch, as ClickHouse's
-/// `toStartOfInterval(ts, toIntervalSecond(step))` puts them, and the last
-/// one holds `now`.
-fn window(range: &str, now: i64) -> (i64, i64, i64, i64) {
-    let (points, step) = match range {
-        "1h" => (60, 60),
-        "24h" => (48, 1800),
-        "30d" => (30, 86400),
-        _ => (42, 14400),
-    };
-    let end = (now / step + 1) * step;
-    (points, step, end - points * step, end)
-}
-
-fn split_url(raw: &str) -> (String, String, Vec<String>, Vec<String>) {
-    let raw: String = raw.chars().take(2000).collect();
-    let (path, query) = match raw.split_once('?') {
-        Some((p, q)) => (p.to_owned(), q.to_owned()),
-        None => (raw.clone(), String::new()),
-    };
-    if query.is_empty() {
-        return (path.clone(), path, vec![], vec![]);
-    }
-    let mut keys = vec![];
-    let mut redacted = vec![];
-    let parts: Vec<String> = query
-        .split('&')
-        .filter(|kv| !kv.is_empty())
-        .map(|kv| {
-            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            let lower = k.to_ascii_lowercase();
-            if !keys.contains(&k.to_owned()) {
-                keys.push(k.to_owned());
-            }
-            if SENSITIVE.iter().any(|s| lower.contains(s)) {
-                if !redacted.contains(&k.to_owned()) {
-                    redacted.push(k.to_owned());
-                }
-                format!("{k}=[redacted]")
-            } else if v.is_empty() {
-                k.to_owned()
-            } else {
-                format!("{k}={v}")
-            }
-        })
-        .collect();
-    (
-        path.clone(),
-        format!("{path}?{}", parts.join("&")),
-        keys,
-        redacted,
-    )
 }
 
 /// A failed request-log query: the details go to the log, the user gets one
@@ -2345,156 +1343,7 @@ fn logs_unreadable(e: impl std::fmt::Display) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{IpMode, split_url, window};
-
-    /// A request lands in the bucket of its own minute (hour, day), the
-    /// one ClickHouse's toStartOfInterval gives it, and the last bucket
-    /// holds now.
-    #[test]
-    fn buckets_hold_their_own_time() {
-        // 2026-11-15T10:03:29Z, and now a few minutes later.
-        let at = 1_794_737_009;
-        let now = at + 200;
-        for range in ["1h", "24h", "7d", "30d"] {
-            let (points, step, start, end) = window(range, now);
-            assert_eq!(end - start, points * step, "{range}");
-            assert_eq!(start % step, 0, "{range}");
-            assert!(start <= now && now < end, "{range}: now in the last bucket");
-            assert!(end - step <= now, "{range}: the last bucket is now's");
-            let bucket = at / step * step;
-            let i = (bucket - start) / step;
-            assert!((0..points).contains(&i), "{range}");
-            assert!(bucket <= at && at < bucket + step, "{range}");
-        }
-        let (_, step, start, _) = window("1h", now);
-        // 10:03:00Z, three before the last bucket (10:06, now's).
-        assert_eq!(at / step * step, 1_794_736_980);
-        assert_eq!((1_794_736_980 - start) / step, 56);
-    }
-
-    /// The proxy's access log, as Vector sends it: every field analytics uses
-    /// comes from a field the proxy writes.
-    #[test]
-    fn access_log_fields() {
-        use super::AccessLine;
-        use serde_json::json;
-        let envoy = json!({ "bytes": 354, "client_ip": "203.0.113.9", "content_type": "text/html; charset=utf-8", "duration_ms": 6, "host": "shop.example.com",
-            "method": "GET", "path": "/x?a=1", "peer": "10.42.0.1", "referer": "https://a.example/", "start_time": "2026-11-06T12:28:32.253Z", "status": 200,
-            "user_agent": "Mozilla/5", "x_forwarded_for": "203.0.113.9,10.0.2.2", "x_real_ip": null, "PyoNode": "sg-1" });
-        let a = AccessLine::read(&envoy);
-        assert_eq!(
-            a,
-            AccessLine {
-                host: "shop.example.com".into(),
-                ts_ms: Some(1793968112253),
-                peer: "10.42.0.1".into(),
-                forwarded_for: "203.0.113.9,10.0.2.2".into(),
-                real_ip: String::new(),
-                user_agent: "Mozilla/5".into(),
-                status: 200,
-                method: "GET".into(),
-                path: "/x?a=1".into(),
-                content_type: "text/html; charset=utf-8".into(),
-                referer: "https://a.example/".into(),
-                duration_ms: 6.0,
-                bytes: 354,
-                node: "sg-1".into(),
-                ..Default::default()
-            }
-        );
-        assert_eq!(a.port_key(), None, "a website request");
-        // Whatever X-Forwarded-For says, the visitor is who the proxy saw.
-        assert_eq!(a.visitor_ip(), "10.42.0.1");
-        // Every key the proxy writes is one this reads (and the reverse).
-        let mut written: Vec<&str> = pyo_proto::system::ACCESS_LOG_FIELDS
-            .iter()
-            .map(|(k, _)| *k)
-            .collect();
-        written.push(pyo_proto::system::ACCESS_LOG_CONTENT_TYPE.0);
-        written.sort();
-        let mut read = vec![
-            "host",
-            "start_time",
-            "peer",
-            "x_forwarded_for",
-            "x_real_ip",
-            "user_agent",
-            "status",
-            "method",
-            "path",
-            "content_type",
-            "referer",
-            "duration_ms",
-            "bytes",
-            "remote",
-            "local_port",
-            "bytes_in",
-            "upstream",
-            "upstream_host",
-            "flags",
-            "termination",
-            "details",
-        ];
-        read.sort();
-        assert_eq!(written, read);
-    }
-
-    #[test]
-    fn connection_lines() {
-        use super::AccessLine;
-        use serde_json::json;
-        // Envoy's line for a TCP connection: no HTTP fields.
-        let tcp = AccessLine::read(
-            &json!({ "start_time": "2026-11-06T12:28:32.253Z", "peer": "10.0.2.2", "remote": "203.0.113.9", "local_port": "16379", "bytes": "120", "bytes_in": 64,
-            "duration_ms": 5012, "upstream": "tcproute/pyo-gateway/shop-cache-tcp-6379/rule/0", "flags": "-", "termination": null, "host": null, "method": null }),
-        );
-        assert_eq!(
-            tcp.port_key(),
-            Some(("TCP", super::PortKey::Route("shop-cache-tcp-6379")))
-        );
-        assert_eq!(
-            (
-                tcp.bytes_in,
-                tcp.bytes,
-                tcp.duration_ms,
-                tcp.remote.as_str(),
-                tcp.outcome()
-            ),
-            (64, 120, 5012.0, "203.0.113.9", "ok")
-        );
-        // As Envoy Gateway v1.9.3 logs them: a UDP session (no route named,
-        // after a minute without packets), and a TCP connection the limit
-        // turned away (nothing upstream).
-        let udp = AccessLine::read(
-            &json!({ "bytes": 123, "bytes_in": 55, "duration_ms": 60004, "flags": "-", "host": null, "local_port": 10053, "method": null, "peer": "10.0.2.2", "remote": "10.0.2.2", "status": 0, "upstream": null, "upstream_host": "10.43.152.148:53" }),
-        );
-        assert_eq!(
-            (udp.port_key(), udp.outcome()),
-            (Some(("UDP", super::PortKey::Listen(10053))), "ok")
-        );
-        let limited = AccessLine::read(
-            &json!({ "bytes": 0, "bytes_in": 0, "duration_ms": 0, "flags": "-", "local_port": 6379, "peer": "10.0.2.2", "upstream": null, "upstream_host": null }),
-        );
-        assert_eq!(
-            (limited.port_key(), limited.outcome()),
-            (Some(("TCP", super::PortKey::Listen(6379))), "limited")
-        );
-        let outcome = |flags: &str, termination: &str| {
-            AccessLine {
-                upstream: "tcproute/x/y/rule/0".into(),
-                flags: flags.into(),
-                termination: termination.into(),
-                ..Default::default()
-            }
-            .outcome()
-        };
-        assert_eq!(
-            outcome("-", "rbac_access_denied_matched_policy[deny]"),
-            "blocked"
-        );
-        assert_eq!(outcome("UF,URX", ""), "unreachable");
-        assert_eq!(outcome("UO", ""), "limited");
-    }
+    use super::IpMode;
 
     #[test]
     fn the_traffic_proxy_is_measured_against_the_whole_cluster() {
@@ -2540,48 +1389,6 @@ mod tests {
     }
 
     #[test]
-    fn visitors_are_who_the_proxy_saw() {
-        let line = |peer: &str, remote: &str, xff: &str, real: &str| super::AccessLine {
-            peer: peer.into(),
-            remote: remote.into(),
-            forwarded_for: xff.into(),
-            real_ip: real.into(),
-            ..Default::default()
-        };
-        // Straight from the internet: the peer, whatever headers say.
-        assert_eq!(
-            line("203.0.113.7", "203.0.113.7", "1.2.3.4", "").visitor_ip(),
-            "203.0.113.7"
-        );
-        // A tailnet device (or anything on a private network) naming someone
-        // else: still itself, as the firewall sees it.
-        assert_eq!(
-            line(
-                "100.101.102.103",
-                "100.101.102.103",
-                "198.51.100.9",
-                "198.51.100.10"
-            )
-            .visitor_ip(),
-            "100.101.102.103"
-        );
-        assert_eq!(
-            line("10.42.0.1", "10.42.0.1", "198.51.100.9", "").visitor_ip(),
-            "10.42.0.1"
-        );
-        // A PROXY protocol header's address, when the proxy read one.
-        assert_eq!(
-            line("10.0.2.2", "198.51.100.9", "6.6.6.6", "").visitor_ip(),
-            "198.51.100.9"
-        );
-        // Lines without the proxy's view: the peer.
-        assert_eq!(
-            line("203.0.113.7", "", "6.6.6.6", "").visitor_ip(),
-            "203.0.113.7"
-        );
-    }
-
-    #[test]
     fn ip_modes() {
         assert_eq!(IpMode::None.apply("203.0.113.7"), "");
         assert_eq!(IpMode::Anonymized.apply("203.0.113.7"), "203.0.113.0");
@@ -2591,25 +1398,6 @@ mod tests {
         );
         assert_eq!(IpMode::Full.apply("203.0.113.7"), "203.0.113.7");
         assert_eq!(IpMode::Full.apply("not-an-ip"), "");
-    }
-
-    #[test]
-    fn redacts_sensitive_values() {
-        let (path, url, keys, redacted) = split_url("/reset?email=a@b.c&token=xyz&page=2");
-        assert_eq!(path, "/reset");
-        assert_eq!(url, "/reset?email=[redacted]&token=[redacted]&page=2");
-        assert_eq!(keys, vec!["email", "token", "page"]);
-        assert_eq!(redacted, vec!["email", "token"]);
-        assert_eq!(
-            split_url("/signup?invite=abc").1,
-            "/signup?invite=[redacted]"
-        );
-    }
-
-    #[test]
-    fn plain_paths() {
-        assert_eq!(split_url("/").1, "/");
-        assert_eq!(split_url("/a?x").1, "/a?x");
     }
 
     #[test]

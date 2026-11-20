@@ -391,25 +391,6 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> ApiRe
     Ok(())
 }
 
-/// Every service's firewall on every cluster, for naming the rule behind a
-/// refusal: (cluster, service) -> its firewall.
-pub async fn all_firewalls(
-    db: &sqlx::PgPool,
-) -> ApiResult<std::collections::HashMap<(String, String), Firewall>> {
-    let mut tx = db.begin().await?;
-    let services: Vec<(String, String)> =
-        sqlx::query_as("SELECT cluster_id, id FROM pyo.services WHERE NOT deleting")
-            .fetch_all(&mut *tx)
-            .await?;
-    let mut out = std::collections::HashMap::new();
-    for (cluster, service) in services {
-        let f = for_service(&mut tx, &service).await?;
-        out.insert((cluster, service), f);
-    }
-    tx.commit().await?;
-    Ok(out)
-}
-
 /// Fill in a deploy's firewall (none without rules) and WAF
 /// (`waf_for`).
 pub async fn fill(
@@ -423,22 +404,6 @@ pub async fn fill(
     let engine = crate::waf::wanted(tx, cluster_id).await?;
     spec.waf = waf_for(tx, engine, service_id).await?;
     Ok(())
-}
-
-/// Why the proxy refused a request or connection, from its log line:
-/// "blocked" (an allow or block rule; the proxy doesn't say which) or
-/// "rate-limit"; "" when it didn't.
-pub fn refusal(details: &str, termination: &str, status: u64) -> String {
-    if [details, termination]
-        .iter()
-        .any(|d| d.starts_with("rbac_access_denied_matched_policy["))
-    {
-        return "blocked".into();
-    }
-    if status == 429 && details.contains("rate_limited") {
-        return "rate-limit".into();
-    }
-    String::new()
 }
 
 #[cfg(test)]
@@ -554,23 +519,5 @@ mod tests {
             ),
             "Allow if client IP is in 203.0.113.7, 2001:db8::/32"
         );
-    }
-
-    #[test]
-    fn refusals() {
-        assert_eq!(
-            refusal("rbac_access_denied_matched_policy[DENY]", "", 403),
-            "blocked"
-        );
-        assert_eq!(
-            refusal("rbac_access_denied_matched_policy[none]", "", 403),
-            "blocked"
-        );
-        assert_eq!(
-            refusal("", "rbac_access_denied_matched_policy[DENY]", 0),
-            "blocked"
-        );
-        assert_eq!(refusal("local_rate_limited", "", 429), "rate-limit");
-        assert_eq!(refusal("via_upstream", "", 403), "");
     }
 }

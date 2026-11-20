@@ -28,7 +28,8 @@ pub fn routes() -> Router<AppState> {
         .route("/commands", get(poll))
         .route("/commands/{id}", post(command_result))
         .route("/deployments/{id}/progress", post(progress))
-        .route("/access-logs", post(access_logs))
+        .route("/traffic-totals", post(traffic_totals))
+        .route("/traffic-context", get(traffic_context))
         .route("/host-metrics", post(host_metrics))
         .route("/certificates/{id}", get(certificate))
         .route("/registry-logins/{id}", get(registry_login))
@@ -1068,24 +1069,29 @@ async fn progress(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// The gateway's access log lines from the cluster's Vector, one JSON object per
-/// line (or a JSON array). See observability.rs for what's kept.
-async fn access_logs(
+/// A cluster's traffic totals, from its traffic store through its agent
+/// (totals.rs): finished minutes per host and proxied port. Raw requests
+/// stay in the cluster.
+async fn traffic_totals(
     State(s): State<AppState>,
     cluster: AgentCluster,
-    body: String,
+    Json(batch): Json<pyo_proto::traffic::TotalsBatch>,
 ) -> ApiResult<Json<Value>> {
-    let lines: Vec<Value> = if body.trim_start().starts_with('[') {
-        serde_json::from_str(&body).map_err(|_| ApiError::bad_request("Expected JSON lines."))?
-    } else {
-        body.lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect()
-    };
-    let received = lines.len();
-    let stored = s.observability.ingest(&cluster.id, lines).await?;
-    Ok(Json(json!({ "received": received, "stored": stored })))
+    let stored = s.observability.ingest_totals(&cluster.id, &batch).await?;
+    Ok(Json(json!({ "stored": stored })))
+}
+
+/// What the cluster's traffic store needs from Pyo: its services' hosts
+/// and ports, their firewalls, the IP setting and the team's limits.
+/// Signed like every answer the agent acts on.
+async fn traffic_context(
+    State(s): State<AppState>,
+    cluster: AgentCluster,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Json<Value>> {
+    let ctx = crate::totals::context(&s.db, &cluster.id, &cluster.team_id).await?;
+    let reply = serde_json::to_value(ctx).map_err(anyhow::Error::from)?;
+    Ok(Json(signed_reply(&cluster.id, &headers, reply).await))
 }
 
 /// Each server's load, disk I/O and network from the cluster's Vector
