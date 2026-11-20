@@ -102,6 +102,14 @@ fn state(d: &Value, deployed: bool) -> (Tone, String) {
     }
     let host = d["hostname"].as_str().unwrap_or("");
     if d["status"] != json!("active") {
+        // Tailnet domains have no DNS to wait for: Pyo sets them up.
+        if pyo_proto::system::is_tailnet_host(host) {
+            return if d["status"] == json!("error") {
+                (Tone::Broken, "Tailscale failed".into())
+            } else {
+                (Tone::Busy, "Setting up on Tailscale…".into())
+            };
+        }
         if is_free(host) {
             return (Tone::Busy, "Checking DNS…".into());
         }
@@ -553,6 +561,14 @@ mod tests {
             state(&d("active", "issued", "auto"), false).1,
             "Live after first deploy"
         );
+        let tn = |status: &str| json!({ "hostname": "blog.tail1.ts.net", "status": status, "tls": "pending", "tlsMode": "auto" });
+        assert_eq!(
+            state(&tn("pending_dns"), true).1,
+            "Setting up on Tailscale…"
+        );
+        let failed = state(&tn("error"), true);
+        assert!(failed.0 == Tone::Broken && failed.1 == "Tailscale failed");
+        assert_eq!(state(&tn("active"), true).1, "Issuing certificate…");
         assert_eq!(https(&d("active", "issued", "auto")), "Let's Encrypt");
         assert_eq!(https(&d("active", "disabled", "off")), "off");
     }
