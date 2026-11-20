@@ -11,6 +11,8 @@ import {
   useCloudflareFor,
   type CloudflareChoice,
 } from "~/components/pyo/Cloudflare";
+import { SetUpTailscaleLink } from "~/components/pyo/Tailscale";
+import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
 import { Dialog } from "~/components/ui/Dialog";
 import {
@@ -24,22 +26,24 @@ import {
 import { HOSTNAME } from "~/lib/pyo/format";
 import {
   clusterTailnet,
-  freeDomainIp,
-  freeHostname,
-  tailnetHostname,
+  hostnameUsed,
+  unusedHostname,
 } from "~/lib/pyo/freeDomain";
 import { api, servicesIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Application, TlsMode } from "~/lib/pyo/types";
 
-/** Your own domain (a DNS record to make), or a free one: nip.io or the tailnet. */
+/**
+ * Your own domain (a DNS record to make), a free one on nip.io at the
+ * cluster's public IP, or a private one on the tailnet (Tailscale).
+ */
 type Kind = "own" | "public" | "tailnet";
 
 /** One DNS label. */
 const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /**
- * Add a domain: your own or a free one, its hostname, the service it routes to (asked when it isn't
+ * Add a domain: your own, a free one or a Tailscale one, its hostname, the service it routes to (asked when it isn't
  * given, e.g. from the team's Domains page), the port when there's a
  * choice, and how HTTPS works.
  */
@@ -85,23 +89,28 @@ export function AddDomainDialog({
   });
   const port = portName || httpPorts[0]?.name || "";
   const cluster = s.clusters.find((c) => c.id === app?.clusterId);
-  const freeIp = app ? freeDomainIp(s, app.clusterId) : undefined;
+  // Free domains go on the public IP, whatever the cluster's free domains
+  // use by default: traffic goes straight to its servers.
+  const freeIp = cluster?.publicIp ?? undefined;
   const tailnet = app ? clusterTailnet(s, app.clusterId) : undefined;
   const namespace =
     s.projects.find((p) => p.id === app?.projectId)?.namespace ?? "app";
-  // A free kind the picked service's cluster doesn't have: back to your own.
-  const k: Kind =
-    (kind === "public" && !freeIp) || (kind === "tailnet" && !tailnet)
-      ? "own"
-      : kind;
+  // Picked, but the service's cluster has none: a note says why.
+  const missing =
+    !!app &&
+    ((kind === "public" && !freeIp) || (kind === "tailnet" && !tailnet));
+  // No service yet: only your own domain, the free ones are named after it.
+  const k: Kind = app ? kind : "own";
   const suffix =
     k === "public" ? `${freeIp}.nip.io` : k === "tailnet" ? tailnet : "";
   const suggested =
-    !app || k === "own"
+    !app || k === "own" || missing
       ? ""
-      : (k === "public"
-          ? freeHostname(app, namespace, freeIp!)
-          : tailnetHostname(s, app, namespace, tailnet!)
+      : // The first name nothing uses yet ("web-2" when "web" is).
+        unusedHostname(
+          s,
+          k === "public" ? `${app.name}-${namespace}` : app.name,
+          suffix!,
         ).slice(0, -suffix!.length - 1);
   const name = label ?? suggested;
   const hostname = k === "own" ? ownHost : `${name}.${suffix}`;
@@ -115,18 +124,17 @@ export function AddDomainDialog({
       (!hostname || covers(c, hostname)),
   );
   const cert = matching.find((c) => c.id === certificateId) ?? matching[0];
-  const taken = s.services.some((a) =>
-    a.domains.some((d) => d.hostname === hostname),
-  );
-  const error =
-    k !== "own" && !LABEL.test(name)
+  const taken = hostnameUsed(s, hostname);
+  const error = missing
+    ? "Pick another option."
+    : k !== "own" && !LABEL.test(name)
       ? "Use lowercase letters, digits and hyphens."
       : !HOSTNAME.test(hostname)
         ? "Enter a valid hostname, e.g. app.example.com."
         : !app
           ? "Pick the service it routes to."
           : taken
-            ? "This hostname is already routed to a service."
+            ? `${hostname} is already used.`
             : k !== "tailnet" && tlsMode === "custom" && !cert
               ? `Upload a certificate valid for ${hostname}, or pick another HTTPS option.`
               : "";
@@ -183,7 +191,7 @@ export function AddDomainDialog({
           <Button variant="ghost" size="sm" onClick={close}>
             Cancel
           </Button>
-          <Button type="submit" size="sm">
+          <Button type="submit" size="sm" disabled={missing}>
             Add domain
           </Button>
         </>
@@ -228,183 +236,194 @@ export function AddDomainDialog({
             onSelect={() => setKind("own")}
           />
           <Choice
-            label={
-              cluster?.freeDomainAddress === "tailscale"
-                ? "Tailscale IP"
-                : "Public"
-            }
-            detail={
-              !app
-                ? "Pick a service first"
-                : freeIp
-                  ? "Free on nip.io"
-                  : cluster?.freeDomainAddress === "tailscale"
-                    ? "No Tailscale IP"
-                    : cluster?.publicTraffic === false
-                      ? "Public traffic is off"
-                      : "No public IP yet"
-            }
+            label="Free domain"
+            detail={app ? "Public, on nip.io" : "Pick a service first"}
             selected={k === "public"}
-            disabled={!freeIp}
+            disabled={!app}
             onSelect={() => {
               setKind("public");
               setLabel(null);
             }}
           />
           <Choice
-            label="Tailnet"
-            detail={
-              !app
-                ? "Pick a service first"
-                : tailnet
-                  ? "Free on ts.net"
-                  : s.tailscale
-                    ? "Cluster not on your tailnet"
-                    : "Set up Tailscale in Integrations"
-            }
+            label="Tailscale"
+            detail={app ? "Private, on ts.net" : "Pick a service first"}
             selected={k === "tailnet"}
-            disabled={!tailnet}
+            disabled={!app}
             onSelect={() => {
               setKind("tailnet");
               setLabel(null);
             }}
           />
         </Choices>
-        <Field
-          label="Hostname"
-          error={touched ? error || undefined : undefined}
-          hint={
-            k === "public"
-              ? `Points at ${freeIp}. No DNS needed.`
-              : k === "tailnet"
-                ? "Only devices on your tailnet can open it."
-                : undefined
-          }
-        >
-          {(p) =>
-            k === "own" ? (
-              <Input
-                {...p}
-                mono
-                value={ownHost}
-                onChange={(e) =>
-                  setOwnHost(e.target.value.trim().toLowerCase())
-                }
-                placeholder="shop.example.com"
-              />
-            ) : (
-              <div className={fieldGroupClass(!!(touched && error))}>
-                <input
-                  {...p}
-                  value={name}
-                  onChange={(e) =>
-                    setLabel(e.target.value.trim().toLowerCase())
-                  }
-                  spellCheck={false}
-                  autoComplete="off"
-                  className={`${groupInputClass} flex-1 pr-0 font-mono text-[12px]`}
-                />
-                <span className="flex shrink-0 items-center pr-3.5 font-mono text-[12px] text-muted-foreground">
-                  .{suffix}
-                </span>
-              </div>
-            )
-          }
-        </Field>
-        {k === "own" ? (
-          <CloudflareFields
-            hostname={HOSTNAME.test(hostname) ? hostname : ""}
-            clusterId={app?.clusterId}
-            value={cf}
-            onChange={setCf}
-          />
-        ) : null}
-        {httpPorts.length > 1 ? (
-          <Field label="Route to port">
-            {(p) => (
-              <Select
-                {...p}
-                value={port}
-                onChange={(e) => setPortName(e.target.value)}
-              >
-                {httpPorts.map((x) => (
-                  <option key={x.id} value={x.name}>
-                    {x.name} ({x.containerPort})
-                  </option>
-                ))}
-              </Select>
-            )}
-          </Field>
-        ) : null}
-        {k === "tailnet" ? null : (
-          <Field
-            label="HTTPS"
-            hint={TLS_MODES.find((m) => m.value === tlsMode)?.hint}
-          >
-            {(p) => (
-              <Select
-                {...p}
-                value={tlsMode}
-                onChange={(e) => setTlsMode(e.target.value as TlsMode)}
-              >
-                {TLS_MODES.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
-              </Select>
-            )}
-          </Field>
-        )}
-        {k !== "tailnet" && tlsMode === "custom" ? (
-          <Field
-            label={
+        {missing && cluster ? (
+          <p className="rounded-lg border border-border bg-muted/40 px-3.5 py-3 text-[12.5px] text-muted-foreground">
+            {k === "tailnet" ? (
+              cluster.tailscale ||
+              (s.tailscale && s.tailscale.clusterId === cluster.id) ? (
+                `${cluster.name} is still joining your tailnet.`
+              ) : (
+                <>
+                  Tailscale isn't set up on {cluster.name}.{" "}
+                  <SetUpTailscaleLink clusterId={cluster.id} />
+                </>
+              )
+            ) : cluster.publicTraffic === false ? (
               <>
-                Certificate
-                <button
-                  type="button"
-                  onClick={() => setUploading(true)}
-                  className="ml-auto text-[12px] font-medium text-primary hover:text-primary/80"
+                Public traffic is off on {cluster.name}.{" "}
+                <AppLink
+                  href={`/clusters/${cluster.id}/settings`}
+                  className="font-medium text-primary hover:text-primary/80"
                 >
-                  Upload new
-                </button>
+                  Cluster settings
+                </AppLink>
               </>
-            }
-            hint={
-              cert
-                ? `${cert.hostnames.join(", ")} · ${expiry(cert).text}`
-                : hostname
-                  ? `No certificate covers ${hostname} yet.`
-                  : undefined
-            }
-          >
-            {(p) => (
-              <Select
-                {...p}
-                value={cert?.id ?? ""}
-                onChange={(e) => setCertificateId(e.target.value)}
-                disabled={!matching.length}
-              >
-                {matching.length ? (
-                  matching.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">No matching certificate</option>
-                )}
-              </Select>
+            ) : (
+              `No public IP found on ${cluster.name} yet.`
             )}
-          </Field>
+          </p>
         ) : null}
-        {k !== "tailnet" && tlsMode !== "off" ? (
-          <Switch
-            checked={redirect}
-            onChange={setRedirect}
-            label="Redirect HTTP to HTTPS"
-          />
-        ) : null}
+        {missing ? null : (
+          <>
+            <Field
+              label="Hostname"
+              error={touched ? error || undefined : undefined}
+              hint={
+                k === "public"
+                  ? cluster?.behindNat
+                    ? `Points at ${freeIp}. Forward ports 80 and 443 to the server.`
+                    : `Points at ${freeIp}. No DNS needed.`
+                  : k === "tailnet"
+                    ? "Only devices on your tailnet can open it."
+                    : undefined
+              }
+            >
+              {(p) =>
+                k === "own" ? (
+                  <Input
+                    {...p}
+                    mono
+                    value={ownHost}
+                    onChange={(e) =>
+                      setOwnHost(e.target.value.trim().toLowerCase())
+                    }
+                    placeholder="shop.example.com"
+                  />
+                ) : (
+                  <div className={fieldGroupClass(!!(touched && error))}>
+                    <input
+                      {...p}
+                      value={name}
+                      onChange={(e) =>
+                        setLabel(e.target.value.trim().toLowerCase())
+                      }
+                      spellCheck={false}
+                      autoComplete="off"
+                      className={`${groupInputClass} flex-1 pr-0 font-mono text-[12px]`}
+                    />
+                    <span className="flex shrink-0 items-center pr-3.5 font-mono text-[12px] text-muted-foreground">
+                      .{suffix}
+                    </span>
+                  </div>
+                )
+              }
+            </Field>
+            {k === "own" ? (
+              <CloudflareFields
+                hostname={HOSTNAME.test(hostname) ? hostname : ""}
+                clusterId={app?.clusterId}
+                value={cf}
+                onChange={setCf}
+              />
+            ) : null}
+            {httpPorts.length > 1 ? (
+              <Field label="Route to port">
+                {(p) => (
+                  <Select
+                    {...p}
+                    value={port}
+                    onChange={(e) => setPortName(e.target.value)}
+                  >
+                    {httpPorts.map((x) => (
+                      <option key={x.id} value={x.name}>
+                        {x.name} ({x.containerPort})
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+            ) : null}
+            {k === "tailnet" ? null : (
+              <Field
+                label="HTTPS"
+                hint={TLS_MODES.find((m) => m.value === tlsMode)?.hint}
+              >
+                {(p) => (
+                  <Select
+                    {...p}
+                    value={tlsMode}
+                    onChange={(e) => setTlsMode(e.target.value as TlsMode)}
+                  >
+                    {TLS_MODES.map((m) => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+            )}
+            {k !== "tailnet" && tlsMode === "custom" ? (
+              <Field
+                label={
+                  <>
+                    Certificate
+                    <button
+                      type="button"
+                      onClick={() => setUploading(true)}
+                      className="ml-auto text-[12px] font-medium text-primary hover:text-primary/80"
+                    >
+                      Upload new
+                    </button>
+                  </>
+                }
+                hint={
+                  cert
+                    ? `${cert.hostnames.join(", ")} · ${expiry(cert).text}`
+                    : hostname
+                      ? `No certificate covers ${hostname} yet.`
+                      : undefined
+                }
+              >
+                {(p) => (
+                  <Select
+                    {...p}
+                    value={cert?.id ?? ""}
+                    onChange={(e) => setCertificateId(e.target.value)}
+                    disabled={!matching.length}
+                  >
+                    {matching.length ? (
+                      matching.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))
+                    ) : (
+                      <option value="">No matching certificate</option>
+                    )}
+                  </Select>
+                )}
+              </Field>
+            ) : null}
+            {k !== "tailnet" && tlsMode !== "off" ? (
+              <Switch
+                checked={redirect}
+                onChange={setRedirect}
+                label="Redirect HTTP to HTTPS"
+              />
+            ) : null}
+          </>
+        )}
       </div>
       <CertificateDialog
         open={uploading}

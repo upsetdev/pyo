@@ -89,9 +89,9 @@ export function DomainStatus({
 }
 
 const KINDS = {
-  public: { label: "Public", tone: "neutral", hint: "Free nip.io domain. Anyone can open it." },
+  public: { label: "Free", tone: "neutral", hint: "Free nip.io domain. Anyone can open it." },
   private: { label: "Private", tone: "neutral", hint: "Free nip.io domain on a private IP." },
-  tailnet: { label: "Tailnet", tone: "info", hint: "Only devices on your tailnet can open it." },
+  tailnet: { label: "Tailscale", tone: "info", hint: "Only devices on your tailnet can open it." },
 } as const;
 
 /** Which free domain it is (none for the team's own), as a badge. */

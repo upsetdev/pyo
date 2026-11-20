@@ -35,7 +35,6 @@ import {
   isFreeDomain,
   isTailnetDomain,
   noFreeDomain,
-  freeDomainIp,
   tailnetHostname,
 } from "~/lib/pyo/freeDomain";
 import { BrandMark, GITHUB_LOGO } from "~/components/pyo/common";
@@ -1184,18 +1183,14 @@ export function DomainsStep({ d, set, errors }: StepProps) {
     !!cloudflareZoneFor(s, host)?.canEdit && !!cluster?.publicIp;
   const httpPorts = d.ports.filter((p) => p.protocol === "HTTP");
   const project = draftProject(s, d);
-  const ip = d.clusterId ? freeDomainIp(s, d.clusterId) : undefined;
+  // Free domains go on the public IP: traffic goes straight to the servers.
+  const ip = cluster?.publicIp ?? undefined;
   const free = ip
     ? freeHostname({ name: d.name || "app" }, project?.namespace ?? "app", ip)
     : "";
   const tailnet = d.clusterId ? clusterTailnet(s, d.clusterId) : undefined;
   const tailnetFree = tailnet
-    ? tailnetHostname(
-        s,
-        { name: d.name || "app" },
-        project?.namespace ?? "app",
-        tailnet,
-      )
+    ? tailnetHostname(s, { name: d.name || "app" }, tailnet)
     : "";
   const hasPublic = d.domains.some(
     (x) => isFreeDomain(x.hostname) && !isTailnetDomain(x.hostname),
@@ -1253,7 +1248,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                       value={dm.hostname}
                       placeholder="app.example.com"
                       className={
-                        tailnetOne ? "pr-[4.5rem]" : freeOne ? "pr-14" : undefined
+                        tailnetOne ? "pr-20" : freeOne ? "pr-14" : undefined
                       }
                       onChange={(e) =>
                         setD({ hostname: e.target.value.trim().toLowerCase() })
@@ -1262,7 +1257,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                     {freeOne ? (
                       <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center">
                         <span className="rounded bg-success/15 px-1.5 text-[10.5px] font-medium text-success">
-                          {tailnetOne ? "tailnet" : "free"}
+                          {tailnetOne ? "tailscale" : "free"}
                         </span>
                       </span>
                     ) : null}
@@ -1374,12 +1369,12 @@ export function DomainsStep({ d, set, errors }: StepProps) {
         <p className="text-[11.5px] text-destructive">{errors.domains}</p>
       ) : null}
       <div className="flex flex-wrap gap-2">
+        <Button variant="secondary" size="xs" onClick={() => add()}>
+          <PlusIcon size={12} /> Your domain
+        </Button>
         {free && !d.domains.some((x) => x.hostname === free) ? (
           <Button variant="secondary" size="xs" onClick={() => add(free)}>
-            <PlusIcon size={12} />{" "}
-            {cluster?.freeDomainAddress === "tailscale"
-              ? "Tailscale IP domain"
-              : "Public domain"}
+            <PlusIcon size={12} /> Free domain
           </Button>
         ) : null}
         {!hasTailnet && d.clusterId ? (
@@ -1389,12 +1384,9 @@ export function DomainsStep({ d, set, errors }: StepProps) {
             disabled={!tailnetFree}
             onClick={() => add(tailnetFree)}
           >
-            <PlusIcon size={12} /> Tailnet domain
+            <PlusIcon size={12} /> Tailscale
           </Button>
         ) : null}
-        <Button variant="secondary" size="xs" onClick={() => add()}>
-          <PlusIcon size={12} /> Your domain
-        </Button>
       </div>
       {free && !hasPublic ? (
         <p className="text-[11.5px] text-muted-foreground">
@@ -1408,12 +1400,26 @@ export function DomainsStep({ d, set, errors }: StepProps) {
       ) : null}
       {tailnetFree && !hasTailnet ? (
         <p className="text-[11.5px] text-muted-foreground">
-          On your tailnet:{" "}
+          On Tailscale:{" "}
           <span className="font-mono text-foreground/85">{tailnetFree}</span>
         </p>
       ) : !tailnet && d.clusterId ? (
         <p className="text-[11.5px] text-muted-foreground">
-          No tailnet domain without Tailscale.
+          {cluster?.tailscale ? (
+            "Joining your tailnet."
+          ) : (
+            <>
+              Tailscale isn't set up on this cluster.{" "}
+              <AppLink
+                href="/integrations#tailscale"
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-primary hover:text-primary/80"
+              >
+                Set up Tailscale
+              </AppLink>
+            </>
+          )}
         </p>
       ) : null}
     </div>

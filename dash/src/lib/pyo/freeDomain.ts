@@ -4,8 +4,9 @@ import type { Application, ClusterServer } from "./types";
 // Free domains through nip.io: "<anything>.<ip>.nip.io" resolves to <ip>
 // (e.g. "app.203.0.113.7.nip.io"), so a hostname works with no DNS record.
 
-// Tailnet domains: "<name>.<tailnet>.ts.net" through Tailscale Services, with
-// Tailscale's own certificate. Only devices on the tailnet can open them.
+// Tailscale domains ("tailnet" in code): "<name>.<tailnet>.ts.net" through
+// Tailscale Services, with Tailscale's own certificate. Only devices on the
+// tailnet can open them.
 
 /** A tailnet domain (ts.net). */
 export const isTailnetDomain = (hostname: string) => /\.ts\.net$/.test(hostname);
@@ -26,46 +27,54 @@ export function clusterTailnet(s: PyoState, clusterId: string) {
   return s.clusters.find((c) => c.id === clusterId)?.tailnet ?? undefined;
 }
 
-/**
- * "blog.tail1234.ts.net". Names are flat on a tailnet, so a name another
- * service has gets the project's namespace, like nip.io names: "blog-shop".
- */
-export function tailnetHostname(
-  s: PyoState,
-  app: Pick<Application, "name"> & { id?: string },
-  namespace: string,
-  tailnet: string,
-) {
-  const taken = (h: string) =>
-    s.services.some(
-      (a) => a.id !== app.id && a.domains.some((d) => d.hostname === h),
-    );
-  const label = (x: string) => x.slice(0, 63).replace(/-+$/, "");
-  const short = `${label(app.name)}.${tailnet}`;
-  if (!taken(short)) return short;
-  const long = `${label(`${app.name}-${namespace}`)}.${tailnet}`;
-  if (!taken(long)) return long;
-  let i = 2;
-  while (taken(`${label(`${app.name}-${namespace}-${i}`)}.${tailnet}`)) i++;
-  return `${label(`${app.name}-${namespace}-${i}`)}.${tailnet}`;
+/** Its host, from a URL or a hostname ("https://pyo.tail1234.ts.net/" → "pyo.tail1234.ts.net"). */
+const hostOf = (x: string) => x.replace(/^[a-z]+:\/\//i, "").split(/[/:]/)[0].toLowerCase();
+
+/** A service has the hostname already, or Pyo's own dashboard or registry on the tailnet. */
+export function hostnameUsed(s: PyoState, hostname: string) {
+  const h = hostname.toLowerCase();
+  return (
+    s.services.some((a) => a.domains.some((d) => d.hostname.toLowerCase() === h)) ||
+    [s.tailscale?.dashboard, s.tailscale?.registry].some((x) => !!x && hostOf(x) === h)
+  );
 }
 
 /**
- * Where the cluster's free domains point: its public or Tailscale IP, as its
- * settings say (the API picks it, never a private one). None without one.
+ * "<label>.<suffix>", else "<label>-2.<suffix>", "<label>-3.<suffix>" and
+ * on: the first one nothing uses. Each label at most 63 characters.
+ */
+export function unusedHostname(s: PyoState, label: string, suffix: string) {
+  const cut = (x: string, n: number) => x.slice(0, n).replace(/-+$/, "");
+  let host = `${cut(label, 63)}.${suffix}`;
+  for (let i = 2; hostnameUsed(s, host); i++)
+    host = `${cut(label, 62 - String(i).length)}-${i}.${suffix}`;
+  return host;
+}
+
+/** "blog.tail1234.ts.net", or "blog-2.tail1234.ts.net" when that's used. Names are flat on a tailnet. */
+export function tailnetHostname(
+  s: PyoState,
+  app: Pick<Application, "name">,
+  tailnet: string,
+) {
+  return unusedHostname(s, app.name, tailnet);
+}
+
+/**
+ * Where a first service's free domain points (onboarding): the cluster's
+ * public IP, or its Tailscale IP behind NAT (the API picks it, never a
+ * private one). None without one. The dialogs use the public IP.
  */
 export function freeDomainIp(s: PyoState, clusterId: string) {
   return s.clusters.find((c) => c.id === clusterId)?.freeDomainIp ?? undefined;
 }
 
-/** Why there's no free domain on the cluster, in a few words. */
+/** Why there's no free domain (on the public IP) on the cluster, in a few words. */
 export function noFreeDomain(s: PyoState, clusterId: string) {
   const c = s.clusters.find((x) => x.id === clusterId);
-  return c?.freeDomainAddress === "tailscale"
-    ? "No Tailscale IP, so no free domain."
-    : c?.publicTraffic === false
-      ? "Public traffic is off, so no free domain."
-      : "No public IP yet, so no free domain.";
+  return c?.publicTraffic === false
+    ? "Public traffic is off, so no free domain."
+    : "No public IP yet, so no free domain.";
 }
 
 /** "hello-storefront.203.0.113.7.nip.io": one label of at most 63 characters, then the address. */

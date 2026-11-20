@@ -635,7 +635,7 @@ function check(step: Section, d: DeployDraft, ctx: ValidationContext): Issues {
       if (!HOSTNAME.test(dm.hostname))
         e[`domain.${dm.id}`] = "Enter a valid hostname, e.g. app.example.com.";
       else if (hosts.has(dm.hostname))
-        e[`domain.${dm.id}`] = "Duplicate hostname.";
+        e[`domain.${dm.id}`] = `${dm.hostname} is already used.`;
       else if (ctx.takenHosts?.[dm.hostname])
         e[`domain.${dm.id}`] =
           `${dm.hostname} is already used by ${ctx.takenHosts[dm.hostname]}.`;

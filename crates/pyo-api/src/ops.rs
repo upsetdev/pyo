@@ -733,6 +733,10 @@ async fn domains_unique_across_teams(
     if hosts.is_empty() {
         return Ok(());
     }
+    // Twice on the service itself.
+    if let Some(host) = hosts.iter().enumerate().find_map(|(i, h)| hosts[..i].contains(h).then_some(h)) {
+        return Err(ApiError::conflict(format!("{host} is already used.")));
+    }
     // Teams that don't trust each other (Pyo Cloud): a new hostname needs
     // proof of owning it, and one held without proof is taken over.
     if crate::verify_domains() {
@@ -2217,7 +2221,7 @@ pub(crate) enum Op {
     /// server but build-only ones (ports 80 and 443, and public TCP and UDP
     /// ports through it). Off: services are only reachable inside the cluster.
     SetClusterPublicTraffic { cluster_id: String, on: bool },
-    /// Where the cluster's free domains (`<name>.<ip>.nip.io`) point: "public" (its public IP, for everyone) or "tailscale" (its Tailscale IP, only from the tailnet). With "tailscale", services are reachable from your tailnet on ports 80 and 443 whether or not the cluster takes public traffic. Free domains on it move to the new address in place. By default it's public when the cluster takes public traffic and a server has its public IP itself (on a network card or as its ExternalIP), a load balancer gives it one, or its cloud maps one to it and Let's Encrypt reached it there. Behind NAT, it's Tailscale.
+    /// Where the cluster's free domains (`<name>.<ip>.nip.io`) point: "public" (its public IP, for everyone) or "tailscale" (its Tailscale IP, only from the tailnet). With "tailscale", services are reachable from your tailnet on ports 80 and 443 whether or not the cluster takes public traffic. Free domains on it move to the new address in place, except ones on the public IP, which stay there while the cluster has one. By default it's public when the cluster takes public traffic and a server has its public IP itself (on a network card or as its ExternalIP), a load balancer gives it one, or its cloud maps one to it and Let's Encrypt reached it there. Behind NAT, it's Tailscale.
     SetClusterFreeDomainAddress { cluster_id: String, address: String },
     /// Add an access rule to the end of a service's firewall. Allow and block rules are checked in order, and the first match decides. With no match, the client gets in. Rate limit rules then apply to websites, and each matching one counts the request, per client address and per server.
     AddFirewallRule {
