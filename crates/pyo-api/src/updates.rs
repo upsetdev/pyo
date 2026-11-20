@@ -857,8 +857,14 @@ fn agent_behind(agent: &str) -> bool {
     newer(current(), agent)
 }
 
+/// Agents run only images pinned by digest: `PYO_AGENT_IMAGE` has to be one.
+const UNPINNED: &str = "This Pyo's agent image isn't pinned by digest, so agents can't update to it.";
+
 /// Queues the update of one cluster's agent to this Pyo's image.
 async fn send_update(s: &AppState, cluster_id: &str) -> ApiResult<String> {
+    if !pyo_proto::pinned_image(&s.config.agent_image) {
+        return Err(ApiError::bad_request(UNPINNED));
+    }
     let mut tx = s.db.begin().await?;
     let id = crate::deploy::enqueue(
         &mut tx,
@@ -877,6 +883,10 @@ async fn send_update(s: &AppState, cluster_id: &str) -> ApiResult<String> {
 /// team with automatic updates whose agent is behind gets the update.
 pub async fn hosted_agents(s: AppState) {
     if !crate::hosted() {
+        return;
+    }
+    if !pyo_proto::pinned_image(&s.config.agent_image) {
+        tracing::warn!(image = %s.config.agent_image, "{UNPINNED} Automatic agent updates are off.");
         return;
     }
     loop {
