@@ -191,7 +191,12 @@ enum Command {
         #[arg(long, conflicts_with_all = ["servers", "tags"])]
         any: bool,
     },
-    /// A shell in the service.
+    /// A shell in the service, or one command: pyo exec -- <command>.
+    ///
+    /// A command runs as it is, without a shell (use sh -c for one). It
+    /// gets a terminal when stdin and stdout are one, else its output and
+    /// errors stay apart, piped input goes to it, and pyo exits with its
+    /// exit code.
     Exec {
         #[command(flatten)]
         which: Which,
@@ -199,8 +204,20 @@ enum Command {
         #[arg(long)]
         replica: Option<String>,
         /// bash, sh, zsh or ash. Defaults to whichever the service has.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "command")]
         shell: Option<String>,
+        /// Give the command a terminal.
+        #[arg(short = 't', long = "tty", conflicts_with = "no_tty")]
+        tty: bool,
+        /// Never give the command a terminal.
+        #[arg(short = 'T', long = "no-tty")]
+        no_tty: bool,
+        /// Send stdin to the command even from a terminal (end it with Ctrl-D).
+        #[arg(short = 'i', long = "interactive")]
+        interactive: bool,
+        /// The command and its arguments, after --.
+        #[arg(last = true, value_name = "COMMAND")]
+        command: Vec<String>,
     },
     /// Open the service on the dashboard.
     Open {
@@ -704,14 +721,22 @@ async fn main() {
         _ => upgrade::Check::start(),
     };
     let result = run(cli).await;
-    if let Err(e) = &result {
-        eprintln!("{} {e:#}", ui::red("error:"));
-    }
+    // A command run with pyo exec: its own exit code, nothing more said.
+    let code = match &result {
+        Ok(()) => 0,
+        Err(e) => match e.downcast_ref::<exec::Exited>() {
+            Some(exec::Exited(c)) => *c,
+            None => {
+                eprintln!("{} {e:#}", ui::red("error:"));
+                1
+            }
+        },
+    };
     if let Some(check) = check {
         check.finish();
     }
-    if result.is_err() {
-        std::process::exit(1);
+    if code != 0 {
+        std::process::exit(code);
     }
 }
 
@@ -933,12 +958,27 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
             which,
             replica,
             shell,
+            tty,
+            no_tty,
+            interactive,
+            command,
         } => {
             exec::run(
                 &config::client(url, token)?,
                 which.service.as_deref(),
-                replica,
-                shell,
+                exec::Opts {
+                    replica,
+                    shell,
+                    command,
+                    tty: if tty {
+                        Some(true)
+                    } else if no_tty {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                    stdin: interactive,
+                },
             )
             .await
         }
