@@ -24,6 +24,7 @@ pub mod agentauth;
 pub mod signing;
 pub mod site;
 pub mod system;
+pub mod traffic;
 
 /// Bumped on breaking changes; the API rejects agents it doesn't speak.
 pub const PROTOCOL_VERSION: u32 = 1;
