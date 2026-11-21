@@ -40,25 +40,17 @@ ENTRYPOINT ["/moco-controller"]
 
 FROM --platform=$TARGETPLATFORM ${MYSQL} AS mysql
 
-FROM --platform=$TARGETPLATFORM ${UBUNTU} AS backup
-LABEL org.opencontainers.image.source=https://github.com/cybozu-go/moco
-
+# MySQL Shell for the backup image, with newer versions of some of the
+# Python packages it bundles (mysqlsh-python.txt) for their CVE fixes.
+# Built here so pip, the wheels and curl stay out of the backup image.
+FROM --platform=$TARGETPLATFORM ${UBUNTU} AS mysqlsh
 # https://bugs.mysql.com/bug.php?id=121027
 ARG MYSQLSH_VERSION=8.4.8
 ARG MYSQLSH_GLIBC_VERSION=2.28
 ARG TARGETARCH
-
-COPY --from=builder /work/moco-backup /moco-backup
-
-COPY --from=mysql /usr/local/mysql/LICENSE         /usr/local/mysql/LICENSE
-COPY --from=mysql /usr/local/mysql/bin/mysqlbinlog /usr/local/mysql/bin/mysqlbinlog
-COPY --from=mysql /usr/local/mysql/bin/mysql       /usr/local/mysql/bin/mysql
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends zstd python3 libpython3.10 s3cmd libgoogle-perftools4 \
-  && rm -rf /var/lib/apt/lists/* \
-  && if [ "${TARGETARCH}" = 'amd64' ]; then MYSQLSH_ARCH='x86-64'; fi \
-  && if [ "${TARGETARCH}" = 'arm64' ]; then MYSQLSH_ARCH='arm-64'; fi \
+COPY mysqlsh-python.txt /tmp/mysqlsh-python.txt
+RUN if [ "${TARGETARCH}" = 'amd64' ]; then MYSQLSH_ARCH='x86-64'; WHEEL_ARCH='x86_64'; fi \
+  && if [ "${TARGETARCH}" = 'arm64' ]; then MYSQLSH_ARCH='arm-64'; WHEEL_ARCH='aarch64'; fi \
   && MYSQLSH_TARBALL="mysql-shell-${MYSQLSH_VERSION}-linux-glibc${MYSQLSH_GLIBC_VERSION}-${MYSQLSH_ARCH:-unknown}bit.tar.gz" \
   # MySQL removes a version from the download site once a newer one is released,
   # so fall back to the archive site.
@@ -66,7 +58,38 @@ RUN apt-get update \
       || curl -o /tmp/mysqlsh.tar.gz -fsSL --retry 2 "https://cdn.mysql.com/archives/mysql-shell/${MYSQLSH_TARBALL}") \
   && mkdir /usr/local/mysql-shell \
   && tar -xf /tmp/mysqlsh.tar.gz -C /usr/local/mysql-shell --strip-components=1 \
-  && rm -f /tmp/mysqlsh.tar.gz
+  && rm -f /tmp/mysqlsh.tar.gz \
+  # MySQL Shell's own Python and pip. The wheels are fetched for glibc 2.28
+  # (not this image's) and checked against the hashes in mysqlsh-python.txt,
+  # then installed over the bundled versions.
+  && PY=/usr/local/mysql-shell/lib/mysqlsh/bin/python3.13 \
+  && export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 PIP_ROOT_USER_ACTION=ignore \
+  && "$PY" -m pip download --no-deps --only-binary=:all: --require-hashes \
+       --platform "manylinux_2_28_${WHEEL_ARCH:-unknown}" --python-version 3.13 --implementation cp \
+       -d /tmp/wheels -r /tmp/mysqlsh-python.txt \
+  && "$PY" -m pip install --no-index --find-links /tmp/wheels --no-deps --require-hashes -r /tmp/mysqlsh-python.txt \
+  # pip leaves the old versions' .dist-info behind with the two files their
+  # RECORD doesn't list (REQUESTED, direct_url.json). Remove them.
+  && for d in /usr/local/mysql-shell/lib/mysqlsh/lib/python3.13/site-packages/*.dist-info; do \
+       [ -e "$d/METADATA" ] || rm -rf "$d"; \
+     done \
+  && "$PY" -c 'import certifi, cryptography.x509, OpenSSL.SSL, oci, paramiko' \
+  && rm -rf /tmp/wheels /tmp/mysqlsh-python.txt
+
+FROM --platform=$TARGETPLATFORM ${UBUNTU} AS backup
+LABEL org.opencontainers.image.source=https://github.com/cybozu-go/moco
+
+COPY --from=builder /work/moco-backup /moco-backup
+
+COPY --from=mysql /usr/local/mysql/LICENSE         /usr/local/mysql/LICENSE
+COPY --from=mysql /usr/local/mysql/bin/mysqlbinlog /usr/local/mysql/bin/mysqlbinlog
+COPY --from=mysql /usr/local/mysql/bin/mysql       /usr/local/mysql/bin/mysql
+
+COPY --from=mysqlsh /usr/local/mysql-shell /usr/local/mysql-shell
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends zstd python3 libpython3.10 s3cmd libgoogle-perftools4 \
+  && rm -rf /var/lib/apt/lists/*
 
 ENV PATH=/usr/local/mysql/bin:/usr/local/mysql-shell/bin:"$PATH"
 USER 10000:10000
