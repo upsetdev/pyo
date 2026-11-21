@@ -30,6 +30,10 @@ pub const CERT_MANAGER_VERSION: &str = "v1.21.2";
 /// v1.9.3: the newest patch of the newest minor with one (1.10.0 is a day old).
 pub const ENVOY_GATEWAY_VERSION: &str = "v1.9.3";
 
+/// The agent's relay for Vector's server figures (pyo-agent's relay.rs), on
+/// its pod's address. platform.yaml's pyo-agent policy lets Vector in here.
+pub const AGENT_RELAY_PORT: u16 = 8089;
+
 /// The gateway's namespace: its controller, its proxies, the Gateways,
 /// routes and certificates.
 pub const GATEWAY_NS: &str = "pyo-gateway";

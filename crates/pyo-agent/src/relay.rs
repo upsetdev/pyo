@@ -28,7 +28,7 @@ fn port() -> u16 {
     std::env::var("PYO_AGENT_RELAY_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8089)
+        .unwrap_or(pyo_proto::system::AGENT_RELAY_PORT)
 }
 
 /// The token Vector sends: this process's own.

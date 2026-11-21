@@ -1437,8 +1437,8 @@ mod tests {
     /// What every install and update applies to Pyo's own namespace keeps
     /// it closed: nothing in by default, Postgres, ClickHouse and the
     /// registry for Pyo only, the backup store's admin API for Pyo only, the
-    /// traffic store for the agent and Vector only, and no plain registry
-    /// on the tailnet.
+    /// traffic store for the agent and Vector only, the agent's relay for
+    /// Vector only, and no plain registry on the tailnet.
     #[test]
     fn pyos_namespace_is_closed() {
         let docs: Vec<Value> = [
@@ -1509,6 +1509,21 @@ mod tests {
                 "ports": [{ "port": pyo_proto::traffic::STORE_PORT }],
             }]),
             "the traffic store answers the agent and Vector only"
+        );
+        // The agent: its relay, for Vector only, from any server.
+        let agent = find("NetworkPolicy", "pyo-agent");
+        assert_eq!(
+            agent["spec"]["podSelector"],
+            json!({ "matchLabels": { "app.kubernetes.io/name": agent_label } })
+        );
+        assert_eq!(agent["spec"]["policyTypes"], json!(["Ingress"]));
+        assert_eq!(
+            agent["spec"]["ingress"],
+            json!([{
+                "from": [{ "podSelector": { "matchLabels": { "app.kubernetes.io/name": pyo_proto::traffic::VECTOR } } }],
+                "ports": [{ "port": pyo_proto::system::AGENT_RELAY_PORT }],
+            }]),
+            "the agent's relay answers Vector only"
         );
         // Pyo's own front: never from a project's pods (Pyo believes
         // X-Forwarded-For from the pod network). Its own namespace, the
