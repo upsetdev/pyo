@@ -356,27 +356,43 @@ pub async fn add(
         println!("{}", ui::dim("Live after the first deploy: pyo deploy"));
         return Ok(());
     }
-    if !is_free(&host) && !made {
+    let tailnet = pyo_proto::system::is_tailnet_host(&host);
+    if tailnet {
+        println!("{}", ui::dim(TAILNET_NOTE));
+    } else if !is_free(&host) && !made {
         println!("Create this DNS record at your DNS provider:");
-        match cluster_ip(&t, "publicIp") {
-            Some(ip) => println!(
-                "  {}  {host}  {ip}",
-                if ip.contains(':') { "AAAA" } else { "A" }
-            ),
-            None => println!(
-                "  CNAME  {host}  {}",
-                ui::dim("(the cluster's public address)")
-            ),
-        }
+        println!(
+            "  {}",
+            dns_record(&host, cluster_ip(&t, "publicIp").as_deref())
+        );
     }
     if !wait {
         println!(
             "{}",
-            ui::dim("Checked automatically. See it: pyo domain list")
+            ui::dim(if tailnet {
+                "See it: pyo domain list"
+            } else {
+                "Checked automatically. See it: pyo domain list"
+            })
         );
         return Ok(());
     }
     follow(api, &t.id, &id, &host).await
+}
+
+/// A tailnet name's DNS is Tailscale's: there's no record to create.
+const TAILNET_NOTE: &str = "Tailscale names need no DNS record. Pyo sets it up on your tailnet.";
+
+/// The DNS record that points `host` at the cluster's public address `ip`
+/// (a CNAME to it when the address isn't known).
+fn dns_record(host: &str, ip: Option<&str>) -> String {
+    match ip {
+        Some(ip) => format!(
+            "{}  {host}  {ip}",
+            if ip.contains(':') { "AAAA" } else { "A" }
+        ),
+        None => format!("CNAME  {host}  {}", ui::dim("(the cluster's public address)")),
+    }
 }
 
 /// Poll until the domain is live (or its certificate failed), checking
@@ -525,6 +541,22 @@ mod tests {
         assert!(!valid_hostname("a.c0m"));
         assert!(!valid_hostname("a..com"));
         assert!(!valid_hostname("App.com"));
+    }
+
+    #[test]
+    fn records_to_create() {
+        assert_eq!(
+            dns_record("a.example.com", Some("203.0.113.7")),
+            "A  a.example.com  203.0.113.7"
+        );
+        assert_eq!(
+            dns_record("a.example.com", Some("2001:db8::1")),
+            "AAAA  a.example.com  2001:db8::1"
+        );
+        assert!(dns_record("a.example.com", None).starts_with("CNAME  a.example.com"));
+        // Tailscale names get the note instead of a record.
+        assert!(pyo_proto::system::is_tailnet_host("web.tail1234.ts.net"));
+        assert!(!TAILNET_NOTE.contains(';'));
     }
 
     #[test]
