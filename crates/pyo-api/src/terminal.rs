@@ -373,20 +373,57 @@ async fn relayed(
     }))
 }
 
-/// Shuttle frames between the browser and the agent until either side closes.
+/// How often each end of a relayed socket gets a ping: proxies on the way
+/// (a Pyo Gateway: 5 minutes by default, Cloudflare: 100 seconds) close a
+/// socket that stays quiet, as a shell or a quiet service's logs do.
+const KEEPALIVE: Duration = Duration::from_secs(30);
+
+/// A ticker for [`KEEPALIVE`], its first tick a whole period away.
+fn keepalive() -> tokio::time::Interval {
+    let mut t = tokio::time::interval_at(tokio::time::Instant::now() + KEEPALIVE, KEEPALIVE);
+    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    t
+}
+
+/// Pings and pongs are each hop's own: answered where they arrive, never
+/// passed on.
+fn passed_on(m: &Message) -> bool {
+    !matches!(m, Message::Ping(_) | Message::Pong(_))
+}
+
+/// Shuttle frames between the browser and the agent until either side
+/// closes, pinging both ([`KEEPALIVE`]).
 pub(crate) async fn relay(browser: WebSocket, agent: WebSocket) {
     let (mut b_tx, mut b_rx) = browser.split();
     let (mut a_tx, mut a_rx) = agent.split();
     let up = async {
-        while let Some(Ok(m)) = b_rx.next().await {
-            if matches!(m, Message::Close(_)) || a_tx.send(m).await.is_err() {
+        let mut tick = keepalive();
+        loop {
+            let m = tokio::select! {
+                m = b_rx.next() => match m {
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(m)) if passed_on(&m) => m,
+                    Some(Ok(_)) => continue,
+                },
+                _ = tick.tick() => Message::Ping(Default::default()),
+            };
+            if a_tx.send(m).await.is_err() {
                 break;
             }
         }
     };
     let down = async {
-        while let Some(Ok(m)) = a_rx.next().await {
-            if matches!(m, Message::Close(_)) || b_tx.send(m).await.is_err() {
+        let mut tick = keepalive();
+        loop {
+            let m = tokio::select! {
+                m = a_rx.next() => match m {
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(m)) if passed_on(&m) => m,
+                    Some(Ok(_)) => continue,
+                },
+                _ = tick.tick() => Message::Ping(Default::default()),
+            };
+            if b_tx.send(m).await.is_err() {
                 break;
             }
         }
@@ -396,7 +433,9 @@ pub(crate) async fn relay(browser: WebSocket, agent: WebSocket) {
     let _ = b_tx.close().await;
 }
 
-/// The cross-replica hop: an axum socket on one side, a client on the other.
+/// The cross-replica hop: an axum socket on one side, a client on the
+/// other. The agent's side gets pinged here, the hop's own end by the
+/// replica holding the other end ([`relay`]).
 async fn forward(
     agent: WebSocket,
     upstream: tokio_tungstenite::WebSocketStream<
@@ -419,12 +458,16 @@ async fn forward(
         }
     };
     let down = async {
-        while let Some(Ok(m)) = u_rx.next().await {
-            let m = match m {
-                tungstenite::Message::Binary(b) => Message::Binary(b),
-                tungstenite::Message::Text(t) => Message::text(t.as_str()),
-                tungstenite::Message::Close(_) => break,
-                _ => continue,
+        let mut tick = keepalive();
+        loop {
+            let m = tokio::select! {
+                m = u_rx.next() => match m {
+                    Some(Ok(tungstenite::Message::Binary(b))) => Message::Binary(b),
+                    Some(Ok(tungstenite::Message::Text(t))) => Message::text(t.as_str()),
+                    Some(Ok(tungstenite::Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(_)) => continue,
+                },
+                _ = tick.tick() => Message::Ping(Default::default()),
             };
             if a_tx.send(m).await.is_err() {
                 break;
