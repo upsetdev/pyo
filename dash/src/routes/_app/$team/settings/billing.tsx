@@ -424,6 +424,14 @@ function Notice({
         {`Your servers get no changes. Services keep running.${deleted ? ` Data is deleted on ${deleted}.` : ""}`}
       </Note>
     );
+  if (b.status === "active" && b.cancelAtPeriodEnd && b.cancelReason === "no_servers")
+    return (
+      <Note tone="warning" title={b.periodEnd ? `No servers. Ends on ${date(b.periodEnd)}` : "No servers"}>
+        {b.periodEnd
+          ? `Connect a server before then to keep it. Data is deleted on ${date(b.periodEnd + retain * DAY_MS)}.`
+          : "Connect a server to keep it."}
+      </Note>
+    );
   if (b.status === "active" && b.cancelAtPeriodEnd)
     return (
       <Note

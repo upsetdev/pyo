@@ -937,6 +937,8 @@ export type CloudBilling = {
   periodEnd: number | null;
   /** Cancelled: it ends at periodEnd. */
   cancelAtPeriodEnd: boolean;
+  /** Why it was cancelled: Pyo after the team removed all servers, or a person. */
+  cancelReason?: "no_servers" | "requested" | null;
   /** Past due: when deploys pause. */
   graceUntil: number | null;
   /** Paused or ended: when the team's data is deleted. */
