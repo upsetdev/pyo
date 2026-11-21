@@ -12,13 +12,16 @@
 //! stops it when pyo-builder takes the file away after a while without
 //! builds. Its cache stays on the server's disk in between.
 
-use k8s_openapi::api::{apps::v1::Deployment, core::v1::Secret};
+use k8s_openapi::api::{
+    apps::v1::Deployment,
+    core::v1::{Node, Secret},
+};
 use kube::{
     Api,
     api::{DeleteParams, Patch, PatchParams},
 };
-use pyo_proto::BuilderSpec;
-use serde_json::json;
+use pyo_proto::{BuilderSpec, memory::Tier};
+use serde_json::{Value, json};
 
 use crate::{Agent, MANAGER};
 
@@ -65,6 +68,54 @@ while :; do
   sleep 1
 done
 "#;
+
+/// BuildKit's memory (its container's resources): every build step runs in
+/// its container, so a big build can't take the whole server. Its limit
+/// is a share of its server's memory (`server_mib`), by the server's
+/// memory tier: half of a small server's, 60% of a normal one's, three
+/// quarters of a large one's. Its request stays 8Mi: BuildKit sleeps
+/// between builds, so nothing is set aside for it. The spec's own request
+/// and limit win (Pyo's `PYO_BUILDKIT_MEMORY_REQUEST` and
+/// `PYO_BUILDKIT_MEMORY_LIMIT`). With no server memory and no limit set,
+/// there's no limit.
+pub fn buildkit_resources(server_mib: Option<u64>, request: &str, limit: &str) -> Value {
+    let valid = |q: &str| crate::observe::bytes(q) >= 1_048_576.0;
+    let request = match request.trim() {
+        r if valid(r) => r.to_owned(),
+        _ => "8Mi".to_owned(),
+    };
+    let limit = match limit.trim() {
+        l if valid(l) => Some(l.to_owned()),
+        _ => server_mib.map(|m| {
+            let percent = match pyo_proto::memory::tier(m) {
+                Tier::Small => 50,
+                Tier::Normal => 60,
+                Tier::Large => 75,
+            };
+            format!("{}Mi", m * percent / 100)
+        }),
+    }
+    // Never under the request (Kubernetes refuses that).
+    .map(|l| {
+        if crate::observe::bytes(&l) < crate::observe::bytes(&request) {
+            request.clone()
+        } else {
+            l
+        }
+    });
+    let mut r = json!({ "requests": { "cpu": "10m", "memory": request } });
+    if let Some(l) = limit {
+        r["limits"] = json!({ "memory": l });
+    }
+    r
+}
+
+/// A server's memory in MiB, from its node.
+async fn server_mib(c: &kube::Client, server: &str) -> Option<u64> {
+    let n = Api::<Node>::all(c.clone()).get(server).await.ok()?;
+    let q = n.status?.capacity?.get("memory")?.0.clone();
+    Some((crate::observe::bytes(&q) / 1_048_576.0) as u64).filter(|&m| m > 0)
+}
 
 pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String> {
     let c = agent.kube.clone();
@@ -115,6 +166,15 @@ pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String>
             })),
         )
         .await?;
+    let mib = server_mib(&c, &spec.server).await;
+    if mib.is_none() && spec.buildkit_memory_limit.is_empty() {
+        tracing::warn!(builder = %spec.builder_id, server = %spec.server, "couldn't read the server's memory: BuildKit runs without a memory limit");
+    }
+    let buildkit = buildkit_resources(
+        mib,
+        &spec.buildkit_memory_request,
+        &spec.buildkit_memory_limit,
+    );
     Api::<Deployment>::namespaced(c, NS)
         .patch(
             &name,
@@ -148,8 +208,8 @@ pub async fn ensure(agent: &Agent, spec: &BuilderSpec) -> anyhow::Result<String>
                                         { "name": "cache", "mountPath": "/var/lib/buildkit" },
                                     ],
                                     // Asleep between builds: a shell and its sleep.
-                                    // A build's memory isn't set aside: it uses what's free.
-                                    "resources": { "requests": { "cpu": "10m", "memory": "8Mi" } },
+                                    // A build's memory isn't set aside, up to its limit.
+                                    "resources": buildkit,
                                 },
                                 {
                                     "name": "builder",
@@ -215,4 +275,45 @@ pub async fn remove(agent: &Agent, builder_id: &str) -> anyhow::Result<String> {
         }
     }
     Ok(format!("Removed {name}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buildkit_gets_a_share_of_its_servers_memory() {
+        let limit = |mib: Option<u64>| buildkit_resources(mib, "", "")["limits"]["memory"].clone();
+        // Small, normal and large servers (pyo_proto::memory's tiers).
+        assert_eq!(limit(Some(2048)), "1024Mi");
+        assert_eq!(limit(Some(4096)), "2457Mi");
+        assert_eq!(limit(Some(32768)), "24576Mi");
+        // Nothing set aside while it sleeps.
+        assert_eq!(
+            buildkit_resources(Some(4096), "", "")["requests"]["memory"],
+            "8Mi"
+        );
+        // Unknown memory: no limit.
+        assert!(buildkit_resources(None, "", "")["limits"].is_null());
+        // Pyo's own settings win; a bad one is left out.
+        let r = buildkit_resources(Some(4096), "1Gi", "6Gi");
+        assert_eq!(
+            (
+                r["requests"]["memory"].as_str(),
+                r["limits"]["memory"].as_str()
+            ),
+            (Some("1Gi"), Some("6Gi"))
+        );
+        let r = buildkit_resources(Some(4096), "lots", "x");
+        assert_eq!(
+            (
+                r["requests"]["memory"].as_str(),
+                r["limits"]["memory"].as_str()
+            ),
+            (Some("8Mi"), Some("2457Mi"))
+        );
+        // A limit is never under the request.
+        let r = buildkit_resources(Some(2048), "3Gi", "");
+        assert_eq!(r["limits"]["memory"], "3Gi");
+    }
 }

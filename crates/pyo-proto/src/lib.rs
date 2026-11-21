@@ -1637,6 +1637,12 @@ pub struct BuilderSpec {
     pub image: String,
     /// Registry the builder pushes to over plain HTTP (host:port).
     pub registry_host: String,
+    /// BuildKit's memory request and limit, like "2Gi". Empty: the agent
+    /// sizes them by the server's memory.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub buildkit_memory_request: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub buildkit_memory_limit: String,
 }
 
 // ── Builders ───────────────────────────────────────────────────────────────

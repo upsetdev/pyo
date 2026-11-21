@@ -29,7 +29,19 @@ use crate::{
 /// EnsureBuilder); builders on an older one get it re-sent. 2: unprivileged,
 /// read-only pyo-builder. 3: BuildKit started on demand. 4: a key of its
 /// own from the agent (agent_auth.rs), a token only to push to Pyo's door.
-pub const CLUSTER_BUILDER_SPEC: i32 = 4;
+/// 5: BuildKit's memory limit.
+pub const CLUSTER_BUILDER_SPEC: i32 = 5;
+
+/// BuildKit's memory request and limit for every cluster builder
+/// (`PYO_BUILDKIT_MEMORY_REQUEST`, `PYO_BUILDKIT_MEMORY_LIMIT`, like
+/// "4Gi"). Unset, the agent sizes them by the builder's server.
+fn buildkit_memory() -> (String, String) {
+    let v = |k: &str| std::env::var(k).unwrap_or_default().trim().to_owned();
+    (
+        v("PYO_BUILDKIT_MEMORY_REQUEST"),
+        v("PYO_BUILDKIT_MEMORY_LIMIT"),
+    )
+}
 
 /// The builder's login at Pyo's registry door, when it pushes there (never
 /// sent for a cluster's own registry, which needs none). Only its hash is
@@ -282,6 +294,7 @@ pub async fn add_on_server(
         .bind(&config.builder_image)
         .execute(&mut **tx)
         .await?;
+    let (buildkit_memory_request, buildkit_memory_limit) = buildkit_memory();
     let spec = pyo_proto::BuilderSpec {
         builder_id: id.to_owned(),
         server: node.to_owned(),
@@ -289,6 +302,8 @@ pub async fn add_on_server(
         token,
         image: config.builder_image.clone(),
         registry_host,
+        buildkit_memory_request,
+        buildkit_memory_limit,
     };
     deploy::enqueue(
         tx,
@@ -422,6 +437,7 @@ async fn refresh_cluster_builders(s: &AppState) -> anyhow::Result<()> {
             .bind(&s.config.builder_image)
             .execute(&mut *tx)
             .await?;
+        let (buildkit_memory_request, buildkit_memory_limit) = buildkit_memory();
         let spec = pyo_proto::BuilderSpec {
             builder_id: id.clone(),
             server: node,
@@ -429,6 +445,8 @@ async fn refresh_cluster_builders(s: &AppState) -> anyhow::Result<()> {
             token,
             image: s.config.builder_image.clone(),
             registry_host,
+            buildkit_memory_request,
+            buildkit_memory_limit,
         };
         deploy::enqueue(
             &mut tx,
