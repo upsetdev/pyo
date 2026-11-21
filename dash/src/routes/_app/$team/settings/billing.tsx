@@ -8,6 +8,7 @@ import {
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { IntegrationCard } from "~/components/pyo/IntegrationCard";
+import { SnapDialog, type SnapCheckout } from "~/components/pyo/SnapDialog";
 import {
   Busy,
   ConfirmNote,
@@ -30,7 +31,7 @@ import {
   type CloudBilling,
 } from "~/lib/pyo/backend";
 import { useQuery } from "~/lib/pyo/query";
-import { loadSnap, snapPay, type SnapOutcome } from "~/lib/pyo/snap";
+import { loadSnap, type SnapOutcome } from "~/lib/pyo/snap";
 import { currentTeam, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { seo } from "~/lib/seo";
@@ -123,6 +124,7 @@ function standing(b: CloudBilling): { tone: Tone; label: string } {
 
 function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh: () => void }) {
   const [open, setOpen] = useState<"plan" | "midtrans" | null>(null);
+  const [checkout, setCheckout] = useState<SnapCheckout | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   // Bumped after a payment, to load the payments again.
@@ -152,8 +154,10 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
   const portal = () => void run("portal", () => cloudBilling.polarPortal(team));
   // How a payment in Snap ended. Midtrans' notification marks it paid a
   // moment later, so billing loads again now and once more after that.
+  // Closed, it loads again quietly: a QR code may have been paid meanwhile.
   const snapDone = (o: SnapOutcome) => {
-    if (o.kind === "closed") return;
+    setCheckout(null);
+    if (o.kind === "closed") return void refresh();
     if (o.kind === "error") return void toast({ tone: "error", title: o.message });
     toast({
       tone: "success",
@@ -389,8 +393,17 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
           }}
         />
       ) : open === "midtrans" && b.midtrans ? (
-        <MidtransDialog b={b} team={team} onClose={() => setOpen(null)} onDone={snapDone} />
+        <MidtransDialog
+          b={b}
+          team={team}
+          onClose={() => setOpen(null)}
+          onPay={(c) => {
+            setOpen(null);
+            setCheckout(c);
+          }}
+        />
       ) : null}
+      {checkout ? <SnapDialog checkout={checkout} onDone={snapDone} /> : null}
     </div>
   );
 }
@@ -745,18 +758,18 @@ function PlanDialog({
 }
 
 /** Indonesia: pay the next month or year, or servers beyond what's paid.
- * Snap opens over the page in its place. Midtrans' payment page is the
+ * Snap opens in its own dialog over the page. Midtrans' payment page is the
  * fallback when snap.js doesn't load. */
 function MidtransDialog({
   b,
   team,
   onClose,
-  onDone,
+  onPay,
 }: {
   b: CloudBilling;
   team: string;
   onClose: () => void;
-  onDone: (o: SnapOutcome) => void;
+  onPay: (c: SnapCheckout) => void;
 }) {
   const m = b.midtrans!;
   const topUp = b.provider === "midtrans" && b.status === "active" && m.topUpServers > 0;
@@ -777,9 +790,7 @@ function MidtransDialog({
     }
     try {
       if (!m.clientKey) throw new Error("No client key");
-      const outcome = snapPay(await loadSnap(m.clientKey, m.sandbox), checkout.token);
-      onClose();
-      onDone(await outcome);
+      onPay({ snap: await loadSnap(m.clientKey, m.sandbox), ...checkout });
     } catch {
       setFallback(checkout.redirectUrl);
       setBusy(false);

@@ -1,4 +1,5 @@
-// Midtrans Snap on the page: snap.js opens the payment over the dashboard
+// Midtrans Snap on the page: snap.js shows the payment inside an element of
+// ours (its embed mode), so it sits in our own dialog over the dashboard
 // instead of sending the user to Midtrans' payment page. The script loads the
 // first time someone pays. The client key it needs is public by design.
 
@@ -10,16 +11,18 @@ export type SnapResult = {
   order_id?: string;
 };
 
-type Snap = {
-  pay: (
+export type Snap = {
+  embed: (
     token: string,
-    callbacks: {
+    options: {
+      embedId: string;
       onSuccess?: (r: SnapResult) => void;
       onPending?: (r: SnapResult) => void;
       onError?: (r: SnapResult) => void;
       onClose?: () => void;
     },
   ) => void;
+  hide: () => void;
 };
 
 declare global {
@@ -66,19 +69,27 @@ export function loadSnap(clientKey: string, sandbox: boolean): Promise<Snap> {
   return loading;
 }
 
-/** Opens Snap over the page. Throws at once if it can't, else settles when
- * the user is done with it. */
-export function snapPay(snap: Snap, token: string): Promise<SnapOutcome> {
-  let resolve!: (o: SnapOutcome) => void;
-  const done = new Promise<SnapOutcome>((r) => (resolve = r));
-  snap.pay(token, {
-    onSuccess: (result) => resolve({ kind: "success", result }),
-    onPending: (result) => resolve({ kind: "pending", result }),
+/** Shows Snap inside the element with id `embedId`. Throws at once if it
+ * can't, else calls `done` once the payment ends. */
+export function snapEmbed(snap: Snap, token: string, embedId: string, done: (o: SnapOutcome) => void) {
+  snap.embed(token, {
+    embedId,
+    onSuccess: (result) => done({ kind: "success", result }),
+    onPending: (result) => done({ kind: "pending", result }),
     onError: (r) => {
       const m = Array.isArray(r.status_message) ? r.status_message.join(" ") : r.status_message;
-      resolve({ kind: "error", message: m || "Midtrans couldn't take the payment" });
+      done({ kind: "error", message: m || "Midtrans couldn't take the payment" });
     },
-    onClose: () => resolve({ kind: "closed" }),
+    onClose: () => done({ kind: "closed" }),
   });
-  return done;
+}
+
+/** Takes Snap off the page, so it can open again later. Does nothing when
+ * it isn't showing. */
+export function snapHide(snap: Snap) {
+  try {
+    snap.hide();
+  } catch {
+    // Not showing.
+  }
 }
