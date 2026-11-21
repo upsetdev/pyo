@@ -57,6 +57,40 @@ pub fn differ(a: &Value, b: &Value) -> bool {
     v(a) != v(b)
 }
 
+/// Whether a cluster's routes are sent again after a heartbeat: its agent
+/// writes routes differently from the last time Pyo saw it (a new agent,
+/// with a new default for every route). Not for an agent that doesn't say.
+pub fn resend_wanted(reported: &str, last: Option<&str>) -> bool {
+    !reported.is_empty() && last != Some(reported)
+}
+
+/// The cluster's agent reported how it writes routes
+/// ([`pyo_proto::Heartbeat::routes_version`]), `last` being what it said
+/// before: when that changed, every running service there gets its routes
+/// again as they now stand (with their firewall and WAF,
+/// `firewall::sync`), so a newer agent's routes reach the services already
+/// there without each one being changed. Gives whether a sync was queued.
+pub async fn resend_on_change(
+    tx: &mut Transaction<'_, Postgres>,
+    cluster_id: &str,
+    reported: &str,
+    last: Option<&str>,
+) -> ApiResult<bool> {
+    if !resend_wanted(reported, last) {
+        return Ok(false);
+    }
+    let any: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.services WHERE cluster_id = $1 AND current_deployment_id IS NOT NULL AND NOT deleting)",
+    )
+    .bind(cluster_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if any {
+        crate::firewall::sync(tx, cluster_id).await?;
+    }
+    Ok(any)
+}
+
 /// A service's domains changed (already saved): a new revision, and, when
 /// it runs on its cluster (or its rollout is under way), its routes follow
 /// now, unless `sync` is off (a deploy that goes out with them). The cluster
@@ -249,6 +283,18 @@ pub async fn finished(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cluster's routes go out again when its agent writes them
+    /// differently, not on every heartbeat, nor for an agent that doesn't
+    /// say how it writes them.
+    #[test]
+    fn routes_go_out_again_when_the_agent_writes_them_differently() {
+        assert!(resend_wanted("a1", None), "first time it says");
+        assert!(resend_wanted("b2", Some("a1")), "updated");
+        assert!(!resend_wanted("a1", Some("a1")), "same agent");
+        assert!(!resend_wanted("", Some("a1")), "older agent");
+        assert!(!resend_wanted("", None), "older agent");
+    }
 
     #[test]
     fn only_routing_changes_count() {

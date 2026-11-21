@@ -883,6 +883,107 @@ pub fn target_spec(t: &pyo_proto::FirewallTarget, waf: bool) -> anyhow::Result<D
     }))?)
 }
 
+/// How this agent writes a service's routes: a fingerprint of the objects
+/// it makes for a few sample services (public and tailnet domains, HTTPS
+/// with its redirect, a firewall rule, a static site, a public TCP port).
+/// Sent with each heartbeat. When it isn't the one Pyo last saw, Pyo sends
+/// every running service's routes again (pyo-api's routes.rs
+/// `resend_on_change`), so a new default for routes reaches the services
+/// already there after an update, not only those changed since.
+pub fn routes_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| fingerprint(&sample_targets()))
+}
+
+/// FNV-1a of the route objects made for these services, in order.
+fn fingerprint(targets: &[pyo_proto::FirewallTarget]) -> String {
+    let mut objects: Vec<String> = targets
+        .iter()
+        .filter_map(|t| target_spec(t, true).ok())
+        .flat_map(|s| route_objects(&s).objects)
+        .map(|o| {
+            let mut out = String::new();
+            canonical(&o, &mut out);
+            out
+        })
+        .collect();
+    objects.sort();
+    let hash = objects
+        .join("\n")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+        });
+    format!("{hash:016x}")
+}
+
+/// A JSON value written with its keys in order, so the fingerprint doesn't
+/// follow how a build orders them.
+fn canonical(v: &Value, out: &mut String) {
+    match v {
+        Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, k) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String(k.clone()).to_string());
+                out.push(':');
+                canonical(&m[k], out);
+            }
+            out.push('}');
+        }
+        Value::Array(a) => {
+            out.push('[');
+            for (i, x) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical(x, out);
+            }
+            out.push(']');
+        }
+        _ => out.push_str(&v.to_string()),
+    }
+}
+
+/// The services [`routes_version`] is made from, as a sync sends them.
+fn sample_targets() -> Vec<pyo_proto::FirewallTarget> {
+    let target = |name: &str, extra: Value| {
+        let mut t = json!({
+            "service": { "serviceId": format!("svc_{name}"), "name": name, "namespace": "sample", "workloadKind": "Deployment" },
+            "projectId": "prj_sample", "routesRevision": 1, "firewall": {},
+            "ports": [{ "name": "http", "containerPort": 8080, "protocol": "HTTP", "exposure": "http", "publicPort": null }],
+            "domains": [
+                { "hostname": format!("{name}.example.com"), "portName": "http", "tls": "letsencrypt", "redirectHttps": true },
+                { "hostname": format!("{name}-plain.example.com"), "portName": "http" },
+                { "hostname": format!("{name}.sample.ts.net"), "portName": "http" },
+            ],
+        });
+        if let (Some(t), Value::Object(extra)) = (t.as_object_mut(), extra) {
+            t.extend(extra);
+        }
+        serde_json::from_value(t).ok()
+    };
+    [
+        target("web", json!({})),
+        target(
+            "guarded",
+            json!({ "firewall": { "rules": [{ "id": "fw_1", "action": "block", "sources": ["203.0.113.0/24"] }] } }),
+        ),
+        target("site", json!({ "site": { "deploy": "dpl_sample" } })),
+        target(
+            "db",
+            json!({ "domains": [], "ports": [{ "name": "pg", "containerPort": 5432, "protocol": "TCP", "exposure": "loadbalancer", "publicPort": 5432, "proxy": {} }] }),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Apply a service's routes ([`apply`]) with the newest domains seen
 /// ([`RouteState`]), one apply per service at a time: what every rollout,
 /// rollback, firewall sync and routes sync goes through. With
@@ -2400,6 +2501,105 @@ mod tests {
             find(&r, "HTTPRoute", "shop-web-https-http")["spec"]["rules"][0]["timeouts"],
             json!({ "request": "60s" })
         );
+    }
+
+    /// A service that was there before request timeouts: the sync Pyo
+    /// sends after an update carries no `requestTimeout` of its own, and
+    /// every route to it (its tailnet one too) gets the default.
+    #[test]
+    fn an_existing_services_routes_get_the_default_timeout() {
+        let t: pyo_proto::FirewallTarget = serde_json::from_value(json!({
+            "service": { "serviceId": "svc_wp", "name": "wordpress", "namespace": "wordpress", "workloadKind": "Deployment" },
+            "projectId": "prj_1", "routesRevision": 3, "firewall": {},
+            "ports": [{ "name": "http", "containerPort": 80, "protocol": "HTTP", "exposure": "http", "publicPort": null }],
+            "domains": [
+                { "hostname": "wordpress.tail1.ts.net", "portName": "http" },
+                { "hostname": "blog.example.com", "portName": "http", "tls": "letsencrypt", "redirectHttps": true },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(t.request_timeout, None);
+        let r = route_objects(&target_spec(&t, false).unwrap());
+        let routes: Vec<_> = r
+            .objects
+            .iter()
+            .filter(|o| o["kind"] == "HTTPRoute")
+            .map(|o| o["metadata"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                "wordpress-wordpress-https-http",
+                "wordpress-wordpress-redirect",
+                "tn--wordpress-wordpress-http"
+            ]
+        );
+        for name in [
+            "wordpress-wordpress-https-http",
+            "tn--wordpress-wordpress-http",
+        ] {
+            assert_eq!(
+                find(&r, "HTTPRoute", name)["spec"]["rules"][0]["timeouts"],
+                json!({ "request": "300s" }),
+                "{name}"
+            );
+        }
+    }
+
+    /// The agent says how it writes routes, so Pyo sends every service's
+    /// routes again once that changes: the same each time it's asked, and
+    /// different as soon as a route would be (a new default timeout).
+    #[test]
+    fn routes_version_follows_how_routes_are_written() {
+        let samples = sample_targets();
+        assert_eq!(samples.len(), 4, "every sample reads");
+        let v = routes_version();
+        assert_eq!(v.len(), 16);
+        assert_eq!(v, fingerprint(&samples));
+        assert_eq!(v, routes_version());
+        // The samples have what a change could touch: public, HTTPS,
+        // redirect and tailnet routes, a firewall, a site, a TCP port.
+        let objects: Vec<Value> = samples
+            .iter()
+            .flat_map(|t| route_objects(&target_spec(t, true).unwrap()).objects)
+            .collect();
+        let names: Vec<&str> = objects
+            .iter()
+            .map(|o| o["metadata"]["name"].as_str().unwrap())
+            .collect();
+        for want in [
+            "sample-web-http-http",
+            "sample-web-https-http",
+            "sample-web-redirect",
+            "tn--sample-web-http",
+            "sample-db-tcp-5432",
+        ] {
+            assert!(names.contains(&want), "{want}: {names:?}");
+        }
+        assert!(objects.iter().any(|o| o["kind"] == "SecurityPolicy"));
+        assert!(
+            objects
+                .iter()
+                .filter(|o| o["kind"] == "HTTPRoute"
+                    && !o["metadata"]["name"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("-redirect"))
+                .all(|o| o["spec"]["rules"][0]["timeouts"]["request"] == "300s")
+        );
+        // A route written differently is another version.
+        let mut other = samples.clone();
+        other[0].request_timeout = Some(15);
+        assert_ne!(fingerprint(&other), v);
+        // Keys in another order are the same object.
+        let (mut a, mut b) = (String::new(), String::new());
+        canonical(&json!({ "a": 1, "b": [{ "c": 2, "d": 3 }] }), &mut a);
+        let mut m = serde_json::Map::new();
+        m.insert("b".into(), json!([{ "d": 3, "c": 2 }]));
+        m.insert("a".into(), json!(1));
+        canonical(&Value::Object(m), &mut b);
+        assert_eq!(a, b);
+        assert_eq!(a, r#"{"a":1,"b":[{"c":2,"d":3}]}"#);
     }
 
     #[test]

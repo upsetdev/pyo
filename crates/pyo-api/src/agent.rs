@@ -325,7 +325,7 @@ async fn heartbeat(
         "connected"
     };
     let caps = &hb.capabilities;
-    let capabilities = json!({
+    let mut capabilities = json!({
         "ingressController": caps.ingress_controller,
         // Why the gateway failed to install, while it isn't answering.
         "gatewayError": caps.gateway_error,
@@ -359,11 +359,19 @@ async fn heartbeat(
         "tailnet": hb.tailnet,
     });
     let workloads = serde_json::to_value(&hb.workloads).map_err(anyhow::Error::from)?;
-    let was: String =
-        sqlx::query_scalar("SELECT status FROM pyo.clusters WHERE id = $1 FOR UPDATE")
-            .bind(&cluster.id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let (was, routes_were): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, capabilities->>'routesVersion' FROM pyo.clusters WHERE id = $1 FOR UPDATE",
+    )
+    .bind(&cluster.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    // How its agent writes routes, kept while an agent doesn't say
+    // (routes.rs `resend_on_change`).
+    capabilities["routesVersion"] = if hb.routes_version.is_empty() {
+        json!(routes_were)
+    } else {
+        json!(hb.routes_version)
+    };
     crate::install::agent_reported(&mut tx, &cluster.id).await?;
     sqlx::query(
         "UPDATE pyo.clusters SET status = $2, version = $3, agent_version = $4, capabilities = $5, workloads = $6, same_cluster = $7, last_seen_at = now() WHERE id = $1",
@@ -403,6 +411,15 @@ async fn heartbeat(
         let wanted = crate::waf::wanted(&mut tx, &cluster.id).await?;
         crate::bundles::sync_waf(&mut tx, &cluster.id, wanted).await?;
     }
+    // An agent that writes routes differently (an update): every running
+    // service's routes again, so they get its new defaults too.
+    let routes_resent = crate::routes::resend_on_change(
+        &mut tx,
+        &cluster.id,
+        &hb.routes_version,
+        routes_were.as_deref(),
+    )
+    .await?;
     // An import that just ended: its database is sent again, without the import's Secret.
     for id in
         crate::databases::reported(&mut tx, &cluster.id, &hb.databases, hb.databases_listed).await?
@@ -649,7 +666,7 @@ async fn heartbeat(
         .await?
         .map(|(_, c)| c.mode().as_str());
     tx.commit().await?;
-    if refresh_sent || builder_added || rehomed {
+    if refresh_sent || builder_added || rehomed || routes_resent {
         s.wake(&cluster.id).await;
     }
     let (observability, team, id) = (
@@ -2271,5 +2288,142 @@ mod gate_tests {
             .as_str()
             .unwrap()
             .to_owned()
+    }
+}
+
+#[cfg(test)]
+mod routes_resend_tests {
+    use super::*;
+
+    /// Against a throwaway Postgres: an agent that writes routes
+    /// differently (an update) gets every running service's routes again,
+    /// once. The same agent again, or one too old to say, gets nothing more.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn an_updated_agent_gets_every_services_routes_again() {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(
+            db.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let run = crate::ids::random_string(8).to_lowercase();
+        let s = crate::rls::tests::state(db.clone());
+        let (team, cluster, project, svc, dpl) = (
+            format!("team_routes_{run}"),
+            format!("cl_r{run}"),
+            format!("prj_r{run}"),
+            format!("svc_r{run}"),
+            format!("dpl_r{run}"),
+        );
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)")
+            .bind(&project)
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        let domains = json!([{ "id": "dom_1", "hostname": format!("web-{run}.tail1.ts.net"), "portName": "http", "tlsMode": "auto" }]);
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', jsonb_build_object('domains', $5::jsonb), 'running')").bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&domains).execute(&db).await.unwrap();
+        let service = pyo_proto::ServiceRef {
+            service_id: svc.clone(),
+            name: "web".into(),
+            namespace: project.clone(),
+            workload_kind: "Deployment".into(),
+        };
+        let spec = json!({ "service": service, "projectId": project, "ports": [{ "name": "http", "containerPort": 80, "protocol": "HTTP", "exposure": "http", "publicPort": null }] });
+        q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'running', '{}', $6)").bind(&dpl).bind(&team).bind(&project).bind(&svc).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
+        q("UPDATE pyo.services SET current_deployment_id = $2 WHERE id = $1")
+            .bind(&svc)
+            .bind(&dpl)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let beat = |routes_version: &str| {
+            let hb = Heartbeat {
+                protocol: PROTOCOL_VERSION,
+                agent_version: "0.5.2".into(),
+                routes_version: routes_version.into(),
+                ..Default::default()
+            };
+            let (s, cluster, team) = (s.clone(), cluster.clone(), team.clone());
+            async move {
+                heartbeat(
+                    State(s),
+                    AgentCluster {
+                        id: cluster,
+                        team_id: team,
+                    },
+                    axum::http::HeaderMap::new(),
+                    Json(hb),
+                )
+                .await
+                .unwrap();
+            }
+        };
+        let syncs = || async {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT command FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'sync_firewall' ORDER BY created_at",
+            )
+            .bind(&cluster)
+            .fetch_all(&db)
+            .await
+            .unwrap()
+        };
+        let seen = || async {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT capabilities->>'routesVersion' FROM pyo.clusters WHERE id = $1",
+            )
+            .bind(&cluster)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+
+        // The first agent that says: its routes go out as they stand.
+        beat("1111111111111111").await;
+        let got = syncs().await;
+        assert_eq!(got.len(), 1);
+        let target = &got[0]["targets"][0];
+        assert_eq!(target["service"]["serviceId"], json!(svc));
+        assert_eq!(
+            target["domains"][0]["hostname"],
+            json!(format!("web-{run}.tail1.ts.net"))
+        );
+        assert_eq!(seen().await.as_deref(), Some("1111111111111111"));
+        // The same agent again, and one too old to say: nothing more.
+        beat("1111111111111111").await;
+        beat("").await;
+        assert_eq!(syncs().await.len(), 1);
+        assert_eq!(seen().await.as_deref(), Some("1111111111111111"));
+        // Updated: once more.
+        beat("2222222222222222").await;
+        beat("2222222222222222").await;
+        assert_eq!(syncs().await.len(), 2);
+
+        // A cluster without running services just notes it.
+        q("UPDATE pyo.services SET current_deployment_id = NULL WHERE id = $1")
+            .bind(&svc)
+            .execute(&db)
+            .await
+            .unwrap();
+        beat("3333333333333333").await;
+        assert_eq!(syncs().await.len(), 2);
+        assert_eq!(seen().await.as_deref(), Some("3333333333333333"));
+
+        q("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }

@@ -141,6 +141,11 @@ pub struct Heartbeat {
     /// run a proxy).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tailnet: Vec<ServerTailnet>,
+    /// How this agent writes a service's routes (a fingerprint). Pyo sends
+    /// every running service's routes again when it changes, so existing
+    /// services get what a newer agent writes. Empty from older agents.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub routes_version: String,
 }
 
 /// A server's Tailscale, as tailscaled says (the agent's tailnet pod on it).
