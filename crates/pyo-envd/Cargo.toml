@@ -12,5 +12,5 @@ publish.workspace = true
 
 [dependencies]
 libc = "0.2.191"
-pyo-proto = { version = "0.4.5", path = "../pyo-proto" }
+pyo-proto = { version = "0.5.0", path = "../pyo-proto" }
 serde_json.workspace = true
