@@ -191,6 +191,19 @@ enum Command {
         #[arg(long, conflicts_with_all = ["servers", "tags"])]
         any: bool,
     },
+    /// How many replicas the service runs. It changes right away, without
+    /// a redeploy, and in pyo.jsonc too. Without a number, shows how many
+    /// run now and where.
+    Scale {
+        /// The number of replicas, 1 or more.
+        #[arg(value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64))]
+        replicas: Option<u32>,
+        #[command(flatten)]
+        which: Which,
+        /// Don't ask: go ahead with a very large change.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// A shell in the service, or one command: pyo exec -- <command>.
     ///
     /// A command runs as it is, without a shell (use sh -c for one). It
@@ -969,6 +982,19 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
             )
             .await
         }
+        Command::Scale {
+            replicas,
+            which,
+            yes,
+        } => {
+            service::scale(
+                &config::client(url, token)?,
+                which.service.as_deref(),
+                replicas,
+                yes,
+            )
+            .await
+        }
         Command::Exec {
             which,
             replica,
@@ -1314,6 +1340,41 @@ mod tests {
             (file.as_str(), out.as_deref(), secrets),
             (".env", Some("prod.env"), true)
         );
+    }
+
+    #[test]
+    fn scale_parses() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|c| c.command);
+        let Ok(Command::Scale {
+            replicas,
+            which,
+            yes,
+        }) = parse(&["pyo", "scale", "3", "-s", "shop/api"])
+        else {
+            panic!("scale didn't parse");
+        };
+        assert_eq!(
+            (replicas, which.service.as_deref(), yes),
+            (Some(3), Some("shop/api"), false)
+        );
+        assert!(matches!(
+            parse(&["pyo", "scale", "-s", "api", "40", "--yes"]),
+            Ok(Command::Scale {
+                replicas: Some(40),
+                yes: true,
+                ..
+            })
+        ));
+        // No number: shows what runs now.
+        assert!(matches!(
+            parse(&["pyo", "scale"]),
+            Ok(Command::Scale { replicas: None, .. })
+        ));
+        // At least 1, and no more than Kubernetes counts.
+        assert!(parse(&["pyo", "scale", "0"]).is_err());
+        assert!(parse(&["pyo", "scale", "-1"]).is_err());
+        assert!(parse(&["pyo", "scale", "2147483648"]).is_err());
+        assert!(parse(&["pyo", "scale", "two"]).is_err());
     }
 
     #[test]

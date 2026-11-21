@@ -1568,8 +1568,16 @@ fn placement_words(service: &Value) -> String {
     };
     let mut parts = servers;
     parts.extend(tags.iter().map(|t| format!("servers tagged {t}")));
+    if parts.is_empty() {
+        return "any server".to_owned();
+    }
+    and_list(parts)
+}
+
+/// "a", "a and b", "a, b and c".
+fn and_list(mut parts: Vec<String>) -> String {
     match parts.len() {
-        0 => "any server".to_owned(),
+        0 => String::new(),
         1 => parts.remove(0),
         n => format!("{} and {}", parts[..n - 1].join(", "), parts[n - 1]),
     }
@@ -1597,6 +1605,131 @@ pub async fn place(
     }
     api.op("saveService", json!({ "service": s })).await?;
     ui::ok(&format!("{name} runs on {}", placement_words(&s)));
+    Ok(())
+}
+
+// ── scale ──────────────────────────────────────────────────────────────
+
+/// "1 replica", "3 replicas".
+fn replicas_count(n: i64) -> String {
+    if n == 1 {
+        "1 replica".to_owned()
+    } else {
+        format!("{n} replicas")
+    }
+}
+
+/// How many replicas a service runs and on which servers, in words:
+/// "api runs 3 replicas: 2 on dev-1 and 1 on dev-2".
+fn scale_words(s: &Value) -> String {
+    let name = s["name"].as_str().unwrap_or("");
+    if s["currentDeploymentId"].as_str().is_none() {
+        return format!("{name} isn't deployed yet");
+    }
+    if s["status"] == json!("stopped") {
+        return format!("{name} is stopped");
+    }
+    let mut line = match (
+        s["autoscale"]["min"].as_i64(),
+        s["autoscale"]["max"].as_i64(),
+    ) {
+        (Some(lo), Some(hi)) => format!("{name} autoscales from {lo} to {hi} replicas"),
+        _ => format!(
+            "{name} runs {}",
+            replicas_count(s["replicas"].as_i64().unwrap_or(1))
+        ),
+    };
+    let mut on = std::collections::BTreeMap::<&str, i64>::new();
+    let mut waiting = 0;
+    for r in s["runtime"]["replicas"].as_array().into_iter().flatten() {
+        match r["server"].as_str().filter(|s| !s.is_empty()) {
+            _ if r["waiting"] == json!(true) => waiting += 1,
+            Some(server) => *on.entry(server).or_default() += 1,
+            None => {}
+        }
+    }
+    let mut parts: Vec<String> = on.iter().map(|(s, n)| format!("{n} on {s}")).collect();
+    if waiting > 0 {
+        parts.push(format!("{waiting} waiting for room"));
+    }
+    if !parts.is_empty() {
+        line.push_str(": ");
+        line.push_str(&and_list(parts));
+    }
+    line
+}
+
+/// Why the API asks first: what follows its question, if anything.
+/// "Scale to 40 replicas? That's more than 10 times the 2 it has now."
+fn confirm_reason(msg: &str) -> Option<&str> {
+    msg.split_once("? ")
+        .map(|(_, why)| why.trim())
+        .filter(|why| !why.is_empty())
+}
+
+/// Show how many replicas the service runs, or change it. A change goes
+/// live right away, and pyo.jsonc's replicas follow so the next deploy
+/// keeps it.
+pub async fn scale(
+    api: &Api,
+    service: Option<&str>,
+    replicas: Option<u32>,
+    yes: bool,
+) -> Result<()> {
+    let t = target(api, service).await?;
+    let s = t.service();
+    let Some(n) = replicas else {
+        println!("{}", scale_words(s));
+        return Ok(());
+    };
+    let name = s["name"].as_str().unwrap_or("");
+    let before = if s["status"] == json!("stopped") {
+        0
+    } else {
+        s["replicas"].as_i64().unwrap_or(1)
+    };
+    let send = |confirm: bool| {
+        api.op(
+            "scaleService",
+            json!({ "id": t.id, "replicas": n, "confirm": confirm }),
+        )
+    };
+    let done = match send(yes).await {
+        Err(e) if e.downcast_ref::<crate::api::NeedsConfirm>().is_some() => {
+            let q = format!("Scale {name} from {before} to {n} replicas?");
+            if let Some(why) = confirm_reason(&e.to_string()) {
+                println!("{}", ui::dim(why));
+            }
+            if !std::io::stdin().is_terminal() {
+                bail!("{q} No terminal to ask on: pass --yes to confirm.");
+            }
+            if !confirmed(&ui::ask(&format!("{q} [y/N] "))?) {
+                bail!("Not scaled.");
+            }
+            send(true).await?
+        }
+        r => r?,
+    };
+    ui::ok(&format!("{name} now runs {}", replicas_count(n.into())));
+    // Replicas that don't fit on the servers wait for room.
+    if let Some(w) = done["warning"].as_str() {
+        println!("{}", ui::yellow(w));
+    }
+    // pyo.jsonc's replicas, or the next pyo deploy scales it back.
+    if let Some((path, f)) = &t.file
+        && f.service.as_deref() == Some(t.id.as_str())
+        && let Some(old) = f.deploy.replicas.filter(|&r| r != i64::from(n))
+    {
+        match config::write_replicas(path, n) {
+            Ok(()) => println!("{}", ui::dim(&format!("Set replicas to {n} in pyo.jsonc"))),
+            Err(_) => println!(
+                "{}",
+                ui::yellow(&format!(
+                    "pyo.jsonc still says {old} replicas. Set it to {n}, or the next pyo deploy scales back to {old}."
+                ))
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -1675,6 +1808,52 @@ mod tests {
             placement_words(&json!({ "placement": { "servers": ["a", "b"], "tags": [] } })),
             "a and b"
         );
+    }
+
+    #[test]
+    fn scale_in_words() {
+        let mut s = json!({ "name": "api", "replicas": 3 });
+        assert_eq!(scale_words(&s), "api isn't deployed yet");
+        s["currentDeploymentId"] = json!("dpl_a");
+        // Before the servers report: the setting only.
+        assert_eq!(scale_words(&s), "api runs 3 replicas");
+        s["runtime"] = json!({ "replicas": [
+            { "name": "api-a", "server": "dev-2", "ready": true },
+            { "name": "api-b", "server": "dev-1", "ready": true },
+            { "name": "api-c", "server": "dev-2", "ready": false },
+        ] });
+        assert_eq!(
+            scale_words(&s),
+            "api runs 3 replicas: 1 on dev-1 and 2 on dev-2"
+        );
+        s["runtime"]["replicas"][2] =
+            json!({ "name": "api-c", "server": "", "ready": false, "waiting": true });
+        assert_eq!(
+            scale_words(&s),
+            "api runs 3 replicas: 1 on dev-1, 1 on dev-2 and 1 waiting for room"
+        );
+        s["autoscale"] = json!({ "min": 2, "max": 5 });
+        assert!(
+            scale_words(&s).starts_with("api autoscales from 2 to 5 replicas: "),
+            "{}",
+            scale_words(&s)
+        );
+        s["status"] = json!("stopped");
+        assert_eq!(scale_words(&s), "api is stopped");
+        assert_eq!(
+            scale_words(&json!({ "name": "api", "replicas": 1, "currentDeploymentId": "dpl_a" })),
+            "api runs 1 replica"
+        );
+    }
+
+    #[test]
+    fn says_why_a_large_change_asks() {
+        assert_eq!(
+            confirm_reason("Scale to 40 replicas? That's more than 10 times the 2 it has now."),
+            Some("That's more than 10 times the 2 it has now.")
+        );
+        assert_eq!(confirm_reason("Scale to 40 replicas?"), None);
+        assert_eq!(confirm_reason("Scale to 40 replicas? "), None);
     }
 
     #[test]

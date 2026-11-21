@@ -336,6 +336,27 @@ fn set_service(text: &str, id: &str) -> Result<String> {
     Ok(root.to_string())
 }
 
+/// Set `deploy.replicas` in pyo.jsonc to `n`, keeping everything else as
+/// it is, comments too. For a file that sets it already.
+pub fn write_replicas(path: &Path, n: u32) -> Result<()> {
+    let text = fs::read_to_string(path)?;
+    fs::write(path, set_replicas(&text, n)?)?;
+    Ok(())
+}
+
+/// `text` with `deploy.replicas` set to `n`, and nothing else changed.
+fn set_replicas(text: &str, n: u32) -> Result<String> {
+    use jsonc_parser::cst::{CstInputValue, CstRootNode};
+    let root = CstRootNode::parse(text, &parse_options())?;
+    let prop = root
+        .object_value()
+        .and_then(|o| o.object_value("deploy"))
+        .and_then(|d| d.get("replicas"))
+        .context("the file doesn't set deploy.replicas")?;
+    prop.set_value(CstInputValue::Number(n.to_string()));
+    Ok(root.to_string())
+}
+
 /// "500m" → 500, "1.5" or "1.5 cores" → 1500 (millicores).
 pub fn parse_cpu(s: &str) -> Result<i64> {
     let s = s.trim();
@@ -523,6 +544,35 @@ mod tests {
 
         assert_eq!(set_service("  \n", "svc_new").unwrap(), new_file("svc_new"));
         assert!(set_service("[]", "svc_new").is_err());
+    }
+
+    #[test]
+    fn scale_changes_only_the_replicas() {
+        let text = set_replicas(FULL, 5).unwrap();
+        assert_eq!(text, FULL.replace("\"replicas\": 2", "\"replicas\": 5"));
+        assert_eq!(parse(&text).unwrap().deploy.replicas, Some(5));
+        // Across lines, with comments.
+        let text = "{\n  \"deploy\": {\n    // more for launch day\n    \"replicas\": 2, // was 1\n  },\n}\n";
+        assert_eq!(
+            set_replicas(text, 40).unwrap(),
+            text.replace("\"replicas\": 2", "\"replicas\": 40")
+        );
+        // Nothing to change: the file doesn't set it.
+        assert!(set_replicas("{ \"deploy\": { \"port\": 80 } }", 3).is_err());
+        assert!(set_replicas("{ \"service\": \"svc_a\" }", 3).is_err());
+        assert!(set_replicas("[]", 3).is_err());
+        // write_replicas changes the file.
+        let dir = temp("scale");
+        let path = dir.join(FILE);
+        fs::write(&path, FULL).unwrap();
+        write_replicas(&path, 3).unwrap();
+        assert_eq!(load(&path).unwrap().deploy.replicas, Some(3));
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("// written by pyo link")
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// The JSON Schema, from the types above: draft 7, which editors know
