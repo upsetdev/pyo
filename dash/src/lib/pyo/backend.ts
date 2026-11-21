@@ -958,6 +958,10 @@ export type CloudBilling = {
     /** Servers beyond what's paid this period, payable now (prorated). */
     topUpServers: number;
     topUpIdr: number;
+    /** Midtrans' public client key, for snap.js. */
+    clientKey: string | null;
+    /** Midtrans' sandbox: no money moves. */
+    sandbox: boolean;
   } | null;
   /** A development build's payments without a provider (no money moves). */
   testPayments?: boolean;

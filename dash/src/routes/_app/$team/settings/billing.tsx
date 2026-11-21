@@ -6,7 +6,7 @@ import {
   ReceiptIcon,
 } from "@phosphor-icons/react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { IntegrationCard } from "~/components/pyo/IntegrationCard";
 import {
   Busy,
@@ -18,7 +18,7 @@ import {
 import { useHosted } from "~/components/pyo/Managed";
 import { useTeamAdmin } from "~/components/pyo/database/NewDatabase";
 import { Badge, Dot, type Tone } from "~/components/ui/Badge";
-import { Button } from "~/components/ui/Button";
+import { Button, buttonClass } from "~/components/ui/Button";
 import { Layered } from "~/components/ui/Layered";
 import { EmptyState, KeyValue, Meter, Panel, Skeleton } from "~/components/ui/Panel";
 import { Table, Td, Th, Tr } from "~/components/ui/Table";
@@ -30,6 +30,7 @@ import {
   type CloudBilling,
 } from "~/lib/pyo/backend";
 import { useQuery } from "~/lib/pyo/query";
+import { loadSnap, snapPay, type SnapOutcome } from "~/lib/pyo/snap";
 import { currentTeam, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { seo } from "~/lib/seo";
@@ -124,6 +125,8 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
   const [open, setOpen] = useState<"plan" | "midtrans" | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  // Bumped after a payment, to load the payments again.
+  const [paidAt, setPaidAt] = useState(0);
   const retain = b.retainDays ?? RETAIN_DAYS;
   const subscribed = b.status !== "none" && b.status !== "canceled";
   const polar = b.provider === "polar" && subscribed;
@@ -147,6 +150,23 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
     }
   };
   const portal = () => void run("portal", () => cloudBilling.polarPortal(team));
+  // How a payment in Snap ended. Midtrans' notification marks it paid a
+  // moment later, so billing loads again now and once more after that.
+  const snapDone = (o: SnapOutcome) => {
+    if (o.kind === "closed") return;
+    if (o.kind === "error") return void toast({ tone: "error", title: o.message });
+    toast({
+      tone: "success",
+      title: o.kind === "success" ? "Payment received" : "Waiting for your payment",
+      description: "It shows here once Midtrans confirms it.",
+    });
+    refresh();
+    setPaidAt(Date.now());
+    setTimeout(() => {
+      refresh();
+      setPaidAt(Date.now());
+    }, 5_000);
+  };
   // Paying what's due: Polar's portal for a card on file, else a plan to pick.
   const pay = () => (polar && b.polar.portal ? portal() : setOpen(midtrans ? "midtrans" : "plan"));
 
@@ -317,6 +337,7 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
 
       <Payments
         team={team}
+        paidAt={paidAt}
         busy={busy}
         onReceipt={(order) => void run(`receipt:${order}`, () => cloudBilling.receipt(team, order))}
       />
@@ -368,7 +389,7 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
           }}
         />
       ) : open === "midtrans" && b.midtrans ? (
-        <MidtransDialog b={b} team={team} onClose={() => setOpen(null)} />
+        <MidtransDialog b={b} team={team} onClose={() => setOpen(null)} onDone={snapDone} />
       ) : null}
     </div>
   );
@@ -548,14 +569,21 @@ const PAYMENT_STATUS: Record<BillingPayment["status"], { tone: Tone; label: stri
 
 function Payments({
   team,
+  paidAt,
   busy,
   onReceipt,
 }: {
   team: string;
+  /** When a payment was last made on this page. */
+  paidAt: number;
   busy: string | null;
   onReceipt: (order: string) => void;
 }) {
   const q = useQuery(`billing-history:${team}`, () => cloudBilling.history(team), { refreshMs: 60_000 });
+  const reload = q.retry;
+  useEffect(() => {
+    if (paidAt) reload();
+  }, [paidAt, reload]);
   return (
     <Panel title="Payments">
       {q.status === "loading" ? (
@@ -716,19 +744,44 @@ function PlanDialog({
   );
 }
 
-/** Indonesia: pay the next month or year, or servers beyond what's paid. */
-function MidtransDialog({ b, team, onClose }: { b: CloudBilling; team: string; onClose: () => void }) {
+/** Indonesia: pay the next month or year, or servers beyond what's paid.
+ * Snap opens over the page in its place. Midtrans' payment page is the
+ * fallback when snap.js doesn't load. */
+function MidtransDialog({
+  b,
+  team,
+  onClose,
+  onDone,
+}: {
+  b: CloudBilling;
+  team: string;
+  onClose: () => void;
+  onDone: (o: SnapOutcome) => void;
+}) {
   const m = b.midtrans!;
   const topUp = b.provider === "midtrans" && b.status === "active" && m.topUpServers > 0;
   const [kind, setKind] = useState<BillingInterval>(b.provider === "midtrans" ? b.interval : "month");
   const [busy, setBusy] = useState(false);
+  // Snap didn't load here: Midtrans' own payment page.
+  const [fallback, setFallback] = useState<string | null>(null);
   const amount = topUp ? m.topUpIdr : kind === "year" ? m.totalYearIdr : m.totalIdr;
   const submit = async () => {
     setBusy(true);
+    let checkout: { token: string; redirectUrl: string };
     try {
-      window.location.assign((await cloudBilling.midtransCheckout(team, topUp ? "topup" : kind)).redirectUrl);
+      checkout = await cloudBilling.midtransCheckout(team, topUp ? "topup" : kind);
     } catch (e) {
       toast({ tone: "error", title: errorTitle(e) });
+      setBusy(false);
+      return;
+    }
+    try {
+      if (!m.clientKey) throw new Error("No client key");
+      const outcome = snapPay(await loadSnap(m.clientKey, m.sandbox), checkout.token);
+      onClose();
+      onDone(await outcome);
+    } catch {
+      setFallback(checkout.redirectUrl);
       setBusy(false);
     }
   };
@@ -740,18 +793,29 @@ function MidtransDialog({ b, team, onClose }: { b: CloudBilling; team: string; o
       name="Pay with Midtrans"
       description="QRIS, bank transfer or e-wallet."
       onClose={onClose}
-      onSubmit={() => void submit()}
+      onSubmit={() => {
+        if (!fallback) void submit();
+      }}
       footer={
         <>
           <Button variant="ghost" size="sm" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" size="sm" disabled={busy || !m.configured}>
-            {busy ? <Busy>Opening</Busy> : `Pay ${idr(amount)}`}
-          </Button>
+          {fallback ? (
+            <a href={fallback} className={buttonClass("primary", "sm")}>
+              Pay on Midtrans
+            </a>
+          ) : (
+            <Button type="submit" size="sm" disabled={busy || !m.configured}>
+              {busy ? <Busy>Opening</Busy> : `Pay ${idr(amount)}`}
+            </Button>
+          )}
         </>
       }
     >
+      {fallback ? (
+        <p className="mb-4 text-[12.5px] text-muted-foreground">Payment couldn't open here. Pay on Midtrans' page instead.</p>
+      ) : null}
       {topUp ? (
         <DialogSection title="New servers, for the rest of this period">
           <Summary
