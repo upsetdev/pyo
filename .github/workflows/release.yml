@@ -106,6 +106,7 @@ jobs:
       contents: read
       packages: write
       id-token: write # Signing: proves the image came from this workflow.
+      security-events: write # The image's CVEs, in code scanning.
     strategy:
       fail-fast: true
       matrix:
@@ -140,6 +141,43 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      # Scanned before anything is pushed or signed. The image is built
+      # into the runner's Docker first (amd64), and the push below takes
+      # its layers from the same builder's cache. A CRITICAL CVE that has
+      # a fix stops the release. HIGH ones are reported in the job's
+      # summary and in code scanning. .trivyignore lists the CVEs checked
+      # and found not to apply.
+      - name: Build for the scan
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context || '.' }}
+          file: deploy/images/${{ matrix.file || matrix.image }}.Dockerfile
+          build-args: ${{ matrix.args }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          cache-from: ${{ matrix.rust && format('type=gha,scope=rust-{0}', github.run_id) || '' }}
+          load: true
+          tags: pyo-scan/${{ matrix.image }}:${{ needs.verify.outputs.version }}
+          provenance: false
+          sbom: false
+      - uses: ./.github/actions/trivy
+      - name: Scan for CVEs
+        id: scan
+        env:
+          IMAGE: pyo-scan/${{ matrix.image }}:${{ needs.verify.outputs.version }}
+        run: .github/scripts/trivy-scan.sh image "$IMAGE" trivy
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: trivy.sarif
+          category: release-image-${{ matrix.image }}
+      - name: No CRITICAL CVE with a fix
+        if: steps.scan.outputs.critical != '0'
+        env:
+          IMAGE: ${{ matrix.image }}
+          CRITICAL: ${{ steps.scan.outputs.critical }}
+        run: |
+          echo "::error::$IMAGE has $CRITICAL CRITICAL CVEs with a fix (see the job's summary). Take the fixed versions and tag a new release, or add a CVE that doesn't apply to .trivyignore with the reason."
+          exit 1
       - name: Build and push
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

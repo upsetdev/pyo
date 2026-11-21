@@ -1,0 +1,4 @@
+# CVEs that Trivy reports and that were checked and found not to apply to
+# Pyo. One ID per line, each with a comment saying why, and an expiry
+# when it's waiting for an upstream fix (exp:2027-01-31 after the ID).
+# The release, CI and the daily scan all read this file.
