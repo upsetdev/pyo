@@ -17,7 +17,7 @@ use tower::ServiceExt;
 
 use crate::ids::random_string;
 
-fn run_big<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
+pub(crate) fn run_big<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(|| {
@@ -32,14 +32,14 @@ fn run_big<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
         .unwrap();
 }
 
-struct Client {
-    app: Router,
-    cookie: Option<String>,
-    ip: &'static str,
+pub(crate) struct Client {
+    pub(crate) app: Router,
+    pub(crate) cookie: Option<String>,
+    pub(crate) ip: &'static str,
 }
 
 impl Client {
-    async fn call(
+    pub(crate) async fn call(
         &mut self,
         method: Method,
         path: &str,
@@ -87,7 +87,7 @@ impl Client {
         (st, bytes.to_vec())
     }
 
-    async fn op(&mut self, op: Value) -> (StatusCode, Value) {
+    pub(crate) async fn op(&mut self, op: Value) -> (StatusCode, Value) {
         self.call(Method::POST, "/api/v1/ops", Some(op)).await
     }
 }

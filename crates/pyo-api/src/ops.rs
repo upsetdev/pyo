@@ -468,6 +468,38 @@ pub async fn unique_team_slug(
     Ok(slug)
 }
 
+/// Makes `user` the owner of a team this transaction just created. Row
+/// security accepts a membership only for a team the transaction may
+/// already see, and a new team isn't one of the user's until this row
+/// exists, so this one insert goes outside the scope. It adds a row only
+/// to a team with no members yet: it can't put anyone into a team that
+/// has some. Scope the transaction again ([`crate::rls::scope`]) to work
+/// in the new team.
+pub(crate) async fn add_first_owner(
+    tx: &mut sqlx::PgConnection,
+    team_id: &str,
+    user: &User,
+) -> ApiResult<()> {
+    let lifted = crate::rls::lift(tx).await?;
+    let added = sqlx::query(
+        "INSERT INTO pyo.members (id, team_id, user_id, email, role, status)
+         SELECT $1, $2, $3, $4, 'owner', 'active'
+          WHERE NOT EXISTS (SELECT 1 FROM pyo.members WHERE team_id = $2)",
+    )
+    .bind(new_id("mem"))
+    .bind(team_id)
+    .bind(&user.id)
+    .bind(&user.email)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    lifted.lower(tx).await?;
+    if added == 0 {
+        return Err(ApiError::conflict("This team already has members."));
+    }
+    Ok(())
+}
+
 /// One entry in the team's activity log (the dashboard's ActivityEvent).
 #[allow(clippy::too_many_arguments)]
 pub async fn log_activity(
@@ -3530,15 +3562,15 @@ async fn apply(
             .bind(description.trim())
             .execute(&mut **tx)
             .await?;
-            sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'active')")
-                .bind(new_id("mem"))
-                .bind(&id)
-                .bind(&user.id)
-                .bind(&user.email)
-                .execute(&mut **tx)
-                .await?;
+            add_first_owner(tx, &id, user).await?;
             // The new team is one of theirs now.
             crate::rls::scope(tx, user).await?;
+            if !crate::rls::team_ids(tx).await?.contains(&id) {
+                // An account that must set up two-factor first has no teams yet.
+                return Err(ApiError::forbidden(
+                    "Set up two-factor authentication in your profile first.",
+                ));
+            }
             log_activity(
                 tx,
                 &id,

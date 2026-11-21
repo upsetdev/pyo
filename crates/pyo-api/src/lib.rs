@@ -61,6 +61,8 @@ mod passkeys;
 mod twofactor;
 #[cfg(test)]
 mod teamsec_tests;
+#[cfg(test)]
+mod teams_rls_tests;
 mod placement;
 mod platform_import;
 mod pressure;
