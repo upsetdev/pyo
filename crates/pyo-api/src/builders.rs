@@ -444,25 +444,69 @@ async fn refresh_cluster_builders(s: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The longest a build may take, and wait for a builder before that:
+/// `PYO_BUILD_TIMEOUT_MINUTES`, 60 by default (at least 5).
+pub fn build_timeout_minutes() -> i32 {
+    std::env::var("PYO_BUILD_TIMEOUT_MINUTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .map_or(60, |m| m.max(5))
+}
+
+/// Builds that fail now ($1: [`build_timeout_minutes`]), with why: one
+/// running that long ("timeout"); one whose builder went quiet for 5
+/// minutes, was removed, or has said since it started that it's busy with
+/// something else (restarted, or its result never came) ("lost"); one
+/// queued that long with no builder taking it ("queued"). A build that
+/// takes long is fine while its builder says it's on it: a deployment's
+/// own rollout timeout (deploy.rs `STALE_ROLLOUTS`) waits for its build.
+pub(crate) const STALE_BUILDS: &str = "UPDATE pyo.build_jobs j SET status = 'failed', finished_at = now()
+      FROM (SELECT j.id,
+                   CASE WHEN j.status = 'queued' THEN 'queued'
+                        WHEN j.started_at < now() - make_interval(mins => $1) THEN 'timeout'
+                        ELSE 'lost' END AS why
+              FROM pyo.build_jobs j LEFT JOIN pyo.builders b ON b.id = j.builder_id
+             WHERE (j.status = 'queued' AND j.created_at < now() - make_interval(mins => $1))
+                OR (j.status = 'running' AND (
+                      j.started_at < now() - make_interval(mins => $1)
+                      OR b.id IS NULL
+                      OR coalesce(b.last_seen_at, j.started_at) < now() - interval '5 minutes'
+                      OR (b.last_seen_at > j.started_at + interval '1 minute' AND b.info->>'busyWith' IS DISTINCT FROM j.id)))
+             FOR UPDATE OF j SKIP LOCKED) w
+     WHERE j.id = w.id
+     RETURNING j.deployment_id, (SELECT cluster_id FROM pyo.deployments d WHERE d.id = j.deployment_id), w.why";
+
 async fn watch_once(s: &AppState) -> anyhow::Result<()> {
     refresh_cluster_builders(s).await?;
     // Folders sent with `pyo deploy` that were never built in time.
     crate::source_uploads::sweep(&s.db).await?;
     sqlx::query("UPDATE pyo.builders SET status = 'offline' WHERE status = 'ready' AND last_seen_at < now() - interval '60 seconds'").execute(&s.db).await?;
-    // Builds nobody finished (builder gone mid-build) fail after an hour.
-    let stale: Vec<(String, String)> = sqlx::query_as(
-        "UPDATE pyo.build_jobs SET status = 'failed', finished_at = now() WHERE status = 'running' AND started_at < now() - interval '60 minutes'
-          RETURNING deployment_id, (SELECT cluster_id FROM pyo.deployments d WHERE d.id = deployment_id)",
-    )
-    .fetch_all(&s.db)
-    .await?;
-    for (dep, cluster) in stale {
+    let minutes = build_timeout_minutes();
+    let stale: Vec<(String, String, String)> = sqlx::query_as(STALE_BUILDS)
+        .bind(minutes)
+        .fetch_all(&s.db)
+        .await?;
+    for (dep, cluster, why) in stale {
+        let (reason, message) = match why.as_str() {
+            "timeout" => (
+                "BuildTimeout",
+                format!("The build took longer than {minutes} minutes."),
+            ),
+            "queued" => (
+                "NoBuilder",
+                format!("No builder started this build within {minutes} minutes."),
+            ),
+            _ => (
+                "BuilderLost",
+                "The builder stopped reporting on this build.".to_owned(),
+            ),
+        };
         let p = DeploymentProgress {
             status: "failed".into(),
             failure: Some(pyo_proto::Failure {
                 stage: "building".into(),
-                reason: "BuilderLost".into(),
-                message: "The builder stopped reporting on this build.".into(),
+                reason: reason.into(),
+                message,
             }),
             ..Default::default()
         };
@@ -575,6 +619,172 @@ pub(crate) mod first_builder_tests {
             .unwrap();
     }
 
+    /// Against a real Postgres: a long build isn't a stuck rollout while
+    /// its builder says it's on it, and a rollout's timeout starts when it's
+    /// sent, not when its deployment was made.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn long_builds_go_on_while_their_builder_reports() {
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&pool).await.unwrap();
+        let run = crate::ids::random_string(8);
+        let (team, cluster, project, service) = (
+            format!("team_l{run}"),
+            format!("cl_l{run}"),
+            format!("prj_l{run}"),
+            format!("svc_l{run}"),
+        );
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)")
+            .bind(&cluster)
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'p', $1)")
+            .bind(&project)
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, 'web', '{}')").bind(&service).bind(&team).bind(&project).bind(&cluster).execute(&pool).await.unwrap();
+        // A deployment made `age` minutes ago, with its data.
+        let deployment = |name: &str, status: &str, age: i32, data: Value| {
+            let (pool, team, project, service, cluster) = (
+                pool.clone(),
+                team.clone(),
+                project.clone(),
+                service.clone(),
+                cluster.clone(),
+            );
+            let (id, status) = (format!("dpl_{name}{run}"), status.to_owned());
+            async move {
+                sqlx::query("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', now() - make_interval(mins => $8))")
+                    .bind(&id).bind(&team).bind(&project).bind(&service).bind(&cluster).bind(&status).bind(data).bind(age)
+                    .execute(&pool).await.unwrap();
+                id
+            }
+        };
+        // A builder that last said it's busy with `busy`, `seen` minutes ago.
+        let builder = |name: &str, busy: Option<String>, seen: i32| {
+            let (pool, team, cluster) = (pool.clone(), team.clone(), cluster.clone());
+            let id = format!("bld_{name}{run}");
+            async move {
+                sqlx::query("INSERT INTO pyo.builders (id, team_id, name, kind, cluster_id, server, token_hash, status, info, last_seen_at) VALUES ($1, $2, $1, 'cluster', $3, 's', $1, 'ready', jsonb_build_object('busyWith', $4::text), now() - make_interval(mins => $5))")
+                    .bind(&id).bind(&team).bind(&cluster).bind(busy).bind(seen)
+                    .execute(&pool).await.unwrap();
+                id
+            }
+        };
+        // A build job of `dep`, `status` since `age` minutes ago.
+        let job = |name: &str, dep: &str, status: &str, builder: Option<&str>, age: i32| {
+            let (pool, team) = (pool.clone(), team.clone());
+            let (id, dep, status, builder) = (
+                format!("bj_{name}{run}"),
+                dep.to_owned(),
+                status.to_owned(),
+                builder.map(str::to_owned),
+            );
+            async move {
+                sqlx::query("INSERT INTO pyo.build_jobs (id, team_id, deployment_id, job, status, builder_id, created_at, started_at) VALUES ($1, $2, $3, '{}', $4, $5, now() - make_interval(mins => $6), CASE WHEN $4 = 'queued' THEN NULL ELSE now() - make_interval(mins => $6) END)")
+                    .bind(&id).bind(&team).bind(&dep).bind(&status).bind(&builder).bind(age)
+                    .execute(&pool).await.unwrap();
+                id
+            }
+        };
+        let ms_ago = |min: i64| json!(pyo_proto::now_ms() - min * 60_000);
+
+        // Building for 30 minutes, its builder on it: neither stuck nor lost.
+        let busy = deployment("busy", "building", 30, json!({})).await;
+        let busy_job = job("busy", &busy, "running", None, 30).await;
+        let b1 = builder("busy", Some(busy_job.clone()), 0).await;
+        q("UPDATE pyo.build_jobs SET builder_id = $2 WHERE id = $1")
+            .bind(&busy_job)
+            .bind(&b1)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Its builder came back without it (restarted): lost.
+        let gone = deployment("gone", "building", 10, json!({})).await;
+        let b2 = builder("gone", None, 0).await;
+        job("gone", &gone, "running", Some(&b2), 10).await;
+        // Its builder went quiet: lost.
+        let quiet = deployment("quiet", "building", 10, json!({})).await;
+        let b3 = builder("quiet", None, 6).await;
+        let quiet_job = job("quiet", &quiet, "running", Some(&b3), 10).await;
+        q("UPDATE pyo.builders SET info = jsonb_build_object('busyWith', $2::text) WHERE id = $1")
+            .bind(&b3)
+            .bind(&quiet_job)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Building past the build timeout, its builder still on it.
+        let long = deployment("long", "building", 70, json!({})).await;
+        let long_job = job("long", &long, "running", None, 70).await;
+        let b4 = builder("long", Some(long_job.clone()), 0).await;
+        q("UPDATE pyo.build_jobs SET builder_id = $2 WHERE id = $1")
+            .bind(&long_job)
+            .bind(&b4)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // No builder took it for the build timeout.
+        let waited = deployment("waited", "building", 70, json!({})).await;
+        job("waited", &waited, "queued", None, 70).await;
+        // Built after 40 minutes, rolling out for 2: not stuck.
+        let rolling = deployment("rolling", "deploying", 42, json!({ "sentAt": ms_ago(2) })).await;
+        job("rolling", &rolling, "succeeded", None, 42).await;
+        // Rolling out for 10 minutes without a word from the agent: stuck.
+        let stuck = deployment("stuck", "deploying", 50, json!({ "sentAt": ms_ago(10) })).await;
+        job("stuck", &stuck, "succeeded", None, 50).await;
+
+        let stale: Vec<String> =
+            sqlx::query_as::<_, (String, String)>(crate::deploy::STALE_ROLLOUTS)
+                .bind((crate::deploy::ROLLOUT_TIMEOUT_SECS + 120) as f64)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .filter(|id| id.ends_with(&run))
+                .collect();
+        assert_eq!(
+            stale,
+            std::slice::from_ref(&stuck),
+            "only the rollout the agent went quiet on"
+        );
+
+        let mut failed: Vec<(String, String, String)> = sqlx::query_as(STALE_BUILDS)
+            .bind(60)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        failed.retain(|(d, _, _)| d.ends_with(&run));
+        failed.sort();
+        let want = |d: &str, why: &str| (d.to_owned(), cluster.clone(), why.to_owned());
+        let mut expected = vec![
+            want(&gone, "lost"),
+            want(&quiet, "lost"),
+            want(&long, "timeout"),
+            want(&waited, "queued"),
+        ];
+        expected.sort();
+        assert_eq!(failed, expected);
+        assert!(!failed.iter().any(|(d, _, _)| *d == busy));
+
+        q("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     /// Against a real Postgres: a build goes to a builder of the deploy's
     /// own cluster. Another cluster's builder takes it only when images go
     /// to Pyo's registry and the deploy's cluster has no ready builder.

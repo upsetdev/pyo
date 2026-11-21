@@ -1008,6 +1008,13 @@ async fn send_or_hold(
 ) -> ApiResult<()> {
     let waiting = unready_databases(tx, service_id).await?;
     if waiting.is_empty() {
+        // The rollout's own timeout starts now (see `sweep`), not when the
+        // deployment was made: a build or a wait came first.
+        sqlx::query("UPDATE pyo.deployments SET data = data || jsonb_build_object('sentAt', $2::bigint) WHERE id = $1")
+            .bind(&spec.deployment_id)
+            .bind(now_ms())
+            .execute(&mut **tx)
+            .await?;
         let spec = with_fallback(tx, service_id, prev_status, spec).await?;
         enqueue(tx, cluster_id, Command::Deploy(Box::new(spec))).await?;
         return Ok(());
@@ -1066,20 +1073,13 @@ async fn release_waiting(state: &AppState) -> ApiResult<()> {
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((cluster_id, service_id, mut spec, mut data)) = row else {
+        let Some((cluster_id, service_id, mut spec, data)) = row else {
             continue;
         };
         let waiting = unready_databases(&mut tx, &service_id).await?;
         if waiting.is_empty() {
             crate::vault::get().open_env(&mut spec).await?;
             let deploy: DeploySpec = serde_json::from_value(spec).map_err(anyhow::Error::from)?;
-            // The rollout's own timeout starts now (see `sweep`).
-            data["sentAt"] = json!(now_ms());
-            sqlx::query("UPDATE pyo.deployments SET data = $2 WHERE id = $1")
-                .bind(&id)
-                .bind(&data)
-                .execute(&mut *tx)
-                .await?;
             send_or_hold(
                 &mut tx,
                 &cluster_id,
@@ -1733,6 +1733,15 @@ pub async fn delete_image(repo: &str, digest: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Rollouts nobody reports on any more: sent to the agent ($1 seconds)
+/// ago, or made that long ago and never sent. A deployment whose build is
+/// queued or running isn't one: the builders' watcher looks after builds
+/// (builders.rs), and its rollout starts when the build is done.
+pub(crate) const STALE_ROLLOUTS: &str = "SELECT d.id, d.cluster_id FROM pyo.deployments d
+      WHERE d.status NOT IN ('succeeded', 'failed', 'cancelled', 'waiting_database')
+        AND NOT EXISTS (SELECT 1 FROM pyo.build_jobs j WHERE j.deployment_id = d.id AND j.status IN ('queued', 'running'))
+        AND coalesce(to_timestamp((d.data->>'sentAt')::bigint / 1000.0), d.created_at) < now() - make_interval(secs => $1)";
+
 /// Marks clusters whose agent went quiet as unreachable, and fails rollouts
 /// nobody is reporting on any more.
 pub async fn sweeper(state: AppState) {
@@ -1833,14 +1842,10 @@ async fn sweep(state: &AppState, mark_unreachable: bool) -> ApiResult<()> {
     )
     .execute(&state.db)
     .await?;
-    let stale: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT id, cluster_id FROM pyo.deployments
-          WHERE status NOT IN ('succeeded', 'failed', 'cancelled', 'waiting_database')
-            AND coalesce(to_timestamp((data->>'sentAt')::bigint / 1000.0), created_at) < now() - interval '{} seconds'",
-        ROLLOUT_TIMEOUT_SECS + 120
-    )))
-    .fetch_all(&state.db)
-    .await?;
+    let stale: Vec<(String, String)> = sqlx::query_as(STALE_ROLLOUTS)
+        .bind((ROLLOUT_TIMEOUT_SECS + 120) as f64)
+        .fetch_all(&state.db)
+        .await?;
     for (id, cluster_id) in stale {
         let p = DeploymentProgress {
             status: "failed".into(),
