@@ -205,6 +205,27 @@ spec:
       ports:
         - { port: 5000 }
 ---
+# The traffic store (the agent's pyo-traffic): the gateway's access log
+# lines from Vector, and the agent's own calls (totals, context, kept
+# requests), from any server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pyo-traffic
+  namespace: pyo-system
+  labels: { app.kubernetes.io/part-of: pyo }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: pyo-traffic }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: [pyo-agent, pyo-vector] }
+      ports:
+        - { port: 8090 }
+---
 # ── Image registry: in the cluster only (pyo-registry:5000), for Pyo's
 # door and its own clean-up; on the node as 127.0.0.1:5005 through pyo-host
 # (k3s pulls from it over HTTP, see /etc/rancher/k3s/registries.yaml). ──

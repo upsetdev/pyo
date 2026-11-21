@@ -43,8 +43,8 @@ use sha2::{Digest, Sha256};
 use clean::{Cleaned, Cleaner};
 
 /// The store's name (Deployment, Service, volume claim) and port.
-pub const NAME: &str = "pyo-traffic";
-pub const PORT: u16 = 8090;
+pub const NAME: &str = pyo_proto::traffic::STORE;
+pub const PORT: u16 = pyo_proto::traffic::STORE_PORT;
 /// Where the store is, from inside the cluster.
 pub fn url() -> String {
     format!("http://{NAME}.{}.svc:{PORT}", pyo_proto::rbac::NS)

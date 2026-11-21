@@ -26,6 +26,9 @@ use serde_json::json;
 use crate::MANAGER;
 
 const NS: &str = "pyo-system";
+/// Vector's DaemonSet and its pods' name label (platform.yaml's pyo-traffic
+/// policy lets these in).
+const VECTOR: &str = pyo_proto::traffic::VECTOR;
 const VECTOR_IMAGE: &str = "timberio/vector:0.60.0-debian";
 
 /// Reads the proxy's container log files directly (CRI format: "<time>
@@ -187,13 +190,13 @@ async fn remove_vector(client: &Client) -> anyhow::Result<()> {
     };
     gone(
         Api::<DaemonSet>::namespaced(client.clone(), NS)
-            .delete("pyo-vector", &DeleteParams::default())
+            .delete(VECTOR, &DeleteParams::default())
             .await
             .map(|_| ()),
     )?;
     gone(
         Api::<Secret>::namespaced(client.clone(), NS)
-            .delete("pyo-vector", &DeleteParams::default())
+            .delete(VECTOR, &DeleteParams::default())
             .await
             .map(|_| ()),
     )?;
@@ -202,9 +205,9 @@ async fn remove_vector(client: &Client) -> anyhow::Result<()> {
 
 async fn vector(client: &Client) -> anyhow::Result<()> {
     let labels =
-        json!({ "app.kubernetes.io/name": "pyo-vector", "app.kubernetes.io/managed-by": MANAGER });
+        json!({ "app.kubernetes.io/name": VECTOR, "app.kubernetes.io/managed-by": MANAGER });
     Api::<ServiceAccount>::namespaced(client.clone(), NS)
-        .patch("pyo-vector", &pp(), &Patch::Apply(json!({ "apiVersion": "v1", "kind": "ServiceAccount", "metadata": { "name": "pyo-vector", "labels": labels } })))
+        .patch(VECTOR, &pp(), &Patch::Apply(json!({ "apiVersion": "v1", "kind": "ServiceAccount", "metadata": { "name": VECTOR, "labels": labels } })))
         .await?;
     // Vector won't expand env vars in the sink URI, so the config carries the
     // relay's address and token itself, and lives in a Secret. Both are this
@@ -217,20 +220,20 @@ async fn vector(client: &Client) -> anyhow::Result<()> {
         .replace("__STORE_TOKEN__", crate::traffic::link::token());
     Api::<Secret>::namespaced(client.clone(), NS)
         .patch(
-            "pyo-vector",
+            VECTOR,
             &pp(),
-            &Patch::Apply(json!({ "apiVersion": "v1", "kind": "Secret", "metadata": { "name": "pyo-vector", "labels": labels }, "type": "Opaque", "stringData": { "vector.yaml": config } })),
+            &Patch::Apply(json!({ "apiVersion": "v1", "kind": "Secret", "metadata": { "name": VECTOR, "labels": labels }, "type": "Opaque", "stringData": { "vector.yaml": config } })),
         )
         .await?;
     Api::<DaemonSet>::namespaced(client.clone(), NS)
         .patch(
-            "pyo-vector",
+            VECTOR,
             &pp(),
             &Patch::Apply(json!({
                 "apiVersion": "apps/v1", "kind": "DaemonSet",
-                "metadata": { "name": "pyo-vector", "labels": labels },
+                "metadata": { "name": VECTOR, "labels": labels },
                 "spec": {
-                    "selector": { "matchLabels": { "app.kubernetes.io/name": "pyo-vector" } },
+                    "selector": { "matchLabels": { "app.kubernetes.io/name": VECTOR } },
                     // Every server's copy moves at once: one on a server that's
                     // down (it can't be replaced there) would otherwise hold
                     // the others on their old config for good. A copy is only
@@ -243,7 +246,7 @@ async fn vector(client: &Client) -> anyhow::Result<()> {
                             "annotations": { "pyo/config-hash": format!("{:x}", fxhash(&config)) },
                         },
                         "spec": {
-                            "serviceAccountName": "pyo-vector",
+                            "serviceAccountName": VECTOR,
                             "tolerations": [{ "operator": "Exists" }],
                             "containers": [{
                                 "name": "vector",
@@ -269,7 +272,7 @@ async fn vector(client: &Client) -> anyhow::Result<()> {
                                 ],
                             }],
                             "volumes": [
-                                { "name": "config", "secret": { "secretName": "pyo-vector" } },
+                                { "name": "config", "secret": { "secretName": VECTOR } },
                                 { "name": "data", "hostPath": { "path": "/var/lib/pyo-vector", "type": "DirectoryOrCreate" } },
                                 { "name": "var-log", "hostPath": { "path": "/var/log" } },
                                 { "name": "host-proc", "hostPath": { "path": "/proc" } },

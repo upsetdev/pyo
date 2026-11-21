@@ -1436,8 +1436,9 @@ mod tests {
 
     /// What every install and update applies to Pyo's own namespace keeps
     /// it closed: nothing in by default, Postgres, ClickHouse and the
-    /// registry for Pyo only, the backup store's admin API for Pyo only, and
-    /// no plain registry on the tailnet.
+    /// registry for Pyo only, the backup store's admin API for Pyo only, the
+    /// traffic store for the agent and Vector only, and no plain registry
+    /// on the tailnet.
     #[test]
     fn pyos_namespace_is_closed() {
         let docs: Vec<Value> = [
@@ -1481,6 +1482,34 @@ mod tests {
         only_pyo("pyo-databases", 8123);
         only_pyo("registry", 5000);
         only_pyo("pyo-backup-store", 3903);
+        // The traffic store: the agent and Vector only, on its port. By
+        // their pods' labels, so from any server: the store, the agent
+        // and each server's Vector are often on different servers.
+        let agent_label = crate::install::render("http://pyo.pyo-system.svc:8000", "agent:1", "t")
+            .split("\n---")
+            .filter_map(|d| serde_norway::from_str::<Value>(d).ok())
+            .find(|d| d["kind"] == "Deployment" && d["metadata"]["name"] == "pyo-agent")
+            .expect("the agent's Deployment")["spec"]["template"]["metadata"]["labels"]
+            ["app.kubernetes.io/name"]
+            .clone();
+        assert_eq!(agent_label, "pyo-agent");
+        let store = find("NetworkPolicy", pyo_proto::traffic::STORE);
+        assert_eq!(
+            store["spec"]["podSelector"],
+            json!({ "matchLabels": { "app.kubernetes.io/name": pyo_proto::traffic::STORE } })
+        );
+        assert_eq!(store["spec"]["policyTypes"], json!(["Ingress"]));
+        assert_eq!(
+            store["spec"]["ingress"],
+            json!([{
+                "from": [{ "podSelector": { "matchExpressions": [{
+                    "key": "app.kubernetes.io/name", "operator": "In",
+                    "values": [agent_label, pyo_proto::traffic::VECTOR],
+                }] } }],
+                "ports": [{ "port": pyo_proto::traffic::STORE_PORT }],
+            }]),
+            "the traffic store answers the agent and Vector only"
+        );
         // Pyo's own front: never from a project's pods (Pyo believes
         // X-Forwarded-For from the pod network). Its own namespace, the
         // gateway's, pyo-static's, import Jobs outside projects, and the

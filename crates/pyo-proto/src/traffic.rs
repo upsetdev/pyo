@@ -15,6 +15,14 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// The traffic store's name in pyo-system (its Deployment, Service and
+/// pods' `app.kubernetes.io/name`) and port. platform.yaml's network
+/// policy of the same name lets in only Vector and the agent.
+pub const STORE: &str = "pyo-traffic";
+pub const STORE_PORT: u16 = 8090;
+/// Vector's DaemonSet in pyo-system, and its pods' `app.kubernetes.io/name`.
+pub const VECTOR: &str = "pyo-vector";
+
 /// Query parameters whose values are never kept.
 pub const SENSITIVE: [&str; 15] = [
     "token",
