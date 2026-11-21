@@ -1,0 +1,111 @@
+name: Security scan
+
+# Every day, Trivy scans:
+# - the images of the latest release (ghcr.io/upsetdev/pyo/*, as its
+#   release.json pins them)
+# - the third-party database images Pyo pins, as this branch has them:
+#   the databases system's images (crates/pyo-proto/system/databases:
+#   CloudNativePG, MOCO and its sidecars, MySQL, valkey-bundle) and the
+#   CloudNativePG bases of deploy/images/postgres.Dockerfile, plus plain
+#   Valkey 8.1, which isn't pinned (it follows a database's version)
+#
+# An image with HIGH or CRITICAL CVEs that have a fix gets one issue,
+# labelled security, listing them with their fixed versions. Each scan
+# updates it, and closes it when nothing is left. It uses the built-in
+# GITHUB_TOKEN only.
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan
+
+jobs:
+  images:
+    name: Images to scan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      images: ${{ steps.list.outputs.images }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The security label
+        run: gh label create security --color B60205 --description "A vulnerability to fix" 2>/dev/null || true
+      - name: List them
+        id: list
+        run: |
+          set -euo pipefail
+          tag=$(gh release view --json tagName --jq .tagName)
+          gh release download "$tag" --pattern release.json --dir release
+          jq -c '[.images | to_entries[] | select(.value | startswith("ghcr.io/upsetdev/pyo/")) | {key: ("pyo/" + .key), ref: .value}]' \
+            release/release.json > pyo.json
+          {
+            git grep -hoE '(docker\.io|ghcr\.io)/[a-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' -- \
+              crates/pyo-proto/system deploy/images/postgres.Dockerfile | sort -u
+            echo docker.io/valkey/valkey:8.1
+          } | jq -Rnc '[inputs | select(length > 0) | {key: sub("@.*$"; ""), ref: .}]' > third-party.json
+          echo "images=$(jq -sc 'add' pyo.json third-party.json)" >> "$GITHUB_OUTPUT"
+          echo "$tag: $(jq length pyo.json) of Pyo's images and $(jq length third-party.json) third-party images."
+
+  scan:
+    name: ${{ matrix.image.key }}
+    needs: images
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        image: ${{ fromJSON(needs.images.outputs.images) }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      KEY: ${{ matrix.image.key }}
+      REF: ${{ matrix.image.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/trivy
+      - name: Scan for CVEs
+        run: .github/scripts/trivy-scan.sh image "$REF" trivy
+      - name: Open, update or close its issue
+        run: .github/scripts/cve-issue.sh "$KEY" "$REF" trivy
+
+  # An image that isn't scanned anymore (a third-party image moved to a
+  # new version, say) has its issue closed.
+  tidy:
+    name: Close the issues of images not scanned
+    needs: [images, scan]
+    if: always() && needs.images.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      IMAGES: ${{ needs.images.outputs.images }}
+    steps:
+      - name: Close them
+        run: |
+          set -euo pipefail
+          gh issue list --state open --label security --limit 500 --json number,body \
+            | jq -r --argjson keep "$(jq -c 'map(.key)' <<<"$IMAGES")" \
+                '.[] | (.body | capture("<!-- pyo-cve-scan: (?<k>[^ ]+) -->").k) as $k | select($keep | index($k) | not) | .number' \
+            | while read -r n; do
+                gh issue close "$n" --comment "This image isn't scanned anymore: the latest release or the pinned images moved on."
+              done
