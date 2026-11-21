@@ -924,6 +924,8 @@ export type BillingInterval = "month" | "year";
 
 /** A team's Pyo Cloud billing (only on a hosted build: see Meta.features). */
 export type CloudBilling = {
+  /** "free": staff made this team free. Nothing to pay, any number of servers. */
+  plan: "free" | "standard";
   servers: number;
   pricePerServerUsd: number;
   pricePerServerYearUsd: number;

@@ -86,6 +86,7 @@ function BillingLoader({ team }: { team: string }) {
         <p className="px-4 py-4 text-[13px] text-muted-foreground">Couldn't load billing: {q.error}</p>
       </Panel>
     );
+  if (q.data.plan === "free") return <FreePlan b={q.data} team={team} />;
   return <Billing b={q.data} team={team} refresh={q.retry} />;
 }
 
@@ -122,6 +123,32 @@ function standing(b: CloudBilling): { tone: Tone; label: string } {
 }
 
 // ── The page ────────────────────────────────────────────────────────────────
+
+/** A team staff made free: nothing to pay or cancel. A subscription it has
+ * anyway is still shown. */
+function FreePlan({ b, team }: { b: CloudBilling; team: string }) {
+  const rows: Pair[] = [
+    ["Price", "Free"],
+    ["Servers", <span className="tabular-nums">{b.servers}</span>],
+  ];
+  if (b.status !== "none") rows.push(["Subscription", standing(b).label]);
+  return (
+    <div className="space-y-4">
+      <Panel
+        title="Plan"
+        actions={
+          <Badge tone="success">
+            <Dot tone="success" />
+            Free plan
+          </Badge>
+        }
+      >
+        <KeyValue items={rows} />
+      </Panel>
+      {b.status !== "none" ? <Payments team={team} paidAt={0} busy={null} /> : null}
+    </div>
+  );
+}
 
 function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh: () => void }) {
   const [open, setOpen] = useState<"plan" | "midtrans" | null>(null);
@@ -608,7 +635,8 @@ function Payments({
   /** When a payment was last made on this page. */
   paidAt: number;
   busy: string | null;
-  onReceipt: (order: string) => void;
+  /** Without it, no receipts (a free team). */
+  onReceipt?: (order: string) => void;
 }) {
   const q = useQuery(`billing-history:${team}`, () => cloudBilling.history(team), { refreshMs: 60_000 });
   const reload = q.retry;
@@ -634,9 +662,11 @@ function Payments({
               <Th className="max-sm:hidden">For</Th>
               <Th className="text-right">Amount</Th>
               <Th>Status</Th>
-              <Th className="w-0">
-                <span className="sr-only">Receipt</span>
-              </Th>
+              {onReceipt ? (
+                <Th className="w-0">
+                  <span className="sr-only">Receipt</span>
+                </Th>
+              ) : null}
             </tr>
           </thead>
           <tbody>
@@ -653,25 +683,27 @@ function Payments({
                   <Td>
                     <Badge tone={st.tone}>{st.label}</Badge>
                   </Td>
-                  <Td className="text-right">
-                    {p.order ? (
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        disabled={busy !== null}
-                        aria-label={`Receipt for ${date(p.at)}`}
-                        onClick={() => onReceipt(p.order!)}
-                      >
-                        {busy === `receipt:${p.order}` ? (
-                          <Busy>Receipt</Busy>
-                        ) : (
-                          <>
-                            <ReceiptIcon size={13} aria-hidden /> <span className="max-sm:hidden">Receipt</span>
-                          </>
-                        )}
-                      </Button>
-                    ) : null}
-                  </Td>
+                  {onReceipt ? (
+                    <Td className="text-right">
+                      {p.order ? (
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          disabled={busy !== null}
+                          aria-label={`Receipt for ${date(p.at)}`}
+                          onClick={() => onReceipt(p.order!)}
+                        >
+                          {busy === `receipt:${p.order}` ? (
+                            <Busy>Receipt</Busy>
+                          ) : (
+                            <>
+                              <ReceiptIcon size={13} aria-hidden /> <span className="max-sm:hidden">Receipt</span>
+                            </>
+                          )}
+                        </Button>
+                      ) : null}
+                    </Td>
+                  ) : null}
                 </Tr>
               );
             })}
