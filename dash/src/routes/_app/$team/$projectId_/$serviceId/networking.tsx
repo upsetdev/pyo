@@ -3,6 +3,7 @@ import { serviceSettingsNav, SettingsFrame } from "~/components/pyo/SettingsFram
 import { useState } from "react";
 import { PortEditor, publicPortError } from "~/components/pyo/editors";
 import { Button } from "~/components/ui/Button";
+import { Field, Input } from "~/components/ui/Field";
 import { KeyValue, Panel } from "~/components/ui/Panel";
 import { CopyButton } from "~/components/ui/Table";
 import type { DraftPort } from "~/lib/pyo/draft";
@@ -168,6 +169,54 @@ function Networking({ app }: { app: Application }) {
           />
         </div>
       </Panel>
+      {app.workloadKind !== "CronJob" ? <RequestTimeout app={app} /> : null}
     </div>
+  );
+}
+
+/** The gateway's default, and the most a service may set (0 is no limit). */
+const DEFAULT_TIMEOUT = 300;
+const MAX_TIMEOUT = 3600;
+
+function RequestTimeout({ app }: { app: Application }) {
+  const saved = String(app.requestTimeout ?? DEFAULT_TIMEOUT);
+  const [value, setValue] = useState(saved);
+  const v = value.trim();
+  const valid = /^\d+$/.test(v) && Number(v) <= MAX_TIMEOUT;
+  const dirty = v !== saved;
+  return (
+    <Panel
+      title="Request timeout"
+      actions={
+        <Button
+          size="xs"
+          disabled={!dirty || !valid}
+          onClick={() => {
+            api.updateService(app.id, { requestTimeout: Number(v) });
+            toast({ title: "Request timeout saved" });
+          }}
+        >
+          Save
+        </Button>
+      }
+    >
+      <div className="grid gap-4 p-4 sm:grid-cols-2">
+        <Field
+          label="Seconds"
+          hint={`Default ${DEFAULT_TIMEOUT}. 0 means no limit.`}
+          error={valid ? undefined : `Use 0 to ${MAX_TIMEOUT}.`}
+        >
+          {(p) => (
+            <Input
+              {...p}
+              mono
+              inputMode="numeric"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+          )}
+        </Field>
+      </div>
+    </Panel>
   );
 }

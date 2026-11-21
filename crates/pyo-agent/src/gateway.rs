@@ -200,11 +200,14 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
             "spec": backend_spec,
         })
     };
+    // Each request may take the service's request timeout (Envoy's own
+    // default is 15 seconds); a WebSocket isn't held to it.
+    let timeouts = json!({ "request": system::request_timeout(spec.request_timeout) });
     let web_rule = |p: &str| match &spec.site {
         Some(site) => {
-            json!({ "backendRefs": [backend_ref(p)], "filters": [system::static_filter(&spec.service.service_id, &site.deploy)] })
+            json!({ "backendRefs": [backend_ref(p)], "filters": [system::static_filter(&spec.service.service_id, &site.deploy)], "timeouts": timeouts })
         }
-        None => json!({ "backendRefs": [backend_ref(p)] }),
+        None => json!({ "backendRefs": [backend_ref(p)], "timeouts": timeouts }),
     };
 
     // Public TCP and UDP ports through the proxy: a Gateway with a listener
@@ -401,7 +404,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         if !hosts.is_empty() {
             out.objects.push(json!({
                 "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(&tailnet_route_name(&base, p)),
-                "spec": { "parentRefs": [{ "name": system::TAILNET_GATEWAY, "sectionName": system::TAILNET_HTTPS_SECTION }], "hostnames": hosts, "rules": [{ "backendRefs": [backend_ref(p)] }] },
+                "spec": { "parentRefs": [{ "name": system::TAILNET_GATEWAY, "sectionName": system::TAILNET_HTTPS_SECTION }], "hostnames": hosts, "rules": [{ "backendRefs": [backend_ref(p)], "timeouts": timeouts }] },
             }));
         }
     }
@@ -812,8 +815,8 @@ pub async fn apply(
     Ok(notes)
 }
 
-/// The newest domains this agent has seen per service (by their
-/// `routes_revision`), and a lock per service: a deploy, its rollback, a
+/// The newest domains (and request timeout) this agent has seen per
+/// service (by their `routes_revision`), and a lock per service: a deploy, its rollback, a
 /// firewall sync and a routes sync each apply a service's routes, one at a
 /// time, with the newest domains whichever of them carried those. So a
 /// rollback, or a deploy handed out before a domain changed, never brings
@@ -821,9 +824,12 @@ pub async fn apply(
 #[derive(Clone, Default)]
 pub struct RouteState(std::sync::Arc<RouteStateInner>);
 
+/// A service's newest routes revision, with its domains and request timeout.
+type Newest = (i64, Vec<DomainSpec>, Option<u32>);
+
 #[derive(Default)]
 pub struct RouteStateInner {
-    newest: std::sync::Mutex<std::collections::HashMap<String, (i64, Vec<DomainSpec>)>>,
+    newest: std::sync::Mutex<std::collections::HashMap<String, Newest>>,
     locks:
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -839,19 +845,24 @@ impl RouteState {
             .clone()
     }
 
-    /// The spec's domains when they're the newest seen (remembered then),
-    /// else the newest instead.
+    /// The spec's domains and request timeout when they're the newest seen
+    /// (remembered then), else the newest instead.
     pub fn settle(&self, spec: &mut DeploySpec) {
         let mut newest = self.0.newest.lock().unwrap_or_else(|e| e.into_inner());
         match newest.get(&spec.service.service_id) {
-            Some((revision, domains)) if *revision > spec.routes_revision => {
+            Some((revision, domains, timeout)) if *revision > spec.routes_revision => {
                 spec.domains = domains.clone();
+                spec.request_timeout = *timeout;
                 spec.routes_revision = *revision;
             }
             _ => {
                 newest.insert(
                     spec.service.service_id.clone(),
-                    (spec.routes_revision, spec.domains.clone()),
+                    (
+                        spec.routes_revision,
+                        spec.domains.clone(),
+                        spec.request_timeout,
+                    ),
                 );
             }
         }
@@ -864,7 +875,7 @@ impl RouteState {
 pub fn target_spec(t: &pyo_proto::FirewallTarget, waf: bool) -> anyhow::Result<DeploySpec> {
     Ok(serde_json::from_value(json!({
         "deploymentId": "", "service": t.service, "projectId": t.project_id, "image": "", "replicas": 0, "env": [],
-        "ports": t.ports, "domains": t.domains, "routesRevision": t.routes_revision,
+        "ports": t.ports, "domains": t.domains, "routesRevision": t.routes_revision, "requestTimeout": t.request_timeout,
         "resources": { "cpuRequest": 0, "cpuLimit": 0, "memoryRequest": 0, "memoryLimit": 0 },
         "healthCheck": { "type": "none", "path": "", "port": 0, "command": "", "initialDelaySeconds": 0, "periodSeconds": 0 },
         "volumes": [], "timeoutSeconds": 0, "networkIsolation": t.network_isolation, "firewall": t.firewall,
@@ -2262,6 +2273,18 @@ mod tests {
         stale.routes_revision = 4;
         state.settle(&mut stale);
         assert!(stale.domains.is_empty());
+        // The request timeout goes with the domains: the newest wins.
+        let mut timed = spec(vec![]);
+        timed.routes_revision = 6;
+        timed.request_timeout = Some(90);
+        state.settle(&mut timed);
+        let mut older = spec(vec![domain("a.example.com", "http", "", false)]);
+        older.routes_revision = 5;
+        state.settle(&mut older);
+        assert_eq!(
+            (older.request_timeout, older.routes_revision),
+            (Some(90), 6)
+        );
         // Another service's are its own.
         let mut other = spec(vec![domain("c.example.com", "http", "", false)]);
         other.service.service_id = "svc_api".into();
@@ -2323,6 +2346,60 @@ mod tests {
     #[test]
     fn no_domains_no_routes() {
         assert!(route_objects(&spec(vec![])).objects.is_empty());
+    }
+
+    /// Every route to the service waits 5 minutes for a response (Envoy's
+    /// own 15 seconds cut long polls short), or the service's own timeout,
+    /// 0 for none. Redirects reach no service, so they have none.
+    #[test]
+    fn routes_carry_the_request_timeout() {
+        let domains = || {
+            vec![
+                domain("shop.example.com", "http", "letsencrypt", true),
+                domain("plain.example.com", "http", "", false),
+                domain("shop.tail1.ts.net", "http", "", false),
+            ]
+        };
+        let timeouts = |r: &Routes| {
+            r.objects
+                .iter()
+                .filter(|o| o["kind"] == "HTTPRoute")
+                .map(|o| {
+                    (
+                        o["metadata"]["name"].as_str().unwrap().to_owned(),
+                        o["spec"]["rules"][0]["timeouts"].clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let r = route_objects(&spec(domains()));
+        let all = timeouts(&r);
+        assert_eq!(all.len(), 4, "{all:?}");
+        for (name, t) in &all {
+            if name.ends_with("-redirect") {
+                assert!(t.is_null(), "{name}");
+            } else {
+                assert_eq!(*t, json!({ "request": "300s" }), "{name}");
+            }
+        }
+        for (set, want) in [(Some(0), "0s"), (Some(1800), "1800s")] {
+            let mut s = spec(domains());
+            s.request_timeout = set;
+            for (name, t) in timeouts(&route_objects(&s)) {
+                if !name.ends_with("-redirect") {
+                    assert_eq!(t["request"], want, "{name}");
+                }
+            }
+        }
+        // A static site's routes too.
+        let mut site = spec(domains());
+        site.site = Some(serde_json::from_value(json!({ "deploy": "dpl_1" })).unwrap());
+        site.request_timeout = Some(60);
+        let r = route_objects(&site);
+        assert_eq!(
+            find(&r, "HTTPRoute", "shop-web-https-http")["spec"]["rules"][0]["timeouts"],
+            json!({ "request": "60s" })
+        );
     }
 
     #[test]
@@ -3623,6 +3700,7 @@ mod tests {
                 ports: s.ports,
                 domains: s.domains,
                 routes_revision: revision,
+                request_timeout: None,
                 network_isolation: false,
                 firewall: Default::default(),
                 waf: None,

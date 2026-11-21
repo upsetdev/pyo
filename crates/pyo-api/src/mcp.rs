@@ -157,6 +157,7 @@ fn curated() -> Vec<Value> {
         json!({ "name": "set_service_placement", "title": "Set service placement", "description": "Choose where a service runs: any server of its cluster (servers and tags both empty), or only the servers named and every server with one of the tags, including servers tagged later (see list_servers). A service with a volume has to keep its volume's server, and one with a GPU needs a GPU server. It changes in place, without a redeploy: its replicas move over with the same image. Refused with the reason when no server picked can run it.", "inputSchema": schema(json!({ "service_id": service, "servers": { "type": "array", "items": { "type": "string" }, "description": "Server names" }, "tags": { "type": "array", "items": { "type": "string" }, "description": "Server tags" } }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain. It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" } }), &["service_id"]), "annotations": write }),
         json!({ "name": "set_static_serving", "title": "Set static serving", "description": "For a service whose build is a static site: serve its build as static files from the cluster's shared static server (\"static\", the default), or run it as a service of its own (\"service\"). Takes effect with the next deploy.", "inputSchema": schema(json!({ "service_id": service, "serve_as": { "type": "string", "enum": ["static", "service"] } }), &["service_id", "serve_as"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
+        json!({ "name": "set_request_timeout", "title": "Set request timeout", "description": "How long the gateway waits for the service to answer a request on its domains before it returns 504, in seconds: 1 to 3600, or 0 for no limit. Without one it's 300. WebSockets aren't cut by it. It changes in place, without a redeploy.", "inputSchema": schema(json!({ "service_id": service, "seconds": { "type": ["integer", "null"], "minimum": 0, "maximum": 3600, "description": "null goes back to the default" } }), &["service_id", "seconds"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "stop_service", "title": "Stop service", "description": "Stop the service (scale to zero). Settings and data are kept.", "inputSchema": schema(json!({ "service_id": service }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
     ]
     .into_iter()
@@ -248,6 +249,7 @@ const CURATED_RUNS: &[(&str, &str)] = &[
     ("create_service", "createService"),
     ("add_domain", "saveService"),
     ("set_static_serving", "saveService"),
+    ("set_request_timeout", "saveService"),
     ("set_service_placement", "saveService"),
     ("create_sandbox", "createSandbox"),
     ("run_code", "createSandboxToken"),
@@ -1350,6 +1352,25 @@ pub(crate) async fn run_tool(
             Ok(
                 json!({ "serveAs": serve_as, "next": "Saved. It takes effect with the next deploy (deploy_service)." }),
             )
+        }
+        "set_request_timeout" => {
+            let id = service_id(args)?;
+            let mut a = find_service(id)?;
+            let max = pyo_proto::system::MAX_REQUEST_TIMEOUT_SECS;
+            let seconds = match &args["seconds"] {
+                Value::Null => None,
+                v => Some(
+                    v.as_u64()
+                        .filter(|&n| n <= u64::from(max))
+                        .ok_or(format!("seconds is 0 to {max}, or null for the default"))?,
+                ),
+            };
+            a["requestTimeout"] = json!(seconds);
+            op(json!({ "op": "saveService", "service": a })).await?;
+            Ok(json!({
+                "requestTimeout": seconds.unwrap_or(u64::from(pyo_proto::system::REQUEST_TIMEOUT_SECS)),
+                "next": "Saved. It goes live in place, without a redeploy.",
+            }))
         }
         other => Err(format!("Unknown tool {other}")),
     }

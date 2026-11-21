@@ -1368,6 +1368,8 @@ export type Application = {
   autoRollback?: boolean;
   /** A build detected as a static site: served as static files ("static", the default) or run as a service. */
   serveAs?: "static" | "service";
+  /** Seconds the gateway waits for a response on its domains (0: no limit). Unset: 300. */
+  requestTimeout?: number | null;
   /** A temporary copy for each open pull request (Git services). */
   previews?: PreviewSettings;
   /** Set on a preview copy: the service it previews. Hidden from lists. */

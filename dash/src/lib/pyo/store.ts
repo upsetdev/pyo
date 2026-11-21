@@ -1949,6 +1949,7 @@ export const api = {
         | "clusterId"
         | "autoRollback"
         | "serveAs"
+        | "requestTimeout"
         | "placement"
         | "servers"
         | "previews"

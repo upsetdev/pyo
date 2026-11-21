@@ -1842,6 +1842,11 @@ pub struct DeploySpec {
     /// each change. The agent applies the newest it has seen.
     #[serde(default)]
     pub routes_revision: i64,
+    /// How long the gateway waits for a whole response on the service's
+    /// domains, in seconds (0: no limit). Like `domains`, the service's
+    /// own: the API puts its current one in. None: [`system::REQUEST_TIMEOUT_SECS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout: Option<u32>,
     pub resources: Resources,
     pub health_check: HealthCheck,
     pub volumes: Vec<VolumeSpec>,
@@ -2039,6 +2044,9 @@ pub struct FirewallTarget {
     /// As [`DeploySpec::routes_revision`].
     #[serde(default)]
     pub routes_revision: i64,
+    /// As [`DeploySpec::request_timeout`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout: Option<u32>,
     #[serde(default)]
     pub network_isolation: bool,
     pub firewall: firewall::Firewall,

@@ -544,9 +544,9 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
                 object.spec.all(k, k in ['targetRefs', 'connection', 'proxyProtocol']) && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name.endsWith('-ports') && has(t.sectionName)) && \
                 (!has(object.spec.connection) || (object.spec.connection.all(k, k in ['connectionLimit', 'maxAcceptPerSocketEvent']) && (!has(object.spec.connection.maxAcceptPerSocketEvent) || object.spec.connection.maxAcceptPerSocketEvent == 1) && (!has(object.spec.connection.connectionLimit) || (object.spec.connection.connectionLimit.all(k, k == 'value') && object.spec.connection.connectionLimit.value >= 1)))) && \
                 (!has(object.spec.proxyProtocol) || object.spec.proxyProtocol == {pp_optional})) || \
-                (object.metadata.labels[?'{cdn_label}'].orValue('') in {behind} && object.spec.all(k, k in ['targetRefs', 'clientIPDetection', 'connection', 'tls', 'proxyProtocol']) && \
+                (object.metadata.labels[?'{cdn_label}'].orValue('') in {behind} && object.spec.all(k, k in ['targetRefs', 'clientIPDetection', 'connection', 'tls', 'proxyProtocol', 'timeout']) && \
                     size(object.spec.targetRefs) >= 1 && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name + '-cdn' == variables.objName && has(t.sectionName) && t.sectionName.startsWith('h-')) && \
-                    {ctp_https}.exists(v, ['connection', 'tls', 'proxyProtocol'].all(k, (k in v) == (k in object.spec) && (!(k in v) || v[k] == object.spec[k]))) && \
+                    {ctp_https}.exists(v, ['connection', 'tls', 'proxyProtocol', 'timeout'].all(k, (k in v) == (k in object.spec) && (!(k in v) || v[k] == object.spec[k]))) && \
                     object.spec.clientIPDetection.all(k, k == 'xForwardedFor') && object.spec.clientIPDetection.xForwardedFor.all(k, k == 'trustedCIDRs') && \
                     size(object.spec.clientIPDetection.xForwardedFor.trustedCIDRs) >= 1 && size(object.spec.clientIPDetection.xForwardedFor.trustedCIDRs) <= {max_trusted} && \
                     object.spec.clientIPDetection.xForwardedFor.trustedCIDRs.all(c, c.matches({trusted_v4}) || c.matches({trusted_v6}))))))) || \

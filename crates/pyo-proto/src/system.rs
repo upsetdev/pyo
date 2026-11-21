@@ -1224,6 +1224,27 @@ pub const TAILNET_WEB_DEFAULTED: [&str; 6] = [
     "internalTrafficPolicy",
 ];
 
+/// How long a request to a service's domains may take, start to end of its
+/// response, unless the service sets its own (`requestTimeout`): Envoy's
+/// own default is 15 seconds, too short for long polls and slow pages.
+pub const REQUEST_TIMEOUT_SECS: u32 = 300;
+/// The longest request timeout a service may set (0 is no limit).
+pub const MAX_REQUEST_TIMEOUT_SECS: u32 = 3600;
+
+/// A service's request timeout as its routes have it (Gateway API
+/// `timeouts.request`): "300s", or "0s" for no limit.
+pub fn request_timeout(secs: Option<u32>) -> String {
+    format!(
+        "{}s",
+        secs.unwrap_or(REQUEST_TIMEOUT_SECS)
+            .min(MAX_REQUEST_TIMEOUT_SECS)
+    )
+}
+
+/// How long a WebSocket or another long stream may stay quiet on a public
+/// website before the proxy closes it (Envoy's own default is 5 minutes).
+pub const STREAM_IDLE_TIMEOUT: &str = "1h";
+
 /// How the proxies place a website's visitor, for the client policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WebSettings {
@@ -1246,12 +1267,14 @@ pub struct WebSettings {
 /// `cdn-origin-pull`). Each connection's buffer is [`WAF_BODY_LIMIT`]: the
 /// part of a body block mode's WAF inspects before the request goes on. Its
 /// other setting is written out as Envoy Gateway's CRD defaults it, so the
-/// stored spec is exactly one the admission policy lists.
+/// stored spec is exactly one the admission policy lists. A WebSocket or a
+/// stream stays open while quiet for [`STREAM_IDLE_TIMEOUT`].
 pub fn client_policy_spec(https: bool, w: WebSettings) -> Value {
     let mut spec = json!({
         "targetSelectors": [{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "matchLabels": { GATEWAY_LABEL: if https { "https" } else { "http" } } }],
         "clientIPDetection": { "directSourceIP": {} },
         "connection": { "bufferLimit": WAF_BODY_LIMIT, "maxAcceptPerSocketEvent": 1 },
+        "timeout": { "http": { "streamIdleTimeout": STREAM_IDLE_TIMEOUT } },
     });
     let (origin_pull, proxy_protocol) = (w.origin_pull, w.proxy_protocol);
     if https && origin_pull {
@@ -2174,12 +2197,33 @@ mod tests {
             );
             // The rest as every website's HTTPS has it.
             let base = client_policy_spec(true, w);
-            for k in ["connection", "tls", "proxyProtocol"] {
+            for k in ["connection", "tls", "proxyProtocol", "timeout"] {
                 assert_eq!(spec.get(k), base.get(k), "{k}");
             }
             assert!(!spec.to_string().contains("numTrustedHops"));
             assert!(!spec.to_string().contains("customHeader"));
         }
+    }
+
+    /// Every website's listeners keep a quiet WebSocket or stream open for
+    /// an hour (Envoy closes them after 5 minutes by default), and the
+    /// admission policy lets the agent write that, behind a CDN too.
+    #[test]
+    fn websites_keep_quiet_streams_open() {
+        for https in [false, true] {
+            for spec in client_policy_variants(https) {
+                assert_eq!(spec["timeout"], json!({ "http": { "streamIdleTimeout": "1h" } }));
+            }
+        }
+        let cdn = cdn_client_policy_spec("ns-web", &["h-1".into()], WebSettings::default(), &["173.245.48.0/20".into()]);
+        assert_eq!(cdn["timeout"]["http"]["streamIdleTimeout"], "1h");
+        let policy = crate::rbac::admission("w", "g")[0].to_string();
+        assert!(policy.contains("'proxyProtocol', 'timeout']"));
+        // A request's own limit: 5 minutes unless the service sets one, 0 is none.
+        assert_eq!(request_timeout(None), "300s");
+        assert_eq!(request_timeout(Some(0)), "0s");
+        assert_eq!(request_timeout(Some(90)), "90s");
+        assert_eq!(request_timeout(Some(99_999)), "3600s");
     }
 
     /// The fixed objects, for checking them against a cluster:

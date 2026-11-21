@@ -1648,6 +1648,7 @@ fn validate_service_spec(spec: &Value) -> ApiResult<()> {
         }
     }
     check_replicas(&spec["replicas"])?;
+    check_request_timeout(&spec["requestTimeout"])?;
     // A static build: served as static files, or run as a service.
     if !matches!(&spec["serveAs"], Value::Null)
         && !matches!(spec["serveAs"].as_str(), Some("static" | "service"))
@@ -1742,6 +1743,19 @@ fn validate_service_spec(spec: &Value) -> ApiResult<()> {
         }
     }
     Ok(())
+}
+
+/// A service's request timeout: seconds, 0 for no limit, or unset for the
+/// default.
+fn check_request_timeout(v: &Value) -> ApiResult<()> {
+    let max = pyo_proto::system::MAX_REQUEST_TIMEOUT_SECS;
+    match v {
+        Value::Null => Ok(()),
+        v if v.as_u64().is_some_and(|n| n <= u64::from(max)) => Ok(()),
+        _ => Err(ApiError::bad_request(format!(
+            "requestTimeout is a number of seconds from 0 to {max}. 0 means no limit."
+        ))),
+    }
 }
 
 /// A public TCP or UDP port's settings: its number, and what the gateway
@@ -6074,6 +6088,8 @@ async fn apply(
                     o.remove("description");
                     o.remove("autoRollback");
                     o.remove("domains");
+                    // Goes live with the domains (routes.rs).
+                    o.remove("requestTimeout");
                     // Where it runs changes in place (placement.rs).
                     o.remove("placement");
                     o.remove("servers");
@@ -6094,7 +6110,9 @@ async fn apply(
                 }
                 v
             };
-            let domains_changed = crate::routes::differ(&spec["domains"], &old_spec["domains"]);
+            let domains_changed = crate::routes::differ(&spec["domains"], &old_spec["domains"])
+                || crate::routes::request_timeout(&spec)
+                    != crate::routes::request_timeout(&old_spec);
             // Compared in the clear: sealing the same value twice differs.
             // Only what the user sets counts, never what the API shows.
             let (mut a, mut b) = (spec.clone(), service_spec_from(&old_spec));
@@ -9649,6 +9667,28 @@ mod service_spec_tests {
         assert!(check_build_args(&json!([{ "key": "RAILPACK_SPA_OUTPUT_DIR", "value": "dist" }, { "key": "", "value": "" }])).is_ok());
         assert!(check_build_args(&Value::Null).is_ok());
         assert!(check_build_args(&json!([{ "key": "A=B", "value": "x" }])).is_err());
+    }
+
+    #[test]
+    fn request_timeouts_are_seconds_up_to_an_hour() {
+        for ok in [Value::Null, json!(0), json!(30), json!(3600)] {
+            assert!(check_request_timeout(&ok).is_ok(), "{ok}");
+        }
+        for bad in [json!(-1), json!(3601), json!(2.5), json!("30s")] {
+            assert!(check_request_timeout(&bad).is_err(), "{bad}");
+        }
+        // Unset is the default; set, it goes to the routes as it is.
+        assert_eq!(crate::routes::request_timeout(&json!({})), None);
+        assert_eq!(
+            crate::routes::request_timeout(&json!({ "requestTimeout": 0 })),
+            Some(0)
+        );
+        assert_eq!(
+            deploy::build_spec("dpl_1", "svc_1", "prj_1", "shop", &json!({ "name": "web", "source": { "type": "image", "image": "nginx" }, "requestTimeout": 90 }), &[])
+                .unwrap()
+                .request_timeout,
+            Some(90)
+        );
     }
 }
 

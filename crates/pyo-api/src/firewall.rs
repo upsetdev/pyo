@@ -332,8 +332,9 @@ async fn waf_for(
 /// engine installed first when a service there has its WAF on, or removed
 /// after the routes stop using it when none has.
 pub async fn sync(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> ApiResult<()> {
-    let rows: Vec<(String, Value, bool, Value, i64)> = sqlx::query_as(
-        "SELECT a.id, d.spec, p.network_isolation, coalesce(a.spec->'domains', '[]'), a.routes_revision
+    let rows: Vec<(String, Value, bool, Value, i64, Value)> = sqlx::query_as(
+        "SELECT a.id, d.spec, p.network_isolation, coalesce(a.spec->'domains', '[]'), a.routes_revision,
+                jsonb_build_object('requestTimeout', a.spec->'requestTimeout')
            FROM pyo.services a JOIN pyo.deployments d ON d.id = a.current_deployment_id JOIN pyo.projects p ON p.id = a.project_id
           WHERE a.cluster_id = $1 AND NOT a.deleting",
     )
@@ -342,7 +343,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> ApiRe
     .await?;
     let engine = crate::waf::wanted(tx, cluster_id).await?;
     let mut targets = vec![];
-    for (service_id, spec, isolation, domains, routes_revision) in rows {
+    for (service_id, spec, isolation, domains, routes_revision, timeout) in rows {
         let firewall = for_service(tx, &service_id).await?;
         // Only what routes are made of: the live deployment's service and
         // ports (never its variables), and the service's domains.
@@ -355,6 +356,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> ApiRe
             ports: serde_json::from_value(spec["ports"].clone()).unwrap_or_default(),
             domains: crate::routes::domain_specs(&domains),
             routes_revision,
+            request_timeout: crate::routes::request_timeout(&timeout),
             network_isolation: isolation,
             firewall,
             waf: waf_for(tx, engine, &service_id).await?,

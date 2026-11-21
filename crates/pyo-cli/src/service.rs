@@ -679,6 +679,23 @@ pub fn apply(service: &mut Value, f: &ServiceFile) -> Result<Vec<String>> {
             format!("serve as {serve}"),
         );
     }
+    if let Some(secs) = d.timeout {
+        let max = i64::from(pyo_proto::system::MAX_REQUEST_TIMEOUT_SECS);
+        if !(0..=max).contains(&secs) {
+            bail!("pyo.jsonc: timeout is 0 to {max} seconds. 0 means no limit.");
+        }
+        let what = if secs == 0 {
+            "no request timeout".to_owned()
+        } else {
+            format!("request timeout {secs}s")
+        };
+        set(
+            &mut changes,
+            &mut service["requestTimeout"],
+            json!(secs),
+            what,
+        );
+    }
     if let Some(on) = d.auto_rollback {
         set(
             &mut changes,
@@ -1953,6 +1970,19 @@ mod tests {
         assert_eq!(a["serveAs"], json!("service"));
         assert!(apply(&mut a, &f).unwrap().is_empty());
         let f = file(r#"{ "deploy": { "serveAs": "files" } }"#);
+        assert!(apply(&mut a, &f).is_err());
+    }
+
+    #[test]
+    fn timeout_sets_the_request_timeout() {
+        let mut a = service();
+        let f = file(r#"{ "deploy": { "timeout": 120 } }"#);
+        assert_eq!(apply(&mut a, &f).unwrap(), ["request timeout 120s"]);
+        assert_eq!(a["requestTimeout"], json!(120));
+        assert!(apply(&mut a, &f).unwrap().is_empty());
+        let f = file(r#"{ "deploy": { "timeout": 0 } }"#);
+        assert_eq!(apply(&mut a, &f).unwrap(), ["no request timeout"]);
+        let f = file(r#"{ "deploy": { "timeout": 3601 } }"#);
         assert!(apply(&mut a, &f).is_err());
     }
 

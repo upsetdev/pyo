@@ -1,5 +1,6 @@
 //! A service's domains belong to the service, not to a deployment: they're
-//! stored with it (`spec.domains`), and a change goes live in place
+//! stored with it (`spec.domains`, with its `spec.requestTimeout`, which
+//! goes with them everywhere below), and a change goes live in place
 //! (`SyncRoutes`), without a redeploy. Each change bumps the service's
 //! `routes_revision`. Every command that carries domains (a deploy and its
 //! fallback, a routes sync, a firewall sync) gets the service's current ones
@@ -40,6 +41,15 @@ pub fn domain_specs(domains: &Value) -> Vec<DomainSpec> {
         .collect()
 }
 
+/// A service's own request timeout (its `spec.requestTimeout`, seconds,
+/// 0 for none): None leaves the default
+/// ([`pyo_proto::system::REQUEST_TIMEOUT_SECS`]).
+pub fn request_timeout(spec: &Value) -> Option<u32> {
+    spec["requestTimeout"]
+        .as_u64()
+        .map(|n| n.min(u64::from(pyo_proto::system::MAX_REQUEST_TIMEOUT_SECS)) as u32)
+}
+
 /// Whether two `spec.domains` route differently (not just their DNS or
 /// certificate status).
 pub fn differ(a: &Value, b: &Value) -> bool {
@@ -78,8 +88,9 @@ async fn target(
     tx: &mut Transaction<'_, Postgres>,
     service_id: &str,
 ) -> ApiResult<Option<(String, FirewallTarget)>> {
-    let row: Option<(String, Value, Value, i64, bool)> = sqlx::query_as(
-        "SELECT a.cluster_id, d.spec, coalesce(a.spec->'domains', '[]'), a.routes_revision, p.network_isolation
+    let row: Option<(String, Value, Value, i64, bool, Value)> = sqlx::query_as(
+        "SELECT a.cluster_id, d.spec, coalesce(a.spec->'domains', '[]'), a.routes_revision, p.network_isolation,
+                jsonb_build_object('requestTimeout', a.spec->'requestTimeout')
            FROM pyo.services a JOIN pyo.projects p ON p.id = a.project_id
            JOIN pyo.deployments d ON d.service_id = a.id
           WHERE a.id = $1 AND NOT a.deleting
@@ -90,7 +101,7 @@ async fn target(
     .bind(service_id)
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((cluster_id, spec, domains, revision, isolation)) = row else {
+    let Some((cluster_id, spec, domains, revision, isolation, timeout)) = row else {
         return Ok(None);
     };
     let Ok(service) = serde_json::from_value(spec["service"].clone()) else {
@@ -111,6 +122,7 @@ async fn target(
             ports: serde_json::from_value(spec["ports"].clone()).unwrap_or_default(),
             domains: domain_specs(&domains),
             routes_revision: revision,
+            request_timeout: request_timeout(&timeout),
             network_isolation: isolation,
             firewall,
             waf,
@@ -142,19 +154,22 @@ pub async fn refresh(db: &PgPool, command: &mut Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One spec or target with its service's current domains and revision.
+/// One spec or target with its service's current domains, request
+/// timeout and revision.
 async fn current(db: &PgPool, o: &mut Value) -> anyhow::Result<()> {
     let Some(id) = o["service"]["serviceId"].as_str() else {
         return Ok(());
     };
     let row: Option<(Value, i64)> = sqlx::query_as(
-        "SELECT coalesce(spec->'domains', '[]'), routes_revision FROM pyo.services WHERE id = $1",
+        "SELECT jsonb_build_object('domains', coalesce(spec->'domains', '[]'), 'requestTimeout', spec->'requestTimeout'), routes_revision
+           FROM pyo.services WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(db)
     .await?;
-    if let Some((domains, revision)) = row {
-        o["domains"] = serde_json::to_value(domain_specs(&domains)).unwrap_or(json!([]));
+    if let Some((routing, revision)) = row {
+        o["domains"] = serde_json::to_value(domain_specs(&routing["domains"])).unwrap_or(json!([]));
+        o["requestTimeout"] = json!(request_timeout(&routing));
         o["routesRevision"] = json!(revision);
     }
     Ok(())

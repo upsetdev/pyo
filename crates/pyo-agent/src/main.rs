@@ -776,6 +776,7 @@ mod tests {
                 ports: vec![],
                 domains: vec![],
                 routes_revision: 0,
+                request_timeout: None,
                 network_isolation: false,
                 firewall: Default::default(),
                 waf: None,

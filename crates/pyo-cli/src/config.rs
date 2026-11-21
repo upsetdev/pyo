@@ -182,6 +182,9 @@ pub struct Deploy {
     /// A static site's build: "static" serves its files, "service" runs it as a service of its own.
     #[cfg_attr(test, schemars(extend("enum" = ["static", "service"])))]
     pub serve_as: Option<String>,
+    /// How many seconds a request may take before the gateway answers 504. 300 by default, 0 for no limit. WebSockets aren't cut by it.
+    #[cfg_attr(test, schemars(range(min = 0, max = 3600)))]
+    pub timeout: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -410,7 +413,7 @@ mod tests {
     "dockerfilePath": "Dockerfile",
     "args": { "RAILPACK_BUILD_CMD": "npm run build", },
   },
-  "deploy": { "replicas": 2, "port": 8080, "health": "/healthz", "autoRollback": false, "serveAs": "service" },
+  "deploy": { "replicas": 2, "port": 8080, "health": "/healthz", "autoRollback": false, "serveAs": "service", "timeout": 60 },
   "resources": { "cpu": "500m", "memory": "1Gi" },
   "env": { "LOG_LEVEL": "info", "WORKERS": 4 },
 }
@@ -424,6 +427,7 @@ mod tests {
         assert_eq!(f.deploy.replicas, Some(2));
         assert_eq!(f.deploy.auto_rollback, Some(false));
         assert_eq!(f.deploy.serve_as.as_deref(), Some("service"));
+        assert_eq!(f.deploy.timeout, Some(60));
         assert_eq!(f.env.len(), 2);
         assert_eq!(f.build.args["RAILPACK_BUILD_CMD"], "npm run build");
         // An empty file is no settings.
