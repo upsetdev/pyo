@@ -47,6 +47,8 @@ export function PolarDialog({ url, onDone }: { url: string; onDone: (o: PolarOut
   const frame = useRef<HTMLIFrameElement>(null);
   const [failed, setFailed] = useState(src === null);
   const loaded = useRef(false);
+  // Polar's page may be see-through: once it shows, it hides the spinner.
+  const [ready, setReady] = useState(false);
   // The card was sent: closing now waits for Polar instead of cancelling.
   const confirmed = useRef(false);
   const done = useRef(onDone);
@@ -67,6 +69,7 @@ export function PolarDialog({ url, onDone }: { url: string; onDone: (o: PolarOut
       switch (e.data.event) {
         case "loaded":
           loaded.current = true;
+          setReady(true);
           setFailed(false);
           break;
         case "confirmed":
@@ -101,7 +104,7 @@ export function PolarDialog({ url, onDone }: { url: string; onDone: (o: PolarOut
           src={src}
           title="Polar checkout"
           allow={`payment 'self' ${ALLOW}; publickey-credentials-get 'self' ${ALLOW}`}
-          className="relative block h-full w-full border-0"
+          className={`relative block h-full w-full border-0 ${ready ? "bg-white" : ""}`}
         />
       ) : null}
       {failed ? (
