@@ -83,6 +83,11 @@ instance with Rekor v1).
 The release's text lists the changes since the previous release (see
 [Release notes](#release-notes)).
 
+Each image is scanned with Trivy before it's pushed or signed. A CRITICAL
+CVE that has a fix stops the release. HIGH ones are listed in the job's
+summary and in code scanning. A CVE checked and found not to apply goes in
+`.trivyignore`, with the reason.
+
 Don't move or reuse a tag. If a release is bad, publish the next version.
 
 The repo has GitHub's immutable releases on: once a release is published,
@@ -96,6 +101,69 @@ as it is. The release's text can still be edited.
 Then the `site` job rebuilds pyo.dev (see
 [Install scripts on pyo.dev](#install-scripts-on-pyodev)). If it fails, run
 that job again.
+
+## Security patch release
+
+When a fix can't wait for the next release, cut a patch release of the
+latest one. Only the latest release gets fixes (see `SECURITY.md`).
+
+What asks for one:
+
+- the daily **Security scan** (`security-scan.yml`): an issue labelled
+  `security` for each image, Pyo's or a third-party database image, with
+  HIGH or CRITICAL CVEs that have a fix
+- the weekly **Postgres rebuild check** (`postgres-rebuild.yml`): an issue
+  when a fresh build of Pyo's Postgres images would have fewer of them
+- Renovate's security pull requests, which it opens right away
+- CI's **Lockfile CVEs** and **cargo-deny** checks
+
+1. Fix it on `dev`: merge Renovate's pull request, or bump the dependency
+   or the image's digest. Name the commit `fix(security): ...` or give it
+   a `Security: GHSA-...` footer, so the release notes list it under
+   Security Fixes. A CVE that doesn't apply goes in `.trivyignore`
+   (images and lockfiles) or in `deny.toml` and `.cargo/audit.toml` (Rust
+   advisories), with the reason.
+2. Make the branch from the last release tag:
+
+   ```bash
+   scripts/patch-release.sh <commit>...           # a dry run: says what it would do
+   scripts/patch-release.sh --apply <commit>...   # does it, locally
+   ```
+
+   It branches `release/vX.Y.Z` from the tag, cherry-picks the commits
+   and bumps the version as a release commit does (`Cargo.toml`, each
+   crate's `pyo-proto` dependency, `Cargo.lock` and
+   `deploy/release-notices.json`). Keep the notices' `minFrom`, and clear
+   `beforeYouUpdate` and `manualOnly` unless the patch needs them. Without
+   commits it's a rebuild of the tag's code, which picks up what the
+   Dockerfiles install as it is today. That's enough when the weekly check
+   says so and the base image's digest didn't change.
+3. Push the branch, open a pull request into `main` and wait for CI. The
+   release checks the template catalog against pyo-templates' main, so if
+   that check fails, cherry-pick the catalog's update too.
+4. Merge it, then tag the merge `vX.Y.Z` (`v0.5.1` after `v0.5.0`) and push
+   the tag. The release workflow scans, signs and publishes it like any
+   release.
+
+How it reaches installations:
+
+- **Self-hosted:** an installation looks for a new release every 6 hours.
+  Its admins see it in the update notice in the sidebar and under
+  **Settings › Updates**, and apply it there. With automatic updates on,
+  it's applied in the maintenance window. `install.sh` updates too. Pyo
+  updates first, then every cluster's agent moves to the new agent image.
+- **Pyo Cloud:** whoever runs it updates the shared Pyo. Each team's agents
+  then follow its version: within a minute for teams with automatic agent
+  updates (the default), or when the team updates a cluster from its page.
+
+How databases pick up new images: the databases system on a cluster
+updates with Pyo, at the cluster's next heartbeat once its agent is the new
+one. pyo-db-controller restarts with the new images and rolls each database
+onto them. A Postgres or MySQL database with replicas restarts a replica
+first and switches over to it, so the primary stops only for the
+switchover. A single instance restarts, which is a short outage. New
+third-party database images (MySQL, valkey-bundle, the Postgres bases) come
+the same way, since the release's code pins them.
 
 ## Release notes
 
