@@ -1,0 +1,109 @@
+name: Postgres rebuild check
+
+# Every week: builds Pyo's Postgres images (16, 17 and 18) from the latest
+# release's deploy/images/postgres.Dockerfile, with this week's extension
+# packages and on the CloudNativePG base of the same tag as it is today,
+# then scans each next to the published one. When the fresh build has
+# fewer HIGH or CRITICAL CVEs with a fix, an issue (labelled security)
+# says a patch release would pick up the fixes.
+#
+# Nothing is pushed anywhere. Pyo's images are published only by a tagged
+# release, signed and versioned (release.yml).
+
+on:
+  schedule:
+    - cron: "41 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: postgres-rebuild
+
+jobs:
+  release:
+    name: Latest release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      images: ${{ steps.release.outputs.images }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Its tag and Postgres images
+        id: release
+        run: |
+          set -euo pipefail
+          tag=$(gh release view --json tagName --jq .tagName)
+          gh release download "$tag" --pattern release.json --dir release
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "images=$(jq -c '.images | {"16": .postgres16, "17": .postgres17, "18": .postgres18}' release/release.json)" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: Postgres ${{ matrix.major }}
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        major: ["16", "17", "18"]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      MAJOR: ${{ matrix.major }}
+      PUBLISHED: ${{ fromJSON(needs.release.outputs.images)[matrix.major] }}
+    steps:
+      # This branch's scripts, and the release's Dockerfile beside them.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          path: release
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: The base, pinned and today
+        id: base
+        run: |
+          set -euo pipefail
+          pinned=$(sed -n "s/^ARG BASE_${MAJOR}=//p" release/deploy/images/postgres.Dockerfile)
+          if [ -z "$pinned" ]; then
+            echo "::error::The release's postgres.Dockerfile has no BASE_${MAJOR}."
+            exit 1
+          fi
+          tag=${pinned%@*}
+          digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "today=$tag@$digest" >> "$GITHUB_OUTPUT"
+      - name: Build, without pushing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: release/deploy/images
+          file: release/deploy/images/postgres.Dockerfile
+          build-args: |
+            PG_MAJOR=${{ matrix.major }}
+            BASE_${{ matrix.major }}=${{ steps.base.outputs.today }}
+          platforms: linux/amd64
+          no-cache: true
+          pull: true
+          push: false
+          load: true
+          tags: pyo-rebuild/postgres:${{ matrix.major }}
+          provenance: false
+          sbom: false
+      - uses: ./.github/actions/trivy
+      - name: Scan the published image
+        run: .github/scripts/trivy-scan.sh image "$PUBLISHED" published
+      - name: Scan the fresh build
+        run: .github/scripts/trivy-scan.sh image "pyo-rebuild/postgres:$MAJOR" fresh
+      - name: Open, update or close the issue
+        env:
+          PINNED: ${{ steps.base.outputs.pinned }}
+          TODAY: ${{ steps.base.outputs.today }}
+        run: .github/scripts/rebuild-issue.sh "$MAJOR" "$PUBLISHED" "$PINNED" "$TODAY"
