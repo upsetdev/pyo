@@ -3573,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-agent"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3604,7 +3604,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-api"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "argon2 0.6.0",
@@ -3660,7 +3660,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-builder"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3681,7 +3681,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3708,7 +3708,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-db-controller"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3730,7 +3730,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-envd"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "libc",
  "pyo-proto",
@@ -3739,7 +3739,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-flows"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -3753,7 +3753,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-kv"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3770,7 +3770,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-proto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.23.1",
  "jiff",
@@ -3788,7 +3788,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-resp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "futures",
  "socket2",
@@ -3797,7 +3797,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-sandbox"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3827,7 +3827,7 @@ dependencies = [
 
 [[package]]
 name = "pyo-static"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
