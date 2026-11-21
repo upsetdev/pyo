@@ -1,27 +1,27 @@
 {
   "contract": 1,
   "ubuntu": "24.04",
-  "date": "20261118",
-  "commit": "99c10c2d273e2f6cf083ec3168ac688caaf71b6b",
+  "date": "20261120",
+  "commit": "8d8daef52b455416e7adcb27127e42e6a4cc74d4",
   "images": {
     "base": {
       "repository": "ghcr.io/upsetdev/pyo-sandbox-images/base",
-      "digest": "sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f",
-      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f",
+      "digest": "sha256:c3735cc2430df05457817f1d8fa111bbb06bd3b70cfa61e197339b5506e79c2a",
+      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:c3735cc2430df05457817f1d8fa111bbb06bd3b70cfa61e197339b5506e79c2a",
       "tags": {
-        "24.04": "sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f",
-        "24.04-20261118": "sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f",
-        "99c10c2d273e2f6cf083ec3168ac688caaf71b6b": "sha256:daa2f35bfaedfe0407c306812f5cfdcc4dfd41d250c553eddb1ec1c96f8a387f"
+        "24.04": "sha256:c3735cc2430df05457817f1d8fa111bbb06bd3b70cfa61e197339b5506e79c2a",
+        "24.04-20261120": "sha256:c3735cc2430df05457817f1d8fa111bbb06bd3b70cfa61e197339b5506e79c2a",
+        "8d8daef52b455416e7adcb27127e42e6a4cc74d4": "sha256:c3735cc2430df05457817f1d8fa111bbb06bd3b70cfa61e197339b5506e79c2a"
       }
     },
     "desktop": {
       "repository": "ghcr.io/upsetdev/pyo-sandbox-images/desktop",
-      "digest": "sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df",
-      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df",
+      "digest": "sha256:c47057d8a037403344172f3a73d3370bf9bd253b6c83addc9801878c76cad5f5",
+      "ref": "ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:c47057d8a037403344172f3a73d3370bf9bd253b6c83addc9801878c76cad5f5",
       "tags": {
-        "24.04": "sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df",
-        "24.04-20261118": "sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df",
-        "99c10c2d273e2f6cf083ec3168ac688caaf71b6b": "sha256:2d6cd2b055fd052ce806bdc0266f12f504cfa0ca6c4440915498b78a75ed36df"
+        "24.04": "sha256:c47057d8a037403344172f3a73d3370bf9bd253b6c83addc9801878c76cad5f5",
+        "24.04-20261120": "sha256:c47057d8a037403344172f3a73d3370bf9bd253b6c83addc9801878c76cad5f5",
+        "8d8daef52b455416e7adcb27127e42e6a4cc74d4": "sha256:c47057d8a037403344172f3a73d3370bf9bd253b6c83addc9801878c76cad5f5"
       }
     }
   }
