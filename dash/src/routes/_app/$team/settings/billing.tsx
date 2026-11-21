@@ -8,6 +8,7 @@ import {
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { IntegrationCard } from "~/components/pyo/IntegrationCard";
+import { PolarDialog, type PolarOutcome } from "~/components/pyo/PolarDialog";
 import { SnapDialog, type SnapCheckout } from "~/components/pyo/SnapDialog";
 import {
   Busy,
@@ -125,6 +126,8 @@ function standing(b: CloudBilling): { tone: Tone; label: string } {
 function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh: () => void }) {
   const [open, setOpen] = useState<"plan" | "midtrans" | null>(null);
   const [checkout, setCheckout] = useState<SnapCheckout | null>(null);
+  // Polar's checkout, open over the page.
+  const [polarCheckout, setPolarCheckout] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   // Bumped after a payment, to load the payments again.
@@ -152,17 +155,13 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
     }
   };
   const portal = () => void run("portal", () => cloudBilling.polarPortal(team));
-  // How a payment in Snap ended. Midtrans' notification marks it paid a
-  // moment later, so billing loads again now and once more after that.
-  // Closed, it loads again quietly: a QR code may have been paid meanwhile.
-  const snapDone = (o: SnapOutcome) => {
-    setCheckout(null);
-    if (o.kind === "closed") return void refresh();
-    if (o.kind === "error") return void toast({ tone: "error", title: o.message });
+  // A payment made on the page. The provider's notification marks it paid
+  // a moment later, so billing loads again now and once more after that.
+  const paid = (received: boolean, provider: string) => {
     toast({
       tone: "success",
-      title: o.kind === "success" ? "Payment received" : "Waiting for your payment",
-      description: "It shows here once Midtrans confirms it.",
+      title: received ? "Payment received" : "Waiting for your payment",
+      description: `It shows here once ${provider} confirms it.`,
     });
     refresh();
     setPaidAt(Date.now());
@@ -170,6 +169,20 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
       refresh();
       setPaidAt(Date.now());
     }, 5_000);
+  };
+  // How a payment in Snap ended. Closed, billing loads again quietly: a QR
+  // code may have been paid meanwhile.
+  const snapDone = (o: SnapOutcome) => {
+    setCheckout(null);
+    if (o.kind === "closed") return void refresh();
+    if (o.kind === "error") return void toast({ tone: "error", title: o.message });
+    paid(o.kind === "success", "Midtrans");
+  };
+  // How Polar's checkout ended. Closed, billing loads again quietly.
+  const polarDone = (o: PolarOutcome) => {
+    setPolarCheckout(null);
+    if (o === "closed") return void refresh();
+    paid(o === "paid", "Polar");
   };
   // Paying what's due: Polar's portal for a card on file, else a plan to pick.
   const pay = () => (polar && b.polar.portal ? portal() : setOpen(midtrans ? "midtrans" : "plan"));
@@ -391,6 +404,10 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
             setOpen(null);
             refresh();
           }}
+          onCheckout={(url) => {
+            setOpen(null);
+            setPolarCheckout(url);
+          }}
         />
       ) : open === "midtrans" && b.midtrans ? (
         <MidtransDialog
@@ -404,6 +421,7 @@ function Billing({ b, team, refresh }: { b: CloudBilling; team: string; refresh:
         />
       ) : null}
       {checkout ? <SnapDialog checkout={checkout} onDone={snapDone} /> : null}
+      {polarCheckout ? <PolarDialog url={polarCheckout} onDone={polarDone} /> : null}
     </div>
   );
 }
@@ -666,17 +684,20 @@ function Payments({
 
 // ── Dialogs ─────────────────────────────────────────────────────────────────
 
-/** Monthly or yearly by card: a checkout for a new subscription, or a switch. */
+/** Monthly or yearly by card: a checkout for a new subscription, or a switch.
+ * Polar's checkout opens in its own dialog over the page. */
 function PlanDialog({
   b,
   team,
   onClose,
   onDone,
+  onCheckout,
 }: {
   b: CloudBilling;
   team: string;
   onClose: () => void;
   onDone: () => void;
+  onCheckout: (url: string) => void;
 }) {
   const subscribed =
     (b.provider === "polar" || b.provider === "test") &&
@@ -694,7 +715,7 @@ function PlanDialog({
         toast({ title: interval === "year" ? "Billed yearly" : "Billed monthly" });
         onDone();
       } else {
-        window.location.assign((await cloudBilling.polarCheckout(team, interval)).url);
+        onCheckout((await cloudBilling.polarCheckout(team, interval)).url);
         return;
       }
     } catch (e) {

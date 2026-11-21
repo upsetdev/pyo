@@ -430,8 +430,8 @@ html:not([data-boot="auth"]) #boot .boot-auth {
 dialog::backdrop {
   background: var(--backdrop, rgb(0 0 0 / 0.55));
 }
-/* Midtrans' payment: the page stays in view, blurred and lightly dimmed. */
-dialog.snap-pay::backdrop {
+/* A payment (Midtrans, Polar): the page stays in view, blurred and lightly dimmed. */
+dialog.pay-dialog::backdrop {
   background: rgb(0 0 0 / 0.35);
   backdrop-filter: blur(12px) saturate(1.5);
 }
