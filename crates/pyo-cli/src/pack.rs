@@ -41,12 +41,8 @@ pub fn is_env_file(name: &str) -> bool {
     )
 }
 
-/// The files of `root` to pack, in order.
-pub fn list(root: &Path, with_env: bool) -> Result<Vec<Entry>> {
-    // The defaults as an ignore file of the lowest precedence, so the
-    // folder's own files can keep what they leave out.
-    let defaults = std::env::temp_dir().join(format!("pyo-defaults-{}.ignore", std::process::id()));
-    std::fs::write(&defaults, DEFAULT_IGNORES)?;
+/// A walk over `root` that heeds the folder's own ignore files.
+fn walker(root: &Path) -> ignore::WalkBuilder {
     let mut walk = ignore::WalkBuilder::new(root);
     walk.hidden(false)
         .ignore(false)
@@ -56,50 +52,76 @@ pub fn list(root: &Path, with_env: bool) -> Result<Vec<Entry>> {
         .require_git(false)
         .parents(true)
         .follow_links(false)
-        .add_custom_ignore_filename(".pyoignore")
-        .sort_by_file_name(|a, b| a.cmp(b))
+        .add_custom_ignore_filename(".pyoignore");
+    walk
+}
+
+/// The files of `root` to pack, in order.
+pub fn list(root: &Path, with_env: bool) -> Result<Vec<Entry>> {
+    // The defaults rank below the folder's own ignore files: they leave a
+    // path out only when those files say nothing about it, so a `!` line
+    // there keeps it.
+    let mut defaults = ignore::gitignore::GitignoreBuilder::new(root);
+    for line in DEFAULT_IGNORES.lines() {
+        defaults.add_line(None, line)?;
+    }
+    let defaults = defaults.build()?;
+    let own = std::sync::Mutex::new(
+        walker(root)
+            .build_matchers()
+            .pop()
+            .context("Couldn't read the folder's ignore files")?,
+    );
+    let base = root.to_path_buf();
+    let mut walk = walker(root);
+    walk.sort_by_file_name(|a, b| a.cmp(b))
         .filter_entry(move |e| {
             let name = e.file_name().to_string_lossy();
             if name == ".git" {
                 return false;
             }
-            with_env || !(e.file_type().is_some_and(|t| !t.is_dir()) && is_env_file(&name))
+            if !with_env && e.file_type().is_some_and(|t| !t.is_dir()) && is_env_file(&name) {
+                return false;
+            }
+            let is_dir = e.file_type().is_some_and(|t| t.is_dir());
+            if defaults.matched(e.path(), is_dir).is_ignore() {
+                // The walk got here, so the folder's files don't leave it out.
+                // Keep it only if they keep it on purpose.
+                let rel = e.path().strip_prefix(&base).unwrap_or(e.path());
+                return own
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .matched(rel, is_dir)
+                    .is_whitelist();
+            }
+            true
         });
-    if let Some(e) = walk.add_ignore(&defaults) {
-        let _ = std::fs::remove_file(&defaults);
-        return Err(e.into());
-    }
     let mut out = vec![];
-    let result = (|| -> Result<()> {
-        for e in walk.build() {
-            let e = e?;
-            let Some(t) = e.file_type() else { continue };
-            if t.is_dir() {
-                continue;
-            }
-            let rel = e
-                .path()
-                .strip_prefix(root)
-                .unwrap_or(e.path())
-                .to_path_buf();
-            if rel.as_os_str().is_empty() {
-                continue;
-            }
-            let size = if t.is_file() {
-                e.metadata().map(|m| m.len()).unwrap_or(0)
-            } else {
-                0
-            };
-            out.push(Entry {
-                rel,
-                abs: e.path().to_path_buf(),
-                size,
-            });
+    for e in walk.build() {
+        let e = e?;
+        let Some(t) = e.file_type() else { continue };
+        if t.is_dir() {
+            continue;
         }
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(&defaults);
-    result?;
+        let rel = e
+            .path()
+            .strip_prefix(root)
+            .unwrap_or(e.path())
+            .to_path_buf();
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let size = if t.is_file() {
+            e.metadata().map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        out.push(Entry {
+            rel,
+            abs: e.path().to_path_buf(),
+            size,
+        });
+    }
     Ok(out)
 }
 
@@ -490,6 +512,58 @@ mod tests {
             ("index.js", "x"),
         ]);
         assert!(names(&d.0, false).contains(&"node_modules/a/index.js".to_owned()));
+    }
+
+    #[test]
+    fn defaults_rank_below_the_folders_ignore_files() {
+        // A `.gitignore` can keep node_modules too, and the default reaches
+        // nested ones.
+        let d = folder(&[
+            (".gitignore", "!node_modules/\n"),
+            ("node_modules/a.js", "x"),
+            ("web/node_modules/b.js", "x"),
+        ]);
+        let got = names(&d.0, false);
+        assert!(got.contains(&"node_modules/a.js".to_owned()), "{got:?}");
+        assert!(got.contains(&"web/node_modules/b.js".to_owned()), "{got:?}");
+        let d = folder(&[
+            ("web/node_modules/b.js", "x"),
+            ("web/index.js", "x"),
+            ("node_modules", "a file, not a folder"),
+        ]);
+        assert_eq!(names(&d.0, false), ["node_modules", "web/index.js"]);
+        // `.pyoignore` wins over `.gitignore`.
+        let d = folder(&[
+            (".gitignore", "!node_modules/\n"),
+            (".pyoignore", "node_modules/\n"),
+            ("node_modules/a.js", "x"),
+        ]);
+        assert!(!names(&d.0, false).contains(&"node_modules/a.js".to_owned()));
+    }
+
+    #[test]
+    fn lists_from_many_threads_at_once() {
+        let d = folder(&[
+            (".pyoignore", "secret.txt\n"),
+            ("index.js", "x"),
+            ("secret.txt", "x"),
+            ("node_modules/a/index.js", "x"),
+        ]);
+        let root = d.0.clone();
+        std::thread::scope(|s| {
+            let runs: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        for _ in 0..50 {
+                            assert_eq!(names(&root, false), [".pyoignore", "index.js"]);
+                        }
+                    })
+                })
+                .collect();
+            for r in runs {
+                r.join().unwrap();
+            }
+        });
     }
 
     #[test]
