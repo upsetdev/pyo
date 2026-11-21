@@ -16,7 +16,7 @@ http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 libc = "0.2.191"
-pyo-proto = { version = "0.5.1", path = "../pyo-proto", features = ["sandbox-token"] }
+pyo-proto = { version = "0.5.2", path = "../pyo-proto", features = ["sandbox-token"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
