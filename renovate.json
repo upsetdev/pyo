@@ -1,0 +1,375 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Dependency updates for Pyo: Rust crates, the dashboard's packages, GitHub Actions and container images. Pull requests go to dev, weekly in groups, security fixes at once, nothing merged automatically.",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "schedule:weekly"
+  ],
+  "baseBranchPatterns": [
+    "dev"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "automerge": false,
+  "semanticCommits": "enabled",
+  "semanticCommitType": "build",
+  "semanticCommitScope": "deps",
+  "prConcurrentLimit": 10,
+  "prHourlyLimit": 4,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "* 0-3 * * 1"
+    ]
+  },
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": [
+      "at any time"
+    ],
+    "prCreation": "immediate",
+    "minimumReleaseAge": null,
+    "automerge": false,
+    "semanticCommitType": "fix",
+    "semanticCommitScope": "security",
+    "addLabels": [
+      "security"
+    ]
+  },
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/tests/**",
+    "**/fixtures/**",
+    "**/testdata/**",
+    "**/examples/**"
+  ],
+  "kubernetes": {
+    "managerFilePatterns": [
+      "/^deploy/k8s/.+\\.yaml$/"
+    ]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Images pinned by tag and digest in the system bundles (crates/pyo-proto/system) and the Rust code that lists them. Tag and digest move together.",
+      "managerFilePatterns": [
+        "/^crates/pyo-proto/system/.+\\.ya?ml$/",
+        "/^crates/pyo-proto/src/bundles\\.rs$/",
+        "/^crates/pyo-db-controller/src/main\\.rs$/"
+      ],
+      "matchStrings": [
+        "(?<depName>(?:docker\\.io|ghcr\\.io|quay\\.io|registry\\.k8s\\.io)/[a-z0-9._/-]+):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Images pinned by tag only in the Rust code (defaults and the images Pyo runs itself).",
+      "managerFilePatterns": [
+        "/^crates/pyo-db-controller/src/main\\.rs$/",
+        "/^crates/pyo-proto/src/lib\\.rs$/",
+        "/^crates/pyo-agent/src/(builder|observability|locate)\\.rs$/"
+      ],
+      "matchStrings": [
+        "\"(?<depName>(?:[a-z0-9-]+\\.)+[a-z]{2,}/[a-z0-9._-]+(?:/[a-z0-9._-]+)*|[a-z0-9-]+/[a-z0-9._-]+):(?<currentValue>[A-Za-z0-9._-]+)\""
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "The MySQL operator's upstream release that deploy/images/moco builds, by tag and the commit it points at.",
+      "managerFilePatterns": [
+        "/^deploy/images/moco/moco\\.Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ARG MOCO_TAG=(?<currentValue>v\\S+)\\s+ARG MOCO_COMMIT=(?<currentDigest>[0-9a-f]{40})"
+      ],
+      "depNameTemplate": "cybozu-go/moco",
+      "datasourceTemplate": "github-tags"
+    },
+    {
+      "customType": "regex",
+      "description": "Rust's version in the workflows, the same as the rust image in pyo.Dockerfile.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?:toolchain|rust-version): (?<currentValue>\\d+\\.\\d+\\.\\d+)\\n"
+      ],
+      "depNameTemplate": "rust",
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Bun's version in the workflows, the same as the oven/bun image in pyo.Dockerfile.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "bun-version: (?<currentValue>\\d+\\.\\d+\\.\\d+)\\n"
+      ],
+      "depNameTemplate": "oven/bun",
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "The Go image the workflows run the WAF's tests in, the same as waf.Dockerfile's.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "docker run [^\\n]*?(?<depName>golang):(?<currentValue>\\d+\\.\\d+) "
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Trivy's version in the local action that installs it.",
+      "managerFilePatterns": [
+        "/^\\.github/actions/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "version: (?<currentValue>v\\d+\\.\\d+\\.\\d+) # (?<depName>aquasecurity/trivy)"
+      ],
+      "datasourceTemplate": "github-releases"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Conventional Commits: dependency updates are build(deps).",
+      "matchPackageNames": [
+        "*"
+      ],
+      "semanticCommitType": "build",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Rust crates.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "addLabels": [
+        "rust"
+      ]
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "Rust crates"
+    },
+    {
+      "description": "The dashboard's packages. A new version waits 3 days first.",
+      "matchManagers": [
+        "npm",
+        "bun"
+      ],
+      "addLabels": [
+        "dash"
+      ],
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "matchManagers": [
+        "npm",
+        "bun"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "Dashboard packages"
+    },
+    {
+      "description": "GitHub Actions, pinned by commit with the version in a comment.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "addLabels": [
+        "ci"
+      ],
+      "semanticCommitType": "ci"
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Container images: Dockerfiles pin their FROM and ARG images by digest as well.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "addLabels": [
+        "images"
+      ]
+    },
+    {
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "pinDigests": true
+    },
+    {
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "groupName": "Container images"
+    },
+    {
+      "description": "The databases' images, in their own group.",
+      "matchDepNames": [
+        "ghcr.io/cloudnative-pg/postgresql",
+        "ghcr.io/cloudnative-pg/cloudnative-pg",
+        "ghcr.io/cybozu-go/moco/**",
+        "ghcr.io/cybozu-go/moco-agent",
+        "docker.io/valkey/**",
+        "valkey/**",
+        "cybozu-go/moco"
+      ],
+      "addLabels": [
+        "databases"
+      ]
+    },
+    {
+      "matchDepNames": [
+        "ghcr.io/cloudnative-pg/postgresql",
+        "ghcr.io/cloudnative-pg/cloudnative-pg",
+        "ghcr.io/cybozu-go/moco/**",
+        "ghcr.io/cybozu-go/moco-agent",
+        "docker.io/valkey/**",
+        "valkey/**"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest"
+      ],
+      "groupName": "Database images"
+    },
+    {
+      "description": "Toolchains move together wherever they're pinned.",
+      "matchDepNames": [
+        "rust"
+      ],
+      "groupName": "Rust toolchain"
+    },
+    {
+      "matchDepNames": [
+        "oven/bun"
+      ],
+      "groupName": "Bun"
+    },
+    {
+      "matchDepNames": [
+        "golang"
+      ],
+      "groupName": "Go"
+    },
+    {
+      "description": "Postgres and MySQL (and the other databases') major versions are never automatic: a pull request only when asked for on the Dependency Dashboard.",
+      "matchDepNames": [
+        "postgres",
+        "docker.io/library/postgres",
+        "mysql",
+        "docker.io/library/mysql",
+        "ghcr.io/cybozu-go/moco/mysql",
+        "mariadb",
+        "docker.io/library/mariadb",
+        "mongo",
+        "docker.io/library/mongo",
+        "clickhouse/clickhouse-server",
+        "docker.io/valkey/**",
+        "valkey/**"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true,
+      "addLabels": [
+        "major"
+      ]
+    },
+    {
+      "description": "postgres.Dockerfile has one CloudNativePG base per major version (BASE_16, BASE_17, BASE_18). Each stays on its own major.",
+      "matchDepNames": [
+        "ghcr.io/cloudnative-pg/postgresql"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "The database operators are vendored: a new version needs its release manifest (and for MySQL's, the patches moved onto it), so only when asked for on the Dependency Dashboard. A new digest of the same tag needs none of that.",
+      "matchDepNames": [
+        "cybozu-go/moco",
+        "ghcr.io/cybozu-go/moco-agent",
+        "ghcr.io/cybozu-go/moco/fluent-bit",
+        "ghcr.io/cybozu-go/moco/mysqld_exporter"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "dependencyDashboardApproval": true,
+      "groupName": "MySQL operator",
+      "prBodyNotes": [
+        "MySQL's operator is vendored and patched. Move `deploy/images/moco/patches` onto the new tag and update `crates/pyo-proto/system/databases/moco.yaml` from its release manifest, as `deploy/images/moco/README.md` says. Its sidecar images (agent, fluent-bit, mysqld_exporter) follow that release."
+      ]
+    },
+    {
+      "matchDepNames": [
+        "ghcr.io/cloudnative-pg/cloudnative-pg"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "dependencyDashboardApproval": true,
+      "groupName": "Postgres operator",
+      "prBodyNotes": [
+        "CloudNativePG is vendored. Update `crates/pyo-proto/system/databases/cnpg.yaml` from the new release manifest as its header says."
+      ]
+    },
+    {
+      "description": "Railpack's frontend must match the railpack CLI, pinned with its checksum in pyo.Dockerfile and scripts/install-railpack.sh: updated by hand.",
+      "matchDepNames": [
+        "ghcr.io/railwayapp/railpack-frontend"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Pyo's own images are pinned by each release, and test strings aren't dependencies.",
+      "matchDepNames": [
+        "ghcr.io/upsetdev/**",
+        "docker.io/library/busybox"
+      ],
+      "enabled": false
+    }
+  ]
+}

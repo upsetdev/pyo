@@ -90,6 +90,55 @@ jobs:
       - run: scripts/install-railpack.sh
       - run: cargo test --locked --workspace
 
+  # Known CVEs in the locked dependencies: Cargo.lock, bun.lock (with the
+  # dashboard's dev dependencies) and the WAF's go.mod. A CRITICAL one
+  # with a fix fails the check. HIGH ones are reported in the job's
+  # summary and in code scanning.
+  lockfiles:
+    name: Lockfile CVEs
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/trivy
+      - name: Scan for CVEs
+        id: scan
+        run: .github/scripts/trivy-scan.sh fs . trivy
+      # A fork's pull request can't write to code scanning.
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          sarif_file: trivy.sarif
+          category: lockfiles
+      - name: No CRITICAL CVE with a fix
+        if: steps.scan.outputs.critical != '0'
+        env:
+          CRITICAL: ${{ steps.scan.outputs.critical }}
+        run: |
+          echo "::error::The lockfiles have $CRITICAL CRITICAL CVEs with a fix (see the job's summary). Update those dependencies, or add a CVE that doesn't apply to .trivyignore with the reason."
+          exit 1
+
+  # cargo-deny, configured in deny.toml. RustSec advisories and crates
+  # from anywhere but crates.io fail the check. Licenses and banned or
+  # duplicate crates only warn for now (continue-on-error), until they're
+  # clean enough to enforce.
+  cargo-deny:
+    name: cargo-deny ${{ matrix.checks }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories sources, bans licenses]
+    continue-on-error: ${{ matrix.checks == 'bans licenses' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: 1.99.1
+          command: check ${{ matrix.checks }}
+
   # Pyo Sandbox end to end: real Firecracker microVMs on the runner's KVM.
   # x64 only, as GitHub's arm runners have no KVM. The networking e2e
   # changes the host's network as root, so it runs last.

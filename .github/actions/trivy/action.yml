@@ -1,0 +1,24 @@
+name: Trivy
+description: >
+  Installs Trivy at the pinned version and restores today's vulnerability
+  database from the Actions cache (saved by the first job of the day to
+  download it).
+
+runs:
+  using: composite
+  steps:
+    - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+      with:
+        version: v0.76.2 # aquasecurity/trivy
+        cache: true
+    - name: Today
+      id: today
+      shell: bash
+      run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+    # Yesterday's database when today's isn't cached yet: Trivy sees it's
+    # old and downloads a new one, which this saves under today's key.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/trivy/db
+        key: trivy-db-${{ steps.today.outputs.date }}
+        restore-keys: trivy-db-
