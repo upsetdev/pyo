@@ -42,7 +42,26 @@ pub async fn target(api: &Api, service: Option<&str>) -> Result<Target> {
         },
     };
     state.service(&id)?;
+    // A pyo.jsonc linked to another service has that service's settings:
+    // none of them apply to the one --service named.
+    let file = file.filter(|(_, f)| linked_to(f, &id));
     Ok(Target { state, id, file })
+}
+
+/// Whether a pyo.jsonc's settings are for service `id`: it's linked to
+/// it, or to none yet.
+fn linked_to(f: &ServiceFile, id: &str) -> bool {
+    f.service.as_deref().is_none_or(|s| s == id)
+}
+
+/// The nearest pyo.jsonc's service when it's linked to another one than `id`.
+fn linked_elsewhere(id: &str) -> Result<Option<String>> {
+    let Some(path) = config::find()? else {
+        return Ok(None);
+    };
+    let f = config::load(&path)?;
+    let linked = linked_to(&f, id);
+    Ok(f.service.filter(|_| !linked))
 }
 
 /// An id, or a name: "service", "project/service" or "team/project/service".
@@ -202,6 +221,26 @@ pub async fn deploy(
     let name = service["name"].as_str().unwrap_or("").to_owned();
     if folder.local && !matches!(kind.as_str(), "git" | "upload") {
         bail!("{name} runs an image, so it isn't built from a folder.");
+    }
+    // This folder belongs to another service (its pyo.jsonc says so): its
+    // settings stay out, and its files never go to this one.
+    if let Some(other) = linked_elsewhere(&t.id)? {
+        let other = t
+            .state
+            .service(&other)
+            .map(|o| t.state.path_of(o))
+            .unwrap_or(other);
+        if kind == "upload" || folder.local {
+            bail!(
+                "This folder's pyo.jsonc is for {other}, not {name}. Deploy {name} from its own folder."
+            );
+        }
+        println!(
+            "{}",
+            ui::dim(&format!(
+                "pyo.jsonc here is for {other}, so its settings don't apply to {name}."
+            ))
+        );
     }
     let changes = match &t.file {
         Some((_, f)) => apply(&mut service, f)?,
@@ -1971,6 +2010,14 @@ mod tests {
         assert!(apply(&mut a, &f).unwrap().is_empty());
         let f = file(r#"{ "deploy": { "serveAs": "files" } }"#);
         assert!(apply(&mut a, &f).is_err());
+    }
+
+    #[test]
+    fn a_file_linked_to_another_service_isnt_its() {
+        let f = file(r#"{ "service": "svc_a", "deploy": { "replicas": 3 } }"#);
+        assert!(linked_to(&f, "svc_a"));
+        assert!(!linked_to(&f, "svc_b"));
+        assert!(linked_to(&file("{}"), "svc_b"));
     }
 
     #[test]
