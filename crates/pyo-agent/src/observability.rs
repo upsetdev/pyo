@@ -226,65 +226,72 @@ async fn vector(client: &Client) -> anyhow::Result<()> {
         )
         .await?;
     Api::<DaemonSet>::namespaced(client.clone(), NS)
-        .patch(
-            VECTOR,
-            &pp(),
-            &Patch::Apply(json!({
-                "apiVersion": "apps/v1", "kind": "DaemonSet",
-                "metadata": { "name": VECTOR, "labels": labels },
-                "spec": {
-                    "selector": { "matchLabels": { "app.kubernetes.io/name": VECTOR } },
-                    // Every server's copy moves at once: one on a server that's
-                    // down (it can't be replaced there) would otherwise hold
-                    // the others on their old config for good. A copy is only
-                    // gone for seconds, and picks up where it stopped.
-                    "updateStrategy": { "type": "RollingUpdate", "rollingUpdate": { "maxUnavailable": "100%" } },
-                    "template": {
-                        "metadata": {
-                            "labels": labels,
-                            // Restart Vector when its config changes.
-                            "annotations": { "pyo/config-hash": format!("{:x}", fxhash(&config)) },
-                        },
-                        "spec": {
-                            "serviceAccountName": VECTOR,
-                            "tolerations": [{ "operator": "Exists" }],
-                            "containers": [{
-                                "name": "vector",
-                                "image": VECTOR_IMAGE,
-                                // Also re-read the config when its Secret changes, in
-                                // case a restart is held up.
-                                "args": ["--config", "/etc/vector/vector.yaml", "--watch-config"],
-                                "env": [
-                                    { "name": "VECTOR_LOG", "value": "warn" },
-                                    { "name": "PYO_NODE_NAME", "valueFrom": { "fieldRef": { "fieldPath": "spec.nodeName" } } },
-                                    // host_metrics reads the server's, not the container's.
-                                    { "name": "PROCFS_ROOT", "value": "/host/proc" },
-                                    { "name": "SYSFS_ROOT", "value": "/host/sys" },
-                                ],
-                                // ~35 MiB at rest (measured).
-                                "resources": { "requests": { "cpu": "10m", "memory": "48Mi" }, "limits": { "memory": "256Mi" } },
-                                "volumeMounts": [
-                                    { "name": "config", "mountPath": "/etc/vector", "readOnly": true },
-                                    { "name": "data", "mountPath": "/vector-data-dir" },
-                                    { "name": "var-log", "mountPath": "/var/log", "readOnly": true },
-                                    { "name": "host-proc", "mountPath": "/host/proc", "readOnly": true },
-                                    { "name": "host-sys", "mountPath": "/host/sys", "readOnly": true },
-                                ],
-                            }],
-                            "volumes": [
-                                { "name": "config", "secret": { "secretName": VECTOR } },
-                                { "name": "data", "hostPath": { "path": "/var/lib/pyo-vector", "type": "DirectoryOrCreate" } },
-                                { "name": "var-log", "hostPath": { "path": "/var/log" } },
-                                { "name": "host-proc", "hostPath": { "path": "/proc" } },
-                                { "name": "host-sys", "hostPath": { "path": "/sys" } },
-                            ],
-                        },
-                    },
-                },
-            })),
-        )
+        .patch(VECTOR, &pp(), &Patch::Apply(vector_daemonset(&config)))
         .await?;
     Ok(())
+}
+
+/// Vector's DaemonSet: on every server, restarted when its config changes.
+fn vector_daemonset(config: &str) -> serde_json::Value {
+    let labels =
+        json!({ "app.kubernetes.io/name": VECTOR, "app.kubernetes.io/managed-by": MANAGER });
+    json!({
+        "apiVersion": "apps/v1", "kind": "DaemonSet",
+        "metadata": { "name": VECTOR, "labels": labels },
+        "spec": {
+            "selector": { "matchLabels": { "app.kubernetes.io/name": VECTOR } },
+            // Every server's copy moves at once: one on a server that's
+            // down (it can't be replaced there) would otherwise hold
+            // the others on their old config for good. A copy is only
+            // gone for seconds, and picks up where it stopped.
+            "updateStrategy": { "type": "RollingUpdate", "rollingUpdate": { "maxUnavailable": "100%" } },
+            "template": {
+                "metadata": {
+                    "labels": labels,
+                    // Restart Vector when its config changes.
+                    "annotations": { "pyo/config-hash": format!("{:x}", fxhash(config)) },
+                },
+                "spec": {
+                    "serviceAccountName": VECTOR,
+                    // Kept on a server short of disk: it reports that
+                    // server's disk, and its DaemonSet mustn't replace it
+                    // over and over there.
+                    "priorityClassName": pyo_proto::system::SERVER_CRITICAL,
+                    "tolerations": [{ "operator": "Exists" }],
+                    "containers": [{
+                        "name": "vector",
+                        "image": VECTOR_IMAGE,
+                        // Also re-read the config when its Secret changes, in
+                        // case a restart is held up.
+                        "args": ["--config", "/etc/vector/vector.yaml", "--watch-config"],
+                        "env": [
+                            { "name": "VECTOR_LOG", "value": "warn" },
+                            { "name": "PYO_NODE_NAME", "valueFrom": { "fieldRef": { "fieldPath": "spec.nodeName" } } },
+                            // host_metrics reads the server's, not the container's.
+                            { "name": "PROCFS_ROOT", "value": "/host/proc" },
+                            { "name": "SYSFS_ROOT", "value": "/host/sys" },
+                        ],
+                        // ~35 MiB at rest (measured).
+                        "resources": { "requests": { "cpu": "10m", "memory": "48Mi" }, "limits": { "memory": "256Mi" } },
+                        "volumeMounts": [
+                            { "name": "config", "mountPath": "/etc/vector", "readOnly": true },
+                            { "name": "data", "mountPath": "/vector-data-dir" },
+                            { "name": "var-log", "mountPath": "/var/log", "readOnly": true },
+                            { "name": "host-proc", "mountPath": "/host/proc", "readOnly": true },
+                            { "name": "host-sys", "mountPath": "/host/sys", "readOnly": true },
+                        ],
+                    }],
+                    "volumes": [
+                        { "name": "config", "secret": { "secretName": VECTOR } },
+                        { "name": "data", "hostPath": { "path": "/var/lib/pyo-vector", "type": "DirectoryOrCreate" } },
+                        { "name": "var-log", "hostPath": { "path": "/var/log" } },
+                        { "name": "host-proc", "hostPath": { "path": "/proc" } },
+                        { "name": "host-sys", "hostPath": { "path": "/sys" } },
+                    ],
+                },
+            },
+        },
+    })
 }
 
 /// The traffic store's volume: the kept requests. Asked for once, never
@@ -408,4 +415,26 @@ fn fxhash(s: &str) -> u64 {
     s.bytes().fold(0xcbf29ce484222325u64, |h, b| {
         (h ^ b as u64).wrapping_mul(0x100000001b3)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_stays_on_a_server_short_of_disk() {
+        let ds: DaemonSet = serde_json::from_value(vector_daemonset("a: 1")).unwrap();
+        let spec = ds.spec.unwrap().template.spec.unwrap();
+        assert_eq!(
+            spec.priority_class_name.as_deref(),
+            Some(pyo_proto::system::SERVER_CRITICAL)
+        );
+        assert_eq!(spec.service_account_name.as_deref(), Some(VECTOR));
+        // A new config restarts it.
+        let hash = |c: &str| {
+            vector_daemonset(c)["spec"]["template"]["metadata"]["annotations"]["pyo/config-hash"]
+                .clone()
+        };
+        assert_ne!(hash("a: 1"), hash("a: 2"));
+    }
 }
