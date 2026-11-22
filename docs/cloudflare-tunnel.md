@@ -1602,12 +1602,13 @@ Where things are:
 Tests (2026-11-22): the full pyo-proto (167), pyo-agent (216), pyo-api
 (611) and pyo-cli (80) suites pass, except `openapi::docs_copy_is_current`,
 which compares with pyo-docs' `openapi/pyo.json` (regenerate it with the
-docs in Phase 6). Clippy's 4 notes are fixed in the last commit, which
-wasn't compiled again (the disk was at its 60 GB floor).
+docs in Phase 6). `cargo clippy -p pyo-proto -p pyo-agent -p pyo-api
+-p pyo-cli --tests -- -D warnings` is clean on 928ac34, and the API and
+CLI tunnel tests pass on it.
 
 Next:
 
-1. Compile and clippy the last commit.
+1. Regenerate pyo-docs' `openapi/pyo.json` with the Phase 6 docs.
 2. Dashboard gaps: the new-service wizard has no tunnel switch, no
    warning for deeper names (a.b.example.com), and "Certificate:
    <reason>" shows only through `tunnel.error`.
