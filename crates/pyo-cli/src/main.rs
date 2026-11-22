@@ -17,7 +17,6 @@ mod login;
 mod pack;
 mod registry;
 mod sandbox;
-mod server;
 mod service;
 mod ui;
 mod upgrade;
@@ -321,19 +320,6 @@ enum Command {
         #[command(flatten)]
         which: Which,
     },
-    /// Hetzner Cloud: the team's API token, for making servers there.
-    Hetzner {
-        #[command(subcommand)]
-        command: HetznerCommand,
-        /// The team (slug or id). Defaults to your first team.
-        #[arg(long, global = true)]
-        team: Option<String>,
-    },
-    /// Servers Pyo makes at Hetzner and joins to a cluster over your tailnet.
-    Server {
-        #[command(subcommand)]
-        command: ServerCommand,
-    },
     /// The CLI's version, like --version.
     #[command(disable_version_flag = true)]
     Version,
@@ -346,86 +332,6 @@ enum Command {
         /// A release instead of the latest, e.g. 0.3.0.
         #[arg(long)]
         version: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum HetznerCommand {
-    /// Save a project API token with Read & Write. Owners and admins.
-    Connect {
-        /// The token. Without it, it's read from PYO_HETZNER_TOKEN, a pipe, or asked for.
-        #[arg(long, env = "PYO_HETZNER_TOKEN", hide_env_values = true)]
-        hetzner_token: Option<String>,
-    },
-    /// List the locations the saved token sees.
-    Test,
-    /// Forget the token. Servers Pyo made there keep running.
-    Disconnect {
-        /// Don't ask to confirm.
-        #[arg(long, short = 'y')]
-        yes: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum ServerCommand {
-    /// Server types and their monthly prices at Hetzner.
-    Types {
-        /// One location, e.g. fsn1.
-        #[arg(long)]
-        location: Option<String>,
-        /// The team (slug or id). Defaults to your first team.
-        #[arg(long)]
-        team: Option<String>,
-    },
-    /// Make a server at Hetzner and join it to a cluster. Shows the price and asks first.
-    Create {
-        /// The cluster it joins (name or id). Defaults to the team's default cluster.
-        #[arg(long, conflicts_with = "new_cluster")]
-        cluster: Option<String>,
-        /// Make a new cluster with this name instead. The server is its first.
-        #[arg(long)]
-        new_cluster: Option<String>,
-        /// Its name. Defaults to <cluster>-<n>.
-        #[arg(long, conflicts_with = "new_cluster")]
-        name: Option<String>,
-        /// A Hetzner location, e.g. fsn1 (see pyo server types).
-        #[arg(long)]
-        location: String,
-        /// A server type, e.g. cx22 (see pyo server types).
-        #[arg(long = "type")]
-        server_type: String,
-        /// A build-only server.
-        #[arg(long, conflicts_with = "new_cluster")]
-        builder: bool,
-        /// Your SSH public key file, to sign in over your tailnet.
-        #[arg(long, value_name = "FILE")]
-        ssh_key: Option<std::path::PathBuf>,
-        /// A tag for placing services (repeatable).
-        #[arg(long = "tag")]
-        tags: Vec<String>,
-        /// The team (slug or id). Defaults to your first team.
-        #[arg(long)]
-        team: Option<String>,
-        /// Don't ask to confirm the price.
-        #[arg(long, short = 'y')]
-        yes: bool,
-        /// Start it and exit, without following it.
-        #[arg(long)]
-        detach: bool,
-    },
-    /// The servers Pyo made at Hetzner, and how they're doing.
-    List,
-    /// Move a server's services off it, take it out of its cluster and your tailnet, and delete it at Hetzner.
-    Delete {
-        /// Its name or id.
-        name: String,
-        /// Its cluster, when names repeat.
-        #[arg(long)]
-        cluster: Option<String>,
-        /// Don't ask to confirm.
-        #[arg(long, short = 'y')]
-        yes: bool,
     },
 }
 
@@ -1170,60 +1076,6 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Upgrade { version } => upgrade::run(version).await,
-        Command::Hetzner { command, team } => {
-            let api = config::client(url, token)?;
-            let team = team.as_deref();
-            match command {
-                HetznerCommand::Connect { hetzner_token } => {
-                    server::connect(&api, team, hetzner_token).await
-                }
-                HetznerCommand::Test => server::test(&api, team).await,
-                HetznerCommand::Disconnect { yes } => server::disconnect(&api, team, yes).await,
-            }
-        }
-        Command::Server { command } => {
-            let api = config::client(url, token)?;
-            match command {
-                ServerCommand::Types { location, team } => {
-                    server::types(&api, team.as_deref(), location.as_deref()).await
-                }
-                ServerCommand::Create {
-                    cluster,
-                    new_cluster,
-                    name,
-                    location,
-                    server_type,
-                    builder,
-                    ssh_key,
-                    tags,
-                    team,
-                    yes,
-                    detach,
-                } => {
-                    server::create(
-                        &api,
-                        server::New {
-                            team: team.as_deref(),
-                            cluster: cluster.as_deref(),
-                            new_cluster: new_cluster.as_deref(),
-                            name: name.as_deref(),
-                            location: &location,
-                            server_type: &server_type,
-                            builder,
-                            ssh_key: ssh_key.as_deref(),
-                            tags,
-                            yes,
-                            detach,
-                        },
-                    )
-                    .await
-                }
-                ServerCommand::List => server::list_servers(&api).await,
-                ServerCommand::Delete { name, cluster, yes } => {
-                    server::delete(&api, &name, cluster.as_deref(), yes).await
-                }
-            }
-        }
         Command::Backup {
             command: BackupCommand::Now { volume, db, wait },
             which,
