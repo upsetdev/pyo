@@ -96,8 +96,9 @@ enum Command {
     ///
     /// A service built from a folder gets this folder, packed and uploaded
     /// (.gitignore and .pyoignore apply). In a folder no service is linked
-    /// to, it makes one and links it. With -f, import a Docker Compose file
-    /// instead: see what it makes, then deploy it.
+    /// to, it makes one and links it. With -f, deploy a Docker Compose file
+    /// instead: the first time it makes a project of it, and after that it
+    /// changes only what the file says differently.
     Deploy {
         #[command(flatten)]
         which: Which,
@@ -113,21 +114,29 @@ enum Command {
         /// A new service's name. Defaults to the folder's.
         #[arg(long, conflicts_with = "file")]
         name: Option<String>,
-        /// A new service's project (name or id), made when there's none by that name.
-        #[arg(long, conflicts_with = "file")]
+        /// A new service's project (name or id), made when there's none by
+        /// that name. With -f, the project the file goes to.
+        #[arg(long)]
         project: Option<String>,
-        /// A Docker Compose file to import as a new project (a .env next to
-        /// it is read too).
+        /// A Docker Compose file to deploy as a project (a .env next to it
+        /// is read too).
         #[arg(long, short = 'f')]
         file: Option<std::path::PathBuf>,
+        /// With -f: show what would change, and change nothing.
+        #[arg(long, requires = "file")]
+        dry_run: bool,
+        /// With -f: also delete the services made from the file that are no
+        /// longer in it. Their volumes are kept.
+        #[arg(long, requires = "file")]
+        prune: bool,
         /// The team of a new service or Compose import (slug or id). Defaults to your first team.
         #[arg(long)]
         team: Option<String>,
         /// The cluster to run it on (name or id). Defaults to the team's default cluster.
         #[arg(long)]
         cluster: Option<String>,
-        /// Don't ask: import the Compose file, or go ahead with a very
-        /// large replica change from pyo.jsonc.
+        /// Don't ask: deploy the Compose file (and delete with --prune), or
+        /// go ahead with a very large replica change.
         #[arg(long, short = 'y')]
         yes: bool,
     },
@@ -818,15 +827,23 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
             file: Some(f),
             team,
             cluster,
+            project,
+            dry_run,
+            prune,
             yes,
             ..
         } => {
             compose::deploy(
                 &config::client(url, token)?,
                 &f,
-                team.as_deref(),
-                cluster.as_deref(),
-                yes,
+                compose::Opts {
+                    team: team.as_deref(),
+                    cluster: cluster.as_deref(),
+                    project: project.as_deref(),
+                    dry_run,
+                    prune,
+                    yes,
+                },
             )
             .await
         }
@@ -1327,6 +1344,30 @@ mod tests {
             })
         ));
         assert!(parse(&["pyo", "deploy", "--local", "-f", "compose.yml"]).is_err());
+        assert!(matches!(
+            parse(&[
+                "pyo",
+                "deploy",
+                "-f",
+                "compose.yml",
+                "--project",
+                "cloud",
+                "--dry-run",
+                "--prune",
+                "-y"
+            ]),
+            Ok(Command::Deploy {
+                file: Some(_),
+                project: Some(_),
+                dry_run: true,
+                prune: true,
+                yes: true,
+                ..
+            })
+        ));
+        // Planning and pruning are for a Compose file.
+        assert!(parse(&["pyo", "deploy", "--dry-run"]).is_err());
+        assert!(parse(&["pyo", "deploy", "--prune"]).is_err());
         let Ok(Command::Env {
             command: Some(EnvCommand::Pull {
                 file, out, secrets, ..
