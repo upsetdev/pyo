@@ -6,7 +6,7 @@ import {
 } from "@phosphor-icons/react";
 import { Logo } from "~/components/site/Logo";
 import { Button } from "~/components/ui/Button";
-import { NAV_GROUPS, NAV_LABEL, navIconClass, navItemClass } from "./nav";
+import { NAV_GROUPS, NAV_ICON_WEIGHT, NAV_LABEL, navIconClass, navItemClass } from "./nav";
 
 // Marks the current page's link. It runs as soon as the links exist, before
 // the first paint, because the app itself hasn't loaded yet. It rewrites the
@@ -67,6 +67,7 @@ export function BootShell() {
                           >
                             <Icon
                               size={16}
+                              weight={NAV_ICON_WEIGHT}
                               className={navIconClass(false)}
                               suppressHydrationWarning
                             />

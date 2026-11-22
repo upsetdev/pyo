@@ -71,7 +71,7 @@ import {
 import { TeamSwitcher } from "./TeamSwitcher";
 import { CrumbSwitcher, type Switcher } from "./CrumbSwitcher";
 import { CaretDownIcon } from "@phosphor-icons/react";
-import { NAV_GROUPS, NAV_LABEL, currentHref, navChildClass, navIconClass, navItemClass, navLinks, type NavItem } from "./nav";
+import { NAV_GROUPS, NAV_ICON_WEIGHT, NAV_LABEL, currentHref, navChildClass, navIconClass, navItemClass, navLinks, type NavItem } from "./nav";
 
 // Dashboard frame: a flat left sidebar (team, New deploy, sections), a
 // slim top bar with the trail and account menus, then the content.
@@ -229,7 +229,7 @@ function AccountNav({
           aria-current={active ? "page" : undefined}
           className={navItemClass(active)}
         >
-          <Icon size={16} aria-hidden className={navIconClass(active)} />
+          <Icon size={16} weight={NAV_ICON_WEIGHT} aria-hidden className={navIconClass(active)} />
           {label}
           {dot ? (
             <span
@@ -258,6 +258,7 @@ function AccountNav({
             >
               <ArrowLeftIcon
                 size={16}
+                weight={NAV_ICON_WEIGHT}
                 aria-hidden
                 className={navIconClass(false)}
               />
@@ -323,7 +324,7 @@ function Sidebar({
     return (
       <li key={item.href}>
         <AppLink href={item.href} activeOptions={{ exact: true }} aria-current={active ? "page" : undefined} className={navItemClass(active)}>
-          <Icon size={16} aria-hidden className={navIconClass(active)} />
+          <Icon size={16} weight={NAV_ICON_WEIGHT} aria-hidden className={navIconClass(active)} />
           {item.label}
         </AppLink>
       </li>
@@ -418,9 +419,9 @@ function NavGroup({ item, current }: { item: NavItem; current?: string }) {
         aria-expanded={open}
         aria-controls={id}
         onClick={() => toggle(!open)}
-        className={`${navItemClass(false)} w-full ${within ? "text-foreground" : ""}`}
+        className={`${navItemClass(false)} w-full`}
       >
-        <Icon size={16} aria-hidden className={navIconClass(within)} />
+        <Icon size={16} weight={NAV_ICON_WEIGHT} aria-hidden className={navIconClass(within)} />
         {item.label}
         <CaretDownIcon
           size={12}
