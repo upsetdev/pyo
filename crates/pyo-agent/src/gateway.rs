@@ -1484,11 +1484,17 @@ pub async fn remove(client: &Client, service_id: &str) {
 /// manifest that also allows it) reaches the proxies, which then roll. The
 /// tailnet Gateway follows the API's wanted list (tailnet.rs).
 /// One the cluster's install refuses (older than Pyo's, until the
-/// cluster's connect command runs) waits for that install to change.
+/// cluster's connect command runs) waits for that install to change. So do
+/// client policies written as an older install accepts them
+/// ([`headers_kept`]): they're written again once it changes.
 pub async fn ensure(client: Client) {
     let mut refusals = 0;
     loop {
         match ensure_once(&client).await {
+            Ok(()) if headers_kept() => {
+                refusals += 1;
+                crate::refused::wait_for_install(&client, refusals).await;
+            }
             Ok(()) => {
                 tracing::info!("gateway ready");
                 return;
