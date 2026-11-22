@@ -59,8 +59,9 @@ pub struct SiteUpload {
 pub const MAX_FILES: usize = 20_000;
 /// The most bytes a deploy may have.
 pub const MAX_BYTES: u64 = 1024 * 1024 * 1024;
-/// The largest file.
-pub const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+/// The largest file: under Cloudflare's 100 MB a request, so a file
+/// goes up in one request on Pyo Cloud and behind a Cloudflare proxy.
+pub const MAX_FILE_BYTES: u64 = 90 * 1024 * 1024;
 /// The most rules each of `_headers` and `_redirects` may have.
 pub const MAX_RULES: usize = 2000;
 
@@ -569,6 +570,14 @@ pub fn headers_for(rules: &[HeaderRule], path: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file goes up in one request: Cloudflare takes at most 100 MB
+    /// (decimal) a request, with room left for the request's headers.
+    #[test]
+    fn a_file_fits_one_cloudflare_request() {
+        assert_eq!(MAX_FILE_BYTES, 90 * 1024 * 1024);
+        assert!(MAX_FILE_BYTES < 100_000_000 - 1_000_000);
+    }
 
     #[test]
     fn paths_stay_in_the_folder() {
