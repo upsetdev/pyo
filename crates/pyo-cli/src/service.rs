@@ -880,6 +880,9 @@ pub async fn status(api: &Api, service: Option<&str>, as_json: bool) -> Result<(
     }
     if let Some(c) = t.state.cluster(a["clusterId"].as_str().unwrap_or("")) {
         row("Cluster", c["name"].as_str().unwrap_or("").to_owned());
+        for taken in ports_taken(c) {
+            row("Gateway", ui::yellow(&taken.text()));
+        }
     }
     let domains: Vec<String> = a["domains"]
         .as_array()
@@ -893,6 +896,12 @@ pub async fn status(api: &Api, service: Option<&str>, as_json: bool) -> Result<(
     }
     row("Dashboard", t.state.service_url(&api.base, a));
     Ok(())
+}
+
+/// Servers of a cluster (as `/state` has it) where another program has the
+/// gateway's ports.
+fn ports_taken(cluster: &Value) -> Vec<pyo_proto::GatewayPortsTaken> {
+    serde_json::from_value(cluster["capabilities"]["gatewayPortsTaken"].clone()).unwrap_or_default()
 }
 
 // ── logs ───────────────────────────────────────────────────────────────
@@ -1800,6 +1809,17 @@ pub async fn open(api: &Api, service: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_reads_where_the_gateways_ports_are_taken() {
+        let c = json!({ "capabilities": { "gatewayPortsTaken": [{ "server": "misc-ten-sin4", "ports": [80, 443], "by": "Traefik" }] } });
+        let t = ports_taken(&c);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].text(), "Ports 80 and 443 are in use on misc-ten-sin4");
+        // An older Pyo's cluster says nothing of it.
+        assert!(ports_taken(&json!({ "capabilities": {} })).is_empty());
+        assert!(ports_taken(&json!({})).is_empty());
+    }
 
     #[test]
     fn followed_lines_print_once_in_the_order_they_come() {

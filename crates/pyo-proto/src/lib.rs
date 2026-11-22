@@ -487,6 +487,11 @@ pub struct Capabilities {
     /// it isn't answering; none while it's on its way or running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_error: Option<String>,
+    /// Servers where the gateway can't get its ports: another program in
+    /// the cluster has them (k3s's Traefik, ingress-nginx…), so the
+    /// gateway's ServiceLB pod there waits. None from older agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateway_ports_taken: Vec<GatewayPortsTaken>,
     /// "servicelb", "metallb" or "none".
     pub load_balancer: String,
     pub load_balancer_ips: Vec<String>,
@@ -526,6 +531,35 @@ pub struct Capabilities {
     /// firewall sync is on its way, is still starting.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waf_active: Vec<String>,
+}
+
+/// A server where the gateway can't get some of its ports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayPortsTaken {
+    pub server: String,
+    /// The ports in use there, lowest first.
+    pub ports: Vec<u16>,
+    /// What has them, when the agent can tell ("Traefik", a pod's name).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
+}
+
+impl GatewayPortsTaken {
+    /// "Ports 80 and 443 are in use on misc-ten-sin4", as Pyo shows it.
+    pub fn text(&self) -> String {
+        let ports: Vec<String> = self.ports.iter().map(u16::to_string).collect();
+        let list = match ports.as_slice() {
+            [] => String::new(),
+            [one] => format!("Port {one} is"),
+            [rest @ .., last] => format!("Ports {} and {last} are", rest.join(", ")),
+        };
+        if list.is_empty() {
+            format!("The gateway's ports are in use on {}", self.server)
+        } else {
+            format!("{list} in use on {}", self.server)
+        }
+    }
 }
 
 /// What the agent can see of the cluster's protections.
@@ -2726,6 +2760,24 @@ pub struct ServerLocation {
 #[cfg(test)]
 mod location_tests {
     use super::*;
+
+    #[test]
+    fn gateway_ports_taken_reads_plainly() {
+        let t = |ports: &[u16]| {
+            GatewayPortsTaken { server: "misc-ten-sin4".into(), ports: ports.to_vec(), by: String::new() }.text()
+        };
+        assert_eq!(t(&[80, 443]), "Ports 80 and 443 are in use on misc-ten-sin4");
+        assert_eq!(t(&[443]), "Port 443 is in use on misc-ten-sin4");
+        assert_eq!(t(&[80, 443, 8443]), "Ports 80, 443 and 8443 are in use on misc-ten-sin4");
+        assert_eq!(t(&[]), "The gateway's ports are in use on misc-ten-sin4");
+        // Older agents send none.
+        let caps: Capabilities = serde_json::from_value(serde_json::json!({
+            "ingressController": "envoy", "loadBalancer": "servicelb", "loadBalancerIps": [],
+            "certManager": true, "metricsServer": true, "storageClasses": [], "podCidr": "", "serviceCidr": ""
+        }))
+        .unwrap();
+        assert!(caps.gateway_ports_taken.is_empty());
+    }
 
     #[test]
     fn host_proofs_are_hmac_sha256() {

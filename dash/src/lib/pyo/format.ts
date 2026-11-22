@@ -267,3 +267,15 @@ export function rate(bps: number | null | undefined) {
   if (bps < 1e9) return `${(bps / 1e6).toFixed(bps < 1e7 ? 1 : 0)} MB/s`;
   return `${(bps / 1e9).toFixed(1)} GB/s`;
 }
+
+/** "Ports 80 and 443 are in use on misc-ten-sin4": a server where another
+ * program has the gateway's ports (pyo-proto `GatewayPortsTaken::text`). */
+export function portsTakenText(t: { server: string; ports: number[] }) {
+  const ps = t.ports.map(String);
+  if (!ps.length) return `The gateway's ports are in use on ${t.server}`;
+  const list =
+    ps.length === 1
+      ? `Port ${ps[0]} is`
+      : `Ports ${ps.slice(0, -1).join(", ")} and ${ps[ps.length - 1]} are`;
+  return `${list} in use on ${t.server}`;
+}

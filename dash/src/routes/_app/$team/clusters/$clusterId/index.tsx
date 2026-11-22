@@ -11,7 +11,7 @@ import { Select } from "~/components/ui/Field";
 import { Callout, Metric, MetricStrip, Panel } from "~/components/ui/Panel";
 import { placesOf } from "~/lib/pyo/location";
 import { gpuSummary } from "~/lib/pyo/format";
-import { plural } from "~/lib/pyo/format";
+import { plural, portsTakenText } from "~/lib/pyo/format";
 import {
   activityIn,
   clusterByRef,
@@ -83,6 +83,15 @@ function ClusterOverview() {
       ) : c.status === "degraded" ? (
         <Callout tone="warning" title="Cluster degraded">
           {sum.servers - sum.readyServers} of {plural(sum.servers, "server")} offline.
+        </Callout>
+      ) : null}
+      {c.status !== "pending" && c.capabilities.gatewayPortsTaken?.length ? (
+        <Callout tone="warning" title="Gateway">
+          {c.capabilities.gatewayPortsTaken.map((t) => (
+            <span key={t.server} className="block">
+              {portsTakenText(t)}.
+            </span>
+          ))}
         </Callout>
       ) : null}
 
