@@ -1062,7 +1062,8 @@ pub async fn reset_login(
             )));
         }
     };
-    // Made on the server: it also turns two-factor off (recovery.rs).
+    // Made on the server: it also turns two-factor off, and for an admin
+    // where admins may sign in from (recovery.rs).
     let token = crate::recovery::new_host_link(&mut conn, &id).await?;
     tracing::info!(user = %id, "sign-in link made on the host");
     Ok(crate::error::Json(serde_json::json!({

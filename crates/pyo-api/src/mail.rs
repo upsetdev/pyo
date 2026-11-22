@@ -464,6 +464,19 @@ pub fn two_factor_off(link: &str) -> Email {
         .reason("You get this email for every change to how you sign in.")
 }
 
+/// An admin sign-in with the right credentials, refused because of where
+/// it came from (admin_sign_in.rs).
+pub fn sign_in_refused(address: &str, link: &str) -> Email {
+    Email::new("A Pyo sign-in was refused", "Sign-in refused")
+        .para(vec![
+            t("Someone used your sign-in details for your Pyo admin account from "),
+            b(address),
+            t(". Pyo refused it because admins can't sign in from there. If that wasn't you, change your password."),
+        ])
+        .button("Open security settings", link)
+        .reason("You get this email for every refused sign-in to an admin account.")
+}
+
 /// A new API key was made on the account.
 pub fn new_api_key(name: &str, link: &str) -> Email {
     Email::new("A new Pyo API key was made", "New API key")
@@ -521,6 +534,7 @@ mod tests {
             ),
             ("two-factor-off", two_factor_off(&c.link("/profile"))),
             ("new-api-key", new_api_key(key, &c.link("/api-keys"))),
+            ("sign-in-refused", sign_in_refused(key, &c.link("/security"))),
         ]
     }
 

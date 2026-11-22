@@ -7,6 +7,7 @@
 //! background tasks, migrations, dashboard features and entitlement checks
 //! (see [`Extensions`]); self-hosted Pyo has none of those.
 
+mod admin_sign_in;
 mod agent;
 mod agent_auth;
 mod agent_tls;

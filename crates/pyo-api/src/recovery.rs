@@ -19,7 +19,9 @@
 //! password: a link alone is one factor. Except a link made on the server
 //! itself, which turns two-factor off (whoever has the server has
 //! everything anyway, and it's how someone who lost their app and their
-//! recovery codes gets back in).
+//! recovery codes gets back in). For an admin it also turns off where
+//! admins may sign in from (admin_sign_in.rs): elsewhere an admin's link
+//! answers as a used one.
 
 use crate::error::Json;
 use crate::error::Query;
@@ -174,6 +176,7 @@ struct ResetBody {
 async fn reset(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    from: crate::admin_sign_in::Source,
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<ResetBody>,
@@ -209,6 +212,27 @@ async fn reset(
         must_set_up,
         key: None,
     };
+    if user.is_admin {
+        if clears_two_factor {
+            // Made on the server: the admin sign-in limit goes too, so the
+            // admin who locked themselves out gets back in.
+            if crate::admin_sign_in::turn_off(&mut tx).await? {
+                crate::twofactor::notify_teams(
+                    &mut tx,
+                    &user,
+                    "auth.admin_sign_in_off",
+                    "Let admins sign in from anywhere with a sign-in link from the server",
+                )
+                .await?;
+            }
+        } else if !crate::admin_sign_in::admits(&mut *tx, &from).await? {
+            // From where admins may not sign in: as a used link, and
+            // nothing changes (the link still works where they may).
+            tx.rollback().await?;
+            crate::admin_sign_in::refused(&state, &user, &from, "with a sign-in link").await;
+            return Err(used_or_expired());
+        }
+    }
     let had_two_factor = crate::twofactor::enabled(&mut *tx, &user.id).await?;
     if clears_two_factor && had_two_factor {
         crate::twofactor::turn_off(&mut tx, &user.id).await?;

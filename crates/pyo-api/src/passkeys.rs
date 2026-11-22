@@ -230,6 +230,7 @@ struct LoginFinish {
 async fn login_finish(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    from: crate::admin_sign_in::Source,
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<LoginFinish>,
@@ -238,6 +239,11 @@ async fn login_finish(
     // Only failures keep their slot.
     ratelimit::take(&state.db, &[(ratelimit::PASSKEY_FINISH_IP, &ip)]).await?;
     let user = verify_passkey(&state, body).await?;
+    // An admin from where admins may not sign in: as a passkey that didn't
+    // work.
+    if !crate::admin_sign_in::sign_in_allowed(&state, &user, &from, "with a passkey").await? {
+        return Err(failed("admin sign-in limit"));
+    }
     ratelimit::forgive(&state.db, &ratelimit::PASSKEY_FINISH_IP, &ip).await?;
     // A passkey is two factors on its own: no code after it (twofactor.rs).
     crate::audit::account_event(

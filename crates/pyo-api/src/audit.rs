@@ -120,6 +120,8 @@ impl Who {
 /// What a request says about itself, for its entries.
 struct RequestInfo {
     ip: String,
+    /// The same address, and whether it came over the tailnet.
+    source: crate::admin_sign_in::Source,
     user_agent: String,
     actor: Mutex<Option<Who>>,
 }
@@ -140,11 +142,23 @@ fn request_info(req: &Request) -> RequestInfo {
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip().to_string())
         .unwrap_or_default();
+    let ip = crate::ratelimit::visitor_of(&peer, req.headers());
+    let host =
+        crate::admin_sign_in::host_of(req.headers(), req.uri().authority().map(|a| a.as_str()));
     RequestInfo {
-        ip: crate::ratelimit::visitor_of(&peer, req.headers()),
+        source: crate::admin_sign_in::Source::from_visitor(&ip, host),
+        ip,
         user_agent: user_agent(req.headers()),
         actor: Mutex::new(None),
     }
+}
+
+/// Where the request being handled comes from (admin_sign_in.rs). Outside
+/// a request: nowhere known.
+pub fn request_source() -> crate::admin_sign_in::Source {
+    REQUEST
+        .try_with(|r| r.source.clone())
+        .unwrap_or_default()
 }
 
 /// A browser's User-Agent, cut to a sane length.
