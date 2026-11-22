@@ -103,7 +103,7 @@ ENTRYPOINT ["/pyo-static"]
 # commit) and railpack (zero-config builds of repositories without a
 # Dockerfile). BuildKit itself runs beside it (a second container in the
 # pod).
-FROM moby/buildkit:v0.34.1 AS buildkit
+FROM moby/buildkit:v0.34.2 AS buildkit
 
 # Railpack's CLI; its BuildKit frontend image must be the same version
 # (RAILPACK_FRONTEND in pyo-builder).
