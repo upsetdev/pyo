@@ -168,6 +168,18 @@ Decisions after the real-Cloudflare test (2026-11-22):
   can be cancelled: the name stays `"on"`. The dashboard shows such a name
   as "Via Tunnel · *.example.com" and offers Switch back only with a kept
   record.
+- **A new name under the default domain gets no record of its own**
+  (user, 2026-11-23). `setDomainTunnel` with `on: true` for a name one
+  level under the default domain that isn't on the tunnel yet reads the
+  records on that exact name at Cloudflare. With no A, AAAA or CNAME
+  there, the domain takes `tunnel: "on"` at once and the answer is
+  `status: "active"`: the wildcard record has it, and Pyo makes no
+  record. With one there (it would answer ahead of the wildcard), or when
+  Cloudflare can't be asked, the usual switch runs: Pyo's own record is
+  replaced and someone else's stops at "conflict". This is in the op, so
+  the dashboard, the CLI, MCP and the API behave the same. The CLI now
+  sends the op for such names too. Asking again for a name already
+  `"on"` still makes its own record (next point).
 - **A name already `"on"` never goes back to `"switching"`.** Asking to
   switch a name the wildcard already serves makes its own record and route
   while it stays gated. Only a name moving from public ports gets both

@@ -123,6 +123,23 @@ pub(crate) fn switch_state(now: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// Whether a name asked onto the tunnel is left to the default domain's
+/// wildcard, with no record of its own: it's one level under the default
+/// domain (`under`), new to the tunnel (no `tunnel` on the domain yet and
+/// no record row), and nothing at Cloudflare answers for that exact name
+/// (`found`: the records on it). A record there, Pyo's or anyone's, would
+/// answer ahead of the wildcard, so the name takes the switch instead,
+/// which replaces Pyo's own and asks before anyone else's. A name already
+/// on the tunnel takes the switch too: someone asked for its own record.
+pub(crate) fn left_to_wildcard(under: bool, tunnel: bool, has_row: bool, host: &str, found: &[tunnel::Kept]) -> bool {
+    under
+        && !tunnel
+        && !has_row
+        && !found
+            .iter()
+            .any(|k| matches!(k.kind.as_str(), "A" | "AAAA" | "CNAME") && super::same_name(&k.name, host))
+}
+
 /// What Switch back does for a domain.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Back {
@@ -492,6 +509,10 @@ pub async fn set_domain(
     let Some((_, account_id, default_domain)) = tunnel_row.filter(|(st, _, _)| st != "removing") else {
         return Err(bad("This cluster has no Cloudflare Tunnel. Pick Cloudflare Tunnel under the cluster's Traffic first."));
     };
+    // One level under the tunnel's default domain: its wildcard covers it.
+    let under = default_domain
+        .as_deref()
+        .is_some_and(|dd| super::tunnel_loop::under_default(&host, dd));
     let status = row.as_ref().map(|r| r.0.as_str()).unwrap_or("");
     let via = row.as_ref().map(|r| r.1.as_str()).unwrap_or("direct");
     if on {
@@ -505,6 +526,31 @@ pub async fn set_domain(
         };
         if via == "tunnel" && status == "created" {
             return Ok(json!({ "ok": true, "status": "active" }));
+        }
+        // A new name under the default domain: the wildcard record has it,
+        // so it needs no record of its own, whoever asks (dashboard, CLI,
+        // MCP, API). Only when Cloudflare says nothing else answers for
+        // the name. When Cloudflare can't be asked, the switch below finds
+        // out.
+        if under && row.is_none() && !d["tunnel"].is_string() {
+            use tunnel::TunnelApi;
+            let found = super::Http::new(&a.token)?.records_kept(&zone.id, &host).await;
+            if found.is_ok_and(|f| left_to_wildcard(under, false, false, &host, &f)) {
+                set_tunnel(tx, service_id, domain_id, Some(pyo_proto::TUNNEL_ON)).await?;
+                sync(tx, service_id, wake).await?;
+                log_activity(
+                    tx,
+                    &team_id,
+                    &user.name,
+                    "domain.tunnel",
+                    "info",
+                    &format!("{host} goes through the Cloudflare Tunnel, under its default domain"),
+                    json!({ "kind": "service", "id": service_id, "label": host }),
+                    json!({ "serviceId": service_id }),
+                )
+                .await?;
+                return Ok(json!({ "ok": true, "status": "active" }));
+            }
         }
         // Already only through the tunnel: it stays gated while its own
         // record is made, and the agent has nothing new to apply.
@@ -528,9 +574,6 @@ pub async fn set_domain(
     // wildcard whenever it has no record of its own, so moving it back
     // would last until the loop's next pass: refused, unless a record it
     // replaced comes back (that one answers ahead of the wildcard).
-    let under = default_domain
-        .as_deref()
-        .is_some_and(|dd| super::tunnel_loop::under_default(&host, dd));
     let plan = back_plan(
         under,
         row.as_ref().map(|r| (r.1.as_str(), r.0.as_str())),
@@ -774,6 +817,36 @@ mod tests {
         assert_eq!(switch_state(Some("switching")), Some("switching"));
         // Under the wildcard, or switched before: never back to both paths.
         assert_eq!(switch_state(Some("on")), None);
+    }
+
+    #[test]
+    fn a_new_name_under_the_default_domain_gets_no_record_of_its_own() {
+        let kept = |kind: &str, name: &str| tunnel::Kept {
+            id: "r1".into(),
+            kind: kind.into(),
+            name: name.into(),
+            content: "203.0.113.7".into(),
+            proxied: false,
+            ttl: 1,
+            comment: None,
+        };
+        let host = "web-shop.example.com";
+        // Nothing on the name: the wildcard has it.
+        assert!(left_to_wildcard(true, false, false, host, &[]));
+        // Records that don't answer for a website, or for another name, don't matter.
+        assert!(left_to_wildcard(true, false, false, host, &[kept("TXT", host), kept("MX", host)]));
+        assert!(left_to_wildcard(true, false, false, host, &[kept("A", "other.example.com")]));
+        // A record on that exact name answers ahead of the wildcard: the
+        // switch takes it (and stops at "conflict" for someone else's).
+        for kind in ["A", "AAAA", "CNAME"] {
+            assert!(!left_to_wildcard(true, false, false, host, &[kept(kind, "Web-Shop.example.com.")]), "{kind}");
+        }
+        // Outside the default domain: always its own record.
+        assert!(!left_to_wildcard(false, false, false, "blog.other.org", &[]));
+        // Already on the tunnel, or with a record row: someone asked for
+        // its own record, so it gets one (and stays gated meanwhile).
+        assert!(!left_to_wildcard(true, true, false, host, &[]));
+        assert!(!left_to_wildcard(true, false, true, host, &[]));
     }
 
     #[test]
