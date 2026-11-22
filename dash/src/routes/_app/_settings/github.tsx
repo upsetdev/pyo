@@ -10,6 +10,7 @@ export const Route = createFileRoute("/_app/_settings/github")({
   component: () => (
     <SettingsSection description="The GitHub App for every team. Each team connects its own accounts in Integrations.">
       <ManagedOr
+        forAdmin
         title="GitHub is managed for you"
         description="Connect repositories when you deploy."
       >

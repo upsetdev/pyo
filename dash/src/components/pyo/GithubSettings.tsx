@@ -1,6 +1,7 @@
 import { ArrowSquareOutIcon, WarningIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { BrandMark, GITHUB_LOGO } from "~/components/pyo/common";
+import { useHosted } from "~/components/pyo/Managed";
 import { Button, buttonClass } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Field, Input } from "~/components/ui/Field";
@@ -224,9 +225,13 @@ const publicHttps = (url: string) => {
   );
 };
 
-/** Create the GitHub App: the dashboard's address, and an organization. */
+/**
+ * Create the GitHub App: the dashboard's address, and an organization. A
+ * hosted Pyo has one public address, which the API uses, so it isn't asked.
+ */
 export function GithubAppSetup() {
   const s = usePyo();
+  const hosted = useHosted();
   const [publicUrl, setPublicUrl] = useState(
     s.email?.publicUrl ??
       (typeof window === "undefined" ? "" : window.location.origin),
@@ -258,23 +263,25 @@ export function GithubAppSetup() {
       <p className="text-[13px] text-muted-foreground">
         Create the GitHub App once. Then each team connects its accounts.
       </p>
-      <Field
-        label="Dashboard URL"
-        hint={
-          webhook
-            ? "GitHub sends each push right away."
-            : "Not public: Pyo checks for new commits every minute."
-        }
-      >
-        {(p) => (
-          <Input
-            {...p}
-            mono
-            value={publicUrl}
-            onChange={(e) => setPublicUrl(e.target.value)}
-          />
-        )}
-      </Field>
+      {hosted ? null : (
+        <Field
+          label="Dashboard URL"
+          hint={
+            webhook
+              ? "GitHub sends each push right away."
+              : "Not public: Pyo checks for new commits every minute."
+          }
+        >
+          {(p) => (
+            <Input
+              {...p}
+              mono
+              value={publicUrl}
+              onChange={(e) => setPublicUrl(e.target.value)}
+            />
+          )}
+        </Field>
+      )}
       <Field label="Organization" optional hint="Instead of your account.">
         {(p) => (
           <Input
