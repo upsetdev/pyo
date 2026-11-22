@@ -67,6 +67,9 @@ and the docs). None has been sent yet.
    the newest one taken at or before `retentionDays` ago, which a restore
    to any moment in that window still needs. A failure to delete is logged
    and doesn't fail the backup. `Bucket` gains `Delete` (S3, GCS, Azure).
+5. **`0005` golang.org/x/net 0.62.0.** A dependency update for
+   CVE-2026-78661 (`go get golang.org/x/net@v0.62.0`, `go mod tidy`): only
+   `go.mod` and `go.sum` change. Dropped once upstream's tag has it.
 
 ## Moving to a new upstream tag
 
