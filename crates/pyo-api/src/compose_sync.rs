@@ -406,7 +406,7 @@ pub fn merge(
             let from = port_words(&exposure, o["publicPort"].as_u64());
             let to = port_words(want_exposure, p.public_port.map(u64::from));
             match (exposure.as_str(), want_exposure) {
-                (a, "loadbalancer") if a == "loadbalancer" => {
+                ("loadbalancer", "loadbalancer") => {
                     if let Some(pp) = p.public_port
                         && o["publicPort"].as_u64() != Some(u64::from(pp))
                     {
