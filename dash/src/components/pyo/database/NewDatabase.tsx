@@ -92,8 +92,11 @@ export function useDatabaseDraft(engine: Engine, init?: { name: string; clusterI
   const [replicas, setReplicas] = useState(2);
   const [pooler, setPooler] = useState(true);
   const [rest, setRest] = useState(false);
+  // The database this form just made. Once it's in the store it mustn't
+  // read as taking its own name while the page moves on.
+  const [made, setMade] = useState<string>();
   const cluster = clusterId || ready[0]?.id || "";
-  const nameError = name ? databaseNameError(engine, name, s.databases.filter((d) => d.teamId === s.currentTeamId)) : "Enter a name.";
+  const nameError = name ? databaseNameError(engine, name, s.databases.filter((d) => d.teamId === s.currentTeamId && d.id !== made)) : "Enter a name.";
   const custom = size === "custom";
   const spec = custom ? { cpu, mem, storage } : SIZE_SPECS[size];
   const sizeError = custom ? customError(engine, cpu, mem) || (storage >= 1 && storage <= 1000 ? "" : "Storage is 1 to 1000 GiB.") : "";
@@ -121,6 +124,7 @@ export function useDatabaseDraft(engine: Engine, init?: { name: string; clusterI
     rest,
     setRest,
     nameError,
+    created: setMade,
     custom,
     spec,
     sizeError,
@@ -231,8 +235,12 @@ function NewDatabase({ engine }: { engine: Engine }) {
     setSaving(true);
     setError("");
     const r = await api.createDatabase(f.fields());
-    setSaving(false);
-    if ("error" in r) return setError(r.error);
+    if ("error" in r) {
+      setSaving(false);
+      return setError(r.error);
+    }
+    // Create stays off while the page moves on.
+    f.created(r.data.id);
     toast({ title: `Creating ${f.name}`, description: "It's ready in a minute or two." });
     void navigate({ href: teamPath(currentSlug(), databaseHref(engine, r.data.id)) });
   };

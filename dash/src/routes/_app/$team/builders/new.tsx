@@ -89,9 +89,13 @@ function AddBuilder() {
   const [server, setServer] = useState("");
   const [saving, setSaving] = useState(false);
   const [touched, setTouched] = useState(false);
+  // The builder Add just made: it doesn't take its own name.
+  const [made, setMade] = useState<string>();
   const nameError = !DNS_LABEL.test(name)
     ? "Lowercase letters, digits and dashes."
-    : buildersIn(s).some((b) => b.name === name && b.id !== draftId)
+    : buildersIn(s).some(
+          (b) => b.name === name && b.id !== draftId && b.id !== made,
+        )
       ? "A builder with this name exists."
       : "";
   const free = servers.filter((x) => !x.builder);
@@ -159,8 +163,9 @@ function AddBuilder() {
     setSaving(true);
     const [clusterId, targetNode] = target.split("|");
     const r = await api.createBuilder({ name, kind, clusterId, server: targetNode });
-    setSaving(false);
-    if (!r) return;
+    if (!r) return setSaving(false);
+    // Add stays off while the page moves on.
+    setMade(r.id);
     toast({ title: `Adding ${name}` });
     void navigate({
       to: "/$team/builders/$builderId",

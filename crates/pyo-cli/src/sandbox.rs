@@ -214,7 +214,7 @@ pub enum ServersCommand {
         /// A location, e.g. fsn1 (see pyo server types).
         #[arg(long)]
         location: String,
-        /// A server type, e.g. cx22 (see pyo server types).
+        /// A server type, e.g. cx23 (see pyo server types).
         #[arg(long = "type")]
         server_type: String,
         /// Serve sandbox ports at <port>-<sandbox>.DOMAIN. Point *.DOMAIN at the server.

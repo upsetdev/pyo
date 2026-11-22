@@ -129,14 +129,8 @@ pub fn error_of(status: u16, body: &Value) -> CloudError {
         (_, "uniqueness_error") => CloudError::NameTaken,
         (429, _) | (_, "rate_limit_exceeded") => CloudError::RateLimited,
         (404, _) | (_, "not_found") => CloudError::NotFound,
-        _ => CloudError::Other {
-            status,
-            message: if message.is_empty() {
-                format!("status {status}")
-            } else {
-                message
-            },
-        },
+        (410, _) | (_, "deprecated_api_endpoint") => CloudError::Removed(message),
+        _ => CloudError::Other { status, message },
     }
 }
 
@@ -207,23 +201,6 @@ impl Provider for Hetzner {
     async fn catalog(&self) -> Result<Catalog, CloudError> {
         let locations = self.locations().await?;
         let types = self.all("/server_types", "server_types").await?;
-        // Which types each datacenter can make now.
-        let mut available: BTreeMap<u64, Vec<String>> = BTreeMap::new();
-        for dc in self.all("/datacenters", "datacenters").await? {
-            let loc = s(&dc["location"]["name"]);
-            for id in dc["server_types"]["available"]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                if let Some(id) = id.as_u64() {
-                    let l = available.entry(id).or_default();
-                    if !l.contains(&loc) {
-                        l.push(loc.clone());
-                    }
-                }
-            }
-        }
         // The IPv4 address each server gets costs extra.
         let pricing = self.call(Method::GET, "/pricing", None).await?;
         let currency = pricing["pricing"]["currency"]
@@ -247,11 +224,30 @@ impl Provider for Hetzner {
         }
         let mut server_types: Vec<ServerType> = types
             .iter()
-            .filter(|t| t["deprecated"] != true && t["deprecation"].is_null())
-            .map(|t| {
-                let id = t["id"].as_u64().unwrap_or(0);
+            .filter_map(|t| {
+                // Each type lists the locations that sell it. A location
+                // where Hetzner is phasing the type out has a `deprecation`
+                // and is left out, the same as a type phased out everywhere.
+                // `available` false means sold out for now.
+                let sold: Vec<(String, bool)> = t["locations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|l| l["deprecation"].is_null())
+                    .map(|l| (s(&l["name"]), l["available"] == true))
+                    .filter(|(name, _)| !name.is_empty())
+                    .collect();
+                if sold.is_empty() {
+                    return None;
+                }
+                let mut available: Vec<String> = sold
+                    .iter()
+                    .filter(|(_, now)| *now)
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                available.sort();
                 let architecture = s(&t["architecture"]);
-                ServerType {
+                Some(ServerType {
                     name: s(&t["name"]),
                     description: s(&t["description"]),
                     cores: t["cores"].as_u64().unwrap_or(0) as u32,
@@ -266,13 +262,16 @@ impl Provider for Hetzner {
                         .flatten()
                         .filter_map(|p| {
                             let loc = s(&p["location"]);
+                            if !sold.iter().any(|(name, _)| *name == loc) {
+                                return None;
+                            }
                             let m = price(&p["price_monthly"]["net"])?;
                             let ip = ipv4.get(&loc).copied().unwrap_or(0.0);
                             Some((loc, ((m + ip) * 100.0).round() / 100.0))
                         })
                         .collect(),
-                    available: available.get(&id).cloned().unwrap_or_default(),
-                }
+                    available,
+                })
             })
             .collect();
         server_types.sort_by(|a, b| {
@@ -442,25 +441,39 @@ pub mod mock {
                     { "id": 2, "name": "ash", "city": "Ashburn, VA", "country": "US", "network_zone": "us-east" },
                 ], "meta": page_one }),
                 ),
+                // The shape since 2026-11-02: availability and deprecation
+                // per location, and no `deprecated` field.
                 ("GET", "/server_types") => (
                     200,
                     json!({ "server_types": [
-                    { "id": 22, "name": "cx22", "description": "CX22", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "architecture": "x86", "deprecated": false, "deprecation": null,
+                    { "id": 104, "name": "cx23", "description": "CX23", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "category": "Cost-Optimized", "architecture": "x86", "storage_type": "local", "deprecation": null,
+                      "locations": [
+                        { "id": 1, "name": "fsn1", "deprecation": null, "recommended": true, "available": true },
+                        { "id": 2, "name": "ash", "deprecation": null, "recommended": false, "available": false } ],
                       "prices": [
-                        { "location": "fsn1", "price_monthly": { "net": "3.7900000000", "gross": "4.5101000000" } },
-                        { "location": "ash", "price_monthly": { "net": "4.9900000000", "gross": "4.9900000000" } } ] },
-                    { "id": 45, "name": "cax11", "description": "CAX11", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "architecture": "arm", "deprecated": false, "deprecation": null,
-                      "prices": [ { "location": "fsn1", "price_monthly": { "net": "3.2900000000", "gross": "3.9151000000" } } ] },
-                    { "id": 1, "name": "cx11", "description": "old", "cores": 1, "memory": 2.0, "disk": 20, "cpu_type": "shared", "architecture": "x86", "deprecated": true,
-                      "prices": [ { "location": "fsn1", "price_monthly": { "net": "3.0000000000", "gross": "3.5700000000" } } ] },
+                        { "location": "fsn1", "price_hourly": { "net": "0.0061000000", "gross": "0.0072590000" }, "price_monthly": { "net": "3.7900000000", "gross": "4.5101000000" }, "included_traffic": 21990232555520i64, "price_per_tb_traffic": { "net": "1.0000000000", "gross": "1.1900000000" } },
+                        { "location": "ash", "price_hourly": { "net": "0.0080000000", "gross": "0.0080000000" }, "price_monthly": { "net": "4.9900000000", "gross": "4.9900000000" }, "included_traffic": 1099511627776i64, "price_per_tb_traffic": { "net": "1.0000000000", "gross": "1.0000000000" } } ] },
+                    { "id": 45, "name": "cax11", "description": "CAX11", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "category": "Cost-Optimized", "architecture": "arm", "storage_type": "local", "deprecation": null,
+                      "locations": [ { "id": 1, "name": "fsn1", "deprecation": null, "recommended": false, "available": true } ],
+                      "prices": [ { "location": "fsn1", "price_hourly": { "net": "0.0053000000", "gross": "0.0063070000" }, "price_monthly": { "net": "3.2900000000", "gross": "3.9151000000" }, "included_traffic": 21990232555520i64, "price_per_tb_traffic": { "net": "1.0000000000", "gross": "1.1900000000" } } ] },
+                    { "id": 108, "name": "cpx22", "description": "CPX22", "cores": 2, "memory": 4.0, "disk": 80, "cpu_type": "shared", "category": "Regular Purpose", "architecture": "x86", "storage_type": "local", "deprecation": null,
+                      "locations": [
+                        { "id": 1, "name": "fsn1", "deprecation": { "announced": "2025-10-16T00:00:00Z", "unavailable_after": "2027-01-01T00:00:00Z" }, "recommended": false, "available": true },
+                        { "id": 2, "name": "ash", "deprecation": null, "recommended": true, "available": true } ],
+                      "prices": [
+                        { "location": "fsn1", "price_hourly": { "net": "0.0100000000", "gross": "0.0119000000" }, "price_monthly": { "net": "6.4900000000", "gross": "7.7231000000" }, "included_traffic": 21990232555520i64, "price_per_tb_traffic": { "net": "1.0000000000", "gross": "1.1900000000" } },
+                        { "location": "ash", "price_hourly": { "net": "0.0120000000", "gross": "0.0120000000" }, "price_monthly": { "net": "7.4900000000", "gross": "7.4900000000" }, "included_traffic": 1099511627776i64, "price_per_tb_traffic": { "net": "1.0000000000", "gross": "1.0000000000" } } ] },
+                    { "id": 22, "name": "cx22", "description": "CX22", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "category": "Cost-Optimized", "architecture": "x86", "storage_type": "local",
+                      "deprecation": { "announced": "2025-10-16T00:00:00Z", "unavailable_after": "2026-12-31T00:00:00Z" },
+                      "locations": [ { "id": 1, "name": "fsn1", "deprecation": { "announced": "2025-10-16T00:00:00Z", "unavailable_after": "2026-12-31T00:00:00Z" }, "recommended": false, "available": true } ],
+                      "prices": [ { "location": "fsn1", "price_hourly": { "net": "0.0050000000", "gross": "0.0059500000" }, "price_monthly": { "net": "3.0000000000", "gross": "3.5700000000" }, "included_traffic": 21990232555520i64, "price_per_tb_traffic": { "net": "1.0000000000", "gross": "1.1900000000" } } ] },
                 ], "meta": page_one }),
                 ),
-                ("GET", "/datacenters") => (
-                    200,
-                    json!({ "datacenters": [
-                    { "name": "fsn1-dc14", "location": { "name": "fsn1" }, "server_types": { "supported": [22, 45, 1], "available": [22, 45] } },
-                    { "name": "ash-dc1", "location": { "name": "ash" }, "server_types": { "supported": [22], "available": [] } },
-                ], "meta": page_one }),
+                // Removed on 2026-10-01: Hetzner answers 410 Gone.
+                ("GET", r) if r.starts_with("/datacenters") => (
+                    410,
+                    json!({ "error": { "code": "deprecated_api_endpoint", "message": "API functionality was removed",
+                        "details": { "announcement": "https://docs.hetzner.cloud/changelog" } } }),
                 ),
                 ("GET", "/pricing") => (
                     200,
