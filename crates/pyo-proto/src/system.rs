@@ -414,6 +414,14 @@ pub fn waf_labels() -> Value {
     json!({ "app.kubernetes.io/name": WAF_NAME, "app.kubernetes.io/managed-by": "pyo" })
 }
 
+/// The priority of Pyo's pods that run on every server (the proxies, the
+/// WAF, the tailnet pods, Vector): Kubernetes' own for such pods. A server
+/// short of disk or memory never evicts them, and starts them all the same.
+/// Without it, a DaemonSet's pod evicted there is replaced at once, the
+/// replacement is refused, and so on: thousands of Failed pods an hour,
+/// which can stall the cluster's datastore.
+pub const SERVER_CRITICAL: &str = "system-node-critical";
+
 /// Which servers run a proxy: every one but build-only servers (labelled
 /// [`crate::BUILDER_NODE_LABEL`]; GPU servers too). The WAF's processor
 /// runs on exactly the same ones.
@@ -445,6 +453,7 @@ pub fn waf_daemonset(image: &str, geoip_image: &str) -> Value {
                     "serviceAccountName": WAF_NAME,
                     "automountServiceAccountToken": true,
                     "securityContext": { "runAsNonRoot": true, "runAsUser": 65532, "runAsGroup": 65532, "seccompProfile": { "type": "RuntimeDefault" } },
+                    "priorityClassName": SERVER_CRITICAL,
                     "affinity": gateway_affinity(),
                     "tolerations": [{ "key": crate::GPU_RESOURCE, "operator": "Exists", "effect": "NoSchedule" }],
                     "containers": [{
@@ -664,6 +673,7 @@ pub fn envoy_proxy(geoip_image: &str, public: bool) -> Value {
                         // host ports, so two fit on one server.
                         "strategy": { "type": "RollingUpdate", "rollingUpdate": { "maxSurge": 1, "maxUnavailable": 0 } },
                         "pod": {
+                            "priorityClassName": SERVER_CRITICAL,
                             "affinity": gateway_affinity(),
                             "tolerations": [{ "key": crate::GPU_RESOURCE, "operator": "Exists", "effect": "NoSchedule" }],
                             "volumes": [{ "name": "geoip", "image": { "reference": geoip_image, "pullPolicy": "IfNotPresent" } }],
@@ -1093,6 +1103,7 @@ pub fn tailnet_daemonset(image: &str) -> Value {
                 "metadata": { "labels": labels },
                 "spec": {
                     "serviceAccountName": TAILNET_DAEMONSET,
+                    "priorityClassName": SERVER_CRITICAL,
                     "affinity": gateway_affinity(),
                     "tolerations": [{ "key": crate::GPU_RESOURCE, "operator": "Exists", "effect": "NoSchedule" }],
                     "containers": [{
@@ -1636,6 +1647,31 @@ mod tests {
             assert_eq!(kept, [80, 443, 2222, 5353]);
             assert!(TAILNET_PORTS.iter().all(|t| !kept.contains(t)));
         }
+    }
+
+    /// A server short of disk keeps its proxy, WAF and tailnet pod: the
+    /// kubelet neither evicts nor refuses them, so their DaemonSets never
+    /// replace them over and over.
+    #[test]
+    fn per_server_pods_are_critical() {
+        for public in [true, false] {
+            let p = envoy_proxy("g", public);
+            assert_eq!(
+                p["spec"]["provider"]["kubernetes"]["envoyDaemonSet"]["pod"]["priorityClassName"],
+                SERVER_CRITICAL
+            );
+        }
+        for ds in [waf_daemonset("w", "g"), tailnet_daemonset("a")] {
+            assert_eq!(ds["kind"], "DaemonSet");
+            assert_eq!(
+                ds["spec"]["template"]["spec"]["priorityClassName"],
+                SERVER_CRITICAL,
+                "{}",
+                ds["metadata"]["name"]
+            );
+        }
+        // Kubernetes' built-in class for pods every server needs.
+        assert_eq!(SERVER_CRITICAL, "system-node-critical");
     }
 
     /// An update never leaves a server without a proxy: the new one starts
