@@ -135,8 +135,8 @@ async fn mail_link(state: &AppState, cfg: &mail::EmailSettings, email: &str) -> 
     let token = new_link(&mut conn, &user)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-    let (subject, text, html) = mail::sign_in_link(&cfg.link(&link_path(&token)), LINK_MINUTES);
-    mail::send(state, cfg, email, &subject, text, html).await
+    let message = mail::sign_in_link(&cfg.link(&link_path(&token)), LINK_MINUTES, None);
+    mail::send(state, cfg, email, &message).await
 }
 
 #[derive(Deserialize)]

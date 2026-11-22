@@ -206,9 +206,9 @@ async fn mail_invite(
         return Ok(json!({ "ok": true, "emailed": false, "link": path }));
     };
     let link = cfg.link(&path);
-    let (subject, text, html) = mail::invite(&user.name, &team, role, &link, invite.is_none());
+    let message = mail::invite(&user.name, &team, role, &link, invite.is_none());
     Ok(
-        match mail::send(s, &cfg, email, &subject, text, html).await {
+        match mail::send(s, &cfg, email, &message).await {
             Ok(()) => json!({ "ok": true, "emailed": true, "link": link }),
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "invite email not sent; retrying in the background");
@@ -258,9 +258,8 @@ pub async fn send_invite_email(
         .as_deref()
         .map(crate::auth::invite_path)
         .unwrap_or_else(|| format!("/{slug}"));
-    let (subject, text, html) =
-        mail::invite(inviter, &team, role, &cfg.link(&path), invite.is_none());
-    mail::send(s, &cfg, email, &subject, text, html).await
+    let message = mail::invite(inviter, &team, role, &cfg.link(&path), invite.is_none());
+    mail::send(s, &cfg, email, &message).await
 }
 
 pub async fn require_role(
@@ -5453,8 +5452,7 @@ async fn apply(
             let cfg = mail::settings(&s.db)
                 .await?
                 .ok_or_else(|| ApiError::bad_request("Save the email settings first."))?;
-            let (subject, text, html) = mail::test(&cfg.link("/"));
-            mail::send(s, &cfg, &user.email, &subject, text, html)
+            mail::send(s, &cfg, &user.email, &mail::test(&cfg.link("/")))
                 .await
                 .map_err(|e| ApiError::bad_request(format!("Couldn't send: {}", smtp_error(&e))))?;
             Ok(json!({ "ok": true, "to": user.email }))
@@ -5598,9 +5596,16 @@ async fn apply(
             )
             .await?;
             if let Some(cfg) = mail::settings(&s.db).await? {
-                let (subject, text, html) =
-                    mail::sign_in_link(&cfg.link(&path), crate::recovery::LINK_MINUTES);
-                return match mail::send(s, &cfg, &email, &subject, text, html).await {
+                let team: String = sqlx::query_scalar("SELECT name FROM pyo.teams WHERE id = $1")
+                    .bind(&team_id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                let message = mail::sign_in_link(
+                    &cfg.link(&path),
+                    crate::recovery::LINK_MINUTES,
+                    Some((&user.name, &team)),
+                );
+                return match mail::send(s, &cfg, &email, &message).await {
                     Ok(()) => Ok(json!({ "ok": true, "emailed": true })),
                     Err(e) => Err(ApiError::bad_request(format!(
                         "The email to {email} didn't send ({}). Try again.",
