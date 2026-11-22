@@ -13,6 +13,7 @@ use super::*;
 
 const TOKEN: &str = "fake-token-0123456789abcdef";
 const MARK: &str = "Made by Pyo (abc123)";
+const INSTALL: &str = "abc123";
 const ZONE: &str = "023e105f4ecef8ad9ca31a8372d0c353";
 const ACCOUNT: &str = "699d98642c564d2e855e9661899b7252";
 
@@ -25,7 +26,7 @@ async fn fake() -> (FakeCf, Http) {
 #[tokio::test]
 async fn a_token_is_checked_over_http() {
     let (cf, http) = fake().await;
-    let zones = inspect(&http, MARK).await.unwrap();
+    let zones = inspect(&http, INSTALL).await.unwrap();
     assert_eq!(zones.len(), 1);
     assert_eq!(zones[0].account_id, ACCOUNT);
     assert_eq!(zones[0].account_name, format!("{ACCOUNT} Co"));
@@ -35,12 +36,49 @@ async fn a_token_is_checked_over_http() {
     assert!(cf.tunnels().iter().all(|t| !t["deleted_at"].is_null()));
     // Without tunnel permission in the account: DNS only there.
     cf.state.lock().unwrap().no_tunnels = vec![ACCOUNT.into()];
-    let zones = inspect(&http, MARK).await.unwrap();
+    let zones = inspect(&http, INSTALL).await.unwrap();
     assert!(!zones[0].tunnel_ready());
     assert_eq!(zones[0].tunnel.missing, [tunnel::TUNNEL_EDIT]);
     // A wrong token: refused, said plainly.
     let wrong = Http::at("another-token-0123456789", &cf.base);
-    assert!(matches!(inspect(&wrong, MARK).await, Err(CfError::Denied(_))));
+    assert!(matches!(inspect(&wrong, INSTALL).await, Err(CfError::Denied(_))));
+}
+
+#[tokio::test]
+async fn a_check_deletes_only_this_installations_old_probes() {
+    let (cf, http) = fake().await;
+    // Another installation's probe, someone's own tunnel, this
+    // installation's probe from a check that stopped halfway, and one from
+    // a check running right now.
+    cf.put_tunnel(ACCOUNT, "pyo-check-zzz999-a1b2c3", 60);
+    cf.put_tunnel(ACCOUNT, "pyo-check-mine", 60);
+    cf.put_tunnel(ACCOUNT, "pyo-check-abc123-a1b2c3", 60);
+    cf.put_tunnel(ACCOUNT, "pyo-check-abc123-d4e5f6", 0);
+    let zones = inspect(&http, INSTALL).await.unwrap();
+    assert!(zones[0].tunnel_ready(), "{zones:?}");
+    let gone = |name: &str| {
+        cf.tunnels()
+            .iter()
+            .any(|t| t["name"] == name && !t["deleted_at"].is_null())
+    };
+    assert!(!gone("pyo-check-zzz999-a1b2c3"));
+    assert!(!gone("pyo-check-mine"));
+    assert!(gone("pyo-check-abc123-a1b2c3"));
+    assert!(!gone("pyo-check-abc123-d4e5f6"));
+    // The check's own probe is named for this installation and is gone.
+    let ts = cf.tunnels();
+    assert_eq!(ts.len(), 5);
+    let own = ts[4]["name"].as_str().unwrap();
+    assert!(own.starts_with("pyo-check-abc123-") && own.len() == 23, "{own}");
+    assert!(!ts[4]["deleted_at"].is_null());
+    // It only ever listed its own probes.
+    assert!(
+        cf.calls()
+            .iter()
+            .filter(|c| c.starts_with("DELETE "))
+            .count()
+            == 3
+    );
 }
 
 #[tokio::test]

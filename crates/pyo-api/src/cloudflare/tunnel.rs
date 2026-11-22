@@ -20,9 +20,15 @@ pub const TUNNEL_EDIT: &str = "Cloudflare Tunnel:Edit";
 /// The permission an Origin CA certificate needs in the zone.
 pub const CERTS_EDIT: &str = "SSL and Certificates:Edit";
 
-/// What a probe tunnel is named: removed right after the check, and any
-/// left behind by a check that stopped halfway is removed by the next.
+/// What a probe tunnel's name starts with, before this installation's id
+/// ([`check_prefix`]). Removed right after the check, and one this
+/// installation left behind by a check that stopped halfway is removed by
+/// a later one.
 pub const CHECK_PREFIX: &str = "pyo-check-";
+
+/// How old a probe left behind must be before a check removes it, so two
+/// checks at once never remove each other's.
+pub const CHECK_STALE_SECS: i64 = 300;
 
 /// How long the Origin CA certificate is valid: 15 years, Cloudflare's
 /// longest (decision 2). Never renewed by age.
@@ -53,6 +59,8 @@ pub struct Tunnel {
     pub status: String,
     /// Deleted at Cloudflare (it stays listed for a while).
     pub deleted: bool,
+    /// When it was made, as Cloudflare says it (RFC 3339).
+    pub created_at: String,
     pub connections: Vec<Connection>,
 }
 
@@ -185,6 +193,7 @@ pub fn tunnel_from(v: &Value) -> Result<Tunnel, CfError> {
         name: s(v, "name"),
         status: s(v, "status"),
         deleted: v["deleted_at"].as_str().is_some_and(|d| !d.is_empty()),
+        created_at: s(v, "created_at"),
         connections: v["connections"]
             .as_array()
             .into_iter()
@@ -386,32 +395,56 @@ impl TunnelApi for Http {
 
 // ── Checking a token ───────────────────────────────────────────────────────
 
+/// What this installation's probe tunnels are named: `pyo-check-<install
+/// id>-`, then six random hex characters. The installation's id is the one
+/// in its tunnels' names and its records' comments, so a check never
+/// touches another installation's probes or someone's own tunnel.
+pub fn check_prefix(install_id: &str) -> String {
+    format!("{CHECK_PREFIX}{install_id}-")
+}
+
+/// A probe this installation left behind: its name is the prefix and six
+/// hex characters, and it was made more than a few minutes ago. One with a
+/// date Pyo can't read is left alone.
+fn left_behind(t: &Tunnel, prefix: &str, now: jiff::Timestamp) -> bool {
+    t.name
+        .strip_prefix(prefix)
+        .is_some_and(|r| r.len() == 6 && r.bytes().all(|b| b.is_ascii_hexdigit()))
+        && t.created_at
+            .parse::<jiff::Timestamp>()
+            .is_ok_and(|made| now.as_second() - made.as_second() > CHECK_STALE_SECS)
+}
+
 /// Whether the token may make tunnels in an account: it makes a probe
 /// tunnel and deletes it again (a token without Cloudflare Tunnel:Edit is
-/// refused the first step). Probes left behind are deleted first. The
-/// permission it lacks, or None.
+/// refused the first step). This installation's own probes left behind are
+/// deleted first. The permission it lacks, or None.
 pub(crate) async fn tunnel_missing<C: TunnelApi>(
     cf: &C,
     account: &str,
+    install_id: &str,
 ) -> Result<Option<String>, CfError> {
-    let left = match cf.tunnels_named(account, CHECK_PREFIX).await {
+    let prefix = check_prefix(install_id);
+    let left = match cf.tunnels_named(account, &prefix).await {
         Ok(t) => t,
         Err(CfError::Denied(_)) => return Ok(Some(TUNNEL_EDIT.into())),
         Err(e) => return Err(e),
     };
-    for t in left.iter().filter(|t| t.name.starts_with(CHECK_PREFIX)) {
+    let now = jiff::Timestamp::now();
+    for t in left.iter().filter(|t| left_behind(t, &prefix, now)) {
         let _ = cf.delete_tunnel(account, &t.id).await;
     }
     let mut b = [0u8; 3];
     rand::fill(&mut b);
     match cf
-        .create_tunnel(account, &format!("{CHECK_PREFIX}{}", hex::encode(b)))
+        .create_tunnel(account, &format!("{prefix}{}", hex::encode(b)))
         .await
     {
-        Ok(t) => {
-            cf.delete_tunnel(account, &t.id).await?;
-            Ok(None)
-        }
+        Ok(t) => match cf.delete_tunnel(account, &t.id).await {
+            // Already gone: nothing is left behind either way.
+            Ok(()) | Err(CfError::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        },
         Err(CfError::Denied(_)) => Ok(Some(TUNNEL_EDIT.into())),
         Err(e) => Err(e),
     }

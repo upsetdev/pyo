@@ -538,7 +538,7 @@ pinned, no redirects, outbound client with `Reach { private: false }`).
 |---|---|---|
 | Zones and their account | `GET /zones?per_page=50&page=n` (already called, now also reads `result[].account.{id,name}`) | Zone:Read |
 | Records (exists) | `GET/POST/PATCH/DELETE /zones/{zone}/dns_records[/{id}]` | DNS:Edit |
-| Tunnel permission check | `POST /accounts/{acct}/cfd_tunnel` `{ "name": "pyo-check-<6 hex>", "config_src": "cloudflare" }`, then `DELETE /accounts/{acct}/cfd_tunnel/{id}`. Leftovers (name prefix `pyo-check-`) are listed with `GET /accounts/{acct}/cfd_tunnel?name=…&is_deleted=false` and deleted. Once per account. | Cloudflare Tunnel:Edit |
+| Tunnel permission check | `POST /accounts/{acct}/cfd_tunnel` `{ "name": "pyo-check-<install id>-<6 hex>", "config_src": "cloudflare" }`, then `DELETE /accounts/{acct}/cfd_tunnel/{id}`. Leftovers are listed with `GET /accounts/{acct}/cfd_tunnel?name=pyo-check-<install id>-&is_deleted=false`, and only this installation's own (that prefix and six hex characters) made more than 5 minutes ago (`created_at`) are deleted. Another installation's probes and anyone's own `pyo-check-…` tunnel are never touched. Once per account. | Cloudflare Tunnel:Edit |
 | Origin CA permission check | `GET /certificates?zone_id={zone}` | SSL and Certificates:Read (Edit is required, see below) |
 | Create tunnel | `POST /accounts/{acct}/cfd_tunnel` `{ "name": "pyo-<cluster>-<install id>", "config_src": "cloudflare" }` | Cloudflare Tunnel:Edit |
 | Read tunnel | `GET /accounts/{acct}/cfd_tunnel/{tunnel}` (status: inactive, degraded, healthy, down; `deleted_at`) | Cloudflare Tunnel:Read |
@@ -1265,8 +1265,9 @@ sentences, no semicolons, no dash-joined clauses.
 ### 17.1 Unit
 
 - **pyo-api `cloudflare/tests.rs`** (fake `Cloudflare`):
-  - zones read their account, tunnel check per account, leftover
-    `pyo-check-` tunnels deleted, Origin CA read check per zone,
+  - zones read their account, tunnel check per account, only this
+    installation's old `pyo-check-<install id>-` tunnels deleted, Origin
+    CA read check per zone,
     `problems()` lines.
   - `tunnel::ingress()`: order, wildcard last, catch-all, `matchSNItoHost`,
     hash stable across runs.

@@ -116,6 +116,15 @@ impl FakeCf {
             .collect()
     }
 
+    /// Add a tunnel that's already in the account, made `age_mins` ago.
+    pub fn put_tunnel(&self, account: &str, name: &str, age_mins: i64) {
+        let mut a = self.state.lock().unwrap();
+        a.next += 1;
+        let made = jiff::Timestamp::now() - jiff::SignedDuration::from_mins(age_mins);
+        let t = json!({ "id": uuid(a.next), "name": name, "status": "inactive", "created_at": made.to_string(), "deleted_at": null, "connections": [], "secret": "first" });
+        a.tunnels.push((account.into(), t));
+    }
+
     /// Add a record someone made by hand.
     pub fn put_record(&self, zone: &str, r: Value) {
         self.state.lock().unwrap().records.push((zone.into(), r));
@@ -231,7 +240,7 @@ async fn handle(
                 .collect::<Vec<_>>()))
         }
         ("POST", ["accounts", account, "cfd_tunnel"]) => {
-            let t = json!({ "id": uuid(n), "name": body["name"], "status": "inactive", "deleted_at": null, "connections": [], "secret": "first" });
+            let t = json!({ "id": uuid(n), "name": body["name"], "status": "inactive", "created_at": jiff::Timestamp::now().to_string(), "deleted_at": null, "connections": [], "secret": "first" });
             a.tunnels.push((account.to_string(), t.clone()));
             ok(t)
         }

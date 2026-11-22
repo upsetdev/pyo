@@ -2945,7 +2945,7 @@ pub(crate) enum Op {
     },
     /// Revoke a Pyo registry token. Team owners and admins.
     RevokeRegistryToken { id: String },
-    /// Connect the team's Cloudflare account, or replace its token. The token needs Zone:Read and DNS:Edit on the zones Pyo may use, and for Cloudflare Tunnel also Cloudflare Tunnel:Edit and SSL and Certificates:Edit. Pyo lists its zones and their accounts, checks it can edit DNS in each (it makes and deletes a TXT record `_pyo-check.<zone>`), checks the tunnel permissions (it makes and deletes a tunnel `pyo-check-<hex>` once per account, and reads each zone's Origin CA certificates), then keeps it encrypted. It's never shown again. Each zone's `tunnel` says whether it can use Cloudflare Tunnel. Team owners and admins.
+    /// Connect the team's Cloudflare account, or replace its token. The token needs Zone:Read and DNS:Edit on the zones Pyo may use, and for Cloudflare Tunnel also Cloudflare Tunnel:Edit and SSL and Certificates:Edit. Pyo lists its zones and their accounts, checks it can edit DNS in each (it makes and deletes a TXT record `_pyo-check.<zone>`), checks the tunnel permissions (it makes and deletes a tunnel `pyo-check-<installation id>-<hex>` once per account, and reads each zone's Origin CA certificates), then keeps it encrypted. It's never shown again. Each zone's `tunnel` says whether it can use Cloudflare Tunnel. Team owners and admins.
     ConnectCloudflare { team_id: String, token: String },
     /// Check the saved Cloudflare token again: the zones it covers now, whether each can use Cloudflare Tunnel, and what it's missing (`problems`). Team owners and admins.
     TestCloudflare { team_id: String },
