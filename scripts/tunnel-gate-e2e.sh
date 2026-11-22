@@ -152,7 +152,7 @@ $(rbac no)
 EOF
 
 docker network create --subnet "$SUBNET" "$NET" >/dev/null
-docker run -d --name "$NET-envoy" --network "$NET" --ip "$ENVOY_IP" \
+docker run -d --memory 512m --name "$NET-envoy" --network "$NET" --ip "$ENVOY_IP" \
   -v "$DIR/envoy.yaml:/etc/envoy/envoy.yaml:ro" "$ENVOY_IMAGE" \
   -c /etc/envoy/envoy.yaml --log-level warn >/dev/null
 
@@ -160,7 +160,7 @@ docker run -d --name "$NET-envoy" --network "$NET" --ip "$ENVOY_IP" \
 ask() {
   local from="$1" host="$2"
   shift 2
-  docker run --rm --network "$NET" --ip "$from" "$CURL_IMAGE" -s -o /dev/null \
+  docker run --rm --memory 128m --network "$NET" --ip "$from" "$CURL_IMAGE" -s -o /dev/null \
     -w '%{http_code} %header{x-visitor}%header{location}' -H "Host: $host" "$@" "http://$ENVOY_IP:10443/"
 }
 
