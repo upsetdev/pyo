@@ -259,10 +259,12 @@ check_system() {
 
 installed() { command -v k3s >/dev/null && kc -n "$NS" get deployment pyo >/dev/null 2>&1; }
 
-# Ports Pyo takes. With k3s already running, 80 and 443 are Pyo Gateway's.
+# Ports Pyo takes. 80 and 443 in use (k3s's Traefik, nginx…) don't stop
+# it: Pyo goes on with public traffic off, so the sites here keep working
+# (connect.sh tells Pyo so), and WEB_PORTS says they're taken.
 check_ports() {
   local ports=(8000 5005 5006)
-  command -v k3s >/dev/null || ports+=(80 443 6443)
+  command -v k3s >/dev/null || ports+=(6443)
   local p busy=""
   for p in "${ports[@]}"; do
     if ss -ltnH "( sport = :$p )" 2>/dev/null | grep -q .; then busy="$busy $p"; fi
@@ -270,9 +272,99 @@ check_ports() {
   if [ -n "$busy" ]; then
     echo "These ports are in use:$busy" >&2
     ss -ltnpH 2>/dev/null | grep -E ":($(echo "$busy" | xargs | tr ' ' '|'))\b" >&2 || true
-    fail "Pyo needs them (80/443 for your services, 8000 for the dashboard, 5005 and 5006 for its registry, 6443 for k3s). Stop what holds them and run this again."
+    fail "Pyo needs them (8000 for the dashboard, 5005 and 5006 for its registry, 6443 for k3s). Stop what holds them and run this again."
+  fi
+  if web_ports_busy; then
+    dot_line yellow "$(web_ports_line)"
   fi
 }
+
+# >>> pyo:web-ports (the same in connect.sh and deploy/install.sh)
+# What already answers on ports 80 and 443 here, which Pyo Gateway would
+# otherwise take over: k3s's Traefik, another load balancer or host port in
+# k3s (ingress-nginx and the like), or a program on this machine (nginx,
+# Apache, Caddy). Pyo's own gateway doesn't count, nor a program only this
+# machine or the tailnet reaches. Sets WEB_PORTS ("80 443", "80" or "443")
+# and WEB_BY (what holds them, when that's known). Fails when both are free.
+web_ports_busy() {
+  local ns name rest addr proc p by80="" by443=""
+  WEB_PORTS="" WEB_BY=""
+  if command -v k3s >/dev/null && k3s kubectl get --raw=/readyz --request-timeout=10s >/dev/null 2>&1; then
+    # Load balancers on 80 or 443: ServiceLB publishes them on every server.
+    while read -r ns name rest; do
+      [ -n "$name" ] && [ "$ns" != pyo-gateway ] || continue
+      for p in $rest; do web_port_taken "$p" "$(web_port_user "$ns" "$name")"; done
+    done < <(k3s kubectl get services -A -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace} {.metadata.name}{range .spec.ports[*]} {.port}{end}{"\n"}{end}' 2>/dev/null || true)
+    # Pods with host port 80 or 443 (not ServiceLB's own: counted above).
+    while read -r ns name rest; do
+      [ -n "$name" ] || continue
+      case "$ns/$name" in pyo-gateway/* | */svclb-*) continue ;; esac
+      for p in $rest; do web_port_taken "$p" "$(web_port_user "$ns" "$name")"; done
+    done < <(k3s kubectl get pods -A --field-selector=status.phase!=Succeeded,status.phase!=Failed -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name}{range .spec.containers[*].ports[*]} {.hostPort}{end}{"\n"}{end}' 2>/dev/null || true)
+    # k3s's Traefik on its way: its chart is there, its Service not yet.
+    if k3s kubectl -n kube-system get helmcharts.helm.cattle.io traefik >/dev/null 2>&1 &&
+      ! k3s kubectl -n kube-system get service traefik >/dev/null 2>&1; then
+      web_port_taken 80 Traefik
+      web_port_taken 443 Traefik
+    fi
+  fi
+  # Programs listening here on an address others reach: not loopback, not
+  # the tailnet.
+  while read -r addr proc; do
+    [ -n "$addr" ] || continue
+    p=${addr##*:} addr=${addr%:*}
+    case "${addr%%%*}" in
+      127.* | '[::1]' | '[::ffff:127.'*) continue ;;
+      100.6[4-9].* | 100.[7-9][0-9].* | 100.1[01][0-9].* | 100.12[0-7].* | '[fd7a:115c:a1e0:'*) continue ;;
+    esac
+    web_port_taken "$p" "$(web_program "$proc")"
+  done < <(ss -Hltnp '( sport = :80 or sport = :443 )' 2>/dev/null | awk '{ print $4, $NF }' || true)
+  [ -z "$by80" ] || WEB_PORTS=80
+  [ -z "$by443" ] || WEB_PORTS="${WEB_PORTS:+$WEB_PORTS }443"
+  WEB_BY=${by80:-$by443}
+  [ "$WEB_BY" != "?" ] || WEB_BY=""
+  [ -n "$WEB_PORTS" ]
+}
+# web_port_taken PORT NAME: the first user of port 80 or 443 ("?": unknown).
+web_port_taken() {
+  case "$1" in
+    80) [ -n "$by80" ] || by80=${2:-?} ;;
+    443) [ -n "$by443" ] || by443=${2:-?} ;;
+  esac
+}
+# web_port_user NAMESPACE NAME: what a Service or pod in k3s is, by name.
+web_port_user() {
+  case "$1/$2" in
+    */*traefik*) echo Traefik ;;
+    ingress-nginx/* | */*ingress-nginx*) echo ingress-nginx ;;
+    */*nginx*) echo nginx ;;
+    */*caddy*) echo Caddy ;;
+    */*haproxy*) echo HAProxy ;;
+    *) echo "$2" ;;
+  esac
+}
+# web_program 'users:(("nginx",pid=1,fd=6))': the program, as ss -p shows it.
+web_program() {
+  local n
+  n=$(sed -n 's/^users:(("\([^"]*\)".*/\1/p' <<<"$1")
+  case "$n" in
+    nginx*) echo nginx ;;
+    apache2 | httpd) echo Apache ;;
+    caddy) echo Caddy ;;
+    traefik) echo Traefik ;;
+    haproxy) echo HAProxy ;;
+    docker-proxy) echo Docker ;;
+    *) echo "$n" ;;
+  esac
+}
+# The line that says so, after web_ports_busy.
+web_ports_line() {
+  local what="Ports 80 and 443 are" by=""
+  case "$WEB_PORTS" in 80) what="Port 80 is" ;; 443) what="Port 443 is" ;; esac
+  [ -z "$WEB_BY" ] || by=" by $WEB_BY"
+  echo "$what in use$by. Public traffic stays off, so your sites keep working."
+}
+# <<< pyo:web-ports
 
 # AppArmor: Ubuntu with kernel 6.17+ and
 # kernel.apparmor_restrict_unprivileged_unconfined=1 stacks container
@@ -1920,7 +2012,8 @@ main() {
   quietly "Connecting this machine to Pyo…" /usr/local/lib/pyo/connect-this-machine.sh ||
     echo "Couldn't connect this machine to Pyo yet. Pyo tries again every minute."
   if [ -n "$fresh" ]; then
-    pyo_addresses 300 "Pyo $R_VERSION is installed"
+    # No HTTPS address on the public IP to wait for while 80 and 443 are taken.
+    pyo_addresses "$([ -n "${WEB_PORTS:-}" ] && echo 0 || echo 300)" "Pyo $R_VERSION is installed"
   else
     pyo_addresses 300 "Pyo is updated to $R_VERSION"
   fi

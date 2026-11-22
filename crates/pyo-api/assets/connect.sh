@@ -994,6 +994,93 @@ tailnet_hostport() {
 }
 # <<< pyo:tailnet-host
 
+# >>> pyo:web-ports (the same in connect.sh and deploy/install.sh)
+# What already answers on ports 80 and 443 here, which Pyo Gateway would
+# otherwise take over: k3s's Traefik, another load balancer or host port in
+# k3s (ingress-nginx and the like), or a program on this machine (nginx,
+# Apache, Caddy). Pyo's own gateway doesn't count, nor a program only this
+# machine or the tailnet reaches. Sets WEB_PORTS ("80 443", "80" or "443")
+# and WEB_BY (what holds them, when that's known). Fails when both are free.
+web_ports_busy() {
+  local ns name rest addr proc p by80="" by443=""
+  WEB_PORTS="" WEB_BY=""
+  if command -v k3s >/dev/null && k3s kubectl get --raw=/readyz --request-timeout=10s >/dev/null 2>&1; then
+    # Load balancers on 80 or 443: ServiceLB publishes them on every server.
+    while read -r ns name rest; do
+      [ -n "$name" ] && [ "$ns" != pyo-gateway ] || continue
+      for p in $rest; do web_port_taken "$p" "$(web_port_user "$ns" "$name")"; done
+    done < <(k3s kubectl get services -A -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace} {.metadata.name}{range .spec.ports[*]} {.port}{end}{"\n"}{end}' 2>/dev/null || true)
+    # Pods with host port 80 or 443 (not ServiceLB's own: counted above).
+    while read -r ns name rest; do
+      [ -n "$name" ] || continue
+      case "$ns/$name" in pyo-gateway/* | */svclb-*) continue ;; esac
+      for p in $rest; do web_port_taken "$p" "$(web_port_user "$ns" "$name")"; done
+    done < <(k3s kubectl get pods -A --field-selector=status.phase!=Succeeded,status.phase!=Failed -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name}{range .spec.containers[*].ports[*]} {.hostPort}{end}{"\n"}{end}' 2>/dev/null || true)
+    # k3s's Traefik on its way: its chart is there, its Service not yet.
+    if k3s kubectl -n kube-system get helmcharts.helm.cattle.io traefik >/dev/null 2>&1 &&
+      ! k3s kubectl -n kube-system get service traefik >/dev/null 2>&1; then
+      web_port_taken 80 Traefik
+      web_port_taken 443 Traefik
+    fi
+  fi
+  # Programs listening here on an address others reach: not loopback, not
+  # the tailnet.
+  while read -r addr proc; do
+    [ -n "$addr" ] || continue
+    p=${addr##*:} addr=${addr%:*}
+    case "${addr%%%*}" in
+      127.* | '[::1]' | '[::ffff:127.'*) continue ;;
+      100.6[4-9].* | 100.[7-9][0-9].* | 100.1[01][0-9].* | 100.12[0-7].* | '[fd7a:115c:a1e0:'*) continue ;;
+    esac
+    web_port_taken "$p" "$(web_program "$proc")"
+  done < <(ss -Hltnp '( sport = :80 or sport = :443 )' 2>/dev/null | awk '{ print $4, $NF }' || true)
+  [ -z "$by80" ] || WEB_PORTS=80
+  [ -z "$by443" ] || WEB_PORTS="${WEB_PORTS:+$WEB_PORTS }443"
+  WEB_BY=${by80:-$by443}
+  [ "$WEB_BY" != "?" ] || WEB_BY=""
+  [ -n "$WEB_PORTS" ]
+}
+# web_port_taken PORT NAME: the first user of port 80 or 443 ("?": unknown).
+web_port_taken() {
+  case "$1" in
+    80) [ -n "$by80" ] || by80=${2:-?} ;;
+    443) [ -n "$by443" ] || by443=${2:-?} ;;
+  esac
+}
+# web_port_user NAMESPACE NAME: what a Service or pod in k3s is, by name.
+web_port_user() {
+  case "$1/$2" in
+    */*traefik*) echo Traefik ;;
+    ingress-nginx/* | */*ingress-nginx*) echo ingress-nginx ;;
+    */*nginx*) echo nginx ;;
+    */*caddy*) echo Caddy ;;
+    */*haproxy*) echo HAProxy ;;
+    *) echo "$2" ;;
+  esac
+}
+# web_program 'users:(("nginx",pid=1,fd=6))': the program, as ss -p shows it.
+web_program() {
+  local n
+  n=$(sed -n 's/^users:(("\([^"]*\)".*/\1/p' <<<"$1")
+  case "$n" in
+    nginx*) echo nginx ;;
+    apache2 | httpd) echo Apache ;;
+    caddy) echo Caddy ;;
+    traefik) echo Traefik ;;
+    haproxy) echo HAProxy ;;
+    docker-proxy) echo Docker ;;
+    *) echo "$n" ;;
+  esac
+}
+# The line that says so, after web_ports_busy.
+web_ports_line() {
+  local what="Ports 80 and 443 are" by=""
+  case "$WEB_PORTS" in 80) what="Port 80 is" ;; 443) what="Port 443 is" ;; esac
+  [ -z "$WEB_BY" ] || by=" by $WEB_BY"
+  echo "$what in use$by. Public traffic stays off, so your sites keep working."
+}
+# <<< pyo:web-ports
+
 # Pyo by its tailnet name, now that this machine is on the tailnet: dialled
 # at its IP, which is also the address the agent is given (pods needn't
 # resolve MagicDNS names). Its registry door the same way.
@@ -1005,10 +1092,19 @@ case "$API" in
 esac
 [ -z "$REGISTRY" ] || REGISTRY=$(tailnet_hostport "$REGISTRY")
 
+# Ports 80 and 443 already in use here (k3s's Traefik, nginx…), on a first
+# connect: Pyo connects with public traffic off, so the sites here keep
+# working. Pyo turns it off before the agent's first word (install.rs).
+WEB_QUERY=""
+if ! { command -v k3s >/dev/null && k3s kubectl -n pyo-system get deployment pyo-agent >/dev/null 2>&1; } &&
+  web_ports_busy; then
+  WEB_QUERY="&webPorts=busy"
+fi
+
 # Pyo answers, and knows this token, before anything is installed.
 MANIFEST=$(mktemp) CRDS=$(mktemp) K3S_DIR=$(mktemp -d)
 trap 'rm -rf "$MANIFEST" "$CRDS" "$K3S_DIR"' EXIT
-code=$(curl -sS -o "$MANIFEST" -w '%{http_code}' --max-time 30 "$API/install/agent.yaml?token=$TOKEN" || true)
+code=$(curl -sS -o "$MANIFEST" -w '%{http_code}' --max-time 30 "$API/install/agent.yaml?token=$TOKEN$WEB_QUERY" || true)
 case "$code" in
   200) ;;
   404) echo "Pyo at $API doesn't know this token. Was the cluster removed, or the token rotated? Copy a fresh command from Pyo." >&2; exit 1 ;;
@@ -1018,10 +1114,13 @@ case "$code" in
   *) echo "Pyo at $API answered $code for the agent manifest." >&2; exit 1 ;;
 esac
 
-# Firewall: web traffic from anywhere, cluster traffic over the tailnet.
+# Firewall: web traffic from anywhere (unless the sites here have 80 and
+# 443), cluster traffic over the tailnet.
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-  ufw allow 80/tcp comment 'Pyo ingress' >/dev/null
-  ufw allow 443/tcp comment 'Pyo ingress' >/dev/null
+  if [ -z "$WEB_QUERY" ]; then
+    ufw allow 80/tcp comment 'Pyo ingress' >/dev/null
+    ufw allow 443/tcp comment 'Pyo ingress' >/dev/null
+  fi
   [ -z "$TS_IP" ] || ufw allow in on tailscale0 comment 'k3s over Tailscale' >/dev/null
 fi
 
@@ -1449,4 +1548,5 @@ if ! quietly "Starting the Pyo agent…" k3s kubectl -n pyo-system rollout statu
   echo "The Pyo agent didn't start. Run the same command again in a minute." >&2
   exit 1
 fi
+[ -z "$WEB_QUERY" ] || dot_line yellow "$(web_ports_line)"
 ok_line "Connected $(hostname). It shows up in Pyo in a few seconds."
