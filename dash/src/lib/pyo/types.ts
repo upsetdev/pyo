@@ -457,6 +457,8 @@ export type Cluster = {
     ingressController: "envoy" | "none";
     /** Why the gateway failed to install, while it isn't running. */
     gatewayError?: string | null;
+    /** Servers where another program (k3s's Traefik…) has the gateway's ports. */
+    gatewayPortsTaken?: { server: string; ports: number[]; by?: string }[];
     /** k3s ServiceLB (klipper-lb) or another LoadBalancer implementation. */
     loadBalancer: "servicelb" | "metallb" | "none";
     loadBalancerIPs: string[];

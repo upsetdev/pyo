@@ -1,4 +1,4 @@
-import { plural } from "~/lib/pyo/format";
+import { plural, portsTakenText } from "~/lib/pyo/format";
 import { serversOf, usePyo } from "~/lib/pyo/store";
 import { CodeText } from "./common";
 import { SetupChecklist, type SetupCheck } from "./SetupChecklist";
@@ -32,7 +32,9 @@ export function ClusterChecklist({ clusterId }: { clusterId: string }) {
       label: "Gateway",
       done: connected && c?.capabilities.ingressController !== "none",
       detail: connected ? (
-        c?.capabilities.ingressController === "envoy" ? (
+        c?.capabilities.gatewayPortsTaken?.length ? (
+          c.capabilities.gatewayPortsTaken.map(portsTakenText).join(". ")
+        ) : c?.capabilities.ingressController === "envoy" ? (
           "Running"
         ) : c?.capabilities.gatewayError ? (
           <CodeText text={c.capabilities.gatewayError} />

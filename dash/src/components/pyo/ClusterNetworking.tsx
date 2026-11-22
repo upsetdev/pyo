@@ -14,7 +14,7 @@ import {
   usePyo,
   servicePath,
 } from "~/lib/pyo/store";
-import { dateTime } from "~/lib/pyo/format";
+import { dateTime, portsTakenText } from "~/lib/pyo/format";
 import { toast } from "~/lib/pyo/toast";
 import type { Cluster } from "~/lib/pyo/types";
 import { CodeText, EntityLink } from "./common";
@@ -43,7 +43,15 @@ export function ClusterNetworking({
             [
               [
                 "Gateway",
-                c.capabilities.ingressController === "envoy" ? (
+                c.capabilities.gatewayPortsTaken?.length ? (
+                  <span className="text-warning">
+                    {c.capabilities.gatewayPortsTaken.map((t) => (
+                      <span key={t.server} className="block">
+                        {portsTakenText(t)}
+                      </span>
+                    ))}
+                  </span>
+                ) : c.capabilities.ingressController === "envoy" ? (
                   "Running"
                 ) : c.capabilities.gatewayError ? (
                   <CodeText text={c.capabilities.gatewayError} />
