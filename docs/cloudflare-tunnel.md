@@ -1577,31 +1577,55 @@ Not merged into `dev` until the feature is complete and tested.
 
 | Phase | State |
 |---|---|
-| Decisions applied to this spec | Done (b145440) |
-| 1. Token and zones | Written, not compiled (e3d91dd api, adc8e62 cli, 12cf81f dash, tsc passes) |
-| 2. Agent and Gateway | Next |
-| 3. Control plane | Not started |
-| 4. Traffic choice, switching, default domain | Not started |
-| 5. Ports, connect.sh, alerts | Not started |
+| Decisions applied to this spec | Done (b145440, 5284a70, bf1cc78) |
+| 1. Token and zones | Done, tested (e3d91dd api, adc8e62 cli, 12cf81f dash) |
+| 2. Agent and Gateway | Written and compiled (eadce05 proto, 4db8b6f agent). Agent tunnel tests pass (9). pyo-proto rbac tests not run yet |
+| 3. Control plane | Written and compiled (3b9ae43): migration 0040, tunnel_loop.rs, heartbeat and snapshot. Unit tests 24 of 26 passed, the 2 failures were test mistakes, fixed in 3b9ae43, not rerun yet |
+| 4. Traffic choice, switching | API, MCP and CLI written (3b9ae43, a47f92e). Dashboard in progress on `feat/cloudflare-tunnel-dash` (worktree `pyo-tunnel-dash`) |
+| 5. Ports, connect.sh, alerts | Public ports Service and tunnel alerts written. connect.sh keeps its line (see Decisions) |
 | 6. Docs, e2e, real-zone test, Pyo Ops | Not started (real zone and Pyo Ops need the user) |
 
-Phase 1 notes:
+Where things are:
 
-- `cloudflare/tunnel.rs` holds the tunnel API client (`TunnelApi`, a
-  trait of its own so the edgecert fakes that implement `Cloudflare` stay
-  as they are), the token checks, `ingress()`, `config_hash()`,
-  `cert_names()`, `key_and_csr()`. Phase 3 adds the loop next to it.
-- The fake account in `cloudflare/tests.rs` implements both traits
-  (tunnels, routes, secrets, certificates) and is `pub(super)` so the
-  tunnel loop's tests can use it.
-- `removeCloudflare` refusing while a tunnel exists moves to Phase 3 (it
-  needs the `cluster_tunnels` table).
+- `crates/pyo-api/src/cloudflare/tunnel.rs`: the Cloudflare tunnel client
+  (`TunnelApi`), token checks, routes, certificate names.
+- `cloudflare/tunnel_loop.rs` (+ `tunnel_loop_tests.rs`): the loop,
+  switching and reverting records, certificates, health, removal, the
+  snapshot's `tunnel`.
+- `cloudflare/tunnel_ops.rs`: the ops and `GET /clusters/{id}/tunnel`.
+- `crates/pyo-agent/src/tunnel.rs`: the connector, its report, trusted
+  pod addresses. `gateway.rs`: tunnel routes, policies, public ports
+  Service.
+- `crates/pyo-proto/src/system.rs` (Cloudflare Tunnel section), `rbac.rs`
+  (origin and public ports Services, `tunnel` client policies).
+
+Next:
+
+1. Rerun `cargo test -p pyo-proto -p pyo-agent -p pyo-api -p pyo-cli tunnel`
+   and `… cloudflare`, plus the full `-p pyo-api -p pyo-agent -p pyo-proto`
+   suites (the access hash and admission tests), and clippy.
+2. Merge `feat/cloudflare-tunnel-dash` once its `tsc` passes.
+3. A DATABASE_URL test (ignored by default, like install.rs's) for the
+   migration and the ops: traffic switch, switch and revert rows,
+   removeCloudflare refused.
+4. Phase 6: pyo-docs pages, `scripts/tunnel-gate-e2e.sh`,
+   `scripts/fake-cloudflare/` with `PYO_DEV_CLOUDFLARE_API`.
 
 Known gaps:
 
-- Nothing on this branch has been compiled or tested yet: `cargo check`
-  was blocked by the permission classifier on 2026-11-22. Run
-  `cargo check -p pyo-api -p pyo-cli --tests` and
-  `cargo test -p pyo-api cloudflare::` first when picking this up.
-- `dash/node_modules` in the worktree is a symlink to the main
+- Free domains in tunnel mode (`freedomain::Mode::Tunnel`,
+  `<service>-<namespace>.<default domain>`) aren't built. The default
+  domain's wildcard record and route are.
+- `GET /clusters/{id}/tunnel` returns the stored view (Cloudflare is read
+  every 2 minutes), not a fresh read.
+- A service deleted while its domain goes through the tunnel leaves its
+  CNAME (its dns_records row cascades away before the loop sees it).
+- Pyo Cloud's domain proof TXT (`_pyo-verify`) isn't written by Switch to
+  Tunnel. Domains were verified when added.
+- A domain moved between clusters isn't removed from the other tunnel
+  first.
+- The cluster-delete op doesn't wait for tunnel removal (§11).
+- Nothing tested against a real Cloudflare account (needs the user's
+  approval and a throwaway zone).
+- `dash/node_modules` in the worktrees is a symlink to the main
   checkout's, for `tsc` only (ignored by git).
