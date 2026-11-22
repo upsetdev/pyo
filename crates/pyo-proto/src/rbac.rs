@@ -540,11 +540,11 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
         // pyo-tls-* Secrets; nothing of the proxy's own.
         { "name": "gatewayAllowed", "expression": format!("variables.ns == '{gw}' && (\
             (request.resource.resource == 'envoyproxies' && variables.objName == 'pyo' && request.operation != 'DELETE' && {proxies}.exists(p, {proxy_keys}.all(k, k in object.spec && object.spec[k] == p[k])) && object.spec.all(k, k in {proxy_keys})) || \
-            (request.resource.resource == 'clienttrafficpolicies' && (variables.objName in ['pyo-http', 'pyo-https'] ? (request.operation != 'DELETE' && ((variables.objName == 'pyo-http' && object.spec in {ctp_http}) || (variables.objName == 'pyo-https' && object.spec in {ctp_https}))) : (request.operation == 'DELETE' || variables.portPolicy && ((\
+            (request.resource.resource == 'clienttrafficpolicies' && (variables.objName in ['pyo-http', 'pyo-https', '{tailnet_gw}'] ? (request.operation != 'DELETE' && ((variables.objName == 'pyo-http' && object.spec in {ctp_http}) || (variables.objName == 'pyo-https' && object.spec in {ctp_https}) || (variables.objName == '{tailnet_gw}' && object.spec == {ctp_tailnet}))) : (request.operation == 'DELETE' || variables.portPolicy && ((\
                 object.spec.all(k, k in ['targetRefs', 'connection', 'proxyProtocol']) && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name.endsWith('-ports') && has(t.sectionName)) && \
                 (!has(object.spec.connection) || (object.spec.connection.all(k, k in ['connectionLimit', 'maxAcceptPerSocketEvent']) && (!has(object.spec.connection.maxAcceptPerSocketEvent) || object.spec.connection.maxAcceptPerSocketEvent == 1) && (!has(object.spec.connection.connectionLimit) || (object.spec.connection.connectionLimit.all(k, k == 'value') && object.spec.connection.connectionLimit.value >= 1)))) && \
                 (!has(object.spec.proxyProtocol) || object.spec.proxyProtocol == {pp_optional})) || \
-                (object.metadata.labels[?'{cdn_label}'].orValue('') in {behind} && object.spec.all(k, k in ['targetRefs', 'clientIPDetection', 'connection', 'tls', 'proxyProtocol', 'timeout']) && \
+                (object.metadata.labels[?'{cdn_label}'].orValue('') in {behind} && object.spec.all(k, k in ['targetRefs', 'clientIPDetection', 'connection', 'headers', 'tls', 'proxyProtocol', 'timeout']) && ({cdn_headers}) && \
                     size(object.spec.targetRefs) >= 1 && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name + '-cdn' == variables.objName && has(t.sectionName) && t.sectionName.startsWith('h-')) && \
                     {ctp_https}.exists(v, ['connection', 'tls', 'proxyProtocol', 'timeout'].all(k, (k in v) == (k in object.spec) && (!(k in v) || v[k] == object.spec[k]))) && \
                     object.spec.clientIPDetection.all(k, k == 'xForwardedFor') && object.spec.clientIPDetection.xForwardedFor.all(k, k == 'trustedCIDRs') && \
@@ -666,6 +666,8 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             proxy_keys = cel_literal(&json!(system::envoy_proxy(geoip_image, true)["spec"].as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default())),
             ctp_http = cel_literal(&json!(system::client_policy_variants(false))),
             ctp_https = cel_literal(&json!(system::client_policy_variants(true))),
+            // The tailnet listeners' (system.rs): exactly this.
+            ctp_tailnet = cel_literal(&system::tailnet_client_policy_spec()),
             // A service's HTTPS behind a CDN (system.rs
             // `cdn_client_policy_spec`): on its own Gateway's listeners,
             // as every website's HTTPS is otherwise, trusting X-Forwarded-For
@@ -673,6 +675,12 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             // change, so they can't be pinned here). Never a hop count or a
             // custom header, which anyone could set.
             cdn_label = system::CDN_LABEL,
+            // The headers it removes: all that name a visitor but the CDN's
+            // own (system.rs `visitor_headers`), pinned per CDN.
+            cdn_headers = crate::firewall::BEHIND.iter().map(|cdn| format!(
+                "(object.metadata.labels[?'{label}'].orValue('') == '{cdn}' && has(object.spec.headers) && object.spec.headers == {headers})",
+                label = system::CDN_LABEL,
+                headers = cel_literal(&system::visitor_headers(system::cdn_own_headers(cdn))))).collect::<Vec<_>>().join(" || "),
             // A website's two fixed rules: Let's Encrypt's challenges, and
             // behind a CDN its connections only (firewall.rs).
             acme_rule = cel_literal(&crate::firewall::acme_rule()),
@@ -1306,6 +1314,46 @@ mod tests {
             eep.contains("annotations[?'pyo.dev/waf'].orValue('') != ''"),
             "{eep}"
         );
+    }
+
+    /// The client policies that remove visitor headers: the agent may
+    /// write the shared ones and the tailnet's exactly as Pyo defines them,
+    /// and a CDN's only with its CDN's own list. No other policy may hold
+    /// header settings (a service's ports' policies never take `headers`).
+    #[test]
+    fn client_policies_remove_visitor_headers_as_pinned() {
+        let all = admission(system::WAF_IMAGE_DEFAULT, system::GEOIP_IMAGE_DEFAULT)[0].to_string();
+        let start = all
+            .find("request.resource.resource == 'clienttrafficpolicies'")
+            .unwrap();
+        let end = all[start..]
+            .find("request.resource.resource == 'securitypolicies'")
+            .unwrap();
+        let ctp = &all[start..start + end];
+        // Pinned by name, exactly.
+        assert!(ctp.contains(&format!(
+            "variables.objName in ['pyo-http', 'pyo-https', '{}']",
+            system::TAILNET_GATEWAY
+        )));
+        let tailnet = system::cel_literal(&system::tailnet_client_policy_spec());
+        assert!(ctp.contains(&format!(
+            "variables.objName == '{}' && object.spec == {tailnet}",
+            system::TAILNET_GATEWAY
+        )));
+        for https in [false, true] {
+            for v in system::client_policy_variants(https) {
+                assert!(ctp.contains(&system::cel_literal(&v["headers"])), "{v}");
+            }
+        }
+        // Behind a CDN: its own list only, and the key is allowed there.
+        let cloudflare = system::cel_literal(&system::visitor_headers(system::cdn_own_headers("cloudflare")));
+        assert!(ctp.contains(&format!(
+            "(object.metadata.labels[?'{}'].orValue('') == 'cloudflare' && has(object.spec.headers) && object.spec.headers == {cloudflare})",
+            system::CDN_LABEL
+        )));
+        assert!(ctp.contains("['targetRefs', 'clientIPDetection', 'connection', 'headers', 'tls', 'proxyProtocol', 'timeout']"));
+        // A port's policy: no headers.
+        assert!(ctp.contains("object.spec.all(k, k in ['targetRefs', 'connection', 'proxyProtocol'])"));
     }
 
     /// Websites on the servers' Tailscale addresses: the agent writes one

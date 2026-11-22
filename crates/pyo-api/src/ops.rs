@@ -9234,20 +9234,9 @@ pub(crate) async fn firewall_me(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<Json<Value>> {
-    let h = |k: &str| {
-        headers
-            .get(k)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_owned()
-    };
     // As sign-in limits see it: the gateway's forwarded address, nothing a
     // client wrote itself.
-    let ip = crate::ratelimit::request_ip(
-        &peer.ip().to_string(),
-        &h("x-forwarded-for"),
-        crate::ratelimit::trusted_proxies(),
-    );
+    let ip = crate::ratelimit::visitor_of(&peer.ip().to_string(), &headers);
     Ok(Json(
         json!({ "ip": ip, "country": s.observability.country_of(&ip) }),
     ))

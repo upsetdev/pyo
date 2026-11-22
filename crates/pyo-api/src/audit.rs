@@ -140,22 +140,8 @@ fn request_info(req: &Request) -> RequestInfo {
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip().to_string())
         .unwrap_or_default();
-    let h = |k: &str| {
-        req.headers()
-            .get_all(k)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let ip = crate::ratelimit::visitor_ip(
-        &peer,
-        &h("cf-connecting-ip"),
-        &h("x-forwarded-for"),
-        crate::ratelimit::trusted_proxies(),
-    );
     RequestInfo {
-        ip,
+        ip: crate::ratelimit::visitor_of(&peer, req.headers()),
         user_agent: user_agent(req.headers()),
         actor: Mutex::new(None),
     }

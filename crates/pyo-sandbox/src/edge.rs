@@ -454,6 +454,7 @@ impl Edge {
                 return redirect(StatusCode::SEE_OTHER, path, Some(&cookie));
             }
         }
+        strip_visitor_headers(req.headers_mut());
         for (k, v) in forwarded(req.headers(), peer, tls, &host) {
             req.headers_mut().insert(k, v);
         }
@@ -608,6 +609,20 @@ fn query_token(uri: &hyper::Uri) -> Option<(String, hyper::Uri)> {
     Some((token, hyper::Uri::from_parts(parts).ok()?))
 }
 
+/// Headers that name the visitor and that only a CDN in front could vouch
+/// for (CF-Connecting-IP, X-Real-IP and the like, as Pyo Gateway removes
+/// them): nothing sits in front of the edge, so each is the client's own
+/// claim and never reaches the guest. X-Forwarded-For stays, with the
+/// edge's own hop appended ([`forwarded`]).
+fn strip_visitor_headers(h: &mut HeaderMap) {
+    for name in pyo_proto::system::CDN_VISITOR_HEADERS
+        .iter()
+        .chain(pyo_proto::system::OTHER_VISITOR_HEADERS.iter())
+    {
+        h.remove(*name);
+    }
+}
+
 fn forwarded(
     h: &HeaderMap,
     peer: SocketAddr,
@@ -740,5 +755,23 @@ mod tests {
         assert_eq!(get("x-forwarded-for"), "1.2.3.4, 5.6.7.8");
         assert_eq!(get("x-forwarded-proto"), "https");
         assert_eq!(get("x-forwarded-host"), "3000-sbx-a.d");
+    }
+
+    /// A client can't name its own address to the guest: the headers that
+    /// would (all of each) go, X-Forwarded-For and the rest stay.
+    #[test]
+    fn visitor_headers_never_reach_the_guest() {
+        let mut h = HeaderMap::new();
+        h.append("cf-connecting-ip", HeaderValue::from_static("1.1.1.1"));
+        h.append("CF-Connecting-IP", HeaderValue::from_static("2.2.2.2"));
+        h.insert("x-real-ip", HeaderValue::from_static("1.1.1.1"));
+        h.insert("true-client-ip", HeaderValue::from_static("1.1.1.1"));
+        h.insert("forwarded", HeaderValue::from_static("for=1.1.1.1"));
+        h.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
+        h.insert("accept", HeaderValue::from_static("*/*"));
+        strip_visitor_headers(&mut h);
+        let mut left: Vec<&str> = h.keys().map(|k| k.as_str()).collect();
+        left.sort();
+        assert_eq!(left, ["accept", "x-forwarded-for"]);
     }
 }
