@@ -70,6 +70,7 @@ import type {
   RegistryLogin,
   Retention,
   SecuritySettings,
+  AdminSignIn,
   Role,
   Team,
   TeamBackups,
@@ -144,6 +145,8 @@ export type PyoState = {
   registryLogins: RegistryLogin[];
   /** Two-factor for everyone and the audit log's retention; null unless you're the installation's admin. */
   securitySettings: SecuritySettings | null;
+  /** Where admins may sign in from; null unless you're the installation's admin. */
+  adminSignIn: AdminSignIn | null;
   /** Installation-wide analytics settings. */
   /** Installation-wide. `small`: Pyo's server has under 3.5 GB of memory now. */
   observabilitySettings: {
@@ -347,6 +350,7 @@ function empty(): PyoState {
     alertChannels: [],
     registryLogins: [],
     securitySettings: null,
+    adminSignIn: null,
     observabilitySettings: {
       ipMode: "none",
       enabled: true,
@@ -2524,6 +2528,10 @@ export const api = {
       s.observabilitySettings.retention = retention;
     });
     return send("saveRetentionSettings", retention);
+  },
+  /** Where the installation's admins may sign in from (its admin). Refused when it would lock out this browser. */
+  saveAdminSignIn(settings: { tailnet: boolean; addresses: string[] }) {
+    return send<{ addresses: string[] }>("saveAdminSignIn", settings);
   },
   /** Two-factor for everyone, and how long the audit log is kept (the installation's admin). */
   saveSecuritySettings(settings: SecuritySettings) {

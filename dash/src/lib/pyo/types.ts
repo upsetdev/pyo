@@ -57,6 +57,21 @@ export type SecuritySettings = {
   auditDays: number;
 };
 
+/** Where the installation's admins may sign in from (its admin). Neither: anywhere. */
+export type AdminSignIn = {
+  tailnet: boolean;
+  /** IP addresses and ranges, IPv4 or IPv6. */
+  addresses: string[];
+  /** This browser's address, as Pyo sees it. */
+  here: string | null;
+  /** This browser came over the tailnet. */
+  hereTailnet: boolean;
+  /** Pyo has a tailnet name, or this browser came over the tailnet. */
+  tailnetAvailable: boolean;
+  /** PYO_ADMIN_SIGNIN_ANYWHERE is set on Pyo: the limit is ignored. */
+  anywhere: boolean;
+};
+
 /** One entry of a team's audit log. */
 export type AuditEvent = {
   id: ID;

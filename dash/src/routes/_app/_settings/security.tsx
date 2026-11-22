@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { useHosted } from "~/components/pyo/Managed";
 import { Button } from "~/components/ui/Button";
-import { Field, Select, Switch } from "~/components/ui/Field";
+import { Field, Select, Switch, Textarea } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
@@ -17,6 +17,84 @@ export const Route = createFileRoute("/_app/_settings/security")({
 });
 
 const DAYS = [90, 180, 365, 730];
+
+/** The addresses as typed: one per line (commas and spaces work too). */
+function addressList(text: string) {
+  return text
+    .split(/[\s,]+/)
+    .map((a) => a.trim())
+    .filter(Boolean);
+}
+
+/** Where admins may sign in from: the tailnet and IP addresses. Pyo Cloud too. */
+function AdminSignInPanel() {
+  const s = usePyo();
+  const saved = s.adminSignIn;
+  const admin = !!s.user.isAdmin && !!saved;
+  const [tailnet, setTailnet] = useState(saved?.tailnet ?? false);
+  const [text, setText] = useState((saved?.addresses ?? []).join("\n"));
+  const [busy, setBusy] = useState(false);
+  const list = addressList(text);
+  const dirty =
+    !!saved &&
+    (tailnet !== saved.tailnet || list.join("\n") !== saved.addresses.join("\n"));
+  const note = !admin
+    ? "Only the installation's admin can change this."
+    : saved?.anywhere
+      ? "PYO_ADMIN_SIGNIN_ANYWHERE is set, so admins can sign in from anywhere."
+      : "Where admins can sign in from. Empty allows anywhere.";
+  return (
+    <Panel title="Admin sign-in" description={note}>
+      <div className="space-y-4 p-4">
+        {saved?.tailnetAvailable || saved?.tailnet ? (
+          <Switch
+            checked={tailnet}
+            disabled={!admin}
+            onChange={setTailnet}
+            label="Tailnet"
+            description="Devices on your tailnet."
+          />
+        ) : null}
+        <Field
+          label="IP addresses"
+          hint={saved?.here ? `One per line. Yours is ${saved.here}.` : "One per line."}
+        >
+          {(p) => (
+            <Textarea
+              {...p}
+              rows={3}
+              value={text}
+              disabled={!admin}
+              spellCheck={false}
+              placeholder={"203.0.113.7\n2001:db8::/48"}
+              className="font-mono text-[12px]"
+              onChange={(e) => setText(e.target.value)}
+            />
+          )}
+        </Field>
+      </div>
+      {admin ? (
+        <div className="flex justify-end border-t border-border px-4 py-3">
+          <Button
+            size="sm"
+            disabled={!dirty || busy}
+            onClick={async () => {
+              setBusy(true);
+              const res = await api.saveAdminSignIn({ tailnet, addresses: list });
+              setBusy(false);
+              if (res) {
+                setText(res.addresses.join("\n"));
+                toast({ title: "Admin sign-in saved" });
+              }
+            }}
+          >
+            Save changes
+          </Button>
+        </div>
+      ) : null}
+    </Panel>
+  );
+}
 
 function SecuritySettingsSection() {
   const s = usePyo();
@@ -52,6 +130,7 @@ function SecuritySettingsSection() {
           />
         </div>
       </Panel>
+      <AdminSignInPanel />
       <Panel title="Audit log" description={note}>
         <div className="p-4">
           <Field label="Keep entries" hint="Teams choose what it keeps of addresses.">
