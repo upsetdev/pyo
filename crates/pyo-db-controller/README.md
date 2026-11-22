@@ -29,7 +29,7 @@ Valkey: the Redis protocol and the REST API.
 | Engine | Image |
 |---|---|
 | Postgres | Pyo's own per major version, `PYO_DB_POSTGRES_IMAGE_16`, `_17`, `_18` (`deploy/images/postgres.Dockerfile`). A version without one gets `PYO_DB_POSTGRES_IMAGE:<version>` (CloudNativePG's). |
-| Valkey | `PYO_DB_VALKEY_IMAGE:<version>`; while it loads modules, `PYO_DB_VALKEY_BUNDLE_IMAGE` (valkey-bundle 8.1.11, pinned; Valkey 8.1 only) |
+| Valkey | `PYO_DB_VALKEY_IMAGE:<version>`; while it loads modules, `PYO_DB_VALKEY_BUNDLE_IMAGE` (valkey-bundle 8.1.12, pinned; Valkey 8.1 only) |
 | MySQL | `PYO_DB_MYSQL_IMAGE`, pinned |
 | KV address | `PYO_DB_PYO_KV_IMAGE` |
 
@@ -66,7 +66,7 @@ doesn't handle them.
 
 `spec.valkey.modules` lists the Valkey modules a KV database loads, the
 catalog's `kv` entries in `extensions.json` (`src/modules.rs`): `valkey-json`,
-`valkey-bloom` and `valkey-search` (BSD-3-Clause), from valkey-bundle 8.1.11
+`valkey-bloom` and `valkey-search` (BSD-3-Clause), from valkey-bundle 8.1.12
 (`json` 1.0.3, `bf` 1.0.1, `search` 1.0.3 by `MODULE LIST`). The bundle also
 has valkey-ldap, which isn't offered.
 
