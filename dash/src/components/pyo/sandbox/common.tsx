@@ -1,5 +1,6 @@
 import { CheckCircleIcon, CircleNotchIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
+import { useHosted } from "~/components/pyo/Managed";
 import { NeedsTailscale } from "~/components/pyo/Tailscale";
 import { TailnetLockWait } from "~/components/pyo/TailnetLock";
 import { AppLink } from "~/components/ui/AppLink";
@@ -100,6 +101,7 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
   const s = usePyo();
   const role = roleIn(s);
   const canManage = role === "owner" || role === "admin";
+  const hosted = useHosted();
   const [name, setName] = useState(`sandbox-${sandboxServersIn(s).length + 1}`);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -230,6 +232,22 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
                 </>
               ) : (
                 error
+              )}
+            </Callout>
+          ) : null}
+          {/* A hosted Pyo shows no NeedsTailscale above, so the reason the button is off goes here. */}
+          {hosted && !s.tailscale ? (
+            <Callout tone="warning">
+              {s.user.isAdmin ? (
+                <>
+                  Set up{" "}
+                  <AppLink href="/integrations#tailscale" className="font-medium underline">
+                    Tailscale
+                  </AppLink>{" "}
+                  first.
+                </>
+              ) : (
+                "Tailscale isn't set up yet. Ask an installation admin."
               )}
             </Callout>
           ) : null}
