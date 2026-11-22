@@ -15,7 +15,7 @@ ARG MOCO_COMMIT=acb2716d1ef13a8953dd18d55cf230c0edf90f04
 ARG GOLANG=ghcr.io/cybozu/golang:1.27-noble@sha256:d78937fddb26c4350824d4022f5c9dfe20bf762811ea31065f8c6d467c58bc30
 ARG UBUNTU=ghcr.io/cybozu/ubuntu:24.04@sha256:add3f3caca7a2a11a0e8f4e14aaee896f59b5a12917af34ab798315188f67c8e
 # MySQL's own binaries for the backup image (mysqlbinlog, mysql), as upstream.
-ARG MYSQL=ghcr.io/cybozu-go/moco/mysql:8.4.10.1@sha256:51dffb347697795e1680b9930fea1e1055a71387a0e769cc61ab4efc539c149b
+ARG MYSQL=ghcr.io/cybozu-go/moco/mysql:8.4.10.1@sha256:bdb88ae2023dcba0218bf900c7f39117c7a6e4101de6b5c8f62774c1d897b68a
 
 FROM --platform=$BUILDPLATFORM ${GOLANG} AS builder
 ARG MOCO_TAG

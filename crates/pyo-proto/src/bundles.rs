@@ -560,7 +560,7 @@ pub fn databases_bundle(img: &crate::system::DbImages) -> SystemBundle {
                 "ghcr.io/cybozu-go/moco-agent:0.17.0@sha256:a6d9cc387a08a5d108ee89fb40e6274c47a435d3bb6fa71d4b822873e26b966b",
                 "ghcr.io/cybozu-go/moco/fluent-bit:5.1.4.1@sha256:33895ebd0f7ba3d53d146b42a461ca6c05e51a78bed22cf158151bba059a5881",
                 "ghcr.io/cybozu-go/moco/mysqld_exporter:0.20.0.1@sha256:793f8c94a43d03a2d1a176e80bfa99fa1ba0e4c4a83161f24a511e38da0e57e6",
-                "ghcr.io/cybozu-go/moco/mysql:8.4.10.1@sha256:51dffb347697795e1680b9930fea1e1055a71387a0e769cc61ab4efc539c149b",
+                "ghcr.io/cybozu-go/moco/mysql:8.4.10.1@sha256:bdb88ae2023dcba0218bf900c7f39117c7a6e4101de6b5c8f62774c1d897b68a",
                 "docker.io/valkey/valkey-bundle:8.1.11@sha256:3f57cc71a102e0e66991ae203b069038d8c3f6214ca887ff32f9a381091af8de",
             ]
             .map(str::to_owned)
