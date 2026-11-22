@@ -465,6 +465,20 @@ enum DomainCommand {
         #[arg(long)]
         keep_dns_record: bool,
     },
+    /// Serve a domain through the cluster's Cloudflare Tunnel, or move it back.
+    Tunnel {
+        /// e.g. app.example.com.
+        hostname: String,
+        /// Replace the records in the way. Owners and admins.
+        #[arg(long)]
+        replace: bool,
+        /// Move it back from the tunnel.
+        #[arg(long, conflicts_with = "replace")]
+        back: bool,
+        /// Moving back: don't put back the records the tunnel replaced.
+        #[arg(long, requires = "back")]
+        no_restore: bool,
+    },
     /// Create a domain's DNS record in Cloudflare, or try again. Never overwrites a record.
     Dns {
         /// e.g. app.example.com.
@@ -503,6 +517,59 @@ enum CloudflareCommand {
         /// Don't ask to confirm.
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+    /// A cluster's Cloudflare Tunnel: websites through Cloudflare, no open ports.
+    Tunnel {
+        #[command(subcommand)]
+        command: TunnelCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TunnelCommand {
+    /// The tunnel, its connectors and its domains.
+    Status {
+        /// The cluster, by name or id (default: the team's).
+        #[arg(long)]
+        cluster: Option<String>,
+    },
+    /// Take the cluster's websites through Cloudflare Tunnel. Owners and admins.
+    On {
+        #[arg(long)]
+        cluster: Option<String>,
+        /// A zone (like example.com): services get names under it.
+        #[arg(long)]
+        default_domain: Option<String>,
+        /// The Cloudflare account, when the token's zones are in more than one.
+        #[arg(long)]
+        account: Option<String>,
+        /// Don't keep public TCP and UDP ports on the servers.
+        #[arg(long)]
+        no_public_ports: bool,
+    },
+    /// Take websites on public ports or Tailscale only again. The tunnel stays until removed.
+    Off {
+        #[arg(long)]
+        cluster: Option<String>,
+        /// "public" or "tailscale".
+        #[arg(long, default_value = "public")]
+        to: String,
+    },
+    /// Remove the tunnel, its records and its connector. Owners and admins.
+    Remove {
+        #[arg(long)]
+        cluster: Option<String>,
+        /// Leave the records the tunnel replaced out (they're put back by default).
+        #[arg(long)]
+        keep_records: bool,
+        /// Don't ask to confirm.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// A new token and certificate for the tunnel. Owners and admins.
+    Rotate {
+        #[arg(long)]
+        cluster: Option<String>,
     },
 }
 
@@ -1147,6 +1214,12 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                     proxied,
                     replace,
                 } => cloudflare::domain_dns(&api, s, &hostname, proxied, replace).await,
+                DomainCommand::Tunnel {
+                    hostname,
+                    replace,
+                    back,
+                    no_restore,
+                } => cloudflare::domain_tunnel(&api, s, &hostname, !back, replace, !no_restore).await,
             }
         }
         Command::Cloudflare { command, team } => {
@@ -1160,6 +1233,41 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                 CloudflareCommand::Test => cloudflare::test(&api, team).await,
                 CloudflareCommand::Zones => cloudflare::zones(&api, team).await,
                 CloudflareCommand::Remove { yes } => cloudflare::remove(&api, team, yes).await,
+                CloudflareCommand::Tunnel { command } => match command {
+                    TunnelCommand::Status { cluster } => {
+                        cloudflare::tunnel_status(&api, team, cluster.as_deref()).await
+                    }
+                    TunnelCommand::On {
+                        cluster,
+                        default_domain,
+                        account,
+                        no_public_ports,
+                    } => {
+                        cloudflare::tunnel_on(
+                            &api,
+                            team,
+                            cluster.as_deref(),
+                            default_domain.as_deref(),
+                            account.as_deref(),
+                            !no_public_ports,
+                        )
+                        .await
+                    }
+                    TunnelCommand::Off { cluster, to } => {
+                        cloudflare::tunnel_off(&api, team, cluster.as_deref(), &to).await
+                    }
+                    TunnelCommand::Remove {
+                        cluster,
+                        keep_records,
+                        yes,
+                    } => {
+                        cloudflare::tunnel_remove(&api, team, cluster.as_deref(), !keep_records, yes)
+                            .await
+                    }
+                    TunnelCommand::Rotate { cluster } => {
+                        cloudflare::tunnel_rotate(&api, team, cluster.as_deref()).await
+                    }
+                },
             }
         }
         Command::Sandbox { command, team } => {
