@@ -173,6 +173,37 @@ fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
+/// The images an installation names (deploy/k8s/pyo.yaml sets each one):
+/// the agent's, the builder's and the system images the agent's install
+/// pins. Left unset, each falls back to a local build
+/// (`127.0.0.1:5005/pyo/…:dev`), which only a laptop's registry has.
+fn image_vars() -> impl Iterator<Item = &'static str> {
+    ["PYO_AGENT_IMAGE", "PYO_BUILDER_IMAGE"]
+        .into_iter()
+        .chain(pyo_proto::rbac::PINNED_ENV)
+}
+
+/// The image variables `get` has no value for.
+fn unset_images(get: impl Fn(&str) -> Option<String>) -> Vec<&'static str> {
+    image_vars()
+        .filter(|v| get(v).is_none_or(|s| s.trim().is_empty()))
+        .collect()
+}
+
+/// A release build refuses to start on a local build's images: clusters
+/// would be handed images they can't pull. Debug builds (`cargo run`) keep
+/// the defaults.
+fn check_images(debug: bool, get: impl Fn(&str) -> Option<String>) -> anyhow::Result<()> {
+    let unset = unset_images(get);
+    if debug || unset.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Pyo needs the images it hands to clusters. Not set: {}. Set each to the release's image, pinned by digest (release.json lists them). Without them clusters would get local build images (127.0.0.1:5005/pyo/…:dev) they can't pull.",
+        unset.join(", ")
+    )
+}
+
 /// What a hosted build adds to Pyo. Everything is optional; the default
 /// changes nothing.
 #[derive(Default)]
@@ -421,6 +452,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "pyo_api=info,cloud_api=info,tower_http=info".into()),
         )
         .init();
+    check_images(cfg!(debug_assertions), |k| std::env::var(k).ok())?;
 
     let database_url =
         std::env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
@@ -828,5 +860,43 @@ mod tests {
         .await;
         assert!(matches!(r, Err(sqlx::Error::Io(_))));
         assert_eq!(tries.load(Ordering::SeqCst), 2);
+    }
+
+    /// A release build won't start on a local build's images. A debug
+    /// build (laptop dev) and a fully set install (pyo.yaml) do.
+    #[test]
+    fn release_builds_need_every_image() {
+        let all = |_: &str| Some("ghcr.io/upsetdev/pyo/x:1@sha256:00".to_owned());
+        let some = |k: &str| {
+            matches!(k, "PYO_AGENT_IMAGE" | "PYO_BUILDER_IMAGE")
+                .then(|| "ghcr.io/upsetdev/pyo/x:1@sha256:00".to_owned())
+        };
+        assert!(check_images(false, all).is_ok());
+        assert!(check_images(true, |_| None).is_ok());
+        assert!(check_images(true, some).is_ok());
+
+        let err = check_images(false, some).unwrap_err().to_string();
+        for v in pyo_proto::rbac::PINNED_ENV {
+            assert!(err.contains(v), "{v} missing from: {err}");
+        }
+        assert!(!err.contains("PYO_AGENT_IMAGE"));
+        assert!(!err.contains(';'));
+        // Blank counts as unset.
+        let blank = |k: &str| Some(if k == "PYO_GEOIP_IMAGE" { " " } else { "img" }.to_owned());
+        assert_eq!(unset_images(blank), ["PYO_GEOIP_IMAGE"]);
+        assert_eq!(unset_images(|_| None).len(), 12);
+    }
+
+    /// The install sets every image the check asks for, on each of Pyo's
+    /// Deployments (web and worker).
+    #[test]
+    fn the_install_sets_every_image() {
+        let yaml = include_str!("../../../deploy/k8s/pyo.yaml");
+        let pyos = yaml.matches("image: __IMAGES__/pyo:__TAG__").count();
+        assert_eq!(pyos, 2);
+        for v in image_vars() {
+            let n = yaml.matches(&format!("name: {v},")).count();
+            assert_eq!(n, pyos, "{v} is set {n} times in deploy/k8s/pyo.yaml");
+        }
     }
 }
