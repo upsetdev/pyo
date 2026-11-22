@@ -30,8 +30,93 @@ that commit. Pyo Cloud references are to pyo-cloud at 94956c8.
 16. Docs pages
 17. Test plan
 18. Build plan (phases, file:line)
-19. Open questions
+19. Open questions (answered)
 20. Draft docs page
+21. Build status
+
+---
+
+## Decisions (2026-11-22)
+
+The user accepted these answers to the open questions (§19). The sections
+below are updated to match.
+
+1. **Origin certificate key**: made by the control plane (rcgen) and kept
+   sealed with the team's certificates.
+2. **Origin CA validity**: 15 years (5475 days, Cloudflare's longest). No
+   renewal loop. Pyo still revokes and issues a new one on demand: when a
+   new name isn't covered, on **Rotate** (new tunnel token and new
+   certificate), and on removal.
+3. **TCP and UDP ports in tunnel mode**: published on the servers by
+   default, since the user asked for them per service. The Traffic panel
+   says they don't go through the tunnel.
+4. **Default domain**: optional. Only a zone apex, as `*.example.com`. A
+   cluster can be in tunnel mode with only domains switched by hand (Pyo
+   Ops needs that). Without a default domain there are no free domains in
+   tunnel mode.
+5. **Removing a domain** that replaced a record: the old record isn't put
+   back by default. The remove dialog offers "Put back the old record"
+   (off by default).
+6. **One Cloudflare account per tunnel**: yes.
+7. **Pyo's own dashboard through the tunnel**: not in 0.51.0.
+8. **Pyo Ops**: cloud.pyo.dev and agent.pyo.dev move onto it right after
+   0.51.0, with no default domain. Planned in §14, not done as part of
+   this work.
+9. **HTTPS redirect**: at the Gateway, from `cf-visitor`.
+10. **Who may switch a domain**: developers when nothing is in the way,
+    owners and admins when it replaces an existing record.
+11. **CF-Connecting-IP fix**: shipped in 0.5.5 (§8.4). Done.
+12. **Release number**: 0.51.0.
+13. **Large uploads**: done in 0.5.x (database dumps upload in parts,
+    static site files up to 90 MiB). Done.
+
+Decisions made while building (not in the first draft):
+
+- **What moves when a cluster switches to tunnel mode.** Pyo asks for a
+  switch of every domain of the cluster in a tunnel-ready zone of the
+  tunnel's account. A domain with nothing in the way (no record, or only
+  Pyo's own) switches. A domain with someone else's record stops at
+  "confirm" and waits for **Replace and switch**. So records made by hand
+  or by Terraform (Pyo Ops) are never replaced without a yes. Pyo's own
+  direct record isn't kept in `previous`: Switch back makes a new one.
+- **No 403 gate on tunnel names.** The first draft put the firewall's
+  "behind" gate (`source.port != 0`) on tunnel routes. It's left out:
+  Envoy reads the visitor from X-Forwarded-For only on connections from
+  the connectors, so any other connection is its own visitor and can't
+  pick an address. Without the gate a domain answers both ways while it
+  switches (the Gateway has the tunnel listener before the record moves,
+  and keeps it until the record is back), so there's no gap on a cluster
+  with public ports. A new connector pod whose address isn't trusted yet
+  is seen as its own address for those few seconds.
+- **Tunnel domains keep their :80 route.** Nothing reaches it through the
+  tunnel (cloudflared speaks HTTPS), but a domain mid-switch still
+  answers plain HTTP directly. Less special casing in the route builder.
+- **A behind-Cloudflare service with tunnel domains**: its CDN client
+  policy covers only its direct HTTPS listeners. The tunnel policy covers
+  the tunnel ones (Envoy Gateway allows one section policy per listener).
+  The behind gate stays on its direct routes only.
+- **Clusters on an older install.** Tunnel mode changes the agent's
+  admission policy (the connector's Deployment, Secret and PDB in
+  pyo-system, the `pyo-tunnel-origin` and `pyo-public-ports` Services, the
+  `tunnel` client policy label). Since 1cebb7a the policy counts toward
+  `agentAccess`, so the 0.51.0 release shows the "run the connect command"
+  notice by itself. On top of that:
+  - `setClusterTraffic` to `tunnel` is refused while the cluster's install
+    is outdated (`install::install_state` says "outdated", or the agent
+    hasn't reported the `tunnel` capability): "Run the command under
+    Refresh this cluster in the cluster's settings first." So a cluster
+    never loses its public ports for a tunnel it can't run.
+  - When the install later turns out older than the agent (a refused
+    write of a tunnel object), the agent keeps what's running, writes
+    nothing else for the tunnel, reports `TunnelReport.refused`, and tries
+    again once the install changes (`refused::install_stamp`). The status
+    line says "Run the command under Refresh this cluster in the cluster's
+    settings." The Gateway itself is never broken by that refusal: the
+    tunnel client policy is written through `write_client_policy`, and a
+    refused one is skipped and reported, never stopping the service's
+    routes.
+- **Rotate** gives the tunnel a new token and a new certificate in one
+  action. There's no separate certificate action.
 
 ---
 
@@ -49,7 +134,7 @@ that commit. Pyo Cloud references are to pyo-cloud at 94956c8.
 - The control plane holds the token (sealed, as today), makes one tunnel per
   cluster through Cloudflare's API, keeps its routes (remotely managed
   ingress) and proxied DNS records in step with the cluster's domains, and
-  issues and renews an Origin CA certificate for Pyo Gateway.
+  issues a 15 year Origin CA certificate for Pyo Gateway.
 - The agent gets only the tunnel token. It runs cloudflared as a system part
   (2 replicas spread across servers, HTTP/2 to Cloudflare), pointed at Pyo
   Gateway inside the cluster over HTTPS, and reports its health.
@@ -76,7 +161,7 @@ that commit. Pyo Cloud references are to pyo-cloud at 94956c8.
 - More than one Cloudflare account per cluster tunnel (see §11).
 - Managing zone settings (Always Use HTTPS, SSL mode, caching). Pyo never
   changes zone-wide settings.
-- Pyo's own dashboard through the tunnel (open question Q7).
+- Pyo's own dashboard through the tunnel (decision 7).
 - Uptime checks or status pages (never in Pyo).
 
 ## 2. How it fits together
@@ -138,12 +223,13 @@ Radio group, same look as "Traffic routing" (`TrafficMode.tsx:24-53`):
 When Cloudflare Tunnel is picked, the panel shows its settings below the
 radio group:
 
-- **Default domain** (select of tunnel-ready zones, required): hint
-  "Services get names like web.example.com."
+- **Default domain** (select of tunnel-ready zones, optional, "None"
+  first): hint "Services get names like web.example.com."
 - **Cloudflare account** (select, only when the token's zones span more than
   one account).
-- **Public TCP and UDP ports** (switch, shown only when the cluster has any):
-  "On every server except build-only servers."
+- **Public TCP and UDP ports** (switch, on by default, shown only when the
+  cluster has any): "On every server except build-only servers. They don't
+  go through the tunnel."
 - Status line (see §10), with a **Remove tunnel** button under Danger zone
   when the cluster is not in tunnel mode and still has one.
 
@@ -151,7 +237,7 @@ Confirm dialog before switching to Cloudflare Tunnel:
 
 - Title: "Switch eu to Cloudflare Tunnel?"
 - Body lines, only those that apply:
-  - "Websites on example.com zones move to the tunnel."
+  - "Websites on example.com zones move to the tunnel. Records Pyo didn't make wait for your OK."
   - "3 domains aren't in your Cloudflare account. They stop answering from the internet."
   - "The public dashboard closes. Open Pyo through Tailscale or your local network." (cluster Pyo runs on)
 - Buttons: "Cancel", "Switch".
@@ -195,7 +281,7 @@ become one switch, on by default in tunnel mode:
 
 **E. Remove domain**: the existing remove dialog's `DeleteRecordSwitch`
 (`Cloudflare.tsx:410`) gets a second switch when a record was kept:
-"Put back the old record" (on by default), description
+"Put back the old record" (off by default, decision 5), description
 "A blog.example.com 203.0.113.7".
 
 ### 3.2 CLI (`crates/pyo-cli`)
@@ -205,7 +291,7 @@ New subcommands under the existing `pyo cloudflare` and `pyo domain`
 
 ```
 pyo cloudflare tunnel status [--cluster eu]
-pyo cloudflare tunnel on  --cluster eu --default-domain example.com [--account <id>] [--no-public-ports]
+pyo cloudflare tunnel on  --cluster eu [--default-domain example.com] [--account <id>] [--no-public-ports]
 pyo cloudflare tunnel off --cluster eu [--to public|tailscale]
 pyo cloudflare tunnel remove --cluster eu [--keep-records]
 pyo cloudflare tunnel rotate --cluster eu
@@ -240,8 +326,8 @@ spec). Plus one read endpoint. Details in §5.
 
 ## 4. Data model and migration
 
-New migration `crates/pyo-api/migrations/0039_cloudflare_tunnel.sql` (next
-free number after `0038_database_log_follows.sql`).
+New migration `crates/pyo-api/migrations/0040_cloudflare_tunnel.sql` (0039
+went to `0039_database_import_parts.sql` in 0.5.5).
 
 ```sql
 -- The cluster's traffic: 'public' (ports 80 and 443 on its servers),
@@ -284,9 +370,12 @@ CREATE TABLE pyo.cluster_tunnels (
   -- The Origin CA certificate the tunnel's domains use.
   certificate_id  text REFERENCES pyo.certificates (id) ON DELETE SET NULL,
   -- Cloudflare's id for it, to revoke it, and the one it replaced
-  -- (revoked a day after the agent took the new one).
+  -- (revoked a day after the new one was issued).
   cf_certificate_id  text,
   cf_certificate_old text,
+  cf_certificate_old_at timestamptz,
+  -- Asked for by Rotate: a new tunnel secret and a new certificate.
+  rotate          boolean NOT NULL DEFAULT false,
   -- Last reads: Cloudflare's view ({status, connections: [{colo, clientVersion,
   -- openedAt, originIp}], at}) and the agent's ({tunnelId, pods: [...], at}).
   cf_status       jsonb NOT NULL DEFAULT '{}',
@@ -357,8 +446,10 @@ for the token, "Clusters" for traffic, "Domains" for the switch
 /// How a cluster takes web traffic: "public" (ports 80 and 443 on every server but build-only ones),
 /// "tailscale" (only from the tailnet, or only inside the cluster without Tailscale) or "tunnel"
 /// (through Cloudflare Tunnel, with no ports 80 and 443 open). For "tunnel", the team's Cloudflare
-/// token needs Cloudflare Tunnel:Edit and SSL and Certificates:Edit, and `defaultDomain` names one of
-/// its zones: services get names under it. Domains in the account move to the tunnel. Team owners and admins.
+/// token needs Cloudflare Tunnel:Edit and SSL and Certificates:Edit. `defaultDomain` (optional) names one of
+/// its zones: services get names under it. Domains in the account move to the tunnel, and those with a
+/// record Pyo didn't make wait for `setDomainTunnel` with `replace`. Refused while the cluster's install is
+/// older than Pyo's. Team owners and admins.
 SetClusterTraffic {
     cluster_id: String,
     mode: String,
@@ -437,7 +528,7 @@ pinned, no redirects, outbound client with `Reach { private: false }`).
 | Rotate token | `PATCH /accounts/{acct}/cfd_tunnel/{tunnel}` `{ "tunnel_secret": "<base64 32 bytes>" }`, then drop connections | Cloudflare Tunnel:Edit |
 | Drop connections | `DELETE /accounts/{acct}/cfd_tunnel/{tunnel}/connections` | Cloudflare Tunnel:Edit |
 | Delete tunnel | `DELETE /accounts/{acct}/cfd_tunnel/{tunnel}` (needs no active connections) | Cloudflare Tunnel:Edit |
-| Origin certificate | `POST /certificates` `{ "csr": "<PEM>", "hostnames": [...], "request_type": "origin-ecc", "requested_validity": 365 }` | SSL and Certificates:Edit |
+| Origin certificate | `POST /certificates` `{ "csr": "<PEM>", "hostnames": [...], "request_type": "origin-ecc", "requested_validity": 5475 }` | SSL and Certificates:Edit |
 | Revoke it | `DELETE /certificates/{id}` | SSL and Certificates:Edit |
 
 Checked against Cloudflare's docs on 2026-11-22: "Create a tunnel (API)"
@@ -509,8 +600,9 @@ tasks next to `deploy::dns_watcher` (`deploy.rs:2531`). Per cluster with a
 3. **Wanted routes** = every domain with `tunnel: true` on a non-deleting
    service of the cluster (by `services.cluster_id`), plus
    `*.<default_domain>` when set. PUT when the hash differs.
-4. **Certificate.** Needed names (§9). Missing a name or under 30 days
-   left: issue a new one, store it, point the domains at it (§9).
+4. **Certificate.** Needed names (§9). Missing a name, or `rotate` set:
+   issue a new one, store it, point the domains at it (§9). No renewal by
+   age (15 years, decision 2).
 5. **Records**, only after step 3 succeeded in this or an earlier pass:
    - Rows `status = 'switching'`: `cloudflare::ensure`-like with
      `kind = CNAME`, `content = <tunnel_id>.cfargotunnel.com`,
@@ -530,8 +622,8 @@ tasks next to `deploy::dns_watcher` (`deploy.rs:2531`). Per cluster with a
    `cf_status`. Health is computed (§10). Down for 5 minutes: alert event
    `cluster.tunnel_down` (alerts.rs, like server offline), and
    `cluster.tunnel_up` when back.
-8. **Old certificate.** `cf_certificate_old` and the agent confirmed the
-   new one a day ago (routes synced): revoke and clear.
+8. **Old certificate.** `cf_certificate_old` and `cf_certificate_old_at`
+   passed (a day after the new one was issued): revoke and clear.
 9. **Removing.** `state = 'removing'`: PUT ingress with only the catch-all,
    restore or delete records (only Pyo's, `ours()`), enqueue
    `TunnelRemove`, wait for its answer (or 10 minutes), drop connections,
@@ -556,12 +648,15 @@ switching, `active` once the CNAME is in place and the route is live.
 ### 6.5 Free domains in tunnel mode
 
 `freedomain::Mode` (`freedomain.rs:69-89`) gains `Tunnel`. In tunnel mode
-the cluster's free domain is `<service>-<namespace>.<default domain>`
+with a default domain, the cluster's free domain is
+`<service>-<namespace>.<default domain>`
 (covered by the wildcard record and route) instead of nip.io, and the
 dashboard's "free domain" button makes that. Existing nip.io domains on the
 cluster stop answering from the internet in tunnel mode (no public 80/443).
 The confirm dialog counts them with the other unreachable domains. On
-Switch back to public, they answer again (nothing to move).
+Switch back to public, they answer again (nothing to move). Without a
+default domain, the cluster has no free domain in tunnel mode and the
+dashboard's button says "Pick a default domain first."
 
 ## 7. Agent
 
@@ -659,10 +754,11 @@ The agent watches pods with `app.kubernetes.io/name=pyo-tunnel` (all their
 `/128`). A change rewrites the client policies of services with tunnel
 domains (§8.3), the same way the websites' settings rewrite CDN policies
 today (`gateway.rs:1914`). A new pod's first requests can arrive before its
-address is trusted. They're refused by the gate (403) for those few seconds,
-never let through with the wrong visitor. The readiness probe keeps
-Cloudflare from sending it traffic until cloudflared is connected, which
-usually takes longer than the policy update.
+address is trusted. For those few seconds they're seen as the pod's own
+address (see Decisions). The readiness probe keeps Cloudflare from
+sending it traffic until cloudflared is connected, which usually takes
+longer than the policy update, and the agent watches pods as soon as
+they have an address, ready or not.
 
 ### 7.4 Heartbeat
 
@@ -685,6 +781,9 @@ pub struct TunnelReport {
     pub pods: Vec<TunnelPod>,
     /// The origin Service and the tunnel certificate Secret are in place.
     pub origin_ready: bool,
+    /// The cluster's install refused a tunnel object: its admission policy
+    /// is older than the agent's (see Decisions).
+    pub refused: bool,
 }
 ```
 
@@ -752,11 +851,10 @@ set by `routes::domain_specs` (`routes.rs:19-43`) from the domain's
   hostname (`gateway.rs:320-335`), `tls = "custom"`, the tunnel's
   certificate (fetched like any uploaded one, `gateway.rs:741-758`).
 - **Routes**: its own route per port, `{base}-tunnel-{port}`, parent the
-  service's Gateway and its listener sections, so the gate below applies to
-  tunnel names only. A service can mix tunnel and direct domains.
-- **No :80 routes**: tunnel domains are left out of the shared HTTP
-  listener (`gateway.rs:347-380`). cloudflared always speaks HTTPS to the
-  Gateway.
+  service's Gateway, so the redirect below applies to tunnel names only.
+  A service can mix tunnel and direct domains.
+- **:80 routes stay** as for any domain (see Decisions). cloudflared
+  always speaks HTTPS to the Gateway.
 - **HTTPS redirect**: with `redirect_https`, the tunnel route's first rule
   matches header `cf-visitor` exactly `{"scheme":"http"}` and redirects to
   https (301). Cloudflare sets that header on every proxied request and
@@ -768,11 +866,9 @@ set by `routes::domain_specs` (`routes.rs:19-43`) from the domain's
   the visitor from X-Forwarded-For (the address Cloudflare appended, the
   same one it puts in CF-Connecting-IP) only on connections from
   cloudflared's pods. Everyone else is their own address.
-- **Gate**: the firewall's "behind" gate (`firewall::behind_gate_rule`,
-  `BEHIND_GATE_CEL = "source.port != 0"`, `pyo-proto/src/firewall.rs:136-150`)
-  goes ahead of the service's own rules on the tunnel routes. A direct
-  connection with a tunnel hostname (another pod, or a visitor reaching
-  443 on a public-ports cluster) gets 403.
+- **No gate** (see Decisions): tunnel routes get the service's own
+  firewall rules (`web_authorization` without `behind`), never the CDN
+  gate. A direct connection with a tunnel hostname is its own visitor.
 - **Firewall, rate limits, WAF, countries**: unchanged. They read the
   visitor Envoy worked out, so they see the real one. GeoIP country follows
   the visitor address. The access log's `remote` field
@@ -811,7 +907,7 @@ header is Cloudflare's own, so audit and rate limits see the real visitor.
 This also closes the Pyo Cloud item "checking real client IPs in the audit
 log".
 
-Done in 0.5.5 (branch `fix/client-ip-headers`):
+**Done** in 0.5.5 (branch `fix/client-ip-headers`, decision 11):
 
 - Every client policy sets `headers.earlyRequestHeaders.remove`
   (`system::visitor_headers`): CF-Connecting-IP, CF-Connecting-IPv6,
@@ -840,8 +936,8 @@ mode.
 
 ## 9. Certificates
 
-- **One Origin CA certificate per cluster tunnel**, ECDSA P-256, 365 days,
-  renewed 30 days before it ends. Names: for each tunnel hostname, the
+- **One Origin CA certificate per cluster tunnel**, ECDSA P-256, 5475
+  days (15 years), never renewed by age (decision 2). Names: for each tunnel hostname, the
   hostname itself if it's a zone apex, else `*.<parent>`
   (`blog.example.com` → `*.example.com`, `a.b.example.com` →
   `*.b.example.com`), plus `*.<default domain>`. Deduped, at most 200.
@@ -852,21 +948,21 @@ mode.
   (`pyo.certificates`, key sealed with `seal_credential`), named
   "Cloudflare Tunnel (eu)", issuer "Cloudflare Origin CA". This is the
   pattern preview wildcards already use (`previews/domain.rs:460-520`).
-  Open question Q1 covers keeping the key in the cluster instead.
+  Decision 1.
 - **Tunnel domains use it as an uploaded certificate**: `tlsMode =
   "custom"`, `certificateId = cluster_tunnels.certificate_id`. The agent
   already fetches custom certificates from the API and writes them as the
   listener's Secret (`gateway.rs:741-758`). Nothing new on the agent's side.
-- **Renewal**: the new certificate replaces the row's chain and key in
-  place (same id), and the services using it get a routes sync
-  (`certs::used_by`, `certs.rs:208`, as `ReplaceCertificate` does). The
-  old Cloudflare certificate is revoked a day later (§6.3 step 8).
+- **Reissue** (a name not covered, or Rotate): the new certificate
+  replaces the row's chain and key in place (same id), and the services
+  using it get a routes sync (`certs::used_by`, `certs.rs:208`, as
+  `ReplaceCertificate` does). The old Cloudflare certificate is revoked a
+  day later (§6.3 step 8).
 - **ACME skipped**: tunnel domains never get a cert-manager `Certificate`,
   so no HTTP-01 to fail. `cloudflare::proxy_ready`
   (`cloudflare.rs:1199-1245`) only handles `via = 'direct'` rows.
-- **Expiry alerts**: the existing certificate warnings (`certs::warn_expiring`,
-  `certs.rs:223`) skip certificates the tunnel loop renews, unless renewal
-  failed for 7 days.
+- **Expiry alerts**: none needed in practice (15 years). The existing
+  warnings (`certs::warn_expiring`) still apply if one ever gets close.
 - Visitors see Cloudflare's edge certificate (Universal SSL). The Origin CA
   certificate is only between cloudflared and the Gateway.
 
@@ -886,7 +982,9 @@ Extra lines under the status, only when true:
 
 - "pyo-tunnel can't start on fal2: ImagePullBackOff" (from the agent's pod reason).
 - "Connect Cloudflare again to change the tunnel." (token gone or refused).
-- "Certificate renewal failed: <reason>" (after 7 days of failures).
+- "Certificate: <reason>" (the last issue failed).
+- "Run the command under Refresh this cluster in the cluster's settings."
+  (the agent reports `refused`, see Decisions).
 
 Colours follow the existing Badge tones (success, warning, destructive).
 The cluster list shows a small "Tunnel" badge next to the cluster's status
@@ -902,8 +1000,9 @@ when in tunnel mode, warning tone when degraded or down.
   another account. The tunnel lives in the account of the default domain's
   zone. Zones in other accounts show "Another Cloudflare account" and stay
   direct.
-- **Default domain**: required in tunnel mode, since nip.io names can't be
-  proxied. It must be a zone the token covers (`example.com`, not
+- **Default domain**: optional (decision 4). Without it, only domains
+  switched by hand use the tunnel, and there are no free domains (nip.io
+  names can't be proxied). It must be a zone the token covers (`example.com`, not
   `apps.example.com`): Universal SSL only covers one level below the zone,
   so `web.apps.example.com` would fail TLS at Cloudflare without Advanced
   Certificate Manager. One wildcard record `*.example.com` (proxied CNAME)
@@ -958,8 +1057,9 @@ when in tunnel mode, warning tone when degraded or down.
 | QUIC/7844 blocked outbound | cloudflared can't connect | Pod not ready. Docs: allow outbound TCP 7844 |
 | Tunnel deleted in Cloudflare | 1033 until recreated | Loop recreates it, repoints Pyo's records, sends the new token |
 | Routes edited in Cloudflare | Pyo's config is PUT back on the next pass | Docs: don't edit Pyo's tunnel in Cloudflare |
-| Origin certificate expired or revoked | 502 from cloudflared | Renewed 30 days early. Failures shown on the status line and alerted after 7 days |
+| Origin certificate revoked by hand | 502 from cloudflared | Rotate issues a new one. Issue failures shown on the status line |
 | Agent too old (no `tunnel` capability) | Choice greyed out | "Not reported yet." |
+| Cluster install older than the agent | Tunnel mode refused, or a running connector kept as it is | "Run the command under Refresh this cluster…" (see Decisions) |
 | New cloudflared pod not yet trusted | Its requests get 403 for a few seconds | Pod watch updates the policy |
 | Record conflict | Switch stops at "confirm" | User replaces or cancels |
 | Cloudflare 429 or 5xx | Pass retried later | Backoff per team |
@@ -1046,10 +1146,9 @@ could move to this once 0.51.0 runs on Pyo Ops:
 
 1. In Pyo Ops (team frans), replace the Cloudflare token with one that also
    has Cloudflare Tunnel:Edit and SSL and Certificates:Edit on pyo.dev.
-2. Cluster `cl_eavb3paccm12` › Traffic › Cloudflare Tunnel, default domain
-   none or pyo.dev (open question Q8: a wildcard on pyo.dev would catch
-   unknown names, so likely no default domain on Pyo Ops). That needs the
-   default domain to be optional when every domain is switched by hand.
+2. Cluster `cl_eavb3paccm12` › Traffic › Cloudflare Tunnel, no default
+   domain (decision 8: a wildcard on pyo.dev would catch unknown names).
+   The default domain is optional (decision 4).
 3. Switch cloud.pyo.dev and agent.pyo.dev to the tunnel. Pyo shows the
    Terraform CNAMEs to the old tunnel and asks. After the switch, traffic
    goes through Pyo's tunnel. The old one stays up until removed, so this
@@ -1078,17 +1177,15 @@ repo needs no change for them.
 
 ## 15. connect.sh
 
-The existing-k3s branch (`crates/pyo-api/assets/connect.sh:1237-1243`) gets
-a preflight in 0.5.5 that finds Traefik or another program on 80 or 443
-(separate fix, not part of this spec). In 0.51.0 that preflight:
+Done in 0.5.5 (`8545c8f`, `378fa72`): connect.sh finds Traefik or another
+program on 80 or 443, sends `&webPorts=busy` with the manifest request,
+leaves the firewall as it is, and the API turns public traffic off before
+the agent's first heartbeat (`install::web_ports_busy`). In 0.51.0:
 
-- prints one line and goes on:
-  `Ports 80 and 443 are in use. In Pyo, choose Cloudflare Tunnel or Tailscale only for this cluster.`
-- adds `&webPorts=busy` to the manifest request (`connect.sh:1011`). The
-  API sets the cluster's `traffic` to `tailscale` before the agent's first
-  heartbeat, so Envoy is installed with a ClusterIP Service and no
-  `svclb-envoy` pods sit pending against Traefik's.
-- skips `ufw allow 443` (`connect.sh:1024`) and 80 when the ports are busy.
+- `web_ports_busy` writes `traffic = 'tailscale'` (the generated
+  `public_traffic` can't be written).
+- connect.sh's line (`web_ports_line`) becomes
+  `Ports 80 and 443 are in use by Traefik. Public traffic stays off, so your sites keep working. Cloudflare Tunnel can take your websites instead.`
 
 The dashboard then shows on the new cluster: "Ports 80 and 443 are taken
 on this server. Choose Cloudflare Tunnel or Tailscale only." with a link to
@@ -1117,8 +1214,8 @@ Changed:
   "Public TCP and UDP ports" adds the tunnel-mode switch.
 - `firewall.mdx` "Behind Cloudflare" (`:58`): tunnel domains don't need it.
   Rules see the real visitor.
-- `certificates.mdx`: the Cloudflare Tunnel certificate Pyo makes and
-  renews.
+- `certificates.mdx`: the Cloudflare Tunnel certificate Pyo makes (15
+  years, a new one on Rotate).
 - `system-reference.mdx` "What runs on your server" (`:143`): `pyo-tunnel`
   (cloudflared, 2 replicas), `pyo-tunnel-origin`, `pyo-public-ports`.
   "Connections" (`:41`): outbound TCP 7844 to Cloudflare in tunnel mode.
@@ -1220,11 +1317,12 @@ through signed commands.
 
 ## 18. Build plan
 
-One branch per phase, merged to `dev` in order. Rust builds one at a time
-under the laptop guardrails. Each phase ends green and shippable behind the
-capability flag.
+Built on one branch, `feat/cloudflare-tunnel` (worktree `pyo-tunnel`),
+merged to `dev` only when the feature is complete and tested. Rust builds
+one at a time under the laptop guardrails. Each phase ends green and
+shippable behind the capability flag.
 
-**Phase 0 (0.5.5, separate fixes, referenced)**
+**Phase 0 (0.5.5, separate fixes, done)**
 
 - connect.sh 80/443 preflight (`connect.sh:1237-1243`).
 - Remove client-sent `CF-Connecting-IP` at the Gateway (§8.4):
@@ -1281,7 +1379,6 @@ capability flag.
 - `crates/pyo-api/src/snapshot.rs:140-170`: `traffic`, `tunnel`.
   `cloudflare::attach` (`cloudflare.rs:591-621`): `via`, `previous`.
 - `crates/pyo-api/src/deploy.rs:2547`: skip tunnel domains in DNS checks.
-- `crates/pyo-api/src/certs.rs:223`: skip renewed tunnel certificates.
 - `crates/pyo-api/src/alerts.rs`: `cluster.tunnel_down`/`_up` events.
 
 **Phase 4: traffic choice, switching, default domain**
@@ -1313,8 +1410,8 @@ capability flag.
 **Phase 5: ports, connect.sh, alerts**
 
 - `pyo-public-ports` Service (§8.5) in `gateway.rs` with its rbac pin.
-- `crates/pyo-api/assets/connect.sh:1011`, `:1024`, preflight message.
-- `crates/pyo-api/src/install.rs`: read `webPorts=busy`, set `traffic`.
+- `crates/pyo-api/assets/connect.sh` `web_ports_line`: mention the tunnel.
+- `crates/pyo-api/src/install.rs` `web_ports_busy`: set `traffic`.
 
 **Phase 6: docs, tests, Pyo Ops**
 
@@ -1323,10 +1420,13 @@ capability flag.
 - Real-zone test with the user's approval (§17.4).
 - After 0.51.0 is on Pyo Ops: move cloud.pyo.dev and agent.pyo.dev
   (§14), then the pyo-cloud cleanup commit.
-- Release notes (Features: Cloudflare Tunnel, Security Fixes: the
-  CF-Connecting-IP fix if it ships here).
+- Release notes (Features: Cloudflare Tunnel). The CF-Connecting-IP fix
+  shipped in 0.5.5.
 
-## 19. Open questions
+## 19. Open questions (answered)
+
+All answered on 2026-11-22. See Decisions at the top. Kept for the
+record.
 
 1. **Origin certificate key**: made by the control plane and kept sealed
    with the team's certificates (like preview wildcards, less code), or
@@ -1390,13 +1490,14 @@ It also lets Pyo run on a server where another program already uses ports
 
 1. Open your cluster's **Settings** and find **Traffic**.
 2. Pick **Cloudflare Tunnel**.
-3. Pick a **default domain**. Services get names under it, like
-   `web.example.com`.
+3. Pick a **default domain** if you want one. Services get names under
+   it, like `web.example.com`.
 4. Select **Switch**.
 
 Pyo creates the tunnel and starts two connectors on different servers.
-Domains in your Cloudflare account move to the tunnel. Domains in other
-accounts stop answering from the internet.
+Domains in your Cloudflare account move to the tunnel. If a name has a
+record Pyo didn't make, Pyo asks first. Domains in other accounts stop
+answering from the internet.
 
 ## Move one domain
 
@@ -1423,7 +1524,8 @@ audit log all see the real visitor.
 ## TCP and UDP ports
 
 Cloudflare Tunnel carries websites only. Public TCP and UDP ports stay on
-your servers' public addresses, or on Tailscale.
+your servers' public addresses, or on Tailscale. They don't go through
+the tunnel.
 
 ## Cloudflare's limits
 
@@ -1437,3 +1539,21 @@ Pick **Public ports** or **Tailscale only**. Then select **Switch back** on
 each domain, and **Remove tunnel**. Pyo deletes the tunnel and only the
 records it made.
 ```
+
+## 21. Build status
+
+Kept current as each phase lands, so the work can be picked up from here.
+Branch `feat/cloudflare-tunnel`, worktree `/home/frx/workspace/upsetdev/pyo-tunnel`.
+Not merged into `dev` until the feature is complete and tested.
+
+| Phase | State |
+|---|---|
+| Decisions applied to this spec | Done |
+| 1. Token and zones | Next |
+| 2. Agent and Gateway | Not started |
+| 3. Control plane | Not started |
+| 4. Traffic choice, switching, default domain | Not started |
+| 5. Ports, connect.sh, alerts | Not started |
+| 6. Docs, e2e, real-zone test, Pyo Ops | Not started (real zone and Pyo Ops need the user) |
+
+Known gaps: none yet.
