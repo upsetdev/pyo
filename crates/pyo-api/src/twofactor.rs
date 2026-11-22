@@ -702,13 +702,12 @@ pub async fn mail_user(
     state: &AppState,
     to: &str,
     path: &str,
-    template: impl FnOnce(&str) -> (String, String, String),
+    template: impl FnOnce(&str) -> crate::mail::Email,
 ) {
     let Ok(Some(cfg)) = crate::mail::settings(&state.db).await else {
         return;
     };
-    let (subject, text, html) = template(&cfg.link(path));
-    if let Err(e) = crate::mail::send(state, &cfg, to, &subject, text, html).await {
+    if let Err(e) = crate::mail::send(state, &cfg, to, &template(&cfg.link(path))).await {
         tracing::warn!(error = %format!("{e:#}"), "security email not sent");
     }
 }
