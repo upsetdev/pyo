@@ -1535,6 +1535,10 @@ fn heard_public() -> Option<bool> {
     }
 }
 
+/// How long a new cluster's gateway waits for the API's first reply, which
+/// says whether it takes public traffic.
+const FIRST_WORD_SECS: u32 = 60;
+
 /// Whether the proxies are published on the servers: as the API last said,
 /// else as they are, else (a new cluster) yes.
 pub fn wanted_public(heard: Option<bool>, current: Option<bool>) -> bool {
@@ -1838,6 +1842,17 @@ async fn ensure_once(client: &Client) -> anyhow::Result<()> {
         .get_opt("pyo")
         .await?
         .map(|p| system::envoy_proxy_public(&p.data["spec"]));
+    // A new cluster: what the API says first. It may take no public
+    // traffic (ports 80 and 443 in use where it was connected, install.rs),
+    // and publishing the proxies for a moment would put pods on those ports.
+    if current.is_none() && heard_public().is_none() {
+        for _ in 0..FIRST_WORD_SECS {
+            if heard_public().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
     let public = wanted_public(heard_public(), current);
     proxies
         .patch(
