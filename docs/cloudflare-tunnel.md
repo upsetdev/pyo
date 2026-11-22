@@ -786,7 +786,10 @@ set by `routes::domain_specs` (`routes.rs:19-43`) from the domain's
 Admission (`rbac.rs:547-552`): the CDN client policy rule allows labels in
 `firewall::BEHIND`. Add `"tunnel"` to that list (not to `BEHIND` itself,
 which is user-facing) and keep the `/32` and `/128` entries within
-`TRUSTED_V4_RE` / `TRUSTED_V6_RE` (both already allow them).
+`TRUSTED_V4_RE` / `TRUSTED_V6_RE` (both already allow them). The CDN
+policy's `headers` are pinned per CDN name (`cdn_headers` in rbac.rs, from
+`system::cdn_own_headers`): give `"tunnel"` Cloudflare's list there too,
+so CF-Connecting-IP keeps passing on tunnel listeners (§8.4).
 
 Why not Envoy's `customHeader: CF-Connecting-IP`: Envoy would trust it from
 any connection (`system.rs:1320-1323`). X-Forwarded-For with trusted peers
@@ -807,6 +810,20 @@ admission policy's client policy variants updated. Through the tunnel the
 header is Cloudflare's own, so audit and rate limits see the real visitor.
 This also closes the Pyo Cloud item "checking real client IPs in the audit
 log".
+
+Done in 0.5.5 (branch `fix/client-ip-headers`):
+
+- Every client policy sets `headers.earlyRequestHeaders.remove`
+  (`system::visitor_headers`): CF-Connecting-IP, CF-Connecting-IPv6,
+  True-Client-IP, Fastly-Client-IP, X-Real-IP, X-Client-IP and Forwarded.
+  `pyo-https` with origin pull keeps the four CDN headers (only the CDN
+  connects). A service behind Cloudflare keeps Cloudflare's two. The
+  tailnet Gateway gets a policy of its own (`pyo-tailnet`) with the full
+  list. X-Forwarded-For is never removed.
+- pyo-api (`ratelimit::visitor_ip`) never takes CF-Connecting-IP from k3s's
+  pod network, whatever `PYO_TRUSTED_PROXIES` lists. Behind the Gateway the
+  visitor comes from X-Forwarded-For, walked right to left.
+- The sandbox edge removes the same headers before the guest sees them.
 
 ### 8.5 TCP and UDP ports in tunnel mode
 
