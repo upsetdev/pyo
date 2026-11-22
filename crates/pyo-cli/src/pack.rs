@@ -267,6 +267,7 @@ pub fn pack(files: &[Entry], limit: u64, mut tick: impl FnMut(usize)) -> Result<
 }
 
 /// One line that rewrites itself on a terminal, at most every 100 ms.
+/// Elsewhere (a CI log, say) a line of its own, at most every 30 seconds.
 struct Progress {
     tty: bool,
     last: Option<Instant>,
@@ -281,19 +282,21 @@ impl Progress {
     }
 
     fn show(&mut self, text: &str, force: bool) {
-        if !self.tty {
-            return;
-        }
-        if !force
-            && self
-                .last
-                .is_some_and(|t| t.elapsed() < Duration::from_millis(100))
-        {
+        let every = if self.tty {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(30)
+        };
+        if !force && self.last.is_some_and(|t| t.elapsed() < every) {
             return;
         }
         self.last = Some(Instant::now());
-        eprint!("\r\x1b[2K{}", ui::dim(text));
-        let _ = std::io::stderr().flush();
+        if self.tty {
+            eprint!("\r\x1b[2K{}", ui::dim(text));
+            let _ = std::io::stderr().flush();
+        } else {
+            eprintln!("{text}");
+        }
     }
 
     fn done(&mut self) {
