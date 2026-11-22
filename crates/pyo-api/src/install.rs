@@ -378,9 +378,15 @@ spec:
         pyo.dev/token: "{token_stamp}"
     spec:
       serviceAccountName: pyo-agent
+      # It keeps running on a server short of disk or memory, and starts
+      # there after an update: it reports that state, and cleans up what
+      # the evictions leave.
+      priorityClassName: system-cluster-critical
       # It may run on a GPU server kept for GPU work.
       tolerations:
         - {{ key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }}
+        - {{ key: node.kubernetes.io/disk-pressure, operator: Exists, effect: NoSchedule }}
+        - {{ key: node.kubernetes.io/memory-pressure, operator: Exists, effect: NoSchedule }}
       containers:
         - name: agent
           image: {image}
@@ -872,6 +878,33 @@ mod tests {
             stamp(&render("https://pyo.example.com", "img@sha256:00", "abc"))
         );
         assert!(!a.contains(&sha256_hex("abc")), "not the lookup hash");
+    }
+
+    /// A server short of disk neither evicts the agent nor keeps a new one
+    /// from starting, so it goes on reporting and cleaning up there.
+    #[test]
+    fn the_agent_stays_on_a_server_short_of_disk() {
+        let pod = render("https://pyo.example.com", "img@sha256:00", "abc")
+            .split("\n---")
+            .filter_map(|d| serde_norway::from_str::<serde_json::Value>(d).ok())
+            .find(|d| d["kind"] == "Deployment" && d["metadata"]["name"] == "pyo-agent")
+            .expect("the agent's Deployment")["spec"]["template"]["spec"]
+            .clone();
+        assert_eq!(pod["priorityClassName"], "system-cluster-critical");
+        let tolerated: Vec<&str> = pod["tolerations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["operator"] == "Exists" && t["effect"] == "NoSchedule")
+            .filter_map(|t| t["key"].as_str())
+            .collect();
+        for taint in [
+            "node.kubernetes.io/disk-pressure",
+            "node.kubernetes.io/memory-pressure",
+            "nvidia.com/gpu",
+        ] {
+            assert!(tolerated.contains(&taint), "{taint}: {tolerated:?}");
+        }
     }
 
     #[test]
