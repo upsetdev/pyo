@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Pyo <pyo@localhost>
 Date: Tue, 10 Nov 2026 16:19:56 +0700
-Subject: [PATCH 4/4] feat: delete old backups after a number of days
+Subject: [PATCH 4/5] feat: delete old backups after a number of days
 
 Backups are never deleted, so the bucket grows forever unless a
 lifecycle rule removes old objects, which can also remove a backup a

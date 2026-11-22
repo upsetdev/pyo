@@ -30,7 +30,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export KUBECONFIG=${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
-BUILDKIT_VERSION=v0.34.1
+BUILDKIT_VERSION=v0.34.2
 BIN="$HOME/.local/bin"
 NS=pyo-system
 # Where Pyo's own images come from: built here, or a published release.

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Pyo <pyo@localhost>
 Date: Tue, 10 Nov 2026 16:15:06 +0700
-Subject: [PATCH 1/4] fix: delete only the cluster's own old ConfigMaps
+Subject: [PATCH 1/5] fix: delete only the cluster's own old ConfigMaps
 
 The old my.cnf and slow query log agent ConfigMaps were found by name
 prefix alone, so a cluster could delete another cluster's ConfigMaps
