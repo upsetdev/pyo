@@ -149,21 +149,20 @@ export function currentHref(items: NavLink[], pathname: string): string | undefi
   return all.sort((x, y) => matchLength(y, pathname) - matchLength(x, pathname))[0]?.href;
 }
 
-/** A sidebar link: muted until hovered, a soft pill when it's the current page. */
+/** A sidebar link: bright text, a faint wash on hover, a soft pill when it's the current page. */
 export const navItemClass = (active: boolean) =>
-  `group flex items-center gap-3 rounded-lg px-2.5 py-[7px] text-[13.5px] transition-[background-color,color,box-shadow] duration-200 ease-out ${
-    active
-      ? "bg-card text-foreground shadow-card"
-      : "text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground"
+  `group flex items-center gap-3 rounded-lg px-2.5 py-[7px] text-[13.5px] text-foreground transition-[background-color,color,box-shadow] duration-200 ease-out ${
+    active ? "bg-card shadow-card" : "hover:bg-foreground/[0.05]"
   }`;
+/** Its icon: a step softer than the text, full strength when current or hovered. */
 export const navIconClass = (active: boolean) =>
-  `shrink-0 transition-colors duration-200 ease-out ${active ? "text-foreground" : "text-muted-foreground group-hover:text-foreground"}`;
+  `shrink-0 transition-colors duration-200 ease-out ${active ? "text-foreground" : "text-foreground/70 group-hover:text-foreground"}`;
+/** The stroke every sidebar icon is drawn with. */
+export const NAV_ICON_WEIGHT = "light" as const;
 /** A page inside an open group: indented along a thin line. */
 export const navChildClass = (active: boolean) =>
-  `flex items-center rounded-lg px-2.5 py-[6px] text-[13px] transition-[background-color,color,box-shadow] duration-200 ease-out ${
-    active
-      ? "bg-card text-foreground shadow-card"
-      : "text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground"
+  `flex items-center rounded-lg px-2.5 py-[6px] text-[13px] text-foreground transition-[background-color,color,box-shadow] duration-200 ease-out ${
+    active ? "bg-card shadow-card" : "hover:bg-foreground/[0.05]"
   }`;
 export const NAV_LABEL =
   "mb-2 px-2.5 text-[12px] font-medium text-muted-foreground/70";
