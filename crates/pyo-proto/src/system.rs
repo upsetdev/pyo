@@ -1688,6 +1688,44 @@ pub fn public_ports_service(ports: &[(String, i32)]) -> Option<Value> {
     }))
 }
 
+/// X-Forwarded-For as a service gets it on its tunnel routes: the visitor
+/// the proxy worked out, alone. The proxy reads the visitor from the
+/// header only on the connectors' connections, then appends the address
+/// it's connected to, so the service would see `<visitor>, <connector's
+/// pod>` and an app reading the last entry would take a pod for its
+/// visitor. This route filter replaces the header once the proxy is done
+/// with it: the visitor through the tunnel, and a direct client's own
+/// address while a domain is switching, whatever either sent.
+pub const FORWARDED_FOR_HEADER: &str = "X-Forwarded-For";
+/// Envoy's own address for the request's client (never a header's text).
+pub const FORWARDED_FOR_VISITOR: &str = "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%";
+
+/// The header a tunnel route's rules set ([`FORWARDED_FOR_HEADER`]).
+pub fn forwarded_for_visitor() -> Value {
+    json!({ "name": FORWARDED_FOR_HEADER, "value": FORWARDED_FOR_VISITOR })
+}
+
+/// A route rule to a service, as its tunnel routes have it: with
+/// X-Forwarded-For set to the visitor ([`forwarded_for_visitor`]). A rule
+/// takes one header filter, so a static site's gets it in the one it has.
+pub fn tunnel_rule(mut rule: Value) -> Value {
+    let header = forwarded_for_visitor();
+    if let Some(set) = rule["filters"]
+        .as_array_mut()
+        .and_then(|fs| fs.iter_mut().find(|f| f["type"] == "RequestHeaderModifier"))
+        .and_then(|f| f["requestHeaderModifier"]["set"].as_array_mut())
+    {
+        set.push(header);
+        return rule;
+    }
+    let filter = json!({ "type": "RequestHeaderModifier", "requestHeaderModifier": { "set": [header] } });
+    match rule["filters"].as_array_mut() {
+        Some(fs) => fs.push(filter),
+        None => rule["filters"] = json!([filter]),
+    }
+    rule
+}
+
 /// A service's client policy for its tunnel listeners.
 pub fn tunnel_policy_name(base: &str) -> String {
     format!("{base}-{TUNNEL_CDN}")

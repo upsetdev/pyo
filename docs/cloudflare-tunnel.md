@@ -137,6 +137,69 @@ Decisions made while building (not in the first draft):
   goes. A removed tunnel domain's record is otherwise reverted without
   putting back what it replaced.
 
+Decisions after the real-Cloudflare test (2026-11-22):
+
+- **The permission probe is this installation's own.** The probe tunnel
+  is `pyo-check-<install id>-<6 hex>`. A check deletes only probes with
+  that prefix made more than 5 minutes ago, so it never touches another
+  installation's probe, a tunnel someone named `pyo-check-…`, or the
+  probe of a check running at the same time. The DNS probe's text is
+  `"pyo-check-<install id>"`: Cloudflare refuses identical records, so
+  with one shared text a probe another installation left in a shared
+  zone would fail every later check there.
+- **No wildcard route.** The default domain keeps its wildcard record and
+  its wildcard name on the certificate, but the tunnel's routes list only
+  names a service has (free names under the default domain included).
+  Any other name stops at the routes' last rule, `http_status:404`, in the
+  connector. Before, the wildcard route sent those names to the Gateway,
+  which has no listener for them and reset the connection (502 at
+  Cloudflare). Nothing was added to the Gateway, so the gate is as it was.
+  A new name still needs the loop's next pass (up to 30 s) and the
+  Gateway's listener before it answers. Until then it gets 404, then for
+  a few seconds 502 while the Gateway takes the listener.
+- **A name under the default domain always goes through the tunnel.**
+  Without a record of its own the loop puts it through the wildcard, so
+  Switch back would last one pass. `setDomainTunnel` with `on: false`
+  answers "<name> is under the tunnel's default domain, so it always goes
+  through the tunnel." and writes no activity line. Two cases still go
+  ahead. A record the switch replaced comes back (`restore` with a kept
+  record: it answers ahead of the wildcard, and removing a domain with
+  "Put back the old record" needs it). And a switch that waits for a yes
+  can be cancelled: the name stays `"on"`. The dashboard shows such a name
+  as "Via Tunnel · *.example.com" and offers Switch back only with a kept
+  record.
+- **A new name under the default domain gets no record of its own**
+  (user, 2026-11-23). `setDomainTunnel` with `on: true` for a name one
+  level under the default domain that isn't on the tunnel yet reads the
+  records on that exact name at Cloudflare. With no A, AAAA or CNAME
+  there, the domain takes `tunnel: "on"` at once and the answer is
+  `status: "active"`: the wildcard record has it, and Pyo makes no
+  record. With one there (it would answer ahead of the wildcard), or when
+  Cloudflare can't be asked, the usual switch runs: Pyo's own record is
+  replaced and someone else's stops at "conflict". This is in the op, so
+  the dashboard, the CLI, MCP and the API behave the same. The CLI now
+  sends the op for such names too. Asking again for a name already
+  `"on"` still makes its own record (next point).
+- **A name already `"on"` never goes back to `"switching"`.** Asking to
+  switch a name the wildcard already serves makes its own record and route
+  while it stays gated. Only a name moving from public ports gets both
+  paths.
+- **X-Forwarded-For for the service is the visitor alone.** Envoy reads
+  the visitor from the header on the connectors' connections, then appends
+  the connection's address, so the service saw `<visitor>, <connector's
+  pod>`. Tunnel routes (`-tunnel-` and `-switching-`) now set
+  `X-Forwarded-For: %DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%` with a
+  `RequestHeaderModifier` on the rule that goes to the service
+  (`system::tunnel_rule`). That is Envoy's own address for the client
+  after the client policy ran: the visitor through the tunnel, and a
+  direct client's own address while a domain is switching, whatever
+  either sent. Envoy Gateway passes the value to Envoy as it is
+  (`buildXdsAddedHeaders`, v1.9.3). Its client policy option
+  `disableXForwardedForAppend` wasn't used: it would pass a direct
+  client's made-up header to the service while a domain is switching.
+  The admission policy's HTTPRoute rule allows that one header and value
+  next to a static site's, so the access hash moves (the roles don't).
+
 ---
 
 ## 1. Goals and non-goals
@@ -538,7 +601,7 @@ pinned, no redirects, outbound client with `Reach { private: false }`).
 |---|---|---|
 | Zones and their account | `GET /zones?per_page=50&page=n` (already called, now also reads `result[].account.{id,name}`) | Zone:Read |
 | Records (exists) | `GET/POST/PATCH/DELETE /zones/{zone}/dns_records[/{id}]` | DNS:Edit |
-| Tunnel permission check | `POST /accounts/{acct}/cfd_tunnel` `{ "name": "pyo-check-<6 hex>", "config_src": "cloudflare" }`, then `DELETE /accounts/{acct}/cfd_tunnel/{id}`. Leftovers (name prefix `pyo-check-`) are listed with `GET /accounts/{acct}/cfd_tunnel?name=…&is_deleted=false` and deleted. Once per account. | Cloudflare Tunnel:Edit |
+| Tunnel permission check | `POST /accounts/{acct}/cfd_tunnel` `{ "name": "pyo-check-<install id>-<6 hex>", "config_src": "cloudflare" }`, then `DELETE /accounts/{acct}/cfd_tunnel/{id}`. Leftovers are listed with `GET /accounts/{acct}/cfd_tunnel?name=pyo-check-<install id>-&is_deleted=false`, and only this installation's own (that prefix and six hex characters) made more than 5 minutes ago (`created_at`) are deleted. Another installation's probes and anyone's own `pyo-check-…` tunnel are never touched. Once per account. | Cloudflare Tunnel:Edit |
 | Origin CA permission check | `GET /certificates?zone_id={zone}` | SSL and Certificates:Read (Edit is required, see below) |
 | Create tunnel | `POST /accounts/{acct}/cfd_tunnel` `{ "name": "pyo-<cluster>-<install id>", "config_src": "cloudflare" }` | Cloudflare Tunnel:Edit |
 | Read tunnel | `GET /accounts/{acct}/cfd_tunnel/{tunnel}` (status: inactive, degraded, healthy, down; `deleted_at`) | Cloudflare Tunnel:Read |
@@ -580,18 +643,19 @@ Tunnel ids are UUIDs: `id_ok` gains `-`, or a separate `uuid_ok`.
   { "hostname": "blog.example.com",
     "service": "https://pyo-tunnel-origin.pyo-gateway.svc.cluster.local:443",
     "originRequest": { "matchSNItoHost": true, "connectTimeout": 10, "keepAliveTimeout": 90 } },
-  { "hostname": "*.example.com",
+  { "hostname": "web-shop.example.com",
     "service": "https://pyo-tunnel-origin.pyo-gateway.svc.cluster.local:443",
     "originRequest": { "matchSNItoHost": true, "connectTimeout": 10, "keepAliveTimeout": 90 } },
   { "service": "http_status:404" }
 ] } }
 ```
 
-- Sorted: exact names first (longest first), the default domain's wildcard
-  last before the catch-all. cloudflared matches top down.
+- Sorted: longest name first, then the catch-all. cloudflared matches top
+  down.
+- No wildcard route for the default domain (see Decisions). Each free name
+  under it has its own rule, and any other name gets the catch-all's 404.
 - `matchSNItoHost` sends the visitor's host as SNI. Go's TLS then checks
-  the Origin CA certificate against that host, so one rule shape works for
-  exact names and the wildcard. Pyo Cloud's Terraform uses
+  the Origin CA certificate against that host. Pyo Cloud's Terraform uses
   `origin_server_name = h` per name (`pyo-cloud deploy/terraform/cloudflare/tunnel.tf:22-27`),
   which can't express a wildcard. Verify in e2e (§17.2).
 - cloudflared trusts Cloudflare's Origin CA itself (Pyo Cloud runs that way
@@ -618,8 +682,8 @@ tasks next to `deploy::dns_watcher` (`deploy.rs:2531`). Per cluster with a
    or `deleted_at`: create a new one (same name plus `-2`), mark every
    Pyo-made tunnel record to repoint, send the new token.
 3. **Wanted routes** = every domain with `tunnel` set on a non-deleting
-   service of the cluster (by `services.cluster_id`), plus
-   `*.<default_domain>` when set. PUT when the hash differs.
+   service of the cluster (by `services.cluster_id`), the free names
+   under the default domain among them. PUT when the hash differs.
 4. **Certificate.** Needed names (§9). Missing a name, or `rotate` set:
    issue a new one, store it, point the domains at it (§9). No renewal by
    age (15 years, decision 2).
@@ -675,7 +739,7 @@ switching, `active` once the CNAME is in place and the route is live.
 `freedomain::Mode` (`freedomain.rs:69-89`) gains `Tunnel`. In tunnel mode
 with a default domain, the cluster's free domain is
 `<service>-<namespace>.<default domain>`
-(covered by the wildcard record and route) instead of nip.io, and the
+(covered by the wildcard record, with a route of its own) instead of nip.io, and the
 dashboard's "free domain" button makes that. Existing nip.io domains on the
 cluster stop answering from the internet in tunnel mode (no public 80/443).
 The confirm dialog counts them with the other unreachable domains. On
@@ -1035,7 +1099,7 @@ when in tunnel mode, warning tone when degraded or down.
   `apps.example.com`): Universal SSL only covers one level below the zone,
   so `web.apps.example.com` would fail TLS at Cloudflare without Advanced
   Certificate Manager. One wildcard record `*.example.com` (proxied CNAME)
-  and one wildcard route. Explicit records on the zone win over the
+  and a route per name (no wildcard route). Explicit records on the zone win over the
   wildcard, so existing sites aren't touched. A wildcard record already
   there is a conflict and asks first, like any record.
 - **Deeper user names** (`a.b.example.com`) can be switched, with a warning
@@ -1265,10 +1329,11 @@ sentences, no semicolons, no dash-joined clauses.
 ### 17.1 Unit
 
 - **pyo-api `cloudflare/tests.rs`** (fake `Cloudflare`):
-  - zones read their account, tunnel check per account, leftover
-    `pyo-check-` tunnels deleted, Origin CA read check per zone,
+  - zones read their account, tunnel check per account, only this
+    installation's old `pyo-check-<install id>-` tunnels deleted, Origin
+    CA read check per zone,
     `problems()` lines.
-  - `tunnel::ingress()`: order, wildcard last, catch-all, `matchSNItoHost`,
+  - `tunnel::ingress()`: order, no wildcard, catch-all, `matchSNItoHost`,
     hash stable across runs.
   - certificate names: apex, one level, two levels, default domain, dedupe,
     200 cap.
@@ -1611,6 +1676,34 @@ Phase 6 checks (2026-11-22): `cargo clippy -p pyo-api -p pyo-cli --tests
 red), pyo-cli 80 passed. `scripts/tunnel-gate-e2e.sh` passes all 11
 checks against Envoy 1.39.5. Previews in tunnel mode go under the
 default domain (3cb5c75).
+
+Fixes after the real-Cloudflare test (2026-11-22, branch
+`worktree-agent-a1e523da2ad53df3d`, see "Decisions after the
+real-Cloudflare test"):
+
+| Bug | Fix | Tested by |
+|---|---|---|
+| The probe deleted every `pyo-check-*` tunnel | Probe named for the installation, only its own old ones deleted (`tunnel::tunnel_missing`), DNS probe text per installation | `http_tests::a_check_deletes_only_this_installations_old_probes` (fake Cloudflare API), `tests::only_this_installations_old_probe_tunnels_are_deleted`, `tests::another_installations_probe_record_is_left_alone` |
+| Switch back undone by the wildcard | Refused under the default domain (`tunnel_ops::back_plan`), dashboard and CLI follow | `tunnel_ops::tests::switch_back_is_refused_under_the_default_domain`, `tsc` |
+| 502 for names no service has | No wildcard route (`tunnel::ingress`) | `tunnel::tests::a_name_no_service_has_stops_at_the_404_before_the_cluster`, `routes_are_exact_names_then_404`, the loop's end-to-end test (CI) |
+| X-Forwarded-For ended with the connector's pod | Tunnel routes set it to the visitor (`system::tunnel_rule`) | `gateway::tests::tunnel_domains_switch_then_close_the_direct_path`, `rbac::tests::a_static_sites_routes_may_only_name_its_folder`, `scripts/tunnel-gate-e2e.sh` (17 checks, Envoy 1.39.5) |
+| The gate opened on a redundant switch | A name already `"on"` stays `"on"` (`tunnel_ops::switch_state`) | `tunnel_ops::tests::a_name_already_on_the_tunnel_stays_gated_while_its_record_is_made` |
+
+The admission policy changed (HTTPRoute header filter), so the access
+hash moves and a cluster connected before this needs **Refresh this
+cluster** before its tunnel routes are accepted. The roles hash
+(`the_roles_are_as_0_51_0s`) is unchanged.
+
+Checks (2026-11-23): `cargo clippy -p pyo-proto -p pyo-agent -p pyo-api
+-p pyo-cli --tests -- -D warnings` clean. Suites pass: pyo-proto 171,
+pyo-agent 221, pyo-api 655, pyo-cli 81. `scripts/tunnel-gate-e2e.sh`
+passes all 17 checks, and its six new ones fail without the header fix.
+The loop's end-to-end test still needs CI's Postgres.
+
+Not checked against a real Envoy Gateway or Cloudflare: that Envoy
+Gateway 1.9.3 accepts the route's header value and hands it to Envoy as
+it is (read from its source, not run), and Cloudflare's 404 for a name
+with no route.
 
 Next:
 

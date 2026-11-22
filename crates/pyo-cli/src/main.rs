@@ -387,7 +387,7 @@ enum DomainCommand {
         /// Replace the records in the way. Owners and admins.
         #[arg(long)]
         replace: bool,
-        /// Move it back from the tunnel.
+        /// Move it back from the tunnel. Not for a name under the tunnel's default domain.
         #[arg(long, conflicts_with = "replace")]
         back: bool,
         /// Moving back: don't put back the records the tunnel replaced.

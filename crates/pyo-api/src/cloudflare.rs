@@ -251,13 +251,17 @@ fn hint(t: &str) -> String {
 
 /// Whether Pyo can edit DNS in a zone: it reads the records, then makes and
 /// deletes a TXT record `_pyo-check.<zone>` (a token with DNS:Read only can
-/// read, not write). The permission it lacks, or None.
+/// read, not write). The record's text carries this installation's id:
+/// Cloudflare refuses a record identical to one that exists, so with the
+/// same text a probe another installation left behind in a shared zone
+/// would fail this check. The permission it lacks, or None.
 pub(crate) async fn missing_in<C: Cloudflare>(
     cf: &C,
     zone: &(String, String),
-    marker: &str,
+    install_id: &str,
 ) -> Result<Option<String>, CfError> {
     let (id, name) = zone;
+    let marker = &marker(install_id);
     let probe = format!("_pyo-check.{name}");
     let found = match cf.records(id, &probe).await {
         Ok(f) => f,
@@ -274,17 +278,19 @@ pub(crate) async fn missing_in<C: Cloudflare>(
             &NewRecord {
                 kind: "TXT".into(),
                 name: probe,
-                content: "\"pyo-check\"".into(),
+                content: format!("\"pyo-check-{install_id}\""),
                 proxied: false,
                 comment: marker.to_owned(),
             },
         )
         .await;
     match made {
-        Ok(r) => {
-            cf.delete(id, &r.id).await?;
-            Ok(None)
-        }
+        Ok(r) => match cf.delete(id, &r.id).await {
+            // Already gone (another check by this installation cleaned
+            // up): nothing is left behind either way.
+            Ok(()) | Err(CfError::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        },
         Err(CfError::Denied(_)) => Ok(Some("DNS:Edit".into())),
         Err(e) => Err(e),
     }
@@ -294,7 +300,7 @@ pub(crate) async fn missing_in<C: Cloudflare>(
 /// tunnels once per account, Origin CA certificates per zone.
 pub(crate) async fn inspect<C: Cloudflare + TunnelApi>(
     cf: &C,
-    marker: &str,
+    install_id: &str,
 ) -> Result<Vec<Zone>, CfError> {
     let mut zones = match cf.zone_accounts().await {
         Ok(z) => z,
@@ -312,13 +318,13 @@ pub(crate) async fn inspect<C: Cloudflare + TunnelApi>(
     let mut tunnels: HashMap<String, Option<String>> = HashMap::new();
     let mut out = vec![];
     for z in &zones {
-        let missing = missing_in(cf, &(z.id.clone(), z.name.clone()), marker).await?;
+        let missing = missing_in(cf, &(z.id.clone(), z.name.clone()), install_id).await?;
         let mut lacks = vec![];
         if z.account_id.is_empty() {
             lacks.push(tunnel::TUNNEL_EDIT.to_owned());
         } else {
             if !tunnels.contains_key(&z.account_id) {
-                let m = tunnel::tunnel_missing(cf, &z.account_id).await?;
+                let m = tunnel::tunnel_missing(cf, &z.account_id, install_id).await?;
                 tunnels.insert(z.account_id.clone(), m);
             }
             if let Some(Some(m)) = tunnels.get(&z.account_id) {
@@ -825,8 +831,8 @@ pub async fn connect(
             "This installation has no PYO_SECRET_KEY, so it can't store keys.",
         ));
     }
-    let marker = marker(&install_id(tx).await?);
-    let zones = inspect(&Http::new(token)?, &marker)
+    let install = install_id(tx).await?;
+    let zones = inspect(&Http::new(token)?, &install)
         .await
         .map_err(api_error)?;
     if zones.is_empty() {
@@ -879,8 +885,8 @@ pub async fn test(
 ) -> ApiResult<Value> {
     require_role(tx, user, team_id, role_for(Action::ManageToken)).await?;
     let a = account(s, tx, team_id).await?.ok_or_else(no_account)?;
-    let marker = marker(&install_id(tx).await?);
-    let zones = match inspect(&Http::new(&a.token)?, &marker).await {
+    let install = install_id(tx).await?;
+    let zones = match inspect(&Http::new(&a.token)?, &install).await {
         Ok(z) => z,
         Err(e @ CfError::Denied(_)) => {
             return Ok(json!({ "ok": false, "zones": [], "problems": [e.to_string()] }));

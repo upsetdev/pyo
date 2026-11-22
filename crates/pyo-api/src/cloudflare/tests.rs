@@ -8,6 +8,8 @@ use super::tunnel::{CfZone, Connection, Kept, OriginCert, Tunnel};
 use super::*;
 
 pub(super) const MARK: &str = "Made by Pyo (abc123)";
+/// The installation [`MARK`] is the comment of.
+pub(super) const INSTALL: &str = "abc123";
 
 pub(super) fn zone(id: &str, name: &str) -> Zone {
     Zone {
@@ -297,7 +299,7 @@ async fn a_test_lists_zones_and_says_what_is_missing() {
         ("z2", "readonly.dev", Dns::Read),
         ("z3", "nodns.io", Dns::None),
     ]);
-    let zones = inspect(&cf, MARK).await.unwrap();
+    let zones = inspect(&cf, INSTALL).await.unwrap();
     let got: Vec<(&str, bool, Option<&str>)> = zones
         .iter()
         .map(|z| (z.name.as_str(), z.can_edit, z.missing.as_deref()))
@@ -321,7 +323,7 @@ async fn a_test_lists_zones_and_says_what_is_missing() {
     assert!(cf.at("z1").is_empty());
     assert!(
         cf.calls()
-            .contains(&"create z1 TXT _pyo-check.example.com \"pyo-check\"".to_string())
+            .contains(&"create z1 TXT _pyo-check.example.com \"pyo-check-abc123\"".to_string())
     );
 }
 
@@ -329,11 +331,11 @@ async fn a_test_lists_zones_and_says_what_is_missing() {
 async fn a_token_without_zone_read_is_refused() {
     let mut cf = Fake::new(&[("z1", "example.com", Dns::Edit)]);
     cf.zone_read = false;
-    let e = inspect(&cf, MARK).await.unwrap_err();
+    let e = inspect(&cf, INSTALL).await.unwrap_err();
     assert!(matches!(e, CfError::Denied(_)));
     assert!(e.to_string().starts_with("Cloudflare refused the token"));
     let none = Fake::new(&[]);
-    let zones = inspect(&none, MARK).await.unwrap();
+    let zones = inspect(&none, INSTALL).await.unwrap();
     assert_eq!(
         problems(&zones),
         ["The token can't see any zones. Give it Zone:Read on the zones Pyo may use."]
@@ -348,12 +350,35 @@ async fn a_probe_left_behind_is_cleaned_up() {
             "old",
             "TXT",
             "_pyo-check.example.com",
-            "\"pyo-check\"",
+            "\"pyo-check-abc123\"",
             Some(MARK),
         ),
     );
-    inspect(&cf, MARK).await.unwrap();
+    inspect(&cf, INSTALL).await.unwrap();
     assert!(cf.at("z1").is_empty());
+}
+
+#[tokio::test]
+async fn another_installations_probe_record_is_left_alone() {
+    // Two installations share the zone. The other one's check stopped
+    // halfway and left its probe: this one's check still passes (its own
+    // record's text differs, so Cloudflare doesn't call it a duplicate),
+    // and the other's record stays.
+    let theirs = rec(
+        "theirs",
+        "TXT",
+        "_pyo-check.example.com",
+        "\"pyo-check-zzz999\"",
+        Some("Made by Pyo (zzz999)"),
+    );
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)]).with("z1", theirs.clone());
+    let zones = inspect(&cf, INSTALL).await.unwrap();
+    assert!(zones[0].can_edit);
+    assert_eq!(cf.at("z1"), [theirs]);
+    assert!(
+        cf.calls()
+            .contains(&"create z1 TXT _pyo-check.example.com \"pyo-check-abc123\"".to_string())
+    );
 }
 
 // ── Records ────────────────────────────────────────────────────────────────
@@ -815,6 +840,7 @@ impl tunnel::TunnelApi for Fake {
             id: self.uuid(),
             name: name.into(),
             status: "inactive".into(),
+            created_at: jiff::Timestamp::now().to_string(),
             ..Default::default()
         };
         self.tunnels
@@ -962,7 +988,7 @@ async fn a_test_says_which_zones_can_use_a_tunnel() {
         .insert("z2".into(), ("acct2".into(), "Other Co".into()));
     cf.no_tunnels = vec!["acct2".into()];
     cf.no_certs = vec!["z2".into(), "z3".into()];
-    let zones = inspect(&cf, MARK).await.unwrap();
+    let zones = inspect(&cf, INSTALL).await.unwrap();
     let got: Vec<(&str, &str, bool, Vec<String>)> = zones
         .iter()
         .map(|z| {
@@ -1003,36 +1029,58 @@ async fn a_test_says_which_zones_can_use_a_tunnel() {
     let checks = cf
         .calls()
         .iter()
-        .filter(|c| c.starts_with("create tunnel acct1 pyo-check-"))
+        .filter(|c| c.starts_with("create tunnel acct1 pyo-check-abc123-"))
         .count();
     assert_eq!(checks, 1);
     assert!(cf.tunnel_list().iter().all(|t| t.deleted));
 }
 
 #[tokio::test]
-async fn a_probe_tunnel_left_behind_is_deleted() {
+async fn only_this_installations_old_probe_tunnels_are_deleted() {
     let cf = Fake::new(&[("z1", "example.com", Dns::Edit)]);
-    cf.tunnels.lock().unwrap().push((
-        "acct1".into(),
-        Tunnel {
-            id: "11111111-2222-4333-8444-555555555555".into(),
-            name: "pyo-check-a1b2c3".into(),
-            ..Default::default()
-        },
-    ));
-    // Someone's own tunnel with another name: never touched.
-    cf.tunnels.lock().unwrap().push((
-        "acct1".into(),
-        Tunnel {
-            id: "11111111-2222-4333-8444-666666666666".into(),
-            name: "home-lab".into(),
-            ..Default::default()
-        },
-    ));
-    inspect(&cf, MARK).await.unwrap();
-    let ts = cf.tunnel_list();
-    assert!(ts.iter().filter(|t| t.name.starts_with("pyo-check-")).all(|t| t.deleted));
-    assert!(ts.iter().any(|t| t.name == "home-lab" && !t.deleted));
+    let old = (jiff::Timestamp::now() - jiff::SignedDuration::from_mins(30)).to_string();
+    let now = jiff::Timestamp::now().to_string();
+    let put = |n: u32, name: &str, made: &str| {
+        cf.tunnels.lock().unwrap().push((
+            "acct1".into(),
+            Tunnel {
+                id: format!("11111111-2222-4333-8444-{n:012}"),
+                name: name.into(),
+                created_at: made.into(),
+                ..Default::default()
+            },
+        ));
+    };
+    put(1, "pyo-check-abc123-a1b2c3", &old);
+    put(2, "pyo-check-abc123-d4e5f6", &now);
+    // Another installation's probe, and people's own tunnels: never touched,
+    // however old.
+    put(3, "pyo-check-zzz999-a1b2c3", &old);
+    put(4, "pyo-check-mine", &old);
+    put(5, "pyo-check-abc123-mine", &old);
+    put(6, "pyo-check-a1b2c3", &old);
+    put(7, "home-lab", &old);
+    // One with a date Pyo can't read stays too.
+    put(8, "pyo-check-abc123-0a0b0c", "");
+    inspect(&cf, INSTALL).await.unwrap();
+    let left: Vec<String> = cf
+        .tunnel_list()
+        .into_iter()
+        .filter(|t| !t.deleted)
+        .map(|t| t.name)
+        .collect();
+    assert_eq!(
+        left,
+        [
+            "pyo-check-abc123-d4e5f6",
+            "pyo-check-zzz999-a1b2c3",
+            "pyo-check-mine",
+            "pyo-check-abc123-mine",
+            "pyo-check-a1b2c3",
+            "home-lab",
+            "pyo-check-abc123-0a0b0c",
+        ]
+    );
 }
 
 #[test]
