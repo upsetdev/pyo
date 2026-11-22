@@ -58,8 +58,9 @@ COPY --from=rust /out/ /
 FROM scratch AS cli
 COPY --from=rust /out/pyo /pyo
 
-FROM debian:trixie-20261020-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+# apt-get upgrade takes Debian's security fixes newer than the base image.
+FROM debian:trixie-20261104-slim AS runtime
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
 FROM runtime AS agent
 COPY --from=rust /out/pyo-agent /usr/local/bin/pyo-agent
@@ -106,13 +107,13 @@ FROM moby/buildkit:v0.34.1 AS buildkit
 
 # Railpack's CLI; its BuildKit frontend image must be the same version
 # (RAILPACK_FRONTEND in pyo-builder).
-FROM debian:trixie-20261020-slim AS railpack
+FROM debian:trixie-20261104-slim AS railpack
 ADD --checksum=sha256:2842de93e68713af9037e0bc0a398d7da78f3b96aa4804303a638db2bc69bd30 \
     https://github.com/railwayapp/railpack/releases/download/v0.40.1/railpack-v0.40.1-x86_64-unknown-linux-musl.tar.gz /tmp/railpack.tgz
 RUN mkdir /tmp/rp && tar -xzf /tmp/railpack.tgz -C /tmp/rp && install -m 0755 "$(find /tmp/rp -type f -name railpack | head -n1)" /railpack
 
-FROM debian:trixie-20261020-slim AS builder
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git && rm -rf /var/lib/apt/lists/*
+FROM debian:trixie-20261104-slim AS builder
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends ca-certificates git && rm -rf /var/lib/apt/lists/*
 COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
 COPY --from=railpack /railpack /usr/local/bin/railpack
 COPY --from=rust /out/pyo-builder /usr/local/bin/pyo-builder
