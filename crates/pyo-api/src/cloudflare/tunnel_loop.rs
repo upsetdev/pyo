@@ -59,6 +59,87 @@ pub async fn pass(s: &AppState) -> ApiResult<()> {
             tracing::warn!(cluster = %id, error = ?e.message, "tunnel pass failed");
         }
     }
+    leftovers(s).await
+}
+
+/// What's left at Cloudflare of a deleted service's tunnel domain or a
+/// deleted cluster's tunnel (the migration's triggers keep them): only
+/// Pyo's own records are deleted, then the tunnel and its certificates.
+#[derive(sqlx::FromRow, Debug)]
+struct Leftover {
+    id: i64,
+    team_id: String,
+    kind: String,
+    zone_id: Option<String>,
+    record_id: Option<String>,
+    hostname: Option<String>,
+    account_id: Option<String>,
+    tunnel_id: Option<String>,
+    cf_certificates: Vec<String>,
+}
+
+async fn leftovers(s: &AppState) -> ApiResult<()> {
+    let rows: Vec<Leftover> = sqlx::query_as(
+        "SELECT id, team_id, kind, zone_id, record_id, hostname, account_id, tunnel_id, cf_certificates
+           FROM pyo.tunnel_leftovers ORDER BY id LIMIT 50",
+    )
+    .fetch_all(&s.db)
+    .await?;
+    for l in rows {
+        let mut tx = s.db.begin().await?;
+        let account = super::account(s, &mut tx, &l.team_id).await.ok().flatten();
+        let mark = marker(&install_id(&mut tx).await?);
+        tx.commit().await?;
+        let Some(account) = account else {
+            sqlx::query("UPDATE pyo.tunnel_leftovers SET error = $2 WHERE id = $1")
+                .bind(l.id)
+                .bind(TOKEN_GONE)
+                .execute(&s.db)
+                .await?;
+            continue;
+        };
+        let done = clean_up(&Http::new(&account.token)?, &l, &mark).await;
+        match done {
+            Ok(()) => {
+                sqlx::query("DELETE FROM pyo.tunnel_leftovers WHERE id = $1")
+                    .bind(l.id)
+                    .execute(&s.db)
+                    .await?;
+            }
+            Err(e) => {
+                sqlx::query("UPDATE pyo.tunnel_leftovers SET error = $2 WHERE id = $1")
+                    .bind(l.id)
+                    .bind(e.to_string())
+                    .execute(&s.db)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One leftover, taken apart. Gone already counts as done.
+async fn clean_up<C: Cloudflare + TunnelApi>(cf: &C, l: &Leftover, mark: &str) -> Result<(), CfError> {
+    let gone = |r: Result<(), CfError>| match r {
+        Ok(()) | Err(CfError::NotFound) => Ok(()),
+        Err(e) => Err(e),
+    };
+    if let (Some(zone), Some(id), Some(host)) = (&l.zone_id, &l.record_id, &l.hostname) {
+        delete_ours(cf, zone, id, host, mark).await?;
+    }
+    if l.kind == "tunnel"
+        && let (Some(account), Some(id)) = (&l.account_id, &l.tunnel_id)
+    {
+        match cf.put_config(account, id, &tunnel::empty_ingress()).await {
+            Ok(_) | Err(CfError::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+        gone(cf.drop_connections(account, id).await)?;
+        gone(cf.delete_tunnel(account, id).await)?;
+    }
+    for c in &l.cf_certificates {
+        gone(cf.revoke_origin_cert(c).await)?;
+    }
     Ok(())
 }
 
@@ -300,6 +381,10 @@ async fn keep<C: Cloudflare + TunnelApi>(
         }
     }
     let target = tunnel::cname_target(&t.id);
+    // Free domains under the default domain: through the tunnel's wildcard.
+    if let Some(d) = &row.default_domain {
+        free_domains_follow(s, &row.cluster_id, d, row.default_record_id.is_some()).await?;
+    }
     let domains = tunnel_domains(&s.db, &row.cluster_id, zones).await?;
 
     // 2. Its routes: every tunnel domain, plus the default domain's wildcard.
@@ -607,6 +692,22 @@ async fn records<C: Cloudflare + TunnelApi>(
     .fetch_all(&s.db)
     .await?;
     for w in waiting {
+        // The same name on its way off another tunnel (a domain moved from
+        // another service or cluster): that one first.
+        if w.status == "switching" {
+            let busy: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pyo.dns_records r WHERE lower(r.hostname) = lower($1) AND r.service_id <> $2
+                                   AND (r.status = 'reverting' OR (r.via = 'tunnel' AND r.status = 'created')))
+                     OR EXISTS (SELECT 1 FROM pyo.tunnel_leftovers l WHERE lower(l.hostname) = lower($1))",
+            )
+            .bind(&w.hostname)
+            .bind(&w.service_id)
+            .fetch_one(&s.db)
+            .await?;
+            if busy {
+                continue;
+            }
+        }
         // The agent's routes first: no record moves before both paths answer.
         match w.routes.as_deref() {
             None | Some("done") => {}
@@ -776,6 +877,12 @@ async fn revert_one<C: Cloudflare + TunnelApi>(
             .await?;
         }
         None => {
+            // Pyo's CNAME is gone already: nothing left for the leftovers.
+            sqlx::query("UPDATE pyo.dns_records SET via = 'direct', record_id = NULL WHERE service_id = $1 AND domain_id = $2")
+                .bind(&w.service_id)
+                .bind(&w.domain_id)
+                .execute(&mut *tx)
+                .await?;
             sqlx::query("DELETE FROM pyo.dns_records WHERE service_id = $1 AND domain_id = $2")
                 .bind(&w.service_id)
                 .bind(&w.domain_id)
@@ -853,6 +960,80 @@ pub(crate) fn take_certificate(d: &mut Value, certificate_id: &str) -> bool {
     d["tlsMode"] = json!("custom");
     d["certificateId"] = json!(certificate_id);
     true
+}
+
+/// Whether `host` is a free name under the default domain `d`: one label
+/// below it (`web-shop.example.com`), as the wildcard covers.
+pub fn under_default(host: &str, d: &str) -> bool {
+    host.to_ascii_lowercase()
+        .strip_suffix(&format!(".{}", d.to_ascii_lowercase()))
+        .is_some_and(|label| !label.is_empty() && !label.contains('.'))
+}
+
+/// A cluster's domains one label under its default domain, with no record
+/// of their own (Pyo's or anyone's: an explicit record wins over the
+/// wildcard), go only through the tunnel: `tunnel: "on"`, and active once
+/// the wildcard record is there.
+async fn free_domains_follow(
+    s: &AppState,
+    cluster_id: &str,
+    default_domain: &str,
+    wildcard: bool,
+) -> ApiResult<()> {
+    let services: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT a.id, coalesce(a.spec->'domains', '[]') FROM pyo.services a
+          WHERE a.cluster_id = $1 AND NOT a.deleting
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(a.spec->'domains') d
+                         WHERE lower(d->>'hostname') LIKE '%.' || lower($2)
+                           AND (NOT d ? 'tunnel' OR (d->>'tunnel' = 'on' AND d->>'status' <> 'active')))",
+    )
+    .bind(cluster_id)
+    .bind(default_domain)
+    .fetch_all(&s.db)
+    .await?;
+    for (service_id, mut domains) in services {
+        let own: Vec<String> = sqlx::query_scalar("SELECT domain_id FROM pyo.dns_records WHERE service_id = $1")
+            .bind(&service_id)
+            .fetch_all(&s.db)
+            .await?;
+        let mut routes = false;
+        let mut changed = false;
+        for d in domains.as_array_mut().into_iter().flatten() {
+            let host = d["hostname"].as_str().unwrap_or("").to_owned();
+            let id = d["id"].as_str().unwrap_or("").to_owned();
+            if !under_default(&host, default_domain) || own.contains(&id) {
+                continue;
+            }
+            if d.get("tunnel").is_none() {
+                d["tunnel"] = json!(pyo_proto::TUNNEL_ON);
+                routes = true;
+                changed = true;
+            }
+            if d["tunnel"] == json!(pyo_proto::TUNNEL_ON) && wildcard && d["status"] != json!("active") {
+                d["status"] = json!("active");
+                changed = true;
+            }
+        }
+        if !changed {
+            continue;
+        }
+        let mut tx = s.db.begin().await?;
+        sqlx::query("UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', $2) WHERE id = $1")
+            .bind(&service_id)
+            .bind(&domains)
+            .execute(&mut *tx)
+            .await?;
+        let wake = if routes {
+            crate::routes::changed(&mut tx, &service_id, true).await?
+        } else {
+            None
+        };
+        tx.commit().await?;
+        if let Some(c) = wake {
+            s.wake(&c).await;
+        }
+    }
+    Ok(())
 }
 
 /// Change one domain of a service's spec.
@@ -1161,6 +1342,36 @@ async fn status(s: &AppState, row: &Row, t: &Tunnel) -> ApiResult<()> {
     Ok(())
 }
 
+/// Read Cloudflare's view of a cluster's tunnel again when the last read
+/// is older than 30 seconds (the tunnel endpoint's fresh read). Quiet when
+/// Cloudflare can't be reached: the stored view is shown then.
+pub async fn refresh(s: &AppState, cluster_id: &str) -> ApiResult<()> {
+    let due: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT team_id, account_id, tunnel_id FROM pyo.cluster_tunnels
+          WHERE cluster_id = $1 AND state <> 'removing' AND tunnel_id IS NOT NULL
+            AND (checked_at IS NULL OR checked_at < now() - interval '30 seconds')",
+    )
+    .bind(cluster_id)
+    .fetch_optional(&s.db)
+    .await?;
+    let Some((team_id, account_id, Some(tunnel_id))) = due else {
+        return Ok(());
+    };
+    let mut tx = s.db.begin().await?;
+    let account = super::account(s, &mut tx, &team_id).await.ok().flatten();
+    tx.commit().await?;
+    let Some(account) = account else {
+        return Ok(());
+    };
+    let Ok(t) = Http::new(&account.token)?.tunnel(&account_id, &tunnel_id).await else {
+        return Ok(());
+    };
+    if let Some(row) = load(&s.db, cluster_id).await? {
+        status(s, &row, &t).await?;
+    }
+    Ok(())
+}
+
 // ── As shown ───────────────────────────────────────────────────────────────
 
 /// A tunnel as the dashboard, CLI and API show it: never a token.
@@ -1346,6 +1557,14 @@ async fn remove<C: Cloudflare + TunnelApi>(
         }
     }
     let mut tx = s.db.begin().await?;
+    // Everything at Cloudflare is gone: nothing left for the leftovers.
+    sqlx::query(
+        "UPDATE pyo.cluster_tunnels SET tunnel_id = NULL, cf_certificate_id = NULL, cf_certificate_old = NULL, default_record_id = NULL
+          WHERE cluster_id = $1",
+    )
+    .bind(&row.cluster_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM pyo.cluster_tunnels WHERE cluster_id = $1")
         .bind(&row.cluster_id)
         .execute(&mut *tx)

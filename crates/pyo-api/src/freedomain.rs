@@ -69,6 +69,10 @@ pub fn tailnet_v4(ip: &str) -> Option<Ipv4Addr> {
 pub enum Mode {
     Public,
     Tailscale,
+    /// Through the cluster's Cloudflare Tunnel: names under its default
+    /// domain (`<service>-<namespace>.example.com`), none without one.
+    /// From the cluster's traffic, never chosen as an address.
+    Tunnel,
 }
 
 impl Mode {
@@ -84,6 +88,7 @@ impl Mode {
         match self {
             Mode::Public => "public",
             Mode::Tailscale => "tailscale",
+            Mode::Tunnel => "tunnel",
         }
     }
 }
@@ -104,6 +109,10 @@ pub struct Cluster {
     /// issued the dashboard's certificate there): on the cluster Pyo runs
     /// on (publicdash.rs `reached`).
     pub reached: Option<Ipv4Addr>,
+    /// In tunnel mode (its traffic is "tunnel").
+    pub tunnel: bool,
+    /// Its tunnel's default domain, when it has one.
+    pub tunnel_domain: Option<String>,
 }
 
 /// Servers that take public traffic, ready ones first.
@@ -198,6 +207,7 @@ impl Cluster {
             return None;
         }
         match (self.mode(), self.set.as_deref()) {
+            (Mode::Tunnel, _) => None,
             (Mode::Public, _) => self.public_ip(),
             (Mode::Tailscale, None) => self.cloud_ip(),
             (Mode::Tailscale, Some(_)) => None,
@@ -223,6 +233,9 @@ impl Cluster {
     /// traffic and the internet reaches its public IP directly, else
     /// Tailscale.
     pub fn mode(&self) -> Mode {
+        if self.tunnel {
+            return Mode::Tunnel;
+        }
         self.set
             .as_deref()
             .and_then(Mode::parse)
@@ -238,8 +251,20 @@ impl Cluster {
         match self.mode() {
             Mode::Public => self.public_ip(),
             Mode::Tailscale => self.tailnet_ip(),
+            Mode::Tunnel => None,
         }
     }
+
+    /// What free domains end in now: "203.0.113.7.nip.io", or in tunnel
+    /// mode the tunnel's default domain ("example.com"). None: no free
+    /// domain (no address, or tunnel mode without a default domain).
+    pub fn suffix(&self) -> Option<String> {
+        match self.mode() {
+            Mode::Tunnel => self.tunnel_domain.clone(),
+            _ => self.address().map(|ip| format!("{ip}.nip.io")),
+        }
+    }
+
 
     /// Where a free domain on `ip` belongs now. One on a public address
     /// stays on the public IP (chosen when it was added: the dashboard's
@@ -275,6 +300,9 @@ impl Cluster {
             "tailnetIp": s(self.tailnet_ip()),
             "freeDomainAddress": self.mode().as_str(),
             "freeDomainIp": s(self.address()),
+            // What free domains end in ("203.0.113.7.nip.io", or the
+            // tunnel's default domain): null for none.
+            "freeDomainSuffix": self.suffix(),
             "behindNat": self.behind_nat(),
         })
     }
@@ -283,8 +311,13 @@ impl Cluster {
 /// "nginx-web.203.0.113.7.nip.io": the label at most 63 characters, so the
 /// whole name stays well within 253.
 pub fn hostname(service: &str, namespace: &str, ip: Ipv4Addr) -> String {
+    format!("{}.{ip}.nip.io", label(service, namespace))
+}
+
+/// A free domain's label: "nginx-web", at most 63 characters.
+fn label(service: &str, namespace: &str) -> String {
     let label: String = format!("{service}-{namespace}").chars().take(63).collect();
-    format!("{}.{ip}.nip.io", label.trim_end_matches('-'))
+    label.trim_end_matches('-').to_owned()
 }
 
 /// A free domain's parts: its label(s), address, and whether it's in the
@@ -368,13 +401,16 @@ pub async fn load(
     tx: &mut Transaction<'_, Postgres>,
     cluster_id: &str,
 ) -> ApiResult<Option<(String, Cluster)>> {
-    let row: Option<(String, bool, Option<String>, Value, bool)> = sqlx::query_as(
-        "SELECT team_id, public_traffic, free_domain_address, capabilities, same_cluster FROM pyo.clusters WHERE id = $1",
+    let row: Option<(String, bool, Option<String>, Value, bool, bool, Option<String>)> = sqlx::query_as(
+        "SELECT c.team_id, c.public_traffic, c.free_domain_address, c.capabilities, c.same_cluster,
+                c.traffic = 'tunnel', t.default_domain
+           FROM pyo.clusters c LEFT JOIN pyo.cluster_tunnels t ON t.cluster_id = c.id AND t.state <> 'removing'
+          WHERE c.id = $1",
     )
     .bind(cluster_id)
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((team_id, public_traffic, set, caps, same_cluster)) = row else {
+    let Some((team_id, public_traffic, set, caps, same_cluster, tunnel, tunnel_domain)) = row else {
         return Ok(None);
     };
     let servers: Vec<Value> =
@@ -395,8 +431,18 @@ pub async fn load(
             } else {
                 None
             },
+            tunnel,
+            tunnel_domain,
         },
     )))
+}
+
+/// What a cluster's free domains end in now ([`Cluster::suffix`]).
+pub async fn suffix_for(
+    tx: &mut Transaction<'_, Postgres>,
+    cluster_id: &str,
+) -> ApiResult<Option<String>> {
+    Ok(load(tx, cluster_id).await?.and_then(|(_, c)| c.suffix()))
 }
 
 /// A cluster's free-domain address now.
@@ -577,6 +623,7 @@ mod tests {
             tailnet_web: vec![],
             servers,
             reached: None,
+            ..Default::default()
         }
     }
 
@@ -584,6 +631,35 @@ mod tests {
     fn direct_server() -> Value {
         json!({ "name": "vps", "status": "ready", "internalIP": "10.0.0.5", "addresses": ["10.0.0.5"],
                 "publicIpv4": "203.0.113.7", "nicPublicIps": ["203.0.113.7"], "tailnetIp": "100.64.0.9" })
+    }
+
+    /// In tunnel mode, free domains go under the tunnel's default domain
+    /// (its wildcard), and there's none without one. nip.io names stay
+    /// where they are (they stop answering until public ports are back).
+    #[test]
+    fn tunnel_mode_names_free_domains_under_the_default_domain() {
+        let mut c = cluster(false, None, vec![direct_server()]);
+        c.tunnel = true;
+        c.tunnel_domain = Some("example.com".into());
+        assert_eq!(c.mode(), Mode::Tunnel);
+        assert_eq!(c.address(), None);
+        assert_eq!(c.suffix().as_deref(), Some("example.com"));
+        assert_eq!(
+            format!("{}.{}", label("web", "shop"), c.suffix().unwrap()),
+            "web-shop.example.com"
+        );
+        assert_eq!(c.shown()["freeDomainAddress"], "tunnel");
+        assert_eq!(c.shown()["freeDomainSuffix"], "example.com");
+        // A nip.io domain from before stays put.
+        assert_eq!(moved("web-shop.203.0.113.7.nip.io", &c.known(), |ip| c.home(ip)), None);
+        c.tunnel_domain = None;
+        assert_eq!(c.suffix(), None);
+
+        // Public ports again: the nip.io names answer as they were.
+        let c = cluster(true, None, vec![direct_server()]);
+        assert_eq!(c.suffix().as_deref(), Some("203.0.113.7.nip.io"));
+        assert_eq!(hostname("web", "shop", v4("203.0.113.7")), "web-shop.203.0.113.7.nip.io");
+        assert_eq!(Mode::parse("tunnel"), None, "never chosen as an address");
     }
 
     #[test]
@@ -675,7 +751,7 @@ mod tests {
         assert_eq!(
             c.shown(),
             json!({ "publicIp": "129.226.158.31", "tailnetIp": "100.101.67.2", "freeDomainAddress": "tailscale",
-                    "freeDomainIp": "100.101.67.2", "behindNat": true })
+                    "freeDomainIp": "100.101.67.2", "freeDomainSuffix": "100.101.67.2.nip.io", "behindNat": true })
         );
         // Public can still be chosen there.
         let c = cluster(true, Some("public"), vec![nat_server()]);

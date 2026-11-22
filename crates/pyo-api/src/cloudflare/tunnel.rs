@@ -213,7 +213,7 @@ impl TunnelApi for Http {
     async fn zone_accounts(&self) -> Result<Vec<CfZone>, CfError> {
         let mut out = vec![];
         for page in 1..=20 {
-            let mut url = Self::url("/zones");
+            let mut url = self.url("/zones");
             url.query_pairs_mut()
                 .append_pair("per_page", "50")
                 .append_pair("page", &page.to_string());
@@ -244,7 +244,7 @@ impl TunnelApi for Http {
     }
 
     async fn records_kept(&self, zone_id: &str, name: &str) -> Result<Vec<Kept>, CfError> {
-        let mut url = Self::url(&Self::record_path(zone_id, None)?);
+        let mut url = self.url(&Self::record_path(zone_id, None)?);
         url.query_pairs_mut()
             .append_pair("name", name)
             .append_pair("per_page", "100");
@@ -258,7 +258,7 @@ impl TunnelApi for Http {
     }
 
     async fn create_kept(&self, zone_id: &str, r: &Kept) -> Result<Record, CfError> {
-        let url = Self::url(&Self::record_path(zone_id, None)?);
+        let url = self.url(&Self::record_path(zone_id, None)?);
         let mut body = json!({
             "type": r.kind, "name": r.name, "content": r.content,
             "ttl": r.ttl, "proxied": r.proxied,
@@ -270,7 +270,7 @@ impl TunnelApi for Http {
     }
 
     async fn tunnels_named(&self, account: &str, name: &str) -> Result<Vec<Tunnel>, CfError> {
-        let mut url = Self::url(&tunnel_path(account, None, "")?);
+        let mut url = self.url(&tunnel_path(account, None, "")?);
         url.query_pairs_mut()
             .append_pair("name", name)
             .append_pair("is_deleted", "false")
@@ -285,23 +285,23 @@ impl TunnelApi for Http {
     }
 
     async fn create_tunnel(&self, account: &str, name: &str) -> Result<Tunnel, CfError> {
-        let url = Self::url(&tunnel_path(account, None, "")?);
+        let url = self.url(&tunnel_path(account, None, "")?);
         let body = json!({ "name": name, "config_src": "cloudflare" });
         tunnel_from(&self.call(Method::POST, url, Some(body)).await?["result"])
     }
 
     async fn tunnel(&self, account: &str, id: &str) -> Result<Tunnel, CfError> {
-        let url = Self::url(&tunnel_path(account, Some(id), "")?);
+        let url = self.url(&tunnel_path(account, Some(id), "")?);
         tunnel_from(&self.call(Method::GET, url, None).await?["result"])
     }
 
     async fn delete_tunnel(&self, account: &str, id: &str) -> Result<(), CfError> {
-        let url = Self::url(&tunnel_path(account, Some(id), "")?);
+        let url = self.url(&tunnel_path(account, Some(id), "")?);
         self.call(Method::DELETE, url, None).await.map(|_| ())
     }
 
     async fn tunnel_token(&self, account: &str, id: &str) -> Result<String, CfError> {
-        let url = Self::url(&tunnel_path(account, Some(id), "/token")?);
+        let url = self.url(&tunnel_path(account, Some(id), "/token")?);
         let v = self.call(Method::GET, url, None).await?;
         v["result"]
             .as_str()
@@ -311,7 +311,7 @@ impl TunnelApi for Http {
     }
 
     async fn put_config(&self, account: &str, id: &str, config: &Value) -> Result<i64, CfError> {
-        let url = Self::url(&tunnel_path(account, Some(id), "/configurations")?);
+        let url = self.url(&tunnel_path(account, Some(id), "/configurations")?);
         let v = self
             .call(Method::PUT, url, Some(json!({ "config": config })))
             .await?;
@@ -319,7 +319,7 @@ impl TunnelApi for Http {
     }
 
     async fn config(&self, account: &str, id: &str) -> Result<(i64, Value), CfError> {
-        let url = Self::url(&tunnel_path(account, Some(id), "/configurations")?);
+        let url = self.url(&tunnel_path(account, Some(id), "/configurations")?);
         let v = self.call(Method::GET, url, None).await?;
         Ok((
             v["result"]["version"].as_i64().unwrap_or(0),
@@ -328,14 +328,14 @@ impl TunnelApi for Http {
     }
 
     async fn rotate_secret(&self, account: &str, id: &str, secret: &str) -> Result<(), CfError> {
-        let url = Self::url(&tunnel_path(account, Some(id), "")?);
+        let url = self.url(&tunnel_path(account, Some(id), "")?);
         self.call(Method::PATCH, url, Some(json!({ "tunnel_secret": secret })))
             .await
             .map(|_| ())
     }
 
     async fn drop_connections(&self, account: &str, id: &str) -> Result<(), CfError> {
-        let url = Self::url(&tunnel_path(account, Some(id), "/connections")?);
+        let url = self.url(&tunnel_path(account, Some(id), "/connections")?);
         self.call(Method::DELETE, url, None).await.map(|_| ())
     }
 
@@ -343,7 +343,7 @@ impl TunnelApi for Http {
         if !id_ok(zone_id) {
             return Err(CfError::NotFound);
         }
-        let mut url = Self::url("/certificates");
+        let mut url = self.url("/certificates");
         url.query_pairs_mut().append_pair("zone_id", zone_id);
         let v = self.call(Method::GET, url, None).await?;
         Ok(v["result"]
@@ -359,7 +359,7 @@ impl TunnelApi for Http {
         csr_pem: &str,
         hostnames: &[String],
     ) -> Result<OriginCert, CfError> {
-        let url = Self::url("/certificates");
+        let url = self.url("/certificates");
         let body = json!({
             "csr": csr_pem, "hostnames": hostnames,
             "request_type": "origin-ecc", "requested_validity": CERT_DAYS,
@@ -379,7 +379,7 @@ impl TunnelApi for Http {
         if !cert_id_ok(id) {
             return Err(CfError::NotFound);
         }
-        let url = Self::url(&format!("/certificates/{id}"));
+        let url = self.url(&format!("/certificates/{id}"));
         self.call(Method::DELETE, url, None).await.map(|_| ())
     }
 }

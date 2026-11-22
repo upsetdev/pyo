@@ -217,6 +217,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         &team_ids,
     )
     .await?;
+    // Its Cloudflare Tunnel, if it has one.
+    crate::cloudflare::tunnel_loop::attach(&mut *db, &team_ids, &mut clusters).await?;
     // Its public and Tailscale addresses, and where its free domains point.
     for c in &mut clusters {
         let f = crate::freedomain::Cluster {
@@ -234,6 +236,11 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
                 .filter(|n| n["clusterId"] == c["id"])
                 .cloned()
                 .collect(),
+            tunnel: c["traffic"] == json!("tunnel"),
+            tunnel_domain: c["tunnel"]["defaultDomain"]
+                .as_str()
+                .filter(|_| c["tunnel"]["state"] != json!("removing"))
+                .map(str::to_owned),
         };
         if let (Some(o), Value::Object(shown)) = (c.as_object_mut(), f.shown()) {
             o.extend(shown);
@@ -242,8 +249,6 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         let shown = crate::previews::domain::show(&c["previewDomain"], f.public_ip());
         c["previewDomain"] = shown;
     }
-    // Its Cloudflare Tunnel, if it has one.
-    crate::cloudflare::tunnel_loop::attach(&mut *db, &team_ids, &mut clusters).await?;
     // The tailnet its tailnet domains are on: Tailscale set up on the
     // cluster, and a server of it on the tailnet. And the cluster's
     // Tailscale as the dashboard shows it (never a secret).

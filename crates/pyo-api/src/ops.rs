@@ -4831,6 +4831,10 @@ async fn apply(
                 crate::freedomain::Mode::Tailscale => {
                     format!("Free domains on {name} use its Tailscale IP")
                 }
+                // Never parsed from an address: it follows the cluster's traffic.
+                crate::freedomain::Mode::Tunnel => {
+                    format!("Free domains on {name} go through its Cloudflare Tunnel")
+                }
             };
             log_activity(
                 tx,

@@ -265,7 +265,17 @@ pub async fn add(
             h
         }
         None if free => {
-            let ip = cluster_ip(&t, "freeDomainIp").context("The cluster has no address for free domains (its public or Tailscale IP, as its settings say), so there's no free domain for it. Use your own hostname.")?;
+            let tunnel = cluster_ip(&t, "traffic").as_deref() == Some("tunnel");
+            // Its public or Tailscale IP's nip.io name, or in tunnel mode a
+            // name under the tunnel's default domain.
+            let suffix = match cluster_ip(&t, "freeDomainSuffix") {
+                Some(s) => s,
+                None if tunnel => bail!("The cluster's Cloudflare Tunnel has no default domain, so there's no free domain for it. Pick a default domain first, or use your own hostname."),
+                None => {
+                    let ip = cluster_ip(&t, "freeDomainIp").context("The cluster has no address for free domains (its public or Tailscale IP, as its settings say), so there's no free domain for it. Use your own hostname.")?;
+                    format!("{ip}.nip.io")
+                }
+            };
             let ns = t
                 .state
                 .project(s["projectId"].as_str().unwrap_or(""))
@@ -276,7 +286,7 @@ pub async fn add(
                 .chars()
                 .take(63)
                 .collect();
-            format!("{}.{ip}.nip.io", label.trim_end_matches('-'))
+            format!("{}.{suffix}", label.trim_end_matches('-'))
         }
         None => bail!("Give a hostname, or --free for a free domain."),
     };
@@ -344,7 +354,20 @@ pub async fn add(
     let in_cloudflare = !is_free(&host)
         && crate::cloudflare::zone_for(&t.state.0, team_id, &host)
             .is_some_and(|z| z["canEdit"] == json!(true));
-    let made = if in_cloudflare && dns.cloudflare {
+    // Through the cluster's Cloudflare Tunnel: Pyo makes the switch (the
+    // tunnel's wildcard already covers a free name under its default domain).
+    let tunnel = cluster_ip(&t, "traffic").as_deref() == Some("tunnel");
+    let free_tunnel = tunnel
+        && cluster_ip(&t, "freeDomainSuffix")
+            .is_some_and(|s| host.strip_suffix(&format!(".{s}")).is_some_and(|l| !l.contains('.')));
+    let made = if free_tunnel {
+        true
+    } else if tunnel && in_cloudflare && dns.cloudflare {
+        crate::cloudflare::domain_tunnel(api, Some(&t.id), &host, true, false, true)
+            .await
+            .map_err(|e| eprintln!("{}", ui::red(&e.to_string())))
+            .is_ok()
+    } else if in_cloudflare && dns.cloudflare {
         crate::cloudflare::create_record(api, &t.id, &id, &host, dns.proxied, false)
             .await
             .map_err(|e| eprintln!("{}", ui::red(&e.to_string())))

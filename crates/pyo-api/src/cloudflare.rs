@@ -375,6 +375,21 @@ pub fn problems(zones: &[Zone]) -> Vec<String> {
 pub(crate) struct Http {
     client: reqwest::Client,
     token: String,
+    /// [`API`], or a debug build's fake ([`api_base`]).
+    base: String,
+}
+
+/// Where Cloudflare's API is: [`API`]. A debug build may point it at a fake
+/// with `PYO_DEV_CLOUDFLARE_API` (`http://127.0.0.1:8787/client/v4`, for the
+/// dashboard and Pyo Cloud e2e tests). Release builds never read it.
+pub(crate) fn api_base() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(b) = std::env::var("PYO_DEV_CLOUDFLARE_API")
+        && !b.trim().is_empty()
+    {
+        return b.trim().trim_end_matches('/').to_owned();
+    }
+    API.to_owned()
 }
 
 // Never print the token.
@@ -414,20 +429,37 @@ fn token_code(v: &Value) -> bool {
 
 impl Http {
     pub fn new(token: &str) -> ApiResult<Self> {
+        let base = api_base();
+        // Only a debug build's fake is on a private address.
+        let reach = Reach {
+            private: base != API,
+        };
         Ok(Self {
-            client: outbound::client(Reach { private: false }, TIMEOUT)
+            client: outbound::client(reach, TIMEOUT)
                 .map_err(|e| ApiError::from(anyhow::Error::from(e)))?,
             token: token.to_owned(),
+            base,
         })
     }
 
-    fn url(path: &str) -> Url {
-        // Constant base, checked ids: always parses.
-        Url::parse(&format!("{API}{path}")).expect("Cloudflare URL")
+    /// A client for the tests' fake Cloudflare (fake.rs).
+    #[cfg(test)]
+    pub fn at(token: &str, base: &str) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            token: token.to_owned(),
+            base: base.trim_end_matches('/').to_owned(),
+        }
+    }
+
+    fn url(&self, path: &str) -> Url {
+        // A fixed base and checked ids: always parses.
+        Url::parse(&format!("{}{path}", self.base)).expect("Cloudflare URL")
     }
 
     async fn call(&self, method: Method, url: Url, body: Option<Value>) -> Result<Value, CfError> {
-        if url.host_str() != Some("api.cloudflare.com") || url.scheme() != "https" {
+        let real = url.host_str() == Some("api.cloudflare.com") && url.scheme() == "https";
+        if !(real || (self.base != API && url.as_str().starts_with(&self.base))) {
             return Err(CfError::Unreachable);
         }
         let mut rq = self.client.request(method, url).bearer_auth(&self.token);
@@ -468,7 +500,7 @@ fn record_from(v: &Value) -> Result<Record, CfError> {
 
 impl Cloudflare for Http {
     async fn records(&self, zone_id: &str, name: &str) -> Result<Vec<Record>, CfError> {
-        let mut url = Self::url(&Self::record_path(zone_id, None)?);
+        let mut url = self.url(&Self::record_path(zone_id, None)?);
         url.query_pairs_mut()
             .append_pair("name", name)
             .append_pair("per_page", "100");
@@ -482,12 +514,12 @@ impl Cloudflare for Http {
     }
 
     async fn record(&self, zone_id: &str, id: &str) -> Result<Record, CfError> {
-        let url = Self::url(&Self::record_path(zone_id, Some(id))?);
+        let url = self.url(&Self::record_path(zone_id, Some(id))?);
         record_from(&self.call(Method::GET, url, None).await?["result"])
     }
 
     async fn create(&self, zone_id: &str, r: &NewRecord) -> Result<Record, CfError> {
-        let url = Self::url(&Self::record_path(zone_id, None)?);
+        let url = self.url(&Self::record_path(zone_id, None)?);
         let body = json!({
             "type": r.kind, "name": r.name, "content": r.content,
             "ttl": 1, "proxied": r.proxied, "comment": r.comment,
@@ -496,14 +528,14 @@ impl Cloudflare for Http {
     }
 
     async fn set_proxied(&self, zone_id: &str, id: &str, proxied: bool) -> Result<(), CfError> {
-        let url = Self::url(&Self::record_path(zone_id, Some(id))?);
+        let url = self.url(&Self::record_path(zone_id, Some(id))?);
         self.call(Method::PATCH, url, Some(json!({ "proxied": proxied })))
             .await
             .map(|_| ())
     }
 
     async fn delete(&self, zone_id: &str, id: &str) -> Result<(), CfError> {
-        let url = Self::url(&Self::record_path(zone_id, Some(id))?);
+        let url = self.url(&Self::record_path(zone_id, Some(id))?);
         self.call(Method::DELETE, url, None).await.map(|_| ())
     }
 }
@@ -709,6 +741,65 @@ pub async fn forget_removed(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+// ── Proof of a domain (Pyo Cloud) ──────────────────────────────────────────
+
+/// Pyo Cloud's proof of owning `host` (domainproof.rs), written by Pyo:
+/// the TXT record `_pyo-verify.<host>` with the team's token, when the
+/// team's Cloudflare token can edit DNS in a zone that covers it. So Cloud
+/// teams with Cloudflare don't add it by hand. Whether it's there now.
+pub(crate) async fn write_proof(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    host: &str,
+) -> ApiResult<bool> {
+    let row: Option<(String, Value)> = sqlx::query_as(
+        "SELECT token_sealed, zones FROM pyo.cloudflare_accounts WHERE team_id = $1",
+    )
+    .bind(team_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((sealed, zones)) = row else {
+        return Ok(false);
+    };
+    let zones: Vec<Zone> = serde_json::from_value(zones).unwrap_or_default();
+    let Some(zone) = zone_for(host, &zones).filter(|z| z.can_edit).cloned() else {
+        return Ok(false);
+    };
+    // Sealed by the vault, or (older keys) with PYO_SECRET_KEY.
+    let token = if sealed.starts_with(crate::secrets::PREFIX) {
+        crate::secrets::Sealer::from_env().open(&sealed)
+    } else {
+        crate::vault::get().open(&sealed).await
+    };
+    let Ok(token) = token else {
+        return Ok(false);
+    };
+    let name = crate::domainproof::record(host);
+    let value = crate::domainproof::token(team_id, host);
+    let mark = marker(&install_id(tx).await?);
+    let cf = Http::new(&token)?;
+    let found = cf.records(&zone.id, &name).await.map_err(api_error)?;
+    if found
+        .iter()
+        .any(|r| r.kind == "TXT" && r.content.trim_matches('"') == value)
+    {
+        return Ok(true);
+    }
+    cf.create(
+        &zone.id,
+        &NewRecord {
+            kind: "TXT".into(),
+            name,
+            content: format!("\"{value}\""),
+            proxied: false,
+            comment: mark,
+        },
+    )
+    .await
+    .map_err(api_error)?;
+    Ok(true)
 }
 
 // ── The connection ─────────────────────────────────────────────────────────
@@ -1319,3 +1410,7 @@ pub async fn proxy_ready(s: &AppState) -> ApiResult<()> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod fake;
+#[cfg(test)]
+mod http_tests;

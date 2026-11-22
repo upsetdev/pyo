@@ -277,3 +277,26 @@ fn domains_take_the_tunnel_certificate_and_give_it_back() {
     leave_tunnel(&mut d);
     assert_eq!((d["tlsMode"].as_str(), d["certificateId"].as_str()), (Some("custom"), Some("crt_mine")));
 }
+
+#[test]
+fn free_names_are_one_label_under_the_default_domain() {
+    assert!(under_default("web-shop.example.com", "example.com"));
+    assert!(under_default("Web-Shop.Example.com", "example.com"));
+    assert!(!under_default("a.web-shop.example.com", "example.com"), "the wildcard covers one level");
+    assert!(!under_default("example.com", "example.com"));
+    assert!(!under_default("web.notexample.com", "example.com"));
+    assert!(!under_default("web.example.com.evil.net", "example.com"));
+}
+
+#[test]
+fn an_explicit_record_wins_over_the_free_wildcard() {
+    // A name switched by hand comes before the default domain's wildcard.
+    let routes = tunnel::ingress(&["web-shop.example.com".into()], Some("example.com"));
+    let names: Vec<&str> = routes["ingress"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["hostname"].as_str())
+        .collect();
+    assert_eq!(names, ["web-shop.example.com", "*.example.com"]);
+}

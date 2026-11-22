@@ -589,7 +589,8 @@ pub async fn rotate(
 /// (`health`, `connections`, `colos`), the connectors in the cluster
 /// (`connectors`: each one's server, whether it's ready, and why not), its
 /// default domain, its certificate, and `refused` when the cluster's install
-/// is older than Pyo's. Never a token. Cloudflare is read every 2 minutes.
+/// is older than Pyo's. Never a token. Cloudflare's view is read again when
+/// it's older than 30 seconds.
 #[utoipa::path(get, path = "/clusters/{id}/tunnel", operation_id = "getClusterTunnel", tag = "Clusters",
     params(("id" = String, Path, description = "The cluster's id (`cl_…`).")),
     responses(
@@ -605,6 +606,10 @@ pub async fn get(
     let mut tx = crate::rls::begin(&s.db, &user).await?;
     let team_id = team_of(&mut tx, "clusters", &id).await?;
     require_role(&mut tx, &user, &team_id, Role::Viewer).await?;
+    tx.commit().await?;
+    // Cloudflare's view as of now (at most 30 seconds old).
+    super::tunnel_loop::refresh(&s, &id).await?;
+    let mut tx = crate::rls::begin(&s.db, &user).await?;
     let traffic: String = sqlx::query_scalar("SELECT traffic FROM pyo.clusters WHERE id = $1")
         .bind(&id)
         .fetch_one(&mut *tx)

@@ -1580,6 +1580,14 @@ fn cluster_at(snap: &Value, team: &str, place: &str) -> Result<(Value, String), 
 /// "nginx-web.203.0.113.7.nip.io": resolves to the cluster's free-domain
 /// address (its public or Tailscale IP, as its settings say).
 fn free_hostname(cluster: &Value, service: &str, namespace: &str) -> Result<String, String> {
+    // In tunnel mode, under its default domain (the tunnel's wildcard).
+    if cluster["traffic"] == json!("tunnel") {
+        let suffix = cluster["freeDomainSuffix"].as_str().ok_or(
+            "The cluster's Cloudflare Tunnel has no default domain, so there's no free domain for it. Pick a default domain first, or use a custom hostname.",
+        )?;
+        let label: String = format!("{service}-{namespace}").chars().take(63).collect();
+        return Ok(format!("{}.{suffix}", label.trim_end_matches('-')));
+    }
     let ip = cluster["freeDomainIp"]
         .as_str()
         .and_then(|ip| ip.parse().ok())

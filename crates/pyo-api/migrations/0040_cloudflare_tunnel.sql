@@ -87,3 +87,55 @@ ALTER TABLE pyo.dns_records ADD CONSTRAINT dns_records_status_check
   CHECK (status IN ('created', 'exists', 'conflict', 'failed', 'switching', 'reverting'));
 CREATE INDEX dns_records_tunnel_idx ON pyo.dns_records (service_id)
   WHERE status IN ('switching', 'reverting');
+
+-- What's left at Cloudflare once its row is gone: a tunnel record of a
+-- deleted service, or the tunnel of a deleted cluster. The tunnel loop
+-- deletes them (only Pyo's own records) with the team's token.
+CREATE TABLE pyo.tunnel_leftovers (
+  id              bigserial PRIMARY KEY,
+  team_id         text NOT NULL REFERENCES pyo.teams (id) ON DELETE CASCADE,
+  -- 'record' (zone_id, record_id, hostname) or 'tunnel' (account_id,
+  -- tunnel_id, cf_certificates, and its wildcard record as a record).
+  kind            text NOT NULL CHECK (kind IN ('record', 'tunnel')),
+  zone_id         text,
+  record_id       text,
+  hostname        text,
+  account_id      text,
+  tunnel_id       text,
+  cf_certificates text[] NOT NULL DEFAULT '{}',
+  error           text,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX tunnel_leftovers_team_idx ON pyo.tunnel_leftovers (team_id);
+ALTER TABLE pyo.tunnel_leftovers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY team_rows ON pyo.tunnel_leftovers TO pyo_team
+  USING (team_id = ANY (pyo.team_scope()))
+  WITH CHECK (team_id = ANY (pyo.team_scope()));
+
+-- Kept when its team is still there (a team deleted takes its token too).
+CREATE FUNCTION pyo.keep_tunnel_record() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.via = 'tunnel' AND OLD.record_id IS NOT NULL
+     AND EXISTS (SELECT 1 FROM pyo.teams WHERE id = OLD.team_id) THEN
+    INSERT INTO pyo.tunnel_leftovers (team_id, kind, zone_id, record_id, hostname)
+    VALUES (OLD.team_id, 'record', OLD.zone_id, OLD.record_id, OLD.hostname);
+  END IF;
+  RETURN OLD;
+END
+$$;
+CREATE TRIGGER dns_records_tunnel_leftover BEFORE DELETE ON pyo.dns_records
+  FOR EACH ROW EXECUTE FUNCTION pyo.keep_tunnel_record();
+
+CREATE FUNCTION pyo.keep_tunnel() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF (OLD.tunnel_id IS NOT NULL OR OLD.cf_certificate_id IS NOT NULL OR OLD.default_record_id IS NOT NULL)
+     AND EXISTS (SELECT 1 FROM pyo.teams WHERE id = OLD.team_id) THEN
+    INSERT INTO pyo.tunnel_leftovers (team_id, kind, zone_id, record_id, hostname, account_id, tunnel_id, cf_certificates)
+    VALUES (OLD.team_id, 'tunnel', OLD.default_zone_id, OLD.default_record_id, '*.' || OLD.default_domain,
+            OLD.account_id, OLD.tunnel_id, array_remove(ARRAY[OLD.cf_certificate_id, OLD.cf_certificate_old], NULL));
+  END IF;
+  RETURN OLD;
+END
+$$;
+CREATE TRIGGER cluster_tunnels_leftover BEFORE DELETE ON pyo.cluster_tunnels
+  FOR EACH ROW EXECUTE FUNCTION pyo.keep_tunnel();
