@@ -1579,8 +1579,8 @@ Not merged into `dev` until the feature is complete and tested.
 |---|---|
 | Decisions applied to this spec | Done (b145440, 5284a70, bf1cc78) |
 | 1. Token and zones | Done, tested (e3d91dd api, adc8e62 cli, 12cf81f dash) |
-| 2. Agent and Gateway | Written and compiled (eadce05 proto, 4db8b6f agent). Agent tunnel tests pass (9). pyo-proto rbac tests not run yet |
-| 3. Control plane | Written and compiled (3b9ae43): migration 0040, tunnel_loop.rs, heartbeat and snapshot. Unit tests 24 of 26 passed, the 2 failures were test mistakes, fixed in 3b9ae43, not rerun yet |
+| 2. Agent and Gateway | Done, tested (eadce05 proto, 4db8b6f agent) |
+| 3. Control plane | Done, unit tested (3b9ae43): migration 0040, tunnel_loop.rs, heartbeat and snapshot. No database test yet |
 | 4. Traffic choice, switching | API, MCP and CLI written (3b9ae43, a47f92e). Dashboard merged (06dfbba, `tsc` passes): Traffic panel, tunnel badge, record line, add and remove domain |
 | 5. Ports, connect.sh, alerts | Public ports Service and tunnel alerts written. connect.sh keeps its line (see Decisions) |
 | 6. Docs, e2e, real-zone test, Pyo Ops | Not started (real zone and Pyo Ops need the user) |
@@ -1599,11 +1599,15 @@ Where things are:
 - `crates/pyo-proto/src/system.rs` (Cloudflare Tunnel section), `rbac.rs`
   (origin and public ports Services, `tunnel` client policies).
 
+Tests (2026-11-22): the full pyo-proto (167), pyo-agent (216), pyo-api
+(611) and pyo-cli (80) suites pass, except `openapi::docs_copy_is_current`,
+which compares with pyo-docs' `openapi/pyo.json` (regenerate it with the
+docs in Phase 6). Clippy's 4 notes are fixed in the last commit, which
+wasn't compiled again (the disk was at its 60 GB floor).
+
 Next:
 
-1. Rerun `cargo test -p pyo-proto -p pyo-agent -p pyo-api -p pyo-cli tunnel`
-   and `… cloudflare`, plus the full `-p pyo-api -p pyo-agent -p pyo-proto`
-   suites (the access hash and admission tests), and clippy.
+1. Compile and clippy the last commit.
 2. Dashboard gaps: the new-service wizard has no tunnel switch, no
    warning for deeper names (a.b.example.com), and "Certificate:
    <reason>" shows only through `tunnel.error`.
