@@ -534,5 +534,24 @@ if command -v script >/dev/null; then
   rm -f "$blk"
 fi
 
+# Ports 80 and 443 in use (nginx here, k3s's Traefik): the install goes on
+# and says so in one line. Pyo's own ports in use still stop it.
+k3s() { return 1; }
+ss() {
+  case "$*" in
+    *"sport = :80 or sport = :443"*) printf '%s\n' 'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=1,fd=6))' 'LISTEN 0 511 [::]:443 [::]:* users:(("nginx",pid=1,fd=7))' ;;
+    *":8000 )"*) [ -n "${DASH_BUSY:-}" ] && echo 'LISTEN 0 4096 *:8000 *:*' ;;
+  esac
+  return 0
+}
+out=$(NO_COLOR=1 check_ports 2>&1) && rc=0 || rc=$?
+check "80 and 443 in use: it goes on" "$rc" "^0$" has
+check "80 and 443 in use: one line says so" "$out" "^● Ports 80 and 443 are in use by nginx\. Public traffic stays off, so your sites keep working\.$" has
+out=$(DASH_BUSY=1 NO_COLOR=1 check_ports 2>&1) && rc=0 || rc=$?
+check "8000 in use: it stops" "$rc" "^1$" has
+check "8000 in use: what Pyo needs" "$out" "8000 for the dashboard" has
+check "8000 in use: 80 and 443 aren't asked for" "$out" "80/443" lacks
+unset -f k3s ss
+
 [ "$failed" = 0 ] && echo "install.sh: all checks passed"
 exit "$failed"

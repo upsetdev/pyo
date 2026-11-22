@@ -709,6 +709,12 @@ mod tests {
             block("tailnet-lock", "connect.sh", CONNECT_SCRIPT),
             "join.sh's tailnet_lock_wait differs from connect.sh's"
         );
+        // How connect.sh and the installer find ports 80 and 443 in use.
+        assert_eq!(
+            block("web-ports", "deploy/install.sh", install),
+            block("web-ports", "connect.sh", CONNECT_SCRIPT),
+            "deploy/install.sh's web_ports_busy differs from connect.sh's"
+        );
         // How both become root.
         assert_eq!(
             block("become-root", "join.sh", SCRIPT),
@@ -1184,6 +1190,106 @@ echo "this one runs"
             String::from_utf8_lossy(&out.stdout).into_owned(),
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
+    }
+
+    /// connect.sh's web_ports_busy with k3s and ss stubbed (`stubs` sets
+    /// what they answer): "busy [WEB_PORTS] [WEB_BY] <line>" or "free".
+    fn web_ports(stubs: &str) -> String {
+        let block = script_block("web-ports", CONNECT_SCRIPT);
+        let (code, out, err) = bash(&format!(
+            r#"set -euo pipefail
+UP=1 SVCS="" PODS="" CHART="" TSVC="" SS=""
+{stubs}
+k3s() {{
+  case "$*" in
+    "kubectl get --raw=/readyz"*) [ -n "$UP" ] ;;
+    "kubectl get services -A"*) printf '%b' "$SVCS" ;;
+    "kubectl get pods -A"*) printf '%b' "$PODS" ;;
+    "kubectl -n kube-system get helmcharts.helm.cattle.io traefik") [ -n "$CHART" ] ;;
+    "kubectl -n kube-system get service traefik") [ -n "$TSVC" ] ;;
+    *) echo "unexpected: k3s $*" >&2; exit 9 ;;
+  esac
+}}
+ss() {{ printf '%b' "$SS"; }}
+{block}
+if web_ports_busy; then echo "busy [$WEB_PORTS] [$WEB_BY] $(web_ports_line)"; else echo "free"; fi
+"#
+        ));
+        assert_eq!(code, 0, "{err}");
+        out.trim().to_owned()
+    }
+
+    #[test]
+    fn connect_finds_what_already_answers_on_80_and_443() {
+        let line = |ports: &str, by: &str, text: &str| {
+            format!("busy [{ports}] [{by}] {text} Public traffic stays off, so your sites keep working.")
+        };
+        // k3s's own Traefik, as a k3s installed without Pyo has it.
+        assert_eq!(
+            web_ports(
+                r#"CHART=1 TSVC=1
+SVCS="kube-system traefik 80 443\npyo-gateway envoy-pyo-1a2b 80 443\n"
+PODS="kube-system svclb-traefik-9f8e-x2 80 443\nkube-system coredns-7b  \nkube-system svclb-envoy-pyo-1a2b-q 80 443\n""#
+            ),
+            line("80 443", "Traefik", "Ports 80 and 443 are in use by Traefik.")
+        );
+        // Its chart is there and its Service not yet: Traefik on its way.
+        assert_eq!(
+            web_ports("CHART=1"),
+            line("80 443", "Traefik", "Ports 80 and 443 are in use by Traefik.")
+        );
+        // Traefik's chart with its Service gone elsewhere (not a load balancer): free.
+        assert_eq!(web_ports("CHART=1 TSVC=1"), "free");
+        // ingress-nginx on host ports.
+        assert_eq!(
+            web_ports(r#"PODS="ingress-nginx ingress-nginx-controller-5c 80 443 8443\n""#),
+            line("80 443", "ingress-nginx", "Ports 80 and 443 are in use by ingress-nginx.")
+        );
+        // Another load balancer on 443 only, by its name.
+        assert_eq!(
+            web_ports(r#"SVCS="shop web-lb 443 8080\n""#),
+            line("443", "web-lb", "Port 443 is in use by web-lb.")
+        );
+        // Pyo's own gateway, and pods without host ports: free.
+        assert_eq!(
+            web_ports(
+                r#"SVCS="pyo-gateway envoy-pyo-1a2b 80 443\n"
+PODS="kube-system svclb-envoy-pyo-1a2b-q 80 443\npyo-system pyo-agent-6d  \n""#
+            ),
+            "free"
+        );
+        // nginx on this machine, no k3s yet.
+        assert_eq!(
+            web_ports(
+                r#"UP=""
+SS='LISTEN 0      511          0.0.0.0:80        0.0.0.0:*    users:(("nginx",pid=812,fd=6),("nginx",pid=811,fd=6))\nLISTEN 0      511             [::]:80           [::]:*    users:(("nginx",pid=812,fd=7))\n'"#
+            ),
+            line("80", "nginx", "Port 80 is in use by nginx.")
+        );
+        // Apache on 443 through an interface, Caddy on 80.
+        assert_eq!(
+            web_ports(
+                r#"SS='LISTEN 0 4096 *:80 *:* users:(("caddy",pid=9,fd=3))\nLISTEN 0 511 10.0.0.5%eth0:443 0.0.0.0:* users:(("apache2",pid=4,fd=4))\n'"#
+            ),
+            line("80 443", "Caddy", "Ports 80 and 443 are in use by Caddy.")
+        );
+        // A program whose name ss can't tell.
+        assert_eq!(
+            web_ports(r#"SS="LISTEN 0 4096 *:443 *:*\n""#),
+            line("443", "", "Port 443 is in use.")
+        );
+        // Only this machine, or only the tailnet, reaches them: free.
+        assert_eq!(
+            web_ports(
+                r#"SS='LISTEN 0 4096 127.0.0.1:80 0.0.0.0:* users:(("x",pid=1,fd=3))\nLISTEN 0 4096 [::1]:443 [::]:* users:(("x",pid=1,fd=4))\nLISTEN 0 4096 100.101.102.103:443 0.0.0.0:* users:(("y",pid=2,fd=3))\nLISTEN 0 4096 [fd7a:115c:a1e0::9]:80 [::]:* users:(("y",pid=2,fd=4))\n'"#
+            ),
+            "free"
+        );
+        // Nothing at all.
+        assert_eq!(web_ports(""), "free");
+        // The manifest is asked for with it, and ufw left alone.
+        assert!(CONNECT_SCRIPT.contains(r#""$API/install/agent.yaml?token=$TOKEN$WEB_QUERY""#));
+        assert!(CONNECT_SCRIPT.contains("WEB_QUERY=\"&webPorts=busy\""));
     }
 
     /// `kubectl version -o json` with these client and server minors.
