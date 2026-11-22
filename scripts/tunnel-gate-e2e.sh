@@ -121,7 +121,7 @@ static_resources:
               domains: ["done.example.com"]
               typed_per_filter_config:
                 envoy.filters.http.rbac:
-$(rbac yes)
+$(rbac yes | sed 's/^/    /')
               routes:
               # gateway.rs tunnel_redirect_rule
               - match:
@@ -136,7 +136,7 @@ $(rbac yes)
               domains: ["moving.example.com"]
               typed_per_filter_config:
                 envoy.filters.http.rbac:
-$(rbac no)
+$(rbac no | sed 's/^/    /')
               routes:
               - match: { prefix: "/" }
                 direct_response: { status: 200, body: { inline_string: "ok" } }
