@@ -15,7 +15,7 @@ import { Button } from "~/components/ui/Button";
 import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import { Field, Input, Textarea } from "~/components/ui/Field";
 import { Menu } from "~/components/ui/Menu";
-import { EmptyState, Panel } from "~/components/ui/Panel";
+import { EmptyState, PageHeader, Panel } from "~/components/ui/Panel";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { isPrivateHost, isTailnetDomain } from "~/lib/pyo/freeDomain";
@@ -254,16 +254,16 @@ export function CertificatesList() {
 
   return (
     <>
-      <div className="mb-3 flex items-center justify-between gap-4">
-        <p className="text-[13px] text-muted-foreground">
-          Your own certificates. Let's Encrypt is automatic.
-        </p>
-        {certs.length ? (
-          <Button size="sm" variant="secondary" onClick={upload}>
-            <UploadSimpleIcon size={13} weight="bold" /> Upload certificate
-          </Button>
-        ) : null}
-      </div>
+      <PageHeader
+        title="Certificates"
+        actions={
+          certs.length ? (
+            <Button size="sm" variant="secondary" onClick={upload}>
+              <UploadSimpleIcon size={13} weight="bold" /> Upload certificate
+            </Button>
+          ) : undefined
+        }
+      />
       <Panel>
         {certs.length ? (
           <ul className="list-rows">
