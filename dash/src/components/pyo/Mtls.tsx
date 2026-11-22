@@ -14,7 +14,7 @@ import { Button } from "~/components/ui/Button";
 import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import { Field, Input, Select, Switch } from "~/components/ui/Field";
 import { Menu } from "~/components/ui/Menu";
-import { EmptyState, Panel } from "~/components/ui/Panel";
+import { EmptyState, PageHeader, Panel } from "~/components/ui/Panel";
 import { CopyButton } from "~/components/ui/Table";
 import { isFreeDomain, isPrivateHost } from "~/lib/pyo/freeDomain";
 import { api, usePyo } from "~/lib/pyo/store";
@@ -619,17 +619,17 @@ export function OriginPullCertificates() {
     });
   const create = () => setCreating(true);
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-4">
-        <p className="text-[13px] text-muted-foreground">
-          Accept traffic only from your CDN. Set per cluster.
-        </p>
-        {certs.length ? (
-          <Button size="sm" variant="secondary" onClick={create}>
-            <PlusIcon size={13} weight="bold" /> Create certificate
-          </Button>
-        ) : null}
-      </div>
+    <>
+      <PageHeader
+        title="Mutual TLS"
+        actions={
+          certs.length ? (
+            <Button size="sm" variant="secondary" onClick={create}>
+              <PlusIcon size={13} weight="bold" /> Create certificate
+            </Button>
+          ) : undefined
+        }
+      />
       <Panel>
         {certs.length ? (
           <ul className="list-rows">
@@ -716,6 +716,6 @@ export function OriginPullCertificates() {
           if (removing) void api.removeOriginPullCertificate(removing.id);
         }}
       />
-    </div>
+    </>
   );
 }
