@@ -9,7 +9,8 @@ import {
   useHosted,
   usePyoVersion,
 } from "~/components/pyo/Managed";
-import { ClusterPublicTraffic, ClusterTrafficMode } from "~/components/pyo/TrafficMode";
+import { ClusterTraffic, ClusterTrafficMode } from "~/components/pyo/TrafficMode";
+import { RemoveTunnelRow } from "~/components/pyo/Tunnel";
 import { Badge, ClusterStatusBadge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
@@ -117,7 +118,7 @@ function ClusterSettings({ c }: { c: Cluster }) {
             </Button>
           </div>
         </Panel>
-        <ClusterPublicTraffic cluster={c} />
+        <ClusterTraffic cluster={c} />
         <ClusterTrafficMode cluster={c} />
         <ClusterMtls cluster={c} />
         <Panel title="Danger zone" tone="danger">
@@ -147,6 +148,7 @@ function ClusterSettings({ c }: { c: Cluster }) {
                 </div>
               ) : null}
             </li>
+            <RemoveTunnelRow c={c} />
             <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
               <div>
                 <p className="text-[13px] font-medium">Remove from Pyo</p>
