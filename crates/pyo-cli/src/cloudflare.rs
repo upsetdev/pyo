@@ -36,7 +36,7 @@ fn read_token(file: Option<&str>, env: Option<String>) -> Result<String> {
     let t = t.trim().to_owned();
     if t.is_empty() {
         bail!(
-            "Give the token in a file (--token-file, - for stdin) or in CLOUDFLARE_API_TOKEN. It needs Zone:Read and DNS:Edit."
+            "Give the token in a file (--token-file, - for stdin) or in CLOUDFLARE_API_TOKEN. It needs Zone:Read and DNS:Edit, and for Cloudflare Tunnel also Cloudflare Tunnel:Edit and SSL and Certificates:Edit."
         );
     }
     Ok(t)
@@ -54,18 +54,41 @@ fn print_zones(zones: &Value) {
         .chain([4])
         .max()
         .unwrap_or(4);
-    println!("{}", ui::dim(&format!("{:<w$}  DNS", "ZONE")));
+    println!("{}", ui::dim(&format!("{:<w$}  {:<10}  TUNNEL", "ZONE", "DNS")));
     for z in zones {
         let name = z["name"].as_str().unwrap_or("");
-        let dns = if z["canEdit"] == json!(true) {
-            ui::green("can edit")
+        let can = z["canEdit"] == json!(true);
+        let dns = if can {
+            ui::green(&format!("{:<10}", "can edit"))
         } else {
             ui::red(&format!(
                 "needs {}",
                 z["missing"].as_str().unwrap_or("DNS:Edit")
             ))
         };
-        println!("{name:<w$}  {dns}");
+        let tunnel = if !can {
+            String::new()
+        } else {
+            tunnel_column(&z["tunnel"])
+        };
+        println!("{name:<w$}  {dns}  {tunnel}");
+    }
+}
+
+/// A zone's tunnel state: ready, DNS only, or the one permission it lacks.
+fn tunnel_column(t: &Value) -> String {
+    let missing: Vec<&str> = t["missing"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if t["ready"] == json!(true) {
+        ui::green("ready")
+    } else if missing.len() == 1 {
+        ui::yellow(&format!("needs {}", missing[0]))
+    } else {
+        ui::dim("DNS only")
     }
 }
 
@@ -251,6 +274,21 @@ mod tests {
         assert_eq!(z("example.com"), Some("example.com"));
         assert_eq!(z("notexample.com"), None);
         assert_eq!(zone_for(&s, "t2", "a.example.com"), None);
+    }
+
+    #[test]
+    fn the_tunnel_column_says_what_a_zone_can_do() {
+        let plain = |t: Value| {
+            tunnel_column(&t)
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+        };
+        assert!(plain(json!({ "ready": true })).contains("ready"));
+        assert!(plain(json!({ "ready": false, "missing": ["SSL and Certificates:Edit"] })).contains("needs SSL and Certificates:Edit"));
+        assert!(plain(json!({ "ready": false, "missing": ["a", "b"] })).contains("DNS only"));
+        // Stored before the tunnel: DNS only.
+        assert!(plain(Value::Null).contains("DNS only"));
     }
 
     #[test]
