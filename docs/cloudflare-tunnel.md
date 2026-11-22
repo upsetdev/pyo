@@ -1548,12 +1548,31 @@ Not merged into `dev` until the feature is complete and tested.
 
 | Phase | State |
 |---|---|
-| Decisions applied to this spec | Done |
-| 1. Token and zones | Next |
-| 2. Agent and Gateway | Not started |
+| Decisions applied to this spec | Done (b145440) |
+| 1. Token and zones | Written, not compiled (e3d91dd api, adc8e62 cli, 12cf81f dash, tsc passes) |
+| 2. Agent and Gateway | Next |
 | 3. Control plane | Not started |
 | 4. Traffic choice, switching, default domain | Not started |
 | 5. Ports, connect.sh, alerts | Not started |
 | 6. Docs, e2e, real-zone test, Pyo Ops | Not started (real zone and Pyo Ops need the user) |
 
-Known gaps: none yet.
+Phase 1 notes:
+
+- `cloudflare/tunnel.rs` holds the tunnel API client (`TunnelApi`, a
+  trait of its own so the edgecert fakes that implement `Cloudflare` stay
+  as they are), the token checks, `ingress()`, `config_hash()`,
+  `cert_names()`, `key_and_csr()`. Phase 3 adds the loop next to it.
+- The fake account in `cloudflare/tests.rs` implements both traits
+  (tunnels, routes, secrets, certificates) and is `pub(super)` so the
+  tunnel loop's tests can use it.
+- `removeCloudflare` refusing while a tunnel exists moves to Phase 3 (it
+  needs the `cluster_tunnels` table).
+
+Known gaps:
+
+- Nothing on this branch has been compiled or tested yet: `cargo check`
+  was blocked by the permission classifier on 2026-11-22. Run
+  `cargo check -p pyo-api -p pyo-cli --tests` and
+  `cargo test -p pyo-api cloudflare::` first when picking this up.
+- `dash/node_modules` in the worktree is a symlink to the main
+  checkout's, for `tsc` only (ignored by git).
