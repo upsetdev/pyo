@@ -13,9 +13,9 @@ import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { EmailSettings } from "~/lib/pyo/types";
 
-// Outgoing email for the whole installation (every team): team invites, and
-// later notifications. Only the installation's admin edits it; others see
-// whether it's on.
+// Outgoing email for the whole installation (every team): team invites,
+// sign-in links and security notices. Only the installation's admin edits
+// it. Others see whether it's on.
 
 export function EmailSettingsSection() {
   const s = usePyo();
@@ -154,7 +154,7 @@ function EmailPage({
       icon={<CheckCircleIcon size={15} />}
       title="Email is set up"
     >
-      Invites are sent from {saved.fromEmail}.
+      Emails are sent from {saved.fromEmail}.
     </StatusNote>
   ) : (
     <StatusNote

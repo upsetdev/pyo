@@ -4,6 +4,7 @@ import { Layered } from "~/components/ui/Layered";
 import { EmptyState } from "~/components/ui/Panel";
 import { fetchMeta } from "~/lib/pyo/backend";
 import { useQuery } from "~/lib/pyo/query";
+import { usePyo } from "~/lib/pyo/store";
 
 const SUPPORT = "support@pyo.dev";
 
@@ -39,19 +40,24 @@ export function olderVersion(a: string | undefined, b: string | undefined) {
  * settings the Pyo team runs show a note instead of their controls.
  * Self-hosted shows `children` as before. Nothing shows until the API has
  * said which it is, so the controls never flash on a hosted build.
+ * `forAdmin`: the installation's admin (the Pyo team) still gets the
+ * controls on a hosted Pyo, for settings only they can set up there.
  */
 export function ManagedOr({
   title,
   description,
+  forAdmin = false,
   children,
 }: {
   title: string;
   description: ReactNode;
+  forAdmin?: boolean;
   children: ReactNode;
 }) {
   const managed = useHosted();
+  const admin = !!usePyo().user.isAdmin;
   if (managed === undefined) return null;
-  if (!managed) return <>{children}</>;
+  if (!managed || (forAdmin && admin)) return <>{children}</>;
   return (
     <Layered>
       <EmptyState
