@@ -200,6 +200,9 @@ const NOT_TOOLS: &[&str] = &[
     "getDatabaseLogs",
     "createDatabaseDumpUpload",
     "uploadDatabaseDump",
+    "uploadDatabaseDumpPart",
+    "getDatabaseDumpUpload",
+    "completeDatabaseDumpUpload",
     // A folder for `pyo deploy` goes up in parts of a request body each,
     // which a tool can't send: assistants deploy what's in Git or an image.
     "createSourceUpload",

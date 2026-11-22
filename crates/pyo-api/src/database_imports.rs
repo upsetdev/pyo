@@ -26,10 +26,15 @@
 //!   a one-time token; the file PUT there is streamed into the team's bucket
 //!   in Pyo's own store (backupstore.rs) under `imports/`, at most
 //!   `PYO_DATABASE_IMPORT_MAX_BYTES` (10 GiB by default). The import's Job
-//!   fetches it from here with a token of its own. A file goes once its
-//!   import succeeded, or after `PYO_DATABASE_IMPORT_RETENTION_HOURS` (24)
-//!   unless an import is using it; an upload never sent, once its URL
-//!   expired.
+//!   fetches it from here with a token of its own. Or the file goes up in
+//!   parts of [`PART`] (`PUT …/parts/{n}`, in order, then `POST
+//!   …/complete`), so no request is bigger than a proxy in front takes
+//!   (Cloudflare's 100 MB on Pyo Cloud). Each part goes on to the store as
+//!   it arrives, and the upload's row keeps the hash so far, so any web
+//!   replica takes the next part. A file goes once its import succeeded,
+//!   or after `PYO_DATABASE_IMPORT_RETENTION_HOURS` (24) unless an import
+//!   is using it. So does one never finished, whichever way it was sent,
+//!   after the same hours. One never started goes once its URL expired.
 
 use crate::error::Json;
 use crate::error::Query;
@@ -37,7 +42,7 @@ use std::time::Duration;
 
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     response::Response,
@@ -66,9 +71,18 @@ pub fn routes() -> Router<AppState> {
         .route("/database-imports", post(start))
         .route("/database-imports/{id}/retry", post(retry))
         .route("/database-imports/uploads", post(create_upload))
+        .route("/database-imports/uploads/{id}", get(upload_status))
         .route(
             "/database-imports/uploads/{id}/content",
             put(upload_content).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/database-imports/uploads/{id}/parts/{n}",
+            put(upload_part).layer(DefaultBodyLimit::max(PART + 1024)),
+        )
+        .route(
+            "/database-imports/uploads/{id}/complete",
+            post(complete_upload),
         )
 }
 
@@ -82,6 +96,10 @@ const GIB: u64 = 1 << 30;
 const PART: usize = 16 << 20;
 /// What of a file is read for its extensions and version (its start).
 const SNIFF: usize = 16 << 20;
+// A part stays under Cloudflare's 100 MB a request, with room to spare.
+const _: () = assert!(PART < 100_000_000 - (1 << 20));
+// A file's first part holds all of its start that's read.
+const _: () = assert!(SNIFF <= PART);
 
 fn max_bytes() -> u64 {
     std::env::var("PYO_DATABASE_IMPORT_MAX_BYTES")
@@ -1408,6 +1426,98 @@ impl Store {
         Ok(res)
     }
 
+    /// Start a multipart upload of `key`: its upload id.
+    async fn start_multipart(&self, key: &str) -> ApiResult<String> {
+        let started = self
+            .send(reqwest::Method::POST, key, &[("uploads", "")], vec![])
+            .await
+            .map_err(store_failed)?;
+        let xml = started.text().await.unwrap_or_default();
+        let upload_id = xml
+            .split("<UploadId>")
+            .nth(1)
+            .and_then(|s| s.split("</UploadId>").next())
+            .unwrap_or("")
+            .to_owned();
+        if upload_id.is_empty() {
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "Couldn't store the file. Try again.",
+            ));
+        }
+        Ok(upload_id)
+    }
+
+    /// Part `n` (from 1) of a multipart upload: its ETag. Sending a part
+    /// again replaces it.
+    async fn put_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        n: u64,
+        body: Vec<u8>,
+    ) -> anyhow::Result<String> {
+        let n = n.to_string();
+        let res = self
+            .send(
+                reqwest::Method::PUT,
+                key,
+                &[("partNumber", &n), ("uploadId", upload_id)],
+                body,
+            )
+            .await?;
+        Ok(res
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned())
+    }
+
+    /// Join a multipart upload's parts (their ETags, in order) into the object.
+    async fn complete_multipart(
+        &self,
+        key: &str,
+        upload_id: &str,
+        etags: &[String],
+    ) -> anyhow::Result<()> {
+        let mut complete = String::from("<CompleteMultipartUpload>");
+        for (i, etag) in etags.iter().enumerate() {
+            complete.push_str(&format!(
+                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+                i + 1,
+                etag.replace('&', "&amp;").replace('<', "&lt;")
+            ));
+        }
+        complete.push_str("</CompleteMultipartUpload>");
+        self.send(
+            reqwest::Method::POST,
+            key,
+            &[("uploadId", upload_id)],
+            complete.into_bytes(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Drop a multipart upload and its parts: whether it's gone.
+    async fn abort_multipart(&self, key: &str, upload_id: &str) -> bool {
+        match self
+            .request(
+                reqwest::Method::DELETE,
+                key,
+                &[("uploadId", upload_id)],
+                vec![],
+            )
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+        {
+            Ok(r) => r.status().is_success() || r.status() == reqwest::StatusCode::NOT_FOUND,
+            Err(_) => false,
+        }
+    }
+
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         match self
             .request(reqwest::Method::DELETE, key, &[], vec![])
@@ -1532,8 +1642,10 @@ fn upload_target(
 /// The first step of uploading a dump to import: say what it is and get
 /// where to send it. Then `PUT` the file to `uploadUrl` as it is, before
 /// `expiresAt`, with exactly the `headers` given and nothing else. Send no
-/// cookies or API key, since the URL may be on another host. Then call
-/// `startDatabaseImport` with `uploadId`. Postgres takes `.sql`, `.sql.gz`
+/// cookies or API key, since the URL may be on another host. Or send it in
+/// parts of `partSize` bytes with `uploadDatabaseDumpPart`, then
+/// `completeDatabaseDumpUpload`, so no request is bigger than a proxy in
+/// front takes. Then call `startDatabaseImport` with `uploadId`. Postgres takes `.sql`, `.sql.gz`
 /// or a custom-format `.dump` (pg_dump -Fc). MySQL takes `.sql` or
 /// `.sql.gz` (mysqldump). The dump stays in the team's storage in Pyo until
 /// its import succeeds, or for `PYO_DATABASE_IMPORT_RETENTION_HOURS` (24 by
@@ -1542,7 +1654,7 @@ fn upload_target(
 #[utoipa::path(post, path = "/database-imports/uploads", operation_id = "createDatabaseDumpUpload", tag = "Databases",
     request_body = NewUpload,
     responses(
-        (status = 200, description = "`uploadId` (for `startDatabaseImport`), and where to send the file: `uploadUrl` (relative to your Pyo's address when it starts with `/`), `method` (\"PUT\"), `headers` (send exactly these) and `expiresAt` (start sending before it).", body = Object),
+        (status = 200, description = "`uploadId` (for `startDatabaseImport`), and where to send the file: `uploadUrl` (relative to your Pyo's address when it starts with `/`), `method` (\"PUT\"), `headers` (send exactly these) and `expiresAt` (start sending before it). For parts: `partSize` (bytes in each part but the last) and `parts` (how many).", body = Object),
         (status = 400, description = "Not a file Pyo can import, by its name, or empty.", body = ErrorBody),
         (status = 403, description = "You aren't an owner or admin of the team, or the API key can't make changes.", body = ErrorBody),
         (status = 413, description = "Bigger than this installation takes.", body = ErrorBody),
@@ -1621,7 +1733,7 @@ pub async fn create_upload(
     .await?;
     let t = upload_target(&id, &token, &content_type, expires_at);
     Ok(Json(
-        json!({ "uploadId": id, "uploadUrl": t.url, "method": t.method, "headers": t.headers, "expiresAt": t.expires_at, "format": format }),
+        json!({ "uploadId": id, "uploadUrl": t.url, "method": t.method, "headers": t.headers, "expiresAt": t.expires_at, "format": format, "partSize": PART, "parts": parts_of(req.size) }),
     ))
 }
 
@@ -1693,6 +1805,33 @@ pub async fn upload_content(
     result
 }
 
+/// What's wrong with a file whose name says `format`, by its first bytes.
+fn format_problem(format: &str, first: &[u8]) -> Option<&'static str> {
+    let is_gz = first.starts_with(&[0x1f, 0x8b]);
+    match format {
+        "sql.gz" if !is_gz => Some("The file isn't gzip-compressed: name it .sql."),
+        "sql" if is_gz => Some("The file is gzip-compressed: name it .sql.gz."),
+        "dump" if !first.starts_with(b"PGDMP") => Some(
+            "The file isn't a custom-format dump (pg_dump -Fc). Upload a plain .sql file, or a .dump made with pg_dump -Fc.",
+        ),
+        _ => None,
+    }
+}
+
+/// The start of a file as text, from its first part: at most [`SNIFF`]
+/// bytes, decompressed when it's gzip (a stream cut off there is fine).
+fn head_of(first_part: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    if !first_part.starts_with(&[0x1f, 0x8b]) {
+        return first_part[..first_part.len().min(SNIFF)].to_vec();
+    }
+    let mut out = Vec::new();
+    let _ = flate2::read::GzDecoder::new(first_part)
+        .take(SNIFF as u64)
+        .read_to_end(&mut out);
+    out
+}
+
 /// Stream the file into the store (multipart), check it, and mark the
 /// upload "uploaded"; on an error, the store's upload is aborted.
 async fn store_file(
@@ -1719,40 +1858,14 @@ async fn store_file(
     }
     let store = Store::for_team(db, &u.team_id).await?;
     let key = u.object_key.as_str();
-    let started = store
-        .send(reqwest::Method::POST, key, &[("uploads", "")], vec![])
-        .await
-        .map_err(store_failed)?;
-    let xml = started.text().await.unwrap_or_default();
-    let upload_id = xml
-        .split("<UploadId>")
-        .nth(1)
-        .and_then(|s| s.split("</UploadId>").next())
-        .unwrap_or("")
-        .to_owned();
-    if upload_id.is_empty() {
-        return Err(ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            "Couldn't store the file. Try again.",
-        ));
-    }
+    let upload_id = store.start_multipart(key).await?;
     // For the sweeper, should this process stop half-way.
     sqlx::query("UPDATE pyo.database_import_uploads SET multipart_id = $2 WHERE id = $1")
         .bind(id)
         .bind(&upload_id)
         .execute(db)
         .await?;
-    let abort = || {
-        let req = store.request(
-            reqwest::Method::DELETE,
-            key,
-            &[("uploadId", &upload_id)],
-            vec![],
-        );
-        async move {
-            let _ = req.send().await;
-        }
-    };
+    let abort = || store.abort_multipart(key, &upload_id);
 
     let mut stream = body.into_data_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(PART);
@@ -1794,24 +1907,12 @@ async fn store_file(
                 return Err(mismatch(total));
             }
             if buf.len() >= PART || (last && (!buf.is_empty() || parts.is_empty())) {
-                let n = (parts.len() + 1).to_string();
                 let part = std::mem::replace(&mut buf, Vec::with_capacity(PART));
-                let res = store
-                    .send(
-                        reqwest::Method::PUT,
-                        key,
-                        &[("partNumber", &n), ("uploadId", &upload_id)],
-                        part,
-                    )
+                let etag = store
+                    .put_part(key, &upload_id, parts.len() as u64 + 1, part)
                     .await
                     .map_err(store_failed)?;
-                parts.push(
-                    res.headers()
-                        .get("etag")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("")
-                        .to_owned(),
-                );
+                parts.push(etag);
             }
             if last {
                 return Ok(());
@@ -1820,41 +1921,15 @@ async fn store_file(
     }
     .await;
     if let Err(e) = result {
-        abort().await;
+        let _ = abort().await;
         return Err(e);
     }
-    let is_gz = first.starts_with(&[0x1f, 0x8b]);
-    let problem = match u.format.as_str() {
-        "sql.gz" if !is_gz => Some("The file isn't gzip-compressed: name it .sql."),
-        "sql" if is_gz => Some("The file is gzip-compressed: name it .sql.gz."),
-        "dump" if !first.starts_with(b"PGDMP") => Some(
-            "The file isn't a custom-format dump (pg_dump -Fc). Upload a plain .sql file, or a .dump made with pg_dump -Fc.",
-        ),
-        _ => None,
-    };
-    if let Some(p) = problem {
-        abort().await;
+    if let Some(p) = format_problem(&u.format, &first) {
+        let _ = abort().await;
         return Err(bad(p));
     }
-    let mut complete = String::from("<CompleteMultipartUpload>");
-    for (i, etag) in parts.iter().enumerate() {
-        complete.push_str(&format!(
-            "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
-            i + 1,
-            etag.replace('&', "&amp;").replace('<', "&lt;")
-        ));
-    }
-    complete.push_str("</CompleteMultipartUpload>");
-    if let Err(e) = store
-        .send(
-            reqwest::Method::POST,
-            key,
-            &[("uploadId", &upload_id)],
-            complete.into_bytes(),
-        )
-        .await
-    {
-        abort().await;
+    if let Err(e) = store.complete_multipart(key, &upload_id, &parts).await {
+        let _ = abort().await;
         return Err(store_failed(e));
     }
     // What was decompressed (a file cut off past the start is fine).
@@ -1889,6 +1964,361 @@ async fn store_file(
     Ok(Json(
         json!({ "ok": true, "uploadId": id, "size": total, "sha256": sha256, "format": u.format, "extensions": extensions, "sourceVersion": source_version }),
     ))
+}
+
+// ── Files in parts ─────────────────────────────────────────────────────────
+
+/// Parts a file of `size` bytes is sent in.
+fn parts_of(size: u64) -> u64 {
+    size.div_ceil(PART as u64)
+}
+
+/// The size part `n` (from 0) of a file of `size` bytes must have, if
+/// there's such a part.
+fn part_len(size: u64, n: u64) -> Option<u64> {
+    let count = parts_of(size);
+    if n >= count {
+        return None;
+    }
+    Some(if n + 1 == count {
+        size - n * PART as u64
+    } else {
+        PART as u64
+    })
+}
+
+/// A hasher's state, to keep between parts.
+fn save_hash(h: &sha2::Sha256) -> Vec<u8> {
+    use sha2::digest::common::hazmat::SerializableState;
+    h.serialize().to_vec()
+}
+
+fn load_hash(b: &[u8]) -> Option<sha2::Sha256> {
+    use sha2::digest::common::hazmat::{SerializableState, SerializedState};
+    let state = SerializedState::<sha2::Sha256>::try_from(b).ok()?;
+    sha2::Sha256::deserialize(&state).ok()
+}
+
+/// An upload, as the parts' handlers read it.
+#[derive(sqlx::FromRow)]
+struct Parted {
+    team_id: String,
+    engine: Option<String>,
+    size: i64,
+    format: String,
+    object_key: String,
+    state: String,
+    /// Pending, and its URL not expired yet.
+    open: bool,
+    multipart_id: String,
+    parts_received: i32,
+    hash_state: Option<Vec<u8>>,
+    last_part_sha256: String,
+    etags: Value,
+    sha256: String,
+    extensions: Value,
+    source_version: String,
+}
+
+macro_rules! parted {
+    () => {
+        "SELECT team_id, engine, size, format, object_key, state, (state = 'pending' AND token_expires_at > now()) AS open,
+                multipart_id, parts_received, hash_state, last_part_sha256, etags, sha256, extensions, source_version
+           FROM pyo.database_import_uploads WHERE id = $1"
+    };
+}
+
+/// An upload of a team the user is an owner or admin of, its row locked
+/// for this transaction when `lock`.
+async fn parted(
+    tx: &mut Transaction<'_, Postgres>,
+    user: &User,
+    id: &str,
+    lock: bool,
+) -> ApiResult<Parted> {
+    let q = if lock {
+        sqlx::query_as(concat!(parted!(), " FOR UPDATE"))
+    } else {
+        sqlx::query_as(parted!())
+    };
+    let u: Parted = q
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Upload"))?;
+    admin(tx, user, &u.team_id).await?;
+    Ok(u)
+}
+
+/// What an uploaded file is, as the upload's last step says.
+fn uploaded_json(id: &str, u: &Parted, sha256: &str) -> Value {
+    json!({ "ok": true, "uploadId": id, "size": u.size, "sha256": sha256, "format": u.format, "extensions": u.extensions, "sourceVersion": u.source_version })
+}
+
+/// Send a part of an upload's file
+///
+/// Part `n` (from 0) of the file, as the request's body: exactly
+/// `partSize` bytes, the last part what's left. Parts go in order. Send a
+/// part again when its request failed: one that arrived already is taken
+/// once. `x-pyo-sha256` may carry the part's SHA-256 (hex), to check it on
+/// arrival. Owners and admins.
+#[utoipa::path(put, path = "/database-imports/uploads/{id}/parts/{n}", operation_id = "uploadDatabaseDumpPart", tag = "Databases",
+    params(("id" = String, Path, description = "The upload's id."), ("n" = u64, Path, description = "The part, from 0.")),
+    request_body(content = String, content_type = "application/octet-stream", description = "The part's bytes."),
+    responses(
+        (status = 200, description = "Stored: `received` (parts so far) and `parts`.", body = Object),
+        (status = 400, description = "Not the next part, not its size or SHA-256, or not what the file's name says.", body = ErrorBody),
+        (status = 403, description = "You aren't an owner or admin of the team, or the API key can't make changes.", body = ErrorBody),
+        (status = 404, description = "No such upload.", body = ErrorBody),
+        (status = 409, description = "The upload is complete already, or sent in one request.", body = ErrorBody),
+        (status = 410, description = "The upload expired.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("full"))))]
+pub async fn upload_part(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path((id, n)): Path<(String, u64)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    use sha2::Digest;
+    let mut tx = s.db.begin().await?;
+    let u = parted(&mut tx, &user, &id, true).await?;
+    let size = u.size as u64;
+    let count = parts_of(size);
+    let got = hex::encode(sha2::Sha256::digest(&body));
+    if let Some(want) = headers.get("x-pyo-sha256").and_then(|v| v.to_str().ok())
+        && !want.trim().eq_ignore_ascii_case(&got)
+    {
+        return Err(bad(format!("Part {n} arrived damaged. Send it again.")));
+    }
+    match u.state.as_str() {
+        "uploaded" => return Err(ApiError::conflict("This upload is complete already.")),
+        "pending" if !u.open => {
+            return Err(ApiError::new(
+                StatusCode::GONE,
+                "This upload expired. Start it again.",
+            ));
+        }
+        "uploading" if u.parts_received == 0 => {
+            return Err(ApiError::conflict(
+                "This upload is being sent in one request already.",
+            ));
+        }
+        _ => {}
+    }
+    let received = u.parts_received as u64;
+    if n < received {
+        // Sent again after its answer got lost: taken once.
+        if n + 1 == received && got == u.last_part_sha256 {
+            return Ok(Json(
+                json!({ "ok": true, "received": received, "parts": count }),
+            ));
+        }
+        return Err(ApiError::conflict(format!("Part {n} arrived already.")));
+    }
+    if n > received {
+        return Err(bad(format!("Send part {received} first.")));
+    }
+    let want = part_len(size, n).ok_or_else(|| bad(format!("This upload has {count} parts.")))?;
+    if body.len() as u64 != want {
+        return Err(bad(format!(
+            "Part {n} is {want} bytes, not {}.",
+            body.len()
+        )));
+    }
+    let (mut hash, extensions, source_version) = if n == 0 {
+        if let Some(p) = format_problem(&u.format, &body) {
+            sqlx::query("DELETE FROM pyo.database_import_uploads WHERE id = $1")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Err(bad(p));
+        }
+        let (e, v) = sniff(u.engine.as_deref().unwrap_or(""), &head_of(&body));
+        (sha2::Sha256::new(), json!(e), v)
+    } else {
+        let h = u.hash_state.as_deref().and_then(load_hash).ok_or_else(|| {
+            ApiError::from(anyhow::anyhow!("an upload's saved hash is unreadable"))
+        })?;
+        (h, u.extensions.clone(), u.source_version.clone())
+    };
+    hash.update(&body);
+    let store = Store::for_team(&s.db, &u.team_id).await?;
+    let multipart = if n == 0 {
+        store.start_multipart(&u.object_key).await?
+    } else {
+        u.multipart_id.clone()
+    };
+    let etag = match store
+        .put_part(&u.object_key, &multipart, n + 1, Vec::from(body))
+        .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            if n == 0 {
+                store.abort_multipart(&u.object_key, &multipart).await;
+            }
+            return Err(store_failed(e));
+        }
+    };
+    sqlx::query(
+        "UPDATE pyo.database_import_uploads SET state = 'uploading', token_hash = NULL, multipart_id = $2, parts_received = $3,
+                hash_state = $4, last_part_sha256 = $5, etags = etags || jsonb_build_array($6::text), extensions = $7, source_version = $8
+          WHERE id = $1",
+    )
+    .bind(&id)
+    .bind(&multipart)
+    .bind((n + 1) as i32)
+    .bind(save_hash(&hash))
+    .bind(&got)
+    .bind(&etag)
+    .bind(&extensions)
+    .bind(&source_version)
+    .execute(&mut *tx)
+    .await?;
+    if let Err(e) = tx.commit().await {
+        if n == 0 {
+            store.abort_multipart(&u.object_key, &multipart).await;
+        }
+        return Err(e.into());
+    }
+    Ok(Json(
+        json!({ "ok": true, "received": n + 1, "parts": count }),
+    ))
+}
+
+/// An upload in parts
+///
+/// How far an upload's file got: `state` ("pending" before any part,
+/// "uploading", "uploaded"), `parts` and `received` (the next part to send
+/// is this). Owners and admins.
+#[utoipa::path(get, path = "/database-imports/uploads/{id}", operation_id = "getDatabaseDumpUpload", tag = "Databases",
+    params(("id" = String, Path, description = "The upload's id.")),
+    responses(
+        (status = 200, description = "`uploadId`, `state`, `partSize`, `parts` and `received`.", body = Object),
+        (status = 403, description = "You aren't an owner or admin of the team, or the API key can't make changes.", body = ErrorBody),
+        (status = 404, description = "No such upload.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("full"))))]
+pub async fn upload_status(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let mut tx = s.db.begin().await?;
+    let u = parted(&mut tx, &user, &id, false).await?;
+    tx.commit().await?;
+    let size = u.size as u64;
+    let received = if u.state == "uploaded" {
+        parts_of(size)
+    } else {
+        u.parts_received as u64
+    };
+    Ok(Json(json!({
+        "uploadId": id,
+        "state": u.state,
+        "partSize": PART,
+        "parts": parts_of(size),
+        "received": received,
+    })))
+}
+
+/// The end of an upload in parts.
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteUpload {
+    /// The whole file's SHA-256 (hex), when known: it's checked.
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
+/// Finish an upload in parts
+///
+/// Once every part is sent: Pyo puts the file together in the team's
+/// storage and checks it against `sha256`, when given. Then call
+/// `startDatabaseImport` with `uploadId`. Owners and admins.
+#[utoipa::path(post, path = "/database-imports/uploads/{id}/complete", operation_id = "completeDatabaseDumpUpload", tag = "Databases",
+    params(("id" = String, Path, description = "The upload's id.")),
+    request_body = CompleteUpload,
+    responses(
+        (status = 200, description = "Stored: `uploadId`, `size`, `sha256`, `format`, `extensions` (Postgres: the ones it makes) and `sourceVersion` (what it was dumped from, when it says).", body = Object),
+        (status = 400, description = "Parts are missing (`getDatabaseDumpUpload` says how many arrived), or the file isn't the one sent (the upload is gone then: start again).", body = ErrorBody),
+        (status = 403, description = "You aren't an owner or admin of the team, or the API key can't make changes.", body = ErrorBody),
+        (status = 404, description = "No such upload.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("full"))))]
+pub async fn complete_upload(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path(id): Path<String>,
+    Json(req): Json<CompleteUpload>,
+) -> ApiResult<Json<Value>> {
+    use sha2::Digest;
+    let want = req
+        .sha256
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty());
+    let mut tx = s.db.begin().await?;
+    let u = parted(&mut tx, &user, &id, true).await?;
+    if u.state == "uploaded" {
+        // Finished already (asked again after its answer got lost).
+        if want.as_ref().is_some_and(|w| *w != u.sha256) {
+            return Err(bad(
+                "The file that arrived isn't the one sent. Upload it again.",
+            ));
+        }
+        return Ok(Json(uploaded_json(&id, &u, &u.sha256)));
+    }
+    if u.state == "uploading" && u.parts_received == 0 {
+        return Err(ApiError::conflict(
+            "This upload is being sent in one request already.",
+        ));
+    }
+    let count = parts_of(u.size as u64);
+    let received = u.parts_received as u64;
+    if received < count {
+        return Err(bad(format!(
+            "{} of {count} parts haven't arrived. Send them first.",
+            count - received
+        )));
+    }
+    let sha256 = u
+        .hash_state
+        .as_deref()
+        .and_then(load_hash)
+        .map(|h| hex::encode(h.finalize()))
+        .ok_or_else(|| ApiError::from(anyhow::anyhow!("an upload's saved hash is unreadable")))?;
+    let store = Store::for_team(&s.db, &u.team_id).await?;
+    if want.as_ref().is_some_and(|w| *w != sha256) {
+        // Gone now, or left for the sweeper when the store can't be reached.
+        if store.abort_multipart(&u.object_key, &u.multipart_id).await {
+            sqlx::query("DELETE FROM pyo.database_import_uploads WHERE id = $1")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+        return Err(bad(
+            "The file that arrived isn't the one sent. Upload it again.",
+        ));
+    }
+    let etags: Vec<String> = serde_json::from_value(u.etags.clone()).unwrap_or_default();
+    store
+        .complete_multipart(&u.object_key, &u.multipart_id, &etags)
+        .await
+        .map_err(store_failed)?;
+    sqlx::query(
+        "UPDATE pyo.database_import_uploads SET state = 'uploaded', sha256 = $2, multipart_id = '', hash_state = NULL, uploaded_at = now()
+          WHERE id = $1",
+    )
+    .bind(&id)
+    .bind(&sha256)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(uploaded_json(&id, &u, &sha256)))
 }
 
 /// The dump, for its import's Job (with the import's token).
@@ -1973,29 +2403,9 @@ pub async fn sweep(db: &PgPool) -> anyhow::Result<()> {
                 continue;
             }
         };
-        if !multipart.is_empty() {
-            match store
-                .request(
-                    reqwest::Method::DELETE,
-                    &key,
-                    &[("uploadId", &multipart)],
-                    vec![],
-                )
-                .timeout(Duration::from_secs(60))
-                .send()
-                .await
-            {
-                Ok(r)
-                    if r.status().is_success() || r.status() == reqwest::StatusCode::NOT_FOUND => {}
-                Ok(r) => {
-                    tracing::warn!(upload = %id, status = %r.status(), "couldn't abort an import's unfinished upload");
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(upload = %id, error = %e, "couldn't abort an import's unfinished upload");
-                    continue;
-                }
-            }
+        if !multipart.is_empty() && !store.abort_multipart(&key, &multipart).await {
+            tracing::warn!(upload = %id, "couldn't abort an import's unfinished upload");
+            continue;
         }
         if let Err(e) = store.delete(&key).await {
             tracing::warn!(upload = %id, error = %format!("{e:#}"), "couldn't delete an import's file");
@@ -2096,6 +2506,50 @@ mod tests {
     }
 
     #[test]
+    fn parts_cover_the_file() {
+        let p = PART as u64;
+        assert_eq!((parts_of(1), parts_of(p), parts_of(p + 1)), (1, 1, 2));
+        assert_eq!(part_len(p + 1, 0), Some(p));
+        assert_eq!(part_len(p + 1, 1), Some(1));
+        assert_eq!(part_len(p + 1, 2), None);
+        assert_eq!(part_len(10, 0), Some(10));
+    }
+
+    #[test]
+    fn the_hash_carries_over_between_parts() {
+        use sha2::Digest;
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let mut h = sha2::Sha256::new();
+        h.update(&data[..4096]);
+        let saved = save_hash(&h);
+        let mut h = load_hash(&saved).unwrap();
+        // An odd cut, so the hasher's buffer is saved too.
+        h.update(&data[4096..50_001]);
+        let mut h = load_hash(&save_hash(&h)).unwrap();
+        h.update(&data[50_001..]);
+        assert_eq!(h.finalize(), sha2::Sha256::digest(&data));
+        assert!(load_hash(b"nonsense").is_none());
+    }
+
+    #[test]
+    fn a_first_part_says_what_the_file_is() {
+        use std::io::Write;
+        let sql = b"-- Dumped from database version 16.4\nCREATE EXTENSION IF NOT EXISTS vector;\n";
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(sql).unwrap();
+        let gz = gz.finish().unwrap();
+        assert_eq!(head_of(sql), sql.to_vec());
+        assert_eq!(head_of(&gz), sql.to_vec());
+        // Cut off past its start: what came out still counts.
+        assert!(head_of(&gz[..gz.len() - 4]).starts_with(b"-- Dumped"));
+        assert_eq!(format_problem("sql.gz", &gz), None);
+        assert!(format_problem("sql", &gz).unwrap().contains(".sql.gz"));
+        assert!(format_problem("sql.gz", sql).is_some());
+        assert!(format_problem("dump", sql).unwrap().contains("pg_dump -Fc"));
+        assert_eq!(format_problem("dump", b"PGDMP\x01"), None);
+    }
+
+    #[test]
     fn what_a_dump_says() {
         let pg = b"--\n-- PostgreSQL database dump\n--\n\n-- Dumped from database version 17.2 (Debian 17.2-1)\n-- Dumped by pg_dump version 18.0\nCREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public;\nCREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public;\n";
         assert_eq!(
@@ -2136,5 +2590,415 @@ mod tests {
                 "1.5 GiB".to_owned()
             )
         );
+    }
+
+    /// A stand-in for Pyo's store (Garage's S3 API): multipart uploads and
+    /// objects, in memory. Signatures aren't checked.
+    #[derive(Default)]
+    struct FakeStore {
+        uploads: std::collections::HashMap<String, std::collections::BTreeMap<u32, Vec<u8>>>,
+        objects: std::collections::HashMap<String, Vec<u8>>,
+        part_puts: usize,
+        next: u32,
+    }
+
+    type Fake = std::sync::Arc<std::sync::Mutex<FakeStore>>;
+
+    fn fake(st: &Fake, method: &str, uri: &axum::http::Uri, body: &[u8]) -> Response {
+        let q: std::collections::HashMap<&str, &str> = uri
+            .query()
+            .unwrap_or("")
+            .split('&')
+            .filter(|p| !p.is_empty())
+            .map(|p| p.split_once('=').unwrap_or((p, "")))
+            .collect();
+        let key = uri.path().to_owned();
+        let mut s = st.lock().unwrap();
+        let answer = |status: u16, text: String| {
+            Response::builder()
+                .status(status)
+                .body(Body::from(text))
+                .unwrap()
+        };
+        match (method, q.get("uploadId").map(|v| v.to_string())) {
+            ("POST", None) if q.contains_key("uploads") => {
+                s.next += 1;
+                let id = format!("mp{}", s.next);
+                s.uploads.insert(id.clone(), Default::default());
+                answer(
+                    200,
+                    format!(
+                        "<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>"
+                    ),
+                )
+            }
+            ("PUT", Some(id)) => {
+                let n: u32 = q["partNumber"].parse().unwrap();
+                s.part_puts += 1;
+                match s.uploads.get_mut(&id) {
+                    Some(u) => {
+                        u.insert(n, body.to_vec());
+                        Response::builder()
+                            .header("etag", format!("\"e{n}\""))
+                            .body(Body::empty())
+                            .unwrap()
+                    }
+                    None => answer(404, "NoSuchUpload".into()),
+                }
+            }
+            ("POST", Some(id)) => {
+                let Some(u) = s.uploads.remove(&id) else {
+                    return answer(404, "NoSuchUpload".into());
+                };
+                let listed = String::from_utf8_lossy(body);
+                for n in u.keys() {
+                    assert!(listed.contains(&format!(
+                        "<PartNumber>{n}</PartNumber><ETag>\"e{n}\"</ETag>"
+                    )));
+                }
+                s.objects.insert(key, u.into_values().flatten().collect());
+                answer(200, "<CompleteMultipartUploadResult/>".into())
+            }
+            ("DELETE", Some(id)) => {
+                s.uploads.remove(&id);
+                answer(204, String::new())
+            }
+            ("DELETE", None) => {
+                s.objects.remove(&key);
+                answer(204, String::new())
+            }
+            ("GET", None) => match s.objects.get(&key) {
+                Some(o) => Response::new(Body::from(o.clone())),
+                None => answer(404, "NoSuchKey".into()),
+            },
+            _ => answer(400, "unexpected".into()),
+        }
+    }
+
+    async fn fake_store() -> (String, Fake) {
+        let st: Fake = Default::default();
+        let app = axum::Router::new()
+            .fallback({
+                let st = st.clone();
+                move |method: axum::http::Method, uri: axum::http::Uri, body: Bytes| {
+                    let st = st.clone();
+                    async move { fake(&st, method.as_str(), &uri, &body) }
+                }
+            })
+            .layer(DefaultBodyLimit::disable());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (format!("http://{addr}"), st)
+    }
+
+    fn state(db: PgPool) -> AppState {
+        let config = crate::Config {
+            agent_api_url: String::new(),
+            agent_image: String::new(),
+            waf_image: String::new(),
+            geoip_image: String::new(),
+            cookie_secure: false,
+            allow_signup: false,
+            builder_image: String::new(),
+            relay_addr: None,
+        };
+        let (_stop, stopping) = tokio::sync::watch::channel(false);
+        AppState {
+            db: db.clone(),
+            config: std::sync::Arc::new(config),
+            observability: crate::observability::Observability::from_env(db),
+            sealer: std::sync::Arc::new(crate::secrets::Sealer::for_tests()),
+            wakers: Default::default(),
+            terminals: Default::default(),
+            stopping,
+        }
+    }
+
+    /// Against a throwaway Postgres (DATABASE_URL) and a stand-in store: an
+    /// admin uploads a dump in parts (in order, one sent twice, one
+    /// damaged), finishes it and gets what it says; the store has exactly
+    /// the file. A file that isn't the one sent, or not what its name says,
+    /// is gone. The one-request upload still works. An upload left half
+    /// sent goes after the retention, its parts with it. A developer can't
+    /// upload.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn a_dump_goes_up_in_parts() {
+        use sha2::Digest;
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(
+            db.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let (url, store) = fake_store().await;
+        // SAFETY: set before any store is used, and only this test reads them.
+        unsafe {
+            std::env::set_var("PYO_BACKUP_STORE_URL", &url);
+            std::env::set_var("PYO_BACKUP_STORE_ACCESS_KEY", "pyo");
+            std::env::set_var("PYO_BACKUP_STORE_SECRET_KEY", "pyo-secret");
+        }
+        let run = crate::ids::random_string(8).to_lowercase();
+        let id = |p: &str| format!("{p}_{run}");
+        let team = id("team");
+        let q = |sql: &'static str| sqlx::query(sql);
+        let user = |uid: String| User {
+            id: uid.clone(),
+            name: uid,
+            email: String::new(),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        for (u, role) in [(id("adm"), "admin"), (id("dev"), "developer")] {
+            q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@t.test', $1, '')").bind(&u).execute(&db).await.unwrap();
+            q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1 || 'm', $2, $1, $1 || '@t.test', $3, 'active')").bind(&u).bind(&team).bind(role).execute(&db).await.unwrap();
+        }
+        let sealed = crate::vault::get()
+            .seal(&team, "team-secret")
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.backup_store_logins (team_id, access_key, secret_sealed) VALUES ($1, 'team-key', $2)")
+            .bind(&team)
+            .bind(sealed)
+            .execute(&db)
+            .await
+            .unwrap();
+        let s = state(db.clone());
+        let adm = user(id("adm"));
+        let new = |name: &str, size: usize| NewUpload {
+            team_id: team.clone(),
+            engine: Some("postgres".into()),
+            filename: name.into(),
+            size: size as u64,
+            content_type: None,
+        };
+        let start = |who: &User, name: &str, size: usize| {
+            create_upload(
+                State(s.clone()),
+                SessionUser(who.clone()),
+                Json(new(name, size)),
+            )
+        };
+        let send = |up: &str, n: u64, b: &[u8], sha: Option<&str>| {
+            let mut h = HeaderMap::new();
+            if let Some(sha) = sha {
+                h.insert("x-pyo-sha256", sha.parse().unwrap());
+            }
+            upload_part(
+                State(s.clone()),
+                SessionUser(adm.clone()),
+                Path((up.to_owned(), n)),
+                h,
+                Bytes::copy_from_slice(b),
+            )
+        };
+        let finish = |up: &str, sha: Option<&str>| {
+            complete_upload(
+                State(s.clone()),
+                SessionUser(adm.clone()),
+                Path(up.to_owned()),
+                Json(CompleteUpload {
+                    sha256: sha.map(str::to_owned),
+                }),
+            )
+        };
+        let status_of = |up: &str| {
+            upload_status(
+                State(s.clone()),
+                SessionUser(adm.clone()),
+                Path(up.to_owned()),
+            )
+        };
+
+        // A dump of two parts and a bit.
+        let mut file = vec![0u8; 2 * PART + 5];
+        rand::fill(&mut file[..]);
+        let start_text =
+            b"-- Dumped from database version 16.4\nCREATE EXTENSION IF NOT EXISTS citext;\n";
+        file[..start_text.len()].copy_from_slice(start_text);
+        let sha = hex::encode(sha2::Sha256::digest(&file));
+        let part = |n: usize| &file[n * PART..((n + 1) * PART).min(file.len())];
+        let part_sha = |n: usize| hex::encode(sha2::Sha256::digest(part(n)));
+
+        let e = start(&user(id("dev")), "shop.sql", file.len())
+            .await
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::FORBIDDEN, "developers can't import");
+        let t = start(&adm, "shop.sql", file.len()).await.unwrap().0;
+        assert_eq!(
+            (t["partSize"].as_u64(), t["parts"].as_u64()),
+            (Some(PART as u64), Some(3))
+        );
+        let up = t["uploadId"].as_str().unwrap().to_owned();
+        let token = t["uploadUrl"]
+            .as_str()
+            .unwrap()
+            .split("token=")
+            .nth(1)
+            .unwrap()
+            .to_owned();
+
+        let e = send(&up, 1, part(1), None).await.unwrap_err();
+        assert!(e.message.contains("Send part 0 first"), "{}", e.message);
+        let e = send(&up, 0, part(0), Some(part_sha(1).as_str()))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("damaged"), "{}", e.message);
+        let e = send(&up, 0, &b"short"[..], None).await.unwrap_err();
+        assert_eq!(e.status, StatusCode::BAD_REQUEST);
+        let r = send(&up, 0, part(0), Some(part_sha(0).as_str()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(r["received"], 1);
+        let puts = store.lock().unwrap().part_puts;
+        // Sent again after its answer got lost: taken once.
+        let r = send(&up, 0, part(0), None).await.unwrap().0;
+        assert_eq!(r["received"], 1);
+        assert_eq!(store.lock().unwrap().part_puts, puts);
+        let e = send(&up, 0, part(1), None).await.unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        // The one-request URL is used up once parts go.
+        let e = upload_content(
+            State(s.clone()),
+            Path(up.clone()),
+            Query(ContentQuery { token }),
+            HeaderMap::new(),
+            Body::from(file.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.status, StatusCode::FORBIDDEN);
+        let e = finish(&up, Some(sha.as_str())).await.unwrap_err();
+        assert!(e.message.contains("2 of 3 parts"), "{}", e.message);
+        let st = status_of(&up).await.unwrap().0;
+        assert_eq!(
+            (st["state"].as_str(), st["received"].as_u64()),
+            (Some("uploading"), Some(1))
+        );
+        send(&up, 1, part(1), Some(part_sha(1).as_str()))
+            .await
+            .unwrap();
+        send(&up, 2, part(2), Some(part_sha(2).as_str()))
+            .await
+            .unwrap();
+        let done = finish(&up, Some(sha.as_str())).await.unwrap().0;
+        assert_eq!(done["sha256"], json!(sha));
+        assert_eq!(done["size"], json!(file.len()));
+        assert_eq!(done["extensions"], json!(["citext"]));
+        assert_eq!(done["sourceVersion"], "16.4");
+        let key = format!("/{}/imports/{up}", crate::backupstore::team_bucket(&team));
+        assert!(
+            store.lock().unwrap().objects.get(&key) == Some(&file),
+            "the store has the file"
+        );
+        assert!(store.lock().unwrap().uploads.is_empty());
+        // Asked again: the same answer.
+        assert_eq!(finish(&up, None).await.unwrap().0, done);
+        let e = send(&up, 2, part(2), None).await.unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        let st = status_of(&up).await.unwrap().0;
+        assert_eq!(
+            (st["state"].as_str(), st["received"].as_u64()),
+            (Some("uploaded"), Some(3))
+        );
+        let ready: String =
+            sqlx::query_scalar("SELECT state FROM pyo.database_import_uploads WHERE id = $1")
+                .bind(&up)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(ready, "uploaded", "an import can use it");
+
+        // Not the file that was sent: gone.
+        let small = b"-- a small dump\n".to_vec();
+        let t = start(&adm, "small.sql", small.len()).await.unwrap().0;
+        let up2 = t["uploadId"].as_str().unwrap().to_owned();
+        send(&up2, 0, &small[..], None).await.unwrap();
+        let e = finish(&up2, Some(sha.as_str())).await.unwrap_err();
+        assert!(e.message.contains("isn't the one sent"), "{}", e.message);
+        assert_eq!(
+            status_of(&up2).await.unwrap_err().status,
+            StatusCode::NOT_FOUND
+        );
+        assert!(store.lock().unwrap().uploads.is_empty());
+
+        // Not what its name says: gone at its first part.
+        let t = start(&adm, "small.sql.gz", small.len()).await.unwrap().0;
+        let up3 = t["uploadId"].as_str().unwrap().to_owned();
+        let e = send(&up3, 0, &small[..], None).await.unwrap_err();
+        assert!(e.message.contains("gzip"), "{}", e.message);
+        assert_eq!(
+            status_of(&up3).await.unwrap_err().status,
+            StatusCode::NOT_FOUND
+        );
+
+        // In one request, as before.
+        let t = start(&adm, "one.sql", small.len()).await.unwrap().0;
+        let up4 = t["uploadId"].as_str().unwrap().to_owned();
+        let token = t["uploadUrl"]
+            .as_str()
+            .unwrap()
+            .split("token=")
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        let r = upload_content(
+            State(s.clone()),
+            Path(up4.clone()),
+            Query(ContentQuery { token }),
+            HeaderMap::new(),
+            Body::from(small.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            r["sha256"],
+            json!(hex::encode(sha2::Sha256::digest(&small)))
+        );
+        let key4 = format!("/{}/imports/{up4}", crate::backupstore::team_bucket(&team));
+        assert!(store.lock().unwrap().objects.get(&key4) == Some(&small));
+        let e = send(&up4, 0, &small[..], None).await.unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+
+        // Left half sent: gone after the retention, its parts with it.
+        let t = start(&adm, "half.sql", file.len()).await.unwrap().0;
+        let up5 = t["uploadId"].as_str().unwrap().to_owned();
+        send(&up5, 0, part(0), None).await.unwrap();
+        assert_eq!(store.lock().unwrap().uploads.len(), 1);
+        sweep(&db).await.unwrap();
+        assert_eq!(
+            status_of(&up5).await.unwrap().0["received"],
+            1,
+            "kept while it may go on"
+        );
+        q("UPDATE pyo.database_import_uploads SET created_at = now() - interval '25 hours' WHERE id = $1")
+            .bind(&up5)
+            .execute(&db)
+            .await
+            .unwrap();
+        sweep(&db).await.unwrap();
+        assert_eq!(
+            status_of(&up5).await.unwrap_err().status,
+            StatusCode::NOT_FOUND
+        );
+        assert!(store.lock().unwrap().uploads.is_empty());
+
+        q("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }
