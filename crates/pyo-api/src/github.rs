@@ -167,9 +167,21 @@ fn reachable(url: &str) -> bool {
 
 // ── Manifest flow (admin) ────────────────────────────────────────────────────
 
+/// The address the app's URLs point at: what the dashboard says, except on
+/// a hosted Pyo with `PYO_PUBLIC_URL` set. There it's always that one
+/// public address (Pyo Cloud's), whatever the browser sent.
+fn manifest_base<'a>(given: &'a str, hosted_url: Option<&'a str>) -> &'a str {
+    hosted_url.unwrap_or(given).trim().trim_end_matches('/')
+}
+
 /// What the dashboard posts to GitHub to create the app.
 pub async fn manifest(user_id: &str, public_url: &str, org: Option<&str>) -> ApiResult<Value> {
-    let base = public_url.trim().trim_end_matches('/');
+    let hosted_url = if crate::hosted() {
+        crate::oauth::configured_public_url()
+    } else {
+        None
+    };
+    let base = manifest_base(public_url, hosted_url);
     if !(base.starts_with("http://") || base.starts_with("https://")) {
         return Err(ApiError::bad_request(
             "The dashboard URL starts with http:// or https://.",
@@ -1059,6 +1071,18 @@ pub fn api_routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hosted_app_uses_the_public_url() {
+        assert_eq!(
+            manifest_base("https://pyo.example.com/", None),
+            "https://pyo.example.com"
+        );
+        assert_eq!(
+            manifest_base("http://10.0.0.5:8000", Some("https://cloud.pyo.dev")),
+            "https://cloud.pyo.dev"
+        );
+    }
 
     #[test]
     fn build_dirs() {
