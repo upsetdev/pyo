@@ -93,7 +93,7 @@ async fn a_tunnel_runs_its_course_over_http() {
     // Made, with routes and a token for the agent.
     let (t, _) = ensure_tunnel(&http, &row, "abc123").await.unwrap();
     assert_eq!(t.name, "pyo-cl_1-abc123");
-    let config = tunnel::ingress(&["blog.example.com".into()], Some("example.com"));
+    let config = tunnel::ingress(&["blog.example.com".into()]);
     assert_eq!(http.put_config(ACCOUNT, &t.id, &config).await.unwrap(), 1);
     assert_eq!(http.config(ACCOUNT, &t.id).await.unwrap(), (1, config));
     let token = http.tunnel_token(ACCOUNT, &t.id).await.unwrap();
@@ -312,8 +312,9 @@ fn the_tunnel_loop_end_to_end() {
         assert_eq!((d["tunnel"].as_str(), d["status"].as_str()), (Some("on"), Some("active")), "{d}");
         let config = cf.state.lock().unwrap().configs.iter().find(|c| c.0 == tunnel_id).map(|c| c.2.clone()).unwrap();
         let hosts: Vec<Value> = config["ingress"].as_array().unwrap().iter().map(|r| r["hostname"].clone()).collect();
-        assert_eq!(hosts.last().unwrap(), &Value::Null);
-        assert_eq!(hosts[hosts.len() - 2], "*.example.com", "the wildcard after every exact name");
+        // The free name is routed by name. The wildcard record has no
+        // wildcard route: any other name gets the tunnel's own 404.
+        assert_eq!(hosts, [json!(free), Value::Null]);
         // The free name has no record of its own: the wildcard covers it.
         assert!(cf.records(ZONE).iter().all(|r| r["name"] != json!(free)));
 

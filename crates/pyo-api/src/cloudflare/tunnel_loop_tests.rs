@@ -289,14 +289,15 @@ fn free_names_are_one_label_under_the_default_domain() {
 }
 
 #[test]
-fn an_explicit_record_wins_over_the_free_wildcard() {
-    // A name switched by hand comes before the default domain's wildcard.
-    let routes = tunnel::ingress(&["web-shop.example.com".into()], Some("example.com"));
+fn free_names_get_their_own_route_and_no_wildcard() {
+    // A free name under the default domain is routed by name, like one
+    // switched by hand. Nothing routes the rest of the default domain.
+    let routes = tunnel::ingress(&["web-shop.example.com".into(), "blog.example.com".into()]);
     let names: Vec<&str> = routes["ingress"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|r| r["hostname"].as_str())
         .collect();
-    assert_eq!(names, ["web-shop.example.com", "*.example.com"]);
+    assert_eq!(names, ["web-shop.example.com", "blog.example.com"]);
 }

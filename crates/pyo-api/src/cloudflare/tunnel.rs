@@ -477,10 +477,17 @@ fn rule(hostname: &str) -> Value {
     })
 }
 
-/// The tunnel's routes: each hostname, exact names first (longest first,
-/// then by name), the default domain's wildcard last, then the catch-all.
-/// cloudflared matches top down.
-pub fn ingress(hostnames: &[String], default_domain: Option<&str>) -> Value {
+/// The tunnel's routes: one per hostname the Gateway serves (longest
+/// first, then by name), then the catch-all. cloudflared matches top down.
+///
+/// The default domain gets no wildcard route. Its wildcard record sends
+/// every name under it to the tunnel, but the Gateway only has a listener
+/// for names a service has, so a wildcard route would hand it names it
+/// resets the connection for (502 at Cloudflare). Each name under the
+/// default domain has its own route here (the loop marks it as a tunnel
+/// domain), and every other name stops at the catch-all's 404 in
+/// cloudflared, before the cluster.
+pub fn ingress(hostnames: &[String]) -> Value {
     let mut exact: Vec<String> = hostnames
         .iter()
         .map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase())
@@ -488,19 +495,14 @@ pub fn ingress(hostnames: &[String], default_domain: Option<&str>) -> Value {
         .collect();
     exact.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     exact.dedup();
-    let wildcard = default_domain.map(|d| format!("*.{}", d.to_ascii_lowercase()));
-    exact.retain(|h| Some(h) != wildcard.as_ref());
     let mut rules: Vec<Value> = exact.iter().map(|h| rule(h)).collect();
-    if let Some(w) = &wildcard {
-        rules.push(rule(w));
-    }
     rules.push(json!({ "service": "http_status:404" }));
     json!({ "ingress": rules })
 }
 
 /// Only the catch-all: what's left while a tunnel is removed.
 pub fn empty_ingress() -> Value {
-    ingress(&[], None)
+    ingress(&[])
 }
 
 /// The routes' hash, to PUT them only when they change. serde_json keeps
@@ -594,15 +596,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn routes_go_exact_names_first_then_the_wildcard_then_404() {
+    fn routes_are_exact_names_then_404() {
         let hosts = vec![
             "blog.example.com".to_owned(),
             "a.b.example.com".to_owned(),
             "API.example.com.".to_owned(),
             "blog.example.com".to_owned(),
-            "*.example.com".to_owned(),
         ];
-        let c = ingress(&hosts, Some("example.com"));
+        let c = ingress(&hosts);
         let names: Vec<Value> = c["ingress"]
             .as_array()
             .unwrap()
@@ -615,29 +616,37 @@ mod tests {
                 json!("blog.example.com"),
                 json!("a.b.example.com"),
                 json!("api.example.com"),
-                json!("*.example.com"),
                 Value::Null
             ]
         );
         let first = &c["ingress"][0];
         assert_eq!(first["service"], ORIGIN);
         assert_eq!(first["originRequest"]["matchSNItoHost"], true);
-        assert_eq!(c["ingress"][4], json!({ "service": "http_status:404" }));
+        assert_eq!(c["ingress"][3], json!({ "service": "http_status:404" }));
         // The same routes always hash the same, whatever order they came in.
         let mut again = hosts.clone();
         again.reverse();
-        assert_eq!(
-            config_hash(&ingress(&again, Some("example.com"))),
-            config_hash(&c)
-        );
-        assert_ne!(
-            config_hash(&ingress(&hosts[..1], Some("example.com"))),
-            config_hash(&c)
-        );
+        assert_eq!(config_hash(&ingress(&again)), config_hash(&c));
+        assert_ne!(config_hash(&ingress(&hosts[..1])), config_hash(&c));
         assert_eq!(
             empty_ingress(),
             json!({ "ingress": [{ "service": "http_status:404" }] })
         );
+    }
+
+    #[test]
+    fn a_name_no_service_has_stops_at_the_404_before_the_cluster() {
+        // The default domain's wildcard record brings every name under it
+        // to the tunnel. Only names a service has are routed to the
+        // Gateway: no rule is a wildcard, so anything else falls to the
+        // catch-all, which is the last rule and has no hostname.
+        let c = ingress(&["web-shop.example.com".to_owned(), "blog.example.com".to_owned()]);
+        let rules = c["ingress"].as_array().unwrap();
+        assert!(rules.iter().all(|r| !r["hostname"].as_str().unwrap_or("").contains('*')), "{c}");
+        let (last, routed) = rules.split_last().unwrap();
+        assert_eq!(last, &json!({ "service": "http_status:404" }));
+        assert!(routed.iter().all(|r| r["service"] == ORIGIN && r["hostname"].is_string()));
+        assert_eq!(routed.len(), 2);
     }
 
     #[test]
