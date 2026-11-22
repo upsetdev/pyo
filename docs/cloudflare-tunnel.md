@@ -120,6 +120,22 @@ Decisions made while building (not in the first draft):
     routes.
 - **Rotate** gives the tunnel a new token and a new certificate in one
   action. There's no separate certificate action.
+- **Certificates while switching**: a domain keeps a certificate already
+  issued for it while it's `"switching"` (cloudflared trusts public CAs
+  too, and direct visitors still see a valid one). It takes the tunnel's
+  Origin CA certificate once `"on"`, or at once when it has no issued one
+  (a new domain). Its old TLS mode is kept as `tlsModeBefore` (and
+  `certificateIdBefore`) and comes back with Switch back.
+- **Public TCP and UDP ports** get their own heartbeat reply field,
+  `publicPorts` (public traffic, or tunnel mode with `ports_public`), so
+  they don't depend on the tunnel id being known yet.
+- **connect.sh keeps its line** ("Public traffic stays off, so your sites
+  keep working."). The seamless-scripts rule keeps hints out of scripts.
+  The dashboard says Cloudflare Tunnel can take the websites.
+- **Tunnel removal while a domain is removed**: the dashboard's "Put back
+  the old record" sends `setDomainTunnel` with `restore` before the domain
+  goes. A removed tunnel domain's record is otherwise reverted without
+  putting back what it replaced.
 
 ---
 
