@@ -1664,8 +1664,7 @@ mod tests {
         for ds in [waf_daemonset("w", "g"), tailnet_daemonset("a")] {
             assert_eq!(ds["kind"], "DaemonSet");
             assert_eq!(
-                ds["spec"]["template"]["spec"]["priorityClassName"],
-                SERVER_CRITICAL,
+                ds["spec"]["template"]["spec"]["priorityClassName"], SERVER_CRITICAL,
                 "{}",
                 ds["metadata"]["name"]
             );

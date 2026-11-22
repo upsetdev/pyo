@@ -603,7 +603,10 @@ mod tests {
         // Memory it can't read: no reservations, the disk settings still.
         let text = config("nothing\n").expect("a drop-in");
         assert!(!text.contains("reserved="), "{text}");
-        assert!(text.contains("\nkubelet-arg+:\n  - \"eviction-hard="), "{text}");
+        assert!(
+            text.contains("\nkubelet-arg+:\n  - \"eviction-hard="),
+            "{text}"
+        );
         // The unit runs it at every start, at the path small_machine writes.
         let block = script_block("small-machine", CONNECT_SCRIPT);
         assert!(
@@ -631,7 +634,11 @@ mod tests {
                     \x20 - \"eviction-minimum-reclaim=imagefs.available=1Gi,nodefs.available=1Gi\"\n\
                     \x20 - \"image-gc-high-threshold=85\"\n\
                     \x20 - \"image-gc-low-threshold=75\"\n";
-        for meminfo in ["MemTotal: 983040 kB\n", "MemTotal: 33554432 kB\n", "nothing\n"] {
+        for meminfo in [
+            "MemTotal: 983040 kB\n",
+            "MemTotal: 33554432 kB\n",
+            "nothing\n",
+        ] {
             let info = dir.join("meminfo");
             std::fs::write(&info, meminfo).unwrap();
             let out = dir.join("50-pyo-memory.yaml");
