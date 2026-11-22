@@ -658,7 +658,10 @@ mod tests {
         assert!(check_manifest(&m).is_err());
         let mut m = ok.clone();
         m.files.push(file("big.bin", site::MAX_FILE_BYTES + 1));
-        assert!(check_manifest(&m).is_err());
+        assert_eq!(check_manifest(&m), Err("big.bin is over the 90 MiB a file may have.".into()));
+        let mut m = ok.clone();
+        m.files.push(file("big.bin", site::MAX_FILE_BYTES));
+        assert!(check_manifest(&m).is_ok());
         let mut m = ok.clone();
         m.files[0].sha256 = "nope".into();
         assert!(check_manifest(&m).is_err());
