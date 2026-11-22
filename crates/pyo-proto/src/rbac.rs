@@ -382,7 +382,23 @@ fn waf_pinned_for(block: bool) -> serde_json::Map<String, Value> {
 /// `waf_image` and `geoip_image`: the installation's images for the WAF's
 /// processor and the proxies' GeoIP database, the only ones they may use.
 pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
-    let bundles = bundles::policy_bundles(waf_image, geoip_image);
+    admission_with(
+        waf_image,
+        geoip_image,
+        &system::static_image_from_env(),
+        &system::db_images_from_env(),
+    )
+}
+
+/// [`admission`] with these images for Pyo Static and the databases too,
+/// rather than the installation's.
+pub fn admission_with(
+    waf_image: &str,
+    geoip_image: &str,
+    static_image: &str,
+    db: &system::DbImages,
+) -> Vec<Value> {
+    let bundles = bundles::policy_bundles_with(waf_image, geoip_image, static_image, db);
     // The pod spec of whatever the request makes pods from.
     let pod_spec = "object.kind == 'Pod' ? object.spec : object.kind == 'CronJob' ? object.spec.jobTemplate.spec.template.spec : object.spec.template.spec";
     let validations = json!([
@@ -905,15 +921,36 @@ pub fn install_hash(
 
 /// A short hash (16 hex digits) of the roles and charts every install sets
 /// up, on any cluster and on the one Pyo runs on, with the optional
-/// self-update role: what only a cluster's connect command can change (a
-/// refresh never writes them). A release carries its own (release.json's
-/// `agentAccess`), so an update that changes it says, before it starts,
-/// that every cluster needs its connect command afterwards.
+/// self-update role, and of the admission policy's rules: what only a
+/// cluster's connect command can change (a refresh never writes the roles,
+/// and a cluster without the self-update role, or read only, never gets a
+/// refresh). A release carries its own (release.json's `agentAccess`), so
+/// an update that changes it says, before it starts, that every cluster
+/// needs its connect command afterwards. Images don't count: each release
+/// has its own, and a refresh or the connect command brings them.
 pub fn access_hash() -> String {
+    access_hash_of(&access_admission())
+}
+
+/// The admission policy [`access_hash`] covers: its rules, with the same
+/// stand-in images whatever the installation runs.
+fn access_admission() -> Vec<Value> {
+    let db = system::DbImages {
+        controller: "db-controller".into(),
+        kv: "kv".into(),
+        postgres: system::POSTGRES_MAJORS.map(|m| format!("postgres:{m}")),
+        mysql_operator: "mysql-operator".into(),
+        mysql_backup: "mysql-backup".into(),
+    };
+    admission_with("waf", "geoip", "static", &db)
+}
+
+fn access_hash_of(admission: &[Value]) -> String {
     short_hash(&json!([
         objects(false),
         objects(true),
-        self_update_objects()
+        self_update_objects(),
+        admission
     ]))
 }
 
@@ -996,6 +1033,11 @@ pub struct AgentScope {
     /// It may refresh its admission policy ([`SELF_UPDATE_ROLE`] is bound).
     #[serde(default)]
     pub self_update: bool,
+    /// The cluster's admission policy is older than the agent's and refused
+    /// the client policies that remove client-sent visitor headers, so the
+    /// agent wrote them without that (`gateway.rs` `write_client_policy`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub headers_kept: bool,
 }
 
 /// What the gateway could get at if it were broken into.
@@ -1541,10 +1583,12 @@ mod tests {
         }
     }
 
-    /// The roles' hash: stable for the same roles, 16 hex digits, and
-    /// not moved by what a refresh can change (pins, the policy).
+    /// The access hash: stable, 16 hex digits, not moved by the images (a
+    /// refresh or the connect command brings those), but moved by any change
+    /// to the roles or to the admission policy's rules, which a cluster
+    /// that can't refresh only gets from its connect command.
     #[test]
-    fn access_hash_covers_only_the_roles() {
+    fn access_hash_covers_the_roles_and_the_admission_policy() {
         let h = access_hash();
         assert_eq!(h.len(), 16);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
@@ -1553,14 +1597,43 @@ mod tests {
         let a = InstallParts::new(false, true, "w:1", "g:1", &db);
         let b = InstallParts::new(false, true, "w:2", "g:2", &db);
         assert_ne!(a.hash, b.hash, "pins change the install");
-        assert_eq!(access_hash(), h, "but not the roles");
-        // Its content: every role set an install can have.
+        assert_eq!(access_hash(), h, "but not the access");
+        // Its content: every role set an install can have, and the policy
+        // with stand-in images.
+        let policy = access_admission();
         assert_eq!(
             short_hash(&json!([
                 objects(false),
                 objects(true),
-                self_update_objects()
+                self_update_objects(),
+                policy
             ])),
+            h
+        );
+        assert_eq!(access_hash_of(&policy), h);
+        // Whatever images the installation runs (third-party images the
+        // code pins are part of the rules).
+        let text = json!(policy).to_string();
+        assert!(
+            !text.contains("ghcr.io/upsetdev/") && !text.contains("127.0.0.1:5005"),
+            "{text}"
+        );
+        // A change to the policy's rules: another hash. This one is what
+        // set apart a 0.5.4 install, whose client policies took no headers.
+        let mut older = policy.clone();
+        let rules = older[0]["spec"]["variables"].to_string().replace(
+            "'clientIPDetection', 'connection', 'headers', 'tls'",
+            "'clientIPDetection', 'connection', 'tls'",
+        );
+        assert_ne!(rules, older[0]["spec"]["variables"].to_string(), "the rule is there");
+        older[0]["spec"]["variables"] = serde_json::from_str(&rules).unwrap();
+        assert_ne!(access_hash_of(&older), h);
+        let mut message = policy.clone();
+        message[0]["spec"]["validations"][0]["message"] = json!("another message");
+        assert_ne!(access_hash_of(&message), h);
+        // And a change to the roles.
+        assert_ne!(
+            short_hash(&json!([objects(false), objects(true), json!([]), policy])),
             h
         );
     }

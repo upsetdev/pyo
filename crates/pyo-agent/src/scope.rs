@@ -306,6 +306,7 @@ pub async fn detect(client: &Client, policy: Policy) -> AgentScope {
         policy,
         install,
         self_update,
+        headers_kept: crate::gateway::headers_kept(),
     }
 }
 

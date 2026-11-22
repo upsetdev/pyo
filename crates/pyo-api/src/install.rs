@@ -422,6 +422,21 @@ fn token_stamp(token: &str) -> String {
 /// the command is): shown with its "Update needed", and by what waits for it.
 pub const OUTDATED: &str = "This cluster's agent needs an update. Run the command under Refresh this cluster in the cluster's settings.";
 
+/// An outdated install that refused the client policies removing
+/// client-sent visitor headers: its agent wrote them without that
+/// (`AgentScope::headers_kept`).
+pub const HEADERS_KEPT: &str = "This cluster's install is older than Pyo's. Run the command under Refresh this cluster in the cluster's settings so client-sent visitor headers are removed.";
+
+/// Why an outdated install needs its connect command, when nothing more
+/// particular is known.
+fn outdated_message(scope: &pyo_proto::rbac::AgentScope) -> &'static str {
+    if scope.headers_kept {
+        HEADERS_KEPT
+    } else {
+        OUTDATED
+    }
+}
+
 /// A deploy that needs what an outdated install can't do.
 pub fn outdated_deploy() -> String {
     format!("{OUTDATED} Then deploy again.")
@@ -632,7 +647,7 @@ pub async fn sync(
     if !message.is_empty() {
         out["message"] = json!(message);
     } else if state == "outdated" {
-        out["message"] = json!(OUTDATED);
+        out["message"] = json!(outdated_message(scope));
     }
     Ok((out, send))
 }
@@ -686,6 +701,30 @@ mod tests {
             ..scope("", true)
         };
         assert_eq!(install_state(&loose, "h1", None).0, "current");
+    }
+
+    /// A cluster whose install refused the client policies that remove
+    /// visitor headers says so, and what to run.
+    #[test]
+    fn an_install_that_keeps_visitor_headers_says_so() {
+        let mut s = scope("old", false);
+        assert_eq!(install_state(&s, "h1", None).0, "outdated");
+        assert_eq!(outdated_message(&s), OUTDATED);
+        s.headers_kept = true;
+        assert_eq!(outdated_message(&s), HEADERS_KEPT);
+        assert!(HEADERS_KEPT.contains("Refresh this cluster"));
+        assert!(!HEADERS_KEPT.contains(';'));
+        // As the agent sends it, and as older agents (without it) do.
+        let sent: AgentScope = serde_json::from_value(serde_json::json!({
+            "access": "limited", "admission": "enforced", "headersKept": true,
+        }))
+        .unwrap();
+        assert!(sent.headers_kept);
+        let older: AgentScope =
+            serde_json::from_value(serde_json::json!({ "access": "limited", "admission": "enforced" }))
+                .unwrap();
+        assert!(!older.headers_kept);
+        assert!(serde_json::to_value(&older).unwrap().get("headersKept").is_none());
     }
 
     #[test]

@@ -18,6 +18,8 @@ mod dbimport;
 mod dbmetrics;
 mod dns;
 mod drain;
+#[cfg(test)]
+mod fakekube;
 mod firewall;
 mod forward;
 mod gateway;

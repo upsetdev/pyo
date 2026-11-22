@@ -141,29 +141,17 @@ pub async fn sync(agent: &crate::Agent, sync: FirewallSync) -> anyhow::Result<St
         );
     }
     let mut skipped = 0;
+    // One service that fails doesn't keep the others from theirs.
+    let mut failed: Vec<String> = vec![];
     for t in &sync.targets {
-        // Its workload gone (a delete that ran first: commands on a service
-        // take turns, main.rs `ordered_keys`): its routes stay gone.
-        let spec = gateway::target_spec(t, sync.waf)?;
-        let Some((notes, _)) = gateway::apply_routes(agent, &spec, true).await? else {
-            skipped += 1;
-            continue;
-        };
-        for note in notes {
-            tracing::warn!(service = %t.service.name, "{note}");
+        match apply_target(agent, t, sync.waf).await {
+            Ok(true) => n += 1,
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                tracing::warn!(service = %t.service.name, error = %format!("{e:#}"), "couldn't apply the firewall to a service");
+                failed.push(format!("{}: {e:#}", t.service.name));
+            }
         }
-        // Ports that bypass the gateway: their Service carries the ranges the
-        // network policy lets in (rollout.rs's set_isolation writes it).
-        let services: Api<Service> = Api::namespaced(client.clone(), &t.service.namespace);
-        let public = crate::rollout::public_service_name(&t.service.name);
-        if services.get_opt(&public).await?.is_some() {
-            let patch = json!({ "metadata": { "annotations": { FIREWALL_ANNOTATION: gateway::ip_blocks_json(&gateway::fw_layers(&spec, None)) } } });
-            services
-                .patch(&public, &PatchParams::default(), &Patch::Merge(&patch))
-                .await?;
-        }
-        crate::rollout::set_isolation(client, &t.service.namespace, t.network_isolation).await?;
-        n += 1;
     }
     // No service wants it: the routes no longer point at it (above); the
     // API removes it.
@@ -175,8 +163,97 @@ pub async fn sync(agent: &crate::Agent, sync: FirewallSync) -> anyhow::Result<St
     if let Err(e) = gateway::collect(agent).await {
         tracing::warn!(error = %format!("{e:#}"), "couldn't collect the gateway's leftover objects");
     }
-    Ok(match skipped {
+    let done = match skipped {
         0 => format!("Firewall applied to {n} service(s)"),
         _ => format!("Firewall applied to {n} service(s); {skipped} no longer here"),
-    })
+    };
+    if !failed.is_empty() {
+        anyhow::bail!("{done}. It couldn't be applied to {}", failed.join(". "));
+    }
+    Ok(done)
+}
+
+/// Apply the firewall to one running service: its routes, its public
+/// Service's ranges and its network policies. False when its workload is
+/// gone (a delete that ran first: commands on a service take turns, main.rs
+/// `ordered_keys`), and its routes stay gone.
+async fn apply_target(
+    agent: &crate::Agent,
+    t: &pyo_proto::FirewallTarget,
+    waf: bool,
+) -> anyhow::Result<bool> {
+    let client = &agent.kube;
+    let spec = gateway::target_spec(t, waf)?;
+    let Some((notes, _)) = gateway::apply_routes(agent, &spec, true).await? else {
+        return Ok(false);
+    };
+    for note in notes {
+        tracing::warn!(service = %t.service.name, "{note}");
+    }
+    // Ports that bypass the gateway: their Service carries the ranges the
+    // network policy lets in (rollout.rs's set_isolation writes it).
+    let services: Api<Service> = Api::namespaced(client.clone(), &t.service.namespace);
+    let public = crate::rollout::public_service_name(&t.service.name);
+    if services.get_opt(&public).await?.is_some() {
+        let patch = json!({ "metadata": { "annotations": { FIREWALL_ANNOTATION: gateway::ip_blocks_json(&gateway::fw_layers(&spec, None)) } } });
+        services
+            .patch(&public, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+    }
+    crate::rollout::set_isolation(client, &t.service.namespace, t.network_isolation).await?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A firewall sync goes on past a service whose routes fail: the
+    /// services after it still get theirs, and the sync says which failed.
+    #[tokio::test]
+    async fn one_failing_service_doesnt_stop_the_others() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let target = |name: &str| -> pyo_proto::FirewallTarget {
+            serde_json::from_value(json!({
+                "service": { "serviceId": format!("svc_{name}"), "name": name, "namespace": format!("ns-{name}"), "workloadKind": "Deployment" },
+                "projectId": "prj_1", "routesRevision": 1, "firewall": {},
+                "ports": [{ "name": "http", "containerPort": 8080, "protocol": "HTTP", "exposure": "http", "publicPort": null }],
+                "domains": [{ "hostname": format!("{name}.example.com"), "portName": "http" }],
+            }))
+            .unwrap()
+        };
+        let mut targets = vec![];
+        for name in ["a", "b", "c"] {
+            kube.put(
+                &format!("apis/apps/v1/namespaces/ns-{name}/deployments/{name}"),
+                json!({ "apiVersion": "apps/v1", "kind": "Deployment", "metadata": { "labels": { crate::observe::SERVICE_LABEL: format!("svc_{name}") } } }),
+            );
+            targets.push(target(name));
+        }
+        // The first service's routes can't be written.
+        kube.admit(|w| w.body.to_string().contains("svc_a").then(|| (500, "etcd timeout".into())));
+        let agent = crate::Agent {
+            kube: client,
+            api: crate::api::PyoApi::new("http://127.0.0.1:9", "t").unwrap(),
+            cancels: Default::default(),
+            deploying: Default::default(),
+            routes: Default::default(),
+            policy: std::sync::Arc::new(std::sync::RwLock::new(Default::default())),
+        };
+        let e = sync(&agent, FirewallSync { targets, waf: false })
+            .await
+            .expect_err("the first service failed");
+        let e = format!("{e:#}");
+        assert!(e.starts_with("Firewall applied to 2 service(s)."), "{e}");
+        assert!(e.contains("a: ") && e.contains("etcd timeout"), "{e}");
+        assert!(!e.contains("b: ") && !e.contains("c: "), "{e}");
+        let route = |name: &str| {
+            kube.get(&format!(
+                "apis/gateway.networking.k8s.io/v1/namespaces/{GATEWAY_NS}/httproutes/ns-{name}-{name}-http-http"
+            ))
+        };
+        assert!(route("a").is_none());
+        assert!(route("b").is_some(), "the service after it");
+        assert!(route("c").is_some(), "and the last one");
+    }
 }

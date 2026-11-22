@@ -18,9 +18,9 @@
 // the ones Pyo ships with, from crates/pyo-api/assets/sandbox-images/. Notices for this release come from
 // deploy/release-notices.json when its "version" is this one; the k3s a
 // fresh install gets, from deploy/k3s.env. `agentAccess` is the hash of the
-// roles the release's agent is installed with (`pyo-agent access-hash`):
-// installations on other roles tell their admin, before updating, to run
-// each cluster's connect command afterwards. `sandbox` lists the SHA-256 of
+// roles and admission policy the release's agent is installed with
+// (`pyo-agent access-hash`): installations on others tell their admin,
+// before updating, to run each cluster's connect command afterwards. `sandbox` lists the SHA-256 of
 // each architecture's sandbox server files (pyo-sandbox-linux-<arch>.tar.gz),
 // and `sandboxGvisor` those of runsc (pyo-sandbox-gvisor-linux-<arch>.tar.gz)
 // for servers without KVM: deploy/sandbox.sh checks them against it once

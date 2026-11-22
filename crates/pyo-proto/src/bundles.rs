@@ -443,10 +443,25 @@ pub fn bindings_in(
 /// its images, Pyo Static and the databases system with the installation's
 /// (`PYO_STATIC_IMAGE`, `PYO_DB_CONTROLLER_IMAGE`, `PYO_KV_IMAGE`).
 pub fn policy_bundles(waf_image: &str, geoip_image: &str) -> Vec<SystemBundle> {
+    policy_bundles_with(
+        waf_image,
+        geoip_image,
+        &crate::system::static_image_from_env(),
+        &crate::system::db_images_from_env(),
+    )
+}
+
+/// [`policy_bundles`] with these images for Pyo Static and the databases.
+pub fn policy_bundles_with(
+    waf_image: &str,
+    geoip_image: &str,
+    static_image: &str,
+    db: &crate::system::DbImages,
+) -> Vec<SystemBundle> {
     vec![
         waf_bundle(waf_image, geoip_image),
-        static_bundle(&crate::system::static_image_from_env()),
-        databases_bundle(&crate::system::db_images_from_env()),
+        static_bundle(static_image),
+        databases_bundle(db),
     ]
 }
 

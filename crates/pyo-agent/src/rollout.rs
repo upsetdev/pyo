@@ -694,6 +694,8 @@ pub async fn set_public_ports(client: &kube::Client, on: bool) -> anyhow::Result
         )))
         .await?;
     let mut changed: Vec<String> = vec![];
+    // One Service that fails doesn't keep the others from theirs.
+    let mut failed: Vec<String> = vec![];
     for svc in &list.items {
         let (Some(ns), Some(name)) = (svc.metadata.namespace.clone(), svc.metadata.name.clone())
         else {
@@ -709,10 +711,14 @@ pub async fn set_public_ports(client: &kube::Client, on: bool) -> anyhow::Result
         };
         if let Err(e) = api.patch(&name, &pp, &Patch::Merge(&patch)).await {
             // Its server ports were taken meanwhile: new ones.
-            let Some(retry) = public_patch(svc, on, false).filter(|_| on) else {
-                return Err(e.into());
+            let retried = match public_patch(svc, on, false).filter(|_| on) {
+                Some(retry) => api.patch(&name, &pp, &Patch::Merge(&retry)).await.err(),
+                None => Some(e),
             };
-            api.patch(&name, &pp, &Patch::Merge(&retry)).await?;
+            if let Some(e) = retried {
+                failed.push(format!("{ns}/{name}: {e}"));
+                continue;
+            }
         }
         tracing::info!(namespace = %ns, service = %name, on, "public ports");
         if !changed.contains(&ns) {
@@ -721,11 +727,22 @@ pub async fn set_public_ports(client: &kube::Client, on: bool) -> anyhow::Result
     }
     // The namespaces' policies follow their public Services.
     for ns in changed {
-        let isolated = Api::<NetworkPolicy>::namespaced(client.clone(), &ns)
+        let isolated = match Api::<NetworkPolicy>::namespaced(client.clone(), &ns)
             .get_opt(pyo_proto::ISOLATION_POLICY)
-            .await?
-            .is_some();
-        set_isolation(client, &ns, isolated).await?;
+            .await
+        {
+            Ok(p) => p.is_some(),
+            Err(e) => {
+                failed.push(format!("{ns}: {e}"));
+                continue;
+            }
+        };
+        if let Err(e) = set_isolation(client, &ns, isolated).await {
+            failed.push(format!("{ns}: {e:#}"));
+        }
+    }
+    if !failed.is_empty() {
+        anyhow::bail!("{}", failed.join(". "));
     }
     Ok(())
 }
