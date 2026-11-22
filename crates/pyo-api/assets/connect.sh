@@ -677,7 +677,8 @@ k3s_install() {
 # sets aside memory for k3s and the system (kube-reserved and
 # system-reserved, in a k3s config drop-in), so the scheduler only hands
 # containers what's left: 256 MiB under 1.5 GB, 512 MiB under 3.5 GB,
-# 768 MiB under 8 GB, 1 GiB from there.
+# 768 MiB under 8 GB, 1 GiB from there. The same drop-in holds when
+# kubelet frees disk space (disk_settings in the helper).
 # K3S_UNIT: k3s's systemd unit, k3s (a server) unless the script sets
 # k3s-agent first (a server joined to a cluster).
 K3S_UNIT=${K3S_UNIT:-k3s}
@@ -690,7 +691,7 @@ small_machine() {
   mkdir -p "/etc/systemd/system/$K3S_UNIT.service.d"
   cat > /usr/local/lib/pyo-memory.sh <<'MEMORY'
 #!/bin/sh
-# Managed by Pyo: k3s's GOMEMLIMIT, kubelet's reservations and compressed
+# Managed by Pyo: k3s's GOMEMLIMIT, kubelet's settings and compressed
 # swap (zram), from this machine's memory at every boot.
 mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' "${PYO_MEMINFO:-/proc/meminfo}")
 # k3s's soft memory limit in MiB: 40% of the memory, at least 768 MiB
@@ -715,6 +716,19 @@ reserved() {
     echo "768 256"
   fi
 }
+# When kubelet frees disk space, at any size. Under 5% free it deletes
+# unused images, then evicts pods, and the server counts as short of disk
+# (DiskPressure) until it has 1 GiB more than that. k3s's own 10% more
+# kept a server whose disk was filled by something else short of disk
+# for hours, evicting nearly every pod for space they didn't hold.
+# Unused images go from 85% used down to 75%, well before any of that.
+# eviction-hard replaces k3s's whole list, which has these two only: no
+# memory or inode limits (the reservations above leave the memory room).
+disk_settings() {
+  printf '  - "%s"\n' 'eviction-hard=imagefs.available<5%,nodefs.available<5%' \
+    'eviction-minimum-reclaim=imagefs.available=1Gi,nodefs.available=1Gi' \
+    'image-gc-high-threshold=85' 'image-gc-low-threshold=75'
+}
 case "$1" in
   k3s-env)
     # For k3s's EnvironmentFile: GOMEMLIMIT under 3.5 GB, else nothing.
@@ -723,17 +737,20 @@ case "$1" in
     fi
     ;;
   k3s-config)
-    # k3s's config drop-in ($2): kubelet's reservations; none (no file)
-    # when the memory can't be read.
+    # k3s's config drop-in ($2): kubelet's reservations (none when the
+    # memory can't be read) and its disk settings.
     [ -n "$2" ] || exit 2
-    if [ "${mem:-0}" -gt 0 ]; then
-      set -- "$2" $(reserved)
-      mkdir -p "$(dirname "$1")"
-      printf '%s\n' "# Managed by Pyo: what kubelet sets aside, from this machine's memory at each start." \
-        'kubelet-arg+:' "  - \"kube-reserved=memory=$2Mi\"" "  - \"system-reserved=memory=$3Mi\"" > "$1.new" && mv -f "$1.new" "$1"
-    else
-      rm -f "$2"
-    fi
+    out=$2
+    mkdir -p "$(dirname "$out")"
+    {
+      echo "# Managed by Pyo: kubelet's settings, from this machine's memory at each start."
+      echo 'kubelet-arg+:'
+      if [ "${mem:-0}" -gt 0 ]; then
+        set -- $(reserved)
+        printf '  - "%s"\n' "kube-reserved=memory=$1Mi" "system-reserved=memory=$2Mi"
+      fi
+      disk_settings
+    } > "$out.new" && mv -f "$out.new" "$out"
     ;;
   zram-start)
     [ "${mem:-0}" -gt 0 ] && [ "$mem" -lt 2816 ] || exit 0

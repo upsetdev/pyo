@@ -12,6 +12,13 @@
 //! those, and a cron run's outcome is read from them), and a few at a time
 //! ([`BATCH`], [`PAUSE`], [`MAX_PER_RUN`]) so neither the API server nor the
 //! kubelets are flooded.
+//!
+//! An owner with more than [`STORM`] Failed pods is caught in a loop (a
+//! DaemonSet's pod refused by its server over and over, a few a second):
+//! its pods past the newest [`KEEP`] go without waiting out the grace
+//! period, and the next run comes after [`SOON`] instead of minutes, until
+//! no owner is over. Pyo's own DaemonSets are critical (pyo-proto's
+//! `system::SERVER_CRITICAL`) so they don't loop: this is for what else may.
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -33,7 +40,11 @@ pub const BATCH: usize = 25;
 pub const PAUSE: Duration = Duration::from_secs(5);
 /// Deletions per run at most: the rest wait for the next run.
 pub const MAX_PER_RUN: usize = 500;
+/// More Failed pods than this for one owner: a loop.
+pub const STORM: usize = 50;
 const EVERY: Duration = Duration::from_secs(5 * 60);
+/// The next run, while some owner is over [`STORM`].
+pub const SOON: Duration = Duration::from_secs(30);
 /// After a start: soon, but after the first heartbeat.
 const FIRST: Duration = Duration::from_secs(60);
 
@@ -110,9 +121,19 @@ pub fn dead(p: &Pod) -> Option<Dead> {
     })
 }
 
-/// The pods to delete, oldest first: past the grace period and not among
-/// the newest [`KEEP`] of their owner (in their namespace). At most `max`.
-pub fn choose(dead: Vec<Dead>, now: i64, max: usize) -> Vec<Dead> {
+/// What a run deletes, and whether some owner is in a loop.
+#[derive(Debug, Default, PartialEq)]
+pub struct Choice {
+    /// Oldest first.
+    pub pods: Vec<Dead>,
+    /// An owner has more than [`STORM`] Failed pods.
+    pub storm: bool,
+}
+
+/// The pods to delete, oldest first: not among the newest [`KEEP`] of their
+/// owner (in their namespace), and past the grace period unless their owner
+/// is over [`STORM`]. At most `max`. Pods with no owner are never a loop.
+pub fn choose(dead: Vec<Dead>, now: i64, max: usize) -> Choice {
     let mut by_owner: BTreeMap<(String, String), Vec<Dead>> = BTreeMap::new();
     for d in dead {
         by_owner
@@ -120,21 +141,25 @@ pub fn choose(dead: Vec<Dead>, now: i64, max: usize) -> Vec<Dead> {
             .or_default()
             .push(d);
     }
-    let mut out: Vec<Dead> = by_owner
-        .into_values()
-        .flat_map(|mut pods| {
-            pods.sort_by_key(|d| std::cmp::Reverse(d.ended_at));
+    let mut storm = false;
+    let mut out: Vec<Dead> = vec![];
+    for ((_, owner), mut pods) in by_owner {
+        let looping = !owner.is_empty() && pods.len() > STORM;
+        storm |= looping;
+        pods.sort_by_key(|d| std::cmp::Reverse(d.ended_at));
+        out.extend(
             pods.into_iter()
                 .skip(KEEP)
-                .filter(|d| now - d.ended_at >= GRACE_MS)
-        })
-        .collect();
+                .filter(|d| looping || now - d.ended_at >= GRACE_MS),
+        );
+    }
     out.sort_by_key(|d| d.ended_at);
     out.truncate(max);
-    out
+    Choice { pods: out, storm }
 }
 
-/// Every few minutes, for good. Not while the cluster's policy is read only.
+/// Every few minutes, for good, or [`SOON`] again while pods loop. Not while
+/// the cluster's policy is read only.
 pub async fn run(agent: Agent) {
     tokio::time::sleep(FIRST).await;
     loop {
@@ -143,19 +168,36 @@ pub async fn run(agent: Agent) {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .read_only;
+        let mut storm = false;
         if !read_only {
-            match once(&agent.kube).await {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(deleted = n, "cleaned up failed pods"),
+            match once(&agent.kube, PAUSE).await {
+                Ok(r) => {
+                    storm = r.storm;
+                    if r.storm {
+                        tracing::warn!(
+                            deleted = r.deleted,
+                            "pods are failing over and over, cleaning up again soon"
+                        );
+                    } else if r.deleted > 0 {
+                        tracing::info!(deleted = r.deleted, "cleaned up failed pods");
+                    }
+                }
                 Err(e) => tracing::warn!(error = %e, "couldn't clean up failed pods"),
             }
         }
-        tokio::time::sleep(EVERY).await;
+        tokio::time::sleep(if storm { SOON } else { EVERY }).await;
     }
 }
 
-/// One run: how many pods it deleted.
-async fn once(client: &kube::Client) -> kube::Result<usize> {
+/// What a run did.
+#[derive(Debug, Default, PartialEq)]
+struct Run {
+    deleted: usize,
+    storm: bool,
+}
+
+/// One run, with `pause` between batches.
+async fn once(client: &kube::Client, pause: Duration) -> kube::Result<Run> {
     let namespaces: Vec<String> = Api::<Namespace>::all(client.clone())
         .list(&ListParams::default())
         .await?
@@ -173,7 +215,10 @@ async fn once(client: &kube::Client) -> kube::Result<usize> {
             dead.extend(d);
         }
     }
-    let chosen = choose(dead, pyo_proto::now_ms(), MAX_PER_RUN);
+    let Choice {
+        pods: chosen,
+        storm,
+    } = choose(dead, pyo_proto::now_ms(), MAX_PER_RUN);
     let mut deleted = 0;
     // Namespaces where the agent's roles don't allow deleting.
     let mut refused: Vec<String> = vec![];
@@ -182,7 +227,7 @@ async fn once(client: &kube::Client) -> kube::Result<usize> {
             continue;
         }
         if i > 0 && i % BATCH == 0 {
-            tokio::time::sleep(PAUSE).await;
+            tokio::time::sleep(pause).await;
         }
         // Only that very pod: a StatefulSet's next one has the same name.
         let dp = DeleteParams {
@@ -207,7 +252,7 @@ async fn once(client: &kube::Client) -> kube::Result<usize> {
             }
         }
     }
-    Ok(deleted)
+    Ok(Run { deleted, storm })
 }
 
 /// [`dead`], for a pod listed in `ns` (only ever that namespace's).
@@ -244,7 +289,7 @@ mod tests {
             .map(|i| d("pyo-gateway", rs, &format!("p{i}"), 20 + i))
             .collect();
         // p0..p2 are the newest; p3..p5 go, oldest first.
-        assert_eq!(names(&choose(pods, NOW, 100)), ["p5", "p4", "p3"]);
+        assert_eq!(names(&choose(pods, NOW, 100).pods), ["p5", "p4", "p3"]);
     }
 
     #[test]
@@ -257,7 +302,7 @@ mod tests {
             d("shop", rs, "young", 9),
             d("shop", rs, "old", 11),
         ];
-        assert_eq!(names(&choose(pods, NOW, 100)), ["old"]);
+        assert_eq!(names(&choose(pods, NOW, 100).pods), ["old"]);
     }
 
     #[test]
@@ -275,7 +320,7 @@ mod tests {
             d("shop", "", "bare4", 43),
         ];
         // Three or fewer each, except the bare pods (one owner: none).
-        assert_eq!(names(&choose(pods, NOW, 100)), ["bare4"]);
+        assert_eq!(names(&choose(pods, NOW, 100).pods), ["bare4"]);
     }
 
     #[test]
@@ -284,7 +329,7 @@ mod tests {
         let pods = (0..4700)
             .map(|i| d("pyo-gateway", rs, &format!("p{i}"), 20 + i))
             .collect();
-        let chosen = choose(pods, NOW, MAX_PER_RUN);
+        let chosen = choose(pods, NOW, MAX_PER_RUN).pods;
         assert_eq!(chosen.len(), MAX_PER_RUN);
         assert_eq!(chosen[0].name, "p4699");
         assert!(
@@ -294,8 +339,252 @@ mod tests {
         );
     }
 
+    /// A DaemonSet's pod refused over and over: its young pods go too
+    /// (all but the newest three), and the next run comes soon.
+    #[test]
+    fn a_loop_skips_the_grace_period() {
+        let ds = "DaemonSet/envoy-pyo-1";
+        let pods: Vec<Dead> = (0..=STORM as i64)
+            .map(|i| d("pyo-gateway", ds, &format!("p{i}"), i % 5))
+            .collect();
+        let c = choose(pods.clone(), NOW, MAX_PER_RUN);
+        assert!(c.storm);
+        assert_eq!(c.pods.len(), STORM + 1 - KEEP);
+        // At its limit, not yet a loop: the grace period holds.
+        let c = choose(pods[..STORM].to_vec(), NOW, MAX_PER_RUN);
+        assert!(!c.storm);
+        assert!(c.pods.is_empty(), "{:?}", names(&c.pods));
+    }
+
+    /// Only the looping owner skips the grace period, and many pods with no
+    /// owner aren't a loop.
+    #[test]
+    fn a_loop_is_one_owners() {
+        let mut pods: Vec<Dead> = (0..60)
+            .map(|i| d("pyo-system", "DaemonSet/pyo-vector", &format!("v{i}"), 1))
+            .collect();
+        pods.extend((0..5).map(|i| d("pyo-system", "ReplicaSet/pyo-agent-1", &format!("a{i}"), 1)));
+        pods.extend((0..5).map(|i| d("shop", "DaemonSet/pyo-vector", &format!("s{i}"), 1)));
+        let c = choose(pods, NOW, MAX_PER_RUN);
+        assert!(c.storm);
+        assert_eq!(c.pods.len(), 57);
+        assert!(
+            c.pods.iter().all(|p| p.name.starts_with('v')),
+            "{:?}",
+            names(&c.pods)
+        );
+
+        let bare: Vec<Dead> = (0..80)
+            .map(|i| d("shop", "", &format!("b{i}"), 1))
+            .collect();
+        let c = choose(bare, NOW, MAX_PER_RUN);
+        assert!(!c.storm);
+        assert!(c.pods.is_empty());
+    }
+
     fn pod(v: serde_json::Value) -> Pod {
         serde_json::from_value(v).unwrap()
+    }
+
+    /// A fake Kubernetes API: namespaces (name, labels), Failed pods per
+    /// namespace, and the deletes it got (namespace, name, uid precondition).
+    mod fake {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            Json, Router,
+            body::Bytes,
+            extract::State,
+            http::{Method, StatusCode, Uri},
+            response::{IntoResponse, Response},
+        };
+        use serde_json::{Value, json};
+
+        #[derive(Default)]
+        pub struct Cluster {
+            pub namespaces: Vec<Value>,
+            pub pods: Vec<Value>,
+            pub deleted: Vec<(String, String, String)>,
+            pub lists: Vec<String>,
+        }
+
+        pub type Shared = Arc<Mutex<Cluster>>;
+
+        async fn handle(
+            State(st): State<Shared>,
+            method: Method,
+            uri: Uri,
+            body: Bytes,
+        ) -> Response {
+            let mut c = st.lock().unwrap();
+            let path = uri.path().to_owned();
+            let parts: Vec<&str> = path.trim_start_matches("/api/v1/").split('/').collect();
+            match (method.as_str(), parts.as_slice()) {
+                ("GET", ["namespaces"]) => Json(json!({
+                    "apiVersion": "v1", "kind": "NamespaceList", "metadata": {}, "items": c.namespaces,
+                }))
+                .into_response(),
+                ("GET", ["namespaces", ns, "pods"]) => {
+                    c.lists.push(format!("{ns}?{}", uri.query().unwrap_or_default()));
+                    let items: Vec<Value> = c
+                        .pods
+                        .iter()
+                        .filter(|p| p["metadata"]["namespace"] == *ns)
+                        .cloned()
+                        .collect();
+                    Json(json!({ "apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": items }))
+                        .into_response()
+                }
+                ("DELETE", ["namespaces", ns, "pods", name]) => {
+                    let opts: Value = serde_json::from_slice(&body).unwrap_or_default();
+                    let uid = opts["preconditions"]["uid"].as_str().unwrap_or_default().to_owned();
+                    c.deleted.push(((*ns).to_owned(), (*name).to_owned(), uid));
+                    let at = c.pods.iter().position(|p| {
+                        p["metadata"]["namespace"] == *ns && p["metadata"]["name"] == *name
+                    });
+                    match at {
+                        Some(i) => Json(c.pods.remove(i)).into_response(),
+                        None => (StatusCode::NOT_FOUND, Json(json!({ "kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404, "message": "not found" }))).into_response(),
+                    }
+                }
+                _ => (StatusCode::NOT_FOUND, Json(json!({ "kind": "Status", "apiVersion": "v1", "status": "Failure", "code": 404, "message": "no such path" }))).into_response(),
+            }
+        }
+
+        pub async fn serve(cluster: Cluster) -> (kube::Client, Shared) {
+            let st: Shared = Arc::new(Mutex::new(cluster));
+            let app = Router::new().fallback(handle).with_state(st.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let config = kube::Config::new(format!("http://{addr}").parse().unwrap());
+            (kube::Client::try_from(config).unwrap(), st)
+        }
+    }
+
+    fn failed_pod(
+        ns: &str,
+        name: &str,
+        owner: Option<(&str, &str)>,
+        ended: &str,
+    ) -> serde_json::Value {
+        let owners: Vec<serde_json::Value> = owner
+            .map(|(kind, n)| json!({ "apiVersion": "apps/v1", "kind": kind, "name": n, "uid": "o", "controller": true }))
+            .into_iter()
+            .collect();
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": { "name": name, "namespace": ns, "uid": format!("uid-{name}"), "ownerReferences": owners },
+            "status": { "phase": "Failed", "reason": "Evicted", "message": "The node had condition: [DiskPressure]. ",
+                "conditions": [{ "type": "Ready", "status": "False", "lastTransitionTime": ended }] },
+        })
+    }
+
+    /// A run against a cluster where the proxy's DaemonSet loops on a
+    /// server short of disk: its pods go at once, each by its uid, but
+    /// only in Pyo's namespaces, never another's, and nothing young that
+    /// isn't looping.
+    #[tokio::test]
+    async fn a_run_cleans_up_a_loop_in_pyos_namespaces_only() {
+        use k8s_openapi::jiff::Timestamp;
+        let now = Timestamp::from_second(Timestamp::now().as_second())
+            .unwrap()
+            .to_string();
+        let ns = |name: &str, labels: serde_json::Value| json!({ "metadata": { "name": name, "labels": labels } });
+        let mut cluster = fake::Cluster {
+            namespaces: vec![
+                ns("pyo-gateway", json!({})),
+                ns("pyo-system", json!({})),
+                ns("theirs", json!({})),
+                ns(
+                    "pyo-waf",
+                    json!({ "pyo.dev/bundle": "waf", "pyo.dev/managed": "true" }),
+                ),
+            ],
+            ..Default::default()
+        };
+        let ds = Some(("DaemonSet", "envoy-pyo-1"));
+        for i in 0..60 {
+            cluster
+                .pods
+                .push(failed_pod("pyo-gateway", &format!("envoy-{i}"), ds, &now));
+            cluster.pods.push(failed_pod(
+                "theirs",
+                &format!("theirs-{i}"),
+                Some(("DaemonSet", "theirs")),
+                &now,
+            ));
+            cluster.pods.push(failed_pod(
+                "pyo-waf",
+                &format!("waf-{i}"),
+                Some(("DaemonSet", "pyo-waf")),
+                &now,
+            ));
+        }
+        // Just evicted, not looping: kept for now.
+        for i in 0..5 {
+            cluster.pods.push(failed_pod(
+                "pyo-system",
+                &format!("vector-{i}"),
+                Some(("DaemonSet", "pyo-vector")),
+                &now,
+            ));
+        }
+        let (client, st) = fake::serve(cluster).await;
+
+        let run = once(&client, Duration::ZERO).await.unwrap();
+        assert_eq!(
+            run,
+            Run {
+                deleted: 57,
+                storm: true
+            }
+        );
+        {
+            let c = st.lock().unwrap();
+            assert_eq!(c.deleted.len(), 57);
+            assert!(
+                c.deleted.iter().all(|(ns, name, uid)| ns == "pyo-gateway"
+                    && name.starts_with("envoy-")
+                    && *uid == format!("uid-{name}")),
+                "{:?}",
+                c.deleted
+            );
+            // The newest three of the loop stay, and everything elsewhere.
+            assert_eq!(
+                c.pods
+                    .iter()
+                    .filter(|p| p["metadata"]["namespace"] == "pyo-gateway")
+                    .count(),
+                KEEP
+            );
+            assert_eq!(c.pods.len(), KEEP + 60 + 60 + 5);
+            // Only Pyo's namespaces are listed, Failed pods only, a page at a time.
+            let listed: Vec<&str> = c
+                .lists
+                .iter()
+                .map(|l| l.split('?').next().unwrap())
+                .collect();
+            assert_eq!(listed, ["pyo-gateway", "pyo-system"]);
+            assert!(
+                c.lists
+                    .iter()
+                    .all(|l| l.contains("fieldSelector=status.phase%3DFailed")
+                        && l.contains("limit=")),
+                "{:?}",
+                c.lists
+            );
+        }
+
+        // Nothing looping any more: the next run is in minutes.
+        let run = once(&client, Duration::ZERO).await.unwrap();
+        assert_eq!(
+            run,
+            Run {
+                deleted: 0,
+                storm: false
+            }
+        );
     }
 
     #[test]

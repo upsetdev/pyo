@@ -215,7 +215,7 @@ pub fn device_plugin() -> Value {
                     "runtimeClassName": GPU_RUNTIME_CLASS,
                     "nodeSelector": { GPU_LABEL: "nvidia" },
                     "tolerations": [{ "key": GPU_RESOURCE, "operator": "Exists", "effect": "NoSchedule" }],
-                    "priorityClassName": "system-node-critical",
+                    "priorityClassName": pyo_proto::system::SERVER_CRITICAL,
                     "containers": [{
                         "name": "nvidia-device-plugin-ctr",
                         "image": DEVICE_PLUGIN_IMAGE,
@@ -411,6 +411,12 @@ mod tests {
         let ds: DaemonSet = serde_json::from_value(device_plugin()).unwrap();
         let spec = ds.spec.unwrap().template.spec.unwrap();
         assert_eq!(spec.runtime_class_name.as_deref(), Some("nvidia"));
+        // Kept on a server short of disk, like Pyo's other per-server pods:
+        // its DaemonSet never replaces it over and over there.
+        assert_eq!(
+            spec.priority_class_name.as_deref(),
+            Some(pyo_proto::system::SERVER_CRITICAL)
+        );
         assert_eq!(
             spec.node_selector
                 .unwrap()
