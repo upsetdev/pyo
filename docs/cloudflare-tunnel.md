@@ -1606,12 +1606,17 @@ docs in Phase 6). `cargo clippy -p pyo-proto -p pyo-agent -p pyo-api
 -p pyo-cli --tests -- -D warnings` is clean on 928ac34, and the API and
 CLI tunnel tests pass on it.
 
+Phase 6 checks (2026-11-22): `cargo clippy -p pyo-api -p pyo-cli --tests
+-- -D warnings` clean, pyo-api 617 passed (only `docs_copy_is_current`
+red), pyo-cli 80 passed. `scripts/tunnel-gate-e2e.sh` passes all 11
+checks against Envoy 1.39.5. Previews in tunnel mode go under the
+default domain (3cb5c75).
+
 Next:
 
-1. Final `cargo clippy -D warnings` and the full suites on the Phase 6
-   commits (waiting for disk above 60 GB).
-2. With the user's OK: run `scripts/tunnel-gate-e2e.sh` (docker), and the
-   real-zone test (§17.4) on a throwaway zone.
+1. Merge into `dev` when asked. Pyo writes Cloud's domain proof when a
+   domain is added (the user may change that).
+2. With the user's OK: the real-zone test (§17.4) on a throwaway zone.
 3. After 0.51.0 merges: regenerate pyo-docs' generated pages, merge
    pyo-docs' `docs/cloudflare-tunnel`, then the Pyo Ops move (§14).
 4. Dashboard: no warning for deeper names (a.b.example.com) when
@@ -1621,15 +1626,11 @@ Known gaps:
 
 - Nothing tested against a real Cloudflare account (needs the user's
   approval and a throwaway zone, §17.4).
-- `scripts/tunnel-gate-e2e.sh` is written but not run: it needs docker
-  (pulls `envoyproxy/envoy:distroless-v1.39.5` and `curlimages/curl`).
 - The loop's end-to-end test (`cloudflare::http_tests::the_tunnel_loop_end_to_end`)
   needs a throwaway Postgres: CI runs it (ci.yml's Postgres job), it
   wasn't run on the laptop.
 - pyo-docs' generated pages (`openapi/pyo.json`, `content/cli/commands.mdx`,
   `content/mcp/tools.mdx`) are regenerated once all 0.51.0 branches are
   merged. `openapi::tests::docs_copy_is_current` stays red until then.
-- Previews in tunnel mode still name preview domains from the cluster's
-  address (§11 says under the default domain).
 - `dash/node_modules` in the worktrees is a symlink to the main
   checkout's, for `tsc` only (ignored by git).
