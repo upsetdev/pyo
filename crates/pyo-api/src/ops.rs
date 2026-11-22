@@ -104,6 +104,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/database-backups", post(crate::database_backups::add))
         .route("/compose/preview", post(crate::compose::preview))
+        .route("/compose/sync-plan", post(crate::compose_sync::plan))
         .route("/cloud/options", get(crate::cloud::options))
         .route("/tailnet/lock", get(crate::tailscale::lock))
         .route("/audit-log", get(crate::audit::list))
@@ -2965,6 +2966,21 @@ pub(crate) enum Op {
         project_id: Option<String>,
         plan: crate::compose::ComposePlan,
     },
+    /// Bring a project in line with a Docker Compose file: `file` from `POST /compose/sync-plan`, which shows what this does. Only what the file says differently changes, so settings changed in Pyo that the file doesn't mention stay, and a secret's value is never changed. Services whose settings change are deployed. What can't change in place (a volume that would move, another kind of source) is left as it is.
+    /// A service no longer in the file stays, unless `prune`.
+    SyncCompose {
+        project_id: String,
+        /// Where services new in the file run. Where the project's services run when omitted.
+        #[serde(default)]
+        cluster_id: Option<String>,
+        plan: crate::compose::ComposePlan,
+        /// Delete the services made from this file that are no longer in it. Their volumes are kept, detached.
+        #[serde(default)]
+        prune: bool,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
+    },
 }
 
 /// Make a change
@@ -3376,7 +3392,8 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::UpdateProject { .. }
         | Op::DeleteProject { .. }
         | Op::SetProjectIsolation { .. }
-        | Op::ImportCompose { .. } => ("Projects", "prj"),
+        | Op::ImportCompose { .. }
+        | Op::SyncCompose { .. } => ("Projects", "prj"),
         Op::CreateService { .. }
         | Op::SaveService { .. }
         | Op::DeleteService { .. }
@@ -5788,6 +5805,26 @@ async fn apply(
                 made.push(json!({ "name": svc.name, "id": id, "deploymentId": deployment_id }));
             }
             Ok(json!({ "ok": true, "projectId": project_id, "services": made }))
+        }
+        Op::SyncCompose {
+            project_id,
+            cluster_id,
+            plan,
+            prune,
+            confirm,
+        } => {
+            crate::compose_sync::apply(
+                s,
+                tx,
+                user,
+                &project_id,
+                cluster_id,
+                plan,
+                prune,
+                confirm,
+                wake,
+            )
+            .await
         }
         Op::CreateProject {
             id,

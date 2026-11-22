@@ -356,7 +356,7 @@ fn op_annotations(op: &str) -> Value {
         "readOnlyHint": read_only,
         // Undoing a server's removal takes nothing away.
         // A volume's restore replaces its data.
-        "destructiveHint": !read_only && op != "cancelServerRemoval" && (starts(&["delete", "remove", "stop", "discard", "rotate", "cancel", "revoke"]) || op == "restoreVolume"),
+        "destructiveHint": !read_only && op != "cancelServerRemoval" && (starts(&["delete", "remove", "stop", "discard", "rotate", "cancel", "revoke"]) || op == "restoreVolume" || op == "syncCompose"),
         "idempotentHint": read_only || starts(&["set", "update", "save", "scale", "remove", "delete", "stop", "verify", "replace", "detach", "attach", "resize"]),
     })
 }
@@ -687,6 +687,9 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         }
         "previewCompose" => {
             json_of(crate::compose::preview(st(), me(), Json(args_as(args)?)).await)
+        }
+        "planComposeSync" => {
+            json_of(crate::compose_sync::plan(st(), me(), Json(args_as(args)?)).await)
         }
         "getServiceConnections" => {
             json_of(ops::connections(st(), me(), path_id()?, Query(args_as(args)?)).await)
