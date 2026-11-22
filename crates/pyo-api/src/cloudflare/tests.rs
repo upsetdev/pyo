@@ -2,22 +2,29 @@
 //! only Pyo's own, who may do what, and the HTTP client's handling of
 //! Cloudflare's answers. Cloudflare itself is a fake account.
 
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
+use super::tunnel::{CfZone, Connection, Kept, OriginCert, Tunnel};
 use super::*;
 
-const MARK: &str = "Made by Pyo (abc123)";
+pub(super) const MARK: &str = "Made by Pyo (abc123)";
 
-fn zone(id: &str, name: &str) -> Zone {
+pub(super) fn zone(id: &str, name: &str) -> Zone {
     Zone {
         id: id.into(),
         name: name.into(),
         can_edit: true,
         missing: None,
+        account_id: "acct1".into(),
+        account_name: "Acme".into(),
+        tunnel: TunnelAccess {
+            ready: true,
+            missing: vec![],
+        },
     }
 }
 
-fn rec(id: &str, kind: &str, name: &str, content: &str, comment: Option<&str>) -> Record {
+pub(super) fn rec(id: &str, kind: &str, name: &str, content: &str, comment: Option<&str>) -> Record {
     Record {
         id: id.into(),
         kind: kind.into(),
@@ -29,24 +36,40 @@ fn rec(id: &str, kind: &str, name: &str, content: &str, comment: Option<&str>) -
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Dns {
+pub(super) enum Dns {
     None,
     Read,
     Edit,
 }
 
-/// A Cloudflare account: zones, the token's DNS permission in each, and
-/// every call made.
-struct Fake {
-    zones: Vec<(String, String, Dns)>,
-    zone_read: bool,
-    records: Mutex<Vec<(String, Record)>>,
-    calls: Mutex<Vec<String>>,
+/// A Cloudflare account: zones, the token's DNS permission in each, its
+/// tunnels and Origin CA certificates, and every call made.
+pub(super) struct Fake {
+    pub zones: Vec<(String, String, Dns)>,
+    pub zone_read: bool,
+    pub records: Mutex<Vec<(String, Record)>>,
+    /// Records' TTLs, by id (1, automatic, when not set).
+    pub ttls: Mutex<HashMap<String, u32>>,
+    pub calls: Mutex<Vec<String>>,
     next: Mutex<u32>,
+    /// Each zone's account (acct1 "Acme" when not set).
+    pub accounts: HashMap<String, (String, String)>,
+    /// Accounts where the token can't make tunnels.
+    pub no_tunnels: Vec<String>,
+    /// Zones whose Origin CA certificates the token can't read or issue.
+    pub no_certs: Vec<String>,
+    /// (account, tunnel).
+    pub tunnels: Mutex<Vec<(String, Tunnel)>>,
+    /// Each tunnel's routes: (version, config).
+    pub configs: Mutex<HashMap<String, (i64, Value)>>,
+    /// Each tunnel's secret.
+    pub secrets: Mutex<HashMap<String, String>>,
+    /// Issued Origin CA certificates: (id, names, revoked).
+    pub certs: Mutex<Vec<(String, Vec<String>, bool)>>,
 }
 
 impl Fake {
-    fn new(zones: &[(&str, &str, Dns)]) -> Self {
+    pub fn new(zones: &[(&str, &str, Dns)]) -> Self {
         Self {
             zones: zones
                 .iter()
@@ -54,14 +77,70 @@ impl Fake {
                 .collect(),
             zone_read: true,
             records: Mutex::new(vec![]),
+            ttls: Mutex::new(HashMap::new()),
             calls: Mutex::new(vec![]),
             next: Mutex::new(0),
+            accounts: HashMap::new(),
+            no_tunnels: vec![],
+            no_certs: vec![],
+            tunnels: Mutex::new(vec![]),
+            configs: Mutex::new(HashMap::new()),
+            secrets: Mutex::new(HashMap::new()),
+            certs: Mutex::new(vec![]),
         }
     }
 
-    fn with(self, zone: &str, r: Record) -> Self {
+    pub fn with(self, zone: &str, r: Record) -> Self {
         self.records.lock().unwrap().push((zone.into(), r));
         self
+    }
+
+    pub fn account_of(&self, zone: &str) -> (String, String) {
+        self.accounts
+            .get(zone)
+            .cloned()
+            .unwrap_or_else(|| ("acct1".into(), "Acme".into()))
+    }
+
+    fn id(&self, prefix: &str) -> String {
+        let mut n = self.next.lock().unwrap();
+        *n += 1;
+        format!("{prefix}{n}")
+    }
+
+    /// A tunnel id as Cloudflare makes them (a UUID).
+    fn uuid(&self) -> String {
+        let n = self.id("");
+        format!("00000000-0000-4000-8000-{:0>12}", n)
+    }
+
+    pub fn tunnel_list(&self) -> Vec<Tunnel> {
+        self.tunnels
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, t)| t.clone())
+            .collect()
+    }
+
+    /// Set a tunnel's status and connections, as Cloudflare reports them.
+    pub fn connect(&self, id: &str, status: &str, colos: &[&str]) {
+        for (_, t) in self.tunnels.lock().unwrap().iter_mut() {
+            if t.id == id {
+                t.status = status.into();
+                t.connections = colos
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| Connection {
+                        client_id: format!("c{}", i / 2),
+                        colo: (*c).into(),
+                        client_version: "2026.10.7".into(),
+                        opened_at: "2026-11-22T00:00:00Z".into(),
+                        origin_ip: "203.0.113.7".into(),
+                    })
+                    .collect();
+            }
+        }
     }
 
     fn dns(&self, zone: &str) -> Dns {
@@ -136,10 +215,8 @@ impl Cloudflare for Fake {
         if self.dns(zone_id) != Dns::Edit {
             return Err(Self::denied());
         }
-        let mut n = self.next.lock().unwrap();
-        *n += 1;
         let made = Record {
-            id: format!("r{n}"),
+            id: self.id("r"),
             kind: r.kind.clone(),
             name: r.name.clone(),
             content: r.content.clone(),
@@ -655,4 +732,347 @@ fn reads_cloudflares_answers() {
     }))
     .unwrap();
     assert!(!ours(&no_comment, MARK, "a.example.com"));
+}
+
+impl tunnel::TunnelApi for Fake {
+    async fn zone_accounts(&self) -> Result<Vec<CfZone>, CfError> {
+        Ok(self
+            .zones()
+            .await?
+            .into_iter()
+            .map(|(id, name)| {
+                let (account_id, account_name) = self.account_of(&id);
+                CfZone {
+                    id,
+                    name,
+                    account_id,
+                    account_name,
+                }
+            })
+            .collect())
+    }
+
+    async fn records_kept(&self, zone_id: &str, name: &str) -> Result<Vec<Kept>, CfError> {
+        let ttls = self.ttls.lock().unwrap().clone();
+        Ok(self
+            .records(zone_id, name)
+            .await?
+            .into_iter()
+            .map(|r| Kept {
+                ttl: ttls.get(&r.id).copied().unwrap_or(1),
+                id: r.id,
+                kind: r.kind,
+                name: r.name,
+                content: r.content,
+                proxied: r.proxied,
+                comment: r.comment,
+            })
+            .collect())
+    }
+
+    async fn create_kept(&self, zone_id: &str, r: &Kept) -> Result<Record, CfError> {
+        self.log(format!(
+            "create {zone_id} {} {} {}",
+            r.kind, r.name, r.content
+        ));
+        if self.dns(zone_id) != Dns::Edit {
+            return Err(Self::denied());
+        }
+        let made = Record {
+            id: self.id("r"),
+            ..r.record()
+        };
+        self.ttls.lock().unwrap().insert(made.id.clone(), r.ttl);
+        self.records
+            .lock()
+            .unwrap()
+            .push((zone_id.into(), made.clone()));
+        Ok(made)
+    }
+
+    async fn tunnels_named(&self, account: &str, name: &str) -> Result<Vec<Tunnel>, CfError> {
+        self.log(format!("tunnels {account} {name}"));
+        if self.no_tunnels.iter().any(|a| a == account) {
+            return Err(Self::denied());
+        }
+        Ok(self
+            .tunnels
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(a, t)| a == account && t.name.starts_with(name) && !t.deleted)
+            .map(|(_, t)| t.clone())
+            .collect())
+    }
+
+    async fn create_tunnel(&self, account: &str, name: &str) -> Result<Tunnel, CfError> {
+        self.log(format!("create tunnel {account} {name}"));
+        if self.no_tunnels.iter().any(|a| a == account) {
+            return Err(Self::denied());
+        }
+        let t = Tunnel {
+            id: self.uuid(),
+            name: name.into(),
+            status: "inactive".into(),
+            ..Default::default()
+        };
+        self.tunnels
+            .lock()
+            .unwrap()
+            .push((account.into(), t.clone()));
+        self.secrets
+            .lock()
+            .unwrap()
+            .insert(t.id.clone(), "first".into());
+        Ok(t)
+    }
+
+    async fn tunnel(&self, account: &str, id: &str) -> Result<Tunnel, CfError> {
+        self.tunnels
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(a, t)| a == account && t.id == id)
+            .map(|(_, t)| t.clone())
+            .ok_or(CfError::NotFound)
+    }
+
+    async fn delete_tunnel(&self, account: &str, id: &str) -> Result<(), CfError> {
+        self.log(format!("delete tunnel {id}"));
+        let mut ts = self.tunnels.lock().unwrap();
+        let Some((_, t)) = ts.iter_mut().find(|(a, t)| a == account && t.id == id) else {
+            return Err(CfError::NotFound);
+        };
+        if !t.connections.is_empty() {
+            return Err(CfError::Refused(
+                "Cannot delete tunnel because it has active connections".into(),
+            ));
+        }
+        t.deleted = true;
+        Ok(())
+    }
+
+    async fn tunnel_token(&self, account: &str, id: &str) -> Result<String, CfError> {
+        self.tunnel(account, id).await?;
+        let secret = self
+            .secrets
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(format!("token-{id}-{secret}"))
+    }
+
+    async fn put_config(&self, account: &str, id: &str, config: &Value) -> Result<i64, CfError> {
+        self.log(format!("put config {id}"));
+        self.tunnel(account, id).await?;
+        let mut cs = self.configs.lock().unwrap();
+        let v = cs.get(id).map_or(1, |(v, _)| v + 1);
+        cs.insert(id.into(), (v, config.clone()));
+        Ok(v)
+    }
+
+    async fn config(&self, account: &str, id: &str) -> Result<(i64, Value), CfError> {
+        self.tunnel(account, id).await?;
+        Ok(self
+            .configs
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or((0, Value::Null)))
+    }
+
+    async fn rotate_secret(&self, account: &str, id: &str, secret: &str) -> Result<(), CfError> {
+        self.log(format!("rotate {id}"));
+        self.tunnel(account, id).await?;
+        self.secrets
+            .lock()
+            .unwrap()
+            .insert(id.into(), secret.into());
+        Ok(())
+    }
+
+    async fn drop_connections(&self, account: &str, id: &str) -> Result<(), CfError> {
+        self.log(format!("drop connections {id}"));
+        self.tunnel(account, id).await?;
+        self.connect(id, "inactive", &[]);
+        Ok(())
+    }
+
+    async fn origin_certs(&self, zone_id: &str) -> Result<Vec<String>, CfError> {
+        if self.no_certs.iter().any(|z| z == zone_id) {
+            return Err(Self::denied());
+        }
+        Ok(vec![])
+    }
+
+    async fn issue_origin_cert(
+        &self,
+        csr_pem: &str,
+        hostnames: &[String],
+    ) -> Result<OriginCert, CfError> {
+        self.log(format!("issue {}", hostnames.join(",")));
+        let zone_denied = self.zones.iter().any(|(id, name, _)| {
+            self.no_certs.contains(id)
+                && hostnames
+                    .iter()
+                    .any(|h| h.trim_start_matches("*.").ends_with(name.as_str()))
+        });
+        if zone_denied {
+            return Err(Self::denied());
+        }
+        assert!(csr_pem.contains("CERTIFICATE REQUEST"), "{csr_pem}");
+        let id = format!("{}", 1000 + self.certs.lock().unwrap().len());
+        self.certs
+            .lock()
+            .unwrap()
+            .push((id.clone(), hostnames.to_vec(), false));
+        Ok(OriginCert {
+            id,
+            pem: String::new(),
+        })
+    }
+
+    async fn revoke_origin_cert(&self, id: &str) -> Result<(), CfError> {
+        self.log(format!("revoke {id}"));
+        for c in self.certs.lock().unwrap().iter_mut() {
+            if c.0 == id {
+                c.2 = true;
+                return Ok(());
+            }
+        }
+        Err(CfError::NotFound)
+    }
+}
+
+// ── Tunnel permissions ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_test_says_which_zones_can_use_a_tunnel() {
+    let mut cf = Fake::new(&[
+        ("z1", "example.com", Dns::Edit),
+        ("z2", "other.org", Dns::Edit),
+        ("z3", "certless.dev", Dns::Edit),
+        ("z4", "readonly.io", Dns::Read),
+    ]);
+    cf.accounts
+        .insert("z2".into(), ("acct2".into(), "Other Co".into()));
+    cf.no_tunnels = vec!["acct2".into()];
+    cf.no_certs = vec!["z2".into(), "z3".into()];
+    let zones = inspect(&cf, MARK).await.unwrap();
+    let got: Vec<(&str, &str, bool, Vec<String>)> = zones
+        .iter()
+        .map(|z| {
+            (
+                z.name.as_str(),
+                z.account_id.as_str(),
+                z.tunnel_ready(),
+                z.tunnel.missing.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("certless.dev", "acct1", false, vec![tunnel::CERTS_EDIT.to_owned()]),
+            ("example.com", "acct1", true, vec![]),
+            (
+                "other.org",
+                "acct2",
+                false,
+                vec![tunnel::TUNNEL_EDIT.to_owned(), tunnel::CERTS_EDIT.to_owned()]
+            ),
+            ("readonly.io", "acct1", false, vec![]),
+        ]
+    );
+    assert_eq!(zones[1].account_name, "Acme");
+    // A zone that can't edit DNS can't be tunnel-ready either.
+    assert!(!zones[3].tunnel.ready);
+    // DNS only (neither tunnel permission) is no problem. Half of them is.
+    assert_eq!(
+        problems(&zones),
+        [
+            "readonly.io: give the token DNS:Edit.",
+            "certless.dev: give the token SSL and Certificates:Edit."
+        ]
+    );
+    // The tunnel check is once per account, and leaves nothing behind.
+    let checks = cf
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("create tunnel acct1 pyo-check-"))
+        .count();
+    assert_eq!(checks, 1);
+    assert!(cf.tunnel_list().iter().all(|t| t.deleted));
+}
+
+#[tokio::test]
+async fn a_probe_tunnel_left_behind_is_deleted() {
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)]);
+    cf.tunnels.lock().unwrap().push((
+        "acct1".into(),
+        Tunnel {
+            id: "11111111-2222-4333-8444-555555555555".into(),
+            name: "pyo-check-a1b2c3".into(),
+            ..Default::default()
+        },
+    ));
+    // Someone's own tunnel with another name: never touched.
+    cf.tunnels.lock().unwrap().push((
+        "acct1".into(),
+        Tunnel {
+            id: "11111111-2222-4333-8444-666666666666".into(),
+            name: "home-lab".into(),
+            ..Default::default()
+        },
+    ));
+    inspect(&cf, MARK).await.unwrap();
+    let ts = cf.tunnel_list();
+    assert!(ts.iter().filter(|t| t.name.starts_with("pyo-check-")).all(|t| t.deleted));
+    assert!(ts.iter().any(|t| t.name == "home-lab" && !t.deleted));
+}
+
+#[test]
+fn zones_stored_before_the_tunnel_read_as_dns_only() {
+    let z: Zone =
+        serde_json::from_value(json!({ "id": "z1", "name": "example.com", "canEdit": true })).unwrap();
+    assert!(!z.tunnel_ready());
+    assert_eq!(z.account_id, "");
+    let v = serde_json::to_value(zone("z1", "example.com")).unwrap();
+    assert_eq!(v["accountId"], "acct1");
+    assert_eq!(v["tunnel"], json!({ "ready": true }));
+}
+
+#[test]
+fn tunnel_ids_are_uuids_before_they_go_into_paths() {
+    use tunnel::uuid_ok;
+    assert!(uuid_ok("c1744f8b-faa1-48a4-9e5c-02ac921467fa"));
+    assert!(!uuid_ok("c1744f8b-faa1-48a4-9e5c-02ac921467f"));
+    assert!(!uuid_ok("../../zones/x-faa1-48a4-9e5c-02ac921467fa"));
+    assert!(!uuid_ok("c1744f8bxfaa1-48a4-9e5c-02ac921467fa"));
+}
+
+#[test]
+fn reads_cloudflares_tunnels() {
+    let t = tunnel::tunnel_from(&json!({
+        "id": "c1744f8b-faa1-48a4-9e5c-02ac921467fa", "name": "pyo-cl_1-abc123",
+        "status": "healthy", "deleted_at": null, "account_tag": "699d98642c564d2e855e9661899b7252",
+        "connections": [{
+            "colo_name": "FRA", "uuid": "1bedc50d-42b3-473c-b108-ff3d10c0d925", "id": "1bedc50d-42b3-473c-b108-ff3d10c0d925",
+            "is_pending_reconnect": false, "origin_ip": "203.0.113.7", "opened_at": "2026-11-22T10:00:00Z",
+            "client_id": "1bedc50d-42b3-473c-b108-ff3d10c0d925", "client_version": "2026.10.7",
+        }],
+    }))
+    .unwrap();
+    assert_eq!(t.status, "healthy");
+    assert!(!t.deleted);
+    assert_eq!(t.connections[0].colo, "FRA");
+    let gone = tunnel::tunnel_from(&json!({
+        "id": "c1744f8b-faa1-48a4-9e5c-02ac921467fa", "name": "x", "deleted_at": "2026-11-22T10:00:00Z",
+    }))
+    .unwrap();
+    assert!(gone.deleted);
+    assert!(tunnel::tunnel_from(&json!({ "id": "../x" })).is_err());
 }

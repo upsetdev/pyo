@@ -19,6 +19,9 @@
 //!   first HTTP-01 check reaches the cluster directly.
 //! - A proxied record suggests the service's "Behind Cloudflare" firewall
 //!   switch (the dashboard's DNS record line), until it's on.
+//! - Cloudflare Tunnel (tunnel.rs): with Cloudflare Tunnel:Edit in the
+//!   account and SSL and Certificates:Edit in a zone, the zone is
+//!   tunnel-ready. Both are optional: DNS:Edit alone still connects.
 
 use crate::error::Json;
 use crate::error::Query;
@@ -44,6 +47,9 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// Zones looked at in one test, at most.
 const MAX_ZONES: usize = 200;
 
+pub(crate) mod tunnel;
+use tunnel::TunnelApi;
+
 // ── Zones and records ──────────────────────────────────────────────────────
 
 /// A zone the token sees, as stored and shown.
@@ -57,6 +63,32 @@ pub struct Zone {
     /// The permission it lacks, when it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing: Option<String>,
+    /// The Cloudflare account it's in. A tunnel lives in one account and
+    /// only takes names from that account's zones.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_name: String,
+    /// Whether it can use Cloudflare Tunnel.
+    #[serde(default)]
+    pub tunnel: TunnelAccess,
+}
+
+/// Whether a zone can use Cloudflare Tunnel: the token may edit DNS in it,
+/// make tunnels in its account and issue its Origin CA certificates.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TunnelAccess {
+    pub ready: bool,
+    /// The tunnel permissions the token lacks here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+}
+
+impl Zone {
+    /// It can take domains through a tunnel.
+    pub fn tunnel_ready(&self) -> bool {
+        self.can_edit && self.tunnel.ready
+    }
 }
 
 /// A DNS record at Cloudflare.
@@ -258,9 +290,13 @@ pub(crate) async fn missing_in<C: Cloudflare>(
     }
 }
 
-/// The zones a token covers, and what it can do in each.
-pub(crate) async fn inspect<C: Cloudflare>(cf: &C, marker: &str) -> Result<Vec<Zone>, CfError> {
-    let mut zones = match cf.zones().await {
+/// The zones a token covers, and what it can do in each: DNS per zone,
+/// tunnels once per account, Origin CA certificates per zone.
+pub(crate) async fn inspect<C: Cloudflare + TunnelApi>(
+    cf: &C,
+    marker: &str,
+) -> Result<Vec<Zone>, CfError> {
+    let mut zones = match cf.zone_accounts().await {
         Ok(z) => z,
         Err(CfError::Denied(m)) => {
             return Err(CfError::Denied(if m.is_empty() {
@@ -271,16 +307,38 @@ pub(crate) async fn inspect<C: Cloudflare>(cf: &C, marker: &str) -> Result<Vec<Z
         }
         Err(e) => return Err(e),
     };
-    zones.sort_by(|a, b| a.1.cmp(&b.1));
+    zones.sort_by(|a, b| a.name.cmp(&b.name));
     zones.truncate(MAX_ZONES);
+    let mut tunnels: HashMap<String, Option<String>> = HashMap::new();
     let mut out = vec![];
     for z in &zones {
-        let missing = missing_in(cf, z, marker).await?;
+        let missing = missing_in(cf, &(z.id.clone(), z.name.clone()), marker).await?;
+        let mut lacks = vec![];
+        if z.account_id.is_empty() {
+            lacks.push(tunnel::TUNNEL_EDIT.to_owned());
+        } else {
+            if !tunnels.contains_key(&z.account_id) {
+                let m = tunnel::tunnel_missing(cf, &z.account_id).await?;
+                tunnels.insert(z.account_id.clone(), m);
+            }
+            if let Some(Some(m)) = tunnels.get(&z.account_id) {
+                lacks.push(m.clone());
+            }
+        }
+        if let Some(m) = tunnel::certs_missing(cf, &z.id).await? {
+            lacks.push(m);
+        }
         out.push(Zone {
-            id: z.0.clone(),
-            name: z.1.to_ascii_lowercase(),
+            id: z.id.clone(),
+            name: z.name.to_ascii_lowercase(),
             can_edit: missing.is_none(),
-            missing,
+            missing: missing.clone(),
+            account_id: z.account_id.clone(),
+            account_name: z.account_name.clone(),
+            tunnel: TunnelAccess {
+                ready: missing.is_none() && lacks.is_empty(),
+                missing: lacks,
+            },
         });
     }
     Ok(out)
@@ -293,14 +351,22 @@ pub fn problems(zones: &[Zone]) -> Vec<String> {
             "The token can't see any zones. Give it Zone:Read on the zones Pyo may use.".into(),
         ];
     }
-    zones
+    let mut out: Vec<String> = zones
         .iter()
         .filter_map(|z| {
             z.missing
                 .as_ref()
                 .map(|m| format!("{}: give the token {m}.", z.name))
         })
-        .collect()
+        .collect();
+    // Tunnel permissions are optional: a zone with neither is DNS only.
+    // One of the two means a tunnel was meant, so the other is a problem.
+    for z in zones.iter().filter(|z| z.can_edit) {
+        if z.tunnel.missing.len() == 1 {
+            out.push(format!("{}: give the token {}.", z.name, z.tunnel.missing[0]));
+        }
+    }
+    out
 }
 
 // ── Cloudflare over HTTP ───────────────────────────────────────────────────
@@ -791,7 +857,7 @@ pub struct CloudflareQuery {
 #[utoipa::path(get, path = "/cloudflare", operation_id = "getCloudflare", tag = "Integrations",
     params(CloudflareQuery),
     responses(
-        (status = 200, description = "`connected`, and when connected `zones` (each with `id`, `name`, `canEdit` and, when it can't, `missing`: the permission the token lacks), `createdAt`, `testedAt`, and for owners and admins `hint` and `createdBy`.", body = Object),
+        (status = 200, description = "`connected`, and when connected `zones` (each with `id`, `name`, `canEdit` and, when it can't, `missing`: the permission the token lacks, `accountId`, `accountName`, and `tunnel`: `ready` and the tunnel permissions it lacks as `missing`), `createdAt`, `testedAt`, and for owners and admins `hint` and `createdBy`.", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = crate::error::ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
