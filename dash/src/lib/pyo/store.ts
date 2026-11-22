@@ -1762,7 +1762,7 @@ export const api = {
     const serviceId = newId("svc");
     let deploymentId = "";
     const volumes: Volume[] = [];
-    const dnsRecords: { domainId: string; proxied: boolean }[] = [];
+    const dnsRecords: { domainId: string; proxied: boolean; tunnel?: boolean }[] = [];
     // No project picked: create one named after the app, before the app itself.
     const fresh =
       draft.projectId === NEW_PROJECT
@@ -1834,8 +1834,16 @@ export const api = {
       });
       const domains: Domain[] = d.domains.map((x) => {
         const id = newId("dom");
-        // On unless turned off, when a connected zone covers it.
+        // Through the cluster's Cloudflare Tunnel: on by default in tunnel mode.
+        const draftCluster = s.clusters.find((c) => c.id === d.clusterId);
         if (
+          !d.cron &&
+          tunnelZoneFor(s, x.hostname, draftCluster) &&
+          (x.tunnel ?? (!!draftCluster && clusterTraffic(draftCluster) === "tunnel"))
+        )
+          dnsRecords.push({ domainId: id, proxied: false, tunnel: true });
+        // On unless turned off, when a connected zone covers it.
+        else if (
           x.cloudflare !== false &&
           !d.cron &&
           cloudflareZoneFor(s, x.hostname, d.teamId)?.canEdit &&
@@ -1975,9 +1983,11 @@ export const api = {
       // Its DNS records in Cloudflare, once the service exists.
       if (made)
         for (const r of dnsRecords)
-          await api.createDnsRecord(serviceId, r.domainId, {
-            proxied: r.proxied,
-          });
+          await (r.tunnel
+            ? api.setDomainTunnel(serviceId, r.domainId, { on: true })
+            : api.createDnsRecord(serviceId, r.domainId, {
+                proxied: r.proxied,
+              }));
       return made;
     })();
     return { serviceId, deploymentId, done };

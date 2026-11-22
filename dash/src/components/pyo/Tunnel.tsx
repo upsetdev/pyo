@@ -158,7 +158,9 @@ export function TunnelSettings({
     return z?.tunnel?.ready && z.accountId === account ? z.name : undefined;
   };
   const moving = [...new Set(domains.map((d) => zoneOf(d.hostname)).filter((z): z is string => !!z))];
-  const outside = domains.filter((d) => !zoneOf(d.hostname)).length;
+  // Free nip.io domains: no public ports, so they stop answering too.
+  const nip = domains.filter((d) => /\.nip\.io$/i.test(d.hostname)).length;
+  const outside = domains.filter((d) => !zoneOf(d.hostname) && !/\.nip\.io$/i.test(d.hostname)).length;
   const lines = [
     moving.length
       ? `Websites on ${list(moving)} move to the tunnel. Records Pyo didn't make wait for your OK.`
@@ -167,6 +169,11 @@ export function TunnelSettings({
       ? "1 domain isn't in your Cloudflare account. It stops answering from the internet."
       : outside
         ? `${outside} domains aren't in your Cloudflare account. They stop answering from the internet.`
+        : null,
+    nip === 1
+      ? "1 free domain stops answering from the internet."
+      : nip
+        ? `${nip} free domains stop answering from the internet.`
         : null,
     c.sameCluster
       ? "The public dashboard closes. Open Pyo through Tailscale or your local network."

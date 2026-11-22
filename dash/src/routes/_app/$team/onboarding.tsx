@@ -29,7 +29,7 @@ import {
   type DeployDraft,
   type Issues,
 } from "~/lib/pyo/draft";
-import { freeHostname, freeDomainIp, reachOf } from "~/lib/pyo/freeDomain";
+import { freeHostname, freeDomainIp, freeHostnameIn, reachOf } from "~/lib/pyo/freeDomain";
 import { DNS_LABEL } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import {
@@ -488,10 +488,16 @@ function DeployStep({
   const ip = freeDomainIp(s, cluster.id);
   const reach = reachOf(s, cluster.id);
   const port = base.ports.find((p) => p.protocol === "HTTP");
-  const host =
-    ip && port
-      ? freeHostname({ name: name || "app" }, project?.namespace ?? "app", ip)
-      : "";
+  // In tunnel mode, under the tunnel's default domain.
+  const tunnelEnd =
+    cluster.traffic === "tunnel" ? (cluster.freeDomainSuffix ?? undefined) : undefined;
+  const host = !port
+    ? ""
+    : tunnelEnd
+      ? freeHostnameIn({ name: name || "app" }, project?.namespace ?? "app", tunnelEnd)
+      : ip
+        ? freeHostname({ name: name || "app" }, project?.namespace ?? "app", ip)
+        : "";
   const onNetwork = !host && !!port && reach === "network";
   const [busy, setBusy] = useState(false);
 

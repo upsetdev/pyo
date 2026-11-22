@@ -421,11 +421,13 @@ export type Cluster = {
   /** Tailscale on this cluster (its agent keeps the client); null when not set up. */
   tailscale?: ClusterTailscale | null;
   /** Where its free domains point, as chosen or by default. */
-  freeDomainAddress?: FreeDomainAddress;
+  freeDomainAddress?: FreeDomainAddress | "tunnel";
   /** As chosen in its settings; null: the default. */
   freeDomainAddressSet?: FreeDomainAddress | null;
   /** The address its free domains point at now; null: no free domains. */
   freeDomainIp?: string | null;
+  /** What its free domains end in ("203.0.113.7.nip.io", or the tunnel's default domain); null: none. */
+  freeDomainSuffix?: string | null;
   /** Its public IP is only what the internet sees (no server has it): ports may not be forwarded. */
   behindNat?: boolean;
   originPull?: {

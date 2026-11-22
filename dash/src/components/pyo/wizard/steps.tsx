@@ -31,7 +31,8 @@ import { locationLabel, parseLocation, placesOf } from "~/lib/pyo/location";
 import { Flag } from "~/components/ui/Flag";
 import {
   clusterTailnet,
-  freeHostname,
+  freeHostnameIn,
+  freeSuffix,
   isFreeDomain,
   isTailnetDomain,
   noFreeDomain,
@@ -70,6 +71,8 @@ import {
 } from "~/lib/pyo/draft";
 import {
   cloudflareZoneFor,
+  clusterTraffic,
+  tunnelZoneFor,
   clusterSummary,
   clustersIn,
   draftProject,
@@ -1182,12 +1185,17 @@ export function DomainsStep({ d, set, errors }: StepProps) {
   // A connected Cloudflare zone covers it: Pyo creates its record.
   const cfFor = (host: string) =>
     !!cloudflareZoneFor(s, host)?.canEdit && !!cluster?.publicIp;
+  // Through the cluster's tunnel: on by default in tunnel mode.
+  const tunnelOn = (dm: { hostname: string; tunnel?: boolean }) =>
+    !!tunnelZoneFor(s, dm.hostname, cluster) &&
+    (dm.tunnel ?? (!!cluster && clusterTraffic(cluster) === "tunnel"));
   const httpPorts = d.ports.filter((p) => p.protocol === "HTTP");
   const project = draftProject(s, d);
   // Free domains go on the public IP: traffic goes straight to the servers.
-  const ip = cluster?.publicIp ?? undefined;
-  const free = ip
-    ? freeHostname({ name: d.name || "app" }, project?.namespace ?? "app", ip)
+  // In tunnel mode, under the tunnel's default domain.
+  const freeEnd = freeSuffix(s, d.clusterId);
+  const free = freeEnd
+    ? freeHostnameIn({ name: d.name || "app" }, project?.namespace ?? "app", freeEnd)
     : "";
   const tailnet = d.clusterId ? clusterTailnet(s, d.clusterId) : undefined;
   const tailnetFree = tailnet
@@ -1310,12 +1318,14 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                 <CloudflareFields
                   hostname={error ? "" : dm.hostname}
                   clusterId={d.clusterId}
+                  tunnel
                   value={{
                     create: dm.cloudflare !== false,
                     proxied: !!dm.proxied,
+                    tunnel: dm.tunnel,
                   }}
                   onChange={(v) =>
-                    setD({ cloudflare: v.create, proxied: v.proxied })
+                    setD({ cloudflare: v.create, proxied: v.proxied, tunnel: v.tunnel })
                   }
                 />
                 <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[11.5px]">
@@ -1329,6 +1339,8 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                         "Only devices on your tailnet can open it."
                       ) : freeOne ? (
                         "No DNS record needed."
+                      ) : dm.hostname && tunnelOn(dm) ? (
+                        "Goes through Cloudflare Tunnel."
                       ) : dm.hostname &&
                         dm.cloudflare !== false &&
                         cfFor(dm.hostname) ? (

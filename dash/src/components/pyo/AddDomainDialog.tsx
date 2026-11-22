@@ -27,6 +27,7 @@ import {
 import { HOSTNAME } from "~/lib/pyo/format";
 import {
   clusterTailnet,
+  freeSuffix,
   hostnameUsed,
   unusedHostname,
 } from "~/lib/pyo/freeDomain";
@@ -91,19 +92,22 @@ export function AddDomainDialog({
   const port = portName || httpPorts[0]?.name || "";
   const cluster = s.clusters.find((c) => c.id === app?.clusterId);
   // Free domains go on the public IP, whatever the cluster's free domains
-  // use by default: traffic goes straight to its servers.
+  // use by default: traffic goes straight to its servers. In tunnel mode,
+  // under the tunnel's default domain.
+  const tunnelMode = cluster?.traffic === "tunnel";
   const freeIp = cluster?.publicIp ?? undefined;
+  const freeEnd = app ? freeSuffix(s, app.clusterId) : undefined;
   const tailnet = app ? clusterTailnet(s, app.clusterId) : undefined;
   const namespace =
     s.projects.find((p) => p.id === app?.projectId)?.namespace ?? "app";
   // Picked, but the service's cluster has none: a note says why.
   const missing =
     !!app &&
-    ((kind === "public" && !freeIp) || (kind === "tailnet" && !tailnet));
+    ((kind === "public" && !freeEnd) || (kind === "tailnet" && !tailnet));
   // No service yet: only your own domain, the free ones are named after it.
   const k: Kind = app ? kind : "own";
   const suffix =
-    k === "public" ? `${freeIp}.nip.io` : k === "tailnet" ? tailnet : "";
+    k === "public" ? freeEnd : k === "tailnet" ? tailnet : "";
   const suggested =
     !app || k === "own" || missing
       ? ""
@@ -248,7 +252,13 @@ export function AddDomainDialog({
           />
           <Choice
             label="Free domain"
-            detail={app ? "Public, on nip.io" : "Pick a service first"}
+            detail={
+              !app
+                ? "Pick a service first"
+                : tunnelMode
+                  ? "Through the tunnel"
+                  : "Public, on nip.io"
+            }
             selected={k === "public"}
             disabled={!app}
             onSelect={() => {
@@ -279,6 +289,16 @@ export function AddDomainDialog({
                   <SetUpTailscaleLink clusterId={cluster.id} />
                 </>
               )
+            ) : tunnelMode ? (
+              <>
+                Pick a default domain first.{" "}
+                <AppLink
+                  href={`/clusters/${cluster.id}/settings`}
+                  className="font-medium text-primary hover:text-primary/80"
+                >
+                  Cluster settings
+                </AppLink>
+              </>
             ) : cluster.publicTraffic === false ? (
               <>
                 Public traffic is off on {cluster.name}.{" "}
@@ -301,7 +321,9 @@ export function AddDomainDialog({
               error={touched ? error || undefined : undefined}
               hint={
                 k === "public"
-                  ? cluster?.behindNat
+                  ? tunnelMode
+                    ? "Through Cloudflare Tunnel. No DNS needed."
+                    : cluster?.behindNat
                     ? `Points at ${freeIp}. Forward ports 80 and 443 to the server.`
                     : `Points at ${freeIp}. No DNS needed.`
                   : k === "tailnet"

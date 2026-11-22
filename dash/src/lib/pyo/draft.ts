@@ -52,6 +52,8 @@ export type DraftDomain = {
   cloudflare?: boolean;
   /** Proxied by Cloudflare. */
   proxied?: boolean;
+  /** Through the cluster's Cloudflare Tunnel (unset: on in tunnel mode). */
+  tunnel?: boolean;
 };
 export type DraftVolume = {
   id: string;
