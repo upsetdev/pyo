@@ -18,6 +18,17 @@ export const onTunnel = (d: Domain) =>
   d.dnsRecord?.status === "switching" ||
   d.dnsRecord?.status === "reverting";
 
+/**
+ * The tunnel's default domain when it covers the name (one label under
+ * it). Such a name always goes through the tunnel, so there's no Switch back.
+ */
+export const defaultDomainOver = (c: Cluster | undefined, hostname: string) => {
+  const dd = c?.tunnel?.defaultDomain?.toLowerCase();
+  const host = hostname.toLowerCase();
+  if (!dd || !host.endsWith(`.${dd}`)) return undefined;
+  return host.slice(0, -dd.length - 1).includes(".") ? undefined : dd;
+};
+
 /** "1f2e….cfargotunnel.com" for the tunnel's long id. */
 const shortTarget = (content: string) => {
   const m = /^([^.]+)\.cfargotunnel\.com\.?$/.exec(content);
@@ -43,6 +54,7 @@ export function TunnelRecordLine({ app, d }: { app: Application; d: Domain }) {
     setBusy(false);
   };
   const back = r?.status === "reverting";
+  const wildcard = defaultDomainOver(cluster, d.hostname);
 
   if (r?.status === "conflict")
     return (
@@ -92,6 +104,16 @@ export function TunnelRecordLine({ app, d }: { app: Application; d: Domain }) {
       </p>
     );
 
+  // No record of its own: the default domain's wildcard has it.
+  if (!r && d.tunnel === "on" && wildcard)
+    return (
+      <p className={lineClass}>
+        <BrandMark icon={CLOUDFLARE_LOGO} size={12} />
+        Via Tunnel ·
+        <span className="font-mono">*.{wildcard}</span>
+      </p>
+    );
+
   if (!r || r.status === "switching" || back)
     return (
       <p className={lineClass}>
@@ -111,7 +133,7 @@ export function TunnelRecordLine({ app, d }: { app: Application; d: Domain }) {
           {r.type} {shortTarget(r.content)}
         </span>
         {r.error ? <span className="text-destructive">· {r.error}</span> : null}
-        {kept.length && !admin ? (
+        {wildcard && !kept.length ? null : kept.length && !admin ? (
           <span>· An owner or admin can switch it back.</span>
         ) : (
           <Button

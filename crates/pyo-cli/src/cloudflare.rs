@@ -456,6 +456,7 @@ pub async fn domain_tunnel(
         )
         .await?;
     match v["status"].as_str().unwrap_or("") {
+        "active" if !on => ui::ok(&format!("{host} stays on the tunnel, under its default domain")),
         "active" => ui::ok(&format!("{host} already goes through the tunnel")),
         "switching" => ui::ok(&format!("Switching {host} to the tunnel. If Cloudflare has a record Pyo didn't make, pyo cloudflare tunnel status shows it.")),
         "reverting" => ui::ok(&format!("Switching {host} back")),

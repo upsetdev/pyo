@@ -123,6 +123,47 @@ pub(crate) fn switch_state(now: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// What Switch back does for a domain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Back {
+    /// It isn't on the tunnel: nothing to do.
+    Direct,
+    /// A switch that never moved the record just stops.
+    Stop,
+    /// A switch that never moved the record stops, and the name stays on
+    /// the tunnel through the default domain's wildcard.
+    Stay,
+    /// Its record moves back, both paths first.
+    Revert,
+    /// The default domain's wildcard would take it straight back: said,
+    /// and nothing changes.
+    Refuse,
+}
+
+/// What Switch back does for a domain. `under`: the tunnel's default
+/// domain covers the name, so without a record of its own the loop puts
+/// it through the wildcard (`free_domains_follow`). `record`: its record
+/// row's (via, status). `tunnel`: the domain has `tunnel` set.
+/// `puts_back`: a record it replaced comes back, which then answers for
+/// the name ahead of the wildcard.
+pub(crate) fn back_plan(under: bool, record: Option<(&str, &str)>, tunnel: bool, puts_back: bool) -> Back {
+    let via_tunnel = record.is_some_and(|(via, _)| via == "tunnel");
+    let waiting = record.is_some_and(|(via, status)| via != "tunnel" && matches!(status, "switching" | "conflict"));
+    match (via_tunnel, tunnel, under) {
+        (true, _, true) if !puts_back => Back::Refuse,
+        (true, _, _) => Back::Revert,
+        (false, false, _) => Back::Direct,
+        (false, true, false) => Back::Stop,
+        (false, true, true) if waiting => Back::Stay,
+        (false, true, true) => Back::Refuse,
+    }
+}
+
+/// Said when Switch back is asked for a name the default domain covers.
+pub fn always_tunnel(host: &str) -> String {
+    format!("{host} is under the tunnel's default domain, so it always goes through the tunnel.")
+}
+
 /// Ask for a domain's switch to the tunnel: its domain takes
 /// `tunnel: "switching"` (both paths answer) unless it's already only
 /// through the tunnel ([`switch_state`]), and its record row waits for the
@@ -442,16 +483,15 @@ pub async fn set_domain(
         Action::CreateRecord
     };
     require_role(tx, user, &team_id, role_for(action)).await?;
-    let tunnel_row: Option<(String, String)> = sqlx::query_as(
-        "SELECT state, account_id FROM pyo.cluster_tunnels WHERE cluster_id = $1",
+    let tunnel_row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT state, account_id, default_domain FROM pyo.cluster_tunnels WHERE cluster_id = $1",
     )
     .bind(&cluster_id)
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((state, account_id)) = tunnel_row.filter(|(st, _)| st != "removing") else {
+    let Some((_, account_id, default_domain)) = tunnel_row.filter(|(st, _, _)| st != "removing") else {
         return Err(bad("This cluster has no Cloudflare Tunnel. Pick Cloudflare Tunnel under the cluster's Traffic first."));
     };
-    let _ = state;
     let status = row.as_ref().map(|r| r.0.as_str()).unwrap_or("");
     let via = row.as_ref().map(|r| r.1.as_str()).unwrap_or("direct");
     if on {
@@ -484,21 +524,50 @@ pub async fn set_domain(
         .await?;
         return Ok(json!({ "ok": true, "status": "switching" }));
     }
-    // Back. A switch that never moved the record (still switching, or
-    // waiting for a yes) just stops.
-    if via != "tunnel" {
-        if d["tunnel"].is_string() {
+    // Back. A name under the default domain goes through the tunnel's
+    // wildcard whenever it has no record of its own, so moving it back
+    // would last until the loop's next pass: refused, unless a record it
+    // replaced comes back (that one answers ahead of the wildcard).
+    let under = default_domain
+        .as_deref()
+        .is_some_and(|dd| super::tunnel_loop::under_default(&host, dd));
+    let plan = back_plan(
+        under,
+        row.as_ref().map(|r| (r.1.as_str(), r.0.as_str())),
+        d["tunnel"].is_string(),
+        restore && kept,
+    );
+    let stop_waiting = "DELETE FROM pyo.dns_records WHERE service_id = $1 AND domain_id = $2 AND status IN ('switching', 'conflict') AND via = 'direct'";
+    match plan {
+        Back::Refuse => return Err(bad(always_tunnel(&host))),
+        Back::Direct => return Ok(json!({ "ok": true, "status": "direct" })),
+        // A switch that never moved the record (still switching, or
+        // waiting for a yes) just stops.
+        Back::Stop => {
             set_tunnel(tx, service_id, domain_id, None).await?;
-            sqlx::query(
-                "DELETE FROM pyo.dns_records WHERE service_id = $1 AND domain_id = $2 AND status IN ('switching', 'conflict') AND via = 'direct'",
-            )
-            .bind(service_id)
-            .bind(domain_id)
-            .execute(&mut **tx)
-            .await?;
+            sqlx::query(stop_waiting)
+                .bind(service_id)
+                .bind(domain_id)
+                .execute(&mut **tx)
+                .await?;
             sync(tx, service_id, wake).await?;
+            return Ok(json!({ "ok": true, "status": "direct" }));
         }
-        return Ok(json!({ "ok": true, "status": "direct" }));
+        // The same, but the wildcard has the name: it stays only through
+        // the tunnel, without a moment off it.
+        Back::Stay => {
+            sqlx::query(stop_waiting)
+                .bind(service_id)
+                .bind(domain_id)
+                .execute(&mut **tx)
+                .await?;
+            if d["tunnel"] != json!(pyo_proto::TUNNEL_ON) {
+                set_tunnel(tx, service_id, domain_id, Some(pyo_proto::TUNNEL_ON)).await?;
+                sync(tx, service_id, wake).await?;
+            }
+            return Ok(json!({ "ok": true, "status": "active" }));
+        }
+        Back::Revert => {}
     }
     sqlx::query(
         "UPDATE pyo.dns_records SET status = 'reverting', restore = $3, error = NULL, updated_at = now()
@@ -705,6 +774,33 @@ mod tests {
         assert_eq!(switch_state(Some("switching")), Some("switching"));
         // Under the wildcard, or switched before: never back to both paths.
         assert_eq!(switch_state(Some("on")), None);
+    }
+
+    #[test]
+    fn switch_back_is_refused_under_the_default_domain() {
+        let created = Some(("tunnel", "created"));
+        // Outside the default domain: Switch back as ever.
+        assert_eq!(back_plan(false, created, true, false), Back::Revert);
+        assert_eq!(back_plan(false, created, true, true), Back::Revert);
+        assert_eq!(back_plan(false, Some(("direct", "conflict")), true, false), Back::Stop);
+        assert_eq!(back_plan(false, Some(("direct", "switching")), true, false), Back::Stop);
+        assert_eq!(back_plan(false, Some(("direct", "created")), false, false), Back::Direct);
+        assert_eq!(back_plan(false, None, false, false), Back::Direct);
+        // Under it, the wildcard takes the name back: refused, with its own
+        // record or only the wildcard.
+        assert_eq!(back_plan(true, created, true, false), Back::Refuse);
+        assert_eq!(back_plan(true, None, true, false), Back::Refuse);
+        assert_eq!(back_plan(true, None, true, true), Back::Refuse);
+        // A record it replaced comes back and answers ahead of the wildcard.
+        assert_eq!(back_plan(true, created, true, true), Back::Revert);
+        // A switch waiting for a yes can be cancelled: it stays on the tunnel.
+        assert_eq!(back_plan(true, Some(("direct", "conflict")), true, false), Back::Stay);
+        assert_eq!(back_plan(true, Some(("direct", "switching")), true, false), Back::Stay);
+        // A direct record of its own wins over the wildcard: it is direct.
+        assert_eq!(back_plan(true, Some(("direct", "created")), false, false), Back::Direct);
+        let said = always_tunnel("web-shop.example.com");
+        assert_eq!(said, "web-shop.example.com is under the tunnel's default domain, so it always goes through the tunnel.");
+        assert!(!said.contains(';') && !said.contains(" - "));
     }
 
     #[test]
