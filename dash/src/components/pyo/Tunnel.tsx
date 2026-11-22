@@ -128,7 +128,9 @@ export function TunnelSettings({
     (z) => z.tunnel?.ready && z.accountId,
   );
   const accounts = [...new Map(zones.map((z) => [z.accountId!, z.accountName ?? z.accountId!]))];
-  const [account, setAccount] = useState(t?.accountId ?? zones[0]?.accountId ?? "");
+  const [picked, setAccount] = useState("");
+  // The tunnel's own account, as picked, or the first one.
+  const account = t?.accountId ?? (picked || zones[0]?.accountId || "");
   const [domain, setDomain] = useState(t?.defaultDomain ?? "");
   const [ports, setPorts] = useState(t?.portsPublic ?? true);
   const [confirm, setConfirm] = useState<"switch" | "rotate" | null>(null);
