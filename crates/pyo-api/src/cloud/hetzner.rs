@@ -129,14 +129,8 @@ pub fn error_of(status: u16, body: &Value) -> CloudError {
         (_, "uniqueness_error") => CloudError::NameTaken,
         (429, _) | (_, "rate_limit_exceeded") => CloudError::RateLimited,
         (404, _) | (_, "not_found") => CloudError::NotFound,
-        _ => CloudError::Other {
-            status,
-            message: if message.is_empty() {
-                format!("status {status}")
-            } else {
-                message
-            },
-        },
+        (410, _) | (_, "deprecated_api_endpoint") => CloudError::Removed(message),
+        _ => CloudError::Other { status, message },
     }
 }
 

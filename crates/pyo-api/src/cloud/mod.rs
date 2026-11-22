@@ -177,6 +177,8 @@ pub enum CloudError {
     /// A server without this installation's label: never deleted.
     NotOurs,
     Network(String),
+    /// A part of Hetzner's API Pyo calls is gone (410): its message.
+    Removed(String),
     Other {
         status: u16,
         message: String,
@@ -195,8 +197,25 @@ impl std::fmt::Display for CloudError {
             Self::NotFound => f.write_str("Hetzner has no such server."),
             Self::NotOurs => f.write_str("This server doesn't carry this Pyo's label at Hetzner, so Pyo won't delete it."),
             Self::Network(e) => write!(f, "Couldn't reach Hetzner. {e}"),
-            Self::Other { status, message } => write!(f, "Hetzner answered {status}: {message}"),
+            Self::Removed(message) => {
+                f.write_str("Hetzner removed a part of its API that Pyo calls")?;
+                said(f, message)
+            }
+            Self::Other { status, message } => {
+                write!(f, "Hetzner answered with error {status}")?;
+                said(f, message)
+            }
         }
+    }
+}
+
+/// Hetzner's own words after ours, when it gave some.
+fn said(f: &mut std::fmt::Formatter<'_>, message: &str) -> std::fmt::Result {
+    let message = message.trim().trim_end_matches('.');
+    if message.is_empty() {
+        f.write_str(".")
+    } else {
+        write!(f, ". It said: \"{message}\".")
     }
 }
 
@@ -213,7 +232,9 @@ impl From<CloudError> for ApiError {
             | CloudError::NotOurs => StatusCode::CONFLICT,
             CloudError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             CloudError::NotFound => StatusCode::NOT_FOUND,
-            CloudError::Network(_) | CloudError::Other { .. } => StatusCode::BAD_GATEWAY,
+            CloudError::Network(_) | CloudError::Removed(_) | CloudError::Other { .. } => {
+                StatusCode::BAD_GATEWAY
+            }
         };
         ApiError::new(status, e.to_string())
     }
@@ -1027,6 +1048,37 @@ mod tests {
         assert!(
             !calls.iter().any(|c| c.contains("/datacenters")),
             "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn hetzner_errors_keep_its_message() {
+        let gone = hetzner::error_of(
+            410,
+            &json!({ "error": { "code": "deprecated_api_endpoint", "message": "API functionality was removed",
+                "details": { "announcement": "https://docs.hetzner.cloud/changelog" } } }),
+        );
+        assert_eq!(
+            gone,
+            CloudError::Removed("API functionality was removed".into())
+        );
+        assert_eq!(
+            gone.to_string(),
+            "Hetzner removed a part of its API that Pyo calls. It said: \"API functionality was removed\"."
+        );
+        let api: ApiError = gone.into();
+        assert_eq!(api.status, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            hetzner::error_of(
+                503,
+                &json!({ "error": { "code": "maintenance", "message": "cannot perform operation due to maintenance." } })
+            )
+            .to_string(),
+            "Hetzner answered with error 503. It said: \"cannot perform operation due to maintenance\"."
+        );
+        assert_eq!(
+            hetzner::error_of(500, &Value::Null).to_string(),
+            "Hetzner answered with error 500."
         );
     }
 
