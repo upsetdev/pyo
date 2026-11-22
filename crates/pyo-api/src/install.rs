@@ -21,6 +21,10 @@ use crate::{
 #[derive(Deserialize)]
 pub struct InstallQuery {
     token: String,
+    /// "busy": something else on the machine has ports 80 and 443 (k3s's
+    /// Traefik, nginx…), as connect.sh found before installing anything.
+    #[serde(default, rename = "webPorts")]
+    web_ports: Option<String>,
 }
 
 /// How long a connect command works.
@@ -118,12 +122,35 @@ async fn token_for_manifest(db: &sqlx::PgPool, token: &str) -> ApiResult<(String
     Ok((cluster, agent))
 }
 
+/// Ports 80 and 443 are taken on the machine a cluster is being connected
+/// from: it takes no public traffic, so the gateway publishes nothing there
+/// and the sites already on it keep working. Only before its agent first
+/// reports in (the reply to that first heartbeat carries it, before the
+/// gateway is set up). A cluster that's running keeps its setting.
+async fn web_ports_busy(db: &sqlx::PgPool, cluster: &str) -> ApiResult<()> {
+    let off = sqlx::query(
+        "UPDATE pyo.clusters SET public_traffic = false
+          WHERE id = $1 AND last_seen_at IS NULL AND public_traffic",
+    )
+    .bind(cluster)
+    .execute(db)
+    .await?
+    .rows_affected();
+    if off > 0 {
+        tracing::info!(%cluster, "ports 80 and 443 are in use where it's being connected: public traffic off");
+    }
+    Ok(())
+}
+
 pub async fn manifest(
     State(s): State<AppState>,
     headers: axum::http::HeaderMap,
     Query(q): Query<InstallQuery>,
 ) -> ApiResult<impl IntoResponse> {
     let (cluster, token) = token_for_manifest(&s.db, q.token.trim()).await?;
+    if q.web_ports.as_deref() == Some("busy") {
+        web_ports_busy(&s.db, &cluster).await?;
+    }
     // Pyo Cloud: the agent dials the mTLS endpoint, trusts only its CA and
     // runs only commands the signer signed for this cluster (agent_tls.rs,
     // the agent's trust.rs).
@@ -1518,5 +1545,56 @@ mod connect_token_tests {
         assert_eq!(token_for_manifest(&db, &foreign).await.unwrap_err().status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(token_for_manifest(&db, "not-hex").await.unwrap_err().status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(agent_hash().await, sha256_hex(&second), "nothing above changed the agent's token");
+    }
+
+    /// Against a throwaway Postgres: connect.sh found ports 80 and 443 in
+    /// use. A cluster whose agent hasn't reported in yet takes no public
+    /// traffic. One that's running keeps what it has.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn busy_web_ports_turn_public_traffic_off_before_the_first_heartbeat() {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let run = crate::ids::random_string(8);
+        let team = format!("team_w{run}");
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&team).execute(&db).await.unwrap();
+        let (new, running) = (format!("cl_wn{run}"), format!("cl_wr{run}"));
+        for (cl, seen) in [(&new, false), (&running, true)] {
+            sqlx::query(
+                "INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, last_seen_at)
+                 VALUES ($1, $2, $1, $3, CASE WHEN $4 THEN now() END)",
+            )
+            .bind(cl)
+            .bind(&team)
+            .bind(sha256_hex(&crate::ids::secret_token()))
+            .bind(seen)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let public = |cl: String| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, bool>("SELECT public_traffic FROM pyo.clusters WHERE id = $1")
+                    .bind(cl)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(public(new.clone()).await, "public by default");
+        web_ports_busy(&db, &new).await.unwrap();
+        assert!(!public(new.clone()).await);
+        // Again (a second try of the command): still off.
+        web_ports_busy(&db, &new).await.unwrap();
+        assert!(!public(new.clone()).await);
+        web_ports_busy(&db, &running).await.unwrap();
+        assert!(public(running.clone()).await, "a running cluster keeps its setting");
+        // The query connect.sh sends.
+        let q: InstallQuery = serde_json::from_value(serde_json::json!({ "token": "ab", "webPorts": "busy" })).unwrap();
+        assert_eq!(q.web_ports.as_deref(), Some("busy"));
+        let q: InstallQuery = serde_json::from_value(serde_json::json!({ "token": "ab" })).unwrap();
+        assert_eq!(q.web_ports, None);
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
     }
 }
