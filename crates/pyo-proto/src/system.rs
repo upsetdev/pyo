@@ -1021,6 +1021,17 @@ pub fn tailnet_policy(servers: &[String]) -> Value {
     })
 }
 
+/// The tailnet listeners' client policy: the headers that name a visitor
+/// are removed ([`visitor_headers`]), as on the public listeners. Nothing
+/// sits in front of these listeners but Tailscale, so the visitor is the
+/// connection (the proxies' default).
+pub fn tailnet_client_policy_spec() -> Value {
+    json!({
+        "targetRefs": [{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": TAILNET_GATEWAY }],
+        "headers": visitor_headers(&[]),
+    })
+}
+
 /// Pyo's own tailnet names, on the cluster Pyo runs on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1045,6 +1056,7 @@ pub fn tailnet_objects(servers: &[String], certs: &[String], own: &TailnetOwn) -
     let mut out = vec![
         json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway", "metadata": meta(TAILNET_GATEWAY), "spec": tailnet_gateway_spec(certs) }),
         tailnet_policy(servers),
+        json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": meta(TAILNET_GATEWAY), "spec": tailnet_client_policy_spec() }),
         json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(TAILNET_REDIRECT), "spec": tailnet_redirect_spec() }),
     ];
     for ((name, host, port), hostname) in [
@@ -1258,6 +1270,48 @@ pub struct WebSettings {
     pub proxy_protocol: bool,
 }
 
+/// Request headers that name the visitor's address and that CDNs set
+/// themselves, replacing whatever the visitor sent: Cloudflare's
+/// (CF-Connecting-IP, and CF-Connecting-IPv6 next to its pseudo IPv4),
+/// True-Client-IP (Akamai's, and Cloudflare Enterprise's), Fastly's.
+pub const CDN_VISITOR_HEADERS: [&str; 4] = [
+    "cf-connecting-ip",
+    "cf-connecting-ipv6",
+    "true-client-ip",
+    "fastly-client-ip",
+];
+
+/// Request headers that name the visitor's address (or, for Forwarded, its
+/// address, host and scheme) and that neither Pyo's proxies nor a CDN in
+/// front set. Whatever is there is the client's own claim.
+pub const OTHER_VISITOR_HEADERS: [&str; 3] = ["x-real-ip", "x-client-ip", "forwarded"];
+
+/// The visitor headers a CDN a website is behind (`Firewall::behind`) sets
+/// itself on every request it passes on.
+pub fn cdn_own_headers(cdn: &str) -> &'static [&'static str] {
+    match cdn {
+        "cloudflare" => &["cf-connecting-ip", "cf-connecting-ipv6"],
+        _ => &[],
+    }
+}
+
+/// The proxies' header settings: every visitor header but `kept` is
+/// removed from requests as they come in ([`CDN_VISITOR_HEADERS`],
+/// [`OTHER_VISITOR_HEADERS`]), so neither Pyo's API nor a service behind
+/// the proxies sees an address a client made up. A proxy only takes such a
+/// header from a CDN that is the only one who can connect (origin pull, or
+/// a service behind it). X-Forwarded-For stays: the proxies append the
+/// address they saw, and Pyo reads it right to left.
+pub fn visitor_headers(kept: &[&str]) -> Value {
+    let remove: Vec<&str> = CDN_VISITOR_HEADERS
+        .iter()
+        .chain(OTHER_VISITOR_HEADERS.iter())
+        .filter(|h| !kept.contains(h))
+        .copied()
+        .collect();
+    json!({ "earlyRequestHeaders": { "remove": remove } })
+}
+
 /// Client traffic policies, on every Pyo Gateway: the visitor is the
 /// connection's address (or, with `proxy_protocol`, a PROXY protocol
 /// header's when one is sent; plain connections still work), never
@@ -1272,15 +1326,23 @@ pub struct WebSettings {
 /// part of a body block mode's WAF inspects before the request goes on. Its
 /// other setting is written out as Envoy Gateway's CRD defaults it, so the
 /// stored spec is exactly one the admission policy lists. A WebSocket or a
-/// stream stays open while quiet for [`STREAM_IDLE_TIMEOUT`].
+/// stream stays open while quiet for [`STREAM_IDLE_TIMEOUT`]. Headers that
+/// name the visitor are removed ([`visitor_headers`]), except a CDN's own
+/// on HTTPS with origin pull on, where only the CDN gets through.
 pub fn client_policy_spec(https: bool, w: WebSettings) -> Value {
+    let (origin_pull, proxy_protocol) = (w.origin_pull, w.proxy_protocol);
+    let kept: &[&str] = if https && origin_pull {
+        &CDN_VISITOR_HEADERS
+    } else {
+        &[]
+    };
     let mut spec = json!({
         "targetSelectors": [{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "matchLabels": { GATEWAY_LABEL: if https { "https" } else { "http" } } }],
         "clientIPDetection": { "directSourceIP": {} },
         "connection": { "bufferLimit": WAF_BODY_LIMIT, "maxAcceptPerSocketEvent": 1 },
+        "headers": visitor_headers(kept),
         "timeout": { "http": { "streamIdleTimeout": STREAM_IDLE_TIMEOUT } },
     });
-    let (origin_pull, proxy_protocol) = (w.origin_pull, w.proxy_protocol);
     if https && origin_pull {
         spec["tls"] = json!({ "clientValidation": { "caCertificateRefs": [{ "group": "", "kind": "ConfigMap", "name": ORIGIN_PULL_SECRET }] } });
     }
@@ -1320,8 +1382,11 @@ pub const TRUSTED_V6_RE: &str = r"^[0-9a-fA-F:]+/(2[4-9]|[3-9][0-9]|1[01][0-9]|1
 /// (`trusted`): the last address there that isn't the CDN's, the one the
 /// CDN appended. Any other connection is its own address, whatever it
 /// sends. Envoy's custom header detection (CF-Connecting-IP) would trust
-/// the header from anyone, so it's never used.
+/// the header from anyone, so it's never used. The CDN's own visitor
+/// headers pass ([`cdn_own_headers`]): the firewall's gate lets only the
+/// CDN's requests through. Every other one is removed.
 pub fn cdn_client_policy_spec(
+    cdn: &str,
     gateway: &str,
     sections: &[String],
     w: WebSettings,
@@ -1338,6 +1403,7 @@ pub fn cdn_client_policy_spec(
             .collect::<Vec<_>>()
     );
     spec["clientIPDetection"] = json!({ "xForwardedFor": { "trustedCIDRs": trusted } });
+    spec["headers"] = visitor_headers(cdn_own_headers(cdn));
     spec
 }
 
@@ -2106,7 +2172,7 @@ mod tests {
             pinned.extend(client_policy_variants(https).into_iter().map(|spec| json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "spec": spec })));
         }
         pinned.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": { "name": "ns-web-cdn" },
-            "spec": cdn_client_policy_spec("ns-web", &["h-1".into()], WebSettings { origin_pull: true, proxy_protocol: true }, &["173.245.48.0/20".into()]) }));
+            "spec": cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into()], WebSettings { origin_pull: true, proxy_protocol: true }, &["173.245.48.0/20".into()]) }));
         pinned.extend(
             tailnet_objects(
                 &tailnet_server_cidrs(["10.42.0.0/24"]),
@@ -2189,7 +2255,7 @@ mod tests {
                 proxy_protocol: true,
             },
         ] {
-            let spec = cdn_client_policy_spec("ns-web", &["h-1".into(), "h-2".into()], w, &trusted);
+            let spec = cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into(), "h-2".into()], w, &trusted);
             assert_eq!(
                 spec["clientIPDetection"],
                 json!({ "xForwardedFor": { "trustedCIDRs": trusted } })
@@ -2209,6 +2275,81 @@ mod tests {
         }
     }
 
+    /// A header that names the visitor reaches Pyo's API or a service only
+    /// when a CDN that alone can connect set it: on every listener else
+    /// (plain HTTP, HTTPS without origin pull, the tailnet), the proxies
+    /// remove each one a client sent, CF-Connecting-IP first. Behind
+    /// Cloudflare only Cloudflare's own pass. X-Forwarded-For is never
+    /// removed: the proxies append to it and Pyo reads it right to left.
+    #[test]
+    fn visitor_headers_only_from_a_cdn() {
+        let removed = |spec: &Value| -> Vec<String> {
+            spec["headers"]["earlyRequestHeaders"]["remove"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h.as_str().unwrap().to_owned())
+                .collect()
+        };
+        let all: Vec<String> = CDN_VISITOR_HEADERS
+            .iter()
+            .chain(OTHER_VISITOR_HEADERS.iter())
+            .map(|h| h.to_string())
+            .collect();
+        for h in ["cf-connecting-ip", "true-client-ip", "x-real-ip", "forwarded"] {
+            assert!(all.iter().any(|a| a == h), "{h}");
+        }
+        assert!(!all.iter().any(|h| h == "x-forwarded-for"));
+        // Header names the CRD takes: lowercase tokens, no repeats.
+        let mut sorted = all.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), all.len());
+        assert!(all.iter().all(|h| h.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')));
+
+        for https in [false, true] {
+            for spec in client_policy_variants(https) {
+                // Only the settings' headers: nothing else in them.
+                assert_eq!(spec["headers"].as_object().unwrap().len(), 1, "{spec}");
+                assert_eq!(spec["headers"]["earlyRequestHeaders"].as_object().unwrap().len(), 1);
+                let origin_pull = spec.get("tls").is_some();
+                if origin_pull {
+                    // Only the CDN gets through: its headers pass, the rest go.
+                    assert_eq!(removed(&spec), OTHER_VISITOR_HEADERS);
+                } else {
+                    assert_eq!(removed(&spec), all, "https {https}");
+                }
+            }
+        }
+        // Behind Cloudflare: Cloudflare's own pass, origin pull or not.
+        for w in [
+            WebSettings::default(),
+            WebSettings {
+                origin_pull: true,
+                proxy_protocol: false,
+            },
+        ] {
+            let cdn = cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into()], w, &["173.245.48.0/20".into()]);
+            let r = removed(&cdn);
+            assert!(!r.iter().any(|h| h == "cf-connecting-ip" || h == "cf-connecting-ipv6"), "{r:?}");
+            for h in ["true-client-ip", "fastly-client-ip", "x-real-ip", "x-client-ip", "forwarded"] {
+                assert!(r.iter().any(|x| x == h), "{h}");
+            }
+        }
+        // A CDN Pyo doesn't know keeps nothing.
+        assert_eq!(visitor_headers(cdn_own_headers("other")), visitor_headers(&[]));
+        // The tailnet listeners: everything goes, and that's all the policy sets.
+        let tn = tailnet_client_policy_spec();
+        assert_eq!(removed(&tn), all);
+        assert_eq!(
+            tn["targetRefs"],
+            json!([{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": TAILNET_GATEWAY }])
+        );
+        assert!(tn.get("clientIPDetection").is_none());
+        let objects = tailnet_objects(&[], &[], &TailnetOwn::default());
+        assert!(objects.iter().any(|o| o["kind"] == "ClientTrafficPolicy" && o["metadata"]["name"] == TAILNET_GATEWAY && o["spec"] == tn));
+    }
+
     /// Every website's listeners keep a quiet WebSocket or stream open for
     /// an hour (Envoy closes them after 5 minutes by default), and the
     /// admission policy lets the agent write that, behind a CDN too.
@@ -2219,7 +2360,7 @@ mod tests {
                 assert_eq!(spec["timeout"], json!({ "http": { "streamIdleTimeout": "1h" } }));
             }
         }
-        let cdn = cdn_client_policy_spec("ns-web", &["h-1".into()], WebSettings::default(), &["173.245.48.0/20".into()]);
+        let cdn = cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into()], WebSettings::default(), &["173.245.48.0/20".into()]);
         assert_eq!(cdn["timeout"]["http"]["streamIdleTimeout"], "1h");
         let policy = crate::rbac::admission("w", "g")[0].to_string();
         assert!(policy.contains("'proxyProtocol', 'timeout']"));

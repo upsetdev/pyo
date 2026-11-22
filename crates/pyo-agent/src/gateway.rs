@@ -480,7 +480,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         m["labels"][system::CDN_LABEL] = json!(cdn);
         out.objects.push(json!({
             "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": m,
-            "spec": system::cdn_client_policy_spec(&base, &sections, system::WebSettings::default(), &ranges),
+            "spec": system::cdn_client_policy_spec(cdn, &base, &sections, system::WebSettings::default(), &ranges),
         }));
     }
 
@@ -1928,9 +1928,13 @@ async fn write_web(client: &Client, w: system::WebSettings) -> anyhow::Result<()
     Ok(())
 }
 
-/// A service's CDN client policy with these websites' settings, its
+/// A service's CDN client policy with these websites' settings, its CDN,
 /// listeners and trusted ranges as they are.
 fn rewrite_cdn_policy(o: &mut Value, w: system::WebSettings) {
+    let cdn = o["metadata"]["labels"][system::CDN_LABEL]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
     let spec = &o["spec"];
     let gateway = spec["targetRefs"][0]["name"]
         .as_str()
@@ -1948,7 +1952,7 @@ fn rewrite_cdn_policy(o: &mut Value, w: system::WebSettings) {
         .flatten()
         .filter_map(|c| c.as_str().map(str::to_owned))
         .collect();
-    o["spec"] = system::cdn_client_policy_spec(&gateway, &sections, w, &trusted);
+    o["spec"] = system::cdn_client_policy_spec(&cdn, &gateway, &sections, w, &trusted);
 }
 
 /// Read the visitor's address from a PROXY protocol header on ports 80 and
@@ -2829,6 +2833,11 @@ mod tests {
             ctp["spec"]["clientIPDetection"],
             json!({ "xForwardedFor": { "trustedCIDRs": cf } })
         );
+        // Cloudflare's own visitor headers pass, every other one goes.
+        assert_eq!(
+            ctp["spec"]["headers"],
+            system::visitor_headers(&["cf-connecting-ip", "cf-connecting-ipv6"])
+        );
         assert_eq!(
             ctp["spec"]["targetRefs"],
             json!([{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "shop-web", "sectionName": format!("h-{}", host_hash("shop.example.com")) }])
@@ -3506,6 +3515,16 @@ mod tests {
         let mut no_pull = ctp.clone();
         no_pull["spec"]["connection"]["bufferLimit"] = json!("1Gi");
         assert!(apply(no_pull).await.is_err(), "other settings");
+        let mut keeps_all = ctp.clone();
+        keeps_all["spec"]["headers"] = system::visitor_headers(&system::CDN_VISITOR_HEADERS);
+        assert!(apply(keeps_all).await.is_err(), "another CDN's headers kept");
+        let mut no_headers = ctp.clone();
+        no_headers["spec"].as_object_mut().unwrap().remove("headers");
+        assert!(apply(no_headers).await.is_err(), "client headers kept");
+        let mut adds = ctp.clone();
+        adds["spec"]["headers"]["earlyRequestHeaders"]["add"] =
+            json!([{ "name": "cf-connecting-ip", "value": "203.0.113.7" }]);
+        assert!(apply(adds).await.is_err(), "a header added");
         api_of(&sa, "ClientTrafficPolicy")
             .delete("shop-web-cdn", &Default::default())
             .await
