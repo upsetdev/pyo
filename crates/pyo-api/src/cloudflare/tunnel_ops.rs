@@ -194,6 +194,10 @@ async fn sync(
     Ok(())
 }
 
+/// A cluster's tunnel as `setClusterTraffic` finds it: (state, account,
+/// default domain, its zone, Pyo's wildcard record).
+type Existing = (String, String, Option<String>, Option<String>, Option<String>);
+
 /// `setClusterTraffic`.
 #[allow(clippy::too_many_arguments)]
 pub async fn set_traffic(
@@ -255,7 +259,7 @@ pub async fn set_traffic(
         .first()
         .map(|z| z.account_name.clone())
         .unwrap_or_default();
-    let existing: Option<(String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    let existing: Option<Existing> = sqlx::query_as(
         "SELECT state, account_id, default_domain, default_zone_id, default_record_id FROM pyo.cluster_tunnels WHERE cluster_id = $1 FOR UPDATE",
     )
     .bind(cluster_id)
@@ -661,9 +665,7 @@ mod tests {
             INSTALL_FIRST
         );
         assert!(install_ready(&json!({ "tunnel": true, "agentInstall": { "state": "current" } })).is_ok());
-        for m in [INSTALL_FIRST] {
-            assert!(!m.contains(';'));
-        }
+        assert!(!INSTALL_FIRST.contains(';'));
     }
 
     #[test]

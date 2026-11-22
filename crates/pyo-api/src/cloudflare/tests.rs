@@ -174,8 +174,8 @@ impl Fake {
     }
 }
 
-impl Cloudflare for Fake {
-    async fn zones(&self) -> Result<Vec<(String, String)>, CfError> {
+impl Fake {
+    fn zone_list(&self) -> Result<Vec<(String, String)>, CfError> {
         self.log("zones".into());
         if !self.zone_read {
             return Err(Self::denied());
@@ -186,7 +186,9 @@ impl Cloudflare for Fake {
             .map(|z| (z.0.clone(), z.1.clone()))
             .collect())
     }
+}
 
+impl Cloudflare for Fake {
     async fn records(&self, zone_id: &str, name: &str) -> Result<Vec<Record>, CfError> {
         self.log(format!("list {zone_id} {name}"));
         if self.dns(zone_id) == Dns::None {
@@ -737,8 +739,7 @@ fn reads_cloudflares_answers() {
 impl tunnel::TunnelApi for Fake {
     async fn zone_accounts(&self) -> Result<Vec<CfZone>, CfError> {
         Ok(self
-            .zones()
-            .await?
+            .zone_list()?
             .into_iter()
             .map(|(id, name)| {
                 let (account_id, account_name) = self.account_of(&id);

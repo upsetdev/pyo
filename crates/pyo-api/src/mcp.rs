@@ -650,6 +650,7 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "listImages" => json_of(crate::images::list(st(), me(), Query(args_as(args)?)).await),
         "getRegistry" => json_of(crate::images::registry(st(), me(), Query(args_as(args)?)).await),
         "getCloudflare" => json_of(crate::cloudflare::get(st(), me(), Query(args_as(args)?)).await),
+        "getClusterTunnel" => json_of(crate::cloudflare::tunnel_ops::get(st(), me(), path_id()?).await),
         "listDatabases" => json_of(crate::databases::list(st(), me(), Query(args_as(args)?)).await),
         "getDatabase" => {
             json_of(crate::databases::get(st(), me(), Path(arg(args, "id")?.to_owned())).await)

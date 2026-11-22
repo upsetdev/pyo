@@ -1545,6 +1545,160 @@ pub fn cel_literal(v: &Value) -> String {
     }
 }
 
+// ── Cloudflare Tunnel ──────────────────────────────────────────────────────
+//
+// A cluster's websites through Cloudflare with no open ports
+// (docs/cloudflare-tunnel.md). The agent runs the connector (cloudflared)
+// in pyo-system with the tunnel's token, and points it at
+// `TUNNEL_ORIGIN_SERVICE`, its own Service in front of the proxies'
+// HTTPS listener. Tunnel domains' listeners trust X-Forwarded-For only from
+// the connector's pods (a client policy labelled [`TUNNEL_CDN`]).
+
+/// cloudflared, by digest (2026.10.7), as Pyo Cloud runs it. Renovate keeps
+/// it current.
+pub const CLOUDFLARED_IMAGE: &str = "cloudflare/cloudflared@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba";
+/// The connector's Deployment, Secret and disruption budget in pyo-system.
+pub const TUNNEL_NAME: &str = "pyo-tunnel";
+/// The label on its pods (and the selector).
+pub const TUNNEL_APP: &str = "pyo-tunnel";
+/// The Secret's label with the tunnel id its token is for.
+pub const TUNNEL_ID_LABEL: &str = "pyo.dev/tunnel-id";
+/// The Secret's key with the token.
+pub const TUNNEL_TOKEN_KEY: &str = "token";
+/// Connectors: two, spread across servers where it can.
+pub const TUNNEL_REPLICAS: i32 = 2;
+/// Where cloudflared serves `/ready` (nothing reaches it: pyo-system
+/// denies ingress).
+pub const TUNNEL_METRICS_PORT: i32 = 2000;
+/// The Service cloudflared sends requests to: the proxies' HTTPS.
+pub const TUNNEL_ORIGIN_SERVICE: &str = "pyo-tunnel-origin";
+/// The label on a service's client policy for its tunnel listeners
+/// ([`CDN_LABEL`]): not a CDN users pick (`firewall::BEHIND`).
+pub const TUNNEL_CDN: &str = "tunnel";
+/// The Service that keeps public TCP and UDP ports on the servers in
+/// tunnel mode, when the proxies' own Service isn't published.
+pub const PUBLIC_PORTS_SERVICE: &str = "pyo-public-ports";
+
+/// The connector's token, labelled with its tunnel.
+pub fn tunnel_secret(tunnel_id: &str, token: &str) -> Value {
+    json!({
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": { "name": TUNNEL_NAME, "namespace": crate::rbac::NS, "labels": { "app.kubernetes.io/managed-by": "pyo", TUNNEL_ID_LABEL: tunnel_id } },
+        "type": "Opaque",
+        "stringData": { TUNNEL_TOKEN_KEY: token },
+    })
+}
+
+/// The connector: cloudflared over HTTP/2 (QUIC is often blocked, and its
+/// fallback is slow enough that the probe restarts it first), with no
+/// service account token, non-root, read only, no capabilities. Never on
+/// build-only servers, spread across servers where it can be.
+pub fn tunnel_deployment(image: &str) -> Value {
+    let app = json!({ "app.kubernetes.io/name": TUNNEL_APP });
+    let probe = json!({ "httpGet": { "path": "/ready", "port": TUNNEL_METRICS_PORT } });
+    json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": { "name": TUNNEL_NAME, "namespace": crate::rbac::NS, "labels": { "app.kubernetes.io/name": TUNNEL_APP, "app.kubernetes.io/managed-by": "pyo" } },
+        "spec": {
+            "replicas": TUNNEL_REPLICAS,
+            "selector": { "matchLabels": app },
+            "strategy": { "type": "RollingUpdate", "rollingUpdate": { "maxSurge": 1, "maxUnavailable": 0 } },
+            "template": {
+                "metadata": { "labels": app },
+                "spec": {
+                    "automountServiceAccountToken": false,
+                    "affinity": gateway_affinity(),
+                    "topologySpreadConstraints": [{ "maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "ScheduleAnyway", "labelSelector": { "matchLabels": app } }],
+                    "securityContext": { "runAsNonRoot": true, "runAsUser": 65532, "seccompProfile": { "type": "RuntimeDefault" } },
+                    "containers": [{
+                        "name": "cloudflared",
+                        "image": image,
+                        "args": ["tunnel", "--no-autoupdate", "--protocol", "http2", "--metrics", format!("0.0.0.0:{TUNNEL_METRICS_PORT}"), "--loglevel", "info", "run"],
+                        "env": [{ "name": "TUNNEL_TOKEN", "valueFrom": { "secretKeyRef": { "name": TUNNEL_NAME, "key": TUNNEL_TOKEN_KEY } } }],
+                        "readinessProbe": { "httpGet": probe["httpGet"], "periodSeconds": 10 },
+                        "livenessProbe": { "httpGet": probe["httpGet"], "initialDelaySeconds": 60, "periodSeconds": 30, "failureThreshold": 6 },
+                        "resources": { "requests": { "cpu": "10m", "memory": "32Mi" }, "limits": { "memory": "128Mi" } },
+                        "securityContext": { "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": { "drop": ["ALL"] } },
+                    }],
+                },
+            },
+        },
+    })
+}
+
+/// One connector stays up through a server's drain or a rollout.
+pub fn tunnel_budget() -> Value {
+    json!({
+        "apiVersion": "policy/v1", "kind": "PodDisruptionBudget",
+        "metadata": { "name": TUNNEL_NAME, "namespace": crate::rbac::NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
+        "spec": { "minAvailable": 1, "selector": { "matchLabels": { "app.kubernetes.io/name": TUNNEL_APP } } },
+    })
+}
+
+/// The origin Service's one port: HTTPS onto the proxies' 443 listener.
+pub fn tunnel_origin_ports() -> Value {
+    json!([{ "name": "https", "port": 443, "targetPort": 10443, "protocol": "TCP" }])
+}
+
+/// The Service cloudflared sends requests to, inside the cluster only.
+pub fn tunnel_origin_service() -> Value {
+    json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": TUNNEL_ORIGIN_SERVICE, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
+        "spec": { "type": "ClusterIP", "selector": proxy_pods()["matchLabels"], "ports": tunnel_origin_ports() },
+    })
+}
+
+/// Fields the API server fills in on a LoadBalancer Service with
+/// externalTrafficPolicy Local, besides [`TAILNET_WEB_DEFAULTED`].
+pub const LOAD_BALANCER_DEFAULTED: [&str; 2] = ["allocateLoadBalancerNodePorts", "healthCheckNodePort"];
+
+/// Public TCP and UDP ports in tunnel mode: a LoadBalancer Service onto
+/// the proxies for these (protocol, public port), and nothing else. The
+/// visitor's own address reaches the proxy (externalTrafficPolicy Local).
+/// None without ports.
+pub fn public_ports_service(ports: &[(String, i32)]) -> Option<Value> {
+    if ports.is_empty() {
+        return None;
+    }
+    let mut ports: Vec<(String, i32)> = ports.to_vec();
+    ports.sort();
+    ports.dedup();
+    let list: Vec<Value> = ports
+        .iter()
+        .map(|(proto, port)| {
+            json!({ "name": format!("{}-{port}", proto.to_lowercase()), "port": port, "targetPort": crate::proxy_listen_port(*port), "protocol": proto })
+        })
+        .collect();
+    Some(json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": PUBLIC_PORTS_SERVICE, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
+        "spec": { "type": "LoadBalancer", "externalTrafficPolicy": "Local", "selector": proxy_pods()["matchLabels"], "ports": list },
+    }))
+}
+
+/// A service's client policy for its tunnel listeners.
+pub fn tunnel_policy_name(base: &str) -> String {
+    format!("{base}-{TUNNEL_CDN}")
+}
+
+/// Addresses as a client policy trusts them: each one alone (/32, /128),
+/// sorted, deduped.
+pub fn host_cidrs(ips: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = ips
+        .iter()
+        .filter_map(|ip| ip.parse::<std::net::IpAddr>().ok())
+        .map(|ip| match ip {
+            std::net::IpAddr::V4(v4) => format!("{v4}/32"),
+            std::net::IpAddr::V6(v6) => format!("{v6}/128"),
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out.truncate(MAX_TRUSTED_CIDRS);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2413,158 +2567,4 @@ mod tests {
         );
         assert_eq!(cel_literal(&json!("a\nb\\c")), "'a\\nb\\\\c'");
     }
-}
-
-// ── Cloudflare Tunnel ──────────────────────────────────────────────────────
-//
-// A cluster's websites through Cloudflare with no open ports
-// (docs/cloudflare-tunnel.md). The agent runs the connector (cloudflared)
-// in pyo-system with the tunnel's token, and points it at
-// `TUNNEL_ORIGIN_SERVICE`, its own Service in front of the proxies'
-// HTTPS listener. Tunnel domains' listeners trust X-Forwarded-For only from
-// the connector's pods (a client policy labelled [`TUNNEL_CDN`]).
-
-/// cloudflared, by digest (2026.10.7), as Pyo Cloud runs it. Renovate keeps
-/// it current.
-pub const CLOUDFLARED_IMAGE: &str = "cloudflare/cloudflared@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba";
-/// The connector's Deployment, Secret and disruption budget in pyo-system.
-pub const TUNNEL_NAME: &str = "pyo-tunnel";
-/// The label on its pods (and the selector).
-pub const TUNNEL_APP: &str = "pyo-tunnel";
-/// The Secret's label with the tunnel id its token is for.
-pub const TUNNEL_ID_LABEL: &str = "pyo.dev/tunnel-id";
-/// The Secret's key with the token.
-pub const TUNNEL_TOKEN_KEY: &str = "token";
-/// Connectors: two, spread across servers where it can.
-pub const TUNNEL_REPLICAS: i32 = 2;
-/// Where cloudflared serves `/ready` (nothing reaches it: pyo-system
-/// denies ingress).
-pub const TUNNEL_METRICS_PORT: i32 = 2000;
-/// The Service cloudflared sends requests to: the proxies' HTTPS.
-pub const TUNNEL_ORIGIN_SERVICE: &str = "pyo-tunnel-origin";
-/// The label on a service's client policy for its tunnel listeners
-/// ([`CDN_LABEL`]): not a CDN users pick (`firewall::BEHIND`).
-pub const TUNNEL_CDN: &str = "tunnel";
-/// The Service that keeps public TCP and UDP ports on the servers in
-/// tunnel mode, when the proxies' own Service isn't published.
-pub const PUBLIC_PORTS_SERVICE: &str = "pyo-public-ports";
-
-/// The connector's token, labelled with its tunnel.
-pub fn tunnel_secret(tunnel_id: &str, token: &str) -> Value {
-    json!({
-        "apiVersion": "v1", "kind": "Secret",
-        "metadata": { "name": TUNNEL_NAME, "namespace": crate::rbac::NS, "labels": { "app.kubernetes.io/managed-by": "pyo", TUNNEL_ID_LABEL: tunnel_id } },
-        "type": "Opaque",
-        "stringData": { TUNNEL_TOKEN_KEY: token },
-    })
-}
-
-/// The connector: cloudflared over HTTP/2 (QUIC is often blocked, and its
-/// fallback is slow enough that the probe restarts it first), with no
-/// service account token, non-root, read only, no capabilities. Never on
-/// build-only servers, spread across servers where it can be.
-pub fn tunnel_deployment(image: &str) -> Value {
-    let app = json!({ "app.kubernetes.io/name": TUNNEL_APP });
-    let probe = json!({ "httpGet": { "path": "/ready", "port": TUNNEL_METRICS_PORT } });
-    json!({
-        "apiVersion": "apps/v1", "kind": "Deployment",
-        "metadata": { "name": TUNNEL_NAME, "namespace": crate::rbac::NS, "labels": { "app.kubernetes.io/name": TUNNEL_APP, "app.kubernetes.io/managed-by": "pyo" } },
-        "spec": {
-            "replicas": TUNNEL_REPLICAS,
-            "selector": { "matchLabels": app },
-            "strategy": { "type": "RollingUpdate", "rollingUpdate": { "maxSurge": 1, "maxUnavailable": 0 } },
-            "template": {
-                "metadata": { "labels": app },
-                "spec": {
-                    "automountServiceAccountToken": false,
-                    "affinity": gateway_affinity(),
-                    "topologySpreadConstraints": [{ "maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "ScheduleAnyway", "labelSelector": { "matchLabels": app } }],
-                    "securityContext": { "runAsNonRoot": true, "runAsUser": 65532, "seccompProfile": { "type": "RuntimeDefault" } },
-                    "containers": [{
-                        "name": "cloudflared",
-                        "image": image,
-                        "args": ["tunnel", "--no-autoupdate", "--protocol", "http2", "--metrics", format!("0.0.0.0:{TUNNEL_METRICS_PORT}"), "--loglevel", "info", "run"],
-                        "env": [{ "name": "TUNNEL_TOKEN", "valueFrom": { "secretKeyRef": { "name": TUNNEL_NAME, "key": TUNNEL_TOKEN_KEY } } }],
-                        "readinessProbe": { "httpGet": probe["httpGet"], "periodSeconds": 10 },
-                        "livenessProbe": { "httpGet": probe["httpGet"], "initialDelaySeconds": 60, "periodSeconds": 30, "failureThreshold": 6 },
-                        "resources": { "requests": { "cpu": "10m", "memory": "32Mi" }, "limits": { "memory": "128Mi" } },
-                        "securityContext": { "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": { "drop": ["ALL"] } },
-                    }],
-                },
-            },
-        },
-    })
-}
-
-/// One connector stays up through a server's drain or a rollout.
-pub fn tunnel_budget() -> Value {
-    json!({
-        "apiVersion": "policy/v1", "kind": "PodDisruptionBudget",
-        "metadata": { "name": TUNNEL_NAME, "namespace": crate::rbac::NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
-        "spec": { "minAvailable": 1, "selector": { "matchLabels": { "app.kubernetes.io/name": TUNNEL_APP } } },
-    })
-}
-
-/// The origin Service's one port: HTTPS onto the proxies' 443 listener.
-pub fn tunnel_origin_ports() -> Value {
-    json!([{ "name": "https", "port": 443, "targetPort": 10443, "protocol": "TCP" }])
-}
-
-/// The Service cloudflared sends requests to, inside the cluster only.
-pub fn tunnel_origin_service() -> Value {
-    json!({
-        "apiVersion": "v1", "kind": "Service",
-        "metadata": { "name": TUNNEL_ORIGIN_SERVICE, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
-        "spec": { "type": "ClusterIP", "selector": proxy_pods()["matchLabels"], "ports": tunnel_origin_ports() },
-    })
-}
-
-/// Fields the API server fills in on a LoadBalancer Service with
-/// externalTrafficPolicy Local, besides [`TAILNET_WEB_DEFAULTED`].
-pub const LOAD_BALANCER_DEFAULTED: [&str; 2] = ["allocateLoadBalancerNodePorts", "healthCheckNodePort"];
-
-/// Public TCP and UDP ports in tunnel mode: a LoadBalancer Service onto
-/// the proxies for these (protocol, public port), and nothing else. The
-/// visitor's own address reaches the proxy (externalTrafficPolicy Local).
-/// None without ports.
-pub fn public_ports_service(ports: &[(String, i32)]) -> Option<Value> {
-    if ports.is_empty() {
-        return None;
-    }
-    let mut ports: Vec<(String, i32)> = ports.to_vec();
-    ports.sort();
-    ports.dedup();
-    let list: Vec<Value> = ports
-        .iter()
-        .map(|(proto, port)| {
-            json!({ "name": format!("{}-{port}", proto.to_lowercase()), "port": port, "targetPort": crate::proxy_listen_port(*port), "protocol": proto })
-        })
-        .collect();
-    Some(json!({
-        "apiVersion": "v1", "kind": "Service",
-        "metadata": { "name": PUBLIC_PORTS_SERVICE, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
-        "spec": { "type": "LoadBalancer", "externalTrafficPolicy": "Local", "selector": proxy_pods()["matchLabels"], "ports": list },
-    }))
-}
-
-/// A service's client policy for its tunnel listeners.
-pub fn tunnel_policy_name(base: &str) -> String {
-    format!("{base}-{TUNNEL_CDN}")
-}
-
-/// Addresses as a client policy trusts them: each one alone (/32, /128),
-/// sorted, deduped.
-pub fn host_cidrs(ips: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = ips
-        .iter()
-        .filter_map(|ip| ip.parse::<std::net::IpAddr>().ok())
-        .map(|ip| match ip {
-            std::net::IpAddr::V4(v4) => format!("{v4}/32"),
-            std::net::IpAddr::V6(v6) => format!("{v6}/128"),
-        })
-        .collect();
-    out.sort();
-    out.dedup();
-    out.truncate(MAX_TRUSTED_CIDRS);
-    out
 }

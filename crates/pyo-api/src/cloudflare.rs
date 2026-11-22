@@ -151,8 +151,6 @@ fn api_error(e: CfError) -> ApiError {
 /// What Pyo asks of Cloudflare. [`Http`] is the real one; the tests use a
 /// fake account.
 pub(crate) trait Cloudflare {
-    /// Every zone the token can read, as (id, name).
-    async fn zones(&self) -> Result<Vec<(String, String)>, CfError>;
     /// The records with exactly this name.
     async fn records(&self, zone_id: &str, name: &str) -> Result<Vec<Record>, CfError>;
     async fn record(&self, zone_id: &str, id: &str) -> Result<Record, CfError>;
@@ -469,28 +467,6 @@ fn record_from(v: &Value) -> Result<Record, CfError> {
 }
 
 impl Cloudflare for Http {
-    async fn zones(&self) -> Result<Vec<(String, String)>, CfError> {
-        let mut out = vec![];
-        for page in 1..=20 {
-            let mut url = Self::url("/zones");
-            url.query_pairs_mut()
-                .append_pair("per_page", "50")
-                .append_pair("page", &page.to_string());
-            let v = self.call(Method::GET, url, None).await?;
-            for z in v["result"].as_array().into_iter().flatten() {
-                if let (Some(id), Some(name)) = (z["id"].as_str(), z["name"].as_str())
-                    && id_ok(id)
-                {
-                    out.push((id.to_owned(), name.to_owned()));
-                }
-            }
-            if page >= v["result_info"]["total_pages"].as_i64().unwrap_or(1) {
-                break;
-            }
-        }
-        Ok(out)
-    }
-
     async fn records(&self, zone_id: &str, name: &str) -> Result<Vec<Record>, CfError> {
         let mut url = Self::url(&Self::record_path(zone_id, None)?);
         url.query_pairs_mut()
