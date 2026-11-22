@@ -110,9 +110,25 @@ fn can_tunnel(host: &str, zones: &[Zone], account_id: &str) -> Option<Zone> {
         .cloned()
 }
 
+/// What a switch to the tunnel makes of the domain's `tunnel`. A name
+/// that's moving from the cluster's public ports takes `"switching"`, so
+/// both paths answer while its record moves. One that's already only
+/// through the tunnel (`"on"`: under the default domain's wildcard, or
+/// switched before) stays as it is, so its gate never opens for a record
+/// that changes nothing for direct visitors. None: leave it.
+pub(crate) fn switch_state(now: Option<&str>) -> Option<&'static str> {
+    match now {
+        Some(pyo_proto::TUNNEL_ON) => None,
+        _ => Some(pyo_proto::TUNNEL_SWITCHING),
+    }
+}
+
 /// Ask for a domain's switch to the tunnel: its domain takes
-/// `tunnel: "switching"` (both paths answer), its record row waits for the
-/// loop, which moves the record once the agent has the routes.
+/// `tunnel: "switching"` (both paths answer) unless it's already only
+/// through the tunnel ([`switch_state`]), and its record row waits for the
+/// loop, which moves the record once the agent has the routes. Whether the
+/// domain's routes changed.
+#[allow(clippy::too_many_arguments)]
 async fn begin_switch(
     tx: &mut Transaction<'_, Postgres>,
     team_id: &str,
@@ -121,12 +137,13 @@ async fn begin_switch(
     host: &str,
     zone: &Zone,
     replace: bool,
-) -> ApiResult<()> {
+    now: Option<&str>,
+) -> ApiResult<bool> {
     sqlx::query(
         "INSERT INTO pyo.dns_records (service_id, domain_id, team_id, hostname, zone_id, zone_name, type, status, replace, routes_command)
          VALUES ($1, $2, $3, $4, $5, $6, 'CNAME', 'switching', $7, NULL)
          ON CONFLICT (service_id, domain_id) DO UPDATE SET hostname = $4, zone_id = $5, zone_name = $6, status = 'switching',
-           replace = $7, error = NULL, existing = '[]', updated_at = now()",
+           replace = $7, error = NULL, existing = '[]', routes_command = NULL, updated_at = now()",
     )
     .bind(service_id)
     .bind(domain_id)
@@ -137,7 +154,13 @@ async fn begin_switch(
     .bind(replace)
     .execute(&mut **tx)
     .await?;
-    set_tunnel(tx, service_id, domain_id, Some(pyo_proto::TUNNEL_SWITCHING)).await
+    match switch_state(now) {
+        Some(state) => {
+            set_tunnel(tx, service_id, domain_id, Some(state)).await?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 async fn set_tunnel(
@@ -353,8 +376,7 @@ pub async fn set_traffic(
                 continue;
             };
             let domain_id = d["id"].as_str().unwrap_or("");
-            begin_switch(tx, &team_id, &service_id, domain_id, &host, &zone, false).await?;
-            any = true;
+            any |= begin_switch(tx, &team_id, &service_id, domain_id, &host, &zone, false, None).await?;
             moving += 1;
         }
         if any {
@@ -444,8 +466,11 @@ pub async fn set_domain(
         if via == "tunnel" && status == "created" {
             return Ok(json!({ "ok": true, "status": "active" }));
         }
-        begin_switch(tx, &team_id, service_id, domain_id, &host, &zone, replace).await?;
-        sync(tx, service_id, wake).await?;
+        // Already only through the tunnel: it stays gated while its own
+        // record is made, and the agent has nothing new to apply.
+        if begin_switch(tx, &team_id, service_id, domain_id, &host, &zone, replace, d["tunnel"].as_str()).await? {
+            sync(tx, service_id, wake).await?;
+        }
         log_activity(
             tx,
             &team_id,
@@ -671,6 +696,15 @@ mod tests {
         );
         assert!(install_ready(&json!({ "tunnel": true, "agentInstall": { "state": "current" } })).is_ok());
         assert!(!INSTALL_FIRST.contains(';'));
+    }
+
+    #[test]
+    fn a_name_already_on_the_tunnel_stays_gated_while_its_record_is_made() {
+        // Moving from public: both paths while the record moves.
+        assert_eq!(switch_state(None), Some("switching"));
+        assert_eq!(switch_state(Some("switching")), Some("switching"));
+        // Under the wildcard, or switched before: never back to both paths.
+        assert_eq!(switch_state(Some("on")), None);
     }
 
     #[test]
