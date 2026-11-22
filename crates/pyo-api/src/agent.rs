@@ -329,6 +329,8 @@ async fn heartbeat(
         "ingressController": caps.ingress_controller,
         // Why the gateway failed to install, while it isn't answering.
         "gatewayError": caps.gateway_error,
+        // Servers where the gateway can't get its ports (another program there has them).
+        "gatewayPortsTaken": caps.gateway_ports_taken,
         "loadBalancer": caps.load_balancer,
         "loadBalancerIps": caps.load_balancer_ips,
         "certManager": caps.cert_manager,

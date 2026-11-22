@@ -863,6 +863,7 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
             &nodes,
             &daemonsets,
             &deployments,
+            &pods,
             m.available,
             &gpus_used,
         )
@@ -887,6 +888,7 @@ async fn capabilities(
     nodes: &[Node],
     daemonsets: &[DaemonSet],
     deployments: &[Deployment],
+    pods: &[Pod],
     metrics_server: bool,
     gpus_used: &HashMap<String, u32>,
 ) -> Capabilities {
@@ -956,6 +958,7 @@ async fn capabilities(
     Capabilities {
         ingress_controller: ingress_controller.into(),
         gateway_error,
+        gateway_ports_taken: gateway_ports_taken(client, pods).await,
         load_balancer: if metallb {
             "metallb"
         } else if servicelb {
@@ -982,6 +985,143 @@ async fn capabilities(
         waf_rejected,
         waf_active,
         tailnet_web_ips: tailnet_web_ips(client).await,
+    }
+}
+
+/// k3s ServiceLB's labels on the pods that publish a LoadBalancer Service
+/// on the servers' host ports: the Service's namespace and name.
+const SVCLB_NS_LABEL: &str = "svccontroller.k3s.cattle.io/svcnamespace";
+const SVCLB_NAME_LABEL: &str = "svccontroller.k3s.cattle.io/svcname";
+
+/// Where the gateway can't get its ports: its ServiceLB pods that wait
+/// because another pod on their server has those host ports (k3s's
+/// Traefik, ingress-nginx…). Said in the log when it changes.
+async fn gateway_ports_taken(client: &Client, live: &[Pod]) -> Vec<pyo_proto::GatewayPortsTaken> {
+    let lp = ListParams::default()
+        .labels(&format!("{SVCLB_NS_LABEL}={}", pyo_proto::system::GATEWAY_NS))
+        .fields("status.phase=Pending");
+    let Ok(waiting) = Api::<Pod>::all(client.clone()).list(&lp).await else {
+        return vec![];
+    };
+    let taken = ports_taken(&waiting.items, live);
+    if let Ok(mut last) = PORTS_TAKEN.lock()
+        && *last != taken
+    {
+        for t in &taken {
+            tracing::warn!(server = %t.server, ports = ?t.ports, by = %t.by, "the gateway can't get its ports there: another program in the cluster has them");
+        }
+        if taken.is_empty() {
+            tracing::info!("the gateway has its ports on every server");
+        }
+        *last = taken.clone();
+    }
+    taken
+}
+
+/// What the last heartbeat found of [`gateway_ports_taken`].
+static PORTS_TAKEN: std::sync::Mutex<Vec<pyo_proto::GatewayPortsTaken>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The gateway's ServiceLB pods that `waiting` holds, unscheduled for lack of
+/// free ports: each one's server (the one its DaemonSet aims it at) and the
+/// ports another pod there in `live` has, with what that is. Every host
+/// port it asks for when none is found there. By server, once each.
+pub fn ports_taken(waiting: &[Pod], live: &[Pod]) -> Vec<pyo_proto::GatewayPortsTaken> {
+    let host_ports = |p: &Pod| -> Vec<(u16, String)> {
+        p.spec
+            .iter()
+            .flat_map(|s| s.containers.iter())
+            .flat_map(|c| c.ports.iter().flatten())
+            .filter_map(|cp| {
+                let port = u16::try_from(cp.host_port?).ok()?;
+                Some((port, cp.protocol.clone().unwrap_or_else(|| "TCP".into())))
+            })
+            .collect()
+    };
+    let ours = |p: &Pod| {
+        p.labels().get(SVCLB_NS_LABEL).map(String::as_str) == Some(pyo_proto::system::GATEWAY_NS)
+    };
+    let mut out: BTreeMap<String, (std::collections::BTreeSet<u16>, String)> = BTreeMap::new();
+    for pod in waiting.iter().filter(|p| ours(p)) {
+        let no_ports = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .into_iter()
+            .flatten()
+            .any(|c| {
+                c.type_ == "PodScheduled"
+                    && c.status == "False"
+                    && c.message.as_deref().is_some_and(|m| m.contains("free ports"))
+            });
+        let Some(server) = target_server(pod) else {
+            continue;
+        };
+        if !no_ports {
+            continue;
+        }
+        let wanted = host_ports(pod);
+        let entry = out.entry(server.clone()).or_default();
+        let mut found = false;
+        for other in live.iter().filter(|o| {
+            !ours(o)
+                && o.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(server.as_str())
+        }) {
+            let theirs = host_ports(other);
+            for (port, proto) in &wanted {
+                if theirs.iter().any(|(p, pr)| p == port && pr == proto) {
+                    found = true;
+                    entry.0.insert(*port);
+                    if entry.1.is_empty() {
+                        entry.1 = holder_name(other);
+                    }
+                }
+            }
+        }
+        if !found {
+            entry.0.extend(wanted.iter().map(|(p, _)| *p));
+        }
+    }
+    out.into_iter()
+        .map(|(server, (ports, by))| pyo_proto::GatewayPortsTaken {
+            server,
+            ports: ports.into_iter().collect(),
+            by,
+        })
+        .collect()
+}
+
+/// The server a DaemonSet's pod is for: its node affinity on the server's
+/// name (set before it's scheduled), else where it runs.
+fn target_server(pod: &Pod) -> Option<String> {
+    let spec = pod.spec.as_ref()?;
+    spec.affinity
+        .as_ref()
+        .and_then(|a| a.node_affinity.as_ref())
+        .and_then(|n| n.required_during_scheduling_ignored_during_execution.as_ref())
+        .into_iter()
+        .flat_map(|r| r.node_selector_terms.iter())
+        .flat_map(|t| t.match_fields.iter().flatten())
+        .find(|f| f.key == "metadata.name" && f.operator == "In")
+        .and_then(|f| f.values.as_ref()?.first().cloned())
+        .or_else(|| spec.node_name.clone())
+}
+
+/// What a pod holding host ports is, in words people know: "Traefik",
+/// "ingress-nginx", else the Service ServiceLB publishes, else its name.
+fn holder_name(pod: &Pod) -> String {
+    let name = pod
+        .labels()
+        .get(SVCLB_NAME_LABEL)
+        .cloned()
+        .unwrap_or_else(|| pod.name_any());
+    let ns = pod.namespace().unwrap_or_default();
+    if name.contains("traefik") {
+        "Traefik".into()
+    } else if ns == "ingress-nginx" || name.contains("ingress-nginx") {
+        "ingress-nginx".into()
+    } else {
+        name
     }
 }
 
@@ -1230,6 +1370,76 @@ pub async fn label_tags(client: &Client, wanted: &[pyo_proto::ServerTags]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ServiceLB pod as k3s makes it for `svc` in `ns`, aimed at `server`:
+    /// pending without free ports, or running there.
+    fn svclb(ns: &str, svc: &str, server: &str, ports: &[i32], pending: bool) -> Pod {
+        let containers: Vec<_> = ports
+            .iter()
+            .map(|p| serde_json::json!({ "name": format!("lb-tcp-{p}"), "ports": [{ "containerPort": p, "hostPort": p, "protocol": "TCP" }] }))
+            .collect();
+        let mut pod = serde_json::json!({
+            "metadata": { "name": format!("svclb-{svc}-1a2b3c4d-x{server}"), "namespace": "kube-system",
+                "labels": { SVCLB_NS_LABEL: ns, SVCLB_NAME_LABEL: svc } },
+            "spec": { "containers": containers, "affinity": { "nodeAffinity": { "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [{ "matchFields": [{ "key": "metadata.name", "operator": "In", "values": [server] }] }] } } } },
+            "status": { "phase": "Running" }
+        });
+        if pending {
+            pod["status"] = serde_json::json!({ "phase": "Pending", "conditions": [{ "type": "PodScheduled", "status": "False", "reason": "Unschedulable",
+                "message": "0/2 nodes are available: 1 node(s) didn't have free ports for the requested pod ports, 1 node(s) didn't match Pod's node affinity/selector." }] });
+        } else {
+            pod["spec"]["nodeName"] = server.into();
+        }
+        serde_json::from_value(pod).unwrap()
+    }
+
+    #[test]
+    fn the_gateway_sees_where_its_ports_are_taken() {
+        let gw = |server: &str, pending: bool| svclb("pyo-gateway", "envoy-pyo-695a31a2", server, &[80, 443], pending);
+        let traefik = svclb("kube-system", "traefik", "misc-ten-sin4", &[80, 443], false);
+        // As on misc-ten-sin4: k3s's Traefik has 80 and 443 there.
+        let live = [traefik.clone(), gw("other", false)];
+        assert_eq!(
+            ports_taken(&[gw("misc-ten-sin4", true)], &live),
+            vec![pyo_proto::GatewayPortsTaken { server: "misc-ten-sin4".into(), ports: vec![80, 443], by: "Traefik".into() }]
+        );
+        assert_eq!(ports_taken(&[gw("misc-ten-sin4", true)], &live)[0].text(), "Ports 80 and 443 are in use on misc-ten-sin4");
+        // ingress-nginx on host ports, 443 only.
+        let nginx: Pod = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "ingress-nginx-controller-5c9", "namespace": "ingress-nginx" },
+            "spec": { "nodeName": "web-2", "containers": [{ "name": "c", "ports": [{ "containerPort": 443, "hostPort": 443 }, { "containerPort": 8443 }] }] }
+        }))
+        .unwrap();
+        assert_eq!(
+            ports_taken(&[gw("web-2", true)], &[nginx.clone()]),
+            vec![pyo_proto::GatewayPortsTaken { server: "web-2".into(), ports: vec![443], by: "ingress-nginx".into() }]
+        );
+        // Another server's holder doesn't count; nothing found: every port it wants.
+        assert_eq!(
+            ports_taken(&[gw("web-3", true)], &[traefik.clone(), nginx]),
+            vec![pyo_proto::GatewayPortsTaken { server: "web-3".into(), ports: vec![80, 443], by: String::new() }]
+        );
+        // Pending for another reason (a server not ready), someone else's
+        // pending pod, or nothing pending: nothing to say.
+        let mut other_reason = gw("misc-ten-sin4", true);
+        other_reason.status.as_mut().unwrap().conditions.as_mut().unwrap()[0].message =
+            Some("0/1 nodes are available: 1 node(s) had untolerated taint {node.kubernetes.io/not-ready: }.".into());
+        assert!(ports_taken(&[other_reason], &live).is_empty());
+        assert!(ports_taken(&[svclb("shop", "lb", "misc-ten-sin4", &[80], true)], &live).is_empty());
+        assert!(ports_taken(&[], &live).is_empty());
+        // Two of the gateway's Services on one server: once, ports merged.
+        let tcp = svclb("pyo-gateway", "envoy-pyo-tcp", "misc-ten-sin4", &[5432], true);
+        let pg: Pod = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "postgres-0", "namespace": "db" },
+            "spec": { "nodeName": "misc-ten-sin4", "hostNetwork": true, "containers": [{ "name": "pg", "ports": [{ "containerPort": 5432, "hostPort": 5432 }] }] }
+        }))
+        .unwrap();
+        let both = ports_taken(&[gw("misc-ten-sin4", true), tcp], &[traefik, pg]);
+        assert_eq!(both.len(), 1);
+        assert_eq!(both[0].ports, vec![80, 443, 5432]);
+        assert_eq!(both[0].by, "Traefik");
+    }
 
     #[test]
     fn a_refused_waf_policy_is_seen() {

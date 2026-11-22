@@ -570,6 +570,8 @@ fn capabilities(stored: &Value) -> Value {
     json!({
         "ingressController": or("ingressController", json!("none")),
         "gatewayError": or("gatewayError", Value::Null),
+        // Servers where the gateway can't get its ports: {server, ports, by}.
+        "gatewayPortsTaken": or("gatewayPortsTaken", json!([])),
         "loadBalancer": or("loadBalancer", json!("none")),
         "loadBalancerIPs": or("loadBalancerIps", json!([])),
         "certManager": or("certManager", json!(false)),
@@ -647,6 +649,9 @@ mod tests {
         assert_eq!(c["ingressController"], "envoy");
         assert_eq!(c["loadBalancerIPs"], json!(["1.2.3.4"]));
         assert_eq!(c["certManager"], true);
+        let taken = json!([{ "server": "misc-ten-sin4", "ports": [80, 443], "by": "Traefik" }]);
+        let c = capabilities(&json!({ "gatewayPortsTaken": taken }));
+        assert_eq!(c["gatewayPortsTaken"], taken);
     }
 
     #[test]
@@ -660,5 +665,6 @@ mod tests {
         assert_eq!(c["updates"], 0);
         assert!(c["agentInstall"].is_null());
         assert!(c["agentScope"].is_null());
+        assert_eq!(c["gatewayPortsTaken"], json!([]));
     }
 }
