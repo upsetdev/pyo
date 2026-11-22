@@ -396,12 +396,17 @@ pub fn ips(caps: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// A cluster's row as [`load`] reads it: team, public traffic, the
+/// free-domain address set, capabilities, same cluster, tunnel mode, and
+/// the tunnel's default domain.
+type Stored = (String, bool, Option<String>, Value, bool, bool, Option<String>);
+
 /// A cluster as stored, and its team.
 pub async fn load(
     tx: &mut Transaction<'_, Postgres>,
     cluster_id: &str,
 ) -> ApiResult<Option<(String, Cluster)>> {
-    let row: Option<(String, bool, Option<String>, Value, bool, bool, Option<String>)> = sqlx::query_as(
+    let row: Option<Stored> = sqlx::query_as(
         "SELECT c.team_id, c.public_traffic, c.free_domain_address, c.capabilities, c.same_cluster,
                 c.traffic = 'tunnel', t.default_domain
            FROM pyo.clusters c LEFT JOIN pyo.cluster_tunnels t ON t.cluster_id = c.id AND t.state <> 'removing'
@@ -443,14 +448,6 @@ pub async fn suffix_for(
     cluster_id: &str,
 ) -> ApiResult<Option<String>> {
     Ok(load(tx, cluster_id).await?.and_then(|(_, c)| c.suffix()))
-}
-
-/// A cluster's free-domain address now.
-pub async fn for_cluster(
-    tx: &mut Transaction<'_, Postgres>,
-    cluster_id: &str,
-) -> ApiResult<Option<Ipv4Addr>> {
-    Ok(load(tx, cluster_id).await?.and_then(|(_, c)| c.address()))
 }
 
 /// Moves the cluster's free domains made on another of its addresses, or
