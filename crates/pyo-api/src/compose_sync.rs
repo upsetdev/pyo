@@ -1035,12 +1035,16 @@ pub async fn plan(
 
 /// A secret goes back blank, so the save keeps its sealed value.
 fn blank_secrets(spec: &mut Value) {
-    for env in [&mut spec["env"], &mut spec["previews"]["env"]] {
+    let blank = |env: &mut Value| {
         for e in env.as_array_mut().into_iter().flatten() {
             if e["secret"] == json!(true) {
                 e["value"] = json!("");
             }
         }
+    };
+    blank(&mut spec["env"]);
+    if let Some(env) = spec.get_mut("previews").and_then(|p| p.get_mut("env")) {
+        blank(env);
     }
 }
 
