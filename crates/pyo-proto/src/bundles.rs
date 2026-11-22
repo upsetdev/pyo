@@ -687,19 +687,31 @@ pub fn never_pruned(r: &ObjectRef) -> bool {
 /// The web application firewall, with the installation's images (so it's
 /// built here, not loaded). Installed with the first service on the cluster
 /// that turns its WAF on, removed after the last one turns it off; its
-/// version follows its images.
+/// version follows its images and its objects, so a release that changes
+/// its DaemonSet (its priority, say) updates it on every cluster.
 pub fn waf_bundle(waf_image: &str, geoip_image: &str) -> SystemBundle {
     use crate::system;
-    // FNV-1a: the same images, the same version.
-    let hash = format!("{waf_image}\n{geoip_image}")
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
-        });
     // Its settings are the agent's (waf.rs writes `config.json`), not the bundle's.
     let config = json!({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": { "name": system::WAF_NAME, "namespace": system::WAF_NS, "labels": system::waf_labels() },
+    });
+    let objects: Vec<Value> = [config]
+        .into_iter()
+        .chain(system::waf_access())
+        .chain([
+            system::waf_daemonset(waf_image, geoip_image),
+            system::waf_service(),
+        ])
+        .collect();
+    // FNV-1a: the same images and objects, the same version.
+    let hash = format!(
+        "{waf_image}\n{geoip_image}\n{}",
+        Value::Array(objects.clone())
+    )
+    .bytes()
+    .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
     });
     SystemBundle {
         id: WAF_ID.into(),
@@ -715,14 +727,7 @@ pub fn waf_bundle(waf_image: &str, geoip_image: &str) -> SystemBundle {
         }],
         in_use: vec![],
         managed_namespace_bindings: vec![],
-        objects: [config]
-            .into_iter()
-            .chain(system::waf_access())
-            .chain([
-                system::waf_daemonset(waf_image, geoip_image),
-                system::waf_service(),
-            ])
-            .collect(),
+        objects,
     }
 }
 
@@ -1076,6 +1081,26 @@ mod tests {
             "registry.example.com/pyo/waf:1",
             "registry.example.com/pyo/geoip:1",
         )
+    }
+
+    /// The WAF's version follows what it writes, not only its images: a
+    /// release that makes its DaemonSet critical updates it on every
+    /// cluster, as the API resends a bundle whose version changed.
+    #[test]
+    fn the_wafs_version_follows_its_objects() {
+        let b = waf_bundle("w:1", "g:1");
+        assert_eq!(b.version, waf_bundle("w:1", "g:1").version);
+        assert_ne!(b.version, waf_bundle("w:2", "g:1").version);
+        assert_eq!(b.version.len(), 8);
+        let images_only = "w:1\ng:1".bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+        });
+        assert_ne!(b.version, format!("{:08x}", images_only >> 32));
+        let ds = b.objects.iter().find(|o| o["kind"] == "DaemonSet").unwrap();
+        assert_eq!(
+            ds["spec"]["template"]["spec"]["priorityClassName"],
+            crate::system::SERVER_CRITICAL
+        );
     }
 
     #[test]
