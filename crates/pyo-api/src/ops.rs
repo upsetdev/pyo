@@ -2225,6 +2225,13 @@ pub(crate) enum Op {
         require_two_factor: bool,
         audit_days: u16,
     },
+    /// Where the installation's admins may sign in from: the tailnet, and addresses or ranges (IPv4 or IPv6, like 203.0.113.7 or 2001:db8::/48). Neither is anywhere. Only the installation's admin can do this, from the dashboard, and the address they save it from must stay allowed.
+    SaveAdminSignIn {
+        #[serde(default)]
+        tailnet: bool,
+        #[serde(default)]
+        addresses: Vec<String>,
+    },
     /// Turn observability (analytics, request logs, firewall and WAF history, usage history) on or off for the whole installation. Only the installation's admin can do this. Off stops storing and showing history and frees its memory. What was stored is kept for when it's back on. Live logs, current usage, deploys and the firewall keep working.
     SetObservability { enabled: bool },
     /// How Pyo updates itself: "manual" or "auto" in a weekly window (UTC).
@@ -3165,6 +3172,7 @@ fn installation_wide(op: &Op) -> bool {
             | Op::SaveObservabilitySettings { .. }
             | Op::SaveRetentionSettings { .. }
             | Op::SaveSecuritySettings { .. }
+            | Op::SaveAdminSignIn { .. }
             | Op::SaveUpdateSettings { .. }
             | Op::SetSandboxLimits { .. }
             | Op::CheckForUpdates {}
@@ -3311,6 +3319,7 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::SaveObservabilitySettings { .. }
             | Op::SaveRetentionSettings { .. }
             | Op::SaveSecuritySettings { .. }
+            | Op::SaveAdminSignIn { .. }
             | Op::SetTeamSecurity { .. }
             | Op::SaveUpdateSettings { .. }
             | Op::SetSandboxLimits { .. }
@@ -3498,6 +3507,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SaveObservabilitySettings { .. }
         | Op::SaveRetentionSettings { .. }
         | Op::SaveSecuritySettings { .. }
+        | Op::SaveAdminSignIn { .. }
         | Op::SaveUpdateSettings { .. }
         | Op::SetSandboxLimits { .. }
         | Op::CheckForUpdates {}
@@ -4276,6 +4286,25 @@ async fn apply(
                     .await?;
             }
             Ok(ok)
+        }
+        Op::SaveAdminSignIn { tailnet, addresses } => {
+            require_admin(user)?;
+            let after = crate::admin_sign_in::checked(tailnet, &addresses)?;
+            // Never one that shuts out the request saving it.
+            crate::admin_sign_in::keeps(&after, &crate::audit::request_source())?;
+            let before = crate::admin_sign_in::save(tx, &after).await?;
+            if before != after {
+                // The admin's teams hear of it, as of a two-factor change
+                // (Pyo Cloud has no team of the installation's own).
+                crate::twofactor::notify_teams(
+                    tx,
+                    user,
+                    "auth.admin_sign_in_changed",
+                    &crate::admin_sign_in::change_title(&after),
+                )
+                .await?;
+            }
+            Ok(json!({ "ok": true, "addresses": after.addresses }))
         }
         Op::SetObservability { enabled } => {
             require_admin(user)?;

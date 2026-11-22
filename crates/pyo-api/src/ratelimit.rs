@@ -264,6 +264,28 @@ impl Cidr {
     }
 }
 
+/// Its network address, then the prefix length unless it's one address:
+/// "198.51.100.0/24", "2001:db8::1".
+impl std::fmt::Display for Cidr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (net, max) = match self.net {
+            IpAddr::V4(n) => {
+                let mask = u32::MAX.checked_shl(32 - self.len).unwrap_or(0);
+                (IpAddr::V4((u32::from(n) & mask).into()), 32)
+            }
+            IpAddr::V6(n) => {
+                let mask = u128::MAX.checked_shl(128 - self.len).unwrap_or(0);
+                (IpAddr::V6((u128::from(n) & mask).into()), 128)
+            }
+        };
+        if self.len == max {
+            write!(f, "{net}")
+        } else {
+            write!(f, "{net}/{}", self.len)
+        }
+    }
+}
+
 /// k3s's pod network, where the gateway's proxies run.
 const DEFAULT_TRUSTED_PROXIES: &str = "10.42.0.0/16,2001:cafe:42::/56";
 

@@ -322,9 +322,17 @@ struct CodeBody {
     code: String,
 }
 
+fn wrong_code() -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::UNAUTHORIZED,
+        "That code didn't work. Try the newest one.",
+    )
+}
+
 async fn login_code(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    from: crate::admin_sign_in::Source,
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<CodeBody>,
@@ -357,6 +365,11 @@ async fn login_code(
     .bind(&user_id)
     .fetch_one(&state.db)
     .await?;
+    // An admin from where admins may not sign in: as a wrong code, before
+    // the code (a recovery code stays unused).
+    if !crate::admin_sign_in::sign_in_allowed(&state, &user, &from, "with a code").await? {
+        return Err(wrong_code());
+    }
     let Some(used) = verify(&state, &user_id, &ip, &body.code).await? else {
         audit::account_event(
             &state.db,
@@ -370,10 +383,7 @@ async fn login_code(
             },
         )
         .await;
-        return Err(ApiError::new(
-            axum::http::StatusCode::UNAUTHORIZED,
-            "That code didn't work. Try the newest one.",
-        ));
+        return Err(wrong_code());
     };
     sqlx::query("DELETE FROM pyo.sign_in_challenges WHERE token_hash = $1")
         .bind(&hash)

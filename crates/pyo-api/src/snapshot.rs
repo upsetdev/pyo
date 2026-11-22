@@ -80,6 +80,12 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     } else {
         Value::Null
     };
+    // Where admins may sign in from, and where this request comes from.
+    let admin_sign_in = if user.is_admin {
+        crate::admin_sign_in::snapshot(db, &crate::audit::request_source()).await?
+    } else {
+        Value::Null
+    };
     // Tailscale (Integrations › Tailscale): the client only for admins.
     let tailscale = crate::tailscale::snapshot(db, user.is_admin).await?;
     // `small`: the server Pyo runs on has under 3.5 GB of memory now (the
@@ -499,7 +505,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // How teams' values are encrypted; the security overview.
     let encryption = crate::vault::get().status(&team_ids).await?;
 
-    Ok(json!({
+    let mut snapshot = json!({
         "user": me,
         "teams": teams,
         "members": members,
@@ -554,7 +560,10 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         // Backups of Pyo's own data: the installation's admin only.
         "controlBackup": control_backup,
         "updates": updates,
-    }))
+    });
+    // Where admins may sign in from: the installation's admin only.
+    snapshot["adminSignIn"] = admin_sign_in;
+    Ok(snapshot)
 }
 
 /// A cluster's capabilities for the dashboard, from what its last heartbeat

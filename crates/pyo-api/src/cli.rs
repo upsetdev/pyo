@@ -274,10 +274,18 @@ struct TokenBody {
 
 /// The CLI's poll: `{"status": "pending"}` until the page answers, then
 /// the key once (approved), or an error that says why not.
-async fn token(State(s): State<AppState>, Json(b): Json<TokenBody>) -> ApiResult<Json<Value>> {
-    Ok(Json(match poll_login(&s.db, &b.id, &b.verifier).await? {
-        None => json!({ "status": "pending" }),
-        Some((key, user_name, email)) => {
+async fn token(
+    State(s): State<AppState>,
+    from: crate::admin_sign_in::Source,
+    Json(b): Json<TokenBody>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(match poll_login(&s.db, &b.id, &b.verifier, &from).await? {
+        Polled::Pending => json!({ "status": "pending" }),
+        Polled::Refused(user) => {
+            crate::admin_sign_in::refused(&s, &user, &from, "with pyo login").await;
+            return Err(mismatch());
+        }
+        Polled::Key(key, user_name, email) => {
             let (s2, to) = (s.clone(), email.clone());
             tokio::spawn(async move {
                 crate::twofactor::mail_user(&s2, &to, "/api-keys", |link| {
@@ -292,16 +300,33 @@ async fn token(State(s): State<AppState>, Json(b): Json<TokenBody>) -> ApiResult
 
 /// A request as the poll reads it: challenge, status, who approved it,
 /// the computer's name and the key's days.
-type Polled = (String, String, Option<String>, String, Option<i32>);
+type RequestRow = (String, String, Option<String>, String, Option<i32>);
 
-/// None while pending, else the new key and its user's name and email.
+/// What a poll finds.
+#[derive(Debug)]
+enum Polled {
+    Pending,
+    /// The new key, and its user's name and email.
+    Key(String, String, String),
+    /// Approved by an admin, polled from where admins may not sign in
+    /// (admin_sign_in.rs): no key, and the request is gone.
+    Refused(crate::auth::User),
+}
+
+/// What a verifier is told when its request isn't one it may have.
+fn mismatch() -> ApiError {
+    ApiError::bad_request("That login doesn't match. Run pyo login again.")
+}
+
+/// A poll from `from`: pending, the key, or refused.
 async fn poll_login(
     db: &PgPool,
     id: &str,
     verifier: &str,
-) -> ApiResult<Option<(String, String, String)>> {
+    from: &crate::admin_sign_in::Source,
+) -> ApiResult<Polled> {
     let mut tx = db.begin().await?;
-    let row: Option<Polled> = sqlx::query_as(
+    let row: Option<RequestRow> = sqlx::query_as(
         "SELECT challenge, status, user_id, name, key_days FROM pyo.cli_login_requests WHERE id = $1 AND expires_at > now() FOR UPDATE",
     )
     .bind(id)
@@ -311,12 +336,10 @@ async fn poll_login(
         return Err(expired());
     };
     if sha256_hex(verifier) != challenge {
-        return Err(ApiError::bad_request(
-            "That login doesn't match. Run pyo login again.",
-        ));
+        return Err(mismatch());
     }
     let user_id = match (status.as_str(), user_id) {
-        ("pending", _) => return Ok(None),
+        ("pending", _) => return Ok(Polled::Pending),
         ("approved", Some(u)) => u,
         _ => {
             sqlx::query("DELETE FROM pyo.cli_login_requests WHERE id = $1")
@@ -331,6 +354,16 @@ async fn poll_login(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    let user = sqlx::query_as::<_, crate::auth::User>(
+        "SELECT id, name, email, timezone, is_admin, must_set_up FROM pyo.users WHERE id = $1",
+    )
+    .bind(&user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if user.is_admin && !crate::admin_sign_in::admits(&mut *tx, from).await? {
+        tx.commit().await?;
+        return Ok(Polled::Refused(user));
+    }
     let name = if name.is_empty() {
         "CLI".to_owned()
     } else {
@@ -346,12 +379,6 @@ async fn poll_login(
         .bind(days)
         .execute(&mut *tx)
         .await?;
-    let user = sqlx::query_as::<_, crate::auth::User>(
-        "SELECT id, name, email, timezone, is_admin, must_set_up FROM pyo.users WHERE id = $1",
-    )
-    .bind(&user_id)
-    .fetch_one(&mut *tx)
-    .await?;
     // A new key: the account's teams hear of it (and the account by email,
     // from `token`). It's the account's doing, through the CLI.
     crate::audit::set_actor(&user, crate::audit::Via::Api, Some(&name));
@@ -363,7 +390,7 @@ async fn poll_login(
     )
     .await?;
     tx.commit().await?;
-    Ok(Some((key, user.name, user.email)))
+    Ok(Polled::Key(key, user.name, user.email))
 }
 
 #[cfg(test)]
@@ -437,8 +464,9 @@ mod tests {
 
         // Approved with its code: the key goes to the verifier, once.
         let (id, code) = start_login(&pool, &body(Some("30d"))).await.unwrap();
-        assert!(poll_login(&pool, &id, &verifier).await.unwrap().is_none());
-        assert!(msg(poll_login(&pool, &id, "wrong").await.unwrap_err()).contains("doesn't match"));
+        let here = crate::admin_sign_in::Source::default();
+        assert!(matches!(poll_login(&pool, &id, &verifier, &here).await.unwrap(), Polled::Pending));
+        assert!(msg(poll_login(&pool, &id, "wrong", &here).await.unwrap_err()).contains("doesn't match"));
         assert!(
             msg(approve_login(&pool, &id, &user, other(&code))
                 .await
@@ -449,7 +477,9 @@ mod tests {
             .await
             .unwrap();
         assert!(approve_login(&pool, &id, &user, &code).await.is_err());
-        let (key, _, email) = poll_login(&pool, &id, &verifier).await.unwrap().unwrap();
+        let Polled::Key(key, _, email) = poll_login(&pool, &id, &verifier, &here).await.unwrap() else {
+            panic!("no key")
+        };
         assert_eq!(email, format!("{user}@cli.test"));
         let (name, days): (String, f64) = sqlx::query_as(
             "SELECT name, extract(epoch FROM expires_at - now())::float8 / 86400 FROM pyo.api_tokens WHERE token_hash = $1",
@@ -461,7 +491,7 @@ mod tests {
         assert_eq!(name, "CLI · laptop");
         assert!((29.9..=30.0).contains(&days), "{days}");
         assert!(
-            msg(poll_login(&pool, &id, &verifier).await.unwrap_err()).contains("expired"),
+            msg(poll_login(&pool, &id, &verifier, &here).await.unwrap_err()).contains("expired"),
             "used"
         );
 
@@ -473,8 +503,8 @@ mod tests {
             .await
             .unwrap();
         assert!(approve_login(&pool, &id, &user, &code).await.is_err());
-        assert!(msg(poll_login(&pool, &id, &verifier).await.unwrap_err()).contains("refused"));
-        assert!(msg(poll_login(&pool, &id, &verifier).await.unwrap_err()).contains("expired"));
+        assert!(msg(poll_login(&pool, &id, &verifier, &here).await.unwrap_err()).contains("refused"));
+        assert!(msg(poll_login(&pool, &id, &verifier, &here).await.unwrap_err()).contains("expired"));
 
         // Five wrong codes end it, the right one after them too.
         let (id, code) = start_login(&pool, &body(None)).await.unwrap();
@@ -486,7 +516,7 @@ mod tests {
             );
         }
         assert!(approve_login(&pool, &id, &user, &code).await.is_err());
-        assert!(msg(poll_login(&pool, &id, &verifier).await.unwrap_err()).contains("refused"));
+        assert!(msg(poll_login(&pool, &id, &verifier, &here).await.unwrap_err()).contains("refused"));
 
         // Expired: nothing to approve or poll.
         let (id, code) = start_login(&pool, &body(None)).await.unwrap();
@@ -500,7 +530,7 @@ mod tests {
         assert!(
             msg(approve_login(&pool, &id, &user, &code).await.unwrap_err()).contains("expired")
         );
-        assert!(msg(poll_login(&pool, &id, &verifier).await.unwrap_err()).contains("expired"));
+        assert!(msg(poll_login(&pool, &id, &verifier, &here).await.unwrap_err()).contains("expired"));
 
         // A bad challenge or lifetime never starts.
         let bad = StartBody {

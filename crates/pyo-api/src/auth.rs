@@ -165,7 +165,8 @@ impl FromRequestParts<AppState> for AnySession {
             .get(SESSION_COOKIE)
             .map(|c| c.value().to_owned())
             .ok_or_else(ApiError::unauthorized)?;
-        let user = session_user(&state.db, &token)
+        let from = crate::admin_sign_in::Source::from_parts(parts);
+        let user = session_user(&state.db, &token, &from)
             .await?
             .ok_or_else(ApiError::unauthorized)?;
         if parts.method != axum::http::Method::GET
@@ -178,14 +179,29 @@ impl FromRequestParts<AppState> for AnySession {
     }
 }
 
+/// A session's user, and whether the account is an admin at all.
+#[derive(sqlx::FromRow)]
+struct SessionRow {
+    #[sqlx(flatten)]
+    user: User,
+    account_admin: bool,
+}
+
 /// The user of a session cookie's token, while the session lasts. In use,
 /// its idle limit moves on (at most once an hour, never past the absolute
 /// one). An admin who must set up two-factor first isn't one until then
-/// (twofactor.rs).
-async fn session_user(db: &sqlx::PgPool, token: &str) -> ApiResult<Option<User>> {
+/// (twofactor.rs). An admin account's session works only from where
+/// admins may sign in (admin_sign_in.rs): elsewhere it's as if signed out,
+/// and it doesn't move on.
+async fn session_user(
+    db: &sqlx::PgPool,
+    token: &str,
+    from: &crate::admin_sign_in::Source,
+) -> ApiResult<Option<User>> {
     let hash = sha256_hex(token);
-    let user = sqlx::query_as::<_, User>(
-        "SELECT u.id, u.name, u.email, u.timezone, u.is_admin AND NOT pyo.needs_two_factor(u.id, $3) AS is_admin, u.must_set_up
+    let row = sqlx::query_as::<_, SessionRow>(
+        "SELECT u.id, u.name, u.email, u.timezone, u.is_admin AND NOT pyo.needs_two_factor(u.id, $3) AS is_admin, u.must_set_up,
+                u.is_admin AS account_admin
            FROM pyo.sessions s JOIN pyo.users u ON u.id = s.user_id
           WHERE s.token_hash = $1 AND s.expires_at > now() AND s.created_at > now() - make_interval(days => $2)",
     )
@@ -194,6 +210,10 @@ async fn session_user(db: &sqlx::PgPool, token: &str) -> ApiResult<Option<User>>
     .bind(crate::hosted())
     .fetch_optional(db)
     .await?;
+    let user = match row {
+        Some(r) if r.account_admin && !crate::admin_sign_in::admits(db, from).await? => None,
+        r => r.map(|r| r.user),
+    };
     if user.is_some() {
         let _ = sqlx::query(
             "UPDATE pyo.sessions SET expires_at = least(created_at + make_interval(days => $2), now() + make_interval(days => $3))
@@ -250,7 +270,19 @@ impl FromRequestParts<AppState> for TokenUser {
             })?;
         let token = token.to_owned();
         let Ok(ClientIp(ip)) = ClientIp::from_request_parts(parts, state).await;
-        Ok(TokenUser(key_user_from(&state.db, &token, &ip).await?))
+        let mut user = key_user_from(&state.db, &token, &ip).await?;
+        // From where admins may not sign in, an admin's key acts as a
+        // member only (admin_sign_in.rs).
+        if user.is_admin
+            && !crate::admin_sign_in::admits(
+                &state.db,
+                &crate::admin_sign_in::Source::from_parts(parts),
+            )
+            .await?
+        {
+            user.is_admin = false;
+        }
+        Ok(TokenUser(user))
     }
 }
 
@@ -774,6 +806,7 @@ struct LoginBody {
 async fn login(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    from: crate::admin_sign_in::Source,
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<LoginBody>,
@@ -826,16 +859,7 @@ async fn login(
             )
             .await;
         }
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "Wrong email or password.",
-        ));
-    }
-    ratelimit::reset(&state.db, &ratelimit::LOGIN_ACCOUNT, &email).await?;
-    ratelimit::forgive(&state.db, &ratelimit::LOGIN_IP, &ip).await?;
-    if crate::twofactor::enabled(&state.db, &id).await? {
-        let challenge = crate::twofactor::start_challenge(&state.db, &id, "password").await?;
-        return Ok((jar, Json(crate::twofactor::code_needed(&challenge))));
+        return Err(wrong_password());
     }
     let user = User {
         id,
@@ -846,6 +870,17 @@ async fn login(
         must_set_up,
         key: None,
     };
+    // An admin from where admins may not sign in: as a wrong password, and
+    // its slots stay taken.
+    if !crate::admin_sign_in::sign_in_allowed(&state, &user, &from, "with a password").await? {
+        return Err(wrong_password());
+    }
+    ratelimit::reset(&state.db, &ratelimit::LOGIN_ACCOUNT, &user.email).await?;
+    ratelimit::forgive(&state.db, &ratelimit::LOGIN_IP, &ip).await?;
+    if crate::twofactor::enabled(&state.db, &user.id).await? {
+        let challenge = crate::twofactor::start_challenge(&state.db, &user.id, "password").await?;
+        return Ok((jar, Json(crate::twofactor::code_needed(&challenge))));
+    }
     crate::audit::account_event(
         &state.db,
         &user.id,
@@ -860,6 +895,10 @@ async fn login(
     .await;
     let jar = start_session(&state, jar, &user.id, &headers).await?;
     Ok((jar, Json(json!(user))))
+}
+
+fn wrong_password() -> ApiError {
+    ApiError::new(StatusCode::UNAUTHORIZED, "Wrong email or password.")
 }
 
 /// Is this the account's password? The same check, and the same work, as
@@ -1224,7 +1263,7 @@ mod invite_tests {
         let ask = |token: String| {
             let pool = pool.clone();
             async move {
-                session_user(&pool, &token)
+                session_user(&pool, &token, &Default::default())
                     .await
                     .unwrap()
                     .map(|u| u.id)

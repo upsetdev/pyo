@@ -644,7 +644,15 @@ impl FromRequestParts<AppState> for OAuthUser {
         }
         // The same limits as an API key with the access the user chose, in
         // all their teams: what the account and the installation allow stays
-        // with the dashboard.
+        // with the dashboard. From where admins may not sign in, an admin's
+        // assistant acts as a member only (admin_sign_in.rs).
+        let is_admin = is_admin
+            && crate::admin_sign_in::admits(
+                &s.db,
+                &crate::admin_sign_in::Source::from_parts(parts),
+            )
+            .await
+            .map_err(|_| challenge(None))?;
         let user = User {
             id,
             name,
