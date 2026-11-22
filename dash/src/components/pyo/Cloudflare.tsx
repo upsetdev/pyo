@@ -23,7 +23,7 @@ import {
   usePyo,
 } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
-import type { Application, Domain } from "~/lib/pyo/types";
+import type { Application, CloudflareZone, Domain } from "~/lib/pyo/types";
 
 // The team's Cloudflare account: Pyo creates the DNS records of domains in
 // its zones. Only owners and admins see or change the token.
@@ -75,8 +75,9 @@ export function CloudflareDialog({ onClose }: { onClose: () => void }) {
     <DialogSection title={editable.length === 1 ? "1 zone" : `${editable.length} zones`}>
       <div className="flex flex-wrap gap-1.5">
         {editable.map((z) => (
-          <Badge key={z.id}>
+          <Badge key={z.id} tone={zoneTone(z)}>
             <span className="font-mono">{z.name}</span>
+            {zoneNote(z)}
           </Badge>
         ))}
         {lacking.map((z) => (
@@ -141,7 +142,7 @@ export function CloudflareDialog({ onClose }: { onClose: () => void }) {
         <div className="space-y-2">
           <Field
             label="API token"
-            hint="Zone:Read and DNS:Edit, on the zones Pyo may use."
+            hint="Zone:Read and DNS:Edit. For Cloudflare Tunnel, also Cloudflare Tunnel:Edit and SSL and Certificates:Edit."
             error={error || undefined}
           >
             {(p) => (
@@ -230,6 +231,18 @@ export function CloudflareDialog({ onClose }: { onClose: () => void }) {
       </>
     ),
   });
+}
+
+/** A zone's tunnel state on its badge: ready, DNS only, or the one permission it lacks. */
+function zoneTone(z: CloudflareZone): "success" | "warning" | undefined {
+  if (z.tunnel?.ready) return "success";
+  return z.tunnel?.missing?.length === 1 ? "warning" : undefined;
+}
+
+function zoneNote(z: CloudflareZone): string {
+  if (z.tunnel?.ready) return "";
+  const missing = z.tunnel?.missing ?? [];
+  return missing.length === 1 ? ` · needs ${missing[0]}` : " · DNS only";
 }
 
 /** What to do about a new domain's DNS record in Cloudflare. */

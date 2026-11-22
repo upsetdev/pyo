@@ -943,6 +943,11 @@ export type CloudflareZone = {
   canEdit: boolean;
   /** The permission the token lacks there. */
   missing?: string;
+  /** The Cloudflare account it's in. */
+  accountId?: string;
+  accountName?: string;
+  /** Whether it can use Cloudflare Tunnel, and the tunnel permissions the token lacks. */
+  tunnel?: { ready: boolean; missing?: string[] };
 };
 
 /** A team's Cloudflare account: its zones, never the token. */
