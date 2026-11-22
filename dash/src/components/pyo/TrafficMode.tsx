@@ -83,7 +83,7 @@ export function ClusterPublicTraffic({ cluster: c }: { cluster: Cluster }) {
         <Switch
           checked={on}
           onChange={async (v) => {
-            const res = await api.setClusterPublicTraffic(c.id, v);
+            const res = await api.setClusterTraffic(c.id, v ? "public" : "tailscale");
             if (res?.ok)
               toast({
                 title: v ? "Public traffic on" : "Public traffic off",
