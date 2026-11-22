@@ -19,7 +19,10 @@
 #   - the service's own rules apply to that visitor;
 #   - a plain-HTTP visitor at Cloudflare is sent to HTTPS;
 #   - switching: a direct client gets through as itself, and can't pick
-#     its address with X-Forwarded-For.
+#     its address with X-Forwarded-For;
+#   - the service gets the visitor alone in X-Forwarded-For (system.rs
+#     `tunnel_rule`): not the connector's pod after it, and not what a
+#     direct client sent.
 #
 # TLS is left out (plain HTTP to the listener): only the visitor and the
 # gate are checked here.
@@ -30,6 +33,9 @@ set -euo pipefail
 
 ENVOY_IMAGE="${ENVOY_IMAGE:-docker.io/envoyproxy/envoy:distroless-v1.39.5}"
 CURL_IMAGE="${CURL_IMAGE:-docker.io/curlimages/curl:8.17.0}"
+# A tunnel route's X-Forwarded-For for the service, as Envoy Gateway writes
+# a route's RequestHeaderModifier "set" (system.rs forwarded_for_visitor).
+FORWARDED_FOR='%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%'
 NET="pyo-tunnel-gate-$$"
 SUBNET="172.30.$((RANDOM % 200 + 20)).0/24"
 PREFIX="${SUBNET%.0/24}"
@@ -129,7 +135,10 @@ $(rbac yes | sed 's/^/    /')
                   headers: [ { name: cf-visitor, string_match: { exact: '{"scheme":"http"}' } } ]
                 redirect: { scheme_redirect: https, response_code: MOVED_PERMANENTLY }
               - match: { prefix: "/" }
-                direct_response: { status: 200, body: { inline_string: "ok" } }
+                route: { cluster: service }
+                request_headers_to_add:
+                - header: { key: x-forwarded-for, value: "$FORWARDED_FOR" }
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
                 response_headers_to_add:
                 - header: { key: x-visitor, value: "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%" }
             - name: switching
@@ -139,7 +148,10 @@ $(rbac yes | sed 's/^/    /')
 $(rbac no | sed 's/^/    /')
               routes:
               - match: { prefix: "/" }
-                direct_response: { status: 200, body: { inline_string: "ok" } }
+                route: { cluster: service }
+                request_headers_to_add:
+                - header: { key: x-forwarded-for, value: "$FORWARDED_FOR" }
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
                 response_headers_to_add:
                 - header: { key: x-visitor, value: "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%" }
           http_filters:
@@ -149,6 +161,37 @@ $(rbac no | sed 's/^/    /')
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  # Stands in for the service: answers with the X-Forwarded-For it got.
+  - name: service
+    address: { socket_address: { address: 127.0.0.1, port_value: 9000 } }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: service
+          route_config:
+            virtual_hosts:
+            - name: service
+              domains: ["*"]
+              routes:
+              - match: { prefix: "/" }
+                direct_response: { status: 200, body: { inline_string: "ok" } }
+                response_headers_to_add:
+                - header: { key: x-service-got, value: "%REQ(X-FORWARDED-FOR)%" }
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+  - name: service
+    type: STATIC
+    connect_timeout: 2s
+    load_assignment:
+      cluster_name: service
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 9000 } } }
 EOF
 
 docker network create --subnet "$SUBNET" "$NET" >/dev/null
@@ -162,6 +205,14 @@ ask() {
   shift 2
   docker run --rm --memory 128m --network "$NET" --ip "$from" "$CURL_IMAGE" -s -o /dev/null \
     -w '%{http_code} %header{x-visitor}%header{location}' -H "Host: $host" "$@" "http://$ENVOY_IP:10443/"
+}
+
+# The X-Forwarded-For the service got: "<status> <header>".
+service_got() {
+  local from="$1" host="$2"
+  shift 2
+  docker run --rm --memory 128m --network "$NET" --ip "$from" "$CURL_IMAGE" -s -o /dev/null \
+    -w '%{http_code} %header{x-service-got}' -H "Host: $host" "$@" "http://$ENVOY_IP:10443/"
 }
 
 for _ in $(seq 1 30); do
@@ -201,5 +252,17 @@ check "switching: a direct client can't pick its address" "200 $DIRECT_IP" \
   "$(ask "$DIRECT_IP" moving.example.com -H 'X-Forwarded-For: 203.0.113.9')"
 check "switching: the connector's visitor gets in as themselves" "200 203.0.113.9" \
   "$(ask "$CONNECTOR_IP" moving.example.com -H 'X-Forwarded-For: 203.0.113.9')"
+check "switched: the service gets the visitor, not the connector after it" "200 203.0.113.9" \
+  "$(service_got "$CONNECTOR_IP" done.example.com -H 'X-Forwarded-For: 203.0.113.9')"
+check "switched: the service doesn't get what the visitor made up" "200 203.0.113.9" \
+  "$(service_got "$CONNECTOR_IP" done.example.com -H 'X-Forwarded-For: 10.9.9.9, 203.0.113.9')"
+check "switching: the service gets the connector's visitor" "200 203.0.113.9" \
+  "$(service_got "$CONNECTOR_IP" moving.example.com -H 'X-Forwarded-For: 203.0.113.9')"
+check "switching: the service gets a direct client's own address" "200 $DIRECT_IP" \
+  "$(service_got "$DIRECT_IP" moving.example.com)"
+check "switching: a direct client can't make up the service's X-Forwarded-For" "200 $DIRECT_IP" \
+  "$(service_got "$DIRECT_IP" moving.example.com -H 'X-Forwarded-For: 203.0.113.9, 198.51.100.7')"
+check "switched: a refused direct client never reaches the service" "403 " \
+  "$(service_got "$DIRECT_IP" done.example.com -H 'X-Forwarded-For: 203.0.113.9')"
 
 exit "$fail"

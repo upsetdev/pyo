@@ -778,7 +778,7 @@ pub fn admission_with(
                     ((l.protocol == 'UDP' && !(l.port in {udp_reserved})) || (l.protocol == 'TCP' && !(l.port in {tcp_reserved}) && !(l.port >= 19000 && l.port <= 19003))) && l.allowedRoutes == {same_ns}))))) || \
             (request.resource.resource == 'httproutes' && !(variables.objName in {tailnet_names}) && (request.operation == 'DELETE' || (object.spec.parentRefs.all(p, (!has(p.namespace) || p.namespace == '{gw}') && \
                 (p.name == '{tailnet_gw}' ? (variables.objName.startsWith('{tn_route}') && has(p.sectionName) && p.sectionName == '{tn_https}' && has(object.spec.hostnames) && size(object.spec.hostnames) >= 1 && object.spec.hostnames.all(h, h.lowerAscii().endsWith('{tn_suffix}'))) : \
-                 (!variables.objName.startsWith('{tn_route}') && (!has(object.spec.hostnames) || object.spec.hostnames.all(h, !h.lowerAscii().endsWith('{tn_suffix}')))))) && object.spec.rules.all(r, (!has(r.backendRefs) || r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}'))) && (!has(r.filters) || r.filters.all(f, (f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https') || (f.type == 'RequestHeaderModifier' && f.requestHeaderModifier.all(k, k == 'set') && size(f.requestHeaderModifier.set) == 1 && f.requestHeaderModifier.set[0].name == '{static_header}'))))))) || \
+                 (!variables.objName.startsWith('{tn_route}') && (!has(object.spec.hostnames) || object.spec.hostnames.all(h, !h.lowerAscii().endsWith('{tn_suffix}')))))) && object.spec.rules.all(r, (!has(r.backendRefs) || r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}'))) && (!has(r.filters) || r.filters.all(f, (f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https') || (f.type == 'RequestHeaderModifier' && f.requestHeaderModifier.all(k, k == 'set') && size(f.requestHeaderModifier.set) >= 1 && size(f.requestHeaderModifier.set) <= 2 && f.requestHeaderModifier.set.all(h, h.name == '{static_header}' || (h.name == '{forwarded_for}' && h.value == '{forwarded_for_visitor}'))))))))) || \
             (request.resource.resource in ['tcproutes', 'udproutes'] && (request.operation == 'DELETE' || (object.spec.all(k, k in ['parentRefs', 'rules']) && object.spec.parentRefs.all(p, (!has(p.namespace) || p.namespace == '{gw}') && p.name.endsWith('-ports')) && size(object.spec.rules) == 1 && \
                 object.spec.rules.all(r, r.all(k, k == 'backendRefs') && r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}')))))) || \
             (request.resource.resource == 'backends' && variables.objName == '{waf}' && (request.operation == 'DELETE' || object.spec == {waf_backend})) || \
@@ -903,6 +903,10 @@ pub fn admission_with(
             same_ns = cel_literal(&json!({ "namespaces": { "from": "Same" } })),
             // A static site's routes: the site and folder for pyo-static.
             static_header = system::STATIC_HEADER,
+            // A tunnel route's X-Forwarded-For: only ever the proxy's own
+            // address for the visitor (system.rs `forwarded_for_visitor`).
+            forwarded_for = system::FORWARDED_FOR_HEADER,
+            forwarded_for_visitor = system::FORWARDED_FOR_VISITOR,
             system_ns = cel_literal(&json!(["kube-system", "kube-public", "kube-node-lease", "default", "pyo-system", system::GATEWAY_NS, "cert-manager"])),
             http_spec = cel_literal(&system::http_gateway_spec())) },
         // Cluster-wide objects it writes, with exactly Pyo's content.
@@ -1347,7 +1351,15 @@ mod tests {
     #[test]
     fn a_static_sites_routes_may_only_name_its_folder() {
         let policy = admission("w", "g")[0].to_string();
-        assert!(policy.contains("(f.type == 'RequestHeaderModifier' && f.requestHeaderModifier.all(k, k == 'set') && size(f.requestHeaderModifier.set) == 1 && f.requestHeaderModifier.set[0].name == 'x-pyo-site')"));
+        assert!(policy.contains("(f.type == 'RequestHeaderModifier' && f.requestHeaderModifier.all(k, k == 'set') && size(f.requestHeaderModifier.set) >= 1 && size(f.requestHeaderModifier.set) <= 2 && f.requestHeaderModifier.set.all(h, h.name == 'x-pyo-site' || (h.name == 'X-Forwarded-For' && h.value == '%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%')))"), "{policy}");
+        // A tunnel route's rule passes them too, alone or with a site's.
+        let rule = system::tunnel_rule(json!({ "filters": [system::static_filter("svc_1", "dep_1")] }));
+        let set = rule["filters"][0]["requestHeaderModifier"]["set"].as_array().unwrap().clone();
+        assert_eq!(rule["filters"].as_array().unwrap().len(), 1);
+        assert_eq!(set.len(), 2);
+        assert_eq!(set[1], json!({ "name": "X-Forwarded-For", "value": "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%" }));
+        let alone = system::tunnel_rule(json!({ "backendRefs": [] }));
+        assert_eq!(alone["filters"], json!([{ "type": "RequestHeaderModifier", "requestHeaderModifier": { "set": [set[1]] } }]));
         // The filter the agent writes passes those checks.
         let f = system::static_filter("svc_1", "dep_1");
         assert_eq!(
