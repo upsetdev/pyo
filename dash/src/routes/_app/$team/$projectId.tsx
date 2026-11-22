@@ -4,6 +4,7 @@ import {
   ArrowUpRightIcon,
   ChartLineUpIcon,
   DotsThreeIcon,
+  FileTextIcon,
   CubeIcon,
   GlobeSimpleIcon,
   GearSixIcon,
@@ -76,6 +77,7 @@ function ProjectLayout() {
   const domain = st.apps
     .flatMap((a) => a.domains)
     .find((d) => d.status === "active");
+  const composeFile = st.apps.find((a) => a.compose?.file)?.compose?.file;
 
   return (
     <Page>
@@ -122,6 +124,17 @@ function ProjectLayout() {
                   {project.namespace}
                 </span>
               </span>
+              {composeFile ? (
+                <span
+                  className="inline-flex items-center gap-1.5"
+                  title="pyo deploy -f applies changes in this file"
+                >
+                  <FileTextIcon size={13} className="shrink-0" />
+                  <span>
+                    From <span className="font-mono text-[12px]">{composeFile}</span>
+                  </span>
+                </span>
+              ) : null}
             </p>
           </div>
           <div className="flex items-center gap-2">
