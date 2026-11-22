@@ -1033,6 +1033,11 @@ pub struct AgentScope {
     /// It may refresh its admission policy ([`SELF_UPDATE_ROLE`] is bound).
     #[serde(default)]
     pub self_update: bool,
+    /// The cluster's admission policy is older than the agent's and refused
+    /// the client policies that remove client-sent visitor headers, so the
+    /// agent wrote them without that (`gateway.rs` `write_client_policy`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub headers_kept: bool,
 }
 
 /// What the gateway could get at if it were broken into.

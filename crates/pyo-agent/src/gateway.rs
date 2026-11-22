@@ -25,7 +25,7 @@
 
 use std::{
     collections::BTreeMap,
-    sync::atomic::{AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
 use k8s_openapi::api::core::v1::Secret;
@@ -765,8 +765,13 @@ pub async fn apply(
         let kind = o["kind"].as_str().unwrap_or("").to_owned();
         let name = o["metadata"]["name"].as_str().unwrap_or("").to_owned();
         let api = api_of(client, &kind);
-        match api.patch(&name, &pp(), &Patch::Apply(o)).await {
-            Ok(_) => {}
+        let written = if kind == "ClientTrafficPolicy" {
+            write_client_policy(&api, &name, o).await
+        } else {
+            api.patch(&name, &pp(), &Patch::Apply(o)).await.map(|_| ())
+        };
+        match written {
+            Ok(()) => {}
             Err(kube::Error::Api(e)) if e.code == 404 && kind == "Certificate" => {
                 notes.push("cert-manager is still being installed on this cluster. HTTPS starts with a later deploy.".into());
             }
@@ -1906,26 +1911,19 @@ async fn web_settings(client: &Client) -> anyhow::Result<system::WebSettings> {
 
 async fn write_web(client: &Client, w: system::WebSettings) -> anyhow::Result<()> {
     let policies = api_of(client, "ClientTrafficPolicy");
-    policies
-        .patch(
-            "pyo-http",
-            &pp(),
-            &Patch::Apply(system::client_policy(
-                false,
-                system::WebSettings {
-                    origin_pull: false,
-                    ..w
-                },
-            )),
-        )
-        .await?;
-    policies
-        .patch(
-            "pyo-https",
-            &pp(),
-            &Patch::Apply(system::client_policy(true, w)),
-        )
-        .await?;
+    write_client_policy(
+        &policies,
+        "pyo-http",
+        &system::client_policy(
+            false,
+            system::WebSettings {
+                origin_pull: false,
+                ..w
+            },
+        ),
+    )
+    .await?;
+    write_client_policy(&policies, "pyo-https", &system::client_policy(true, w)).await?;
     // Services behind a CDN: their HTTPS policies follow.
     let cdn = policies
         .list(&ListParams::default().labels(system::CDN_LABEL))
@@ -1938,7 +1936,56 @@ async fn write_web(client: &Client, w: system::WebSettings) -> anyhow::Result<()
             "spec": p.data["spec"].clone(),
         });
         rewrite_cdn_policy(&mut o, w);
-        policies.patch(&name, &pp(), &Patch::Apply(&o)).await?;
+        write_client_policy(&policies, &name, &o).await?;
+    }
+    Ok(())
+}
+
+/// Said once in the agent's log when the cluster's install refuses the
+/// client policies that remove client-sent visitor headers.
+pub const HEADERS_KEPT: &str = "This cluster's install is older than Pyo's. Run the connect command in the cluster's settings so client-sent visitor headers are removed.";
+
+/// Whether the agent last wrote a client policy without its `headers`
+/// because the install refused them. Sent with each heartbeat
+/// (`AgentScope::headers_kept`).
+static KEPT: AtomicBool = AtomicBool::new(false);
+
+pub fn headers_kept() -> bool {
+    KEPT.load(Ordering::Relaxed)
+}
+
+/// A client policy without its `headers`: the shape an install whose
+/// admission policy is older than this agent's accepts (it lists the
+/// policies as they were before they removed visitor headers).
+pub fn without_headers(o: &Value) -> Option<Value> {
+    o["spec"].get("headers")?;
+    let mut older = o.clone();
+    older["spec"].as_object_mut()?.remove("headers");
+    Some(older)
+}
+
+/// Write a ClientTrafficPolicy. When the cluster's install refuses one
+/// that removes visitor headers (its admission policy is older than this
+/// agent's, and the cluster can't refresh it), it's written without them,
+/// as that install accepts, so routes, certificates and the rest still go
+/// on. That's said once ([`HEADERS_KEPT`]) and reported until such a
+/// write goes through.
+async fn write_client_policy(api: &Api<DynamicObject>, name: &str, o: &Value) -> kube::Result<()> {
+    let refused = match api.patch(name, &pp(), &Patch::Apply(o)).await {
+        Ok(_) => {
+            if o["spec"].get("headers").is_some() {
+                KEPT.store(false, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
+        Err(e) => e,
+    };
+    let Some(older) = without_headers(o).filter(|_| crate::refused::is_refusal(&refused)) else {
+        return Err(refused);
+    };
+    api.patch(name, &pp(), &Patch::Apply(&older)).await?;
+    if !KEPT.swap(true, Ordering::Relaxed) {
+        tracing::warn!(policy = name, error = %refused, "{HEADERS_KEPT}");
     }
     Ok(())
 }
@@ -2004,19 +2051,18 @@ pub async fn set_origin_pull(client: &Client, ca_pem: &str) -> anyhow::Result<St
     let policies = api_of(client, "ClientTrafficPolicy");
     let w = web_settings(client).await?;
     if ca_pem.is_empty() {
-        policies
-            .patch(
-                "pyo-https",
-                &pp(),
-                &Patch::Apply(system::client_policy(
-                    true,
-                    system::WebSettings {
-                        origin_pull: false,
-                        ..w
-                    },
-                )),
-            )
-            .await?;
+        write_client_policy(
+            &policies,
+            "pyo-https",
+            &system::client_policy(
+                true,
+                system::WebSettings {
+                    origin_pull: false,
+                    ..w
+                },
+            ),
+        )
+        .await?;
         match maps
             .delete(system::ORIGIN_PULL_SECRET, &DeleteParams::default())
             .await
@@ -2034,19 +2080,18 @@ pub async fn set_origin_pull(client: &Client, ca_pem: &str) -> anyhow::Result<St
     });
     maps.patch(system::ORIGIN_PULL_SECRET, &pp(), &Patch::Apply(&map))
         .await?;
-    policies
-        .patch(
-            "pyo-https",
-            &pp(),
-            &Patch::Apply(system::client_policy(
-                true,
-                system::WebSettings {
-                    origin_pull: true,
-                    ..w
-                },
-            )),
-        )
-        .await?;
+    write_client_policy(
+        &policies,
+        "pyo-https",
+        &system::client_policy(
+            true,
+            system::WebSettings {
+                origin_pull: true,
+                ..w
+            },
+        ),
+    )
+    .await?;
     Ok("HTTPS now requires your CDN's client certificate".into())
 }
 
@@ -4160,5 +4205,138 @@ mod tests {
         let _ = Api::<Deployment>::namespaced(admin.clone(), ns)
             .delete("whoami", &DeleteParams::default())
             .await;
+    }
+
+    /// What a cluster still on 0.5.4's admission policy accepts of the
+    /// client policies: the shared ones only as listed then (before they
+    /// removed visitor headers), a CDN's only without `headers`, and no
+    /// tailnet one. Kubernetes' words for a refusal.
+    pub(crate) fn admission_054(w: &crate::fakekube::Write) -> Option<(u16, String)> {
+        if w.plural != "clienttrafficpolicies" || w.method == "DELETE" {
+            return None;
+        }
+        let shared: Vec<Value> = [false, true]
+            .into_iter()
+            .flat_map(system::client_policy_variants)
+            .filter_map(|v| without_headers(&json!({ "spec": v })).map(|o| o["spec"].clone()))
+            .collect();
+        let spec = &w.body["spec"];
+        let ok = match w.name.as_str() {
+            "pyo-http" | "pyo-https" => shared.contains(spec),
+            system::TAILNET_GATEWAY => false,
+            _ => spec.get("headers").is_none(),
+        };
+        (!ok).then(|| (403, format!("clienttrafficpolicies.gateway.envoyproxy.io \"{}\" is forbidden: ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request: failed expression: gatewayAllowed", w.name)))
+    }
+
+    /// A cluster that can't refresh its install (Pyo Cloud, self-update
+    /// off, read only) keeps 0.5.4's admission policy after the agent
+    /// moves on. Its client policies go in without the visitor headers'
+    /// removal, and the rest of a deploy's routes still does: the WAF's
+    /// policies after the CDN's client policy, the stale route's removal,
+    /// the gateway's settings. That's reported (the heartbeat's
+    /// `headersKept`) until the connect command brings the new policy.
+    #[tokio::test]
+    async fn an_older_admission_policy_gets_client_policies_without_headers() {
+        use pyo_proto::{Waf, WafSettings};
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let at = |kind: &str, name: &str| {
+            let (group, plural) = match kind {
+                "HTTPRoute" => ("gateway.networking.k8s.io/v1", "httproutes"),
+                "EnvoyExtensionPolicy" => ("gateway.envoyproxy.io/v1alpha1", "envoyextensionpolicies"),
+                "SecurityPolicy" => ("gateway.envoyproxy.io/v1alpha1", "securitypolicies"),
+                _ => ("gateway.envoyproxy.io/v1alpha1", "clienttrafficpolicies"),
+            };
+            format!("apis/{group}/namespaces/{GATEWAY_NS}/{plural}/{name}")
+        };
+        kube.admit(admission_054);
+        // A route an earlier deploy made, that this one no longer has.
+        kube.put(
+            &at("HTTPRoute", "shop-web-old"),
+            json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": { "labels": { SERVICE_LABEL: "svc_web" } }, "spec": {} }),
+        );
+        // Behind Cloudflare, with its WAF on.
+        let mut b = spec(vec![domain("shop.example.com", "http", "letsencrypt", true)]);
+        b.firewall = Some(Firewall {
+            behind: Some("cloudflare".into()),
+            presets: [("cloudflare".to_owned(), vec!["173.245.48.0/20".to_owned()])].into(),
+            ..Default::default()
+        });
+        b.waf = Some(Waf {
+            settings: WafSettings {
+                mode: "block".into(),
+                level: 1,
+                ..Default::default()
+            },
+            rules: vec![],
+        });
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let notes = apply(&client, &pyo, &b).await.expect("the deploy's routes");
+        assert!(notes.is_empty(), "{notes:?}");
+        // Refused with its headers, then written as 0.5.4 wrote it.
+        assert!(
+            kube.refused()
+                .iter()
+                .any(|w| w.name == "shop-web-cdn" && w.body["spec"]["headers"].is_object())
+        );
+        let cdn = kube.get(&at("ClientTrafficPolicy", "shop-web-cdn")).expect("the CDN's client policy");
+        assert!(cdn["spec"].get("headers").is_none(), "{cdn}");
+        assert_eq!(
+            cdn["spec"]["clientIPDetection"],
+            json!({ "xForwardedFor": { "trustedCIDRs": ["173.245.48.0/20"] } })
+        );
+        assert_eq!(cdn["metadata"]["labels"][system::CDN_LABEL], "cloudflare");
+        // What comes after it.
+        for (kind, name) in [
+            ("HTTPRoute", "shop-web-https-http"),
+            ("SecurityPolicy", "shop-web-https-http"),
+            ("EnvoyExtensionPolicy", "shop-web-https-http"),
+        ] {
+            assert!(kube.get(&at(kind, name)).is_some(), "{kind} {name}");
+        }
+        assert!(kube.get(&at("HTTPRoute", "shop-web-old")).is_none(), "the stale route");
+        assert!(headers_kept());
+
+        // The gateway's settings (origin pull, PROXY protocol): the shared
+        // policies as 0.5.4 lists them, and the CDN's follows.
+        write_web(&client, system::WebSettings { origin_pull: true, proxy_protocol: true })
+            .await
+            .expect("the gateway's settings");
+        for (https, name) in [(false, "pyo-http"), (true, "pyo-https")] {
+            let p = kube.get(&at("ClientTrafficPolicy", name)).expect(name);
+            assert!(p["spec"].get("headers").is_none(), "{p}");
+            let w = system::WebSettings { origin_pull: https, proxy_protocol: true };
+            assert_eq!(Some(p), without_headers(&system::client_policy(https, w)).map(|mut o| {
+                o["metadata"]["resourceVersion"] = json!("1");
+                o["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
+                o
+            }));
+        }
+        let cdn = kube.get(&at("ClientTrafficPolicy", "shop-web-cdn")).unwrap();
+        assert!(cdn["spec"]["proxyProtocol"].is_object() && cdn["spec"].get("headers").is_none());
+        set_web_proxy_protocol(&client, false).await.expect("PROXY protocol off");
+        set_origin_pull(&client, "").await.expect("origin pull off");
+        assert!(kube.get(&at("ClientTrafficPolicy", "pyo-https")).unwrap()["spec"].get("tls").is_none());
+
+        // The connect command ran: the new policy takes them whole.
+        kube.admit(|_| None);
+        apply(&client, &pyo, &b).await.expect("the deploy's routes");
+        let cdn = kube.get(&at("ClientTrafficPolicy", "shop-web-cdn")).unwrap();
+        assert_eq!(cdn["spec"]["headers"], system::visitor_headers(system::cdn_own_headers("cloudflare")));
+        write_web(&client, system::WebSettings::default()).await.unwrap();
+        for name in ["pyo-http", "pyo-https"] {
+            let p = kube.get(&at("ClientTrafficPolicy", name)).unwrap();
+            assert_eq!(p["spec"]["headers"], system::visitor_headers(&[]), "{name}");
+        }
+        assert!(!headers_kept());
+
+        // Refused for anything else: an error, as before.
+        kube.admit(|w| {
+            (w.plural == "clienttrafficpolicies").then(|| (403, "ValidatingAdmissionPolicy 'pyo-agent' denied request".into()))
+        });
+        assert!(write_web(&client, system::WebSettings::default()).await.is_err());
+        kube.admit(|w| (w.plural == "clienttrafficpolicies").then(|| (500, "etcd timeout".into())));
+        assert!(apply(&client, &pyo, &b).await.is_err());
+        assert!(!headers_kept());
     }
 }
