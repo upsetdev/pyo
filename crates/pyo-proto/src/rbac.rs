@@ -1952,21 +1952,23 @@ mod tests {
         }
     }
 
-    /// The roles alone: stable for the same roles. The disk pressure fix
+    /// The roles alone: stable for the same roles. 0.5.5's roles plus the
+    /// Cloudflare Tunnel's two Services (its origin and the public ports),
+    /// which the agent gets with the connect command. The disk pressure fix
     /// (critical per-server pods, the agent's own priority and
-    /// tolerations) changes no role: 0.5.5's roles. Its stricter admission
-    /// policy does move [`access_hash`], so clusters that can't refresh
-    /// are told to run the connect command. Change this only with a
-    /// release that means to change the roles.
+    /// tolerations) changes no role. Its stricter admission policy does
+    /// move [`access_hash`], so clusters that can't refresh are told to run
+    /// the connect command. Change this only with a release that means to
+    /// change the roles.
     #[test]
-    fn the_roles_are_as_0_5_5s() {
+    fn the_roles_are_as_0_51_0s() {
         assert_eq!(
             short_hash(&json!([
                 objects(false),
                 objects(true),
                 self_update_objects()
             ])),
-            "5db0cd47517256de"
+            "0162f7a9cdebb354"
         );
     }
 
