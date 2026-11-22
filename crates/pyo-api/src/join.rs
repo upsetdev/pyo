@@ -600,8 +600,10 @@ mod tests {
                 "{mem}: {text}"
             );
         }
-        // Memory it can't read: no drop-in (the one before is removed).
-        assert_eq!(config("nothing\n"), None);
+        // Memory it can't read: no reservations, the disk settings still.
+        let text = config("nothing\n").expect("a drop-in");
+        assert!(!text.contains("reserved="), "{text}");
+        assert!(text.contains("\nkubelet-arg+:\n  - \"eviction-hard="), "{text}");
         // The unit runs it at every start, at the path small_machine writes.
         let block = script_block("small-machine", CONNECT_SCRIPT);
         assert!(
@@ -610,6 +612,74 @@ mod tests {
         assert!(block.contains(
             "\"ExecStartPre=-/usr/local/lib/pyo-memory.sh k3s-config $K3S_MEMORY_CONFIG\""
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same drop-in: kubelet frees disk space only under 5% free (unused
+    /// images well before), and the server stops counting as short of disk
+    /// once 1 GiB more is free, not k3s's 10% more. Whatever the memory.
+    #[test]
+    fn kubelet_frees_disk_space_late_and_lets_go_soon() {
+        let helper = CONNECT_SCRIPT
+            .split("<<'MEMORY'\n")
+            .nth(1)
+            .and_then(|r| r.split("\nMEMORY\n").next())
+            .expect("connect.sh has the memory helper");
+        let dir = std::env::temp_dir().join(format!("pyo-disk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let want = "  - \"eviction-hard=imagefs.available<5%,nodefs.available<5%\"\n\
+                    \x20 - \"eviction-minimum-reclaim=imagefs.available=1Gi,nodefs.available=1Gi\"\n\
+                    \x20 - \"image-gc-high-threshold=85\"\n\
+                    \x20 - \"image-gc-low-threshold=75\"\n";
+        for meminfo in ["MemTotal: 983040 kB\n", "MemTotal: 33554432 kB\n", "nothing\n"] {
+            let info = dir.join("meminfo");
+            std::fs::write(&info, meminfo).unwrap();
+            let out = dir.join("50-pyo-memory.yaml");
+            let status = std::process::Command::new("sh")
+                .args(["-c", helper, "pyo-memory.sh", "k3s-config"])
+                .arg(&out)
+                .env("PYO_MEMINFO", &info)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let text = std::fs::read_to_string(&out).unwrap();
+            assert!(text.ends_with(want), "{meminfo}: {text}");
+            // One list, which k3s adds to its own arguments.
+            assert_eq!(text.matches("kubelet-arg").count(), 1, "{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        // Image cleanup starts and ends before eviction does (95% used).
+        let pct = |key: &str| -> u32 {
+            want.split(&format!("{key}="))
+                .nth(1)
+                .and_then(|r| r.split('"').next())
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        assert!(pct("image-gc-low-threshold") < pct("image-gc-high-threshold"));
+        assert!(pct("image-gc-high-threshold") < 95);
+    }
+
+    /// A server set up before the disk settings gets them, and k3s restarts
+    /// once for them, when its script runs again.
+    #[test]
+    fn existing_k3s_restarts_once_for_the_disk_settings() {
+        let dir = std::env::temp_dir().join(format!("pyo-disk-refresh-{}", std::process::id()));
+        let block = sandboxed_small_machine(&dir);
+        let d = dir.display();
+        let (code, out, err) = bash(&format!(
+            "set -euo pipefail\nsystemctl() {{ [ \"$1\" != restart ] || echo RESTART; }}\n{block}\n\
+             export PYO_MEMINFO={d}/meminfo; echo 'MemTotal: 16777216 kB' > $PYO_MEMINFO\n\
+             mkdir -p {d}/config.yaml.d\n\
+             printf '%s\\n' '# Managed by Pyo: what kubelet sets aside.' 'kubelet-arg+:' '  - \"kube-reserved=memory=768Mi\"' '  - \"system-reserved=memory=256Mi\"' > {d}/config.yaml.d/50-pyo-memory.yaml\n\
+             : > {d}/run/pyo-k3s.env\n\
+             k3s_memory_refresh\nk3s_memory_refresh"
+        ));
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out.matches("RESTART").count(), 1, "{out}");
+        let text = std::fs::read_to_string(dir.join("config.yaml.d/50-pyo-memory.yaml")).unwrap();
+        assert!(text.contains("eviction-minimum-reclaim="), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
