@@ -540,39 +540,41 @@ mod tests {
                 storm: true
             }
         );
-        let c = st.lock().unwrap();
-        assert_eq!(c.deleted.len(), 57);
-        assert!(
-            c.deleted.iter().all(|(ns, name, uid)| ns == "pyo-gateway"
-                && name.starts_with("envoy-")
-                && *uid == format!("uid-{name}")),
-            "{:?}",
-            c.deleted
-        );
-        // The newest three of the loop stay, and everything elsewhere.
-        assert_eq!(
-            c.pods
+        {
+            let c = st.lock().unwrap();
+            assert_eq!(c.deleted.len(), 57);
+            assert!(
+                c.deleted.iter().all(|(ns, name, uid)| ns == "pyo-gateway"
+                    && name.starts_with("envoy-")
+                    && *uid == format!("uid-{name}")),
+                "{:?}",
+                c.deleted
+            );
+            // The newest three of the loop stay, and everything elsewhere.
+            assert_eq!(
+                c.pods
+                    .iter()
+                    .filter(|p| p["metadata"]["namespace"] == "pyo-gateway")
+                    .count(),
+                KEEP
+            );
+            assert_eq!(c.pods.len(), KEEP + 60 + 60 + 5);
+            // Only Pyo's namespaces are listed, Failed pods only, a page at a time.
+            let listed: Vec<&str> = c
+                .lists
                 .iter()
-                .filter(|p| p["metadata"]["namespace"] == "pyo-gateway")
-                .count(),
-            KEEP
-        );
-        assert_eq!(c.pods.len(), KEEP + 60 + 60 + 5);
-        // Only Pyo's namespaces are listed, Failed pods only, a page at a time.
-        let listed: Vec<&str> = c
-            .lists
-            .iter()
-            .map(|l| l.split('?').next().unwrap())
-            .collect();
-        assert_eq!(listed, ["pyo-gateway", "pyo-system"]);
-        assert!(
-            c.lists
-                .iter()
-                .all(|l| l.contains("fieldSelector=status.phase%3DFailed") && l.contains("limit=")),
-            "{:?}",
-            c.lists
-        );
-        drop(c);
+                .map(|l| l.split('?').next().unwrap())
+                .collect();
+            assert_eq!(listed, ["pyo-gateway", "pyo-system"]);
+            assert!(
+                c.lists
+                    .iter()
+                    .all(|l| l.contains("fieldSelector=status.phase%3DFailed")
+                        && l.contains("limit=")),
+                "{:?}",
+                c.lists
+            );
+        }
 
         // Nothing looping any more: the next run is in minutes.
         let run = once(&client, Duration::ZERO).await.unwrap();
