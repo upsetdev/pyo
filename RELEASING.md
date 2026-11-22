@@ -239,8 +239,8 @@ release carries it as an asset. Installations find it in **Settings › Updates*
 - `migrations`: the migration files, so an installation can say how many it
   hasn't run yet
 - the notices from `deploy/release-notices.json`
-- `agentAccess`: a hash of the roles the release's agent is installed with
-  (see [Notices](#notices))
+- `agentAccess`: a hash of the roles and the admission policy the release's
+  agent is installed with (see [Notices](#notices))
 - `k3s`: the k3s a fresh install gets, from `deploy/k3s.env` (see
   [Bump k3s](#bump-k3s)).
 - `sandbox`: the SHA-256 of each architecture's sandbox server files.
@@ -291,13 +291,18 @@ release's (old notices never carry over):
   intermediate release has to run first (e.g. a migration in two steps).
   Older installations are told to update to `minFrom` first.
 
-A change to the agent's roles needs no notice: `release.json` carries the
-release agent's `agentAccess` (`pyo-agent access-hash`, which
-`check-release` verifies), and an installation whose agent has other roles
-adds "After updating, run the connect command shown in each cluster's
-settings." to the update dialog by itself. An agent brings its admission
+A change to the agent's roles or to its admission policy's rules needs no
+notice: `release.json` carries the release agent's `agentAccess`
+(`pyo-agent access-hash`, which `check-release` verifies), and an
+installation whose agent has other ones adds "After updating, run the
+connect command shown in each cluster's settings." to the update dialog by
+itself. The images in the policy don't count. An agent brings its admission
 policy and image pins up to date on its own (with the self-update role), but
-never its roles.
+never its roles, and a cluster without that role (Pyo Cloud's, or with
+`PYO_AGENT_SELF_UPDATE=false`) or read only gets a new policy only from its
+connect command. Until then, the agent writes the gateway's client policies
+in the shape the cluster's older policy accepts, and the cluster's settings
+say to run the command.
 
 ### How an installation updates
 
