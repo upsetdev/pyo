@@ -6,7 +6,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::{api::Api, ui};
+use crate::{
+    api::Api,
+    pack::{Progress, size_text},
+    ui,
+};
 
 /// The team's database by name or id.
 fn find<'a>(state: &'a Value, team: Option<&str>, which: &str) -> Result<&'a Value> {
@@ -38,17 +42,25 @@ fn find<'a>(state: &'a Value, team: Option<&str>, which: &str) -> Result<&'a Val
     Ok(first)
 }
 
-/// Upload a dump, as it's read: say what it is, then send it where Pyo
-/// says, with only the headers it gives (no API key: the URL may be on
-/// another host).
+/// Tries for each request of an upload, and the wait before the next.
+const TRIES: u32 = 6;
+
+fn backoff(try_n: u32) -> Duration {
+    Duration::from_secs((1u64 << try_n).min(30))
+}
+
+/// Upload a dump: say what it is, then send it in the parts Pyo asks for,
+/// in order, each sent again when its request fails. A Pyo that takes no
+/// parts gets it in one request.
 async fn upload(api: &Api, team_id: &str, engine: &str, path: &std::path::Path) -> Result<Value> {
+    use sha2::Digest;
     use tokio::io::AsyncReadExt;
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("dump.sql")
         .to_owned();
-    let file = tokio::fs::File::open(path)
+    let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("Can't read {}", path.display()))?;
     let size = file
@@ -62,6 +74,85 @@ async fn upload(api: &Api, team_id: &str, engine: &str, path: &std::path::Path) 
             &json!({ "teamId": team_id, "engine": engine, "filename": name, "size": size }),
         )
         .await?;
+    let Some(part_size) = target["partSize"].as_u64().filter(|n| *n > 0) else {
+        upload_whole(&target, api, file, size, &name).await?;
+        return Ok(target);
+    };
+    let id = target["uploadId"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Pyo gave no upload id."))?
+        .to_owned();
+    let parts = size.div_ceil(part_size);
+    let total = size_text(size);
+    let mut progress = Progress::new();
+    progress.show(&format!("Uploading {name}, {total}…"), true);
+    let mut hash = sha2::Sha256::new();
+    let mut sent = 0u64;
+    for n in 0..parts {
+        let len = part_size.min(size - n * part_size);
+        let mut buf = vec![0u8; len as usize];
+        file.read_exact(&mut buf)
+            .await
+            .with_context(|| format!("Can't read {}", path.display()))?;
+        hash.update(&buf);
+        let sha = hex::encode(sha2::Sha256::digest(&buf));
+        let at = format!("/api/v1/database-imports/uploads/{id}/parts/{n}");
+        let mut tries = 0;
+        loop {
+            match api.put_part(&at, buf.clone(), &sha).await {
+                Ok(_) => break,
+                Err(e) if tries + 1 < TRIES && crate::api::retryable(&e) => {
+                    tries += 1;
+                    progress.show(&format!("Retrying a part: {e}"), true);
+                    tokio::time::sleep(backoff(tries)).await;
+                }
+                Err(e) => {
+                    progress.done();
+                    return Err(e.context("The upload broke off. Try again."));
+                }
+            }
+        }
+        sent += len;
+        progress.show(
+            &format!(
+                "Uploading {name}: {} of {total} ({}%)",
+                size_text(sent),
+                sent * 100 / size.max(1)
+            ),
+            n + 1 == parts,
+        );
+    }
+    let at = format!("/api/v1/database-imports/uploads/{id}/complete");
+    let sha256 = hex::encode(hash.finalize());
+    let mut tries = 0;
+    loop {
+        match api.post(&at, &json!({ "sha256": sha256 })).await {
+            Ok(_) => break,
+            Err(e) if tries + 1 < TRIES && crate::api::retryable(&e) => {
+                tries += 1;
+                tokio::time::sleep(backoff(tries)).await;
+            }
+            Err(e) => {
+                progress.done();
+                return Err(e);
+            }
+        }
+    }
+    progress.done();
+    eprintln!("{} Uploaded {name}, {total}", ui::green("✓"));
+    Ok(target)
+}
+
+/// The whole file in one request to `uploadUrl`, with only the headers Pyo
+/// gives (no API key: the URL may be on another host).
+async fn upload_whole(
+    target: &Value,
+    api: &Api,
+    file: tokio::fs::File,
+    size: u64,
+    name: &str,
+) -> Result<()> {
+    use tokio::io::AsyncReadExt;
     let url = target["uploadUrl"]
         .as_str()
         .ok_or_else(|| anyhow!("Pyo gave no upload URL."))?;
@@ -72,10 +163,7 @@ async fn upload(api: &Api, team_id: &str, engine: &str, path: &std::path::Path) 
         .unwrap_or(reqwest::Method::PUT);
     eprintln!(
         "{}",
-        ui::dim(&format!(
-            "Uploading {name} ({:.1} MiB)…",
-            size as f64 / 1_048_576.0
-        ))
+        ui::dim(&format!("Uploading {name}, {}…", size_text(size)))
     );
     let stream = futures::stream::unfold(file, |mut f| async move {
         let mut buf = vec![0u8; 1 << 20];
@@ -112,7 +200,8 @@ async fn upload(api: &Api, team_id: &str, engine: &str, path: &std::path::Path) 
             .unwrap_or_else(|| format!("The upload failed ({status})"));
         bail!(msg);
     }
-    Ok(target)
+    eprintln!("{} Uploaded {name}, {}", ui::green("✓"), size_text(size));
+    Ok(())
 }
 
 pub async fn import(
