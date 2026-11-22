@@ -1412,7 +1412,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            ports_taken(&[gw("web-2", true)], &[nginx.clone()]),
+            ports_taken(&[gw("web-2", true)], std::slice::from_ref(&nginx)),
             vec![pyo_proto::GatewayPortsTaken { server: "web-2".into(), ports: vec![443], by: "ingress-nginx".into() }]
         );
         // Another server's holder doesn't count; nothing found: every port it wants.
