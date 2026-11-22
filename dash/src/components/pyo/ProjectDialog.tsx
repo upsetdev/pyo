@@ -25,8 +25,13 @@ export function useProjectForm(project?: Project) {
   const [nsEdited, setNsEdited] = useState(!!project);
   const [description, setDescription] = useState(project?.description ?? "");
   const [touched, setTouched] = useState(false);
+  // The project this form just made. It's in the store at once, so it
+  // mustn't read as taking its own name while the page moves on.
+  const [made, setMade] = useState<string>();
 
-  const others = projectsIn(s).filter((p) => p.id !== project?.id);
+  const others = projectsIn(s).filter(
+    (p) => p.id !== project?.id && p.id !== made,
+  );
   const ns = nsEdited ? namespace : slugify(name);
   const errors = {
     name: !name.trim()
@@ -48,7 +53,7 @@ export function useProjectForm(project?: Project) {
               ? "Another project already uses this name."
               : "",
   };
-  const valid = !errors.name && !errors.namespace;
+  const valid = !made && !errors.name && !errors.namespace;
   return {
     name,
     setName,
@@ -61,6 +66,8 @@ export function useProjectForm(project?: Project) {
     setDescription,
     touched,
     setTouched,
+    created: setMade,
+    reset: () => setMade(undefined),
     errors,
     valid,
   };
@@ -134,6 +141,7 @@ export function ProjectDialog({
     f.setName(project?.name ?? "");
     f.setDescription(project?.description ?? "");
     f.setTouched(false);
+    f.reset();
     // Reset when reopened.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -160,6 +168,7 @@ export function ProjectDialog({
             description: f.description,
             namespace: f.namespace,
           });
+          f.created(id);
           toast({ title: `Project ${f.name.trim()} created` });
           onClose();
           void navigate({

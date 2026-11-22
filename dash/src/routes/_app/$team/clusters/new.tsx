@@ -267,7 +267,11 @@ function HetznerCluster({
     name && !/^[a-z0-9]([a-z0-9-]{0,59}[a-z0-9])?$/.test(name)
       ? "Lowercase letters, digits and dashes."
       : s.clusters.some(
-            (c) => c.teamId === s.currentTeamId && c.name === name && c.id !== draftId,
+            (c) =>
+              c.teamId === s.currentTeamId &&
+              c.name === name &&
+              c.id !== draftId &&
+              c.id !== made?.clusterId,
           )
         ? "A cluster with this name exists."
         : "";

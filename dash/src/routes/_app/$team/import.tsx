@@ -107,6 +107,7 @@ function ImportForm() {
         "databaseId" in target
           ? await importInto({ id: target.databaseId, teamId: s.currentTeamId, engine }, src)
           : await importNew(s.currentTeamId, engine, target.newDatabase, src);
+      if ("newDatabase" in target) f.created(newDbId);
       const name = into === "existing" ? existing?.name : f.name;
       toast({
         title: `Importing into ${name}`,
