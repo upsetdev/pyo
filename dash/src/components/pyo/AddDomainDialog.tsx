@@ -9,6 +9,7 @@ import {
 import {
   CloudflareFields,
   useCloudflareFor,
+  useTunnelChoice,
   type CloudflareChoice,
 } from "~/components/pyo/Cloudflare";
 import { SetUpTailscaleLink } from "~/components/pyo/Tailscale";
@@ -118,6 +119,12 @@ export function AddDomainDialog({
     k === "own" ? hostname : "",
     app?.clusterId,
   );
+  // Through the cluster's Cloudflare Tunnel instead of a direct record.
+  const viaTunnel = useTunnelChoice(
+    k === "own" && HOSTNAME.test(hostname) ? hostname : "",
+    app?.clusterId,
+    cf,
+  ).on;
   const matching = s.certificates.filter(
     (c) =>
       c.teamId === (app?.teamId ?? s.currentTeamId) &&
@@ -170,9 +177,13 @@ export function AddDomainDialog({
                   ? { certificateId: cert.id }
                   : {}),
               },
-          k === "own" && inCloudflare && cf.create
-            ? { proxied: cf.proxied }
-            : undefined,
+          k !== "own"
+            ? undefined
+            : viaTunnel
+              ? { tunnel: true }
+              : inCloudflare && cf.create
+                ? { proxied: cf.proxied }
+                : undefined,
         );
         toast({
           title: fixed
@@ -180,7 +191,7 @@ export function AddDomainDialog({
             : `Added ${hostname} to ${app.name}`,
           description: !app.currentDeploymentId
             ? "Live after the first deploy."
-            : k !== "own" || (inCloudflare && cf.create)
+            : k !== "own" || viaTunnel || (inCloudflare && cf.create)
               ? undefined
               : "Create the DNS record, then check DNS.",
         });
@@ -334,6 +345,7 @@ export function AddDomainDialog({
                 clusterId={app?.clusterId}
                 value={cf}
                 onChange={setCf}
+                tunnel
               />
             ) : null}
             {httpPorts.length > 1 ? (

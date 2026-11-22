@@ -13,16 +13,24 @@ import {
 } from "~/components/pyo/IntegrationDialog";
 import { Field, SecretInput, Switch } from "~/components/ui/Field";
 import { timeAgo } from "~/lib/pyo/format";
-import { isFreeDomain } from "~/lib/pyo/freeDomain";
+import { isFreeDomain, isTailnetDomain } from "~/lib/pyo/freeDomain";
 import {
   api,
   cloudflareIn,
   cloudflareZoneFor,
+  clusterTraffic,
   roleIn,
   servicePath,
+  tunnelZoneFor,
   usePyo,
 } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
+import {
+  onTunnel,
+  OutsideTunnel,
+  SwitchToTunnel,
+  TunnelRecordLine,
+} from "~/components/pyo/TunnelRecord";
 import type { Application, CloudflareZone, Domain } from "~/lib/pyo/types";
 
 // The team's Cloudflare account: Pyo creates the DNS records of domains in
@@ -245,31 +253,86 @@ function zoneNote(z: CloudflareZone): string {
   return missing.length === 1 ? ` · needs ${missing[0]}` : " · DNS only";
 }
 
-/** What to do about a new domain's DNS record in Cloudflare. */
-export type CloudflareChoice = { create: boolean; proxied: boolean };
+/**
+ * What to do about a new domain's DNS record in Cloudflare. `tunnel`:
+ * through the cluster's tunnel (unset: on in tunnel mode).
+ */
+export type CloudflareChoice = { create: boolean; proxied: boolean; tunnel?: boolean };
+
+/** The tunnel-ready zone a new domain can use, and whether it goes through the tunnel. */
+export function useTunnelChoice(
+  hostname: string,
+  clusterId: string | undefined,
+  value: CloudflareChoice,
+) {
+  const s = usePyo();
+  const cluster = s.clusters.find((c) => c.id === clusterId);
+  const zone =
+    hostname && !isFreeDomain(hostname)
+      ? tunnelZoneFor(s, hostname, cluster)
+      : undefined;
+  const on =
+    !!zone &&
+    (value.tunnel ?? (!!cluster && clusterTraffic(cluster) === "tunnel"));
+  return { zone, on };
+}
 
 /**
  * "Create the DNS record in Cloudflare" and "Proxied by Cloudflare", when a
- * connected zone covers the hostname. Nothing otherwise.
+ * connected zone covers the hostname. Nothing otherwise. With `tunnel`, a
+ * tunnel-ready zone offers "Through Cloudflare Tunnel" first.
  */
 export function CloudflareFields({
   hostname,
   clusterId,
   value,
   onChange,
+  tunnel,
 }: {
   hostname: string;
   clusterId?: string;
   value: CloudflareChoice;
   onChange: (v: CloudflareChoice) => void;
+  /** Offer the cluster's tunnel (the caller switches the domain to it). */
+  tunnel?: boolean;
 }) {
   const s = usePyo();
   const zone = cloudflareZoneFor(s, hostname);
+  const choice = useTunnelChoice(tunnel ? hostname : "", clusterId, value);
   if (!zone || !hostname || isFreeDomain(hostname)) return null;
   const ip = s.clusters.find((c) => c.id === clusterId)?.publicIp;
-  const usable = zone.canEdit && !!ip;
   return (
     <div className="space-y-3">
+      {choice.zone ? (
+        <Switch
+          checked={choice.on}
+          onChange={(on) => onChange({ ...value, tunnel: on })}
+          label="Through Cloudflare Tunnel"
+          description={`CNAME to the tunnel in ${choice.zone.name}`}
+        />
+      ) : null}
+      {choice.on ? null : (
+        <DirectRecordFields zone={zone} ip={ip} value={value} onChange={onChange} />
+      )}
+    </div>
+  );
+}
+
+/** A direct A record: create it, and proxied or not. */
+function DirectRecordFields({
+  zone,
+  ip,
+  value,
+  onChange,
+}: {
+  zone: CloudflareZone;
+  ip?: string | null;
+  value: CloudflareChoice;
+  onChange: (v: CloudflareChoice) => void;
+}) {
+  const usable = zone.canEdit && !!ip;
+  return (
+    <>
       <Switch
         checked={usable && value.create}
         disabled={!usable}
@@ -295,7 +358,7 @@ export function CloudflareFields({
           }
         />
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -307,8 +370,42 @@ export function useCloudflareFor(hostname: string, clusterId?: string) {
   return !!zone?.canEdit && !!ip && !isFreeDomain(hostname);
 }
 
-/** A domain's record in Cloudflare on the service's Domains: how it stands, and what to do. */
+/**
+ * A domain's record in Cloudflare on the service's Domains: how it stands,
+ * and what to do. Through the cluster's tunnel or not.
+ */
 export function DnsRecordLine({ app, d }: { app: Application; d: Domain }) {
+  const s = usePyo();
+  const cluster = s.clusters.find((c) => c.id === app.clusterId);
+  if (onTunnel(d)) return <TunnelRecordLine app={app} d={d} />;
+  const tunnelMode = !!cluster && clusterTraffic(cluster) === "tunnel";
+  const zone = isFreeDomain(d.hostname)
+    ? undefined
+    : tunnelZoneFor(s, d.hostname, cluster);
+  if (tunnelMode && !zone && !isTailnetDomain(d.hostname))
+    return <OutsideTunnel c={cluster} d={d} />;
+  const r = d.dnsRecord;
+  const direct = <DirectRecordLine app={app} d={d} noCreate={tunnelMode} />;
+  if (!zone || (r && !["created", "exists"].includes(r.status))) return direct;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3">
+      {direct}
+      <SwitchToTunnel app={app} d={d} />
+    </div>
+  );
+}
+
+/** A direct record: created, already there, in the way, or failed. */
+function DirectRecordLine({
+  app,
+  d,
+  noCreate,
+}: {
+  app: Application;
+  d: Domain;
+  /** No "Create in Cloudflare": the cluster takes no direct web traffic. */
+  noCreate: boolean;
+}) {
   const s = usePyo();
   const r = d.dnsRecord;
   const admin = isAdmin(roleIn(s));
@@ -324,7 +421,12 @@ export function DnsRecordLine({ app, d }: { app: Application; d: Domain }) {
   };
   if (!r) {
     // None yet: offer it while the domain waits for DNS.
-    if (!zone?.canEdit || d.status === "active" || isFreeDomain(d.hostname))
+    if (
+      noCreate ||
+      !zone?.canEdit ||
+      d.status === "active" ||
+      isFreeDomain(d.hostname)
+    )
       return null;
     return (
       <Button
