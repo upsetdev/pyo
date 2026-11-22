@@ -73,6 +73,10 @@ pub struct PlanProject {
     pub name: String,
     /// Its slug, used in service addresses: lowercase letters, digits and dashes.
     pub namespace: String,
+    /// The Compose file's name, e.g. "compose.yaml". Its services remember
+    /// it, so a later sync finds them.
+    #[serde(default)]
+    pub file: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
@@ -94,6 +98,34 @@ pub struct PlanService {
     pub container: pyo_proto::ContainerOverrides,
     /// Services it starts after.
     pub depends_on: Vec<String>,
+    /// What the file sets, which a sync keeps in line with it: "source",
+    /// "env", "ports", "volumes", "health", "replicas", "resources.cpuLimit"
+    /// and the other resources, "container.command" and the other container
+    /// settings, and the `x-pyo` ones ("domains", "behindCdn", "placement",
+    /// "secrets"). The rest stays as it is in Pyo.
+    #[serde(default)]
+    pub managed: Vec<String>,
+    /// `x-pyo.domains`: served on its first web port.
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// `x-pyo.behindCdn`: "cloudflare", or none.
+    #[serde(default)]
+    pub behind_cdn: Option<String>,
+    /// `x-pyo.placement`: `{"servers": [...], "tags": [...]}`.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub placement: Option<Value>,
+    /// `x-pyo.secrets`: secret variables it needs, by name. Their values
+    /// are set in Pyo, never in the file.
+    #[serde(default)]
+    pub secrets: Vec<String>,
+}
+
+impl PlanService {
+    /// Whether the file sets this (see `managed`).
+    pub fn manages(&self, field: &str) -> bool {
+        self.managed.iter().any(|m| m == field)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
@@ -722,6 +754,174 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("oom_score_adj", "Out-of-memory priority isn't changed."),
 ];
 
+/// Service keys of `x-pyo` that templates use (pyo-templates' schema.json).
+/// The template catalog reads them, so an import leaves them alone.
+const TEMPLATE_KEYS: [&str; 3] = ["workload", "gpu", "expose"];
+
+/// A service's own `x-pyo`: the settings Compose has no field for.
+#[derive(Default)]
+struct XPyo {
+    domains: Vec<String>,
+    /// Set: `Some(None)` takes it out of a CDN.
+    behind_cdn: Option<Option<String>>,
+    health: Option<String>,
+    replicas: Option<i32>,
+    placement: Option<Value>,
+    secrets: Vec<String>,
+}
+
+/// Text, or a list of it.
+fn texts(v: &Value) -> Option<Vec<String>> {
+    match v {
+        Value::Null => Some(vec![]),
+        Value::String(s) => Some(vec![s.clone()]),
+        Value::Array(a) => a.iter().map(|x| x.as_str().map(str::to_owned)).collect(),
+        _ => None,
+    }
+}
+
+fn env_name(k: &str) -> bool {
+    !k.is_empty()
+        && !k.as_bytes()[0].is_ascii_digit()
+        && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn x_pyo(v: Option<&Value>, sn: Option<&str>, w: &mut Warnings) -> XPyo {
+    let mut x = XPyo::default();
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return x;
+    };
+    let Some(m) = v.as_object() else {
+        w.add(
+            sn,
+            "x-pyo",
+            "x-pyo holds Pyo's settings by name (domains, replicas…), so it's left out.",
+        );
+        return x;
+    };
+    for (k, v) in m {
+        let field = format!("x-pyo.{k}");
+        match k.as_str() {
+            "domains" => match texts(v) {
+                Some(ds) => {
+                    for d in ds {
+                        let d = d.trim().trim_end_matches('.').to_lowercase();
+                        if d.is_empty() {
+                            continue;
+                        }
+                        if !crate::util::hostname(&d) {
+                            w.add(
+                                sn,
+                                &field,
+                                format!("{d} isn't a domain like app.example.com, so it's left out."),
+                            );
+                        } else if !x.domains.contains(&d) {
+                            x.domains.push(d);
+                        }
+                    }
+                }
+                None => w.add(
+                    sn,
+                    &field,
+                    "domains is a list like [app.example.com], so it's left out.",
+                ),
+            },
+            "behindCdn" => match v {
+                Value::Null | Value::Bool(false) => x.behind_cdn = Some(None),
+                Value::String(c) if c == "none" => x.behind_cdn = Some(None),
+                Value::String(c) => match crate::firewall::check_behind(Some(c)) {
+                    Ok(c) => x.behind_cdn = Some(c),
+                    Err(_) => w.add(
+                        sn,
+                        &field,
+                        format!("{c} isn't a CDN Pyo knows: use cloudflare or none."),
+                    ),
+                },
+                _ => w.add(sn, &field, "behindCdn is cloudflare or none."),
+            },
+            "health" => match v.as_str() {
+                Some(h) if h == "tcp" || h == "none" || h.starts_with('/') => {
+                    x.health = Some(h.to_owned());
+                }
+                _ => w.add(
+                    sn,
+                    &field,
+                    "health is a path like /healthz, or tcp or none, so it's left out.",
+                ),
+            },
+            "replicas" => match v.as_i64().filter(|n| (0..=i64::from(i32::MAX)).contains(n)) {
+                Some(n) => x.replicas = Some(n as i32),
+                None => w.add(sn, &field, "replicas is a whole number, 0 or more."),
+            },
+            "placement" => {
+                let Some(p) = v.as_object() else {
+                    w.add(
+                        sn,
+                        &field,
+                        "placement has servers or tags, like {tags: [eu]}, so it's left out.",
+                    );
+                    continue;
+                };
+                let mut out = json!({ "servers": [], "tags": [] });
+                let mut ok = true;
+                for (pk, pv) in p {
+                    let list = texts(pv);
+                    match (pk.as_str(), list) {
+                        ("servers", Some(l)) => out["servers"] = json!(l),
+                        ("tags", Some(l)) => {
+                            if let Some(bad) =
+                                l.iter().find(|t| pyo_proto::valid_tag(t).is_none())
+                            {
+                                w.add(sn, &field, format!("{bad} isn't a tag: tags are lowercase letters, digits and dashes. Placement is left out."));
+                                ok = false;
+                            }
+                            out["tags"] = json!(l);
+                        }
+                        _ => {
+                            w.add(
+                                sn,
+                                &field,
+                                format!("placement.{pk} isn't used: placement has servers and tags."),
+                            );
+                        }
+                    }
+                }
+                if ok {
+                    x.placement = Some(out);
+                }
+            }
+            "secrets" => match texts(v) {
+                Some(names) => {
+                    for n in names {
+                        let n = n.trim().to_owned();
+                        if !env_name(&n) {
+                            w.add(
+                                sn,
+                                &field,
+                                format!("{n:?} isn't a variable name, so it's left out."),
+                            );
+                        } else if !x.secrets.contains(&n) {
+                            x.secrets.push(n);
+                        }
+                    }
+                }
+                None => w.add(
+                    sn,
+                    &field,
+                    "secrets is a list of variable names, so it's left out.",
+                ),
+            },
+            k if TEMPLATE_KEYS.contains(&k) => {}
+            _ => w.add(
+                sn,
+                &field,
+                format!("x-pyo.{k} isn't a Pyo setting, so it's left out."),
+            ),
+        }
+    }
+    x
+}
+
 /// The plan for a Compose file.
 pub fn plan(input: &Input) -> Result<ComposePlan, String> {
     let mut w = Warnings(vec![]);
@@ -796,6 +996,11 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
             },
             40,
         ),
+        file: input
+            .repo
+            .as_ref()
+            .map(|r| r.path.clone())
+            .unwrap_or_default(),
     };
 
     // Names in Pyo, unique, and what changed.
@@ -844,6 +1049,13 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
                 w.add(sn, field, *why);
             }
         }
+        let x = x_pyo(svc.get("x-pyo"), sn, &mut w);
+        let present = |k: &str| {
+            svc.get(k).is_some_and(|v| {
+                !v.is_null() && v.as_array().is_none_or(|a| !a.is_empty())
+            })
+        };
+        let mut managed: Vec<String> = vec!["source".into(), "env".into()];
 
         // Source: an image, or a build from the repository.
         let image = svc
@@ -1122,8 +1334,36 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
                 "No port is declared: if other services connect to it, add the port it listens on.",
             );
         }
+        if present("ports") || present("expose") {
+            managed.push("ports".into());
+        }
+        let mut domains = x.domains.clone();
+        if !domains.is_empty() {
+            let web = ports
+                .iter()
+                .position(|p| p.public && p.protocol == "HTTP")
+                .or_else(|| ports.iter().position(|p| p.protocol == "HTTP"));
+            match web {
+                Some(i) => {
+                    for p in &mut ports {
+                        p.domain = None;
+                    }
+                    ports[i].public = true;
+                    ports[i].domain = domains.first().cloned();
+                    managed.push("domains".into());
+                    if !managed.iter().any(|m| m == "ports") {
+                        managed.push("ports".into());
+                    }
+                }
+                None => {
+                    w.add(sn, "x-pyo.domains", "It has no web port to serve its domains on: add the port it listens on under ports or expose.");
+                    domains.clear();
+                }
+            }
+        }
         if ports.iter().any(|p| p.public && p.protocol == "HTTP")
             && input.domain_base.is_none()
+            && domains.is_empty()
             && first_http
         {
             first_http = false;
@@ -1198,6 +1438,20 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
                 }
             }
             _ => {}
+        }
+        // Secrets take no value from the file.
+        unset.retain(|k| !x.secrets.contains(k));
+        let given: Vec<String> = env
+            .iter()
+            .filter(|e| x.secrets.contains(&e.key) && !e.value.is_empty())
+            .map(|e| e.key.clone())
+            .collect();
+        if !given.is_empty() {
+            w.add(sn, "x-pyo.secrets", format!("Secrets take their values from Pyo, not the file, so the file's {} isn't used.", given.join(", ")));
+        }
+        env.retain(|e| !x.secrets.contains(&e.key));
+        if !x.secrets.is_empty() {
+            managed.push("secrets".into());
         }
         if !unset.is_empty() {
             w.add(sn, "environment", format!("Taken from the shell in Compose and not set here, so left out: {}. Add the ones it needs.", unset.join(", ")));
@@ -1279,6 +1533,10 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
             }
         }
 
+        if present("volumes") {
+            managed.push("volumes".into());
+        }
+
         // Health check.
         let first_port = ports.first().map(|p| p.container_port);
         let health = svc.get("healthcheck").and_then(Value::as_object);
@@ -1319,7 +1577,7 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
             .and_then(|v| duration_secs(&scalar(v)))
             .unwrap_or(5)
             .clamp(0, 600);
-        let health_check = match (disabled, command, first_port) {
+        let mut health_check = match (disabled, command, first_port) {
             (false, Some(c), p) => {
                 json!({ "type": "exec", "command": c, "path": "", "port": p.unwrap_or(0), "initialDelaySeconds": delay, "periodSeconds": period })
             }
@@ -1330,6 +1588,30 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
                 json!({ "type": "tcp", "command": "", "path": "", "port": p, "initialDelaySeconds": delay, "periodSeconds": period })
             }
         };
+
+        if health.is_some() {
+            managed.push("health".into());
+            if health.is_some_and(|h| h.contains_key("interval") || h.contains_key("start_period")) {
+                managed.push("healthTiming".into());
+            }
+        }
+        if let Some(h) = &x.health {
+            let web = ports
+                .iter()
+                .find(|p| p.protocol == "HTTP")
+                .or(ports.first())
+                .map(|p| p.container_port);
+            let kind = if h.starts_with('/') { "http" } else { h.as_str() };
+            match (kind, web) {
+                ("none", _) | ("http" | "tcp", Some(_)) => {
+                    health_check = json!({ "type": kind, "command": "", "path": if kind == "http" { h.as_str() } else { "" }, "port": if kind == "none" { 0 } else { web.unwrap_or(0) }, "initialDelaySeconds": delay, "periodSeconds": period });
+                    if !managed.iter().any(|m| m == "health") {
+                        managed.push("health".into());
+                    }
+                }
+                _ => w.add(sn, "x-pyo.health", "It has no port to check: add the port it listens on under ports or expose."),
+            }
+        }
 
         // Replicas and resources.
         let deploy = svc.get("deploy").and_then(Value::as_object);
@@ -1353,12 +1635,16 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
                 );
             }
         }
-        let replicas = deploy
+        let compose_replicas = deploy
             .and_then(|d| d.get("replicas"))
             .and_then(Value::as_i64)
-            .or_else(|| svc.get("scale").and_then(Value::as_i64))
-            .unwrap_or(1)
-            .clamp(0, i32::MAX as i64) as i32;
+            .or_else(|| svc.get("scale").and_then(Value::as_i64));
+        if compose_replicas.is_some() || x.replicas.is_some() {
+            managed.push("replicas".into());
+        }
+        let replicas = x.replicas.unwrap_or_else(|| {
+            compose_replicas.unwrap_or(1).clamp(0, i32::MAX as i64) as i32
+        });
         let limits = deploy
             .and_then(|d| d.get("resources"))
             .and_then(|r| r.get("limits"));
@@ -1415,6 +1701,17 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
                 }
             }
         }
+        for (k, set) in [
+            ("resources.cpuLimit", cpu_limit.is_some()),
+            ("resources.memoryLimit", mem_limit.is_some()),
+            ("resources.cpuRequest", cpu_request.is_some()),
+            ("resources.memoryRequest", mem_request.is_some()),
+            ("resources.gpu", !gpu_devices.is_empty()),
+        ] {
+            if set {
+                managed.push(k.into());
+            }
+        }
         let cpu_request =
             cpu_request.unwrap_or_else(|| cpu_limit.map(|l| l.min(100)).unwrap_or(100));
         let memory_request =
@@ -1449,6 +1746,23 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
             }
         }
 
+        for (k, field) in [
+            ("entrypoint", "container.entrypoint"),
+            ("command", "container.command"),
+            ("working_dir", "container.workingDir"),
+            ("user", "container.user"),
+        ] {
+            if svc.get(k).is_some_and(|v| !v.is_null()) {
+                managed.push(field.into());
+            }
+        }
+        if x.behind_cdn.is_some() {
+            managed.push("behindCdn".into());
+        }
+        if x.placement.is_some() {
+            managed.push("placement".into());
+        }
+
         let depends_on: Vec<String> = match svc.get("depends_on") {
             Some(Value::Array(a)) => a.iter().map(scalar).collect(),
             Some(Value::Object(m)) => m.keys().cloned().collect(),
@@ -1478,6 +1792,11 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
             resources,
             container,
             depends_on: deps,
+            managed,
+            domains,
+            behind_cdn: x.behind_cdn.flatten(),
+            placement: x.placement,
+            secrets: x.secrets,
         });
     }
 
@@ -1529,9 +1848,49 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
     })
 }
 
+/// A plan port as a service's port.
+pub fn port_json(p: &PlanPort, id: String) -> Value {
+    let exposure = exposure(p);
+    let mut v = json!({ "id": id, "name": p.name, "protocol": p.protocol, "containerPort": p.container_port, "exposure": exposure });
+    if exposure == "loadbalancer" {
+        // Published TCP and UDP ports go through the gateway.
+        v["proxy"] = json!(true);
+        if let Some(pp) = p.public_port {
+            v["publicPort"] = json!(pp);
+        }
+    }
+    v
+}
+
+/// "internal", "http" (a website) or "loadbalancer" (a public TCP or UDP port).
+pub fn exposure(p: &PlanPort) -> &'static str {
+    match (p.public, p.protocol.as_str()) {
+        (false, _) => "internal",
+        (true, "HTTP") => "http",
+        (true, _) => "loadbalancer",
+    }
+}
+
+/// A new domain of a service, on its port `port`.
+pub fn domain_json(hostname: &str, port: &str, id: String, now: i64) -> Value {
+    let private = crate::deploy::private_host(hostname);
+    json!({ "id": id, "hostname": hostname, "portName": port, "status": "pending_dns", "tls": "pending", "tlsMode": "auto", "redirectHttps": !private, "createdAt": now })
+}
+
+/// What a service made from a Compose file remembers of it: the file, and
+/// its name there.
+pub fn record(file: &str, compose_name: &str) -> Value {
+    let file = file.trim();
+    json!({ "file": if file.is_empty() { "compose.yaml" } else { file }, "service": compose_name })
+}
+
 /// A plan service as the service object `createService` takes.
+#[allow(clippy::too_many_arguments)]
 pub fn service_spec(
     s: &PlanService,
+    // The Compose file it's from, which it remembers. None for a service
+    // that isn't kept in line with a file (a platform import's).
+    file: Option<&str>,
     id: &str,
     team_id: &str,
     project_id: &str,
@@ -1539,36 +1898,39 @@ pub fn service_spec(
     now: i64,
     new_id: &dyn Fn(&str) -> String,
 ) -> Value {
-    let env: Vec<Value> = s.env.iter().map(|e| json!({ "id": new_id("env"), "key": e.key, "value": e.value, "secret": e.secret, "updatedAt": now })).collect();
+    let mut env: Vec<Value> = s.env.iter().map(|e| json!({ "id": new_id("env"), "key": e.key, "value": e.value, "secret": e.secret, "updatedAt": now })).collect();
+    // Secrets it needs get their values in Pyo.
+    for k in &s.secrets {
+        if !s.env.iter().any(|e| &e.key == k) {
+            env.push(json!({ "id": new_id("env"), "key": k, "value": "", "secret": true, "updatedAt": now }));
+        }
+    }
     let ports: Vec<Value> = s
         .ports
         .iter()
-        .map(|p| {
-            let exposure = match (p.public, p.protocol.as_str()) {
-                (false, _) => "internal",
-                (true, "HTTP") => "http",
-                (true, _) => "loadbalancer",
-            };
-            let mut v = json!({ "id": new_id("port"), "name": p.name, "protocol": p.protocol, "containerPort": p.container_port, "exposure": exposure });
-            if exposure == "loadbalancer" {
-                // Published TCP and UDP ports go through the gateway.
-                v["proxy"] = json!(true);
-                if let Some(pp) = p.public_port {
-                    v["publicPort"] = json!(pp);
-                }
-            }
-            v
-        })
+        .map(|p| port_json(p, new_id("port")))
         .collect();
-    let domains: Vec<Value> = s
-        .ports
+    let mut hosts: Vec<(String, String)> = vec![];
+    for p in s.ports.iter().filter(|p| p.public && p.protocol == "HTTP") {
+        if let Some(d) = p
+            .domain
+            .as_ref()
+            .map(|d| d.trim().to_lowercase())
+            .filter(|d| !d.is_empty())
+        {
+            hosts.push((d, p.name.clone()));
+        }
+    }
+    if let Some(web) = s.ports.iter().find(|p| p.public && p.protocol == "HTTP") {
+        for d in &s.domains {
+            if !hosts.iter().any(|(h, _)| h == d) {
+                hosts.push((d.clone(), web.name.clone()));
+            }
+        }
+    }
+    let domains: Vec<Value> = hosts
         .iter()
-        .filter(|p| p.public && p.protocol == "HTTP")
-        .filter_map(|p| p.domain.as_ref().filter(|d| !d.trim().is_empty()).map(|d| (p, d.trim().to_lowercase())))
-        .map(|(p, d)| {
-            let private = crate::deploy::private_host(&d);
-            json!({ "id": new_id("dom"), "hostname": d, "portName": p.name, "status": "pending_dns", "tls": "pending", "tlsMode": "auto", "redirectHttps": !private, "createdAt": now })
-        })
+        .map(|(h, p)| domain_json(h, p, new_id("dom"), now))
         .collect();
     let source = if s.source.kind == "git" {
         json!({
@@ -1587,8 +1949,14 @@ pub fn service_spec(
         "resources": { "cpuRequest": s.resources.cpu_request, "cpuLimit": s.resources.cpu_limit, "memoryRequest": s.resources.memory_request, "memoryLimit": s.resources.memory_limit, "gpu": s.resources.gpu },
         "replicas": s.replicas, "healthCheck": s.health_check,
     });
+    if let Some(f) = file {
+        spec["compose"] = record(f, &s.compose_name);
+    }
     if !s.container.is_empty() {
         spec["container"] = serde_json::to_value(&s.container).unwrap_or(Value::Null);
+    }
+    if let Some(p) = &s.placement {
+        spec["placement"] = p.clone();
     }
     spec
 }
@@ -1622,9 +1990,13 @@ pub struct PreviewBody {
     /// The project's name, when the file has none.
     #[serde(default)]
     pub name: Option<String>,
+    /// The file's name, e.g. "compose.yaml". Its services remember it, so a
+    /// later sync finds them. A repository's file is named by its path.
+    #[serde(default)]
+    pub file_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoInput {
     /// "owner/repo".
@@ -1655,9 +2027,19 @@ pub async fn preview(
     crate::auth::SessionUser(user): crate::auth::SessionUser,
     crate::error::Json(b): crate::error::Json<PreviewBody>,
 ) -> crate::error::ApiResult<crate::error::Json<ComposePlan>> {
+    Ok(crate::error::Json(read_plan(&s, &user, &b).await?))
+}
+
+/// The plan of the file a preview or a sync names, for a team its user can
+/// see.
+pub(crate) async fn read_plan(
+    s: &crate::AppState,
+    user: &crate::auth::User,
+    b: &PreviewBody,
+) -> crate::error::ApiResult<ComposePlan> {
     use crate::error::ApiError;
     let mut tx = s.db.begin().await?;
-    crate::ops::require_role(&mut tx, &user, &b.team_id, crate::ops::Role::Viewer).await?;
+    crate::ops::require_role(&mut tx, user, &b.team_id, crate::ops::Role::Viewer).await?;
     // Free domains go on the cluster's free-domain address, or in tunnel
     // mode under its default domain (none without either).
     let domain_base = match &b.cluster_id {
@@ -1692,7 +2074,7 @@ pub async fn preview(
                 .trim_end_matches(".git")
                 .to_owned();
             let (text, installation) =
-                crate::github::read_file(&s, &b.team_id, &repo, &r.branch, &r.path)
+                crate::github::read_file(s, &b.team_id, &repo, &r.branch, &r.path)
                     .await?
                     .ok_or_else(|| ApiError::not_found(&format!("{} on {}", r.path, r.branch)))?;
             let dir = r
@@ -1729,7 +2111,7 @@ pub async fn preview(
             wanted.dedup();
             for f in wanted.into_iter().take(20) {
                 if let Some((t, _)) =
-                    crate::github::read_file(&s, &b.team_id, &repo, &r.branch, &near(&f)).await?
+                    crate::github::read_file(s, &b.team_id, &repo, &r.branch, &near(&f)).await?
                 {
                     files.insert(f, t);
                 }
@@ -1760,7 +2142,7 @@ pub async fn preview(
         .clone()
         .filter(|n| !n.trim().is_empty())
         .unwrap_or(hint);
-    let plan = plan(&Input {
+    let mut plan = plan(&Input {
         file: &text,
         files,
         repo,
@@ -1768,7 +2150,16 @@ pub async fn preview(
         domain_base,
     })
     .map_err(ApiError::bad_request)?;
-    Ok(crate::error::Json(plan))
+    if let Some(f) = b
+        .file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        && plan.project.file.is_empty()
+    {
+        plan.project.file = f.chars().take(200).collect();
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -2181,5 +2572,132 @@ mod tests {
                 .iter()
                 .any(|e| e.key == "API_URL" && e.value == "http://api:8000")
         );
+    }
+
+    #[test]
+    fn x_pyo_settings_and_their_mistakes() {
+        let file = r#"
+services:
+  web:
+    image: nginx:1.27
+    expose: ["80"]
+    x-pyo:
+      domains: [Shop.Example.com, "not a domain", shop.example.com]
+      behindCdn: fastly
+      health: healthz
+      replicas: -1
+      placement: { tags: [Bad_Tag] }
+      secrets: [API_KEY, "1BAD"]
+      domain: oops
+      workload: StatefulSet
+  worker:
+    image: busybox
+    x-pyo:
+      domains: [w.example.com]
+      health: tcp
+      placement: { servers: [fal1], tags: [eu] }
+      behindCdn: none
+"#;
+        let p = plan(&Input {
+            file,
+            name_hint: "shop",
+            ..Default::default()
+        })
+        .unwrap();
+        let web = svc(&p, "web");
+        assert_eq!(web.domains, vec!["shop.example.com"]);
+        assert!(web.ports[0].public, "a domain makes its web port public");
+        assert_eq!(web.secrets, vec!["API_KEY"]);
+        assert!(web.behind_cdn.is_none() && !web.manages("behindCdn"));
+        assert!(web.placement.is_none() && !web.manages("replicas"));
+        assert_eq!(web.health_check["type"], "tcp", "the default stays");
+        for field in [
+            "x-pyo.domains",
+            "x-pyo.behindCdn",
+            "x-pyo.health",
+            "x-pyo.replicas",
+            "x-pyo.placement",
+            "x-pyo.secrets",
+            "x-pyo.domain",
+        ] {
+            assert!(warned(&p, Some("web"), field), "{field}");
+        }
+        assert!(!warned(&p, Some("web"), "x-pyo.workload"), "a template's key");
+        let worker = svc(&p, "worker");
+        assert!(worker.domains.is_empty(), "no web port to serve it on");
+        assert!(warned(&p, Some("worker"), "x-pyo.domains"));
+        assert!(warned(&p, Some("worker"), "x-pyo.health"), "no port to check");
+        assert_eq!(
+            worker.placement,
+            Some(json!({ "servers": ["fal1"], "tags": ["eu"] }))
+        );
+        assert!(worker.manages("behindCdn") && worker.behind_cdn.is_none());
+    }
+
+    fn without_x_pyo(v: &mut Value) {
+        if let Some(m) = v.as_object_mut() {
+            m.remove("x-pyo");
+            m.values_mut().for_each(without_x_pyo);
+        }
+        if let Some(a) = v.as_array_mut() {
+            a.iter_mut().for_each(without_x_pyo);
+        }
+    }
+
+    /// The templates of pyo-templates (next to this repository, or at
+    /// PYO_TEMPLATES_DIR) import as they did before: their `x-pyo` is for
+    /// the template catalog, so it changes nothing here and warns about
+    /// nothing.
+    #[test]
+    fn every_template_imports_as_before() {
+        let dir = std::env::var_os("PYO_TEMPLATES_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .ancestors()
+                    .map(|a| a.join("pyo-templates/templates"))
+                    .find(|d| d.is_dir())
+            });
+        let Some(dir) = dir else {
+            eprintln!("pyo-templates isn't next to this repository, so no templates were read");
+            return;
+        };
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.join("compose.yaml").is_file())
+            .collect();
+        names.sort();
+        assert!(!names.is_empty(), "no templates in {}", dir.display());
+        for t in &names {
+            let name = t.file_name().unwrap().to_string_lossy();
+            let text = std::fs::read_to_string(t.join("compose.yaml")).unwrap();
+            let read = |text: &str| {
+                plan(&Input {
+                    file: text,
+                    name_hint: &name,
+                    domain_base: Some("1.2.3.4.nip.io".into()),
+                    ..Default::default()
+                })
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+            };
+            let with = read(&text);
+            let mut doc = read_yaml(&text).unwrap();
+            without_x_pyo(&mut doc);
+            // JSON is YAML too.
+            let without = read(&doc.to_string());
+            assert_eq!(
+                serde_json::to_value(&with).unwrap(),
+                serde_json::to_value(&without).unwrap(),
+                "{name}"
+            );
+            assert!(
+                with.warnings.iter().all(|w| !w.field.starts_with("x-pyo")),
+                "{name}: {:?}",
+                with.warnings
+            );
+        }
+        eprintln!("{} templates imported as before", names.len());
     }
 }

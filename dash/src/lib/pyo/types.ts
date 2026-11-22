@@ -1379,6 +1379,8 @@ export type Application = {
   command?: string;
   /** How its image starts, where it differs from the image's own (Compose imports, templates). */
   container?: { entrypoint?: string[]; command?: string[]; workingDir?: string; runAsUser?: number; runAsGroup?: number };
+  /** The Compose file it was made from, and its name there. `pyo deploy -f` keeps it in line with the file. */
+  compose?: { file: string; service: string };
   source: ServiceSource;
   status: ServiceStatus;
   currentDeploymentId?: ID;

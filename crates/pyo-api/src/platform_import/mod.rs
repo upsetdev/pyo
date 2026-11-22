@@ -1738,6 +1738,7 @@ async fn create(
                 let id = new_id("svc");
                 let mut spec = crate::compose::service_spec(
                     &service,
+                    None,
                     &id,
                     team_id,
                     &pid,
@@ -1821,6 +1822,7 @@ async fn create(
                     let id = new_id("svc");
                     let mut spec = crate::compose::service_spec(
                         cs,
+                        None,
                         &id,
                         team_id,
                         &pid,

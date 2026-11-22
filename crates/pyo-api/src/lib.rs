@@ -28,6 +28,7 @@ mod cli;
 mod cloud;
 mod cloudflare;
 pub mod compose;
+pub mod compose_sync;
 mod cronruns;
 mod database_analytics;
 mod database_backups;

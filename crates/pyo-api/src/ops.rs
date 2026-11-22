@@ -108,6 +108,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/database-backups", post(crate::database_backups::add))
         .route("/compose/preview", post(crate::compose::preview))
+        .route("/compose/sync-plan", post(crate::compose_sync::plan))
         .route("/cloud/options", get(crate::cloud::options))
         .route("/tailnet/lock", get(crate::tailscale::lock))
         .route("/audit-log", get(crate::audit::list))
@@ -3010,6 +3011,21 @@ pub(crate) enum Op {
         project_id: Option<String>,
         plan: crate::compose::ComposePlan,
     },
+    /// Bring a project in line with a Docker Compose file: `file` from `POST /compose/sync-plan`, which shows what this does. Only what the file says differently changes, so settings changed in Pyo that the file doesn't mention stay, and a secret's value is never changed. Services whose settings change are deployed. What can't change in place (a volume that would move, another kind of source) is left as it is.
+    /// A service no longer in the file stays, unless `prune`.
+    SyncCompose {
+        project_id: String,
+        /// Where services new in the file run. Where the project's services run when omitted.
+        #[serde(default)]
+        cluster_id: Option<String>,
+        plan: crate::compose::ComposePlan,
+        /// Delete the services made from this file that are no longer in it. Their volumes are kept, detached.
+        #[serde(default)]
+        prune: bool,
+        /// Go ahead with a very large replica change: without it, one that goes to 20 or more replicas and to more than 10 times what the service had, or more than twice what its servers have room for, is refused with 409 and `needsConfirm: true`. Ask the user before sending it.
+        #[serde(default)]
+        confirm: bool,
+    },
 }
 
 /// Make a change
@@ -3423,7 +3439,8 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::UpdateProject { .. }
         | Op::DeleteProject { .. }
         | Op::SetProjectIsolation { .. }
-        | Op::ImportCompose { .. } => ("Projects", "prj"),
+        | Op::ImportCompose { .. }
+        | Op::SyncCompose { .. } => ("Projects", "prj"),
         Op::CreateService { .. }
         | Op::SaveService { .. }
         | Op::DeleteService { .. }
@@ -3584,6 +3601,21 @@ fn key_allows(user: &User, op: &Op) -> ApiResult<()> {
         ),
         _ => Ok(()),
     }
+}
+
+/// Another operation, run inside this one's transaction with its own
+/// checks (a Compose sync saves, creates and deletes services this way).
+pub(crate) fn nested<'a, 'c>(
+    s: &'a AppState,
+    tx: &'a mut Transaction<'c, Postgres>,
+    user: &'a User,
+    op: Op,
+    wake: &'a mut Vec<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApiResult<Value>> + Send + 'a>>
+where
+    'c: 'a,
+{
+    Box::pin(apply(s, tx, user, op, wake))
 }
 
 async fn apply(
@@ -5813,6 +5845,7 @@ async fn apply(
                 let deployment_id = new_id("dpl");
                 let service = crate::compose::service_spec(
                     svc,
+                    Some(&plan.project.file),
                     &id,
                     &team_id,
                     &project_id,
@@ -5832,9 +5865,42 @@ async fn apply(
                     None,
                 )
                 .await?;
+                if let Some(cdn) = &svc.behind_cdn {
+                    nested(
+                        s,
+                        tx,
+                        user,
+                        Op::SetServiceBehindCdn {
+                            service_id: id.clone(),
+                            cdn: Some(cdn.clone()),
+                        },
+                        wake,
+                    )
+                    .await?;
+                }
                 made.push(json!({ "name": svc.name, "id": id, "deploymentId": deployment_id }));
             }
             Ok(json!({ "ok": true, "projectId": project_id, "services": made }))
+        }
+        Op::SyncCompose {
+            project_id,
+            cluster_id,
+            plan,
+            prune,
+            confirm,
+        } => {
+            crate::compose_sync::apply(
+                s,
+                tx,
+                user,
+                &project_id,
+                cluster_id,
+                plan,
+                prune,
+                confirm,
+                wake,
+            )
+            .await
         }
         Op::CreateProject {
             id,
@@ -6122,6 +6188,13 @@ async fn apply(
             // Where it came from stays, and a secret field's value never does.
             crate::template_source::keep_record(&mut spec, &old_spec);
             crate::template_source::scrub_fields(&mut spec);
+            // What it remembers of the Compose file it was made from stays
+            // when a client leaves it out.
+            if spec.get("compose").is_none_or(Value::is_null)
+                && let Some(c) = old_spec.get("compose").filter(|c| c.is_object())
+            {
+                spec["compose"] = c.clone();
+            }
             // Autoscaling has its own op: a save from a tab that hasn't seen
             // the latest setting can't change it, or the size it manages.
             match old_spec.get("autoscale") {
@@ -6200,6 +6273,7 @@ async fn apply(
                 if let Some(o) = v.as_object_mut() {
                     o.remove("description");
                     o.remove("autoRollback");
+                    o.remove("compose");
                     o.remove("domains");
                     // Goes live with the domains (routes.rs).
                     o.remove("requestTimeout");

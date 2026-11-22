@@ -76,6 +76,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::git::branches,
         crate::git::build_file,
         crate::compose::preview,
+        crate::compose_sync::plan,
         crate::cloud::options,
         crate::audit::list,
         crate::tailscale::lock,
@@ -224,6 +225,7 @@ fn title(op: &str) -> String {
     match op {
         "setServerLocation" => return "Set server region".into(),
         "importCompose" => return "Import Docker Compose".into(),
+        "syncCompose" => return "Sync Docker Compose".into(),
         _ => {}
     }
     let mut words: Vec<String> = vec![];
