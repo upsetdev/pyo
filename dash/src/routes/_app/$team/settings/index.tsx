@@ -163,7 +163,7 @@ function TeamSettings({ ws }: { ws: Team }) {
                   });
               }}
               label="Update agents automatically"
-              description="Off: update each cluster from its settings."
+              description="When off, you update each cluster from its settings."
             />
           </div>
         </Panel>
