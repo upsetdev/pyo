@@ -14,6 +14,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { locationLabel, parseLocation, placesOf } from "~/lib/pyo/location";
 import { Flag, PlaceFlags } from "~/components/ui/Flag";
 import { ClusterCommandDialog } from "~/components/pyo/AgentInstall";
+import { TunnelBadge } from "~/components/pyo/Tunnel";
 import { SandboxServers } from "~/components/pyo/sandbox/SandboxServers";
 import { CARD_HOVER, useStoredView, ViewToggle } from "~/components/pyo/ProjectCard";
 import { useState } from "react";
@@ -267,6 +268,7 @@ function ServersPage() {
                               {clusterLabel[c.status]}
                             </span>
                           ) : null}
+                          <TunnelBadge c={c} />
                         </h2>
                         <p className="truncate text-[12.5px] text-muted-foreground">
                           {placesOf(c, s.servers).length > 1
@@ -480,6 +482,7 @@ function ClusterCard({
                 {clusterLabel[c.status]}
               </span>
             ) : null}
+            <TunnelBadge c={c} className="ml-2 align-middle" />
             <Tags tags={c.tags} className="ml-2 align-middle font-normal" />
           </h3>
           <p className="truncate text-[13px] text-muted-foreground">

@@ -5,6 +5,7 @@ import { createFileRoute, Outlet } from "@tanstack/react-router";
 import { placesOf } from "~/lib/pyo/location";
 import { PlaceFlags } from "~/components/ui/Flag";
 import { ClusterStatusBadge } from "~/components/ui/Badge";
+import { TunnelBadge } from "~/components/pyo/Tunnel";
 import { ButtonLink } from "~/components/ui/Button";
 import { EmptyState, Page, PageHeader } from "~/components/ui/Panel";
 import { api, clusterByRef, clusterSummary, usePyo } from "~/lib/pyo/store";
@@ -44,6 +45,7 @@ function ClusterLayout() {
             <span className="flex items-center gap-2.5">
               {c.name}
               <ClusterStatusBadge status={c.status} />
+              <TunnelBadge c={c} />
               <span className="flex flex-wrap items-center gap-1 text-[13px] font-normal">
                 <TagsBeside
                   name={c.name}

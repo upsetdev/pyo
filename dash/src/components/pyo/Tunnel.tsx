@@ -98,10 +98,14 @@ export function TunnelStatus({ c }: { c: Cluster }) {
 }
 
 /** "Tunnel" beside a cluster in tunnel mode, warning tone while it's degraded or down. */
-export function TunnelBadge({ c }: { c: Cluster }) {
+export function TunnelBadge({ c, className }: { c: Cluster; className?: string }) {
   if (clusterTraffic(c) !== "tunnel") return null;
   const bad = c.tunnel?.health === "degraded" || c.tunnel?.health === "down";
-  return <Badge tone={bad ? "warning" : "neutral"}>Tunnel</Badge>;
+  return (
+    <Badge tone={bad ? "warning" : "neutral"} className={className}>
+      Tunnel
+    </Badge>
+  );
 }
 
 /**
