@@ -74,6 +74,9 @@ pub enum Event {
     BackupFailed,
     CertificateExpiring,
     CertificateFailed,
+    /// A cluster's Cloudflare Tunnel down for 5 minutes, and back.
+    TunnelDown,
+    TunnelUp,
     /// The Send test button.
     Test,
 }
@@ -93,6 +96,8 @@ impl Event {
         match self {
             Event::DeployFailed => "deploy_failed",
             Event::ServerOffline | Event::ServerOnline => "server_offline",
+            // Websites unreachable, as a cluster is: the same setting.
+            Event::TunnelDown | Event::TunnelUp => "server_offline",
             Event::ServerPressure | Event::ServerPressureEnded => "server_pressure",
             Event::BackupFailed => "backup_failed",
             Event::CertificateExpiring | Event::CertificateFailed => "certificate",
@@ -111,6 +116,8 @@ impl Event {
             Event::BackupFailed => "backup_failed",
             Event::CertificateExpiring => "certificate_expiring",
             Event::CertificateFailed => "certificate_failed",
+            Event::TunnelDown => "tunnel_down",
+            Event::TunnelUp => "tunnel_up",
             Event::Test => "test",
         }
     }
@@ -120,6 +127,7 @@ impl Event {
         match self {
             Event::ServerOnline => Some(Event::ServerOffline),
             Event::ServerPressureEnded => Some(Event::ServerPressure),
+            Event::TunnelUp => Some(Event::TunnelDown),
             _ => None,
         }
     }
@@ -128,7 +136,10 @@ impl Event {
     /// within the window after it ended is held, and sent if it still holds
     /// once the window is over.
     fn lasts(self) -> bool {
-        matches!(self, Event::ServerOffline | Event::ServerPressure)
+        matches!(
+            self,
+            Event::ServerOffline | Event::ServerPressure | Event::TunnelDown
+        )
     }
 }
 
@@ -147,6 +158,8 @@ pub fn classify(kind: &str, target: &Value) -> Option<Event> {
             Event::CertificateExpiring
         }
         "domain.certificate_failed" => Event::CertificateFailed,
+        "cluster.tunnel_down" => Event::TunnelDown,
+        "cluster.tunnel_up" => Event::TunnelUp,
         _ => return None,
     })
 }
@@ -926,6 +939,27 @@ async fn build(
                 title,
                 vec![],
                 format!("/clusters/{name}"),
+            )
+        }
+        Event::TunnelDown | Event::TunnelUp => {
+            let Some(name): Option<String> =
+                sqlx::query_scalar("SELECT name FROM pyo.clusters WHERE id = $1")
+                    .bind(&target_id)
+                    .fetch_optional(&mut **tx)
+                    .await?
+            else {
+                return Ok(None);
+            };
+            let title = if event == Event::TunnelDown {
+                format!("Cloudflare Tunnel of {name} is down")
+            } else {
+                format!("Cloudflare Tunnel of {name} is back")
+            };
+            alert(
+                format!("tunnel:{target_id}"),
+                title,
+                vec![],
+                format!("/clusters/{name}/settings"),
             )
         }
         Event::ServerOffline | Event::ServerOnline => {

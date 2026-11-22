@@ -555,3 +555,137 @@ pub fn tunnel_name(cluster_id: &str, install_id: &str, attempt: u32) -> String {
 pub fn cname_target(tunnel_id: &str) -> String {
     format!("{tunnel_id}.cfargotunnel.com")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_go_exact_names_first_then_the_wildcard_then_404() {
+        let hosts = vec![
+            "blog.example.com".to_owned(),
+            "a.b.example.com".to_owned(),
+            "API.example.com.".to_owned(),
+            "blog.example.com".to_owned(),
+            "*.example.com".to_owned(),
+        ];
+        let c = ingress(&hosts, Some("example.com"));
+        let names: Vec<Value> = c["ingress"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["hostname"].clone())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                json!("blog.example.com"),
+                json!("a.b.example.com"),
+                json!("api.example.com"),
+                json!("*.example.com"),
+                Value::Null
+            ]
+        );
+        let first = &c["ingress"][0];
+        assert_eq!(first["service"], ORIGIN);
+        assert_eq!(first["originRequest"]["matchSNItoHost"], true);
+        assert_eq!(c["ingress"][4], json!({ "service": "http_status:404" }));
+        // The same routes always hash the same, whatever order they came in.
+        let mut again = hosts.clone();
+        again.reverse();
+        assert_eq!(
+            config_hash(&ingress(&again, Some("example.com"))),
+            config_hash(&c)
+        );
+        assert_ne!(
+            config_hash(&ingress(&hosts[..1], Some("example.com"))),
+            config_hash(&c)
+        );
+        assert_eq!(
+            empty_ingress(),
+            json!({ "ingress": [{ "service": "http_status:404" }] })
+        );
+    }
+
+    #[test]
+    fn certificate_names_cover_each_host_one_level_up() {
+        assert_eq!(cert_name("example.com", "example.com"), "example.com");
+        assert_eq!(cert_name("blog.example.com", "example.com"), "*.example.com");
+        assert_eq!(cert_name("a.b.example.com", "example.com"), "*.b.example.com");
+        assert_eq!(cert_name("Shop.Example.com.", "example.com"), "*.example.com");
+        let hosts = vec![
+            ("blog.example.com".to_owned(), "example.com".to_owned()),
+            ("shop.example.com".to_owned(), "example.com".to_owned()),
+            ("other.org".to_owned(), "other.org".to_owned()),
+            ("x.y.other.org".to_owned(), "other.org".to_owned()),
+        ];
+        assert_eq!(
+            cert_names(&hosts, Some("example.com")).unwrap(),
+            ["*.example.com", "*.y.other.org", "other.org"]
+        );
+        let many: Vec<(String, String)> = (0..=MAX_CERT_NAMES)
+            .map(|i| (format!("a.s{i}.example.com"), "example.com".to_owned()))
+            .collect();
+        assert_eq!(
+            cert_names(&many, None).unwrap_err(),
+            "This tunnel has too many names for one certificate."
+        );
+        let have = vec!["*.example.com".to_owned(), "other.org".to_owned()];
+        assert!(covers_all(&have, &["*.example.com".to_owned()]));
+        assert!(!covers_all(&have, &["*.b.example.com".to_owned()]));
+    }
+
+    #[test]
+    fn a_csr_names_every_host_and_the_key_stays_here() {
+        let names = vec!["*.example.com".to_owned(), "example.com".to_owned()];
+        let (csr, key) = key_and_csr(&names).unwrap();
+        assert!(csr.starts_with("-----BEGIN CERTIFICATE REQUEST-----"));
+        assert!(key.contains("PRIVATE KEY"));
+        assert!(!csr.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn names_secrets_and_targets() {
+        assert_eq!(tunnel_name("cl_1", "abc123", 0), "pyo-cl_1-abc123");
+        assert_eq!(tunnel_name("cl_1", "abc123", 2), "pyo-cl_1-abc123-2");
+        assert_eq!(
+            cname_target("c1744f8b-faa1-48a4-9e5c-02ac921467fa"),
+            "c1744f8b-faa1-48a4-9e5c-02ac921467fa.cfargotunnel.com"
+        );
+        use base64::Engine;
+        let s = new_secret();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&s)
+                .unwrap()
+                .len(),
+            32
+        );
+        assert_ne!(new_secret(), s);
+        assert!(cert_id_ok("123456789012345678901234567890"));
+        assert!(!cert_id_ok("12/34"));
+        assert!(!cert_id_ok(""));
+    }
+
+    #[test]
+    fn kept_records_round_trip_without_their_id() {
+        let k = kept_from(&json!({
+            "id": "372e67954025e0ba6aaa6d586b9e0b59", "type": "A", "name": "blog.example.com",
+            "content": "203.0.113.7", "proxied": true, "ttl": 300, "comment": "by hand",
+        }))
+        .unwrap();
+        assert_eq!(k.id, "372e67954025e0ba6aaa6d586b9e0b59");
+        assert_eq!(k.ttl, 300);
+        let stored = serde_json::to_value(&k).unwrap();
+        assert!(stored.get("id").is_none());
+        assert_eq!(stored["type"], "A");
+        let back: Kept = serde_json::from_value(stored).unwrap();
+        assert_eq!(back.ttl, 300);
+        assert_eq!(back.comment.as_deref(), Some("by hand"));
+        let auto: Kept = serde_json::from_value(
+            json!({ "type": "CNAME", "name": "a.example.com", "content": "x.example.net" }),
+        )
+        .unwrap();
+        assert_eq!((auto.ttl, auto.proxied), (1, false));
+    }
+}

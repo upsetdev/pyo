@@ -42,6 +42,8 @@ const REMOVALS: &[&str] = &[
     "remove_server",
     "forget_snapshot",
     "tailscale_remove",
+    // A team can always take its Cloudflare Tunnel (and its records) back.
+    "tunnel_remove",
 ];
 
 /// Commands that follow a change made elsewhere, a removal's too (the

@@ -48,6 +48,8 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_ZONES: usize = 200;
 
 pub(crate) mod tunnel;
+pub(crate) mod tunnel_loop;
+pub(crate) mod tunnel_ops;
 use tunnel::TunnelApi;
 
 // ── Zones and records ──────────────────────────────────────────────────────
@@ -663,6 +665,7 @@ pub async fn attach(
         "SELECT service_id, domain_id, jsonb_build_object(
                 'zone', zone_name, 'type', type, 'content', content, 'proxied', proxied, 'proxy', proxy,
                 'status', status, 'error', error, 'existing', existing, 'mine', record_id IS NOT NULL,
+                'via', via, 'previous', previous,
                 'updatedAt', pyo.ms(updated_at))
            FROM pyo.dns_records WHERE team_id = ANY($1)",
     )
@@ -687,7 +690,10 @@ pub async fn attach(
 }
 
 /// A service was saved: records of domains it no longer has (or whose
-/// hostname changed) are forgotten. What's at Cloudflare stays.
+/// hostname changed) are forgotten. What's at Cloudflare stays, except a
+/// record through the Cloudflare Tunnel: the tunnel loop deletes Pyo's
+/// CNAME. The record it replaced isn't put back (decision 5), unless a
+/// switch back that puts it back was already asked for.
 pub async fn forget_removed(
     tx: &mut Transaction<'_, Postgres>,
     service_id: &str,
@@ -705,7 +711,19 @@ pub async fn forget_removed(
         })
         .unzip();
     sqlx::query(
-        "DELETE FROM pyo.dns_records r WHERE r.service_id = $1
+        "UPDATE pyo.dns_records r SET status = 'reverting', restore = r.status = 'reverting' AND r.restore,
+                routes_command = NULL, updated_at = now()
+          WHERE r.service_id = $1 AND r.via = 'tunnel'
+            AND NOT EXISTS (SELECT 1 FROM unnest($2::text[], $3::text[]) AS d(id, host)
+                             WHERE d.id = r.domain_id AND d.host = lower(r.hostname))",
+    )
+    .bind(service_id)
+    .bind(&ids)
+    .bind(&hosts)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM pyo.dns_records r WHERE r.service_id = $1 AND r.via <> 'tunnel'
             AND NOT EXISTS (SELECT 1 FROM unnest($2::text[], $3::text[]) AS d(id, host)
                              WHERE d.id = r.domain_id AND d.host = lower(r.hostname))",
     )
@@ -813,13 +831,26 @@ pub async fn test(
     Ok(json!({ "ok": problems.is_empty(), "zones": zones, "problems": problems }))
 }
 
-/// Forget the token. Records Pyo made stay at Cloudflare.
+/// Forget the token. Records Pyo made stay at Cloudflare. Refused while a
+/// cluster of the team has a tunnel.
 pub async fn remove(
     tx: &mut Transaction<'_, Postgres>,
     user: &User,
     team_id: &str,
 ) -> ApiResult<Value> {
     require_role(tx, user, team_id, role_for(Action::ManageToken)).await?;
+    // Without the token, Pyo could no longer change or remove a tunnel.
+    let tunneled: Option<String> = sqlx::query_scalar(
+        "SELECT c.name FROM pyo.cluster_tunnels t JOIN pyo.clusters c ON c.id = t.cluster_id WHERE t.team_id = $1 ORDER BY c.name LIMIT 1",
+    )
+    .bind(team_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(name) = tunneled {
+        return Err(ApiError::conflict(format!(
+            "Remove the Cloudflare Tunnel of {name} first. Its websites keep working until then."
+        )));
+    }
     let gone = sqlx::query("DELETE FROM pyo.cloudflare_accounts WHERE team_id = $1")
         .bind(team_id)
         .execute(&mut **tx)

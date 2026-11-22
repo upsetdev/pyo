@@ -479,7 +479,8 @@ fn secret_fields(cmd: &mut Value) -> Vec<&mut Value> {
             }
             ("tailscale_setup", "token")
             | ("tailscale_client", "secret")
-            | ("sandbox_call", "token") => out.push(v),
+            | ("sandbox_call", "token")
+            | ("tunnel_set", "token") => out.push(v),
             ("backup", "connection") | ("db_setup", "admin") => {
                 if let Some(p) = v.get_mut("password") {
                     out.push(p);
@@ -505,11 +506,14 @@ pub async fn seal_command(team_id: &str, cmd: &mut Value) -> anyhow::Result<()> 
 }
 
 /// A command whose secret fields are of no more use once it's answered
-/// (Tailscale's token and client secret): blanked, so Pyo's database keeps
-/// no Tailscale credential, not even sealed.
+/// (Tailscale's token and client secret, a Cloudflare Tunnel's token):
+/// blanked, so Pyo's database keeps no such credential, not even sealed.
 pub fn wipe_command(cmd: &mut Value) -> bool {
     let kind = cmd["kind"].as_str().unwrap_or("").to_owned();
-    if !matches!(kind.as_str(), "tailscale_setup" | "tailscale_client" | "sandbox_call") {
+    if !matches!(
+        kind.as_str(),
+        "tailscale_setup" | "tailscale_client" | "sandbox_call" | "tunnel_set"
+    ) {
         return false;
     }
     for v in secret_fields(cmd) {
@@ -1095,6 +1099,29 @@ mod tests {
                 .collect();
             assert_eq!(found, ["p", "k"], "{v}");
         }
+    }
+
+    /// The tunnel's token: sealed while queued, wiped once answered, as the
+    /// command reaches the database.
+    #[test]
+    fn the_tunnel_token_is_sealed_then_wiped() {
+        let c = Command::TunnelSet {
+            tunnel_id: "c1744f8b-faa1-48a4-9e5c-02ac921467fa".into(),
+            token: "eyJhIjoiYiJ9".into(),
+        };
+        let mut v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["kind"], "tunnel_set");
+        let found: Vec<String> = secret_fields(&mut v)
+            .into_iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(found, ["eyJhIjoiYiJ9"]);
+        assert!(wipe_command(&mut v));
+        assert_eq!(v["token"], "");
+        assert_eq!(v["tunnel_id"], "c1744f8b-faa1-48a4-9e5c-02ac921467fa");
+        let mut remove = serde_json::to_value(Command::TunnelRemove {}).unwrap();
+        assert!(secret_fields(&mut remove).is_empty());
+        assert!(!wipe_command(&mut remove));
     }
 
     #[test]

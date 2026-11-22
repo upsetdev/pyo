@@ -36,6 +36,11 @@ pub fn domain_specs(domains: &Value) -> Vec<DomainSpec> {
                 redirect_https: d["redirectHttps"].as_bool().unwrap_or(true),
                 port_name: s(d, "portName"),
                 hostname,
+                // Through the cluster's Cloudflare Tunnel (cloudflare/tunnel.rs).
+                tunnel: match d["tunnel"].as_str() {
+                    Some(t @ (pyo_proto::TUNNEL_SWITCHING | pyo_proto::TUNNEL_ON)) => t.to_owned(),
+                    _ => String::new(),
+                },
             }
         })
         .collect()
@@ -112,6 +117,24 @@ pub async fn changed(
     };
     crate::deploy::enqueue(tx, &cluster_id, Command::SyncRoutes(Box::new(target))).await?;
     Ok(Some(cluster_id))
+}
+
+/// [`changed`], with the routes sync's command (to wait for the agent to
+/// have it): (cluster, command id). None when nothing was queued (the
+/// service never ran, or is being deleted).
+pub async fn changed_waiting(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: &str,
+) -> ApiResult<Option<(String, String)>> {
+    sqlx::query("UPDATE pyo.services SET routes_revision = routes_revision + 1 WHERE id = $1")
+        .bind(service_id)
+        .execute(&mut **tx)
+        .await?;
+    let Some((cluster_id, target)) = target(tx, service_id).await? else {
+        return Ok(None);
+    };
+    let id = crate::deploy::enqueue(tx, &cluster_id, Command::SyncRoutes(Box::new(target))).await?;
+    Ok(Some((cluster_id, id)))
 }
 
 /// What a routes sync applies: the live deployment's service and ports (or,

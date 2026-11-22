@@ -143,7 +143,7 @@ impl Fake {
         }
     }
 
-    fn dns(&self, zone: &str) -> Dns {
+    pub fn dns(&self, zone: &str) -> Dns {
         self.zones
             .iter()
             .find(|z| z.0 == zone)
@@ -151,15 +151,15 @@ impl Fake {
             .unwrap_or(Dns::None)
     }
 
-    fn log(&self, c: String) {
+    pub fn log(&self, c: String) {
         self.calls.lock().unwrap().push(c);
     }
 
-    fn calls(&self) -> Vec<String> {
+    pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
 
-    fn at(&self, zone: &str) -> Vec<Record> {
+    pub fn at(&self, zone: &str) -> Vec<Record> {
         self.records
             .lock()
             .unwrap()

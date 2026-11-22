@@ -349,6 +349,8 @@ async fn heartbeat(
         "wafRejected": caps.waf_rejected,
         // And those whose WAF policy it accepted (bundles.rs `waf_shown`).
         "wafActive": caps.waf_active,
+        // It runs a Cloudflare Tunnel connector (cloudflare/tunnel_loop.rs).
+        "tunnel": caps.tunnel,
         // Whether this agent can update Pyo and itself (updates.rs).
         "updates": hb.updates,
         // Its builders and pyo-static sign their requests (agent_auth.rs).
@@ -388,6 +390,14 @@ async fn heartbeat(
     .execute(&mut *tx)
     .await?;
     name_from_host(&mut tx, &cluster.id, &cluster.team_id, &hb.servers).await?;
+    // Its Cloudflare Tunnel connector, as the agent sees it.
+    if let Some(t) = &hb.tunnel {
+        sqlx::query("UPDATE pyo.cluster_tunnels SET agent_status = $2 || jsonb_build_object('at', pyo.ms(now())) WHERE cluster_id = $1")
+            .bind(&cluster.id)
+            .bind(json!(t))
+            .execute(&mut *tx)
+            .await?;
+    }
     // The server Pyo runs on, connecting for the first time: the team's
     // first builder goes there. Where every cluster keeps its own images
     // (Pyo Cloud), a team's first cluster to connect gets it.
@@ -732,8 +742,41 @@ async fn heartbeat(
     let tailnet = crate::tailscale::wanted_for(&s.db, &cluster.id, same_cluster).await?;
     // Pyo's dashboard on the public IP, while it's open.
     let public_dashboard = crate::publicdash::wanted_for(&s.db, same_cluster).await?;
-    let reply = json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability, "tailnet": tailnet, "publicDashboard": public_dashboard });
+    // The Cloudflare Tunnel connector it runs, if any.
+    let tunnel = tunnel_wanted(&s.db, &cluster.id).await?;
+    // TCP and UDP ports on the servers: with public traffic, or in tunnel
+    // mode while the cluster keeps them.
+    let public_ports: bool = sqlx::query_scalar(
+        "SELECT c.traffic = 'public' OR (c.traffic = 'tunnel' AND coalesce(t.ports_public, true))
+           FROM pyo.clusters c LEFT JOIN pyo.cluster_tunnels t ON t.cluster_id = c.id WHERE c.id = $1",
+    )
+    .bind(&cluster.id)
+    .fetch_one(&s.db)
+    .await?;
+    let reply = json!({ "ok": true, "clusterId": cluster.id, "serverLocations": server_locations, "serverTags": server_tags, "gpuPolicies": gpu_policies, "publicTraffic": public_traffic, "freeDomainAddress": free_domain_address, "projectTeams": project_teams, "observability": observability, "tailnet": tailnet, "publicDashboard": public_dashboard, "tunnel": tunnel, "publicPorts": public_ports });
     Ok(Json(signed_reply(&cluster.id, &headers, reply).await))
+}
+
+/// The Cloudflare Tunnel connector a cluster runs: its tunnel once
+/// Cloudflare made it, none while it's removed or there's none (the agent
+/// then removes what it has). Left out while the tunnel is still being
+/// made.
+async fn tunnel_wanted(db: &sqlx::PgPool, cluster_id: &str) -> ApiResult<Option<pyo_proto::TunnelWanted>> {
+    let row: Option<(Option<String>, String, bool)> = sqlx::query_as(
+        "SELECT tunnel_id, state, ports_public FROM pyo.cluster_tunnels WHERE cluster_id = $1",
+    )
+    .bind(cluster_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(match row {
+        None => Some(pyo_proto::TunnelWanted::default()),
+        Some((_, state, _)) if state == "removing" => Some(pyo_proto::TunnelWanted::default()),
+        Some((None, _, _)) => None,
+        Some((Some(id), _, ports_public)) => Some(pyo_proto::TunnelWanted {
+            tunnel_id: Some(id),
+            ports_public,
+        }),
+    })
 }
 
 /// Which GPU servers are kept for GPU work. A server's own setting wins;

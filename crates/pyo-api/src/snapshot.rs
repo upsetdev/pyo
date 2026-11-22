@@ -152,6 +152,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'trafficMode', coalesce(traffic_mode, 'region'),
             'webProxyProtocol', web_proxy_protocol,
             'publicTraffic', public_traffic,
+            -- 'public', 'tailscale' or 'tunnel' (Cloudflare Tunnel).
+            'traffic', traffic,
             -- 'public' or 'tailscale' as chosen; freeDomainAddress below
             -- is the one in use (freedomain.rs).
             'freeDomainAddressSet', free_domain_address,
@@ -240,6 +242,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         let shown = crate::previews::domain::show(&c["previewDomain"], f.public_ip());
         c["previewDomain"] = shown;
     }
+    // Its Cloudflare Tunnel, if it has one.
+    crate::cloudflare::tunnel_loop::attach(&mut *db, &team_ids, &mut clusters).await?;
     // The tailnet its tailnet domains are on: Tailscale set up on the
     // cluster, and a server of it on the tailnet. And the cluster's
     // Tailscale as the dashboard shows it (never a secret).
@@ -588,6 +592,8 @@ fn capabilities(stored: &Value) -> Value {
         // Whether its install is this Pyo's (install.rs): the cluster
         // settings' "Updating" and "Update needed".
         "agentInstall": or("agentInstall", Value::Null),
+        // Its agent runs Cloudflare Tunnel connectors.
+        "tunnel": or("tunnel", json!(false)),
     })
 }
 

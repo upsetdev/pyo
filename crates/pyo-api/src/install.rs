@@ -129,8 +129,8 @@ async fn token_for_manifest(db: &sqlx::PgPool, token: &str) -> ApiResult<(String
 /// gateway is set up). A cluster that's running keeps its setting.
 async fn web_ports_busy(db: &sqlx::PgPool, cluster: &str) -> ApiResult<()> {
     let off = sqlx::query(
-        "UPDATE pyo.clusters SET public_traffic = false
-          WHERE id = $1 AND last_seen_at IS NULL AND public_traffic",
+        "UPDATE pyo.clusters SET traffic = 'tailscale'
+          WHERE id = $1 AND last_seen_at IS NULL AND traffic = 'public'",
     )
     .bind(cluster)
     .execute(db)
