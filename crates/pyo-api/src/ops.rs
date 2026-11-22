@@ -3534,6 +3534,21 @@ fn key_allows(user: &User, op: &Op) -> ApiResult<()> {
     }
 }
 
+/// Another operation, run inside this one's transaction with its own
+/// checks (a Compose sync saves, creates and deletes services this way).
+pub(crate) fn nested<'a, 'c>(
+    s: &'a AppState,
+    tx: &'a mut Transaction<'c, Postgres>,
+    user: &'a User,
+    op: Op,
+    wake: &'a mut Vec<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApiResult<Value>> + Send + 'a>>
+where
+    'c: 'a,
+{
+    Box::pin(apply(s, tx, user, op, wake))
+}
+
 async fn apply(
     s: &AppState,
     tx: &mut Transaction<'_, Postgres>,
@@ -5737,6 +5752,7 @@ async fn apply(
                 let deployment_id = new_id("dpl");
                 let service = crate::compose::service_spec(
                     svc,
+                    Some(&plan.project.file),
                     &id,
                     &team_id,
                     &project_id,
@@ -5756,6 +5772,19 @@ async fn apply(
                     None,
                 )
                 .await?;
+                if let Some(cdn) = &svc.behind_cdn {
+                    nested(
+                        s,
+                        tx,
+                        user,
+                        Op::SetServiceBehindCdn {
+                            service_id: id.clone(),
+                            cdn: Some(cdn.clone()),
+                        },
+                        wake,
+                    )
+                    .await?;
+                }
                 made.push(json!({ "name": svc.name, "id": id, "deploymentId": deployment_id }));
             }
             Ok(json!({ "ok": true, "projectId": project_id, "services": made }))
@@ -6046,6 +6075,13 @@ async fn apply(
             // Where it came from stays, and a secret field's value never does.
             crate::template_source::keep_record(&mut spec, &old_spec);
             crate::template_source::scrub_fields(&mut spec);
+            // What it remembers of the Compose file it was made from stays
+            // when a client leaves it out.
+            if spec.get("compose").is_none_or(Value::is_null)
+                && let Some(c) = old_spec.get("compose").filter(|c| c.is_object())
+            {
+                spec["compose"] = c.clone();
+            }
             // Autoscaling has its own op: a save from a tab that hasn't seen
             // the latest setting can't change it, or the size it manages.
             match old_spec.get("autoscale") {
@@ -6124,6 +6160,7 @@ async fn apply(
                 if let Some(o) = v.as_object_mut() {
                     o.remove("description");
                     o.remove("autoRollback");
+                    o.remove("compose");
                     o.remove("domains");
                     // Goes live with the domains (routes.rs).
                     o.remove("requestTimeout");
