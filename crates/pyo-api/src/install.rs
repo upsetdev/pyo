@@ -380,13 +380,10 @@ spec:
       serviceAccountName: pyo-agent
       # It keeps running on a server short of disk or memory, and starts
       # there after an update: it reports that state, and cleans up what
-      # the evictions leave.
-      priorityClassName: system-cluster-critical
-      # It may run on a GPU server kept for GPU work.
-      tolerations:
-        - {{ key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }}
-        - {{ key: node.kubernetes.io/disk-pressure, operator: Exists, effect: NoSchedule }}
-        - {{ key: node.kubernetes.io/memory-pressure, operator: Exists, effect: NoSchedule }}
+      # the evictions leave. It may also run on a GPU server kept for GPU
+      # work. A refresh brings these two to an older install.
+      priorityClassName: {priority}
+      tolerations: {tolerations}
       containers:
         - name: agent
           image: {image}
@@ -413,6 +410,8 @@ spec:
 {admission}"#,
         annotation = pyo_proto::rbac::INSTALL_ANNOTATION,
         token_stamp = token_stamp(token),
+        priority = pyo_proto::rbac::AGENT_PRIORITY,
+        tolerations = pyo_proto::rbac::agent_tolerations(),
     )
 }
 
@@ -891,6 +890,9 @@ mod tests {
             .expect("the agent's Deployment")["spec"]["template"]["spec"]
             .clone();
         assert_eq!(pod["priorityClassName"], "system-cluster-critical");
+        // Exactly what a refresh brings, and the admission policy allows.
+        assert_eq!(pod["priorityClassName"], pyo_proto::rbac::AGENT_PRIORITY);
+        assert_eq!(pod["tolerations"], pyo_proto::rbac::agent_tolerations());
         let tolerated: Vec<&str> = pod["tolerations"]
             .as_array()
             .unwrap()

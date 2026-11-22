@@ -13,6 +13,8 @@
 //! - Servers (labels, taints, cordon, drain, removal) in a role of their own
 //!   that can be left out.
 //! - The customer's `pyo-system/pyo-policy` ConfigMap: read, never written.
+//! - Its own Deployment: only its image, image pins, install stamp, and its
+//!   pods' priority and tolerations as this release sets them.
 //!
 //! RBAC can't say "only these names" for creating, or "only namespaces with
 //! this label"; the ValidatingAdmissionPolicy does, for requests made by the
@@ -52,6 +54,156 @@ const TAILNET_SERVERS: &str = "object.spec.authorization.rules[1].principal.clie
 pub const UPGRADER: &str = "pyo-upgrade";
 
 const RBAC: &str = "rbac.authorization.k8s.io/v1";
+
+/// The agent's own Deployment, in [`NS`].
+pub const AGENT_DEPLOYMENT: &str = "pyo-agent";
+/// Its pods' priority: a server short of disk or memory neither evicts the
+/// agent nor refuses a new one, so it goes on reporting and cleaning up
+/// there. The connect command sets it, and a refresh brings it.
+pub const AGENT_PRIORITY: &str = "system-cluster-critical";
+
+/// Its pods' tolerations, in this order: a GPU server kept for GPU work,
+/// and a server short of disk or memory (so a new agent starts there after
+/// an update). The connect command sets them, and a refresh brings them.
+pub fn agent_tolerations() -> Value {
+    json!([
+        { "key": crate::GPU_RESOURCE, "operator": "Exists", "effect": "NoSchedule" },
+        { "key": "node.kubernetes.io/disk-pressure", "operator": "Exists", "effect": "NoSchedule" },
+        { "key": "node.kubernetes.io/memory-pressure", "operator": "Exists", "effect": "NoSchedule" },
+    ])
+}
+
+/// Its pod spec's fields that the agent never changes (all but its
+/// containers, priority and tolerations), as of Kubernetes 1.30: a field
+/// the API server doesn't know would break the whole policy.
+const AGENT_POD_KEPT: [&str; 34] = [
+    "activeDeadlineSeconds",
+    "affinity",
+    "automountServiceAccountToken",
+    "dnsConfig",
+    "dnsPolicy",
+    "enableServiceLinks",
+    "ephemeralContainers",
+    "hostAliases",
+    "hostIPC",
+    "hostNetwork",
+    "hostPID",
+    "hostUsers",
+    "hostname",
+    "imagePullSecrets",
+    "initContainers",
+    "nodeName",
+    "nodeSelector",
+    "os",
+    "overhead",
+    "preemptionPolicy",
+    "priority",
+    "readinessGates",
+    "resourceClaims",
+    "restartPolicy",
+    "runtimeClassName",
+    "schedulerName",
+    "schedulingGates",
+    "securityContext",
+    "serviceAccountName",
+    "setHostnameAsFQDN",
+    "shareProcessNamespace",
+    "subdomain",
+    "terminationGracePeriodSeconds",
+    "volumes",
+];
+/// Its containers' fields that the agent never changes (all but the agent
+/// container's image and the pinned env values), as of Kubernetes 1.30.
+const AGENT_CONTAINER_KEPT: [&str; 20] = [
+    "args",
+    "command",
+    "envFrom",
+    "imagePullPolicy",
+    "lifecycle",
+    "livenessProbe",
+    "ports",
+    "readinessProbe",
+    "resizePolicy",
+    "resources",
+    "restartPolicy",
+    "securityContext",
+    "startupProbe",
+    "stdin",
+    "stdinOnce",
+    "terminationMessagePath",
+    "terminationMessagePolicy",
+    "tty",
+    "volumeDevices",
+    "volumeMounts",
+];
+/// The Deployment spec's fields kept as they are (all but its template).
+const AGENT_SPEC_KEPT: [&str; 7] = [
+    "minReadySeconds",
+    "paused",
+    "progressDeadlineSeconds",
+    "replicas",
+    "revisionHistoryLimit",
+    "selector",
+    "strategy",
+];
+
+/// CEL: `new.f` and `old.f` both missing, or equal.
+fn kept_field(new: &str, old: &str, f: &str) -> String {
+    format!("(has({new}.{f}) == has({old}.{f}) && (!has({new}.{f}) || {new}.{f} == {old}.{f}))")
+}
+
+/// CEL, for an update of the agent's own Deployment: all as it was but the
+/// install stamp, the agent container's image (an update of the agent) and
+/// pinned env values (a refresh), and its pods' priority and tolerations,
+/// which may only become [`AGENT_PRIORITY`] and [`agent_tolerations`]. So
+/// its token, Pyo's address, its other env, volumes and service account
+/// stay as the connect command set them.
+pub fn agent_deployment_kept() -> String {
+    let (n, o) = ("object", "oldObject");
+    let (t, ot) = ("object.spec.template.spec", "oldObject.spec.template.spec");
+    let ann =
+        |x: &str| format!("(has({x}.metadata.annotations) ? {x}.metadata.annotations : {{}})");
+    let labels = |x: &str| format!("(has({x}.metadata.labels) ? {x}.metadata.labels : {{}})");
+    let spec: Vec<String> = AGENT_SPEC_KEPT
+        .iter()
+        .map(|f| kept_field(&format!("{n}.spec"), &format!("{o}.spec"), f))
+        .collect();
+    let pod: Vec<String> = AGENT_POD_KEPT
+        .iter()
+        .map(|f| kept_field(t, ot, f))
+        .collect();
+    let container: Vec<String> = AGENT_CONTAINER_KEPT
+        .iter()
+        .map(|f| kept_field("c", "p", f))
+        .collect();
+    let pinned = cel_literal(&json!(PINNED_ENV));
+    format!(
+        "{labels_n} == {labels_o} && \
+         {ann_n}.all(k, k == '{stamp}' || (k in {ann_o} && {ann_o}[k] == {ann_n}[k])) && {ann_o}.all(k, k == '{stamp}' || k in {ann_n}) && \
+         {spec} && {template_meta} && {pod} && \
+         (!has({t}.priorityClassName) ? !has({ot}.priorityClassName) : ({t}.priorityClassName == '{priority}' || (has({ot}.priorityClassName) && {ot}.priorityClassName == {t}.priorityClassName))) && \
+         ((has({t}.tolerations) ? {t}.tolerations : []) == (has({ot}.tolerations) ? {ot}.tolerations : []) || (has({t}.tolerations) && {t}.tolerations == {tolerations})) && \
+         size({t}.containers) == size({ot}.containers) && \
+         {t}.containers.all(c, {ot}.containers.exists(p, p.name == c.name && (c.name == 'agent' || c.image == p.image) && {container} && \
+             (has(c.env) ? c.env : []).all(e, e.name in {pinned} ? !has(e.valueFrom) : (has(p.env) && p.env.exists(x, x == e))) && \
+             (has(p.env) ? p.env : []).all(x, x.name in {pinned} || (has(c.env) && c.env.exists(e, e == x)))))",
+        labels_n = labels(n),
+        labels_o = labels(o),
+        ann_n = ann(n),
+        ann_o = ann(o),
+        stamp = INSTALL_ANNOTATION,
+        spec = spec.join(" && "),
+        template_meta = kept_field(
+            &format!("{n}.spec.template"),
+            &format!("{o}.spec.template"),
+            "metadata"
+        ),
+        pod = pod.join(" && "),
+        priority = AGENT_PRIORITY,
+        tolerations = cel_literal(&agent_tolerations()),
+        container = container.join(" && "),
+    )
+}
 
 fn labels() -> Value {
     json!({ "app.kubernetes.io/managed-by": "pyo", "app.kubernetes.io/part-of": "pyo-agent" })
@@ -473,6 +625,13 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
             "expression": "!(request.resource.resource == 'configmaps' && variables.ns == 'pyo-system' && variables.reqName == 'pyo-policy')",
             "message": "pyo-system/pyo-policy belongs to you: Pyo's agent only reads it.",
         },
+        // Its own Deployment: only updated, and then only its image, image
+        // pins, install stamp, priority and tolerations, the last two to
+        // exactly this release's.
+        {
+            "expression": format!("!(request.resource.resource == 'deployments' && variables.ns == '{NS}' && variables.objName == '{AGENT_DEPLOYMENT}') || (request.operation == 'UPDATE' && variables.sub == '' && {})", agent_deployment_kept()),
+            "message": "Pyo's agent only changes its own Deployment's image, image pins, install stamp, priority and tolerations, as this release sets them.",
+        },
         // No privileged containers, host namespaces or host paths, except
         // Pyo's own components that need them.
         {
@@ -775,7 +934,8 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
 // its own.
 //
 // With the optional [`SELF_UPDATE_ROLE`] bound, the agent brings the
-// admission policy and its image pins up to date itself (`RefreshInstall`):
+// admission policy, its image pins and its pods' priority and tolerations up
+// to date itself (`RefreshInstall`):
 // only when its roles are already as Pyo's are (it may read them, never
 // write them). Without it, the cluster's connect command does.
 
@@ -785,8 +945,8 @@ pub const INSTALL_ANNOTATION: &str = "pyo.dev/install";
 /// Optional: the agent may rewrite its own admission policy (and read its
 /// roles, to know they're current). Deleting its binding takes that away.
 pub const SELF_UPDATE_ROLE: &str = "pyo-agent-self-update";
-/// The agent Deployment's env that pins system images: the only part of
-/// the Deployment a refresh changes.
+/// The agent Deployment's env that pins system images: what a refresh
+/// changes of it, with its pods' priority and tolerations.
 pub const PINNED_ENV: [&str; 10] = [
     "PYO_WAF_IMAGE",
     "PYO_GEOIP_IMAGE",
@@ -1502,6 +1662,91 @@ mod tests {
         }
     }
 
+    /// The agent's own Deployment: only updated, its priority and
+    /// tolerations only to exactly this release's, and its token, Pyo's
+    /// address, other env, volumes and account kept.
+    #[test]
+    fn the_agents_deployment_changes_only_as_a_refresh_does() {
+        let policy = admission("w", "g")[0].to_string();
+        let rule = agent_deployment_kept();
+        let escaped = serde_json::to_string(&rule).unwrap();
+        assert!(policy.contains(&escaped[1..escaped.len() - 1]));
+        assert!(policy.contains(&format!(
+            "variables.objName == '{AGENT_DEPLOYMENT}') || (request.operation == 'UPDATE' && variables.sub == '' && "
+        )));
+        assert!(rule.contains(&format!(
+            "object.spec.template.spec.priorityClassName == '{AGENT_PRIORITY}'"
+        )));
+        assert!(rule.contains(&format!(
+            "object.spec.template.spec.tolerations == {}",
+            cel_literal(&agent_tolerations())
+        )));
+        // The two new tolerations, besides the GPU one it always had.
+        let tolerations = agent_tolerations();
+        let keys: Vec<&str> = tolerations
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                crate::GPU_RESOURCE,
+                "node.kubernetes.io/disk-pressure",
+                "node.kubernetes.io/memory-pressure"
+            ]
+        );
+        // What must stay: by field, and env other than the pins.
+        for f in [
+            "serviceAccountName",
+            "volumes",
+            "automountServiceAccountToken",
+            "initContainers",
+        ] {
+            assert!(
+                rule.contains(&format!(
+                    "has(object.spec.template.spec.{f}) == has(oldObject.spec.template.spec.{f})"
+                )),
+                "{f}"
+            );
+        }
+        for f in [
+            "envFrom",
+            "command",
+            "args",
+            "volumeMounts",
+            "securityContext",
+        ] {
+            assert!(rule.contains(&format!("has(c.{f}) == has(p.{f})")), "{f}");
+        }
+        assert!(rule.contains("(c.name == 'agent' || c.image == p.image)"));
+        assert!(rule.contains("e.name in [dyn('PYO_WAF_IMAGE')"));
+        assert!(rule.contains("object.spec.template.metadata == oldObject.spec.template.metadata"));
+        assert!(rule.contains(&format!("k == '{INSTALL_ANNOTATION}'")));
+        // No field twice, and none it may change.
+        for list in [
+            &AGENT_POD_KEPT[..],
+            &AGENT_CONTAINER_KEPT[..],
+            &AGENT_SPEC_KEPT[..],
+        ] {
+            let mut sorted = list.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), list.len());
+            for f in [
+                "containers",
+                "priorityClassName",
+                "tolerations",
+                "image",
+                "env",
+                "template",
+            ] {
+                assert!(!list.contains(&f), "{f}");
+            }
+        }
+    }
+
     #[test]
     fn the_geoip_image_is_the_installations() {
         let img = "registry.example.com/pyo/geoip:7@sha256:bb";
@@ -1543,6 +1788,16 @@ mod tests {
 
     /// The roles' hash: stable for the same roles, 16 hex digits, and
     /// not moved by what a refresh can change (pins, the policy).
+    /// The disk pressure fix (critical per-server pods, the agent's own
+    /// priority and tolerations, the policy that allows them) changes no
+    /// role: 0.5.5's roles. So clusters take it through the agent's update
+    /// and a refresh, with no connect command. Change this only with a
+    /// release that means to ask for the connect command.
+    #[test]
+    fn the_roles_are_as_0_5_5s() {
+        assert_eq!(access_hash(), "5db0cd47517256de");
+    }
+
     #[test]
     fn access_hash_covers_only_the_roles() {
         let h = access_hash();

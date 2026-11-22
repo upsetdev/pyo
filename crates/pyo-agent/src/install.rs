@@ -8,8 +8,10 @@
 //! 2. The admission policy is replaced as a whole (its binding only if that
 //!    differs), then a dry run of the Deployment change below goes through
 //!    it. If the new policy refuses that, the old one is put back.
-//! 3. Last, after reporting: the Deployment's image pins and its stamp.
-//!    When the pins change, the agent restarts on them.
+//! 3. Last, after reporting: the Deployment's image pins, its stamp, and
+//!    its pods' priority and tolerations (pyo-proto's `rbac::AGENT_PRIORITY`
+//!    and `rbac::agent_tolerations`, the connect command's too). When more
+//!    than the stamp changes, the agent restarts on it.
 //!
 //! On a small server under load, the API server can take longer to check
 //! the policy than it gives a write by default (34 s): each write here asks
@@ -19,7 +21,8 @@
 //!
 //! Every step finds what's already done, so a refresh that stops halfway
 //! is simply sent again. The agent's token, Pyo's address, its image and
-//! everything else of its Deployment are never touched here.
+//! everything else of its Deployment are never touched here, and the
+//! admission policy refuses the agent any other change to it.
 
 use std::time::{Duration, Instant};
 
@@ -33,7 +36,7 @@ use serde_json::{Value, json};
 
 use crate::scope::{api_for, same};
 
-const DEPLOYMENT: &str = "pyo-agent";
+const DEPLOYMENT: &str = rbac::AGENT_DEPLOYMENT;
 /// What a refresh can't do by itself.
 const RERUN: &str = "run the cluster's connect command to bring them up to date";
 /// What each write of the admission policy (and the dry run through it)
@@ -202,7 +205,9 @@ pub fn check(p: &InstallParts) -> Result<(), String> {
     Ok(())
 }
 
-/// The Deployment change: its pins (env by name, the rest kept) and stamp.
+/// The Deployment change: its pins (env by name, the rest kept), stamp,
+/// priority and tolerations (the whole list, as a strategic merge replaces
+/// a list without a merge key).
 fn deployment_patch(p: &InstallParts) -> Value {
     let env: Vec<Value> = p
         .pins
@@ -211,7 +216,11 @@ fn deployment_patch(p: &InstallParts) -> Value {
         .collect();
     json!({
         "metadata": { "annotations": { rbac::INSTALL_ANNOTATION: p.hash } },
-        "spec": { "template": { "spec": { "containers": [{ "name": "agent", "env": env }] } } },
+        "spec": { "template": { "spec": {
+            "priorityClassName": rbac::AGENT_PRIORITY,
+            "tolerations": rbac::agent_tolerations(),
+            "containers": [{ "name": "agent", "env": env }],
+        } } },
     })
 }
 
@@ -402,8 +411,8 @@ pub async fn refresh(
     Ok(())
 }
 
-/// Step 3: the Deployment's pins and stamp. When the pins change, this
-/// agent restarts.
+/// Step 3: the Deployment's pins, stamp, priority and tolerations. When
+/// more than the stamp changes, this agent restarts.
 pub async fn finish(client: &Client, p: &InstallParts) -> anyhow::Result<()> {
     Api::<Deployment>::namespaced(client.clone(), rbac::NS)
         .patch(
@@ -658,6 +667,99 @@ mod tests {
             "no image, command or anything else"
         );
         assert_eq!(c["env"].as_array().unwrap().len(), rbac::PINNED_ENV.len());
+        let spec = &patch["spec"]["template"]["spec"];
+        let mut keys: Vec<&String> = spec.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["containers", "priorityClassName", "tolerations"]);
+        assert_eq!(spec["priorityClassName"], rbac::AGENT_PRIORITY);
+        assert_eq!(spec["tolerations"], rbac::agent_tolerations());
+    }
+
+    /// A strategic merge patch as the API server makes it for these fields:
+    /// maps merged, `containers` and `env` merged by name, other lists
+    /// (tolerations) replaced.
+    fn strategic_merge(target: &mut Value, patch: &Value) {
+        let (Some(t), Some(p)) = (target.as_object_mut(), patch.as_object()) else {
+            *target = patch.clone();
+            return;
+        };
+        for (k, v) in p {
+            match (t.get_mut(k), v) {
+                (Some(Value::Array(have)), Value::Array(new))
+                    if k == "containers" || k == "env" =>
+                {
+                    for item in new {
+                        match have.iter_mut().find(|h| h["name"] == item["name"]) {
+                            Some(h) => strategic_merge(h, item),
+                            None => have.push(item.clone()),
+                        }
+                    }
+                }
+                (Some(have @ Value::Object(_)), Value::Object(_)) => strategic_merge(have, v),
+                _ => {
+                    t.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+
+    /// An agent Deployment as an older connect command made it: no
+    /// priority, the GPU toleration only, older pins.
+    fn older_deployment() -> Value {
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": { "name": DEPLOYMENT, "namespace": rbac::NS, "annotations": { rbac::INSTALL_ANNOTATION: "0123456789abcdef" } },
+            "spec": { "replicas": 1, "template": { "metadata": { "annotations": { "pyo.dev/token": "t" } }, "spec": {
+                "serviceAccountName": "pyo-agent",
+                "tolerations": [{ "key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule" }],
+                "containers": [{ "name": "agent", "image": "agent@sha256:00", "envFrom": [{ "secretRef": { "name": "pyo-agent" } }],
+                    "env": [{ "name": "RUST_LOG", "value": "pyo_agent=info" }, { "name": "PYO_WAF_IMAGE", "value": "waf:old" }] }],
+            } } },
+        })
+    }
+
+    /// A refresh brings an older Deployment the priority and tolerations
+    /// (whole, the GPU one kept), and its pins and stamp; the token, Pyo's
+    /// address and other env stay. Applied again, nothing changes.
+    #[test]
+    fn a_refresh_brings_the_priority_and_tolerations() {
+        let p = parts();
+        let patch = deployment_patch(&p);
+        let mut d = older_deployment();
+        strategic_merge(&mut d, &patch);
+        let spec = &d["spec"]["template"]["spec"];
+        assert_eq!(spec["priorityClassName"], rbac::AGENT_PRIORITY);
+        assert_eq!(spec["tolerations"], rbac::agent_tolerations());
+        assert_eq!(spec["serviceAccountName"], "pyo-agent");
+        assert_eq!(
+            d["metadata"]["annotations"][rbac::INSTALL_ANNOTATION],
+            json!(p.hash)
+        );
+        assert_eq!(
+            d["spec"]["template"]["metadata"]["annotations"]["pyo.dev/token"],
+            "t"
+        );
+        let c = &spec["containers"][0];
+        assert_eq!(c["image"], "agent@sha256:00");
+        assert_eq!(
+            c["envFrom"],
+            json!([{ "secretRef": { "name": "pyo-agent" } }])
+        );
+        let env: std::collections::BTreeMap<&str, &str> = c["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["name"].as_str().unwrap(), e["value"].as_str().unwrap()))
+            .collect();
+        assert_eq!(env["RUST_LOG"], "pyo_agent=info");
+        for (k, v) in &p.pins {
+            assert_eq!(env[k.as_str()], v, "{k}");
+        }
+        assert_eq!(env.len(), p.pins.len() + 1);
+        // Sent again (a refresh that stopped halfway): the same Deployment.
+        let once = d.clone();
+        strategic_merge(&mut d, &patch);
+        assert_eq!(d, once);
     }
 
     /// Against a throwaway cluster (1.30+), as the agent's own
@@ -1114,8 +1216,115 @@ mod tests {
             .map(|e| (e.name, e.value.unwrap_or_default()))
             .collect();
         assert_eq!(env, new.pins);
-        // Sent again: nothing to do.
+        // The stand-in had neither: the refresh brought both.
+        let d = deployments.get(DEPLOYMENT).await.unwrap();
+        let generation = d.metadata.generation;
+        let pod = serde_json::to_value(d.spec.unwrap().template.spec.unwrap()).unwrap();
+        assert_eq!(pod["priorityClassName"], rbac::AGENT_PRIORITY);
+        assert_eq!(pod["tolerations"], rbac::agent_tolerations());
+        // Sent again: nothing to do, and the Deployment is as it was.
         refresh(&sa, &new, &mut Progress::default()).await.unwrap();
+        finish(&sa, &new).await.unwrap();
+        assert_eq!(
+            deployments
+                .get(DEPLOYMENT)
+                .await
+                .unwrap()
+                .metadata
+                .generation,
+            generation
+        );
+
+        // Its own Deployment, through the policy: only what a refresh or
+        // an update of the agent changes, to exactly this release's.
+        let own = Api::<Deployment>::namespaced(sa.clone(), rbac::NS);
+        let try_patch = |patch: Value| {
+            let own = own.clone();
+            async move {
+                own.patch(
+                    DEPLOYMENT,
+                    &PatchParams {
+                        dry_run: true,
+                        ..Default::default()
+                    },
+                    &Patch::Strategic(patch),
+                )
+                .await
+            }
+        };
+        let refused = |r: Result<Deployment, kube::Error>, what: &str| {
+            assert!(
+                r.as_ref()
+                    .is_err_and(|e| e.to_string().contains("own Deployment")),
+                "{what}: {r:?}"
+            )
+        };
+        let pod_patch = |spec: Value| json!({ "spec": { "template": { "spec": spec } } });
+        try_patch(pod_patch(
+            json!({ "containers": [{ "name": "agent", "image": "registry.k8s.io/pause:3.9" }] }),
+        ))
+        .await
+        .expect("an update of the agent: its image");
+        try_patch(deployment_patch(&new)).await.expect("a refresh");
+        refused(
+            try_patch(pod_patch(
+                json!({ "priorityClassName": "system-node-critical" }),
+            ))
+            .await,
+            "another priority class",
+        );
+        let mut extra = rbac::agent_tolerations();
+        extra
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "operator": "Exists" }));
+        refused(
+            try_patch(pod_patch(json!({ "tolerations": extra }))).await,
+            "an extra toleration",
+        );
+        refused(
+            try_patch(pod_patch(json!({ "tolerations": [{ "key": "node.kubernetes.io/disk-pressure", "operator": "Exists", "effect": "NoSchedule" }] }))).await,
+            "other tolerations",
+        );
+        refused(
+            try_patch(pod_patch(json!({ "containers": [{ "name": "agent", "env": [{ "name": "PYO_API_URL", "value": "https://elsewhere.example" }] }] }))).await,
+            "Pyo's address",
+        );
+        refused(
+            try_patch(pod_patch(json!({ "containers": [{ "name": "agent", "envFrom": [{ "secretRef": { "name": "other" } }] }] }))).await,
+            "its token",
+        );
+        refused(
+            try_patch(pod_patch(json!({ "serviceAccountName": "default" }))).await,
+            "its service account",
+        );
+        refused(
+            try_patch(pod_patch(
+                json!({ "volumes": [{ "name": "x", "emptyDir": {} }] }),
+            ))
+            .await,
+            "a volume",
+        );
+        refused(
+            try_patch(json!({ "spec": { "template": { "metadata": { "annotations": { "pyo.dev/token": "other" } } } } })).await,
+            "its token stamp",
+        );
+        refused(
+            try_patch(json!({ "spec": { "replicas": 2 } })).await,
+            "its replicas",
+        );
+        refused(
+            own.delete(
+                DEPLOYMENT,
+                &kube::api::DeleteParams {
+                    dry_run: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(|_| Deployment::default()),
+            "deleting it",
+        );
         // Still enforced: a privileged pod is refused.
         let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(json!({ "metadata": { "name": "pyo-test-privileged" }, "spec": { "containers": [{ "name": "x", "image": "registry.k8s.io/pause:3.10", "securityContext": { "privileged": true } }] } })).unwrap();
         let refused = Api::<k8s_openapi::api::core::v1::Pod>::namespaced(sa.clone(), rbac::NS)
