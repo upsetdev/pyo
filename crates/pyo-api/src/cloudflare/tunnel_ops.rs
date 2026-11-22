@@ -110,9 +110,83 @@ fn can_tunnel(host: &str, zones: &[Zone], account_id: &str) -> Option<Zone> {
         .cloned()
 }
 
+/// What a switch to the tunnel makes of the domain's `tunnel`. A name
+/// that's moving from the cluster's public ports takes `"switching"`, so
+/// both paths answer while its record moves. One that's already only
+/// through the tunnel (`"on"`: under the default domain's wildcard, or
+/// switched before) stays as it is, so its gate never opens for a record
+/// that changes nothing for direct visitors. None: leave it.
+pub(crate) fn switch_state(now: Option<&str>) -> Option<&'static str> {
+    match now {
+        Some(pyo_proto::TUNNEL_ON) => None,
+        _ => Some(pyo_proto::TUNNEL_SWITCHING),
+    }
+}
+
+/// Whether a name asked onto the tunnel is left to the default domain's
+/// wildcard, with no record of its own: it's one level under the default
+/// domain (`under`), new to the tunnel (no `tunnel` on the domain yet and
+/// no record row), and nothing at Cloudflare answers for that exact name
+/// (`found`: the records on it). A record there, Pyo's or anyone's, would
+/// answer ahead of the wildcard, so the name takes the switch instead,
+/// which replaces Pyo's own and asks before anyone else's. A name already
+/// on the tunnel takes the switch too: someone asked for its own record.
+pub(crate) fn left_to_wildcard(under: bool, tunnel: bool, has_row: bool, host: &str, found: &[tunnel::Kept]) -> bool {
+    under
+        && !tunnel
+        && !has_row
+        && !found
+            .iter()
+            .any(|k| matches!(k.kind.as_str(), "A" | "AAAA" | "CNAME") && super::same_name(&k.name, host))
+}
+
+/// What Switch back does for a domain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Back {
+    /// It isn't on the tunnel: nothing to do.
+    Direct,
+    /// A switch that never moved the record just stops.
+    Stop,
+    /// A switch that never moved the record stops, and the name stays on
+    /// the tunnel through the default domain's wildcard.
+    Stay,
+    /// Its record moves back, both paths first.
+    Revert,
+    /// The default domain's wildcard would take it straight back: said,
+    /// and nothing changes.
+    Refuse,
+}
+
+/// What Switch back does for a domain. `under`: the tunnel's default
+/// domain covers the name, so without a record of its own the loop puts
+/// it through the wildcard (`free_domains_follow`). `record`: its record
+/// row's (via, status). `tunnel`: the domain has `tunnel` set.
+/// `puts_back`: a record it replaced comes back, which then answers for
+/// the name ahead of the wildcard.
+pub(crate) fn back_plan(under: bool, record: Option<(&str, &str)>, tunnel: bool, puts_back: bool) -> Back {
+    let via_tunnel = record.is_some_and(|(via, _)| via == "tunnel");
+    let waiting = record.is_some_and(|(via, status)| via != "tunnel" && matches!(status, "switching" | "conflict"));
+    match (via_tunnel, tunnel, under) {
+        (true, _, true) if !puts_back => Back::Refuse,
+        (true, _, _) => Back::Revert,
+        (false, false, _) => Back::Direct,
+        (false, true, false) => Back::Stop,
+        (false, true, true) if waiting => Back::Stay,
+        (false, true, true) => Back::Refuse,
+    }
+}
+
+/// Said when Switch back is asked for a name the default domain covers.
+pub fn always_tunnel(host: &str) -> String {
+    format!("{host} is under the tunnel's default domain, so it always goes through the tunnel.")
+}
+
 /// Ask for a domain's switch to the tunnel: its domain takes
-/// `tunnel: "switching"` (both paths answer), its record row waits for the
-/// loop, which moves the record once the agent has the routes.
+/// `tunnel: "switching"` (both paths answer) unless it's already only
+/// through the tunnel ([`switch_state`]), and its record row waits for the
+/// loop, which moves the record once the agent has the routes. Whether the
+/// domain's routes changed.
+#[allow(clippy::too_many_arguments)]
 async fn begin_switch(
     tx: &mut Transaction<'_, Postgres>,
     team_id: &str,
@@ -121,12 +195,13 @@ async fn begin_switch(
     host: &str,
     zone: &Zone,
     replace: bool,
-) -> ApiResult<()> {
+    now: Option<&str>,
+) -> ApiResult<bool> {
     sqlx::query(
         "INSERT INTO pyo.dns_records (service_id, domain_id, team_id, hostname, zone_id, zone_name, type, status, replace, routes_command)
          VALUES ($1, $2, $3, $4, $5, $6, 'CNAME', 'switching', $7, NULL)
          ON CONFLICT (service_id, domain_id) DO UPDATE SET hostname = $4, zone_id = $5, zone_name = $6, status = 'switching',
-           replace = $7, error = NULL, existing = '[]', updated_at = now()",
+           replace = $7, error = NULL, existing = '[]', routes_command = NULL, updated_at = now()",
     )
     .bind(service_id)
     .bind(domain_id)
@@ -137,7 +212,13 @@ async fn begin_switch(
     .bind(replace)
     .execute(&mut **tx)
     .await?;
-    set_tunnel(tx, service_id, domain_id, Some(pyo_proto::TUNNEL_SWITCHING)).await
+    match switch_state(now) {
+        Some(state) => {
+            set_tunnel(tx, service_id, domain_id, Some(state)).await?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 async fn set_tunnel(
@@ -353,8 +434,7 @@ pub async fn set_traffic(
                 continue;
             };
             let domain_id = d["id"].as_str().unwrap_or("");
-            begin_switch(tx, &team_id, &service_id, domain_id, &host, &zone, false).await?;
-            any = true;
+            any |= begin_switch(tx, &team_id, &service_id, domain_id, &host, &zone, false, None).await?;
             moving += 1;
         }
         if any {
@@ -420,16 +500,19 @@ pub async fn set_domain(
         Action::CreateRecord
     };
     require_role(tx, user, &team_id, role_for(action)).await?;
-    let tunnel_row: Option<(String, String)> = sqlx::query_as(
-        "SELECT state, account_id FROM pyo.cluster_tunnels WHERE cluster_id = $1",
+    let tunnel_row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT state, account_id, default_domain FROM pyo.cluster_tunnels WHERE cluster_id = $1",
     )
     .bind(&cluster_id)
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((state, account_id)) = tunnel_row.filter(|(st, _)| st != "removing") else {
+    let Some((_, account_id, default_domain)) = tunnel_row.filter(|(st, _, _)| st != "removing") else {
         return Err(bad("This cluster has no Cloudflare Tunnel. Pick Cloudflare Tunnel under the cluster's Traffic first."));
     };
-    let _ = state;
+    // One level under the tunnel's default domain: its wildcard covers it.
+    let under = default_domain
+        .as_deref()
+        .is_some_and(|dd| super::tunnel_loop::under_default(&host, dd));
     let status = row.as_ref().map(|r| r.0.as_str()).unwrap_or("");
     let via = row.as_ref().map(|r| r.1.as_str()).unwrap_or("direct");
     if on {
@@ -444,8 +527,36 @@ pub async fn set_domain(
         if via == "tunnel" && status == "created" {
             return Ok(json!({ "ok": true, "status": "active" }));
         }
-        begin_switch(tx, &team_id, service_id, domain_id, &host, &zone, replace).await?;
-        sync(tx, service_id, wake).await?;
+        // A new name under the default domain: the wildcard record has it,
+        // so it needs no record of its own, whoever asks (dashboard, CLI,
+        // MCP, API). Only when Cloudflare says nothing else answers for
+        // the name. When Cloudflare can't be asked, the switch below finds
+        // out.
+        if under && row.is_none() && !d["tunnel"].is_string() {
+            use tunnel::TunnelApi;
+            let found = super::Http::new(&a.token)?.records_kept(&zone.id, &host).await;
+            if found.is_ok_and(|f| left_to_wildcard(under, false, false, &host, &f)) {
+                set_tunnel(tx, service_id, domain_id, Some(pyo_proto::TUNNEL_ON)).await?;
+                sync(tx, service_id, wake).await?;
+                log_activity(
+                    tx,
+                    &team_id,
+                    &user.name,
+                    "domain.tunnel",
+                    "info",
+                    &format!("{host} goes through the Cloudflare Tunnel, under its default domain"),
+                    json!({ "kind": "service", "id": service_id, "label": host }),
+                    json!({ "serviceId": service_id }),
+                )
+                .await?;
+                return Ok(json!({ "ok": true, "status": "active" }));
+            }
+        }
+        // Already only through the tunnel: it stays gated while its own
+        // record is made, and the agent has nothing new to apply.
+        if begin_switch(tx, &team_id, service_id, domain_id, &host, &zone, replace, d["tunnel"].as_str()).await? {
+            sync(tx, service_id, wake).await?;
+        }
         log_activity(
             tx,
             &team_id,
@@ -459,21 +570,47 @@ pub async fn set_domain(
         .await?;
         return Ok(json!({ "ok": true, "status": "switching" }));
     }
-    // Back. A switch that never moved the record (still switching, or
-    // waiting for a yes) just stops.
-    if via != "tunnel" {
-        if d["tunnel"].is_string() {
+    // Back. A name under the default domain goes through the tunnel's
+    // wildcard whenever it has no record of its own, so moving it back
+    // would last until the loop's next pass: refused, unless a record it
+    // replaced comes back (that one answers ahead of the wildcard).
+    let plan = back_plan(
+        under,
+        row.as_ref().map(|r| (r.1.as_str(), r.0.as_str())),
+        d["tunnel"].is_string(),
+        restore && kept,
+    );
+    let stop_waiting = "DELETE FROM pyo.dns_records WHERE service_id = $1 AND domain_id = $2 AND status IN ('switching', 'conflict') AND via = 'direct'";
+    match plan {
+        Back::Refuse => return Err(bad(always_tunnel(&host))),
+        Back::Direct => return Ok(json!({ "ok": true, "status": "direct" })),
+        // A switch that never moved the record (still switching, or
+        // waiting for a yes) just stops.
+        Back::Stop => {
             set_tunnel(tx, service_id, domain_id, None).await?;
-            sqlx::query(
-                "DELETE FROM pyo.dns_records WHERE service_id = $1 AND domain_id = $2 AND status IN ('switching', 'conflict') AND via = 'direct'",
-            )
-            .bind(service_id)
-            .bind(domain_id)
-            .execute(&mut **tx)
-            .await?;
+            sqlx::query(stop_waiting)
+                .bind(service_id)
+                .bind(domain_id)
+                .execute(&mut **tx)
+                .await?;
             sync(tx, service_id, wake).await?;
+            return Ok(json!({ "ok": true, "status": "direct" }));
         }
-        return Ok(json!({ "ok": true, "status": "direct" }));
+        // The same, but the wildcard has the name: it stays only through
+        // the tunnel, without a moment off it.
+        Back::Stay => {
+            sqlx::query(stop_waiting)
+                .bind(service_id)
+                .bind(domain_id)
+                .execute(&mut **tx)
+                .await?;
+            if d["tunnel"] != json!(pyo_proto::TUNNEL_ON) {
+                set_tunnel(tx, service_id, domain_id, Some(pyo_proto::TUNNEL_ON)).await?;
+                sync(tx, service_id, wake).await?;
+            }
+            return Ok(json!({ "ok": true, "status": "active" }));
+        }
+        Back::Revert => {}
     }
     sqlx::query(
         "UPDATE pyo.dns_records SET status = 'reverting', restore = $3, error = NULL, updated_at = now()
@@ -671,6 +808,72 @@ mod tests {
         );
         assert!(install_ready(&json!({ "tunnel": true, "agentInstall": { "state": "current" } })).is_ok());
         assert!(!INSTALL_FIRST.contains(';'));
+    }
+
+    #[test]
+    fn a_name_already_on_the_tunnel_stays_gated_while_its_record_is_made() {
+        // Moving from public: both paths while the record moves.
+        assert_eq!(switch_state(None), Some("switching"));
+        assert_eq!(switch_state(Some("switching")), Some("switching"));
+        // Under the wildcard, or switched before: never back to both paths.
+        assert_eq!(switch_state(Some("on")), None);
+    }
+
+    #[test]
+    fn a_new_name_under_the_default_domain_gets_no_record_of_its_own() {
+        let kept = |kind: &str, name: &str| tunnel::Kept {
+            id: "r1".into(),
+            kind: kind.into(),
+            name: name.into(),
+            content: "203.0.113.7".into(),
+            proxied: false,
+            ttl: 1,
+            comment: None,
+        };
+        let host = "web-shop.example.com";
+        // Nothing on the name: the wildcard has it.
+        assert!(left_to_wildcard(true, false, false, host, &[]));
+        // Records that don't answer for a website, or for another name, don't matter.
+        assert!(left_to_wildcard(true, false, false, host, &[kept("TXT", host), kept("MX", host)]));
+        assert!(left_to_wildcard(true, false, false, host, &[kept("A", "other.example.com")]));
+        // A record on that exact name answers ahead of the wildcard: the
+        // switch takes it (and stops at "conflict" for someone else's).
+        for kind in ["A", "AAAA", "CNAME"] {
+            assert!(!left_to_wildcard(true, false, false, host, &[kept(kind, "Web-Shop.example.com.")]), "{kind}");
+        }
+        // Outside the default domain: always its own record.
+        assert!(!left_to_wildcard(false, false, false, "blog.other.org", &[]));
+        // Already on the tunnel, or with a record row: someone asked for
+        // its own record, so it gets one (and stays gated meanwhile).
+        assert!(!left_to_wildcard(true, true, false, host, &[]));
+        assert!(!left_to_wildcard(true, false, true, host, &[]));
+    }
+
+    #[test]
+    fn switch_back_is_refused_under_the_default_domain() {
+        let created = Some(("tunnel", "created"));
+        // Outside the default domain: Switch back as ever.
+        assert_eq!(back_plan(false, created, true, false), Back::Revert);
+        assert_eq!(back_plan(false, created, true, true), Back::Revert);
+        assert_eq!(back_plan(false, Some(("direct", "conflict")), true, false), Back::Stop);
+        assert_eq!(back_plan(false, Some(("direct", "switching")), true, false), Back::Stop);
+        assert_eq!(back_plan(false, Some(("direct", "created")), false, false), Back::Direct);
+        assert_eq!(back_plan(false, None, false, false), Back::Direct);
+        // Under it, the wildcard takes the name back: refused, with its own
+        // record or only the wildcard.
+        assert_eq!(back_plan(true, created, true, false), Back::Refuse);
+        assert_eq!(back_plan(true, None, true, false), Back::Refuse);
+        assert_eq!(back_plan(true, None, true, true), Back::Refuse);
+        // A record it replaced comes back and answers ahead of the wildcard.
+        assert_eq!(back_plan(true, created, true, true), Back::Revert);
+        // A switch waiting for a yes can be cancelled: it stays on the tunnel.
+        assert_eq!(back_plan(true, Some(("direct", "conflict")), true, false), Back::Stay);
+        assert_eq!(back_plan(true, Some(("direct", "switching")), true, false), Back::Stay);
+        // A direct record of its own wins over the wildcard: it is direct.
+        assert_eq!(back_plan(true, Some(("direct", "created")), false, false), Back::Direct);
+        let said = always_tunnel("web-shop.example.com");
+        assert_eq!(said, "web-shop.example.com is under the tunnel's default domain, so it always goes through the tunnel.");
+        assert!(!said.contains(';') && !said.contains(" - "));
     }
 
     #[test]

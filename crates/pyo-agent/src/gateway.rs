@@ -379,7 +379,9 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
                 if redirect {
                     rules.push(tunnel_redirect_rule());
                 }
-                rules.push(web_rule(p));
+                // X-Forwarded-For is the visitor alone, not the visitor
+                // and then the connector's pod.
+                rules.push(system::tunnel_rule(web_rule(p)));
                 out.objects.push(json!({
                     "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
                     "metadata": meta(&tunnel_route_name(&base, only, redirect, p)),
@@ -3157,6 +3159,34 @@ mod tests {
         assert!(done["spec"]["rules"][1]["backendRefs"].is_array());
         let raw = find(&r, "HTTPRoute", "shop-web-tunnel-plain-http");
         assert_eq!(raw["spec"]["rules"].as_array().unwrap().len(), 1);
+        // The service gets the visitor alone in X-Forwarded-For, switched
+        // or switching: never the connector's pod after it, and never what
+        // a direct client sent. Routes outside the tunnel are as they were.
+        let visitor = json!([{ "type": "RequestHeaderModifier", "requestHeaderModifier": { "set": [
+            { "name": "X-Forwarded-For", "value": "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%" },
+        ] } }]);
+        assert_eq!(done["spec"]["rules"][1]["filters"], visitor);
+        assert_eq!(raw["spec"]["rules"][0]["filters"], visitor);
+        assert_eq!(find(&r, "HTTPRoute", "shop-web-switching-http")["spec"]["rules"][1]["filters"], visitor);
+        assert!(find(&r, "HTTPRoute", "shop-web-https-http")["spec"]["rules"][0]["filters"].is_null());
+        // The redirect rule forwards nothing, so it sets nothing.
+        assert_eq!(done["spec"]["rules"][0]["filters"].as_array().unwrap().len(), 1);
+        // A static site's rule takes it in its one header filter.
+        let mut site = s.clone();
+        site.site = Some(pyo_proto::site::SiteSpec {
+            deploy: "dpl_7".into(),
+            index_fallback: false,
+        });
+        let sr = route_objects(&site);
+        let filters = find(&sr, "HTTPRoute", "shop-web-tunnel-plain-http")["spec"]["rules"][0]["filters"].clone();
+        assert_eq!(filters.as_array().unwrap().len(), 1);
+        assert_eq!(
+            filters[0]["requestHeaderModifier"]["set"],
+            json!([
+                { "name": system::STATIC_HEADER, "value": "svc_web/dpl_7" },
+                { "name": "X-Forwarded-For", "value": "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%" },
+            ])
+        );
         // Plain HTTP: the switching domain still answers there, the switched ones don't.
         let redirect = find(&r, "HTTPRoute", "shop-web-redirect")["spec"]["hostnames"].clone();
         assert_eq!(redirect, json!(["direct.example.com", "moving.example.com"]));

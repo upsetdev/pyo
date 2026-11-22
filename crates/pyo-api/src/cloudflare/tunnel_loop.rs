@@ -387,9 +387,11 @@ async fn keep<C: Cloudflare + TunnelApi>(
     }
     let domains = tunnel_domains(&s.db, &row.cluster_id, zones).await?;
 
-    // 2. Its routes: every tunnel domain, plus the default domain's wildcard.
+    // 2. Its routes: every tunnel domain, the free ones under the default
+    // domain among them. No wildcard route: a name no service has gets
+    // the tunnel's own 404 (see `tunnel::ingress`).
     let hosts: Vec<String> = domains.iter().map(|d| d.host.clone()).collect();
-    let config = tunnel::ingress(&hosts, row.default_domain.as_deref());
+    let config = tunnel::ingress(&hosts);
     let hash = tunnel::config_hash(&config);
     if hash != row.config_hash || recreated {
         let version = cf.put_config(&row.account_id, &t.id, &config).await?;

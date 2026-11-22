@@ -2945,7 +2945,7 @@ pub(crate) enum Op {
     },
     /// Revoke a Pyo registry token. Team owners and admins.
     RevokeRegistryToken { id: String },
-    /// Connect the team's Cloudflare account, or replace its token. The token needs Zone:Read and DNS:Edit on the zones Pyo may use, and for Cloudflare Tunnel also Cloudflare Tunnel:Edit and SSL and Certificates:Edit. Pyo lists its zones and their accounts, checks it can edit DNS in each (it makes and deletes a TXT record `_pyo-check.<zone>`), checks the tunnel permissions (it makes and deletes a tunnel `pyo-check-<hex>` once per account, and reads each zone's Origin CA certificates), then keeps it encrypted. It's never shown again. Each zone's `tunnel` says whether it can use Cloudflare Tunnel. Team owners and admins.
+    /// Connect the team's Cloudflare account, or replace its token. The token needs Zone:Read and DNS:Edit on the zones Pyo may use, and for Cloudflare Tunnel also Cloudflare Tunnel:Edit and SSL and Certificates:Edit. Pyo lists its zones and their accounts, checks it can edit DNS in each (it makes and deletes a TXT record `_pyo-check.<zone>`), checks the tunnel permissions (it makes and deletes a tunnel `pyo-check-<installation id>-<hex>` once per account, and reads each zone's Origin CA certificates), then keeps it encrypted. It's never shown again. Each zone's `tunnel` says whether it can use Cloudflare Tunnel. Team owners and admins.
     ConnectCloudflare { team_id: String, token: String },
     /// Check the saved Cloudflare token again: the zones it covers now, whether each can use Cloudflare Tunnel, and what it's missing (`problems`). Team owners and admins.
     TestCloudflare { team_id: String },
@@ -2981,7 +2981,7 @@ pub(crate) enum Op {
         #[serde(default)]
         ports_public: Option<bool>,
     },
-    /// Serve a domain through the cluster's Cloudflare Tunnel (`on`), or move it back. Pyo adds the tunnel's route first, then points the name at the tunnel with a proxied CNAME, so both paths answer while it moves. When records Pyo didn't make have the name, the domain's `dnsRecord.status` turns "conflict" and `existing` lists them. Send it again with `replace` to replace them (team owners and admins): Pyo keeps a copy. Moving back with `restore` puts that copy back (team owners and admins), or without one, points the name at the cluster's public IP.
+    /// Serve a domain through the cluster's Cloudflare Tunnel (`on`), or move it back. Pyo adds the tunnel's route first, then points the name at the tunnel with a proxied CNAME, so both paths answer while it moves. When records Pyo didn't make have the name, the domain's `dnsRecord.status` turns "conflict" and `existing` lists them. Send it again with `replace` to replace them (team owners and admins): Pyo keeps a copy. Moving back with `restore` puts that copy back (team owners and admins), or without one, points the name at the cluster's public IP. A name one level under the tunnel's default domain always goes through the tunnel, so moving it back is refused unless a record it replaced comes back. A new name one level under the default domain gets no record of its own when nothing else at Cloudflare answers for it: the default domain's wildcard record has it, and the answer is `status: "active"`. A name that's already only through the tunnel stays that way while its own record is made.
     SetDomainTunnel {
         service_id: String,
         domain_id: String,

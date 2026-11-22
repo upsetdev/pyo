@@ -354,19 +354,20 @@ pub async fn add(
     let in_cloudflare = !is_free(&host)
         && crate::cloudflare::zone_for(&t.state.0, team_id, &host)
             .is_some_and(|z| z["canEdit"] == json!(true));
-    // Through the cluster's Cloudflare Tunnel: Pyo makes the switch (the
-    // tunnel's wildcard already covers a free name under its default domain).
+    // Through the cluster's Cloudflare Tunnel: Pyo makes the switch. A name
+    // under the tunnel's default domain gets no record of its own (its
+    // wildcard has it), unless a record on that name is in the way.
     let tunnel = cluster_ip(&t, "traffic").as_deref() == Some("tunnel");
     let free_tunnel = tunnel
         && cluster_ip(&t, "freeDomainSuffix")
             .is_some_and(|s| host.strip_suffix(&format!(".{s}")).is_some_and(|l| !l.contains('.')));
-    let made = if free_tunnel {
-        true
-    } else if tunnel && in_cloudflare && dns.cloudflare {
+    let made = if tunnel && in_cloudflare && dns.cloudflare {
         crate::cloudflare::domain_tunnel(api, Some(&t.id), &host, true, false, true)
             .await
             .map_err(|e| eprintln!("{}", ui::red(&e.to_string())))
             .is_ok()
+    } else if free_tunnel {
+        true
     } else if in_cloudflare && dns.cloudflare {
         crate::cloudflare::create_record(api, &t.id, &id, &host, dns.proxied, false)
             .await
