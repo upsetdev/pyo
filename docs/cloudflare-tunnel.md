@@ -1581,7 +1581,7 @@ Not merged into `dev` until the feature is complete and tested.
 | 1. Token and zones | Done, tested (e3d91dd api, adc8e62 cli, 12cf81f dash) |
 | 2. Agent and Gateway | Written and compiled (eadce05 proto, 4db8b6f agent). Agent tunnel tests pass (9). pyo-proto rbac tests not run yet |
 | 3. Control plane | Written and compiled (3b9ae43): migration 0040, tunnel_loop.rs, heartbeat and snapshot. Unit tests 24 of 26 passed, the 2 failures were test mistakes, fixed in 3b9ae43, not rerun yet |
-| 4. Traffic choice, switching | API, MCP and CLI written (3b9ae43, a47f92e). Dashboard in progress on `feat/cloudflare-tunnel-dash` (worktree `pyo-tunnel-dash`) |
+| 4. Traffic choice, switching | API, MCP and CLI written (3b9ae43, a47f92e). Dashboard merged (06dfbba, `tsc` passes): Traffic panel, tunnel badge, record line, add and remove domain |
 | 5. Ports, connect.sh, alerts | Public ports Service and tunnel alerts written. connect.sh keeps its line (see Decisions) |
 | 6. Docs, e2e, real-zone test, Pyo Ops | Not started (real zone and Pyo Ops need the user) |
 
@@ -1604,7 +1604,9 @@ Next:
 1. Rerun `cargo test -p pyo-proto -p pyo-agent -p pyo-api -p pyo-cli tunnel`
    and `… cloudflare`, plus the full `-p pyo-api -p pyo-agent -p pyo-proto`
    suites (the access hash and admission tests), and clippy.
-2. Merge `feat/cloudflare-tunnel-dash` once its `tsc` passes.
+2. Dashboard gaps: the new-service wizard has no tunnel switch, no
+   warning for deeper names (a.b.example.com), and "Certificate:
+   <reason>" shows only through `tunnel.error`.
 3. A DATABASE_URL test (ignored by default, like install.rs's) for the
    migration and the ops: traffic switch, switch and revert rows,
    removeCloudflare refused.
