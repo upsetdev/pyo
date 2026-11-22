@@ -554,7 +554,7 @@ pub fn databases_bundle(img: &crate::system::DbImages) -> SystemBundle {
                 "__POSTGRES_IMAGE_16__",
                 "__POSTGRES_IMAGE_17__",
                 "__POSTGRES_IMAGE_18__",
-                "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07",
+                "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.2@sha256:f96f6be3d81ec93819b443c665c575c609342fca840df90d4d87dae314a5b913",
                 MYSQL_OPERATOR_PLACEHOLDER,
                 MYSQL_BACKUP_PLACEHOLDER,
                 "ghcr.io/cybozu-go/moco-agent:0.17.0@sha256:a6d9cc387a08a5d108ee89fb40e6274c47a435d3bb6fa71d4b822873e26b966b",
