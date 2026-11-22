@@ -67,9 +67,6 @@ impl Cf {
 }
 
 impl Cloudflare for Arc<Cf> {
-    async fn zones(&self) -> Result<Vec<(String, String)>, CfError> {
-        Ok(vec![(ZONE.into(), "example.com".into())])
-    }
     async fn records(&self, zone_id: &str, name: &str) -> Result<Vec<Record>, CfError> {
         assert_eq!(zone_id, ZONE);
         Ok(self.named(name))
@@ -434,9 +431,6 @@ async fn a_wildcard_certificate_through_dns01() {
 struct Dropping(Arc<Cf>);
 
 impl Cloudflare for Dropping {
-    async fn zones(&self) -> Result<Vec<(String, String)>, CfError> {
-        self.0.zones().await
-    }
     async fn records(&self, z: &str, n: &str) -> Result<Vec<Record>, CfError> {
         self.0.records(z, n).await
     }
@@ -481,9 +475,6 @@ async fn a_failed_challenge_still_cleans_up() {
 struct Refusing;
 
 impl Cloudflare for Refusing {
-    async fn zones(&self) -> Result<Vec<(String, String)>, CfError> {
-        Ok(vec![])
-    }
     async fn records(&self, _: &str, _: &str) -> Result<Vec<Record>, CfError> {
         Ok(vec![])
     }

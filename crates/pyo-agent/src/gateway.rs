@@ -349,7 +349,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         for p in &ports {
             let hosts: Vec<&str> = secure
                 .iter()
-                .filter(|d| d.port_name == *p)
+                .filter(|d| d.port_name == *p && !d.via_tunnel())
                 .map(|d| d.hostname.as_str())
                 .collect();
             if !hosts.is_empty() {
@@ -358,14 +358,44 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
                     "spec": { "parentRefs": [{ "name": base }], "hostnames": hosts, "rules": [web_rule(p)] },
                 }));
             }
+            // Through the Cloudflare Tunnel: routes of their own, so the
+            // gate (once switched) and the cf-visitor redirect apply to
+            // those names only. Grouped by switched or not, and by redirect.
+            for (only, redirect) in [(true, true), (true, false), (false, true), (false, false)] {
+                let hosts: Vec<&str> = secure
+                    .iter()
+                    .filter(|d| {
+                        d.port_name == *p
+                            && d.via_tunnel()
+                            && d.tunnel_only() == only
+                            && d.redirect_https == redirect
+                    })
+                    .map(|d| d.hostname.as_str())
+                    .collect();
+                if hosts.is_empty() {
+                    continue;
+                }
+                let mut rules = vec![];
+                if redirect {
+                    rules.push(tunnel_redirect_rule());
+                }
+                rules.push(web_rule(p));
+                out.objects.push(json!({
+                    "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
+                    "metadata": meta(&tunnel_route_name(&base, only, redirect, p)),
+                    "spec": { "parentRefs": [{ "name": base }], "hostnames": hosts, "rules": rules },
+                }));
+            }
         }
     }
 
     // HTTP, on the shared :80 listener: redirects, then plain HTTP.
     let http_parent = json!([{ "name": HTTP_GATEWAY, "sectionName": "http" }]);
+    // A domain switched to the tunnel has no plain HTTP route: nothing
+    // reaches it directly any more (cloudflared speaks HTTPS).
     let redirect: Vec<&str> = secure
         .iter()
-        .filter(|d| d.redirect_https)
+        .filter(|d| d.redirect_https && !d.tunnel_only())
         .map(|d| d.hostname.as_str())
         .collect();
     if !redirect.is_empty() {
@@ -381,6 +411,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
             .filter(reachable)
             .filter(public)
             .filter(|d| d.port_name == *p && !(!d.tls.is_empty() && d.redirect_https))
+            .filter(|d| !d.tunnel_only())
             .map(|d| d.hostname.as_str())
             .collect();
         if !hosts.is_empty() {
@@ -428,11 +459,17 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         .filter(|n| !n.ends_with("-redirect"))
         .map(str::to_owned)
         .collect();
+    // Switched to the tunnel: only its connectors get through.
+    let tunnel_auth = Some(pyo_proto::firewall::tunnel_authorization(&fw));
     for name in names {
-        let https = name.starts_with(&format!("{base}-https-"));
+        let tunnel_on = name.starts_with(&format!("{base}-tunnel-"));
+        let https = name.starts_with(&format!("{base}-https-"))
+            || name.starts_with(&format!("{base}-switching-"));
         let on_tailnet = name.starts_with(system::TAILNET_ROUTE_PREFIX);
         let (authorization, rate) = if on_tailnet {
             (&None, rate.as_ref())
+        } else if tunnel_on {
+            (&tunnel_auth, rate.as_ref())
         } else if https {
             (&https_auth, rate.as_ref())
         } else {
@@ -468,10 +505,11 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
     // settings (origin pull, PROXY protocol) are filled in as the cluster
     // has them when it's applied (`apply`). Without the CDN's ranges
     // nothing is trusted, so the CDN check above refuses everyone.
+    let direct: Vec<&&DomainSpec> = secure.iter().filter(|d| !d.via_tunnel()).collect();
     if let Some((cdn, ranges)) = fw.behind_ranges().filter(|(_, r)| !r.is_empty())
-        && !secure.is_empty()
+        && !direct.is_empty()
     {
-        let sections: Vec<String> = secure
+        let sections: Vec<String> = direct
             .iter()
             .map(|d| format!("h-{}", host_hash(&d.hostname)))
             .collect();
@@ -481,6 +519,32 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         out.objects.push(json!({
             "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": m,
             "spec": system::cdn_client_policy_spec(cdn, &base, &sections, system::WebSettings::default(), &ranges),
+        }));
+    }
+
+    // Through the tunnel: those listeners read the visitor from
+    // X-Forwarded-For only on connections from the tunnel's connectors
+    // (their pods' addresses, filled in when it's applied). While a domain
+    // switches, a service behind a CDN also still trusts the CDN, which
+    // reaches it directly until the record moves.
+    let tunneled: Vec<&&DomainSpec> = secure.iter().filter(|d| d.via_tunnel()).collect();
+    if !tunneled.is_empty() {
+        let sections: Vec<String> = tunneled
+            .iter()
+            .map(|d| format!("h-{}", host_hash(&d.hostname)))
+            .collect();
+        let switching = tunneled.iter().any(|d| !d.tunnel_only());
+        let extra: Vec<String> = fw
+            .behind_ranges()
+            .filter(|_| switching)
+            .map(|(_, r)| r)
+            .unwrap_or_default();
+        let name = system::tunnel_policy_name(&base);
+        let mut m = meta(&name);
+        m["labels"][system::CDN_LABEL] = json!(system::TUNNEL_CDN);
+        out.objects.push(json!({
+            "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": m,
+            "spec": system::cdn_client_policy_spec(system::TUNNEL_CDN, &base, &sections, system::WebSettings::default(), &pyo_proto::firewall::trusted_or_nothing(extra)),
         }));
     }
 
@@ -524,6 +588,30 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
 }
 
 pub use system::WAF_ANNOTATION;
+
+/// A service's route for its tunnel domains on a port: switched ("tunnel")
+/// or switching, with or without the redirect to HTTPS ("-plain").
+pub fn tunnel_route_name(base: &str, only: bool, redirect: bool, port: &str) -> String {
+    format!(
+        "{base}-{}{}-{port}",
+        if only { "tunnel" } else { "switching" },
+        if redirect { "" } else { "-plain" }
+    )
+}
+
+/// The value of `cf-visitor` Cloudflare sets on a request a visitor made
+/// over plain HTTP.
+pub const CF_VISITOR_HTTP: &str = r#"{"scheme":"http"}"#;
+
+/// A tunnel route's first rule with the redirect to HTTPS on: a request
+/// Cloudflare took over plain HTTP (its `cf-visitor` says so) goes to
+/// HTTPS, whatever the zone's own settings.
+pub fn tunnel_redirect_rule() -> Value {
+    json!({
+        "matches": [{ "headers": [{ "type": "Exact", "name": "cf-visitor", "value": CF_VISITOR_HTTP }] }],
+        "filters": [{ "type": "RequestRedirect", "requestRedirect": { "scheme": "https", "statusCode": 301 } }],
+    })
+}
 
 /// Marks a UDP route with the address ranges its port lets in, for the
 /// network policy on the proxy's pods ("" when open), and with where the
@@ -677,12 +765,21 @@ pub async fn apply(
         notes.push(p.clone());
     }
     let mut r = route_objects(spec);
-    // Behind a CDN: its HTTPS client policy as the cluster's websites have
-    // theirs otherwise.
-    if let Some(o) = r.objects.iter_mut().find(|o| {
+    // Behind a CDN, or through the tunnel: its HTTPS client policy as the
+    // cluster's websites have theirs otherwise. The tunnel's trusts its
+    // connectors' pods as they are now.
+    let mut w = None;
+    for o in r.objects.iter_mut().filter(|o| {
         o["kind"] == "ClientTrafficPolicy" && o["metadata"]["labels"][system::CDN_LABEL].is_string()
     }) {
-        let w = web_settings(client).await?;
+        let w = match w {
+            Some(w) => w,
+            None => *w.insert(web_settings(client).await?),
+        };
+        if o["metadata"]["labels"][system::CDN_LABEL] == system::TUNNEL_CDN {
+            let pods = crate::tunnel::trusted_now();
+            set_trusted(o, |have| with_pods(have, &[], &pods));
+        }
         rewrite_cdn_policy(o, w);
     }
     // New public TCP and UDP ports wait for the servers to free them (a port
@@ -770,8 +867,17 @@ pub async fn apply(
         } else {
             api.patch(&name, &pp(), &Patch::Apply(o)).await.map(|_| ())
         };
+        let tunnel_policy = kind == "ClientTrafficPolicy"
+            && o["metadata"]["labels"][system::CDN_LABEL] == system::TUNNEL_CDN;
         match written {
             Ok(()) => {}
+            // An install older than this agent doesn't know the tunnel's
+            // policy: the rest of the routes still go on, and it's said.
+            Err(e) if tunnel_policy && crate::refused::is_refusal(&e) => {
+                crate::tunnel::refused_now(&e);
+                notes.push(crate::tunnel::REFUSED.into());
+                continue;
+            }
             Err(kube::Error::Api(e)) if e.code == 404 && kind == "Certificate" => {
                 notes.push("cert-manager is still being installed on this cluster. HTTPS starts with a later deploy.".into());
             }
@@ -1778,6 +1884,103 @@ pub fn public_nat_ips(nodes: &[k8s_openapi::api::core::v1::Node]) -> Vec<String>
 static PUBLIC_NAT_REFUSED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// The gateway's public TCP and UDP ports (its `-ports` Gateways'
+/// listeners) as (protocol, port).
+pub fn l4_ports(gateways: &[DynamicObject]) -> Vec<(String, i32)> {
+    let mut out: Vec<(String, i32)> = gateways
+        .iter()
+        .filter(|g| g.labels().get(GATEWAY_LABEL).map(String::as_str) == Some(system::L4_GATEWAY))
+        .flat_map(|g| {
+            g.data["spec"]["listeners"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|l| {
+            Some((
+                l["protocol"].as_str()?.to_owned(),
+                i32::try_from(l["port"].as_i64()?).ok()?,
+            ))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+static PUBLIC_PORTS_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// In tunnel mode with public TCP and UDP ports kept, the proxies' own
+/// Service isn't published, so their ports go out through one of their
+/// own (system.rs `PUBLIC_PORTS_SERVICE`). Off, or with no such port: none.
+/// From each heartbeat's reply.
+pub async fn set_public_ports_service(client: &Client, on: bool) {
+    let services: Api<k8s_openapi::api::core::v1::Service> =
+        Api::namespaced(client.clone(), GATEWAY_NS);
+    let ports = if on {
+        match api_of(client, "Gateway").list(&ListParams::default()).await {
+            Ok(l) => l4_ports(&l.items),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't list the gateway's ports");
+                return;
+            }
+        }
+    } else {
+        vec![]
+    };
+    let current = match services.get_opt(system::PUBLIC_PORTS_SERVICE).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't read the public ports Service");
+            return;
+        }
+    };
+    match system::public_ports_service(&ports) {
+        None if current.is_none() => {}
+        None => match services
+            .delete(system::PUBLIC_PORTS_SERVICE, &DeleteParams::default())
+            .await
+        {
+            Ok(_) => tracing::info!("no public TCP or UDP ports in tunnel mode"),
+            Err(e) => tracing::warn!(error = %e, "couldn't remove the public ports Service"),
+        },
+        Some(want) => {
+            let have = current
+                .and_then(|s| s.spec)
+                .and_then(|s| s.ports)
+                .map(|p| serde_json::to_value(p).unwrap_or_default());
+            let same = have.as_ref().is_some_and(|h| {
+                let strip = |v: &Value| -> Vec<Value> {
+                    v.as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|p| json!([p["name"], p["port"], p["targetPort"], p["protocol"]]))
+                        .collect()
+                };
+                strip(h) == strip(&want["spec"]["ports"])
+            });
+            if same {
+                return;
+            }
+            match services
+                .patch(system::PUBLIC_PORTS_SERVICE, &pp(), &Patch::Apply(&want))
+                .await
+            {
+                Ok(_) => {
+                    PUBLIC_PORTS_REFUSED.store(false, Ordering::Relaxed);
+                    tracing::info!(?ports, "public TCP and UDP ports published in tunnel mode");
+                }
+                Err(e) if crate::refused::is_refusal(&e) => {
+                    if !PUBLIC_PORTS_REFUSED.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(error = %e, "couldn't publish the public ports in tunnel mode (run the cluster's connect command)");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "couldn't write the public ports Service"),
+            }
+        }
+    }
+}
+
 /// The cluster's own requests to the public IPs behind the cloud's NAT go
 /// to the proxies (system.rs `PUBLIC_NAT_SERVICE`), while it takes public
 /// traffic (from each heartbeat's reply): the Service written or removed
@@ -1998,11 +2201,67 @@ async fn write_client_policy(api: &Api<DynamicObject>, name: &str, o: &Value) ->
 
 /// A service's CDN client policy with these websites' settings, its CDN,
 /// listeners and trusted ranges as they are.
-fn rewrite_cdn_policy(o: &mut Value, w: system::WebSettings) {
+/// A client policy's trusted ranges, changed by `f`.
+fn set_trusted(o: &mut Value, f: impl FnOnce(Vec<String>) -> Vec<String>) {
+    let have: Vec<String> = o["spec"]["clientIPDetection"]["xForwardedFor"]["trustedCIDRs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.as_str().map(str::to_owned))
+        .collect();
+    o["spec"]["clientIPDetection"]["xForwardedFor"]["trustedCIDRs"] = json!(f(have));
+}
+
+/// A tunnel policy's trusted ranges with the connectors' pods now `pods`
+/// instead of `old`: the rest (a CDN's ranges while a domain switches)
+/// stays. Never empty.
+pub fn with_pods(have: Vec<String>, old: &[String], pods: &[String]) -> Vec<String> {
+    let nothing = pyo_proto::firewall::trusted_or_nothing(vec![]);
+    let mut out: Vec<String> = have
+        .into_iter()
+        .filter(|c| !old.contains(c) && !nothing.contains(c))
+        .chain(pods.iter().cloned())
+        .collect();
+    out.truncate(system::MAX_TRUSTED_CIDRS);
+    pyo_proto::firewall::trusted_or_nothing(out)
+}
+
+/// The connectors' pods moved (`old` → `pods`): every tunnel policy
+/// trusts the new ones. Refused by an older install: said, and kept.
+pub async fn set_tunnel_pods(client: &Client, old: &[String], pods: &[String]) -> anyhow::Result<()> {
+    let policies = api_of(client, "ClientTrafficPolicy");
+    let found = policies
+        .list(&ListParams::default().labels(&format!("{}={}", system::CDN_LABEL, system::TUNNEL_CDN)))
+        .await?;
+    for p in found {
+        let name = p.name_any();
+        let mut o = json!({
+            "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy",
+            "metadata": { "name": name, "namespace": GATEWAY_NS, "labels": p.labels() },
+            "spec": p.data["spec"].clone(),
+        });
+        set_trusted(&mut o, |have| with_pods(have, old, pods));
+        if let Err(e) = write_client_policy(&policies, &name, &o).await {
+            if crate::refused::is_refusal(&e) {
+                crate::tunnel::refused_now(&e);
+                continue;
+            }
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_cdn_policy(o: &mut Value, mut w: system::WebSettings) {
     let cdn = o["metadata"]["labels"][system::CDN_LABEL]
         .as_str()
         .unwrap_or("")
         .to_owned();
+    // cloudflared has no origin pull certificate: the tunnel's listeners
+    // never ask for one (only its connectors reach them anyway).
+    if cdn == system::TUNNEL_CDN {
+        w.origin_pull = false;
+    }
     let spec = &o["spec"];
     let gateway = spec["targetRefs"][0]["name"]
         .as_str()
@@ -2404,6 +2663,7 @@ mod tests {
                 String::new()
             },
             redirect_https: redirect,
+            tunnel: String::new(),
         }
     }
 
@@ -2866,6 +3126,185 @@ mod tests {
                 .iter()
                 .any(|o| o["metadata"]["name"].as_str().unwrap().contains("27015"))
         );
+    }
+
+    #[test]
+    fn tunnel_domains_switch_then_close_the_direct_path() {
+        let tunnel = |host: &str, state: &str, redirect: bool| DomainSpec {
+            tunnel: state.into(),
+            ..domain(host, "http", "custom", redirect)
+        };
+        let s = spec(vec![
+            domain("direct.example.com", "http", "letsencrypt", true),
+            tunnel("moving.example.com", pyo_proto::TUNNEL_SWITCHING, true),
+            tunnel("done.example.com", pyo_proto::TUNNEL_ON, true),
+            tunnel("raw.example.com", pyo_proto::TUNNEL_ON, false),
+        ]);
+        let r = route_objects(&s);
+        let hosts = |name: &str| find(&r, "HTTPRoute", name)["spec"]["hostnames"].clone();
+        // Each kind on a route of its own.
+        assert_eq!(hosts("shop-web-https-http"), json!(["direct.example.com"]));
+        assert_eq!(hosts("shop-web-switching-http"), json!(["moving.example.com"]));
+        assert_eq!(hosts("shop-web-tunnel-http"), json!(["done.example.com"]));
+        assert_eq!(hosts("shop-web-tunnel-plain-http"), json!(["raw.example.com"]));
+        // The redirect for visitors Cloudflare took over plain HTTP.
+        let done = find(&r, "HTTPRoute", "shop-web-tunnel-http");
+        assert_eq!(done["spec"]["rules"][0], tunnel_redirect_rule());
+        assert_eq!(
+            done["spec"]["rules"][0]["matches"][0]["headers"][0]["value"],
+            r#"{"scheme":"http"}"#
+        );
+        assert!(done["spec"]["rules"][1]["backendRefs"].is_array());
+        let raw = find(&r, "HTTPRoute", "shop-web-tunnel-plain-http");
+        assert_eq!(raw["spec"]["rules"].as_array().unwrap().len(), 1);
+        // Plain HTTP: the switching domain still answers there, the switched ones don't.
+        let redirect = find(&r, "HTTPRoute", "shop-web-redirect")["spec"]["hostnames"].clone();
+        assert_eq!(redirect, json!(["direct.example.com", "moving.example.com"]));
+        assert!(!r.objects.iter().any(|o| o["kind"] == "HTTPRoute"
+            && o["spec"]["hostnames"].as_array().is_some_and(|h| h.contains(&json!("done.example.com")) || h.contains(&json!("raw.example.com")))
+            && o["spec"]["parentRefs"][0]["name"] == HTTP_GATEWAY));
+        // Switched: the gate first, so a direct connection gets 403.
+        let gate = find(&r, "SecurityPolicy", "shop-web-tunnel-http");
+        assert_eq!(
+            gate["spec"]["authorization"]["rules"][0],
+            pyo_proto::firewall::behind_gate_rule()
+        );
+        assert!(r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
+            && o["metadata"]["name"] == "shop-web-tunnel-plain-http"));
+        // Switching: no gate, both paths answer.
+        assert!(!r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
+            && o["metadata"]["name"] == "shop-web-switching-http"));
+        // The tunnel's listeners trust its connectors only (filled in when
+        // applied), with Cloudflare's own headers kept.
+        let ctp = find(&r, "ClientTrafficPolicy", "shop-web-tunnel");
+        assert_eq!(ctp["metadata"]["labels"][system::CDN_LABEL], system::TUNNEL_CDN);
+        let sections: Vec<String> = ctp["spec"]["targetRefs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["sectionName"].as_str().unwrap().to_owned())
+            .collect();
+        let mut want: Vec<String> = ["moving.example.com", "done.example.com", "raw.example.com"]
+            .iter()
+            .map(|h| format!("h-{}", host_hash(h)))
+            .collect();
+        want.sort();
+        let mut got = sections.clone();
+        got.sort();
+        assert_eq!(got, want);
+        assert_eq!(
+            ctp["spec"]["clientIPDetection"]["xForwardedFor"]["trustedCIDRs"],
+            json!(["0.0.0.0/32"])
+        );
+        assert_eq!(
+            ctp["spec"]["headers"],
+            system::visitor_headers(&["cf-connecting-ip", "cf-connecting-ipv6"])
+        );
+        // No direct-domain CDN policy: the service isn't behind one.
+        assert!(!r.objects.iter().any(|o| o["metadata"]["name"] == "shop-web-cdn"));
+    }
+
+    #[test]
+    fn behind_cloudflare_with_tunnel_domains_splits_the_listeners() {
+        let cf = vec!["173.245.48.0/20".to_owned()];
+        let mut s = spec(vec![
+            domain("shop.example.com", "http", "letsencrypt", false),
+            DomainSpec {
+                tunnel: pyo_proto::TUNNEL_SWITCHING.into(),
+                ..domain("blog.example.com", "http", "custom", false)
+            },
+        ]);
+        s.firewall = Some(Firewall {
+            rules: vec![],
+            presets: [("cloudflare".to_owned(), cf.clone())].into(),
+            behind: Some("cloudflare".into()),
+        });
+        let r = route_objects(&s);
+        let refs = |name: &str| find(&r, "ClientTrafficPolicy", name)["spec"]["targetRefs"].clone();
+        assert_eq!(
+            refs("shop-web-cdn")[0]["sectionName"],
+            format!("h-{}", host_hash("shop.example.com"))
+        );
+        assert_eq!(refs("shop-web-cdn").as_array().unwrap().len(), 1);
+        assert_eq!(
+            refs("shop-web-tunnel")[0]["sectionName"],
+            format!("h-{}", host_hash("blog.example.com"))
+        );
+        // While it switches, Cloudflare still reaches it directly too.
+        assert_eq!(
+            find(&r, "ClientTrafficPolicy", "shop-web-tunnel")["spec"]["clientIPDetection"]["xForwardedFor"]["trustedCIDRs"],
+            json!(cf)
+        );
+        // Switched: only the connectors.
+        s.domains[1].tunnel = pyo_proto::TUNNEL_ON.into();
+        let r = route_objects(&s);
+        assert_eq!(
+            find(&r, "ClientTrafficPolicy", "shop-web-tunnel")["spec"]["clientIPDetection"]["xForwardedFor"]["trustedCIDRs"],
+            json!(["0.0.0.0/32"])
+        );
+        // The gate is the tunnel's, not doubled with the service's own.
+        let rules = find(&r, "SecurityPolicy", "shop-web-tunnel-plain-http")["spec"]["authorization"]["rules"].clone();
+        let gates = rules
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| **r == pyo_proto::firewall::behind_gate_rule())
+            .count();
+        assert_eq!(gates, 1);
+    }
+
+    #[test]
+    fn tunnel_mode_publishes_the_gateways_own_ports() {
+        let gw = |name: &str, label: &str, listeners: Value| -> DynamicObject {
+            serde_json::from_value(json!({
+                "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway",
+                "metadata": { "name": name, "namespace": GATEWAY_NS, "labels": { GATEWAY_LABEL: label } },
+                "spec": { "listeners": listeners },
+            }))
+            .unwrap()
+        };
+        let all = [
+            gw("shop-db-ports", system::L4_GATEWAY, json!([{ "name": "tcp-5432", "port": 5432, "protocol": "TCP" }, { "name": "udp-27015", "port": 27015, "protocol": "UDP" }])),
+            gw("shop-mq-ports", system::L4_GATEWAY, json!([{ "name": "tcp-5432", "port": 5432, "protocol": "TCP" }])),
+            gw("shop-web", "https", json!([{ "name": "h-1", "port": 443, "protocol": "HTTPS" }])),
+        ];
+        assert_eq!(
+            l4_ports(&all),
+            [("TCP".to_owned(), 5432), ("UDP".to_owned(), 27015)]
+        );
+    }
+
+    #[test]
+    fn tunnel_policies_follow_the_connectors_pods() {
+        let old = vec!["10.42.0.5/32".to_owned()];
+        let cf = "173.245.48.0/20".to_owned();
+        assert_eq!(
+            with_pods(vec!["0.0.0.0/32".into()], &[], &["10.42.0.9/32".into()]),
+            ["10.42.0.9/32"]
+        );
+        assert_eq!(
+            with_pods(vec![cf.clone(), old[0].clone()], &old, &["10.42.1.2/32".into()]),
+            ["10.42.1.2/32", cf.as_str()]
+        );
+        // No pods: nobody, never anyone.
+        assert_eq!(with_pods(old.clone(), &old, &[]), ["0.0.0.0/32"]);
+    }
+
+    /// An install older than the agent refuses the tunnel's client policy:
+    /// the rest of the deploy still goes on, and it's said.
+    #[tokio::test]
+    async fn a_refused_tunnel_policy_leaves_the_rest_of_the_routes() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        kube.admit(|w| {
+            (w.plural == "clienttrafficpolicies" && w.name.ends_with("-tunnel")).then(|| (403, "clienttrafficpolicies.gateway.envoyproxy.io \"shop-web-tunnel\" is forbidden: ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request".into()))
+        });
+        let b = spec(vec![DomainSpec {
+            tunnel: pyo_proto::TUNNEL_ON.into(),
+            ..domain("shop.example.com", "http", "selfsigned", true)
+        }]);
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let notes = apply(&client, &pyo, &b).await.expect("the routes");
+        assert!(notes.contains(&crate::tunnel::REFUSED.to_owned()), "{notes:?}");
     }
 
     #[test]

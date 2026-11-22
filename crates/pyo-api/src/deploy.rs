@@ -2551,6 +2551,9 @@ pub(crate) async fn check_pending_dns(state: &AppState) -> ApiResult<()> {
            FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
           WHERE NOT a.deleting AND d->>'status' IN ('pending_dns', 'verifying')
             AND lower(d->>'hostname') NOT LIKE '%.ts.net'
+            -- Through the Cloudflare Tunnel: its address is Cloudflare's,
+            -- and the tunnel loop says when it's ready.
+            AND coalesce(d->>'tunnel', '') = ''
             AND pyo.ms(now()) - coalesce((d->>'dnsCheckedAt')::bigint, 0) >=
                 CASE WHEN pyo.ms(now()) - coalesce((d->>'createdAt')::bigint, 0) < 3600000 THEN 30000
                      WHEN pyo.ms(now()) - coalesce((d->>'createdAt')::bigint, 0) < 86400000 THEN 300000

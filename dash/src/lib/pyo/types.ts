@@ -423,6 +423,10 @@ export type Cluster = {
   webProxyProtocol?: boolean;
   /** The gateway answers public traffic on its servers (all but build-only ones); on by default. */
   publicTraffic?: boolean;
+  /** How it takes web traffic: public ports, only the tailnet, or Cloudflare Tunnel. */
+  traffic?: ClusterTraffic;
+  /** Its Cloudflare Tunnel; absent when it has none. */
+  tunnel?: ClusterTunnel | null;
   /** Its public IPv4 address, for DNS records (never a private one); null without one. */
   publicIp?: string | null;
   /** Its Tailscale IPv4 address that answers websites; null without one. */
@@ -432,11 +436,13 @@ export type Cluster = {
   /** Tailscale on this cluster (its agent keeps the client); null when not set up. */
   tailscale?: ClusterTailscale | null;
   /** Where its free domains point, as chosen or by default. */
-  freeDomainAddress?: FreeDomainAddress;
+  freeDomainAddress?: FreeDomainAddress | "tunnel";
   /** As chosen in its settings; null: the default. */
   freeDomainAddressSet?: FreeDomainAddress | null;
   /** The address its free domains point at now; null: no free domains. */
   freeDomainIp?: string | null;
+  /** What its free domains end in ("203.0.113.7.nip.io", or the tunnel's default domain); null: none. */
+  freeDomainSuffix?: string | null;
   /** Its public IP is only what the internet sees (no server has it): ports may not be forwarded. */
   behindNat?: boolean;
   originPull?: {
@@ -488,6 +494,8 @@ export type Cluster = {
     trafficModes?: boolean;
     /** The agent can keep traffic on the same server ("local"). */
     trafficLocal?: boolean;
+    /** The agent can run a Cloudflare Tunnel connector. */
+    tunnel?: boolean;
     /** What the agent may do on the cluster; null until it reports it. */
     agentScope?: AgentScope | null;
     /** The agent's update protocol (0: it can't update Pyo or itself). */
@@ -506,6 +514,35 @@ export type Cluster = {
   serviceCidr: string;
   createdAt: Timestamp;
   lastSeenAt: Timestamp;
+};
+
+/** How a cluster takes web traffic. */
+export type ClusterTraffic = "public" | "tailscale" | "tunnel";
+
+export type TunnelHealth =
+  "connected" | "degraded" | "down" | "starting" | "unknown" | "removing";
+
+/** A cluster's Cloudflare Tunnel, as the control plane and the agent see it. */
+export type ClusterTunnel = {
+  state: "creating" | "ready" | "failed" | "removing";
+  error: string | null;
+  accountId: string;
+  accountName: string;
+  tunnelId: string | null;
+  tunnelName: string;
+  /** Its zone apex: services get names under it. */
+  defaultDomain: string | null;
+  /** Public TCP and UDP ports stay open on the servers. */
+  portsPublic: boolean;
+  connectors: { server: string; ready: boolean; reason?: string | null }[];
+  /** Cloudflare's data centers it's connected to ("FRA"). */
+  colos: string[];
+  connections: number;
+  health: TunnelHealth;
+  /** The cluster's install refused a tunnel object: run the connect command again. */
+  refused: boolean;
+  certificate: { id: ID; notAfter: Timestamp } | null;
+  checkedAt: Timestamp | null;
 };
 
 /** A cluster's wildcard domain for preview URLs. */
@@ -922,6 +959,8 @@ export type Domain = {
   createdAt: Timestamp;
   /** Its DNS record in the team's Cloudflare account, when Pyo was asked to make one. */
   dnsRecord?: DnsRecordState;
+  /** Through the cluster's Cloudflare Tunnel: "switching" (both ways work) or "on". */
+  tunnel?: "switching" | "on";
 };
 
 /** A domain's DNS record in Cloudflare, as Pyo left it. */
@@ -933,14 +972,33 @@ export type DnsRecordState = {
   proxied: boolean;
   /** Proxied was asked for: on once the certificate is issued. */
   proxy: boolean;
-  /** "created": Pyo made it. "exists": it already pointed there. "conflict": other records have the name. */
-  status: "created" | "exists" | "conflict" | "failed";
+  /**
+   * "created": Pyo made it. "exists": it already pointed there. "conflict":
+   * other records have the name. "switching" and "reverting": moving to the
+   * tunnel and back.
+   */
+  status:
+    "created" | "exists" | "conflict" | "failed" | "switching" | "reverting";
   error?: string | null;
   /** The records in the way, on a conflict. */
   existing: CloudflareRecord[];
   /** Pyo made it, so Pyo may delete it. */
   mine: boolean;
+  /** A CNAME to the cluster's tunnel, or straight to the cluster. */
+  via?: "direct" | "tunnel";
+  /** The records it replaced, kept for Switch back. */
+  previous?: PreviousRecord[];
   updatedAt: Timestamp;
+};
+
+/** A record a tunnel domain replaced. */
+export type PreviousRecord = {
+  type: string;
+  name: string;
+  content: string;
+  proxied: boolean;
+  ttl: number;
+  comment?: string | null;
 };
 
 export type CloudflareRecord = {
@@ -958,6 +1016,11 @@ export type CloudflareZone = {
   canEdit: boolean;
   /** The permission the token lacks there. */
   missing?: string;
+  /** The Cloudflare account it's in. */
+  accountId?: string;
+  accountName?: string;
+  /** Whether it can use Cloudflare Tunnel, and the tunnel permissions the token lacks. */
+  tunnel?: { ready: boolean; missing?: string[] };
 };
 
 /** A team's Cloudflare account: its zones, never the token. */

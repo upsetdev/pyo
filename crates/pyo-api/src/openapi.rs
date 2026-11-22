@@ -51,6 +51,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::images::list,
         crate::images::registry,
         crate::cloudflare::get,
+        crate::cloudflare::tunnel_ops::get,
         crate::databases::list,
         crate::databases::get,
         crate::databases::extensions,

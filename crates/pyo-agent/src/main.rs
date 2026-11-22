@@ -45,6 +45,7 @@ mod tailnet;
 mod tailscale;
 mod terminal;
 mod tls;
+mod tunnel;
 mod traffic;
 mod trust;
 mod upgrade;
@@ -261,6 +262,7 @@ async fn heartbeat_loop(agent: Agent) {
                 hb.host_proof = agent.api.host_proof(&agent.kube).await;
                 hb.scope = Some(scope::detect(&agent.kube, policy.clone()).await);
                 hb.tailnet = tailnet::statuses(&agent.kube).await;
+                hb.tunnel = Some(tunnel::report(&agent.kube).await);
                 match agent.api.heartbeat(&hb).await {
                     Ok(_) if policy.read_only => {}
                     Ok(reply) => {
@@ -270,9 +272,14 @@ async fn heartbeat_loop(agent: Agent) {
                         if let Some(on) = reply.public_traffic {
                             gateway::set_public_traffic(&agent.kube, on).await;
                             gateway::set_public_nat(&agent.kube, on).await;
-                            if let Err(e) = rollout::set_public_ports(&agent.kube, on).await {
+                            // TCP and UDP ports: with public traffic, or kept
+                            // in tunnel mode (then the gateway's go through a
+                            // Service of their own).
+                            let ports = reply.public_ports.unwrap_or(on);
+                            if let Err(e) = rollout::set_public_ports(&agent.kube, ports).await {
                                 tracing::warn!(error = %format!("{e:#}"), "couldn't change public ports");
                             }
+                            gateway::set_public_ports_service(&agent.kube, ports && !on).await;
                         }
                         if let Some(address) = &reply.free_domain_address {
                             gateway::set_tailnet_web(&agent.kube, address == "tailscale").await;
@@ -280,6 +287,9 @@ async fn heartbeat_loop(agent: Agent) {
                         databases::label_teams(&agent.kube, &reply.project_teams).await;
                         if let Some(t) = &reply.tailnet {
                             tailnet::apply(&agent.kube, t, agent.api.same_cluster()).await;
+                        }
+                        if let Some(w) = &reply.tunnel {
+                            tunnel::follow(&agent.kube, w).await;
                         }
                         if let Some(p) = &reply.public_dashboard
                             && agent.api.same_cluster()
@@ -413,6 +423,8 @@ fn ordered_keys(c: &Command) -> Vec<String> {
         | Command::TailscaleSync(_)
         | Command::TailscaleRemove { .. } => vec!["tailscale".to_owned()],
         Command::SyncRegistryTokens(_) => vec!["registry-tokens".to_owned()],
+        // The tunnel's token and connector: in the order sent.
+        Command::TunnelSet { .. } | Command::TunnelRemove {} => vec!["tunnel".to_owned()],
         _ => vec![],
     };
     keys.sort();
@@ -604,6 +616,8 @@ async fn run_command(agent: Agent, envelope: CommandEnvelope) {
             tailscale::run_remove(&agent.kube, &names, &marks).await
         }
         Command::SandboxCall(c) => tailscale::sandbox::run(&c).await,
+        Command::TunnelSet { tunnel_id, token } => tunnel::set(&agent.kube, &tunnel_id, &token).await,
+        Command::TunnelRemove {} => tunnel::remove(&agent.kube).await,
         // Answered before switching: the switch stops this process.
         Command::UpdateAgent { image } => {
             let result = match upgrade::check_agent_image(&agent.kube, &image).await {
@@ -725,6 +739,8 @@ fn command_kind(c: &Command) -> &'static str {
         Command::TailscaleRemove { .. } => "tailscale_remove",
         Command::SandboxCall(_) => "sandbox_call",
         Command::SyncRegistryTokens(_) => "sync_registry_tokens",
+        Command::TunnelSet { .. } => "tunnel_set",
+        Command::TunnelRemove {} => "tunnel_remove",
         Command::CheckDatabaseImport(_) => "check_database_import",
         Command::ListSnapshots(_) => "list_snapshots",
         Command::ForgetSnapshot(_) => "forget_snapshot",

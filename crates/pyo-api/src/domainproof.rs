@@ -252,6 +252,49 @@ async fn own_free_domain(
     Ok(Some(false))
 }
 
+/// Not proven yet: the team's Cloudflare writes the record when it can
+/// (cloudflare.rs `write_proof`), and it's read again for a few seconds
+/// while Cloudflare's name servers take it.
+async fn prove_with_cloudflare(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    host: &str,
+) -> bool {
+    match crate::cloudflare::write_proof(tx, team_id, host).await {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(e) => {
+            tracing::info!(%host, error = ?e.message, "domain proof: Cloudflare didn't write it");
+            return false;
+        }
+    }
+    for _ in 0..5 {
+        if proven(team_id, host).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    false
+}
+
+/// One label under the default domain of a Cloudflare Tunnel of the
+/// team's (Pyo Cloud: the zone is the team's, its token edits it).
+async fn own_tunnel_domain(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    host: &str,
+) -> ApiResult<bool> {
+    let domains: Vec<String> = sqlx::query_scalar(
+        "SELECT default_domain FROM pyo.cluster_tunnels WHERE team_id = $1 AND default_domain IS NOT NULL AND state <> 'removing'",
+    )
+    .bind(team_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(domains
+        .iter()
+        .any(|d| crate::cloudflare::tunnel_loop::under_default(host, d)))
+}
+
 /// Checks the hostnames a service is about to claim, and takes over any
 /// another team holds without proof. `new_hosts`: the ones it doesn't
 /// have yet (the ones it has stay, proven when they were claimed).
@@ -267,6 +310,11 @@ pub async fn check_claims(
         if pyo_proto::system::is_tailnet_host(host) {
             continue;
         }
+        // A free name under one of the team's own tunnels' default
+        // domains: a zone its Cloudflare token was checked to control.
+        if own_tunnel_domain(tx, team_id, host).await? {
+            continue;
+        }
         match own_free_domain(tx, team_id, host).await? {
             Some(true) => continue,
             Some(false) => {
@@ -276,7 +324,7 @@ pub async fn check_claims(
             }
             None => {}
         }
-        if !proven(team_id, host).await {
+        if !proven(team_id, host).await && !prove_with_cloudflare(tx, team_id, host).await {
             return Err(ApiError::forbidden(how_to(team_id, host)));
         }
         // Held by another team: theirs while they can still prove it.

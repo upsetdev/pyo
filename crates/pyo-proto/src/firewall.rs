@@ -591,6 +591,38 @@ pub fn web_authorization(fw: &Firewall, entry: Entry) -> Option<Value> {
     Some(json!({ "defaultAction": default, "rules": rules }))
 }
 
+/// A website's authorization on its tunnel routes once its record points
+/// at the tunnel (`DomainSpec::tunnel_only`): the behind gate first, so only
+/// the tunnel's connectors (whose visitor was read from X-Forwarded-For)
+/// get through and a direct connection gets 403, then the service's own
+/// rules. The service's own "behind" CDN doesn't apply there.
+pub fn tunnel_authorization(fw: &Firewall) -> Value {
+    let own = Firewall {
+        behind: None,
+        ..fw.clone()
+    };
+    let (default, rules) = match authorization(&[&own], true) {
+        Some(a) => (
+            a["defaultAction"].clone(),
+            a["rules"].as_array().cloned().unwrap_or_default(),
+        ),
+        None => (json!("Allow"), vec![]),
+    };
+    let rules: Vec<Value> = [behind_gate_rule()].into_iter().chain(rules).collect();
+    json!({ "defaultAction": default, "rules": rules })
+}
+
+/// What a tunnel client policy trusts: these addresses, or (with none
+/// yet) one no connection ever comes from, never "anyone".
+pub fn trusted_or_nothing(mut cidrs: Vec<String>) -> Vec<String> {
+    cidrs.sort();
+    cidrs.dedup();
+    if cidrs.is_empty() {
+        cidrs.push(NOTHING.into());
+    }
+    cidrs
+}
+
 /// Whether a website's plain HTTP routes take its rate limits: not behind
 /// a CDN, where every request there comes from the CDN's few addresses.
 pub fn http_rate_limits(fw: &Firewall) -> bool {

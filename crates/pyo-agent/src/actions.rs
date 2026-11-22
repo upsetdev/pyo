@@ -165,7 +165,9 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
         | Command::TailscaleCheckName { .. }
         | Command::TailscaleRemove { .. }
         | Command::SandboxCall(_)
-        | Command::SyncRegistryTokens(_) => {
+        | Command::SyncRegistryTokens(_)
+        | Command::TunnelSet { .. }
+        | Command::TunnelRemove {} => {
             unreachable!("handled by the command loop")
         }
     };

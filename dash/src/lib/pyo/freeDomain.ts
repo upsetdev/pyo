@@ -72,9 +72,31 @@ export function freeDomainIp(s: PyoState, clusterId: string) {
 /** Why there's no free domain (on the public IP) on the cluster, in a few words. */
 export function noFreeDomain(s: PyoState, clusterId: string) {
   const c = s.clusters.find((x) => x.id === clusterId);
+  if (c?.traffic === "tunnel") return "Pick a default domain first.";
   return c?.publicTraffic === false
     ? "Public traffic is off, so no free domain."
     : "No public IP yet, so no free domain.";
+}
+
+/**
+ * What a cluster's free domains end in: "203.0.113.7.nip.io" on its public
+ * IP, or in tunnel mode its tunnel's default domain ("example.com"). None
+ * without either.
+ */
+export function freeSuffix(s: PyoState, clusterId: string | undefined) {
+  const c = s.clusters.find((x) => x.id === clusterId);
+  if (!c) return undefined;
+  if (c.traffic === "tunnel") return c.freeDomainSuffix ?? undefined;
+  return c.publicIp ? `${c.publicIp}.nip.io` : undefined;
+}
+
+/** "hello-storefront.example.com": one label of at most 63 characters, then the suffix. */
+export function freeHostnameIn(
+  app: Pick<Application, "name">,
+  namespace: string,
+  suffix: string,
+) {
+  return `${`${app.name}-${namespace}`.slice(0, 63).replace(/-+$/, "")}.${suffix}`;
 }
 
 /** "hello-storefront.203.0.113.7.nip.io": one label of at most 63 characters, then the address. */

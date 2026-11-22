@@ -102,11 +102,12 @@ jobs:
       - run: scripts/install-railpack.sh
       - run: cargo test --locked --workspace
       # Row security and teams against a real Postgres: what a person's
-      # requests may see and change, signing up, creating and joining teams.
+      # requests may see and change, signing up, creating and joining teams,
+      # and the Cloudflare Tunnel loop against a fake Cloudflare.
       - name: Teams and row security (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
-        run: cargo test --locked -p pyo-api --lib -- --ignored rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests
+        run: cargo test --locked -p pyo-api --lib -- --ignored rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests cloudflare::http_tests
 
   # Known CVEs in the locked dependencies: Cargo.lock, bun.lock (with the
   # dashboard's dev dependencies) and the WAF's go.mod. A CRITICAL one

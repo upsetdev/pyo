@@ -36,7 +36,7 @@ fn read_token(file: Option<&str>, env: Option<String>) -> Result<String> {
     let t = t.trim().to_owned();
     if t.is_empty() {
         bail!(
-            "Give the token in a file (--token-file, - for stdin) or in CLOUDFLARE_API_TOKEN. It needs Zone:Read and DNS:Edit."
+            "Give the token in a file (--token-file, - for stdin) or in CLOUDFLARE_API_TOKEN. It needs Zone:Read and DNS:Edit, and for Cloudflare Tunnel also Cloudflare Tunnel:Edit and SSL and Certificates:Edit."
         );
     }
     Ok(t)
@@ -54,18 +54,41 @@ fn print_zones(zones: &Value) {
         .chain([4])
         .max()
         .unwrap_or(4);
-    println!("{}", ui::dim(&format!("{:<w$}  DNS", "ZONE")));
+    println!("{}", ui::dim(&format!("{:<w$}  {:<10}  TUNNEL", "ZONE", "DNS")));
     for z in zones {
         let name = z["name"].as_str().unwrap_or("");
-        let dns = if z["canEdit"] == json!(true) {
-            ui::green("can edit")
+        let can = z["canEdit"] == json!(true);
+        let dns = if can {
+            ui::green(&format!("{:<10}", "can edit"))
         } else {
             ui::red(&format!(
                 "needs {}",
                 z["missing"].as_str().unwrap_or("DNS:Edit")
             ))
         };
-        println!("{name:<w$}  {dns}");
+        let tunnel = if !can {
+            String::new()
+        } else {
+            tunnel_column(&z["tunnel"])
+        };
+        println!("{name:<w$}  {dns}  {tunnel}");
+    }
+}
+
+/// A zone's tunnel state: ready, DNS only, or the one permission it lacks.
+fn tunnel_column(t: &Value) -> String {
+    let missing: Vec<&str> = t["missing"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if t["ready"] == json!(true) {
+        ui::green("ready")
+    } else if missing.len() == 1 {
+        ui::yellow(&format!("needs {}", missing[0]))
+    } else {
+        ui::dim("DNS only")
     }
 }
 
@@ -235,6 +258,212 @@ pub async fn domain_dns(
     .await
 }
 
+// ── Cloudflare Tunnel ──────────────────────────────────────────────────────
+
+/// The cluster (name or id, else the team's default) a tunnel command is about.
+async fn cluster_of(api: &Api, team: Option<&str>, cluster: Option<&str>) -> Result<(String, String)> {
+    let (_, id) = crate::compose::team_and_cluster(api, team, cluster).await?;
+    let state = api.state().await?;
+    let name = state
+        .cluster(&id)
+        .and_then(|c| c["name"].as_str())
+        .unwrap_or(&id)
+        .to_owned();
+    Ok((id, name))
+}
+
+/// A tunnel's state in one line, as the dashboard says it.
+pub fn tunnel_line(t: &Value) -> String {
+    let n = t["connectors"].as_array().map_or(0, Vec::len);
+    let ready = t["connectors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["ready"] == json!(true))
+        .count();
+    let colos: Vec<&str> = t["colos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    match t["health"].as_str().unwrap_or("unknown") {
+        "connected" if colos.is_empty() => format!("Tunnel connected · {ready} connectors"),
+        "connected" => format!("Tunnel connected · {ready} connectors · {}", colos.join(", ")),
+        "degraded" => format!("Tunnel degraded · {ready} of {n} connectors"),
+        "down" => "Tunnel down. Its websites don't answer.".into(),
+        "starting" => "Starting the tunnel…".into(),
+        "removing" => "Removing the tunnel…".into(),
+        _ => "Pyo can't reach Cloudflare. Websites keep working.".into(),
+    }
+}
+
+pub async fn tunnel_status(api: &Api, team: Option<&str>, cluster: Option<&str>) -> Result<()> {
+    let (id, name) = cluster_of(api, team, cluster).await?;
+    let v = api.get(&format!("/clusters/{id}/tunnel")).await?;
+    println!("{name}: traffic {}", v["traffic"].as_str().unwrap_or("public"));
+    let t = &v["tunnel"];
+    if t.is_null() {
+        println!("No Cloudflare Tunnel. Turn it on: pyo cloudflare tunnel on --cluster {name}");
+        return Ok(());
+    }
+    println!("{}", tunnel_line(t));
+    if let Some(e) = t["error"].as_str() {
+        println!("{}", ui::yellow(e));
+    }
+    if t["refused"] == json!(true) {
+        println!(
+            "{}",
+            ui::yellow("Run the command under Refresh this cluster in the cluster's settings.")
+        );
+    }
+    for c in t["connectors"].as_array().into_iter().flatten() {
+        let server = c["server"].as_str().unwrap_or("?");
+        match c["reason"].as_str() {
+            Some(r) if c["ready"] != json!(true) => println!("  {server}  {}", ui::red(r)),
+            _ if c["ready"] == json!(true) => println!("  {server}  {}", ui::green("ready")),
+            _ => println!("  {server}  {}", ui::dim("starting")),
+        }
+    }
+    if let Some(d) = t["defaultDomain"].as_str() {
+        println!("Default domain: *.{d}");
+    }
+    // Each domain through it, from the snapshot.
+    let state = api.state().await?;
+    for s in state.services().iter().filter(|s| s["clusterId"] == json!(id)) {
+        for d in s["domains"].as_array().into_iter().flatten() {
+            let Some(state) = d["tunnel"].as_str() else {
+                continue;
+            };
+            let host = d["hostname"].as_str().unwrap_or("");
+            let rec = &d["dnsRecord"];
+            let what = match (state, rec["status"].as_str()) {
+                (_, Some("conflict")) => ui::yellow("waiting for --replace"),
+                (_, Some("reverting")) => ui::dim("switching back"),
+                ("on", _) => ui::green("via Tunnel"),
+                _ => ui::dim("switching"),
+            };
+            println!("  {host}  {what}");
+        }
+    }
+    Ok(())
+}
+
+pub async fn tunnel_on(
+    api: &Api,
+    team: Option<&str>,
+    cluster: Option<&str>,
+    default_domain: Option<&str>,
+    account: Option<&str>,
+    ports_public: bool,
+) -> Result<()> {
+    let (id, name) = cluster_of(api, team, cluster).await?;
+    let v = api
+        .op(
+            "setClusterTraffic",
+            json!({ "clusterId": id, "mode": "tunnel", "defaultDomain": default_domain, "accountId": account, "portsPublic": ports_public }),
+        )
+        .await?;
+    ui::ok(&format!("{name} takes websites through Cloudflare Tunnel"));
+    let moving = v["moving"].as_u64().unwrap_or(0);
+    if moving > 0 {
+        println!("{moving} domains are moving. See them: pyo cloudflare tunnel status --cluster {name}");
+    }
+    Ok(())
+}
+
+pub async fn tunnel_off(api: &Api, team: Option<&str>, cluster: Option<&str>, to: &str) -> Result<()> {
+    if !matches!(to, "public" | "tailscale") {
+        bail!("--to is public or tailscale.");
+    }
+    let (id, name) = cluster_of(api, team, cluster).await?;
+    api.op("setClusterTraffic", json!({ "clusterId": id, "mode": to }))
+        .await?;
+    ui::ok(&format!(
+        "{name} takes traffic {}",
+        if to == "public" { "on public ports" } else { "from Tailscale only" }
+    ));
+    println!("Domains keep using the tunnel until you move them back: pyo domain tunnel <hostname> --back");
+    Ok(())
+}
+
+pub async fn tunnel_remove(
+    api: &Api,
+    team: Option<&str>,
+    cluster: Option<&str>,
+    restore: bool,
+    yes: bool,
+) -> Result<()> {
+    let (id, name) = cluster_of(api, team, cluster).await?;
+    if !yes {
+        let a = ui::ask(&format!("Remove the Cloudflare Tunnel of {name}? [y/N] "))?;
+        if !a.eq_ignore_ascii_case("y") {
+            bail!("Not removed.");
+        }
+    }
+    api.op(
+        "removeClusterTunnel",
+        json!({ "clusterId": id, "restoreRecords": restore }),
+    )
+    .await?;
+    ui::ok("Removing the tunnel. Pyo deletes only the records it made.");
+    Ok(())
+}
+
+pub async fn tunnel_rotate(api: &Api, team: Option<&str>, cluster: Option<&str>) -> Result<()> {
+    let (id, name) = cluster_of(api, team, cluster).await?;
+    api.op("rotateTunnelToken", json!({ "clusterId": id }))
+        .await?;
+    ui::ok(&format!("{name}'s tunnel gets a new token and certificate"));
+    Ok(())
+}
+
+/// `pyo domain tunnel`: a domain through the tunnel, or back.
+pub async fn domain_tunnel(
+    api: &Api,
+    service: Option<&str>,
+    hostname: &str,
+    on: bool,
+    replace: bool,
+    restore: bool,
+) -> Result<()> {
+    let t = crate::service::target(api, service).await?;
+    let host = hostname.trim().trim_end_matches('.').to_lowercase();
+    let d = t.service()["domains"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|d| d["hostname"] == json!(host))
+        .with_context(|| format!("{host} isn't one of {}'s domains.", t.state.path_of(t.service())))?;
+    // A record already in the way, from an earlier try.
+    let rec = &d["dnsRecord"];
+    if on && !replace && rec["status"] == json!("conflict") {
+        println!("{}", ui::yellow(&format!("Cloudflare has a record for {host}:")));
+        for r in rec["existing"].as_array().into_iter().flatten() {
+            println!(
+                "  {}  {}  {}",
+                r["type"].as_str().unwrap_or(""),
+                r["name"].as_str().unwrap_or(""),
+                r["content"].as_str().unwrap_or("")
+            );
+        }
+        bail!("Run again with --replace to replace it. Pyo keeps a copy.");
+    }
+    let v = api
+        .op(
+            "setDomainTunnel",
+            json!({ "serviceId": t.id, "domainId": d["id"], "on": on, "replace": replace, "restore": restore }),
+        )
+        .await?;
+    match v["status"].as_str().unwrap_or("") {
+        "active" => ui::ok(&format!("{host} already goes through the tunnel")),
+        "switching" => ui::ok(&format!("Switching {host} to the tunnel. If Cloudflare has a record Pyo didn't make, pyo cloudflare tunnel status shows it.")),
+        "reverting" => ui::ok(&format!("Switching {host} back")),
+        _ => ui::ok(&format!("{host} doesn't go through the tunnel")),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +480,31 @@ mod tests {
         assert_eq!(z("example.com"), Some("example.com"));
         assert_eq!(z("notexample.com"), None);
         assert_eq!(zone_for(&s, "t2", "a.example.com"), None);
+    }
+
+    #[test]
+    fn the_tunnel_column_says_what_a_zone_can_do() {
+        let plain = |t: Value| {
+            tunnel_column(&t)
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+        };
+        assert!(plain(json!({ "ready": true })).contains("ready"));
+        assert!(plain(json!({ "ready": false, "missing": ["SSL and Certificates:Edit"] })).contains("needs SSL and Certificates:Edit"));
+        assert!(plain(json!({ "ready": false, "missing": ["a", "b"] })).contains("DNS only"));
+        // Stored before the tunnel: DNS only.
+        assert!(plain(Value::Null).contains("DNS only"));
+    }
+
+    #[test]
+    fn tunnel_lines() {
+        let t = json!({ "health": "connected", "colos": ["AMS", "FRA"], "connectors": [{ "ready": true }, { "ready": true }] });
+        assert_eq!(tunnel_line(&t), "Tunnel connected · 2 connectors · AMS, FRA");
+        let t = json!({ "health": "degraded", "connectors": [{ "ready": true }, { "ready": false }] });
+        assert_eq!(tunnel_line(&t), "Tunnel degraded · 1 of 2 connectors");
+        assert_eq!(tunnel_line(&json!({ "health": "down" })), "Tunnel down. Its websites don't answer.");
+        assert_eq!(tunnel_line(&json!({})), "Pyo can't reach Cloudflare. Websites keep working.");
     }
 
     #[test]

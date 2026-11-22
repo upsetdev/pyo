@@ -554,6 +554,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         // Each loop runs on one worker at a time (leader lock); jobs on any.
         tokio::spawn(deploy::sweeper(state.clone()));
         tokio::spawn(deploy::dns_watcher(state.clone()));
+        tokio::spawn(cloudflare::tunnel_loop::run(state.clone()));
         tokio::spawn(builders::watcher(state.clone()));
         tokio::spawn(github::poller(state.clone()));
         tokio::spawn(git::poller(state.clone()));

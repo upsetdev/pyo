@@ -1658,7 +1658,8 @@ pub async fn preview(
     use crate::error::ApiError;
     let mut tx = s.db.begin().await?;
     crate::ops::require_role(&mut tx, &user, &b.team_id, crate::ops::Role::Viewer).await?;
-    // Free domains go on the cluster's public address (none without one).
+    // Free domains go on the cluster's free-domain address, or in tunnel
+    // mode under its default domain (none without either).
     let domain_base = match &b.cluster_id {
         Some(id) => {
             sqlx::query_scalar::<_, String>(
@@ -1669,9 +1670,7 @@ pub async fn preview(
             .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| ApiError::not_found("Cluster"))?;
-            crate::freedomain::for_cluster(&mut tx, id)
-                .await?
-                .map(|ip| format!("{ip}.nip.io"))
+            crate::freedomain::suffix_for(&mut tx, id).await?
         }
         None => None,
     };

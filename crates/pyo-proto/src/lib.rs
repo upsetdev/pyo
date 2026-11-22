@@ -146,6 +146,58 @@ pub struct Heartbeat {
     /// services get what a newer agent writes. Empty from older agents.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub routes_version: String,
+    /// The Cloudflare Tunnel connector, when the cluster has one (or the
+    /// agent knows tunnels: then it says it has none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<TunnelReport>,
+}
+
+/// The cluster's Cloudflare Tunnel connector, as the agent sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelReport {
+    /// The tunnel its token is for (the Secret's label). None: no token here.
+    #[serde(default)]
+    pub tunnel_id: Option<String>,
+    #[serde(default)]
+    pub replicas: i32,
+    #[serde(default)]
+    pub ready_replicas: i32,
+    #[serde(default)]
+    pub pods: Vec<TunnelPod>,
+    /// The origin Service is in place.
+    #[serde(default)]
+    pub origin_ready: bool,
+    /// The cluster's install refused a tunnel object: its admission policy
+    /// is older than the agent's. What runs is kept as it is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refused: bool,
+}
+
+/// One connector pod.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelPod {
+    pub server: String,
+    pub ready: bool,
+    #[serde(default)]
+    pub restarts: i32,
+    /// Why it isn't ready ("ImagePullBackOff"), at most 200 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The Cloudflare Tunnel connector Pyo wants ([`HeartbeatReply::tunnel`]).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelWanted {
+    /// The tunnel to run (with the token the agent has for it). None:
+    /// remove the connector and its token.
+    #[serde(default)]
+    pub tunnel_id: Option<String>,
+    /// In tunnel mode, TCP and UDP ports stay published on the servers.
+    #[serde(default)]
+    pub ports_public: bool,
 }
 
 /// A server's Tailscale, as tailscaled says (the agent's tailnet pod on it).
@@ -531,6 +583,10 @@ pub struct Capabilities {
     /// firewall sync is on its way, is still starting.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waf_active: Vec<String>,
+    /// The agent runs a Cloudflare Tunnel connector (`TunnelSet`) and
+    /// writes tunnel domains' routes.
+    #[serde(default)]
+    pub tunnel: bool,
 }
 
 /// A server where the gateway can't get some of its ports.
@@ -1307,6 +1363,12 @@ pub enum Command {
     /// The team's registry tokens (their hashes) for the door of the
     /// cluster's own registry: these, and no others, from now on.
     SyncRegistryTokens(Box<registry_door::RegistryTokens>),
+    /// Run the cluster's Cloudflare Tunnel connector with this token: kept
+    /// as the Secret pyo-system/pyo-tunnel, labelled with the tunnel's id,
+    /// and the connector (re)applied. `data` is a [`TunnelReport`].
+    TunnelSet { tunnel_id: String, token: String },
+    /// Stop the connector and delete its token.
+    TunnelRemove {},
 }
 
 // ── Releases and updates ───────────────────────────────────────────────────
@@ -2295,7 +2357,29 @@ pub struct DomainSpec {
     /// Send plain HTTP requests to HTTPS (when `tls` is set).
     #[serde(default)]
     pub redirect_https: bool,
+    /// Through the cluster's Cloudflare Tunnel: "switching" (the tunnel and
+    /// direct visitors both get through, while its record moves) or "on"
+    /// (only the tunnel: direct connections get 403, no plain HTTP route).
+    /// "": direct only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tunnel: String,
 }
+
+impl DomainSpec {
+    /// Served through the tunnel ("switching" or "on").
+    pub fn via_tunnel(&self) -> bool {
+        matches!(self.tunnel.as_str(), TUNNEL_SWITCHING | TUNNEL_ON)
+    }
+    /// Only through the tunnel.
+    pub fn tunnel_only(&self) -> bool {
+        self.tunnel == TUNNEL_ON
+    }
+}
+
+/// A domain's `tunnel` while its record moves: both paths answer.
+pub const TUNNEL_SWITCHING: &str = "switching";
+/// A domain's `tunnel` once its record points at the tunnel.
+pub const TUNNEL_ON: &str = "on";
 
 /// An uploaded certificate, as the agent gets it: the chain and its key, PEM.
 #[derive(Clone, Serialize, Deserialize)]
@@ -2680,6 +2764,15 @@ pub struct HeartbeatReply {
     /// without it): left as it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_dashboard: Option<PublicDashboard>,
+    /// The Cloudflare Tunnel connector. None (a reply without it): left as
+    /// it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<TunnelWanted>,
+    /// Public TCP and UDP ports are published on the servers: with public
+    /// traffic, or in tunnel mode when the cluster keeps them. None (a
+    /// reply without it): as `public_traffic` says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_ports: Option<bool>,
 }
 
 /// Pyo's dashboard on the public IP ([`system::public_dashboard_objects`]).

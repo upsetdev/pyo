@@ -880,6 +880,8 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
         database_metrics: crate::dbmetrics::report(&pods, &m.pods, &k.volumes),
         tailnet: Vec::new(),
         routes_version: crate::gateway::routes_version().into(),
+        // Filled in by the heartbeat loop (tunnel.rs).
+        tunnel: None,
     })
 }
 
@@ -985,6 +987,7 @@ async fn capabilities(
         waf_rejected,
         waf_active,
         tailnet_web_ips: tailnet_web_ips(client).await,
+        tunnel: true,
     }
 }
 

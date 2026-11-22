@@ -29,12 +29,13 @@ import {
   DeleteRecordSwitch,
   DnsRecordLine,
 } from "~/components/pyo/Cloudflare";
+import { onTunnel, RestoreRecordSwitch } from "~/components/pyo/TunnelRecord";
 import { useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Callout, EmptyState, Panel } from "~/components/ui/Panel";
 import { CopyButton } from "~/components/ui/Table";
-import { api, usePyo, serviceIdOf } from "~/lib/pyo/store";
+import { api, clusterTraffic, usePyo, serviceIdOf } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Application, Certificate, Domain } from "~/lib/pyo/types";
 
@@ -53,6 +54,7 @@ function Domains({ app }: { app: Application }) {
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<Domain | null>(null);
   const [deleteRecord, setDeleteRecord] = useState(true);
+  const [restoreRecord, setRestoreRecord] = useState(false);
   const [picking, setPicking] = useState<Domain | null>(null);
   const [replacing, setReplacing] = useState<Certificate | null>(null);
   const certOf = (d: Domain) =>
@@ -61,6 +63,8 @@ function Domains({ app }: { app: Application }) {
       : undefined;
   const cluster = s.clusters.find((c) => c.id === app.clusterId);
   const target = cluster?.publicIp ?? undefined;
+  // In tunnel mode no direct record helps: the tunnel line says what to do.
+  const tunnelMode = !!cluster && clusterTraffic(cluster) === "tunnel";
   const httpPorts = app.ports.filter((p) => p.protocol === "HTTP");
 
   return (
@@ -213,6 +217,7 @@ function Domains({ app }: { app: Application }) {
                             danger: true,
                             onSelect: () => {
                               setDeleteRecord(true);
+                              setRestoreRecord(false);
                               setRemoving(d);
                             },
                           },
@@ -263,6 +268,8 @@ function Domains({ app }: { app: Application }) {
                   <DnsRecordLine app={app} d={d} />
                   {d.status !== "active" &&
                   !isFreeDomain(d.hostname) &&
+                  !tunnelMode &&
+                  !onTunnel(d) &&
                   !(
                     d.dnsRecord &&
                     ["created", "exists"].includes(d.dnsRecord.status)
@@ -336,17 +343,29 @@ function Domains({ app }: { app: Application }) {
         confirmLabel="Remove domain"
         onConfirm={async () => {
           if (!removing) return;
+          // Putting back the old record replaces Pyo's own as well.
+          const restore =
+            !!removing.dnsRecord?.previous?.length && restoreRecord;
           const res = await api.removeDomain(app.id, removing.id, {
-            deleteDnsRecord: !!removing.dnsRecord?.mine && deleteRecord,
+            deleteDnsRecord:
+              !restore && !!removing.dnsRecord?.mine && deleteRecord,
+            restoreRecord: restore,
           });
           if (res) toast({ title: `Removed ${removing.hostname}` });
         }}
       >
-        <DeleteRecordSwitch
+        <RestoreRecordSwitch
           d={removing}
-          checked={deleteRecord}
-          onChange={setDeleteRecord}
+          checked={restoreRecord}
+          onChange={setRestoreRecord}
         />
+        {restoreRecord && removing?.dnsRecord?.previous?.length ? null : (
+          <DeleteRecordSwitch
+            d={removing}
+            checked={deleteRecord}
+            onChange={setDeleteRecord}
+          />
+        )}
       </ConfirmDialog>
     </div>
   );

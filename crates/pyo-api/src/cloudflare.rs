@@ -19,6 +19,9 @@
 //!   first HTTP-01 check reaches the cluster directly.
 //! - A proxied record suggests the service's "Behind Cloudflare" firewall
 //!   switch (the dashboard's DNS record line), until it's on.
+//! - Cloudflare Tunnel (tunnel.rs): with Cloudflare Tunnel:Edit in the
+//!   account and SSL and Certificates:Edit in a zone, the zone is
+//!   tunnel-ready. Both are optional: DNS:Edit alone still connects.
 
 use crate::error::Json;
 use crate::error::Query;
@@ -44,6 +47,11 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// Zones looked at in one test, at most.
 const MAX_ZONES: usize = 200;
 
+pub(crate) mod tunnel;
+pub(crate) mod tunnel_loop;
+pub(crate) mod tunnel_ops;
+use tunnel::TunnelApi;
+
 // ── Zones and records ──────────────────────────────────────────────────────
 
 /// A zone the token sees, as stored and shown.
@@ -57,6 +65,32 @@ pub struct Zone {
     /// The permission it lacks, when it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing: Option<String>,
+    /// The Cloudflare account it's in. A tunnel lives in one account and
+    /// only takes names from that account's zones.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_name: String,
+    /// Whether it can use Cloudflare Tunnel.
+    #[serde(default)]
+    pub tunnel: TunnelAccess,
+}
+
+/// Whether a zone can use Cloudflare Tunnel: the token may edit DNS in it,
+/// make tunnels in its account and issue its Origin CA certificates.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TunnelAccess {
+    pub ready: bool,
+    /// The tunnel permissions the token lacks here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+}
+
+impl Zone {
+    /// It can take domains through a tunnel.
+    pub fn tunnel_ready(&self) -> bool {
+        self.can_edit && self.tunnel.ready
+    }
 }
 
 /// A DNS record at Cloudflare.
@@ -117,8 +151,6 @@ fn api_error(e: CfError) -> ApiError {
 /// What Pyo asks of Cloudflare. [`Http`] is the real one; the tests use a
 /// fake account.
 pub(crate) trait Cloudflare {
-    /// Every zone the token can read, as (id, name).
-    async fn zones(&self) -> Result<Vec<(String, String)>, CfError>;
     /// The records with exactly this name.
     async fn records(&self, zone_id: &str, name: &str) -> Result<Vec<Record>, CfError>;
     async fn record(&self, zone_id: &str, id: &str) -> Result<Record, CfError>;
@@ -258,9 +290,13 @@ pub(crate) async fn missing_in<C: Cloudflare>(
     }
 }
 
-/// The zones a token covers, and what it can do in each.
-pub(crate) async fn inspect<C: Cloudflare>(cf: &C, marker: &str) -> Result<Vec<Zone>, CfError> {
-    let mut zones = match cf.zones().await {
+/// The zones a token covers, and what it can do in each: DNS per zone,
+/// tunnels once per account, Origin CA certificates per zone.
+pub(crate) async fn inspect<C: Cloudflare + TunnelApi>(
+    cf: &C,
+    marker: &str,
+) -> Result<Vec<Zone>, CfError> {
+    let mut zones = match cf.zone_accounts().await {
         Ok(z) => z,
         Err(CfError::Denied(m)) => {
             return Err(CfError::Denied(if m.is_empty() {
@@ -271,16 +307,38 @@ pub(crate) async fn inspect<C: Cloudflare>(cf: &C, marker: &str) -> Result<Vec<Z
         }
         Err(e) => return Err(e),
     };
-    zones.sort_by(|a, b| a.1.cmp(&b.1));
+    zones.sort_by(|a, b| a.name.cmp(&b.name));
     zones.truncate(MAX_ZONES);
+    let mut tunnels: HashMap<String, Option<String>> = HashMap::new();
     let mut out = vec![];
     for z in &zones {
-        let missing = missing_in(cf, z, marker).await?;
+        let missing = missing_in(cf, &(z.id.clone(), z.name.clone()), marker).await?;
+        let mut lacks = vec![];
+        if z.account_id.is_empty() {
+            lacks.push(tunnel::TUNNEL_EDIT.to_owned());
+        } else {
+            if !tunnels.contains_key(&z.account_id) {
+                let m = tunnel::tunnel_missing(cf, &z.account_id).await?;
+                tunnels.insert(z.account_id.clone(), m);
+            }
+            if let Some(Some(m)) = tunnels.get(&z.account_id) {
+                lacks.push(m.clone());
+            }
+        }
+        if let Some(m) = tunnel::certs_missing(cf, &z.id).await? {
+            lacks.push(m);
+        }
         out.push(Zone {
-            id: z.0.clone(),
-            name: z.1.to_ascii_lowercase(),
+            id: z.id.clone(),
+            name: z.name.to_ascii_lowercase(),
             can_edit: missing.is_none(),
-            missing,
+            missing: missing.clone(),
+            account_id: z.account_id.clone(),
+            account_name: z.account_name.clone(),
+            tunnel: TunnelAccess {
+                ready: missing.is_none() && lacks.is_empty(),
+                missing: lacks,
+            },
         });
     }
     Ok(out)
@@ -293,14 +351,22 @@ pub fn problems(zones: &[Zone]) -> Vec<String> {
             "The token can't see any zones. Give it Zone:Read on the zones Pyo may use.".into(),
         ];
     }
-    zones
+    let mut out: Vec<String> = zones
         .iter()
         .filter_map(|z| {
             z.missing
                 .as_ref()
                 .map(|m| format!("{}: give the token {m}.", z.name))
         })
-        .collect()
+        .collect();
+    // Tunnel permissions are optional: a zone with neither is DNS only.
+    // One of the two means a tunnel was meant, so the other is a problem.
+    for z in zones.iter().filter(|z| z.can_edit) {
+        if z.tunnel.missing.len() == 1 {
+            out.push(format!("{}: give the token {}.", z.name, z.tunnel.missing[0]));
+        }
+    }
+    out
 }
 
 // ── Cloudflare over HTTP ───────────────────────────────────────────────────
@@ -309,6 +375,21 @@ pub fn problems(zones: &[Zone]) -> Vec<String> {
 pub(crate) struct Http {
     client: reqwest::Client,
     token: String,
+    /// [`API`], or a debug build's fake ([`api_base`]).
+    base: String,
+}
+
+/// Where Cloudflare's API is: [`API`]. A debug build may point it at a fake
+/// with `PYO_DEV_CLOUDFLARE_API` (`http://127.0.0.1:8787/client/v4`, for the
+/// dashboard and Pyo Cloud e2e tests). Release builds never read it.
+pub(crate) fn api_base() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(b) = std::env::var("PYO_DEV_CLOUDFLARE_API")
+        && !b.trim().is_empty()
+    {
+        return b.trim().trim_end_matches('/').to_owned();
+    }
+    API.to_owned()
 }
 
 // Never print the token.
@@ -348,20 +429,37 @@ fn token_code(v: &Value) -> bool {
 
 impl Http {
     pub fn new(token: &str) -> ApiResult<Self> {
+        let base = api_base();
+        // Only a debug build's fake is on a private address.
+        let reach = Reach {
+            private: base != API,
+        };
         Ok(Self {
-            client: outbound::client(Reach { private: false }, TIMEOUT)
+            client: outbound::client(reach, TIMEOUT)
                 .map_err(|e| ApiError::from(anyhow::Error::from(e)))?,
             token: token.to_owned(),
+            base,
         })
     }
 
-    fn url(path: &str) -> Url {
-        // Constant base, checked ids: always parses.
-        Url::parse(&format!("{API}{path}")).expect("Cloudflare URL")
+    /// A client for the tests' fake Cloudflare (fake.rs).
+    #[cfg(test)]
+    pub fn at(token: &str, base: &str) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            token: token.to_owned(),
+            base: base.trim_end_matches('/').to_owned(),
+        }
+    }
+
+    fn url(&self, path: &str) -> Url {
+        // A fixed base and checked ids: always parses.
+        Url::parse(&format!("{}{path}", self.base)).expect("Cloudflare URL")
     }
 
     async fn call(&self, method: Method, url: Url, body: Option<Value>) -> Result<Value, CfError> {
-        if url.host_str() != Some("api.cloudflare.com") || url.scheme() != "https" {
+        let real = url.host_str() == Some("api.cloudflare.com") && url.scheme() == "https";
+        if !(real || (self.base != API && url.as_str().starts_with(&self.base))) {
             return Err(CfError::Unreachable);
         }
         let mut rq = self.client.request(method, url).bearer_auth(&self.token);
@@ -401,30 +499,8 @@ fn record_from(v: &Value) -> Result<Record, CfError> {
 }
 
 impl Cloudflare for Http {
-    async fn zones(&self) -> Result<Vec<(String, String)>, CfError> {
-        let mut out = vec![];
-        for page in 1..=20 {
-            let mut url = Self::url("/zones");
-            url.query_pairs_mut()
-                .append_pair("per_page", "50")
-                .append_pair("page", &page.to_string());
-            let v = self.call(Method::GET, url, None).await?;
-            for z in v["result"].as_array().into_iter().flatten() {
-                if let (Some(id), Some(name)) = (z["id"].as_str(), z["name"].as_str())
-                    && id_ok(id)
-                {
-                    out.push((id.to_owned(), name.to_owned()));
-                }
-            }
-            if page >= v["result_info"]["total_pages"].as_i64().unwrap_or(1) {
-                break;
-            }
-        }
-        Ok(out)
-    }
-
     async fn records(&self, zone_id: &str, name: &str) -> Result<Vec<Record>, CfError> {
-        let mut url = Self::url(&Self::record_path(zone_id, None)?);
+        let mut url = self.url(&Self::record_path(zone_id, None)?);
         url.query_pairs_mut()
             .append_pair("name", name)
             .append_pair("per_page", "100");
@@ -438,12 +514,12 @@ impl Cloudflare for Http {
     }
 
     async fn record(&self, zone_id: &str, id: &str) -> Result<Record, CfError> {
-        let url = Self::url(&Self::record_path(zone_id, Some(id))?);
+        let url = self.url(&Self::record_path(zone_id, Some(id))?);
         record_from(&self.call(Method::GET, url, None).await?["result"])
     }
 
     async fn create(&self, zone_id: &str, r: &NewRecord) -> Result<Record, CfError> {
-        let url = Self::url(&Self::record_path(zone_id, None)?);
+        let url = self.url(&Self::record_path(zone_id, None)?);
         let body = json!({
             "type": r.kind, "name": r.name, "content": r.content,
             "ttl": 1, "proxied": r.proxied, "comment": r.comment,
@@ -452,14 +528,14 @@ impl Cloudflare for Http {
     }
 
     async fn set_proxied(&self, zone_id: &str, id: &str, proxied: bool) -> Result<(), CfError> {
-        let url = Self::url(&Self::record_path(zone_id, Some(id))?);
+        let url = self.url(&Self::record_path(zone_id, Some(id))?);
         self.call(Method::PATCH, url, Some(json!({ "proxied": proxied })))
             .await
             .map(|_| ())
     }
 
     async fn delete(&self, zone_id: &str, id: &str) -> Result<(), CfError> {
-        let url = Self::url(&Self::record_path(zone_id, Some(id))?);
+        let url = self.url(&Self::record_path(zone_id, Some(id))?);
         self.call(Method::DELETE, url, None).await.map(|_| ())
     }
 }
@@ -597,6 +673,7 @@ pub async fn attach(
         "SELECT service_id, domain_id, jsonb_build_object(
                 'zone', zone_name, 'type', type, 'content', content, 'proxied', proxied, 'proxy', proxy,
                 'status', status, 'error', error, 'existing', existing, 'mine', record_id IS NOT NULL,
+                'via', via, 'previous', previous,
                 'updatedAt', pyo.ms(updated_at))
            FROM pyo.dns_records WHERE team_id = ANY($1)",
     )
@@ -621,7 +698,10 @@ pub async fn attach(
 }
 
 /// A service was saved: records of domains it no longer has (or whose
-/// hostname changed) are forgotten. What's at Cloudflare stays.
+/// hostname changed) are forgotten. What's at Cloudflare stays, except a
+/// record through the Cloudflare Tunnel: the tunnel loop deletes Pyo's
+/// CNAME. The record it replaced isn't put back (decision 5), unless a
+/// switch back that puts it back was already asked for.
 pub async fn forget_removed(
     tx: &mut Transaction<'_, Postgres>,
     service_id: &str,
@@ -639,7 +719,19 @@ pub async fn forget_removed(
         })
         .unzip();
     sqlx::query(
-        "DELETE FROM pyo.dns_records r WHERE r.service_id = $1
+        "UPDATE pyo.dns_records r SET status = 'reverting', restore = r.status = 'reverting' AND r.restore,
+                routes_command = NULL, updated_at = now()
+          WHERE r.service_id = $1 AND r.via = 'tunnel'
+            AND NOT EXISTS (SELECT 1 FROM unnest($2::text[], $3::text[]) AS d(id, host)
+                             WHERE d.id = r.domain_id AND d.host = lower(r.hostname))",
+    )
+    .bind(service_id)
+    .bind(&ids)
+    .bind(&hosts)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM pyo.dns_records r WHERE r.service_id = $1 AND r.via <> 'tunnel'
             AND NOT EXISTS (SELECT 1 FROM unnest($2::text[], $3::text[]) AS d(id, host)
                              WHERE d.id = r.domain_id AND d.host = lower(r.hostname))",
     )
@@ -649,6 +741,65 @@ pub async fn forget_removed(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+// ── Proof of a domain (Pyo Cloud) ──────────────────────────────────────────
+
+/// Pyo Cloud's proof of owning `host` (domainproof.rs), written by Pyo:
+/// the TXT record `_pyo-verify.<host>` with the team's token, when the
+/// team's Cloudflare token can edit DNS in a zone that covers it. So Cloud
+/// teams with Cloudflare don't add it by hand. Whether it's there now.
+pub(crate) async fn write_proof(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    host: &str,
+) -> ApiResult<bool> {
+    let row: Option<(String, Value)> = sqlx::query_as(
+        "SELECT token_sealed, zones FROM pyo.cloudflare_accounts WHERE team_id = $1",
+    )
+    .bind(team_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((sealed, zones)) = row else {
+        return Ok(false);
+    };
+    let zones: Vec<Zone> = serde_json::from_value(zones).unwrap_or_default();
+    let Some(zone) = zone_for(host, &zones).filter(|z| z.can_edit).cloned() else {
+        return Ok(false);
+    };
+    // Sealed by the vault, or (older keys) with PYO_SECRET_KEY.
+    let token = if sealed.starts_with(crate::secrets::PREFIX) {
+        crate::secrets::Sealer::from_env().open(&sealed)
+    } else {
+        crate::vault::get().open(&sealed).await
+    };
+    let Ok(token) = token else {
+        return Ok(false);
+    };
+    let name = crate::domainproof::record(host);
+    let value = crate::domainproof::token(team_id, host);
+    let mark = marker(&install_id(tx).await?);
+    let cf = Http::new(&token)?;
+    let found = cf.records(&zone.id, &name).await.map_err(api_error)?;
+    if found
+        .iter()
+        .any(|r| r.kind == "TXT" && r.content.trim_matches('"') == value)
+    {
+        return Ok(true);
+    }
+    cf.create(
+        &zone.id,
+        &NewRecord {
+            kind: "TXT".into(),
+            name,
+            content: format!("\"{value}\""),
+            proxied: false,
+            comment: mark,
+        },
+    )
+    .await
+    .map_err(api_error)?;
+    Ok(true)
 }
 
 // ── The connection ─────────────────────────────────────────────────────────
@@ -747,13 +898,26 @@ pub async fn test(
     Ok(json!({ "ok": problems.is_empty(), "zones": zones, "problems": problems }))
 }
 
-/// Forget the token. Records Pyo made stay at Cloudflare.
+/// Forget the token. Records Pyo made stay at Cloudflare. Refused while a
+/// cluster of the team has a tunnel.
 pub async fn remove(
     tx: &mut Transaction<'_, Postgres>,
     user: &User,
     team_id: &str,
 ) -> ApiResult<Value> {
     require_role(tx, user, team_id, role_for(Action::ManageToken)).await?;
+    // Without the token, Pyo could no longer change or remove a tunnel.
+    let tunneled: Option<String> = sqlx::query_scalar(
+        "SELECT c.name FROM pyo.cluster_tunnels t JOIN pyo.clusters c ON c.id = t.cluster_id WHERE t.team_id = $1 ORDER BY c.name LIMIT 1",
+    )
+    .bind(team_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(name) = tunneled {
+        return Err(ApiError::conflict(format!(
+            "Remove the Cloudflare Tunnel of {name} first. Its websites keep working until then."
+        )));
+    }
     let gone = sqlx::query("DELETE FROM pyo.cloudflare_accounts WHERE team_id = $1")
         .bind(team_id)
         .execute(&mut **tx)
@@ -791,7 +955,7 @@ pub struct CloudflareQuery {
 #[utoipa::path(get, path = "/cloudflare", operation_id = "getCloudflare", tag = "Integrations",
     params(CloudflareQuery),
     responses(
-        (status = 200, description = "`connected`, and when connected `zones` (each with `id`, `name`, `canEdit` and, when it can't, `missing`: the permission the token lacks), `createdAt`, `testedAt`, and for owners and admins `hint` and `createdBy`.", body = Object),
+        (status = 200, description = "`connected`, and when connected `zones` (each with `id`, `name`, `canEdit` and, when it can't, `missing`: the permission the token lacks, `accountId`, `accountName`, and `tunnel`: `ready` and the tunnel permissions it lacks as `missing`), `createdAt`, `testedAt`, and for owners and admins `hint` and `createdBy`.", body = Object),
         (status = 404, description = "No such team, or you aren't in it.", body = crate::error::ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
@@ -1246,3 +1410,7 @@ pub async fn proxy_ready(s: &AppState) -> ApiResult<()> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod fake;
+#[cfg(test)]
+mod http_tests;

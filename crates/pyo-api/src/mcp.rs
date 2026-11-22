@@ -155,7 +155,7 @@ fn curated() -> Vec<Value> {
             "server_tags": { "type": "array", "items": { "type": "string" }, "description": "Older form of placement.tags" },
         }), &["name", "image"]), "annotations": write }),
         json!({ "name": "set_service_placement", "title": "Set service placement", "description": "Choose where a service runs: any server of its cluster (servers and tags both empty), or only the servers named and every server with one of the tags, including servers tagged later (see list_servers). A service with a volume has to keep its volume's server, and one with a GPU needs a GPU server. It changes in place, without a redeploy: its replicas move over with the same image. Refused with the reason when no server picked can run it.", "inputSchema": schema(json!({ "service_id": service, "servers": { "type": "array", "items": { "type": "string" }, "description": "Server names" }, "tags": { "type": "array", "items": { "type": "string" }, "description": "Server tags" } }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
-        json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain. It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" } }), &["service_id"]), "annotations": write }),
+        json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain. It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" }, "tunnel": { "type": "boolean", "description": "Through the cluster's Cloudflare Tunnel when a tunnel-ready zone covers the hostname (default: on in tunnel mode)." } }), &["service_id"]), "annotations": write }),
         json!({ "name": "set_static_serving", "title": "Set static serving", "description": "For a service whose build is a static site: serve its build as static files from the cluster's shared static server (\"static\", the default), or run it as a service of its own (\"service\"). Takes effect with the next deploy.", "inputSchema": schema(json!({ "service_id": service, "serve_as": { "type": "string", "enum": ["static", "service"] } }), &["service_id", "serve_as"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "set_request_timeout", "title": "Set request timeout", "description": "How long the gateway waits for the service to answer a request on its domains before it returns 504, in seconds: 1 to 3600, or 0 for no limit. Without one it's 300. WebSockets aren't cut by it. It changes in place, without a redeploy.", "inputSchema": schema(json!({ "service_id": service, "seconds": { "type": ["integer", "null"], "minimum": 0, "maximum": 3600, "description": "null goes back to the default" } }), &["service_id", "seconds"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "stop_service", "title": "Stop service", "description": "Stop the service (scale to zero). Settings and data are kept.", "inputSchema": schema(json!({ "service_id": service }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
@@ -650,6 +650,7 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "listImages" => json_of(crate::images::list(st(), me(), Query(args_as(args)?)).await),
         "getRegistry" => json_of(crate::images::registry(st(), me(), Query(args_as(args)?)).await),
         "getCloudflare" => json_of(crate::cloudflare::get(st(), me(), Query(args_as(args)?)).await),
+        "getClusterTunnel" => json_of(crate::cloudflare::tunnel_ops::get(st(), me(), path_id()?).await),
         "listDatabases" => json_of(crate::databases::list(st(), me(), Query(args_as(args)?)).await),
         "getDatabase" => {
             json_of(crate::databases::get(st(), me(), Path(arg(args, "id")?.to_owned())).await)
@@ -1304,7 +1305,31 @@ pub(crate) async fn run_tool(
                             && !n.is_empty()
                             && (host == n || host.ends_with(&format!(".{n}")))
                     });
-            let dns_record = if covered && args["cloudflare_dns"].as_bool().unwrap_or(true) {
+            // Through the cluster's Cloudflare Tunnel, by default in tunnel mode.
+            let cluster = list("clusters")
+                .into_iter()
+                .find(|c| c["id"] == a["clusterId"])
+                .unwrap_or_default();
+            let tunnel_mode = cluster["traffic"] == json!("tunnel");
+            let tunnel_ready = covered
+                && cluster["tunnel"].is_object()
+                && list("cloudflare")
+                    .iter()
+                    .filter(|c| c["teamId"] == team)
+                    .flat_map(|c| c["zones"].as_array().cloned().unwrap_or_default())
+                    .any(|z| {
+                        let n = z["name"].as_str().unwrap_or("");
+                        z["tunnel"]["ready"] == json!(true)
+                            && z["accountId"] == cluster["tunnel"]["accountId"]
+                            && !n.is_empty()
+                            && (host == n || host.ends_with(&format!(".{n}")))
+                    });
+            let tunnel = tunnel_ready && args["tunnel"].as_bool().unwrap_or(tunnel_mode);
+            let dns_record = if tunnel {
+                op(json!({ "op": "setDomainTunnel", "serviceId": id, "domainId": d["id"], "on": true }))
+                    .await
+                    .unwrap_or_else(|e| json!({ "status": "failed", "error": e }))
+            } else if covered && args["cloudflare_dns"].as_bool().unwrap_or(true) {
                 op(json!({
                     "op": "createDnsRecord", "serviceId": id, "domainId": d["id"],
                     "proxied": args["proxied"].as_bool().unwrap_or(false),
@@ -1555,6 +1580,14 @@ fn cluster_at(snap: &Value, team: &str, place: &str) -> Result<(Value, String), 
 /// "nginx-web.203.0.113.7.nip.io": resolves to the cluster's free-domain
 /// address (its public or Tailscale IP, as its settings say).
 fn free_hostname(cluster: &Value, service: &str, namespace: &str) -> Result<String, String> {
+    // In tunnel mode, under its default domain (the tunnel's wildcard).
+    if cluster["traffic"] == json!("tunnel") {
+        let suffix = cluster["freeDomainSuffix"].as_str().ok_or(
+            "The cluster's Cloudflare Tunnel has no default domain, so there's no free domain for it. Pick a default domain first, or use a custom hostname.",
+        )?;
+        let label: String = format!("{service}-{namespace}").chars().take(63).collect();
+        return Ok(format!("{}.{suffix}", label.trim_end_matches('-')));
+    }
     let ip = cluster["freeDomainIp"]
         .as_str()
         .and_then(|ip| ip.parse().ok())

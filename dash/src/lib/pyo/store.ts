@@ -35,6 +35,7 @@ import type {
   AlertEvent,
   AlertKind,
   Cluster,
+  ClusterTraffic,
   ClusterServer,
   ControlBackup,
   Updates,
@@ -739,6 +740,19 @@ export function cloudflareZoneFor(
   return (cloudflareIn(s, wsId)?.zones ?? [])
     .filter((z) => host === z.name || host.endsWith(`.${z.name}`))
     .sort((a, b) => b.name.length - a.name.length)[0];
+}
+/** How a cluster takes web traffic, from `publicTraffic` when it isn't reported. */
+export const clusterTraffic = (c: Cluster): ClusterTraffic =>
+  c.traffic ?? (c.publicTraffic === false ? "tailscale" : "public");
+
+/** The zone that lets a hostname use the cluster's tunnel: ready, in the tunnel's account. */
+export function tunnelZoneFor(s: PyoState, hostname: string, c?: Cluster) {
+  const t = c?.tunnel;
+  if (!t || t.state === "removing") return undefined;
+  const zone = cloudflareZoneFor(s, hostname, c.teamId);
+  return zone?.tunnel?.ready && zone.accountId === t.accountId
+    ? zone
+    : undefined;
 }
 /** Your role in a team. */
 export const roleIn = (s: PyoState, wsId = s.currentTeamId) =>
@@ -1501,13 +1515,46 @@ export const api = {
     });
     return send("setClusterWebProxyProtocol", { clusterId, on });
   },
-  /** The gateway answers public traffic on the cluster's servers, or not. */
-  setClusterPublicTraffic(clusterId: string, on: boolean) {
+  /** How the cluster takes web traffic. Tunnel mode takes its settings along. */
+  setClusterTraffic(
+    clusterId: string,
+    mode: ClusterTraffic,
+    tunnel?: {
+      defaultDomain: string | null;
+      accountId?: string;
+      portsPublic?: boolean;
+    },
+  ) {
     update((s) => {
       const c = s.clusters.find((x) => x.id === clusterId);
-      if (c) c.publicTraffic = on;
+      if (!c) return;
+      c.traffic = mode;
+      c.publicTraffic = mode === "public";
+      if (c.tunnel && tunnel) {
+        c.tunnel.defaultDomain = tunnel.defaultDomain;
+        if (tunnel.portsPublic !== undefined)
+          c.tunnel.portsPublic = tunnel.portsPublic;
+      }
     });
-    return send("setClusterPublicTraffic", { clusterId, on });
+    return send<{ traffic: ClusterTraffic; moving: number }>(
+      "setClusterTraffic",
+      { clusterId, mode, ...tunnel },
+    );
+  },
+  /** Remove the cluster's tunnel; `restoreRecords` puts back what it replaced. */
+  removeClusterTunnel(clusterId: string, restoreRecords: boolean) {
+    update((s) => {
+      const c = s.clusters.find((x) => x.id === clusterId);
+      if (c?.tunnel) {
+        c.tunnel.state = "removing";
+        c.tunnel.health = "removing";
+      }
+    });
+    return send("removeClusterTunnel", { clusterId, restoreRecords });
+  },
+  /** A new tunnel token and certificate. */
+  rotateTunnelToken(clusterId: string) {
+    return send("rotateTunnelToken", { clusterId });
   },
   /** The cluster's preview domain; null removes it. */
   setClusterPreviewDomain(id: string, domain: string | null) {
@@ -1719,7 +1766,7 @@ export const api = {
     const serviceId = newId("svc");
     let deploymentId = "";
     const volumes: Volume[] = [];
-    const dnsRecords: { domainId: string; proxied: boolean }[] = [];
+    const dnsRecords: { domainId: string; proxied: boolean; tunnel?: boolean }[] = [];
     // No project picked: create one named after the app, before the app itself.
     const fresh =
       draft.projectId === NEW_PROJECT
@@ -1791,8 +1838,16 @@ export const api = {
       });
       const domains: Domain[] = d.domains.map((x) => {
         const id = newId("dom");
-        // On unless turned off, when a connected zone covers it.
+        // Through the cluster's Cloudflare Tunnel: on by default in tunnel mode.
+        const draftCluster = s.clusters.find((c) => c.id === d.clusterId);
         if (
+          !d.cron &&
+          tunnelZoneFor(s, x.hostname, draftCluster) &&
+          (x.tunnel ?? (!!draftCluster && clusterTraffic(draftCluster) === "tunnel"))
+        )
+          dnsRecords.push({ domainId: id, proxied: false, tunnel: true });
+        // On unless turned off, when a connected zone covers it.
+        else if (
           x.cloudflare !== false &&
           !d.cron &&
           cloudflareZoneFor(s, x.hostname, d.teamId)?.canEdit &&
@@ -1932,9 +1987,11 @@ export const api = {
       // Its DNS records in Cloudflare, once the service exists.
       if (made)
         for (const r of dnsRecords)
-          await api.createDnsRecord(serviceId, r.domainId, {
-            proxied: r.proxied,
-          });
+          await (r.tunnel
+            ? api.setDomainTunnel(serviceId, r.domainId, { on: true })
+            : api.createDnsRecord(serviceId, r.domainId, {
+                proxied: r.proxied,
+              }));
       return made;
     })();
     return { serviceId, deploymentId, done };
@@ -1998,8 +2055,8 @@ export const api = {
       tlsMode?: TlsMode;
       certificateId?: string;
     },
-    /** Create its DNS record in Cloudflare once it's saved. */
-    cloudflare?: { proxied: boolean },
+    /** Create its DNS record in Cloudflare once it's saved, or switch it to the tunnel. */
+    cloudflare?: { proxied: boolean } | { tunnel: true },
   ) {
     const domainId = newId("dom");
     update((s) => {
@@ -2016,7 +2073,9 @@ export const api = {
     });
     const res = await saveService(id);
     if (res?.ok && cloudflare)
-      await api.createDnsRecord(id, domainId, { proxied: cloudflare.proxied });
+      await ("tunnel" in cloudflare
+        ? api.setDomainTunnel(id, domainId, { on: true })
+        : api.createDnsRecord(id, domainId, { proxied: cloudflare.proxied }));
     return res;
   },
   /** HTTPS settings of a domain; applied live once the service is deployed. */
@@ -2042,8 +2101,18 @@ export const api = {
   async removeDomain(
     id: string,
     domainId: string,
-    opts?: { deleteDnsRecord?: boolean },
+    opts?: { deleteDnsRecord?: boolean; restoreRecord?: boolean },
   ) {
+    // Put back the record a tunnel domain replaced, before it goes.
+    if (opts?.restoreRecord) {
+      const res = await send("setDomainTunnel", {
+        serviceId: id,
+        domainId,
+        on: false,
+        restore: true,
+      });
+      if (!res?.ok) return null;
+    }
     if (opts?.deleteDnsRecord) {
       const res = await send("deleteDnsRecord", { serviceId: id, domainId });
       if (!res?.ok) return null;
@@ -2635,6 +2704,33 @@ export const api = {
         title: res.error ?? "Cloudflare didn't create the record.",
       });
     return res;
+  },
+  /**
+   * Serve a domain through the cluster's tunnel, or switch it back.
+   * `replace` replaces records in the way, `restore` puts a kept one back.
+   */
+  setDomainTunnel(
+    serviceId: string,
+    domainId: string,
+    opts: { on: boolean; replace?: boolean; restore?: boolean },
+  ) {
+    update((s) => {
+      const d = s.services
+        .find((a) => a.id === serviceId)
+        ?.domains.find((x) => x.id === domainId);
+      if (!d) return;
+      if (opts.on) d.tunnel ??= "switching";
+      if (d.dnsRecord && (opts.on || d.dnsRecord.via === "tunnel"))
+        d.dnsRecord = {
+          ...d.dnsRecord,
+          status: opts.on ? "switching" : "reverting",
+          error: null,
+        };
+    });
+    return send<{ status: "switching" | "active" | "reverting" | "direct" }>(
+      "setDomainTunnel",
+      { serviceId, domainId, ...opts },
+    );
   },
   saveTailscale(clientId: string, secret?: string, clusterId?: string) {
     return attempt<{ checks: TailscaleCheck[] }>("saveTailscale", {

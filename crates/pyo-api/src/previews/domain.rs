@@ -11,6 +11,10 @@
 //!   certificate, and the record is made by hand.
 //! - Else nip.io on the cluster's free-domain address
 //!   (`web-pr-42.203.0.113.7.nip.io`).
+//! - In Cloudflare Tunnel mode, public previews go under the tunnel's
+//!   default domain (`web-pr-42.example.com`), covered by its wildcard
+//!   record and route, like free domains. The preview domain isn't used
+//!   then. Without a default domain there's no preview URL.
 //!
 //! A domain is per cluster: its wildcard record can point at one cluster.
 
@@ -58,6 +62,10 @@ pub async fn with_certificate(
     cluster_id: &str,
     mut d: Value,
 ) -> ApiResult<Value> {
+    // Through the cluster's tunnel: the tunnel loop keeps its certificate.
+    if d["tunnel"].is_string() {
+        return Ok(d);
+    }
     let pd = stored(tx, cluster_id).await?;
     let host = d["hostname"].as_str().unwrap_or("").to_owned();
     let under = pd["domain"]
@@ -93,15 +101,31 @@ async fn suffix(
             None => Err("Private previews need Tailscale on the cluster.".into()),
         });
     }
-    if let Some(d) = stored(tx, cluster_id).await?["domain"].as_str() {
-        return Ok(Ok(d.to_owned()));
+    let preview_domain = stored(tx, cluster_id).await?["domain"]
+        .as_str()
+        .map(str::to_owned);
+    let cluster = crate::freedomain::load(tx, cluster_id)
+        .await?
+        .map(|(_, c)| c)
+        .unwrap_or_default();
+    Ok(public_suffix(&cluster, preview_domain.as_deref()))
+}
+
+/// Said when a cluster in tunnel mode has no default domain for previews.
+pub const PICK_DEFAULT_DOMAIN: &str = "Pick a default domain for the cluster's Cloudflare Tunnel first. Previews get names under it.";
+
+/// Where a public preview's URL goes: under the tunnel's default domain in
+/// tunnel mode (none without one), else the preview domain, else the
+/// cluster's free-domain address on nip.io.
+pub fn public_suffix(c: &crate::freedomain::Cluster, preview_domain: Option<&str>) -> Result<String, String> {
+    if c.tunnel {
+        return c.tunnel_domain.clone().ok_or_else(|| PICK_DEFAULT_DOMAIN.to_owned());
     }
-    Ok(
-        match crate::freedomain::for_cluster(tx, cluster_id).await? {
-            Some(ip) => Ok(format!("{ip}.nip.io")),
-            None => Err("The cluster has no address for preview URLs yet.".into()),
-        },
-    )
+    if let Some(d) = preview_domain {
+        return Ok(d.to_owned());
+    }
+    c.suffix()
+        .ok_or_else(|| "The cluster has no address for preview URLs yet.".into())
 }
 
 /// Whether a host is taken: by a service's domain (not `copy`), or by
@@ -618,6 +642,38 @@ mod tests {
         assert_eq!(v["dns"], "cloudflare");
         assert_eq!(v["certificate"]["state"], "issued");
         assert_eq!(v["record"]["content"], Value::Null);
+    }
+
+    #[test]
+    fn previews_in_tunnel_mode_go_under_the_default_domain() {
+        use crate::freedomain::Cluster;
+        let server = json!({ "name": "vps", "status": "ready", "internalIP": "10.0.0.5", "addresses": ["10.0.0.5"],
+                             "publicIpv4": "203.0.113.7", "nicPublicIps": ["203.0.113.7"] });
+        let public = Cluster {
+            public_traffic: true,
+            servers: vec![server],
+            ..Default::default()
+        };
+        assert_eq!(public_suffix(&public, None).unwrap(), "203.0.113.7.nip.io");
+        assert_eq!(public_suffix(&public, Some("preview.example.com")).unwrap(), "preview.example.com");
+        // Tunnel mode: under the default domain, whatever the preview domain.
+        let tunnel = Cluster {
+            tunnel: true,
+            tunnel_domain: Some("example.com".into()),
+            ..Default::default()
+        };
+        assert_eq!(public_suffix(&tunnel, Some("preview.example.com")).unwrap(), "example.com");
+        assert!(crate::cloudflare::tunnel_loop::under_default(
+            &naming::host(&naming::label("web", 42, naming::LABEL_MAX), "example.com"),
+            "example.com"
+        ));
+        // Without one: no preview URL, and why.
+        let bare = Cluster {
+            tunnel: true,
+            ..Default::default()
+        };
+        assert_eq!(public_suffix(&bare, None).unwrap_err(), PICK_DEFAULT_DOMAIN);
+        assert!(!PICK_DEFAULT_DOMAIN.contains(';'));
     }
 
     #[test]

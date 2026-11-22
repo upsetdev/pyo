@@ -94,6 +94,10 @@ pub fn routes() -> Router<AppState> {
         .route("/images", get(crate::images::list))
         .route("/registry", get(crate::images::registry))
         .route("/cloudflare", get(crate::cloudflare::get))
+        .route(
+            "/clusters/{id}/tunnel",
+            get(crate::cloudflare::tunnel_ops::get),
+        )
         .route("/databases", get(crate::databases::list))
         .route("/databases/{id}", get(crate::databases::get))
         .route("/database-extensions", get(crate::databases::extensions))
@@ -2940,9 +2944,9 @@ pub(crate) enum Op {
     },
     /// Revoke a Pyo registry token. Team owners and admins.
     RevokeRegistryToken { id: String },
-    /// Connect the team's Cloudflare account, or replace its token. The token needs Zone:Read and DNS:Edit on the zones Pyo may use. Pyo lists its zones, checks it can edit DNS in each (it makes and deletes a TXT record `_pyo-check.<zone>`), then keeps it encrypted. It's never shown again. Team owners and admins.
+    /// Connect the team's Cloudflare account, or replace its token. The token needs Zone:Read and DNS:Edit on the zones Pyo may use, and for Cloudflare Tunnel also Cloudflare Tunnel:Edit and SSL and Certificates:Edit. Pyo lists its zones and their accounts, checks it can edit DNS in each (it makes and deletes a TXT record `_pyo-check.<zone>`), checks the tunnel permissions (it makes and deletes a tunnel `pyo-check-<hex>` once per account, and reads each zone's Origin CA certificates), then keeps it encrypted. It's never shown again. Each zone's `tunnel` says whether it can use Cloudflare Tunnel. Team owners and admins.
     ConnectCloudflare { team_id: String, token: String },
-    /// Check the saved Cloudflare token again: the zones it covers now, and what it's missing (`problems`). Team owners and admins.
+    /// Check the saved Cloudflare token again: the zones it covers now, whether each can use Cloudflare Tunnel, and what it's missing (`problems`). Team owners and admins.
     TestCloudflare { team_id: String },
     /// Forget the team's Cloudflare token. DNS records Pyo made stay in Cloudflare. Team owners and admins.
     RemoveCloudflare { team_id: String },
@@ -2962,6 +2966,40 @@ pub(crate) enum Op {
         service_id: String,
         domain_id: String,
     },
+    /// How a cluster takes web traffic: "public" (ports 80 and 443 on every server but build-only ones), "tailscale" (only from the tailnet, or only inside the cluster without Tailscale) or "tunnel" (through Cloudflare Tunnel, with no ports 80 and 443 open). For "tunnel", the team's Cloudflare token needs Cloudflare Tunnel:Edit and SSL and Certificates:Edit, and the cluster's install must be Pyo's (run its connect command first when it's older). Domains in zones of the tunnel's account move to the tunnel. Those with a DNS record Pyo didn't make wait for `setDomainTunnel` with `replace`. Pyo does the Cloudflare work in the background: the cluster's `tunnel` shows how it's going. Team owners and admins.
+    SetClusterTraffic {
+        cluster_id: String,
+        mode: String,
+        /// A zone of the token (its apex, like "example.com"): services get names under it, and `*.example.com` goes through the tunnel. Optional.
+        #[serde(default)]
+        default_domain: Option<String>,
+        /// The Cloudflare account for the tunnel, when the token's zones are in more than one.
+        #[serde(default)]
+        account_id: Option<String>,
+        /// Public TCP and UDP ports stay on the servers in tunnel mode (they don't go through the tunnel). On by default.
+        #[serde(default)]
+        ports_public: Option<bool>,
+    },
+    /// Serve a domain through the cluster's Cloudflare Tunnel (`on`), or move it back. Pyo adds the tunnel's route first, then points the name at the tunnel with a proxied CNAME, so both paths answer while it moves. When records Pyo didn't make have the name, the domain's `dnsRecord.status` turns "conflict" and `existing` lists them. Send it again with `replace` to replace them (team owners and admins): Pyo keeps a copy. Moving back with `restore` puts that copy back (team owners and admins), or without one, points the name at the cluster's public IP.
+    SetDomainTunnel {
+        service_id: String,
+        domain_id: String,
+        on: bool,
+        /// Replace the records in the way.
+        #[serde(default)]
+        replace: bool,
+        /// Moving back: put back the records the tunnel replaced. On by default.
+        #[serde(default = "yes")]
+        restore: bool,
+    },
+    /// Remove a cluster's Cloudflare Tunnel: its routes, the DNS records Pyo made (with `restoreRecords`, the ones they replaced come back), the connector in the cluster, its certificate and the tunnel itself. Pick Public ports or Tailscale only for the cluster first. Team owners and admins.
+    RemoveClusterTunnel {
+        cluster_id: String,
+        #[serde(default = "yes")]
+        restore_records: bool,
+    },
+    /// Give the cluster's Cloudflare Tunnel a new token and a new certificate, and drop its old connections. Team owners and admins.
+    RotateTunnelToken { cluster_id: String },
     /// Create a project and its services from a Docker Compose plan (from `POST /compose/preview`, edited if you like), and deploy them in order.
     ImportCompose {
         team_id: String,
@@ -3402,9 +3440,10 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         Op::SaveCronJob { .. } | Op::RemoveCronJob { .. } | Op::RunCronJob { .. } => {
             ("Cron jobs", "crn")
         }
-        Op::VerifyDomain { .. } | Op::CreateDnsRecord { .. } | Op::DeleteDnsRecord { .. } => {
-            ("Domains", "dom")
-        }
+        Op::VerifyDomain { .. }
+        | Op::CreateDnsRecord { .. }
+        | Op::DeleteDnsRecord { .. }
+        | Op::SetDomainTunnel { .. } => ("Domains", "dom"),
         Op::UploadCertificate { .. }
         | Op::ReplaceCertificate { .. }
         | Op::RemoveCertificate { .. } => ("Domains", "crt"),
@@ -3444,6 +3483,9 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SetClusterTrafficMode { .. }
         | Op::SetClusterWebProxyProtocol { .. }
         | Op::SetClusterPublicTraffic { .. }
+        | Op::SetClusterTraffic { .. }
+        | Op::RemoveClusterTunnel { .. }
+        | Op::RotateTunnelToken { .. }
         | Op::SetClusterFreeDomainAddress { .. } => ("Clusters", "cl"),
         Op::AddFirewallRule { .. }
         | Op::UpdateFirewallRule { .. }
@@ -4764,8 +4806,9 @@ async fn apply(
         Op::SetClusterPublicTraffic { cluster_id, on } => {
             let team_id = team_of(tx, "clusters", &cluster_id).await?;
             require_role(tx, user, &team_id, Role::Admin).await?;
+            // `public_traffic` follows `traffic` (a generated column).
             let name: String = sqlx::query_scalar(
-                "UPDATE pyo.clusters SET public_traffic = $2 WHERE id = $1 RETURNING name",
+                "UPDATE pyo.clusters SET traffic = CASE WHEN $2 THEN 'public' ELSE 'tailscale' END WHERE id = $1 RETURNING name",
             )
             .bind(&cluster_id)
             .bind(on)
@@ -4816,6 +4859,10 @@ async fn apply(
                 }
                 crate::freedomain::Mode::Tailscale => {
                     format!("Free domains on {name} use its Tailscale IP")
+                }
+                // Never parsed from an address: it follows the cluster's traffic.
+                crate::freedomain::Mode::Tunnel => {
+                    format!("Free domains on {name} go through its Cloudflare Tunnel")
                 }
             };
             log_activity(
@@ -8251,6 +8298,53 @@ async fn apply(
             service_id,
             domain_id,
         } => crate::cloudflare::delete_record(s, tx, user, &service_id, &domain_id).await,
+        Op::SetClusterTraffic {
+            cluster_id,
+            mode,
+            default_domain,
+            account_id,
+            ports_public,
+        } => {
+            crate::cloudflare::tunnel_ops::set_traffic(
+                s,
+                tx,
+                user,
+                &cluster_id,
+                &mode,
+                default_domain.as_deref(),
+                account_id.as_deref(),
+                ports_public,
+                wake,
+            )
+            .await
+        }
+        Op::SetDomainTunnel {
+            service_id,
+            domain_id,
+            on,
+            replace,
+            restore,
+        } => {
+            crate::cloudflare::tunnel_ops::set_domain(
+                s,
+                tx,
+                user,
+                &service_id,
+                &domain_id,
+                on,
+                replace,
+                restore,
+                wake,
+            )
+            .await
+        }
+        Op::RemoveClusterTunnel {
+            cluster_id,
+            restore_records,
+        } => crate::cloudflare::tunnel_ops::remove(tx, user, &cluster_id, restore_records, wake).await,
+        Op::RotateTunnelToken { cluster_id } => {
+            crate::cloudflare::tunnel_ops::rotate(tx, user, &cluster_id).await
+        }
         Op::UpdateProfile { name, timezone } => {
             let name = require_text(&name, "Name", 80)?;
             let tz = require_text(&timezone, "Time zone", 64)?;
