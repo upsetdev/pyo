@@ -265,7 +265,7 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
                 { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::FIREWALL_POLICY] },
                 // Websites on the servers' Tailscale addresses: its own Service.
                 { "apiGroups": [""], "resources": ["services"], "verbs": ["create"] },
-                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE] },
+                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE, system::TUNNEL_ORIGIN_SERVICE, system::PUBLIC_PORTS_SERVICE] },
                 // The Tailscale Services' wanted list, for the servers' tailnet pods.
                 { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WANTED] },
                 // The proxy's failed pods, cleaned up (an eviction on a full
@@ -561,7 +561,7 @@ pub fn admission_with(
                 (!has(object.spec.connection) || (object.spec.connection.all(k, k in ['connectionLimit', 'maxAcceptPerSocketEvent']) && (!has(object.spec.connection.maxAcceptPerSocketEvent) || object.spec.connection.maxAcceptPerSocketEvent == 1) && (!has(object.spec.connection.connectionLimit) || (object.spec.connection.connectionLimit.all(k, k == 'value') && object.spec.connection.connectionLimit.value >= 1)))) && \
                 (!has(object.spec.proxyProtocol) || object.spec.proxyProtocol == {pp_optional})) || \
                 (object.metadata.labels[?'{cdn_label}'].orValue('') in {behind} && object.spec.all(k, k in ['targetRefs', 'clientIPDetection', 'connection', 'headers', 'tls', 'proxyProtocol', 'timeout']) && ({cdn_headers}) && \
-                    size(object.spec.targetRefs) >= 1 && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name + '-cdn' == variables.objName && has(t.sectionName) && t.sectionName.startsWith('h-')) && \
+                    size(object.spec.targetRefs) >= 1 && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name + (object.metadata.labels[?'{cdn_label}'].orValue('') == '{tunnel_cdn}' ? '-{tunnel_cdn}' : '-cdn') == variables.objName && has(t.sectionName) && t.sectionName.startsWith('h-')) && \
                     {ctp_https}.exists(v, ['connection', 'tls', 'proxyProtocol', 'timeout'].all(k, (k in v) == (k in object.spec) && (!(k in v) || v[k] == object.spec[k]))) && \
                     object.spec.clientIPDetection.all(k, k == 'xForwardedFor') && object.spec.clientIPDetection.xForwardedFor.all(k, k == 'trustedCIDRs') && \
                     size(object.spec.clientIPDetection.xForwardedFor.trustedCIDRs) >= 1 && size(object.spec.clientIPDetection.xForwardedFor.trustedCIDRs) <= {max_trusted} && \
@@ -602,6 +602,13 @@ pub fn admission_with(
             (request.resource.resource == 'services' && variables.objName == '{vip_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {tw_keys}) && \
                 object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && object.spec.ports == {vip_ports} && \
                 size(object.spec.externalIPs) >= 1 && size(object.spec.externalIPs) <= 1024 && object.spec.externalIPs.all(ip, ip.matches({tw_v4}) || ip.matches({tw_v6}))))) || \
+            (request.resource.resource == 'services' && variables.objName == '{origin_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {origin_keys}) && \
+                object.spec.type == 'ClusterIP' && object.spec.selector == {tw_selector} && object.spec.ports == {origin_ports}))) || \
+            (request.resource.resource == 'services' && variables.objName == '{pp_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {pp_keys}) && \
+                object.spec.type == 'LoadBalancer' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && size(object.spec.ports) >= 1 && size(object.spec.ports) <= 256 && \
+                object.spec.ports.all(p, p.all(k, k in ['name', 'port', 'targetPort', 'protocol', 'nodePort']) && \
+                    ((p.protocol == 'UDP' && !(p.port in {udp_reserved})) || (p.protocol == 'TCP' && !(p.port in {tcp_reserved}) && !(p.port >= 19000 && p.port <= 19003))) && \
+                    p.targetPort == (p.port < 1024 ? p.port + 10000 : p.port))))) || \
             (request.resource.resource == 'services' && variables.objName == '{nat_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {tw_keys}) && \
                 object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && object.spec.ports == {tw_ports} && \
                 size(object.spec.externalIPs) >= 1 && size(object.spec.externalIPs) <= 64 && object.spec.externalIPs.all(ip, ip.matches({nat_v4}) && !ip.matches({nat_private}))))) || \
@@ -672,6 +679,16 @@ pub fn admission_with(
             // NAT (system.rs): this Service only, onto the proxies, the
             // websites' ports, and public IPv4 addresses alone.
             nat_svc = system::PUBLIC_NAT_SERVICE,
+            // Cloudflare Tunnel (system.rs): the connector's way in, onto the
+            // proxies' HTTPS only, and public TCP and UDP ports in tunnel
+            // mode, onto the proxies, never the websites' or the servers'
+            // own ports.
+            origin_svc = system::TUNNEL_ORIGIN_SERVICE,
+            origin_keys = cel_literal(&json!(["type", "selector", "ports"].iter().chain(system::TAILNET_WEB_DEFAULTED.iter()).collect::<Vec<_>>())),
+            origin_ports = cel_literal(&system::tunnel_origin_ports()),
+            pp_svc = system::PUBLIC_PORTS_SERVICE,
+            pp_keys = cel_literal(&json!(["type", "externalTrafficPolicy", "selector", "ports"].iter().chain(system::TAILNET_WEB_DEFAULTED.iter()).chain(system::LOAD_BALANCER_DEFAULTED.iter()).collect::<Vec<_>>())),
+            tunnel_cdn = system::TUNNEL_CDN,
             nat_v4 = cel_literal(&json!(system::IPV4_RE)),
             nat_private = cel_literal(&json!(system::NOT_PUBLIC_IPV4_RE)),
             label = system::GATEWAY_LABEL,
@@ -693,7 +710,7 @@ pub fn admission_with(
             cdn_label = system::CDN_LABEL,
             // The headers it removes: all that name a visitor but the CDN's
             // own (system.rs `visitor_headers`), pinned per CDN.
-            cdn_headers = crate::firewall::BEHIND.iter().map(|cdn| format!(
+            cdn_headers = crate::firewall::BEHIND.iter().chain([&system::TUNNEL_CDN]).map(|cdn| format!(
                 "(object.metadata.labels[?'{label}'].orValue('') == '{cdn}' && has(object.spec.headers) && object.spec.headers == {headers})",
                 label = system::CDN_LABEL,
                 headers = cel_literal(&system::visitor_headers(system::cdn_own_headers(cdn))))).collect::<Vec<_>>().join(" || "),
@@ -701,7 +718,8 @@ pub fn admission_with(
             // behind a CDN its connections only (firewall.rs).
             acme_rule = cel_literal(&crate::firewall::acme_rule()),
             gate_rule = cel_literal(&crate::firewall::behind_gate_rule()),
-            behind = cel_literal(&json!(crate::firewall::BEHIND)),
+            // The CDNs a website can be behind, and the tunnel's connectors.
+            behind = cel_literal(&json!(crate::firewall::BEHIND.iter().chain([&system::TUNNEL_CDN]).collect::<Vec<_>>())),
             max_trusted = system::MAX_TRUSTED_CIDRS,
             trusted_v4 = cel_literal(&json!(system::TRUSTED_V4_RE)),
             trusted_v6 = cel_literal(&json!(system::TRUSTED_V6_RE)),
@@ -1419,7 +1437,7 @@ mod tests {
             svc,
             [
                 &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["create"] }),
-                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE] }),
+                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE, system::TUNNEL_ORIGIN_SERVICE, system::PUBLIC_PORTS_SERVICE] }),
             ]
         );
         let policy = admission("w", "g");
@@ -1479,6 +1497,112 @@ mod tests {
 
     /// The Service for the public IPs behind the cloud's NAT: pinned like
     /// the tailnet websites' one, on public IPv4 addresses only.
+    #[test]
+    fn the_tunnel_services_are_pinned() {
+        let policy = admission("w", "g");
+        let all = policy[0]["spec"]["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "gatewayAllowed")
+            .unwrap()["expression"]
+            .as_str()
+            .unwrap();
+        let clause = |name: &str| {
+            let start = all
+                .find(&format!("variables.objName == '{name}'"))
+                .unwrap_or_else(|| panic!("{name}'s clause"));
+            all[start..start + all[start..].find("))) || ").unwrap()].to_owned()
+        };
+        let selector = format!(
+            "object.spec.selector == {}",
+            cel_literal(&system::proxy_pods()["matchLabels"])
+        );
+        let origin = clause(system::TUNNEL_ORIGIN_SERVICE);
+        for part in [
+            "object.spec.type == 'ClusterIP'".to_owned(),
+            selector.clone(),
+            format!(
+                "object.spec.ports == {}",
+                cel_literal(&system::tunnel_origin_ports())
+            ),
+        ] {
+            assert!(origin.contains(&part), "{part}\n{origin}");
+        }
+        // No external addresses on the origin.
+        assert!(!origin.contains("externalIPs"));
+        let ports = clause(system::PUBLIC_PORTS_SERVICE);
+        for part in [
+            "object.spec.type == 'LoadBalancer' && object.spec.externalTrafficPolicy == 'Local'"
+                .to_owned(),
+            selector,
+            "!(p.port in [80, 443, 10080, 10443, 22, 53, 2379, 2380, 6443, 10250".to_owned(),
+            "p.targetPort == (p.port < 1024 ? p.port + 10000 : p.port)".to_owned(),
+        ] {
+            assert!(ports.contains(&part), "{part}\n{ports}");
+        }
+        assert!(!ports.contains("externalIPs"));
+        // What the agent writes is what's pinned.
+        assert_eq!(system::tunnel_origin_service()["spec"]["ports"], system::tunnel_origin_ports());
+        let s = system::public_ports_service(&[("TCP".into(), 5432), ("UDP".into(), 53), ("TCP".into(), 25)]).unwrap();
+        assert_eq!(s["spec"]["ports"][0], json!({ "name": "tcp-25", "port": 25, "targetPort": 10025, "protocol": "TCP" }));
+        assert_eq!(s["spec"]["ports"][1]["targetPort"], 5432);
+        assert!(system::public_ports_service(&[]).is_none());
+        // The agent may write both, by name.
+        let roles = json!(objects(false)).to_string();
+        assert!(roles.contains(system::TUNNEL_ORIGIN_SERVICE) && roles.contains(system::PUBLIC_PORTS_SERVICE));
+    }
+
+    #[test]
+    fn tunnel_client_policies_trust_only_their_listeners() {
+        let all = admission(system::WAF_IMAGE_DEFAULT, system::GEOIP_IMAGE_DEFAULT)[0].to_string();
+        let start = all
+            .find("request.resource.resource == 'clienttrafficpolicies'")
+            .unwrap();
+        let end = all[start..]
+            .find("request.resource.resource == 'securitypolicies'")
+            .unwrap();
+        let ctp = &all[start..start + end];
+        // The label, and Cloudflare's own headers kept (they come from it).
+        assert!(ctp.contains("dyn('cloudflare'), dyn('tunnel')"), "{ctp}");
+        let kept = system::cel_literal(&system::visitor_headers(system::cdn_own_headers(system::TUNNEL_CDN)));
+        assert!(ctp.contains(&format!(
+            "(object.metadata.labels[?'{}'].orValue('') == 'tunnel' && has(object.spec.headers) && object.spec.headers == {kept})",
+            system::CDN_LABEL
+        )));
+        // Named after its own Gateway.
+        assert!(ctp.contains("== 'tunnel' ? '-tunnel' : '-cdn') == variables.objName"));
+        // Not a CDN a user can pick.
+        assert!(!crate::firewall::BEHIND.contains(&system::TUNNEL_CDN));
+        // Pod addresses as the policy holds them.
+        assert_eq!(
+            system::host_cidrs(&["10.42.1.7".into(), "fd00::5".into(), "10.42.1.7".into(), "bad".into()]),
+            ["10.42.1.7/32", "fd00::5/128"]
+        );
+        let v4 = regex::Regex::new(system::TRUSTED_V4_RE).unwrap();
+        let v6 = regex::Regex::new(system::TRUSTED_V6_RE).unwrap();
+        assert!(v4.is_match("10.42.1.7/32") && v6.is_match("fd00::5/128"));
+    }
+
+    #[test]
+    fn the_tunnel_connector_passes_the_pod_rules() {
+        let d = system::tunnel_deployment(system::CLOUDFLARED_IMAGE);
+        let pod = &d["spec"]["template"]["spec"];
+        assert_eq!(pod["automountServiceAccountToken"], false);
+        assert!(pod.get("hostNetwork").is_none() && pod.get("volumes").is_none());
+        let c = &pod["containers"][0];
+        assert_eq!(c["securityContext"]["capabilities"]["drop"], json!(["ALL"]));
+        assert!(c.get("ports").is_none(), "nothing connects to it");
+        assert!(c["args"].as_array().unwrap().contains(&json!("http2")));
+        assert_eq!(d["metadata"]["namespace"], NS);
+        assert_eq!(system::tunnel_budget()["spec"]["minAvailable"], 1);
+        let s = system::tunnel_secret("c1744f8b-faa1-48a4-9e5c-02ac921467fa", "tok");
+        assert_eq!(s["metadata"]["labels"][system::TUNNEL_ID_LABEL], "c1744f8b-faa1-48a4-9e5c-02ac921467fa");
+        // The write role covers Deployments, Secrets and budgets in pyo-system.
+        let roles = json!(objects(false)).to_string();
+        assert!(roles.contains("poddisruptionbudgets"));
+    }
+
     #[test]
     fn the_public_nat_service_is_pinned() {
         let policy = admission("w", "g");
