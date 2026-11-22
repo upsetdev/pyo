@@ -77,7 +77,7 @@ pub struct Location {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerType {
-    /// "cx22"
+    /// "cx23"
     pub name: String,
     pub description: String,
     pub cores: u32,
@@ -989,29 +989,45 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_reads_types_prices_and_availability() {
-        let h = Hetzner::mock(mock::TOKEN, mock::Mock::new());
+        let m = mock::Mock::new();
+        let h = Hetzner::mock(mock::TOKEN, m.clone());
         let c = h.catalog().await.unwrap();
         assert_eq!(c.currency, "EUR");
         assert_eq!(c.locations.len(), 2);
-        // The deprecated type is left out; the cheapest comes first.
+        // The type phased out everywhere is left out. The cheapest comes first.
         let names: Vec<&str> = c.server_types.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, ["cax11", "cx22"]);
-        let cx = c.server_types.iter().find(|t| t.name == "cx22").unwrap();
+        assert_eq!(names, ["cax11", "cx23", "cpx22"]);
+        let cx = c.server_types.iter().find(|t| t.name == "cx23").unwrap();
         // 3.79 for the server, 0.50 for its IPv4 address.
         assert_eq!(cx.prices.get("fsn1"), Some(&4.29));
+        assert_eq!(cx.prices.get("ash"), Some(&4.99));
+        assert_eq!(cx.available, ["fsn1"]);
         assert!(cx.supported && cx.architecture == "x86");
-        assert_eq!(c.pick("fsn1", "cx22").unwrap(), 4.29);
+        assert_eq!(c.pick("fsn1", "cx23").unwrap(), 4.29);
         // Arm isn't for Pyo's servers.
         assert!(c.pick("fsn1", "cax11").unwrap_err().message.contains("Arm"));
         // Sold out in Ashburn.
-        let e = c.pick("ash", "cx22").unwrap_err();
+        let e = c.pick("ash", "cx23").unwrap_err();
         assert!(
             e.message.contains("isn't available in Ashburn"),
             "{}",
             e.message
         );
-        assert!(c.pick("nbg1", "cx22").is_err());
+        // Phased out in Falkenstein only: sold in Ashburn, no price in Falkenstein.
+        let cpx = c.server_types.iter().find(|t| t.name == "cpx22").unwrap();
+        assert_eq!(cpx.available, ["ash"]);
+        assert_eq!(cpx.prices.keys().collect::<Vec<_>>(), ["ash"]);
+        assert_eq!(c.pick("ash", "cpx22").unwrap(), 7.49);
+        assert!(c.pick("fsn1", "cpx22").is_err());
+        assert!(c.pick("fsn1", "cx22").is_err());
+        assert!(c.pick("nbg1", "cx23").is_err());
         assert!(c.pick("fsn1", "cx99").is_err());
+        // Only endpoints Hetzner still has: /datacenters answers 410 since 2026-10-01.
+        let calls = m.0.lock().unwrap().calls.clone();
+        assert!(
+            !calls.iter().any(|c| c.contains("/datacenters")),
+            "{calls:?}"
+        );
     }
 
     #[tokio::test]
@@ -1039,7 +1055,7 @@ mod tests {
                 .collect();
             assert_eq!(open, ["tcp/80", "tcp/443", "udp/41641"]);
         }
-        let mut c = create("web-1", "cx22", "cl_one", "#cloud-config\n");
+        let mut c = create("web-1", "cx23", "cl_one", "#cloud-config\n");
         c.firewall = Some(&fw);
         let r = h.create(&c).await.unwrap();
         assert_eq!(r.status, "initializing");
@@ -1130,9 +1146,9 @@ mod tests {
         let m = mock::Mock::new();
         m.0.lock().unwrap().limit = 1;
         let h = Hetzner::mock(mock::TOKEN, m.clone());
-        h.create(&create("a", "cx22", "cl_one", "")).await.unwrap();
+        h.create(&create("a", "cx23", "cl_one", "")).await.unwrap();
         let e = h
-            .create(&create("b", "cx22", "cl_one", ""))
+            .create(&create("b", "cx23", "cl_one", ""))
             .await
             .unwrap_err();
         assert!(matches!(e, CloudError::Quota(_)));
@@ -1141,9 +1157,9 @@ mod tests {
         assert!(api.message.contains("server limit") && api.message.contains("Limits page"));
 
         m.0.lock().unwrap().limit = 5;
-        m.0.lock().unwrap().sold_out = vec!["cx32".into()];
+        m.0.lock().unwrap().sold_out = vec!["cx33".into()];
         let e = h
-            .create(&create("c", "cx32", "cl_one", ""))
+            .create(&create("c", "cx33", "cl_one", ""))
             .await
             .unwrap_err();
         assert!(matches!(e, CloudError::Unavailable(_)));

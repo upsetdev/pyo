@@ -2745,7 +2745,7 @@ pub(crate) enum Op {
         provider: Option<String>,
         /// A location's `name` from getCloudOptions ("fsn1").
         location: String,
-        /// A server type's `name` from getCloudOptions ("cx22").
+        /// A server type's `name` from getCloudOptions ("cx23").
         server_type: String,
         /// A build-only server: only Pyo's builder runs on it.
         #[serde(default)]

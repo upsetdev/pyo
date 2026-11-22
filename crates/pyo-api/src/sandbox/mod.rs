@@ -1558,7 +1558,7 @@ pub struct AddCloudServer {
     pub provider: Option<String>,
     /// A location's `name` from getCloudOptions ("fsn1").
     pub location: String,
-    /// A server type's `name` from getCloudOptions ("cx22").
+    /// A server type's `name` from getCloudOptions ("cx23").
     pub server_type: String,
     /// A domain whose wildcard points at the server, as for
     /// `addSandboxServer`.
