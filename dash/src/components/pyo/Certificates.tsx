@@ -250,11 +250,7 @@ export function CertificatesList() {
         .map((d) => d.hostname),
     );
 
-  const upload = (variant: "primary" | "secondary" = "secondary") => (
-    <Button size="sm" variant={variant} onClick={() => setUploading(true)}>
-      <UploadSimpleIcon size={13} weight="bold" /> Upload certificate
-    </Button>
-  );
+  const upload = () => setUploading(true);
 
   return (
     <>
@@ -262,7 +258,11 @@ export function CertificatesList() {
         <p className="text-[13px] text-muted-foreground">
           Your own certificates. Let's Encrypt is automatic.
         </p>
-        {certs.length ? upload() : null}
+        {certs.length ? (
+          <Button size="sm" variant="secondary" onClick={upload}>
+            <UploadSimpleIcon size={13} weight="bold" /> Upload certificate
+          </Button>
+        ) : null}
       </div>
       <Panel>
         {certs.length ? (
@@ -319,11 +319,14 @@ export function CertificatesList() {
           </ul>
         ) : (
           <EmptyState
-            compact
             icon={LockSimpleIcon}
             title="No certificates"
             description="Use your own, like a wildcard."
-            action={upload("primary")}
+            action={
+              <Button size="sm" onClick={upload}>
+                Upload certificate
+              </Button>
+            }
           />
         )}
         <CertificateDialog

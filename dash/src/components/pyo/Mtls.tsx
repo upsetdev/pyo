@@ -617,18 +617,18 @@ export function OriginPullCertificates() {
       const { enforced, wanted, applying } = originPull(x);
       return enforced.includes(c.id) || (applying && wanted.includes(c.id));
     });
-  const add = (variant: "primary" | "secondary" = "secondary") => (
-    <Button size="sm" variant={variant} onClick={() => setCreating(true)}>
-      <PlusIcon size={13} weight="bold" /> Create certificate
-    </Button>
-  );
+  const create = () => setCreating(true);
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-4">
         <p className="text-[13px] text-muted-foreground">
           Accept traffic only from your CDN. Set per cluster.
         </p>
-        {certs.length ? add() : null}
+        {certs.length ? (
+          <Button size="sm" variant="secondary" onClick={create}>
+            <PlusIcon size={13} weight="bold" /> Create certificate
+          </Button>
+        ) : null}
       </div>
       <Panel>
         {certs.length ? (
@@ -689,11 +689,14 @@ export function OriginPullCertificates() {
           </ul>
         ) : (
           <EmptyState
-            compact
             icon={ShieldCheckIcon}
             title="No certificates"
             description="For mTLS with your CDN."
-            action={add("primary")}
+            action={
+              <Button size="sm" onClick={create}>
+                Create certificate
+              </Button>
+            }
           />
         )}
       </Panel>
