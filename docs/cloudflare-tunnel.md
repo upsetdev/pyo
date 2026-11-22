@@ -79,18 +79,21 @@ Decisions made while building (not in the first draft):
   "confirm" and waits for **Replace and switch**. So records made by hand
   or by Terraform (Pyo Ops) are never replaced without a yes. Pyo's own
   direct record isn't kept in `previous`: Switch back makes a new one.
-- **No 403 gate on tunnel names.** The first draft put the firewall's
-  "behind" gate (`source.port != 0`) on tunnel routes. It's left out:
-  Envoy reads the visitor from X-Forwarded-For only on connections from
-  the connectors, so any other connection is its own visitor and can't
-  pick an address. Without the gate a domain answers both ways while it
-  switches (the Gateway has the tunnel listener before the record moves,
-  and keeps it until the record is back), so there's no gap on a cluster
-  with public ports. A new connector pod whose address isn't trusted yet
-  is seen as its own address for those few seconds.
-- **Tunnel domains keep their :80 route.** Nothing reaches it through the
-  tunnel (cloudflared speaks HTTPS), but a domain mid-switch still
-  answers plain HTTP directly. Less special casing in the route builder.
+- **Both paths only while a domain switches** (user, 2026-11-22). A
+  domain's `tunnel` is `"switching"` or `"on"`:
+  - `"switching"`: the Gateway has the tunnel listener and route, the
+    tunnel route has no 403 gate, and the domain keeps its plain-HTTP
+    :80 route. Direct visitors and the tunnel both work, so there's no
+    gap on a cluster with public ports while the record moves.
+  - `"on"` (the record points at the tunnel, switch complete): the
+    firewall's "behind" gate (`source.port != 0`) goes ahead of the
+    tunnel route's rules, so a direct, non-tunnel connection with that
+    hostname gets 403, and the :80 route is removed.
+  - Switch back goes through `"switching"` again before the record
+    moves back, so direct visitors are let in before DNS sends them.
+  - A new connector pod whose address isn't trusted yet is refused by
+    the gate (403) for those few seconds, never let through with the
+    wrong visitor.
 - **A behind-Cloudflare service with tunnel domains**: its CDN client
   policy covers only its direct HTTPS listeners. The tunnel policy covers
   the tunnel ones (Envoy Gateway allows one section policy per listener).
@@ -401,9 +404,10 @@ ALTER TABLE pyo.dns_records ADD CONSTRAINT dns_records_status_check
 Plus row security for `cluster_tunnels` on `team_id`, like
 `0032_row_security_rest.sql`.
 
-Domain spec (`services.spec.domains[]`, JSON) gains `"tunnel": true` for a
-domain served through the tunnel. It's the agent's switch (routes.rs) and
-changes routes, so it bumps `routes_revision` like any domain change.
+Domain spec (`services.spec.domains[]`, JSON) gains `"tunnel"`:
+`"switching"` (both paths, see Decisions) or `"on"` (only through the
+tunnel). Absent: direct. It's the agent's switch (routes.rs) and changes
+routes, so it bumps `routes_revision` like any domain change.
 `dns_records.via` mirrors it for the record's side. The domain's `tlsMode`
 becomes `"custom"` with `certificateId` = the tunnel's certificate while via
 Tunnel, and goes back to what it was (`"auto"` by default) on Switch back.
@@ -430,7 +434,7 @@ Snapshot (`crates/pyo-api/src/snapshot.rs:140-170`) per cluster:
 ```
 
 Per domain, `dnsRecord` (`cloudflare::attach`, `cloudflare.rs:591-621`)
-gains `via` and `previous`, and the domain itself carries `tunnel: true`.
+gains `via` and `previous`, and the domain itself carries `tunnel`.
 `dash/src/lib/pyo/types.ts` (`Cluster` at `:391`, `Domain.dnsRecord` at
 `:907`) follows.
 
@@ -597,22 +601,27 @@ tasks next to `deploy::dns_watcher` (`deploy.rs:2531`). Per cluster with a
 2. **Tunnel.** No `tunnel_id`: create it, store the id. `GET` returns 404
    or `deleted_at`: create a new one (same name plus `-2`), mark every
    Pyo-made tunnel record to repoint, send the new token.
-3. **Wanted routes** = every domain with `tunnel: true` on a non-deleting
+3. **Wanted routes** = every domain with `tunnel` set on a non-deleting
    service of the cluster (by `services.cluster_id`), plus
    `*.<default_domain>` when set. PUT when the hash differs.
 4. **Certificate.** Needed names (§9). Missing a name, or `rotate` set:
    issue a new one, store it, point the domains at it (§9). No renewal by
    age (15 years, decision 2).
 5. **Records**, only after step 3 succeeded in this or an earlier pass:
-   - Rows `status = 'switching'`: `cloudflare::ensure`-like with
+   - Rows `status = 'switching'`, once the service's routes with the
+     domain's `tunnel: "switching"` reached the agent (its applied routes
+     revision is at least the switch's): `cloudflare::ensure`-like with
      `kind = CNAME`, `content = <tunnel_id>.cfargotunnel.com`,
      `proxied = true`, comment `marker(install_id)`. Replaced records go to
-     `previous` (only when the op said `replace`). Then `status = 'created'`
-     and the domain's `status = 'active'`.
-   - Rows `status = 'reverting'`: delete Pyo's CNAME (`delete_ours`,
-     `cloudflare.rs:1124`), create each `previous` record as it was (or an A
-     record to the public IP, per the op), then drop the route on the next
-     pass (records first, route after: no gap).
+     `previous` (only when the op said `replace`). Then `status = 'created'`,
+     the domain's `tunnel = "on"` (gate on, :80 route gone) and its
+     `status = 'active'`.
+   - Rows `status = 'reverting'`: the domain goes back to
+     `tunnel: "switching"` first. Once that reached the agent: delete
+     Pyo's CNAME (`delete_ours`, `cloudflare.rs:1124`), create each
+     `previous` record as it was (or an A record to the public IP, per the
+     op), then drop `tunnel` from the domain and the route on the next pass
+     (records first, route after: no gap).
    - The default domain's wildcard: `edgecert::ensure_wildcard`
      (`sandbox/edgecert.rs:775`) with a CNAME.
 6. **Agent token.** The agent's last report has no tunnel or another
@@ -641,7 +650,7 @@ token.
 ### 6.4 Domain DNS checks
 
 `deploy::check_pending_dns` (`deploy.rs:2547`) skips domains with
-`tunnel: true` (their address is Cloudflare's, not the cluster's), like it
+`tunnel` set (their address is Cloudflare's, not the cluster's), like it
 skips `.ts.net`. The tunnel loop sets their status: `pending_dns` while
 switching, `active` once the CNAME is in place and the route is live.
 
@@ -754,8 +763,8 @@ The agent watches pods with `app.kubernetes.io/name=pyo-tunnel` (all their
 `/128`). A change rewrites the client policies of services with tunnel
 domains (§8.3), the same way the websites' settings rewrite CDN policies
 today (`gateway.rs:1914`). A new pod's first requests can arrive before its
-address is trusted. For those few seconds they're seen as the pod's own
-address (see Decisions). The readiness probe keeps Cloudflare from
+address is trusted. For those few seconds the gate refuses them (403) on
+switched domains (see Decisions). The readiness probe keeps Cloudflare from
 sending it traffic until cloudflared is connected, which usually takes
 longer than the policy update, and the agent watches pods as soon as
 they have an address, ready or not.
@@ -843,9 +852,9 @@ CEL pins near `:649-660`) with exactly this spec.
 ### 8.3 Tunnel domains on the service's Gateway
 
 `DomainSpec` (`lib.rs:2250-2264`) gains
-`#[serde(default, skip_serializing_if = "is_false")] pub tunnel: bool`,
-set by `routes::domain_specs` (`routes.rs:19-43`) from the domain's
-`tunnel`. For a domain with `tunnel`:
+`#[serde(default, skip_serializing_if = "String::is_empty")] pub tunnel: String`
+(`""`, `"switching"` or `"on"`), set by `routes::domain_specs`
+(`routes.rs:19-43`) from the domain's `tunnel`. For a domain with `tunnel`:
 
 - **Listener**: as today, one HTTPS listener `h-<hash>` on 443 per
   hostname (`gateway.rs:320-335`), `tls = "custom"`, the tunnel's
@@ -853,8 +862,8 @@ set by `routes::domain_specs` (`routes.rs:19-43`) from the domain's
 - **Routes**: its own route per port, `{base}-tunnel-{port}`, parent the
   service's Gateway, so the redirect below applies to tunnel names only.
   A service can mix tunnel and direct domains.
-- **:80 routes stay** as for any domain (see Decisions). cloudflared
-  always speaks HTTPS to the Gateway.
+- **:80 routes** stay while `"switching"` and go once `"on"` (see
+  Decisions). cloudflared always speaks HTTPS to the Gateway.
 - **HTTPS redirect**: with `redirect_https`, the tunnel route's first rule
   matches header `cf-visitor` exactly `{"scheme":"http"}` and redirects to
   https (301). Cloudflare sets that header on every proxied request and
@@ -866,9 +875,13 @@ set by `routes::domain_specs` (`routes.rs:19-43`) from the domain's
   the visitor from X-Forwarded-For (the address Cloudflare appended, the
   same one it puts in CF-Connecting-IP) only on connections from
   cloudflared's pods. Everyone else is their own address.
-- **No gate** (see Decisions): tunnel routes get the service's own
-  firewall rules (`web_authorization` without `behind`), never the CDN
-  gate. A direct connection with a tunnel hostname is its own visitor.
+- **Gate** (see Decisions): with `"on"`, the firewall's "behind" gate
+  (`firewall::behind_gate_rule`, `BEHIND_GATE_CEL = "source.port != 0"`)
+  goes ahead of the service's own rules on the tunnel route. A direct
+  connection with a tunnel hostname (another pod, or a visitor reaching
+  443 on a public-ports cluster) gets 403. With `"switching"`, no gate.
+  Tunnel routes with both kinds of domains are split: `{base}-tunnel-{port}`
+  for `"on"` names, `{base}-switching-{port}` for the others.
 - **Firewall, rate limits, WAF, countries**: unchanged. They read the
   visitor Envoy worked out, so they see the real one. GeoIP country follows
   the visitor address. The access log's `remote` field
