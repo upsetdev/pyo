@@ -225,19 +225,7 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
             .get::<ConnectInfo<SocketAddr>>()
             .map(|c| c.0.ip().to_string())
             .unwrap_or_default();
-        let xff = parts
-            .headers
-            .get_all("x-forwarded-for")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect::<Vec<_>>()
-            .join(",");
-        let cf = parts
-            .headers
-            .get("cf-connecting-ip")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        Ok(ClientIp(ip_key(&visitor_ip(&peer, cf, &xff, trusted_proxies()))))
+        Ok(ClientIp(ip_key(&visitor_of(&peer, &parts.headers))))
     }
 }
 
@@ -314,11 +302,7 @@ fn server_end(ip: &IpAddr) -> bool {
 /// A process on a server's host (pyo-forward's port forwards, k3s), as Pyo
 /// sees it: k3s's pod network, at a server's own end.
 pub fn from_server_host(ip: &IpAddr) -> bool {
-    DEFAULT_TRUSTED_PROXIES
-        .split(',')
-        .filter_map(Cidr::parse)
-        .any(|c| c.contains(ip))
-        && server_end(ip)
+    in_pod_network(ip) && server_end(ip)
 }
 
 fn trusted(ip: &IpAddr, proxies: &[Cidr]) -> bool {
@@ -352,18 +336,47 @@ pub fn request_ip(peer: &str, forwarded_for: &str, proxies: &[Cidr]) -> String {
     ip.to_string()
 }
 
+/// k3s's pod network, where Pyo's gateway runs.
+fn in_pod_network(ip: &IpAddr) -> bool {
+    DEFAULT_TRUSTED_PROXIES
+        .split(',')
+        .filter_map(Cidr::parse)
+        .any(|c| c.contains(ip))
+}
+
 /// The visitor's address behind Cloudflare: its `CF-Connecting-IP`, but
-/// only when the connection comes from a trusted proxy (Cloudflare's
-/// ranges, or cloudflared on this machine, in `PYO_TRUSTED_PROXIES`):
-/// anyone else could send that header. Otherwise as [`request_ip`].
+/// only when the connection comes straight from Cloudflare or cloudflared
+/// (Cloudflare's ranges, or cloudflared on this machine, listed in
+/// `PYO_TRUSTED_PROXIES`). Never from k3s's pod network, whatever that
+/// list says: Pyo's gateway is there and passes on headers its clients
+/// wrote. It tells Pyo the visitor through X-Forwarded-For instead.
+/// Otherwise as [`request_ip`].
 pub fn visitor_ip(peer: &str, cf_connecting_ip: &str, forwarded_for: &str, proxies: &[Cidr]) -> String {
     let parsed = |s: &str| s.trim().trim_matches(['[', ']']).parse::<IpAddr>().ok().map(|a| a.to_canonical());
     if let (Some(p), Some(cf)) = (parsed(peer), parsed(cf_connecting_ip))
+        && !in_pod_network(&p)
         && (trusted(&p, proxies) || (p.is_loopback() && proxies.iter().any(|c| c.contains(&p))))
     {
         return cf.to_string();
     }
     request_ip(peer, forwarded_for, proxies)
+}
+
+/// A request's visitor, from its TCP peer and headers ([`visitor_ip`],
+/// with [`trusted_proxies`]): what rate limits, sign-in protection and the
+/// audit log all use.
+pub fn visitor_of(peer: &str, headers: &axum::http::HeaderMap) -> String {
+    let all = |k: &str| {
+        headers
+            .get_all(k)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    // Only one CF-Connecting-IP: two is no address at all.
+    let cf = all("cf-connecting-ip");
+    visitor_ip(peer, &cf, &all("x-forwarded-for"), trusted_proxies())
 }
 
 pub fn ip_key(ip: &str) -> String {
@@ -680,6 +693,71 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(ip, "203.0.113.7");
+    }
+
+    /// CF-Connecting-IP counts only from Cloudflare or cloudflared on this
+    /// machine, listed in PYO_TRUSTED_PROXIES. Never from the pod network,
+    /// where Pyo's gateway passes on what its client sent: there the
+    /// visitor is what the gateway appended to X-Forwarded-For.
+    #[test]
+    fn cloudflare_s_header_never_from_the_pod_network() {
+        let default: Vec<Cidr> = DEFAULT_TRUSTED_PROXIES
+            .split(',')
+            .map(|c| Cidr::parse(c).unwrap())
+            .collect();
+        // A client that reaches the gateway directly makes one up: the
+        // gateway (a pod) passes it on and appends the client's address.
+        assert_eq!(
+            visitor_ip("10.42.0.17", "1.1.1.1", "203.0.113.7", &default),
+            "203.0.113.7"
+        );
+        assert_eq!(
+            visitor_ip("[2001:cafe:42::1a]", "1.1.1.1", "2001:db8::5", &default),
+            "2001:db8::5"
+        );
+        // Same with the pod network listed by hand (Pyo Cloud lists it).
+        let listed = [Cidr::parse("10.42.0.0/16").unwrap()];
+        assert_eq!(
+            visitor_ip("10.42.0.17", "1.1.1.1", "203.0.113.7", &listed),
+            "203.0.113.7"
+        );
+        // Pyo Cloud: Cloudflare's edge sets X-Forwarded-For to the visitor
+        // (after anything the visitor sent), cloudflared (a pod) passes it
+        // on, the gateway appends cloudflared's address. The visitor, not
+        // cloudflared, and not what the visitor wrote.
+        assert_eq!(
+            visitor_ip("10.42.1.9", "198.51.100.20", "6.6.6.6, 198.51.100.20, 10.42.0.33", &listed),
+            "198.51.100.20"
+        );
+        assert_eq!(
+            visitor_ip("10.42.1.9", "", "198.51.100.20, 10.42.0.33", &default),
+            "198.51.100.20"
+        );
+        // cloudflared on this machine counts only when listed
+        // (cloudflare_s_header_counts_only_from_a_trusted_proxy).
+        assert_eq!(visitor_ip("127.0.0.1", "203.0.113.7", "", &default), "127.0.0.1");
+        // A server's own end of the pod network, even when listed.
+        assert_eq!(visitor_ip("10.42.0.1", "1.1.1.1", "", &listed), "10.42.0.1");
+    }
+
+    #[tokio::test]
+    async fn spoofed_cloudflare_header_through_the_gateway() {
+        let mut r = axum::http::Request::builder()
+            .header("cf-connecting-ip", "1.1.1.1")
+            .header("x-forwarded-for", "1.1.1.1, 203.0.113.7")
+            .body(())
+            .unwrap();
+        r.extensions_mut()
+            .insert(ConnectInfo("10.42.0.7:5000".parse::<SocketAddr>().unwrap()));
+        let mut parts = r.into_parts().0;
+        let ClientIp(ip) = ClientIp::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(ip, "203.0.113.7");
+        assert_eq!(visitor_of("10.42.0.7", &parts.headers), "203.0.113.7");
+        // Two of them name no one.
+        let mut h = axum::http::HeaderMap::new();
+        h.append("cf-connecting-ip", "1.1.1.1".parse().unwrap());
+        h.append("cf-connecting-ip", "2.2.2.2".parse().unwrap());
+        assert_eq!(visitor_of("203.0.113.9", &h), "203.0.113.9");
     }
 
     #[test]
