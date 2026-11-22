@@ -1580,10 +1580,10 @@ Not merged into `dev` until the feature is complete and tested.
 | Decisions applied to this spec | Done (b145440, 5284a70, bf1cc78) |
 | 1. Token and zones | Done, tested (e3d91dd api, adc8e62 cli, 12cf81f dash) |
 | 2. Agent and Gateway | Done, tested (eadce05 proto, 4db8b6f agent) |
-| 3. Control plane | Done, unit tested (3b9ae43): migration 0040, tunnel_loop.rs, heartbeat and snapshot. No database test yet |
+| 3. Control plane | Done (3b9ae43): migration 0040, tunnel_loop.rs, heartbeat and snapshot. Unit tested, and end to end against the fake Cloudflare and a throwaway Postgres in CI |
 | 4. Traffic choice, switching | API, MCP and CLI written (3b9ae43, a47f92e). Dashboard merged (06dfbba, `tsc` passes): Traffic panel, tunnel badge, record line, add and remove domain |
 | 5. Ports, connect.sh, alerts | Public ports Service and tunnel alerts written. connect.sh keeps its line (see Decisions) |
-| 6. Docs, e2e, real-zone test, Pyo Ops | Not started (real zone and Pyo Ops need the user) |
+| 6. Docs, e2e, gaps, free domains | Done except the real-zone test and Pyo Ops (both need the user): fake Cloudflare and the loop test (0394f36), gaps and free domains (e36141e, d135ff0), gate e2e written, not run (d8e1a16), pyo-docs branch `docs/cloudflare-tunnel` (011a38f, ec36fd2) |
 
 Where things are:
 
@@ -1608,31 +1608,28 @@ CLI tunnel tests pass on it.
 
 Next:
 
-1. Regenerate pyo-docs' `openapi/pyo.json` with the Phase 6 docs.
-2. Dashboard gaps: the new-service wizard has no tunnel switch, no
-   warning for deeper names (a.b.example.com), and "Certificate:
-   <reason>" shows only through `tunnel.error`.
-3. A DATABASE_URL test (ignored by default, like install.rs's) for the
-   migration and the ops: traffic switch, switch and revert rows,
-   removeCloudflare refused.
-4. Phase 6: pyo-docs pages, `scripts/tunnel-gate-e2e.sh`,
-   `scripts/fake-cloudflare/` with `PYO_DEV_CLOUDFLARE_API`.
+1. Final `cargo clippy -D warnings` and the full suites on the Phase 6
+   commits (waiting for disk above 60 GB).
+2. With the user's OK: run `scripts/tunnel-gate-e2e.sh` (docker), and the
+   real-zone test (§17.4) on a throwaway zone.
+3. After 0.51.0 merges: regenerate pyo-docs' generated pages, merge
+   pyo-docs' `docs/cloudflare-tunnel`, then the Pyo Ops move (§14).
+4. Dashboard: no warning for deeper names (a.b.example.com) when
+   switching, and "Certificate: <reason>" shows only through `tunnel.error`.
 
 Known gaps:
 
-- Free domains in tunnel mode (`freedomain::Mode::Tunnel`,
-  `<service>-<namespace>.<default domain>`) aren't built. The default
-  domain's wildcard record and route are.
-- `GET /clusters/{id}/tunnel` returns the stored view (Cloudflare is read
-  every 2 minutes), not a fresh read.
-- A service deleted while its domain goes through the tunnel leaves its
-  CNAME (its dns_records row cascades away before the loop sees it).
-- Pyo Cloud's domain proof TXT (`_pyo-verify`) isn't written by Switch to
-  Tunnel. Domains were verified when added.
-- A domain moved between clusters isn't removed from the other tunnel
-  first.
-- The cluster-delete op doesn't wait for tunnel removal (§11).
 - Nothing tested against a real Cloudflare account (needs the user's
-  approval and a throwaway zone).
+  approval and a throwaway zone, §17.4).
+- `scripts/tunnel-gate-e2e.sh` is written but not run: it needs docker
+  (pulls `envoyproxy/envoy:distroless-v1.39.5` and `curlimages/curl`).
+- The loop's end-to-end test (`cloudflare::http_tests::the_tunnel_loop_end_to_end`)
+  needs a throwaway Postgres: CI runs it (ci.yml's Postgres job), it
+  wasn't run on the laptop.
+- pyo-docs' generated pages (`openapi/pyo.json`, `content/cli/commands.mdx`,
+  `content/mcp/tools.mdx`) are regenerated once all 0.51.0 branches are
+  merged. `openapi::tests::docs_copy_is_current` stays red until then.
+- Previews in tunnel mode still name preview domains from the cluster's
+  address (§11 says under the default domain).
 - `dash/node_modules` in the worktrees is a symlink to the main
   checkout's, for `tsc` only (ignored by git).
