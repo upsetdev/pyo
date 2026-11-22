@@ -48,13 +48,93 @@ export function dumpError(engine: "postgres" | "mysql", name: string) {
   return engine === "postgres" ? "A .sql, .sql.gz or .dump (pg_dump -Fc) file." : "A .sql or .sql.gz file (mysqldump).";
 }
 
-/** Where to send a dump's file: `createDatabaseDumpUpload`'s answer. */
-type UploadTarget = { uploadId: string; uploadUrl: string; method: string; headers: Record<string, string>; expiresAt: number };
+/** How to send a dump's file: `createDatabaseDumpUpload`'s answer. */
+type UploadTarget = { uploadId: string; partSize: number; parts: number };
+
+/** Tries for each request of an upload. */
+const TRIES = 6;
+
+const stopped = () => new ApiError("The upload was stopped.", 0);
+
+/** Whether a failed request is worth sending again: no answer, or a passing problem. */
+const passing = (e: unknown) => e instanceof ApiError && (e.status === 0 || e.status >= 500 || e.status === 408 || e.status === 429);
+
+function wait(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    const stop = () => {
+      clearTimeout(t);
+      reject(stopped());
+    };
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", stop);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", stop, { once: true });
+  });
+}
+
+/** Send again on a passing problem, waiting longer each time. */
+async function withRetries<T>(send: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  for (let tries = 1; ; tries++) {
+    try {
+      return await send();
+    } catch (e) {
+      if (signal?.aborted) throw stopped();
+      if (tries >= TRIES || !passing(e)) throw e;
+      await wait(Math.min(30, 2 ** tries) * 1000, signal);
+    }
+  }
+}
+
+/** A part's SHA-256 in hex, where the browser can tell (HTTPS or localhost). */
+async function sha256(data: ArrayBuffer): Promise<string | undefined> {
+  if (!globalThis.crypto?.subtle) return undefined;
+  const d = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** One part of an upload. `onSent` gets the bytes of it sent so far. */
+function sendPart(url: string, data: ArrayBuffer, sha: string | undefined, onSent: (n: number) => void, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(stopped());
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("x-pyo-csrf", "1");
+    xhr.setRequestHeader("content-type", "application/octet-stream");
+    if (sha) xhr.setRequestHeader("x-pyo-sha256", sha);
+    xhr.upload.onprogress = (e) => onSent(e.loaded);
+    const stop = () => xhr.abort();
+    signal?.addEventListener("abort", stop, { once: true });
+    const done = () => signal?.removeEventListener("abort", stop);
+    xhr.onabort = () => {
+      done();
+      reject(stopped());
+    };
+    xhr.onerror = () => {
+      done();
+      reject(new ApiError("The upload broke off. Check your connection.", 0));
+    };
+    xhr.onload = () => {
+      done();
+      if (xhr.status >= 200 && xhr.status < 300) return resolve();
+      let error = "";
+      try {
+        const data = JSON.parse(xhr.responseText) as { error?: unknown };
+        if (typeof data?.error === "string") error = data.error;
+      } catch {
+        error = "";
+      }
+      reject(new ApiError(error || `Upload failed (${xhr.status})`, xhr.status));
+    };
+    xhr.send(data);
+  });
+}
 
 /**
- * Upload a dump into the team's storage, in two steps: say what it is, then
- * send it where Pyo says. That URL may be on another host, so it gets only
- * the headers Pyo gives (no cookies). `onProgress` gets 0 to 1.
+ * Upload a dump into the team's storage: say what it is, then send it in
+ * the parts Pyo asks for, in order, each sent again on a passing problem.
+ * Parts keep each request small enough for a proxy in front (Cloudflare
+ * takes at most 100 MB). `onProgress` gets 0 to 1.
  */
 export async function uploadDump(
   teamId: string,
@@ -70,40 +150,18 @@ export async function uploadDump(
     size: file.size,
     contentType: file.type || undefined,
   });
-  if (signal?.aborted) throw new ApiError("The upload was stopped.", 0);
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open(t.method || "PUT", new URL(t.uploadUrl, window.location.origin).toString());
-    xhr.withCredentials = false;
-    for (const [k, v] of Object.entries(t.headers ?? {})) xhr.setRequestHeader(k, v);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(e.loaded / e.total);
-    };
-    const stop = () => xhr.abort();
-    signal?.addEventListener("abort", stop, { once: true });
-    const done = () => signal?.removeEventListener("abort", stop);
-    xhr.onabort = () => {
-      done();
-      reject(new ApiError("The upload was stopped.", 0));
-    };
-    xhr.onerror = () => {
-      done();
-      reject(new ApiError("The upload broke off. Check your connection.", 0));
-    };
-    xhr.onload = () => {
-      done();
-      if (xhr.status >= 200 && xhr.status < 300) return resolve({ uploadId: t.uploadId });
-      let error = "";
-      try {
-        const data = JSON.parse(xhr.responseText) as { error?: unknown };
-        if (typeof data?.error === "string") error = data.error;
-      } catch {
-        error = "";
-      }
-      reject(new ApiError(error || `Upload failed (${xhr.status})`, xhr.status));
-    };
-    xhr.send(file);
-  });
+  const base = `/api/v1/database-imports/uploads/${encodeURIComponent(t.uploadId)}`;
+  let sent = 0;
+  for (let n = 0; n < t.parts; n++) {
+    if (signal?.aborted) throw stopped();
+    const data = await file.slice(n * t.partSize, Math.min(file.size, (n + 1) * t.partSize)).arrayBuffer();
+    const sha = await sha256(data);
+    await withRetries(() => sendPart(`${base}/parts/${n}`, data, sha, (b) => onProgress((sent + b) / file.size), signal), signal);
+    sent += data.byteLength;
+    onProgress(sent / file.size);
+  }
+  await withRetries(() => post(`${base}/complete`, {}), signal);
+  return { uploadId: t.uploadId };
 }
 
 /** What a check found: the source's version and size, and the extensions turned on first. */

@@ -18,6 +18,30 @@ impl std::fmt::Display for NeedsConfirm {
 
 impl std::error::Error for NeedsConfirm {}
 
+/// Pyo answered with an error: its status and message (what it shows).
+#[derive(Debug)]
+pub struct Refused {
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Whether a request that failed with `e` is worth sending again: Pyo
+/// wasn't reached, or it (or a proxy in front) had a passing problem.
+pub fn retryable(e: &anyhow::Error) -> bool {
+    match e.downcast_ref::<Refused>() {
+        Some(r) => r.status >= 500 || r.status == 408 || r.status == 429,
+        None => true,
+    }
+}
+
 pub struct Api {
     pub base: String,
     token: String,
@@ -64,7 +88,11 @@ impl Api {
             if body["needsConfirm"] == true {
                 return Err(NeedsConfirm(msg).into());
             }
-            bail!(msg);
+            return Err(Refused {
+                status: status.as_u16(),
+                message: msg,
+            }
+            .into());
         }
         Ok(body)
     }
@@ -90,6 +118,19 @@ impl Api {
             self.http
                 .put(format!("{}{path}", self.base))
                 .header("content-type", "application/octet-stream")
+                .timeout(std::time::Duration::from_secs(300))
+                .body(body),
+        )
+        .await
+    }
+
+    /// A part of an upload with its SHA-256 (hex), which Pyo checks.
+    pub async fn put_part(&self, path: &str, body: Vec<u8>, sha256: &str) -> Result<Value> {
+        self.send(
+            self.http
+                .put(format!("{}{path}", self.base))
+                .header("content-type", "application/octet-stream")
+                .header("x-pyo-sha256", sha256)
                 .timeout(std::time::Duration::from_secs(300))
                 .body(body),
         )
@@ -254,6 +295,24 @@ pub fn now_ms() -> i64 {
 mod error_tests {
     use super::*;
     use reqwest::StatusCode;
+
+    #[test]
+    fn only_passing_problems_are_retried() {
+        let refused = |status| {
+            anyhow::Error::from(Refused {
+                status,
+                message: "x".into(),
+            })
+        };
+        assert!(retryable(&anyhow!("Can't reach Pyo")));
+        assert!(retryable(&refused(502)) && retryable(&refused(524)));
+        assert!(retryable(&refused(429)));
+        assert!(!retryable(&refused(400)) && !retryable(&refused(409)));
+        assert_eq!(refused(400).to_string(), "x");
+        assert!(!retryable(
+            &refused(410).context("The upload broke off. Try again.")
+        ));
+    }
 
     #[test]
     fn failed_requests_say_why() {

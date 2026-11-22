@@ -174,9 +174,11 @@ impl std::fmt::Display for TooBig {
 
 impl std::error::Error for TooBig {}
 
-/// "12.3 MB", "980 KB".
+/// "3.5 GB", "12.3 MB", "980 KB".
 pub fn size_text(b: u64) -> String {
-    if b >= 1_000_000 {
+    if b >= 1_000_000_000 {
+        format!("{:.1} GB", b as f64 / 1_000_000_000.0)
+    } else if b >= 1_000_000 {
         format!("{:.1} MB", b as f64 / 1_000_000.0)
     } else {
         format!("{} KB", b.div_ceil(1000))
@@ -267,36 +269,39 @@ pub fn pack(files: &[Entry], limit: u64, mut tick: impl FnMut(usize)) -> Result<
 }
 
 /// One line that rewrites itself on a terminal, at most every 100 ms.
-struct Progress {
+/// Elsewhere (a CI log, say) a line of its own, at most every 30 seconds.
+pub(crate) struct Progress {
     tty: bool,
     last: Option<Instant>,
 }
 
 impl Progress {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             tty: std::io::stderr().is_terminal(),
             last: None,
         }
     }
 
-    fn show(&mut self, text: &str, force: bool) {
-        if !self.tty {
-            return;
-        }
-        if !force
-            && self
-                .last
-                .is_some_and(|t| t.elapsed() < Duration::from_millis(100))
-        {
+    pub(crate) fn show(&mut self, text: &str, force: bool) {
+        let every = if self.tty {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(30)
+        };
+        if !force && self.last.is_some_and(|t| t.elapsed() < every) {
             return;
         }
         self.last = Some(Instant::now());
-        eprint!("\r\x1b[2K{}", ui::dim(text));
-        let _ = std::io::stderr().flush();
+        if self.tty {
+            eprint!("\r\x1b[2K{}", ui::dim(text));
+            let _ = std::io::stderr().flush();
+        } else {
+            eprintln!("{text}");
+        }
     }
 
-    fn done(&mut self) {
+    pub(crate) fn done(&mut self) {
         if self.tty && self.last.is_some() {
             eprint!("\r\x1b[2K");
             let _ = std::io::stderr().flush();
@@ -617,6 +622,7 @@ mod tests {
     #[test]
     fn sizes_in_words() {
         assert_eq!(size_text(12_345_678), "12.3 MB");
+        assert_eq!(size_text(3_456_789_012), "3.5 GB");
         assert_eq!(size_text(980_001), "981 KB");
         assert_eq!(size_text(1), "1 KB");
     }
