@@ -33,6 +33,10 @@ export function useClusterDraft(
   const s = usePyo();
   const [draft, setDraft] = useState<ClusterDraft | null>(null);
   const draftRef = useRef<ClusterDraft | null>(null);
+  // Every cluster this form made. One it took back to start over stays in
+  // the store until the next snapshot, and mustn't read as another cluster
+  // with the form's name, or as this machine's.
+  const [mine, setMine] = useState<string[]>([]);
   const kept = useRef(false);
   useEffect(() => {
     const discard = () => {
@@ -51,7 +55,7 @@ export function useClusterDraft(
   // A hosted Pyo runs outside every team's servers, so there it's never offered.
   const hosted = useHosted();
   const local = hosted ? undefined : clustersIn(s).find((c) => c.sameCluster);
-  const otherLocal = local && local.id !== draft?.id ? local : undefined;
+  const otherLocal = local && !mine.includes(local.id) ? local : undefined;
   const [picked, setWhere] = useState<"local" | "other">(() =>
     !local && !clustersIn(s).length ? "local" : "other",
   );
@@ -65,7 +69,7 @@ export function useClusterDraft(
       ? "Lowercase letters, digits and dashes."
       : RESERVED_CLUSTER_NAMES.includes(name)
         ? "That name is reserved."
-        : clustersIn(s).some((c) => c.name === name && c.id !== draft?.id)
+        : clustersIn(s).some((c) => c.name === name && !mine.includes(c.id))
           ? "A cluster with this name exists."
           : "";
   const showForm = !(thisMachine && otherLocal);
@@ -110,6 +114,7 @@ export function useClusterDraft(
         };
         draftRef.current = made;
         setDraft(made);
+        setMine((ids) => [...ids, id]);
         return { data: made };
       });
       chain.current = next.catch(() => undefined);
