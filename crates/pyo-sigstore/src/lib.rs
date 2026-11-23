@@ -1,6 +1,9 @@
 //! Checks a Sigstore bundle (`cosign sign-blob --bundle`, keyless) for a
 //! file: what the release workflow makes for release.json, so the
-//! dashboard's updates use only a release Pyo's own workflow signed.
+//! dashboard's updates (pyo-api) and the verifier on a customer's server
+//! (pyo-verify) use only a release Pyo's own workflow signed.
+//!
+//! The trust root is compiled in. Nothing here takes another one.
 //!
 //! The trust is Sigstore's public instance, as of its trusted root
 //! (assets/): Fulcio's root and intermediate (valid to 2031) and
@@ -49,6 +52,31 @@ pub const RELEASE_SIGNER: Signer<'static> = Signer {
     exact: false,
     issuer: "https://token.actions.githubusercontent.com",
 };
+
+/// Pyo's release workflow at the tag of one version, and no other: see
+/// `release_signer_for`.
+pub struct ReleaseSigner {
+    identity: String,
+}
+
+impl ReleaseSigner {
+    pub fn signer(&self) -> Signer<'_> {
+        Signer {
+            identity_prefix: &self.identity,
+            exact: true,
+            issuer: RELEASE_SIGNER.issuer,
+        }
+    }
+}
+
+/// Pyo's release workflow at exactly the tag `v<version>`. Unlike
+/// `RELEASE_SIGNER` (any version tag), a release signed at one tag doesn't
+/// pass as another version's. `version` is the caller's to validate.
+pub fn release_signer_for(version: &str) -> ReleaseSigner {
+    ReleaseSigner {
+        identity: format!("{}{version}", RELEASE_SIGNER.identity_prefix),
+    }
+}
 
 /// upsetdev/pyo-sandbox-images' release workflow, on main: what signs its
 /// images.json (sandbox/images.rs).
@@ -120,6 +148,20 @@ fn signed_by(cert: &X509Certificate, issuer: &X509Certificate) -> bool {
 
 /// Checks `bundle` (a Sigstore bundle, JSON) for `blob`, signed by `signer`.
 pub fn verify(blob: &[u8], bundle: &str, signer: &Signer) -> anyhow::Result<()> {
+    verify_logged(blob, bundle, signer).map(|_| ())
+}
+
+/// What a bundle that checks out also says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verified {
+    /// When Rekor took the signature into its log (seconds since 1970):
+    /// Rekor's `integratedTime`, which its signed entry timestamp covers.
+    /// It is the log's word, not the signer's and not a local clock's.
+    pub integrated_time: i64,
+}
+
+/// `verify`, and when Rekor logged the signature.
+pub fn verify_logged(blob: &[u8], bundle: &str, signer: &Signer) -> anyhow::Result<Verified> {
     let b: Value = serde_json::from_str(bundle).context("the signature isn't a Sigstore bundle")?;
     let vm = &b["verificationMaterial"];
     let leaf_der = match vm["certificate"]["rawBytes"].as_str() {
@@ -297,7 +339,9 @@ pub fn verify(blob: &[u8], bundle: &str, signer: &Signer) -> anyhow::Result<()> 
     if !ecdsa_ok(&curve, "sha256", key, blob, &signature) {
         bail!("the signature doesn't match the file");
     }
-    Ok(())
+    Ok(Verified {
+        integrated_time: integrated,
+    })
 }
 
 #[cfg(test)]
@@ -317,6 +361,53 @@ mod tests {
     #[test]
     fn a_real_bundle_checks_out() {
         verify(BLOB, BUNDLE, &COSIGN).unwrap();
+    }
+
+    /// Pyo's release 0.5.4: its release.json and the bundle the release
+    /// workflow made for it.
+    const RELEASE: &[u8] = include_bytes!("../assets/testdata/release-0.5.4/release.json");
+    const RELEASE_BUNDLE: &str =
+        include_str!("../assets/testdata/release-0.5.4/release.json.sigstore.json");
+
+    #[test]
+    fn a_release_is_signed_at_its_own_tag_only() {
+        let at = |v: &str| verify_logged(RELEASE, RELEASE_BUNDLE, &release_signer_for(v).signer());
+        // Rekor's time comes back with it.
+        assert_eq!(at("0.5.4").unwrap().integrated_time, 1_795_294_220);
+        verify(RELEASE, RELEASE_BUNDLE, &RELEASE_SIGNER).unwrap();
+        // Exact: not a version this one's tag starts with or continues, and
+        // not another one.
+        for other in ["0.5", "0.5.40", "0.5.4-rc.1", "0.5.5", "0.5.3", "", "0.5.4 "] {
+            let e = format!("{:#}", at(other).unwrap_err());
+            assert!(
+                e.contains("signed by https://github.com/upsetdev/pyo/.github/workflows/release.yml@refs/tags/v0.5.4, not"),
+                "{other:?}: {e}"
+            );
+        }
+        let s = release_signer_for("0.51.0");
+        assert_eq!(
+            s.signer().identity_prefix,
+            "https://github.com/upsetdev/pyo/.github/workflows/release.yml@refs/tags/v0.51.0"
+        );
+        assert!(s.signer().exact);
+        assert_eq!(s.signer().issuer, "https://token.actions.githubusercontent.com");
+        // Another file under that signature.
+        let mut other = RELEASE.to_vec();
+        other[20] ^= 1;
+        assert!(verify_logged(&other, RELEASE_BUNDLE, &release_signer_for("0.5.4").signer()).is_err());
+    }
+
+    #[test]
+    fn the_logged_time_is_rekors() {
+        assert_eq!(
+            verify_logged(BLOB, BUNDLE, &COSIGN).unwrap().integrated_time,
+            serde_json::from_str::<Value>(BUNDLE).unwrap()["verificationMaterial"]["tlogEntries"][0]
+                ["integratedTime"]
+                .as_str()
+                .unwrap()
+                .parse::<i64>()
+                .unwrap()
+        );
     }
 
     #[test]
