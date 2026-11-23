@@ -1730,7 +1730,7 @@ static PUBLIC_REFUSED: std::sync::Mutex<Option<(bool, String)>> = std::sync::Mut
 
 /// Said once in the agent's log when the cluster's install refuses the
 /// proxies' priority.
-pub const PRIORITY_LEFT_OUT: &str = "This cluster's install is older than Pyo's. Run the connect command in the cluster's settings so the proxies keep running on a server short of disk.";
+pub const PRIORITY_LEFT_OUT: &str = "This cluster needs a refresh. Run the command under Refresh this cluster in the cluster's settings so the proxies keep running on a server short of disk.";
 
 /// Whether the agent last wrote the proxies' settings without their
 /// priority because the install refused it.
