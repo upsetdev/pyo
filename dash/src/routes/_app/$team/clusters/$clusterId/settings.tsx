@@ -4,6 +4,7 @@ import { useState } from "react";
 import { RESERVED_CLUSTER_NAMES } from "~/lib/pyo/location";
 import { AgentInstall, Command } from "~/components/pyo/AgentInstall";
 import { ClusterMtls } from "~/components/pyo/Mtls";
+import { DATABASES_RESTART } from "~/components/pyo/UpdateSettings";
 import {
   olderVersion,
   useHosted,
@@ -246,6 +247,9 @@ function ClusterSettings({ c }: { c: Cluster }) {
               <p className="text-[12px] text-muted-foreground">
                 Applies Pyo's latest host settings, like the memory reserve for
                 k3s.
+                {install.state === "outdated" && c.databasesRestart
+                  ? ` ${DATABASES_RESTART}.`
+                  : ""}
               </p>
             </div>
             <Command value={install.command} />

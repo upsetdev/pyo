@@ -29,6 +29,9 @@ import { Arrow } from "~/components/ui/Arrow";
 import { useHosted } from "~/components/pyo/Managed";
 import { MenuPath } from "~/components/ui/MenuPath";
 
+/** Said wherever an update moves databases to new images. */
+export const DATABASES_RESTART = "Restarts your databases once";
+
 // Updates of Pyo itself: the version it runs, the latest release, how it
 // updates (an admin, or automatically in a weekly window) and the update
 // dialog listing everything that changes. Installation-wide, for its admin.
@@ -233,6 +236,7 @@ function Status({ u, onOpen }: { u: Updates; onOpen: () => void }) {
           : u.settings.mode === "auto"
             ? `It's applied automatically in the next window (${windowText(u.settings)}), or now.`
             : "See what changes before you update."}
+        {u.plan?.databasesRestart ? ` ${DATABASES_RESTART}.` : ""}
       </StatusNote>
     );
   if (lastFailed)
@@ -563,6 +567,17 @@ export function UpdateDialog({
                   }
                 />
               ))}
+              {plan.databasesRestart ? (
+                <li className="flex items-start gap-3 px-3 py-2.5">
+                  <WarningIcon
+                    size={15}
+                    className="mt-0.5 shrink-0 text-warning"
+                  />
+                  <p className="min-w-0 flex-1 font-medium">
+                    {DATABASES_RESTART}
+                  </p>
+                </li>
+              ) : null}
               <li className="flex items-start gap-3 px-3 py-2.5">
                 <DatabaseIcon
                   size={15}
