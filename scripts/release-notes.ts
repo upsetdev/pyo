@@ -5,11 +5,17 @@
 //   bun run scripts/release-notes.ts --to v0.2.3 > notes.md
 //   bun run scripts/release-notes.ts --from v0.2.1 --to v0.2.2
 //
-// --from defaults to the highest version tag below --to. The changes are
-// the commits reachable from --to and from no earlier version tag (so a
-// hotfix released on its own line isn't listed again), merge commits left
-// out but the commits they bring in kept. A commit whose subject was
-// already released, or appears twice (a cherry-pick), is listed once.
+// Only a version tag with a published GitHub release counts as a release
+// here: not a draft, not a pre-release (`gh release list`). A tag whose
+// release was never published (0.5.5's was cancelled) is left out, so its
+// commits go in the next release's notes. --offline counts every version
+// tag.
+//
+// --from defaults to the highest release below --to. The changes are the
+// commits reachable from --to and from no earlier release (so a hotfix
+// released on its own line isn't listed again), merge commits left out but
+// the commits they bring in kept. A commit whose subject was already
+// released, or appears twice (a cherry-pick), is listed once.
 //
 // Sections, in this order and only when they have something:
 // Features (feat), Bug Fixes (fix), Security Fixes, Performance (perf),
@@ -168,6 +174,20 @@ function versionTags(): string[] {
     .sort(compareTags);
 }
 
+// The tags with a published release: not a draft, not a pre-release.
+function publishedTags(): Set<string> {
+  try {
+    const out = run("gh", [
+      "release", "list", "-R", REPO, "--exclude-drafts", "--exclude-pre-releases",
+      "--limit", "1000", "--json", "tagName", "--jq", ".[].tagName",
+    ]);
+    return new Set(out.split("\n").filter(Boolean));
+  } catch (e) {
+    console.error(`release-notes: couldn't list the published releases with gh (--offline counts every version tag): ${e}`);
+    process.exit(1);
+  }
+}
+
 function readCommits(range: string[]): Commit[] {
   const raw = git("log", "--no-merges", "--reverse", "--topo-order", "--format=%H%x1f%s%x1f%b%x1e", ...range);
   return raw
@@ -211,7 +231,9 @@ function main() {
     console.error("release-notes: --to is required");
     process.exit(1);
   }
-  const earlier = versionTags().filter((t) => compareTags(t, to) < 0);
+  const tags = versionTags().filter((t) => compareTags(t, to) < 0);
+  const published = args.has("offline") ? null : publishedTags();
+  const earlier = published ? tags.filter((t) => published.has(t)) : tags;
   const from = args.get("from") ?? earlier.at(-1) ?? null;
   const commits = readCommits([to, ...earlier.map((t) => `^${t}`)]);
   const released = earlier.length ? readCommits(earlier).map((c) => c.subject) : [];
