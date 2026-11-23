@@ -1054,6 +1054,12 @@ pub fn admission_with(
 // agent, still needs the cluster's connect command. Without the role, the
 // connect command does all of it.
 //
+// A refresh that can't bring every role still brings the rest: the policy
+// (which only narrows what the roles allow) and the image pins. Its stamp
+// then names what was left ([`stamp`]), the agent reports those
+// (`AgentScope::roles_older`), and Pyo holds back only what needs them
+// until the connect command runs.
+//
 // What that role means: its holder can write any rule into the agent's own
 // roles, so whoever controls Pyo can reach cluster-admin on the cluster.
 // That was already so with this role before it could write roles: the
@@ -1070,9 +1076,10 @@ pub const INSTALL_ANNOTATION: &str = "pyo.dev/install";
 /// Optional: the agent may rewrite its own admission policy and update its
 /// own roles and bindings. Deleting its binding takes that away.
 pub const SELF_UPDATE_ROLE: &str = "pyo-agent-self-update";
-/// How a refresh's failure starts when the agent's roles aren't Pyo's
-/// (0.5.5's agent says the same): only the cluster's connect command
-/// changes them, so Pyo doesn't send that refresh again.
+/// How a refresh's failure starts when the agent's roles aren't Pyo's, as
+/// 0.5.5's agent says it (it never writes them, and stops there): only
+/// the cluster's connect command changes them, so Pyo doesn't send that
+/// agent the refresh again.
 pub const ROLES_OLDER: &str = "this agent's roles are older than Pyo's";
 /// The agent Deployment's env that pins system images: what a refresh
 /// changes of it, with its pods' priority and tolerations.
@@ -1244,10 +1251,53 @@ fn short_hash(doc: &Value) -> String {
         .collect()
 }
 
+/// Between an install's hash and the roles a refresh left as they were, in
+/// its stamp.
+const STAMP_EXCEPT: &str = " except ";
+
+/// An install's stamp ([`INSTALL_ANNOTATION`]): its hash, and after a
+/// refresh that couldn't bring every role, the ones left as they were
+/// ("Kind/name" or "Kind/namespace/name").
+pub fn stamp(hash: &str, older: &[String]) -> String {
+    if older.is_empty() {
+        hash.to_owned()
+    } else {
+        format!("{hash}{STAMP_EXCEPT}{}", older.join(","))
+    }
+}
+
+/// A [`stamp`]'s hash and the roles left as they were.
+pub fn parse_stamp(stamp: &str) -> (String, Vec<String>) {
+    match stamp.split_once(STAMP_EXCEPT) {
+        Some((hash, older)) => (
+            hash.to_owned(),
+            older
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        ),
+        None => (stamp.to_owned(), vec![]),
+    }
+}
+
+/// Whether roles a refresh left as they were (`older`) hold back the system
+/// bundles (the databases system, the WAF, Pyo Static): the bundles' own
+/// two roles (their cluster-wide names are in them), or a chart installed
+/// with the agent. Any other role leaves them free to install and update.
+pub fn bundles_held_back(older: &[String]) -> bool {
+    older.iter().any(|k| {
+        k.starts_with("HelmChart/")
+            || [bundles::CLUSTER_ROLE, bundles::WRITE_ROLE]
+                .iter()
+                .any(|r| k.rsplit('/').next() == Some(r) && k.contains("Role"))
+    })
+}
+
 /// Whether a cluster's install, as its agent reports it, is Pyo's.
 pub fn install_current(scope: &AgentScope, expected: &str) -> bool {
     match scope.admission.as_str() {
-        "enforced" => scope.install == expected,
+        "enforced" => scope.install == expected && scope.roles_older.is_empty(),
         // The cluster has admission policies but not the agent's: only its
         // connect command puts it back.
         "missing" => false,
@@ -1314,6 +1364,13 @@ pub struct AgentScope {
     /// It may refresh its admission policy ([`SELF_UPDATE_ROLE`] is bound).
     #[serde(default)]
     pub self_update: bool,
+    /// The roles of [`AgentScope::install`] that a refresh left as they
+    /// were, from its stamp ([`parse_stamp`]): the install is current
+    /// except for these, until the connect command runs. The agent doesn't
+    /// compare its roles itself at each heartbeat: it only knows its own
+    /// release's, which aren't Pyo's while it's being updated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles_older: Vec<String>,
     /// The cluster's admission policy is older than the agent's and refused
     /// the client policies that remove client-sent visitor headers, so the
     /// agent wrote them without that (`gateway.rs` `write_client_policy`).
@@ -2323,6 +2380,45 @@ mod tests {
         assert_eq!(a.pins["PYO_DB_CONTROLLER_IMAGE"], "c");
         assert_eq!(a.pins["PYO_POSTGRES_IMAGE_18"], "p18");
         assert_eq!(others[2].pins["PYO_DB_CONTROLLER_IMAGE"], "c2");
+    }
+
+    /// A refresh that left roles behind stamps them, and that install
+    /// isn't current.
+    #[test]
+    fn a_stamp_names_the_roles_left_behind() {
+        assert_eq!(stamp("abc", &[]), "abc");
+        assert_eq!(parse_stamp("abc"), ("abc".to_owned(), vec![]));
+        let older = vec!["Role/pyo-gateway/pyo-agent".to_owned(), "ClusterRole/pyo-agent-self-update".to_owned()];
+        let s = stamp("abc", &older);
+        assert_eq!(s, "abc except Role/pyo-gateway/pyo-agent,ClusterRole/pyo-agent-self-update");
+        assert_eq!(parse_stamp(&s), ("abc".to_owned(), older.clone()));
+        assert_eq!(parse_stamp(""), (String::new(), vec![]));
+        let scope = AgentScope {
+            admission: "enforced".into(),
+            install: "abc".into(),
+            roles_older: older.clone(),
+            ..Default::default()
+        };
+        assert!(!install_current(&scope, "abc"));
+        // Agents that don't say (0.5.5's) read as before, and a full
+        // install's scope carries no such field.
+        let wire = serde_json::to_value(AgentScope { roles_older: vec![], ..scope.clone() }).unwrap();
+        assert!(wire.get("rolesOlder").is_none());
+        let read: AgentScope = serde_json::from_value(wire).unwrap();
+        assert!(install_current(&read, "abc"));
+        assert_eq!(serde_json::to_value(&scope).unwrap()["rolesOlder"], json!(older));
+        // What holds the bundles back: their own roles, or a chart.
+        assert!(!bundles_held_back(&older));
+        assert!(!bundles_held_back(&[]));
+        for k in [
+            format!("ClusterRole/{}", bundles::CLUSTER_ROLE),
+            format!("ClusterRoleBinding/{}", bundles::CLUSTER_ROLE),
+            format!("ClusterRole/{}", bundles::WRITE_ROLE),
+            "HelmChart/kube-system/cert-manager".to_owned(),
+        ] {
+            assert!(bundles_held_back(&[older[0].clone(), k.clone()]), "{k}");
+        }
+        assert!(!bundles_held_back(&["ClusterRole/pyo-agent-write".to_owned()]));
     }
 
     #[test]

@@ -360,15 +360,17 @@ async fn installed(
         .await?)
 }
 
-/// Whether the cluster's install (its agent's admission policy) is this
-/// Pyo's, as its last heartbeat found (install.rs): an older one refuses
-/// this Pyo's bundles, so updates wait for it.
+/// Whether the cluster's install lets this Pyo's bundles in, as its last
+/// heartbeat found (install.rs `bundles_ready`): its admission policy is
+/// this Pyo's, and so are the bundles' own roles. An older policy refuses
+/// this Pyo's bundles, so updates wait for it. Other roles a refresh left
+/// behind don't hold them back.
 async fn install_current(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> ApiResult<bool> {
-    Ok(sqlx::query_scalar("SELECT coalesce(capabilities->'agentInstall'->>'state', 'current') = 'current' FROM pyo.clusters WHERE id = $1")
+    let row: Option<(Option<String>, Option<bool>)> = sqlx::query_as("SELECT capabilities->'agentInstall'->>'state', (capabilities->'agentInstall'->>'bundles')::boolean FROM pyo.clusters WHERE id = $1")
         .bind(cluster_id)
         .fetch_optional(&mut **tx)
-        .await?
-        .unwrap_or(true))
+        .await?;
+    Ok(row.is_none_or(|(state, bundles)| crate::install::bundles_ready(state.as_deref(), bundles)))
 }
 
 fn busy(state: &str, stale: bool) -> bool {
@@ -456,13 +458,16 @@ pub async fn static_blocked(
     .bind(STATIC_ID)
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(static_needs_connect(&install, state.as_deref()))
+    let ready = install_current(tx, cluster_id).await?;
+    Ok(static_needs_connect(&install, ready, state.as_deref()))
 }
 
 /// [`static_blocked`]'s decision: an install that's updating itself gets
-/// there by itself, and one that already runs pyo-static keeps serving.
-fn static_needs_connect(install: &str, bundle: Option<&str>) -> bool {
-    install == "outdated" && bundle != Some("applied")
+/// there by itself, one that's current except for roles the bundles don't
+/// need (`ready`) takes pyo-static, and one that already runs pyo-static
+/// keeps serving.
+fn static_needs_connect(install: &str, ready: bool, bundle: Option<&str>) -> bool {
+    (install == "outdated" || (install == "roles" && !ready)) && bundle != Some("applied")
 }
 
 /// A bundle that runs only while something on the cluster needs it:
@@ -852,13 +857,17 @@ mod tests {
 
     #[test]
     fn static_deploys_wait_for_the_connect_command_only_when_they_must() {
-        assert!(static_needs_connect("outdated", None));
-        assert!(static_needs_connect("outdated", Some("failed")));
-        assert!(static_needs_connect("outdated", Some("installing")));
+        assert!(static_needs_connect("outdated", false, None));
+        assert!(static_needs_connect("outdated", false, Some("failed")));
+        assert!(static_needs_connect("outdated", false, Some("installing")));
+        // Current except for roles: only when those are the bundles' own.
+        assert!(static_needs_connect("roles", false, None));
+        assert!(!static_needs_connect("roles", true, None));
+        assert!(!static_needs_connect("roles", false, Some("applied")));
         // pyo-static from before the update keeps serving.
-        assert!(!static_needs_connect("outdated", Some("applied")));
-        assert!(!static_needs_connect("current", None));
-        assert!(!static_needs_connect("updating", None));
+        assert!(!static_needs_connect("outdated", false, Some("applied")));
+        assert!(!static_needs_connect("current", true, None));
+        assert!(!static_needs_connect("updating", false, None));
     }
 
     #[test]

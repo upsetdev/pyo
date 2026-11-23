@@ -367,6 +367,20 @@ What a refresh can't do, and still needs the connect command for:
   `pyo-agent-self-update` ClusterRoleBinding) **or read only.** Pyo sends it
   no refresh.
 
+When a refresh can't bring a role, it still brings the rest: the admission
+policy (it only narrows what the roles allow, so the new policy is safe
+with the roles as they are), the image pins, and with them the databases
+system, unless the roles left behind are the bundles' own
+(`pyo-agent-bundles`, `pyo-agent-bundle-write`) or a chart. The install's
+stamp then names the roles left behind, the cluster's settings show
+"Update needed" with "This cluster's agent needs an update for some
+features.", and only the features that need those roles wait for the
+command (Cloudflare Tunnel is one). This is also what 0.51.0's agent does
+on a 0.5.5 install before its owner runs the command. A feature that
+needs a new permission must check for it and point to **Refresh this
+cluster**, as `install_ready` in
+`crates/pyo-api/src/cloudflare/tunnel_ops.rs` does.
+
 The self-update role holds `update`, `escalate` and `bind` on the agent's
 own roles, by name. With it, whoever controls Pyo can give the agent any
 permission on the cluster, up to cluster-admin. That was already so while

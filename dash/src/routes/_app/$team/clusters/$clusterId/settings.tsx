@@ -224,7 +224,8 @@ function ClusterSettings({ c }: { c: Cluster }) {
                 ) : null}
                 {install?.state === "updating" ? (
                   <Badge tone="progress">Updating</Badge>
-                ) : install?.state === "outdated" ? (
+                ) : install?.state === "outdated" ||
+                  install?.state === "roles" ? (
                   <Badge tone="warning">
                     <span title={install.message}>Update needed</span>
                   </Badge>
