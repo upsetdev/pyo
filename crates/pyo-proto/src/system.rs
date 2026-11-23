@@ -735,6 +735,18 @@ pub fn envoy_proxy_public(spec: &Value) -> bool {
     spec["provider"]["kubernetes"]["envoyService"]["type"] != "ClusterIP"
 }
 
+/// [`envoy_proxy`] without its pods' priority: the proxies as an install
+/// whose admission policy is older than this agent's lists them (it
+/// compares their whole settings, and 0.5.5's had no priority). None when
+/// there's no priority to leave out.
+pub fn envoy_proxy_without_priority(proxy: &Value) -> Option<Value> {
+    let mut older = proxy.clone();
+    older["spec"]["provider"]["kubernetes"]["envoyDaemonSet"]["pod"]
+        .as_object_mut()?
+        .remove("priorityClassName")?;
+    Some(older)
+}
+
 pub fn gateway_class() -> Value {
     json!({
         "apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayClass",
@@ -1864,6 +1876,27 @@ mod tests {
         }
         // Kubernetes' built-in class for pods every server needs.
         assert_eq!(SERVER_CRITICAL, "system-node-critical");
+    }
+
+    /// An install older than this agent lists the proxies without their
+    /// priority: that shape differs from this release's by the priority
+    /// alone, published or not, and there's none to leave out twice.
+    #[test]
+    fn the_proxies_older_shape_drops_only_their_priority() {
+        for public in [true, false] {
+            let now = envoy_proxy("g", public);
+            let mut older = envoy_proxy_without_priority(&now).expect("a priority to leave out");
+            assert!(
+                older["spec"]["provider"]["kubernetes"]["envoyDaemonSet"]["pod"]
+                    .get("priorityClassName")
+                    .is_none()
+            );
+            assert_eq!(envoy_proxy_public(&older["spec"]), public);
+            assert_eq!(envoy_proxy_without_priority(&older), None);
+            older["spec"]["provider"]["kubernetes"]["envoyDaemonSet"]["pod"]["priorityClassName"] =
+                json!(SERVER_CRITICAL);
+            assert_eq!(older, now);
+        }
     }
 
     /// An update never leaves a server without a proxy: the new one starts
