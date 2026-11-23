@@ -133,7 +133,7 @@ pub async fn test(api: &Api, team_arg: Option<&str>) -> Result<()> {
 
 pub async fn zones(api: &Api, team_arg: Option<&str>) -> Result<()> {
     let team_id = team(api, team_arg).await?;
-    let v = api.get(&format!("/cloudflare?team={team_id}")).await?;
+    let v = api.get(&format!("/api/v1/cloudflare?team={team_id}")).await?;
     if v["connected"] != json!(true) {
         println!("Cloudflare isn't connected. Connect it: pyo cloudflare connect");
         return Ok(());
@@ -300,7 +300,7 @@ pub fn tunnel_line(t: &Value) -> String {
 
 pub async fn tunnel_status(api: &Api, team: Option<&str>, cluster: Option<&str>) -> Result<()> {
     let (id, name) = cluster_of(api, team, cluster).await?;
-    let v = api.get(&format!("/clusters/{id}/tunnel")).await?;
+    let v = api.get(&format!("/api/v1/clusters/{id}/tunnel")).await?;
     println!("{name}: traffic {}", v["traffic"].as_str().unwrap_or("public"));
     let t = &v["tunnel"];
     if t.is_null() {
