@@ -4209,6 +4209,121 @@ mod tests {
             Vec::<String>::new(),
             "the holder had no servers on it"
         );
+
+        // A new token: c keeps it now, and the old client is listed.
+        let agent = tokio::spawn(answers_for(
+            s.db.clone(),
+            c.clone(),
+            "tailscale_setup",
+            json!({ "ok": true, "changed": [], "todo": [], "error": null, "checks": [], "tokenDeleted": true, "reviewAgain": false,
+                    "client": { "clientId": "kNew", "hint": "…W" } }),
+        ));
+        set_up(
+            &s,
+            &Scope::Team(team.clone()),
+            "tskey-api-kAbc-0123456789abcdef".into(),
+            "v1",
+        )
+        .await
+        .unwrap();
+        agent.await.unwrap();
+        let tt = team_tailnet(&s.db, &team).await.unwrap().unwrap();
+        assert_eq!(
+            (tt.holder.as_deref(), tt.problem.as_deref()),
+            (Some(c.as_str()), None)
+        );
+        let old: Value =
+            sqlx::query_scalar("SELECT old_clients FROM pyo.team_tailscale WHERE team_id = $1")
+                .bind(&team)
+                .fetch_one(&s.db)
+                .await
+                .unwrap();
+        assert_eq!(old[0]["clientId"], "kT");
+        assert_eq!(old[0]["clusterId"], "", "its cluster is gone");
+    }
+
+    /// On Pyo Cloud every Tailscale command for the team's clusters is
+    /// signed for the holder: the cluster whose agent runs it. A member's
+    /// agent would refuse it.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn the_holders_commands_are_signed_for_the_holder() {
+        use pyo_proto::signing::{Claims, Refused, Signer, TrustedKeys};
+        struct Local(Signer);
+        impl crate::CommandSigner for Local {
+            fn sign<'a>(
+                &'a self,
+                cluster_id: &'a str,
+                items: &'a [crate::ToSign],
+            ) -> futures::future::BoxFuture<'a, anyhow::Result<Vec<crate::Signature>>> {
+                Box::pin(async move {
+                    let now = pyo_proto::now_ms() as u64;
+                    Ok(items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| {
+                            let (claims, sig) = self.0.sign(&Claims {
+                                v: 1,
+                                id: t.id.clone(),
+                                cluster: cluster_id.into(),
+                                seq: i as u64 + 1,
+                                iat: now,
+                                exp: now + 600_000,
+                                kind: t.kind.clone(),
+                                sha256: t.sha256.clone(),
+                            });
+                            crate::Signature {
+                                claims,
+                                sig,
+                                kid: self.0.kid().into(),
+                                refused: None,
+                                delegation: None,
+                            }
+                        })
+                        .collect())
+                })
+            }
+            fn sign_reply<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a crate::ReplyToSign,
+            ) -> futures::future::BoxFuture<'a, anyhow::Result<crate::Signature>> {
+                Box::pin(async { Err(anyhow::anyhow!("not here")) })
+            }
+            fn public_keys(&self) -> String {
+                self.0.public_key()
+            }
+        }
+        let (s, team, cl, suffix) = holder_team(3).await;
+        let h = &cl[0];
+        set_tailscale(&s.db, h, &own("kT", Some(&suffix))).await;
+        keep_team(&s.db, h, "kT", "…T", Some(&suffix))
+            .await
+            .unwrap();
+        sync_names(&s, Some(&team)).await.unwrap();
+        let got = pending(&s.db, h).await;
+        assert_eq!(got.len(), 3);
+        let out: Vec<pyo_proto::CommandEnvelope> = got
+            .iter()
+            .map(|(id, _, _, cmd)| pyo_proto::CommandEnvelope {
+                id: id.clone(),
+                command: serde_json::from_value(cmd.clone()).unwrap(),
+                signed: None,
+            })
+            .collect();
+        let signer = Local(Signer::from_pkcs8(&Signer::generate_pkcs8().unwrap()).unwrap());
+        let keys = TrustedKeys::parse(&crate::CommandSigner::public_keys(&signer)).unwrap();
+        let signed = crate::agent::sign_all(&s, &signer, h, out).await.unwrap();
+        assert_eq!(signed.len(), 3);
+        let now = pyo_proto::now_ms() as u64;
+        for e in &signed {
+            let c = keys.verify(e.signed.as_ref(), &e.id, h, 0, now).unwrap();
+            assert_eq!(c.kind, "tailscale_sync");
+            assert!(matches!(
+                keys.verify(e.signed.as_ref(), &e.id, &cl[1], 0, now),
+                Err(Refused::OtherCluster)
+            ));
+        }
     }
 
     // ── The team's Tailscale on Integrations ────────────────────────────────
