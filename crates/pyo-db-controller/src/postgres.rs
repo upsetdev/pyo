@@ -903,7 +903,22 @@ impl Kube<'_> {
                         .map(|b| b.last_archived_wal.clone())
                         .filter(|s| !s.is_empty())
                 });
-                Some(backup_status(&status, at))
+                let mut b = backup_status(&status, at);
+                // The failover history a restore needs, when backups came
+                // on after a failover (history.rs).
+                if let (Some(on), Some(c)) = (backup_on(self.db), c.as_ref()) {
+                    match self
+                        .timeline_history(&on.destination, c, !primary.is_empty() && ready > 0)
+                        .await
+                    {
+                        Ok(m) if b.message.is_empty() => b.message = m,
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(db = %self.name(), error = format!("{e:#}"), "timeline history")
+                        }
+                    }
+                }
+                Some(b)
             }
             None => None,
         };
