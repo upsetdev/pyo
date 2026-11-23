@@ -19,6 +19,7 @@
 mod controller;
 mod crd;
 mod extensions;
+mod history;
 mod import;
 mod leader;
 mod modules;
