@@ -167,6 +167,10 @@ pub struct TailnetSync {
     /// whose server was deleted).
     #[serde(default)]
     pub forget: Vec<String>,
+    /// The cluster these names are for: the team's holder syncs the names
+    /// of every cluster of its team. For the agent's logs only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
 }
 
 /// One name, as the agent left it.
