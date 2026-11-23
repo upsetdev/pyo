@@ -19,6 +19,7 @@ import {
 } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Builder } from "~/lib/pyo/types";
+import { useHeld } from "~/lib/pyo/useHeld";
 import { useLiveCommand } from "~/lib/pyo/useLiveCommand";
 
 export const Route = createFileRoute("/_app/$team/builders/new")({
@@ -89,15 +90,15 @@ function AddBuilder() {
   const [server, setServer] = useState("");
   const [saving, setSaving] = useState(false);
   const [touched, setTouched] = useState(false);
-  // The builder Add just made: it doesn't take its own name.
-  const [made, setMade] = useState<string>();
-  const nameError = !DNS_LABEL.test(name)
-    ? "Lowercase letters, digits and dashes."
-    : buildersIn(s).some(
-          (b) => b.name === name && b.id !== draftId && b.id !== made,
-        )
-      ? "A builder with this name exists."
-      : "";
+  // Held from Add on: the builder it makes doesn't take its own name.
+  const nameError = useHeld(
+    !DNS_LABEL.test(name)
+      ? "Lowercase letters, digits and dashes."
+      : buildersIn(s).some((b) => b.name === name && b.id !== draftId)
+        ? "A builder with this name exists."
+        : "",
+    saving,
+  );
   const free = servers.filter((x) => !x.builder);
   const target =
     where === "local"
@@ -165,7 +166,6 @@ function AddBuilder() {
     const r = await api.createBuilder({ name, kind, clusterId, server: targetNode });
     if (!r) return setSaving(false);
     // Add stays off while the page moves on.
-    setMade(r.id);
     toast({ title: `Adding ${name}` });
     void navigate({
       to: "/$team/builders/$builderId",

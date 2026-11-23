@@ -25,6 +25,7 @@ import { nameConflict } from "~/lib/pyo/databaseNames";
 import { currentSlug, teamPath } from "~/lib/pyo/paths";
 import { DB_SECTION, api, clustersIn, databaseHref, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
+import { useHeld } from "~/lib/pyo/useHeld";
 import type { Database } from "~/lib/pyo/types";
 import { seo } from "~/lib/seo";
 
@@ -74,8 +75,11 @@ function freeName(engine: Engine, team: Database[]) {
   return "";
 }
 
-/** A new database's fields, as the form edits them. */
-export function useDatabaseDraft(engine: Engine, init?: { name: string; clusterId: string } | null) {
+/**
+ * A new database's fields, as the form edits them. `held`: on from its
+ * submit, so the database it makes doesn't read as taking its own name.
+ */
+export function useDatabaseDraft(engine: Engine, init?: { name: string; clusterId: string } | null, held = false) {
   const s = usePyo();
   const ready = clustersIn(s).filter((c) => c.status === "connected" || c.status === "degraded");
   // Prefilled, so Create works as it opens. An untouched suggestion isn't
@@ -92,11 +96,11 @@ export function useDatabaseDraft(engine: Engine, init?: { name: string; clusterI
   const [replicas, setReplicas] = useState(2);
   const [pooler, setPooler] = useState(true);
   const [rest, setRest] = useState(false);
-  // The database this form just made. Once it's in the store it mustn't
-  // read as taking its own name while the page moves on.
-  const [made, setMade] = useState<string>();
   const cluster = clusterId || ready[0]?.id || "";
-  const nameError = name ? databaseNameError(engine, name, s.databases.filter((d) => d.teamId === s.currentTeamId && d.id !== made)) : "Enter a name.";
+  const nameError = useHeld(
+    name ? databaseNameError(engine, name, s.databases.filter((d) => d.teamId === s.currentTeamId)) : "Enter a name.",
+    held,
+  );
   const custom = size === "custom";
   const spec = custom ? { cpu, mem, storage } : SIZE_SPECS[size];
   const sizeError = custom ? customError(engine, cpu, mem) || (storage >= 1 && storage <= 1000 ? "" : "Storage is 1 to 1000 GiB.") : "";
@@ -124,7 +128,6 @@ export function useDatabaseDraft(engine: Engine, init?: { name: string; clusterI
     rest,
     setRest,
     nameError,
-    created: setMade,
     custom,
     spec,
     sizeError,
@@ -223,12 +226,13 @@ export function SizeAndAvailability({ engine, draft: f }: { engine: Engine; draf
 function NewDatabase({ engine }: { engine: Engine }) {
   const navigate = useNavigate();
   const admin = useTeamAdmin();
-  const f = useDatabaseDraft(engine, carried);
+  // On from Create until the page moves on. Off again when it's refused.
+  const [saving, setSaving] = useState(false);
+  const f = useDatabaseDraft(engine, carried, saving);
   useEffect(() => {
     carried = null;
   }, []);
   const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
   const canCreate = f.valid && !saving;
 
   const create = async () => {
@@ -239,8 +243,6 @@ function NewDatabase({ engine }: { engine: Engine }) {
       setSaving(false);
       return setError(r.error);
     }
-    // Create stays off while the page moves on.
-    f.created(r.data.id);
     toast({ title: `Creating ${f.name}`, description: "It's ready in a minute or two." });
     void navigate({ href: teamPath(currentSlug(), databaseHref(engine, r.data.id)) });
   };

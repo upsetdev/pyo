@@ -7,6 +7,7 @@ import { Field, Input } from "~/components/ui/Field";
 import { DNS_LABEL, slugify } from "~/lib/pyo/format";
 import { api, projectsIn, usePyo, projectParams } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
+import { useHeld } from "~/lib/pyo/useHeld";
 import type { Project } from "~/lib/pyo/types";
 import { currentSlug } from "~/lib/pyo/paths";
 
@@ -25,15 +26,14 @@ export function useProjectForm(project?: Project) {
   const [nsEdited, setNsEdited] = useState(!!project);
   const [description, setDescription] = useState(project?.description ?? "");
   const [touched, setTouched] = useState(false);
-  // The project this form just made. It's in the store at once, so it
-  // mustn't read as taking its own name while the page moves on.
-  const [made, setMade] = useState<string>();
+  // Once it has made its project, which is in the store at once: the checks
+  // stay as they were, so it doesn't read as taking its own name while the
+  // page moves on.
+  const [made, setMade] = useState(false);
 
-  const others = projectsIn(s).filter(
-    (p) => p.id !== project?.id && p.id !== made,
-  );
+  const others = projectsIn(s).filter((p) => p.id !== project?.id);
   const ns = nsEdited ? namespace : slugify(name);
-  const errors = {
+  const live = {
     name: !name.trim()
       ? "Name is required."
       : name.trim().length > 48
@@ -53,6 +53,7 @@ export function useProjectForm(project?: Project) {
               ? "Another project already uses this name."
               : "",
   };
+  const errors = useHeld(live, made);
   const valid = !made && !errors.name && !errors.namespace;
   return {
     name,
@@ -66,8 +67,8 @@ export function useProjectForm(project?: Project) {
     setDescription,
     touched,
     setTouched,
-    created: setMade,
-    reset: () => setMade(undefined),
+    created: () => setMade(true),
+    reset: () => setMade(false),
     errors,
     valid,
   };
@@ -168,7 +169,7 @@ export function ProjectDialog({
             description: f.description,
             namespace: f.namespace,
           });
-          f.created(id);
+          f.created();
           toast({ title: `Project ${f.name.trim()} created` });
           onClose();
           void navigate({

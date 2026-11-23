@@ -33,7 +33,7 @@ function NewProjectPage() {
             description: f.description,
             namespace: f.namespace,
           });
-          f.created(id);
+          f.created();
           toast({ title: `Project ${f.name.trim()} created` });
           void navigate({
             to: "/$team/$projectId",
