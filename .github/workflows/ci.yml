@@ -115,6 +115,13 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: cargo test --locked -p pyo-api --lib -- --ignored compose_sync::db_tests
+      # Tailscale through each team's holder: routing, join keys, the move
+      # from clusters' own clients, and removed clusters leaving the
+      # tailnet, with a stand-in agent. A run of its own, as above.
+      - name: Tailscale (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api --lib -- --ignored tailscale::tests
 
   # Known CVEs in the locked dependencies: Cargo.lock, bun.lock (with the
   # dashboard's dev dependencies) and the WAF's go.mod. A CRITICAL one
