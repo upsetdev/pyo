@@ -1,5 +1,6 @@
 import { ShieldCheckIcon } from "@phosphor-icons/react";
 import { createFileRoute, notFound, Outlet } from "@tanstack/react-router";
+import { HeldTailscale } from "~/components/pyo/Tailscale";
 import { AppShell } from "~/components/shell/AppShell";
 import { api, currentTeam, getState, teamBySlug } from "~/lib/pyo/store";
 
@@ -15,6 +16,7 @@ export const Route = createFileRoute("/_app/$team")({
   component: () => (
     <AppShell>
       <Outlet />
+      <HeldTailscale />
     </AppShell>
   ),
 });

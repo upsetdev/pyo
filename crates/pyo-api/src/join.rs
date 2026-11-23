@@ -334,6 +334,23 @@ pub fn tailnet_only_command(base: &str, key: &str) -> String {
     )
 }
 
+/// Moves a single-server cluster's server to its team's tailnet
+/// (connect.sh --tailnet-only --tailnet): it leaves the tailnet it's on,
+/// joins `suffix`'s with `key`, and its k3s follows.
+pub fn tailnet_move_command(base: &str, key: &str, suffix: &str) -> String {
+    format!(
+        "curl -fsSL {base}/connect.sh | bash -s -- {}",
+        quoted(&pinned(
+            base,
+            vec![
+                ("--tailnet-only", None),
+                ("--tailnet", Some(suffix.to_owned())),
+                ("--tailscale-key", Some(key.to_owned())),
+            ]
+        ))
+    )
+}
+
 /// A script's arguments for where it's fetched from (`base`). A Pyo's own
 /// scripts and the published ones ([`published_scripts_url`]) are this
 /// release's. From anywhere else (a mirror) they get `--version`: a
@@ -2468,6 +2485,55 @@ if connect_lock_held; then echo has-lock; else echo no-lock; fi
             "set -euo pipefail\nset -- {args}\n{block}\necho \"[$AUTO_UPDATE] $API $TOKEN [$UNINSTALL]\"\n"
         ));
         if code == 0 { out.trim().to_owned() } else { format!("{code} {}", err.trim()) }
+    }
+
+    /// A machine on another tailnet leaves it for --tailnet's, once: run
+    /// again on the new one, nothing changes. Without a key or --tailnet,
+    /// nothing either.
+    #[test]
+    fn connect_switches_tailnet_only_when_asked() {
+        let args = script_block("connect-args", CONNECT_SCRIPT);
+        let switch = script_block("tailnet-switch", CONNECT_SCRIPT);
+        let run = |args_line: &str, on: &str| {
+            let (code, out, err) = bash(&format!(
+                "set -euo pipefail\nset -- {args_line}\n{args}\n{switch}\n\
+                 tailscale() {{ case \"$1\" in\n\
+                   ip) echo 100.64.0.7 ;;\n\
+                   status) printf '{{\\n  \"MagicDNSSuffix\": \"%s\",\\n}}\\n' '{on}' ;;\n\
+                   logout) echo LOGGED-OUT ;;\n\
+                 esac; }}\n\
+                 tailnet_switch\n"
+            ));
+            assert_eq!(code, 0, "{err}");
+            out.trim().to_owned()
+        };
+        let moving = "--tailnet-only --tailnet 'tail2.ts.net.' --tailscale-key 'tskey-auth-k'";
+        assert_eq!(
+            run(moving, "tail1.ts.net"),
+            "Leaving tail1.ts.net for tail2.ts.net.\nLOGGED-OUT"
+        );
+        assert_eq!(run(moving, "tail2.ts.net"), "");
+        assert_eq!(
+            run(
+                "--tailnet-only --tailscale-key 'tskey-auth-k'",
+                "tail1.ts.net"
+            ),
+            ""
+        );
+        assert_eq!(
+            run("--tailnet-only --tailnet 'tail2.ts.net'", "tail1.ts.net"),
+            ""
+        );
+        // What Pyo gives to run.
+        let c = tailnet_move_command(
+            "https://pyo.example/install",
+            "tskey-auth-k",
+            "tail2.ts.net",
+        );
+        assert!(
+            c.contains("--tailnet-only --tailnet 'tail2.ts.net' --tailscale-key 'tskey-auth-k'"),
+            "{c}"
+        );
     }
 
     #[test]

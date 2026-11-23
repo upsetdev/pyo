@@ -8,6 +8,8 @@ import {
   useAutoUpdate,
 } from "~/components/pyo/AgentInstall";
 import { ClusterMtls } from "~/components/pyo/Mtls";
+import { TailnetBadge, teamTailscale } from "~/components/pyo/Tailscale";
+import { AppLink } from "~/components/ui/AppLink";
 import { DATABASES_RESTART } from "~/components/pyo/UpdateSettings";
 import {
   olderVersion,
@@ -27,6 +29,9 @@ import { api, clusterByRef, clustersIn, listedServices, usePyo } from "~/lib/pyo
 import { toast } from "~/lib/pyo/toast";
 import type { Cluster } from "~/lib/pyo/types";
 import { currentSlug } from "~/lib/pyo/paths";
+
+const KEEPS_TAILSCALE =
+  "This cluster keeps your team's Tailscale. After it's removed, set Tailscale up again.";
 
 export const Route = createFileRoute(
   "/_app/$team/clusters/$clusterId/settings",
@@ -51,6 +56,8 @@ function ClusterSettings({ c }: { c: Cluster }) {
     command: string;
   } | null>(null);
   const apps = listedServices(s).filter((a) => a.clusterId === c.id);
+  // It keeps the team's Tailscale: removing it means setting that up again.
+  const keepsTailscale = teamTailscale(s)?.holderId === c.id;
   // Gone for 10 minutes: removable with its services (as the API allows).
   const gone = Date.now() - c.lastSeenAt >= 10 * 60_000;
   const install = c.capabilities.agentInstall;
@@ -131,6 +138,17 @@ function ClusterSettings({ c }: { c: Cluster }) {
           </div>
         </Panel>
         <ClusterTraffic cluster={c} />
+        <Panel title="Tailscale">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+            <TailnetBadge clusterId={c.id} />
+            <AppLink
+              href="/integrations#tailscale"
+              className="text-[12.5px] font-medium text-primary hover:text-primary/80"
+            >
+              Integrations
+            </AppLink>
+          </div>
+        </Panel>
         <ClusterTrafficMode cluster={c} />
         <ClusterMtls cluster={c} />
         <Panel title="Danger zone" tone="danger">
@@ -291,7 +309,11 @@ function ClusterSettings({ c }: { c: Cluster }) {
         open={confirm === "remove"}
         onClose={() => setConfirm(null)}
         title={`Remove ${c.name}?`}
-        description="Nothing on the cluster is deleted."
+        description={
+          keepsTailscale
+            ? `Nothing on the cluster is deleted. ${KEEPS_TAILSCALE}`
+            : "Nothing on the cluster is deleted."
+        }
         confirmText={c.name}
         confirmLabel="Remove cluster"
         onConfirm={() => {
@@ -307,7 +329,7 @@ function ClusterSettings({ c }: { c: Cluster }) {
         open={confirm === "force"}
         onClose={() => setConfirm(null)}
         title={`Remove ${c.name} anyway?`}
-        description="Pyo forgets this cluster, its services, databases and volumes. Anything still running there is left alone."
+        description={`Pyo forgets this cluster, its services, databases and volumes. Anything still running there is left alone.${keepsTailscale ? ` ${KEEPS_TAILSCALE}` : ""}`}
         confirmText={c.name}
         confirmLabel="Remove cluster"
         onConfirm={() => {

@@ -9,7 +9,7 @@ import {
 import { RegistriesDialog } from "~/components/pyo/RegistryLogins";
 import { SecretStoresDialog } from "~/components/pyo/SecretStores";
 import { CloudflareDialog } from "~/components/pyo/Cloudflare";
-import { TailscaleDialog } from "~/components/pyo/Tailscale";
+import { TailscaleDialog, teamTailscale } from "~/components/pyo/Tailscale";
 import {
   GithubDialog,
   GitlabDialog,
@@ -110,10 +110,10 @@ function Integrations() {
   useGithubReturn(() => setOpen("github"));
 
   const team = s.currentTeamId;
-  // Pyo's own (self-hosted), else the first of the team's clusters with it.
-  const teamTailnets = clustersIn(s).flatMap((c) => (c.tailscale ? [c.tailscale] : []));
-  const ts = s.tailscale;
-  const tsSuffix = ts?.suffix ?? teamTailnets.find((t) => t.suffix)?.suffix;
+  // The team's Tailscale, and Pyo's own names when the team holds Pyo's cluster.
+  const teamTs = teamTailscale(s);
+  const ts = clustersIn(s).some((c) => c.sameCluster) ? s.tailscale : null;
+  const tsSuffix = teamTs?.suffix ?? ts?.suffix;
   const hetzner = hetznerOf(s);
   const cloudServers = s.cloudServers.filter((c) => c.teamId === team);
   const installs = s.githubInstallations.filter((g) => g.teamId === team);
@@ -123,6 +123,12 @@ function Integrations() {
   const stores = s.secretStores.filter((x) => x.teamId === team);
 
   const tsProblem = (): Integration["problem"] => {
+    if (teamTs?.problem === "holder_gone")
+      return { tone: "danger", label: ATTENTION, detail: "The cluster that kept it is gone" };
+    if (teamTs?.problem === "client_refused")
+      return { tone: "danger", label: ATTENTION, detail: "Tailscale doesn't take the client" };
+    if (teamTs?.oldClients.length || teamTs?.leftovers.length)
+      return { tone: "warning", label: ATTENTION, detail: "Left to do in the Tailscale console" };
     if (!ts) return null;
     if (ts.hostMove?.state === "failed")
       return { tone: "danger", label: ATTENTION, detail: "This server couldn't move" };
@@ -151,10 +157,10 @@ function Integrations() {
       category: "Networking",
       icon: <BrandMark icon={siTailscale} size={18} />,
       description: "Servers join your tailnet with it.",
-      connected: !!ts || teamTailnets.length > 0,
+      connected: !!teamTs,
       detail: tsSuffix ? <span className="font-mono text-[11.5px]">{tsSuffix}</span> : null,
       problem: tsProblem(),
-      canSetUp: !!s.user.isAdmin || teamAdmin,
+      canSetUp: teamAdmin,
       dialog: (onClose) => <TailscaleDialog onClose={onClose} />,
     },
     {

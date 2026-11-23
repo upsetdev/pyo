@@ -35,6 +35,33 @@ export type Team = {
   requireTwoFactor?: boolean;
   /** What the audit log keeps of addresses. */
   auditIps?: AuditIps;
+  /** The team's Tailscale (Integrations › Tailscale). Absent when it isn't set up. */
+  tailscale?: TeamTailscale | null;
+};
+
+/** Where a cluster stands with its team's tailnet. */
+export type ClusterTailnetState = "holder" | "member" | "moving" | "elsewhere" | "waiting";
+
+/** A team's Tailscale: one cluster (the holder) keeps its client, and acts for every cluster of the team. Never a secret. */
+export type TeamTailscale = {
+  /** The tailnet ("tail1234.ts.net"), once seen. */
+  suffix: string | null;
+  holderId: ID | null;
+  holderName: string | null;
+  holderConnected: boolean;
+  /** Why it isn't working. */
+  problem: "holder_gone" | "client_refused" | null;
+  clientId: string;
+  /** The secret's last characters. */
+  hint: string;
+  /** Pyo's tagged devices on the tailnet (tag:pyo), as last seen. */
+  devices: number;
+  /** OAuth clients clusters kept before, to delete in the Tailscale console. `suffix`: on another tailnet. */
+  oldClients: { clientId: string; hint: string; clusterId: string; cluster: string; suffix?: string }[];
+  /** Servers of removed clusters still on a tailnet. */
+  leftovers: { cluster: string; suffix: string | null; servers: string[] }[];
+  /** The team's clusters, oldest first. `servers`: on a tailnet, `onTailnet`: on the team's. */
+  clusters: { id: ID; state: ClusterTailnetState; suffix: string | null; servers: number; onTailnet: number }[];
 };
 
 export type AuditIps = "full" | "anonymized" | "none";
@@ -2042,13 +2069,17 @@ export type Builder = {
   lastSeenAt?: Timestamp | null;
 };
 
-/** Tailscale on one cluster: its client (never the secret) and tailnet. */
+/** Tailscale for one cluster: the client that acts for it (never the secret) and its tailnet. */
 export type ClusterTailscale = {
   clientId: string;
   /** The secret's last characters. */
   hint: string;
   /** The tailnet ("tail1234.ts.net"), once the cluster has seen it. */
   suffix: string | null;
+  /** On its team's tailnet: the cluster that keeps the team's client. */
+  holderId?: ID | null;
+  state?: ClusterTailnetState | null;
+  problem?: TeamTailscale["problem"];
 };
 
 /** Tailscale on the cluster Pyo runs on (Integrations › Tailscale). The client only for admins. */

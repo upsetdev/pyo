@@ -939,7 +939,7 @@ async fn poll(
 /// Has the signer sign each command for this cluster, in order. When it
 /// can't, the commands go back to the queue and the agent asks again.
 /// A command the signer refuses fails, with its reason; the rest go out.
-async fn sign_all(
+pub(crate) async fn sign_all(
     s: &AppState,
     signer: &dyn crate::CommandSigner,
     cluster_id: &str,

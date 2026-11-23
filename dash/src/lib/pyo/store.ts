@@ -2732,24 +2732,33 @@ export const api = {
       { serviceId, domainId, ...opts },
     );
   },
-  saveTailscale(clientId: string, secret?: string, clusterId?: string) {
-    return attempt<{ checks: TailscaleCheck[] }>("saveTailscale", {
-      clusterId,
+  saveTailscale(clientId: string, secret?: string) {
+    return attempt<{ ok: boolean; checks: TailscaleCheck[] }>("saveTailscale", {
+      teamId: get().currentTeamId,
       clientId: clientId.trim(),
       secret: secret?.trim() || undefined,
     });
   },
-  planTailscaleSetup(token: string, clusterId?: string) {
-    return attempt<{ plan: TailscaleSetupPlan }>("planTailscaleSetup", { clusterId, token: token.trim() });
+  planTailscaleSetup(token: string) {
+    return attempt<{ plan: TailscaleSetupPlan; clusterId: string }>("planTailscaleSetup", {
+      teamId: get().currentTeamId,
+      token: token.trim(),
+    });
   },
-  setUpTailscale(token: string, version: string, clusterId?: string) {
-    return attempt<TailscaleSetupOutcome>("setUpTailscale", { clusterId, token: token.trim(), version });
+  setUpTailscale(token: string, version: string) {
+    return attempt<TailscaleSetupOutcome>("setUpTailscale", { teamId: get().currentTeamId, token: token.trim(), version });
   },
-  testTailscale(clusterId?: string) {
-    return attempt<{ checks: TailscaleCheck[] }>("testTailscale", { clusterId });
+  testTailscale() {
+    return attempt<{ checks: TailscaleCheck[] }>("testTailscale", { teamId: get().currentTeamId });
   },
-  removeTailscale(clusterId?: string) {
-    return send("removeTailscale", { clusterId });
+  removeTailscale() {
+    return send("removeTailscale", { teamId: get().currentTeamId });
+  },
+  moveClusterToTailnet(clusterId: string) {
+    return attempt<{ suffix: string; commands: { server: string; command: string }[]; expiresAt: number }>(
+      "moveClusterToTailnet",
+      { clusterId },
+    );
   },
   renameTailscaleName(kind: "dashboard" | "registry" | "sandboxes", name: string) {
     return attempt("renameTailscaleName", { kind, name: name.trim() });

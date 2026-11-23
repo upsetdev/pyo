@@ -941,13 +941,16 @@ pub async fn run_test(kube: &kube::Client) -> CommandResult {
     )
 }
 
-/// [`pyo_proto::Command::TailscaleSync`].
+/// [`pyo_proto::Command::TailscaleSync`]: this cluster's names, or, on the
+/// team's holder, another cluster's of the team.
 pub async fn run_sync(kube: &kube::Client, w: &TailnetSync) -> CommandResult {
+    use tracing::Instrument;
     let c = match need_client(kube).await {
         Ok(c) => c,
         Err(r) => return r,
     };
-    match sync(&c, w).await {
+    let span = tracing::info_span!("tailnet_sync", cluster = w.cluster.as_deref().unwrap_or(""));
+    match sync(&c, w).instrument(span).await {
         Ok(s) => with_data(ok("Synced."), s),
         Err(e) => failed(format!("{e:#}")),
     }
