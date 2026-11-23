@@ -8,6 +8,8 @@
 #
 #   --api            where the agent reaches Pyo
 #   --token          the connect token (works once, within an hour)
+#   --install-url    where this server gets Pyo's install files, when the
+#                    agent reaches Pyo at another address (Pyo Cloud)
 #   --tailscale-key  joins your tailnet first (a single-use key from Pyo)
 #   --registry       Pyo's registry door, for images Pyo builds
 #   --registry-token this cluster's login there (pull only)
@@ -240,12 +242,13 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 # >>> pyo:connect-args (connect.sh only; join.rs tests it)
-API="" TOKEN="" TS_AUTHKEY="${TS_AUTHKEY:-}" REGISTRY="" REGISTRY_TOKEN="" LOCAL_REGISTRY=""
+API="" TOKEN="" TS_AUTHKEY="${TS_AUTHKEY:-}" REGISTRY="" REGISTRY_TOKEN="" LOCAL_REGISTRY="" INSTALL_URL=""
 UNINSTALL="" KEEP_DATA="" YES="" DRY_RUN="" WITH_PYO="" TAILNET_ONLY="" AUTO_UPDATE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --api) API="${2%/}"; shift 2 ;;
     --token) TOKEN="$2"; shift 2 ;;
+    --install-url) INSTALL_URL="${2%/}"; shift 2 ;;
     --tailscale-key) TS_AUTHKEY="$2"; shift 2 ;;
     --registry) REGISTRY="$2"; shift 2 ;;
     --registry-token) REGISTRY_TOKEN="$2"; shift 2 ;;
@@ -436,6 +439,53 @@ auto_update_off() {
   return 0
 }
 # <<< pyo:auto-update
+# >>> pyo:install-url (connect.sh only; join.rs tests it)
+# Where this server gets Pyo's install files (the agent's manifest, the
+# gateway's CRDs) and where its verifier looks for releases: INSTALL_URL.
+# On a Pyo whose agents reach it at an address only they may use (Pyo
+# Cloud's), Pyo's commands name its public address with --install-url. It
+# is kept for later runs without it (INSTALL_URL_FILE). Elsewhere the
+# agent's address serves both. The server Pyo runs on keeps nothing.
+INSTALL_URL_FILE=/etc/pyo/install-url
+FROM_AGENT=""
+agent_secret() { k3s kubectl -n pyo-system get secret pyo-agent -o "jsonpath={.data.$1}" 2>/dev/null | base64 -d 2>/dev/null || true; }
+# A refresh: Pyo's address and the token from the agent already here.
+agent_settings() {
+  FROM_AGENT=1
+  API=$(agent_secret PYO_API_URL); API="${API%/}"; TOKEN=$(agent_secret PYO_AGENT_TOKEN)
+  # The cluster Pyo runs on: its agent reaches Pyo inside the cluster, this
+  # machine at Pyo's local address.
+  case "$API" in http://*.svc:* | http://*.svc.cluster.local:*) API=http://127.0.0.1:8000 ;; esac
+  [ -n "$INSTALL_URL" ] || [ -e "$OWN_SERVER" ] || INSTALL_URL=$(install_url_kept)
+}
+# The address an earlier run kept, when it is one.
+install_url_kept() {
+  local u
+  u=$(head -n1 "$INSTALL_URL_FILE" 2>/dev/null || true)
+  case "$u" in https://?* | http://?*) echo "${u%/}" ;; esac
+}
+# Keeps --install-url for later runs. A connect without it (--api) has one
+# address for both, so a kept one goes.
+install_url_keep() {
+  [ ! -e "$OWN_SERVER" ] || return 0
+  if [ -n "$INSTALL_URL" ]; then
+    { mkdir -p "$(dirname "$INSTALL_URL_FILE")" && echo "$INSTALL_URL" > "$INSTALL_URL_FILE"; } 2>/dev/null || true
+  elif [ -z "$FROM_AGENT" ]; then
+    rm -f "$INSTALL_URL_FILE" 2>/dev/null || true
+  fi
+}
+# An http:// address with its tailnet name as tailnet_hostport has it.
+tailnet_url() {
+  case "$1" in
+    http://*)
+      local hostport=${1#http://}
+      hostport=${hostport%%/*}
+      echo "http://$(tailnet_hostport "$hostport")${1#"http://$hostport"}"
+      ;;
+    *) echo "$1" ;;
+  esac
+}
+# <<< pyo:install-url
 
 # ── connect.sh --uninstall ──────────────────────────────────────────────────
 # Deletes only what Pyo made, found by its names and labels: the agent
@@ -617,7 +667,7 @@ uninstall() {
       verify_remove || echo "Automatic updates couldn't be removed from this server." >&2
     fi
   fi
-  [ "${KC[0]}" != k3s ] || [ -n "$DRY_RUN" ] || rm -f "$AUTO_UPDATE_FILE"
+  [ "${KC[0]}" != k3s ] || [ -n "$DRY_RUN" ] || rm -f "$AUTO_UPDATE_FILE" "$INSTALL_URL_FILE"
   echo "Stopping the Pyo agent…"
   act -n pyo-system delete deployment pyo-agent --ignore-not-found --wait=true --timeout=120s >/dev/null
   act delete validatingadmissionpolicybinding,validatingadmissionpolicy -l app.kubernetes.io/part-of=pyo-agent --ignore-not-found >/dev/null 2>&1 || true
@@ -745,11 +795,7 @@ fi
 # Without them, on a cluster that's already connected: bring its agent's
 # install up to date with Pyo (Pyo shows this command when it's older).
 if [ -z "$TAILNET_ONLY" ] && [ -z "$API" ] && [ -z "$TOKEN" ] && command -v k3s >/dev/null; then
-  secret() { k3s kubectl -n pyo-system get secret pyo-agent -o "jsonpath={.data.$1}" 2>/dev/null | base64 -d 2>/dev/null || true; }
-  API=$(secret PYO_API_URL); API="${API%/}"; TOKEN=$(secret PYO_AGENT_TOKEN)
-  # The cluster Pyo runs on: its agent reaches Pyo inside the cluster, this
-  # machine at Pyo's local address.
-  case "$API" in http://*.svc:* | http://*.svc.cluster.local:*) API=http://127.0.0.1:8000 ;; esac
+  agent_settings
   [ -z "$API" ] || echo "Updating this cluster's Pyo agent."
 fi
 [ -n "$TAILNET_ONLY" ] || { [ -n "$API" ] && [ -n "$TOKEN" ]; } || { echo "Usage: connect.sh --api URL --token TOKEN [--tailscale-key KEY] [--registry HOST:PORT --registry-token TOKEN | --local-registry]" >&2; exit 2; }
@@ -785,6 +831,7 @@ api_ok() {
   return 1
 }
 [ -n "$TAILNET_ONLY" ] || api_ok "$API" || { echo "Pyo's address must be https:// ($API isn't on a private network or the tailnet)." >&2; exit 2; }
+[ -n "$TAILNET_ONLY" ] || [ -z "$INSTALL_URL" ] || api_ok "$INSTALL_URL" || { echo "Pyo's address must be https:// ($INSTALL_URL isn't on a private network or the tailnet)." >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "Run it as root (sudo)." >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo "Pyo clusters run on Linux, and this is $(uname -s)." >&2; exit 1; }
 case "$(uname -m)" in
@@ -1183,6 +1230,7 @@ fi
 # Automatic updates: off now, on once the agent runs (at the end).
 auto_update_choice
 [ "$AUTO_UPDATE" != off ] || auto_update_off
+install_url_keep
 
 # >>> pyo:tailnet-host (the same in connect.sh, join.sh and deploy/sandbox.sh)
 # A tailnet machine's address, from the MagicDNS name Pyo's commands give
@@ -1301,12 +1349,8 @@ web_ports_line() {
 # Pyo by its tailnet name, now that this machine is on the tailnet: dialled
 # at its IP, which is also the address the agent is given (pods needn't
 # resolve MagicDNS names). Its registry door the same way.
-case "$API" in
-  http://*)
-    api_hostport=${API#http://}; api_hostport=${api_hostport%%/*}
-    API="http://$(tailnet_hostport "$api_hostport")${API#"http://$api_hostport"}"
-    ;;
-esac
+API=$(tailnet_url "$API")
+INSTALL_URL=$(tailnet_url "${INSTALL_URL:-$API}")
 [ -z "$REGISTRY" ] || REGISTRY=$(tailnet_hostport "$REGISTRY")
 
 # Ports 80 and 443 already in use here (k3s's Traefik, nginx…), on a first
@@ -1321,15 +1365,21 @@ fi
 # Pyo answers, and knows this token, before anything is installed.
 MANIFEST=$(mktemp) CRDS=$(mktemp) K3S_DIR=$(mktemp -d)
 trap 'rm -rf "$MANIFEST" "$CRDS" "$K3S_DIR"' EXIT
-code=$(curl -sS -o "$MANIFEST" -w '%{http_code}' --max-time 30 "$API/install/agent.yaml?token=$TOKEN$WEB_QUERY" || true)
+# >>> pyo:agent-manifest (connect.sh only; join.rs tests it)
+code=$(curl -sS -o "$MANIFEST" -w '%{http_code}' --max-time 30 "$INSTALL_URL/install/agent.yaml?token=$TOKEN$WEB_QUERY" || true)
 case "$code" in
   200) ;;
-  404) echo "Pyo at $API doesn't know this token. Was the cluster removed, or the token rotated? Copy a fresh command from Pyo." >&2; exit 1 ;;
+  404) echo "Pyo at $INSTALL_URL doesn't know this token. Was the cluster removed, or the token rotated? Copy a fresh command from Pyo." >&2; exit 1 ;;
   409) echo "This command was used already. Get a new one in Pyo: open the cluster and show its install command." >&2; exit 1 ;;
   410) echo "This command expired. Get a new one in Pyo: open the cluster and show its install command." >&2; exit 1 ;;
-  000) echo "Can't reach Pyo at $API from this machine. Is it on the same network (or tailnet), and is port ${API##*:} open?" >&2; exit 1 ;;
-  *) echo "Pyo at $API answered $code for the agent manifest." >&2; exit 1 ;;
+  000) echo "Can't reach Pyo at $INSTALL_URL from this machine. Is it on the same network (or tailnet), and is port ${INSTALL_URL##*:} open?" >&2; exit 1 ;;
+  *)
+    echo "Pyo at $INSTALL_URL answered $code for the agent manifest." >&2
+    [ -z "$FROM_AGENT" ] || echo "Copy the command from Pyo again and run that." >&2
+    exit 1
+    ;;
 esac
+# <<< pyo:agent-manifest
 
 # Firewall: web traffic from anywhere (unless the sites here have 80 and
 # 443), cluster traffic over the tailnet.
@@ -1590,8 +1640,8 @@ gateway_crds() {
   # Envoy Gateway already running without its CRDs: restart it once they're in.
   k3s kubectl get "$crd/backends.gateway.envoyproxy.io" >/dev/null 2>&1 || restart=1
   for i in 1 2 3 4; do
-    curl -fsS --max-time 60 -o "$CRDS" "$API/install/gateway-crds.yaml$q" && break
-    [ "$i" = 4 ] && { echo "Couldn't get the gateway's CRDs from Pyo at $API." >&2; exit 1; }
+    curl -fsS --max-time 60 -o "$CRDS" "$INSTALL_URL/install/gateway-crds.yaml$q" && break
+    [ "$i" = 4 ] && { echo "Couldn't get the gateway's CRDs from Pyo at $INSTALL_URL." >&2; exit 1; }
     sleep 2
   done
   k3s kubectl apply --server-side --force-conflicts --field-manager=pyo -f "$CRDS" >/dev/null || { echo "Couldn't install the gateway's CRDs (see above)." >&2; exit 1; }
@@ -1765,6 +1815,6 @@ if ! quietly "Starting the Pyo agent…" k3s kubectl -n pyo-system rollout statu
   echo "The Pyo agent didn't start. Run the same command again in a minute." >&2
   exit 1
 fi
-[ "$AUTO_UPDATE" != on ] || auto_update_on "$API"
+[ "$AUTO_UPDATE" != on ] || auto_update_on "$INSTALL_URL"
 [ -z "$WEB_QUERY" ] || dot_line yellow "$(web_ports_line)"
 ok_line "Connected $(hostname). It shows up in Pyo in a few seconds."

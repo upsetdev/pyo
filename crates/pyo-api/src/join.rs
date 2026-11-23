@@ -349,6 +349,35 @@ pub fn auto_update_flag(self_update: bool, keep: bool) -> Option<&'static str> {
     }
 }
 
+/// connect.sh's flag for Pyo's public address, where a server gets its
+/// install files (the agent's manifest, the gateway's CRDs) and its
+/// verifier looks for releases. connect.sh keeps it for later runs.
+pub const INSTALL_URL: &str = "--install-url";
+
+/// What [`INSTALL_URL`] names on a Pyo whose agents reach it at another
+/// address (`PYO_AGENT_ENDPOINT`, [`crate::agent_tls::endpoint`]): Pyo
+/// Cloud's agent address takes only the agents' own requests, never
+/// `/install/`. Pyo's public API address (`PYO_PUBLIC_API_URL`), else its
+/// dashboard's. None on any other Pyo, where the agent's address serves
+/// both (a refresh reads it from the agent's Secret).
+pub fn install_url() -> Option<String> {
+    let endpoint = crate::agent_tls::endpoint()?;
+    pick_install_url(
+        &endpoint,
+        std::env::var("PYO_PUBLIC_API_URL").ok().as_deref(),
+        crate::web::public_url().as_deref(),
+    )
+}
+
+fn pick_install_url(endpoint: &str, configured: Option<&str>, dashboard: Option<&str>) -> Option<String> {
+    let url = [configured, dashboard]
+        .into_iter()
+        .flatten()
+        .map(|u| u.trim().trim_end_matches('/'))
+        .find(|u| !u.is_empty())?;
+    (url != endpoint.trim_end_matches('/') && outside(url) && secure_transport(url)).then(|| url.to_owned())
+}
+
 /// The command that makes a machine a new cluster connected to Pyo.
 /// `registry`: Pyo's registry door on the tailnet and the cluster's pull
 /// token there.
@@ -366,10 +395,14 @@ pub fn connect_command(
         tailscale_key,
         registry,
         auto_update_flag(crate::install::self_update(), true),
+        // Not "This machine"'s, from Pyo on it.
+        install_url().is_some() && outside(api),
     )
 }
 
-/// [`connect_command`] with this [`auto_update_flag`].
+/// [`connect_command`] with this [`auto_update_flag`]. With `install`,
+/// also [`INSTALL_URL`]: `api`, the public address it connects at, so
+/// connect.sh keeps it for refreshes run without it.
 fn connect_command_with(
     base: &str,
     api: &str,
@@ -377,8 +410,12 @@ fn connect_command_with(
     tailscale_key: Option<&str>,
     registry: Option<(&str, &str)>,
     auto_update: Option<&'static str>,
+    install: bool,
 ) -> String {
     let mut args = connect_args(api, token, tailscale_key, registry);
+    if install {
+        args.push((INSTALL_URL, Some(api.to_owned())));
+    }
     args.extend(auto_update.map(|flag| (flag, None)));
     format!(
         "curl -fsSL {base}/connect.sh | bash -s -- {}",
@@ -411,14 +448,24 @@ pub fn connect_args(
 
 /// The command that brings a connected cluster's agent install up to date
 /// with Pyo's: connect.sh run on the cluster's first server, which reads
-/// Pyo's address and the token from the agent already there.
+/// Pyo's address and the token from the agent already there. Where the
+/// agent's address isn't for installs, with [`INSTALL_URL`].
 pub fn refresh_command(base: &str) -> String {
-    refresh_command_with(base, auto_update_flag(crate::install::self_update(), true))
+    refresh_command_with(
+        base,
+        auto_update_flag(crate::install::self_update(), true),
+        install_url().as_deref(),
+    )
 }
 
-/// [`refresh_command`] with this [`auto_update_flag`].
-fn refresh_command_with(base: &str, auto_update: Option<&'static str>) -> String {
-    match quoted(&pinned(base, auto_update.map(|flag| (flag, None)).into_iter().collect())) {
+/// [`refresh_command`] with this [`auto_update_flag`] and [`install_url`].
+fn refresh_command_with(base: &str, auto_update: Option<&'static str>, install: Option<&str>) -> String {
+    let mut args: Vec<(&'static str, Option<String>)> = install
+        .map(|u| (INSTALL_URL, Some(u.to_owned())))
+        .into_iter()
+        .collect();
+    args.extend(auto_update.map(|flag| (flag, None)));
+    match quoted(&pinned(base, args)) {
         a if a.is_empty() => format!("curl -fsSL {base}/connect.sh | bash"),
         a => format!("curl -fsSL {base}/connect.sh | bash -s -- {a}"),
     }
@@ -1146,6 +1193,7 @@ mod tests {
                 None,
                 None,
                 flag,
+                false,
             )
         };
         let plain = "curl -fsSL https://cloud.example/install/connect.sh | bash -s -- --api 'https://cloud.example' --token 'abc'";
@@ -1155,7 +1203,7 @@ mod tests {
         // Hosted: ticked, then unticked.
         assert_eq!(connect(auto_update_flag(false, true)), format!("{plain} --auto-update"));
         assert_eq!(connect(auto_update_flag(false, false)), format!("{plain} --no-auto-update"));
-        let refresh = |base, flag| refresh_command_with(base, flag);
+        let refresh = |base, flag| refresh_command_with(base, flag, None);
         let own = "https://cloud.example/install";
         assert_eq!(
             refresh(own, auto_update_flag(true, true)),
@@ -1190,6 +1238,67 @@ mod tests {
                 .iter()
                 .any(|(flag, _)| flag.contains("auto-update"))
         );
+    }
+
+    /// A Pyo whose agents reach it at an address only they may use (Pyo
+    /// Cloud's agent address) names its public one for installs: the
+    /// refresh, which otherwise takes the agent's, and the connect, whose
+    /// --api it is, so the server keeps it. Any other Pyo: as before.
+    #[test]
+    fn hosted_commands_name_the_install_address() {
+        let agent = "https://agent.cloud.example";
+        let public = Some("https://cloud.example");
+        // Pyo Cloud: PYO_PUBLIC_API_URL, else the dashboard's address.
+        assert_eq!(
+            pick_install_url(agent, Some(" https://cloud.example/ "), Some("https://pyo.tail1.ts.net")).as_deref(),
+            public
+        );
+        assert_eq!(pick_install_url(agent, None, public).as_deref(), public);
+        assert_eq!(pick_install_url(agent, Some(""), public).as_deref(), public);
+        // The same address for both, none, or one another machine can't
+        // use: nothing to name.
+        assert_eq!(pick_install_url(agent, Some("https://agent.cloud.example/"), None), None);
+        assert_eq!(pick_install_url(agent, None, None), None);
+        assert_eq!(pick_install_url(agent, Some("http://127.0.0.1:8000"), None), None);
+        assert_eq!(pick_install_url(agent, Some("http://pyo.example.com"), None), None);
+        // Agents with tokens (self-hosted): the address in their Secret serves both.
+        assert_eq!(crate::agent_tls::endpoint(), None);
+        assert_eq!(install_url(), None);
+
+        let base = "https://cloud.example/install";
+        assert_eq!(
+            refresh_command_with(base, Some(AUTO_UPDATE), public),
+            "curl -fsSL https://cloud.example/install/connect.sh | bash -s -- --install-url 'https://cloud.example' --auto-update"
+        );
+        assert_eq!(
+            refresh_command_with(base, Some(NO_AUTO_UPDATE), public),
+            "curl -fsSL https://cloud.example/install/connect.sh | bash -s -- --install-url 'https://cloud.example' --no-auto-update"
+        );
+        // Before a mirror's --version.
+        assert_eq!(
+            refresh_command_with("https://mirror.example.com", Some(AUTO_UPDATE), public),
+            format!("curl -fsSL https://mirror.example.com/connect.sh | bash -s -- --install-url 'https://cloud.example' --auto-update{PIN}")
+        );
+        assert_eq!(
+            connect_command_with(base, "https://cloud.example", "abc", None, None, Some(AUTO_UPDATE), true),
+            "curl -fsSL https://cloud.example/install/connect.sh | bash -s -- --api 'https://cloud.example' --token 'abc' --install-url 'https://cloud.example' --auto-update"
+        );
+
+        // Self-hosted: the commands as before, with no install address.
+        let own = "https://pyo.example/install";
+        assert_eq!(refresh_command(own), "curl -fsSL https://pyo.example/install/connect.sh | bash");
+        assert_eq!(
+            connect_command(own, "https://pyo.example", "abc", None, None),
+            "curl -fsSL https://pyo.example/install/connect.sh | bash -s -- --api 'https://pyo.example' --token 'abc'"
+        );
+        // "This machine": from Pyo on it.
+        assert_eq!(
+            connect_command(&local_scripts_url(), &local_api_url(), "abc", None, None),
+            "curl -fsSL http://127.0.0.1:8000/install/connect.sh | bash -s -- --api 'http://127.0.0.1:8000' --token 'abc'"
+        );
+        // The dashboard swaps --auto-update (AgentInstall.tsx): the install
+        // address never looks like it.
+        assert!(!INSTALL_URL.contains("auto-update"));
     }
 
     #[test]
@@ -1476,7 +1585,7 @@ SS='LISTEN 0      511          0.0.0.0:80        0.0.0.0:*    users:(("nginx",pi
         // Nothing at all.
         assert_eq!(web_ports(""), "free");
         // The manifest is asked for with it, and ufw left alone.
-        assert!(CONNECT_SCRIPT.contains(r#""$API/install/agent.yaml?token=$TOKEN$WEB_QUERY""#));
+        assert!(CONNECT_SCRIPT.contains(r#""$INSTALL_URL/install/agent.yaml?token=$TOKEN$WEB_QUERY""#));
         assert!(CONNECT_SCRIPT.contains("WEB_QUERY=\"&webPorts=busy\""));
     }
 
@@ -2259,7 +2368,7 @@ if connect_lock_held; then echo has-lock; else echo no-lock; fi
 
     /// connect.sh's options, read by its own loop: AUTO_UPDATE, or the
     /// error.
-    fn auto_update_flag(args: &str) -> String {
+    fn auto_update_arg(args: &str) -> String {
         let block = script_block("connect-args", CONNECT_SCRIPT);
         let (code, out, err) = bash(&format!(
             "set -euo pipefail\nset -- {args}\n{block}\necho \"[$AUTO_UPDATE] $API $TOKEN [$UNINSTALL]\"\n"
@@ -2270,23 +2379,23 @@ if connect_lock_held; then echo has-lock; else echo no-lock; fi
     #[test]
     fn connect_reads_the_auto_update_flags() {
         // As Pyo's commands give them: last, or before a mirror's --version.
-        assert_eq!(auto_update_flag("--auto-update"), "[on]   []");
-        assert_eq!(auto_update_flag("--no-auto-update"), "[off]   []");
-        assert_eq!(auto_update_flag("--api 'https://pyo.example/' --token 'ab12' --auto-update"), "[on] https://pyo.example ab12 []");
+        assert_eq!(auto_update_arg("--auto-update"), "[on]   []");
+        assert_eq!(auto_update_arg("--no-auto-update"), "[off]   []");
+        assert_eq!(auto_update_arg("--api 'https://pyo.example/' --token 'ab12' --auto-update"), "[on] https://pyo.example ab12 []");
         assert_eq!(
-            auto_update_flag("--api 'https://pyo.example' --token 'ab12' --local-registry --no-auto-update --version '0.51.0'"),
+            auto_update_arg("--api 'https://pyo.example' --token 'ab12' --local-registry --no-auto-update --version '0.51.0'"),
             "[off] https://pyo.example ab12 []"
         );
-        assert_eq!(auto_update_flag("--auto-update --version '0.51.0'"), "[on]   []");
+        assert_eq!(auto_update_arg("--auto-update --version '0.51.0'"), "[on]   []");
         // Neither: nothing chosen in this run.
-        assert_eq!(auto_update_flag(""), "[]   []");
-        assert_eq!(auto_update_flag("--api 'https://pyo.example' --token 'ab12'"), "[] https://pyo.example ab12 []");
+        assert_eq!(auto_update_arg(""), "[]   []");
+        assert_eq!(auto_update_arg("--api 'https://pyo.example' --token 'ab12'"), "[] https://pyo.example ab12 []");
         // Both: the last one.
-        assert_eq!(auto_update_flag("--auto-update --no-auto-update"), "[off]   []");
-        assert_eq!(auto_update_flag("--no-auto-update --auto-update"), "[on]   []");
-        assert_eq!(auto_update_flag("--uninstall --yes"), "[]   [1]");
-        assert_eq!(auto_update_flag("--auto-updates"), "2 Unknown option: --auto-updates");
-        assert_eq!(auto_update_flag("--auto-update=off"), "2 Unknown option: --auto-update=off");
+        assert_eq!(auto_update_arg("--auto-update --no-auto-update"), "[off]   []");
+        assert_eq!(auto_update_arg("--no-auto-update --auto-update"), "[on]   []");
+        assert_eq!(auto_update_arg("--uninstall --yes"), "[]   [1]");
+        assert_eq!(auto_update_arg("--auto-updates"), "2 Unknown option: --auto-updates");
+        assert_eq!(auto_update_arg("--auto-update=off"), "2 Unknown option: --auto-update=off");
     }
 
     /// A server for connect.sh's auto-update steps: its files under a
@@ -2388,6 +2497,8 @@ esac
                 .replace("/usr/local/bin/pyo-verify", &format!("{d}/bin/pyo-verify"))
                 .replace("/etc/systemd/system", &format!("{d}/units"))
                 .replace("/usr/local/lib/pyo/connect-this-machine.sh", &format!("{d}/lib/connect-this-machine.sh"));
+            let install = script_block("install-url", &script)
+                .replace("/etc/pyo/install-url", &format!("{d}/etc/pyo/install-url"));
             bash(&format!(
                 r#"set -euo pipefail
 T='{d}'
@@ -2408,6 +2519,7 @@ curl() {{
 {progress}
 {lock}
 {block}
+{install}
 {steps}
 "#
             ))
@@ -2455,12 +2567,12 @@ auto_update_choice
         let lock = at("\n[ -n \"$TAILNET_ONLY\" ] || connect_lock\n");
         let choice = at("\nauto_update_choice\n[ \"$AUTO_UPDATE\" != off ] || auto_update_off\n");
         let agent = at("k3s kubectl -n pyo-system rollout status deployment/pyo-agent");
-        let on = at("\n[ \"$AUTO_UPDATE\" != on ] || auto_update_on \"$API\"\n");
+        let on = at("\n[ \"$AUTO_UPDATE\" != on ] || auto_update_on \"$INSTALL_URL\"\n");
         let done = at("\nok_line \"Connected ");
         assert!(lock < choice && choice < agent && agent < on && on < done);
         assert!(at("  echo \"$(hostname) is on your tailnet.\"\n") < choice);
         for line in CONNECT_STEPS.lines() {
-            let line = line.replace("https://pyo.example", "\"$API\"").replace("connect_lock", "[ -n \"$TAILNET_ONLY\" ] || connect_lock");
+            let line = line.replace("https://pyo.example", "\"$INSTALL_URL\"").replace("connect_lock", "[ -n \"$TAILNET_ONLY\" ] || connect_lock");
             assert_eq!(CONNECT_SCRIPT.matches(&format!("\n{line}\n")).count(), 1, "{line}");
         }
         // Nothing about it shows sudo or a command to type.
@@ -2809,6 +2921,7 @@ uninstall
         let h = VerifyHost::new("uninstall");
         h.installed("0.51.0");
         std::fs::write(h.dir.join("etc/pyo/auto-update"), "on\n").unwrap();
+        std::fs::write(h.dir.join("etc/pyo/install-url"), "https://cloud.example\n").unwrap();
         // A dry run only says so.
         let (code, out, err) = uninstall_with_verifier(&h, "DRY_RUN=1");
         assert_eq!((code, err.as_str()), (0, ""), "{out}");
@@ -2823,6 +2936,7 @@ uninstall
         assert!(removing < out.find("\nStopping the Pyo agent…\n").unwrap(), "{out}");
         assert_eq!(h.log(), ["0.51.0 uninstall"]);
         assert!(!h.has("bin/pyo-verify") && !h.has("etc/pyo/auto-update"));
+        assert!(!h.has("etc/pyo/install-url"));
         // No verifier here: not a word about it, and the choice goes.
         std::fs::write(h.dir.join("etc/pyo/auto-update"), "off\n").unwrap();
         let (code, out, err) = uninstall_with_verifier(&h, "");
@@ -2830,5 +2944,289 @@ uninstall
         assert!(!out.contains("automatic updates"), "{out}");
         assert!(h.log().is_empty());
         assert!(!h.has("etc/pyo/auto-update"));
+    }
+
+    /// connect.sh's own lines from its options to the verifier, in its
+    /// order: the lock, a refresh reads the agent's settings, the install
+    /// address is kept, then the manifest (the agent-manifest block) and
+    /// the verifier come from it.
+    const INSTALL_STEPS: [&str; 6] = [
+        "[ -n \"$TAILNET_ONLY\" ] || connect_lock",
+        "if [ -z \"$TAILNET_ONLY\" ] && [ -z \"$API\" ] && [ -z \"$TOKEN\" ] && command -v k3s >/dev/null; then\n  agent_settings\n  [ -z \"$API\" ] || echo \"Updating this cluster's Pyo agent.\"\nfi",
+        "auto_update_choice\n[ \"$AUTO_UPDATE\" != off ] || auto_update_off\ninstall_url_keep",
+        "API=$(tailnet_url \"$API\")\nINSTALL_URL=$(tailnet_url \"${INSTALL_URL:-$API}\")",
+        "AGENT_MANIFEST",
+        "[ \"$AUTO_UPDATE\" != on ] || auto_update_on \"$INSTALL_URL\"",
+    ];
+
+    /// A connect.sh run on `h` with `args`, from its options to the
+    /// verifier ([`INSTALL_STEPS`]). The agent already here reaches Pyo at
+    /// `agent` (its Secret's PYO_API_URL), with the token ab12. Pyo answers
+    /// at every address but https://agent.cloud.example, which takes only
+    /// the agents' own requests (Pyo Cloud's Cloudflare rule) and answers
+    /// 403. What it printed. `h.log()` has what k3s and curl were asked.
+    fn connect_run(h: &VerifyHost, pins: Option<[&str; 3]>, args: &str, agent: &str) -> (i32, String, String) {
+        let script = match pins {
+            Some(p) => stamp_verifier(CONNECT_SCRIPT, p),
+            None => CONNECT_SCRIPT.to_owned(),
+        };
+        let steps = INSTALL_STEPS
+            .join("\n")
+            .replace("AGENT_MANIFEST", &script_block("agent-manifest", &script));
+        h.bash(
+            pins,
+            &format!(
+                r#"AGENT_API='{agent}' MANIFEST="$T/manifest" WEB_QUERY=""
+k3s() {{
+  echo "k3s $*" >>"$T/log"
+  case "$*" in
+    "kubectl -n pyo-system get secret pyo-agent -o jsonpath={{.data.PYO_API_URL}}") printf %s "$AGENT_API" | base64 ;;
+    "kubectl -n pyo-system get secret pyo-agent -o jsonpath={{.data.PYO_AGENT_TOKEN}}") printf %s ab12 | base64 ;;
+    *) return 1 ;;
+  esac
+}}
+curl() {{
+  local out="" url=""
+  while [ $# -gt 0 ]; do
+    case "$1" in -o) out=$2; shift 2 ;; -w | --proto | --max-time | --max-filesize) shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac
+  done
+  echo "curl $url" >>"$T/log"
+  case "$url" in
+    https://agent.cloud.example/*) echo 403; return 0 ;;
+    */install/agent.yaml\?token=ab12) echo manifest >"$out"; echo 200; return 0 ;;
+    */install/agent.yaml*) echo 404; return 0 ;;
+  esac
+  [ -f "$T/release/${{url##*/}}" ] || return 22
+  cp "$T/release/${{url##*/}}" "$out"
+}}
+{tailnet}
+set -- {args}
+{connect_args}
+{steps}
+echo "agent at $API, installs from $INSTALL_URL"
+"#,
+                tailnet = script_block("tailnet-host", &script),
+                connect_args = script_block("connect-args", &script),
+            ),
+        )
+    }
+
+    /// The steps [`connect_run`] runs are connect.sh's, in its order, and
+    /// every install file comes from the install address.
+    #[test]
+    fn connect_gets_its_install_files_from_the_install_address() {
+        let at = |text: &str| {
+            assert_eq!(CONNECT_SCRIPT.matches(text).count(), 1, "{text}");
+            CONNECT_SCRIPT.find(text).unwrap()
+        };
+        let mut last = 0;
+        for step in INSTALL_STEPS {
+            let here = match step {
+                "AGENT_MANIFEST" => at("\n# >>> pyo:agent-manifest "),
+                _ => at(&format!("{step}\n")),
+            };
+            assert!(last < here, "{step}");
+            last = here;
+        }
+        // Checked as --api is, before anything is set up.
+        let api = at("\n[ -n \"$TAILNET_ONLY\" ] || api_ok \"$API\" || ");
+        let install = at("\n[ -n \"$TAILNET_ONLY\" ] || [ -z \"$INSTALL_URL\" ] || api_ok \"$INSTALL_URL\" || { echo \"Pyo's address must be https:// ($INSTALL_URL isn't on a private network or the tailnet).\" >&2; exit 2; }\n");
+        assert!(api < install && install < at("\n[ \"$(id -u)\" = 0 ] || "));
+        // The gateway's CRDs too. Nothing else is fetched from Pyo.
+        assert!(CONNECT_SCRIPT.contains(
+            "curl -fsS --max-time 60 -o \"$CRDS\" \"$INSTALL_URL/install/gateway-crds.yaml$q\" && break\n"
+        ));
+        let fetches: Vec<&str> = CONNECT_SCRIPT
+            .lines()
+            .filter(|l| l.contains("/install/") && !l.trim_start().starts_with('#'))
+            .collect();
+        assert_eq!(fetches.len(), 2, "{fetches:?}");
+        assert!(fetches.iter().all(|l| l.contains("\"$INSTALL_URL/install/")), "{fetches:?}");
+        assert!(!CONNECT_SCRIPT.contains("$API/"));
+        // --uninstall drops the kept address.
+        assert!(CONNECT_SCRIPT.contains("rm -f \"$AUTO_UPDATE_FILE\" \"$INSTALL_URL_FILE\"\n"));
+    }
+
+    #[test]
+    fn connect_reads_the_install_address() {
+        let h = VerifyHost::new("install-flag");
+        let (code, out, err) = connect_run(&h, None, "--api 'https://pyo.example' --token 'ab12' --install-url 'https://cloud.example/'", "");
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert_eq!(out, "agent at https://pyo.example, installs from https://cloud.example\n");
+        let (code, _, err) = connect_run(&h, None, "--install-url", "");
+        assert_ne!(code, 0, "{err}");
+    }
+
+    const AGENT: &str = "https://agent.cloud.example";
+
+    const SECRET_READS: [&str; 2] = [
+        "k3s kubectl -n pyo-system get secret pyo-agent -o jsonpath={.data.PYO_API_URL}",
+        "k3s kubectl -n pyo-system get secret pyo-agent -o jsonpath={.data.PYO_AGENT_TOKEN}",
+    ];
+
+    /// Pyo Cloud's refresh command: the manifest and the verifier from Pyo's
+    /// public address, while the agent keeps its own (only read here, the
+    /// manifest Pyo hands out names it). Later runs without the flag (a
+    /// command copied before it) find the address kept.
+    #[test]
+    fn a_hosted_refresh_installs_from_the_public_address() {
+        let h = VerifyHost::new("hosted-refresh");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        let pins = Some(["0.51.0", sum.as_str(), OTHER_SUM]);
+        let (code, out, err) = connect_run(&h, pins, "--install-url 'https://cloud.example' --auto-update", AGENT);
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert!(out.starts_with("Updating this cluster's Pyo agent.\n"), "{out}");
+        assert!(out.contains("Set up automatic updates"), "{out}");
+        assert!(
+            out.ends_with("agent at https://agent.cloud.example, installs from https://cloud.example\n"),
+            "{out}"
+        );
+        assert_eq!(
+            h.log(),
+            [
+                SECRET_READS[0],
+                SECRET_READS[1],
+                "curl https://cloud.example/install/agent.yaml?token=ab12",
+                "curl https://github.com/upsetdev/pyo/releases/download/v0.51.0/pyo-verify-linux-x86_64",
+                "0.51.0 install --url https://cloud.example",
+            ]
+        );
+        assert_eq!(h.read("manifest"), "manifest\n");
+        assert_eq!(h.read("etc/pyo/install-url"), "https://cloud.example\n");
+
+        // A refresh command copied before --install-url: the kept address,
+        // and the verifier (already this release's) is given it again.
+        for args in ["--auto-update", ""] {
+            let (code, out, err) = connect_run(&h, pins, args, AGENT);
+            assert_eq!((code, err.as_str()), (0, ""), "{out}");
+            assert!(out.ends_with("installs from https://cloud.example\n"), "{out}");
+            assert_eq!(
+                h.log(),
+                [
+                    SECRET_READS[0],
+                    SECRET_READS[1],
+                    "curl https://cloud.example/install/agent.yaml?token=ab12",
+                    "0.51.0 install --url https://cloud.example",
+                ]
+            );
+        }
+        assert_eq!(h.read("etc/pyo/install-url"), "https://cloud.example\n");
+    }
+
+    /// A refresh command copied before --install-url, on a server that
+    /// never ran one with it: the agent's address turns the manifest away,
+    /// so it stops before anything is installed, and says to copy the
+    /// command again.
+    #[test]
+    fn an_old_hosted_refresh_asks_for_the_new_command() {
+        let h = VerifyHost::new("old-refresh");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        for args in ["", "--auto-update"] {
+            let (code, out, err) = connect_run(&h, Some(["0.51.0", sum.as_str(), OTHER_SUM]), args, AGENT);
+            assert_eq!(code, 1, "{out}");
+            assert_eq!(
+                err,
+                "Pyo at https://agent.cloud.example answered 403 for the agent manifest.\nCopy the command from Pyo again and run that.\n"
+            );
+            assert_eq!(
+                h.log(),
+                [SECRET_READS[0], SECRET_READS[1], "curl https://agent.cloud.example/install/agent.yaml?token=ab12"]
+            );
+            assert!(!h.has("bin/pyo-verify") && !h.has("etc/pyo/install-url"));
+        }
+        // A first connect isn't told to copy it again.
+        let (code, _, err) = connect_run(&h, None, "--api 'https://agent.cloud.example' --token 'ab12'", "");
+        assert_eq!(code, 1);
+        assert_eq!(err, "Pyo at https://agent.cloud.example answered 403 for the agent manifest.\n");
+    }
+
+    /// The first connect: everything from --api, as before. Pyo Cloud's
+    /// command also names it as the install address, which is kept. One
+    /// without it (self-hosted) drops a kept one: one address serves both.
+    #[test]
+    fn a_first_connect_installs_from_its_api() {
+        let h = VerifyHost::new("first-connect");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        let (code, out, err) = connect_run(
+            &h,
+            Some(["0.51.0", sum.as_str(), OTHER_SUM]),
+            "--api 'https://cloud.example' --token 'ab12' --install-url 'https://cloud.example' --auto-update",
+            "",
+        );
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert!(!out.contains("Updating"), "{out}");
+        assert_eq!(
+            h.log(),
+            [
+                "curl https://cloud.example/install/agent.yaml?token=ab12",
+                "curl https://github.com/upsetdev/pyo/releases/download/v0.51.0/pyo-verify-linux-x86_64",
+                "0.51.0 install --url https://cloud.example",
+            ]
+        );
+        assert_eq!(h.read("etc/pyo/install-url"), "https://cloud.example\n");
+        // Self-hosted, or a connect command from before: nothing kept.
+        let h = VerifyHost::new("first-connect-self-hosted");
+        std::fs::write(h.dir.join("etc/pyo/install-url"), "https://cloud.example\n").unwrap();
+        let (code, out, err) = connect_run(&h, None, "--api 'https://pyo.example/' --token 'ab12'", "");
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert_eq!(out, "agent at https://pyo.example, installs from https://pyo.example\n");
+        assert_eq!(h.log(), ["curl https://pyo.example/install/agent.yaml?token=ab12"]);
+        assert!(!h.has("etc/pyo/install-url"));
+    }
+
+    /// Self-hosted refreshes, as before: everything from the agent's
+    /// address. Pyo's own server too (connect-this-machine.sh), from Pyo
+    /// on it, whatever a file says.
+    #[test]
+    fn a_self_hosted_refresh_installs_from_the_agent_s_address() {
+        let h = VerifyHost::new("self-hosted-refresh");
+        for (agent, from) in [
+            ("https://pyo.example/", "https://pyo.example"),
+            ("http://100.64.0.1:8000", "http://100.64.0.1:8000"),
+        ] {
+            let (code, out, err) = connect_run(&h, None, "", agent);
+            assert_eq!((code, err.as_str()), (0, ""), "{out}");
+            assert_eq!(out, format!("Updating this cluster's Pyo agent.\nagent at {from}, installs from {from}\n"));
+            assert_eq!(
+                h.log(),
+                [
+                    SECRET_READS[0].to_owned(),
+                    SECRET_READS[1].to_owned(),
+                    format!("curl {from}/install/agent.yaml?token=ab12"),
+                ]
+            );
+            assert!(!h.has("etc/pyo/install-url"));
+        }
+        // Pyo's own server: its agent reaches Pyo in the cluster.
+        std::fs::write(h.dir.join("lib/connect-this-machine.sh"), "").unwrap();
+        std::fs::write(h.dir.join("etc/pyo/install-url"), "https://cloud.example\n").unwrap();
+        let (code, out, err) = connect_run(&h, None, "", "http://pyo.pyo-system.svc:8000");
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert_eq!(
+            out,
+            "Updating this cluster's Pyo agent.\nagent at http://127.0.0.1:8000, installs from http://127.0.0.1:8000\n"
+        );
+        assert_eq!(
+            h.log().last().map(String::as_str),
+            Some("curl http://127.0.0.1:8000/install/agent.yaml?token=ab12")
+        );
+        assert_eq!(h.read("etc/pyo/install-url"), "https://cloud.example\n");
+    }
+
+    /// A kept address that isn't one is left out.
+    #[test]
+    fn a_kept_install_address_has_to_be_one() {
+        let h = VerifyHost::new("kept-garbage");
+        for kept in ["", "pyo.example\n", "ftp://pyo.example\n", "https://\n"] {
+            std::fs::write(h.dir.join("etc/pyo/install-url"), kept).unwrap();
+            let (code, out, err) = connect_run(&h, None, "", "https://pyo.example");
+            assert_eq!((code, err.as_str()), (0, ""), "{out}");
+            assert!(out.ends_with("installs from https://pyo.example\n"), "{kept:?} {out}");
+            h.log();
+        }
+        std::fs::write(h.dir.join("etc/pyo/install-url"), "https://cloud.example/\nmore\n").unwrap();
+        let (code, out, err) = connect_run(&h, None, "", AGENT);
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert!(out.ends_with("installs from https://cloud.example\n"), "{out}");
     }
 }
