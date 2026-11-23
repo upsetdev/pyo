@@ -197,7 +197,10 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // (the cluster settings say so by the refresh command).
     let databases_restart = crate::bundles::databases_restart(&mut *db, &ids).await?;
     for c in &mut clusters {
-        if c["id"].as_str().is_some_and(|id| databases_restart.contains(id)) {
+        if c["id"]
+            .as_str()
+            .is_some_and(|id| databases_restart.contains(id))
+        {
             c["databasesRestart"] = json!(true);
         }
         waf_rejected.extend(
@@ -264,22 +267,31 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // The tailnet its tailnet domains are on: Tailscale set up on the
     // cluster, and a server of it on the tailnet. And the cluster's
     // Tailscale as the dashboard shows it (never a secret).
-    let tailnets: Vec<(String, Option<Value>, bool)> = sqlx::query_as(
-        "SELECT id, tailscale,
+    let tailnets: Vec<(String, String, Option<Value>, bool)> = sqlx::query_as(
+        "SELECT id, team_id, tailscale,
                 EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(capabilities->'tailnet', '[]')) t WHERE t->>'state' = 'Running')
            FROM pyo.clusters WHERE team_id = ANY($1)",
     )
     .bind(&team_ids)
     .fetch_all(&mut *db)
     .await?;
+    let mut teams_tailnets = std::collections::BTreeMap::new();
+    for team in &team_ids {
+        if let Some(t) = crate::tailscale::team_tailnet(&mut *db, team).await? {
+            teams_tailnets.insert(team.clone(), t);
+        }
+    }
     for c in &mut clusters {
         let row = tailnets.iter().find(|r| c["id"] == json!(r.0));
         let t = row
-            .and_then(|r| r.1.clone())
+            .and_then(|r| r.2.clone())
             .and_then(|v| serde_json::from_value::<crate::tailscale::Tailnet>(v).ok());
-        let on = row.is_some_and(|r| r.2);
+        let on = row.is_some_and(|r| r.3);
         c["tailnet"] = json!(t.as_ref().and_then(|t| t.suffix.clone()).filter(|_| on));
-        c["tailscale"] = t.as_ref().map(crate::tailscale::cluster_view).unwrap_or(Value::Null);
+        c["tailscale"] = match (row, &t) {
+            (Some(r), Some(t)) => crate::tailscale::cluster_view(&r.0, t, teams_tailnets.get(&r.1)),
+            _ => Value::Null,
+        };
     }
 
     // Workloads come from each cluster's last heartbeat.

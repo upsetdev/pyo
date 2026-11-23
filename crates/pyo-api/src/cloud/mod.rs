@@ -686,8 +686,10 @@ async fn tailnet_devices(
     db: &PgPool,
     cluster: Option<&str>,
 ) -> Option<Vec<pyo_proto::tailscale::Machine>> {
-    let t = crate::tailscale::of(db, cluster?).await.ok().flatten()?;
-    Some(t.machines)
+    crate::tailscale::machines_of(db, cluster?)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// One pass: new servers move on, deleted ones go. Run by the Tailscale
