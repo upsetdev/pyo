@@ -37,10 +37,39 @@ const shortTarget = (content: string) => {
 
 const recordText = (p: PreviousRecord) => `${p.type} ${p.name} ${p.content}`;
 
+/** Through the tunnel or on its way there or back: a record in the way or a failed switch alone isn't. */
+export const throughTunnel = (d: Domain) =>
+  !!d.tunnel ||
+  d.dnsRecord?.status === "switching" ||
+  d.dnsRecord?.status === "reverting" ||
+  (d.dnsRecord?.via === "tunnel" &&
+    (d.dnsRecord.status === "created" || d.dnsRecord.status === "exists"));
+
+/**
+ * What a settled tunnel domain says when there's nothing to do, for the
+ * logo's tooltip: the wildcard or record it goes through. None while
+ * TunnelRecordLine has something to show.
+ */
+export function tunnelNote(
+  d: Domain,
+  cluster: Cluster | undefined,
+  admin: boolean,
+): { name: string; more?: string } | undefined {
+  const r = d.dnsRecord;
+  const wildcard = defaultDomainOver(cluster, d.hostname);
+  if (!r) return d.tunnel === "on" && wildcard ? { name: `*.${wildcard}` } : undefined;
+  if (r.error || (r.status !== "created" && r.status !== "exists")) return undefined;
+  const name = `${r.type} ${shortTarget(r.content)}`;
+  const kept = r.previous?.length ?? 0;
+  if (wildcard && !kept) return { name };
+  // Switch back is a button: the line stays.
+  return kept && !admin ? { name, more: "An owner or admin can switch it back." } : undefined;
+}
+
 const lineClass =
   "mt-1.5 inline-flex flex-wrap items-center gap-1.5 text-[12px] text-muted-foreground";
 
-/** Through the tunnel, switching, in the way, or failed. */
+/** Switching, in the way, failed, or with a Switch back. Nothing for a settled one with nothing to do. */
 export function TunnelRecordLine({ app, d }: { app: Application; d: Domain }) {
   const s = usePyo();
   const r = d.dnsRecord;
@@ -104,15 +133,8 @@ export function TunnelRecordLine({ app, d }: { app: Application; d: Domain }) {
       </p>
     );
 
-  // No record of its own: the default domain's wildcard has it.
-  if (!r && d.tunnel === "on" && wildcard)
-    return (
-      <p className={lineClass}>
-        <BrandMark icon={CLOUDFLARE_LOGO} size={12} />
-        Via Tunnel ·
-        <span className="font-mono">*.{wildcard}</span>
-      </p>
-    );
+  // Nothing to do: the row's Cloudflare logo says it.
+  if (tunnelNote(d, cluster, admin)) return null;
 
   if (!r || r.status === "switching" || back)
     return (
