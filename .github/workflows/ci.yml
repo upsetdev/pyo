@@ -108,6 +108,13 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: cargo test --locked -p pyo-api --lib -- --ignored rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests cloudflare::http_tests
+      # What a Compose sync writes. A run of its own: the tests above set a
+      # secret key for the whole process, and its one vault then keeps its
+      # data keys in whichever test's database came first.
+      - name: Compose sync (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api --lib -- --ignored compose_sync::db_tests
 
   # Known CVEs in the locked dependencies: Cargo.lock, bun.lock (with the
   # dashboard's dev dependencies) and the WAF's go.mod. A CRITICAL one

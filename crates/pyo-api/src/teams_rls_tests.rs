@@ -23,7 +23,7 @@ use crate::teamsec_tests::{Client, run_big};
 /// Pyo's tables owned by a login that's neither a superuser nor bypasses
 /// row security, in a database of its own, as on Pyo Cloud. Dropped by
 /// [`drop_db`].
-async fn cloud_db() -> (PgPool, String) {
+pub(crate) async fn cloud_db() -> (PgPool, String) {
     let opts: PgConnectOptions = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL")
         .parse()
@@ -70,7 +70,7 @@ async fn cloud_db() -> (PgPool, String) {
     (db, name)
 }
 
-async fn drop_db(db: PgPool, name: &str) {
+pub(crate) async fn drop_db(db: PgPool, name: &str) {
     db.close().await;
     let admin = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
         .await
@@ -83,7 +83,7 @@ async fn drop_db(db: PgPool, name: &str) {
     .unwrap();
 }
 
-async fn installation_db() -> PgPool {
+pub(crate) async fn installation_db() -> PgPool {
     let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
         .await
         .unwrap();

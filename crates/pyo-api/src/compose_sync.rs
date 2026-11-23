@@ -1274,3 +1274,7 @@ pub(crate) async fn apply(
 #[cfg(test)]
 #[path = "compose_sync_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "compose_sync_db_tests.rs"]
+mod db_tests;
