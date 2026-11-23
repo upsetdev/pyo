@@ -1514,7 +1514,7 @@ async fn sync_names(s: &AppState, only: Option<&str>) -> ApiResult<Vec<ClusterRo
         tx.commit().await?;
         s.wake(&acting).await;
     }
-    leftovers(s, &install, &teams).await?;
+    leftovers(s, &install, &teams, only).await?;
     forget_moved(s, &teams).await?;
     Ok(rows)
 }
@@ -1531,13 +1531,59 @@ async fn busy(db: &PgPool, acting: &str) -> ApiResult<bool> {
     Ok(n >= HOLDER_IN_FLIGHT)
 }
 
-/// Removed clusters' machines and names on their team's tailnet: the
-/// holder takes them off with a sync for the removed cluster (its mark, no
-/// names wanted, its machines forgotten). Tried every 5 minutes for a week.
+/// A removed cluster's server on its tailnet, as kept in its leftovers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeftMachine {
+    #[serde(default)]
+    pub server: String,
+    pub node_id: String,
+}
+
+/// Who takes a removed cluster's leftovers off `suffix` (its tailnet, as
+/// last seen): the team's holder when it's the team's tailnet (or one Pyo
+/// never saw), else a connected cluster of the team that keeps its own
+/// client on it. None when no one can now.
+async fn leftovers_actor(
+    db: &PgPool,
+    team_id: &str,
+    team: Option<&TeamTailnet>,
+    suffix: Option<&str>,
+) -> ApiResult<Option<String>> {
+    if let Some(t) = team
+        && (suffix.is_none() || suffix == t.suffix.as_deref())
+    {
+        return Ok(t.holder.clone().filter(|_| t.holder_connected));
+    }
+    let Some(suffix) = suffix else {
+        return Ok(None);
+    };
+    let rows: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT id, tailscale FROM pyo.clusters
+          WHERE team_id = $1 AND status IN ('connected', 'degraded')
+            AND coalesce(tailscale->>'clientId', '') <> '' AND tailscale->>'suffix' = $2
+          ORDER BY created_at",
+    )
+    .bind(team_id)
+    .bind(suffix)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().find_map(|(id, v)| {
+        let t: Tailnet = serde_json::from_value(v).ok()?;
+        (acting_for(&id, Some(&t), team) == Acting::Own).then_some(id)
+    }))
+}
+
+/// Removed clusters' machines and names on their tailnet: a cluster of the
+/// team that keeps a client there ([`leftovers_actor`]) takes them off
+/// with a sync for the removed cluster (its mark, no names wanted, its
+/// machines forgotten). Tried every 5 minutes for a week. `only`: one
+/// team's.
 pub async fn leftovers(
     s: &AppState,
     install: &str,
     teams: &std::collections::BTreeMap<String, TeamTailnet>,
+    only: Option<&str>,
 ) -> ApiResult<()> {
     sqlx::query("DELETE FROM pyo.tailnet_leftovers WHERE created_at < now() - interval '7 days'")
         .execute(&s.db)
@@ -1552,21 +1598,26 @@ pub async fn leftovers(
     )
     .execute(&s.db)
     .await?;
-    type Leftover = (i64, String, String, Vec<String>, Vec<String>, Vec<String>);
+    type Leftover = (
+        i64,
+        String,
+        String,
+        Option<String>,
+        Vec<String>,
+        Vec<String>,
+        Value,
+    );
     let rows: Vec<Leftover> = sqlx::query_as(
-        "SELECT id, team_id, cluster_id, adopt, names, nodes FROM pyo.tailnet_leftovers
+        "SELECT id, team_id, cluster_id, suffix, adopt, names, machines FROM pyo.tailnet_leftovers
           WHERE command_id IS NULL AND (tried_at IS NULL OR tried_at < now() - interval '5 minutes')
-            AND team_id = ANY($1)
+            AND ($1::text IS NULL OR team_id = $1)
           ORDER BY id",
     )
-    .bind(teams.keys().cloned().collect::<Vec<_>>())
+    .bind(only)
     .fetch_all(&s.db)
     .await?;
-    for (lid, team, cluster, adopt, names, nodes) in rows {
-        let Some(h) = teams
-            .get(&team)
-            .filter(|t| t.holder_connected)
-            .and_then(|t| t.holder.clone())
+    for (lid, team, cluster, suffix, adopt, names, machines) in rows {
+        let Some(h) = leftovers_actor(&s.db, &team, teams.get(&team), suffix.as_deref()).await?
         else {
             continue;
         };
@@ -1584,13 +1635,15 @@ pub async fn leftovers(
         .bind(&team)
         .fetch_all(&s.db)
         .await?;
+        let machines: Vec<LeftMachine> = serde_json::from_value(machines).unwrap_or_default();
+        let ids: Vec<String> = machines.iter().map(|m| m.node_id.clone()).collect();
         let nodes: Vec<String> = sqlx::query_scalar(
             "SELECT x FROM unnest($1::text[]) x
               WHERE NOT EXISTS (SELECT 1 FROM pyo.clusters c, jsonb_array_elements(coalesce(c.capabilities->'tailnet', '[]')) t
                                  WHERE t->>'nodeId' = x)
               ORDER BY x",
         )
-        .bind(&nodes)
+        .bind(&ids)
         .fetch_all(&s.db)
         .await?;
         if names.is_empty() && nodes.is_empty() {
@@ -1619,7 +1672,7 @@ pub async fn leftovers(
         .await?;
         tx.commit().await?;
         s.wake(&h).await;
-        tracing::info!(cluster = %cluster, "tailscale: taking a removed cluster's machines and names off the tailnet");
+        tracing::info!(cluster = %cluster, by = %h, "tailscale: taking a removed cluster's machines and names off the tailnet");
     }
     Ok(())
 }
@@ -1631,22 +1684,27 @@ async fn leftovers_synced(
     command_id: &str,
     r: &CommandResult,
 ) -> ApiResult<bool> {
-    let row: Option<(i64, Vec<String>)> =
-        sqlx::query_as("SELECT id, nodes FROM pyo.tailnet_leftovers WHERE command_id = $1")
+    let row: Option<(i64, Value)> =
+        sqlx::query_as("SELECT id, machines FROM pyo.tailnet_leftovers WHERE command_id = $1")
             .bind(command_id)
             .fetch_optional(&mut **tx)
             .await?;
-    let Some((lid, nodes)) = row else {
+    let Some((lid, machines)) = row else {
         return Ok(false);
     };
+    let machines: Vec<LeftMachine> = serde_json::from_value(machines).unwrap_or_default();
     let done = r
         .data
         .clone()
         .and_then(|d| serde_json::from_value::<TailnetSynced>(d).ok())
         .filter(|_| r.ok);
-    let left: Vec<String> = nodes
+    let left: Vec<LeftMachine> = machines
         .into_iter()
-        .filter(|n| !done.as_ref().is_some_and(|d| d.forgotten.contains(n)))
+        .filter(|m| {
+            !done
+                .as_ref()
+                .is_some_and(|d| d.forgotten.contains(&m.node_id))
+        })
         .collect();
     if done.is_some() && left.is_empty() {
         sqlx::query("DELETE FROM pyo.tailnet_leftovers WHERE id = $1")
@@ -1655,13 +1713,15 @@ async fn leftovers_synced(
             .await?;
     } else {
         if !r.ok {
-            tracing::warn!(error = ?r.message, "the holder couldn't take a removed cluster off the tailnet");
+            tracing::warn!(error = ?r.message, "the removed cluster's servers couldn't be taken off the tailnet");
         }
-        sqlx::query("UPDATE pyo.tailnet_leftovers SET command_id = NULL, nodes = $2 WHERE id = $1")
-            .bind(lid)
-            .bind(&left)
-            .execute(&mut **tx)
-            .await?;
+        sqlx::query(
+            "UPDATE pyo.tailnet_leftovers SET command_id = NULL, machines = $2 WHERE id = $1",
+        )
+        .bind(lid)
+        .bind(serde_json::to_value(&left).map_err(anyhow::Error::from)?)
+        .execute(&mut **tx)
+        .await?;
     }
     Ok(true)
 }

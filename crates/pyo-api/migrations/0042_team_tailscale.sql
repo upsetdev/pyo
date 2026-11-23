@@ -33,20 +33,23 @@ CREATE POLICY team_rows ON pyo.team_tailscale TO pyo_team
 ALTER TABLE pyo.commands ADD COLUMN for_cluster text REFERENCES pyo.clusters (id) ON DELETE CASCADE;
 CREATE INDEX commands_for_cluster_idx ON pyo.commands (for_cluster) WHERE for_cluster IS NOT NULL;
 
--- A removed cluster's machines and names on its team's tailnet, for the
--- holder to take off. Gone once it did, or after a week.
+-- A removed cluster's machines and names on its tailnet, for a cluster of
+-- its team that keeps a client there (the holder, on the team's tailnet)
+-- to take off. Gone once it did, or after a week.
 CREATE TABLE pyo.tailnet_leftovers (
   id           bigserial PRIMARY KEY,
   team_id      text NOT NULL REFERENCES pyo.teams (id) ON DELETE CASCADE,
   -- The removed cluster (its row is gone): its names' mark is made from it.
   cluster_id   text NOT NULL,
   cluster_name text NOT NULL DEFAULT '',
+  -- Its tailnet, as last seen.
+  suffix       text,
   -- Older marks that were its own too.
   adopt        text[] NOT NULL DEFAULT '{}',
   names        text[] NOT NULL DEFAULT '{}',
-  -- Its servers' node IDs.
-  nodes        text[] NOT NULL DEFAULT '{}',
-  -- The holder's sync taking them off, while one is out, and the last try.
+  -- Its servers on the tailnet: [{server, nodeId}].
+  machines     jsonb NOT NULL DEFAULT '[]',
+  -- The sync taking them off, while one is out, and the last try.
   command_id   text,
   tried_at     timestamptz,
   created_at   timestamptz NOT NULL DEFAULT now()
@@ -57,35 +60,28 @@ CREATE POLICY team_rows ON pyo.tailnet_leftovers TO pyo_team
   USING (team_id = ANY (pyo.team_scope()))
   WITH CHECK (team_id = ANY (pyo.team_scope()));
 
--- Kept when a cluster on its team's tailnet is removed (not Pyo's own
--- cluster, and not one with its own client on another tailnet), while its
--- team is still there.
+-- Kept when a cluster on a tailnet is removed (not Pyo's own cluster),
+-- while its team is still there.
 CREATE FUNCTION pyo.keep_tailnet_leftovers() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
-  v_nodes text[];
+  v_machines jsonb;
   v_names text[];
 BEGIN
   IF OLD.tailscale IS NULL OR OLD.same_cluster
      OR NOT EXISTS (SELECT 1 FROM pyo.teams WHERE id = OLD.team_id) THEN
     RETURN OLD;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pyo.team_tailscale tt
-                  WHERE tt.team_id = OLD.team_id
-                    AND (coalesce(OLD.tailscale->>'clientId', '') = ''
-                         OR tt.holder_cluster_id = OLD.id
-                         OR OLD.tailscale->>'suffix' = tt.suffix)) THEN
-    RETURN OLD;
-  END IF;
-  SELECT coalesce(array_agg(DISTINCT t->>'nodeId'), '{}') INTO v_nodes
+  SELECT coalesce(jsonb_agg(DISTINCT jsonb_build_object('server', coalesce(t->>'server', ''), 'nodeId', t->>'nodeId')), '[]')
+    INTO v_machines
     FROM jsonb_array_elements(coalesce(OLD.capabilities->'tailnet', '[]')) t
    WHERE coalesce(t->>'nodeId', '') <> '';
   SELECT coalesce(array_agg(name), '{}') INTO v_names
     FROM pyo.cluster_tailnet_names WHERE cluster_id = OLD.id;
-  IF cardinality(v_nodes) > 0 OR cardinality(v_names) > 0 THEN
-    INSERT INTO pyo.tailnet_leftovers (team_id, cluster_id, cluster_name, adopt, names, nodes)
-    VALUES (OLD.team_id, OLD.id, OLD.name,
+  IF jsonb_array_length(v_machines) > 0 OR cardinality(v_names) > 0 THEN
+    INSERT INTO pyo.tailnet_leftovers (team_id, cluster_id, cluster_name, suffix, adopt, names, machines)
+    VALUES (OLD.team_id, OLD.id, OLD.name, nullif(OLD.tailscale->>'suffix', ''),
             ARRAY(SELECT jsonb_array_elements_text(coalesce(OLD.tailscale->'adopt', '[]'))),
-            v_names, v_nodes);
+            v_names, v_machines);
   END IF;
   RETURN OLD;
 END
