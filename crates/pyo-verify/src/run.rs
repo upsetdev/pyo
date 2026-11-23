@@ -110,7 +110,8 @@ fn lock(env: &Env) -> Lock {
     }
 }
 
-/// The cluster's `updates` switch says hold.
+/// The cluster's `updates` switch says hold: `hold`, as Pyo reads it
+/// (trimmed, any case). Empty or `auto` go on, anything else stops.
 fn policy_hold(env: &Env) -> Result<bool, Problem> {
     let unreadable = || {
         Problem::new(
@@ -143,8 +144,9 @@ fn policy_hold(env: &Env) -> Result<bool, Problem> {
         .to_ascii_lowercase()
         .as_str()
     {
-        "hold" | "held" | "paused" | "off" | "false" | "no" | "disabled" => Ok(true),
-        "" | "auto" | "on" | "true" | "yes" | "enabled" => Ok(false),
+        // What Pyo shows as on hold (pyo-proto's `Policy::updates_hold`).
+        "hold" => Ok(true),
+        "" | "auto" => Ok(false),
         // A value it does not know is not read as "go on".
         _ => Err(Problem::new(
             "The updates setting in this cluster's pyo-policy is not one the verifier knows. Nothing was changed.",
@@ -863,7 +865,7 @@ mod tests {
 
     #[test]
     fn hold_in_the_cluster_stops_it() {
-        for value in ["hold", "Hold\n", "paused", "off"] {
+        for value in ["hold", "Hold\n", " HOLD "] {
             let w = World::new("0.51.0");
             *w.runner.policy.borrow_mut() = value.into();
             w.live("0.52.0");
@@ -877,6 +879,15 @@ mod tests {
             assert!(w.http.calls.borrow().is_empty(), "{value}");
             w.assert_unchanged();
             assert_eq!(w.status()["hold"], true);
+        }
+        // Empty or `auto`: it goes on.
+        for value in ["", "auto", " Auto\n"] {
+            let w = World::new("0.51.0");
+            *w.runner.policy.borrow_mut() = value.into();
+            w.live("0.52.0");
+            w.release("0.52.0", Some(b"new"));
+            assert_eq!(w.run().outcome, Outcome::HandedOver, "{value:?}");
+            assert_eq!(w.status()["hold"], false, "{value:?}");
         }
         // The switch is read, never written.
         let w = World::new("0.51.0");
@@ -895,14 +906,23 @@ mod tests {
 
     #[test]
     fn a_hold_switch_it_cannot_read_stops_it() {
-        // A value it does not know.
-        let w = World::new("0.51.0");
-        *w.runner.policy.borrow_mut() = "sometimes".into();
-        w.live("0.52.0");
-        w.release("0.52.0", Some(b"new"));
-        assert_eq!(w.run().outcome, Outcome::Failed);
-        assert!(w.http.calls.borrow().is_empty());
-        w.assert_unchanged();
+        // A value it does not know, a word Pyo doesn't show as on hold
+        // among them: neither hold nor go.
+        for value in ["sometimes", "paused", "off", "false", "on", "true", "holding"] {
+            let w = World::new("0.51.0");
+            *w.runner.policy.borrow_mut() = value.into();
+            w.live("0.52.0");
+            w.release("0.52.0", Some(b"new"));
+            let r = w.run();
+            assert_eq!(r.outcome, Outcome::Failed, "{value}");
+            assert_eq!(
+                r.message,
+                "The updates setting in this cluster's pyo-policy is not one the verifier knows. Nothing was changed.",
+                "{value}"
+            );
+            assert!(w.http.calls.borrow().is_empty(), "{value}");
+            w.assert_unchanged();
+        }
 
         // k3s is not answering: nothing happens, and the status is the file.
         let w = World::new("0.51.0");
