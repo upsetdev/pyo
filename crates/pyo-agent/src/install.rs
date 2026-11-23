@@ -735,7 +735,7 @@ mod tests {
 
     /// What 0.52.0 could bring: a rule added to one role, one removed from
     /// another, and a name added to the self-update role.
-    fn changed_roles(access: &mut Vec<Value>) {
+    fn changed_roles(access: &mut [Value]) {
         role(access, "ClusterRole", "pyo-agent-cluster")["rules"]
             .as_array_mut()
             .unwrap()
@@ -757,7 +757,7 @@ mod tests {
         let (kube, client) = FakeKube::start().await;
         let a = parts();
         installed(&kube, &a);
-        let b = later(&a, changed_roles);
+        let b = later(&a, |access| changed_roles(access));
         assert_ne!(a.hash, b.hash);
         // Every write, in order.
         let writes: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -812,7 +812,7 @@ mod tests {
             .access
             .retain(|o| !(o["kind"] == "ClusterRoleBinding" && o["metadata"]["name"] == rbac::NODES_ROLE));
         installed(&kube, &without);
-        let b = later(&a, changed_roles);
+        let b = later(&a, |access| changed_roles(access));
         refresh(&client, &b, &mut Progress::default()).await.unwrap();
         let binding = b.access.iter().find(|o| optional_binding(o)).unwrap();
         assert!(kube.get(&path_of(binding)).is_none());
@@ -827,7 +827,7 @@ mod tests {
         let (kube, client) = FakeKube::start().await;
         let a = parts();
         installed(&kube, &a);
-        let b = later(&a, changed_roles);
+        let b = later(&a, |access| changed_roles(access));
         kube.admit(|w| {
             (w.plural == "deployments").then(|| {
                 (422, "ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request".to_owned())
@@ -862,7 +862,7 @@ mod tests {
         let (kube, client) = FakeKube::start().await;
         let a = parts();
         installed(&kube, &a);
-        let b = later(&a, changed_roles);
+        let b = later(&a, |access| changed_roles(access));
         kube.admit(roles_are_read_only);
         let mut progress = Progress::default();
         let refreshed = refresh(&client, &b, &mut progress).await.unwrap();
