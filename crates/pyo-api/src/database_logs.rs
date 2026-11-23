@@ -330,6 +330,7 @@ fn activity_reason(kind: &str) -> &'static str {
         "database.import_finished" => "Imported",
         "database.import_failed" => "Import failed",
         "database.deleted" => "Deleting",
+        "database.restarted" => "Update",
         "database.connected" => "Connected",
         "database.disconnected" => "Disconnected",
         "secret.revealed" => "Password shown",

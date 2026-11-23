@@ -687,6 +687,12 @@ pub async fn snapshot(db: &PgPool) -> ApiResult<Value> {
     platform_images.sort();
     platform_images.dedup();
     let migrations = new_migrations(db, r).await?;
+    // Databases that run another image on the release restart once.
+    let databases_restart = if pyo_needed {
+        crate::bundles::restart_count(db, &r.database_images()).await?
+    } else {
+        0
+    };
     let agents_needed = agents.iter().any(|a| {
         a["needed"] == json!(true) && a["canUpdate"] == json!(true) && a["online"] == json!(true)
     });
@@ -730,6 +736,7 @@ pub async fn snapshot(db: &PgPool) -> ApiResult<Value> {
         "builders": builders,
         "migrations": migrations,
         "platformImages": platform_images,
+        "databasesRestart": databases_restart,
         "images": r.images,
     });
     Ok(out)
