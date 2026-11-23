@@ -14,6 +14,8 @@
 //! - Servers (labels, taints, cordon, drain, removal) in a role of their own
 //!   that can be left out.
 //! - The customer's `pyo-system/pyo-policy` ConfigMap: read, never written.
+//! - `pyo-system/pyo-verifier`, where the server's verifier says how its
+//!   automatic updates stand: read, never written.
 //! - Its own Deployment: only its image, image pins, install stamp, and its
 //!   pods' priority and tolerations as this release sets them.
 //!
@@ -43,6 +45,10 @@ pub const WRITE_ROLE: &str = "pyo-agent-write";
 pub const WRITE_BINDING: &str = "pyo-agent";
 /// The customer's switches (see `Policy`), only ever read.
 pub const POLICY_CONFIGMAP: &str = "pyo-policy";
+/// Where the verifier on the cluster's first server (`pyo-verify`, run as
+/// root by a timer there) writes how its automatic updates stand (see
+/// [`VerifierStatus`]), only ever read.
+pub const VERIFIER_CONFIGMAP: &str = "pyo-verifier";
 /// The admission policy and its binding.
 pub const ADMISSION_POLICY: &str = "pyo-agent";
 /// Server operations: optional.
@@ -372,12 +378,12 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
             ]),
         ),
         write_binding(NS),
-        // The customer's switches: read only.
+        // The customer's switches, and their verifier's status: read only.
         role(
             NS,
             "pyo-agent-policy",
             json!([
-                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"], "resourceNames": [POLICY_CONFIGMAP] },
+                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"], "resourceNames": [POLICY_CONFIGMAP, VERIFIER_CONFIGMAP] },
             ]),
         ),
         role_binding(NS, "pyo-agent-policy", "Role", "pyo-agent-policy"),
@@ -712,6 +718,11 @@ pub fn admission_with(
         {
             "expression": "!(request.resource.resource == 'configmaps' && variables.ns == 'pyo-system' && variables.reqName == 'pyo-policy')",
             "message": "pyo-system/pyo-policy belongs to you: Pyo's agent only reads it.",
+        },
+        // So is what their server's verifier says of its automatic updates.
+        {
+            "expression": format!("!(request.resource.resource == 'configmaps' && variables.ns == '{NS}' && variables.reqName == '{VERIFIER_CONFIGMAP}')"),
+            "message": "pyo-system/pyo-verifier belongs to your server: Pyo's agent only reads it.",
         },
         // Its own Deployment: only updated, and then only its image, image
         // pins, install stamp, priority and tolerations, the last two to
@@ -1322,6 +1333,10 @@ pub struct Policy {
     /// `readOnly: "true"`: the agent reports, and changes nothing.
     #[serde(default)]
     pub read_only: bool,
+    /// `updates: "hold"`: the server's verifier applies no update. Only
+    /// the verifier acts on it: Pyo shows it, and nothing else.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub updates_hold: bool,
 }
 
 impl Policy {
@@ -1335,6 +1350,63 @@ impl Policy {
             no_terminal: is("terminal", &["off", "false", "no", "disabled"]),
             no_force_remove: is("forceRemoveServers", &["off", "false", "no", "disabled"]),
             read_only: is("readOnly", &["true", "on", "yes"]),
+            updates_hold: is("updates", &["hold"]),
+        }
+    }
+}
+
+/// How automatic updates stand on a cluster, as the verifier on its first
+/// server wrote it to `pyo-system/pyo-verifier` and the agent read it.
+///
+/// Only ever shown. The agent passes it on, so an agent that was broken
+/// into can say anything here: no decision of Pyo's may follow from it.
+/// The verifier takes nothing from Pyo but the version to be on, and Pyo
+/// has no switch that turns it on or off or makes it run: those are the
+/// customer's, in `pyo-system/pyo-policy` (`updates: "hold"`) and in
+/// `/etc/pyo/verify.conf` on the server.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifierStatus {
+    /// The verifier's own version.
+    #[serde(default)]
+    pub version: String,
+    /// The version Pyo named when it last asked.
+    #[serde(default)]
+    pub live: String,
+    /// When it last checked (RFC 3339).
+    #[serde(default)]
+    pub checked: String,
+    /// What went wrong, in plain words. Empty when nothing did.
+    #[serde(default)]
+    pub error: String,
+    /// It's on hold: turned off on the server, or by the policy.
+    #[serde(default)]
+    pub hold: bool,
+    /// The server it runs on.
+    #[serde(default)]
+    pub host: String,
+}
+
+impl VerifierStatus {
+    /// The longest a field is kept: an error is a sentence or two.
+    pub const FIELD_MAX: usize = 400;
+
+    /// From the ConfigMap's data. A missing field is empty, `hold` is on
+    /// only when it says "true", and each field is cut to
+    /// [`Self::FIELD_MAX`] characters.
+    pub fn from_data(data: &std::collections::BTreeMap<String, String>) -> Self {
+        let text = |k: &str| -> String {
+            data.get(k)
+                .map(|v| v.trim().chars().take(Self::FIELD_MAX).collect())
+                .unwrap_or_default()
+        };
+        VerifierStatus {
+            version: text("version"),
+            live: text("live"),
+            checked: text("checked"),
+            error: text("error"),
+            hold: text("hold").eq_ignore_ascii_case("true"),
+            host: text("host"),
         }
     }
 }
@@ -1377,6 +1449,11 @@ pub struct AgentScope {
     /// agent wrote them without that (`gateway.rs` `write_client_policy`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub headers_kept: bool,
+    /// What the verifier on the cluster's first server last said (the
+    /// `pyo-system/pyo-verifier` ConfigMap): none when there's none, or
+    /// the install doesn't let the agent read it yet. Only ever shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<VerifierStatus>,
 }
 
 /// What the gateway could get at if it were broken into.
@@ -2279,7 +2356,9 @@ mod tests {
     /// (critical per-server pods, the agent's own priority and
     /// tolerations) changes no role. Its stricter admission policy does
     /// move [`access_hash`], so clusters that can't refresh are told to run
-    /// the connect command. Change this only with a release that means to
+    /// the connect command. And the role that reads the customer's policy
+    /// also reads their verifier's status (`pyo-system/pyo-verifier`).
+    /// Change this only with a release that means to
     /// change the roles: from 0.51.0 on a cluster with the self-update role
     /// gets them with a refresh, any other with its connect command.
     #[test]
@@ -2290,7 +2369,7 @@ mod tests {
                 objects(true),
                 self_update_objects()
             ])),
-            "a8341a8e9fa552d5"
+            "0dcaac0328ee92f9"
         );
     }
 
@@ -2576,5 +2655,122 @@ mod tests {
         ]));
         assert!(p.no_terminal && p.no_force_remove && p.read_only);
         assert!(!Policy::from_data(&d(&[("terminal", "on"), ("readOnly", "false")])).read_only);
+        // Automatic updates on hold: only the word "hold".
+        assert!(!p.updates_hold);
+        assert!(Policy::from_data(&d(&[("updates", " Hold ")])).updates_hold);
+        for other in ["", "on", "true", "off", "holding"] {
+            assert!(!Policy::from_data(&d(&[("updates", other)])).updates_hold, "{other}");
+        }
+        // On the wire only when it's on, and a policy that never says is off.
+        let held = Policy { updates_hold: true, ..Default::default() };
+        assert_eq!(json!(held)["updatesHold"], true);
+        assert!(json!(Policy::default()).get("updatesHold").is_none());
+        assert_eq!(serde_json::from_value::<Policy>(json!({})).unwrap(), Policy::default());
+    }
+
+    /// The verifier's status: the agent may read it by name, with the
+    /// role that reads the customer's policy (no new role object, so a
+    /// refresh brings it), and the admission policy refuses the agent any
+    /// write to it, whatever its roles say.
+    #[test]
+    fn the_agent_reads_the_verifiers_status_and_never_writes_it() {
+        let objs = objects(false);
+        let role = objs
+            .iter()
+            .find(|o| o["kind"] == "Role" && o["metadata"]["name"] == "pyo-agent-policy")
+            .unwrap();
+        assert_eq!(role["metadata"]["namespace"], NS);
+        assert_eq!(
+            role["rules"],
+            json!([{ "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"], "resourceNames": ["pyo-policy", "pyo-verifier"] }])
+        );
+        // No other rule of an install names it, and the role bound in
+        // pyo-system reaches no ConfigMap.
+        for o in objects(true).iter().chain(self_update_objects().iter()) {
+            if o["kind"] == "Role" && o["metadata"]["name"] == "pyo-agent-policy" {
+                continue;
+            }
+            assert!(!o["rules"].to_string().contains(VERIFIER_CONFIGMAP), "{o}");
+        }
+        let write = objs
+            .iter()
+            .find(|o| o["kind"] == "ClusterRole" && o["metadata"]["name"] == WRITE_ROLE)
+            .unwrap();
+        assert!(!write["rules"].to_string().contains("configmaps"));
+        // The policy: every operation on it is refused, as for pyo-policy,
+        // with or without the self-update role.
+        for self_update in [false, true] {
+            let policy = &admission_for(self_update, "w", "g")[0];
+            let rules = policy["spec"]["validations"].as_array().unwrap();
+            for name in [POLICY_CONFIGMAP, VERIFIER_CONFIGMAP] {
+                let want = format!("!(request.resource.resource == 'configmaps' && variables.ns == 'pyo-system' && variables.reqName == '{name}')");
+                let found: Vec<_> = rules.iter().filter(|r| r["expression"] == json!(want)).collect();
+                assert_eq!(found.len(), 1, "{name}");
+                // No way round it: the rule stands alone, with no "or".
+                assert!(!found[0]["expression"].as_str().unwrap().contains("||"));
+            }
+        }
+        assert_eq!(
+            admission("w", "g")[0]["spec"]["validations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["expression"].as_str().is_some_and(|e| e.contains("'pyo-verifier'")))
+                .unwrap()["message"],
+            "pyo-system/pyo-verifier belongs to your server: Pyo's agent only reads it."
+        );
+    }
+
+    #[test]
+    fn the_verifiers_status_is_read_leniently() {
+        let d = |pairs: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let full = VerifierStatus::from_data(&d(&[
+            ("version", "0.51.0"),
+            ("live", "0.51.0"),
+            ("checked", "2026-11-23T10:00:00Z"),
+            ("error", ""),
+            ("hold", "false"),
+            ("host", "server-1"),
+            ("more", "ignored"),
+        ]));
+        assert_eq!(
+            full,
+            VerifierStatus {
+                version: "0.51.0".into(),
+                live: "0.51.0".into(),
+                checked: "2026-11-23T10:00:00Z".into(),
+                error: String::new(),
+                hold: false,
+                host: "server-1".into(),
+            }
+        );
+        // Missing fields are empty, and off.
+        assert_eq!(VerifierStatus::from_data(&d(&[])), VerifierStatus::default());
+        // Hold only when it says so.
+        assert!(VerifierStatus::from_data(&d(&[("hold", " True ")])).hold);
+        for other in ["", "yes", "1", "on", "false"] {
+            assert!(!VerifierStatus::from_data(&d(&[("hold", other)])).hold, "{other}");
+        }
+        // Whatever is there is kept as text, cut short.
+        let long = "é".repeat(5000);
+        let odd = VerifierStatus::from_data(&d(&[("checked", "yesterday"), ("error", &long)]));
+        assert_eq!(odd.checked, "yesterday");
+        assert_eq!(odd.error.chars().count(), VerifierStatus::FIELD_MAX);
+        // On the wire: camelCase, absent when there's none, and a scope
+        // from an agent that never says is read as none.
+        let scope = AgentScope { verifier: Some(full.clone()), ..Default::default() };
+        let wire = json!(scope);
+        assert_eq!(wire["verifier"]["checked"], "2026-11-23T10:00:00Z");
+        assert_eq!(serde_json::from_value::<AgentScope>(wire).unwrap(), scope);
+        assert!(json!(AgentScope::default()).get("verifier").is_none());
+        let old: AgentScope = serde_json::from_value(json!({ "access": "limited", "admission": "enforced" })).unwrap();
+        assert_eq!(old.verifier, None);
+        let partial: AgentScope = serde_json::from_value(json!({ "access": "limited", "admission": "enforced", "verifier": { "hold": true } })).unwrap();
+        assert_eq!(partial.verifier, Some(VerifierStatus { hold: true, ..Default::default() }));
     }
 }
