@@ -979,14 +979,25 @@ pub async fn cancel(tx: &mut Transaction<'_, Postgres>, deployment_id: &str) -> 
 /// How long a rollout waits for its service's databases before it fails.
 pub const DATABASE_WAIT_SECS: i64 = 15 * 60;
 
-/// The service's connected databases that don't serve yet, by name. A
-/// degraded one serves (some of its instances are still coming up).
+/// How long a database may say it can't start (no server has room for an
+/// instance) before the rollout waiting for it fails: a server may still be
+/// joining, or freeing room.
+pub const DATABASE_STUCK_SECS: i64 = 2 * 60;
+
+/// How long an instance may have no server, when the database doesn't say
+/// why (its controller is older), before the rollout fails. Longer: its
+/// volume may still be being made.
+pub const DATABASE_NO_SERVER_SECS: i64 = 5 * 60;
+
+/// The service's connected databases that don't serve yet, by name, with
+/// their status. A degraded one serves (some of its instances are still
+/// coming up).
 async fn unready_databases(
     tx: &mut Transaction<'_, Postgres>,
     service_id: &str,
-) -> ApiResult<Vec<String>> {
-    Ok(sqlx::query_scalar(
-        "SELECT m.name FROM pyo.database_links l JOIN pyo.databases m ON m.id = l.database_id
+) -> ApiResult<Vec<(String, Value)>> {
+    Ok(sqlx::query_as(
+        "SELECT m.name, m.status FROM pyo.database_links l JOIN pyo.databases m ON m.id = l.database_id
           WHERE l.service_id = $1 AND m.state = 'active' AND coalesce(m.status->>'phase', '') NOT IN ('Ready', 'Degraded')
           ORDER BY m.name",
     )
@@ -1044,7 +1055,7 @@ async fn send_or_hold(
         .bind(&data)
         .execute(&mut **tx)
         .await?;
-    for name in &waiting {
+    for (name, _) in &waiting {
         sqlx::query("INSERT INTO pyo.deployment_logs (deployment_id, at, level, source, message) VALUES ($1, now(), 'info', 'pyo', $2)")
             .bind(&deployment_id)
             .bind(format!("Waiting for database {name}"))
@@ -1093,14 +1104,32 @@ async fn release_waiting(state: &AppState) -> ApiResult<()> {
             continue;
         }
         let since = data["waitingSince"].as_i64().unwrap_or(0);
+        let now = now_ms();
+        let had = data.get("stuckSince").cloned().unwrap_or(json!({}));
+        let (stuck_since, cannot) = stuck(&waiting, &had, now);
+        if stuck_since != had {
+            sqlx::query("UPDATE pyo.deployments SET data = data || jsonb_build_object('stuckSince', $2::jsonb) WHERE id = $1")
+                .bind(&id)
+                .bind(&stuck_since)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
-        if now_ms() - since > DATABASE_WAIT_SECS * 1000 {
+        let failure = match cannot {
+            Some(message) => Some(("DatabaseUnschedulable", message)),
+            None if now - since > DATABASE_WAIT_SECS * 1000 => {
+                let names: Vec<String> = waiting.into_iter().map(|(n, _)| n).collect();
+                Some(("DatabaseNotReady", not_ready_message(&names)))
+            }
+            None => None,
+        };
+        if let Some((reason, message)) = failure {
             let p = DeploymentProgress {
                 status: "failed".into(),
                 failure: Some(pyo_proto::Failure {
                     stage: "waiting_database".into(),
-                    reason: "DatabaseNotReady".into(),
-                    message: not_ready_message(&waiting),
+                    reason: reason.into(),
+                    message,
                 }),
                 ..Default::default()
             };
@@ -1140,6 +1169,46 @@ fn shown_failure(f: &mut pyo_proto::Failure, install: &str) {
         f.reason = "AgentOutdated".into();
         f.message = crate::install::outdated_deploy();
     }
+}
+
+/// Why a database can't start, from its status, to follow "can't start: ",
+/// and how long it may say so first. Its controller's words when it gives
+/// the reason Unschedulable; from older controllers, which don't, an
+/// instance that has no server.
+fn cannot_start(status: &Value) -> Option<(String, i64)> {
+    const NO_ROOM: &str = "no server has room for it";
+    if status["reason"] == "Unschedulable" {
+        let mut words = status["message"].as_str().unwrap_or_default().chars();
+        let why = match words.next() {
+            Some(first) => first.to_lowercase().chain(words).collect(),
+            None => NO_ROOM.into(),
+        };
+        return Some((why, DATABASE_STUCK_SECS));
+    }
+    status["members"]
+        .as_array()?
+        .iter()
+        .any(|m| m["node"].as_str() == Some("") && m["ready"] != true)
+        .then(|| (NO_ROOM.into(), DATABASE_NO_SERVER_SECS))
+}
+
+/// Since when (ms) each waiting database can't start, by name, kept from
+/// the last pass's (`before`), and the failure once one has been so for
+/// longer than it may.
+fn stuck(waiting: &[(String, Value)], before: &Value, now: i64) -> (Value, Option<String>) {
+    let mut since = serde_json::Map::new();
+    let mut failure = None;
+    for (name, status) in waiting {
+        let Some((why, grace)) = cannot_start(status) else {
+            continue;
+        };
+        let at = before[name].as_i64().unwrap_or(now);
+        since.insert(name.clone(), json!(at));
+        if failure.is_none() && now - at > grace * 1000 {
+            failure = Some(format!("Database {name} can't start: {why}."));
+        }
+    }
+    (Value::Object(since), failure)
 }
 
 fn not_ready_message(names: &[String]) -> String {
@@ -2582,6 +2651,59 @@ pub(crate) async fn check_pending_dns(state: &AppState) -> ApiResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stuck_tests {
+    use super::*;
+
+    #[test]
+    fn a_database_that_cant_start_fails_the_rollout_early() {
+        let no_room = json!({
+            "phase": "Creating", "reason": "Unschedulable", "message": "Not enough memory on any server",
+            "members": [{ "name": "ghost-db-0", "role": "primary", "ready": false, "node": "" }],
+        });
+        let waiting = vec![("ghost-db".to_owned(), no_room)];
+        // First seen: noted, not failed yet.
+        let (since, failed) = stuck(&waiting, &json!({}), 1_000);
+        assert_eq!(since, json!({ "ghost-db": 1_000 }));
+        assert_eq!(failed, None);
+        // Still so after the grace: failed, with the reason.
+        let (_, failed) = stuck(&waiting, &since, 1_000 + DATABASE_STUCK_SECS * 1000 + 1);
+        assert_eq!(
+            failed.as_deref(),
+            Some("Database ghost-db can't start: not enough memory on any server.")
+        );
+        // Once it has a server, it starts over.
+        let started = vec![(
+            "ghost-db".to_owned(),
+            json!({ "phase": "Creating", "members": [{ "name": "ghost-db-0", "ready": false, "node": "a" }] }),
+        )];
+        assert_eq!(stuck(&started, &since, 10_000_000), (json!({}), None));
+    }
+
+    #[test]
+    fn older_controllers_fall_back_to_an_instance_without_a_server() {
+        // No reason: an instance without a server, for longer.
+        let old = json!({ "phase": "Creating", "message": "0 of 1 instances ready", "members": [{ "name": "ghost-db-0", "ready": false, "node": "" }] });
+        let waiting = vec![("ghost-db".to_owned(), old)];
+        let before = json!({ "ghost-db": 0 });
+        assert_eq!(
+            stuck(&waiting, &before, DATABASE_STUCK_SECS * 1000 + 1).1,
+            None
+        );
+        assert_eq!(
+            stuck(&waiting, &before, DATABASE_NO_SERVER_SECS * 1000 + 1)
+                .1
+                .as_deref(),
+            Some("Database ghost-db can't start: no server has room for it.")
+        );
+        // Nothing to go by (no instances yet, or no status): the 15 minutes.
+        for status in [json!({ "phase": "Creating", "members": [] }), json!({})] {
+            let waiting = vec![("ghost-db".to_owned(), status)];
+            assert_eq!(stuck(&waiting, &before, 10_000_000), (json!({}), None));
+        }
+    }
 }
 
 #[cfg(test)]
