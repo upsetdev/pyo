@@ -155,15 +155,35 @@ How it reaches installations:
 - **Pyo Cloud:** whoever runs it updates the shared Pyo. Each team's agents
   then follow its version: within a minute for teams with automatic agent
   updates (the default), or when the team updates a cluster from its page.
+  A team's databases don't move with either. They restart once the team
+  runs the command under **Refresh this cluster** in the cluster's settings,
+  which says "Restarts your databases once" while that's so. Say in the
+  release's announcement to Cloud teams that this command restarts their
+  databases once.
 
 How databases pick up new images: the databases system on a cluster
-updates with Pyo, at the cluster's next heartbeat once its agent is the new
-one. pyo-db-controller restarts with the new images and rolls each database
+updates with Pyo, at the cluster's next heartbeat once the cluster's
+install (its admission policy, which pins the images) is the new Pyo's.
+The agent's own image doesn't matter. With the self-update role the agent
+brings the install up to date by itself within a minute of Pyo's update.
+Without it (Pyo Cloud's clusters, or `PYO_AGENT_SELF_UPDATE=false`) that
+happens when the connect command under **Refresh this cluster** runs.
+pyo-db-controller then restarts with the new images and rolls each database
 onto them. A Postgres or MySQL database with replicas restarts a replica
 first and switches over to it, so the primary stops only for the
 switchover. A single instance restarts, which is a short outage. New
 third-party database images (MySQL, valkey-bundle, the Postgres bases) come
 the same way, since the release's code pins them.
+
+Every release restarts Postgres and KV databases once: their images are
+built with the release and tagged with its version, so they're never the
+ones before. MySQL databases restart when the release pins another MySQL
+image. Pyo says so by itself, nothing to write in the notices: the update
+dialog and the cluster's refresh command show "Restarts your databases
+once" when a database runs an image the release changes (compared from
+`release.json`'s images and `databasePins`), and each database's restart
+is written to its team's activity ("Restarting the database main for an
+update").
 
 ## Release notes
 
@@ -241,6 +261,11 @@ release carries it as an asset. Installations find it in **Settings › Updates*
 - the notices from `deploy/release-notices.json`
 - `agentAccess`: a hash of the roles and the admission policy the release's
   agent is installed with (see [Notices](#notices))
+- `databasePins`: the database images the release's code pins itself
+  (`pyo-agent database-pins`: MySQL's and Valkey's with its modules, which
+  `check-release` verifies). With `images.postgres16` to `postgres18` and
+  `images.kv` they're what the release's databases run. The workflow writes
+  it, nothing to set by hand
 - `k3s`: the k3s a fresh install gets, from `deploy/k3s.env` (see
   [Bump k3s](#bump-k3s)).
 - `sandbox`: the SHA-256 of each architecture's sandbox server files.
@@ -262,6 +287,7 @@ bun run scripts/release-manifest.ts --version 0.1.0 --images ghcr.io/upsetdev/py
   --mysql-operator sha256:<64 hex> --mysql-backup sha256:<64 hex> \
   --postgres-16 sha256:<64 hex> --postgres-17 sha256:<64 hex> --postgres-18 sha256:<64 hex> \
   --agent-access "$(cargo run -q -p pyo-agent -- access-hash)" \
+  --database-pins "$(cargo run -q -p pyo-agent -- database-pins)" \
   --sandbox-x86_64 <64 hex> --sandbox-aarch64 <64 hex> \
   --sandbox-gvisor-x86_64 <64 hex> --sandbox-gvisor-aarch64 <64 hex> \
   --scripts /tmp/release-scripts

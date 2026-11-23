@@ -13,7 +13,7 @@
 //!   there, and updated with Pyo (`sync_databases`, every heartbeat). Never
 //!   removed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use pyo_proto::{
     Command,
@@ -43,6 +43,162 @@ fn static_bundle() -> SystemBundle {
 /// The databases system's bundle, with this installation's images.
 fn databases_bundle() -> SystemBundle {
     pyo_proto::bundles::databases_bundle(&pyo_proto::system::db_images_from_env())
+}
+
+/// This Pyo's databases system: its version, and the images its databases
+/// run (pyo-proto's `database_images`).
+fn databases_now() -> &'static (String, BTreeMap<String, String>) {
+    static NOW: std::sync::OnceLock<(String, BTreeMap<String, String>)> =
+        std::sync::OnceLock::new();
+    NOW.get_or_init(|| {
+        let b = databases_bundle();
+        let images = pyo_proto::bundles::database_images(&b);
+        (b.version, images)
+    })
+}
+
+/// A database, as far as the image it runs goes.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Runs {
+    pub id: String,
+    pub team_id: String,
+    pub cluster_id: String,
+    pub name: String,
+    pub engine: String,
+    pub version: String,
+    /// A KV database that loads modules.
+    pub modules: bool,
+}
+
+/// Every database with what it runs, then `$filter`.
+macro_rules! runs {
+    ($filter:literal) => {
+        concat!(
+            "SELECT id, team_id, cluster_id, name, engine, version,
+                    (engine = 'valkey' AND jsonb_typeof(extensions) = 'array' AND jsonb_array_length(extensions) > 0) AS modules
+               FROM pyo.databases WHERE state <> 'deleting'",
+            $filter
+        )
+    };
+}
+
+/// Those of `dbs` that restart when their databases system goes from the
+/// images `applied` to `new`. `applied` is None for a databases system set
+/// up before Pyo kept its images: every database then.
+pub fn restarting<'a>(
+    dbs: &'a [Runs],
+    applied: Option<&BTreeMap<String, String>>,
+    new: &BTreeMap<String, String>,
+) -> Vec<&'a Runs> {
+    dbs.iter()
+        .filter(|d| {
+            applied.is_none_or(|old| {
+                pyo_proto::bundles::database_restarts(&d.engine, &d.version, d.modules, old, new)
+            })
+        })
+        .collect()
+}
+
+/// How many of the installation's databases restart when Pyo moves to a
+/// release whose databases run `new` (`Release::database_images`).
+pub async fn restart_count(db: &sqlx::PgPool, new: &BTreeMap<String, String>) -> ApiResult<usize> {
+    let dbs: Vec<Runs> = sqlx::query_as(runs!("")).fetch_all(db).await?;
+    Ok(restarting(&dbs, Some(&databases_now().1), new).len())
+}
+
+/// The clusters among these whose databases restart once their databases
+/// system is this Pyo's: it's older there (it waits for the cluster's
+/// install) and a database runs an image that changed.
+pub async fn databases_restart(
+    db: &mut sqlx::PgConnection,
+    cluster_ids: &[String],
+) -> ApiResult<HashSet<String>> {
+    let (version, new) = databases_now();
+    let behind: Vec<(String, Option<Value>)> = sqlx::query_as(
+        "SELECT cluster_id, images FROM pyo.cluster_bundles WHERE bundle = $1 AND cluster_id = ANY($2) AND version <> $3",
+    )
+    .bind(DATABASES_ID)
+    .bind(cluster_ids)
+    .bind(version)
+    .fetch_all(&mut *db)
+    .await?;
+    if behind.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let ids: Vec<String> = behind.iter().map(|(c, _)| c.clone()).collect();
+    let dbs: Vec<Runs> = sqlx::query_as(runs!(" AND cluster_id = ANY($1)"))
+        .bind(&ids)
+        .fetch_all(&mut *db)
+        .await?;
+    Ok(behind
+        .into_iter()
+        .filter(|(c, images)| {
+            let here: Vec<Runs> = dbs.iter().filter(|d| &d.cluster_id == c).cloned().collect();
+            !restarting(&here, applied_images(images.clone()).as_ref(), new).is_empty()
+        })
+        .map(|(c, _)| c)
+        .collect())
+}
+
+/// A row's `images` as kept.
+fn applied_images(images: Option<Value>) -> Option<BTreeMap<String, String>> {
+    images.and_then(|v| serde_json::from_value(v).ok())
+}
+
+/// A database's restart for new images, in its team's activity.
+fn restart_title(d: &Runs) -> String {
+    let kind = if d.engine == "valkey" { "KV database" } else { "database" };
+    format!("Restarting the {kind} {} for an update", d.name)
+}
+
+/// The agent applied a databases system: its databases that now run another
+/// image restart, which their team's activity says (not on first setup),
+/// and the row keeps the images for the next update.
+async fn databases_applied(
+    tx: &mut Transaction<'_, Postgres>,
+    cluster_id: &str,
+    command: &Value,
+    first_setup: bool,
+) -> ApiResult<()> {
+    let Ok(b) = serde_json::from_value::<SystemBundle>(command["bundle"].clone()) else {
+        return Ok(());
+    };
+    let new = pyo_proto::bundles::database_images(&b);
+    if !first_setup {
+        let applied: Option<Option<Value>> = sqlx::query_scalar(
+            "SELECT images FROM pyo.cluster_bundles WHERE cluster_id = $1 AND bundle = $2",
+        )
+        .bind(cluster_id)
+        .bind(DATABASES_ID)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let applied = applied_images(applied.flatten());
+        let dbs: Vec<Runs> =
+            sqlx::query_as(runs!(" AND cluster_id = $1 ORDER BY created_at"))
+                .bind(cluster_id)
+                .fetch_all(&mut **tx)
+                .await?;
+        for d in restarting(&dbs, applied.as_ref(), &new) {
+            log_activity(
+                tx,
+                &d.team_id,
+                "pyo",
+                "database.restarted",
+                "info",
+                &restart_title(d),
+                json!({ "kind": "database", "id": d.id, "label": d.name }),
+                json!({ "clusterId": cluster_id }),
+            )
+            .await?;
+        }
+    }
+    sqlx::query("UPDATE pyo.cluster_bundles SET images = $3 WHERE cluster_id = $1 AND bundle = $2")
+        .bind(cluster_id)
+        .bind(DATABASES_ID)
+        .bind(serde_json::to_value(&new).map_err(anyhow::Error::from)?)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 fn known(id: &str) -> Option<SystemBundle> {
@@ -542,6 +698,9 @@ pub async fn finished(
             .await?;
         return Ok(());
     }
+    if ok && bundle == DATABASES_ID && !removing {
+        databases_applied(tx, cluster_id, command, first_setup).await?;
+    }
     let (state, message) = if ok {
         ("applied", String::new())
     } else {
@@ -626,6 +785,70 @@ pub async fn reported(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runs(name: &str, engine: &str, version: &str, modules: bool) -> Runs {
+        Runs {
+            id: format!("db_{name}"),
+            team_id: "team_a".into(),
+            cluster_id: "cl_a".into(),
+            name: name.into(),
+            engine: engine.into(),
+            version: version.into(),
+            modules,
+        }
+    }
+
+    /// Only the databases whose image a new databases system changes
+    /// restart, and their team's activity says so in these words.
+    #[test]
+    fn databases_restart_for_the_images_that_changed() {
+        let dbs = [
+            runs("pg18", "postgres", "18", false),
+            runs("pg17", "postgres", "17", false),
+            runs("shop", "mysql", "8.4", false),
+            runs("cache", "valkey", "8.1", false),
+            runs("search", "valkey", "8.1", true),
+        ];
+        let names = |v: Vec<&Runs>| v.iter().map(|d| d.name.clone()).collect::<Vec<_>>();
+        let old = databases_now().1.clone();
+        // This Pyo's own images: nothing restarts.
+        assert!(restarting(&dbs, Some(&old), &old).is_empty());
+        // A release with a new Postgres 18 and a new pyo-kv.
+        let mut new = old.clone();
+        new.insert("postgres18".into(), "pyo/postgres:18-9@sha256:1".into());
+        new.insert("kv".into(), "pyo/kv:9@sha256:1".into());
+        assert_eq!(names(restarting(&dbs, Some(&old), &new)), ["pg18", "cache", "search"]);
+        // One that only names MySQL's (a release tells its pins).
+        let mysql: BTreeMap<String, String> =
+            [("mysql".to_owned(), "mysql:9@sha256:1".to_owned())].into();
+        assert_eq!(names(restarting(&dbs, Some(&old), &mysql)), ["shop"]);
+        // A release that names none of the images: not known to restart any.
+        assert!(restarting(&dbs, Some(&old), &BTreeMap::new()).is_empty());
+        // A databases system from before Pyo kept its images: every one.
+        assert_eq!(restarting(&dbs, None, &old).len(), dbs.len());
+        assert!(restarting(&[], None, &old).is_empty());
+
+        assert_eq!(restart_title(&dbs[0]), "Restarting the database pg18 for an update");
+        assert_eq!(restart_title(&dbs[3]), "Restarting the KV database cache for an update");
+        assert_eq!(applied_images(None), None);
+        assert_eq!(applied_images(Some(json!({ "kv": "k" }))).unwrap()["kv"], "k");
+    }
+
+    /// What an applied databases system leaves in its row: the images its
+    /// own controller hands out, read back from the command as sent.
+    #[test]
+    fn an_applied_databases_system_names_its_images() {
+        let b = databases_bundle();
+        let command = serde_json::to_value(Command::ApplyBundle {
+            bundle: Box::new(b.clone()),
+            prune: vec![],
+        })
+        .unwrap();
+        let back: SystemBundle = serde_json::from_value(command["bundle"].clone()).unwrap();
+        assert_eq!(pyo_proto::bundles::database_images(&back), databases_now().1);
+        assert_eq!(b.version, databases_now().0);
+        assert!(databases_now().1.contains_key("postgres18"));
+    }
 
     #[test]
     fn static_deploys_wait_for_the_connect_command_only_when_they_must() {

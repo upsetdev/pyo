@@ -27,6 +27,7 @@
 //!   to one of its service accounts in each project namespace while it's
 //!   installed (and in new ones as they're made), exactly that.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -618,6 +619,76 @@ pub fn databases_bundle(img: &crate::system::DbImages) -> SystemBundle {
     });
     b.version = format!("{hash:016x}");
     b
+}
+
+/// The images databases themselves run, as a databases bundle gives them to
+/// pyo-db-controller (its env): Pyo's Postgres per version ("postgres16",
+/// "postgres17", "postgres18"), pyo-kv beside each KV database ("kv"),
+/// MySQL's ("mysql") and Valkey with its modules ("valkeyBundle"). A database
+/// restarts once when the image it runs changes.
+pub fn database_images(b: &SystemBundle) -> BTreeMap<String, String> {
+    const ENV: [(&str, &str); 6] = [
+        ("PYO_DB_POSTGRES_IMAGE_16", "postgres16"),
+        ("PYO_DB_POSTGRES_IMAGE_17", "postgres17"),
+        ("PYO_DB_POSTGRES_IMAGE_18", "postgres18"),
+        ("PYO_DB_PYO_KV_IMAGE", "kv"),
+        ("PYO_DB_MYSQL_IMAGE", "mysql"),
+        ("PYO_DB_VALKEY_BUNDLE_IMAGE", "valkeyBundle"),
+    ];
+    let mut out = BTreeMap::new();
+    for c in b.containers() {
+        for e in c["env"].as_array().into_iter().flatten() {
+            let found = ENV.iter().find(|(name, _)| e["name"] == *name);
+            if let (Some((_, key)), Some(image)) = (found, e["value"].as_str())
+                && !image.is_empty()
+            {
+                out.insert((*key).to_owned(), image.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// The database images a release's code pins itself (not built with the
+/// release): MySQL's and Valkey's with its modules. release.json carries
+/// them as `databasePins` (`pyo-agent database-pins`), so an installation
+/// knows before it updates whether its databases restart.
+pub fn database_pins() -> BTreeMap<String, String> {
+    let mut all = database_images(&databases_bundle(&crate::system::DbImages {
+        controller: String::new(),
+        kv: String::new(),
+        postgres: Default::default(),
+        mysql_operator: String::new(),
+        mysql_backup: String::new(),
+    }));
+    all.retain(|k, _| DATABASE_PINS.contains(&k.as_str()));
+    all
+}
+
+/// The keys of [`database_pins`].
+pub const DATABASE_PINS: [&str; 2] = ["mysql", "valkeyBundle"];
+
+/// Whether a database restarts when the images go from `old` to `new`
+/// ([`database_images`]): the one it runs is in both and differs. An image
+/// one side doesn't name isn't known to change. `modules`: a KV database
+/// that loads modules (it runs Valkey's image with them).
+pub fn database_restarts(
+    engine: &str,
+    version: &str,
+    modules: bool,
+    old: &BTreeMap<String, String>,
+    new: &BTreeMap<String, String>,
+) -> bool {
+    let major = version.split('.').next().unwrap_or("");
+    let keys: Vec<String> = match engine {
+        "postgres" => vec![format!("postgres{major}")],
+        "mysql" => vec!["mysql".into()],
+        "valkey" if modules => vec!["kv".into(), "valkeyBundle".into()],
+        "valkey" => vec!["kv".into()],
+        _ => vec![],
+    };
+    keys.iter()
+        .any(|k| matches!((old.get(k), new.get(k)), (Some(a), Some(b)) if a != b))
 }
 
 /// One of the databases system's Deployments that the agent stops on a
@@ -1460,6 +1531,58 @@ mod tests {
                 .iter()
                 .any(|b| b.id == DATABASES_ID)
         );
+    }
+
+    /// What a database runs comes from the bundle's own controller, so a
+    /// release that changes an image says which databases restart.
+    #[test]
+    fn databases_restart_when_their_image_changes() {
+        let old = database_images(&db());
+        for k in ["postgres16", "postgres17", "postgres18", "kv", "mysql", "valkeyBundle"] {
+            assert!(old.contains_key(k), "{k}");
+        }
+        assert_eq!(old["postgres18"], "registry.example.com/pyo/postgres:18-1");
+        assert_eq!(old["kv"], "registry.example.com/pyo/kv:1");
+        assert!(old["mysql"].starts_with("ghcr.io/cybozu-go/moco/mysql:"));
+        // The same images: nothing restarts.
+        for (engine, version) in [("postgres", "18"), ("mysql", "8.4"), ("valkey", "8.1")] {
+            assert!(!database_restarts(engine, version, true, &old, &old), "{engine}");
+        }
+        // A new Postgres 18 image: only Postgres 18 databases.
+        let mut new = old.clone();
+        new.insert("postgres18".into(), "registry.example.com/pyo/postgres:18-2".into());
+        assert!(database_restarts("postgres", "18", false, &old, &new));
+        assert!(database_restarts("postgres", "18.1", false, &old, &new));
+        assert!(!database_restarts("postgres", "17", false, &old, &new));
+        assert!(!database_restarts("mysql", "8.4", false, &old, &new));
+        assert!(!database_restarts("valkey", "8.1", true, &old, &new));
+        // MySQL's, and Valkey's with modules only where a database loads any.
+        let mut new = old.clone();
+        new.insert("mysql".into(), "mysql:2".into());
+        new.insert("valkeyBundle".into(), "bundle:2".into());
+        assert!(database_restarts("mysql", "8.4", false, &old, &new));
+        assert!(database_restarts("valkey", "8.1", true, &old, &new));
+        assert!(!database_restarts("valkey", "8.1", false, &old, &new));
+        assert!(!database_restarts("postgres", "16", false, &old, &new));
+        // pyo-kv: every KV database.
+        let mut new = old.clone();
+        new.insert("kv".into(), "kv:2".into());
+        assert!(database_restarts("valkey", "9.0", false, &old, &new));
+        // An image one side doesn't name isn't known to change.
+        let mut unknown = old.clone();
+        unknown.remove("mysql");
+        assert!(!database_restarts("mysql", "8.4", false, &unknown, &old));
+        assert!(!database_restarts("mysql", "8.4", false, &old, &unknown));
+        assert!(!database_restarts("sqlite", "3", false, &old, &new));
+    }
+
+    /// What release.json carries of them: the two the code pins, by digest.
+    #[test]
+    fn database_pins_are_the_images_the_code_pins() {
+        let pins = database_pins();
+        assert_eq!(pins.keys().map(String::as_str).collect::<Vec<_>>(), DATABASE_PINS);
+        assert!(pins.values().all(|i| crate::pinned_image(i)), "{pins:?}");
+        assert_eq!(pins["mysql"], database_images(&db())["mysql"]);
     }
 
     /// The agent starts and stops the operators: their replica count is

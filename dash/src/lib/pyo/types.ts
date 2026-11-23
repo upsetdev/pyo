@@ -267,6 +267,8 @@ export type Updates = {
     /** Migrations of the release this database hasn't run. */
     migrations: string[];
     platformImages: string[];
+    /** How many databases run another image on the release (they restart once). */
+    databasesRestart?: number;
     /** Every image the release pins, by its key in release.json. */
     images: {
       pyo: string;
@@ -467,6 +469,8 @@ export type Cluster = {
   };
   /** Until then its install command works, while its agent hasn't connected. */
   connectExpiresAt?: Timestamp | null;
+  /** Its databases restart once its install is this Pyo's (the refresh command). */
+  databasesRestart?: boolean;
   /** Its agent's last update (a hosted Pyo's cluster page). */
   agentUpdate?: {
     status: "pending" | "sent" | "done" | "failed";

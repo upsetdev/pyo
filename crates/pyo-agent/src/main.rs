@@ -144,6 +144,15 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", pyo_proto::rbac::access_hash());
         return Ok(());
     }
+    // `pyo-agent database-pins`: the database images this release's code
+    // pins, as release.json's `databasePins` (the release workflow writes it).
+    if args.get(1).map(String::as_str) == Some("database-pins") {
+        println!(
+            "{}",
+            serde_json::to_string(&pyo_proto::bundles::database_pins())?
+        );
+        return Ok(());
+    }
     // `pyo-agent check-release <release.json>`: what the upgrader would
     // refuse in a release (the release workflow runs it before publishing).
     if args.get(1).map(String::as_str) == Some("check-release") {

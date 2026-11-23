@@ -1402,6 +1402,12 @@ pub struct Release {
     /// release's own agent checks it (`pyo-agent check-release`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_access: Option<String>,
+    /// The database images the release's code pins itself
+    /// ([`bundles::database_pins`]: MySQL's, Valkey's with its modules).
+    /// With `images`, what its databases run ([`Release::database_images`]).
+    /// The release's own agent checks it (`pyo-agent check-release`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_pins: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -1531,6 +1537,25 @@ pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
 }
 
 impl Release {
+    /// The images its databases run, by [`bundles::database_images`]' keys:
+    /// Pyo's Postgres and pyo-kv from `images`, the rest from
+    /// `databasePins`. One it doesn't name is left out.
+    pub fn database_images(&self) -> std::collections::BTreeMap<String, String> {
+        let mut out = self.database_pins.clone().unwrap_or_default();
+        out.retain(|k, _| bundles::DATABASE_PINS.contains(&k.as_str()));
+        for (key, image) in [
+            ("postgres16", &self.images.postgres16),
+            ("postgres17", &self.images.postgres17),
+            ("postgres18", &self.images.postgres18),
+            ("kv", &self.images.kv),
+        ] {
+            if !image.is_empty() {
+                out.insert(key.to_owned(), image.clone());
+            }
+        }
+        out
+    }
+
     /// What's wrong with it, if anything: a release Pyo would apply must
     /// name its version and pin every one of Pyo's images by digest, and
     /// its manifests may only use those (or images that aren't Pyo's).
@@ -3120,6 +3145,31 @@ mod release_tests {
             },
             ..Default::default()
         }
+    }
+
+    /// What a release's databases run: Pyo's own images and the pins its
+    /// code carries, under the keys a bundle's are compared by.
+    #[test]
+    fn a_release_names_its_database_images() {
+        let mut r = release();
+        let images = r.database_images();
+        assert_eq!(
+            images.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["kv", "postgres16", "postgres17", "postgres18"]
+        );
+        assert_eq!(images["postgres18"], r.images.postgres18);
+        r.database_pins = Some(
+            [("mysql", "m@sha256:1"), ("other", "x")]
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .into(),
+        );
+        let images = r.database_images();
+        assert_eq!(images["mysql"], "m@sha256:1");
+        assert!(!images.contains_key("other"));
+        // As release.json spells it, and left out when a release has none.
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["databasePins"]["mysql"], "m@sha256:1");
+        assert!(serde_json::to_value(release()).unwrap().get("databasePins").is_none());
     }
 
     #[test]

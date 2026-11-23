@@ -9,6 +9,7 @@
 //     --db-controller sha256:… --kv sha256:… --static sha256:… --mysql-operator sha256:… --mysql-backup sha256:… \
 //     --postgres-16 sha256:… --postgres-17 sha256:… --postgres-18 sha256:… \
 //     --agent-access "$(pyo-agent access-hash)" \
+//     --database-pins "$(pyo-agent database-pins)" \
 //     --sandbox-x86_64 <sha256> --sandbox-aarch64 <sha256> \
 //     --sandbox-gvisor-x86_64 <sha256> --sandbox-gvisor-aarch64 <sha256> \
 //     --scripts release-scripts > release.json
@@ -51,6 +52,23 @@ const need = (k: string) => args.get(k) || fail(`--${k} is required`);
 const version = need("version").replace(/^v/, "");
 const agentAccess = need("agent-access");
 if (!/^[0-9a-f]{16}$/.test(agentAccess)) fail(`--agent-access isn't 16 hex digits: ${agentAccess}`);
+// The database images the release's code pins itself (`pyo-agent
+// database-pins`, as JSON: MySQL's and Valkey's with its modules). With the
+// images below they're what the release's databases run, so an installation
+// knows before it updates whether its databases restart.
+const databasePins: Record<string, string> = (() => {
+  try {
+    return JSON.parse(need("database-pins"));
+  } catch {
+    return fail("--database-pins isn't JSON");
+  }
+})();
+for (const [engine, image] of Object.entries(databasePins)) {
+  if (typeof image !== "string" || !/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(image)) {
+    fail(`--database-pins: the ${engine} image isn't pinned by digest: ${image}`);
+  }
+}
+if (!Object.keys(databasePins).length) fail("--database-pins names no image");
 const images = need("images").replace(/\/$/, "");
 const cargo = readFileSync("Cargo.toml", "utf8").match(/^version = "(.+)"$/m)?.[1];
 if (cargo !== version && !args.has("allow-version-mismatch")) {
@@ -211,6 +229,7 @@ const release = {
   manualOnly: forThis ? !!notices.manualOnly : false,
   beforeYouUpdate: forThis ? (notices.beforeYouUpdate ?? []) : [],
   agentAccess,
+  databasePins,
   sandbox,
   sandboxGvisor,
   scripts,

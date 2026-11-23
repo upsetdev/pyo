@@ -193,7 +193,13 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     let mut waf_rejected: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut waf_active: std::collections::HashSet<String> = std::collections::HashSet::new();
     let syncing = crate::bundles::syncing_firewall(&mut *db, &ids).await?;
+    // Clusters whose databases restart once their install is this Pyo's
+    // (the cluster settings say so by the refresh command).
+    let databases_restart = crate::bundles::databases_restart(&mut *db, &ids).await?;
     for c in &mut clusters {
+        if c["id"].as_str().is_some_and(|id| databases_restart.contains(id)) {
+            c["databasesRestart"] = json!(true);
+        }
         waf_rejected.extend(
             c["capabilities"]["wafRejected"]
                 .as_array()
