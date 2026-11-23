@@ -7,10 +7,16 @@ A version is one number for everything: `version` in the root `Cargo.toml`.
 1. Set `version` in `Cargo.toml` and run `cargo check` to update `Cargo.lock`.
 2. Write what installations should know in `deploy/release-notices.json`
    (see [Notices](#notices)), with `"version"` set to the new version.
-3. Write the API reference for the docs (see [API reference](#api-reference)):
+3. Check whether `agentAccess` changed since the last release: compare
+   `cargo run -q -p pyo-agent -- access-hash` with `agentAccess` in the last
+   release's `release.json`. When it changed, the release notes must say
+   that every cluster needs the connect command under **Refresh this
+   cluster** once, and that databases restart once when it runs (see
+   [Notices](#notices)).
+4. Write the API reference for the docs (see [API reference](#api-reference)):
    `cargo run -p pyo-api --bin openapi`.
-4. Commit that to `main`, and wait for CI to pass.
-5. Tag the commit and push the tag:
+5. Commit that to `main`, and wait for CI to pass.
+6. Tag the commit and push the tag:
 
    ```bash
    git tag v0.1.0
@@ -152,6 +158,12 @@ How it reaches installations:
   **Settings › Updates**, and apply it there. With automatic updates on,
   it's applied in the maintenance window. `install.sh` updates too. Pyo
   updates first, then every cluster's agent moves to the new agent image.
+  When the release left the agent's roles as they were, a cluster with the
+  self-update role then brings the rest up to date by itself within a
+  minute, and its databases restart then. When the release changed the
+  roles, every cluster stays outdated until someone runs the command under
+  **Refresh this cluster** in the cluster's settings, and its databases
+  restart when that command runs.
 - **Pyo Cloud:** whoever runs it updates the shared Pyo. Each team's agents
   then follow its version: within a minute for teams with automatic agent
   updates (the default), or when the team updates a cluster from its page.
@@ -164,10 +176,16 @@ How it reaches installations:
 How databases pick up new images: the databases system on a cluster
 updates with Pyo, at the cluster's next heartbeat once the cluster's
 install (its admission policy, which pins the images) is the new Pyo's.
-The agent's own image doesn't matter. With the self-update role the agent
-brings the install up to date by itself within a minute of Pyo's update.
-Without it (Pyo Cloud's clusters, or `PYO_AGENT_SELF_UPDATE=false`) that
-happens when the connect command under **Refresh this cluster** runs.
+The agent's own image doesn't matter. An agent's own refresh never writes
+its roles. It first checks that they match the new Pyo's, and fails as a
+whole when they differ. So after a release that leaves the roles as they
+were, an agent with the self-update role brings the install up to date by
+itself within a minute of Pyo's update. After a release that changes the
+roles (0.51.0 is one), every cluster stays outdated until the connect
+command under **Refresh this cluster** runs, with the self-update role too.
+The admission policy, the image pins and the databases system wait with it.
+Clusters without that role (Pyo Cloud's, or `PYO_AGENT_SELF_UPDATE=false`)
+always wait for the command.
 pyo-db-controller then restarts with the new images and rolls each database
 onto them. A Postgres or MySQL database with replicas restarts a replica
 first and switches over to it, so the primary stops only for the
@@ -178,7 +196,11 @@ the same way, since the release's code pins them.
 Every release restarts Postgres and KV databases once: their images are
 built with the release and tagged with its version, so they're never the
 ones before. MySQL databases restart when the release pins another MySQL
-image. Pyo says so by itself, nothing to write in the notices: the update
+image. They restart when the cluster's install becomes the new Pyo's:
+within a minute of Pyo's update on a self-hosted cluster with the
+self-update role, when the release left the agent's roles as they were.
+On every other cluster, and after a release that changed the roles, they
+restart when the command under **Refresh this cluster** runs. Pyo says so by itself, nothing to write in the notices: the update
 dialog and the cluster's refresh command show "Restarts your databases
 once" when a database runs an image the release changes (compared from
 `release.json`'s images and `databasePins`), and each database's restart
@@ -318,15 +340,28 @@ release's (old notices never carry over):
   Older installations are told to update to `minFrom` first.
 
 A change to the agent's roles or to its admission policy's rules needs no
-notice: `release.json` carries the release agent's `agentAccess`
+notice for the update dialog: `release.json` carries the release agent's `agentAccess`
 (`pyo-agent access-hash`, which `check-release` verifies), and an
 installation whose agent has other ones adds "After updating, run the
 connect command shown in each cluster's settings." to the update dialog by
-itself. The images in the policy don't count. An agent brings its admission
-policy and image pins up to date on its own (with the self-update role), but
-never its roles, and a cluster without that role (Pyo Cloud's, or with
-`PYO_AGENT_SELF_UPDATE=false`) or read only gets a new policy only from its
-connect command. Until then, the agent writes the gateway's client policies
+itself. The images in the policy don't count. The release notes don't get
+that line by themselves, so write it there (step 3 of
+[Cut a release](#cut-a-release)): as a `beforeYouUpdate` notice, which the
+release notes put first, or in the release's text (see
+[Release notes](#release-notes)).
+
+An agent never writes its own roles. Its refresh first checks that they
+match Pyo's, and fails as a whole when they differ. So a release that changes
+the roles leaves every cluster outdated, with the self-update role too,
+until its connect command runs. The admission policy, the image pins and
+the databases system wait for that command as well. The roles are partly
+built from the cluster-wide object names in the system bundles
+(`cluster_rules` in `crates/pyo-proto/src/bundles.rs`), so a release that
+adds or renames such an object changes the roles too. When the roles are
+unchanged, an agent with the self-update role brings its admission policy
+and image pins up to date on its own. A cluster without that role (Pyo
+Cloud's, or with `PYO_AGENT_SELF_UPDATE=false`) or read only gets a new
+policy only from its connect command. Until then, the agent writes the gateway's client policies
 in the shape the cluster's older policy accepts, and the cluster's settings
 say to run the command.
 
