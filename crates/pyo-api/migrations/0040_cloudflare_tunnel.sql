@@ -1,3 +1,4 @@
+-- pyo:contract since=v0.5.5 dns_records_status_check only widens (adds switching and reverting), so every status v0.5.5 writes (created, exists, conflict, failed) still fits
 -- Cloudflare Tunnel (cloudflare/tunnel.rs, docs/cloudflare-tunnel.md).
 
 -- The cluster's traffic: 'public' (ports 80 and 443 on its servers),
@@ -6,10 +7,28 @@
 ALTER TABLE pyo.clusters ADD COLUMN traffic text NOT NULL DEFAULT 'public'
   CHECK (traffic IN ('public', 'tailscale', 'tunnel'));
 UPDATE pyo.clusters SET traffic = CASE WHEN public_traffic THEN 'public' ELSE 'tailscale' END;
--- Every reader of public_traffic keeps working: it follows the choice.
-ALTER TABLE pyo.clusters DROP COLUMN public_traffic;
-ALTER TABLE pyo.clusters ADD COLUMN public_traffic boolean
-  GENERATED ALWAYS AS (traffic = 'public') STORED;
+-- public_traffic stays a plain column while v0.5.5 may still run: it reads
+-- it and writes it (setClusterPublicTraffic, install::web_ports_busy). This
+-- trigger keeps the two in step, so every reader of public_traffic follows
+-- traffic, and v0.5.5 writing public_traffic moves traffic with it. A later
+-- release makes it a generated column (RELEASING.md, Pending contracts).
+CREATE FUNCTION pyo.clusters_traffic_sync() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.traffic = 'public' AND NOT NEW.public_traffic THEN
+      NEW.traffic := 'tailscale';
+    END IF;
+  ELSIF NEW.traffic IS DISTINCT FROM OLD.traffic THEN
+    NULL;
+  ELSIF NEW.public_traffic IS DISTINCT FROM OLD.public_traffic THEN
+    NEW.traffic := CASE WHEN NEW.public_traffic THEN 'public' ELSE 'tailscale' END;
+  END IF;
+  NEW.public_traffic := NEW.traffic = 'public';
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER clusters_traffic_sync BEFORE INSERT OR UPDATE OF traffic, public_traffic
+  ON pyo.clusters FOR EACH ROW EXECUTE FUNCTION pyo.clusters_traffic_sync();
 
 -- A cluster's Cloudflare Tunnel. Nothing secret: the tunnel token is read
 -- from Cloudflare when the agent needs it, and the Origin CA key sits

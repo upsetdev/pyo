@@ -452,6 +452,9 @@ mod tests {
         }
 
         pub async fn serve(cluster: Cluster) -> (kube::Client, Shared) {
+            // As main does: a workspace build has ring next to aws-lc-rs,
+            // and kube's client can't guess which one to use.
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             let st: Shared = Arc::new(Mutex::new(cluster));
             let app = Router::new().fallback(handle).with_state(st.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -4838,7 +4838,7 @@ async fn apply(
         Op::SetClusterPublicTraffic { cluster_id, on } => {
             let team_id = team_of(tx, "clusters", &cluster_id).await?;
             require_role(tx, user, &team_id, Role::Admin).await?;
-            // `public_traffic` follows `traffic` (a generated column).
+            // `public_traffic` follows `traffic` (a trigger keeps them in step).
             let name: String = sqlx::query_scalar(
                 "UPDATE pyo.clusters SET traffic = CASE WHEN $2 THEN 'public' ELSE 'tailscale' END WHERE id = $1 RETURNING name",
             )
