@@ -6,6 +6,7 @@ import { copyText } from "~/lib/pyo/clipboard";
 import { api, membersIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Role } from "~/lib/pyo/types";
+import { useHeld } from "~/lib/pyo/useHeld";
 
 export const ROLES: { value: Role; label: string; body: string }[] = [
   {
@@ -52,14 +53,22 @@ export function InviteDialog({
   const exists = membersIn(s).some(
     (m) => m.email.toLowerCase() === email.trim().toLowerCase(),
   );
-  const error = !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
-    ? "Enter a valid email address."
-    : exists
-      ? "Already a member or invited."
-      : "";
+  // Held from Send on: the invite is in the store at once, and mustn't read
+  // as already there while it's sent. A refused one stays in the store for a
+  // moment more, so the hold lasts until the address is edited.
+  const [sent, setSent] = useState(false);
+  const error = useHeld(
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+      ? "Enter a valid email address."
+      : exists
+        ? "Already a member or invited."
+        : "",
+    sent,
+  );
   const close = () => {
     setEmail("");
     setTouched(false);
+    setSent(false);
     onClose();
   };
   return (
@@ -77,6 +86,7 @@ export function InviteDialog({
         if (error || sending) return;
         const address = email.trim().toLowerCase();
         setSending(true);
+        setSent(true);
         const r = await api.inviteMember(address, role);
         setSending(false);
         if (!r) return;
@@ -109,7 +119,10 @@ export function InviteDialog({
               {...p}
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                setSent(false);
+              }}
               placeholder="teammate@company.com"
             />
           )}
