@@ -1245,6 +1245,16 @@ mod tests {
                 .unwrap()
                 .contains("@sha256:")
         );
+        // A new operator updates the instance manager in place: Postgres
+        // restarts only for a new image of its own.
+        assert!(
+            cnpg["spec"]["template"]["spec"]["containers"][0]["env"]
+                .as_array()
+                .unwrap()
+                .contains(
+                    &json!({ "name": "ENABLE_INSTANCE_MANAGER_INPLACE_UPDATES", "value": "true" })
+                )
+        );
         // Namespace first, then CRDs and cluster roles, webhooks last; all labelled.
         let objs = b.objects();
         assert_eq!(objs[0]["kind"], "Namespace");

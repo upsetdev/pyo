@@ -7,7 +7,10 @@ use anyhow::anyhow;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use k8s_openapi::{
     ByteString,
-    api::core::v1::{Pod, Secret},
+    api::{
+        apps::v1::Deployment,
+        core::v1::{Pod, Secret},
+    },
     apimachinery::pkg::apis::meta::v1::ObjectMeta,
 };
 use kube::{
@@ -256,7 +259,7 @@ async fn run(
 }
 
 /// The operator an engine's objects need (pyo-proto's `OPERATORS`).
-fn operator_of(engine: &Engine) -> Option<&'static pyo_proto::bundles::Operator> {
+pub(crate) fn operator_of(engine: &Engine) -> Option<&'static pyo_proto::bundles::Operator> {
     let name = match engine {
         Engine::Postgres => "postgres",
         Engine::Mysql => "mysql",
@@ -278,21 +281,51 @@ fn waiting_for(op: &pyo_proto::bundles::Operator) -> String {
     format!("Starting {}", op.label)
 }
 
-/// Whether the operator's Deployment (beside this controller) has a ready
-/// replica.
-async fn operator_ready(ctx: &Ctx, deployment: &str) -> anyhow::Result<bool> {
-    use k8s_openapi::api::apps::v1::Deployment;
+/// The operator's Deployment, beside this controller.
+async fn operator_deployment(ctx: &Ctx, deployment: &str) -> anyhow::Result<Option<Deployment>> {
     let ns = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "pyo-databases".into());
     let list = Api::<Deployment>::namespaced(ctx.client.clone(), &ns)
         .list(&ListParams::default().fields(&format!("metadata.name={deployment}")))
         .await?;
-    Ok(list.items.iter().any(|d| {
-        d.status
-            .as_ref()
-            .and_then(|s| s.ready_replicas)
-            .unwrap_or(0)
-            > 0
-    }))
+    Ok(list.items.into_iter().next())
+}
+
+/// Whether the operator's Deployment has a ready replica.
+async fn operator_ready(ctx: &Ctx, deployment: &str) -> anyhow::Result<bool> {
+    Ok(operator_deployment(ctx, deployment)
+        .await?
+        .is_some_and(|d| {
+            d.status
+                .as_ref()
+                .and_then(|s| s.ready_replicas)
+                .unwrap_or(0)
+                > 0
+        }))
+}
+
+/// Whether the operator's Deployment runs only its current version, as
+/// `kubectl rollout status` sees it. While Pyo updates the operator, a
+/// running database keeps its image: the new operator then changes the image
+/// and its own instance manager in one restart.
+pub(crate) async fn operator_rolled_out(ctx: &Ctx, deployment: &str) -> anyhow::Result<bool> {
+    Ok(operator_deployment(ctx, deployment)
+        .await?
+        .is_some_and(|d| rolled_out(&d)))
+}
+
+/// Every replica of the Deployment's current version is up and available,
+/// and none of an older one is left, terminating ones included.
+fn rolled_out(d: &Deployment) -> bool {
+    let (Some(spec), Some(st)) = (d.spec.as_ref(), d.status.as_ref()) else {
+        return false;
+    };
+    let want = spec.replicas.unwrap_or(1);
+    let updated = st.updated_replicas.unwrap_or(0);
+    d.metadata.generation.unwrap_or(0) <= st.observed_generation.unwrap_or(0)
+        && updated >= want
+        && st.replicas.unwrap_or(0) == updated
+        && st.available_replicas.unwrap_or(0) >= updated
+        && st.terminating_replicas.unwrap_or(0) == 0
 }
 
 fn validate(db: &Database) -> anyhow::Result<()> {
@@ -826,6 +859,49 @@ mod tests {
         // Only one being made (or failed): a running one doesn't wait.
         assert!(starting("") && starting(crd::CREATING) && starting(crd::FAILED));
         assert!(!starting("Ready") && !starting("Degraded"));
+    }
+
+    #[test]
+    fn the_operator_is_rolled_out_with_only_its_current_version() {
+        let d = |generation: i64, status: Value| -> Deployment {
+            serde_json::from_value(json!({
+                "metadata": { "name": "cnpg-controller-manager", "generation": generation },
+                "spec": {
+                    "replicas": 2,
+                    "selector": { "matchLabels": { "app": "x" } },
+                    "template": {},
+                },
+                "status": status,
+            }))
+            .unwrap()
+        };
+        let done = json!({ "observedGeneration": 3, "replicas": 2, "updatedReplicas": 2, "readyReplicas": 2, "availableReplicas": 2 });
+        assert!(rolled_out(&d(3, done.clone())));
+        // The new spec not seen yet.
+        assert!(!rolled_out(&d(4, done.clone())));
+        // A new replica not made yet, or not available yet.
+        assert!(!rolled_out(&d(
+            3,
+            json!({ "observedGeneration": 3, "replicas": 2, "updatedReplicas": 1, "readyReplicas": 2, "availableReplicas": 2 })
+        )));
+        assert!(!rolled_out(&d(
+            3,
+            json!({ "observedGeneration": 3, "replicas": 2, "updatedReplicas": 2, "readyReplicas": 1, "availableReplicas": 1 })
+        )));
+        // An old replica still running, or still terminating.
+        assert!(!rolled_out(&d(
+            3,
+            json!({ "observedGeneration": 3, "replicas": 3, "updatedReplicas": 2, "readyReplicas": 3, "availableReplicas": 3 })
+        )));
+        let mut terminating = done.clone();
+        terminating["terminatingReplicas"] = json!(1);
+        assert!(!rolled_out(&d(3, terminating)));
+        // No status yet.
+        assert!(!rolled_out(&d(3, Value::Null)));
+        // Stopped (no replicas wanted): nothing to wait for.
+        let mut stopped = d(3, json!({ "observedGeneration": 3 }));
+        stopped.spec.as_mut().unwrap().replicas = Some(0);
+        assert!(rolled_out(&stopped));
     }
 
     #[test]
