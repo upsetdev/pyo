@@ -22,7 +22,7 @@ import {
 } from "~/components/pyo/Certificates";
 import { TlsBadge } from "~/components/ui/Badge";
 import { Tooltip } from "~/components/ui/Tooltip";
-import { DomainKind, DomainStatus } from "~/components/pyo/DomainState";
+import { DomainKind, DomainMark, DomainStatus } from "~/components/pyo/DomainState";
 import { AppLink } from "~/components/ui/AppLink";
 import { AddDomainDialog } from "~/components/pyo/AddDomainDialog";
 import {
@@ -108,19 +108,7 @@ function Domains({ app }: { app: Application }) {
               return (
                 <li key={d.id} className="px-4 py-3.5">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                    {d.tls === "issued" ? (
-                      <LockSimpleIcon
-                        size={14}
-                        className="text-success"
-                        aria-label="HTTPS"
-                      />
-                    ) : (
-                      <GlobeIcon
-                        size={14}
-                        className="text-muted-foreground"
-                        aria-label="HTTP only"
-                      />
-                    )}
+                    <DomainMark d={d} clusterId={app.clusterId} />
                     <span className="inline-flex min-w-0 items-center gap-1.5">
                       <span className="truncate font-mono text-[13px]">
                         {d.hostname}

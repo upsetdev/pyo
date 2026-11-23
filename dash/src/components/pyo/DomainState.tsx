@@ -1,4 +1,9 @@
+import { GlobeIcon, LockSimpleIcon } from "@phosphor-icons/react";
+import type { ReactNode } from "react";
+import { siTailscale } from "simple-icons";
 import { expiry } from "~/components/pyo/Certificates";
+import { BrandMark, CLOUDFLARE_LOGO } from "~/components/pyo/common";
+import { throughTunnel, tunnelNote } from "~/components/pyo/TunnelRecord";
 import {
   freeKind,
   isFreeDomain,
@@ -8,6 +13,7 @@ import {
 import { Badge, type Tone } from "~/components/ui/Badge";
 import { Tooltip } from "~/components/ui/Tooltip";
 import { timeAgo } from "~/lib/pyo/format";
+import { roleIn, usePyo } from "~/lib/pyo/store";
 import type { Certificate, Domain } from "~/lib/pyo/types";
 
 // One status for a domain instead of separate DNS and certificate badges:
@@ -96,16 +102,97 @@ export function DomainStatus({
 const KINDS = {
   public: { label: "Free", tone: "neutral", hint: "Free nip.io domain. Anyone can open it." },
   private: { label: "Private", tone: "neutral", hint: "Free nip.io domain on a private IP." },
-  tailnet: { label: "Tailscale", tone: "info", hint: "Only devices on your tailnet can open it." },
 } as const;
 
-/** Which free domain it is (none for the team's own), as a badge. */
+/** Which nip.io domain it is, as a badge. None for the team's own, or a tailnet one: DomainMark has its logo. */
 export function DomainKind({ hostname }: { hostname: string }) {
   const k = freeKind(hostname);
-  if (!k) return null;
+  if (!k || k === "tailnet") return null;
   return (
     <Tooltip content={KINDS[k].hint}>
       <Badge tone={KINDS[k].tone}>{KINDS[k].label}</Badge>
     </Tooltip>
+  );
+}
+
+/** A logo in the lock's box, so hostnames stay in a column. */
+function Logo({
+  label,
+  hint,
+  icon,
+}: {
+  label: string;
+  hint: ReactNode;
+  icon: Parameters<typeof BrandMark>[0]["icon"];
+}) {
+  return (
+    <Tooltip content={hint}>
+      <span
+        role="img"
+        aria-label={label}
+        className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-foreground"
+      >
+        <BrandMark icon={icon} size={13} />
+      </span>
+    </Tooltip>
+  );
+}
+
+/**
+ * What a domain goes through, before its name: the Tailscale logo on the
+ * tailnet, the Cloudflare logo through the cluster's tunnel or a record
+ * Cloudflare proxies, else the lock (the globe without HTTPS). `logoOnly`:
+ * nothing for the rest.
+ */
+export function DomainMark({
+  d,
+  clusterId,
+  logoOnly,
+}: {
+  d: Domain;
+  clusterId: string;
+  logoOnly?: boolean;
+}) {
+  const s = usePyo();
+  if (isTailnetDomain(d.hostname))
+    return (
+      <Logo
+        label="Tailscale"
+        icon={siTailscale}
+        hint="Tailscale. Only devices on your tailnet can open it."
+      />
+    );
+  if (throughTunnel(d)) {
+    const role = roleIn(s);
+    const note = tunnelNote(
+      d,
+      s.clusters.find((c) => c.id === clusterId),
+      role === "owner" || role === "admin",
+    );
+    return (
+      <Logo
+        label="Cloudflare Tunnel"
+        icon={CLOUDFLARE_LOGO}
+        hint={
+          note ? (
+            <>
+              Cloudflare Tunnel · <span className="font-mono">{note.name}</span>
+              {note.more ? <span className="block">{note.more}</span> : null}
+            </>
+          ) : (
+            "Cloudflare Tunnel"
+          )
+        }
+      />
+    );
+  }
+  const r = d.dnsRecord;
+  if (r?.proxied && (r.status === "created" || r.status === "exists"))
+    return <Logo label="Cloudflare" icon={CLOUDFLARE_LOGO} hint="Cloudflare · Proxied" />;
+  if (logoOnly) return null;
+  return d.tls === "issued" ? (
+    <LockSimpleIcon size={14} className="text-success" aria-label="HTTPS" />
+  ) : (
+    <GlobeIcon size={14} className="text-muted-foreground" aria-label="HTTP only" />
   );
 }
