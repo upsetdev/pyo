@@ -652,6 +652,10 @@ Its `connect.sh` comes from the pre-release's own assets, not pyo.dev:
 curl -fsSL https://github.com/upsetdev/pyo/releases/download/vX.Y.Z-rc.N/connect.sh | bash -s -- --api <Pyo> --token <token> --auto-update
 ```
 
+A candidate Pyo's own commands fetch its scripts from there too, wherever
+a release's would come from pyo.dev (`published_scripts_url` in
+`crates/pyo-api/src/join.rs`).
+
 It pins the candidate's verifier and sets it up with `channel=rc` in
 `/etc/pyo/verify.conf`, so it takes release candidates too. On a test
 server only, `soak_hours=0` there skips the day's wait. A stable verifier
