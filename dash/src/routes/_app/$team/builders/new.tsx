@@ -1,3 +1,4 @@
+import { useHosted } from "~/components/pyo/Managed";
 import { NeedsTailscale } from "~/components/pyo/Tailscale";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
@@ -36,6 +37,22 @@ export const Route = createFileRoute("/_app/$team/builders/new")({
 // form and the checklist follows it).
 
 function AddBuilder() {
+  // A hosted Pyo runs on none of the team's machines, so "This machine"
+  // isn't offered there. The form waits until that's known: it picks where
+  // to start once, and the choices don't change under it.
+  const hosted = useHosted();
+  return (
+    <Page width="max-w-2xl">
+      <PageHeader
+        title="Add builder"
+        description="Builds Git deploys."
+      />
+      {hosted === undefined ? null : <BuilderForm hosted={hosted} />}
+    </Page>
+  );
+}
+
+function BuilderForm({ hosted }: { hosted: boolean }) {
   const s = usePyo();
   const navigate = useNavigate();
   const search = Route.useSearch();
@@ -65,7 +82,7 @@ function AddBuilder() {
     })),
   );
   // "This machine": the cluster Pyo runs on, on its control-plane server.
-  const local = clusters.find((c) => c.sameCluster);
+  const local = hosted ? undefined : clusters.find((c) => c.sameCluster);
   const localNode = local
     ? (serversOf(s, local.id).find(
         (n) => n.roles.includes("control-plane") && n.status === "ready",
@@ -173,17 +190,15 @@ function AddBuilder() {
     });
   };
   return (
-    <Page width="max-w-2xl">
-      <PageHeader
-        title="Add builder"
-        description="Builds Git deploys."
-      />
+    <>
       <Segmented
         label="Where it runs"
         value={where}
         onChange={switchTo}
         options={[
-          { value: "local", label: "This machine" },
+          ...(hosted
+            ? []
+            : [{ value: "local" as const, label: "This machine" }]),
           { value: "cluster", label: "In a cluster" },
           { value: "server", label: "New server" },
         ]}
@@ -393,6 +408,6 @@ function AddBuilder() {
           </>
         )}
       </div>
-    </Page>
+    </>
   );
 }
