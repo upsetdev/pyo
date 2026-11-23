@@ -10,6 +10,7 @@ use super::fake::FakeCf;
 use super::tunnel::{self, TunnelApi};
 use super::tunnel_loop::{Switched, ensure_tunnel, issue, revert_record, switch_record};
 use super::*;
+use crate::teamsec_tests::run_big;
 
 const TOKEN: &str = "fake-token-0123456789abcdef";
 const MARK: &str = "Made by Pyo (abc123)";
@@ -140,21 +141,6 @@ async fn a_tunnel_runs_its_course_over_http() {
 }
 
 // ── The whole loop, against a throwaway Postgres ───────────────────────────
-
-fn run_big<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
-    std::thread::Builder::new()
-        .stack_size(64 << 20)
-        .spawn(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(f)
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
 
 /// The domain as its service has it now.
 async fn domain(db: &sqlx::PgPool, service: &str) -> Value {
