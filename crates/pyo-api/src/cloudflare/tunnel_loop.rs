@@ -426,37 +426,18 @@ async fn keep<C: Cloudflare + TunnelApi>(
     // 5. The agent's token.
     let agent_has = row.agent_status["tunnelId"].as_str();
     if agent_has != Some(t.id.as_str()) && row.token_due && agent_knows_tunnels(s, &row.cluster_id).await? {
-        let token = cf.tunnel_token(&row.account_id, &t.id).await?;
-        let mut tx = s.db.begin().await?;
-        crate::deploy::enqueue(
-            &mut tx,
-            &row.cluster_id,
-            pyo_proto::Command::TunnelSet {
-                tunnel_id: t.id.clone(),
-                token,
-            },
-        )
-        .await?;
-        sqlx::query("UPDATE pyo.cluster_tunnels SET token_sent_at = now() WHERE cluster_id = $1")
-            .bind(&row.cluster_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        s.wake(&row.cluster_id).await;
+        send_token(s, cf, row, &t.id, false).await?;
     }
 
-    // 6. Rotate: a new secret, old connections dropped, then the token again.
+    // 6. Rotate: a new secret, the token for it sent right away, then the
+    // old connections dropped. The token goes out here, not through step 5:
+    // the tunnel's id doesn't change, and every heartbeat reports the id
+    // the agent's token is for, so step 5 would never see it as missing.
     if row.rotate {
         cf.rotate_secret(&row.account_id, &t.id, &tunnel::new_secret())
             .await?;
+        send_token(s, cf, row, &t.id, true).await?;
         cf.drop_connections(&row.account_id, &t.id).await?;
-        sqlx::query(
-            "UPDATE pyo.cluster_tunnels SET rotate = false, token_sent_at = NULL,
-                    agent_status = agent_status - 'tunnelId' WHERE cluster_id = $1",
-        )
-        .bind(&row.cluster_id)
-        .execute(&s.db)
-        .await?;
     }
 
     // 7. Cloudflare's view, every 2 minutes.
@@ -488,6 +469,41 @@ async fn keep<C: Cloudflare + TunnelApi>(
             .await?;
     }
     set_error(s, &row.cluster_id, None).await?;
+    Ok(())
+}
+
+/// Send the agent the tunnel's token (`TunnelSet`). After a rotation it
+/// also clears `rotate`, in the same transaction, so a failed send rotates
+/// again on the next pass rather than leaving the agent on the old secret.
+async fn send_token<C: TunnelApi>(
+    s: &AppState,
+    cf: &C,
+    row: &Row,
+    tunnel_id: &str,
+    rotated: bool,
+) -> Result<(), Step> {
+    let token = cf.tunnel_token(&row.account_id, tunnel_id).await?;
+    let mut tx = s.db.begin().await?;
+    crate::deploy::enqueue(
+        &mut tx,
+        &row.cluster_id,
+        pyo_proto::Command::TunnelSet {
+            tunnel_id: tunnel_id.to_owned(),
+            token,
+        },
+    )
+    .await?;
+    let sql = if rotated {
+        "UPDATE pyo.cluster_tunnels SET token_sent_at = now(), rotate = false WHERE cluster_id = $1"
+    } else {
+        "UPDATE pyo.cluster_tunnels SET token_sent_at = now() WHERE cluster_id = $1"
+    };
+    sqlx::query(sql)
+        .bind(&row.cluster_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    s.wake(&row.cluster_id).await;
     Ok(())
 }
 
