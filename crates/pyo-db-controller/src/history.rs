@@ -74,6 +74,8 @@ pub fn needed(timeline: i64, recorded: Option<&str>, fingerprint: &str) -> bool 
 /// get there.
 pub const SCRIPT: &str = r#"set -uo pipefail
 fail() { echo "$1" | tee /dev/termination-log >&2; exit 1; }
+# The last thing a tool said, without barman's time and level.
+why() { grep -v '^$' /work/err | tail -n 1 | sed 's/^.* ERROR: //'; }
 conn="host=$PGHOST_RW port=5432 dbname=postgres user=streaming_replica replication=true sslmode=verify-ca sslcert=/certs/tls.crt sslkey=/certs/tls.key sslrootcert=/ca/ca.crt connect_timeout=10"
 cd /work || fail "no work directory"
 added=""
@@ -82,16 +84,16 @@ for ((t = 2; t <= TIMELINE; t++)); do
   barman-cloud-wal-restore --endpoint-url "$ENDPOINT" "$DESTINATION" "$SERVER" "$f" "/work/have-$f" 2>/work/err
   rc=$?
   if [ "$rc" = 0 ]; then echo "pyo-history: $f is in the backups"; continue; fi
-  if [ "$rc" != 1 ]; then fail "can't read the backups: $(tail -n 1 /work/err)"; fi
+  if [ "$rc" != 1 ]; then fail "can't read the backups: $(why)"; fi
   if ! psql "$conn" -XAtc "TIMELINE_HISTORY $t" >/work/raw 2>/work/err; then
     if [ "$t" -lt "$TIMELINE" ]; then echo "pyo-history: the primary has no $f, skipped"; continue; fi
-    fail "can't read $f from the primary: $(tail -n 1 /work/err)"
+    fail "can't read $f from the primary: $(why)"
   fi
   # psql prints "<file name>|<content>" and one newline of its own.
   sed '1s/^[^|]*|//' /work/raw | head -c -1 >"/work/$f"
   [ -s "/work/$f" ] || fail "the primary sent an empty $f"
   barman-cloud-wal-archive --gzip --endpoint-url "$ENDPOINT" "$DESTINATION" "$SERVER" "/work/$f" 2>/work/err \
-    || fail "can't write $f to the backups: $(tail -n 1 /work/err)"
+    || fail "can't write $f to the backups: $(why)"
   echo "pyo-history: archived $f"
   added="$added $f"
 done
@@ -336,7 +338,7 @@ mod tests {
         // The store is a directory; STORE_RC makes reads fail another way.
         write(
             "barman-cloud-wal-restore",
-            "#!/bin/bash\n[ -n \"${STORE_RC:-}\" ] && { echo 'boom' >&2; exit \"$STORE_RC\"; }\nf=\"${@: -2:1}\"; [ -f \"$STORE/$f\" ] || exit 1; cp \"$STORE/$f\" \"${@: -1}\"\n",
+            "#!/bin/bash\n[ -n \"${STORE_RC:-}\" ] && { echo '2026-01-01 00:00:00,000 [8] ERROR: boom' >&2; echo >&2; exit \"$STORE_RC\"; }\nf=\"${@: -2:1}\"; [ -f \"$STORE/$f\" ] || exit 1; cp \"$STORE/$f\" \"${@: -1}\"\n",
         );
         write(
             "barman-cloud-wal-archive",
