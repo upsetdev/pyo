@@ -2,7 +2,11 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { TagInput } from "~/components/ui/TagInput";
 import { useState } from "react";
 import { RESERVED_CLUSTER_NAMES } from "~/lib/pyo/location";
-import { AgentInstall, Command } from "~/components/pyo/AgentInstall";
+import {
+  AgentInstall,
+  Command,
+  useAutoUpdate,
+} from "~/components/pyo/AgentInstall";
 import { ClusterMtls } from "~/components/pyo/Mtls";
 import { DATABASES_RESTART } from "~/components/pyo/UpdateSettings";
 import {
@@ -50,6 +54,8 @@ function ClusterSettings({ c }: { c: Cluster }) {
   // Gone for 10 minutes: removable with its services (as the API allows).
   const gone = Date.now() - c.lastSeenAt >= 10 * 60_000;
   const install = c.capabilities.agentInstall;
+  const refresh = useAutoUpdate(install?.command ?? "");
+  const autoUpdate = install?.autoUpdate;
   // A hosted Pyo's agents follow its version (automatic, or when the team says).
   const hosted = useHosted();
   const pyoVersion = usePyoVersion();
@@ -253,7 +259,15 @@ function ClusterSettings({ c }: { c: Cluster }) {
                   : ""}
               </p>
             </div>
-            <Command value={install.command} />
+            {refresh.checkbox}
+            <Command value={refresh.command} />
+            {autoUpdate ? (
+              <p
+                className={`text-[12px] ${autoUpdate.state === "error" ? "text-warning" : "text-muted-foreground"}`}
+              >
+                {autoUpdate.message}
+              </p>
+            ) : null}
           </div>
         ) : null}
       </Panel>

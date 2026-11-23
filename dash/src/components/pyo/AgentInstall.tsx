@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { Dialog } from "~/components/ui/Dialog";
-import { Segmented } from "~/components/ui/Field";
+import { Checkbox, Segmented } from "~/components/ui/Field";
 import { useHosted } from "~/components/pyo/Managed";
 import { api, usePyo } from "~/lib/pyo/store";
 import type { Cluster } from "~/lib/pyo/types";
@@ -26,6 +26,36 @@ export function Command({ value }: { value: string }) {
   );
 }
 
+// The flag a hosted Pyo's commands carry, and the one that leaves
+// automatic updates out.
+const AUTO_UPDATE = /(^| )--auto-update(?= |$)/;
+
+/** `command` with automatic updates kept or left out. */
+export function withAutoUpdate(command: string, keep: boolean) {
+  return keep ? command : command.replace(AUTO_UPDATE, "$1--no-auto-update");
+}
+
+/**
+ * The choice to keep a cluster up to date automatically, on a hosted Pyo
+ * whose command offers it: the command as chosen, and its checkbox (null
+ * anywhere else). It only changes the command shown. Pyo keeps no setting.
+ */
+export function useAutoUpdate(command: string) {
+  const hosted = useHosted();
+  const [keep, setKeep] = useState(true);
+  const offered = hosted === true && AUTO_UPDATE.test(command);
+  return {
+    command: offered ? withAutoUpdate(command, keep) : command,
+    checkbox: offered ? (
+      <Checkbox
+        checked={keep}
+        onChange={setKeep}
+        label="Keep this cluster up to date automatically"
+      />
+    ) : null,
+  };
+}
+
 /**
  * The one command that sets up a cluster: it installs k3s on the machine if
  * it isn't there, then the Pyo agent. The token in it works once, for an
@@ -45,9 +75,11 @@ export function AgentInstall({
   thisMachine?: boolean;
 }) {
   const [kubectl, setKubectl] = useState(false);
+  const auto = useAutoUpdate(command);
   return (
     <div className="space-y-2">
-      <LiveCommand command={command} stale={stale} />
+      {auto.checkbox}
+      <LiveCommand command={auto.command} stale={stale} />
       <p className="text-[12px] leading-relaxed text-muted-foreground">
         Works once, for an hour
         {thisMachine ? null : " · "}
