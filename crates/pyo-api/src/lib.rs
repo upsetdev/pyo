@@ -422,6 +422,11 @@ pub(crate) fn hosted() -> bool {
 /// Runs Pyo: migrates, starts the background work, and serves until a
 /// shutdown signal. The `pyo-api` binary is `run(Extensions::default())`.
 pub async fn run(ext: Extensions) -> anyhow::Result<()> {
+    // One TLS provider for every client and server that doesn't pick its
+    // own, before any of them starts. A build with ring next to aws-lc-rs
+    // (pyo-sandbox's, in a workspace build) can't guess one, and building a
+    // TLS config would panic.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let Extensions {
         routes: extra_routes,
         tasks,

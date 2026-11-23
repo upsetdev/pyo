@@ -719,6 +719,9 @@ enum EnvCommand {
 
 #[tokio::main]
 async fn main() {
+    // One TLS provider for the websockets and anything else that doesn't
+    // pick its own: a build with ring next to aws-lc-rs can't guess one.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let cli = Cli::parse();
     upgrade::remove_old();
     let check = match cli.command {
