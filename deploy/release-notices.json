@@ -1,6 +1,10 @@
 {
-  "version": "0.5.5",
+  "version": "0.51.0",
   "minFrom": null,
   "manualOnly": false,
-  "beforeYouUpdate": []
+  "beforeYouUpdate": [
+    "After updating, run the connect command shown in each cluster's settings.",
+    "Skip the cluster Pyo runs on. Its server runs the command by itself.",
+    "Your databases restart once when their cluster runs that command."
+  ]
 }
