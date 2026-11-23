@@ -3861,6 +3861,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyo-verify"
+version = "0.5.5"
+dependencies = [
+ "hex",
+ "pyo-sigstore",
+ "serde_json",
+ "sha2 0.11.1",
+]
+
+[[package]]
 name = "qrcode"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
