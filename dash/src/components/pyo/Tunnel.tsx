@@ -245,7 +245,9 @@ export function TunnelSettings({
           ) : null}
           {outdated ? (
             <p className="text-[12px] text-warning">
-              Run the command under Refresh this cluster in the cluster's settings first.
+              {install?.state === "updating"
+                ? "This cluster is updating. Try again in a few minutes."
+                : "Run the command under Refresh this cluster in the cluster's settings first."}
             </p>
           ) : null}
         </div>

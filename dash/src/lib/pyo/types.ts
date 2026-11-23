@@ -505,7 +505,8 @@ export type Cluster = {
     /** The agent's update protocol (0: it can't update Pyo or itself). */
     updates?: number;
     /** Whether its install is this Pyo's: "updating" while the agent
-     * refreshes it, "outdated" until `command` runs on the cluster,
+     * refreshes it (or the server Pyo runs on runs `command` by itself),
+     * "outdated" until `command` runs on the cluster,
      * "roles" when it's current except for roles only `command` brings
      * (`bundles`: the databases system and the WAF don't wait for them).
      * `command` (any state): the connect command again, for the cluster's

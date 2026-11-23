@@ -21,6 +21,10 @@ pub const MODES: [&str; 3] = ["public", "tailscale", "tunnel"];
 /// Said when the cluster's install can't run a tunnel yet.
 pub const INSTALL_FIRST: &str = "Run the command under Refresh this cluster in the cluster's settings first.";
 
+/// Said while the cluster's install is being brought up to date, by its
+/// agent or by the server Pyo runs on: there's no command to run.
+pub const INSTALL_UPDATING: &str = "This cluster is updating. Try again in a few minutes.";
+
 fn bad(m: impl Into<String>) -> ApiError {
     ApiError::bad_request(m.into())
 }
@@ -97,6 +101,7 @@ pub fn install_ready(capabilities: &Value) -> Result<(), &'static str> {
     }
     match capabilities["agentInstall"]["state"].as_str() {
         Some("current") | None => Ok(()),
+        Some("updating") => Err(INSTALL_UPDATING),
         _ => Err(INSTALL_FIRST),
     }
 }
@@ -806,8 +811,9 @@ mod tests {
         );
         assert_eq!(
             install_ready(&json!({ "tunnel": true, "agentInstall": { "state": "updating" } })).unwrap_err(),
-            INSTALL_FIRST
+            INSTALL_UPDATING
         );
+        assert!(!INSTALL_UPDATING.contains(';') && !INSTALL_UPDATING.contains("command"));
         assert!(install_ready(&json!({ "tunnel": true, "agentInstall": { "state": "current" } })).is_ok());
         // A refresh that left the roles behind: the tunnel needs them.
         assert_eq!(
