@@ -1,0 +1,17 @@
+[package]
+name = "pyo-sigstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Offline Sigstore checks, for pyo-api and the small static pyo-verify:
+# keep this list short.
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+hex = "0.4.3"
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+x509-parser = "0.18"

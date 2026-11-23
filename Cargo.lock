@@ -3629,6 +3629,7 @@ dependencies = [
  "libc",
  "maxminddb",
  "pyo-proto",
+ "pyo-sigstore",
  "qrcode",
  "rand 0.10.3",
  "rcgen",
@@ -3823,6 +3824,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots",
+]
+
+[[package]]
+name = "pyo-sigstore"
+version = "0.5.5"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "hex",
+ "rustls",
+ "serde_json",
+ "sha2 0.11.1",
+ "x509-parser",
 ]
 
 [[package]]

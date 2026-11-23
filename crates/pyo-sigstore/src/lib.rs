@@ -3,7 +3,7 @@
 //! dashboard's updates use only a release Pyo's own workflow signed.
 //!
 //! The trust is Sigstore's public instance, as of its trusted root
-//! (assets/sigstore/): Fulcio's root and intermediate (valid to 2031) and
+//! (assets/): Fulcio's root and intermediate (valid to 2031) and
 //! Rekor v1's key. The release workflow signs with Rekor v1
 //! (.github/release-signing-config.json), whose signed entry timestamp
 //! (SET) this reads; checking is offline.
@@ -26,10 +26,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use x509_parser::{certificate::X509Certificate, prelude::FromDer};
 
-const FULCIO_INTERMEDIATE: &[u8] = include_bytes!("../assets/sigstore/fulcio-intermediate.der");
-const FULCIO_ROOT: &[u8] = include_bytes!("../assets/sigstore/fulcio-root.der");
+const FULCIO_INTERMEDIATE: &[u8] = include_bytes!("../assets/fulcio-intermediate.der");
+const FULCIO_ROOT: &[u8] = include_bytes!("../assets/fulcio-root.der");
 /// Rekor v1's public key (SPKI, ECDSA P-256).
-const REKOR_KEY: &[u8] = include_bytes!("../assets/sigstore/rekor.der");
+const REKOR_KEY: &[u8] = include_bytes!("../assets/rekor.der");
 
 /// Who must have signed: the certificate's SAN (a URI or email) starting
 /// with `identity_prefix` (or equal to it when `exact`), issued for a
@@ -304,9 +304,9 @@ pub fn verify(blob: &[u8], bundle: &str, signer: &Signer) -> anyhow::Result<()> 
 mod tests {
     use super::*;
 
-    const BLOB: &[u8] = include_bytes!("../assets/sigstore/testdata/cosign_checksums.txt");
+    const BLOB: &[u8] = include_bytes!("../assets/testdata/cosign_checksums.txt");
     const BUNDLE: &str =
-        include_str!("../assets/sigstore/testdata/cosign_checksums.txt.sigstore.json");
+        include_str!("../assets/testdata/cosign_checksums.txt.sigstore.json");
     /// cosign's own release (v3.1.4), signed keyless by its release account.
     const COSIGN: Signer<'static> = Signer {
         identity_prefix: "keyless@projectsigstore.iam.gserviceaccount.com",

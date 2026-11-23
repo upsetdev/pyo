@@ -83,7 +83,7 @@ mod routes;
 mod sandbox;
 mod secrets;
 mod secretstores;
-mod sigstore;
+use pyo_sigstore as sigstore;
 mod sites;
 mod snapshot;
 mod source_uploads;
