@@ -429,7 +429,7 @@ impl Web {
                 self.port(port, false);
             }
             self.warnings.push(format!(
-                "{host} is a free domain {} made. Add a free Pyo domain instead.",
+                "{host} is a free domain {} made. Add a domain in Pyo instead.",
                 platform.label()
             ));
             return;

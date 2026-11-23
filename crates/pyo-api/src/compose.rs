@@ -1370,7 +1370,7 @@ pub fn plan(input: &Input) -> Result<ComposePlan, String> {
             w.add(
                 None,
                 "ports",
-                "Public web ports need a domain: pick a cluster for a free one, or enter your own.",
+                "Public web ports need a domain: pick a cluster to get one, or enter your own.",
             );
         }
 
