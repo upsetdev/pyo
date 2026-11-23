@@ -318,6 +318,22 @@ fn the_tunnel_loop_end_to_end() {
         // The free name has no record of its own: the wildcard covers it.
         assert!(cf.records(ZONE).iter().all(|r| r["name"] != json!(free)));
 
+        // Rotated while the agent runs the tunnel: its heartbeat keeps
+        // reporting the same tunnel id, so the new token must go out with
+        // the rotation itself, not wait for the id to go missing.
+        let sets = |db: sqlx::PgPool, cluster: String| async move {
+            commands(&db, &cluster).await.iter().filter(|k| *k == "tunnel_set").count()
+        };
+        let before = sets(db.clone(), cluster.clone()).await;
+        q("UPDATE pyo.cluster_tunnels SET rotate = true, token_sent_at = now(), agent_status = jsonb_build_object('tunnelId', tunnel_id) WHERE cluster_id = $1")
+            .bind(&cluster).execute(&db).await.unwrap();
+        tunnel_loop::pass(&s).await.unwrap();
+        assert_eq!(sets(db.clone(), cluster.clone()).await, before + 1, "the new token, sent with the rotation");
+        let rotate: bool = sqlx::query_scalar("SELECT rotate FROM pyo.cluster_tunnels WHERE cluster_id = $1").bind(&cluster).fetch_one(&db).await.unwrap();
+        assert!(!rotate);
+        tunnel_loop::pass(&s).await.unwrap();
+        assert_eq!(sets(db.clone(), cluster.clone()).await, before + 1, "once");
+
         // Removed: no routes but the catch-all, the tunnel deleted, its certificate revoked.
         q("UPDATE pyo.clusters SET traffic = 'public' WHERE id = $1").bind(&cluster).execute(&db).await.unwrap();
         q("UPDATE pyo.cluster_tunnels SET state = 'removing', agent_status = '{}' WHERE cluster_id = $1").bind(&cluster).execute(&db).await.unwrap();
