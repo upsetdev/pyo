@@ -20,6 +20,11 @@
 # pyo-linux-x86_64 (installed with `curl -fsSL https://pyo.dev/cli.sh | sh`).
 # The CLI for the other platforms is built on their own runners
 # (.github/workflows/cli.yml).
+#
+# The `verify` target is Pyo's verifier alone (pyo-verify, static), for the
+# GitHub release's pyo-verify-linux-x86_64. connect.sh sets it up on a
+# cluster's first server. Linux on Arm's is built with the CLI's
+# (.github/workflows/cli.yml).
 
 FROM rust:1.99.1-trixie AS rust
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/* \
@@ -33,7 +38,8 @@ COPY deploy/sandbox.sh ./deploy/sandbox.sh
 COPY deploy/install.sh ./deploy/install.sh
 ARG CARGO_PROFILE=release
 # Static (musl): pyo-builder (it also runs on any Linux VM), pyo-flows and
-# pyo-static (scratch images) and the CLI. The two builds run side by side, each in its
+# pyo-static (scratch images), the CLI and the verifier (it runs on a
+# customer's server, outside any image). The two builds run side by side, each in its
 # own target directory. PYO_CLI_RELEASE marks the CLI as a release build:
 # `pyo upgrade` replaces only those (a CLI built with plain cargo is left to
 # its builder).
@@ -43,11 +49,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --profile "$CARGO_PROFILE" --locked --target-dir target/gnu \
       -p pyo-api -p pyo-agent -p pyo-db-controller -p pyo-kv & gnu=$!; \
     PYO_CLI_RELEASE=1 cargo build --profile "$CARGO_PROFILE" --locked --target-dir target/musl --target x86_64-unknown-linux-musl \
-      -p pyo-builder -p pyo-flows -p pyo-static -p pyo-cli & musl=$!; \
+      -p pyo-builder -p pyo-flows -p pyo-static -p pyo-cli -p pyo-verify & musl=$!; \
     wait "$gnu"; wait "$musl"; \
     mkdir /out; \
     for b in pyo-api pyo-agent pyo-db-controller pyo-kv; do cp "target/gnu/$CARGO_PROFILE/$b" /out/; done; \
-    for b in pyo-builder pyo-flows pyo-static pyo; do cp "target/musl/x86_64-unknown-linux-musl/$CARGO_PROFILE/$b" /out/; done
+    for b in pyo-builder pyo-flows pyo-static pyo pyo-verify; do cp "target/musl/x86_64-unknown-linux-musl/$CARGO_PROFILE/$b" /out/; done
 
 # Just the binaries (scripts/build-images.sh hashes them to tell which
 # images changed).
@@ -57,6 +63,10 @@ COPY --from=rust /out/ /
 # The CLI, for the release's pyo-linux-x86_64.
 FROM scratch AS cli
 COPY --from=rust /out/pyo /pyo
+
+# The verifier, for the release's pyo-verify-linux-x86_64.
+FROM scratch AS verify
+COPY --from=rust /out/pyo-verify /pyo-verify
 
 # apt-get upgrade takes Debian's security fixes newer than the base image.
 FROM debian:trixie-20261104-slim AS runtime
