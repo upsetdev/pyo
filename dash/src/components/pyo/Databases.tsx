@@ -10,7 +10,8 @@ import { siMysql } from "simple-icons";
 import type { Tone } from "~/components/ui/Badge";
 import { PostgresLogo } from "~/components/ui/EngineLogo";
 import { Field, Input, optionClass, Select, Stepper } from "~/components/ui/Field";
-import type { Database } from "~/lib/pyo/types";
+import { largestFreeMemory } from "~/lib/pyo/capacity";
+import type { ClusterServer, Database } from "~/lib/pyo/types";
 
 // Shared by the Databases pages: labels for engines, sizes and states.
 
@@ -298,6 +299,36 @@ export function customError(engine: Database["engine"], cpu: number, mem: number
 export const vcpu = (m: number) => `${+(m / 1000).toFixed(3)} vCPU`;
 /** "512 MiB" or "1.5 GiB", from MiB, like the rest of the dashboard. */
 export const memText = (mi: number) => (mi < 1024 ? `${mi} MiB` : `${+(mi / 1024).toFixed(1)} GiB`);
+
+/**
+ * Memory (MiB) one instance asks the server for, as the API and controller
+ * ask: Small sets aside 128 MiB, the others all of theirs, and MySQL adds
+ * its metrics helper's 24 MiB.
+ */
+export const instanceMemoryRequest = (engine: Database["engine"], size: string, mem: number) =>
+  (size === "small" ? 128 : mem) + (engine === "mysql" ? 24 : 0);
+
+/**
+ * A note when no server of the cluster has the memory one instance of this
+ * size asks for, so it couldn't start. Null when one has, or when the
+ * servers haven't said.
+ */
+export function roomNote(
+  servers: ClusterServer[],
+  clusterId: string,
+  engine: Database["engine"],
+  size: string,
+  /** Custom's memory (MiB). */
+  customMem: number,
+): string | null {
+  const mem = size === "custom" ? customMem : SIZE_SPECS[size]?.mem;
+  const free = largestFreeMemory(servers, clusterId);
+  if (!mem || free === null) return null;
+  const need = instanceMemoryRequest(engine, size, mem);
+  const freeMi = Math.max(0, Math.floor(free * 1024));
+  if (need <= freeMi) return null;
+  return `No server has room for this size. It needs ${memText(need)} of memory and the most free on one server is ${memText(freeMi)}.`;
+}
 
 /** A preset or Custom, with CPU and memory (and storage) for Custom. */
 export function SizeFields({
