@@ -418,11 +418,12 @@ went to `0039_database_import_parts.sql` in 0.5.5).
 ALTER TABLE pyo.clusters ADD COLUMN traffic text NOT NULL DEFAULT 'public'
   CHECK (traffic IN ('public', 'tailscale', 'tunnel'));
 UPDATE pyo.clusters SET traffic = CASE WHEN public_traffic THEN 'public' ELSE 'tailscale' END;
--- Every reader of public_traffic keeps working (freedomain.rs, traffic.rs,
--- agent.rs, snapshot.rs): it follows the choice.
-ALTER TABLE pyo.clusters DROP COLUMN public_traffic;
-ALTER TABLE pyo.clusters ADD COLUMN public_traffic boolean
-  GENERATED ALWAYS AS (traffic = 'public') STORED;
+-- public_traffic stays a plain column while v0.5.5 may still run (it
+-- writes it). A trigger keeps the two in step: every reader of
+-- public_traffic (freedomain.rs, traffic.rs, agent.rs, snapshot.rs) follows
+-- traffic, and v0.5.5 writing public_traffic moves traffic with it.
+CREATE TRIGGER clusters_traffic_sync BEFORE INSERT OR UPDATE OF traffic, public_traffic
+  ON pyo.clusters FOR EACH ROW EXECUTE FUNCTION pyo.clusters_traffic_sync();
 
 -- A cluster's Cloudflare Tunnel (cloudflare/tunnel.rs). Nothing secret:
 -- the tunnel token is read from Cloudflare when the agent needs it, and
@@ -556,7 +557,7 @@ RotateTunnelToken { cluster_id: String },
 
 - `SetClusterPublicTraffic` (`ops.rs:2308`, handler `:4736-4764`) stays for
   API users and maps `on` to "public" and off to "tailscale". Its handler
-  writes `traffic` (the generated `public_traffic` can't be written).
+  writes `traffic`, and the trigger sets `public_traffic`.
 - `SetDomainTunnel` with `on` needs Role::Developer, with `replace` or with
   `on: false` restoring a kept record needs Role::Admin (same split as
   `cloudflare::role_for`, `cloudflare.rs:536-542`).
@@ -1172,7 +1173,7 @@ when in tunnel mode, warning tone when degraded or down.
 - Whole feature: an agent that ignores `tunnel` (N-1) keeps the connector
   it has. Removing the tunnel through the op is the way out. A release
   rollback leaves `cluster_tunnels` and `dns_records.via` unused (the
-  `traffic` column with its generated `public_traffic` stays compatible).
+  `traffic` column with its synced `public_traffic` stays compatible).
 
 ## 13. Security
 
@@ -1275,8 +1276,8 @@ program on 80 or 443, sends `&webPorts=busy` with the manifest request,
 leaves the firewall as it is, and the API turns public traffic off before
 the agent's first heartbeat (`install::web_ports_busy`). In 0.51.0:
 
-- `web_ports_busy` writes `traffic = 'tailscale'` (the generated
-  `public_traffic` can't be written).
+- `web_ports_busy` writes `traffic = 'tailscale'`, and the trigger sets
+  `public_traffic`.
 - connect.sh's line (`web_ports_line`) becomes
   `Ports 80 and 443 are in use by Traefik. Public traffic stays off, so your sites keep working. Cloudflare Tunnel can take your websites instead.`
 
@@ -1349,7 +1350,7 @@ sentences, no semicolons, no dash-joined clauses.
   - secret handling: `tunnel_set` token sealed in `pyo.commands`, wiped
     after the answer (extend the existing teambackup tests).
 - **pyo-api `ops.rs`**: `setClusterTraffic` roles, validation messages,
-  `setClusterPublicTraffic` mapping, generated `public_traffic`.
+  `setClusterPublicTraffic` mapping, `public_traffic` kept in step.
 - **pyo-proto `system.rs` / `rbac.rs`**: tunnel objects pass the admission
   policy, origin and public-ports Services pinned (wrong selector, port 80,
   extra externalIPs refused), CDN client policy with label `tunnel` and

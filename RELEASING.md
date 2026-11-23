@@ -772,6 +772,18 @@ To remove or rename something, split it across releases:
 CI rejects a contract whose tag doesn't exist yet, because that release has to
 have shipped first.
 
+### Pending contracts
+
+Removals waiting for a release that no longer depends on the old thing:
+
+- `pyo.clusters.public_traffic` (0040): 0.51.0 writes only `traffic`, and
+  the trigger `clusters_traffic_sync` copies it to `public_traffic` because
+  v0.5.5 still writes `public_traffic`. In the release after v0.51.0 ships,
+  drop the trigger and its function, and make `public_traffic` a column
+  generated from `traffic` (or move its readers to `traffic` and drop it),
+  with `-- pyo:contract since=v0.51.0 no release since v0.51.0 writes
+  clusters.public_traffic`.
+
 A migration that an installation already ran can't get that line, because
 sqlx checksums the file. Its contract goes in `scripts/migration-contracts.json`
 instead, keyed by the file name, with the same `since` and reason and the
