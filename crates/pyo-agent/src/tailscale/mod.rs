@@ -888,6 +888,7 @@ pub async fn run_setup(
     kube: &kube::Client,
     token: String,
     version: Option<String>,
+    delete_clients: &[String],
 ) -> CommandResult {
     let host = setup::Cluster {
         kube: kube.clone(),
@@ -900,7 +901,7 @@ pub async fn run_setup(
             Err(e) => failed(e),
         },
         Some(v) => {
-            let out = setup::apply(&api, &host, &v).await;
+            let out = setup::apply(&api, &host, &v, delete_clients).await;
             let mut data = serde_json::to_value(&out).unwrap_or(Value::Null);
             // The client the cluster keeps now, as Pyo shows it (never
             // its secret).

@@ -8,8 +8,11 @@
 #   PYO_SESSION  a dashboard session of a team admin there (the pyo_session
 #                cookie), for the dashboard-only Tailscale ops
 #   OP_ITEM      the 1Password item with the throwaway tailnet's API access
-#                token (op://<vault>/<item>/credential). Read by `op` and
-#                piped straight to Pyo: never printed, never in argv.
+#                token (default "Tailscale pyo test"), its field OP_FIELD
+#                (default "credential"). Read by `op` and piped straight to
+#                Pyo: never printed, never in argv. Pyo deletes the token
+#                after a setup, so step 4 asks for a fresh one in the same
+#                item.
 #   TEAM         the test team's id (a new, empty team)
 #
 #   scripts/tailscale-real-e2e.sh vms        two VMs (a third comes in step 2)
@@ -28,6 +31,20 @@ fail() { printf '  FAIL  %s\n' "$*"; FAILED=$((FAILED + 1)); }
 check() { local what=$1; shift; if "$@"; then pass "$what"; else fail "$what"; fi; }
 wait_enter() { read -r -p "  $* Then press Enter. " _; }
 FAILED=0
+OP_ITEM=${OP_ITEM:-Tailscale pyo test}
+OP_FIELD=${OP_FIELD:-credential}
+
+# The token, from 1Password, onto stdout for the next pipe only.
+token() { op item get "$OP_ITEM" --fields "label=$OP_FIELD" --reveal; }
+# planTailscaleSetup, then setUpTailscale as reviewed: the setup's outcome.
+set_up_team() {
+  local plan version
+  plan=$(token | jq -Rsc --arg team "$TEAM" '{op: "planTailscaleSetup", teamId: $team, token: (. | rtrimstr("\n"))}' | op_call)
+  version=$(jq -r .plan.version <<<"$plan")
+  echo "  It runs on $(jq -r .clusterId <<<"$plan"). Pyo will: $(jq -r '.plan.changes | join(", ")' <<<"$plan")" >&2
+  token | jq -Rsc --arg team "$TEAM" --arg v "$version" \
+    '{op: "setUpTailscale", teamId: $team, token: (. | rtrimstr("\n")), version: $v}' | op_call
+}
 
 need() { [ -n "${!1:-}" ] || { echo "Set $1." >&2; exit 2; }; }
 
@@ -72,19 +89,13 @@ vms)
   vm ts-e2e-b
   ;;
 test)
-  for v in PYO_URL PYO_SESSION OP_ITEM TEAM; do need "$v"; done
+  for v in PYO_URL PYO_SESSION TEAM; do need "$v"; done
 
   connect ts-e2e-a
   connect ts-e2e-b
 
   say "1. Set up Tailscale for the team, once"
-  plan=$(op read "op://$OP_ITEM/credential" | jq -Rsc --arg team "$TEAM" '{op: "planTailscaleSetup", teamId: $team, token: (. | rtrimstr("\n"))}' | op_call)
-  version=$(jq -r .plan.version <<<"$plan")
-  echo "  Pyo will: $(jq -r '.plan.changes | join(", ")' <<<"$plan")"
-  echo "  It runs on $(jq -r .clusterId <<<"$plan")."
-  wait_enter "Check the review above."
-  op read "op://$OP_ITEM/credential" | jq -Rsc --arg team "$TEAM" --arg v "$version" \
-    '{op: "setUpTailscale", teamId: $team, token: (. | rtrimstr("\n")), version: $v}' | op_call | jq '{ok, changed, todo, error, tokenDeleted}'
+  set_up_team | jq '{ok, changed, todo, error, tokenDeleted}'
   check "the team has a holder" bash -c "[ \"\$(team_ts | jq -r .holderId)\" != null ]"
 
   say "2. A new cluster joins with no paste"
@@ -119,8 +130,27 @@ test)
   done
   echo "  Add server on another cluster now says $holder keeps your Tailscale and isn't connected."
   wait_enter "Check it."
+
+  say "4b. A new holder while it's away, and its old client deleted"
+  old_client=$(team_ts | jq -r .clientId)
+  echo "  Pyo deleted the first token. Make a new API access token in the throwaway console"
+  echo "  and put it in the same 1Password item, in place of the first."
+  wait_enter "Update the item."
+  OUTCOME=$(set_up_team)
+  export OUTCOME
+  jq '{ok, changed, todo, error, tokenDeleted, oldClients}' <<<"$OUTCOME"
+  check "the setup went through" bash -c '[ "$(jq -r .ok <<<"$OUTCOME")" = true ]'
+  check "another cluster keeps it now" bash -c "[ \"\$(team_ts | jq -r .holderName)\" != '$holder' ]"
+  check "the old client $old_client was deleted" \
+    bash -c "jq -e '.oldClients[]? | select(.clientId == \"$old_client\" and .state == \"deleted\")' <<<\"\$OUTCOME\" >/dev/null"
+  check "it's off the console list" bash -c "! team_ts | jq -e '.oldClients[] | select(.clientId == \"$old_client\")' >/dev/null"
+  echo "  In the throwaway console, Settings › Trust credentials no longer shows $old_client."
+  wait_enter "Check it."
+
   multipass start "$holder"
-  check "the holder is back" until_ok 60 bash -c "[ \"\$(team_ts | jq -r .holderConnected)\" = true ]"
+  check "$holder is back as a member" until_ok 60 bash -c \
+    "[ \"\$(team_ts | jq -r '.clusters[] | select(.state == \"member\") | .id' | grep -c .)\" -ge 1 ]"
+  holder=$(team_ts | jq -r .holderName)
 
   say "5. A removed cluster's server leaves the tailnet"
   gone=ts-e2e-c

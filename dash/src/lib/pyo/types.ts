@@ -57,7 +57,7 @@ export type TeamTailscale = {
   /** Pyo's tagged devices on the tailnet (tag:pyo), as last seen. */
   devices: number;
   /** OAuth clients clusters kept before, to delete in the Tailscale console. `suffix`: on another tailnet. */
-  oldClients: { clientId: string; hint: string; clusterId: string; cluster: string; suffix?: string }[];
+  oldClients: { clientId: string; hint: string; clusterId: string; cluster: string; suffix?: string; error?: string }[];
   /** Servers of removed clusters still on a tailnet. */
   leftovers: { cluster: string; suffix: string | null; servers: string[] }[];
   /** The team's clusters, oldest first. `servers`: on a tailnet, `onTailnet`: on the team's. */
