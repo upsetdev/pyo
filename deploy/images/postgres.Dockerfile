@@ -11,9 +11,9 @@
 # backups use (barmanObjectStore).
 
 ARG PG_MAJOR=18
-ARG BASE_16=ghcr.io/cloudnative-pg/postgresql:16-system-trixie@sha256:1e55b58c8baecce687cc625b47c90d5787f5b410d199da429378ebd8b7e16e4c
-ARG BASE_17=ghcr.io/cloudnative-pg/postgresql:17-system-trixie@sha256:4aabc4e49078b9ceae3cd37e307e7ac7c59ace827f6c17ae6bb8648c88e42ca0
-ARG BASE_18=ghcr.io/cloudnative-pg/postgresql:18-system-trixie@sha256:b4bbd2e623f1a8833e9a2a4210480ef215b6d13fc0988b06786a778a5c699a20
+ARG BASE_16=ghcr.io/cloudnative-pg/postgresql:16-system-trixie@sha256:a20a00bcf6f111424628a520e0b15fca28bcca939dcfdfef681697ea868e44a2
+ARG BASE_17=ghcr.io/cloudnative-pg/postgresql:17-system-trixie@sha256:0f34d3fb12f415713ec94c3f2aa8295c7975f7114a0a8d360f26c958253bd032
+ARG BASE_18=ghcr.io/cloudnative-pg/postgresql:18-system-trixie@sha256:c437b7c6c00aa7e66f5d6de1dd83602391fdebd4ff776ffb1ab7aaba5e7351ad
 
 FROM ${BASE_16} AS base-16
 FROM ${BASE_17} AS base-17
