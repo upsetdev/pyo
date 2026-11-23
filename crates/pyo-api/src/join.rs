@@ -1778,4 +1778,323 @@ if apply_agent; then echo "ok after $applies"; else echo "failed after $applies"
             assert_eq!(out.trim(), want.to_string(), "{mem}");
         }
     }
+
+    /// A script install.sh's host_units writes to /usr/local/lib/pyo.
+    fn host_script(name: &str) -> String {
+        let install = include_str!("../../../deploy/install.sh");
+        let head = format!("tee /usr/local/lib/pyo/{name} >/dev/null <<'SH'\n");
+        let start = install
+            .find(&head)
+            .unwrap_or_else(|| panic!("host_units writes no {name}"))
+            + head.len();
+        let end = install[start..].find("\nSH\n").unwrap();
+        install[start..start + end + 1].to_owned()
+    }
+
+    /// Pyo's own server as connect-this-machine.sh sees it: its files in a
+    /// directory of the test's, Pyo's answers and connect.sh stubbed.
+    struct OwnServer {
+        dir: std::path::PathBuf,
+    }
+
+    impl OwnServer {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("pyo-own-server-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("bootstrap-key"), "k3y\n").unwrap();
+            Self { dir }
+        }
+
+        /// One run in `mode` ("auto", "refresh" or none) with Pyo
+        /// answering `answer` and connect.sh ending with `rc`: its exit
+        /// code and output.
+        fn run(&self, mode: &str, answer: &str, rc: i32) -> (i32, String) {
+            let d = self.dir.display().to_string();
+            let script = host_script("connect-this-machine.sh")
+                .replace("/etc/pyo/", &format!("{d}/"))
+                .replace("/run/pyo-connect.lock", &format!("{d}/lock"));
+            assert!(!script.contains("/etc/pyo") && !script.contains("/run/"), "{script}");
+            let (code, out, err) = bash(&format!(
+                r#"T='{d}'
+ANSWER='{answer}'
+curl() {{
+  local a
+  case "$*" in
+    *"http://127.0.0.1:8000/install/this-machine?key=k3y") printf '%s' "$ANSWER" ;;
+    *"http://127.0.0.1:8000/install/this-machine/refresh"*)
+      for a in "$@"; do case "$a" in install=* | status=*) printf '%s ' "${{a#*=}}" >> "$T/told" ;; esac; done
+      echo >> "$T/told" ;;
+    *"http://127.0.0.1:8000/install/connect.sh") echo "echo connect.sh ran; echo x >> '$T/ran'; exit {rc}" ;;
+    *) echo "unexpected: curl $*" >&2; return 9 ;;
+  esac
+}}
+k3s() {{ [ ! -e "$T/no-policy" ]; }}
+systemctl() {{ echo "$*" >> "$T/systemctl"; }}
+flock() {{ echo "$*" >> "$T/flock"; }}
+set -- {mode}
+{script}"#
+            ));
+            assert_eq!(err, "", "{out}");
+            (code, out)
+        }
+
+        fn read(&self, file: &str) -> String {
+            std::fs::read_to_string(self.dir.join(file)).unwrap_or_default()
+        }
+
+        /// How often connect.sh ran.
+        fn ran(&self) -> usize {
+            self.read("ran").lines().count()
+        }
+
+        /// What the host told Pyo, one "install status" per line.
+        fn told(&self) -> Vec<String> {
+            self.read("told").lines().map(|l| l.trim().to_owned()).collect()
+        }
+
+        /// Makes `file` look written `minutes` ago.
+        fn age(&self, file: &str, minutes: u32) {
+            let ok = std::process::Command::new("touch")
+                .args(["-d", &format!("{minutes} minutes ago")])
+                .arg(self.dir.join(file))
+                .status()
+                .unwrap();
+            assert!(ok.success());
+        }
+    }
+
+    impl Drop for OwnServer {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    const ASKED: &str = r#"{"install":"0.51.0-abc","refresh":true,"state":"connected"}"#;
+    const CURRENT: &str = r#"{"install":"0.51.0-abc","state":"connected"}"#;
+
+    /// The timer's run every minute: nothing while Pyo doesn't ask, then
+    /// connect.sh once for the install, however long Pyo goes on asking.
+    #[test]
+    fn pyo_s_own_server_refreshes_once_when_pyo_asks() {
+        let s = OwnServer::new("once");
+        for answer in [CURRENT, r#"{"state":"connected"}"#, r#"{"state":"waiting"}"#, ""] {
+            assert_eq!(s.run("auto", answer, 0), (0, String::new()), "{answer}");
+        }
+        // Nor does it connect the machine: the connect timer does that.
+        let connect = r#"{"command":"echo connecting","state":"connect"}"#;
+        assert_eq!(s.run("auto", connect, 0), (0, String::new()));
+        assert_eq!((s.ran(), s.told().len()), (0, 0));
+
+        let (code, out) = s.run("auto", ASKED, 0);
+        assert_eq!(code, 0);
+        assert_eq!(
+            out,
+            "Refreshing this server for Pyo 0.51.0.\nconnect.sh ran\nThis server is up to date.\n"
+        );
+        assert_eq!(s.ran(), 1);
+        assert_eq!(s.told(), ["0.51.0-abc running", "0.51.0-abc done"]);
+        assert_eq!(s.read("refresh-tried"), "0.51.0-abc\n");
+        assert!(!s.dir.join("refresh-failed").exists());
+        // It never waits for the lock, and never stops the connect timer.
+        assert_eq!(s.read("flock").lines().last(), Some("-n 9"));
+        assert_eq!(s.read("systemctl"), "");
+
+        // Pyo still asks (the agent hasn't said it's current, or it never
+        // will): not again, a day later either.
+        for _ in 0..5 {
+            assert_eq!(s.run("auto", ASKED, 0), (0, String::new()));
+        }
+        s.age("refresh-tried", 3 * 24 * 60);
+        assert_eq!(s.run("auto", ASKED, 0), (0, String::new()));
+        assert_eq!(s.ran(), 1);
+        assert_eq!(s.told().last().unwrap(), "0.51.0-abc done");
+
+        // Another release: once for it. And not again for the one before,
+        // should two Pyos answer in turn while one replaces the other.
+        let next = ASKED.replace("0.51.0-abc", "0.52.0-def");
+        assert_eq!(s.run("auto", &next, 0).0, 0);
+        assert_eq!(s.ran(), 2);
+        for answer in [ASKED, next.as_str(), ASKED] {
+            assert_eq!(s.run("auto", answer, 0), (0, String::new()));
+        }
+        assert_eq!(s.ran(), 2);
+        assert_eq!(s.read("refresh-tried"), "0.51.0-abc\n0.52.0-def\n");
+    }
+
+    /// A refresh that failed comes again after an hour, not every minute,
+    /// at most 4 times a day, and at once for another Pyo version.
+    #[test]
+    fn a_failed_refresh_of_pyo_s_own_server_is_tried_again_hourly() {
+        let s = OwnServer::new("failed");
+        let (code, out) = s.run("auto", ASKED, 1);
+        // The timer's unit doesn't fail with it.
+        assert_eq!(code, 0);
+        assert!(
+            out.ends_with("Couldn't refresh this server. Pyo tries again in an hour.\n"),
+            "{out}"
+        );
+        assert_eq!(s.read("refresh-failed"), "0.51.0-abc\n");
+        assert_eq!(s.told(), ["0.51.0-abc running", "0.51.0-abc failed"]);
+        // The next minutes: nothing but its word to Pyo.
+        for _ in 0..3 {
+            assert_eq!(s.run("auto", ASKED, 1), (0, String::new()));
+        }
+        s.age("refresh-failed", 59);
+        assert_eq!(s.run("auto", ASKED, 1), (0, String::new()));
+        assert_eq!(s.ran(), 1);
+        assert_eq!(s.told().last().unwrap(), "0.51.0-abc failed");
+        // An hour later: again, and again failed.
+        s.age("refresh-failed", 61);
+        assert_eq!(s.run("auto", ASKED, 1).0, 0);
+        assert_eq!(s.ran(), 2);
+        // Four in a day, then no more however old the failure.
+        for _ in 0..4 {
+            s.age("refresh-failed", 61);
+            s.run("auto", ASKED, 1);
+        }
+        assert_eq!(s.ran(), 4);
+        assert_eq!(s.read("refresh-runs").lines().count(), 4);
+        assert_eq!(s.told().last().unwrap(), "0.51.0-abc held");
+        // Another Pyo version would run at once, but for the day's four.
+        let next = ASKED.replace("0.51.0-abc", "0.51.1-abc");
+        assert_eq!(s.run("auto", &next, 0), (0, String::new()));
+        assert_eq!(s.told().last().unwrap(), "0.51.1-abc held");
+        // A day on (the runs are older): the new version at once, and a
+        // success clears the failure.
+        std::fs::write(s.dir.join("refresh-runs"), "1000\n1001\n1002\n1003\n").unwrap();
+        let (code, out) = s.run("auto", &next, 0);
+        assert_eq!(code, 0);
+        assert!(out.ends_with("This server is up to date.\n"), "{out}");
+        assert_eq!(s.ran(), 5);
+        assert!(!s.dir.join("refresh-failed").exists());
+        assert_eq!(s.read("refresh-runs").lines().count(), 1);
+        // The one that failed, an hour on: once more, and it's done.
+        let two = OwnServer::new("failed-then-done");
+        two.run("auto", ASKED, 1);
+        two.age("refresh-failed", 61);
+        two.run("auto", ASKED, 0);
+        assert_eq!((two.ran(), two.dir.join("refresh-failed").exists()), (2, false));
+        assert_eq!(two.run("auto", ASKED, 0), (0, String::new()));
+        assert_eq!(two.ran(), 2);
+    }
+
+    /// install.sh after an update: the refresh now, whether or not Pyo
+    /// asks yet, and the timer doesn't run it again for that install.
+    #[test]
+    fn the_installer_s_refresh_counts_for_the_timer() {
+        let s = OwnServer::new("installer");
+        let (code, out) = s.run("refresh", CURRENT, 0);
+        assert_eq!(code, 0);
+        assert!(out.starts_with("Refreshing this server for Pyo 0.51.0.\n"), "{out}");
+        assert_eq!(s.ran(), 1);
+        // It waits for the lock, and leaves the day's automatic runs alone.
+        assert_eq!(s.read("flock").lines().last(), Some("9"));
+        assert_eq!(s.read("refresh-runs"), "");
+        assert_eq!(s.run("auto", ASKED, 0), (0, String::new()));
+        assert_eq!(s.ran(), 1);
+        // One that fails says so to install.sh, and the timer takes over
+        // an hour later.
+        let f = OwnServer::new("installer-failed");
+        assert_eq!(f.run("refresh", ASKED, 1).0, 1);
+        assert_eq!(f.run("auto", ASKED, 0), (0, String::new()));
+        f.age("refresh-failed", 61);
+        f.run("auto", ASKED, 0);
+        assert_eq!(f.ran(), 2);
+        // A Pyo that doesn't keep its servers current (no install in its
+        // answer): as before, connect.sh only for a missing policy.
+        let c = OwnServer::new("installer-cloud");
+        assert_eq!(c.run("refresh", r#"{"state":"connected"}"#, 0), (0, String::new()));
+        assert_eq!(c.run("", r#"{"state":"connected"}"#, 0), (0, String::new()));
+        assert_eq!(c.ran(), 0);
+        assert!(c.read("systemctl").contains("disable --now pyo-connect.timer"));
+    }
+
+    /// Only a stamp is taken from Pyo's answer, and only with a quoted
+    /// "refresh":true.
+    #[test]
+    fn the_host_reads_only_a_stamp_from_pyo_s_answer() {
+        let s = OwnServer::new("stamp");
+        for answer in [
+            r#"{"install":"","refresh":true,"state":"connected"}"#,
+            r#"{"install":"a b; touch x","refresh":true,"state":"connected"}"#,
+            r#"{"install":"$(touch x)","refresh":true,"state":"connected"}"#,
+            r#"{"install":"0.51.0-abc","refresh":false,"state":"connected"}"#,
+        ] {
+            assert_eq!(s.run("auto", answer, 0), (0, String::new()), "{answer}");
+        }
+        assert_eq!(s.ran(), 0);
+    }
+
+    /// The tailnet timer's script (every minute, for good) brings this
+    /// Pyo's host scripts first, then asks for the refresh with them.
+    #[test]
+    fn the_minute_timer_updates_its_scripts_then_refreshes() {
+        let s = host_script("tailnet-this-machine.sh");
+        let units = s.find("exec bash -c \"$units\"").unwrap();
+        let auto = s.find("\nexec /usr/local/lib/pyo/connect-this-machine.sh auto\n").unwrap();
+        assert!(units < auto);
+        assert!(s.ends_with("connect-this-machine.sh auto\n"));
+        // install.sh refreshes after an update, and connects a new install.
+        let install = include_str!("../../../deploy/install.sh");
+        assert!(install.contains("quietly \"Refreshing this server…\" /usr/local/lib/pyo/connect-this-machine.sh refresh ||"));
+        assert!(install.contains("quietly \"Connecting this machine to Pyo…\" /usr/local/lib/pyo/connect-this-machine.sh ||"));
+        // What they say is plain.
+        for script in [host_script("connect-this-machine.sh"), s] {
+            for line in script.lines().filter(|l| l.trim_start().starts_with("echo \"")) {
+                assert!(!line.contains(';') && !line.contains(" - "), "{line}");
+            }
+        }
+    }
+
+    /// connect.sh's own_server_lock with flock stubbed: "locked" when it
+    /// took the lock, "theirs" when it came with it, "none" elsewhere.
+    fn own_server_lock(setup: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "pyo-own-lock-{}-{}",
+            std::process::id(),
+            setup.len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.display().to_string();
+        let block = script_block("own-server-lock", CONNECT_SCRIPT)
+            .replace("/usr/local/lib/pyo/", &format!("{d}/"))
+            .replace("/run/pyo-connect.lock", &format!("{d}/lock"));
+        let (code, out, err) = bash(&format!(
+            r#"set -euo pipefail
+T='{d}'
+flock() {{ echo "flock $*"; [ "$*" != "-n 9" ] || [ -z "${{BUSY:-}}" ]; }}
+{setup}
+{block}
+own_server_lock
+if [ "$(readlink "/proc/$$/fd/9" 2>/dev/null)" = "$T/lock" ]; then echo has-lock; else echo no-lock; fi
+"#
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        out.trim().replace('\n', ", ")
+    }
+
+    /// A connect.sh run by hand on Pyo's own server takes the lock its
+    /// timers and installer hold, and doesn't wait for itself under them.
+    #[test]
+    fn connect_takes_turns_with_pyo_s_own_runs_on_its_server() {
+        // Another cluster's server: no lock at all.
+        assert_eq!(own_server_lock(""), "no-lock");
+        let own = r#": > "$T/connect-this-machine.sh""#;
+        assert_eq!(own_server_lock(own), "flock -n 9, has-lock");
+        // Pyo's timer runs: it waits, and says so.
+        assert_eq!(
+            own_server_lock(&format!("{own}\nBUSY=1")),
+            "flock -n 9, Waiting for another Pyo setup on this server to finish., flock 9, has-lock"
+        );
+        // Run by the timer or the installer, which hold it: theirs.
+        assert_eq!(own_server_lock(&format!("{own}\nexec 9>\"$T/lock\"")), "has-lock");
+        // Before --tailnet-only's exit and after --uninstall's.
+        let at = CONNECT_SCRIPT.find("\n[ -n \"$TAILNET_ONLY\" ] || own_server_lock\n").unwrap();
+        assert!(CONNECT_SCRIPT.find("\n  uninstall\n  exit 0\n").unwrap() < at);
+        assert!(at < CONNECT_SCRIPT.find("\nnvidia_gpu\n").unwrap());
+    }
 }
