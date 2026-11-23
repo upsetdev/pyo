@@ -10,6 +10,7 @@ import { Field, Input, Segmented, Switch } from "~/components/ui/Field";
 import { Callout, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { currentSlug } from "~/lib/pyo/paths";
 import { useClusterDraft } from "~/lib/pyo/useClusterDraft";
+import { useHeld } from "~/lib/pyo/useHeld";
 import { LiveCommand } from "~/components/pyo/LiveCommand";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import {
@@ -263,18 +264,20 @@ function HetznerCluster({
   const [error, setError] = useState("");
   const [made, setMade] = useState<{ clusterId: string; id: string } | null>(null);
   const price = priceOf(options, choice);
-  const nameError =
+  // Held from Create on: the cluster it makes doesn't take its own name.
+  const nameError = useHeld(
     name && !/^[a-z0-9]([a-z0-9-]{0,59}[a-z0-9])?$/.test(name)
       ? "Lowercase letters, digits and dashes."
       : s.clusters.some(
             (c) =>
               c.teamId === s.currentTeamId &&
               c.name === name &&
-              c.id !== draftId &&
-              c.id !== made?.clusterId,
+              c.id !== draftId,
           )
         ? "A cluster with this name exists."
-        : "";
+        : "",
+    busy || !!made,
+  );
   const server = made ? s.cloudServers.find((x) => x.id === made.id) : undefined;
   const cluster = made ? s.clusters.find((c) => c.id === made.clusterId) : undefined;
   const create = async () => {

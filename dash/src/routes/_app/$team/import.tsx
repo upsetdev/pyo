@@ -62,8 +62,9 @@ function ImportForm() {
   const [existingId, setExistingId] = useState(preset?.id ?? "");
   const [showOptions, setShowOptions] = useState(false);
   const [newDbId] = useState(() => newId("mdb"));
-  const f = useDatabaseDraft(engine);
+  // On from Import until the page moves on. Off again when it's refused.
   const [busy, setBusy] = useState(false);
+  const f = useDatabaseDraft(engine, null, busy);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [check, setCheck] = useState<{ key: string; state: "checking" | "ok" | "error"; result?: ImportChecked; message?: string } | null>(null);
@@ -107,7 +108,6 @@ function ImportForm() {
         "databaseId" in target
           ? await importInto({ id: target.databaseId, teamId: s.currentTeamId, engine }, src)
           : await importNew(s.currentTeamId, engine, target.newDatabase, src);
-      if ("newDatabase" in target) f.created(newDbId);
       const name = into === "existing" ? existing?.name : f.name;
       toast({
         title: `Importing into ${name}`,
