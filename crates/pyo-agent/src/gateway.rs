@@ -1945,6 +1945,19 @@ pub fn l4_ports(gateways: &[DynamicObject]) -> Vec<(String, i32)> {
 }
 
 static PUBLIC_PORTS_REFUSED: AtomicBool = AtomicBool::new(false);
+/// The public ports Service couldn't be read at the last heartbeat: said
+/// once, then again only after a read went through.
+static PUBLIC_PORTS_UNREAD: AtomicBool = AtomicBool::new(false);
+
+/// Whether to say that a state holds: only when it starts (`flag` goes on).
+/// [`settled`] turns it off again.
+fn first_time(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::Relaxed)
+}
+
+fn settled(flag: &AtomicBool) {
+    flag.store(false, Ordering::Relaxed);
+}
 
 /// In tunnel mode with public TCP and UDP ports kept, the proxies' own
 /// Service isn't published, so their ports go out through one of their
@@ -1965,9 +1978,16 @@ pub async fn set_public_ports_service(client: &Client, on: bool) {
         vec![]
     };
     let current = match services.get_opt(system::PUBLIC_PORTS_SERVICE).await {
-        Ok(s) => s,
+        Ok(s) => {
+            settled(&PUBLIC_PORTS_UNREAD);
+            s
+        }
+        // Every heartbeat asks: an install that refuses the read (one not
+        // refreshed yet) is said once, not each time.
         Err(e) => {
-            tracing::warn!(error = %e, "couldn't read the public ports Service");
+            if first_time(&PUBLIC_PORTS_UNREAD) {
+                tracing::warn!(error = %e, "couldn't read the public ports Service");
+            }
             return;
         }
     };
@@ -4713,6 +4733,18 @@ mod tests {
     /// The tests that write as an older install does share what the agent
     /// keeps of it (whether visitor headers stayed): one at a time.
     static OLDER_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A state that holds at every heartbeat is said when it starts, and
+    /// again only after it stopped holding.
+    #[test]
+    fn a_lasting_state_is_said_once() {
+        let flag = AtomicBool::new(false);
+        assert!(first_time(&flag));
+        assert!(!first_time(&flag));
+        assert!(!first_time(&flag));
+        settled(&flag);
+        assert!(first_time(&flag));
+    }
 
     /// What a cluster still on 0.5.4's admission policy accepts of the
     /// client policies: the shared ones only as listed then (before they
