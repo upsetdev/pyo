@@ -21,7 +21,10 @@
 
 use anyhow::{Context, anyhow, bail, ensure};
 use base64::Engine;
-use rustls::pki_types::{AlgorithmIdentifier, alg_id};
+use aws_lc_rs::signature::{
+    ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA384_ASN1, ECDSA_P384_SHA256_ASN1, ECDSA_P384_SHA384_ASN1,
+    UnparsedPublicKey,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use x509_parser::{certificate::X509Certificate, prelude::FromDer};
@@ -67,22 +70,19 @@ fn b64(s: &str) -> anyhow::Result<Vec<u8>> {
     Ok(base64::engine::general_purpose::STANDARD.decode(s.trim())?)
 }
 
-/// An ECDSA signature check by aws-lc (rustls's provider): `key` is the
-/// SPKI's point, `curve` its curve's OID, `hash` the signature's.
+/// An ECDSA signature check by aws-lc: `key` is the SPKI's point, `curve`
+/// its curve's OID, `hash` the signature's.
 fn ecdsa_ok(curve: &str, hash: &str, key: &[u8], message: &[u8], signature: &[u8]) -> bool {
-    let want: (AlgorithmIdentifier, AlgorithmIdentifier) = match (curve, hash) {
-        (OID_EC_P256, "sha256") => (alg_id::ECDSA_P256, alg_id::ECDSA_SHA256),
-        (OID_EC_P256, "sha384") => (alg_id::ECDSA_P256, alg_id::ECDSA_SHA384),
-        (OID_EC_P384, "sha256") => (alg_id::ECDSA_P384, alg_id::ECDSA_SHA256),
-        (OID_EC_P384, "sha384") => (alg_id::ECDSA_P384, alg_id::ECDSA_SHA384),
+    let alg = match (curve, hash) {
+        (OID_EC_P256, "sha256") => &ECDSA_P256_SHA256_ASN1,
+        (OID_EC_P256, "sha384") => &ECDSA_P256_SHA384_ASN1,
+        (OID_EC_P384, "sha256") => &ECDSA_P384_SHA256_ASN1,
+        (OID_EC_P384, "sha384") => &ECDSA_P384_SHA384_ASN1,
         _ => return false,
     };
-    rustls::crypto::aws_lc_rs::default_provider()
-        .signature_verification_algorithms
-        .all
-        .iter()
-        .find(|a| a.public_key_alg_id() == want.0 && a.signature_alg_id() == want.1)
-        .is_some_and(|a| a.verify_signature(key, message, signature).is_ok())
+    UnparsedPublicKey::new(alg, key)
+        .verify(message, signature)
+        .is_ok()
 }
 
 /// A certificate's public key: (curve OID, point).

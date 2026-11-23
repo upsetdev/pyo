@@ -9,9 +9,10 @@ publish.workspace = true
 # keep this list short.
 [dependencies]
 anyhow = "1.0.104"
+# The same aws-lc the rest of Pyo uses through rustls.
+aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
 base64 = "0.23.1"
 hex = "0.4.3"
-rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 x509-parser = "0.18"

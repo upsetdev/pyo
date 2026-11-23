@@ -3831,9 +3831,9 @@ name = "pyo-sigstore"
 version = "0.5.5"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
  "base64 0.23.1",
  "hex",
- "rustls",
  "serde_json",
  "sha2 0.11.1",
  "x509-parser",
