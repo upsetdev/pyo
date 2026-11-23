@@ -546,6 +546,20 @@ if [ -n "$UNINSTALL" ]; then
   uninstall
   exit 0
 fi
+# >>> pyo:own-server-lock (connect.sh only; join.rs tests it)
+# On the server Pyo runs on, one run at a time with Pyo's own timers and
+# installer (install.sh `host_units`). They hold this lock while they run
+# connect.sh, which then has it as file 9. A run by hand waits for them.
+own_server_lock() {
+  [ -e /usr/local/lib/pyo/connect-this-machine.sh ] || return 0
+  [ "$(readlink "/proc/$$/fd/9" 2>/dev/null)" != /run/pyo-connect.lock ] || return 0
+  exec 9>/run/pyo-connect.lock
+  flock -n 9 && return 0
+  echo "Waiting for another Pyo setup on this server to finish."
+  flock 9
+}
+# <<< pyo:own-server-lock
+[ -n "$TAILNET_ONLY" ] || own_server_lock
 # Without them, on a cluster that's already connected: bring its agent's
 # install up to date with Pyo (Pyo shows this command when it's older).
 if [ -z "$TAILNET_ONLY" ] && [ -z "$API" ] && [ -z "$TOKEN" ] && command -v k3s >/dev/null; then

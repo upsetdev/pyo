@@ -952,8 +952,9 @@ pyo_addresses() {
   [ -n "$ADDR_HTTPS" ] || echo "For an HTTPS address, set up Tailscale in Pyo."
 }
 # The host's own helpers, as systemd timers (root), every minute: connecting
-# this machine as a cluster until it's done, and putting it on the tailnet
-# once Tailscale is set up in Pyo. Idempotent.
+# this machine as a cluster until it's done, putting it on the tailnet
+# once Tailscale is set up in Pyo, and refreshing its cluster after a
+# release that needs the connect command. Idempotent.
 host_units() {
   local sudo=()
   [ "$(id -u)" = 0 ] || sudo=(sudo)
@@ -966,7 +967,20 @@ host_units() {
 # cluster › This machine", which fetches connect.sh from Pyo here (no
 # internet needed). Stops itself once the agent has reported in and its
 # admission policy, which holds it to its limits, is there.
+#
+# After that it keeps this server's cluster current. A release can bring
+# what the agent can't write itself (a new role, a chart, host settings):
+# Pyo then says "refresh", and connect.sh from Pyo here runs again.
+#   auto     from pyo-tailnet's timer, every minute: only that refresh,
+#            once per Pyo version and install (refresh-tried lists them).
+#            One that failed (refresh-failed) is tried again after an
+#            hour, and never more than 4 run in a day (refresh-runs).
+#   refresh  from install.sh after an update: that refresh now.
 set -euo pipefail
+mode=${1:-}
+tried=/etc/pyo/refresh-tried
+failed=/etc/pyo/refresh-failed
+runs=/etc/pyo/refresh-runs
 done_() { systemctl disable --now pyo-connect.timer >/dev/null 2>&1 || true; }
 # The policy and its binding are there, or Kubernetes is older than 1.30.
 policy_ok() {
@@ -977,22 +991,82 @@ policy_ok() {
     sed -n '/"serverVersion"/,/}/s/^ *"minor": *"\([0-9][0-9]*\).*/\1/p')
   [ -n "$minor" ] && [ "$minor" -lt 30 ]
 }
-# One run at a time (the timer and the setup's own run): a second one waits,
-# then finds this machine connected, or runs the same command again.
+# tell INSTALL STATUS: how the refresh goes, for the cluster's settings.
+tell() {
+  curl -fsS -m 20 -o /dev/null --data-urlencode "key=$key" --data-urlencode "install=$1" \
+    --data-urlencode "status=$2" http://127.0.0.1:8000/install/this-machine/refresh 2>/dev/null || true
+}
+# Automatic runs in the last day.
+runs_today() {
+  local since=$(($(date +%s) - 86400))
+  awk -v since="$since" '$1 + 0 > since' "$runs" 2>/dev/null | wc -l
+}
+# refresh INSTALL: connect.sh from Pyo here, for that install.
+refresh() {
+  local want=$1 rc=0
+  if [ "$mode" = auto ]; then
+    if grep -qxF -- "$want" "$tried" 2>/dev/null; then
+      # It ran for this install. Again only an hour after it failed.
+      if [ "$(cat "$failed" 2>/dev/null)" != "$want" ]; then
+        tell "$want" done
+        return 0
+      fi
+      if [ -z "$(find "$failed" -mmin +60 2>/dev/null)" ]; then
+        tell "$want" failed
+        return 0
+      fi
+    fi
+    if [ "$(runs_today)" -ge 4 ]; then
+      tell "$want" held
+      return 0
+    fi
+    { awk -v since="$(($(date +%s) - 86400))" '$1 + 0 > since' "$runs" 2>/dev/null || true; date +%s; } > "$runs.new"
+    mv -f "$runs.new" "$runs"
+  fi
+  { grep -vxF -- "$want" "$tried" 2>/dev/null | tail -n 20 || true; echo "$want"; } > "$tried.new"
+  mv -f "$tried.new" "$tried"
+  # Failed until it's through: one cut short (a restart) is tried again too.
+  echo "$want" > "$failed"
+  tell "$want" running
+  echo "Refreshing this server for Pyo ${want%-*}."
+  curl -fsS -m 60 http://127.0.0.1:8000/install/connect.sh | bash || rc=$?
+  if [ "$rc" = 0 ]; then
+    rm -f "$failed"
+    tell "$want" done
+    echo "This server is up to date."
+  else
+    tell "$want" failed
+    echo "Couldn't refresh this server. Pyo tries again in an hour."
+  fi
+  return "$rc"
+}
+# One run at a time (the timers, the setup's own run and connect.sh run by
+# hand): a second one waits, then finds this machine connected, or runs the
+# same command again. The automatic refresh doesn't wait: it comes back in
+# a minute.
 exec 9>/run/pyo-connect.lock
-flock 9
+if [ "$mode" = auto ]; then flock -n 9 || exit 0; else flock 9; fi
 key=$(cat /etc/pyo/bootstrap-key)
 r=$(curl -fsS -m 20 "http://127.0.0.1:8000/install/this-machine?key=$key") || exit 0
+# The install this Pyo brings, when it keeps this server current.
+install=$(sed -n 's/.*"install":"\([0-9A-Za-z._+-]*\)".*/\1/p' <<<"$r")
 case "$r" in
   *'"state":"connected"'*)
-    # Without its policy (k3s didn't answer in time): connect.sh again, which
-    # reads the agent's token from the cluster.
-    if ! policy_ok; then
+    if [ "$mode" = auto ]; then
+      case "$r" in *'"refresh":true'*) [ -z "$install" ] || refresh "$install" || true ;; esac
+      exit 0
+    fi
+    if [ "$mode" = refresh ] && [ -n "$install" ]; then
+      refresh "$install"
+    elif ! policy_ok; then
+      # Without its policy (k3s didn't answer in time): connect.sh again,
+      # which reads the agent's token from the cluster.
       curl -fsS -m 60 http://127.0.0.1:8000/install/connect.sh | bash
     fi
     if policy_ok; then done_; fi
     ;;
   *'"state":"connect"'*)
+    [ "$mode" != auto ] || exit 0
     cmd=$(sed -n 's/.*"command":"\([^"]*\)".*/\1/p' <<<"$r")
     [ -n "$cmd" ] || exit 0
     bash -c "$cmd"
@@ -1073,8 +1147,12 @@ esac
 # rewrites this script.
 units=$(curl -fsS -m 30 http://127.0.0.1:8000/install/host-units.sh) || exit 0
 sum=$(sha256sum <<<"$units" | cut -d' ' -f1)
-[ "$sum" != "$(cat /etc/pyo/host-units 2>/dev/null)" ] || exit 0
-exec bash -c "$units"$'\n'"echo $sum > /etc/pyo/host-units"
+if [ "$sum" != "$(cat /etc/pyo/host-units 2>/dev/null)" ]; then
+  exec bash -c "$units"$'\n'"echo $sum > /etc/pyo/host-units"
+fi
+# With this Pyo's scripts in place: this server's refresh, when Pyo asks
+# for one (connect-this-machine.sh).
+exec /usr/local/lib/pyo/connect-this-machine.sh auto
 SH
   "${sudo[@]}" tee /usr/local/lib/pyo/addresses.sh >/dev/null <<'ADDR'
 # Where Pyo is, as the install script, scripts/pyo-up.sh and pyo-reset-login
@@ -2025,9 +2103,16 @@ main() {
     update_local_agent
   fi
   # This machine as a cluster: its gateway serves Pyo over HTTPS on the
-  # public IP, which the addresses wait for.
-  quietly "Connecting this machine to Pyo…" /usr/local/lib/pyo/connect-this-machine.sh ||
-    echo "Couldn't connect this machine to Pyo yet. Pyo tries again every minute."
+  # public IP, which the addresses wait for. After an update, its cluster
+  # is refreshed for the new release, as the command under "Refresh this
+  # cluster" does.
+  if [ -n "$fresh" ]; then
+    quietly "Connecting this machine to Pyo…" /usr/local/lib/pyo/connect-this-machine.sh ||
+      echo "Couldn't connect this machine to Pyo yet. Pyo tries again every minute."
+  else
+    quietly "Refreshing this server…" /usr/local/lib/pyo/connect-this-machine.sh refresh ||
+      echo "Couldn't refresh this server yet. Pyo tries again in an hour."
+  fi
   if [ -n "$fresh" ]; then
     # No HTTPS address on the public IP to wait for while 80 and 443 are taken.
     pyo_addresses "$([ -n "${WEB_PORTS:-}" ] && echo 0 || echo 300)" "Pyo $R_VERSION is installed"

@@ -706,7 +706,18 @@ pub async fn sync(
         .await?;
         tracing::info!(cluster = cluster_id, install = %parts.hash, "sent the agent its install's refresh");
     }
+    // The cluster Pyo runs on: its server runs the command by itself.
+    let host = host_refreshes(same_cluster, self_update(), scope, state);
+    let stamp = host_stamp(&parts.hash);
+    let (state, message) = if host && host_at_work(tx, &stamp).await? {
+        ("updating", String::new())
+    } else {
+        (state, message)
+    };
     let mut out = json!({ "state": state, "command": command(same_cluster) });
+    if host {
+        out["hostRefresh"] = json!(stamp);
+    }
     if state == "roles" {
         out["bundles"] = json!(!pyo_proto::rbac::bundles_held_back(&scope.roles_older));
     }
@@ -716,6 +727,191 @@ pub async fn sync(
         out["message"] = json!(outdated_message(scope));
     }
     Ok((out, send))
+}
+
+// ── The cluster Pyo runs on, refreshed by its own server ───────────────────
+//
+// What no agent can bring (a new role object, a chart installed with the
+// agent, host settings) comes with the connect command. On the server Pyo
+// runs on, the host's timer (install.sh `host_units`) runs that command by
+// itself: it asks GET /install/this-machine every minute, which says
+// `"refresh": true` while this is so, and reports each step to POST
+// /install/this-machine/refresh. Meanwhile the cluster shows "updating",
+// not "Update needed". The host runs it once per install ([`host_stamp`]),
+// again about hourly after a failure, and a few times a day at most.
+
+/// Whether the server Pyo runs on refreshes its cluster's install by
+/// itself: the install waits for the connect command (`state`), and both
+/// this installation (`self_update`, off on Pyo Cloud) and the cluster's
+/// owner (the self-update role is bound, the cluster isn't read only) let
+/// Pyo keep it current.
+pub fn host_refreshes(
+    same_cluster: bool,
+    self_update: bool,
+    scope: &pyo_proto::rbac::AgentScope,
+    state: &str,
+) -> bool {
+    same_cluster && host_may_refresh(self_update, scope) && matches!(state, "outdated" | "roles")
+}
+
+/// Whether the server Pyo runs on may run the connect command for its
+/// cluster by itself at all (see [`host_refreshes`]).
+fn host_may_refresh(self_update: bool, scope: &pyo_proto::rbac::AgentScope) -> bool {
+    self_update && scope.self_update && !scope.policy.read_only
+}
+
+/// What the host counts its automatic runs by: this Pyo's version and the
+/// install (`hash`) it brings. One run each, unless it failed.
+pub fn host_stamp(hash: &str) -> String {
+    format!("{}-{hash}", env!("CARGO_PKG_VERSION"))
+}
+
+/// What the host last said of its refresh (`pyo.settings` 'host_refresh').
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostRefresh {
+    /// The [`host_stamp`] it's about.
+    pub install: String,
+    /// "waiting" (Pyo's own, until the host says more), "running", "done",
+    /// "failed" or "held" (it ran for this install already, or too often
+    /// today).
+    pub status: String,
+    pub age_secs: i64,
+}
+
+/// The host takes this long to start (its timer runs every minute; after
+/// an update its scripts come first), and after it's done the agent this
+/// long to say the install is current.
+const HOST_WAIT_SECS: i64 = 10 * 60;
+/// A run takes minutes, more when k3s restarts.
+const HOST_RUN_SECS: i64 = 30 * 60;
+
+/// Whether the host is about to refresh the install `stamp`, or at it
+/// (`last`: its last word). Not once it failed, gave up, or took too long:
+/// the cluster then says "Update needed" with its command, as any other.
+/// A server without the timer (set up before Pyo 0.4.2 and never since)
+/// gets there after [`HOST_WAIT_SECS`].
+pub fn host_working(stamp: &str, last: Option<&HostRefresh>) -> bool {
+    match last {
+        Some(l) if l.install == stamp => match l.status.as_str() {
+            "waiting" | "done" => l.age_secs < HOST_WAIT_SECS,
+            "running" => l.age_secs < HOST_RUN_SECS,
+            _ => false,
+        },
+        // Nothing said of this install yet: asked from now on.
+        _ => true,
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// [`HostRefresh`] from its setting.
+fn host_refresh_from(value: &serde_json::Value, now: i64) -> Option<HostRefresh> {
+    Some(HostRefresh {
+        install: value["install"].as_str()?.to_owned(),
+        status: value["status"].as_str()?.to_owned(),
+        age_secs: (now - value["at"].as_i64()?).max(0),
+    })
+}
+
+/// The setting's next value when the host (or Pyo, "waiting") says
+/// `status` of `install`: none when it said the same before, so the time
+/// stays the first one's.
+fn host_refresh_next(
+    last: Option<&HostRefresh>,
+    install: &str,
+    status: &str,
+    now: i64,
+) -> Option<serde_json::Value> {
+    if last.is_some_and(|l| l.install == install && l.status == status) {
+        return None;
+    }
+    Some(serde_json::json!({ "install": install, "status": status, "at": now }))
+}
+
+async fn host_refresh_get(db: impl sqlx::PgExecutor<'_>) -> ApiResult<Option<HostRefresh>> {
+    let v: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM pyo.settings WHERE key = 'host_refresh'")
+            .fetch_optional(db)
+            .await?;
+    Ok(v.and_then(|v| host_refresh_from(&v, unix_now())))
+}
+
+async fn host_refresh_set(db: impl sqlx::PgExecutor<'_>, value: serde_json::Value) -> ApiResult<()> {
+    sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('host_refresh', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+        .bind(value)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// [`host_working`] for the install `stamp`, noting when Pyo first waited
+/// for the host to refresh it.
+async fn host_at_work(db: &mut sqlx::PgConnection, stamp: &str) -> ApiResult<bool> {
+    let last = host_refresh_get(&mut *db).await?;
+    if last.as_ref().is_none_or(|l| l.install != stamp) {
+        if let Some(v) = host_refresh_next(last.as_ref(), stamp, "waiting", unix_now()) {
+            host_refresh_set(&mut *db, v).await?;
+        }
+        return Ok(true);
+    }
+    Ok(host_working(stamp, last.as_ref()))
+}
+
+/// What GET /install/this-machine adds for a connected machine: `install`,
+/// this Pyo's [`host_stamp`], and `refresh` when the host should run the
+/// connect command now (`asked`: the `hostRefresh` its cluster's last
+/// heartbeat left, for this Pyo's install or an earlier one). Nothing when
+/// the host may not refresh its cluster (`may`, [`host_may_refresh`]):
+/// install.sh then leaves the cluster's install alone after an update too.
+fn host_answer(may: bool, stamp: &str, asked: Option<&str>) -> serde_json::Value {
+    let mut out = serde_json::json!({ "state": "connected" });
+    if may {
+        out["install"] = serde_json::json!(stamp);
+        if asked == Some(stamp) {
+            out["refresh"] = serde_json::json!(true);
+        }
+    }
+    out
+}
+
+/// A [`host_stamp`], as the host sends it back: a version and a hash.
+fn stamp_like(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'_'))
+}
+
+#[derive(Deserialize)]
+pub struct ThisMachineRefresh {
+    key: String,
+    #[serde(default)]
+    install: String,
+    #[serde(default)]
+    status: String,
+}
+
+/// POST /install/this-machine/refresh (form: key, install, status): how
+/// the host's refresh of the install `install` goes ("running", "done",
+/// "failed" or "held"), from its timer, with the bootstrap key as for
+/// [`this_machine`]. Only what the cluster's settings show follows from it.
+pub async fn this_machine_refresh(
+    State(s): State<AppState>,
+    axum::Form(f): axum::Form<ThisMachineRefresh>,
+) -> ApiResult<crate::error::Json<serde_json::Value>> {
+    bootstrap_key(&f.key)?;
+    if !stamp_like(&f.install) || !matches!(f.status.as_str(), "running" | "done" | "failed" | "held") {
+        return Err(ApiError::bad_request("Not a refresh's status."));
+    }
+    let last = host_refresh_get(&s.db).await?;
+    if let Some(v) = host_refresh_next(last.as_ref(), &f.install, &f.status, unix_now()) {
+        host_refresh_set(&s.db, v).await?;
+        tracing::info!(install = %f.install, status = %f.status, "this machine: its refresh");
+    }
+    Ok(crate::error::Json(serde_json::json!({})))
 }
 
 /// The connect command again, run on the cluster's first server: it reads
@@ -1011,6 +1207,115 @@ mod tests {
         }
     }
 
+    /// Pyo's own server runs the connect command for its cluster when the
+    /// install waits for it, and nowhere else.
+    #[test]
+    fn only_pyo_s_own_cluster_is_refreshed_by_its_server() {
+        let s = scope("h0", true);
+        for state in ["outdated", "roles"] {
+            assert!(host_refreshes(true, true, &s, state), "{state}");
+            // Another cluster, or Pyo Cloud (self-update off).
+            assert!(!host_refreshes(false, true, &s, state), "{state}");
+            assert!(!host_refreshes(true, false, &s, state), "{state}");
+            // Its owner took the self-update role away, or made it read only.
+            assert!(!host_refreshes(true, true, &scope("h0", false), state), "{state}");
+            let mut read_only = scope("h0", true);
+            read_only.policy.read_only = true;
+            assert!(!host_refreshes(true, true, &read_only, state), "{state}");
+        }
+        // Current, or the agent is still at its own refresh.
+        for state in ["current", "updating"] {
+            assert!(!host_refreshes(true, true, &s, state), "{state}");
+        }
+        // A missing admission policy is the command's too.
+        let mut missing = scope("h0", true);
+        missing.admission = "missing".into();
+        let (state, _, send) = install_state(&missing, "h1", None);
+        assert!(!send && host_refreshes(true, true, &missing, state));
+    }
+
+    fn said(install: &str, status: &str, age_secs: i64) -> HostRefresh {
+        HostRefresh { install: install.into(), status: status.into(), age_secs }
+    }
+
+    /// The cluster says "updating" while its server is about to run the
+    /// command or runs it, and "Update needed" once that failed, was given
+    /// up, or never came.
+    #[test]
+    fn the_cluster_waits_for_its_server_then_asks_for_the_command() {
+        // Nothing said yet, or only of an earlier install: it will.
+        assert!(host_working("1-h1", None));
+        assert!(host_working("1-h1", Some(&said("1-h0", "failed", 5))));
+        assert!(host_working("1-h1", Some(&said("1-h0", "held", 99_999))));
+        // Asked, running, done: for a while each.
+        assert!(host_working("1-h1", Some(&said("1-h1", "waiting", HOST_WAIT_SECS - 1))));
+        assert!(!host_working("1-h1", Some(&said("1-h1", "waiting", HOST_WAIT_SECS))));
+        assert!(host_working("1-h1", Some(&said("1-h1", "running", HOST_RUN_SECS - 1))));
+        assert!(!host_working("1-h1", Some(&said("1-h1", "running", HOST_RUN_SECS))));
+        assert!(host_working("1-h1", Some(&said("1-h1", "done", HOST_WAIT_SECS - 1))));
+        assert!(!host_working("1-h1", Some(&said("1-h1", "done", HOST_WAIT_SECS))));
+        // Failed, or not run again: the command's pointer at once.
+        for status in ["failed", "held", "something else"] {
+            assert!(!host_working("1-h1", Some(&said("1-h1", status, 0))), "{status}");
+        }
+    }
+
+    /// The host's word is kept with the time it was first said, so a
+    /// status repeated every minute doesn't start its wait again.
+    #[test]
+    fn the_host_s_word_keeps_its_first_time() {
+        let v = host_refresh_next(None, "1-h1", "waiting", 100).unwrap();
+        assert_eq!(v, serde_json::json!({ "install": "1-h1", "status": "waiting", "at": 100 }));
+        let last = host_refresh_from(&v, 160).unwrap();
+        assert_eq!(last, said("1-h1", "waiting", 60));
+        assert_eq!(host_refresh_next(Some(&last), "1-h1", "waiting", 160), None);
+        // Another status, or another install: from now.
+        assert_eq!(
+            host_refresh_next(Some(&last), "1-h1", "running", 160).unwrap()["at"],
+            serde_json::json!(160)
+        );
+        assert!(host_refresh_next(Some(&last), "1-h2", "waiting", 160).is_some());
+        // A clock set back never makes it negative, and other shapes are none.
+        assert_eq!(host_refresh_from(&v, 40).unwrap().age_secs, 0);
+        assert_eq!(host_refresh_from(&serde_json::json!({ "install": "x" }), 0), None);
+    }
+
+    /// What the host's timer reads: `refresh` only for this Pyo's install,
+    /// and nothing at all on an installation that doesn't self-update.
+    #[test]
+    fn the_host_is_told_to_refresh_only_this_pyo_s_install() {
+        use serde_json::json;
+        let stamp = host_stamp("abc123");
+        assert_eq!(stamp, concat!(env!("CARGO_PKG_VERSION"), "-abc123"));
+        assert!(stamp_like(&stamp));
+        assert_eq!(
+            host_answer(true, &stamp, Some(&stamp)),
+            json!({ "state": "connected", "install": stamp, "refresh": true })
+        );
+        // Current, or asked by the Pyo before this one.
+        for asked in [None, Some("0.0.1-abc123")] {
+            assert_eq!(
+                host_answer(true, &stamp, asked),
+                json!({ "state": "connected", "install": stamp })
+            );
+        }
+        // Pyo Cloud, or a cluster its owner keeps Pyo from changing: as before.
+        assert_eq!(host_answer(false, &stamp, Some(&stamp)), json!({ "state": "connected" }));
+        assert!(host_may_refresh(true, &scope("h0", true)));
+        assert!(!host_may_refresh(false, &scope("h0", true)));
+        assert!(!host_may_refresh(true, &scope("h0", false)));
+        // The host's script reads these as plain text.
+        let text = host_answer(true, &stamp, Some(&stamp)).to_string();
+        assert!(text.contains(r#""state":"connected""#), "{text}");
+        assert!(text.contains(r#""refresh":true"#), "{text}");
+        assert!(text.contains(&format!(r#""install":"{stamp}""#)), "{text}");
+        // And only a stamp comes back from it.
+        assert!(stamp_like("0.51.0-rc.1+b_2-0a1b"));
+        for bad in ["", "a b", "a\"b", "a/b", "$(x)", &"a".repeat(101)] {
+            assert!(!stamp_like(bad), "{bad}");
+        }
+    }
+
     #[test]
     fn unanswered_refreshes_are_sent_again_sooner_then_less_often() {
         assert_eq!(REFRESH_PATIENCE_SECS, 60);
@@ -1173,7 +1478,8 @@ pub struct ThisMachineQuery {
 /// install.sh, and their timer until it's done). `key` is the installation's
 /// bootstrap key (`PYO_BOOTSTRAP_KEY`, a Secret only the host reads). The
 /// cluster goes to the first team; before anyone has signed up there's none
-/// yet, so the host asks again later. Answers `{"state": "connected"}`,
+/// yet, so the host asks again later. Answers `{"state": "connected"}`
+/// (with `install` and `refresh`, see [`host_answer`]),
 /// `{"state": "waiting"}` (no team yet) or `{"state": "connect", "command"}`.
 ///
 /// Until its agent reports in, every ask gets the same command, whichever
@@ -1188,7 +1494,20 @@ pub async fn this_machine(
     use serde_json::json;
     let key = bootstrap_key(&q.key)?;
     Ok(crate::error::Json(match hand_over(&s.db, &key).await? {
-        Handover::Connected => json!({ "state": "connected" }),
+        Handover::Connected => {
+            // What its cluster's last heartbeat asked of the host, and
+            // what its agent may do there.
+            let own: Option<(Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
+                "SELECT capabilities->'agentInstall'->>'hostRefresh', capabilities->'agentScope' FROM pyo.clusters WHERE same_cluster LIMIT 1",
+            )
+            .fetch_optional(&s.db)
+            .await?;
+            let (asked, scope) = own.unwrap_or_default();
+            let may = scope
+                .and_then(|v| serde_json::from_value::<pyo_proto::rbac::AgentScope>(v).ok())
+                .is_some_and(|scope| host_may_refresh(self_update(), &scope));
+            host_answer(may, &host_stamp(&parts(true).hash), asked.as_deref())
+        }
         Handover::Waiting => json!({ "state": "waiting" }),
         Handover::Connect { cluster_id, token } => {
             // The same command "Add cluster › This machine" gives.

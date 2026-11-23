@@ -82,18 +82,38 @@ pub const RECONNECT_NOTICE: &str =
 /// What to know before updating to `r`: its notices, and [`RECONNECT_NOTICE`]
 /// when its agent's roles aren't this Pyo's (a release that doesn't say
 /// isn't assumed to change them) and this installation's clusters can't
-/// bring them by themselves.
-pub fn before_you_update(r: &Release) -> Vec<String> {
-    notices(r, crate::install::self_update())
+/// bring them by themselves. `own_server_only`: its only cluster is the
+/// one Pyo runs on ([`own_server_only`]).
+pub fn before_you_update(r: &Release, own_server_only: bool) -> Vec<String> {
+    notices(r, crate::install::self_update(), own_server_only)
+}
+
+/// Whether every cluster of the installation is the one Pyo runs on, kept
+/// current by its own server (install.rs `host_refreshes`): nobody has a
+/// connect command to run after an update.
+fn own_server_only(clusters: &[ClusterRow], self_update: bool) -> bool {
+    clusters.iter().all(|c| {
+        c.scope
+            .clone()
+            .and_then(|v| serde_json::from_value::<pyo_proto::rbac::AgentScope>(v).ok())
+            .is_some_and(|scope| {
+                crate::install::host_refreshes(c.same_cluster, self_update, &scope, "outdated")
+            })
+    })
 }
 
 /// [`before_you_update`], for an installation whose clusters have the
 /// self-update role (`self_update`) or not. With it their agents write the
 /// new roles themselves, so nothing is added: a release that needs the
 /// command anyway (a new role object, a chart installed with the agent)
-/// says so in its own notices.
-fn notices(r: &Release, self_update: bool) -> Vec<String> {
+/// says so in its own notices, with [`RECONNECT_NOTICE`]. That line is
+/// left out where Pyo's own server is the only cluster
+/// (`own_server_only`): it runs the command by itself.
+fn notices(r: &Release, self_update: bool, own_server_only: bool) -> Vec<String> {
     let mut out = r.before_you_update.clone();
+    if self_update && own_server_only {
+        out.retain(|n| n != RECONNECT_NOTICE);
+    }
     let reconnect = !self_update
         && r.agent_access
             .as_deref()
@@ -735,7 +755,7 @@ pub async fn snapshot(db: &PgPool) -> ApiResult<Value> {
         "url": found.url,
         "publishedAt": found.published_at,
         "notes": found.notes,
-        "beforeYouUpdate": if pyo_needed { before_you_update(r) } else { r.before_you_update.clone() },
+        "beforeYouUpdate": if pyo_needed { before_you_update(r, own_server_only(&all, crate::install::self_update())) } else { r.before_you_update.clone() },
         "manualOnly": r.manual_only,
         "minFrom": r.min_from,
     });
@@ -1794,13 +1814,34 @@ mod tests {
         }
     }
 
+    /// Nobody has a connect command to run where the only cluster is the
+    /// one Pyo runs on and its server keeps it current.
+    #[test]
+    fn an_installation_of_pyo_s_own_server_only() {
+        let with = |same: bool, scope: Value| ClusterRow { scope: Some(scope), ..cluster(same, 1, true) };
+        let kept = json!({ "access": "limited", "admission": "enforced", "selfUpdate": true });
+        let own = with(true, kept.clone());
+        assert!(own_server_only(&[], true));
+        assert!(own_server_only(&[with(true, kept.clone())], true));
+        // Another cluster beside it, or Pyo Cloud.
+        assert!(!own_server_only(&[own, with(false, kept.clone())], true));
+        assert!(!own_server_only(&[with(true, kept.clone())], false));
+        // Its owner took the self-update role away or made it read only,
+        // or its agent doesn't say.
+        let plain = json!({ "access": "limited", "admission": "enforced" });
+        let read_only = json!({ "access": "limited", "admission": "enforced", "selfUpdate": true, "policy": { "readOnly": true } });
+        assert!(!own_server_only(&[with(true, plain)], true));
+        assert!(!own_server_only(&[with(true, read_only)], true));
+        assert!(!own_server_only(&[cluster(true, 1, true)], true));
+    }
+
     /// An update whose agent has other roles says, before it starts, that
     /// each cluster needs its connect command; one with the same roles, or
     /// a release that doesn't say, doesn't. Nor does an installation whose
     /// agents bring their roles themselves.
     #[test]
     fn other_agent_roles_ask_for_the_connect_command() {
-        let before_you_update = |r: &Release| notices(r, false);
+        let before_you_update = |r: &Release| notices(r, false, false);
         let with = |access: Option<String>, notices: &[&str]| Release {
             version: "99.0.0".into(),
             agent_access: access,
@@ -1825,11 +1866,22 @@ mod tests {
         // With the self-update role the agents write the new roles: only
         // the release's own notices.
         assert_eq!(
-            notices(&with(Some("0000000000000000".into()), &["Postgres restarts."]), true),
+            notices(&with(Some("0000000000000000".into()), &["Postgres restarts."]), true, false),
             ["Postgres restarts."]
         );
         assert_eq!(
-            notices(&with(Some("0000000000000000".into()), &[RECONNECT_NOTICE]), true),
+            notices(&with(Some("0000000000000000".into()), &[RECONNECT_NOTICE]), true, false),
+            [RECONNECT_NOTICE]
+        );
+        // Pyo's own server is the only cluster: it runs the command by
+        // itself, so the release's line isn't shown. Its other notices are.
+        let both = with(Some("0000000000000000".into()), &["Postgres restarts.", RECONNECT_NOTICE]);
+        assert_eq!(notices(&both, true, true), ["Postgres restarts."]);
+        assert_eq!(notices(&both, true, false), ["Postgres restarts.", RECONNECT_NOTICE]);
+        // Without the self-update role nothing runs it there (Pyo Cloud).
+        assert_eq!(notices(&both, false, true), ["Postgres restarts.", RECONNECT_NOTICE]);
+        assert_eq!(
+            notices(&with(Some("0000000000000000".into()), &[]), false, true),
             [RECONNECT_NOTICE]
         );
     }
