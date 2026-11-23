@@ -227,11 +227,15 @@ Commits since the previous release, and the release workflow publishes it.
 Try it before tagging:
 
 ```bash
-bun run scripts/release-notes.ts --to v0.2.2             # from the version tag before it
+bun run scripts/release-notes.ts --to v0.2.2             # from the release before it
 bun run scripts/release-notes.ts --from v0.2.1 --to v0.2.2 --offline
 ```
 
-- The changes are the commits the tag reaches and no earlier version tag
+- Only a version tag with a published GitHub release counts as an earlier
+  release (`gh release list`, drafts and pre-releases left out). A tag
+  whose release was cancelled, like `v0.5.5`, doesn't, so its commits are
+  listed with the next release. `--offline` counts every version tag.
+- The changes are the commits the tag reaches and no earlier release
   does. Merge commits are left out, the commits they bring in are listed.
   A commit whose subject was already released, or that appears twice (a
   cherry-pick), is listed once.
