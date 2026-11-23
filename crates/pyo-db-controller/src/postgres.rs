@@ -318,7 +318,36 @@ pub fn rfc3339(secs: i64) -> String {
     )
 }
 
+/// The image a running Cluster (`have`) keeps when `want` changes it, until
+/// the Postgres operator is updated.
+fn image_change(have: &Value, want: &Value) -> Option<Value> {
+    let had = &have["spec"]["imageName"];
+    (had.is_string() && *had != want["spec"]["imageName"]).then(|| had.clone())
+}
+
 impl Kube<'_> {
+    /// A running Cluster keeps its image while Pyo updates the Postgres
+    /// operator. Changed under the old operator, the image restarts every
+    /// instance with the old instance manager, which the new operator then
+    /// replaces. Changed under the new one, the instances restart once,
+    /// with both new.
+    async fn hold_image(&self, have: &Value, want: &mut Value) -> anyhow::Result<()> {
+        let Some(had) = image_change(have, want) else {
+            return Ok(());
+        };
+        let Some(op) = crate::controller::operator_of(&crd::Engine::Postgres) else {
+            return Ok(());
+        };
+        if !crate::controller::operator_rolled_out(self.ctx, op.deployment).await? {
+            tracing::info!(
+                db = %self.name(),
+                "the new Postgres image waits for the Postgres operator's update"
+            );
+            want["spec"]["imageName"] = had;
+        }
+        Ok(())
+    }
+
     pub(crate) fn pg_image(&self) -> String {
         let s = &self.db.spec;
         let version = if s.version.is_empty() {
@@ -641,9 +670,9 @@ impl Kube<'_> {
         let name = self.name();
         let (cluster, pooler) = (read_cluster(&name), read_pooler(&name));
         let want = self.db.spec.read_instances();
-        let have = self
-            .get(CNPG, "Cluster", &cluster)
-            .await?
+        let existing = self.get(CNPG, "Cluster", &cluster).await?;
+        let have = existing
+            .as_ref()
             .map(|c| c.data["spec"]["instances"].as_i64().unwrap_or(0) as i32);
         if want == 0 {
             if have.is_some() {
@@ -664,7 +693,11 @@ impl Kube<'_> {
             cm["metadata"]["labels"]["cnpg.io/reload"] = json!("");
             cm["data"] = json!({ "queries": LAG_QUERY });
             self.apply(&cm).await?;
-            self.apply(&self.read_replicas_cluster(ext)).await?;
+            let mut read = self.read_replicas_cluster(ext);
+            if let Some(c) = &existing {
+                self.hold_image(&c.data, &mut read).await?;
+            }
+            self.apply(&read).await?;
             self.apply(&self.read_replicas_pooler()).await?;
             self.read_replicas_event(have.unwrap_or(0), want).await;
         }
@@ -769,6 +802,7 @@ impl Kube<'_> {
         // settings at once (a switchover in between): the image first, the
         // settings at the next pass.
         if let Some(have) = self.get(CNPG, "Cluster", &name).await? {
+            self.hold_image(&have.data, &mut cluster).await?;
             let spec = &have.data["spec"];
             if spec["imageName"] != cluster["spec"]["imageName"]
                 && spec["postgresql"] != cluster["spec"]["postgresql"]
@@ -989,6 +1023,18 @@ mod tests {
                 .get("region")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_running_cluster_keeps_its_image_only_when_it_changes() {
+        let c = |image: &str| json!({ "spec": { "imageName": image, "instances": 1 } });
+        assert_eq!(
+            image_change(&c("pg:18-1"), &c("pg:18-2")),
+            Some(json!("pg:18-1"))
+        );
+        assert_eq!(image_change(&c("pg:18-1"), &c("pg:18-1")), None);
+        // One without an image yet takes the new one.
+        assert_eq!(image_change(&json!({ "spec": {} }), &c("pg:18-2")), None);
     }
 
     #[test]
