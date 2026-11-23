@@ -87,8 +87,10 @@ pub fn default_domain<'a>(zones: &'a [&'a Zone], given: &str) -> Result<&'a Zone
 }
 
 /// Whether a cluster's install can run a tunnel: its agent says it can,
-/// and its install is this Pyo's (the admission policy lets the connector
-/// in). Why not, when it can't.
+/// and its install is this Pyo's, roles included (the admission policy
+/// lets the connector in, and the gateway's role its Services). An install
+/// that's current except for its roles ("roles") waits too. Why not, when
+/// it can't.
 pub fn install_ready(capabilities: &Value) -> Result<(), &'static str> {
     if capabilities["tunnel"] != json!(true) {
         return Err("This cluster's agent doesn't run Cloudflare Tunnel yet. Update the agent first.");
@@ -807,6 +809,11 @@ mod tests {
             INSTALL_FIRST
         );
         assert!(install_ready(&json!({ "tunnel": true, "agentInstall": { "state": "current" } })).is_ok());
+        // A refresh that left the roles behind: the tunnel needs them.
+        assert_eq!(
+            install_ready(&json!({ "tunnel": true, "agentInstall": { "state": "roles", "bundles": true } })).unwrap_err(),
+            INSTALL_FIRST
+        );
         assert!(!INSTALL_FIRST.contains(';'));
     }
 

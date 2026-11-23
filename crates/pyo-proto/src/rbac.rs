@@ -7,7 +7,8 @@
 //!   (pyo-system) and the projects' it creates. Each gets a RoleBinding to
 //!   `pyo-agent-write`, the only role the agent may bind.
 //! - A few named objects elsewhere: the gateway's objects in
-//!   `pyo-gateway`, the GPU device plugin, join tokens, CoreDNS's replica
+//!   `pyo-gateway` (its Services, network policies and ConfigMaps named by
+//!   the admission policy, not the role), the GPU device plugin, join tokens, CoreDNS's replica
 //!   count and disruption budget, two certificate issuers, the proxy's
 //!   GatewayClass and a RuntimeClass.
 //! - Servers (labels, taints, cordon, drain, removal) in a role of their own
@@ -410,16 +411,15 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
                 { "apiGroups": ["gateway.envoyproxy.io"], "resources": ["backends", "clienttrafficpolicies", "securitypolicies", "backendtrafficpolicies", "envoyextensionpolicies", "envoyproxies"], "verbs": ALL },
                 { "apiGroups": ["cert-manager.io"], "resources": ["certificates"], "verbs": ALL },
                 { "apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "patch", "delete"] },
-                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["create"] },
-                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::ORIGIN_PULL_SECRET] },
-                // The firewall for UDP ports: a network policy on the proxy's pods.
-                { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["create"] },
-                { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::FIREWALL_POLICY] },
-                // Websites on the servers' Tailscale addresses: its own Service.
-                { "apiGroups": [""], "resources": ["services"], "verbs": ["create"] },
-                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE, system::TUNNEL_ORIGIN_SERVICE, system::PUBLIC_PORTS_SERVICE] },
-                // The Tailscale Services' wanted list, for the servers' tailnet pods.
-                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WANTED] },
+                // Services, network policies and ConfigMaps: written without
+                // names here, so a release that adds one changes no role.
+                // The admission policy (`gatewayAllowed`) holds each to
+                // Pyo's own, by name and content. ConfigMaps are read by
+                // name only.
+                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "create", "patch", "delete"] },
+                { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "create", "patch", "delete"] },
+                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["create", "patch", "delete"] },
+                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"], "resourceNames": [system::ORIGIN_PULL_SECRET, system::TAILNET_WANTED] },
                 // The proxy's failed pods, cleaned up (an eviction on a full
                 // disk leaves one each try).
                 { "apiGroups": [""], "resources": ["pods"], "verbs": ["delete"] },
@@ -534,7 +534,16 @@ fn waf_pinned_for(block: bool) -> serde_json::Map<String, Value> {
 /// `waf_image` and `geoip_image`: the installation's images for the WAF's
 /// processor and the proxies' GeoIP database, the only ones they may use.
 pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
+    admission_for(false, waf_image, geoip_image)
+}
+
+/// [`admission`] for an install with (`self_update`) or without the
+/// [`SELF_UPDATE_ROLE`]: with it, the policy lets the agent update its own
+/// roles and bindings ([`own_roles_cel`]). Without it that stays refused,
+/// whatever the roles say.
+pub fn admission_for(self_update: bool, waf_image: &str, geoip_image: &str) -> Vec<Value> {
     admission_with(
+        self_update,
         waf_image,
         geoip_image,
         &system::static_image_from_env(),
@@ -542,9 +551,72 @@ pub fn admission(waf_image: &str, geoip_image: &str) -> Vec<Value> {
     )
 }
 
-/// [`admission`] with these images for Pyo Static and the databases too,
-/// rather than the installation's.
+/// The agent's own roles and bindings, as every install can have them
+/// (the upgrader's and the self-update role's too): (resource, namespace or
+/// "", name).
+pub fn own_role_objects() -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = objects(true)
+        .iter()
+        .chain(self_update_objects().iter())
+        .filter_map(|o| {
+            let resource = match o["kind"].as_str()? {
+                "ClusterRole" => "clusterroles",
+                "ClusterRoleBinding" => "clusterrolebindings",
+                "Role" => "roles",
+                "RoleBinding" => "rolebindings",
+                _ => return None,
+            };
+            Some((
+                resource.to_owned(),
+                o["metadata"]["namespace"].as_str().unwrap_or("").to_owned(),
+                o["metadata"]["name"].as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The `ownRoles` variable, with the self-update role: an update (never a
+/// create or a delete) of one of the agent's own roles or bindings, by
+/// namespace and name. A binding's subjects stay Pyo's own accounts in
+/// pyo-system (Kubernetes never lets a binding's role change). What a role
+/// holds isn't pinned: a later release's rules are what a refresh brings.
+fn own_roles_cel() -> String {
+    let own = own_role_objects();
+    let of = |resource: &str| -> Value {
+        json!(
+            own.iter()
+                .filter(|(r, _, _)| r == resource)
+                .map(|(_, ns, name)| if ns.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{ns}/{name}")
+                })
+                .collect::<Vec<_>>()
+        )
+    };
+    let subjects = format!(
+        "has(object.subjects) && object.subjects.all(s, s.kind == 'ServiceAccount' && has(s.namespace) && s.namespace == '{NS}' && s.name in ['{SA}', '{TAILNET_SA}'])"
+    );
+    format!(
+        "request.resource.group == 'rbac.authorization.k8s.io' && request.operation == 'UPDATE' && variables.sub == '' && (\
+            (request.resource.resource == 'clusterroles' && variables.reqName in {cluster_roles}) || \
+            (request.resource.resource == 'clusterrolebindings' && variables.reqName in {cluster_bindings} && {subjects}) || \
+            (request.resource.resource == 'roles' && (variables.ns + '/' + variables.reqName) in {roles}) || \
+            (request.resource.resource == 'rolebindings' && (variables.ns + '/' + variables.reqName) in {bindings} && {subjects}))",
+        cluster_roles = cel_literal(&of("clusterroles")),
+        cluster_bindings = cel_literal(&of("clusterrolebindings")),
+        roles = cel_literal(&of("roles")),
+        bindings = cel_literal(&of("rolebindings")),
+    )
+}
+
+/// [`admission_for`] with these images for Pyo Static and the databases
+/// too, rather than the installation's.
 pub fn admission_with(
+    self_update: bool,
     waf_image: &str,
     geoip_image: &str,
     static_image: &str,
@@ -563,12 +635,12 @@ pub fn admission_with(
         },
         // Only namespaces it manages, and the named objects of kube-system.
         {
-            "expression": "variables.ns == '' || request.resource.resource == 'namespaces' || variables.managed || variables.kubeSystemAllowed || variables.gatewayAllowed || variables.drain || variables.bundleAllowed",
+            "expression": "variables.ns == '' || request.resource.resource == 'namespaces' || variables.managed || variables.kubeSystemAllowed || variables.gatewayAllowed || variables.drain || variables.bundleAllowed || variables.ownRoles",
             "messageExpression": "variables.ns in ['kube-system', 'pyo-gateway'] ? 'In ' + variables.ns + ', Pyo\\'s agent only writes its own objects, with exactly the content this release defines.' : 'Pyo\\'s agent only changes namespaces labelled pyo.dev/managed=true; ' + variables.ns + ' isn\\'t one.'",
         },
         // Bundles' cluster-wide objects and charts: only as a bundle has them.
         {
-            "expression": format!("!(request.resource.resource in {}) || variables.bundleAllowed", cel_literal(&json!(bundles::guarded_resources()))),
+            "expression": format!("!(request.resource.resource in {}) || variables.bundleAllowed || variables.ownRoles", cel_literal(&json!(bundles::guarded_resources()))),
             "message": "Pyo's agent only writes its components' own objects, as this release defines them.",
         },
         // In a bundle's namespace, only the bundle's own containers.
@@ -629,11 +701,11 @@ pub fn admission_with(
         },
         // RoleBindings: the write role, to the agent; the upgrader's, to the upgrader.
         {
-            "expression": "request.resource.resource != 'rolebindings' || request.operation == 'DELETE' || (object.roleRef.kind == 'ClusterRole' && object.roleRef.name == 'pyo-agent-write' && object.subjects.all(s, s.kind == 'ServiceAccount' && s.name == 'pyo-agent' && s.namespace == 'pyo-system')) || (variables.ns == 'pyo-system' && object.metadata.name == 'pyo-upgrade' && object.roleRef.kind == 'Role' && object.roleRef.name == 'pyo-upgrade' && object.subjects.all(s, s.kind == 'ServiceAccount' && s.name == 'pyo-upgrade' && s.namespace == 'pyo-system')) || variables.bundleAllowed",
+            "expression": "request.resource.resource != 'rolebindings' || request.operation == 'DELETE' || (object.roleRef.kind == 'ClusterRole' && object.roleRef.name == 'pyo-agent-write' && object.subjects.all(s, s.kind == 'ServiceAccount' && s.name == 'pyo-agent' && s.namespace == 'pyo-system')) || (variables.ns == 'pyo-system' && object.metadata.name == 'pyo-upgrade' && object.roleRef.kind == 'Role' && object.roleRef.name == 'pyo-upgrade' && object.subjects.all(s, s.kind == 'ServiceAccount' && s.name == 'pyo-upgrade' && s.namespace == 'pyo-system')) || variables.bundleAllowed || variables.ownRoles",
             "message": "Pyo's agent may only bind its own write role to itself.",
         },
         {
-            "expression": "request.resource.resource != 'roles' || (variables.ns == 'pyo-system' && variables.reqName == 'pyo-upgrade') || variables.bundleAllowed",
+            "expression": "request.resource.resource != 'roles' || (variables.ns == 'pyo-system' && variables.reqName == 'pyo-upgrade') || variables.bundleAllowed || variables.ownRoles",
             "message": "Pyo's agent may only write the upgrader's role, and its components' own.",
         },
         // The customer's policy is theirs.
@@ -917,6 +989,9 @@ pub fn admission_with(
             issuers = system::cluster_issuers().iter().map(|(n, spec)| format!("(variables.objName == '{n}' && object.spec == {})", cel_literal(spec))).collect::<Vec<_>>().join(" || "),
             class = cel_literal(&system::gateway_class()["spec"]),
             scheduling = cel_literal(&system::gpu_runtime_scheduling())) },
+        // Its own roles and bindings, updated by a refresh: only with the
+        // self-update role (never on an install without it).
+        { "name": "ownRoles", "expression": if self_update { own_roles_cel() } else { "false".to_owned() } },
         // Draining a server: evicting or deleting its pods, wherever they are.
         { "name": "drain", "expression": "(request.resource.resource == 'pods' && variables.sub == 'eviction') || (request.resource.resource == 'pods' && variables.sub == '' && request.operation == 'DELETE')" },
         { "name": "hasPods", "expression": "request.operation != 'DELETE' && variables.sub == '' && object.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet', 'Job', 'CronJob']" },
@@ -971,21 +1046,40 @@ pub fn admission_with(
 // the agent reports it, so Pyo knows when a cluster's install is older than
 // its own.
 //
-// With the optional [`SELF_UPDATE_ROLE`] bound, the agent brings the
-// admission policy, its image pins and its pods' priority and tolerations up
-// to date itself (`RefreshInstall`):
-// only when its roles are already as Pyo's are (it may read them, never
-// write them). Without it, the cluster's connect command does.
+// With the optional [`SELF_UPDATE_ROLE`] bound, the agent brings its roles,
+// the admission policy, its image pins and its pods' priority and
+// tolerations up to date itself (`RefreshInstall`). It updates the roles
+// and bindings an install already has, by name. It never makes one: a
+// release that adds a role object, or changes a chart installed with the
+// agent, still needs the cluster's connect command. Without the role, the
+// connect command does all of it.
+//
+// A refresh that can't bring every role still brings the rest: the policy
+// (which only narrows what the roles allow) and the image pins. Its stamp
+// then names what was left ([`stamp`]), the agent reports those
+// (`AgentScope::roles_older`), and Pyo holds back only what needs them
+// until the connect command runs.
+//
+// What that role means: its holder can write any rule into the agent's own
+// roles, so whoever controls Pyo can reach cluster-admin on the cluster.
+// That was already so with this role before it could write roles: the
+// agent takes any admission policy that fails closed (pyo-agent's
+// install.rs `check` can't pin a later release's rules), and without the
+// policy's limits its roles make privileged pods in pyo-system and write
+// any rule into the bundles' ClusterRoles (bundles.rs `cluster_rules`).
+// Pyo Cloud installs without this role, and a cluster's owner takes it away
+// by deleting the `pyo-agent-self-update` ClusterRoleBinding.
 
 /// On the admission policy and the agent's Deployment: the hash of the
 /// install they're from.
 pub const INSTALL_ANNOTATION: &str = "pyo.dev/install";
-/// Optional: the agent may rewrite its own admission policy (and read its
-/// roles, to know they're current). Deleting its binding takes that away.
+/// Optional: the agent may rewrite its own admission policy and update its
+/// own roles and bindings. Deleting its binding takes that away.
 pub const SELF_UPDATE_ROLE: &str = "pyo-agent-self-update";
-/// How a refresh's failure starts when the agent's roles aren't Pyo's
-/// (0.5.5's agent says the same): only the cluster's connect command
-/// changes them, so Pyo doesn't send that refresh again.
+/// How a refresh's failure starts when the agent's roles aren't Pyo's, as
+/// 0.5.5's agent says it (it never writes them, and stops there): only
+/// the cluster's connect command changes them, so Pyo doesn't send that
+/// agent the refresh again.
 pub const ROLES_OLDER: &str = "this agent's roles are older than Pyo's";
 /// The agent Deployment's env that pins system images: what a refresh
 /// changes of it, with its pods' priority and tolerations.
@@ -1003,8 +1097,11 @@ pub const PINNED_ENV: [&str; 10] = [
 ];
 
 /// The optional role (and its binding) that lets the agent refresh its
-/// admission policy: update only that policy and its binding, by name; read
-/// only its own roles and the charts installed with it, by name.
+/// install. All by name: update the admission policy and its binding; read
+/// and update its own roles and bindings (this role too), writing rules it
+/// doesn't hold itself (`escalate`) and keeping them bound (`bind`); read
+/// the charts installed with it. Never create, patch or delete: a role
+/// object an install doesn't have yet comes with the connect command.
 pub fn self_update_objects() -> Vec<Value> {
     let own = objects(true);
     let names = |kinds: &[&str], namespaced: bool| -> Vec<String> {
@@ -1028,8 +1125,10 @@ pub fn self_update_objects() -> Vec<Value> {
             SELF_UPDATE_ROLE,
             json!([
                 { "apiGroups": ["admissionregistration.k8s.io"], "resources": ["validatingadmissionpolicies", "validatingadmissionpolicybindings"], "verbs": ["get", "update"], "resourceNames": [ADMISSION_POLICY] },
-                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["clusterroles", "clusterrolebindings"], "verbs": ["get"], "resourceNames": names(&["ClusterRole", "ClusterRoleBinding"], false) },
-                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["roles", "rolebindings"], "verbs": ["get"], "resourceNames": names(&["Role", "RoleBinding"], true) },
+                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["clusterroles", "clusterrolebindings"], "verbs": ["get", "update"], "resourceNames": names(&["ClusterRole", "ClusterRoleBinding"], false) },
+                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["clusterroles"], "verbs": ["escalate", "bind"], "resourceNames": names(&["ClusterRole"], false) },
+                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["roles", "rolebindings"], "verbs": ["get", "update"], "resourceNames": names(&["Role", "RoleBinding"], true) },
+                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["roles"], "verbs": ["escalate", "bind"], "resourceNames": names(&["Role"], true) },
                 { "apiGroups": ["helm.cattle.io"], "resources": ["helmcharts"], "verbs": ["get"], "resourceNames": names(&["HelmChart"], true) },
             ]),
         ),
@@ -1043,8 +1142,9 @@ pub fn self_update_objects() -> Vec<Value> {
 pub struct InstallParts {
     /// Hex, stamped as [`INSTALL_ANNOTATION`].
     pub hash: String,
-    /// Its roles and bindings (and the charts installed with it): only
-    /// read by a refresh, never written.
+    /// Its roles and bindings (and the charts installed with it). A
+    /// refresh updates the roles and bindings the cluster already has, and
+    /// only reads the rest.
     pub access: Vec<Value>,
     /// The admission policy (stamped) and its binding.
     pub admission: Vec<Value>,
@@ -1066,7 +1166,7 @@ impl InstallParts {
         if self_update {
             access.extend(self_update_objects());
         }
-        let mut admission = admission(waf_image, geoip_image);
+        let mut admission = admission_for(self_update, waf_image, geoip_image);
         let [pg16, pg17, pg18] = db.postgres.clone();
         let pins: std::collections::BTreeMap<String, String> = PINNED_ENV
             .iter()
@@ -1107,19 +1207,20 @@ pub fn install_hash(
 
 /// A short hash (16 hex digits) of the roles and charts every install sets
 /// up, on any cluster and on the one Pyo runs on, with the optional
-/// self-update role, and of the admission policy's rules: what only a
-/// cluster's connect command can change (a refresh never writes the roles,
-/// and a cluster without the self-update role, or read only, never gets a
-/// refresh). A release carries its own (release.json's `agentAccess`), so
-/// an update that changes it says, before it starts, that every cluster
-/// needs its connect command afterwards. Images don't count: each release
+/// self-update role, and of the admission policy's rules (with and without
+/// that role): what a cluster without the self-update role, or read only,
+/// only gets from its connect command. A release carries its own
+/// (release.json's `agentAccess`), so an update that changes it says,
+/// before it starts and on an installation without the self-update role,
+/// that every cluster needs its connect command afterwards. Images don't count: each release
 /// has its own, and a refresh or the connect command brings them.
 pub fn access_hash() -> String {
     access_hash_of(&access_admission())
 }
 
-/// The admission policy [`access_hash`] covers: its rules, with the same
-/// stand-in images whatever the installation runs.
+/// The admission policies [`access_hash`] covers (without the self-update
+/// role, then with it): their rules, with the same stand-in images
+/// whatever the installation runs.
 fn access_admission() -> Vec<Value> {
     let db = system::DbImages {
         controller: "db-controller".into(),
@@ -1128,7 +1229,9 @@ fn access_admission() -> Vec<Value> {
         mysql_operator: "mysql-operator".into(),
         mysql_backup: "mysql-backup".into(),
     };
-    admission_with("waf", "geoip", "static", &db)
+    let mut out = admission_with(false, "waf", "geoip", "static", &db);
+    out.extend(admission_with(true, "waf", "geoip", "static", &db));
+    out
 }
 
 fn access_hash_of(admission: &[Value]) -> String {
@@ -1149,10 +1252,53 @@ fn short_hash(doc: &Value) -> String {
         .collect()
 }
 
+/// Between an install's hash and the roles a refresh left as they were, in
+/// its stamp.
+const STAMP_EXCEPT: &str = " except ";
+
+/// An install's stamp ([`INSTALL_ANNOTATION`]): its hash, and after a
+/// refresh that couldn't bring every role, the ones left as they were
+/// ("Kind/name" or "Kind/namespace/name").
+pub fn stamp(hash: &str, older: &[String]) -> String {
+    if older.is_empty() {
+        hash.to_owned()
+    } else {
+        format!("{hash}{STAMP_EXCEPT}{}", older.join(","))
+    }
+}
+
+/// A [`stamp`]'s hash and the roles left as they were.
+pub fn parse_stamp(stamp: &str) -> (String, Vec<String>) {
+    match stamp.split_once(STAMP_EXCEPT) {
+        Some((hash, older)) => (
+            hash.to_owned(),
+            older
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        ),
+        None => (stamp.to_owned(), vec![]),
+    }
+}
+
+/// Whether roles a refresh left as they were (`older`) hold back the system
+/// bundles (the databases system, the WAF, Pyo Static): the bundles' own
+/// two roles (their cluster-wide names are in them), or a chart installed
+/// with the agent. Any other role leaves them free to install and update.
+pub fn bundles_held_back(older: &[String]) -> bool {
+    older.iter().any(|k| {
+        k.starts_with("HelmChart/")
+            || [bundles::CLUSTER_ROLE, bundles::WRITE_ROLE]
+                .iter()
+                .any(|r| k.rsplit('/').next() == Some(r) && k.contains("Role"))
+    })
+}
+
 /// Whether a cluster's install, as its agent reports it, is Pyo's.
 pub fn install_current(scope: &AgentScope, expected: &str) -> bool {
     match scope.admission.as_str() {
-        "enforced" => scope.install == expected,
+        "enforced" => scope.install == expected && scope.roles_older.is_empty(),
         // The cluster has admission policies but not the agent's: only its
         // connect command puts it back.
         "missing" => false,
@@ -1219,6 +1365,13 @@ pub struct AgentScope {
     /// It may refresh its admission policy ([`SELF_UPDATE_ROLE`] is bound).
     #[serde(default)]
     pub self_update: bool,
+    /// The roles of [`AgentScope::install`] that a refresh left as they
+    /// were, from its stamp ([`parse_stamp`]): the install is current
+    /// except for these, until the connect command runs. The agent doesn't
+    /// compare its roles itself at each heartbeat: it only knows its own
+    /// release's, which aren't Pyo's while it's being updated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles_older: Vec<String>,
     /// The cluster's admission policy is older than the agent's and refused
     /// the client policies that remove client-sent visitor headers, so the
     /// agent wrote them without that (`gateway.rs` `write_client_policy`).
@@ -1612,8 +1765,9 @@ mod tests {
         assert_eq!(
             svc,
             [
-                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["create"] }),
-                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE, system::TUNNEL_ORIGIN_SERVICE, system::PUBLIC_PORTS_SERVICE] }),
+                // No names: the admission policy has them (below, and
+                // `the_gateway_namespace_is_held_by_the_policy`).
+                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "create", "patch", "delete"] }),
             ]
         );
         let policy = admission("w", "g");
@@ -1724,9 +1878,153 @@ mod tests {
         assert_eq!(s["spec"]["ports"][0], json!({ "name": "tcp-25", "port": 25, "targetPort": 10025, "protocol": "TCP" }));
         assert_eq!(s["spec"]["ports"][1]["targetPort"], 5432);
         assert!(system::public_ports_service(&[]).is_none());
-        // The agent may write both, by name.
-        let roles = json!(objects(false)).to_string();
-        assert!(roles.contains(system::TUNNEL_ORIGIN_SERVICE) && roles.contains(system::PUBLIC_PORTS_SERVICE));
+    }
+
+    /// The gateway role names no Service, network policy or ConfigMap it
+    /// writes, so the admission policy is what holds them. For each of
+    /// those three, every allowance in `gatewayAllowed` names one of Pyo's
+    /// own objects, and nothing else lets a write into pyo-gateway through.
+    #[test]
+    fn the_gateway_namespace_is_held_by_the_policy() {
+        let objects = objects(true);
+        let gw = objects
+            .iter()
+            .find(|o| {
+                o["kind"] == "Role"
+                    && o["metadata"]["namespace"] == system::GATEWAY_NS
+                    && o["metadata"]["name"] == "pyo-agent"
+            })
+            .unwrap();
+        let rules = gw["rules"].as_array().unwrap();
+        let of = |resource: &str| -> Vec<&Value> {
+            rules
+                .iter()
+                .filter(|r| r["resources"] == json!([resource]))
+                .collect()
+        };
+        assert_eq!(of("services"), [&json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "create", "patch", "delete"] })]);
+        assert_eq!(of("networkpolicies"), [&json!({ "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "create", "patch", "delete"] })]);
+        // ConfigMaps: read by name only (the policy doesn't see reads).
+        assert_eq!(
+            of("configmaps"),
+            [
+                &json!({ "apiGroups": [""], "resources": ["configmaps"], "verbs": ["create", "patch", "delete"] }),
+                &json!({ "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"], "resourceNames": [system::ORIGIN_PULL_SECRET, system::TAILNET_WANTED] }),
+            ]
+        );
+        // Secrets as they were, and no rule here reaches subresources,
+        // every object of a kind at once, or every kind.
+        assert_eq!(of("secrets"), [&json!({ "apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "patch", "delete"] })]);
+        for r in rules {
+            let text = r.to_string();
+            assert!(
+                !text.contains('*') && !text.contains("deletecollection") && !text.contains('/'),
+                "{r}"
+            );
+        }
+        let policy = admission("w", "g");
+        let spec = &policy[0]["spec"];
+        // The policy sees every write the agent makes, and fails closed.
+        assert_eq!(spec["failurePolicy"], "Fail");
+        assert_eq!(
+            spec["matchConstraints"]["resourceRules"],
+            json!([{ "apiGroups": ["*"], "apiVersions": ["*"], "operations": ["CREATE", "UPDATE", "DELETE"], "resources": ["*/*"] }])
+        );
+        // A write in a namespace passes only as one of these.
+        assert_eq!(spec["validations"][1]["expression"], NAMESPACE_WRITES);
+        let var = |name: &str| -> String {
+            spec["variables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["name"] == name)
+                .unwrap()["expression"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        // pyo-gateway isn't a managed namespace, and the agent can't make
+        // it one: it only changes a namespace already labelled as Pyo's.
+        let ns = objects
+            .iter()
+            .find(|o| o["kind"] == "Namespace" && o["metadata"]["name"] == system::GATEWAY_NS)
+            .unwrap();
+        assert!(ns["metadata"]["labels"].is_null(), "{ns}");
+        assert!(spec["validations"].to_string().contains(
+            "request.operation == 'CREATE' || (has(oldObject.metadata.labels) && (oldObject.metadata.labels[?'pyo.dev/managed'].orValue('') == 'true'"
+        ));
+        // The other ways through are for other things: kube-system, pods
+        // (a drain), a component's own pinned objects (none in
+        // pyo-gateway) and the agent's own roles (never without the
+        // self-update role).
+        assert_eq!(var("ownRoles"), "false");
+        assert!(own_roles_cel().starts_with("request.resource.group == 'rbac.authorization.k8s.io' && "));
+        assert!(var("kubeSystemAllowed").starts_with("variables.ns == 'kube-system' && ("));
+        assert_eq!(
+            var("drain"),
+            "(request.resource.resource == 'pods' && variables.sub == 'eviction') || (request.resource.resource == 'pods' && variables.sub == '' && request.operation == 'DELETE')"
+        );
+        for b in bundles::policy_bundles("w", "g") {
+            assert_ne!(b.namespace, system::GATEWAY_NS);
+            for r in b.refs() {
+                assert_ne!(r.namespace.as_deref(), Some(system::GATEWAY_NS), "{r:?}");
+            }
+        }
+        // In `gatewayAllowed`, each of the three kinds is only ever let
+        // through by name: creates and updates with content the policy
+        // checks (the clauses' own tests), deletes of those names alone.
+        let all = var("gatewayAllowed");
+        assert!(all.starts_with(&format!("variables.ns == '{}' && (", system::GATEWAY_NS)));
+        for (resource, names) in [
+            (
+                "services",
+                &[
+                    system::TAILNET_WEB_SERVICE,
+                    system::TAILNET_VIP_SERVICE,
+                    system::PUBLIC_NAT_SERVICE,
+                    system::TUNNEL_ORIGIN_SERVICE,
+                    system::PUBLIC_PORTS_SERVICE,
+                ][..],
+            ),
+            ("networkpolicies", &[system::FIREWALL_POLICY][..]),
+            (
+                "configmaps",
+                &[system::TAILNET_WANTED, system::ORIGIN_PULL_SECRET][..],
+            ),
+        ] {
+            let test = format!("request.resource.resource == '{resource}'");
+            let mut seen = vec![];
+            for (at, _) in all.match_indices(&test) {
+                let rest = &all[at + test.len()..];
+                let name = names
+                    .iter()
+                    .find(|n| rest.starts_with(&format!(" && variables.objName == '{n}' && ")))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{resource} let through without a name: {}",
+                            &rest[..rest.len().min(80)]
+                        )
+                    });
+                // Its clause: a delete, or content the policy checks.
+                let clause = &rest[..rest.find(" || (request.resource.resource").unwrap_or(rest.len())];
+                assert!(clause.contains("(request.operation == 'DELETE' || "), "{clause}");
+                assert!(
+                    clause.contains("object.spec.") || clause.contains("object.data.all("),
+                    "{clause}"
+                );
+                seen.push(*name);
+            }
+            seen.sort_unstable();
+            let mut want = names.to_vec();
+            want.sort_unstable();
+            assert_eq!(seen, want, "{resource}");
+            // And by no list of kinds or negated test.
+            assert!(
+                !all.contains(&format!("'{resource}',")) && !all.contains(&format!(", '{resource}'")),
+                "{resource}"
+            );
+            assert!(!all.contains(&format!("request.resource.resource != '{resource}'")), "{resource}");
+        }
     }
 
     #[test]
@@ -1958,6 +2256,9 @@ mod tests {
         );
     }
 
+    /// The validation every write in a namespace goes through.
+    const NAMESPACE_WRITES: &str = "variables.ns == '' || request.resource.resource == 'namespaces' || variables.managed || variables.kubeSystemAllowed || variables.gatewayAllowed || variables.drain || variables.bundleAllowed || variables.ownRoles";
+
     fn db(controller: &str) -> system::DbImages {
         system::DbImages {
             controller: controller.into(),
@@ -1968,14 +2269,19 @@ mod tests {
         }
     }
 
-    /// The roles alone: stable for the same roles. 0.5.5's roles plus the
-    /// Cloudflare Tunnel's two Services (its origin and the public ports),
-    /// which the agent gets with the connect command. The disk pressure fix
+    /// The roles alone: stable for the same roles. 0.5.5's roles with the
+    /// gateway's Services, network policies and ConfigMaps no longer named
+    /// in the role (the admission policy names them, so the Cloudflare
+    /// Tunnel's two Services and any later one change no role), which the
+    /// agent gets with the connect command, and the self-update role's
+    /// update, escalate and bind on the agent's own roles, so later
+    /// releases' roles come with a refresh. The disk pressure fix
     /// (critical per-server pods, the agent's own priority and
     /// tolerations) changes no role. Its stricter admission policy does
     /// move [`access_hash`], so clusters that can't refresh are told to run
     /// the connect command. Change this only with a release that means to
-    /// change the roles.
+    /// change the roles: from 0.51.0 on a cluster with the self-update role
+    /// gets them with a refresh, any other with its connect command.
     #[test]
     fn the_roles_are_as_0_51_0s() {
         assert_eq!(
@@ -1984,7 +2290,7 @@ mod tests {
                 objects(true),
                 self_update_objects()
             ])),
-            "0162f7a9cdebb354"
+            "a8341a8e9fa552d5"
         );
     }
 
@@ -2006,6 +2312,9 @@ mod tests {
         // Its content: every role set an install can have, and the policy
         // with stand-in images.
         let policy = access_admission();
+        // With and without the self-update role.
+        assert_eq!(policy.len(), 4);
+        assert_ne!(policy[0], policy[2]);
         assert_eq!(
             short_hash(&json!([
                 objects(false),
@@ -2074,6 +2383,45 @@ mod tests {
         assert_eq!(others[2].pins["PYO_DB_CONTROLLER_IMAGE"], "c2");
     }
 
+    /// A refresh that left roles behind stamps them, and that install
+    /// isn't current.
+    #[test]
+    fn a_stamp_names_the_roles_left_behind() {
+        assert_eq!(stamp("abc", &[]), "abc");
+        assert_eq!(parse_stamp("abc"), ("abc".to_owned(), vec![]));
+        let older = vec!["Role/pyo-gateway/pyo-agent".to_owned(), "ClusterRole/pyo-agent-self-update".to_owned()];
+        let s = stamp("abc", &older);
+        assert_eq!(s, "abc except Role/pyo-gateway/pyo-agent,ClusterRole/pyo-agent-self-update");
+        assert_eq!(parse_stamp(&s), ("abc".to_owned(), older.clone()));
+        assert_eq!(parse_stamp(""), (String::new(), vec![]));
+        let scope = AgentScope {
+            admission: "enforced".into(),
+            install: "abc".into(),
+            roles_older: older.clone(),
+            ..Default::default()
+        };
+        assert!(!install_current(&scope, "abc"));
+        // Agents that don't say (0.5.5's) read as before, and a full
+        // install's scope carries no such field.
+        let wire = serde_json::to_value(AgentScope { roles_older: vec![], ..scope.clone() }).unwrap();
+        assert!(wire.get("rolesOlder").is_none());
+        let read: AgentScope = serde_json::from_value(wire).unwrap();
+        assert!(install_current(&read, "abc"));
+        assert_eq!(serde_json::to_value(&scope).unwrap()["rolesOlder"], json!(older));
+        // What holds the bundles back: their own roles, or a chart.
+        assert!(!bundles_held_back(&older));
+        assert!(!bundles_held_back(&[]));
+        for k in [
+            format!("ClusterRole/{}", bundles::CLUSTER_ROLE),
+            format!("ClusterRoleBinding/{}", bundles::CLUSTER_ROLE),
+            format!("ClusterRole/{}", bundles::WRITE_ROLE),
+            "HelmChart/kube-system/cert-manager".to_owned(),
+        ] {
+            assert!(bundles_held_back(&[older[0].clone(), k.clone()]), "{k}");
+        }
+        assert!(!bundles_held_back(&["ClusterRole/pyo-agent-write".to_owned()]));
+    }
+
     #[test]
     fn install_current_only_counts_an_enforced_policy() {
         let scope = |admission: &str, install: &str| AgentScope {
@@ -2091,66 +2439,125 @@ mod tests {
         assert!(install_current(&scope("unsupported", ""), "abc"));
     }
 
+    /// The self-update role, exactly: everything by name, no create, patch
+    /// or delete, and `escalate` and `bind` only on the agent's own roles.
     #[test]
     fn self_update_is_narrow() {
         let objs = self_update_objects();
         assert_eq!(objs.len(), 2);
-        let rules = objs[0]["rules"].as_array().unwrap();
-        for r in rules {
-            // Everything by name; writes only to the admission policy, never create/patch/escalate/bind.
-            assert!(
-                r["resourceNames"].as_array().is_some_and(|n| !n.is_empty()),
-                "{r}"
-            );
-            let verbs: Vec<&str> = r["verbs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
-            if r["apiGroups"] == json!(["admissionregistration.k8s.io"]) {
-                assert_eq!(verbs, ["get", "update"]);
-                assert_eq!(r["resourceNames"], json!([ADMISSION_POLICY]));
-            } else {
-                assert_eq!(verbs, ["get"], "{r}");
+        let cluster_roles = json!([
+            "pyo-agent-bundle-write",
+            "pyo-agent-bundles",
+            "pyo-agent-cluster",
+            "pyo-agent-namespaces",
+            "pyo-agent-nodes",
+            "pyo-agent-read",
+            "pyo-agent-self-update",
+            "pyo-agent-stats",
+            "pyo-agent-write",
+        ]);
+        // Bindings share their roles' names (the bundles' write role is
+        // bound per namespace, by the agent).
+        let roles = json!(["pyo-agent", "pyo-agent-policy", "pyo-agent-upgrade", "pyo-tailnet"]);
+        assert_eq!(
+            objs[0]["rules"],
+            json!([
+                { "apiGroups": ["admissionregistration.k8s.io"], "resources": ["validatingadmissionpolicies", "validatingadmissionpolicybindings"], "verbs": ["get", "update"], "resourceNames": [ADMISSION_POLICY] },
+                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["clusterroles", "clusterrolebindings"], "verbs": ["get", "update"], "resourceNames": cluster_roles },
+                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["clusterroles"], "verbs": ["escalate", "bind"], "resourceNames": cluster_roles },
+                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["roles", "rolebindings"], "verbs": ["get", "update"], "resourceNames": roles },
+                { "apiGroups": ["rbac.authorization.k8s.io"], "resources": ["roles"], "verbs": ["escalate", "bind"], "resourceNames": roles },
+                { "apiGroups": ["helm.cattle.io"], "resources": ["helmcharts"], "verbs": ["get"], "resourceNames": ["cert-manager", "envoy-gateway"] },
+            ])
+        );
+        // Every name is one of an install's own objects, and every role and
+        // binding of an install is named.
+        let own = own_role_objects();
+        for o in objects(true).iter().chain(objs.iter()) {
+            let kind = o["kind"].as_str().unwrap();
+            if !kind.contains("Role") {
+                continue;
+            }
+            let name = o["metadata"]["name"].as_str().unwrap();
+            let list = if kind.starts_with("Cluster") { &cluster_roles } else { &roles };
+            assert!(list.as_array().unwrap().contains(&json!(name)), "{kind} {name}");
+            assert!(own.iter().any(|(_, _, n)| n == name), "{name}");
+        }
+        // No verb that makes or removes an object, and none unnamed.
+        for r in objs[0]["rules"].as_array().unwrap() {
+            assert!(r["resourceNames"].as_array().is_some_and(|n| !n.is_empty()), "{r}");
+            for v in r["verbs"].as_array().unwrap() {
+                assert!(["get", "update", "escalate", "bind"].contains(&v.as_str().unwrap()), "{r}");
             }
         }
-        // It may read its own roles, the self-update one included.
-        let cluster = rules
-            .iter()
-            .find(|r| r["resources"] == json!(["clusterroles", "clusterrolebindings"]))
-            .unwrap();
-        for n in [
-            "pyo-agent-read",
-            WRITE_ROLE,
-            NODES_ROLE,
-            SELF_UPDATE_ROLE,
-            bundles::CLUSTER_ROLE,
-        ] {
-            assert!(
-                cluster["resourceNames"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(n)),
-                "{n}"
-            );
-        }
-        let ns = rules
-            .iter()
-            .find(|r| r["resources"] == json!(["roles", "rolebindings"]))
-            .unwrap();
-        assert!(
-            ns["resourceNames"]
+        // Its binding is the owner's switch: to the agent's account only.
+        assert_eq!(objs[1]["kind"], "ClusterRoleBinding");
+        assert_eq!(objs[1]["metadata"]["name"], SELF_UPDATE_ROLE);
+        assert_eq!(objs[1]["subjects"], json!([{ "kind": "ServiceAccount", "name": SA, "namespace": NS }]));
+        // Not part of the default roles, nor of an install without it
+        // (Pyo Cloud's), whose policy refuses a write to the roles too.
+        assert!(!objects(true).iter().any(|o| o["metadata"]["name"] == SELF_UPDATE_ROLE));
+        let without = InstallParts::new(false, false, "w", "g", &db("c"));
+        assert!(!json!(without.access).to_string().contains(SELF_UPDATE_ROLE));
+        assert!(!json!(without.access).to_string().contains("escalate\",\"bind\"],\"resourceNames\":[\"pyo-agent\""));
+        let own_roles = |p: &InstallParts| {
+            p.admission[0]["spec"]["variables"]
                 .as_array()
                 .unwrap()
-                .contains(&json!("pyo-agent-upgrade"))
-        );
-        // Not part of the default roles.
-        assert!(
-            !objects(true)
                 .iter()
-                .any(|o| o["metadata"]["name"] == SELF_UPDATE_ROLE)
-        );
+                .find(|v| v["name"] == "ownRoles")
+                .unwrap()["expression"]
+                .clone()
+        };
+        assert_eq!(own_roles(&without), "false");
+        let with = InstallParts::new(false, true, "w", "g", &db("c"));
+        assert_eq!(own_roles(&with), json!(own_roles_cel()));
+        assert_ne!(with.hash, without.hash);
+    }
+
+    /// With the self-update role, the policy lets the agent update its own
+    /// roles and bindings: those objects only, never made or deleted, and
+    /// a binding's subjects stay Pyo's accounts.
+    #[test]
+    fn the_policy_lets_a_refresh_update_the_agents_own_roles() {
+        let cel = own_roles_cel();
+        assert!(cel.starts_with("request.resource.group == 'rbac.authorization.k8s.io' && request.operation == 'UPDATE' && variables.sub == '' && ("), "{cel}");
+        assert!(!cel.contains("CREATE") && !cel.contains("DELETE"));
+        for part in [
+            "(request.resource.resource == 'clusterroles' && variables.reqName in ",
+            "'pyo-agent-read'",
+            "'pyo-agent-self-update'",
+            "(request.resource.resource == 'roles' && (variables.ns + '/' + variables.reqName) in ",
+            "'kube-system/pyo-agent'",
+            "'pyo-gateway/pyo-agent'",
+            "'pyo-gateway/pyo-tailnet'",
+            "'pyo-system/pyo-agent-policy'",
+            "'pyo-system/pyo-agent-upgrade'",
+        ] {
+            assert!(cel.contains(part), "{part}\n{cel}");
+        }
+        // Both kinds of binding carry the subjects' rule.
+        let subjects = "has(object.subjects) && object.subjects.all(s, s.kind == 'ServiceAccount' && has(s.namespace) && s.namespace == 'pyo-system' && s.name in ['pyo-agent', 'pyo-tailnet'])";
+        assert_eq!(cel.matches(subjects).count(), 2);
+        for resource in ["clusterrolebindings", "rolebindings"] {
+            let at = cel.find(&format!("request.resource.resource == '{resource}'")).unwrap();
+            let clause = &cel[at..at + cel[at..].find(") || ").unwrap_or(cel.len() - at)];
+            assert!(clause.contains(subjects), "{clause}");
+        }
+        // Only roles of an install: nothing of a bundle, the upgrader or
+        // the cluster.
+        for other in ["cluster-admin", "'pyo-upgrade'", "system:", "cnpg"] {
+            assert!(!cel.contains(other), "{other}");
+        }
+        // The four rules a role write would otherwise fail let it through,
+        // and only with the self-update role.
+        let with = admission_for(true, "w", "g")[0].to_string();
+        let without = admission("w", "g")[0].to_string();
+        assert_eq!(with.matches("|| variables.ownRoles\"").count(), 4);
+        assert_eq!(without.matches("|| variables.ownRoles\"").count(), 4);
+        assert!(without.contains(r#"{"expression":"false","name":"ownRoles"}"#), "{without}");
+        assert!(!without.contains("'pyo-agent-self-update'"));
+        assert!(with.contains("'pyo-agent-self-update'"));
     }
 
     #[test]

@@ -283,10 +283,13 @@ pub async fn detect(client: &Client, policy: Policy) -> AgentScope {
             _ => "missing",
         }
     };
-    // The install it's from: the same stamp on the policy and on its Deployment.
-    let install = match crate::install::deployment_stamp(client).await {
-        Some(d) if !installed_policy.is_empty() && d == installed_policy => installed_policy,
-        _ => String::new(),
+    // The install it's from: the same stamp on the policy and on its
+    // Deployment. And the roles a refresh left as they were, if any.
+    let (install, roles_older) = match crate::install::deployment_stamp(client).await {
+        Some(d) if !installed_policy.is_empty() && d == installed_policy => {
+            rbac::parse_stamp(&installed_policy)
+        }
+        _ => (String::new(), vec![]),
     };
     let self_update = can_named(
         client,
@@ -305,6 +308,7 @@ pub async fn detect(client: &Client, policy: Policy) -> AgentScope {
         servers: can(client, "patch", "", "nodes", None).await,
         policy,
         install,
+        roles_older,
         self_update,
         headers_kept: crate::gateway::headers_kept(),
     }

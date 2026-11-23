@@ -245,11 +245,12 @@ fn gateway_crds_yaml(with_api: bool) -> String {
 }
 
 /// Whether new installs bind the self-update role: their agent then
-/// brings its admission policy up to date with Pyo by itself. On unless
-/// `PYO_AGENT_SELF_UPDATE` is false: with it, whoever controls this Pyo can
-/// loosen what the agent may do on those clusters, so a Pyo serving other
-/// people's clusters (Pyo Cloud) turns it off. A cluster's owner can also
-/// delete its `pyo-agent-self-update` binding.
+/// brings its roles and its admission policy up to date with Pyo by
+/// itself. On unless `PYO_AGENT_SELF_UPDATE` is false: with it, whoever
+/// controls this Pyo can give the agent any permission on those clusters
+/// (pyo-proto's rbac.rs says why that was so before it wrote roles too),
+/// so a Pyo serving other people's clusters (Pyo Cloud) turns it off. A
+/// cluster's owner can also delete its `pyo-agent-self-update` binding.
 pub fn self_update() -> bool {
     self_update_from(std::env::var("PYO_AGENT_SELF_UPDATE").ok().as_deref())
 }
@@ -325,7 +326,11 @@ pub fn render_with(api_url: &str, image: &str, token: &str, extra_env: &[(&str, 
 #   DNS's scale;
 # - the gateway's routes, certificates and settings in pyo-gateway,
 #   with exactly the content this release writes (never its Secrets' content),
-#   and its failed pods, deleted;
+#   and its failed pods, deleted. Its role there names no Service, network
+#   policy or ConfigMap it writes: the admission policy at the end does, by
+#   name and content. On Kubernetes older than 1.30 there is no admission
+#   policy, so the agent could change or delete any of those three kinds in
+#   pyo-gateway (Envoy Gateway's own included);
 # - the databases system in pyo-databases (CloudNativePG, the MySQL
 #   operator and pyo-db-controller), once a team makes its first database
 #   here, with exactly the content this release defines;
@@ -337,8 +342,17 @@ pub fn render_with(api_url: &str, image: &str, token: &str, extra_env: &[(&str, 
 #   (pyo-agent-stats): delete those two bindings to take that away;
 # - read your pyo-system/pyo-policy ConfigMap, never write it;
 # - with pyo-agent-self-update bound (on unless this Pyo turns it off):
-#   rewrite its own admission policy when Pyo is updated, once its roles are
-#   already as Pyo's; delete that binding to take that away.
+#   when Pyo is updated, update its own roles and bindings (the ones below,
+#   by name, never a new one) and rewrite its own admission policy, so the
+#   cluster needs no command after a release. With it, whoever controls
+#   this Pyo can give the agent any permission here, up to cluster-admin.
+#   That was already so while this role only rewrote the admission policy:
+#   the policy is what keeps the agent's roles from privileged pods and
+#   from writing other roles. Delete the pyo-agent-self-update
+#   ClusterRoleBinding to take all of it away. The agent's roles then
+#   change only when you run the connect command. A role the agent can't
+#   update (a new one, say) waits for that command, and the rest of a
+#   refresh goes on without it.
 # The admission policy at the end holds it to this, and refuses privileged
 # containers and the host's network, processes and files, except for Pyo's
 # own build, metrics and GPU components.
@@ -432,6 +446,25 @@ pub const OUTDATED: &str = "This cluster's agent needs an update. Run the comman
 /// (`AgentScope::headers_kept`).
 pub const HEADERS_KEPT: &str = "This cluster's install is older than Pyo's. Run the command under Refresh this cluster in the cluster's settings so client-sent visitor headers are removed.";
 
+/// What an install that's current except for some of its roles needs (a
+/// refresh brought the admission policy and the image pins, and couldn't
+/// write those roles): shown with its "Update needed", and by the features
+/// that wait for them.
+pub const ROLES: &str = "This cluster's agent needs an update for some features. Run the command under Refresh this cluster in the cluster's settings.";
+
+/// Whether the system bundles (the databases system, the WAF, Pyo Static)
+/// can be installed and updated on a cluster whose install is in `state`:
+/// when it's current, or current except for roles they don't need
+/// (`bundles`, from `agentInstall.bundles`). Never while it's outdated or
+/// updating: its older admission policy refuses this Pyo's bundles.
+pub fn bundles_ready(state: Option<&str>, bundles: Option<bool>) -> bool {
+    match state {
+        None | Some("current") => true,
+        Some("roles") => bundles == Some(true),
+        _ => false,
+    }
+}
+
 /// Why an outdated install needs its connect command, when nothing more
 /// particular is known.
 fn outdated_message(scope: &pyo_proto::rbac::AgentScope) -> &'static str {
@@ -456,16 +489,19 @@ pub fn refused_by_install(message: &str) -> bool {
 }
 
 /// A command's error as the team reads it: a refusal while the cluster's
-/// install (`install`, its state) is outdated is [`OUTDATED`]'s to fix.
+/// install (`install`, its state) is outdated, or current except for some
+/// roles, is [`OUTDATED`]'s to fix.
 pub fn shown(message: Option<&str>, install: &str) -> Option<String> {
     match message {
-        Some(m) if install == "outdated" && refused_by_install(m) => Some(OUTDATED.into()),
+        Some(m) if matches!(install, "outdated" | "roles") && refused_by_install(m) => {
+            Some(OUTDATED.into())
+        }
         m => m.map(str::to_owned),
     }
 }
 
 /// The cluster's install as its last heartbeat found: "current",
-/// "updating" or "outdated" (current when it never said).
+/// "updating", "outdated" or "roles" (current when it never said).
 pub async fn state_of(db: impl sqlx::PgExecutor<'_>, cluster_id: &str) -> ApiResult<String> {
     Ok(sqlx::query_scalar::<_, Option<String>>(
         "SELECT capabilities->'agentInstall'->>'state' FROM pyo.clusters WHERE id = $1",
@@ -502,7 +538,8 @@ const REFRESH_PATIENCE_MAX_SECS: i64 = 10 * 60;
 const REFRESH_RETRY_SECS: i64 = 30 * 60;
 
 /// Where a cluster's install stands, and whether to send it a refresh:
-/// ("current" | "updating" | "outdated", why it's outdated, send).
+/// ("current" | "updating" | "outdated" | "roles", why it isn't current,
+/// send). "roles": current except for some of its roles.
 pub fn install_state(
     scope: &pyo_proto::rbac::AgentScope,
     expected: &str,
@@ -510,6 +547,12 @@ pub fn install_state(
 ) -> (&'static str, String, bool) {
     if pyo_proto::rbac::install_current(scope, expected) {
         return ("current", String::new(), false);
+    }
+    // A refresh brought this Pyo's admission policy and image pins, and
+    // left roles it couldn't write. Another refresh would leave the same
+    // ones, so none is sent: the connect command brings them.
+    if scope.admission == "enforced" && scope.install == expected && !scope.roles_older.is_empty() {
+        return ("roles", ROLES.into(), false);
     }
     // The agent may only update its admission policy, never make it: the
     // cluster's connect command puts a missing one back.
@@ -629,7 +672,9 @@ pub async fn refreshing(
 }
 
 /// From a heartbeat: where the cluster's install stands against this Pyo's,
-/// as `capabilities.agentInstall` (`{state, message, command}`), sending
+/// as `capabilities.agentInstall` (`{state, message, command}`, and in
+/// state "roles" `bundles`: whether the roles left behind leave the system
+/// bundles free, see [`bundles_ready`]), sending
 /// the agent (version `agent`) a refresh when it can make one. Returns it, and whether a
 /// command was queued. `command`, in every state, is the connect command
 /// run again on the cluster's first server: it also applies Pyo's latest
@@ -662,6 +707,9 @@ pub async fn sync(
         tracing::info!(cluster = cluster_id, install = %parts.hash, "sent the agent its install's refresh");
     }
     let mut out = json!({ "state": state, "command": command(same_cluster) });
+    if state == "roles" {
+        out["bundles"] = json!(!pyo_proto::rbac::bundles_held_back(&scope.roles_older));
+    }
     if !message.is_empty() {
         out["message"] = json!(message);
     } else if state == "outdated" {
@@ -878,6 +926,89 @@ mod tests {
         assert!(install_state(&s, "h1", Some(&last("failed", REFRESH_RETRY_SECS))).2);
         // The install the connect command brings is current again.
         assert_eq!(install_state(&scope("h1", true), "h1", Some(&on_roles(60))).0, "current");
+    }
+
+    fn partial(install: &str, self_update: bool, older: &[&str]) -> AgentScope {
+        AgentScope {
+            roles_older: older.iter().map(|s| s.to_string()).collect(),
+            ..scope(install, self_update)
+        }
+    }
+
+    /// A refresh that brought all but some roles: its own state, with its
+    /// own message, and no refresh sent again whatever came before.
+    #[test]
+    fn an_install_current_except_its_roles_says_so_and_gets_no_refresh() {
+        let s = partial("h1", true, &["Role/pyo-gateway/pyo-agent"]);
+        for l in [
+            None,
+            Some(last("done", 5)),
+            Some(last("done", 30 * REFRESH_RETRY_SECS)),
+            Some(last("failed", 30 * REFRESH_RETRY_SECS)),
+            Some(LastRefresh { agent_changed: true, ..last("failed", 5) }),
+            Some(LastRefresh { attempts: 9, ..last("sent", REFRESH_PATIENCE_MAX_SECS) }),
+        ] {
+            assert_eq!(install_state(&s, "h1", l.as_ref()), ("roles", ROLES.to_owned(), false), "{l:?}");
+        }
+        assert!(ROLES.contains("Refresh this cluster") && !ROLES.contains(';') && !ROLES.contains(" - "));
+        // The same without the self-update role, or read only.
+        assert_eq!(install_state(&partial("h1", false, &["x"]), "h1", None).0, "roles");
+        // Pyo moves on: the install is older again, and refreshed as any.
+        assert_eq!(install_state(&s, "h2", None), ("updating", String::new(), true));
+        assert_eq!(install_state(&partial("h1", false, &["x"]), "h2", None), ("outdated", String::new(), false));
+        // The connect command brings the roles: current.
+        assert_eq!(install_state(&scope("h1", true), "h1", None).0, "current");
+        // What its roles refuse reads as the connect command's to fix.
+        let forbidden = "services \"pyo-tunnel-origin\" is forbidden: User \"system:serviceaccount:pyo-system:pyo-agent\" cannot patch resource";
+        assert_eq!(shown(Some(forbidden), "roles").as_deref(), Some(OUTDATED));
+        assert_eq!(shown(Some("image not found"), "roles").as_deref(), Some("image not found"));
+        // The bundles go on when the roles left behind aren't theirs.
+        assert!(bundles_ready(None, None));
+        assert!(bundles_ready(Some("current"), None));
+        assert!(bundles_ready(Some("roles"), Some(true)));
+        assert!(!bundles_ready(Some("roles"), Some(false)));
+        assert!(!bundles_ready(Some("roles"), None));
+        assert!(!bundles_ready(Some("outdated"), Some(true)));
+        assert!(!bundles_ready(Some("updating"), None));
+    }
+
+    /// The whole way from 0.5.5, as each heartbeat sees it. Nothing loops,
+    /// one command brings it home, and the release after needs none.
+    #[test]
+    fn from_0_5_5_one_command_then_none() {
+        let was = "this agent's roles are older than Pyo's (Role pyo-agent differs); run the cluster's connect command to bring them up to date";
+        // Pyo is now 0.51.0 (install h1). 0.5.5's agent gets one refresh.
+        let old = scope("h0", true);
+        assert_eq!(install_state(&old, "h1", None), ("updating", String::new(), true));
+        // It never writes roles: it fails, and isn't sent another.
+        let failed = LastRefresh { message: was.into(), ..last("failed", 5) };
+        assert_eq!(install_state(&old, "h1", Some(&failed)), ("outdated", String::new(), false));
+        // So the agent's image moves on (updates.rs waits only while "updating").
+        // 0.51.0's agent runs: one more try.
+        let moved = LastRefresh { agent_changed: true, ..failed.clone() };
+        assert_eq!(install_state(&old, "h1", Some(&moved)), ("updating", String::new(), true));
+        // 0.5.5's self-update role may not write roles, so that refresh
+        // brings the policy and the pins and leaves the roles: said once,
+        // with nothing more sent, however long it stays so.
+        let left = partial("h1", true, &["Role/pyo-gateway/pyo-agent", "ClusterRole/pyo-agent-self-update"]);
+        for age in [5, REFRESH_PATIENCE_MAX_SECS, 30 * REFRESH_RETRY_SECS] {
+            assert_eq!(install_state(&left, "h1", Some(&last("done", age))), ("roles", ROLES.to_owned(), false));
+        }
+        // Its bundles' roles are as they were, so the databases system goes on.
+        assert!(!pyo_proto::rbac::bundles_held_back(&left.roles_older));
+        // The owner runs the connect command, once.
+        let home = scope("h1", true);
+        assert_eq!(install_state(&home, "h1", Some(&last("done", 600))).0, "current");
+        // A later release (h2) with other rules in the same roles: one
+        // refresh, which the agent makes whole. No command.
+        assert_eq!(install_state(&home, "h2", None), ("updating", String::new(), true));
+        assert_eq!(install_state(&scope("h2", true), "h2", Some(&last("done", 5))).0, "current");
+        // On Pyo Cloud (no self-update role) every step is the command's:
+        // no refresh is ever sent, so no partial one either.
+        let cloud = scope("h0", false);
+        for l in [None, Some(last("done", 5)), Some(moved.clone())] {
+            assert_eq!(install_state(&cloud, "h1", l.as_ref()), ("outdated", String::new(), false));
+        }
     }
 
     #[test]

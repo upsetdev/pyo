@@ -72,20 +72,32 @@ fn newer(a: &str, b: &str) -> bool {
     matches!((parse_version(a), parse_version(b)), (Some(a), Some(b)) if a > b)
 }
 
-/// Said before an update whose agent has other roles than this Pyo's: no
-/// agent can change its own roles, so each cluster's connect command does.
+/// Said before an update whose agent has other roles than this Pyo's, on
+/// an installation whose clusters don't have the self-update role: their
+/// agents can't change their own roles, so each cluster's connect command
+/// does.
 pub const RECONNECT_NOTICE: &str =
     "After updating, run the connect command shown in each cluster's settings.";
 
 /// What to know before updating to `r`: its notices, and [`RECONNECT_NOTICE`]
 /// when its agent's roles aren't this Pyo's (a release that doesn't say
-/// isn't assumed to change them).
+/// isn't assumed to change them) and this installation's clusters can't
+/// bring them by themselves.
 pub fn before_you_update(r: &Release) -> Vec<String> {
+    notices(r, crate::install::self_update())
+}
+
+/// [`before_you_update`], for an installation whose clusters have the
+/// self-update role (`self_update`) or not. With it their agents write the
+/// new roles themselves, so nothing is added: a release that needs the
+/// command anyway (a new role object, a chart installed with the agent)
+/// says so in its own notices.
+fn notices(r: &Release, self_update: bool) -> Vec<String> {
     let mut out = r.before_you_update.clone();
-    let reconnect = r
-        .agent_access
-        .as_deref()
-        .is_some_and(|h| h != pyo_proto::rbac::access_hash());
+    let reconnect = !self_update
+        && r.agent_access
+            .as_deref()
+            .is_some_and(|h| h != pyo_proto::rbac::access_hash());
     if reconnect && !out.iter().any(|n| n == RECONNECT_NOTICE) {
         out.push(RECONNECT_NOTICE.into());
     }
@@ -1784,9 +1796,11 @@ mod tests {
 
     /// An update whose agent has other roles says, before it starts, that
     /// each cluster needs its connect command; one with the same roles, or
-    /// a release that doesn't say, doesn't.
+    /// a release that doesn't say, doesn't. Nor does an installation whose
+    /// agents bring their roles themselves.
     #[test]
     fn other_agent_roles_ask_for_the_connect_command() {
+        let before_you_update = |r: &Release| notices(r, false);
         let with = |access: Option<String>, notices: &[&str]| Release {
             version: "99.0.0".into(),
             agent_access: access,
@@ -1806,6 +1820,16 @@ mod tests {
         // Written by hand as well: once.
         assert_eq!(
             before_you_update(&with(Some("0000000000000000".into()), &[RECONNECT_NOTICE])),
+            [RECONNECT_NOTICE]
+        );
+        // With the self-update role the agents write the new roles: only
+        // the release's own notices.
+        assert_eq!(
+            notices(&with(Some("0000000000000000".into()), &["Postgres restarts."]), true),
+            ["Postgres restarts."]
+        );
+        assert_eq!(
+            notices(&with(Some("0000000000000000".into()), &[RECONNECT_NOTICE]), true),
             [RECONNECT_NOTICE]
         );
     }
