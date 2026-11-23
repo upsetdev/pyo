@@ -2159,28 +2159,28 @@ set -- {mode}
         }
     }
 
-    /// connect.sh's own_server_lock with flock stubbed: "locked" when it
-    /// took the lock, "theirs" when it came with it, "none" elsewhere.
-    fn own_server_lock(setup: &str) -> String {
+    /// connect.sh's connect_lock with flock stubbed, as root unless `setup`
+    /// says otherwise: the flock calls it made, then whether it has the lock.
+    fn connect_lock(setup: &str) -> String {
         let dir = std::env::temp_dir().join(format!(
-            "pyo-own-lock-{}-{}",
+            "pyo-connect-lock-{}-{}",
             std::process::id(),
             setup.len()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let d = dir.display().to_string();
-        let block = script_block("own-server-lock", CONNECT_SCRIPT)
-            .replace("/usr/local/lib/pyo/", &format!("{d}/"))
+        let block = script_block("connect-lock", CONNECT_SCRIPT)
             .replace("/run/pyo-connect.lock", &format!("{d}/lock"));
         let (code, out, err) = bash(&format!(
             r#"set -euo pipefail
 T='{d}'
+id() {{ echo "${{ID:-0}}"; }}
 flock() {{ echo "flock $*"; [ "$*" != "-n 9" ] || [ -z "${{BUSY:-}}" ]; }}
 {setup}
 {block}
-own_server_lock
-if [ "$(readlink "/proc/$$/fd/9" 2>/dev/null)" = "$T/lock" ]; then echo has-lock; else echo no-lock; fi
+connect_lock
+if connect_lock_held; then echo has-lock; else echo no-lock; fi
 "#
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2188,24 +2188,647 @@ if [ "$(readlink "/proc/$$/fd/9" 2>/dev/null)" = "$T/lock" ]; then echo has-lock
         out.trim().replace('\n', ", ")
     }
 
-    /// A connect.sh run by hand on Pyo's own server takes the lock its
-    /// timers and installer hold, and doesn't wait for itself under them.
+    /// connect.sh takes one lock on every server, which the verifier's runs
+    /// and Pyo's own timers and installer take too, and doesn't wait for
+    /// itself under them.
     #[test]
-    fn connect_takes_turns_with_pyo_s_own_runs_on_its_server() {
-        // Another cluster's server: no lock at all.
-        assert_eq!(own_server_lock(""), "no-lock");
-        let own = r#": > "$T/connect-this-machine.sh""#;
-        assert_eq!(own_server_lock(own), "flock -n 9, has-lock");
-        // Pyo's timer runs: it waits, and says so.
+    fn connect_takes_turns_with_other_pyo_setups_on_a_server() {
+        assert_eq!(connect_lock(""), "flock -n 9, has-lock");
+        // Something else runs (the verifier, Pyo's timer): it waits, and
+        // says so.
         assert_eq!(
-            own_server_lock(&format!("{own}\nBUSY=1")),
+            connect_lock("BUSY=1"),
             "flock -n 9, Waiting for another Pyo setup on this server to finish., flock 9, has-lock"
         );
-        // Run by the timer or the installer, which hold it: theirs.
-        assert_eq!(own_server_lock(&format!("{own}\nexec 9>\"$T/lock\"")), "has-lock");
+        // Run by Pyo's timer or installer, which hold it: theirs.
+        assert_eq!(connect_lock("exec 9>\"$T/lock\""), "has-lock");
+        // Not root (--uninstall with KUBECONFIG): /run isn't its to write.
+        assert_eq!(connect_lock("ID=1000"), "no-lock");
         // Before --tailnet-only's exit and after --uninstall's.
-        let at = CONNECT_SCRIPT.find("\n[ -n \"$TAILNET_ONLY\" ] || own_server_lock\n").unwrap();
+        let at = CONNECT_SCRIPT.find("\n[ -n \"$TAILNET_ONLY\" ] || connect_lock\n").unwrap();
         assert!(CONNECT_SCRIPT.find("\n  uninstall\n  exit 0\n").unwrap() < at);
         assert!(at < CONNECT_SCRIPT.find("\nnvidia_gpu\n").unwrap());
+    }
+
+    /// The lines release-manifest.ts writes the verifier's release and
+    /// SHA-256 on, in the connect.sh a release publishes.
+    const VERIFY_PINS: [(&str, &str); 3] = [
+        ("release", "PYO_VERIFY_RELEASE"),
+        ("x86_64", "PYO_VERIFY_SHA256_X86_64"),
+        ("aarch64", "PYO_VERIFY_SHA256_AARCH64"),
+    ];
+
+    fn verify_pin_line(name: &str, var: &str, value: &str) -> String {
+        format!("\n{var}=\"{value}\" # pyo:verify-pin {name}\n")
+    }
+
+    /// `script` as a release publishes it: `pins` are the release, then the
+    /// x86_64 and aarch64 verifiers' SHA-256.
+    fn stamp_verifier(script: &str, pins: [&str; 3]) -> String {
+        let mut s = script.to_owned();
+        for ((name, var), value) in VERIFY_PINS.iter().zip(pins) {
+            let empty = verify_pin_line(name, var, "");
+            assert_eq!(s.matches(&empty).count(), 1, "{name}");
+            s = s.replace(&empty, &verify_pin_line(name, var, value));
+        }
+        s
+    }
+
+    /// Pyo's own connect.sh has the pin lines empty, and the release's
+    /// script fills in exactly those.
+    #[test]
+    fn the_release_pins_its_verifier_in_connect_sh() {
+        let manifest = include_str!("../../../scripts/release-manifest.ts");
+        for (name, var) in VERIFY_PINS {
+            assert_eq!(CONNECT_SCRIPT.matches(&verify_pin_line(name, var, "")).count(), 1, "{name}");
+            assert_eq!(CONNECT_SCRIPT.matches(&format!("# pyo:verify-pin {name}\n")).count(), 1);
+            assert!(manifest.contains(&format!("[\"{name}\", \"{var}\"")), "{name}");
+        }
+        assert!(manifest.contains("`\\n${variable}=\"${value}\" # pyo:verify-pin ${name}\\n`"));
+        // Only connect.sh is given them.
+        for other in [SCRIPT, SANDBOX_SCRIPT, include_str!("../../../deploy/install.sh")] {
+            assert!(!other.contains("pyo:verify-pin"));
+        }
+        // What the verifier's own release names: the same files, from the
+        // same place.
+        assert!(CONNECT_SCRIPT.contains(
+            "\nPYO_VERIFY_RELEASES=https://github.com/upsetdev/pyo/releases/download\n"
+        ));
+        assert!(CONNECT_SCRIPT.contains("\"$PYO_VERIFY_RELEASES/v$PYO_VERIFY_RELEASE/pyo-verify-linux-$arch\""));
+    }
+
+    /// connect.sh's options, read by its own loop: AUTO_UPDATE, or the
+    /// error.
+    fn auto_update_flag(args: &str) -> String {
+        let block = script_block("connect-args", CONNECT_SCRIPT);
+        let (code, out, err) = bash(&format!(
+            "set -euo pipefail\nset -- {args}\n{block}\necho \"[$AUTO_UPDATE] $API $TOKEN [$UNINSTALL]\"\n"
+        ));
+        if code == 0 { out.trim().to_owned() } else { format!("{code} {}", err.trim()) }
+    }
+
+    #[test]
+    fn connect_reads_the_auto_update_flags() {
+        // As Pyo's commands give them: last, or before a mirror's --version.
+        assert_eq!(auto_update_flag("--auto-update"), "[on]   []");
+        assert_eq!(auto_update_flag("--no-auto-update"), "[off]   []");
+        assert_eq!(auto_update_flag("--api 'https://pyo.example/' --token 'ab12' --auto-update"), "[on] https://pyo.example ab12 []");
+        assert_eq!(
+            auto_update_flag("--api 'https://pyo.example' --token 'ab12' --local-registry --no-auto-update --version '0.51.0'"),
+            "[off] https://pyo.example ab12 []"
+        );
+        assert_eq!(auto_update_flag("--auto-update --version '0.51.0'"), "[on]   []");
+        // Neither: nothing chosen in this run.
+        assert_eq!(auto_update_flag(""), "[]   []");
+        assert_eq!(auto_update_flag("--api 'https://pyo.example' --token 'ab12'"), "[] https://pyo.example ab12 []");
+        // Both: the last one.
+        assert_eq!(auto_update_flag("--auto-update --no-auto-update"), "[off]   []");
+        assert_eq!(auto_update_flag("--no-auto-update --auto-update"), "[on]   []");
+        assert_eq!(auto_update_flag("--uninstall --yes"), "[]   [1]");
+        assert_eq!(auto_update_flag("--auto-updates"), "2 Unknown option: --auto-updates");
+        assert_eq!(auto_update_flag("--auto-update=off"), "2 Unknown option: --auto-update=off");
+    }
+
+    /// A server for connect.sh's auto-update steps: its files under a
+    /// directory, a release on "GitHub" with a stand-in verifier, and curl,
+    /// systemctl, uname and id answered here. flock and sha256sum are real.
+    struct VerifyHost {
+        dir: std::path::PathBuf,
+    }
+
+    /// The x86_64 verifier's sum when a test wants one that matches nothing.
+    const OTHER_SUM: &str = "00000000000000000000000000000000000000000000000000000000000000ff";
+
+    impl VerifyHost {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("pyo-verify-host-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            for sub in ["bin", "etc/pyo", "units", "release", "lib"] {
+                std::fs::create_dir_all(dir.join(sub)).unwrap();
+            }
+            VerifyHost { dir }
+        }
+
+        fn d(&self) -> String {
+            self.dir.display().to_string()
+        }
+
+        /// A stand-in verifier that says it is `version`. It writes what it
+        /// is asked to `log`, and says so when it was started with the
+        /// lock's file.
+        fn verifier(&self, version: &str) -> String {
+            format!(
+                r#"#!/usr/bin/env bash
+T='{d}'
+[ ! -e "/proc/$$/fd/9" ] || echo "$1 was started with file 9" >>"$T/log"
+case "$1" in
+  version) echo '{version}' ;;
+  install)
+    echo "{version} $*" >>"$T/log"
+    [ ! -e "$T/install-fails" ] || exit 1
+    [ "$0" -ef "$T/bin/pyo-verify" ] || cp "$0" "$T/bin/pyo-verify"
+    ;;
+  uninstall)
+    echo "{version} uninstall" >>"$T/log"
+    rm -f "$T/bin/pyo-verify"
+    ;;
+  run)
+    exec 8>"$T/lock"
+    if flock -n 8; then echo "run: took the lock"; else echo "run: skipped"; fi >>"$T/log"
+    ;;
+esac
+"#,
+                d = self.d()
+            )
+        }
+
+        /// Puts `version`'s verifier in the release, as `file`. Its SHA-256.
+        fn release(&self, file: &str, version: &str) -> String {
+            use sha2::{Digest, Sha256};
+            let text = self.verifier(version);
+            std::fs::write(self.dir.join("release").join(file), &text).unwrap();
+            hex::encode(Sha256::digest(text.as_bytes()))
+        }
+
+        /// The verifier this server already has.
+        fn installed(&self, version: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.dir.join("bin/pyo-verify");
+            std::fs::write(&path, self.verifier(version)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn has(&self, file: &str) -> bool {
+            self.dir.join(file).exists()
+        }
+
+        fn read(&self, file: &str) -> String {
+            std::fs::read_to_string(self.dir.join(file)).unwrap_or_default()
+        }
+
+        /// What curl, systemctl and the verifier were asked, a line each.
+        fn log(&self) -> Vec<String> {
+            let log = self.read("log").replace(&self.d(), "");
+            let _ = std::fs::remove_file(self.dir.join("log"));
+            log.lines().map(str::to_owned).collect()
+        }
+
+        /// The blocks as connect.sh has them, with `pins` written as a
+        /// release does (None: Pyo's own copy), then `steps`.
+        fn bash(&self, pins: Option<[&str; 3]>, steps: &str) -> (i32, String, String) {
+            let d = self.d();
+            let script = match pins {
+                Some(p) => stamp_verifier(CONNECT_SCRIPT, p),
+                None => CONNECT_SCRIPT.to_owned(),
+            };
+            let progress = script_block("progress", &script);
+            let lock = script_block("connect-lock", &script).replace("/run/pyo-connect.lock", &format!("{d}/lock"));
+            let block = script_block("auto-update", &script)
+                .replace("/etc/pyo/auto-update", &format!("{d}/etc/pyo/auto-update"))
+                .replace("/usr/local/bin/pyo-verify", &format!("{d}/bin/pyo-verify"))
+                .replace("/etc/systemd/system", &format!("{d}/units"))
+                .replace("/usr/local/lib/pyo/connect-this-machine.sh", &format!("{d}/lib/connect-this-machine.sh"));
+            bash(&format!(
+                r#"set -euo pipefail
+T='{d}'
+AUTO_UPDATE=""
+id() {{ echo 0; }}
+uname() {{ echo "${{ARCH:-x86_64}}"; }}
+sleep() {{ :; }}
+systemctl() {{ echo "systemctl $*" >>"$T/log"; }}
+curl() {{
+  local out="" url=""
+  while [ $# -gt 0 ]; do
+    case "$1" in -o) out=$2; shift 2 ;; --proto | --max-time | --max-filesize) shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac
+  done
+  echo "curl $url" >>"$T/log"
+  [ -f "$T/release/${{url##*/}}" ] || return 22
+  cp "$T/release/${{url##*/}}" "$out"
+}}
+{progress}
+{lock}
+{block}
+{steps}
+"#
+            ))
+        }
+
+        /// A connect run with `flag` ("on", "off" or none), as connect.sh
+        /// orders the steps: what it printed, which has to end in
+        /// "connected".
+        fn connect(&self, pins: Option<[&str; 3]>, flag: &str) -> String {
+            let (code, out, err) = self.bash(
+                pins,
+                &format!(
+                    r#"AUTO_UPDATE={flag}
+{CONNECT_STEPS}
+echo connected"#
+                ),
+            );
+            assert_eq!((code, err.as_str()), (0, ""), "{out}");
+            let out = out.trim_end();
+            assert!(out.ends_with("connected"), "{out}");
+            out.trim_end_matches("connected").trim_end().replace('\n', " | ")
+        }
+    }
+
+    impl Drop for VerifyHost {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+    }
+
+    /// connect.sh's own lines for the lock and automatic updates, in the
+    /// order it runs them, for Pyo at https://pyo.example.
+    const CONNECT_STEPS: &str = r#"connect_lock
+auto_update_choice
+[ "$AUTO_UPDATE" != off ] || auto_update_off
+[ "$AUTO_UPDATE" != on ] || auto_update_on https://pyo.example"#;
+
+    /// CONNECT_STEPS are connect.sh's: the lock first, the choice once
+    /// --tailnet-only has left, the verifier once the agent runs.
+    #[test]
+    fn connect_sets_up_automatic_updates_after_the_agent() {
+        let at = |text: &str| CONNECT_SCRIPT.find(text).unwrap_or_else(|| panic!("no {text:?}"));
+        let lock = at("\n[ -n \"$TAILNET_ONLY\" ] || connect_lock\n");
+        let choice = at("\nauto_update_choice\n[ \"$AUTO_UPDATE\" != off ] || auto_update_off\n");
+        let agent = at("k3s kubectl -n pyo-system rollout status deployment/pyo-agent");
+        let on = at("\n[ \"$AUTO_UPDATE\" != on ] || auto_update_on \"$API\"\n");
+        let done = at("\nok_line \"Connected ");
+        assert!(lock < choice && choice < agent && agent < on && on < done);
+        assert!(at("  echo \"$(hostname) is on your tailnet.\"\n") < choice);
+        for line in CONNECT_STEPS.lines() {
+            let line = line.replace("https://pyo.example", "\"$API\"").replace("connect_lock", "[ -n \"$TAILNET_ONLY\" ] || connect_lock");
+            assert_eq!(CONNECT_SCRIPT.matches(&format!("\n{line}\n")).count(), 1, "{line}");
+        }
+        // Nothing about it shows sudo or a command to type.
+        let block = script_block("auto-update", CONNECT_SCRIPT);
+        let said: Vec<&str> = block
+            .lines()
+            .filter(|l| !l.starts_with('#') && l.to_lowercase().contains("automatic updates"))
+            .collect();
+        assert_eq!(said.len(), 9, "{said:?}");
+        for line in said {
+            assert!(!line.contains("sudo") && !line.contains(';') && !line.contains(" - "), "{line}");
+        }
+    }
+
+    const SET_UP: &str = "→ Setting up automatic updates… | ✓ Set up automatic updates";
+
+    #[test]
+    fn a_released_connect_installs_its_pinned_verifier() {
+        let h = VerifyHost::new("installs");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        let pins = Some(["0.51.0", sum.as_str(), OTHER_SUM]);
+        assert_eq!(h.connect(pins, "on"), SET_UP);
+        assert_eq!(
+            h.log(),
+            [
+                "curl https://github.com/upsetdev/pyo/releases/download/v0.51.0/pyo-verify-linux-x86_64",
+                "0.51.0 install --url https://pyo.example",
+            ]
+        );
+        assert_eq!(h.read("bin/pyo-verify"), h.verifier("0.51.0"));
+        assert_eq!(h.read("etc/pyo/auto-update"), "on\n");
+        // Nothing of the download stays.
+        assert!(!h.has("bin/.pyo-verify.new"));
+        // A release candidate's verifier takes release candidates.
+        let h = VerifyHost::new("installs-rc");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0-rc.1");
+        assert_eq!(h.connect(Some(["0.51.0-rc.1", sum.as_str(), OTHER_SUM]), "on"), SET_UP);
+        assert_eq!(
+            h.log(),
+            [
+                "curl https://github.com/upsetdev/pyo/releases/download/v0.51.0-rc.1/pyo-verify-linux-x86_64",
+                "0.51.0-rc.1 install --url https://pyo.example --channel rc",
+            ]
+        );
+    }
+
+    #[test]
+    fn connect_remembers_the_auto_update_choice() {
+        let h = VerifyHost::new("remembers");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        let pins = Some(["0.51.0", sum.as_str(), OTHER_SUM]);
+        // Never asked for: nothing, and nothing kept.
+        assert_eq!(h.connect(pins, ""), "");
+        assert!(h.log().is_empty());
+        assert!(!h.has("etc/pyo/auto-update") && !h.has("bin/pyo-verify"));
+        // On, then the refresh command without arguments: still on. The
+        // verifier it has is this release's, so nothing is downloaded.
+        assert_eq!(h.connect(pins, "on"), SET_UP);
+        h.log();
+        assert_eq!(h.connect(pins, ""), SET_UP);
+        assert_eq!(h.log(), ["0.51.0 install --url https://pyo.example"]);
+        // Off, and it stays off without arguments.
+        assert_eq!(h.connect(pins, "off"), "✓ Turned off automatic updates");
+        assert_eq!(h.log(), ["0.51.0 uninstall"]);
+        assert_eq!(h.read("etc/pyo/auto-update"), "off\n");
+        assert_eq!(h.connect(pins, ""), "");
+        assert!(h.log().is_empty());
+        assert!(!h.has("bin/pyo-verify"));
+        // And on again.
+        assert_eq!(h.connect(pins, "on"), SET_UP);
+        assert_eq!(h.read("etc/pyo/auto-update"), "on\n");
+        // A file that says neither is no choice.
+        std::fs::write(h.dir.join("etc/pyo/auto-update"), "maybe\n").unwrap();
+        h.installed("0.51.0");
+        h.log();
+        assert_eq!(h.connect(pins, ""), "");
+        assert!(h.log().is_empty());
+    }
+
+    #[test]
+    fn connect_takes_the_verifier_for_the_server_s_processor() {
+        for (machine, file, arm) in [
+            ("x86_64", "pyo-verify-linux-x86_64", false),
+            ("amd64", "pyo-verify-linux-x86_64", false),
+            ("aarch64", "pyo-verify-linux-aarch64", true),
+            ("arm64", "pyo-verify-linux-aarch64", true),
+        ] {
+            let h = VerifyHost::new(&format!("arch-{machine}"));
+            let sum = h.release(file, "0.51.0");
+            // The other processor's sum matches nothing here.
+            let pins = if arm { ["0.51.0", OTHER_SUM, sum.as_str()] } else { ["0.51.0", sum.as_str(), OTHER_SUM] };
+            let (code, out, err) = h.bash(Some(pins), &format!("ARCH={machine} AUTO_UPDATE=on\n{CONNECT_STEPS}\n"));
+            assert_eq!((code, err.as_str()), (0, ""), "{machine}: {out}");
+            assert!(out.ends_with("✓ Set up automatic updates\n"), "{machine}: {out}");
+            assert_eq!(
+                h.log(),
+                [
+                    format!("curl https://github.com/upsetdev/pyo/releases/download/v0.51.0/{file}"),
+                    "0.51.0 install --url https://pyo.example".to_owned(),
+                ],
+                "{machine}"
+            );
+        }
+        // A processor the release has no verifier for.
+        let h = VerifyHost::new("arch-other");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        let (code, out, _) = h.bash(Some(["0.51.0", sum.as_str(), OTHER_SUM]), &format!("ARCH=riscv64 AUTO_UPDATE=on\n{CONNECT_STEPS}\necho connected"));
+        assert_eq!(code, 0);
+        assert_eq!(out, "● Automatic updates aren't available here. They stay off on this server.\nconnected\n");
+        assert!(h.log().is_empty());
+    }
+
+    /// Pyo's own copy of connect.sh (a dev build, a self-hosted Pyo) has no
+    /// pins: the flag installs nothing, and the connect goes on.
+    #[test]
+    fn a_connect_script_without_pins_installs_no_verifier() {
+        const NEEDS: &str = "● Automatic updates aren't available here. They stay off on this server.";
+        let h = VerifyHost::new("unpinned");
+        h.release("pyo-verify-linux-x86_64", "0.51.0");
+        assert_eq!(h.connect(None, "on"), NEEDS);
+        assert!(h.log().is_empty(), "nothing is downloaded");
+        assert!(!h.has("bin/pyo-verify"));
+        // Half a pin is none: a release without a sum, a sum that isn't one,
+        // a release that isn't one.
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        for pins in [
+            ["0.51.0", "", ""],
+            ["", sum.as_str(), sum.as_str()],
+            ["0.51.0", "abc", "abc"],
+            ["0.51", sum.as_str(), sum.as_str()],
+            ["latest", sum.as_str(), sum.as_str()],
+            ["0.51.0/../x", sum.as_str(), sum.as_str()],
+        ] {
+            assert_eq!(h.connect(Some(pins), "on"), NEEDS, "{pins:?}");
+            assert!(h.log().is_empty(), "{pins:?}");
+        }
+        // Off works without pins, and a verifier a release set up stays
+        // as it is, quietly.
+        h.installed("0.51.0");
+        assert_eq!(h.connect(None, "on"), "");
+        assert!(h.log().is_empty());
+        assert_eq!(h.connect(None, "off"), "✓ Turned off automatic updates");
+        // The server Pyo itself runs on never gets one, whatever the flag,
+        // and remembers none.
+        let h = VerifyHost::new("own-server");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        std::fs::write(h.dir.join("lib/connect-this-machine.sh"), "").unwrap();
+        for flag in ["on", "off", ""] {
+            assert_eq!(h.connect(Some(["0.51.0", sum.as_str(), OTHER_SUM]), flag), "", "{flag}");
+        }
+        assert!(h.log().is_empty());
+        assert!(!h.has("etc/pyo/auto-update") && !h.has("bin/pyo-verify"));
+    }
+
+    #[test]
+    fn a_verifier_that_fails_its_checksum_is_not_installed() {
+        let h = VerifyHost::new("mismatch");
+        h.release("pyo-verify-linux-x86_64", "0.51.0");
+        // What the release pinned is another file.
+        assert_eq!(
+            h.connect(Some(["0.51.0", OTHER_SUM, OTHER_SUM]), "on"),
+            "→ Setting up automatic updates… | ● Automatic updates aren't set up. The download didn't match its checksum."
+        );
+        // Downloaded once, never run, nothing left.
+        assert_eq!(h.log(), ["curl https://github.com/upsetdev/pyo/releases/download/v0.51.0/pyo-verify-linux-x86_64"]);
+        assert!(!h.has("bin/pyo-verify") && !h.has("bin/.pyo-verify.new"));
+        // The choice stays: the next run tries again.
+        assert_eq!(h.read("etc/pyo/auto-update"), "on\n");
+    }
+
+    #[test]
+    fn a_failed_verifier_download_or_setup_does_not_stop_the_connect() {
+        // The release has no such file (or GitHub doesn't answer).
+        let h = VerifyHost::new("download");
+        assert_eq!(
+            h.connect(Some(["0.51.0", OTHER_SUM, OTHER_SUM]), "on"),
+            "→ Setting up automatic updates… | ● Automatic updates aren't set up. The download failed."
+        );
+        assert_eq!(h.log().len(), 3, "three tries");
+        assert!(!h.has("bin/pyo-verify") && !h.has("bin/.pyo-verify.new"));
+        // The verifier's own install fails.
+        let h = VerifyHost::new("install-fails");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        std::fs::write(h.dir.join("install-fails"), "").unwrap();
+        assert_eq!(
+            h.connect(Some(["0.51.0", sum.as_str(), OTHER_SUM]), "on"),
+            "→ Setting up automatic updates… | ● Automatic updates couldn't be set up on this server."
+        );
+        assert!(!h.has("bin/pyo-verify") && !h.has("bin/.pyo-verify.new"));
+        // Without the lock (no flock here), nothing is set up: the
+        // verifier's install counts on connect.sh holding it.
+        let h = VerifyHost::new("no-lock");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        let (code, out, err) = h.bash(
+            Some(["0.51.0", sum.as_str(), OTHER_SUM]),
+            "AUTO_UPDATE=on\nauto_update_choice\nauto_update_on https://pyo.example\necho connected",
+        );
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(out, "● Automatic updates couldn't be set up on this server.\nconnected\n");
+        assert!(h.log().is_empty());
+    }
+
+    #[test]
+    fn no_auto_update_removes_the_verifier() {
+        let h = VerifyHost::new("off");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        let pins = Some(["0.51.0", sum.as_str(), OTHER_SUM]);
+        // None here: nothing to say.
+        assert_eq!(h.connect(pins, "off"), "");
+        assert!(h.log().is_empty());
+        assert_eq!(h.read("etc/pyo/auto-update"), "off\n");
+        h.installed("0.50.0");
+        assert_eq!(h.connect(pins, "off"), "✓ Turned off automatic updates");
+        assert_eq!(h.log(), ["0.50.0 uninstall"]);
+        assert!(!h.has("bin/pyo-verify"));
+        // A verifier that doesn't run here: its timer and files go anyway.
+        for file in ["bin/pyo-verify", "bin/pyo-verify.previous", "units/pyo-verify.timer", "units/pyo-verify.service"] {
+            std::fs::write(h.dir.join(file), "not a program").unwrap();
+        }
+        assert_eq!(h.connect(pins, "off"), "✓ Turned off automatic updates");
+        assert_eq!(h.log(), ["systemctl disable --now pyo-verify.timer", "systemctl daemon-reload"]);
+        for file in ["bin/pyo-verify", "bin/pyo-verify.previous", "units/pyo-verify.timer", "units/pyo-verify.service"] {
+            assert!(!h.has(file), "{file}");
+        }
+    }
+
+    #[test]
+    fn connect_never_moves_the_verifier_backwards() {
+        let h = VerifyHost::new("backwards");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        let pins = Some(["0.51.0", sum.as_str(), OTHER_SUM]);
+        // The verifier moved on to a later release: kept, and set up again.
+        for later in ["0.51.1", "0.52.0", "1.0.0", "0.52.0-rc.1"] {
+            h.installed(later);
+            assert_eq!(h.connect(pins, "on"), SET_UP, "{later}");
+            assert_eq!(h.log(), [format!("{later} install --url https://pyo.example")]);
+            assert_eq!(h.read("bin/pyo-verify"), h.verifier(later));
+        }
+        // An earlier one, a release candidate of this release, or one that
+        // doesn't say: replaced by this release's.
+        for earlier in ["0.50.9", "0.5.5", "0.51.0-rc.9", "", "dev"] {
+            h.installed(earlier);
+            assert_eq!(h.connect(pins, "on"), SET_UP, "{earlier}");
+            assert_eq!(h.log().last().unwrap(), "0.51.0 install --url https://pyo.example", "{earlier}");
+            assert_eq!(h.read("bin/pyo-verify"), h.verifier("0.51.0"));
+        }
+        let (code, out, err) = h.bash(
+            None,
+            r#"for pair in "0.51.0 0.52.0" "0.51.9 0.52.0" "0.9.0 0.10.0" "0.51.0-rc.1 0.51.0" "0.51.0-rc.2 0.51.0-rc.10" "0.50.9 0.51.0-rc.1"; do
+  set -- $pair
+  verify_older "$1" "$2" || echo "$1 isn't older than $2"
+  ! verify_older "$2" "$1" || echo "$2 is older than $1"
+  ! verify_older "$1" "$1" || echo "$1 is older than itself"
+done
+! verify_older 0.51.0 "" && ! verify_older "" 0.51.0 && ! verify_older 0.51.0 v0.52.0 && ! verify_older 0.51.0 0.52 || echo "not versions"
+"#,
+        );
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
+    }
+
+    /// With the real flock: a verifier run skips while connect.sh has the
+    /// lock, connect.sh waits for a run that has it, the verifier connect.sh
+    /// starts never gets the lock's file, and the lock goes with the script.
+    #[test]
+    fn connect_and_the_verifier_never_overlap_or_wait_for_each_other() {
+        if bash("command -v flock").0 != 0 {
+            return;
+        }
+        let h = VerifyHost::new("turns");
+        let sum = h.release("pyo-verify-linux-x86_64", "0.51.0");
+        let pins = Some(["0.51.0", sum.as_str(), OTHER_SUM]);
+        // The timer fires in the middle of a connect: that run skips. The
+        // connect's own steps (install, then off's uninstall) don't take
+        // the lock, so they don't wait for the script that holds it.
+        let (code, out, err) = h.bash(
+            pins,
+            &format!(
+                r#"AUTO_UPDATE=on
+{CONNECT_STEPS}
+"$T/bin/pyo-verify" run 9>&-
+AUTO_UPDATE=off
+auto_update_choice
+auto_update_off
+connect_lock
+echo connected
+"#
+            ),
+        );
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert_eq!(
+            out,
+            "→ Setting up automatic updates…\n✓ Set up automatic updates\n✓ Turned off automatic updates\nconnected\n"
+        );
+        assert_eq!(
+            h.log(),
+            [
+                "curl https://github.com/upsetdev/pyo/releases/download/v0.51.0/pyo-verify-linux-x86_64",
+                "0.51.0 install --url https://pyo.example",
+                "run: skipped",
+                "0.51.0 uninstall",
+            ],
+            "no line says a verifier was started with file 9"
+        );
+        // The script ended: the next run has the lock to itself.
+        h.installed("0.51.0");
+        let (code, _, err) = bash(&format!("'{}/bin/pyo-verify' run", h.d()));
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(h.log(), ["run: took the lock"]);
+        // A run has the lock: the connect waits for it, then goes on.
+        let (code, out, err) = h.bash(
+            pins,
+            r#"( exec 8>"$T/lock"; flock 8; : >"$T/running"; command sleep 0.5; echo "run: done" >>"$T/log" ) &
+until [ -e "$T/running" ]; do command sleep 0.05; done
+connect_lock
+echo "connect: has the lock" >>"$T/log"
+wait
+"#,
+        );
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert_eq!(out, "Waiting for another Pyo setup on this server to finish.\n");
+        assert_eq!(h.log(), ["run: done", "connect: has the lock"]);
+    }
+
+    /// connect.sh's uninstall() on a server whose cluster answers nothing
+    /// much: what it says and asks the verifier.
+    fn uninstall_with_verifier(h: &VerifyHost, vars: &str) -> (i32, String, String) {
+        let start = CONNECT_SCRIPT.find("\nuninstall() {\n").unwrap();
+        let end = CONNECT_SCRIPT[start..].find("\n}\nif [ -n \"$UNINSTALL\" ]; then\n").unwrap();
+        let uninstall = &CONNECT_SCRIPT[start..start + end + 3];
+        h.bash(
+            None,
+            &format!(
+                r#"unset KUBECONFIG
+KEEP_DATA="" YES=1 DRY_RUN="" WITH_PYO=1
+k3s() {{ return 0; }}
+{vars}
+{uninstall}
+uninstall
+"#
+            ),
+        )
+    }
+
+    #[test]
+    fn uninstall_removes_the_verifier_from_the_server() {
+        let h = VerifyHost::new("uninstall");
+        h.installed("0.51.0");
+        std::fs::write(h.dir.join("etc/pyo/auto-update"), "on\n").unwrap();
+        // A dry run only says so.
+        let (code, out, err) = uninstall_with_verifier(&h, "DRY_RUN=1");
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert!(out.contains("\n  - automatic updates on this server\n"), "{out}");
+        assert!(out.contains("\n  would remove automatic updates from this server\n"), "{out}");
+        assert!(h.log().is_empty());
+        assert!(h.has("bin/pyo-verify") && h.has("etc/pyo/auto-update"));
+        // For real: before the agent stops, under the lock.
+        let (code, out, err) = uninstall_with_verifier(&h, "");
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        let removing = out.find("\nRemoving automatic updates…\n").expect(&out);
+        assert!(removing < out.find("\nStopping the Pyo agent…\n").unwrap(), "{out}");
+        assert_eq!(h.log(), ["0.51.0 uninstall"]);
+        assert!(!h.has("bin/pyo-verify") && !h.has("etc/pyo/auto-update"));
+        // No verifier here: not a word about it, and the choice goes.
+        std::fs::write(h.dir.join("etc/pyo/auto-update"), "off\n").unwrap();
+        let (code, out, err) = uninstall_with_verifier(&h, "");
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert!(!out.contains("automatic updates"), "{out}");
+        assert!(h.log().is_empty());
+        assert!(!h.has("etc/pyo/auto-update"));
     }
 }

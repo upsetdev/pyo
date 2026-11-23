@@ -2,13 +2,17 @@ name: Release
 
 # Pushing a tag like v0.1.0 publishes that version: signed images at
 # ghcr.io/upsetdev/pyo, and a GitHub release with the CLI for each
-# platform, the sandbox server files, the install scripts and release.json
-# (what the dashboard's updates apply). Then pyo.dev is rebuilt, to serve
-# the release's install scripts. See RELEASING.md.
+# platform, the verifier, the sandbox server files, the install scripts
+# and release.json (what the dashboard's updates apply). Then pyo.dev is
+# rebuilt, to serve the release's install scripts. See RELEASING.md.
+#
+# A tag like v0.1.0-rc.1 is a release candidate, for testing the verifier:
+# the same build, published as a pre-release (never GitHub's latest, so
+# installations and pyo.dev don't see it), and pyo.dev isn't rebuilt.
 
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"]
 
 permissions:
   contents: read
@@ -22,6 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      rc: ${{ steps.version.outputs.rc }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: The tag matches Cargo.toml
@@ -33,6 +38,7 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          case "$version" in *-rc.*) echo "rc=true" ;; *) echo "rc=false" ;; esac >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.1
@@ -91,6 +97,41 @@ jobs:
     name: CLI
     needs: verify
     uses: ./.github/workflows/cli.yml
+
+  # The verifier for Linux on Arm, built on an Arm runner like the CLI
+  # (cli.yml). Linux x86-64's comes from pyo.Dockerfile's `verify` target,
+  # in the release job. Static (musl): it runs on any customer's server.
+  verifier:
+    name: Verifier (Linux on Arm)
+    needs: verify
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.1
+          targets: aarch64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Build
+        env:
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo build --release --locked -p pyo-verify --target aarch64-unknown-linux-musl
+          mkdir out
+          cp target/aarch64-unknown-linux-musl/release/pyo-verify out/pyo-verify-linux-aarch64
+      # It runs on the platform it's for, and says the tag's version: a
+      # server's verifier compares it with the release it took.
+      - name: Check it runs
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          got=$(out/pyo-verify-linux-aarch64 version)
+          [ "$got" = "$VERSION" ] || { echo "::error::pyo-verify version says \"$got\", not $VERSION."; exit 1; }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verifier-linux-aarch64
+          path: out/
+          if-no-files-found: error
 
   # A sandbox server's files for each architecture (sandbox.yml).
   sandbox:
@@ -215,7 +256,7 @@ jobs:
 
   release:
     name: GitHub release
-    needs: [verify, images, cli, sandbox]
+    needs: [verify, images, cli, verifier, sandbox]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -252,11 +293,42 @@ jobs:
             sha256sum -c "pyo-sandbox-linux-$a.tar.gz.sha256"
             sha256sum -c "pyo-sandbox-gvisor-linux-$a.tar.gz.sha256"
           done
+      # The verifier for each architecture: Linux x86-64's from the binaries
+      # this run built (pyo.Dockerfile's `verify` target), Linux on Arm's
+      # from the verifier job. release.json lists their sums, so they're
+      # signed with it, and connect.sh gets the same sums on its
+      # pyo:verify-pin lines.
+      - name: Build the verifier
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/images/pyo.Dockerfile
+          target: verify
+          platforms: linux/amd64
+          cache-from: type=gha,scope=rust-${{ github.run_id }}
+          outputs: type=local,dest=verify-build
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verifier-linux-aarch64
+          path: verifier
+      - name: Check the verifier
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          cp verify-build/pyo-verify verifier/pyo-verify-linux-x86_64
+          chmod 755 verifier/pyo-verify-linux-*
+          got=$(verifier/pyo-verify-linux-x86_64 version)
+          [ "$got" = "$VERSION" ] || { echo "::error::pyo-verify version says \"$got\", not $VERSION."; exit 1; }
+          for a in x86_64 aarch64; do
+            file -b "verifier/pyo-verify-linux-$a" | grep -qE 'static(-pie)? linked|statically linked' || { echo "::error::pyo-verify-linux-$a isn't static: $(file -b "verifier/pyo-verify-linux-$a")"; exit 1; }
+          done
+          sha256sum verifier/pyo-verify-linux-*
       # What Pyo needs to update itself from the dashboard: the images
       # pinned by the digests that were just signed, and the manifests.
       # Also the install scripts as the release publishes them, written to
       # release-scripts/ (connect.sh, join.sh and sandbox.sh with this
-      # version on their pyo:release-version line), and their SHA-256:
+      # version on their pyo:release-version line, connect.sh with the
+      # verifier's sums on its pyo:verify-pin lines), and their SHA-256:
       # pyo.dev serves only scripts that match these signed sums.
       - name: Write release.json
         env:
@@ -275,13 +347,37 @@ jobs:
             --sandbox-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-aarch64.tar.gz.sha256)" \
             --sandbox-gvisor-x86_64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-x86_64.tar.gz.sha256)" \
             --sandbox-gvisor-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-aarch64.tar.gz.sha256)" \
-            --scripts release-scripts > release.json
-          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, sandbox, sandboxGvisor, scripts, migrations: (.migrations | length)}' release.json
+            --verifier verifier --scripts release-scripts > release.json
+          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, sandbox, sandboxGvisor, verifier, scripts, migrations: (.migrations | length)}' release.json
+      # The verifier's sums are the files', and connect.sh carries them.
+      - name: Check release.json's verifier
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          jq -r '.verifier | to_entries[] | "\(.value)  verifier/pyo-verify-\(.key)"' release.json | sha256sum -c
+          [ "$(jq '.verifier | length' release.json)" = 2 ]
+          grep -qx "PYO_VERIFY_RELEASE=\"$VERSION\" # pyo:verify-pin release" release-scripts/connect.sh
+          for a in x86_64 aarch64; do
+            sum=$(jq -r --arg k "linux-$a" '.verifier[$k]' release.json)
+            grep -qx "PYO_VERIFY_SHA256_${a^^}=\"$sum\" # pyo:verify-pin $a" release-scripts/connect.sh
+          done
       # The release's own upgrader reads it before it's signed: an image
       # it doesn't accept, or an agentAccess that isn't its agent's roles,
       # fails the release here, not on installations.
+      #
+      # A release candidate's version isn't one installations take, so the
+      # upgrader checks everything else in it: a copy with the version's
+      # numbers alone.
       - name: Check release.json with the release's upgrader
-        run: docker run --rm -v "$PWD/release.json:/release.json:ro" "$(jq -r .images.agent release.json)" check-release /release.json
+        env:
+          RC: ${{ needs.verify.outputs.rc }}
+        run: |
+          check=release.json
+          if [ "$RC" = true ]; then
+            jq '.version |= sub("-rc\\.[0-9]+$"; "")' release.json > release-check.json
+            check=release-check.json
+          fi
+          docker run --rm -v "$PWD/$check:/release.json:ro" "$(jq -r .images.agent release.json)" check-release /release.json
       # release.json is signed like the images: keyless, as this workflow
       # at this tag. install.sh, pyo-up.sh --release and the dashboard's
       # updates (pyo-api sigstore.rs) check it before using anything in it.
@@ -359,6 +455,8 @@ jobs:
             release-scripts/connect.sh
             release-scripts/join.sh
             release-scripts/sandbox.sh
+            verifier/pyo-verify-linux-x86_64
+            verifier/pyo-verify-linux-aarch64
             sandbox/pyo-sandbox-linux-x86_64.tar.gz
             sandbox/pyo-sandbox-linux-x86_64.tar.gz.sha256
             sandbox/pyo-sandbox-linux-aarch64.tar.gz
@@ -386,8 +484,9 @@ jobs:
                 --notes-file release-notes.md "${files[@]}"
               ;;
           esac
-      # What the draft holds now: each install script as release.json lists it.
-      - name: Check the draft's install scripts
+      # What the draft holds now: each install script and verifier as
+      # release.json lists it.
+      - name: Check the draft's install scripts and verifier
         if: steps.draft.outputs.published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -395,11 +494,21 @@ jobs:
           gh release download "$GITHUB_REF_NAME" --pattern '*.sh' --dir uploaded
           jq -r '.scripts | to_entries[] | "\(.value)  uploaded/\(.key)"' release.json | sha256sum -c
           [ "$(ls uploaded | wc -l)" = "$(jq '.scripts | length' release.json)" ]
+          gh release download "$GITHUB_REF_NAME" --pattern 'pyo-verify-*' --dir uploaded-verifier
+          jq -r '.verifier | to_entries[] | "\(.value)  uploaded-verifier/pyo-verify-\(.key)"' release.json | sha256sum -c
+          [ "$(ls uploaded-verifier | wc -l)" = "$(jq '.verifier | length' release.json)" ]
+      # A release candidate is a pre-release: never GitHub's latest.
       - name: Publish the release
         if: steps.draft.outputs.published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          RC: ${{ needs.verify.outputs.rc }}
+        run: |
+          if [ "$RC" = true ]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease
+          else
+            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          fi
 
   # pyo.dev serves the latest release's install scripts, and each release's
   # at pyo.dev/v/<version>/. Its build takes them from the published
@@ -408,9 +517,12 @@ jobs:
   # whose URL is the secret PYO_WEB_DEPLOY_HOOK (Cloudflare dashboard >
   # Workers & Pages > pyo-web > Settings > Builds > Deploy Hooks). When it
   # fails, run this job again: the release stays as it is.
+  #
+  # Not for a release candidate: pyo.dev serves releases only.
   site:
     name: Rebuild pyo.dev
-    needs: release
+    needs: [verify, release]
+    if: needs.verify.outputs.rc != 'true'
     runs-on: ubuntu-24.04
     permissions: {}
     steps:

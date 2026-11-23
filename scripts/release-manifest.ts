@@ -12,7 +12,7 @@
 //     --database-pins "$(pyo-agent database-pins)" \
 //     --sandbox-x86_64 <sha256> --sandbox-aarch64 <sha256> \
 //     --sandbox-gvisor-x86_64 <sha256> --sandbox-gvisor-aarch64 <sha256> \
-//     --scripts release-scripts > release.json
+//     --verifier verifier --scripts release-scripts > release.json
 //
 // Images are pinned by digest. deploy/k8s/{platform,pyo}.yaml become JSON
 // objects. The sandbox templates' images (sandboxBase, sandboxDesktop) are
@@ -34,9 +34,16 @@
 // know their release (run_release). pyo.dev serves these files only when
 // they match this list, at /<script> for the latest release and at
 // /v/<version>/<script> for each one.
+//
+// `verifier` lists the SHA-256 of the release's verifier for each
+// architecture (pyo-verify-linux-<arch>), read from the files in
+// --verifier <dir>. A server's verifier checks release.json's signature,
+// then the next verifier against these (crates/pyo-verify). connect.sh
+// gets this version and the same sums on its pyo:verify-pin lines, so it
+// installs only this release's verifier, whoever served the script.
 
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const args = new Map<string, string>();
@@ -192,6 +199,35 @@ const sums = (flag: string) =>
 const sandbox = sums("sandbox");
 const sandboxGvisor = sums("sandbox-gvisor");
 
+// The release's verifier for each architecture, from --verifier <dir>: the
+// very files the release uploads. Each has to be a Linux program for its
+// architecture, no larger than a verifier downloads (pyo-verify's
+// MAX_BINARY).
+const VERIFIER_MAX = 64 * 1024 * 1024;
+const ELF_MACHINE: Record<string, number> = { x86_64: 62, aarch64: 183 };
+const verifierDir = need("verifier");
+const verifier: Record<string, string> = {};
+const verifierSum: Record<string, string> = {};
+for (const [arch, machine] of Object.entries(ELF_MACHINE)) {
+  const file = join(verifierDir, `pyo-verify-linux-${arch}`);
+  if (!existsSync(file)) fail(`--verifier has no pyo-verify-linux-${arch}`);
+  const bytes = readFileSync(file);
+  const elf = bytes.length > 64 && bytes.readUInt32BE(0) === 0x7f454c46 && bytes[4] === 2 && bytes[5] === 1;
+  if (!elf || bytes.readUInt16LE(18) !== machine) fail(`${file} isn't a Linux program for ${arch}`);
+  if (bytes.length > VERIFIER_MAX) fail(`${file} is larger than a verifier downloads (${bytes.length} bytes)`);
+  verifierSum[arch] = createHash("sha256").update(bytes).digest("hex");
+  verifier[`linux-${arch}`] = verifierSum[arch];
+}
+// connect.sh's pyo:verify-pin lines, empty in the repo, and what the
+// release writes on each.
+const VERIFY_PINS: [string, string, string][] = [
+  ["release", "PYO_VERIFY_RELEASE", version],
+  ["x86_64", "PYO_VERIFY_SHA256_X86_64", verifierSum.x86_64],
+  ["aarch64", "PYO_VERIFY_SHA256_AARCH64", verifierSum.aarch64],
+];
+const verifyPin = (name: string, variable: string, value: string) =>
+  `\n${variable}="${value}" # pyo:verify-pin ${name}\n`;
+
 // The install scripts as the release publishes them, written to --scripts.
 const RELEASE_LINE = '\n  local release="" # pyo:release-version\n';
 const SCRIPTS: [string, string, boolean][] = [
@@ -209,6 +245,15 @@ for (const [name, source, stamped] of SCRIPTS) {
   if (stamped) {
     if (text.split(RELEASE_LINE).length !== 2) fail(`${source} needs exactly one pyo:release-version line`);
     text = text.replace(RELEASE_LINE, `\n  local release="${version}" # pyo:release-version\n`);
+  }
+  if (name === "connect.sh") {
+    for (const [pin, variable, value] of VERIFY_PINS) {
+      const empty = verifyPin(pin, variable, "");
+      if (text.split(empty).length !== 2) fail(`${source} needs exactly one pyo:verify-pin ${pin} line`);
+      text = text.replace(empty, verifyPin(pin, variable, value));
+    }
+  } else if (text.includes("pyo:verify-pin")) {
+    fail(`${source} has a pyo:verify-pin line, which only connect.sh gets`);
   }
   writeFileSync(join(scriptsDir, name), text);
   scripts[name] = createHash("sha256").update(text).digest("hex");
@@ -232,6 +277,7 @@ const release = {
   databasePins,
   sandbox,
   sandboxGvisor,
+  verifier,
   scripts,
 };
 // Pretty-printed, two spaces: deploy/install.sh reads it with sed.

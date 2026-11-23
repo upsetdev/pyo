@@ -14,6 +14,9 @@
 #   --local-registry a registry in this cluster for the images it builds,
 #                    instead of Pyo's (Pyo Cloud: images stay on your servers)
 #   --version        runs this Pyo release's connect.sh instead, from pyo.dev
+#   --auto-update    sets up automatic updates on this server: Pyo's verifier,
+#                    which takes only signed Pyo releases
+#   --no-auto-update turns them off. Without either, the last choice stays
 #
 # Or only joins this machine to the tailnet (Pyo's own machine does this
 # once Tailscale is set up in Pyo): --tailnet-only, with TS_AUTHKEY.
@@ -236,8 +239,9 @@ quietly() {
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# >>> pyo:connect-args (connect.sh only; join.rs tests it)
 API="" TOKEN="" TS_AUTHKEY="${TS_AUTHKEY:-}" REGISTRY="" REGISTRY_TOKEN="" LOCAL_REGISTRY=""
-UNINSTALL="" KEEP_DATA="" YES="" DRY_RUN="" WITH_PYO="" TAILNET_ONLY=""
+UNINSTALL="" KEEP_DATA="" YES="" DRY_RUN="" WITH_PYO="" TAILNET_ONLY="" AUTO_UPDATE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --api) API="${2%/}"; shift 2 ;;
@@ -247,6 +251,8 @@ while [ $# -gt 0 ]; do
     --registry-token) REGISTRY_TOKEN="$2"; shift 2 ;;
     --local-registry) LOCAL_REGISTRY=1; shift ;;
     --tailnet-only) TAILNET_ONLY=1; shift ;;
+    --auto-update) AUTO_UPDATE=on; shift ;;
+    --no-auto-update) AUTO_UPDATE=off; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     --keep-data) KEEP_DATA=1; shift ;;
     --yes | -y) YES=1; shift ;;
@@ -258,6 +264,178 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
+# <<< pyo:connect-args
+# >>> pyo:connect-lock (connect.sh only; join.rs tests it)
+# One Pyo setup at a time on a server: this script and Pyo's verifier
+# (`pyo-verify run` skips its turn while the lock is held). On the server
+# Pyo runs on, also Pyo's own timers and installer (install.sh
+# `host_units`). They hold this lock while they run connect.sh, which then
+# has it as file 9. A run by hand waits for them. The lock goes when this
+# script ends. The verifier is started without file 9, so nothing that
+# stays behind holds the lock.
+CONNECT_LOCK=/run/pyo-connect.lock
+connect_lock_held() { [ "$(readlink "/proc/$$/fd/9" 2>/dev/null)" = "$CONNECT_LOCK" ]; }
+connect_lock() {
+  [ "$(id -u)" = 0 ] && command -v flock >/dev/null || return 0
+  ! connect_lock_held || return 0
+  exec 9>"$CONNECT_LOCK"
+  flock -n 9 && return 0
+  echo "Waiting for another Pyo setup on this server to finish."
+  flock 9
+}
+# <<< pyo:connect-lock
+# >>> pyo:auto-update (connect.sh only; join.rs tests it)
+# Automatic updates on a cluster's first server: Pyo's verifier
+# (pyo-verify), a small root program a systemd timer runs. It takes only
+# what a signed Pyo release defines, for the version Pyo names.
+# --auto-update turns it on, --no-auto-update off. Without either, the
+# choice of the last run stays (AUTO_UPDATE_FILE). The server Pyo itself
+# runs on has no verifier: it updates with Pyo.
+#
+# The release workflow writes this script's release and the SHA-256 of that
+# release's verifier on the pyo:verify-pin lines, in the copy it publishes
+# (scripts/release-manifest.ts). The verifier comes from that GitHub
+# release and is installed only when it matches. A copy without the lines
+# (Pyo's own at <pyo>/install/, a dev build) installs no verifier. Nothing
+# here stops a connect: a step that fails says so in one line.
+PYO_VERIFY_RELEASE="" # pyo:verify-pin release
+PYO_VERIFY_SHA256_X86_64="" # pyo:verify-pin x86_64
+PYO_VERIFY_SHA256_AARCH64="" # pyo:verify-pin aarch64
+PYO_VERIFY_RELEASES=https://github.com/upsetdev/pyo/releases/download
+AUTO_UPDATE_FILE=/etc/pyo/auto-update
+VERIFY_BIN=/usr/local/bin/pyo-verify
+VERIFY_UNITS=/etc/systemd/system
+OWN_SERVER=/usr/local/lib/pyo/connect-this-machine.sh
+# AUTO_UPDATE for this run: the flag, kept for later runs, else the choice
+# of the last run.
+auto_update_choice() {
+  if [ -e "$OWN_SERVER" ]; then
+    AUTO_UPDATE=""
+  elif [ -n "$AUTO_UPDATE" ]; then
+    { mkdir -p "$(dirname "$AUTO_UPDATE_FILE")" && echo "$AUTO_UPDATE" > "$AUTO_UPDATE_FILE"; } 2>/dev/null || true
+  else
+    AUTO_UPDATE=$(cat "$AUTO_UPDATE_FILE" 2>/dev/null || true)
+    case "$AUTO_UPDATE" in on | off) ;; *) AUTO_UPDATE="" ;; esac
+  fi
+}
+# This machine's processor, as the verifier's files name it.
+verify_arch() {
+  case "$(uname -m)" in
+    x86_64 | amd64) echo x86_64 ;;
+    aarch64 | arm64) echo aarch64 ;;
+  esac
+}
+verify_pin() {
+  case "$(verify_arch)" in
+    x86_64) echo "$PYO_VERIFY_SHA256_X86_64" ;;
+    aarch64) echo "$PYO_VERIFY_SHA256_AARCH64" ;;
+  esac
+}
+verify_version() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; }
+# verify_older A B: release A is older than B. A release candidate
+# (X.Y.Z-rc.N) comes before its release.
+verify_older() {
+  local a=${1%%-*} b=${2%%-*} ra=999999999 rb=999999999 x y i
+  verify_version "$1" && verify_version "$2" || return 1
+  [ "$1" = "$a" ] || ra=${1##*-rc.}
+  [ "$2" = "$b" ] || rb=${2##*-rc.}
+  IFS=. read -r -a x <<<"$a.$ra"
+  IFS=. read -r -a y <<<"$b.$rb"
+  for i in 0 1 2 3; do
+    [ "${x[i]}" -eq "${y[i]}" ] || { [ "${x[i]}" -lt "${y[i]}" ]; return; }
+  done
+  return 1
+}
+# verify_step COMMAND...: COMMAND in the background while the step's time
+# ticks, quiet, and without the lock's file.
+verify_step() {
+  local pid rc=0
+  "$@" >/dev/null 2>&1 </dev/null 9>&- &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    progress_tick
+  done
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+# verify_fetch URL SHA256 FILE: 1 when the download fails, 2 when it isn't
+# the pinned file.
+verify_fetch() {
+  local i got=""
+  for i in 1 2 3; do
+    curl -fsSL --proto '=https' --max-time 300 --max-filesize 67108864 -o "$3" "$1" && got=1 && break
+    [ "$i" = 3 ] || sleep 2
+  done
+  [ -n "$got" ] || return 1
+  [ "$(sha256sum "$3" | cut -d' ' -f1)" = "$2" ] || return 2
+}
+# Sets the verifier up for Pyo at URL, once the agent runs.
+auto_update_on() {
+  local url=$1 arch want have="" dir new rc=0 channel=()
+  arch=$(verify_arch)
+  want=$(verify_pin)
+  if ! verify_version "$PYO_VERIFY_RELEASE" || [[ ! $want =~ ^[0-9a-f]{64}$ ]]; then
+    [ -x "$VERIFY_BIN" ] || dot_line yellow "Automatic updates aren't available here. They stay off on this server."
+    return 0
+  fi
+  # The verifier's install doesn't take the lock: this script holds it.
+  if ! connect_lock_held; then
+    dot_line yellow "Automatic updates couldn't be set up on this server."
+    return 0
+  fi
+  [[ $PYO_VERIFY_RELEASE != *-rc.* ]] || channel=(--channel rc)
+  progress_start "Setting up automatic updates…"
+  [ ! -x "$VERIFY_BIN" ] || have=$("$VERIFY_BIN" version 2>/dev/null 9>&- || true)
+  if [ "$have" = "$PYO_VERIFY_RELEASE" ] || verify_older "$PYO_VERIFY_RELEASE" "$have"; then
+    # This release's verifier, or a later one it moved to: kept.
+    new=$VERIFY_BIN
+  else
+    dir=$(mktemp -d)
+    verify_step verify_fetch "$PYO_VERIFY_RELEASES/v$PYO_VERIFY_RELEASE/pyo-verify-linux-$arch" "$want" "$dir/pyo-verify" || rc=$?
+    if [ "$rc" != 0 ]; then
+      rm -rf "$dir"
+      if [ "$rc" = 2 ]; then
+        progress_end wait "Automatic updates aren't set up. The download didn't match its checksum."
+      else
+        progress_end wait "Automatic updates aren't set up. The download failed."
+      fi
+      return 0
+    fi
+    # Beside its place, not in /tmp, which may not run programs.
+    new=$(dirname "$VERIFY_BIN")/.pyo-verify.new
+    install -m 755 "$dir/pyo-verify" "$new" 2>/dev/null || rc=$?
+    rm -rf "$dir"
+  fi
+  [ "$rc" != 0 ] || verify_step "$new" install --url "$url" ${channel[@]+"${channel[@]}"} || rc=$?
+  [ "$new" = "$VERIFY_BIN" ] || rm -f "$new"
+  if [ "$rc" = 0 ]; then
+    progress_end ok "Set up automatic updates"
+  else
+    progress_end wait "Automatic updates couldn't be set up on this server."
+  fi
+  return 0
+}
+# Removes the verifier from this server. When it can't do that itself (a
+# file that doesn't run here), its timer and files go anyway.
+verify_remove() {
+  "$VERIFY_BIN" uninstall >/dev/null 2>&1 9>&- && return 0
+  systemctl disable --now pyo-verify.timer >/dev/null 2>&1 9>&- || true
+  rm -f "$VERIFY_UNITS/pyo-verify.timer" "$VERIFY_UNITS/pyo-verify.service" "$VERIFY_BIN" "$VERIFY_BIN.previous" "$VERIFY_BIN.new" "$(dirname "$VERIFY_BIN")/.pyo-verify.new"
+  systemctl daemon-reload >/dev/null 2>&1 9>&- || true
+  [ ! -e "$VERIFY_BIN" ]
+}
+auto_update_off() {
+  [ -e "$VERIFY_BIN" ] || return 0
+  if verify_remove; then
+    progress_paint 32 ✓
+    echo " Turned off automatic updates"
+  else
+    dot_line yellow "Automatic updates couldn't be turned off on this server."
+  fi
+  return 0
+}
+# <<< pyo:auto-update
 
 # ── connect.sh --uninstall ──────────────────────────────────────────────────
 # Deletes only what Pyo made, found by its names and labels: the agent
@@ -367,8 +545,14 @@ uninstall() {
     done < <(kc get pv -o jsonpath='{range .items[*]}{.metadata.name}|{.spec.claimRef.namespace}|{.spec.claimRef.name}|{.spec.persistentVolumeReclaimPolicy}|{.spec.local.path}{.spec.hostPath.path}|{.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]}{"\n"}{end}' 2>/dev/null || true)
   fi
 
+  # Automatic updates on this server (the verifier), when it's this server
+  # being cleaned up.
+  local verify_here=""
+  [ "${KC[0]}" != k3s ] || [ ! -e "$VERIFY_BIN" ] || verify_here=1
+
   echo "This removes Pyo from the cluster at ${server:-?}:"
   echo "  - the Pyo agent, its roles and admission policy (namespace pyo-system)"
+  [ -z "$verify_here" ] || echo "  - automatic updates on this server"
   [ -z "$pyo_here" ] || echo "  - Pyo itself, with its own database, registry and backup store (pyo-system)"
   has namespace pyo-gateway && echo "  - Pyo Gateway (namespace pyo-gateway${gateway_chart:+, Envoy Gateway})"
   for line in "${bundles[@]}"; do
@@ -422,7 +606,18 @@ uninstall() {
     [ "$policy" = Retain ] || act patch pv "$pv" --type=merge -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}' >/dev/null
   done
 
-  # 1. The agent, so it stops putting things back; its admission policy.
+  # 1. Automatic updates on this server, between the verifier's runs. Then
+  # the agent, so it stops putting things back; its admission policy.
+  if [ -n "$verify_here" ]; then
+    if [ -n "$DRY_RUN" ]; then
+      echo "  would remove automatic updates from this server" >&4
+    else
+      echo "Removing automatic updates…"
+      connect_lock
+      verify_remove || echo "Automatic updates couldn't be removed from this server." >&2
+    fi
+  fi
+  [ "${KC[0]}" != k3s ] || [ -n "$DRY_RUN" ] || rm -f "$AUTO_UPDATE_FILE"
   echo "Stopping the Pyo agent…"
   act -n pyo-system delete deployment pyo-agent --ignore-not-found --wait=true --timeout=120s >/dev/null
   act delete validatingadmissionpolicybinding,validatingadmissionpolicy -l app.kubernetes.io/part-of=pyo-agent --ignore-not-found >/dev/null 2>&1 || true
@@ -546,20 +741,7 @@ if [ -n "$UNINSTALL" ]; then
   uninstall
   exit 0
 fi
-# >>> pyo:own-server-lock (connect.sh only; join.rs tests it)
-# On the server Pyo runs on, one run at a time with Pyo's own timers and
-# installer (install.sh `host_units`). They hold this lock while they run
-# connect.sh, which then has it as file 9. A run by hand waits for them.
-own_server_lock() {
-  [ -e /usr/local/lib/pyo/connect-this-machine.sh ] || return 0
-  [ "$(readlink "/proc/$$/fd/9" 2>/dev/null)" != /run/pyo-connect.lock ] || return 0
-  exec 9>/run/pyo-connect.lock
-  flock -n 9 && return 0
-  echo "Waiting for another Pyo setup on this server to finish."
-  flock 9
-}
-# <<< pyo:own-server-lock
-[ -n "$TAILNET_ONLY" ] || own_server_lock
+[ -n "$TAILNET_ONLY" ] || connect_lock
 # Without them, on a cluster that's already connected: bring its agent's
 # install up to date with Pyo (Pyo shows this command when it's older).
 if [ -z "$TAILNET_ONLY" ] && [ -z "$API" ] && [ -z "$TOKEN" ] && command -v k3s >/dev/null; then
@@ -997,6 +1179,10 @@ if [ -n "$TAILNET_ONLY" ]; then
   fi
   exit 0
 fi
+
+# Automatic updates: off now, on once the agent runs (at the end).
+auto_update_choice
+[ "$AUTO_UPDATE" != off ] || auto_update_off
 
 # >>> pyo:tailnet-host (the same in connect.sh, join.sh and deploy/sandbox.sh)
 # A tailnet machine's address, from the MagicDNS name Pyo's commands give
@@ -1579,5 +1765,6 @@ if ! quietly "Starting the Pyo agent…" k3s kubectl -n pyo-system rollout statu
   echo "The Pyo agent didn't start. Run the same command again in a minute." >&2
   exit 1
 fi
+[ "$AUTO_UPDATE" != on ] || auto_update_on "$API"
 [ -z "$WEB_QUERY" ] || dot_line yellow "$(web_ports_line)"
 ok_line "Connected $(hostname). It shows up in Pyo in a few seconds."

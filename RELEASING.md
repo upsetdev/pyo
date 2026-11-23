@@ -46,6 +46,9 @@ by `.github/workflows/cli.yml`, which you can also run by hand (Actions ›
 CLI › Run workflow) to try those builds on a branch. That run publishes
 nothing. It keeps the binaries as the run's artifacts.
 
+The release also carries Pyo's verifier, `pyo-verify-linux-x86_64` and
+`pyo-verify-linux-aarch64` (see [The verifier](#the-verifier)).
+
 The release also carries a sandbox server's files for each architecture,
 `pyo-sandbox-linux-x86_64.tar.gz` and `pyo-sandbox-linux-aarch64.tar.gz`,
 each with its `.sha256`, beside `deploy/sandbox.sh`, which installs them.
@@ -303,12 +306,18 @@ release carries it as an asset. Installations find it in **Settings › Updates*
 - `sandbox`: the SHA-256 of each architecture's sandbox server files.
   `deploy/sandbox.sh` checks release.json's signature with cosign, as
   `install.sh` does, then the files against these.
+- `verifier`: the SHA-256 of the release's verifier for each architecture,
+  `{"linux-x86_64": "<sha256>", "linux-aarch64": "<sha256>"}`, read from
+  the files in `--verifier <dir>` (`pyo-verify-linux-<arch>`, each a Linux
+  program for its architecture). A server's verifier checks release.json's
+  signature, then the next verifier against these.
 - `scripts`: the SHA-256 of each install script the release publishes
   (`install.sh`, `cli.sh`, `connect.sh`, `join.sh`, `sandbox.sh`). The
   script writes them to `--scripts <dir>`, with this version on the
   `pyo:release-version` line of `connect.sh`, `join.sh` and `sandbox.sh`,
-  and the release uploads them from there. pyo.dev serves only scripts
-  that match these sums. The release notes list them too.
+  and the verifier's version and sums on the `pyo:verify-pin` lines of
+  `connect.sh`. The release uploads them from there. pyo.dev serves only
+  scripts that match these sums. The release notes list them too.
 
 To try it before tagging:
 
@@ -322,8 +331,12 @@ bun run scripts/release-manifest.ts --version 0.1.0 --images ghcr.io/upsetdev/py
   --database-pins "$(cargo run -q -p pyo-agent -- database-pins)" \
   --sandbox-x86_64 <64 hex> --sandbox-aarch64 <64 hex> \
   --sandbox-gvisor-x86_64 <64 hex> --sandbox-gvisor-aarch64 <64 hex> \
-  --scripts /tmp/release-scripts
+  --verifier /tmp/verifier --scripts /tmp/release-scripts
 ```
+
+`/tmp/verifier` holds `pyo-verify-linux-x86_64` and
+`pyo-verify-linux-aarch64`. Any Linux program for each architecture will
+do for a try.
 
 ### Notices
 
@@ -563,6 +576,91 @@ Sigstore's trusted root in `crates/pyo-api/assets/sigstore/`, and Fulcio's
 certificates are valid to 2031), `install.sh` with cosign (the machine's, or
 a pinned download checked by SHA-256). The images' own signatures aren't
 verified in the cluster. `pyo-up.sh --release` checks them.
+
+## The verifier
+
+`pyo-verify` (`crates/pyo-verify`) is a small root program on a cluster's
+first server, run by a systemd timer. It takes only what a signed Pyo
+release defines, for the version Pyo names. `connect.sh --auto-update`
+sets it up, `--no-auto-update` and `--uninstall` remove it. The server
+Pyo itself runs on never gets one: it updates with Pyo.
+
+**The assets.** Each release carries `pyo-verify-linux-x86_64` and
+`pyo-verify-linux-aarch64`, static (musl), beside `release.json` and
+`release.json.sigstore.json`. Linux x86-64's comes from the Rust binaries
+job (`pyo.Dockerfile`'s `verify` target). Linux on Arm's is built on an
+Arm runner by the release workflow's `verifier` job, the way `cli.yml`
+builds the CLI. `pyo-verify version` says the crate's version, which is
+`version` in `Cargo.toml`, which the workflow holds equal to the tag. The
+workflow checks that each says it, and that each is static.
+
+**The pins.** `connect.sh` has three `pyo:verify-pin` lines, empty in the
+repo: `PYO_VERIFY_RELEASE`, `PYO_VERIFY_SHA256_X86_64` and
+`PYO_VERIFY_SHA256_AARCH64`. `scripts/release-manifest.ts` writes the
+release's version and the verifier's sums on them in the `connect.sh` the
+release publishes, the same sums as in `release.json`'s `verifier`. With
+`--auto-update` the script downloads the verifier for its server's
+processor from
+`https://github.com/upsetdev/pyo/releases/download/v<version>/`, checks it
+against its pin and runs `pyo-verify install --url <Pyo's address>`. So it
+installs only that release's verifier, whoever served the script. A copy
+without pins (a Pyo's own `<pyo>/install/connect.sh`, a dev build) installs
+none and says "Automatic updates aren't available here." A Pyo that hands
+out `--auto-update` (one without the self-update role, like Pyo Cloud)
+needs `PYO_SCRIPTS_URL=https://pyo.dev`: its commands then fetch
+`https://pyo.dev/v/<version>/connect.sh`, the release's stamped copy.
+Nothing about the verifier ever fails a connect.
+
+Before the release is signed, the workflow checks that `release.json`'s
+`verifier` sums are the files' and that `connect.sh` carries them. Before
+it's published, that the draft's `pyo-verify-*` assets match them.
+
+**The order for Pyo Cloud.**
+
+1. Tag the release, and wait until the GitHub release is published and
+   pyo.dev serves `https://pyo.dev/v/<version>/connect.sh`.
+2. Only then deploy Pyo Cloud at that version. Pyo Cloud names its own
+   version to every verifier (`GET /install/version`), and its commands
+   fetch that version's `connect.sh` from pyo.dev. Deployed before the
+   release is out, verifiers find no signed release for the version and
+   report a problem, and new commands fetch a script that isn't there.
+3. Customers' verifiers act about a day later: a verifier takes a release
+   only once its signature is 24 hours old (the soak). Expect their
+   servers to move a day after the release, not when Pyo Cloud deploys.
+
+### Release candidates
+
+A release candidate tests the verifier before a release. It's the same
+build, published as a GitHub pre-release.
+
+1. Branch from `main`, set `version` in `Cargo.toml` to `X.Y.Z-rc.N` (and
+   `cargo check`), commit it as `chore(release): X.Y.Z-rc.N`.
+2. Tag that commit `vX.Y.Z-rc.N` and push the tag. Keep the branch out of
+   `main`: the release itself is `X.Y.Z`.
+
+The workflow builds and signs it as usual, then publishes it as a
+pre-release, never as latest. So installations, `install.sh`, `pyo
+upgrade` and pyo.dev don't see it, and pyo.dev isn't rebuilt. Its
+`release.json` keeps the `-rc.N` version. The upgrader's check reads a
+copy with the version's numbers alone, since installations never take
+a release candidate. A failed candidate isn't fixed in place: tag the next
+`-rc.N`.
+
+Its `connect.sh` comes from the pre-release's own assets, not pyo.dev:
+
+```bash
+curl -fsSL https://github.com/upsetdev/pyo/releases/download/vX.Y.Z-rc.N/connect.sh | bash -s -- --api <Pyo> --token <token> --auto-update
+```
+
+It pins the candidate's verifier and sets it up with `channel=rc` in
+`/etc/pyo/verify.conf`, so it takes release candidates too. On a test
+server only, `soak_hours=0` there skips the day's wait. A stable verifier
+refuses both.
+
+What doesn't take a release candidate: `--version` in the scripts
+(`run_release`), `install.sh --version` and the dashboard's updates. Run
+`cargo test --workspace` with the candidate's version before tagging:
+code that reads its own version as `X.Y.Z` may not expect `-rc.N`.
 
 ## Install scripts on pyo.dev
 

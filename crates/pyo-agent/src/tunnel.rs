@@ -28,7 +28,6 @@ use kube::{
     api::{DeleteParams, ListParams, Patch, PatchParams},
 };
 use pyo_proto::{CommandResult, TunnelPod, TunnelReport, TunnelWanted, rbac, system};
-use serde_json::json;
 
 use crate::{MANAGER, failed};
 
@@ -372,6 +371,7 @@ pub async fn report(client: &Client) -> TunnelReport {
 mod tests {
     use super::*;
     use crate::fakekube::FakeKube;
+    use serde_json::json;
 
     const ID: &str = "c1744f8b-faa1-48a4-9e5c-02ac921467fa";
     const SECRET: &str = "api/v1/namespaces/pyo-system/secrets/pyo-tunnel";
