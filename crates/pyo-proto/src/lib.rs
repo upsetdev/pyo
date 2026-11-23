@@ -1320,11 +1320,17 @@ pub enum Command {
     /// say what would change (`data` is the plan). With the plan's
     /// `version`: make those changes, create the cluster's OAuth client
     /// and keep it in pyo-system, and delete the token (`data` is what
-    /// happened). Nothing secret comes back.
+    /// happened). Nothing secret comes back. With the setup done, the
+    /// OAuth clients in `delete_clients` are deleted with the same token
+    /// (the team's old ones, never the one the cluster keeps now), each in
+    /// `data.oldClients` ([`tailscale::OldClientDeleted`]). Older agents
+    /// ignore the field and delete none.
     TailscaleSetup {
         token: String,
         #[serde(default)]
         version: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        delete_clients: Vec<String>,
     },
     /// Use this OAuth client from now on, once it signs in: pasted by hand,
     /// or the one Pyo kept before clusters kept their own. `data` is a

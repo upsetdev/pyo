@@ -603,9 +603,11 @@ async fn run_command(agent: Agent, envelope: CommandEnvelope) {
             password,
         } => backup::setup(&agent, &namespace, &admin, &password).await,
         Command::UpgradePyo(spec) => upgrade::start(&agent, *spec).await,
-        Command::TailscaleSetup { token, version } => {
-            tailscale::run_setup(&agent.kube, token, version).await
-        }
+        Command::TailscaleSetup {
+            token,
+            version,
+            delete_clients,
+        } => tailscale::run_setup(&agent.kube, token, version, &delete_clients).await,
         Command::TailscaleClient { client_id, secret } => {
             tailscale::run_client(&agent.kube, &client_id, &secret).await
         }

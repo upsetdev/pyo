@@ -770,6 +770,13 @@ pub struct Outcome {
     /// The tailnet changed since it was reviewed, so Pyo stopped there.
     /// The token is kept: plan again with it and review the new changes.
     pub review_again: bool,
+    /// The old OAuth clients it was asked to delete, each as it went.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub old_clients: Vec<pyo_proto::tailscale::OldClientDeleted>,
+    /// The tailnet the token is for ("tail1234.ts.net"), when an old client
+    /// was missing and Tailscale said: Pyo then knows it's gone from there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tailnet: Option<String>,
 }
 
 /// Why the setup stopped before the end.
@@ -949,6 +956,67 @@ async fn make_client(api: &Api, host: &impl Host) -> Result<Vec<Value>, String> 
     }
 }
 
+const CANT_DELETE_CLIENTS: &str = "The token can't delete OAuth clients.";
+
+/// The team's old OAuth clients, deleted with the pasted token once the
+/// setup is done: never the one the cluster keeps now. Not on this
+/// tailnet (404): "missing", with the tailnet the token is for.
+async fn delete_old_clients(
+    api: &Api,
+    host: &impl Host,
+    ids: &[String],
+    out: &mut Outcome,
+) {
+    use pyo_proto::tailscale::OldClientDeleted;
+    if ids.is_empty() {
+        return;
+    }
+    let kept = host.working_client().await;
+    for id in ids {
+        let said = |state: &str, reason: Option<String>| OldClientDeleted {
+            client_id: id.clone(),
+            state: state.into(),
+            reason,
+        };
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            out.old_clients.push(said("failed", Some("Not a client ID.".into())));
+            continue;
+        }
+        if kept.as_deref() == Some(id.as_str()) {
+            out.old_clients.push(said("kept", None));
+            continue;
+        }
+        let r = api
+            .send(
+                reqwest::Method::DELETE,
+                &format!("/tailnet/-/keys/{id}"),
+                Body::None,
+                &[],
+            )
+            .await;
+        out.old_clients.push(match r {
+            Ok(_) => {
+                tracing::info!(client = %id, "old tailscale client deleted");
+                out.changed.push(format!("Deleted the old OAuth client {id}"));
+                said("deleted", None)
+            }
+            Err(e) if e.status == 404 => said("missing", None),
+            Err(e) if e.status == 401 || e.status == 403 => {
+                said("failed", Some(CANT_DELETE_CLIENTS.into()))
+            }
+            Err(e) => said("failed", Some(say(&e, "delete the old OAuth client"))),
+        });
+    }
+    if out.old_clients.iter().any(|c| c.state == "missing") {
+        out.tailnet = api.get("/tailnet/-/devices").await.ok().and_then(|v| {
+            v["devices"]
+                .as_array()?
+                .iter()
+                .find_map(|d| d["name"].as_str().and_then(pyo_proto::tailscale::suffix_of))
+        });
+    }
+}
+
 /// What became of the pasted token.
 enum Gone {
     Deleted,
@@ -1049,10 +1117,19 @@ async fn set_up(
 /// it if something did. However it ends, the pasted token is deleted
 /// last, or left to the admin as a todo, except when the tailnet changed
 /// since the review: then it stays for the new one.
-pub(crate) async fn apply_with(api: &Api, host: &impl Host, reviewed: &str) -> Outcome {
+pub(crate) async fn apply_with(
+    api: &Api,
+    host: &impl Host,
+    reviewed: &str,
+    delete_clients: &[String],
+) -> Outcome {
     let mut out = Outcome::default();
     let failed = match set_up(api, host, reviewed, &mut out).await {
-        Ok(()) => None,
+        // The new client is kept: the old ones can go, before the token.
+        Ok(()) => {
+            delete_old_clients(api, host, delete_clients, &mut out).await;
+            None
+        }
         Err(Stop::Failed(e)) => Some(e),
         Err(Stop::Review) => {
             out.review_again = true;
@@ -1088,14 +1165,19 @@ pub async fn plan(api: &Api, host: &impl Host) -> Result<Plan, String> {
 }
 
 /// The setup, as reviewed (`version` is the reviewed plan's).
-pub async fn apply(api: &Api, host: &impl Host, version: &str) -> Outcome {
+pub async fn apply(
+    api: &Api,
+    host: &impl Host,
+    version: &str,
+    delete_clients: &[String],
+) -> Outcome {
     if let Err(e) = check_shape(&api.token) {
         return Outcome {
             error: Some(e),
             ..Default::default()
         };
     }
-    apply_with(api, host, version).await
+    apply_with(api, host, version, delete_clients).await
 }
 
 #[cfg(test)]

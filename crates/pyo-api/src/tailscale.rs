@@ -138,6 +138,28 @@ pub struct TeamTailnet {
     pub suffix: Option<String>,
     /// "holder_gone" or "client_refused".
     pub problem: Option<String>,
+    /// The OAuth clients to delete in the Tailscale console, when read.
+    pub old_clients: Vec<OldClient>,
+}
+
+/// An OAuth client a cluster of the team kept before, to delete
+/// (`pyo.team_tailscale.old_clients`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OldClient {
+    pub client_id: String,
+    #[serde(default)]
+    pub hint: String,
+    #[serde(default)]
+    pub cluster_id: String,
+    #[serde(default)]
+    pub cluster: String,
+    /// Its tailnet, when it's another than the team's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    /// Why a setup couldn't delete it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A team row as it's read: team, holder (its id, name, connected),
@@ -175,6 +197,7 @@ fn team_from(r: TeamRow) -> TeamTailnet {
         hint,
         suffix,
         problem,
+        old_clients: Vec::new(),
     }
 }
 
@@ -662,6 +685,7 @@ pub async fn plan(s: &AppState, scope: &Scope, token: String) -> ApiResult<Value
         Command::TailscaleSetup {
             token,
             version: None,
+            delete_clients: Vec::new(),
         },
         SETUP_WAIT,
     )
@@ -674,12 +698,18 @@ pub async fn plan(s: &AppState, scope: &Scope, token: String) -> ApiResult<Value
 pub async fn set_up(s: &AppState, scope: &Scope, token: String, version: &str) -> ApiResult<Value> {
     token_shape(&token)?;
     let (target, team_wide) = setup_target(&s.db, scope).await?;
+    let team = match team_wide {
+        true => team_of_cluster(&s.db, &target).await?,
+        false => None,
+    };
+    let delete_clients = team.as_ref().map(clients_to_delete).unwrap_or_default();
     let (_, r) = ask(
         s,
         &target,
         Command::TailscaleSetup {
             token,
             version: Some(version.to_owned()),
+            delete_clients,
         },
         SETUP_WAIT,
     )
@@ -694,10 +724,135 @@ pub async fn set_up(s: &AppState, scope: &Scope, token: String, version: &str) -
             keep_team(&s.db, &target, id, hint, None).await?;
         }
     }
+    // An agent from before the list says nothing about it: it stays.
+    if let Some(team) = &team
+        && let Some(said) = out.get("oldClients").cloned()
+    {
+        let said: Vec<ts::OldClientDeleted> = serde_json::from_value(said).unwrap_or_default();
+        let tailnet = out["tailnet"].as_str();
+        settle_old_clients(&s.db, &team.team_id, &said, tailnet, team.suffix.as_deref()).await?;
+    }
     if let Some(o) = out.as_object_mut() {
         o.insert("clusterId".into(), json!(target));
     }
     Ok(out)
+}
+
+/// The team of a cluster, with its Tailscale as it is now and the old
+/// clients it lists.
+async fn team_of_cluster(db: &PgPool, cluster_id: &str) -> ApiResult<Option<TeamTailnet>> {
+    let team: Option<String> = sqlx::query_scalar("SELECT team_id FROM pyo.clusters WHERE id = $1")
+        .bind(cluster_id)
+        .fetch_optional(db)
+        .await?;
+    let Some(team) = team else {
+        return Ok(None);
+    };
+    let tt = team_tailnet(db, &team).await?;
+    let old: Value =
+        sqlx::query_scalar("SELECT old_clients FROM pyo.team_tailscale WHERE team_id = $1")
+            .bind(&team)
+            .fetch_optional(db)
+            .await?
+            .unwrap_or(json!([]));
+    let mut now = tt.clone().unwrap_or(TeamTailnet {
+        team_id: team,
+        ..Default::default()
+    });
+    now.old_clients = serde_json::from_value(old).unwrap_or_default();
+    Ok(Some(now))
+}
+
+/// What a setup deletes with the pasted token: the team's old OAuth
+/// clients on its tailnet (or ones Pyo saw on no other), and the team's
+/// own (a new client replaces it, and the agent never deletes the one it
+/// keeps).
+fn clients_to_delete(t: &TeamTailnet) -> Vec<String> {
+    let mut ids: Vec<String> = t
+        .old_clients
+        .iter()
+        .filter(|c| {
+            c.suffix.as_deref().is_none_or(str::is_empty)
+                || c.suffix.as_deref() == t.suffix.as_deref()
+        })
+        .map(|c| c.client_id.clone())
+        .chain(Some(t.client_id.clone()).filter(|c| !c.is_empty()))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// The team's old clients after a setup said what became of them: deleted
+/// ones go, and so do missing ones on the tailnet the token is for
+/// (`tailnet`). Any other stays, with why (`error`).
+async fn settle_old_clients(
+    db: &PgPool,
+    team_id: &str,
+    said: &[ts::OldClientDeleted],
+    tailnet: Option<&str>,
+    team_suffix: Option<&str>,
+) -> ApiResult<()> {
+    let old: Option<Value> =
+        sqlx::query_scalar("SELECT old_clients FROM pyo.team_tailscale WHERE team_id = $1")
+            .bind(team_id)
+            .fetch_optional(db)
+            .await?;
+    let Some(old) = old else {
+        return Ok(());
+    };
+    let list = settled(old, said, tailnet, team_suffix);
+    sqlx::query(
+        "UPDATE pyo.team_tailscale SET old_clients = $2, updated_at = now() WHERE team_id = $1",
+    )
+    .bind(team_id)
+    .bind(list)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// [`settle_old_clients`]' list.
+pub(crate) fn settled(
+    old: Value,
+    said: &[ts::OldClientDeleted],
+    tailnet: Option<&str>,
+    team_suffix: Option<&str>,
+) -> Value {
+    let list: Vec<Value> = old
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|mut c| {
+            let id = c["clientId"].as_str().unwrap_or("").to_owned();
+            let Some(r) = said.iter().find(|r| r.client_id == id) else {
+                return Some(c);
+            };
+            let on = c["suffix"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or(team_suffix);
+            match r.state.as_str() {
+                "deleted" => None,
+                "missing" if tailnet.is_some() && on == tailnet => None,
+                "missing" => {
+                    c["error"] = json!("Tailscale doesn't know it on the tailnet set up now.");
+                    Some(c)
+                }
+                "failed" => {
+                    c["error"] = json!(
+                        r.reason
+                            .clone()
+                            .unwrap_or_else(|| "Couldn't delete it.".into())
+                    );
+                    Some(c)
+                }
+                _ => Some(c),
+            }
+        })
+        .collect();
+    Value::Array(list)
 }
 
 /// Saves the cluster's client as Pyo shows it. Another tailnet: Pyo's
@@ -3513,6 +3668,7 @@ mod tests {
             hint: "…T".into(),
             suffix: suffix.map(str::to_owned),
             problem: None,
+            old_clients: Vec::new(),
         }
     }
 
@@ -4676,5 +4832,193 @@ mod tests {
             left,
             [format!("{e1} [\"web-1\"]"), format!("{e2} [\"web-1\"]")]
         );
+    }
+
+    // ── Deleting the old clients ────────────────────────────────────────────
+
+    fn old(id: &str, suffix: Option<&str>) -> OldClient {
+        OldClient {
+            client_id: id.into(),
+            suffix: suffix.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    /// A setup deletes the team's old clients on its tailnet and the
+    /// team's own (which the agent keeps if it's still its), never one on
+    /// another tailnet.
+    #[test]
+    fn a_setup_deletes_the_old_clients_on_the_teams_tailnet() {
+        let mut t = team(Some("cl_h"), Some("tail1.ts.net"));
+        t.old_clients = vec![
+            old("kA", None),
+            old("kB", Some("tail1.ts.net")),
+            old("kC", Some("tail2.ts.net")),
+            old("kT", None),
+        ];
+        assert_eq!(clients_to_delete(&t), ["kA", "kB", "kT"]);
+        t.client_id = String::new();
+        t.old_clients.clear();
+        assert!(clients_to_delete(&t).is_empty());
+    }
+
+    /// What the agent said: deleted ones go, missing ones go when the token
+    /// is for their tailnet, the rest stay with why. An older agent says
+    /// nothing, and nothing changes.
+    #[test]
+    fn deleted_clients_come_off_the_list() {
+        let list = json!([
+            { "clientId": "kA", "hint": "…A", "clusterId": "cl_a", "cluster": "a" },
+            { "clientId": "kB", "hint": "", "clusterId": "", "cluster": "" },
+            { "clientId": "kC", "hint": "", "clusterId": "", "cluster": "", "suffix": "tail2.ts.net" },
+            { "clientId": "kD", "hint": "", "clusterId": "", "cluster": "" },
+            { "clientId": "kE", "hint": "", "clusterId": "", "cluster": "" },
+        ]);
+        let said = |id: &str, state: &str, reason: Option<&str>| ts::OldClientDeleted {
+            client_id: id.into(),
+            state: state.into(),
+            reason: reason.map(str::to_owned),
+        };
+        let out = settled(
+            list.clone(),
+            &[
+                said("kA", "deleted", None),
+                said("kB", "missing", None),
+                said("kC", "missing", None),
+                said(
+                    "kD",
+                    "failed",
+                    Some("The token can't delete OAuth clients."),
+                ),
+            ],
+            Some("tail1.ts.net"),
+            Some("tail1.ts.net"),
+        );
+        let ids: Vec<&str> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["clientId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["kC", "kD", "kE"]);
+        assert_eq!(
+            out[0]["error"],
+            "Tailscale doesn't know it on the tailnet set up now."
+        );
+        assert_eq!(out[1]["error"], "The token can't delete OAuth clients.");
+        assert!(out[2].get("error").is_none());
+        // Missing, and the tailnet unknown: it stays.
+        let out = settled(
+            list.clone(),
+            &[said("kB", "missing", None)],
+            None,
+            Some("tail1.ts.net"),
+        );
+        assert_eq!(out.as_array().unwrap().len(), 5);
+        assert_eq!(settled(list.clone(), &[], None, None), list);
+    }
+
+    /// A new setup on a new holder sends the team's old clients and its
+    /// own to the agent, and keeps what came back: deleted ones off the
+    /// list, a refused one on it with why. An agent from before says
+    /// nothing, and the list stays.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn a_new_holder_deletes_the_old_clients() {
+        let (s, team, cl, suffix) = holder_team(2).await;
+        set_tailscale(&s.db, &cl[0], &own("kT", Some(&suffix))).await;
+        keep_team(&s.db, &cl[0], "kT", "…T", Some(&suffix))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE pyo.team_tailscale SET old_clients = $2 WHERE team_id = $1")
+            .bind(&team)
+            .bind(json!([
+                { "clientId": "kOld", "hint": "", "clusterId": "", "cluster": "" },
+                { "clientId": "kElse", "hint": "", "clusterId": "", "cluster": "", "suffix": "other.ts.net" },
+            ]))
+            .execute(&s.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE pyo.clusters SET status = 'unreachable' WHERE id = $1")
+            .bind(&cl[0])
+            .execute(&s.db)
+            .await
+            .unwrap();
+        let setup = |data: Value| {
+            tokio::spawn(answers_for(
+                s.db.clone(),
+                cl[1].clone(),
+                "tailscale_setup",
+                data,
+            ))
+        };
+        let base = json!({ "ok": true, "changed": [], "todo": [], "error": null, "checks": [], "tokenDeleted": true, "reviewAgain": false,
+                           "client": { "clientId": "kNew", "hint": "…N" } });
+        let mut said = base.clone();
+        said["oldClients"] = json!([
+            { "clientId": "kOld", "state": "deleted" },
+            { "clientId": "kT", "state": "failed", "reason": "The token can't delete OAuth clients." },
+        ]);
+        let agent = setup(said);
+        set_up(
+            &s,
+            &Scope::Team(team.clone()),
+            "tskey-api-kAbc-0123456789abcdef".into(),
+            "v1",
+        )
+        .await
+        .unwrap();
+        let (cmd, _) = agent.await.unwrap();
+        assert_eq!(
+            cmd["delete_clients"],
+            json!(["kOld", "kT"]),
+            "not the one on another tailnet"
+        );
+        let old: Value =
+            sqlx::query_scalar("SELECT old_clients FROM pyo.team_tailscale WHERE team_id = $1")
+                .bind(&team)
+                .fetch_one(&s.db)
+                .await
+                .unwrap();
+        let left: Vec<(String, Option<String>)> = old
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["clientId"].as_str().unwrap().to_owned(),
+                    c["error"].as_str().map(str::to_owned),
+                )
+            })
+            .collect();
+        assert_eq!(
+            left,
+            [
+                ("kElse".to_owned(), None),
+                (
+                    "kT".to_owned(),
+                    Some("The token can't delete OAuth clients.".to_owned())
+                )
+            ]
+        );
+
+        // An agent from before: it ignores the list and says nothing.
+        let agent = setup(base);
+        set_up(
+            &s,
+            &Scope::Team(team.clone()),
+            "tskey-api-kAbc-0123456789abcdef".into(),
+            "v1",
+        )
+        .await
+        .unwrap();
+        agent.await.unwrap();
+        let after: Value =
+            sqlx::query_scalar("SELECT old_clients FROM pyo.team_tailscale WHERE team_id = $1")
+                .bind(&team)
+                .fetch_one(&s.db)
+                .await
+                .unwrap();
+        assert_eq!(after, old, "the list stays");
     }
 }

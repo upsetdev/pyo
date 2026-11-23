@@ -173,6 +173,20 @@ pub struct TailnetSync {
     pub cluster: Option<String>,
 }
 
+/// What became of an old OAuth client a setup was asked to delete
+/// ([`crate::Command::TailscaleSetup`]'s `delete_clients`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OldClientDeleted {
+    pub client_id: String,
+    /// "deleted", "missing" (not on this tailnet, or deleted already),
+    /// "kept" (the cluster keeps it now) or "failed".
+    pub state: String,
+    /// Why it failed, as people read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// One name, as the agent left it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

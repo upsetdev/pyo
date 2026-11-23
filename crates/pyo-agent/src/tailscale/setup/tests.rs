@@ -101,6 +101,12 @@ struct Mock {
     echo_token: bool,
     clients: Vec<Value>,
     deleted: Vec<String>,
+    /// OAuth clients made before (the team's old ones), by ID.
+    old: Vec<String>,
+    /// The token can't delete OAuth clients (only itself).
+    refuse_delete_clients: bool,
+    /// Machines on the tailnet, by full name.
+    devices: Vec<String>,
     /// "METHOD /path" of every request.
     log: Vec<String>,
     /// Policy texts written.
@@ -238,6 +244,22 @@ async fn handle(
                 _ => err(&m, StatusCode::NOT_FOUND, "key not found", &auth),
             }
         }
+        ("GET", "/tailnet/-/devices") => {
+            let list: Vec<Value> = m.devices.iter().map(|n| json!({ "name": n })).collect();
+            axum::Json(json!({ "devices": list })).into_response()
+        }
+        ("DELETE", p) if p.starts_with("/tailnet/-/keys/") && p != "/tailnet/-/keys/kTok1CNTRL" => {
+            let id = p["/tailnet/-/keys/".len()..].to_owned();
+            let known = m.old.contains(&id) || m.clients.iter().any(|k| k["id"] == id.as_str());
+            if !known || m.deleted.contains(&id) {
+                return err(&m, StatusCode::NOT_FOUND, "key not found", &auth);
+            }
+            if m.refuse_delete_clients {
+                return err(&m, StatusCode::FORBIDDEN, "insufficient permissions", &auth);
+            }
+            m.deleted.push(id);
+            axum::Json(json!({})).into_response()
+        }
         ("DELETE", p) if p.starts_with("/tailnet/-/keys/") => {
             let id = p["/tailnet/-/keys/".len()..].to_owned();
             if m.refuse_revoke && id == "kTok1CNTRL" {
@@ -304,7 +326,7 @@ fn api(base: &str) -> Api {
 /// Plans, then sets up what was reviewed, as the dashboard does.
 async fn set_up(base: &str, host: &FakeHost) -> Outcome {
     let p = plan_with(&api(base), host).await.unwrap();
-    apply_with(&api(base), host, &p.version).await
+    apply_with(&api(base), host, &p.version, &[]).await
 }
 
 fn fresh() -> Mock {
@@ -584,7 +606,7 @@ async fn a_fresh_tailnet_with_the_default_policy() {
         "the plan changes nothing"
     );
 
-    let out = apply_with(&api(&base), &host, &p.version).await;
+    let out = apply_with(&api(&base), &host, &p.version, &[]).await;
     assert!(out.ok, "{out:?}");
     assert_eq!(
         out.changed,
@@ -645,7 +667,7 @@ async fn a_restricted_policy_with_its_own_tag_owners() {
             "Create the Pyo OAuth client",
         ]
     );
-    let out = apply_with(&api(&base), &host, &p.version).await;
+    let out = apply_with(&api(&base), &host, &p.version, &[]).await;
     assert!(out.ok, "{out:?}");
     let m = st.lock().unwrap();
     assert!(
@@ -681,7 +703,7 @@ async fn an_already_set_up_tailnet_changes_nothing() {
     assert!(p.changes.is_empty(), "{p:?}");
     assert!(p.diff.is_empty());
     assert_eq!(p.done.len(), 6);
-    let out = apply_with(&api(&base), &host, &p.version).await;
+    let out = apply_with(&api(&base), &host, &p.version, &[]).await;
     assert!(
         out.ok && out.changed.is_empty() && out.token_deleted,
         "{out:?}"
@@ -706,7 +728,7 @@ async fn a_saved_client_from_another_tailnet_is_replaced() {
     };
     let p = plan_with(&api(&base), &host).await.unwrap();
     assert_eq!(p.changes, ["Create the Pyo OAuth client"]);
-    let out = apply_with(&api(&base), &host, &p.version).await;
+    let out = apply_with(&api(&base), &host, &p.version, &[]).await;
     assert!(out.ok);
     assert_eq!(st.lock().unwrap().clients.len(), 1);
 }
@@ -728,7 +750,7 @@ async fn a_policy_managed_in_git_is_never_written() {
             .any(|l| l.contains("\"tag:pyo\": [\"autogroup:admin\"]"))
     );
     // Set up anyway: nothing is written, and the token stays for a new review.
-    let out = apply_with(&api(&base), &host, &p.version).await;
+    let out = apply_with(&api(&base), &host, &p.version, &[]).await;
     assert!(!out.ok && out.review_again && !out.token_deleted, "{out:?}");
     assert!(writes(&st.lock().unwrap()).is_empty());
 
@@ -742,7 +764,7 @@ async fn a_policy_managed_in_git_is_never_written() {
     let p = plan_with(&api(&base), &host).await.unwrap();
     assert!(p.blocked.is_none() && p.diff.is_empty(), "{p:?}");
     assert!(!p.changes.iter().any(|c| c.contains("Approve")));
-    let out = apply_with(&api(&base), &host, &p.version).await;
+    let out = apply_with(&api(&base), &host, &p.version, &[]).await;
     assert!(out.ok, "{out:?}");
     assert!(st.lock().unwrap().written.is_empty());
 }
@@ -757,7 +779,7 @@ async fn a_policy_changed_while_setting_up_is_reviewed_again() {
     .await;
     let host = FakeHost::default();
     let p = plan_with(&api(&base), &host).await.unwrap();
-    let out = apply_with(&api(&base), &host, &p.version).await;
+    let out = apply_with(&api(&base), &host, &p.version, &[]).await;
     // Saving would lose the other edit or save what wasn't reviewed: stop.
     assert!(!out.ok && out.review_again, "{out:?}");
     assert_eq!(out.changed, ["Turned on HTTPS certificates"]);
@@ -773,7 +795,7 @@ async fn a_policy_changed_while_setting_up_is_reviewed_again() {
     let again = plan_with(&api(&base), &host).await.unwrap();
     assert_ne!(again.version, p.version);
     assert!(again.done.contains(&"HTTPS certificates are on".to_owned()));
-    let out = apply_with(&api(&base), &host, &again.version).await;
+    let out = apply_with(&api(&base), &host, &again.version, &[]).await;
     assert!(out.ok && out.token_deleted, "{out:?}");
     let m = st.lock().unwrap();
     // The other edit is kept, under Pyo's.
@@ -793,7 +815,7 @@ async fn a_policy_changed_after_the_review_changes_nothing() {
         m.policy = m.policy.replacen('{', "{\n  // edited after the review", 1);
         m.etag += 1;
     }
-    let out = apply_with(&api(&base), &host, &p.version).await;
+    let out = apply_with(&api(&base), &host, &p.version, &[]).await;
     assert!(
         !out.ok && out.review_again && out.changed.is_empty(),
         "{out:?}"
@@ -904,7 +926,7 @@ async fn magic_dns_without_nameservers_changes_nothing() {
     let host = FakeHost::default();
     let p = plan_with(&api(&base), &host).await.unwrap();
     assert_eq!(p.changes[0], "Turn on MagicDNS");
-    let out = apply_with(&api(&base), &host, &p.version).await;
+    let out = apply_with(&api(&base), &host, &p.version, &[]).await;
     assert!(!out.ok && out.changed.is_empty(), "{out:?}");
     let e = out.error.clone().unwrap();
     assert!(e.contains("needs a DNS nameserver"), "{e}");
@@ -945,7 +967,7 @@ async fn a_token_tailscale_no_longer_takes_needs_no_deleting() {
         &base,
         Token::new("tskey-api-kOther1CNTRL-zzzzzzzzzzzzzzzzzzzz"),
     );
-    let out = apply_with(&wrong, &FakeHost::default(), "").await;
+    let out = apply_with(&wrong, &FakeHost::default(), "", &[]).await;
     assert_eq!(out.error.as_deref(), Some(BAD_TOKEN));
     assert!(
         !out.ok && !out.token_deleted && out.todo.is_empty(),
@@ -1031,7 +1053,7 @@ async fn the_token_never_shows_in_logs_errors_or_saved_settings() {
         seen.push(format!("{p:?}"));
         let reviewed = p.as_ref().map(|p| p.version.clone()).unwrap_or_default();
         seen.push(serde_json::to_string(&p.ok()).unwrap());
-        let out = apply_with(&api(&base), &host, &reviewed).await;
+        let out = apply_with(&api(&base), &host, &reviewed, &[]).await;
         seen.push(format!("{out:?}"));
         seen.push(serde_json::to_string(&out).unwrap());
         for (id, secret) in host.saved.lock().unwrap().iter() {
@@ -1093,4 +1115,91 @@ async fn a_policy_pyo_cant_read_stops_the_plan_with_why() {
         "{e}"
     );
     assert!(writes(&st.lock().unwrap()).is_empty());
+}
+
+/// The team's old OAuth clients go with the pasted token once the setup is
+/// done, before the token: one deleted, one Tailscale doesn't know, and
+/// never the one the cluster keeps now.
+#[tokio::test]
+async fn old_clients_are_deleted_before_the_token() {
+    let _one = ONE.lock().await;
+    let (base, st) = serve(Mock {
+        old: vec!["kOld1".into(), "kOld2".into()],
+        devices: vec!["web-1.tail9.ts.net".into()],
+        ..fresh()
+    })
+    .await;
+    let host = FakeHost::default();
+    let p = plan_with(&api(&base), &host).await.unwrap();
+    let ids = ["kOld1", "kGone", "kOld2", "kPyo1CNTRL"].map(str::to_owned);
+    let out = apply_with(&api(&base), &host, &p.version, &ids).await;
+    assert!(out.ok && out.token_deleted, "{out:?}");
+    let states: Vec<(&str, &str)> = out
+        .old_clients
+        .iter()
+        .map(|c| (c.client_id.as_str(), c.state.as_str()))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            ("kOld1", "deleted"),
+            ("kGone", "missing"),
+            ("kOld2", "deleted"),
+            ("kPyo1CNTRL", "kept")
+        ]
+    );
+    assert_eq!(out.tailnet.as_deref(), Some("tail9.ts.net"));
+    let m = st.lock().unwrap();
+    assert_eq!(
+        m.deleted,
+        ["kOld1", "kOld2", "kTok1CNTRL"],
+        "the token last"
+    );
+    // What Pyo reads.
+    let v = serde_json::to_value(&out).unwrap();
+    assert_eq!(
+        v["oldClients"][1],
+        json!({ "clientId": "kGone", "state": "missing" })
+    );
+}
+
+/// A token that can't delete OAuth clients: the setup is done anyway, and
+/// each old client says why it's still there.
+#[tokio::test]
+async fn a_token_that_cant_delete_clients_leaves_them() {
+    let _one = ONE.lock().await;
+    let (base, st) = serve(Mock {
+        old: vec!["kOld1".into()],
+        refuse_delete_clients: true,
+        ..fresh()
+    })
+    .await;
+    let host = FakeHost::default();
+    let p = plan_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version, &["kOld1".to_owned()]).await;
+    assert!(out.ok && out.token_deleted, "{out:?}");
+    assert_eq!(out.old_clients[0].state, "failed");
+    assert_eq!(
+        out.old_clients[0].reason.as_deref(),
+        Some(CANT_DELETE_CLIENTS)
+    );
+    assert_eq!(st.lock().unwrap().deleted, ["kTok1CNTRL"]);
+}
+
+/// A setup that stops deletes no old client: the team may still need it.
+#[tokio::test]
+async fn a_failed_setup_deletes_no_old_client() {
+    let _one = ONE.lock().await;
+    let (base, st) = serve(Mock {
+        old: vec!["kOld1".into()],
+        refuse_client: true,
+        ..fresh()
+    })
+    .await;
+    let host = FakeHost::default();
+    let p = plan_with(&api(&base), &host).await.unwrap();
+    let out = apply_with(&api(&base), &host, &p.version, &["kOld1".to_owned()]).await;
+    assert!(!out.ok);
+    assert!(out.old_clients.is_empty());
+    assert!(!st.lock().unwrap().deleted.contains(&"kOld1".to_owned()));
 }

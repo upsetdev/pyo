@@ -452,10 +452,11 @@ function ClusterList({ ts, admin }: { ts: TeamTailscale; admin: boolean }) {
 
 /** Left to do in the Tailscale console: old OAuth clients, servers of removed clusters. */
 function ConsoleTodo({ ts }: { ts: TeamTailscale }) {
-  const clients = ts.oldClients.map((c) =>
-    c.suffix && c.suffix !== ts.suffix
-      ? `Delete the OAuth client ${c.clientId} in the console of ${c.suffix}.`
-      : `Delete the OAuth client ${c.clientId}.`,
+  const clients = ts.oldClients.map(
+    (c) =>
+      (c.suffix && c.suffix !== ts.suffix
+        ? `Delete the OAuth client ${c.clientId} in the console of ${c.suffix}.`
+        : `Delete the OAuth client ${c.clientId}.`) + (c.error ? ` ${c.error}` : ""),
   );
   const servers = ts.leftovers.map(
     (l) => `Remove ${l.servers.join(", ")} of the removed cluster ${l.cluster}${l.suffix && l.suffix !== ts.suffix ? ` from ${l.suffix}` : ""}.`,
