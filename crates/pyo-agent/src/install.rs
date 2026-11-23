@@ -247,10 +247,12 @@ pub async fn refresh(
             .map_err(|e| anyhow::anyhow!("couldn't read its {kind} {name} ({e}); {RERUN}"))?;
         match have {
             None => anyhow::bail!(
-                "this agent's roles are older than Pyo's ({kind} {name} is missing); {RERUN}"
+                "{} ({kind} {name} is missing); {RERUN}",
+                rbac::ROLES_OLDER
             ),
             Some(h) if !same(o, &serde_json::to_value(&h)?) => anyhow::bail!(
-                "this agent's roles are older than Pyo's ({kind} {name} differs); {RERUN}"
+                "{} ({kind} {name} differs); {RERUN}",
+                rbac::ROLES_OLDER
             ),
             Some(_) => {}
         }

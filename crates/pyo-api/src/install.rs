@@ -523,6 +523,11 @@ pub fn install_state(
     }
     match last {
         None => ("updating", String::new(), true),
+        // Its roles aren't this Pyo's: the same agent can't make this
+        // refresh however often it's sent, so the connect command it is.
+        Some(l) if l.status == "failed" && roles_older(&l.message) && !l.agent_changed => {
+            ("outdated", String::new(), false)
+        }
         Some(l) if l.status == "failed" => {
             if l.age_secs < REFRESH_RETRY_SECS && !l.agent_changed {
                 ("outdated", l.message.clone(), false)
@@ -538,6 +543,14 @@ pub fn install_state(
             l.age_secs >= refresh_patience(l.attempts),
         ),
     }
+}
+
+/// Whether a refresh failed because the agent's roles aren't this Pyo's
+/// (pyo-agent's install.rs says so in these words): no agent can change
+/// its own roles, so only the cluster's connect command gets it further.
+/// A release that changes the roles leaves every cluster there.
+pub fn roles_older(message: &str) -> bool {
+    message.contains(pyo_proto::rbac::ROLES_OLDER)
 }
 
 /// How long the `attempts`th refresh of an install has before another is sent.
@@ -826,6 +839,45 @@ mod tests {
         assert!(!agent_changed(Some("0.3.2"), "0.3.2"));
         assert!(!agent_changed(None, "0.3.2"));
         assert!(!agent_changed(Some("0.3.1"), ""));
+    }
+
+    /// A release that changes the agent's roles (0.51.0's Cloudflare
+    /// Tunnel Services): the refresh fails on them, on any cluster. It
+    /// isn't sent again every half hour, the install stays outdated (never
+    /// "updating" in between) and the cluster's settings say what to run,
+    /// in Pyo's words.
+    #[test]
+    fn a_refresh_that_failed_on_the_roles_waits_for_the_connect_command() {
+        let s = scope("h0", true);
+        let on_roles = |age_secs: i64| LastRefresh {
+            message: "this agent's roles are older than Pyo's (Role pyo-agent differs); run the cluster's connect command to bring them up to date".into(),
+            ..last("failed", age_secs)
+        };
+        for age in [5, 60, REFRESH_RETRY_SECS, 30 * REFRESH_RETRY_SECS] {
+            assert_eq!(
+                install_state(&s, "h1", Some(&on_roles(age))),
+                ("outdated", String::new(), false),
+                "{age}"
+            );
+        }
+        // With no message of its own, the cluster's settings say Pyo's.
+        assert_eq!(outdated_message(&s), OUTDATED);
+        assert!(OUTDATED.contains("Refresh this cluster") && !OUTDATED.contains(';'));
+        // Another version of the agent runs: it gets one try.
+        let other = LastRefresh {
+            agent_changed: true,
+            ..on_roles(60)
+        };
+        assert_eq!(
+            install_state(&s, "h1", Some(&other)),
+            ("updating", String::new(), true)
+        );
+        // Any other failure is still tried again later.
+        assert!(roles_older(&on_roles(0).message));
+        assert!(!roles_older("couldn't read its Role pyo-agent (timed out); run the cluster's connect command to bring them up to date"));
+        assert!(install_state(&s, "h1", Some(&last("failed", REFRESH_RETRY_SECS))).2);
+        // The install the connect command brings is current again.
+        assert_eq!(install_state(&scope("h1", true), "h1", Some(&on_roles(60))).0, "current");
     }
 
     #[test]

@@ -1593,13 +1593,14 @@ pub async fn remove(client: &Client, service_id: &str) {
 /// tailnet Gateway follows the API's wanted list (tailnet.rs).
 /// One the cluster's install refuses (older than Pyo's, until the
 /// cluster's connect command runs) waits for that install to change. So do
-/// client policies written as an older install accepts them
-/// ([`headers_kept`]): they're written again once it changes.
+/// client policies and the proxies' settings written as an older install
+/// accepts them ([`headers_kept`], [`priority_left_out`]): they're written
+/// again once it changes.
 pub async fn ensure(client: Client) {
     let mut refusals = 0;
     loop {
         match ensure_once(&client).await {
-            Ok(()) if headers_kept() => {
+            Ok(()) if headers_kept() || priority_left_out() => {
                 refusals += 1;
                 crate::refused::wait_for_install(&client, refusals).await;
             }
@@ -1712,15 +1713,8 @@ pub async fn set_public_traffic(client: &Client, on: bool) {
     {
         return;
     }
-    match proxies
-        .patch(
-            "pyo",
-            &pp(),
-            &Patch::Apply(system::envoy_proxy(&system::geoip_image_from_env(), on)),
-        )
-        .await
-    {
-        Ok(_) => tracing::info!(on, "public traffic"),
+    match write_envoy_proxy(&proxies, on).await {
+        Ok(()) => tracing::info!(on, "public traffic"),
         Err(e) if crate::refused::is_refusal(&e) => {
             tracing::warn!(error = %e, "couldn't change public traffic (run the cluster's connect command)");
             if let Ok(mut r) = PUBLIC_REFUSED.lock() {
@@ -1733,6 +1727,46 @@ pub async fn set_public_traffic(client: &Client, on: bool) {
 
 /// The public traffic setting the install refused, and that install's stamp.
 static PUBLIC_REFUSED: std::sync::Mutex<Option<(bool, String)>> = std::sync::Mutex::new(None);
+
+/// Said once in the agent's log when the cluster's install refuses the
+/// proxies' priority.
+pub const PRIORITY_LEFT_OUT: &str = "This cluster needs a refresh. Run the command under Refresh this cluster in the cluster's settings so the proxies keep running on a server short of disk.";
+
+/// Whether the agent last wrote the proxies' settings without their
+/// priority because the install refused it.
+static LEFT_OUT: AtomicBool = AtomicBool::new(false);
+
+pub fn priority_left_out() -> bool {
+    LEFT_OUT.load(Ordering::Relaxed)
+}
+
+/// Write the proxies' settings, published or not. When the cluster's
+/// install refuses them (its admission policy is older than this agent's
+/// and lists them without their pods' priority), they're written as that
+/// install accepts, so the gateway's other settings still follow and
+/// public traffic can still be switched. That's said once
+/// ([`PRIORITY_LEFT_OUT`]), and [`ensure`] writes them whole once the
+/// install changes.
+async fn write_envoy_proxy(proxies: &Api<DynamicObject>, public: bool) -> kube::Result<()> {
+    let o = system::envoy_proxy(&system::geoip_image_from_env(), public);
+    let refused = match proxies.patch("pyo", &pp(), &Patch::Apply(&o)).await {
+        Ok(_) => {
+            LEFT_OUT.store(false, Ordering::Relaxed);
+            return Ok(());
+        }
+        Err(e) => e,
+    };
+    let Some(older) = system::envoy_proxy_without_priority(&o)
+        .filter(|_| crate::refused::is_refusal(&refused))
+    else {
+        return Err(refused);
+    };
+    proxies.patch("pyo", &pp(), &Patch::Apply(&older)).await?;
+    if !LEFT_OUT.swap(true, Ordering::Relaxed) {
+        tracing::warn!(error = %refused, "{PRIORITY_LEFT_OUT}");
+    }
+    Ok(())
+}
 
 /// The Tailscale addresses the websites are published on: every server's
 /// that runs a proxy (all but build-only ones), from what locate.rs found,
@@ -2070,13 +2104,7 @@ async fn ensure_once(client: &Client) -> anyhow::Result<()> {
         }
     }
     let public = wanted_public(heard_public(), current);
-    proxies
-        .patch(
-            "pyo",
-            &pp(),
-            &Patch::Apply(system::envoy_proxy(&system::geoip_image_from_env(), public)),
-        )
-        .await?;
+    write_envoy_proxy(&proxies, public).await?;
     let classes = Api::<DynamicObject>::all_with(
         client.clone(),
         &resource(
@@ -4682,6 +4710,10 @@ mod tests {
             .await;
     }
 
+    /// The tests that write as an older install does share what the agent
+    /// keeps of it (whether visitor headers stayed): one at a time.
+    static OLDER_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// What a cluster still on 0.5.4's admission policy accepts of the
     /// client policies: the shared ones only as listed then (before they
     /// removed visitor headers), a CDN's only without `headers`, and no
@@ -4714,6 +4746,7 @@ mod tests {
     #[tokio::test]
     async fn an_older_admission_policy_gets_client_policies_without_headers() {
         use pyo_proto::{Waf, WafSettings};
+        let _one = OLDER_INSTALL.lock().await;
         let (kube, client) = crate::fakekube::FakeKube::start().await;
         let at = |kind: &str, name: &str| {
             let (group, plural) = match kind {
@@ -4813,5 +4846,97 @@ mod tests {
         kube.admit(|w| (w.plural == "clienttrafficpolicies").then(|| (500, "etcd timeout".into())));
         assert!(apply(&client, &pyo, &b).await.is_err());
         assert!(!headers_kept());
+    }
+
+    /// What a cluster still on 0.5.5's admission policy accepts of the
+    /// proxies' settings: exactly as listed then, without their pods'
+    /// priority, published or not. Kubernetes' words for a refusal.
+    fn admission_055(w: &crate::fakekube::Write) -> Option<(u16, String)> {
+        if w.plural != "envoyproxies" || w.method == "DELETE" {
+            return None;
+        }
+        let listed: Vec<Value> = [true, false]
+            .into_iter()
+            .filter_map(|public| {
+                let now = system::envoy_proxy(&system::geoip_image_from_env(), public);
+                system::envoy_proxy_without_priority(&now).map(|o| o["spec"].clone())
+            })
+            .collect();
+        (!listed.contains(&w.body["spec"])).then(|| (403, "envoyproxies.gateway.envoyproxy.io \"pyo\" is forbidden: ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request: failed expression: gatewayAllowed".to_owned()))
+    }
+
+    /// A cluster whose install wasn't refreshed keeps 0.5.5's admission
+    /// policy after the agent moves on: it lists the proxies without their
+    /// priority. They're written as it accepts, so public traffic still
+    /// switches and the gateway's other settings still follow at a start.
+    /// Once the connect command brings the new policy, they get their
+    /// priority.
+    #[tokio::test]
+    async fn an_older_admission_policy_gets_the_proxies_without_their_priority() {
+        let _one = OLDER_INSTALL.lock().await;
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        let at = |group: &str, plural: &str, name: &str| {
+            format!("apis/{group}/namespaces/{GATEWAY_NS}/{plural}/{name}")
+        };
+        let proxy = at("gateway.envoyproxy.io/v1alpha1", "envoyproxies", "pyo");
+        let priority = |o: &Value| {
+            o["spec"]["provider"]["kubernetes"]["envoyDaemonSet"]["pod"]["priorityClassName"].clone()
+        };
+        // As 0.5.5's agent left them: published, no priority.
+        let was = system::envoy_proxy_without_priority(&system::envoy_proxy(
+            &system::geoip_image_from_env(),
+            true,
+        ))
+        .unwrap();
+        kube.put(&proxy, was);
+        kube.admit(admission_055);
+
+        // Public traffic off: refused whole, then written as 0.5.5 listed them.
+        set_public_traffic(&client, false).await;
+        let p = kube.get(&proxy).unwrap();
+        assert!(!system::envoy_proxy_public(&p["spec"]), "{p}");
+        assert!(priority(&p).is_null());
+        assert!(priority_left_out());
+        assert!(
+            kube.refused()
+                .iter()
+                .any(|w| w.plural == "envoyproxies" && priority(&w.body) == system::SERVER_CRITICAL)
+        );
+
+        // A start of the agent: the class, the shared Gateway, the WAF's
+        // Backend and the client policies still follow the proxies.
+        ensure_once(&client).await.expect("the gateway's settings");
+        assert!(priority_left_out());
+        assert!(!system::envoy_proxy_public(&kube.get(&proxy).unwrap()["spec"]));
+        assert!(kube.get(&at("gateway.networking.k8s.io/v1", "gateways", HTTP_GATEWAY)).is_some());
+        assert!(kube.get(&at("gateway.envoyproxy.io/v1alpha1", "backends", system::WAF_NAME)).is_some());
+        assert!(kube.get(&at("gateway.envoyproxy.io/v1alpha1", "clienttrafficpolicies", "pyo-https")).is_some());
+
+        // And back on.
+        set_public_traffic(&client, true).await;
+        let p = kube.get(&proxy).unwrap();
+        assert!(system::envoy_proxy_public(&p["spec"]) && priority(&p).is_null(), "{p}");
+
+        // The connect command ran: the new policy takes them whole.
+        kube.admit(|_| None);
+        ensure_once(&client).await.expect("the gateway's settings");
+        let p = kube.get(&proxy).unwrap();
+        assert_eq!(priority(&p), system::SERVER_CRITICAL);
+        assert!(system::envoy_proxy_public(&p["spec"]));
+        assert!(!priority_left_out());
+
+        // Refused either way: left as they are, and an error at a start.
+        kube.admit(|w| {
+            (w.plural == "envoyproxies").then(|| (403, "ValidatingAdmissionPolicy 'pyo-agent' denied request".into()))
+        });
+        set_public_traffic(&client, false).await;
+        assert!(system::envoy_proxy_public(&kube.get(&proxy).unwrap()["spec"]));
+        let e = ensure_once(&client).await.expect_err("refused");
+        assert!(crate::refused::in_chain(&e), "{e:#}");
+        // Anything else than a refusal isn't written another way.
+        kube.admit(|w| (w.plural == "envoyproxies").then(|| (500, "etcd timeout".into())));
+        assert!(ensure_once(&client).await.is_err());
+        assert_eq!(priority(&kube.get(&proxy).unwrap()), system::SERVER_CRITICAL);
+        assert!(!priority_left_out());
     }
 }
