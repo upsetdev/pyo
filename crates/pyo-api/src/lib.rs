@@ -673,6 +673,7 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
             .route("/api/{*rest}", get(error::not_found).post(error::not_found))
             .route("/install/agent.yaml", get(install::manifest))
             .route("/install/gateway-crds.yaml", get(install::gateway_crds))
+            .route("/install/version", get(install::version))
             .route("/install/this-machine", get(install::this_machine))
             .route("/install/first-sign-in", get(install::first_sign_in))
             .route(
