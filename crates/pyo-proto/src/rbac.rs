@@ -7,7 +7,8 @@
 //!   (pyo-system) and the projects' it creates. Each gets a RoleBinding to
 //!   `pyo-agent-write`, the only role the agent may bind.
 //! - A few named objects elsewhere: the gateway's objects in
-//!   `pyo-gateway`, the GPU device plugin, join tokens, CoreDNS's replica
+//!   `pyo-gateway` (its Services, network policies and ConfigMaps named by
+//!   the admission policy, not the role), the GPU device plugin, join tokens, CoreDNS's replica
 //!   count and disruption budget, two certificate issuers, the proxy's
 //!   GatewayClass and a RuntimeClass.
 //! - Servers (labels, taints, cordon, drain, removal) in a role of their own
@@ -410,16 +411,15 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
                 { "apiGroups": ["gateway.envoyproxy.io"], "resources": ["backends", "clienttrafficpolicies", "securitypolicies", "backendtrafficpolicies", "envoyextensionpolicies", "envoyproxies"], "verbs": ALL },
                 { "apiGroups": ["cert-manager.io"], "resources": ["certificates"], "verbs": ALL },
                 { "apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "patch", "delete"] },
-                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["create"] },
-                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::ORIGIN_PULL_SECRET] },
-                // The firewall for UDP ports: a network policy on the proxy's pods.
-                { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["create"] },
-                { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::FIREWALL_POLICY] },
-                // Websites on the servers' Tailscale addresses: its own Service.
-                { "apiGroups": [""], "resources": ["services"], "verbs": ["create"] },
-                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE, system::TUNNEL_ORIGIN_SERVICE, system::PUBLIC_PORTS_SERVICE] },
-                // The Tailscale Services' wanted list, for the servers' tailnet pods.
-                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WANTED] },
+                // Services, network policies and ConfigMaps: written without
+                // names here, so a release that adds one changes no role.
+                // The admission policy (`gatewayAllowed`) holds each to
+                // Pyo's own, by name and content. ConfigMaps are read by
+                // name only.
+                { "apiGroups": [""], "resources": ["services"], "verbs": ["get", "create", "patch", "delete"] },
+                { "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "create", "patch", "delete"] },
+                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["create", "patch", "delete"] },
+                { "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"], "resourceNames": [system::ORIGIN_PULL_SECRET, system::TAILNET_WANTED] },
                 // The proxy's failed pods, cleaned up (an eviction on a full
                 // disk leaves one each try).
                 { "apiGroups": [""], "resources": ["pods"], "verbs": ["delete"] },
@@ -1612,8 +1612,9 @@ mod tests {
         assert_eq!(
             svc,
             [
-                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["create"] }),
-                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "patch", "delete"], "resourceNames": [system::TAILNET_WEB_SERVICE, system::TAILNET_VIP_SERVICE, system::PUBLIC_NAT_SERVICE, system::TUNNEL_ORIGIN_SERVICE, system::PUBLIC_PORTS_SERVICE] }),
+                // No names: the admission policy has them (below, and
+                // `the_gateway_namespace_is_held_by_the_policy`).
+                &json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "create", "patch", "delete"] }),
             ]
         );
         let policy = admission("w", "g");
@@ -1724,9 +1725,150 @@ mod tests {
         assert_eq!(s["spec"]["ports"][0], json!({ "name": "tcp-25", "port": 25, "targetPort": 10025, "protocol": "TCP" }));
         assert_eq!(s["spec"]["ports"][1]["targetPort"], 5432);
         assert!(system::public_ports_service(&[]).is_none());
-        // The agent may write both, by name.
-        let roles = json!(objects(false)).to_string();
-        assert!(roles.contains(system::TUNNEL_ORIGIN_SERVICE) && roles.contains(system::PUBLIC_PORTS_SERVICE));
+    }
+
+    /// The gateway role names no Service, network policy or ConfigMap it
+    /// writes, so the admission policy is what holds them. For each of
+    /// those three, every allowance in `gatewayAllowed` names one of Pyo's
+    /// own objects, and nothing else lets a write into pyo-gateway through.
+    #[test]
+    fn the_gateway_namespace_is_held_by_the_policy() {
+        let objects = objects(true);
+        let gw = objects
+            .iter()
+            .find(|o| {
+                o["kind"] == "Role"
+                    && o["metadata"]["namespace"] == system::GATEWAY_NS
+                    && o["metadata"]["name"] == "pyo-agent"
+            })
+            .unwrap();
+        let rules = gw["rules"].as_array().unwrap();
+        let of = |resource: &str| -> Vec<&Value> {
+            rules
+                .iter()
+                .filter(|r| r["resources"] == json!([resource]))
+                .collect()
+        };
+        assert_eq!(of("services"), [&json!({ "apiGroups": [""], "resources": ["services"], "verbs": ["get", "create", "patch", "delete"] })]);
+        assert_eq!(of("networkpolicies"), [&json!({ "apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "verbs": ["get", "create", "patch", "delete"] })]);
+        // ConfigMaps: read by name only (the policy doesn't see reads).
+        assert_eq!(
+            of("configmaps"),
+            [
+                &json!({ "apiGroups": [""], "resources": ["configmaps"], "verbs": ["create", "patch", "delete"] }),
+                &json!({ "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"], "resourceNames": [system::ORIGIN_PULL_SECRET, system::TAILNET_WANTED] }),
+            ]
+        );
+        // Secrets as they were, and no rule here reaches subresources,
+        // every object of a kind at once, or every kind.
+        assert_eq!(of("secrets"), [&json!({ "apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "patch", "delete"] })]);
+        for r in rules {
+            let text = r.to_string();
+            assert!(
+                !text.contains('*') && !text.contains("deletecollection") && !text.contains('/'),
+                "{r}"
+            );
+        }
+        let policy = admission("w", "g");
+        let spec = &policy[0]["spec"];
+        // The policy sees every write the agent makes, and fails closed.
+        assert_eq!(spec["failurePolicy"], "Fail");
+        assert_eq!(
+            spec["matchConstraints"]["resourceRules"],
+            json!([{ "apiGroups": ["*"], "apiVersions": ["*"], "operations": ["CREATE", "UPDATE", "DELETE"], "resources": ["*/*"] }])
+        );
+        // A write in a namespace passes only as one of these.
+        assert_eq!(spec["validations"][1]["expression"], NAMESPACE_WRITES);
+        let var = |name: &str| -> String {
+            spec["variables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["name"] == name)
+                .unwrap()["expression"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        // pyo-gateway isn't a managed namespace, and the agent can't make
+        // it one: it only changes a namespace already labelled as Pyo's.
+        let ns = objects
+            .iter()
+            .find(|o| o["kind"] == "Namespace" && o["metadata"]["name"] == system::GATEWAY_NS)
+            .unwrap();
+        assert!(ns["metadata"]["labels"].is_null(), "{ns}");
+        assert!(spec["validations"].to_string().contains(
+            "request.operation == 'CREATE' || (has(oldObject.metadata.labels) && (oldObject.metadata.labels[?'pyo.dev/managed'].orValue('') == 'true'"
+        ));
+        // The other ways through are for other things: kube-system, pods
+        // (a drain) and a component's own pinned objects (none in
+        // pyo-gateway).
+        assert!(var("kubeSystemAllowed").starts_with("variables.ns == 'kube-system' && ("));
+        assert_eq!(
+            var("drain"),
+            "(request.resource.resource == 'pods' && variables.sub == 'eviction') || (request.resource.resource == 'pods' && variables.sub == '' && request.operation == 'DELETE')"
+        );
+        for b in bundles::policy_bundles("w", "g") {
+            assert_ne!(b.namespace, system::GATEWAY_NS);
+            for r in b.refs() {
+                assert_ne!(r.namespace.as_deref(), Some(system::GATEWAY_NS), "{r:?}");
+            }
+        }
+        // In `gatewayAllowed`, each of the three kinds is only ever let
+        // through by name: creates and updates with content the policy
+        // checks (the clauses' own tests), deletes of those names alone.
+        let all = var("gatewayAllowed");
+        assert!(all.starts_with(&format!("variables.ns == '{}' && (", system::GATEWAY_NS)));
+        for (resource, names) in [
+            (
+                "services",
+                &[
+                    system::TAILNET_WEB_SERVICE,
+                    system::TAILNET_VIP_SERVICE,
+                    system::PUBLIC_NAT_SERVICE,
+                    system::TUNNEL_ORIGIN_SERVICE,
+                    system::PUBLIC_PORTS_SERVICE,
+                ][..],
+            ),
+            ("networkpolicies", &[system::FIREWALL_POLICY][..]),
+            (
+                "configmaps",
+                &[system::TAILNET_WANTED, system::ORIGIN_PULL_SECRET][..],
+            ),
+        ] {
+            let test = format!("request.resource.resource == '{resource}'");
+            let mut seen = vec![];
+            for (at, _) in all.match_indices(&test) {
+                let rest = &all[at + test.len()..];
+                let name = names
+                    .iter()
+                    .find(|n| rest.starts_with(&format!(" && variables.objName == '{n}' && ")))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{resource} let through without a name: {}",
+                            &rest[..rest.len().min(80)]
+                        )
+                    });
+                // Its clause: a delete, or content the policy checks.
+                let clause = &rest[..rest.find(" || (request.resource.resource").unwrap_or(rest.len())];
+                assert!(clause.contains("(request.operation == 'DELETE' || "), "{clause}");
+                assert!(
+                    clause.contains("object.spec.") || clause.contains("object.data.all("),
+                    "{clause}"
+                );
+                seen.push(*name);
+            }
+            seen.sort_unstable();
+            let mut want = names.to_vec();
+            want.sort_unstable();
+            assert_eq!(seen, want, "{resource}");
+            // And by no list of kinds or negated test.
+            assert!(
+                !all.contains(&format!("'{resource}',")) && !all.contains(&format!(", '{resource}'")),
+                "{resource}"
+            );
+            assert!(!all.contains(&format!("request.resource.resource != '{resource}'")), "{resource}");
+        }
     }
 
     #[test]
@@ -1958,6 +2100,9 @@ mod tests {
         );
     }
 
+    /// The validation every write in a namespace goes through.
+    const NAMESPACE_WRITES: &str = "variables.ns == '' || request.resource.resource == 'namespaces' || variables.managed || variables.kubeSystemAllowed || variables.gatewayAllowed || variables.drain || variables.bundleAllowed";
+
     fn db(controller: &str) -> system::DbImages {
         system::DbImages {
             controller: controller.into(),
@@ -1968,9 +2113,11 @@ mod tests {
         }
     }
 
-    /// The roles alone: stable for the same roles. 0.5.5's roles plus the
-    /// Cloudflare Tunnel's two Services (its origin and the public ports),
-    /// which the agent gets with the connect command. The disk pressure fix
+    /// The roles alone: stable for the same roles. 0.5.5's roles with the
+    /// gateway's Services, network policies and ConfigMaps no longer named
+    /// in the role (the admission policy names them, so the Cloudflare
+    /// Tunnel's two Services and any later one change no role), which the
+    /// agent gets with the connect command. The disk pressure fix
     /// (critical per-server pods, the agent's own priority and
     /// tolerations) changes no role. Its stricter admission policy does
     /// move [`access_hash`], so clusters that can't refresh are told to run
@@ -1984,7 +2131,7 @@ mod tests {
                 objects(true),
                 self_update_objects()
             ])),
-            "0162f7a9cdebb354"
+            "782edfc8fb056969"
         );
     }
 

@@ -325,7 +325,11 @@ pub fn render_with(api_url: &str, image: &str, token: &str, extra_env: &[(&str, 
 #   DNS's scale;
 # - the gateway's routes, certificates and settings in pyo-gateway,
 #   with exactly the content this release writes (never its Secrets' content),
-#   and its failed pods, deleted;
+#   and its failed pods, deleted. Its role there names no Service, network
+#   policy or ConfigMap it writes: the admission policy at the end does, by
+#   name and content. On Kubernetes older than 1.30 there is no admission
+#   policy, so the agent could change or delete any of those three kinds in
+#   pyo-gateway (Envoy Gateway's own included);
 # - the databases system in pyo-databases (CloudNativePG, the MySQL
 #   operator and pyo-db-controller), once a team makes its first database
 #   here, with exactly the content this release defines;

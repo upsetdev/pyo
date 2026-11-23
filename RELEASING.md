@@ -357,7 +357,13 @@ until its connect command runs. The admission policy, the image pins and
 the databases system wait for that command as well. The roles are partly
 built from the cluster-wide object names in the system bundles
 (`cluster_rules` in `crates/pyo-proto/src/bundles.rs`), so a release that
-adds or renames such an object changes the roles too. When the roles are
+adds or renames such an object changes the roles too. A new Service,
+network policy or ConfigMap of the gateway in `pyo-gateway` changes no role:
+the role there names none of them, and the admission policy
+(`gatewayAllowed` in `crates/pyo-proto/src/rbac.rs`) holds each to Pyo's own
+by name and content. Add the new object's clause there. A cluster on
+Kubernetes older than 1.30 has no admission policy, so nothing but the
+agent's own code keeps it to those names in that namespace. When the roles are
 unchanged, an agent with the self-update role brings its admission policy
 and image pins up to date on its own. A cluster without that role (Pyo
 Cloud's, or with `PYO_AGENT_SELF_UPDATE=false`) or read only gets a new
