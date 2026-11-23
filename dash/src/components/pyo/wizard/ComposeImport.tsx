@@ -255,7 +255,7 @@ export function ComposeImport({ onBack }: { onBack: () => void }) {
         </Layered>
         <Layered title="Where it runs">
           <div className="p-5">
-            <Field label="Cluster" hint="Web ports get a free domain on it.">
+            <Field label="Cluster" hint="Web ports get a domain on it.">
               {(f) => (
                 <Select {...f} value={clusterId} onChange={(e) => setClusterId(e.target.value)}>
                   {clusters.length ? null : <option value="">No clusters yet</option>}

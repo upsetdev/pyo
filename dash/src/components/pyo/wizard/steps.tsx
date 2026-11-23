@@ -31,6 +31,7 @@ import { locationLabel, parseLocation, placesOf } from "~/lib/pyo/location";
 import { Flag } from "~/components/ui/Flag";
 import {
   clusterTailnet,
+  freeDomainNoun,
   freeHostnameIn,
   freeSuffix,
   isFreeDomain,
@@ -1197,12 +1198,17 @@ export function DomainsStep({ d, set, errors }: StepProps) {
   const free = freeEnd
     ? freeHostnameIn({ name: d.name || "app" }, project?.namespace ?? "app", freeEnd)
     : "";
+  // "Tunnel domain" in tunnel mode: it's under the team's own domain.
+  const freeNoun = freeDomainNoun([cluster]);
   const tailnet = d.clusterId ? clusterTailnet(s, d.clusterId) : undefined;
   const tailnetFree = tailnet
     ? tailnetHostname(s, { name: d.name || "app" }, tailnet)
     : "";
+  // The tunnel one isn't a nip.io name: matched by its hostname.
   const hasPublic = d.domains.some(
-    (x) => isFreeDomain(x.hostname) && !isTailnetDomain(x.hostname),
+    (x) =>
+      (isFreeDomain(x.hostname) && !isTailnetDomain(x.hostname)) ||
+      (!!free && x.hostname === free),
   );
   const hasTailnet = d.domains.some((x) => isTailnetDomain(x.hostname));
   const add = (hostname = "") =>
@@ -1353,7 +1359,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
                           onClick={() => setD({ hostname: free })}
                           className="font-medium text-primary hover:text-primary/80"
                         >
-                          Use the free domain instead
+                          Use the {freeNoun.toLowerCase()} instead
                         </button>
                       ) : (
                         "Enter your domain, like app.example.com."
@@ -1387,7 +1393,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
         </Button>
         {free && !d.domains.some((x) => x.hostname === free) ? (
           <Button variant="secondary" size="xs" onClick={() => add(free)}>
-            <PlusIcon size={12} /> Free domain
+            <PlusIcon size={12} /> {freeNoun}
           </Button>
         ) : null}
         {!hasTailnet && d.clusterId ? (
@@ -1403,7 +1409,7 @@ export function DomainsStep({ d, set, errors }: StepProps) {
       </div>
       {free && !hasPublic ? (
         <p className="text-[11.5px] text-muted-foreground">
-          Free domain, ready instantly:{" "}
+          {freeNoun}, ready instantly:{" "}
           <span className="font-mono text-foreground/85">{free}</span>
         </p>
       ) : !free && d.clusterId ? (

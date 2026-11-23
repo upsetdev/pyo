@@ -27,6 +27,7 @@ import {
 import { HOSTNAME } from "~/lib/pyo/format";
 import {
   clusterTailnet,
+  freeDomainNoun,
   freeSuffix,
   hostnameUsed,
   unusedHostname,
@@ -45,7 +46,7 @@ type Kind = "own" | "public" | "tailnet";
 const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /**
- * Add a domain: your own, a free one or a Tailscale one, its hostname, the service it routes to (asked when it isn't
+ * Add a domain: your own, a free one (a tunnel one in tunnel mode) or a Tailscale one, its hostname, the service it routes to (asked when it isn't
  * given, e.g. from the team's Domains page), the port when there's a
  * choice, and how HTTPS works.
  */
@@ -95,6 +96,14 @@ export function AddDomainDialog({
   // use by default: traffic goes straight to its servers. In tunnel mode,
   // under the tunnel's default domain.
   const tunnelMode = cluster?.traffic === "tunnel";
+  // Before a service is picked: by the clusters it could be on.
+  const freeNoun = freeDomainNoun(
+    cluster
+      ? [cluster]
+      : [...new Set(usable.map((x) => x.a.clusterId))].map((id) =>
+          s.clusters.find((c) => c.id === id),
+        ),
+  );
   const freeIp = cluster?.publicIp ?? undefined;
   const freeEnd = app ? freeSuffix(s, app.clusterId) : undefined;
   const tailnet = app ? clusterTailnet(s, app.clusterId) : undefined;
@@ -251,12 +260,12 @@ export function AddDomainDialog({
             onSelect={() => setKind("own")}
           />
           <Choice
-            label="Free domain"
+            label={freeNoun}
             detail={
               !app
                 ? "Pick a service first"
                 : tunnelMode
-                  ? "Through the tunnel"
+                  ? "Ready instantly"
                   : "Public, on nip.io"
             }
             selected={k === "public"}
