@@ -23,11 +23,11 @@
 //! - the signature is the certificate key's, over the file.
 
 use anyhow::{Context, anyhow, bail, ensure};
-use base64::Engine;
 use aws_lc_rs::signature::{
     ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA384_ASN1, ECDSA_P384_SHA256_ASN1, ECDSA_P384_SHA384_ASN1,
     UnparsedPublicKey,
 };
+use base64::Engine;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use x509_parser::{certificate::X509Certificate, prelude::FromDer};
@@ -349,8 +349,7 @@ mod tests {
     use super::*;
 
     const BLOB: &[u8] = include_bytes!("../assets/testdata/cosign_checksums.txt");
-    const BUNDLE: &str =
-        include_str!("../assets/testdata/cosign_checksums.txt.sigstore.json");
+    const BUNDLE: &str = include_str!("../assets/testdata/cosign_checksums.txt.sigstore.json");
     /// cosign's own release (v3.1.4), signed keyless by its release account.
     const COSIGN: Signer<'static> = Signer {
         identity_prefix: "keyless@projectsigstore.iam.gserviceaccount.com",
@@ -377,7 +376,15 @@ mod tests {
         verify(RELEASE, RELEASE_BUNDLE, &RELEASE_SIGNER).unwrap();
         // Exact: not a version this one's tag starts with or continues, and
         // not another one.
-        for other in ["0.5", "0.5.40", "0.5.4-rc.1", "0.5.5", "0.5.3", "", "0.5.4 "] {
+        for other in [
+            "0.5",
+            "0.5.40",
+            "0.5.4-rc.1",
+            "0.5.5",
+            "0.5.3",
+            "",
+            "0.5.4 ",
+        ] {
             let e = format!("{:#}", at(other).unwrap_err());
             assert!(
                 e.contains("signed by https://github.com/upsetdev/pyo/.github/workflows/release.yml@refs/tags/v0.5.4, not"),
@@ -390,19 +397,31 @@ mod tests {
             "https://github.com/upsetdev/pyo/.github/workflows/release.yml@refs/tags/v0.51.0"
         );
         assert!(s.signer().exact);
-        assert_eq!(s.signer().issuer, "https://token.actions.githubusercontent.com");
+        assert_eq!(
+            s.signer().issuer,
+            "https://token.actions.githubusercontent.com"
+        );
         // Another file under that signature.
         let mut other = RELEASE.to_vec();
         other[20] ^= 1;
-        assert!(verify_logged(&other, RELEASE_BUNDLE, &release_signer_for("0.5.4").signer()).is_err());
+        assert!(
+            verify_logged(
+                &other,
+                RELEASE_BUNDLE,
+                &release_signer_for("0.5.4").signer()
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn the_logged_time_is_rekors() {
         assert_eq!(
-            verify_logged(BLOB, BUNDLE, &COSIGN).unwrap().integrated_time,
-            serde_json::from_str::<Value>(BUNDLE).unwrap()["verificationMaterial"]["tlogEntries"][0]
-                ["integratedTime"]
+            verify_logged(BLOB, BUNDLE, &COSIGN)
+                .unwrap()
+                .integrated_time,
+            serde_json::from_str::<Value>(BUNDLE).unwrap()["verificationMaterial"]["tlogEntries"]
+                [0]["integratedTime"]
                 .as_str()
                 .unwrap()
                 .parse::<i64>()
