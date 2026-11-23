@@ -55,6 +55,11 @@ function ClusterSettings({ c }: { c: Cluster }) {
   const gone = Date.now() - c.lastSeenAt >= 10 * 60_000;
   const install = c.capabilities.agentInstall;
   const refresh = useAutoUpdate(install?.command ?? "");
+  // Its databases wait for the refresh command while the install is
+  // outdated, or current except for roles they need (no `bundles`).
+  const databasesWait =
+    install?.state === "outdated" ||
+    (install?.state === "roles" && install.bundles !== true);
   const autoUpdate = install?.autoUpdate;
   // A hosted Pyo's agents follow its version (automatic, or when the team says).
   const hosted = useHosted();
@@ -254,7 +259,7 @@ function ClusterSettings({ c }: { c: Cluster }) {
               <p className="text-[12px] text-muted-foreground">
                 Applies Pyo's latest host settings, like the memory reserve for
                 k3s.
-                {install.state === "outdated" && c.databasesRestart
+                {databasesWait && c.databasesRestart
                   ? ` ${DATABASES_RESTART}.`
                   : ""}
               </p>
