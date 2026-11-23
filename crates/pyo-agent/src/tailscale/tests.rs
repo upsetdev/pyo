@@ -26,7 +26,7 @@ struct Net {
 
 type Shared = Arc<Mutex<Net>>;
 
-async fn handle(State(st): State<Shared>, method: Method, uri: Uri, _body: Bytes) -> Response {
+async fn handle(State(st): State<Shared>, method: Method, uri: Uri, body: Bytes) -> Response {
     let mut n = st.lock().unwrap();
     let path = uri.path().to_owned();
     let svc = |p: &str| {
@@ -55,6 +55,12 @@ async fn handle(State(st): State<Shared>, method: Method, uri: Uri, _body: Bytes
         ("POST", "/tailnet/-/keys") => {
             n.writes.push("key".into());
             Json(json!({ "id": "k1", "key": "tskey-auth-k1-secret" })).into_response()
+        }
+        ("DELETE", p) if p.starts_with("/device/") => {
+            let id = p.trim_start_matches("/device/").to_owned();
+            n.writes.push(format!("delete device {id}"));
+            n.devices.retain(|(d, _, _)| *d != id);
+            Json(json!({})).into_response()
         }
         ("POST", p) if p.starts_with("/device/") && p.ends_with("/tags") => {
             let id = p
@@ -98,8 +104,11 @@ async fn handle(State(st): State<Shared>, method: Method, uri: Uri, _body: Bytes
                 "PUT" => {
                     n.writes.push(format!("PUT {name}"));
                     let addrs = vec![format!("100.100.1.{}", n.services.len() + 10)];
-                    n.services
-                        .insert(name, ("Made by Pyo (i cl_a)".into(), addrs.clone()));
+                    let comment = serde_json::from_slice::<Value>(&body)
+                        .ok()
+                        .and_then(|b| b["comment"].as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    n.services.insert(name, (comment, addrs.clone()));
                     Json(json!({ "addrs": addrs })).into_response()
                 }
                 "DELETE" => {
@@ -360,4 +369,83 @@ async fn a_join_key_is_single_use_tagged_and_short_lived() {
 #[test]
 fn hints_show_the_last_characters_only() {
     assert_eq!(hint("tskey-client-abc-0123456789WXYZ"), "…WXYZ");
+}
+
+/// The team's holder syncs every cluster of its team with its one client:
+/// each cluster's names carry its own mark, a name another cluster of the
+/// tailnet has is taken, a cluster's sync deletes only its own names, and
+/// a removed cluster's names and machines go with the sync that has them.
+#[tokio::test]
+async fn one_holder_syncs_every_cluster_of_its_team() {
+    let mut net = Net::default();
+    for (id, host) in [("n1", "web-1"), ("n2", "db-1"), ("n3", "old-1")] {
+        net.devices
+            .push((id.into(), format!("{host}.tail1.ts.net"), vec![TAG.into()]));
+    }
+    let (holder, st) = serve(net).await;
+    let mark = |c: &str| ts::marker("i", c);
+    let sync_of = |c: &str, domains: &[&str], made: &[&str]| TailnetSync {
+        mark: mark(c),
+        domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+        made: made.iter().map(|d| (*d).to_owned()).collect(),
+        cluster: Some(c.to_owned()),
+        ..Default::default()
+    };
+    // Three clusters, one client: each makes its own.
+    for (c, d) in [("cl_a", "blog"), ("cl_b", "shop"), ("cl_c", "wiki")] {
+        let s = sync(&holder, &sync_of(c, &[d], &[])).await.unwrap();
+        assert_eq!(names(&s), [(d.to_owned(), "domain".to_owned(), true)]);
+        assert_eq!(s.suffix.as_deref(), Some("tail1.ts.net"));
+    }
+    {
+        let n = st.lock().unwrap();
+        assert_eq!(n.services["blog"].0, mark("cl_a"));
+        assert_eq!(n.services["shop"].0, mark("cl_b"));
+        assert_eq!(n.services["wiki"].0, mark("cl_c"));
+    }
+    // cl_c wants cl_a's name: taken, and nothing written.
+    let s = sync(&holder, &sync_of("cl_c", &["wiki", "blog"], &["wiki"]))
+        .await
+        .unwrap();
+    assert_eq!(s.names[1].name, "blog");
+    assert_eq!(s.names[1].error.as_deref(), Some(TAKEN));
+    // cl_b no longer wants shop, and lists blog as made: only shop goes.
+    let s = sync(&holder, &sync_of("cl_b", &[], &["shop", "blog"]))
+        .await
+        .unwrap();
+    assert_eq!(s.deleted, ["shop"]);
+    // cl_c was removed: its names and its server go, nothing else.
+    let gone = TailnetSync {
+        forget: vec!["n3".into()],
+        ..sync_of("cl_c", &[], &["wiki", "blog"])
+    };
+    let s = sync(&holder, &gone).await.unwrap();
+    assert_eq!(s.deleted, ["wiki"]);
+    assert_eq!(s.forgotten, ["n3"]);
+    let n = st.lock().unwrap();
+    assert_eq!(n.services.keys().collect::<Vec<_>>(), ["blog"]);
+    assert_eq!(
+        n.devices.iter().map(|d| d.0.as_str()).collect::<Vec<_>>(),
+        ["n1", "n2"]
+    );
+    assert!(
+        !n.writes.iter().any(|w| w == "DELETE blog"),
+        "{:?}",
+        n.writes
+    );
+}
+
+/// A join key for any cluster of the team comes from the holder's client:
+/// it carries nothing of the cluster it's for.
+#[tokio::test]
+async fn the_holder_makes_join_keys_for_every_cluster() {
+    let (holder, st) = serve(Net::default()).await;
+    for c in ["cl_a", "cl_b", "cl_c"] {
+        let (_, key) = holder
+            .auth_key(&format!("Pyo: join {c}-web-2"))
+            .await
+            .unwrap();
+        assert_eq!(key, "tskey-auth-k1-secret");
+    }
+    assert_eq!(st.lock().unwrap().writes, ["key", "key", "key"]);
 }
