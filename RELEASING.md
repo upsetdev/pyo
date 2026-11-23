@@ -15,7 +15,11 @@ A version is one number for everything: `version` in the root `Cargo.toml`.
    [Notices](#notices)). For 0.51.0 that's every cluster. After it, a
    self-hosted cluster with the self-update role needs it only when the
    release adds a role object or changes a chart installed with the agent,
-   and a cluster without that role (Pyo Cloud's) whenever it changed.
+   and a cluster without that role (Pyo Cloud's) whenever it changed. The
+   cluster Pyo itself runs on never needs it from its admin: its server
+   runs the command by itself (see
+   [The server Pyo runs on](#the-server-pyo-runs-on)). Say so in the notes,
+   so an installation with only that cluster knows there's nothing to run.
 4. Write the API reference for the docs (see [API reference](#api-reference)):
    `cargo run -p pyo-api --bin openapi`.
 5. Commit that to `main`, and wait for CI to pass.
@@ -166,7 +170,9 @@ How it reaches installations:
   then. 0.51.0 is the last release where every cluster needs the command
   under **Refresh this cluster** in the cluster's settings once. After it,
   only a release that adds a role object or changes a chart installed with
-  the agent does.
+  the agent does. On the cluster Pyo runs on, the server runs that command
+  by itself within a few minutes, 0.51.0 included. So an installation with
+  only that cluster has nothing to run after any release.
 - **Pyo Cloud:** whoever runs it updates the shared Pyo. Each team's agents
   then follow its version: within a minute for teams with automatic agent
   updates (the default), or when the team updates a cluster from its page.
@@ -184,8 +190,9 @@ brings the install up to date by itself within a minute of Pyo's update,
 its roles included (see [Notices](#notices) for what it can't bring).
 0.51.0 is the exception: 0.5.5's self-update role can't write roles, so
 every cluster stays outdated until the connect command under **Refresh this
-cluster** runs once. Clusters without that role (Pyo Cloud's, or
-`PYO_AGENT_SELF_UPDATE=false`) always wait for the command.
+cluster** runs once. The server Pyo runs on runs it by itself. Clusters
+without that role (Pyo Cloud's, or `PYO_AGENT_SELF_UPDATE=false`) always
+wait for the command.
 pyo-db-controller then restarts with the new images and rolls each database
 onto them. A Postgres or MySQL database with replicas restarts a replica
 first and switches over to it, so the primary stops only for the
@@ -199,7 +206,8 @@ ones before. MySQL databases restart when the release pins another MySQL
 image. They restart when the cluster's install becomes the new Pyo's:
 within a minute of Pyo's update on a self-hosted cluster with the
 self-update role. On every other cluster they restart when the command
-under **Refresh this cluster** runs. Pyo says so by itself, nothing to write in the notices: the update
+under **Refresh this cluster** runs, which on the cluster Pyo runs on is
+within a few minutes of the update. Pyo says so by itself, nothing to write in the notices: the update
 dialog and the cluster's refresh command show "Restarts your databases
 once" when a database runs an image the release changes (compared from
 `release.json`'s images and `databasePins`), and each database's restart
@@ -349,7 +357,9 @@ self-hosted installation with the self-update role gets no such line from
 0.51.0 on, since its agents bring the roles themselves. So when a release
 adds a role object or changes a chart installed with the agent (the two
 things a refresh can't bring, see below), write that line yourself as a
-`beforeYouUpdate` notice. The release notes never get the line by
+`beforeYouUpdate` notice. An installation whose only cluster is the one
+Pyo runs on doesn't show that exact line: its server runs the command by
+itself. The release notes never get the line by
 themselves, so write it there when it applies (step 3 of
 [Cut a release](#cut-a-release)): as a `beforeYouUpdate` notice, which the
 release notes put first, or in the release's text (see
@@ -417,6 +427,49 @@ without the self-update role or read only gets new roles and a new policy
 only from its connect command. Until then, the agent writes the gateway's client policies
 in the shape the cluster's older policy accepts, and the cluster's settings
 say to run the command.
+
+### The server Pyo runs on
+
+The cluster Pyo itself runs on needs no command from its admin. Most
+self-hosted installations have only this cluster.
+
+- The server's `pyo-tailnet` timer runs as root every minute
+  (`host_units` in `deploy/install.sh`). It first brings the running Pyo's
+  host scripts (`/install/host-units.sh`, when its checksum changes), then
+  runs `connect-this-machine.sh auto`.
+- That asks `GET /install/this-machine` (with the bootstrap key). The
+  answer has `"refresh": true` while the cluster's install is "outdated"
+  or "roles", this installation has the self-update role
+  (`PYO_AGENT_SELF_UPDATE` isn't off), the cluster's own self-update
+  binding is there and the cluster isn't read only (`host_refreshes` in
+  `crates/pyo-api/src/install.rs`).
+- The server then runs `connect.sh` from Pyo on `127.0.0.1:8000`, the same
+  command as under **Refresh this cluster**. It brings new role objects,
+  charts and host settings, and may restart k3s once.
+- It runs once per Pyo version and install (`/etc/pyo/refresh-tried`). One
+  that failed (`/etc/pyo/refresh-failed`) is tried again after an hour. No
+  more than 4 run in a day (`/etc/pyo/refresh-runs`). A run by hand and the
+  installer take turns with it (`/run/pyo-connect.lock`).
+- Meanwhile the cluster's settings show "Updating". They show "Update
+  needed" with the command once the run failed, or when the server said
+  nothing for 10 minutes.
+- `install.sh` runs the same refresh at the end of an update.
+- Its log: `journalctl -u pyo-tailnet`.
+
+From 0.5.5 this needs no command either: 0.5.5's timer already brings the
+new host scripts within a minute of the update, and the next run refreshes
+the cluster. 0.5.5's own update dialog still says "After updating, run the
+connect command shown in each cluster's settings." for 0.51.0, since it
+writes that line itself. Say in 0.51.0's release notes that the server Pyo
+runs on needs nothing, and every other cluster needs the command once.
+
+A server set up with Pyo 0.4.1 or earlier, and never by `install.sh` since,
+has no such timer script. Its cluster shows "Updating" for 10 minutes,
+then "Update needed" with the command. Running the command, or
+`install.sh` again, brings the timer script.
+
+Pyo Cloud's clusters are never refreshed this way: Pyo Cloud runs without
+the self-update role, and a team's servers have no such timer.
 
 ### How an installation updates
 
