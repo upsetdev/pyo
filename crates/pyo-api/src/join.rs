@@ -2259,7 +2259,7 @@ if connect_lock_held; then echo has-lock; else echo no-lock; fi
 
     /// connect.sh's options, read by its own loop: AUTO_UPDATE, or the
     /// error.
-    fn auto_update_flag(args: &str) -> String {
+    fn auto_update_arg(args: &str) -> String {
         let block = script_block("connect-args", CONNECT_SCRIPT);
         let (code, out, err) = bash(&format!(
             "set -euo pipefail\nset -- {args}\n{block}\necho \"[$AUTO_UPDATE] $API $TOKEN [$UNINSTALL]\"\n"
@@ -2270,23 +2270,23 @@ if connect_lock_held; then echo has-lock; else echo no-lock; fi
     #[test]
     fn connect_reads_the_auto_update_flags() {
         // As Pyo's commands give them: last, or before a mirror's --version.
-        assert_eq!(auto_update_flag("--auto-update"), "[on]   []");
-        assert_eq!(auto_update_flag("--no-auto-update"), "[off]   []");
-        assert_eq!(auto_update_flag("--api 'https://pyo.example/' --token 'ab12' --auto-update"), "[on] https://pyo.example ab12 []");
+        assert_eq!(auto_update_arg("--auto-update"), "[on]   []");
+        assert_eq!(auto_update_arg("--no-auto-update"), "[off]   []");
+        assert_eq!(auto_update_arg("--api 'https://pyo.example/' --token 'ab12' --auto-update"), "[on] https://pyo.example ab12 []");
         assert_eq!(
-            auto_update_flag("--api 'https://pyo.example' --token 'ab12' --local-registry --no-auto-update --version '0.51.0'"),
+            auto_update_arg("--api 'https://pyo.example' --token 'ab12' --local-registry --no-auto-update --version '0.51.0'"),
             "[off] https://pyo.example ab12 []"
         );
-        assert_eq!(auto_update_flag("--auto-update --version '0.51.0'"), "[on]   []");
+        assert_eq!(auto_update_arg("--auto-update --version '0.51.0'"), "[on]   []");
         // Neither: nothing chosen in this run.
-        assert_eq!(auto_update_flag(""), "[]   []");
-        assert_eq!(auto_update_flag("--api 'https://pyo.example' --token 'ab12'"), "[] https://pyo.example ab12 []");
+        assert_eq!(auto_update_arg(""), "[]   []");
+        assert_eq!(auto_update_arg("--api 'https://pyo.example' --token 'ab12'"), "[] https://pyo.example ab12 []");
         // Both: the last one.
-        assert_eq!(auto_update_flag("--auto-update --no-auto-update"), "[off]   []");
-        assert_eq!(auto_update_flag("--no-auto-update --auto-update"), "[on]   []");
-        assert_eq!(auto_update_flag("--uninstall --yes"), "[]   [1]");
-        assert_eq!(auto_update_flag("--auto-updates"), "2 Unknown option: --auto-updates");
-        assert_eq!(auto_update_flag("--auto-update=off"), "2 Unknown option: --auto-update=off");
+        assert_eq!(auto_update_arg("--auto-update --no-auto-update"), "[off]   []");
+        assert_eq!(auto_update_arg("--no-auto-update --auto-update"), "[on]   []");
+        assert_eq!(auto_update_arg("--uninstall --yes"), "[]   [1]");
+        assert_eq!(auto_update_arg("--auto-updates"), "2 Unknown option: --auto-updates");
+        assert_eq!(auto_update_arg("--auto-update=off"), "2 Unknown option: --auto-update=off");
     }
 
     /// A server for connect.sh's auto-update steps: its files under a
