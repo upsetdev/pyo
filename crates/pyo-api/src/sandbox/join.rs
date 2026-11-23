@@ -536,13 +536,14 @@ mod tests {
             render(&pick(Some("https://mirror.example.com/")))
                 .starts_with("curl -fsSL https://mirror.example.com/sandbox.sh | bash -s -- ")
         );
-        // Else this release's sandbox.sh on pyo.dev.
+        // Else this release's published sandbox.sh: on pyo.dev, or a
+        // release candidate's on GitHub.
         for unset in [None, Some(" ")] {
             let c = render(&pick(unset));
             assert!(
                 c.starts_with(&format!(
-                    "curl -fsSL https://pyo.dev/v/{}/sandbox.sh | bash -s -- ",
-                    env!("CARGO_PKG_VERSION")
+                    "curl -fsSL {}/sandbox.sh | bash -s -- ",
+                    crate::join::published_scripts_url()
                 )) && c.contains(" --version '0.4.0'"),
                 "{c}"
             );
