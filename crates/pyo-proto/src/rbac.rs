@@ -1209,9 +1209,10 @@ pub fn install_hash(
 /// up, on any cluster and on the one Pyo runs on, with the optional
 /// self-update role, and of the admission policy's rules (with and without
 /// that role): what a cluster without the self-update role, or read only,
-/// only gets from its connect command. A release carries its own (release.json's `agentAccess`), so
-/// an update that changes it says, before it starts, that every cluster
-/// needs its connect command afterwards. Images don't count: each release
+/// only gets from its connect command. A release carries its own
+/// (release.json's `agentAccess`), so an update that changes it says,
+/// before it starts and on an installation without the self-update role,
+/// that every cluster needs its connect command afterwards. Images don't count: each release
 /// has its own, and a refresh or the connect command brings them.
 pub fn access_hash() -> String {
     access_hash_of(&access_admission())

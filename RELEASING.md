@@ -10,9 +10,12 @@ A version is one number for everything: `version` in the root `Cargo.toml`.
 3. Check whether `agentAccess` changed since the last release: compare
    `cargo run -q -p pyo-agent -- access-hash` with `agentAccess` in the last
    release's `release.json`. When it changed, the release notes must say
-   that every cluster needs the connect command under **Refresh this
-   cluster** once, and that databases restart once when it runs (see
-   [Notices](#notices)).
+   which clusters need the connect command under **Refresh this cluster**
+   once, and that databases restart once when it runs (see
+   [Notices](#notices)). For 0.51.0 that's every cluster. After it, a
+   self-hosted cluster with the self-update role needs it only when the
+   release adds a role object or changes a chart installed with the agent,
+   and a cluster without that role (Pyo Cloud's) whenever it changed.
 4. Write the API reference for the docs (see [API reference](#api-reference)):
    `cargo run -p pyo-api --bin openapi`.
 5. Commit that to `main`, and wait for CI to pass.
@@ -338,10 +341,16 @@ release's (old notices never carry over):
 A change to the agent's roles or to its admission policy's rules needs no
 notice for the update dialog: `release.json` carries the release agent's `agentAccess`
 (`pyo-agent access-hash`, which `check-release` verifies), and an
-installation whose agent has other ones adds "After updating, run the
-connect command shown in each cluster's settings." to the update dialog by
-itself. The images in the policy don't count. The release notes don't get
-that line by themselves, so write it there (step 3 of
+installation whose agent has other ones and whose clusters don't have the
+self-update role (Pyo Cloud, or `PYO_AGENT_SELF_UPDATE=false`) adds "After
+updating, run the connect command shown in each cluster's settings." to the
+update dialog by itself. The images in the policy don't count. A
+self-hosted installation with the self-update role gets no such line from
+0.51.0 on, since its agents bring the roles themselves. So when a release
+adds a role object or changes a chart installed with the agent (the two
+things a refresh can't bring, see below), write that line yourself as a
+`beforeYouUpdate` notice. The release notes never get the line by
+themselves, so write it there when it applies (step 3 of
 [Cut a release](#cut-a-release)): as a `beforeYouUpdate` notice, which the
 release notes put first, or in the release's text (see
 [Release notes](#release-notes)).
