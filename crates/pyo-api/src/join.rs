@@ -18,9 +18,44 @@ pub const SANDBOX_SCRIPT: &str = include_str!("../../../deploy/sandbox.sh");
 /// `/v/<version>/`, only as its signed release.json lists them.
 pub const PUBLISHED_SCRIPTS_URL: &str = "https://pyo.dev";
 
-/// This release's scripts on pyo.dev: `https://pyo.dev/v/<version>`.
+/// Each release's assets on GitHub, its install scripts among them:
+/// `<url>/v<version>/connect.sh`. pyo.dev doesn't serve a release
+/// candidate's scripts, so a candidate's commands fetch them here.
+pub const RELEASES_URL: &str = "https://github.com/upsetdev/pyo/releases/download";
+
+/// This release's published scripts: `https://pyo.dev/v/<version>`, or
+/// for a release candidate its GitHub release.
 pub fn published_scripts_url() -> String {
-    format!("{PUBLISHED_SCRIPTS_URL}/v/{}", env!("CARGO_PKG_VERSION"))
+    published_scripts_url_for(env!("CARGO_PKG_VERSION"))
+}
+
+/// A release's published scripts ([`published_scripts_url`]).
+fn published_scripts_url_for(version: &str) -> String {
+    if is_release_candidate(version) {
+        format!("{RELEASES_URL}/v{version}")
+    } else {
+        format!("{PUBLISHED_SCRIPTS_URL}/v/{version}")
+    }
+}
+
+/// A release candidate's version: `X.Y.Z-rc.N`.
+pub const fn is_release_candidate(version: &str) -> bool {
+    let b = version.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i] != b'-' {
+        i += 1;
+    }
+    if b.len() < i + 5 || b[i + 1] != b'r' || b[i + 2] != b'c' || b[i + 3] != b'.' {
+        return false;
+    }
+    i += 4;
+    while i < b.len() {
+        if !b[i].is_ascii_digit() {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Where the commands for other machines fetch their scripts from, first
@@ -31,8 +66,8 @@ pub fn published_scripts_url() -> String {
 ///    which it has to reach anyway;
 /// 3. Pyo on the tailnet ([`crate::web::tailnet_api_url`]), then its HTTPS
 ///    dashboard;
-/// 4. pyo.dev ([`published_scripts_url`]), when Pyo is only on its own
-///    machine or in its cluster.
+/// 4. this release's published scripts ([`published_scripts_url`]), when
+///    Pyo is only on its own machine or in its cluster.
 ///
 /// Only for machines already on the tailnet, or told Pyo's public URL. A
 /// command with a Tailscale key uses [`scripts_url_before_tailnet`].
@@ -70,7 +105,7 @@ fn pick_scripts_url(configured: Option<&str>, pyo: &[Option<&str>]) -> String {
 /// its public IP: that address may not be reachable from outside (a server
 /// behind NAT, like Starlink's). So:
 /// 1. `PYO_SCRIPTS_URL`, when set;
-/// 2. else this release's scripts on pyo.dev ([`published_scripts_url`]),
+/// 2. else this release's published scripts ([`published_scripts_url`]),
 ///    and join.sh's `--k3s` keeps the server on the cluster's k3s.
 ///
 /// A dev build's version may not be a published release, so pyo.dev has no
@@ -300,15 +335,19 @@ pub fn tailnet_only_command(base: &str, key: &str) -> String {
 }
 
 /// A script's arguments for where it's fetched from (`base`). A Pyo's own
-/// scripts and pyo.dev's `/v/<version>/` are this release's. From anywhere
-/// else (a mirror) they get `--version`: a release's join.sh and connect.sh
-/// then run that release's script from pyo.dev when they're another's.
+/// scripts and the published ones ([`published_scripts_url`]) are this
+/// release's. From anywhere else (a mirror) they get `--version`: a
+/// release's join.sh and connect.sh then run that release's published
+/// script when they're another's.
 pub fn pinned(
     base: &str,
     mut args: Vec<(&'static str, Option<String>)>,
 ) -> Vec<(&'static str, Option<String>)> {
     let base = base.trim_end_matches('/');
-    if !base.ends_with("/install") && !base.starts_with(&format!("{PUBLISHED_SCRIPTS_URL}/v/")) {
+    if !base.ends_with("/install")
+        && !base.starts_with(&format!("{PUBLISHED_SCRIPTS_URL}/v/"))
+        && base != published_scripts_url()
+    {
         args.push(("--version", Some(env!("CARGO_PKG_VERSION").to_owned())));
     }
     args
@@ -548,8 +587,16 @@ mod tests {
         }
     }
 
-    /// This release's scripts on pyo.dev.
-    const V: &str = concat!("https://pyo.dev/v/", env!("CARGO_PKG_VERSION"));
+    /// This release's published scripts: on pyo.dev, or a release
+    /// candidate's on GitHub.
+    const V: &str = if is_release_candidate(env!("CARGO_PKG_VERSION")) {
+        concat!(
+            "https://github.com/upsetdev/pyo/releases/download/v",
+            env!("CARGO_PKG_VERSION")
+        )
+    } else {
+        concat!("https://pyo.dev/v/", env!("CARGO_PKG_VERSION"))
+    };
     /// From a mirror, a release's scripts run this release's.
     const PIN: &str = concat!(" --version '", env!("CARGO_PKG_VERSION"), "'");
 
@@ -980,6 +1027,53 @@ mod tests {
         ] {
             assert!(!is_k3s_version(v), "{v}");
         }
+    }
+
+    /// pyo.dev serves a release's scripts, but not a release candidate's:
+    /// a candidate's commands fetch them from its GitHub release, which
+    /// has them as assets (release.yml).
+    #[test]
+    fn a_release_candidates_scripts_come_from_its_github_release() {
+        assert_eq!(
+            published_scripts_url_for("0.51.0"),
+            "https://pyo.dev/v/0.51.0"
+        );
+        assert_eq!(
+            published_scripts_url_for("0.51.0-rc.1"),
+            "https://github.com/upsetdev/pyo/releases/download/v0.51.0-rc.1"
+        );
+        for v in ["0.51.0-rc.1", "0.51.0-rc.12", "1.0.0-rc.0"] {
+            assert!(is_release_candidate(v), "{v}");
+        }
+        for v in [
+            "0.51.0",
+            "",
+            "0.51.0-rc",
+            "0.51.0-rc.",
+            "0.51.0-rc.1x",
+            "0.51.0-beta.1",
+            "0.51.0-",
+        ] {
+            assert!(!is_release_candidate(v), "{v}");
+        }
+        // This release's own published scripts need no --version, wherever
+        // they are.
+        let args = || vec![("--auto-update", None)];
+        assert_eq!(pinned(&published_scripts_url(), args()), args());
+        assert_eq!(
+            pinned(&format!("{}/", published_scripts_url()), args()),
+            args()
+        );
+        assert_eq!(
+            refresh_command_with(&published_scripts_url(), None, None),
+            format!("curl -fsSL {}/connect.sh | bash", published_scripts_url())
+        );
+        // Another candidate's assets are a mirror's: pinned to this release.
+        let other = "https://github.com/upsetdev/pyo/releases/download/v0.0.1-rc.1";
+        assert_eq!(
+            refresh_command_with(other, None, None),
+            format!("curl -fsSL {other}/connect.sh | bash -s --{PIN}")
+        );
     }
 
     #[test]
