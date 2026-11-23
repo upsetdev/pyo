@@ -683,6 +683,10 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 "/install/this-machine/tailnet",
                 axum::routing::post(install::this_machine_tailnet),
             )
+            .route(
+                "/install/this-machine/refresh",
+                axum::routing::post(install::this_machine_refresh),
+            )
             .route("/install/join.sh", get(join::serve))
             .route("/install/connect.sh", get(join::serve_connect))
             .route("/install/sandbox.sh", get(join::serve_sandbox))
