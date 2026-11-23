@@ -245,11 +245,12 @@ fn gateway_crds_yaml(with_api: bool) -> String {
 }
 
 /// Whether new installs bind the self-update role: their agent then
-/// brings its admission policy up to date with Pyo by itself. On unless
-/// `PYO_AGENT_SELF_UPDATE` is false: with it, whoever controls this Pyo can
-/// loosen what the agent may do on those clusters, so a Pyo serving other
-/// people's clusters (Pyo Cloud) turns it off. A cluster's owner can also
-/// delete its `pyo-agent-self-update` binding.
+/// brings its roles and its admission policy up to date with Pyo by
+/// itself. On unless `PYO_AGENT_SELF_UPDATE` is false: with it, whoever
+/// controls this Pyo can give the agent any permission on those clusters
+/// (pyo-proto's rbac.rs says why that was so before it wrote roles too),
+/// so a Pyo serving other people's clusters (Pyo Cloud) turns it off. A
+/// cluster's owner can also delete its `pyo-agent-self-update` binding.
 pub fn self_update() -> bool {
     self_update_from(std::env::var("PYO_AGENT_SELF_UPDATE").ok().as_deref())
 }
@@ -341,8 +342,15 @@ pub fn render_with(api_url: &str, image: &str, token: &str, extra_env: &[(&str, 
 #   (pyo-agent-stats): delete those two bindings to take that away;
 # - read your pyo-system/pyo-policy ConfigMap, never write it;
 # - with pyo-agent-self-update bound (on unless this Pyo turns it off):
-#   rewrite its own admission policy when Pyo is updated, once its roles are
-#   already as Pyo's; delete that binding to take that away.
+#   when Pyo is updated, update its own roles and bindings (the ones below,
+#   by name, never a new one) and rewrite its own admission policy, so the
+#   cluster needs no command after a release. With it, whoever controls
+#   this Pyo can give the agent any permission here, up to cluster-admin.
+#   That was already so while this role only rewrote the admission policy:
+#   the policy is what keeps the agent's roles from privileged pods and
+#   from writing other roles. Delete the pyo-agent-self-update
+#   ClusterRoleBinding to take all of it away. The agent's roles then
+#   change only when you run the connect command.
 # The admission policy at the end holds it to this, and refuses privileged
 # containers and the host's network, processes and files, except for Pyo's
 # own build, metrics and GPU components.

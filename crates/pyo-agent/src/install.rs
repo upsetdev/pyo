@@ -2,16 +2,26 @@
 //! `RefreshInstall`), with the optional self-update role. Pyo sends it when
 //! the agent's heartbeat reports an older install (after Pyo was updated).
 //!
-//! 1. Its roles must already be as Pyo's: the agent reads each one (it may
-//!    never write them); if any differs, only the cluster's connect command
-//!    can bring them up to date, and nothing is changed.
+//! 1. Its roles and bindings, as Pyo's are: the agent reads each one and
+//!    updates those that differ, by name, the self-update role itself
+//!    last (it's what allows the other writes). It never makes one. If
+//!    one is missing or it may not update one (an install whose
+//!    self-update role is older, a role object a release added, a chart
+//!    installed with the agent that changed), only the cluster's connect
+//!    command brings that, and nothing is changed.
 //! 2. The admission policy is replaced as a whole (its binding only if that
 //!    differs), then a dry run of the Deployment change below goes through
-//!    it. If the new policy refuses that, the old one is put back.
+//!    it. If the new policy refuses that, the old one is put back, and
+//!    the roles of step 1 with it.
 //! 3. Last, after reporting: the Deployment's image pins, its stamp, and
 //!    its pods' priority and tolerations (pyo-proto's `rbac::AGENT_PRIORITY`
 //!    and `rbac::agent_tolerations`, the connect command's too). When more
 //!    than the stamp changes, the agent restarts on it.
+//!
+//! Roles before the policy, the policy before the pins: the new policy only
+//! narrows what the roles allow, so at every step in between the agent
+//! holds a working install, and a refresh that stops there is made whole
+//! by the next one.
 //!
 //! On a small server under load, the API server can take longer to check
 //! the policy than it gives a write by default (34 s): each write here asks
@@ -49,6 +59,8 @@ const BUDGET: Duration = Duration::from_secs(300);
 /// The first wait before trying again; it doubles up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// How long the API server gets to start enforcing a policy just written.
+const ENFORCE_WAIT: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 3 });
 
 /// A refresh's progress: logged as it goes, and sent back with its result.
 #[derive(Default)]
@@ -202,7 +214,64 @@ pub fn check(p: &InstallParts) -> Result<(), String> {
     if rbac::install_hash(&p.access, &unstamped, &p.pins) != p.hash {
         return Err("its hash doesn't match its content".into());
     }
+    // Its bindings: only to Pyo's own accounts (the admission policy says
+    // the same of the ones the agent may update).
+    for o in p.access.iter().filter(|o| is_binding(o)) {
+        let own = o["subjects"].as_array().is_some_and(|s| {
+            !s.is_empty()
+                && s.iter().all(|s| {
+                    s["kind"] == "ServiceAccount"
+                        && s["namespace"] == rbac::NS
+                        && [rbac::SA, rbac::TAILNET_SA].contains(&s["name"].as_str().unwrap_or(""))
+                })
+        });
+        if !own {
+            return Err("a binding isn't to the agent's own accounts".into());
+        }
+    }
     Ok(())
+}
+
+fn kind_of(o: &Value) -> &str {
+    o["kind"].as_str().unwrap_or("")
+}
+
+fn is_binding(o: &Value) -> bool {
+    matches!(kind_of(o), "RoleBinding" | "ClusterRoleBinding")
+}
+
+/// A role or binding: what a refresh may update.
+fn is_role_object(o: &Value) -> bool {
+    matches!(kind_of(o), "Role" | "ClusterRole") || is_binding(o)
+}
+
+/// A binding the cluster's owner may delete to take servers or their
+/// figures away from the agent: missing, it stays missing.
+fn optional_binding(o: &Value) -> bool {
+    kind_of(o) == "ClusterRoleBinding"
+        && [rbac::NODES_ROLE, rbac::STATS_ROLE].contains(&o["metadata"]["name"].as_str().unwrap_or(""))
+}
+
+/// An object of the install, as a refresh names it: "Kind/name", or
+/// "Kind/namespace/name".
+pub fn object_key(o: &Value) -> String {
+    let name = o["metadata"]["name"].as_str().unwrap_or("");
+    match o["metadata"]["namespace"].as_str() {
+        Some(ns) => format!("{}/{ns}/{name}", kind_of(o)),
+        None => format!("{}/{name}", kind_of(o)),
+    }
+}
+
+/// The order roles are written in: roles, then bindings, then the
+/// self-update role, which allows the writes before it.
+fn write_rank(o: &Value) -> u8 {
+    if kind_of(o) == "ClusterRole" && o["metadata"]["name"] == rbac::SELF_UPDATE_ROLE {
+        2
+    } else if is_binding(o) {
+        1
+    } else {
+        0
+    }
 }
 
 /// The Deployment change: its pins (env by name, the rest kept), stamp,
@@ -224,8 +293,210 @@ fn deployment_patch(p: &InstallParts) -> Value {
     })
 }
 
-/// Steps 1 and 2. Ok once the admission policy is this install's and lets
-/// the Deployment change through; `finish` makes that change.
+/// Why a write of the install didn't happen.
+enum WriteFailed {
+    /// The object isn't there: the agent never makes one.
+    Missing,
+    /// The cluster refused it: this agent's roles or its admission policy.
+    Refused(kube::Error),
+    Other(anyhow::Error),
+}
+
+/// Replace `name` with `want` (its rules or spec, labels and annotations.
+/// Other labels and annotations stay), trying again while the API server
+/// is busy. Ok(Some(what was there before)) once written, Ok(None) when it
+/// was already so.
+async fn put(
+    client: &Client,
+    api: &Api<DynamicObject>,
+    name: &str,
+    want: &Value,
+    progress: &mut Progress,
+    deadline: Instant,
+) -> Result<Option<DynamicObject>, WriteFailed> {
+    let kind = kind_of(want);
+    // What was there before the first write: put back if a later step
+    // fails, even when that write's answer was lost.
+    let mut before: Option<DynamicObject> = None;
+    let mut tries = 0;
+    loop {
+        let old = match api.get_opt(name).await {
+            Ok(Some(old)) => old,
+            Ok(None) => return Err(WriteFailed::Missing),
+            Err(e) if crate::refused::is_refusal(&e) => return Err(WriteFailed::Refused(e)),
+            Err(e) => return Err(WriteFailed::Other(e.into())),
+        };
+        let old_value = serde_json::to_value(&old).map_err(|e| WriteFailed::Other(e.into()))?;
+        let stamped = want["metadata"]["annotations"]
+            .as_object()
+            .is_none_or(|a| a.iter().all(|(k, v)| old.annotations().get(k).map(String::as_str) == v.as_str()));
+        if same(want, &old_value) && stamped {
+            // In place, maybe by an earlier try whose answer didn't come back.
+            if before.is_some() {
+                progress.say(format!("The {kind} {name} is in place."));
+            }
+            return Ok(before);
+        }
+        let mut new: DynamicObject =
+            serde_json::from_value(want.clone()).map_err(|e| WriteFailed::Other(e.into()))?;
+        new.metadata.resource_version = old.resource_version();
+        // Other labels and annotations stay (kubectl's own, say).
+        let mut labels = old.labels().clone();
+        labels.extend(new.labels().clone());
+        new.metadata.labels = Some(labels);
+        let mut annotations = old.annotations().clone();
+        annotations.extend(new.annotations().clone());
+        new.metadata.annotations = Some(annotations);
+        tries += 1;
+        progress.say(if tries == 1 {
+            format!("Updating the {kind} {name}…")
+        } else {
+            format!("Updating the {kind} {name} (try {tries})…")
+        });
+        if before.is_none() {
+            before = Some(old);
+        }
+        match replace(client, api, name, &new).await {
+            Ok(_) => return Ok(before),
+            // Changed under it (another process of this agent, on its
+            // way out, making the same refresh): read it again.
+            Err(kube::Error::Api(e)) if e.code == 409 && tries < 3 => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(e) if crate::refused::is_refusal(&e) => return Err(WriteFailed::Refused(e)),
+            Err(e) if transient(&e) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let Some(wait) = backoff(tries, left) else {
+                    return Err(WriteFailed::Other(anyhow::anyhow!(
+                        "couldn't update {kind} {name} in {} minutes: {e}. The API server may be overloaded; this is tried again later",
+                        BUDGET.as_secs() / 60
+                    )));
+                };
+                progress.say(format!(
+                    "The API server didn't take it ({e}). Trying again in {}s…",
+                    wait.as_secs()
+                ));
+                tokio::time::sleep(wait).await;
+            }
+            Err(e) => {
+                return Err(WriteFailed::Other(anyhow::anyhow!(
+                    "couldn't update {kind} {name}: {e}"
+                )));
+            }
+        }
+    }
+}
+
+/// Put back what a refresh replaced, the last written first. What to say
+/// when that failed too (empty when it didn't).
+async fn put_back(client: &Client, replaced: Vec<(Api<DynamicObject>, DynamicObject)>) -> String {
+    let mut failed = String::new();
+    for (api, mut old) in replaced.into_iter().rev() {
+        let name = old.name_any();
+        old.metadata.managed_fields = None;
+        for attempt in 1..=3 {
+            old.metadata.resource_version = api
+                .get(&name)
+                .await
+                .ok()
+                .and_then(|cur| cur.resource_version());
+            match replace(client, &api, &name, &old).await {
+                Ok(_) => break,
+                Err(e) => {
+                    if attempt < 3
+                        && (transient(&e) || matches!(&e, kube::Error::Api(s) if s.code == 409))
+                    {
+                        tokio::time::sleep(FIRST_BACKOFF).await;
+                    } else {
+                        failed = format!(" Putting back the old {name} failed too: {e}.");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    failed
+}
+
+/// What step 1 did.
+#[derive(Default)]
+struct Roles {
+    /// Updated: what each was before, to put back if a later step fails.
+    written: Vec<(Api<DynamicObject>, DynamicObject)>,
+    /// Not as Pyo's, and not this agent's to change ([`object_key`]s).
+    older: Vec<String>,
+}
+
+/// Step 1: the install's roles, bindings and charts read, and the roles
+/// and bindings that differ updated where the agent may.
+async fn update_roles(
+    client: &Client,
+    p: &InstallParts,
+    progress: &mut Progress,
+    deadline: Instant,
+) -> anyhow::Result<Roles> {
+    let mut out = Roles::default();
+    let mut differ: Vec<&Value> = vec![];
+    for o in &p.access {
+        let kind = kind_of(o);
+        // Nothing in these to compare: there by now.
+        if matches!(kind, "Namespace" | "ServiceAccount") {
+            continue;
+        }
+        let (api, name) = api_for(client, o);
+        let have = match api.get_opt(&name).await {
+            Ok(h) => h,
+            // It may not even read it: not this agent's to change.
+            Err(e) if crate::refused::is_refusal(&e) => {
+                out.older.push(object_key(o));
+                continue;
+            }
+            Err(e) => anyhow::bail!("couldn't read its {kind} {name} ({e})"),
+        };
+        match have {
+            None if optional_binding(o) => {}
+            None => out.older.push(object_key(o)),
+            Some(h) => {
+                let h = serde_json::to_value(&h)?;
+                if same(o, &h) {
+                    continue;
+                }
+                // A chart, or a binding to another role (which Kubernetes
+                // never changes): the connect command's.
+                if is_role_object(o) && (!is_binding(o) || same(&json!({ "roleRef": o["roleRef"] }), &h)) {
+                    differ.push(o);
+                } else {
+                    out.older.push(object_key(o));
+                }
+            }
+        }
+    }
+    differ.sort_by_key(|o| write_rank(o));
+    for o in differ {
+        let (api, name) = api_for(client, o);
+        match put(client, &api, &name, o, progress, deadline).await {
+            Ok(Some(before)) => out.written.push((api, before)),
+            Ok(None) => {}
+            Err(WriteFailed::Missing) => out.older.push(object_key(o)),
+            Err(WriteFailed::Refused(e)) => {
+                progress.say(format!(
+                    "This agent may not update its {} {name} ({e}).",
+                    kind_of(o)
+                ));
+                out.older.push(object_key(o));
+            }
+            Err(WriteFailed::Other(e)) => {
+                let back = put_back(client, std::mem::take(&mut out.written)).await;
+                anyhow::bail!("{e:#}, so its roles stay as they were.{back}");
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Steps 1 and 2. Ok once the roles and the admission policy are this
+/// install's and the policy lets the Deployment change through; `finish`
+/// makes that change.
 pub async fn refresh(
     client: &Client,
     p: &InstallParts,
@@ -234,106 +505,44 @@ pub async fn refresh(
     check(p).map_err(|e| anyhow::anyhow!("Pyo sent an install this agent won't apply: {e}"))?;
     let deadline = Instant::now() + BUDGET;
     // 1. Its roles, as Pyo's are.
-    for o in &p.access {
-        let kind = o["kind"].as_str().unwrap_or("");
-        // Nothing in these to compare: there by now.
-        if matches!(kind, "Namespace" | "ServiceAccount") {
-            continue;
-        }
-        let (api, name) = api_for(client, o);
-        let have = api
-            .get_opt(&name)
-            .await
-            .map_err(|e| anyhow::anyhow!("couldn't read its {kind} {name} ({e}); {RERUN}"))?;
-        match have {
-            None => anyhow::bail!(
-                "{} ({kind} {name} is missing); {RERUN}",
-                rbac::ROLES_OLDER
-            ),
-            Some(h) if !same(o, &serde_json::to_value(&h)?) => anyhow::bail!(
-                "{} ({kind} {name} differs); {RERUN}",
-                rbac::ROLES_OLDER
-            ),
-            Some(_) => {}
-        }
+    let roles = update_roles(client, p, progress, deadline).await?;
+    if !roles.older.is_empty() {
+        let back = put_back(client, roles.written).await;
+        anyhow::bail!(
+            "{} ({} can't be brought up to date by the agent); {RERUN}.{back}",
+            rbac::ROLES_OLDER,
+            roles.older.join(", ")
+        );
     }
+    let mut replaced = roles.written;
+    let wrote_roles = !replaced.is_empty();
     // 2. The admission policy, then its binding.
-    let mut replaced: Vec<(Api<DynamicObject>, DynamicObject)> = vec![];
+    let mut wrote_policy = false;
     for o in &p.admission {
         let (api, name) = api_for(client, o);
-        let kind = o["kind"].as_str().unwrap_or("");
-        // What was there before the first write: put back if the new policy
-        // refuses the agent (below), even when that write's answer was lost.
-        let mut before: Option<DynamicObject> = None;
-        let mut tries = 0;
-        loop {
-            let Some(old) = api.get_opt(&name).await? else {
-                anyhow::bail!("this cluster has no admission policy for the agent; {RERUN}")
-            };
-            let stamp = |d: &DynamicObject| d.annotations().get(rbac::INSTALL_ANNOTATION).cloned();
-            let old_value = serde_json::to_value(&old)?;
-            if same(o, &old_value)
-                && stamp(&old).as_deref()
-                    == o["metadata"]["annotations"][rbac::INSTALL_ANNOTATION].as_str()
-            {
-                // In place, by an earlier try whose answer didn't come back.
-                if let Some(b) = before.take() {
-                    progress.say(format!("The {kind} is in place."));
-                    replaced.push((api.clone(), b));
-                }
-                break;
+        let kind = kind_of(o);
+        match put(client, &api, &name, o, progress, deadline).await {
+            Ok(Some(before)) => {
+                replaced.push((api, before));
+                wrote_policy = true;
             }
-            let mut new: DynamicObject = serde_json::from_value(o.clone())?;
-            new.metadata.resource_version = old.resource_version();
-            // Other labels and annotations stay (kubectl's own, say).
-            let mut labels = old.labels().clone();
-            labels.extend(new.labels().clone());
-            new.metadata.labels = Some(labels);
-            let mut annotations = old.annotations().clone();
-            annotations.extend(new.annotations().clone());
-            new.metadata.annotations = Some(annotations);
-            tries += 1;
-            progress.say(if tries == 1 {
-                format!("Updating the {kind}…")
-            } else {
-                format!("Updating the {kind} (try {tries})…")
-            });
-            if before.is_none() {
-                before = Some(old);
-            }
-            match replace(client, &api, &name, &new).await {
-                Ok(_) => {
-                    if let Some(b) = before.take() {
-                        replaced.push((api.clone(), b));
+            Ok(None) => {}
+            Err(failed) => {
+                let why = match failed {
+                    WriteFailed::Missing => {
+                        format!("this cluster has no admission policy for the agent; {RERUN}")
                     }
-                    break;
-                }
-                // Changed under it (another process of this agent, on its
-                // way out, making the same refresh): read it again.
-                Err(kube::Error::Api(e)) if e.code == 409 && tries < 3 => {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-                Err(e) if transient(&e) => {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    let Some(wait) = backoff(tries, left) else {
-                        anyhow::bail!(
-                            "couldn't update {kind} {name} in {} minutes: {e}. The API server may be overloaded; this is tried again later",
-                            BUDGET.as_secs() / 60
-                        );
-                    };
-                    progress.say(format!(
-                        "The API server didn't take it ({e}). Trying again in {}s…",
-                        wait.as_secs()
-                    ));
-                    tokio::time::sleep(wait).await;
-                }
-                Err(e) => anyhow::bail!("couldn't update {kind} {name}: {e}"),
+                    WriteFailed::Refused(e) => format!("couldn't update {kind} {name}: {e}"),
+                    WriteFailed::Other(e) => format!("{e:#}"),
+                };
+                let back = put_back(client, replaced).await;
+                anyhow::bail!("{why}{}{back}", if wrote_roles { ", so its roles stay as they were." } else { "" });
             }
         }
     }
-    if !replaced.is_empty() {
+    if wrote_policy {
         // The API server takes a moment to enforce it.
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(ENFORCE_WAIT).await;
     }
     let deployments = Api::<Deployment>::namespaced(client.clone(), rbac::NS);
     progress.say("Checking the agent's own update against it…".into());
@@ -377,36 +586,9 @@ pub async fn refresh(
             format!("the new admission policy refused the agent's own update ({e})")
         };
         if !replaced.is_empty() {
-            progress.say("Putting the old admission policy back…".into());
+            progress.say("Putting the old install back…".into());
         }
-        let mut back = String::new();
-        for (api, mut old) in replaced.into_iter().rev() {
-            let name = old.name_any();
-            old.metadata.managed_fields = None;
-            for attempt in 1..=3 {
-                old.metadata.resource_version = api
-                    .get(&name)
-                    .await
-                    .ok()
-                    .and_then(|cur| cur.resource_version());
-                match replace(client, &api, &name, &old).await {
-                    Ok(_) => {
-                        back.clear();
-                        break;
-                    }
-                    Err(e) => {
-                        back = format!(" Putting back the old one failed too: {e}.");
-                        if attempt < 3
-                            && (transient(&e) || matches!(&e, kube::Error::Api(s) if s.code == 409))
-                        {
-                            tokio::time::sleep(FIRST_BACKOFF).await;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        let back = put_back(client, replaced).await;
         anyhow::bail!("{why}, so the old one stays.{back}");
     }
     progress.say("The new admission policy lets the agent's own update through.".into());
@@ -445,6 +627,195 @@ mod tests {
             "127.0.0.1:5005/pyo/geoip:dev",
             &db,
         )
+    }
+
+    // ── A refresh against the in-memory API server ───────────────────────
+
+    use crate::fakekube::FakeKube;
+    use std::sync::{Arc, Mutex};
+
+    /// Where the fake server keeps an object of the install.
+    fn path_of(o: &Value) -> String {
+        let version = o["apiVersion"].as_str().unwrap();
+        let prefix = if version.contains('/') {
+            format!("apis/{version}")
+        } else {
+            format!("api/{version}")
+        };
+        let plural = match kind_of(o) {
+            "ValidatingAdmissionPolicy" => "validatingadmissionpolicies".to_owned(),
+            k => format!("{}s", k.to_ascii_lowercase()),
+        };
+        let name = o["metadata"]["name"].as_str().unwrap();
+        match o["metadata"]["namespace"].as_str() {
+            Some(ns) => format!("{prefix}/namespaces/{ns}/{plural}/{name}"),
+            None => format!("{prefix}/{plural}/{name}"),
+        }
+    }
+
+    const DEPLOYMENT_PATH: &str = "apis/apps/v1/namespaces/pyo-system/deployments/pyo-agent";
+
+    /// A cluster as the connect command left it at install `p`.
+    fn installed(kube: &FakeKube, p: &InstallParts) {
+        for o in p.access.iter().chain(p.admission.iter()) {
+            kube.put(&path_of(o), o.clone());
+        }
+        kube.put(
+            DEPLOYMENT_PATH,
+            json!({
+                "apiVersion": "apps/v1", "kind": "Deployment",
+                "metadata": { "annotations": { rbac::INSTALL_ANNOTATION: p.hash } },
+                "spec": { "template": { "spec": { "containers": [{ "name": "agent", "image": "agent:1" }] } } },
+            }),
+        );
+    }
+
+    /// `p` with its roles changed by `change`, as a later release of Pyo
+    /// would hand it out (hashed and stamped again).
+    fn later(p: &InstallParts, change: impl Fn(&mut Vec<Value>)) -> InstallParts {
+        let mut p = p.clone();
+        change(&mut p.access);
+        p.admission[0]["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("annotations");
+        p.hash = rbac::install_hash(&p.access, &p.admission, &p.pins);
+        p.admission[0]["metadata"]["annotations"] = json!({ rbac::INSTALL_ANNOTATION: p.hash });
+        check(&p).unwrap();
+        p
+    }
+
+    fn role<'a>(access: &'a mut [Value], kind: &str, name: &str) -> &'a mut Value {
+        access
+            .iter_mut()
+            .find(|o| o["kind"] == kind && o["metadata"]["name"] == name)
+            .unwrap()
+    }
+
+    fn stamp_at(kube: &FakeKube, path: &str) -> Value {
+        kube.get(path).unwrap()["metadata"]["annotations"][rbac::INSTALL_ANNOTATION].clone()
+    }
+
+    /// What 0.52.0 could bring: a rule added to one role, one removed from
+    /// another, and a name added to the self-update role.
+    fn changed_roles(access: &mut Vec<Value>) {
+        role(access, "ClusterRole", "pyo-agent-cluster")["rules"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "apiGroups": ["example.pyo.dev"], "resources": ["widgets"], "verbs": ["get", "patch"] }));
+        role(access, "Role", "pyo-agent-policy")["rules"] = json!([]);
+        role(access, "ClusterRole", rbac::SELF_UPDATE_ROLE)["rules"][1]["resourceNames"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("pyo-agent-later"));
+    }
+
+    /// The upgrade path's second half: a cluster whose owner ran the
+    /// connect command once on 0.51.0 (so it has this release's
+    /// self-update role). Pyo then moves to a release with other rules in
+    /// roles the cluster already has. The refresh writes them, then the
+    /// policy, then the pins, and stamps the install current. No command.
+    #[tokio::test]
+    async fn a_later_release_with_changed_roles_refreshes_by_itself() {
+        let (kube, client) = FakeKube::start().await;
+        let a = parts();
+        installed(&kube, &a);
+        let b = later(&a, changed_roles);
+        assert_ne!(a.hash, b.hash);
+        // Every write, in order.
+        let writes: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = writes.clone();
+        kube.admit(move |w| {
+            seen.lock().unwrap().push(format!("{} {}/{}", w.method, w.plural, w.name));
+            None
+        });
+        let mut progress = Progress::default();
+        refresh(&client, &b, &mut progress).await.unwrap();
+        // Roles first, the self-update role last of them, then the policy,
+        // then the dry run of the agent's own update.
+        assert_eq!(
+            *writes.lock().unwrap(),
+            [
+                "PUT roles/pyo-agent-policy",
+                "PUT clusterroles/pyo-agent-cluster",
+                "PUT clusterroles/pyo-agent-self-update",
+                "PUT validatingadmissionpolicies/pyo-agent",
+                "PATCH deployments/pyo-agent",
+            ]
+        );
+        for o in b.access.iter().filter(|o| is_role_object(o)) {
+            assert!(same(o, &kube.get(&path_of(o)).unwrap()), "{}", object_key(o));
+        }
+        // The removed rule is gone, not merged.
+        let policy_role = role(&mut b.access.clone(), "Role", "pyo-agent-policy").clone();
+        assert_eq!(kube.get(&path_of(&policy_role)).unwrap()["rules"], json!([]));
+        assert_eq!(stamp_at(&kube, &path_of(&b.admission[0])), json!(b.hash));
+        // The Deployment last, after the result is reported.
+        assert_eq!(stamp_at(&kube, DEPLOYMENT_PATH), json!(a.hash));
+        finish(&client, &b).await.unwrap();
+        assert_eq!(stamp_at(&kube, DEPLOYMENT_PATH), json!(b.hash));
+        let d = kube.get(DEPLOYMENT_PATH).unwrap();
+        assert_eq!(d["spec"]["template"]["spec"]["priorityClassName"], rbac::AGENT_PRIORITY);
+        // Sent again: nothing left to write but the dry run.
+        writes.lock().unwrap().clear();
+        refresh(&client, &b, &mut Progress::default()).await.unwrap();
+        assert_eq!(*writes.lock().unwrap(), ["PATCH deployments/pyo-agent"]);
+    }
+
+    /// A binding the owner deleted to take servers away stays deleted, and
+    /// the refresh goes through without it.
+    #[tokio::test]
+    async fn a_refresh_leaves_a_deleted_optional_binding_alone() {
+        let (kube, client) = FakeKube::start().await;
+        let a = parts();
+        let mut without = a.clone();
+        without
+            .access
+            .retain(|o| !(o["kind"] == "ClusterRoleBinding" && o["metadata"]["name"] == rbac::NODES_ROLE));
+        installed(&kube, &without);
+        let b = later(&a, changed_roles);
+        refresh(&client, &b, &mut Progress::default()).await.unwrap();
+        let binding = b.access.iter().find(|o| optional_binding(o)).unwrap();
+        assert!(kube.get(&path_of(binding)).is_none());
+        assert_eq!(stamp_at(&kube, &path_of(&b.admission[0])), json!(b.hash));
+    }
+
+    /// A new policy that refuses the agent's own update: the old policy is
+    /// put back, and the roles written before it too. The old install
+    /// stays whole.
+    #[tokio::test]
+    async fn a_refused_policy_puts_the_roles_back_too() {
+        let (kube, client) = FakeKube::start().await;
+        let a = parts();
+        installed(&kube, &a);
+        let b = later(&a, changed_roles);
+        kube.admit(|w| {
+            (w.plural == "deployments").then(|| {
+                (422, "ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request".to_owned())
+            })
+        });
+        let err = refresh(&client, &b, &mut Progress::default()).await.unwrap_err();
+        assert!(format!("{err:#}").contains("refused the agent's own update"), "{err:#}");
+        assert!(!format!("{err:#}").contains("failed too"), "{err:#}");
+        for o in a.access.iter().filter(|o| is_role_object(o)).chain(a.admission.iter()) {
+            assert!(same(o, &kube.get(&path_of(o)).unwrap()), "{}", object_key(o));
+        }
+        assert_eq!(stamp_at(&kube, &path_of(&a.admission[0])), json!(a.hash));
+        assert_eq!(stamp_at(&kube, DEPLOYMENT_PATH), json!(a.hash));
+    }
+
+    /// Pyo only sends bindings to the agent's own accounts.
+    #[test]
+    fn refuses_a_binding_to_anyone_else() {
+        let p = later(&parts(), |_| {});
+        let mut other = p.clone();
+        role(&mut other.access, "ClusterRoleBinding", "pyo-agent-read")["subjects"] =
+            json!([{ "kind": "User", "name": "someone" }]);
+        other.admission[0]["metadata"].as_object_mut().unwrap().remove("annotations");
+        other.hash = rbac::install_hash(&other.access, &other.admission, &other.pins);
+        other.admission[0]["metadata"]["annotations"] = json!({ rbac::INSTALL_ANNOTATION: other.hash });
+        assert_eq!(check(&other).unwrap_err(), "a binding isn't to the agent's own accounts");
+        assert!(check(&p).is_ok());
     }
 
     /// Writes ask the API server for more than its 34 s default.

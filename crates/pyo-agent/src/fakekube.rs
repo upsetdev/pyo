@@ -1,7 +1,8 @@
 //! A Kubernetes API server in memory, for tests that run the agent's
 //! writes end to end without a cluster: objects by path, server-side apply
 //! as a replace, merge patches, deletes, lists with label selectors, and an
-//! admission check each test sets (an older admission policy, say).
+//! admission check each test sets (an older admission policy, say). A dry
+//! run is checked and not stored.
 
 use std::{
     collections::BTreeMap,
@@ -229,7 +230,10 @@ async fn handle(
         obj["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
     }
     obj["metadata"]["resourceVersion"] = json!("1");
-    inner.objects.insert(key, obj.clone());
+    // A dry run goes through admission and writes nothing.
+    if query(&uri, "dryRun").is_none() {
+        inner.objects.insert(key, obj.clone());
+    }
     json_response(if method == Method::POST { 201 } else { 200 }, obj)
 }
 
