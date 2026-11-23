@@ -618,20 +618,31 @@ async fn new_migrations(db: &PgPool, release: &Release) -> ApiResult<Vec<String>
 
 /// Why `release` can't be started now, if it can't.
 fn blockers(release: &Release, clusters: &[ClusterRow], active: bool) -> Vec<String> {
+    blockers_from(current(), release, clusters, active)
+}
+
+/// [`blockers`] for a Pyo on `pyo`. A release candidate's version isn't
+/// one updates compare, so tests name a release.
+fn blockers_from(
+    pyo: &str,
+    release: &Release,
+    clusters: &[ClusterRow],
+    active: bool,
+) -> Vec<String> {
     let mut out = vec![];
     if active {
         out.push("An update is already running.".into());
     }
-    if !release.allows_from(current()) {
+    if !release.allows_from(pyo) {
         out.push(format!(
             "Pyo {} can't update straight to {}: update to {} first. On the server, run: curl -fsSL https://pyo.dev/install.sh | bash -s -- --version {}",
-            current(),
+            pyo,
             release.version,
             release.min_from.as_deref().unwrap_or("?"),
             release.min_from.as_deref().unwrap_or("?"),
         ));
     }
-    if newer(&release.version, current()) {
+    if newer(&release.version, pyo) {
         match clusters.iter().find(|c| c.same_cluster) {
             None => out.push("Pyo updates itself through an agent on the cluster it runs on, and there's none. Connect this machine as a cluster, or on the server run: curl -fsSL https://pyo.dev/install.sh | bash".into()),
             Some(c) if c.updates < 1 => out.push(format!("The agent on {} is too old to update Pyo. Update once on the server with: curl -fsSL https://pyo.dev/install.sh | bash (later releases can be applied here)", c.name)),
@@ -1888,6 +1899,8 @@ mod tests {
 
     #[test]
     fn what_stops_an_update() {
+        let blockers =
+            |r: &Release, c: &[ClusterRow], active: bool| blockers_from("0.51.0", r, c, active);
         let r = Release {
             version: "99.0.0".into(),
             ..Default::default()
@@ -1916,7 +1929,9 @@ mod hosted_tests {
     fn only_older_agents_are_behind() {
         let v = current();
         assert!(!agent_behind(v));
-        assert!(agent_behind("0.0.1"));
+        // A release candidate isn't a version updates compare, so it moves
+        // no agent.
+        assert_eq!(agent_behind("0.0.1"), parse_version(v).is_some());
         assert!(!agent_behind("99.0.0"));
         // A build with no version is left alone.
         assert!(!agent_behind(""));
