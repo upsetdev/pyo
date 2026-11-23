@@ -283,6 +283,50 @@ pub fn parts(upgrades: bool) -> &'static pyo_proto::rbac::InstallParts {
     })[usize::from(upgrades)]
 }
 
+/// The hash of the install a cluster without the self-update role gets
+/// from this Pyo (not the cluster Pyo runs on): [`parts`]`(false)`'s on a
+/// Pyo that hands out no self-update role (Pyo Cloud).
+pub fn verifier_install() -> &'static str {
+    use pyo_proto::system::{db_images_from_env, geoip_image_from_env, waf_image_from_env};
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        pyo_proto::rbac::InstallParts::new(
+            false,
+            false,
+            &waf_image_from_env(),
+            &geoip_image_from_env(),
+            &db_images_from_env(),
+        )
+        .hash
+    })
+}
+
+/// How long an answer of [`version`] may be kept, in seconds.
+const VERSION_MAX_AGE: &str = "public, max-age=60";
+
+/// GET /install/version: the version this Pyo runs and the install a
+/// cluster without the self-update role gets from it
+/// ([`verifier_install`]), as `{"version":"X.Y.Z","install":"<hash>"}`.
+///
+/// For the verifier on a cluster's first server (`pyo-verify`): it applies
+/// only what the signed release of this version defines, so this names a
+/// version and nothing more. No key, as `/api/v1/meta` (which says the
+/// version too) and the install scripts beside it: nothing here is secret,
+/// nothing is read from the database, and the answer may be kept a minute.
+pub async fn version() -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, VERSION_MAX_AGE)],
+        crate::error::Json(version_answer(
+            env!("CARGO_PKG_VERSION"),
+            verifier_install(),
+        )),
+    )
+}
+
+fn version_answer(version: &str, install: &str) -> serde_json::Value {
+    serde_json::json!({ "version": version, "install": install })
+}
+
 /// The agent's manifest. On the cluster Pyo itself runs on (an in-cluster
 /// API address), its agent also runs Pyo's upgrader.
 pub fn render(api_url: &str, image: &str, token: &str) -> String {
@@ -341,6 +385,8 @@ pub fn render_with(api_url: &str, image: &str, token: &str, extra_env: &[(&str, 
 # - servers (pyo-agent-nodes) and their disk and network figures
 #   (pyo-agent-stats): delete those two bindings to take that away;
 # - read your pyo-system/pyo-policy ConfigMap, never write it;
+# - read pyo-system/pyo-verifier, where your server's verifier says how
+#   automatic updates stand (when you set them up), never write it;
 # - with pyo-agent-self-update bound (on unless this Pyo turns it off):
 #   when Pyo is updated, update its own roles and bindings (the ones below,
 #   by name, never a new one) and rewrite its own admission policy, so the
@@ -714,8 +760,32 @@ pub async fn sync(
     } else {
         (state, message)
     };
-    let mut out = json!({ "state": state, "command": command(same_cluster) });
-    if host {
+    let out = install_shown(
+        scope,
+        state,
+        &message,
+        command(same_cluster),
+        host.then_some(stamp.as_str()),
+        unix_now(),
+    );
+    Ok((out, send))
+}
+
+/// `capabilities.agentInstall` for a cluster whose install is in `state`
+/// (see [`sync`]): `host_stamp` when its own server refreshes it.
+/// `autoUpdate` ([`auto_update`]) is added last and is only ever shown:
+/// everything else here is the same whatever the verifier's status says.
+fn install_shown(
+    scope: &pyo_proto::rbac::AgentScope,
+    state: &str,
+    message: &str,
+    command: String,
+    host_stamp: Option<&str>,
+    now: i64,
+) -> serde_json::Value {
+    use serde_json::json;
+    let mut out = json!({ "state": state, "command": command });
+    if let Some(stamp) = host_stamp {
         out["hostRefresh"] = json!(stamp);
     }
     if state == "roles" {
@@ -726,7 +796,185 @@ pub async fn sync(
     } else if state == "outdated" {
         out["message"] = json!(outdated_message(scope));
     }
-    Ok((out, send))
+    if let Some(auto) = auto_update(scope, state, now) {
+        out["autoUpdate"] = auto;
+    }
+    out
+}
+
+// ── Automatic updates, as the server's verifier reports them ───────────────
+//
+// A cluster without the self-update role (Pyo Cloud's) gets a release's
+// roles, admission policy and image pins only from its connect command.
+// With `--auto-update` that command also sets up the verifier
+// (`pyo-verify`) on the cluster's first server: a root program on a timer
+// that asks GET /install/version which version this Pyo runs, checks that
+// version's signed release, and applies only what that release defines.
+// Pyo can name a version. It can't turn the verifier on or off, make it
+// run, or hand it anything to apply: the customer's switches are theirs
+// (`updates: "hold"` in pyo-system/pyo-policy, /etc/pyo/verify.conf).
+//
+// 0.51.0 ships the verifier's bootstrap only: it checks the signed
+// release, never moves backwards, replaces itself with that release's
+// verifier, and writes its status. It applies nothing to the cluster yet,
+// so an outdated install still shows "Update needed" with its command.
+//
+// Its status reaches Pyo through the agent (`AgentScope::verifier`), so an
+// agent that was broken into can say anything there. It only ever adds
+// `autoUpdate` to what the cluster's settings show ([`auto_update`]). The
+// install's state, the refresh Pyo sends, what waits for the connect
+// command and what the host does all follow from the rest of the scope.
+
+/// A status the verifier last wrote longer ago than this counts as no
+/// verifier: its timer stopped, or it was removed.
+pub const VERIFIER_STALE_SECS: i64 = 48 * 60 * 60;
+
+pub const AUTO_UPDATE_ON: &str = "Automatic updates are set up on this cluster";
+pub const AUTO_UPDATE_NEEDS_COMMAND: &str = "This update still needs the command.";
+pub const AUTO_UPDATE_HOLD_SERVER: &str =
+    "Automatic updates are on hold. They were turned off on the server.";
+pub const AUTO_UPDATE_HOLD_POLICY: &str =
+    "Automatic updates are on hold. They were turned off in this cluster's policy.";
+pub const AUTO_UPDATE_PROBLEM: &str = "Automatic updates reported a problem:";
+pub const AUTO_UPDATE_FALLBACK: &str = "Run the command to update this cluster.";
+
+/// Seconds since 1970 of an RFC 3339 time ("2026-11-23T10:00:00Z", with or
+/// without a fraction, `Z` or an offset). None when it isn't one.
+fn rfc3339_secs(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if !s.is_ascii() || s.len() < 20 {
+        return None;
+    }
+    let b = s.as_bytes();
+    let num = |from: usize, to: usize| -> Option<i64> {
+        let part = s.get(from..to)?;
+        part.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| part.parse::<i64>().ok())
+            .flatten()
+    };
+    if b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't' | b' ') || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let (y, m, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, min, sec) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    let mut rest = &s[19..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        rest = &fraction[digits..];
+    }
+    let offset = match rest {
+        "Z" | "z" => 0,
+        o if o.len() == 6 && o.as_bytes()[3] == b':' => {
+            let sign = match o.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let part = |r: std::ops::Range<usize>| -> Option<i64> {
+                let p = o.get(r)?;
+                p.bytes().all(|c| c.is_ascii_digit()).then(|| p.parse::<i64>().ok()).flatten()
+            };
+            let (oh, om) = (part(1..3)?, part(4..6)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            sign * (oh * 3600 + om * 60)
+        }
+        _ => return None,
+    };
+    // Days since 1970-01-01 of a date in the Gregorian calendar.
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * m + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some(days * 86_400 + h * 3600 + min * 60 + sec - offset)
+}
+
+/// The verifier's status when it counts: the cluster has no self-update
+/// role (its agent refreshes it otherwise), and the verifier checked
+/// within [`VERIFIER_STALE_SECS`] of `now`. A time that can't be read is
+/// as good as none.
+fn verifier_of(
+    scope: &pyo_proto::rbac::AgentScope,
+    now: i64,
+) -> Option<&pyo_proto::rbac::VerifierStatus> {
+    let v = scope.verifier.as_ref().filter(|_| !scope.self_update)?;
+    let checked = rfc3339_secs(&v.checked)?;
+    (now - checked <= VERIFIER_STALE_SECS).then_some(v)
+}
+
+/// Text from the verifier, as shown: one line, no control characters, at
+/// most `max` characters.
+fn shown_text(s: &str, max: usize) -> String {
+    let line = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", line[..at].trim_end()),
+        None => line,
+    }
+}
+
+/// A version as the verifier names it, when it looks like one.
+fn shown_version(s: &str) -> Option<&str> {
+    let s = s.trim().trim_start_matches('v');
+    (!s.is_empty()
+        && s.len() <= 32
+        && s.starts_with(|c: char| c.is_ascii_digit())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')))
+    .then_some(s)
+}
+
+/// How automatic updates stand on a cluster without the self-update role,
+/// for its settings: `{state, message, version?}`, none without a
+/// verifier that checked lately ([`verifier_of`]). `state`:
+///
+/// - "on": the verifier runs. While the install waits for the connect
+///   command (`install`: its state), the message says the command is
+///   still needed: the bootstrap applies nothing to the cluster.
+/// - "hold": turned off by the customer, on the server or in the policy.
+/// - "error": the verifier's last check failed, with its own words.
+///
+/// Only ever shown: see the section's note.
+pub fn auto_update(
+    scope: &pyo_proto::rbac::AgentScope,
+    install: &str,
+    now: i64,
+) -> Option<serde_json::Value> {
+    let v = verifier_of(scope, now)?;
+    let waits = matches!(install, "outdated" | "roles");
+    let version = shown_version(&v.version);
+    let error = shown_text(&v.error, 300);
+    let (state, message) = if scope.policy.updates_hold {
+        ("hold", AUTO_UPDATE_HOLD_POLICY.to_owned())
+    } else if v.hold {
+        ("hold", AUTO_UPDATE_HOLD_SERVER.to_owned())
+    } else if !error.is_empty() {
+        let end = if error.ends_with(['.', '!', '?', '…']) { "" } else { "." };
+        let fallback = if waits { format!(" {AUTO_UPDATE_FALLBACK}") } else { String::new() };
+        ("error", format!("{AUTO_UPDATE_PROBLEM} {error}{end}{fallback}"))
+    } else {
+        let on = match version {
+            Some(v) => format!("{AUTO_UPDATE_ON} (version {v})."),
+            None => format!("{AUTO_UPDATE_ON}."),
+        };
+        ("on", if waits { format!("{on} {AUTO_UPDATE_NEEDS_COMMAND}") } else { on })
+    };
+    let mut out = serde_json::json!({ "state": state, "message": message });
+    if let Some(version) = version {
+        out["version"] = serde_json::json!(version);
+    }
+    Some(out)
 }
 
 // ── The cluster Pyo runs on, refreshed by its own server ───────────────────
@@ -1337,6 +1585,273 @@ mod tests {
                 })
             )
             .2
+        );
+    }
+
+    // ── The verifier ───────────────────────────────────────────────────
+
+    /// 2026-11-23T10:00:00Z.
+    const NOW: i64 = 1_795_428_000;
+
+    fn verifier(checked: &str) -> pyo_proto::rbac::VerifierStatus {
+        pyo_proto::rbac::VerifierStatus {
+            version: "0.51.0".into(),
+            live: "0.51.0".into(),
+            checked: checked.into(),
+            error: String::new(),
+            hold: false,
+            host: "server-1".into(),
+        }
+    }
+
+    /// A cluster without the self-update role whose verifier checked an
+    /// hour ago.
+    fn verified(install: &str) -> AgentScope {
+        AgentScope {
+            verifier: Some(verifier("2026-11-23T09:00:00Z")),
+            ..scope(install, false)
+        }
+    }
+
+    #[test]
+    fn rfc_3339_times_are_read() {
+        assert_eq!(rfc3339_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_secs("2026-11-23T10:00:00Z"), Some(NOW));
+        assert_eq!(rfc3339_secs(" 2026-11-23T10:00:00.123456789Z "), Some(NOW));
+        assert_eq!(rfc3339_secs("2026-11-23T17:00:00+07:00"), Some(NOW));
+        assert_eq!(rfc3339_secs("2026-11-23T05:30:00-04:30"), Some(NOW));
+        assert_eq!(rfc3339_secs("2026-11-23t10:00:00z"), Some(NOW));
+        assert_eq!(rfc3339_secs("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        assert_eq!(rfc3339_secs("2000-03-01T00:00:00Z"), Some(951_868_800));
+        for bad in [
+            "",
+            "yesterday",
+            "2026-11-23",
+            "2026-11-23T10:00:00",
+            "2026-11-23T10:00:00.Z",
+            "2026-13-01T00:00:00Z",
+            "2026-11-23T24:00:00Z",
+            "2026-11-23T10:00:00+0700",
+            "2026-11-23T10:00:00*07:00",
+            "+026-11-23T10:00:00Z",
+            "2026-11-23T10:00:00Zjunk",
+            "２０２６-11-23T10:00:00Z",
+            "1795428000",
+        ] {
+            assert_eq!(rfc3339_secs(bad), None, "{bad}");
+        }
+    }
+
+    /// A status older than 48 hours counts as no verifier, and so does one
+    /// whose time can't be read. A cluster with the self-update role is
+    /// kept current by its agent, so its status isn't shown either.
+    #[test]
+    fn a_verifier_that_last_checked_two_days_ago_counts_as_none() {
+        let at = |checked: &str| {
+            let mut s = verified("h");
+            s.verifier = Some(verifier(checked));
+            auto_update(&s, "current", NOW)
+        };
+        assert!(at("2026-11-23T09:59:59Z").is_some());
+        // Exactly 48 hours: still counts. A second more: gone.
+        assert!(at("2026-11-21T10:00:00Z").is_some());
+        assert!(at("2026-11-21T09:59:59Z").is_none());
+        assert!(at("2026-01-01T00:00:00Z").is_none());
+        // The server's clock ahead of Pyo's: fine.
+        assert!(at("2026-11-23T10:05:00Z").is_some());
+        for unread in ["", "soon", "2026-11-23"] {
+            assert!(at(unread).is_none(), "{unread}");
+        }
+        assert_eq!(VERIFIER_STALE_SECS, 48 * 3600);
+        // No verifier at all.
+        assert_eq!(auto_update(&scope("h", false), "current", NOW), None);
+        // With the self-update role: the agent's job.
+        let mut own = verified("h");
+        own.self_update = true;
+        assert_eq!(auto_update(&own, "current", NOW), None);
+    }
+
+    /// What the cluster's settings say of automatic updates. 0.51.0's
+    /// verifier applies nothing to the cluster, so an outdated install is
+    /// told it still needs the command, never that it updates by itself.
+    #[test]
+    fn automatic_updates_are_shown_as_the_verifier_says() {
+        use serde_json::json;
+        // Set up, the install current.
+        assert_eq!(
+            auto_update(&verified("h"), "current", NOW),
+            Some(json!({ "state": "on", "version": "0.51.0", "message": "Automatic updates are set up on this cluster (version 0.51.0)." }))
+        );
+        // Set up, the install outdated or short of roles: the command.
+        for waits in ["outdated", "roles"] {
+            assert_eq!(
+                auto_update(&verified("old"), waits, NOW),
+                Some(json!({ "state": "on", "version": "0.51.0", "message": "Automatic updates are set up on this cluster (version 0.51.0). This update still needs the command." }))
+            );
+        }
+        // A version that isn't one isn't shown.
+        let mut odd = verified("h");
+        odd.verifier.as_mut().unwrap().version = "<b>9</b>".into();
+        assert_eq!(
+            auto_update(&odd, "current", NOW),
+            Some(json!({ "state": "on", "message": "Automatic updates are set up on this cluster." }))
+        );
+        // On hold on the server.
+        let mut held = verified("h");
+        held.verifier.as_mut().unwrap().hold = true;
+        assert_eq!(
+            auto_update(&held, "current", NOW),
+            Some(json!({ "state": "hold", "version": "0.51.0", "message": "Automatic updates are on hold. They were turned off on the server." }))
+        );
+        // On hold in the policy, whatever the verifier noticed of it yet.
+        let mut policy = verified("h");
+        policy.policy.updates_hold = true;
+        assert_eq!(
+            auto_update(&policy, "outdated", NOW),
+            Some(json!({ "state": "hold", "version": "0.51.0", "message": "Automatic updates are on hold. They were turned off in this cluster's policy." }))
+        );
+        // The policy alone, without a verifier: nothing to show.
+        let mut alone = scope("h", false);
+        alone.policy.updates_hold = true;
+        assert_eq!(auto_update(&alone, "current", NOW), None);
+        // An error, in the verifier's words, with the command when the
+        // install waits for it. Hold comes first: a held verifier's last
+        // error isn't news.
+        let mut failed = verified("h");
+        failed.verifier.as_mut().unwrap().error = "The release's signature couldn't be checked".into();
+        assert_eq!(
+            auto_update(&failed, "current", NOW),
+            Some(json!({ "state": "error", "version": "0.51.0", "message": "Automatic updates reported a problem: The release's signature couldn't be checked." }))
+        );
+        assert_eq!(
+            auto_update(&failed, "outdated", NOW).unwrap()["message"],
+            "Automatic updates reported a problem: The release's signature couldn't be checked. Run the command to update this cluster."
+        );
+        failed.verifier.as_mut().unwrap().hold = true;
+        assert_eq!(auto_update(&failed, "current", NOW).unwrap()["state"], "hold");
+        // Its words are shown as one plain line, cut short.
+        let mut noisy = verified("h");
+        noisy.verifier.as_mut().unwrap().error = format!("GitHub didn't answer.\n\t\u{1b}[31m{}", "x".repeat(1000));
+        let message = auto_update(&noisy, "current", NOW).unwrap()["message"].as_str().unwrap().to_owned();
+        assert!(message.starts_with("Automatic updates reported a problem: GitHub didn't answer. [31mxxx"), "{message}");
+        assert!(message.ends_with("x…") && message.chars().count() < 350, "{message}");
+        assert!(!message.contains(char::is_control));
+        // No copy with a semicolon or a dash between clauses.
+        for text in [AUTO_UPDATE_ON, AUTO_UPDATE_NEEDS_COMMAND, AUTO_UPDATE_HOLD_SERVER, AUTO_UPDATE_HOLD_POLICY, AUTO_UPDATE_PROBLEM, AUTO_UPDATE_FALLBACK] {
+            assert!(!text.contains(';') && !text.contains(" - ") && !text.contains('—'), "{text}");
+        }
+    }
+
+    /// The verifier's status comes through the agent, so a broken-into
+    /// agent can make it say anything. Whatever it says, nothing but
+    /// `autoUpdate` changes: not the install's state, not whether a
+    /// refresh is sent, not what waits for the connect command, not what
+    /// the host does, not the command shown.
+    #[test]
+    fn a_lying_verifier_status_only_changes_what_is_shown() {
+        use pyo_proto::rbac::VerifierStatus;
+        let lies = [
+            None,
+            Some(verifier("2026-11-23T09:00:00Z")),
+            Some(VerifierStatus { version: "99.0.0".into(), live: "99.0.0".into(), ..verifier("2026-11-23T09:59:00Z") }),
+            Some(VerifierStatus { hold: true, ..verifier("2026-11-23T09:00:00Z") }),
+            Some(VerifierStatus { error: "all is lost".into(), ..verifier("2026-11-23T09:00:00Z") }),
+            Some(VerifierStatus { checked: "9999-12-31T23:59:59Z".into(), ..verifier("") }),
+            Some(VerifierStatus { checked: "never".into(), ..verifier("") }),
+            Some(VerifierStatus::default()),
+        ];
+        let failed = LastRefresh { message: "nope".into(), ..last("failed", 10) };
+        let bases = [
+            scope("h", true),
+            scope("old", true),
+            scope("h", false),
+            scope("old", false),
+            partial("h", true, &["ClusterRole/pyo-agent-bundles"]),
+            partial("h", false, &["ClusterRole/pyo-agent-read"]),
+            AgentScope { admission: "missing".into(), ..scope("old", false) },
+            AgentScope { headers_kept: true, ..scope("old", false) },
+        ];
+        for base in &bases {
+            for last in [None, Some(&failed)] {
+                let honest = install_state(base, "h", last);
+                let honest_shown = install_shown(base, honest.0, &honest.1, "cmd".into(), Some("stamp"), NOW);
+                assert!(honest_shown.get("autoUpdate").is_none());
+                for (lie, hold) in lies.iter().flat_map(|l| [(l, false), (l, true)]) {
+                    let mut lying = base.clone();
+                    lying.verifier = lie.clone();
+                    lying.policy.updates_hold = hold;
+                    let what = format!("{base:?} {lie:?} hold={hold}");
+                    assert_eq!(install_state(&lying, "h", last), honest, "{what}");
+                    assert_eq!(
+                        pyo_proto::rbac::install_current(&lying, "h"),
+                        pyo_proto::rbac::install_current(base, "h"),
+                        "{what}"
+                    );
+                    for (same, own) in [(true, true), (true, false), (false, true)] {
+                        assert_eq!(
+                            host_refreshes(same, own, &lying, honest.0),
+                            host_refreshes(same, own, base, honest.0),
+                            "{what}"
+                        );
+                        assert_eq!(host_may_refresh(own, &lying), host_may_refresh(own, base), "{what}");
+                    }
+                    let mut shown = install_shown(&lying, honest.0, &honest.1, "cmd".into(), Some("stamp"), NOW);
+                    if let Some(o) = shown.as_object_mut() {
+                        o.remove("autoUpdate");
+                    }
+                    assert_eq!(shown, honest_shown, "{what}");
+                    // What the gates read of it: the state and `bundles`.
+                    assert_eq!(
+                        bundles_ready(shown["state"].as_str(), shown["bundles"].as_bool()),
+                        bundles_ready(honest_shown["state"].as_str(), honest_shown["bundles"].as_bool()),
+                        "{what}"
+                    );
+                }
+            }
+        }
+        // An outdated install stays "Update needed", with its command and
+        // its message, beside a verifier that says all is well.
+        let outdated = verified("old");
+        let (state, message, send) = install_state(&outdated, "h", None);
+        assert_eq!((state, send), ("outdated", false));
+        let shown = install_shown(&outdated, state, &message, "cmd".into(), None, NOW);
+        assert_eq!(shown["state"], "outdated");
+        assert_eq!(shown["command"], "cmd");
+        assert_eq!(shown["message"], OUTDATED);
+        assert_eq!(shown["autoUpdate"]["state"], "on");
+    }
+
+    /// GET /install/version: the version and the install a cluster
+    /// without the self-update role gets, and nothing else, kept a minute.
+    #[tokio::test]
+    async fn the_version_route_names_this_pyo_and_its_install() {
+        let res = version().await.into_response();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "public, max-age=60");
+        assert!(res.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("application/json"));
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "install": verifier_install() })
+        );
+        assert_eq!(v.as_object().unwrap().len(), 2);
+        // The install: without the self-update role, on a cluster that
+        // isn't Pyo's own, with this installation's images.
+        use pyo_proto::system::{db_images_from_env, geoip_image_from_env, waf_image_from_env};
+        let new = |self_update| {
+            pyo_proto::rbac::InstallParts::new(false, self_update, &waf_image_from_env(), &geoip_image_from_env(), &db_images_from_env()).hash
+        };
+        assert_eq!(verifier_install(), new(false));
+        assert_ne!(verifier_install(), new(true));
+        assert_eq!(verifier_install().len(), 16);
+        // What a Pyo without self-update hands its clusters.
+        if !self_update() {
+            assert_eq!(verifier_install(), parts(false).hash);
+        }
+        assert_eq!(
+            version_answer("0.51.0", "abc").to_string(),
+            r#"{"install":"abc","version":"0.51.0"}"#
         );
     }
 

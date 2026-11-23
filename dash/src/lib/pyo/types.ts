@@ -510,12 +510,19 @@ export type Cluster = {
      * "roles" when it's current except for roles only `command` brings
      * (`bundles`: the databases system and the WAF don't wait for them).
      * `command` (any state): the connect command again, for the cluster's
-     * first server, which also applies Pyo's latest host settings. */
+     * first server, which also applies Pyo's latest host settings.
+     * `autoUpdate`: how automatic updates stand, as the cluster's first
+     * server reports it (absent without them). Only ever shown. */
     agentInstall?: {
       state: "current" | "updating" | "outdated" | "roles";
       message?: string;
       bundles?: boolean;
       command?: string;
+      autoUpdate?: {
+        state: "on" | "hold" | "error";
+        message: string;
+        version?: string;
+      };
     } | null;
   };
   podCidr: string;

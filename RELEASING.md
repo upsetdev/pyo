@@ -180,7 +180,10 @@ How it reaches installations:
   runs the command under **Refresh this cluster** in the cluster's settings,
   which says "Restarts your databases once" while that's so. Say in the
   release's announcement to Cloud teams that this command restarts their
-  databases once.
+  databases once. From 0.51.0 that command also sets up automatic updates
+  on the cluster's first server. In 0.51.0 they apply nothing yet, so the
+  command is still needed after each release (see
+  [Automatic updates on Pyo Cloud](#automatic-updates-on-pyo-cloud)).
 
 How databases pick up new images: the databases system on a cluster
 updates with Pyo, at the cluster's next heartbeat once the cluster's
@@ -469,7 +472,76 @@ then "Update needed" with the command. Running the command, or
 `install.sh` again, brings the timer script.
 
 Pyo Cloud's clusters are never refreshed this way: Pyo Cloud runs without
-the self-update role, and a team's servers have no such timer.
+the self-update role, and a team's servers have no such timer. They have
+a verifier of their own instead.
+
+### Automatic updates on Pyo Cloud
+
+Pyo Cloud must never be able to push roles, an admission policy or image
+pins to a team's cluster. So a cluster there gets them only from something
+the team runs as root on its own server: the connect command, or the
+verifier that command sets up.
+
+- On a Pyo without the self-update role (`PYO_AGENT_SELF_UPDATE=false`),
+  the connect command and the command under **Refresh this cluster** carry
+  `--auto-update` (`auto_update_flag` in `crates/pyo-api/src/join.rs`). The
+  dashboard shows a checkbox with them, "Keep this cluster up to date
+  automatically", ticked. Unticked, the command shown carries
+  `--no-auto-update`. Pyo keeps no setting for it: the command the team
+  runs decides. A self-hosted Pyo with the self-update role shows no
+  checkbox and adds no flag.
+- With `--auto-update`, `connect.sh` installs the verifier (`pyo-verify`)
+  on the cluster's first server, run as root by a systemd timer.
+- The verifier asks `GET /install/version` on Pyo's public address. The
+  answer is `{"version":"X.Y.Z","install":"<hash>"}`: the version this Pyo
+  runs and the hash of the install a cluster without the self-update role
+  gets (`verifier_install` in `crates/pyo-api/src/install.rs`). It needs no
+  key and may be cached for a minute. Naming a version is all Pyo does.
+- The verifier checks that version's signed release on GitHub and takes
+  only what that release defines. It never moves to an earlier version.
+- It writes its status to the ConfigMap `pyo-system/pyo-verifier`
+  (`version`, `live`, `checked`, `error`, `hold`, `host`). The agent may
+  read that ConfigMap by name and the admission policy refuses it any
+  write. The agent passes the status on with its heartbeat.
+- The team's switches are on their side only: `updates: "hold"` in the
+  ConfigMap `pyo-system/pyo-policy`, and `/etc/pyo/verify.conf` on the
+  server. Pyo has no switch that turns the verifier on or off or makes it
+  run. Don't add one.
+
+**What 0.51.0 ships is the bootstrap only.** Its verifier checks the
+signed release, never moves backwards, replaces itself with that release's
+verifier and writes its status. It applies nothing to the cluster. So
+after 0.51.0 and after the release that follows it, a Pyo Cloud cluster
+still shows "Update needed" and still needs the command under **Refresh
+this cluster**, as before. Applying a release's roles, admission policy
+and image pins is 0.52.0's work. Don't tell Cloud teams their clusters
+update by themselves before that ships.
+
+What the cluster's settings show under **Refresh this cluster**, from the
+status (`auto_update` in `crates/pyo-api/src/install.rs`):
+
+- "Automatic updates are set up on this cluster (version 0.51.0)." With
+  "This update still needs the command." while the install is outdated.
+- "Automatic updates are on hold. They were turned off on the server." Or
+  "…in this cluster's policy." for `updates: "hold"`.
+- "Automatic updates reported a problem: …" with the verifier's own words,
+  and "Run the command to update this cluster." while the install is
+  outdated.
+- Nothing when there's no verifier, or its last check is more than 48
+  hours old.
+
+The status comes through the agent, so an agent that was broken into can
+make it say anything. It only adds `autoUpdate` to what the settings show.
+The install's state, the "Update needed" badge, the command and every
+feature that waits for a refresh follow from the install's own stamp, never
+from the status (`a_lying_verifier_status_only_changes_what_is_shown`).
+Keep it that way: never read `AgentScope::verifier` to decide anything.
+
+This release changes the agent's roles once more: the role
+`pyo-agent-policy` also reads `pyo-system/pyo-verifier`. It's a rule in a
+role every install has, so a self-hosted cluster gets it with a refresh. A
+Pyo Cloud cluster gets it with the command, and until then its agent says
+once in its log that it can't read the status.
 
 ### How an installation updates
 

@@ -324,6 +324,31 @@ pub fn local_api_url() -> String {
         .unwrap_or_else(|| "http://127.0.0.1:8000".into())
 }
 
+/// connect.sh's flag that sets up the verifier on the cluster's first
+/// server (`pyo-verify`, on a timer there): it keeps the cluster on what
+/// this Pyo's signed release defines.
+pub const AUTO_UPDATE: &str = "--auto-update";
+/// connect.sh's flag that leaves the verifier out, and removes one that's
+/// there.
+pub const NO_AUTO_UPDATE: &str = "--no-auto-update";
+
+/// Which of the two a connect or refresh command carries: none on a Pyo
+/// whose agents refresh their install themselves (`self_update`,
+/// install.rs), where there's no verifier. On one that hands out no
+/// self-update role (Pyo Cloud), [`AUTO_UPDATE`] unless the team unticked
+/// it (`keep` off), then [`NO_AUTO_UPDATE`].
+///
+/// Pyo always renders the ticked one. The choice is never kept: the
+/// dashboard's checkbox swaps the flag in the command it shows, so what
+/// decides is the command the customer runs as root, never Pyo.
+pub fn auto_update_flag(self_update: bool, keep: bool) -> Option<&'static str> {
+    match (self_update, keep) {
+        (true, _) => None,
+        (false, true) => Some(AUTO_UPDATE),
+        (false, false) => Some(NO_AUTO_UPDATE),
+    }
+}
+
 /// The command that makes a machine a new cluster connected to Pyo.
 /// `registry`: Pyo's registry door on the tailnet and the cluster's pull
 /// token there.
@@ -334,12 +359,30 @@ pub fn connect_command(
     tailscale_key: Option<&str>,
     registry: Option<(&str, &str)>,
 ) -> String {
+    connect_command_with(
+        base,
+        api,
+        token,
+        tailscale_key,
+        registry,
+        auto_update_flag(crate::install::self_update(), true),
+    )
+}
+
+/// [`connect_command`] with this [`auto_update_flag`].
+fn connect_command_with(
+    base: &str,
+    api: &str,
+    token: &str,
+    tailscale_key: Option<&str>,
+    registry: Option<(&str, &str)>,
+    auto_update: Option<&'static str>,
+) -> String {
+    let mut args = connect_args(api, token, tailscale_key, registry);
+    args.extend(auto_update.map(|flag| (flag, None)));
     format!(
         "curl -fsSL {base}/connect.sh | bash -s -- {}",
-        quoted(&pinned(
-            base,
-            connect_args(api, token, tailscale_key, registry)
-        ))
+        quoted(&pinned(base, args))
     )
 }
 
@@ -370,7 +413,12 @@ pub fn connect_args(
 /// with Pyo's: connect.sh run on the cluster's first server, which reads
 /// Pyo's address and the token from the agent already there.
 pub fn refresh_command(base: &str) -> String {
-    match quoted(&pinned(base, Vec::new())) {
+    refresh_command_with(base, auto_update_flag(crate::install::self_update(), true))
+}
+
+/// [`refresh_command`] with this [`auto_update_flag`].
+fn refresh_command_with(base: &str, auto_update: Option<&'static str>) -> String {
+    match quoted(&pinned(base, auto_update.map(|flag| (flag, None)).into_iter().collect())) {
         a if a.is_empty() => format!("curl -fsSL {base}/connect.sh | bash"),
         a => format!("curl -fsSL {base}/connect.sh | bash -s -- {a}"),
     }
@@ -1079,6 +1127,69 @@ mod tests {
         for unset in [None, Some(""), Some("  ")] {
             assert_eq!(pick(unset), V);
         }
+    }
+
+    /// The verifier's flag: on a Pyo that hands out no self-update role
+    /// (Pyo Cloud) the commands carry `--auto-update`, or
+    /// `--no-auto-update` when the team unticked it. On any other, neither.
+    #[test]
+    fn commands_carry_the_auto_update_flag_only_without_self_update() {
+        assert_eq!(auto_update_flag(true, true), None);
+        assert_eq!(auto_update_flag(true, false), None);
+        assert_eq!(auto_update_flag(false, true), Some("--auto-update"));
+        assert_eq!(auto_update_flag(false, false), Some("--no-auto-update"));
+        let connect = |flag| {
+            connect_command_with(
+                "https://cloud.example/install",
+                "https://cloud.example",
+                "abc",
+                None,
+                None,
+                flag,
+            )
+        };
+        let plain = "curl -fsSL https://cloud.example/install/connect.sh | bash -s -- --api 'https://cloud.example' --token 'abc'";
+        // Self-hosted, with self-update: as before.
+        assert_eq!(connect(auto_update_flag(true, true)), plain);
+        assert_eq!(connect(auto_update_flag(true, false)), plain);
+        // Hosted: ticked, then unticked.
+        assert_eq!(connect(auto_update_flag(false, true)), format!("{plain} --auto-update"));
+        assert_eq!(connect(auto_update_flag(false, false)), format!("{plain} --no-auto-update"));
+        let refresh = |base, flag| refresh_command_with(base, flag);
+        let own = "https://cloud.example/install";
+        assert_eq!(
+            refresh(own, auto_update_flag(true, true)),
+            "curl -fsSL https://cloud.example/install/connect.sh | bash"
+        );
+        assert_eq!(
+            refresh(own, auto_update_flag(false, true)),
+            "curl -fsSL https://cloud.example/install/connect.sh | bash -s -- --auto-update"
+        );
+        assert_eq!(
+            refresh(own, auto_update_flag(false, false)),
+            "curl -fsSL https://cloud.example/install/connect.sh | bash -s -- --no-auto-update"
+        );
+        // Before a mirror's --version, as the other flags.
+        assert_eq!(
+            refresh("https://mirror.example.com", auto_update_flag(false, true)),
+            format!("curl -fsSL https://mirror.example.com/connect.sh | bash -s -- --auto-update{PIN}")
+        );
+        // What Pyo hands out follows this installation, always ticked.
+        let handed = auto_update_flag(crate::install::self_update(), true);
+        assert_eq!(refresh_command(own), refresh(own, handed));
+        assert_eq!(
+            connect_command(own, "https://cloud.example", "abc", None, None),
+            connect(handed)
+        );
+        assert_eq!(handed.is_some(), !crate::install::self_update());
+        // The servers Pyo makes at a cloud provider take connect.sh's
+        // arguments as they are: no verifier is set up without the
+        // customer's own command.
+        assert!(
+            !connect_args("https://cloud.example", "abc", None, None)
+                .iter()
+                .any(|(flag, _)| flag.contains("auto-update"))
+        );
     }
 
     #[test]

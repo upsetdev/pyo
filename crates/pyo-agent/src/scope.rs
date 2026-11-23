@@ -5,8 +5,14 @@
 //!   a RoleBinding to the write role (`ensure_managed`).
 //! - Every heartbeat it finds out what it may do (`detect`) and reads the
 //!   policy, which `refusal` applies to commands.
+//! - Every heartbeat it also reads what the server's verifier says of its
+//!   automatic updates (`pyo-system/pyo-verifier`) and passes it on. It
+//!   never writes there, and nothing it does follows from it.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+};
 
 use k8s_openapi::api::{
     authorization::v1::{ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec},
@@ -19,7 +25,7 @@ use kube::{
 };
 use pyo_proto::{
     Command,
-    rbac::{self, AgentScope, Policy},
+    rbac::{self, AgentScope, Policy, VerifierStatus},
 };
 use serde_json::Value;
 
@@ -249,6 +255,111 @@ pub async fn read_policy(client: &Client) -> Policy {
     }
 }
 
+/// The verifier's status couldn't be read at the last heartbeat: said once,
+/// then again only after a read went through.
+static VERIFIER_UNREAD: AtomicBool = AtomicBool::new(false);
+/// Whether the last heartbeat found a verifier: 0 not looked yet, 1 none,
+/// 2 one. Said when it changes.
+static VERIFIER_SEEN: AtomicU8 = AtomicU8::new(0);
+
+/// What a read of the verifier's ConfigMap gave.
+#[derive(Debug, PartialEq)]
+enum VerifierRead {
+    /// Its data.
+    Found(std::collections::BTreeMap<String, String>),
+    /// No ConfigMap: no verifier on this cluster.
+    Missing,
+    /// The install doesn't let the agent read it (one not refreshed yet).
+    Refused,
+    /// Anything else.
+    Failed(String),
+}
+
+fn verifier_read(r: Result<Option<ConfigMap>, kube::Error>) -> VerifierRead {
+    match r {
+        Ok(Some(cm)) => VerifierRead::Found(cm.data.unwrap_or_default()),
+        Ok(None) => VerifierRead::Missing,
+        Err(kube::Error::Api(e)) if e.code == 403 => VerifierRead::Refused,
+        Err(e) => VerifierRead::Failed(e.to_string()),
+    }
+}
+
+/// The status a read gave (none unless one was found), and what to log of
+/// it: each state is said when it starts, never at every heartbeat. A
+/// refusal is expected on an install not refreshed yet, so it's said
+/// quietly.
+fn verifier_from(
+    read: VerifierRead,
+    unread: &AtomicBool,
+    seen: &AtomicU8,
+) -> (Option<VerifierStatus>, Option<(tracing::Level, String)>) {
+    use crate::gateway::{first_time, settled};
+    let mut said = None;
+    let status = match read {
+        VerifierRead::Found(data) => {
+            settled(unread);
+            let status = VerifierStatus::from_data(&data);
+            if seen.swap(2, Ordering::Relaxed) != 2 {
+                said = Some((
+                    tracing::Level::INFO,
+                    format!(
+                        "the verifier on this cluster's server reports in (version {})",
+                        status.version
+                    ),
+                ));
+            }
+            Some(status)
+        }
+        VerifierRead::Missing => {
+            settled(unread);
+            if seen.swap(1, Ordering::Relaxed) == 2 {
+                said = Some((
+                    tracing::Level::INFO,
+                    "the verifier on this cluster's server no longer reports in".into(),
+                ));
+            }
+            None
+        }
+        VerifierRead::Refused => {
+            if first_time(unread) {
+                said = Some((
+                    tracing::Level::INFO,
+                    "this install doesn't let the agent read the verifier's status yet: the cluster's connect command brings that".into(),
+                ));
+            }
+            None
+        }
+        VerifierRead::Failed(e) => {
+            if first_time(unread) {
+                said = Some((
+                    tracing::Level::WARN,
+                    format!("couldn't read the verifier's status: {e}"),
+                ));
+            }
+            None
+        }
+    };
+    (status, said)
+}
+
+/// What the verifier on the cluster's first server last said of its
+/// automatic updates: none when there's no ConfigMap (no verifier), or
+/// when it can't be read. Passed on with the heartbeat, only to be shown.
+pub async fn read_verifier(client: &Client) -> Option<VerifierStatus> {
+    let read = verifier_read(
+        Api::<ConfigMap>::namespaced(client.clone(), rbac::NS)
+            .get_opt(rbac::VERIFIER_CONFIGMAP)
+            .await,
+    );
+    let (status, said) = verifier_from(read, &VERIFIER_UNREAD, &VERIFIER_SEEN);
+    match said {
+        Some((tracing::Level::WARN, m)) => tracing::warn!("{m}"),
+        Some((_, m)) => tracing::info!("{m}"),
+        None => {}
+    }
+    status
+}
+
 /// What the agent may do, as the cluster answers.
 pub async fn detect(client: &Client, policy: Policy) -> AgentScope {
     let full = can(client, "*", "*", "*", None).await;
@@ -311,6 +422,7 @@ pub async fn detect(client: &Client, policy: Policy) -> AgentScope {
         roles_older,
         self_update,
         headers_kept: crate::gateway::headers_kept(),
+        verifier: read_verifier(client).await,
     }
 }
 
@@ -407,6 +519,110 @@ mod tests {
         .await;
         assert!(r.is_err());
         assert_eq!(tries.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    fn data(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn api_error(code: u16, reason: &str) -> kube::Error {
+        kube::Error::Api(Box::new(
+            kube::core::Status::failure(&format!("configmaps \"pyo-verifier\" is {reason}"), reason)
+                .with_code(code),
+        ))
+    }
+
+    /// What the cluster answers for the verifier's ConfigMap: no ConfigMap
+    /// is no verifier, and an install that refuses the read is told apart
+    /// from any other failure.
+    #[test]
+    fn the_verifiers_configmap_is_read_as_the_cluster_answers() {
+        assert_eq!(verifier_read(Ok(None)), VerifierRead::Missing);
+        let cm = ConfigMap {
+            data: Some(data(&[("version", "0.51.0")])),
+            ..Default::default()
+        };
+        assert_eq!(
+            verifier_read(Ok(Some(cm))),
+            VerifierRead::Found(data(&[("version", "0.51.0")]))
+        );
+        // One without data: a verifier that said nothing yet.
+        assert_eq!(
+            verifier_read(Ok(Some(ConfigMap::default()))),
+            VerifierRead::Found(Default::default())
+        );
+        assert_eq!(verifier_read(Err(api_error(403, "Forbidden"))), VerifierRead::Refused);
+        assert!(matches!(
+            verifier_read(Err(api_error(500, "InternalError"))),
+            VerifierRead::Failed(_)
+        ));
+    }
+
+    /// The status the heartbeat carries: only from a ConfigMap that's
+    /// there, with missing and odd fields read as they are.
+    #[test]
+    fn the_verifiers_status_goes_into_the_scope_only_when_its_there() {
+        let (unread, seen) = (AtomicBool::new(false), AtomicU8::new(0));
+        let status = |read| verifier_from(read, &unread, &seen).0;
+        assert_eq!(status(VerifierRead::Missing), None);
+        assert_eq!(status(VerifierRead::Refused), None);
+        assert_eq!(status(VerifierRead::Failed("timeout".into())), None);
+        let full = status(VerifierRead::Found(data(&[
+            ("version", "0.51.0"),
+            ("live", "0.51.0"),
+            ("checked", "2026-11-23T10:00:00Z"),
+            ("error", ""),
+            ("hold", "true"),
+            ("host", "server-1"),
+        ])))
+        .unwrap();
+        assert_eq!(full.version, "0.51.0");
+        assert_eq!(full.checked, "2026-11-23T10:00:00Z");
+        assert!(full.hold && full.error.is_empty());
+        // Missing fields: empty. Odd ones: as they are, for Pyo to judge.
+        assert_eq!(status(VerifierRead::Found(data(&[]))), Some(VerifierStatus::default()));
+        let odd = status(VerifierRead::Found(data(&[("checked", "soon"), ("hold", "maybe")]))).unwrap();
+        assert_eq!(odd.checked, "soon");
+        assert!(!odd.hold);
+    }
+
+    /// Every heartbeat reads it: a refusal (an install not refreshed yet)
+    /// or a failure is said once, not each time, and so is finding one.
+    #[test]
+    fn a_verifier_that_cant_be_read_is_said_once() {
+        let (unread, seen) = (AtomicBool::new(false), AtomicU8::new(0));
+        let said = |read| verifier_from(read, &unread, &seen).1;
+        // Refused at every heartbeat: one quiet line.
+        let first = said(VerifierRead::Refused).unwrap();
+        assert_eq!(first.0, tracing::Level::INFO);
+        assert!(first.1.contains("connect command"), "{}", first.1);
+        for _ in 0..5 {
+            assert_eq!(said(VerifierRead::Refused), None);
+        }
+        // No verifier at all: nothing to say, at any heartbeat.
+        let (unread, seen) = (AtomicBool::new(false), AtomicU8::new(0));
+        let said = |read| verifier_from(read, &unread, &seen).1;
+        for _ in 0..3 {
+            assert_eq!(said(VerifierRead::Missing), None);
+        }
+        // One appears: said once. A failure after: once, as a warning.
+        assert_eq!(
+            said(VerifierRead::Found(data(&[("version", "0.51.0")]))).unwrap().1,
+            "the verifier on this cluster's server reports in (version 0.51.0)"
+        );
+        assert_eq!(said(VerifierRead::Found(data(&[]))), None);
+        assert_eq!(said(VerifierRead::Failed("timeout".into())).unwrap().0, tracing::Level::WARN);
+        assert_eq!(said(VerifierRead::Failed("timeout".into())), None);
+        assert_eq!(said(VerifierRead::Refused), None);
+        // Read again, then refused again: said again.
+        assert_eq!(said(VerifierRead::Found(data(&[]))), None);
+        assert!(said(VerifierRead::Refused).is_some());
+        // And when it's gone.
+        assert!(said(VerifierRead::Missing).is_some());
+        assert_eq!(said(VerifierRead::Missing), None);
     }
 
     #[test]
