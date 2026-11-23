@@ -52,8 +52,9 @@ jobs:
           jq -c '[.images | to_entries[] | select(.value | startswith("ghcr.io/upsetdev/pyo/")) | {key: ("pyo/" + .key), ref: .value}]' \
             release/release.json > pyo.json
           {
+            # Not MOCO's fluent-bit: it never runs (pyo-db-controller sets disableSlowQueryLogContainer).
             git grep -hoE '(docker\.io|ghcr\.io)/[a-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' -- \
-              crates/pyo-proto/system deploy/images/postgres.Dockerfile | sort -u
+              crates/pyo-proto/system deploy/images/postgres.Dockerfile | grep -v '^ghcr\.io/cybozu-go/moco/fluent-bit:' | sort -u
             echo docker.io/valkey/valkey:8.1
           } | jq -Rnc '[inputs | select(length > 0) | {key: sub("@.*$"; ""), ref: .}]' > third-party.json
           echo "images=$(jq -sc 'add' pyo.json third-party.json)" >> "$GITHUB_OUTPUT"
