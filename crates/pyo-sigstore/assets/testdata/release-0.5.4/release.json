@@ -1,0 +1,3308 @@
+{
+  "version": "0.5.4",
+  "images": {
+    "pyo": "ghcr.io/upsetdev/pyo/pyo:0.5.4@sha256:b8778bdec53339b0f23d94520e2fe743728a519806d0f50e24cbc0c3afb60f8a",
+    "agent": "ghcr.io/upsetdev/pyo/agent:0.5.4@sha256:75947f00afdb21e3526cffa0c70f727b1d7b30bcc19a2fcd7b666d14ae4e48ba",
+    "builder": "ghcr.io/upsetdev/pyo/builder:0.5.4@sha256:774500c22a953db40c670822691e6209095531a70d2330c33a8313e4000deec0",
+    "flows": "ghcr.io/upsetdev/pyo/flows:0.5.4@sha256:aa9293228599aa952bb4ab315865787f8071f8f2c23c39fa3cb1bcc0edfd04dc",
+    "waf": "ghcr.io/upsetdev/pyo/waf:0.5.4@sha256:5a00c51d2de1bdb321703d9227ebd244606f24d07a6a373b2b52e3f06c625f5d",
+    "geoip": "ghcr.io/upsetdev/pyo/geoip:0.5.4@sha256:6d5b45b2b6bd0d2da9676e7ad8ea3cd66d330275cdb329c153a8c13bb88abb40",
+    "dbController": "ghcr.io/upsetdev/pyo/db-controller:0.5.4@sha256:3903974417d92f47fb0841d510e6f8d05343733327bd16fc826dcbbff95c750f",
+    "kv": "ghcr.io/upsetdev/pyo/kv:0.5.4@sha256:af56ee5e3f6e5f55fe642267c596381816de7e60455dc1adbf74262b386d4009",
+    "static": "ghcr.io/upsetdev/pyo/static:0.5.4@sha256:407bf277d59a158e1e4c7e8e31bcfbe4aef28b3ef1f79c6963117d3850511d4a",
+    "mysqlOperator": "ghcr.io/upsetdev/pyo/mysql-operator:0.5.4@sha256:84361c6e7990055481cd6032ec4b377eded64f82fc58d31043159364793a99ad",
+    "mysqlBackup": "ghcr.io/upsetdev/pyo/mysql-backup:0.5.4@sha256:70d2d853d357bd8d94ccec7fa8834cfb539c9b1fa5a56594e9de3017b27c23e5",
+    "sandboxBase": "ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:c3735cc2430df05457817f1d8fa111bbb06bd3b70cfa61e197339b5506e79c2a",
+    "sandboxDesktop": "ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:c47057d8a037403344172f3a73d3370bf9bd253b6c83addc9801878c76cad5f5",
+    "postgres16": "ghcr.io/upsetdev/pyo/postgres:16-0.5.4@sha256:54cd52417c189df7b035754d75a749c3cf05ba903b7c8ff957980d22079606dc",
+    "postgres17": "ghcr.io/upsetdev/pyo/postgres:17-0.5.4@sha256:e55fb95cf080da188e821d5eacfcdf626f9a7e88c38fdc3b26b5e9dc4f0bfd76",
+    "postgres18": "ghcr.io/upsetdev/pyo/postgres:18-0.5.4@sha256:7fff3b644b3c496ae3d467791166efe3000da1f8dae8d2aa3d523736db43612c"
+  },
+  "k3s": {
+    "version": "v1.37.2+k3s1",
+    "installerSha256": "ed01f89fd977bf20ac1516bbebf8370bf3ddbaa55dac8aba610956a4c78cc00b",
+    "amd64Sha256": "265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda",
+    "arm64Sha256": "a779ccf1e5e2e33a62f5a29c2f1c0bbf99431e100579d4c10f0aa0742a6aa84b"
+  },
+  "manifests": {
+    "platform": [
+      {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+          "name": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "default-deny",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {},
+          "policyTypes": [
+            "Ingress"
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "pyo",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo"
+            }
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "from": [
+                {
+                  "namespaceSelector": {
+                    "matchLabels": {
+                      "kubernetes.io/metadata.name": "pyo-system"
+                    }
+                  }
+                },
+                {
+                  "namespaceSelector": {
+                    "matchLabels": {
+                      "kubernetes.io/metadata.name": "pyo-gateway"
+                    }
+                  }
+                },
+                {
+                  "namespaceSelector": {
+                    "matchLabels": {
+                      "kubernetes.io/metadata.name": "pyo-static"
+                    }
+                  }
+                },
+                {
+                  "namespaceSelector": {
+                    "matchExpressions": [
+                      {
+                        "key": "pyo/project-id",
+                        "operator": "DoesNotExist"
+                      }
+                    ]
+                  },
+                  "podSelector": {
+                    "matchLabels": {
+                      "pyo.dev/component": "import"
+                    }
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 8000
+                },
+                {
+                  "port": 5006
+                }
+              ]
+            },
+            {
+              "from": [
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.0.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.1.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.2.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.3.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.4.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.5.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.6.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.7.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.8.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.9.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.10.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.11.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.12.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.13.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.14.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.15.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.16.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.17.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.18.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.19.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.20.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.21.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.22.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.23.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.24.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.25.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.26.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.27.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.28.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.29.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.30.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.31.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.32.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.33.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.34.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.35.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.36.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.37.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.38.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.39.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.40.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.41.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.42.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.43.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.44.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.45.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.46.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.47.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.48.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.49.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.50.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.51.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.52.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.53.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.54.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.55.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.56.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.57.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.58.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.59.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.60.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.61.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.62.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.63.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.64.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.65.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.66.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.67.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.68.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.69.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.70.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.71.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.72.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.73.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.74.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.75.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.76.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.77.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.78.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.79.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.80.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.81.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.82.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.83.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.84.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.85.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.86.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.87.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.88.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.89.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.90.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.91.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.92.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.93.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.94.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.95.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.96.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.97.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.98.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.99.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.100.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.101.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.102.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.103.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.104.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.105.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.106.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.107.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.108.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.109.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.110.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.111.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.112.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.113.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.114.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.115.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.116.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.117.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.118.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.119.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.120.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.121.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.122.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.123.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.124.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.125.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.126.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.127.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.128.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.129.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.130.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.131.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.132.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.133.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.134.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.135.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.136.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.137.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.138.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.139.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.140.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.141.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.142.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.143.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.144.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.145.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.146.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.147.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.148.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.149.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.150.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.151.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.152.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.153.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.154.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.155.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.156.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.157.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.158.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.159.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.160.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.161.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.162.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.163.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.164.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.165.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.166.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.167.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.168.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.169.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.170.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.171.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.172.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.173.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.174.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.175.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.176.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.177.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.178.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.179.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.180.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.181.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.182.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.183.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.184.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.185.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.186.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.187.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.188.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.189.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.190.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.191.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.192.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.193.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.194.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.195.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.196.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.197.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.198.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.199.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.200.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.201.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.202.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.203.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.204.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.205.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.206.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.207.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.208.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.209.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.210.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.211.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.212.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.213.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.214.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.215.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.216.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.217.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.218.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.219.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.220.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.221.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.222.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.223.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.224.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.225.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.226.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.227.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.228.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.229.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.230.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.231.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.232.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.233.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.234.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.235.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.236.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.237.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.238.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.239.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.240.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.241.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.242.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.243.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.244.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.245.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.246.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.247.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.248.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.249.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.250.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.251.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.252.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.253.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.254.0/31"
+                  }
+                },
+                {
+                  "ipBlock": {
+                    "cidr": "10.42.255.0/31"
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 8000
+                },
+                {
+                  "port": 5006
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "pyo-databases",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchExpressions": [
+              {
+                "key": "app.kubernetes.io/name",
+                "operator": "In",
+                "values": [
+                  "pyo-postgres",
+                  "pyo-clickhouse"
+                ]
+              }
+            ]
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "from": [
+                {
+                  "podSelector": {
+                    "matchExpressions": [
+                      {
+                        "key": "app.kubernetes.io/name",
+                        "operator": "In",
+                        "values": [
+                          "pyo",
+                          "pyo-worker"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 5432
+                },
+                {
+                  "port": 8123
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "pyo-backup-store",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-backup-store"
+            }
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "ports": [
+                {
+                  "port": 3900
+                }
+              ]
+            },
+            {
+              "from": [
+                {
+                  "podSelector": {
+                    "matchExpressions": [
+                      {
+                        "key": "app.kubernetes.io/name",
+                        "operator": "In",
+                        "values": [
+                          "pyo",
+                          "pyo-worker"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 3903
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "registry",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "registry"
+            }
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "from": [
+                {
+                  "podSelector": {
+                    "matchExpressions": [
+                      {
+                        "key": "app.kubernetes.io/name",
+                        "operator": "In",
+                        "values": [
+                          "pyo",
+                          "pyo-worker"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 5000
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "pyo-traffic",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-traffic"
+            }
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "from": [
+                {
+                  "podSelector": {
+                    "matchExpressions": [
+                      {
+                        "key": "app.kubernetes.io/name",
+                        "operator": "In",
+                        "values": [
+                          "pyo-agent",
+                          "pyo-vector"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 8090
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "pyo-agent",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "podSelector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-agent"
+            }
+          },
+          "policyTypes": [
+            "Ingress"
+          ],
+          "ingress": [
+            {
+              "from": [
+                {
+                  "podSelector": {
+                    "matchLabels": {
+                      "app.kubernetes.io/name": "pyo-vector"
+                    }
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 8089
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+          "name": "registry-data",
+          "namespace": "pyo-system"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "20Gi"
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-registry",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "registry",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app.kubernetes.io/name": "registry"
+          },
+          "ports": [
+            {
+              "name": "registry",
+              "port": 5000,
+              "targetPort": "registry"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "registry",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "registry",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "strategy": {
+            "type": "Recreate"
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "registry"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "registry",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "name": "registry",
+                  "image": "registry:3.1.2",
+                  "env": [
+                    {
+                      "name": "REGISTRY_HTTP_ADDR",
+                      "value": "0.0.0.0:5000"
+                    },
+                    {
+                      "name": "REGISTRY_STORAGE_DELETE_ENABLED",
+                      "value": "true"
+                    },
+                    {
+                      "name": "OTEL_TRACES_EXPORTER",
+                      "value": "none"
+                    },
+                    {
+                      "name": "REGISTRY_LOG_LEVEL",
+                      "value": "warn"
+                    },
+                    {
+                      "name": "REGISTRY_LOG_ACCESSLOG_DISABLED",
+                      "value": "true"
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "name": "registry",
+                      "containerPort": 5000
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/v2/",
+                      "port": "registry"
+                    },
+                    "periodSeconds": 30,
+                    "failureThreshold": 3
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/registry"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "10m",
+                      "memory": "24Mi"
+                    },
+                    "limits": {
+                      "memory": "512Mi"
+                    }
+                  }
+                },
+                {
+                  "name": "gc",
+                  "image": "registry:3.1.2",
+                  "command": [
+                    "sh",
+                    "-c",
+                    "while sleep 86400; do registry garbage-collect /etc/distribution/config.yml; done"
+                  ],
+                  "volumeMounts": [
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/registry"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "5m",
+                      "memory": "8Mi"
+                    },
+                    "limits": {
+                      "memory": "256Mi"
+                    }
+                  }
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "data",
+                  "persistentVolumeClaim": {
+                    "claimName": "registry-data"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "pyo-host",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-host",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "strategy": {
+            "type": "Recreate"
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-host"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-host",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "hostNetwork": true,
+              "dnsPolicy": "ClusterFirstWithHostNet",
+              "affinity": {
+                "podAffinity": {
+                  "requiredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                      "labelSelector": {
+                        "matchLabels": {
+                          "app.kubernetes.io/name": "registry"
+                        }
+                      },
+                      "topologyKey": "kubernetes.io/hostname"
+                    }
+                  ]
+                }
+              },
+              "containers": [
+                {
+                  "name": "forward",
+                  "image": "alpine/socat:1.8.1.3",
+                  "args": [
+                    "TCP-LISTEN:5005,bind=127.0.0.1,fork,reuseaddr",
+                    "TCP:pyo-registry.pyo-system.svc.cluster.local:5000"
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "5m",
+                      "memory": "8Mi"
+                    },
+                    "limits": {
+                      "memory": "64Mi"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+          "name": "buildkitd",
+          "namespace": "pyo-system"
+        },
+        "data": {
+          "buildkitd.toml": "[registry.\"127.0.0.1:5005\"]\n  http = true\n  insecure = true\n[worker.oci]\n  gc = true\n  gckeepstorage = \"20GB\"\n"
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+          "name": "buildkit-cache",
+          "namespace": "pyo-system"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "30Gi"
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "buildkitd",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "buildkitd",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 0,
+          "strategy": {
+            "type": "Recreate"
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "buildkitd"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "buildkitd",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "hostNetwork": true,
+              "containers": [
+                {
+                  "name": "buildkitd",
+                  "image": "moby/buildkit:v0.34.1",
+                  "args": [
+                    "--addr=tcp://127.0.0.1:1234",
+                    "--addr=unix:///run/buildkit/buildkitd.sock",
+                    "--config=/etc/buildkit/buildkitd.toml"
+                  ],
+                  "securityContext": {
+                    "privileged": true
+                  },
+                  "readinessProbe": {
+                    "exec": {
+                      "command": [
+                        "buildctl",
+                        "debug",
+                        "workers"
+                      ]
+                    },
+                    "initialDelaySeconds": 3,
+                    "periodSeconds": 10
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "config",
+                      "mountPath": "/etc/buildkit"
+                    },
+                    {
+                      "name": "cache",
+                      "mountPath": "/var/lib/buildkit"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "100m",
+                      "memory": "256Mi"
+                    }
+                  }
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "config",
+                  "configMap": {
+                    "name": "buildkitd"
+                  }
+                },
+                {
+                  "name": "cache",
+                  "persistentVolumeClaim": {
+                    "claimName": "buildkit-cache"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-postgres",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-postgres",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app.kubernetes.io/name": "pyo-postgres"
+          },
+          "ports": [
+            {
+              "name": "postgres",
+              "port": 5432,
+              "targetPort": "postgres"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "pyo-postgres",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-postgres",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "serviceName": "pyo-postgres",
+          "replicas": 1,
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-postgres"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-postgres",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "securityContext": {
+                "runAsUser": 70,
+                "runAsGroup": 70,
+                "runAsNonRoot": true
+              },
+              "containers": [
+                {
+                  "name": "postgres",
+                  "image": "postgres:18.6-alpine",
+                  "command": [
+                    "sh",
+                    "-c"
+                  ],
+                  "args": [
+                    "mem=$$(awk '/^MemTotal:/ { print int($2 / 1024) }' \"${PYO_MEMINFO:-/proc/meminfo}\")\nif [ \"${mem:-4096}\" -lt 3584 ]; then\n  set -- -c shared_buffers=16MB -c effective_cache_size=128MB -c maintenance_work_mem=16MB \\\n    -c wal_buffers=512kB -c max_connections=40 -c autovacuum_max_workers=1 \\\n    -c max_parallel_workers_per_gather=0\nelif [ \"$mem\" -lt 8192 ]; then\n  set -- -c shared_buffers=32MB -c effective_cache_size=256MB -c maintenance_work_mem=32MB \\\n    -c wal_buffers=1MB -c max_connections=80 -c autovacuum_max_workers=2\nelse\n  set -- -c shared_buffers=64MB -c effective_cache_size=1GB -c maintenance_work_mem=64MB \\\n    -c wal_buffers=2MB -c max_connections=120 -c autovacuum_max_workers=2\nfi\nexec docker-entrypoint.sh postgres \"$@\" -c work_mem=2MB -c jit=off -c huge_pages=off\n"
+                  ],
+                  "env": [
+                    {
+                      "name": "POSTGRES_DB",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "POSTGRES_USER",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "POSTGRES_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-postgres",
+                          "key": "password"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PGDATA",
+                      "value": "/var/lib/postgresql/data/pgdata"
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "name": "postgres",
+                      "containerPort": 5432
+                    }
+                  ],
+                  "readinessProbe": {
+                    "exec": {
+                      "command": [
+                        "pg_isready",
+                        "-U",
+                        "pyo",
+                        "-d",
+                        "pyo"
+                      ]
+                    },
+                    "periodSeconds": 5
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/postgresql/data"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "50m",
+                      "memory": "112Mi"
+                    },
+                    "limits": {
+                      "memory": "512Mi"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "volumeClaimTemplates": [
+            {
+              "metadata": {
+                "name": "data"
+              },
+              "spec": {
+                "accessModes": [
+                  "ReadWriteOnce"
+                ],
+                "resources": {
+                  "requests": {
+                    "storage": "10Gi"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-clickhouse",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-clickhouse",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app.kubernetes.io/name": "pyo-clickhouse"
+          },
+          "ports": [
+            {
+              "name": "http",
+              "port": 8123,
+              "targetPort": "http"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+          "name": "pyo-clickhouse",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-clickhouse",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "data": {
+          "config.xml": "<clickhouse>\n    <!-- Warnings and errors only, and little of them on disk. -->\n    <logger>\n        <level>warning</level>\n        <size>50M</size>\n        <count>2</count>\n    </logger>\n\n    <!-- System log tables Pyo never reads: each would keep a table, a\n         flush thread and its buffers. -->\n    <query_log remove=\"1\"/>\n    <query_thread_log remove=\"1\"/>\n    <query_views_log remove=\"1\"/>\n    <query_metric_log remove=\"1\"/>\n    <trace_log remove=\"1\"/>\n    <instrumentation_trace_log remove=\"1\"/>\n    <metric_log remove=\"1\"/>\n    <asynchronous_metric_log remove=\"1\"/>\n    <part_log remove=\"1\"/>\n    <text_log remove=\"1\"/>\n    <error_log remove=\"1\"/>\n    <crash_log remove=\"1\"/>\n    <session_log remove=\"1\"/>\n    <processors_profile_log remove=\"1\"/>\n    <opentelemetry_span_log remove=\"1\"/>\n    <asynchronous_insert_log remove=\"1\"/>\n    <background_schedule_pool_log remove=\"1\"/>\n    <backup_log remove=\"1\"/>\n    <blob_storage_log remove=\"1\"/>\n    <iceberg_metadata_log remove=\"1\"/>\n    <delta_lake_metadata_log remove=\"1\"/>\n    <zookeeper_log remove=\"1\"/>\n    <zookeeper_connection_log remove=\"1\"/>\n    <aggregated_zookeeper_log remove=\"1\"/>\n\n    <!-- Memory: what ClickHouse allocates stays under 70% of the pod's\n         limit (it reads the limit as the machine's memory); the rest is\n         its code. Past it a query fails rather than the pod. -->\n    <max_server_memory_usage>0</max_server_memory_usage>\n    <max_server_memory_usage_to_ram_ratio>0.7</max_server_memory_usage_to_ram_ratio>\n    <!-- A few queries at once (an Analytics page sends 14): the rest wait\n         their turn (queue_max_wait_ms in the profile) rather than all\n         sharing the memory above and some failing. -->\n    <max_concurrent_queries>6</max_concurrent_queries>\n    <merges_mutations_memory_usage_soft_limit>134217728</merges_mutations_memory_usage_soft_limit>\n    <mark_cache_size>16777216</mark_cache_size>\n    <uncompressed_cache_size>0</uncompressed_cache_size>\n    <index_mark_cache_size>0</index_mark_cache_size>\n    <index_uncompressed_cache_size>0</index_uncompressed_cache_size>\n    <primary_index_cache_size>16777216</primary_index_cache_size>\n    <mmap_cache_size>64</mmap_cache_size>\n    <compiled_expression_cache_size>8388608</compiled_expression_cache_size>\n    <compiled_expression_cache_elements_size>1000</compiled_expression_cache_elements_size>\n    <query_condition_cache_size>8388608</query_condition_cache_size>\n    <query_cache>\n        <max_size_in_bytes>0</max_size_in_bytes>\n        <max_entries>0</max_entries>\n    </query_cache>\n\n    <!-- Threads -->\n    <max_thread_pool_size>500</max_thread_pool_size>\n    <max_thread_pool_free_size>10</max_thread_pool_free_size>\n    <thread_pool_queue_size>500</thread_pool_queue_size>\n    <max_io_thread_pool_size>16</max_io_thread_pool_size>\n    <max_active_parts_loading_thread_pool_size>2</max_active_parts_loading_thread_pool_size>\n    <max_outdated_parts_loading_thread_pool_size>2</max_outdated_parts_loading_thread_pool_size>\n    <max_unexpected_parts_loading_thread_pool_size>2</max_unexpected_parts_loading_thread_pool_size>\n    <max_parts_cleaning_thread_pool_size>2</max_parts_cleaning_thread_pool_size>\n    <max_prefixes_deserialization_thread_pool_size>2</max_prefixes_deserialization_thread_pool_size>\n    <max_format_parsing_thread_pool_size>2</max_format_parsing_thread_pool_size>\n    <max_backups_io_thread_pool_size>2</max_backups_io_thread_pool_size>\n    <max_fetch_partition_thread_pool_size>1</max_fetch_partition_thread_pool_size>\n    <max_build_vector_similarity_index_thread_pool_size>1</max_build_vector_similarity_index_thread_pool_size>\n    <async_insert_threads>1</async_insert_threads>\n    <tables_loader_foreground_pool_size>2</tables_loader_foreground_pool_size>\n    <tables_loader_background_pool_size>2</tables_loader_background_pool_size>\n    <background_pool_size>2</background_pool_size>\n    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>\n    <background_schedule_pool_size>16</background_schedule_pool_size>\n    <background_common_pool_size>2</background_common_pool_size>\n    <background_move_pool_size>1</background_move_pool_size>\n    <background_fetches_pool_size>1</background_fetches_pool_size>\n    <background_buffer_flush_schedule_pool_size>1</background_buffer_flush_schedule_pool_size>\n    <background_message_broker_schedule_pool_size>1</background_message_broker_schedule_pool_size>\n    <background_distributed_schedule_pool_size>1</background_distributed_schedule_pool_size>\n    <background_streaming_schedule_pool_size>1</background_streaming_schedule_pool_size>\n    <parts_killer_pool_size>1</parts_killer_pool_size>\n    <prefetch_threadpool_pool_size>2</prefetch_threadpool_pool_size>\n    <load_marks_threadpool_pool_size>2</load_marks_threadpool_pool_size>\n    <threadpool_writer_pool_size>2</threadpool_writer_pool_size>\n    <threadpool_local_fs_reader_pool_size>2</threadpool_local_fs_reader_pool_size>\n\n    <merge_tree>\n        <!-- The pool above has 4 slots: don't hold merges small while\n             it's busy, and let mutations run. -->\n        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>0</number_of_free_entries_in_pool_to_lower_max_size_of_merge>\n        <number_of_free_entries_in_pool_to_execute_mutation>0</number_of_free_entries_in_pool_to_execute_mutation>\n        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>0</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>\n    </merge_tree>\n</clickhouse>\n",
+          "users.xml": "<clickhouse>\n    <profiles>\n        <default>\n            <max_threads>2</max_threads>\n            <max_memory_usage>209715200</max_memory_usage>\n            <max_bytes_before_external_group_by>33554432</max_bytes_before_external_group_by>\n            <max_bytes_ratio_before_external_group_by>0.2</max_bytes_ratio_before_external_group_by>\n            <max_bytes_before_external_sort>33554432</max_bytes_before_external_sort>\n            <max_bytes_ratio_before_external_sort>0.2</max_bytes_ratio_before_external_sort>\n            <max_execution_time>30</max_execution_time>\n            <queue_max_wait_ms>20000</queue_max_wait_ms>\n            <log_queries>0</log_queries>\n        </default>\n    </profiles>\n</clickhouse>\n"
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "pyo-clickhouse",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-clickhouse",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "serviceName": "pyo-clickhouse",
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-clickhouse"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-clickhouse",
+                "app.kubernetes.io/part-of": "pyo"
+              },
+              "annotations": {
+                "pyo.dev/config": "1"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "name": "clickhouse",
+                  "image": "clickhouse/clickhouse-server:26.8.36.3",
+                  "env": [
+                    {
+                      "name": "CLICKHOUSE_DB",
+                      "value": "pyo_observability"
+                    },
+                    {
+                      "name": "CLICKHOUSE_USER",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "CLICKHOUSE_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-clickhouse",
+                          "key": "password"
+                        }
+                      }
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "name": "http",
+                      "containerPort": 8123
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/ping",
+                      "port": "http"
+                    },
+                    "periodSeconds": 5
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/clickhouse"
+                    },
+                    {
+                      "name": "config",
+                      "mountPath": "/etc/clickhouse-server/config.d/pyo.xml",
+                      "subPath": "config.xml",
+                      "readOnly": true
+                    },
+                    {
+                      "name": "config",
+                      "mountPath": "/etc/clickhouse-server/users.d/pyo.xml",
+                      "subPath": "users.xml",
+                      "readOnly": true
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "50m",
+                      "memory": "144Mi"
+                    },
+                    "limits": {
+                      "memory": "512Mi"
+                    }
+                  }
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "config",
+                  "configMap": {
+                    "name": "pyo-clickhouse"
+                  }
+                }
+              ]
+            }
+          },
+          "volumeClaimTemplates": [
+            {
+              "metadata": {
+                "name": "data"
+              },
+              "spec": {
+                "accessModes": [
+                  "ReadWriteOnce"
+                ],
+                "resources": {
+                  "requests": {
+                    "storage": "10Gi"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+          "name": "pyo-backup-store",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-backup-store",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "data": {
+          "garage.toml": "metadata_dir = \"/var/lib/garage/meta\"\ndata_dir = \"/var/lib/garage/data\"\ndb_engine = \"lmdb\"\nreplication_factor = 1\ncompression_level = \"none\"\nblock_ram_buffer_max = \"64MiB\"\nrpc_bind_addr = \"127.0.0.1:3901\"\nrpc_public_addr = \"127.0.0.1:3901\"\n\n[s3_api]\ns3_region = \"garage\"\napi_bind_addr = \"0.0.0.0:3900\"\n\n[admin]\napi_bind_addr = \"0.0.0.0:3903\"\nmetrics_require_token = true\n"
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-backup-store",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-backup-store",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app.kubernetes.io/name": "pyo-backup-store"
+          },
+          "ports": [
+            {
+              "name": "s3",
+              "port": 3900,
+              "targetPort": "s3"
+            },
+            {
+              "name": "admin",
+              "port": 3903,
+              "targetPort": "admin"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "pyo-backup-store",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-backup-store",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "serviceName": "pyo-backup-store",
+          "replicas": 1,
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-backup-store"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-backup-store",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "automountServiceAccountToken": false,
+              "securityContext": {
+                "runAsNonRoot": true,
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "fsGroup": 1000,
+                "seccompProfile": {
+                  "type": "RuntimeDefault"
+                }
+              },
+              "containers": [
+                {
+                  "name": "garage",
+                  "image": "dxflrs/garage@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5",
+                  "command": [
+                    "/garage",
+                    "-c",
+                    "/etc/garage/garage.toml",
+                    "server"
+                  ],
+                  "env": [
+                    {
+                      "name": "GARAGE_RPC_SECRET",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "rpc-secret"
+                        }
+                      }
+                    },
+                    {
+                      "name": "GARAGE_ADMIN_TOKEN",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "admin-token"
+                        }
+                      }
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "name": "s3",
+                      "containerPort": 3900
+                    },
+                    {
+                      "name": "admin",
+                      "containerPort": 3903
+                    }
+                  ],
+                  "readinessProbe": {
+                    "tcpSocket": {
+                      "port": "s3"
+                    },
+                    "periodSeconds": 5
+                  },
+                  "securityContext": {
+                    "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true,
+                    "capabilities": {
+                      "drop": [
+                        "ALL"
+                      ]
+                    }
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "config",
+                      "mountPath": "/etc/garage",
+                      "readOnly": true
+                    },
+                    {
+                      "name": "data",
+                      "mountPath": "/var/lib/garage"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "20m",
+                      "memory": "16Mi"
+                    },
+                    "limits": {
+                      "memory": "512Mi"
+                    }
+                  }
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "config",
+                  "configMap": {
+                    "name": "pyo-backup-store"
+                  }
+                }
+              ]
+            }
+          },
+          "volumeClaimTemplates": [
+            {
+              "metadata": {
+                "name": "data"
+              },
+              "spec": {
+                "accessModes": [
+                  "ReadWriteOnce"
+                ],
+                "resources": {
+                  "requests": {
+                    "storage": "50Gi"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "pyo": [
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "type": "ClusterIP",
+          "selector": {
+            "app.kubernetes.io/name": "pyo"
+          },
+          "ports": [
+            {
+              "name": "http",
+              "port": 8000,
+              "targetPort": "http"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "pyo-registry-door",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "type": "ClusterIP",
+          "selector": {
+            "app.kubernetes.io/name": "pyo"
+          },
+          "ports": [
+            {
+              "name": "registry-door",
+              "port": 5006,
+              "targetPort": "registry-door"
+            }
+          ]
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "pyo",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "strategy": {
+            "type": "RollingUpdate",
+            "rollingUpdate": {
+              "maxUnavailable": 0,
+              "maxSurge": 1
+            }
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "terminationGracePeriodSeconds": 45,
+              "affinity": {
+                "podAntiAffinity": {
+                  "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                      "weight": 100,
+                      "podAffinityTerm": {
+                        "labelSelector": {
+                          "matchLabels": {
+                            "app.kubernetes.io/name": "pyo"
+                          }
+                        },
+                        "topologyKey": "kubernetes.io/hostname"
+                      }
+                    }
+                  ]
+                }
+              },
+              "containers": [
+                {
+                  "name": "pyo",
+                  "image": "ghcr.io/upsetdev/pyo/pyo:0.5.4@sha256:b8778bdec53339b0f23d94520e2fe743728a519806d0f50e24cbc0c3afb60f8a",
+                  "ports": [
+                    {
+                      "name": "http",
+                      "containerPort": 8000
+                    },
+                    {
+                      "name": "registry-door",
+                      "containerPort": 5006
+                    }
+                  ],
+                  "env": [
+                    {
+                      "name": "DATABASE_URL",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-postgres",
+                          "key": "url"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_AGENT_API_URL",
+                      "value": "http://pyo.pyo-system.svc:8000"
+                    },
+                    {
+                      "name": "PYO_AGENT_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/agent:0.5.4@sha256:75947f00afdb21e3526cffa0c70f727b1d7b30bcc19a2fcd7b666d14ae4e48ba"
+                    },
+                    {
+                      "name": "PYO_AGENT_SELF_UPDATE",
+                      "value": "true"
+                    },
+                    {
+                      "name": "PYO_ALLOW_PRIVATE_NETWORKS",
+                      "value": "true"
+                    },
+                    {
+                      "name": "PYO_FLOWS_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/flows:0.5.4@sha256:aa9293228599aa952bb4ab315865787f8071f8f2c23c39fa3cb1bcc0edfd04dc"
+                    },
+                    {
+                      "name": "PYO_WAF_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/waf:0.5.4@sha256:5a00c51d2de1bdb321703d9227ebd244606f24d07a6a373b2b52e3f06c625f5d"
+                    },
+                    {
+                      "name": "PYO_GEOIP_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/geoip:0.5.4@sha256:6d5b45b2b6bd0d2da9676e7ad8ea3cd66d330275cdb329c153a8c13bb88abb40"
+                    },
+                    {
+                      "name": "PYO_DB_CONTROLLER_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/db-controller:0.5.4@sha256:3903974417d92f47fb0841d510e6f8d05343733327bd16fc826dcbbff95c750f"
+                    },
+                    {
+                      "name": "PYO_KV_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/kv:0.5.4@sha256:af56ee5e3f6e5f55fe642267c596381816de7e60455dc1adbf74262b386d4009"
+                    },
+                    {
+                      "name": "PYO_STATIC_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/static:0.5.4@sha256:407bf277d59a158e1e4c7e8e31bcfbe4aef28b3ef1f79c6963117d3850511d4a"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_16",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:16-0.5.4@sha256:54cd52417c189df7b035754d75a749c3cf05ba903b7c8ff957980d22079606dc"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_17",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:17-0.5.4@sha256:e55fb95cf080da188e821d5eacfcdf626f9a7e88c38fdc3b26b5e9dc4f0bfd76"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_18",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:18-0.5.4@sha256:7fff3b644b3c496ae3d467791166efe3000da1f8dae8d2aa3d523736db43612c"
+                    },
+                    {
+                      "name": "PYO_MYSQL_OPERATOR_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/mysql-operator:0.5.4@sha256:84361c6e7990055481cd6032ec4b377eded64f82fc58d31043159364793a99ad"
+                    },
+                    {
+                      "name": "PYO_MYSQL_BACKUP_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/mysql-backup:0.5.4@sha256:70d2d853d357bd8d94ccec7fa8834cfb539c9b1fa5a56594e9de3017b27c23e5"
+                    },
+                    {
+                      "name": "RUST_LOG",
+                      "value": "pyo_api=info,tower_http=warn"
+                    },
+                    {
+                      "name": "PYO_ROLE",
+                      "value": "web"
+                    },
+                    {
+                      "name": "POD_IP",
+                      "valueFrom": {
+                        "fieldRef": {
+                          "fieldPath": "status.podIP"
+                        }
+                      }
+                    },
+                    {
+                      "name": "CLICKHOUSE_URL",
+                      "value": "http://pyo-clickhouse.pyo-system.svc:8123"
+                    },
+                    {
+                      "name": "CLICKHOUSE_USER",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "CLICKHOUSE_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-clickhouse",
+                          "key": "password"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_GEOIP_DB",
+                      "value": "/geoip/GeoLite2-City.mmdb"
+                    },
+                    {
+                      "name": "MAXMIND_LICENSE_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-geoip",
+                          "key": "maxmind-license-key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BUILDER_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/builder:0.5.4@sha256:774500c22a953db40c670822691e6209095531a70d2330c33a8313e4000deec0"
+                    },
+                    {
+                      "name": "PYO_REGISTRY_PULL",
+                      "value": "127.0.0.1:5005"
+                    },
+                    {
+                      "name": "PYO_REGISTRY",
+                      "value": "pyo-registry.pyo-system.svc.cluster.local:5000"
+                    },
+                    {
+                      "name": "PYO_BOOTSTRAP_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-bootstrap",
+                          "key": "key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_SECRET_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-secrets",
+                          "key": "secret-key"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_ADMIN_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-admin",
+                          "key": "password",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_TELEMETRY",
+                      "valueFrom": {
+                        "configMapKeyRef": {
+                          "name": "pyo-install",
+                          "key": "telemetry",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_URL",
+                      "value": "http://pyo-backup-store.pyo-system.svc.cluster.local:3900"
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ADMIN_URL",
+                      "value": "http://pyo-backup-store.pyo-system.svc.cluster.local:3903"
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ADMIN_TOKEN",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "admin-token",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ACCESS_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "access-key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_SECRET_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "secret-key",
+                          "optional": true
+                        }
+                      }
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/readyz",
+                      "port": "http"
+                    },
+                    "periodSeconds": 3,
+                    "failureThreshold": 1
+                  },
+                  "lifecycle": {
+                    "preStop": {
+                      "sleep": {
+                        "seconds": 5
+                      }
+                    }
+                  },
+                  "livenessProbe": {
+                    "httpGet": {
+                      "path": "/healthz",
+                      "port": "http"
+                    },
+                    "initialDelaySeconds": 20,
+                    "periodSeconds": 20
+                  },
+                  "securityContext": {
+                    "runAsNonRoot": true,
+                    "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true,
+                    "capabilities": {
+                      "drop": [
+                        "ALL"
+                      ]
+                    }
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "geoip",
+                      "mountPath": "/geoip"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "20m",
+                      "memory": "64Mi"
+                    },
+                    "limits": {
+                      "memory": "256Mi"
+                    }
+                  }
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "geoip",
+                  "emptyDir": {
+                    "sizeLimit": "256Mi"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "policy/v1",
+        "kind": "PodDisruptionBudget",
+        "metadata": {
+          "name": "pyo",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "maxUnavailable": 1,
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo"
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "pyo-worker",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-worker",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "strategy": {
+            "type": "RollingUpdate",
+            "rollingUpdate": {
+              "maxUnavailable": 0,
+              "maxSurge": 1
+            }
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-worker"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-worker",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "terminationGracePeriodSeconds": 45,
+              "containers": [
+                {
+                  "name": "worker",
+                  "image": "ghcr.io/upsetdev/pyo/pyo:0.5.4@sha256:b8778bdec53339b0f23d94520e2fe743728a519806d0f50e24cbc0c3afb60f8a",
+                  "ports": [
+                    {
+                      "name": "http",
+                      "containerPort": 8000
+                    }
+                  ],
+                  "env": [
+                    {
+                      "name": "PYO_ROLE",
+                      "value": "worker"
+                    },
+                    {
+                      "name": "DATABASE_URL",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-postgres",
+                          "key": "url"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_AGENT_API_URL",
+                      "value": "http://pyo.pyo-system.svc:8000"
+                    },
+                    {
+                      "name": "PYO_AGENT_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/agent:0.5.4@sha256:75947f00afdb21e3526cffa0c70f727b1d7b30bcc19a2fcd7b666d14ae4e48ba"
+                    },
+                    {
+                      "name": "PYO_AGENT_SELF_UPDATE",
+                      "value": "true"
+                    },
+                    {
+                      "name": "PYO_ALLOW_PRIVATE_NETWORKS",
+                      "value": "true"
+                    },
+                    {
+                      "name": "PYO_FLOWS_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/flows:0.5.4@sha256:aa9293228599aa952bb4ab315865787f8071f8f2c23c39fa3cb1bcc0edfd04dc"
+                    },
+                    {
+                      "name": "PYO_WAF_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/waf:0.5.4@sha256:5a00c51d2de1bdb321703d9227ebd244606f24d07a6a373b2b52e3f06c625f5d"
+                    },
+                    {
+                      "name": "PYO_GEOIP_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/geoip:0.5.4@sha256:6d5b45b2b6bd0d2da9676e7ad8ea3cd66d330275cdb329c153a8c13bb88abb40"
+                    },
+                    {
+                      "name": "PYO_DB_CONTROLLER_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/db-controller:0.5.4@sha256:3903974417d92f47fb0841d510e6f8d05343733327bd16fc826dcbbff95c750f"
+                    },
+                    {
+                      "name": "PYO_KV_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/kv:0.5.4@sha256:af56ee5e3f6e5f55fe642267c596381816de7e60455dc1adbf74262b386d4009"
+                    },
+                    {
+                      "name": "PYO_STATIC_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/static:0.5.4@sha256:407bf277d59a158e1e4c7e8e31bcfbe4aef28b3ef1f79c6963117d3850511d4a"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_16",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:16-0.5.4@sha256:54cd52417c189df7b035754d75a749c3cf05ba903b7c8ff957980d22079606dc"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_17",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:17-0.5.4@sha256:e55fb95cf080da188e821d5eacfcdf626f9a7e88c38fdc3b26b5e9dc4f0bfd76"
+                    },
+                    {
+                      "name": "PYO_POSTGRES_IMAGE_18",
+                      "value": "ghcr.io/upsetdev/pyo/postgres:18-0.5.4@sha256:7fff3b644b3c496ae3d467791166efe3000da1f8dae8d2aa3d523736db43612c"
+                    },
+                    {
+                      "name": "PYO_MYSQL_OPERATOR_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/mysql-operator:0.5.4@sha256:84361c6e7990055481cd6032ec4b377eded64f82fc58d31043159364793a99ad"
+                    },
+                    {
+                      "name": "PYO_MYSQL_BACKUP_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/mysql-backup:0.5.4@sha256:70d2d853d357bd8d94ccec7fa8834cfb539c9b1fa5a56594e9de3017b27c23e5"
+                    },
+                    {
+                      "name": "PYO_SANDBOX_BASE_REF",
+                      "value": ""
+                    },
+                    {
+                      "name": "PYO_SANDBOX_DESKTOP_REF",
+                      "value": ""
+                    },
+                    {
+                      "name": "RUST_LOG",
+                      "value": "pyo_api=info"
+                    },
+                    {
+                      "name": "CLICKHOUSE_URL",
+                      "value": "http://pyo-clickhouse.pyo-system.svc:8123"
+                    },
+                    {
+                      "name": "CLICKHOUSE_USER",
+                      "value": "pyo"
+                    },
+                    {
+                      "name": "CLICKHOUSE_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-clickhouse",
+                          "key": "password"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BUILDER_IMAGE",
+                      "value": "ghcr.io/upsetdev/pyo/builder:0.5.4@sha256:774500c22a953db40c670822691e6209095531a70d2330c33a8313e4000deec0"
+                    },
+                    {
+                      "name": "PYO_REGISTRY_PULL",
+                      "value": "127.0.0.1:5005"
+                    },
+                    {
+                      "name": "PYO_REGISTRY",
+                      "value": "pyo-registry.pyo-system.svc.cluster.local:5000"
+                    },
+                    {
+                      "name": "PYO_BOOTSTRAP_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-bootstrap",
+                          "key": "key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_SECRET_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-secrets",
+                          "key": "secret-key"
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_URL",
+                      "value": "http://pyo-backup-store.pyo-system.svc.cluster.local:3900"
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ADMIN_URL",
+                      "value": "http://pyo-backup-store.pyo-system.svc.cluster.local:3903"
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ADMIN_TOKEN",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "admin-token",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_ACCESS_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "access-key",
+                          "optional": true
+                        }
+                      }
+                    },
+                    {
+                      "name": "PYO_BACKUP_STORE_SECRET_KEY",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "name": "pyo-backup-store",
+                          "key": "secret-key",
+                          "optional": true
+                        }
+                      }
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/readyz",
+                      "port": "http"
+                    },
+                    "periodSeconds": 5
+                  },
+                  "livenessProbe": {
+                    "httpGet": {
+                      "path": "/healthz",
+                      "port": "http"
+                    },
+                    "initialDelaySeconds": 20,
+                    "periodSeconds": 20
+                  },
+                  "securityContext": {
+                    "runAsNonRoot": true,
+                    "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true,
+                    "capabilities": {
+                      "drop": [
+                        "ALL"
+                      ]
+                    }
+                  },
+                  "resources": {
+                    "requests": {
+                      "cpu": "10m",
+                      "memory": "32Mi"
+                    },
+                    "limits": {
+                      "memory": "512Mi"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "pyo-forward",
+          "namespace": "pyo-system",
+          "labels": {
+            "app.kubernetes.io/name": "pyo-forward",
+            "app.kubernetes.io/part-of": "pyo"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "strategy": {
+            "type": "Recreate"
+          },
+          "selector": {
+            "matchLabels": {
+              "app.kubernetes.io/name": "pyo-forward"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app.kubernetes.io/name": "pyo-forward",
+                "app.kubernetes.io/part-of": "pyo"
+              }
+            },
+            "spec": {
+              "hostNetwork": true,
+              "dnsPolicy": "ClusterFirstWithHostNet",
+              "affinity": {
+                "podAffinity": {
+                  "requiredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                      "labelSelector": {
+                        "matchLabels": {
+                          "app.kubernetes.io/name": "registry"
+                        }
+                      },
+                      "topologyKey": "kubernetes.io/hostname"
+                    }
+                  ]
+                }
+              },
+              "containers": [
+                {
+                  "name": "forward",
+                  "image": "ghcr.io/upsetdev/pyo/agent:0.5.4@sha256:75947f00afdb21e3526cffa0c70f727b1d7b30bcc19a2fcd7b666d14ae4e48ba",
+                  "args": [
+                    "forward",
+                    "8000/local,private,tailnet=pyo.pyo-system.svc.cluster.local:8000",
+                    "5006/tailnet=pyo-registry-door.pyo-system.svc.cluster.local:5006"
+                  ],
+                  "securityContext": {
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true,
+                    "capabilities": {
+                      "drop": [
+                        "ALL"
+                      ]
+                    }
+                  },
+                  "resources": {
+                    "requests": {
+                      "cpu": "5m",
+                      "memory": "8Mi"
+                    },
+                    "limits": {
+                      "memory": "64Mi"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  },
+  "migrations": [
+    "0001_init.sql",
+    "0002_free_domain_address.sql",
+    "0003_database_imported_from.sql",
+    "0004_platform_imports.sql",
+    "0005_tailnet.sql",
+    "0006_behind_cdn.sql",
+    "0007_cloudflare_dns.sql",
+    "0008_git_connections.sql",
+    "0009_cloud_servers.sql",
+    "0010_static_sites.sql",
+    "0011_sandboxes.sql",
+    "0012_sandbox_edges.sql",
+    "0013_sign_in_links.sql",
+    "0014_cloud_sandbox_servers.sql",
+    "0015_sandbox_base_template.sql",
+    "0016_sandbox_lifetimes.sql",
+    "0017_sandbox_names.sql",
+    "0018_tailnet_sandboxes.sql",
+    "0019_alerts.sql",
+    "0020_agent_certificates.sql",
+    "0021_agent_keys.sql",
+    "0022_row_security.sql",
+    "0023_component_keys.sql",
+    "0024_connect_tokens.sql",
+    "0025_agent_updates.sql",
+    "0026_build_log_cleanup.sql",
+    "0027_tailscale_in_clusters.sql",
+    "0028_previews.sql",
+    "0029_cli_login_requests.sql",
+    "0030_source_uploads.sql",
+    "0031_team_analytics_months.sql",
+    "0032_row_security_rest.sql",
+    "0033_rate_limit_lockout.sql",
+    "0034_team_security.sql",
+    "0035_log_follows.sql",
+    "0036_relay_tickets.sql",
+    "0037_commands_held.sql",
+    "0038_database_log_follows.sql"
+  ],
+  "minFrom": null,
+  "manualOnly": false,
+  "beforeYouUpdate": [],
+  "agentAccess": "5db0cd47517256de",
+  "sandbox": {
+    "x86_64": "784b397993a0113e8877cf93fd7a1b71540ad8e1b6a05bbfddbf9ea6b089f312",
+    "aarch64": "4fc6124dcb9e5134ec5627fb10b4888ecce2210a69a148b75cdaebdfd9bd5123"
+  },
+  "sandboxGvisor": {
+    "x86_64": "1f1e66eec9b9c54a8e34dbcdd3ffa8c3e5007893266fa823e11c45bd7c0c3b73",
+    "aarch64": "e5d6a239b6f0c3f708647c07459ddde22a97c14c2fe77358abee0f55c27aa548"
+  },
+  "scripts": {
+    "install.sh": "e3139e037f3e903db91c15e8695ad1cf72a9228d0751dd81ea7446ae3adecb55",
+    "cli.sh": "481ef4bcedcbc637b567dd8634b70de72ddafe87e1bb6e82f017477bcb0e9fc0",
+    "connect.sh": "1ea825f2981ed32c39f578faebc0957ab1a780ceb4131b5517ec8d24b6a8068b",
+    "join.sh": "83d94e47cdba43bd7aed1d755c5a6c3cb6506376d4773eb847d9578327b55ff4",
+    "sandbox.sh": "0d947ac6d481e022d7120de60dba5419ec8c2552b1802fb1846bc040e29bdc37"
+  }
+}

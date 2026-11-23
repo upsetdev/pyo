@@ -3629,6 +3629,7 @@ dependencies = [
  "libc",
  "maxminddb",
  "pyo-proto",
+ "pyo-sigstore",
  "qrcode",
  "rand 0.10.3",
  "rcgen",
@@ -3826,6 +3827,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyo-sigstore"
+version = "0.5.5"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "hex",
+ "serde_json",
+ "sha2 0.11.1",
+ "x509-parser",
+]
+
+[[package]]
 name = "pyo-static"
 version = "0.5.5"
 dependencies = [
@@ -3844,6 +3858,16 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pyo-verify"
+version = "0.5.5"
+dependencies = [
+ "hex",
+ "pyo-sigstore",
+ "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]
