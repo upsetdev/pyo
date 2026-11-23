@@ -55,12 +55,12 @@ impl Status {
     }
 
     /// The ConfigMap, as JSON (which kubectl takes like YAML). Its values
-    /// are all strings.
+    /// are all strings, under the keys Pyo's agent reads ([`configmap_key`]).
     fn configmap(&self) -> String {
         let data: serde_json::Map<String, serde_json::Value> = self
             .fields()
             .into_iter()
-            .map(|(k, s)| (k.to_owned(), json!(s)))
+            .map(|(k, s)| (configmap_key(k).to_owned(), json!(s)))
             .collect();
         json!({
             "apiVersion": "v1",
@@ -73,6 +73,19 @@ impl Status {
             "data": data,
         })
         .to_string()
+    }
+}
+
+/// A status field's key in the ConfigMap: what Pyo's agent reads there
+/// (pyo-proto's `VerifierStatus::from_data`: version, live, checked,
+/// error, hold, host). The file keeps its own names.
+fn configmap_key(field: &str) -> &str {
+    match field {
+        "verifierVersion" => "version",
+        "liveVersion" => "live",
+        "lastCheck" => "checked",
+        "lastError" => "error",
+        other => other,
     }
 }
 
@@ -172,7 +185,25 @@ mod tests {
         assert_eq!(cm["metadata"]["namespace"], "pyo-system");
         assert_eq!(cm["metadata"]["name"], "pyo-verifier");
         assert_eq!(cm["data"]["hold"], "false");
-        assert_eq!(cm["data"]["lastError"], "A \"quoted\"\nline");
+        // The keys Pyo's agent reads (pyo-proto's VerifierStatus::from_data).
+        assert_eq!(cm["data"]["version"], "0.51.0");
+        assert_eq!(cm["data"]["live"], "0.52.0");
+        assert_eq!(cm["data"]["checked"], "1970-01-01T00:00:00Z");
+        assert_eq!(cm["data"]["error"], "A \"quoted\"\nline");
+        assert_eq!(cm["data"]["host"], "web-1");
+        let mut keys: Vec<&str> = cm["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "checked", "error", "hold", "host", "live", "message", "state", "version"
+            ]
+        );
         assert!(
             cm["data"]
                 .as_object()
