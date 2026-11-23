@@ -87,16 +87,37 @@ fn secrets(client: &Client) -> Api<Secret> {
 
 /// The tunnel the token here is for, from its Secret's label.
 async fn token_for(client: &Client) -> kube::Result<Option<String>> {
+    Ok(here(client).await?.map(|(id, _)| id))
+}
+
+/// The tunnel the token here is for, and the token ("" when the Secret
+/// has none).
+async fn here(client: &Client) -> kube::Result<Option<(String, String)>> {
     Ok(secrets(client)
         .get_opt(system::TUNNEL_NAME)
         .await?
-        .and_then(|s| s.labels().get(system::TUNNEL_ID_LABEL).cloned()))
+        .and_then(|s| {
+            let id = s.labels().get(system::TUNNEL_ID_LABEL).cloned()?;
+            let data = s
+                .data
+                .as_ref()
+                .and_then(|d| d.get(system::TUNNEL_TOKEN_KEY))
+                .map(|b| String::from_utf8_lossy(&b.0).into_owned());
+            let token = data.or_else(|| {
+                s.string_data
+                    .as_ref()
+                    .and_then(|d| d.get(system::TUNNEL_TOKEN_KEY))
+                    .cloned()
+            });
+            Some((id, token.unwrap_or_default()))
+        }))
 }
 
-/// The connector's objects, as written.
-fn connector() -> [serde_json::Value; 3] {
+/// The connector's objects, as written for `token`: its hash in the pod
+/// template, so a new token rolls the connector out.
+fn connector(token: &str) -> [serde_json::Value; 3] {
     [
-        system::tunnel_deployment(system::CLOUDFLARED_IMAGE),
+        system::tunnel_deployment(system::CLOUDFLARED_IMAGE, &system::tunnel_token_hash(token)),
         system::tunnel_budget(),
         system::tunnel_origin_service(),
     ]
@@ -104,8 +125,8 @@ fn connector() -> [serde_json::Value; 3] {
 
 /// Write the connector's objects (only when they changed since the last
 /// write here, or are missing).
-async fn apply_connector(client: &Client, force: bool) -> kube::Result<()> {
-    let objects = connector();
+async fn apply_connector(client: &Client, token: &str, force: bool) -> kube::Result<()> {
+    let objects = connector(token);
     let text = serde_json::to_string(&objects).unwrap_or_default();
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), rbac::NS);
     let there = deployments.get_opt(system::TUNNEL_NAME).await?.is_some();
@@ -148,7 +169,7 @@ pub async fn set(client: &Client, tunnel_id: &str, token: &str) -> CommandResult
                 &Patch::Apply(system::tunnel_secret(tunnel_id, token)),
             )
             .await?;
-        apply_connector(client, true).await
+        apply_connector(client, token, true).await
     }
     .await;
     match written {
@@ -212,7 +233,7 @@ pub async fn follow(client: &Client, wanted: &TunnelWanted) {
         kept().refused_on = None;
         REFUSED_NOW.store(false, Ordering::Relaxed);
     }
-    let have = match token_for(client).await {
+    let have = match here(client).await {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(error = %e, "couldn't read the tunnel's token");
@@ -223,7 +244,9 @@ pub async fn follow(client: &Client, wanted: &TunnelWanted) {
         (None, None) => Ok(()),
         (None, Some(_)) => remove_all(client).await,
         // The token for it is here: the connector runs with it.
-        (Some(w), Some(h)) if w == h => apply_connector(client, false).await,
+        (Some(w), Some((h, token))) if w == h && !token.is_empty() => {
+            apply_connector(client, token, false).await
+        }
         // Waiting for `TunnelSet` (the report says which token is here).
         (Some(_), _) => Ok(()),
     };
@@ -430,6 +453,66 @@ mod tests {
         assert_eq!(report(&client).await.tunnel_id, None);
         // Removing again is fine.
         assert!(remove(&client).await.ok);
+    }
+
+    /// A new token changes the connector's pod template (so its pods
+    /// restart with it, cloudflared reads it only when it starts), the
+    /// same token doesn't, and a write that failed after the Secret took
+    /// the new token converges on the retry or the next heartbeat.
+    #[tokio::test]
+    async fn a_new_token_rolls_the_connector_out() {
+        let _one = SERIAL.lock().await;
+        let (kube, client) = FakeKube::start().await;
+        reset();
+        let hash = |kube: &FakeKube| {
+            kube.get(DEPLOYMENT).expect("the connector")["spec"]["template"]["metadata"]
+                ["annotations"][system::TUNNEL_TOKEN_HASH_ANNOTATION]
+                .as_str()
+                .map(str::to_owned)
+        };
+        let wanted = TunnelWanted {
+            tunnel_id: Some(ID.into()),
+            ports_public: true,
+        };
+        assert!(set(&client, ID, "eyJ0b2tlbiI6MX0").await.ok);
+        let first = hash(&kube).expect("the token's hash");
+        assert_eq!(first, system::tunnel_token_hash("eyJ0b2tlbiI6MX0"));
+        let d = kube.get(DEPLOYMENT).unwrap().to_string();
+        assert!(!d.contains("eyJ0b2tlbiI6MX0"), "never the token");
+        // The same token again: nothing changes.
+        assert!(set(&client, ID, "eyJ0b2tlbiI6MX0").await.ok);
+        follow(&client, &wanted).await;
+        assert_eq!(hash(&kube), Some(first.clone()));
+
+        // The connector's write fails after the Secret has the new token.
+        let fail = |kube: &FakeKube| {
+            kube.admit(|w| (w.plural == "deployments").then(|| (500, "etcd timed out".into())))
+        };
+        fail(&kube);
+        assert!(!set(&client, ID, "eyJ0b2tlbiI6Mn0").await.ok);
+        assert_eq!(
+            kube.get(SECRET).unwrap()["stringData"]["token"],
+            "eyJ0b2tlbiI6Mn0"
+        );
+        assert_eq!(hash(&kube), Some(first.clone()), "not rolled out yet");
+        // Pyo sends the same token again: it rolls out.
+        kube.admit(|_| None);
+        assert!(set(&client, ID, "eyJ0b2tlbiI6Mn0").await.ok);
+        assert_eq!(
+            hash(&kube),
+            Some(system::tunnel_token_hash("eyJ0b2tlbiI6Mn0"))
+        );
+
+        // Again, and this time the next heartbeat gets there first.
+        fail(&kube);
+        assert!(!set(&client, ID, "eyJ0b2tlbiI6M30").await.ok);
+        kube.admit(|_| None);
+        follow(&client, &wanted).await;
+        assert_eq!(
+            hash(&kube),
+            Some(system::tunnel_token_hash("eyJ0b2tlbiI6M30"))
+        );
+        assert!(!report(&client).await.refused);
     }
 
     /// The connector is put back when it's missing, with the token here.

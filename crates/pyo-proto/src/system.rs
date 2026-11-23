@@ -1588,6 +1588,10 @@ pub const TUNNEL_APP: &str = "pyo-tunnel";
 pub const TUNNEL_ID_LABEL: &str = "pyo.dev/tunnel-id";
 /// The Secret's key with the token.
 pub const TUNNEL_TOKEN_KEY: &str = "token";
+/// The connector's pod template annotation with [`tunnel_token_hash`]:
+/// cloudflared reads its token only when it starts, so a new token changes
+/// the Deployment and its pods restart with it.
+pub const TUNNEL_TOKEN_HASH_ANNOTATION: &str = "pyo.dev/token-hash";
 /// Connectors: two, spread across servers where it can.
 pub const TUNNEL_REPLICAS: i32 = 2;
 /// Where cloudflared serves `/ready` (nothing reaches it: pyo-system
@@ -1612,11 +1616,22 @@ pub fn tunnel_secret(tunnel_id: &str, token: &str) -> Value {
     })
 }
 
+/// A token's hash for [`TUNNEL_TOKEN_HASH_ANNOTATION`]: the first 16 hex
+/// digits of its SHA-256, never the token.
+pub fn tunnel_token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// The connector: cloudflared over HTTP/2 (QUIC is often blocked, and its
 /// fallback is slow enough that the probe restarts it first), with no
 /// service account token, non-root, read only, no capabilities. Never on
-/// build-only servers, spread across servers where it can be.
-pub fn tunnel_deployment(image: &str) -> Value {
+/// build-only servers, spread across servers where it can be. `token_hash`
+/// is [`tunnel_token_hash`] of the token in its Secret.
+pub fn tunnel_deployment(image: &str, token_hash: &str) -> Value {
     let app = json!({ "app.kubernetes.io/name": TUNNEL_APP });
     let probe = json!({ "httpGet": { "path": "/ready", "port": TUNNEL_METRICS_PORT } });
     json!({
@@ -1627,7 +1642,7 @@ pub fn tunnel_deployment(image: &str) -> Value {
             "selector": { "matchLabels": app },
             "strategy": { "type": "RollingUpdate", "rollingUpdate": { "maxSurge": 1, "maxUnavailable": 0 } },
             "template": {
-                "metadata": { "labels": app },
+                "metadata": { "labels": app, "annotations": { TUNNEL_TOKEN_HASH_ANNOTATION: token_hash } },
                 "spec": {
                     "automountServiceAccountToken": false,
                     "affinity": gateway_affinity(),

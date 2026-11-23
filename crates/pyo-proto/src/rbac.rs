@@ -2137,8 +2137,14 @@ mod tests {
 
     #[test]
     fn the_tunnel_connector_passes_the_pod_rules() {
-        let d = system::tunnel_deployment(system::CLOUDFLARED_IMAGE);
+        let d =
+            system::tunnel_deployment(system::CLOUDFLARED_IMAGE, &system::tunnel_token_hash("tok"));
         let pod = &d["spec"]["template"]["spec"];
+        // The token's hash, never the token, restarts it on a new token.
+        let hash =
+            &d["spec"]["template"]["metadata"]["annotations"][system::TUNNEL_TOKEN_HASH_ANNOTATION];
+        assert_eq!(hash.as_str().map(str::len), Some(16));
+        assert!(!d.to_string().contains("\"tok\""));
         assert_eq!(pod["automountServiceAccountToken"], false);
         assert!(pod.get("hostNetwork").is_none() && pod.get("volumes").is_none());
         let c = &pod["containers"][0];
