@@ -886,6 +886,14 @@ impl Kube<'_> {
             .pods(&format!("cnpg.io/cluster={name},cnpg.io/podRole=instance"))
             .await?;
         st.members = crate::controller::members(&pods, &primary, Some("cnpg.io/instanceRole"));
+        if st.phase != crate::crd::READY {
+            // Every pod of it: the first instance starts as an initdb job.
+            let all = self
+                .pods(&format!("cnpg.io/cluster={name}"))
+                .await
+                .unwrap_or_default();
+            crate::controller::explain_unscheduled(&mut st, &all);
+        }
         st.backup = match backup_on(self.db) {
             Some(_) => {
                 let ip = pods

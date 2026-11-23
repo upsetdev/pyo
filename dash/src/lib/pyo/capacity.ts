@@ -42,6 +42,24 @@ export function freeRoom(
   return seen ? free : null;
 }
 
+/**
+ * The most memory (GiB) one server of the cluster can still hand out: what
+ * it can give pods less what the ones there ask for. A database instance
+ * runs whole on one server. Null when none of them has said.
+ */
+export function largestFreeMemory(servers: ClusterServer[], clusterId: string): number | null {
+  let best: number | null = null;
+  for (const n of servers) {
+    if (n.clusterId !== clusterId || n.removal) continue;
+    const alloc = n.allocatable;
+    if (!alloc || alloc.cpu <= 0) continue;
+    best ??= 0;
+    if (n.status !== "ready" || !n.schedulable || n.maintenance || n.builder || n.gpuDedicated) continue;
+    best = Math.max(best, alloc.memoryGi - (n.requested?.memoryGi ?? 0));
+  }
+  return best;
+}
+
 /** "2.5", "30": one decimal under 10, whole numbers above. */
 function amount(x: number) {
   if (x < 10) return String(Math.round(x * 10) / 10);

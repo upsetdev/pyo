@@ -239,6 +239,8 @@ pub const READY: &str = "Ready";
 pub const DEGRADED: &str = "Degraded";
 pub const CREATING: &str = "Creating";
 pub const FAILED: &str = "Failed";
+/// The status reason while an instance waits for a server with room.
+pub const UNSCHEDULABLE: &str = "Unschedulable";
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -248,6 +250,10 @@ pub struct DatabaseStatus {
     /// What's happening or what's wrong, in plain words.
     #[serde(default)]
     pub message: String,
+    /// Why it can't go on, when that's known: [`UNSCHEDULABLE`] while an
+    /// instance has no server to run on (the message says what's short).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
     #[serde(default)]
     pub observed_generation: i64,
     #[serde(default)]

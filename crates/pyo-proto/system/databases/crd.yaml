@@ -171,6 +171,7 @@ spec:
               properties:
                 phase: {type: string}
                 message: {type: string}
+                reason: {type: string}
                 observedGeneration: {type: integer, format: int64}
                 instances: {type: integer}
                 readyInstances: {type: integer}

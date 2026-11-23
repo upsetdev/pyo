@@ -1,4 +1,4 @@
-import { PlusIcon } from "@phosphor-icons/react";
+import { PlusIcon, WarningIcon } from "@phosphor-icons/react";
 import {
   AvailabilityField,
   Choice,
@@ -7,9 +7,11 @@ import {
   ENGINE_LABEL,
   fitReplicas,
   instancesOf,
+  roomNote,
   sizesFor,
 } from "~/components/pyo/Databases";
 import { Field, Input, Select, Switch } from "~/components/ui/Field";
+import { Callout } from "~/components/ui/Panel";
 import { fetchDatabaseExtensions } from "~/lib/pyo/backend";
 import { DNS_LABEL } from "~/lib/pyo/format";
 import { useQuery } from "~/lib/pyo/query";
@@ -145,6 +147,7 @@ export function TemplateDatabaseFields({
   const missing = c.mode === "existing" ? missingOn(req, picked, catalog) : [];
   const restarts = catalog?.some((e) => e.restart && missing.includes(e.name));
   const managed = managedOf(req, catalog);
+  const noRoom = c.mode === "new" ? roomNote(s.servers, clusterId, engine, c.size, 0) : null;
   return (
     <div className="space-y-4">
       <Choices label="Database">
@@ -222,6 +225,11 @@ export function TemplateDatabaseFields({
               )}
             </Field>
           </div>
+          {noRoom ? (
+            <Callout tone="warning" icon={WarningIcon}>
+              {noRoom}
+            </Callout>
+          ) : null}
           <AvailabilityField engine={engine} ha={c.ha} replicas={c.replicas} onChange={(ha, replicas) => set({ ha, replicas })} />
         </>
       )}

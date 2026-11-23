@@ -738,6 +738,7 @@ impl Kube<'_> {
             }
         }
         st.members = members;
+        crate::controller::explain_unscheduled(&mut st, &pods);
 
         if let Err(e) = self.label_job_pods(&restore_job).await {
             tracing::warn!(db = %name, error = format!("{e:#}"), "label job pods");

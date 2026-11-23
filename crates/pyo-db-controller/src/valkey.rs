@@ -604,6 +604,7 @@ impl Kube<'_> {
         if let Some(h) = held.or(rolling) {
             st.message = h;
         }
+        crate::controller::explain_unscheduled(&mut st, &pods);
         st.endpoints = Default::default();
         st.endpoints.primary = format!("{}:6379", self.svc_host(&name));
         if n > 1 {

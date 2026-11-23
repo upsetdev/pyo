@@ -90,11 +90,16 @@ pub async fn reconcile(db: Arc<Database>, ctx: Arc<Ctx>) -> Result<Action, Error
         return Ok(Action::await_change()); // owner references clean up the rest
     }
     let before = db.status.clone().unwrap_or_default();
-    let (mut st, requeue) = match run(&db, &ctx, before.clone()).await {
+    // Each pass says again whether it's stuck (explain_unscheduled).
+    let fresh = DatabaseStatus {
+        reason: String::new(),
+        ..before.clone()
+    };
+    let (mut st, requeue) = match run(&db, &ctx, fresh.clone()).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(db = %db.name_any(), ns = db.namespace().unwrap_or_default(), error = format!("{e:#}"), "reconcile");
-            let mut st = before.clone();
+            let mut st = fresh;
             if pyo_proto::transient_error(&format!("{e:#}")) {
                 // The operators are still starting (right after they're
                 // installed): not a failure. A running database keeps its phase.
@@ -654,6 +659,49 @@ pub fn phase_for(st: &mut DatabaseStatus, ready: i32, want: i32, serving: bool) 
     };
 }
 
+/// While it isn't ready and an instance has no server to run on, says why
+/// in the message, in Pyo's words, with the reason [`crd::UNSCHEDULABLE`].
+pub fn explain_unscheduled(st: &mut DatabaseStatus, pods: &[Pod]) {
+    if st.phase == crd::READY || st.phase == crd::FAILED {
+        return;
+    }
+    let waiting = pods
+        .iter()
+        .filter(|p| p.metadata.deletion_timestamp.is_none())
+        .filter_map(|p| p.status.as_ref()?.conditions.as_ref())
+        .flatten()
+        .find(|c| {
+            c.type_ == "PodScheduled"
+                && c.status == "False"
+                && c.reason.as_deref() == Some("Unschedulable")
+        });
+    if let Some(words) = waiting.and_then(|c| no_room(c.message.as_deref().unwrap_or(""))) {
+        st.message = words.into();
+        st.reason = crd::UNSCHEDULABLE.into();
+    }
+}
+
+/// The scheduler's "0/1 nodes are available: 1 Insufficient memory. ..."
+/// in plain words. None while it only waits for its volume to be made.
+fn no_room(raw: &str) -> Option<&'static str> {
+    // What follows "preemption:" repeats it.
+    let head = raw.split(" preemption:").next().unwrap_or(raw);
+    if head.contains("unbound immediate PersistentVolumeClaims") {
+        return None;
+    }
+    Some(
+        match (
+            head.contains("Insufficient memory"),
+            head.contains("Insufficient cpu"),
+        ) {
+            (true, true) => "Not enough CPU and memory on any server",
+            (true, false) => "Not enough memory on any server",
+            (false, true) => "Not enough CPU on any server",
+            _ => "No server can run it",
+        },
+    )
+}
+
 /// CPU and memory as container resources: memory is the limit, and the
 /// request too unless `memory_request` sets aside less (a small database
 /// holds far less than it may use).
@@ -891,6 +939,72 @@ mod tests {
             "status": { "conditions": [{ "type": "Ready", "status": if ready { "True" } else { "False" } }] },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn says_why_an_instance_cant_start() {
+        let waiting = |message: &str| -> Pod {
+            serde_json::from_value(serde_json::json!({
+                "metadata": { "name": "ghost-db-0" },
+                "status": { "phase": "Pending", "conditions": [{ "type": "PodScheduled", "status": "False", "reason": "Unschedulable", "message": message }] },
+            }))
+            .unwrap()
+        };
+        let creating = || {
+            let mut st = DatabaseStatus::default();
+            phase_for(&mut st, 0, 1, false);
+            st
+        };
+        let said = |pods: &[Pod]| {
+            let mut st = creating();
+            explain_unscheduled(&mut st, pods);
+            (st.message, st.reason)
+        };
+        let memory = "0/1 nodes are available: 1 Insufficient memory. preemption: 0/1 nodes are available: 1 No preemption victims found for incoming pod.";
+        assert_eq!(
+            said(&[waiting(memory)]),
+            (
+                "Not enough memory on any server".into(),
+                crd::UNSCHEDULABLE.into()
+            )
+        );
+        assert_eq!(
+            said(&[waiting("0/3 nodes are available: 1 Insufficient cpu, 2 node(s) had untolerated taint {a: b}.")]).0,
+            "Not enough CPU on any server"
+        );
+        assert_eq!(
+            said(&[waiting(
+                "0/2 nodes are available: 2 Insufficient cpu, 2 Insufficient memory."
+            )])
+            .0,
+            "Not enough CPU and memory on any server"
+        );
+        assert_eq!(
+            said(&[waiting(
+                "0/2 nodes are available: 2 node(s) had volume node affinity conflict."
+            )])
+            .0,
+            "No server can run it"
+        );
+        // Kubernetes' words never get through.
+        assert!(!said(&[waiting(memory)]).0.contains("node"));
+        // Waiting for its volume to be made, or scheduled: as it was.
+        let as_was = ("0 of 1 instances ready".to_owned(), String::new());
+        assert_eq!(
+            said(&[waiting(
+                "0/1 nodes are available: pod has unbound immediate PersistentVolumeClaims."
+            )]),
+            as_was
+        );
+        assert_eq!(said(&[pod("ghost-db-0", None, false, Some("a"))]), as_was);
+        assert_eq!(said(&[]), as_was);
+        // Ready or failed: left alone.
+        let mut st = DatabaseStatus {
+            phase: crd::READY.into(),
+            ..Default::default()
+        };
+        explain_unscheduled(&mut st, &[waiting(memory)]);
+        assert_eq!((st.message.as_str(), st.reason.as_str()), ("", ""));
     }
 
     fn m(name: &str, role: &str, ready: bool, node: &str) -> crd::Member {
