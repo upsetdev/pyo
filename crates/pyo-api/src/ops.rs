@@ -2815,41 +2815,53 @@ pub(crate) enum Op {
     RemoveBuilder { id: String },
     /// A new token for a builder. The old one stops working.
     RotateBuilderToken { id: String },
-    /// Set up Tailscale on a cluster (the team's admins) with an OAuth client with the scopes Devices › Core and Auth Keys (both with tag:pyo) and Services. The cluster's agent checks it and keeps it. Pyo never stores it. Servers join the cluster's tailnet with it, and Pyo gets names on it. Without `clusterId`, the cluster Pyo runs on.
+    /// Set up the team's Tailscale (the team's admins) with an OAuth client with the scopes Devices › Core and Auth Keys (both with tag:pyo) and Services. One cluster of the team keeps it (the holder, picked by Pyo) and its agent checks it. Pyo never stores it. Every cluster of the team joins that tailnet, and Pyo gets names on it. `clusterId` instead of `teamId`: that cluster's team (older clients). Neither: the team of the cluster Pyo runs on.
     SaveTailscale {
+        #[serde(default)]
+        team_id: Option<String>,
         #[serde(default)]
         cluster_id: Option<String>,
         client_id: String,
         secret: Option<String>,
     },
-    /// See what setting up Tailscale on a cluster with an API access token would change (the team's admins). Nothing changes yet. Without `clusterId`, the cluster Pyo runs on.
+    /// See what setting up the team's Tailscale with an API access token would change (the team's admins). Nothing changes yet. It runs on the cluster that keeps the team's Tailscale (`clusterId` in the answer). `clusterId` instead of `teamId`: that cluster's team (older clients).
     PlanTailscaleSetup {
         #[serde(default)]
+        team_id: Option<String>,
+        #[serde(default)]
         cluster_id: Option<String>,
-        /// An API access token from the Tailscale console's Keys page. Passed to the cluster's agent and never stored.
+        /// An API access token from the Tailscale console's Keys page. Passed to the holder's agent and never stored.
         #[schema(value_type = String)]
         token: crate::tailscale::Token,
     },
-    /// Set up Tailscale on a cluster with an API access token (the team's admins): MagicDNS, HTTPS certificates, tag:pyo in the tailnet policy, and an OAuth client the cluster's agent keeps. The agent deletes the token when it's done. Without `clusterId`, the cluster Pyo runs on.
+    /// Set up the team's Tailscale with an API access token (the team's admins): MagicDNS, HTTPS certificates, tag:pyo in the tailnet policy, and an OAuth client that one cluster of the team keeps. The agent deletes the token when it's done. Every cluster of the team joins that tailnet. `clusterId` instead of `teamId`: that cluster's team (older clients).
     SetUpTailscale {
         #[serde(default)]
+        team_id: Option<String>,
+        #[serde(default)]
         cluster_id: Option<String>,
-        /// An API access token from the Tailscale console's Keys page. Passed to the cluster's agent and never stored.
+        /// An API access token from the Tailscale console's Keys page. Passed to the holder's agent and never stored.
         #[schema(value_type = String)]
         token: crate::tailscale::Token,
         /// The `version` planTailscaleSetup returned. If the tailnet policy changed since, nothing changes and `reviewAgain` comes back.
         version: String,
     },
-    /// Check a cluster's Tailscale OAuth client again, scope by scope. Without `clusterId`, the cluster Pyo runs on.
+    /// Check the team's Tailscale OAuth client again, scope by scope. `clusterId` instead of `teamId`: the client that acts for that cluster (older clients).
     TestTailscale {
         #[serde(default)]
-        cluster_id: Option<String>,
-    },
-    /// Forget a cluster's Tailscale OAuth client. Pyo's names on its tailnet are deleted. Servers stay on it. Without `clusterId`, the cluster Pyo runs on.
-    RemoveTailscale {
+        team_id: Option<String>,
         #[serde(default)]
         cluster_id: Option<String>,
     },
+    /// Disconnect the team's Tailscale: every cluster of the team leaves the tailnet in Pyo, Pyo's names there are deleted and the holder forgets the client. Servers stay on the tailnet. `clusterId` instead of `teamId`: that cluster's team, or a cluster on another tailnet alone (older clients).
+    RemoveTailscale {
+        #[serde(default)]
+        team_id: Option<String>,
+        #[serde(default)]
+        cluster_id: Option<String>,
+    },
+    /// Move a single-server cluster on another tailnet to the team's (the team's admins). Pyo's names on the old tailnet are deleted and the cluster's own client is forgotten (delete it in that tailnet's console). Its tailnet domains move to the team's tailnet. Answers `commands`: for each server, the command to run on it (it leaves the old tailnet and joins the team's, with a key valid an hour). A cluster with more servers moves by hand (docs).
+    MoveClusterToTailnet { cluster_id: String },
     /// Rename Pyo's own name on your tailnet: `kind` "dashboard" (pyo.<tailnet>.ts.net), "registry" or "sandboxes" (sandboxes' web pages, like the desktop).
     RenameTailscaleName { kind: String, name: String },
     /// Connect a team to Hetzner Cloud (team admins): a project API token with Read & Write, from the project's Security page. Pyo checks it by listing the locations, and keeps it encrypted. Servers join over your tailnet, so Tailscale comes first.
@@ -3188,6 +3200,7 @@ async fn run_op_counted(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
             | Op::SaveTailscale { .. }
             | Op::TestTailscale { .. }
             | Op::RemoveTailscale { .. }
+            | Op::MoveClusterToTailnet { .. }
             | Op::RenameTailscaleName { .. }
             | Op::TestAlertChannel { .. }
     ) {
@@ -3237,40 +3250,74 @@ fn installation_wide(op: &Op) -> bool {
     )
 }
 
-/// The cluster a Tailscale op is for, and that the user may set it up
-/// there: the team's admins. Without one, the cluster Pyo runs on, for the
-/// installation's admins.
-async fn tailscale_cluster(s: &AppState, user: &User, cluster_id: Option<String>) -> ApiResult<String> {
-    match cluster_id {
-        Some(c) => {
-            crate::tailscale::require_cluster_admin(s, user, &c).await?;
-            Ok(c)
+/// What a Tailscale op is for, and that the user may change it there: a
+/// team's, for its admins (and the installation's admins too when it holds
+/// the cluster Pyo runs on). `clusterId` (older clients): that cluster.
+/// Neither: the team of the cluster Pyo runs on, for the installation's
+/// admins. With the team, for the activity log.
+async fn tailscale_scope(
+    s: &AppState,
+    user: &User,
+    team_id: Option<String>,
+    cluster_id: Option<String>,
+) -> ApiResult<(crate::tailscale::Scope, String)> {
+    use crate::tailscale::Scope;
+    if let Some(c) = cluster_id.filter(|_| team_id.is_none()) {
+        crate::tailscale::require_cluster_admin(s, user, &c).await?;
+        let team: String = sqlx::query_scalar("SELECT team_id FROM pyo.clusters WHERE id = $1")
+            .bind(&c)
+            .fetch_one(&s.db)
+            .await?;
+        return Ok((Scope::Cluster(c), team));
+    }
+    let team = match team_id {
+        Some(t) => {
+            let mut tx = s.db.begin().await?;
+            crate::rls::scope(&mut tx, user).await?;
+            require_role(&mut tx, user, &t, Role::Admin).await?;
+            let id: String =
+                sqlx::query_scalar("SELECT id FROM pyo.teams WHERE id = $1 OR slug = $1")
+                    .bind(&t)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            tx.commit().await?;
+            id
         }
         None => {
             require_admin(user)?;
-            crate::tailscale::host_cluster(&s.db)
+            let host = crate::tailscale::host_cluster(&s.db)
                 .await?
-                .ok_or_else(|| ApiError::bad_request("Pick the cluster to set Tailscale up on."))
+                .ok_or_else(|| ApiError::bad_request("Pick the team to set Tailscale up for."))?;
+            sqlx::query_scalar("SELECT team_id FROM pyo.clusters WHERE id = $1")
+                .bind(&host)
+                .fetch_one(&s.db)
+                .await?
         }
+    };
+    // Pyo's own names live on the tailnet of the team that holds Pyo's cluster.
+    let holds_host: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.clusters WHERE team_id = $1 AND same_cluster)",
+    )
+    .bind(&team)
+    .fetch_one(&s.db)
+    .await?;
+    if holds_host {
+        require_admin(user)?;
     }
+    Ok((Scope::Team(team.clone()), team))
 }
 
-/// Logs a Tailscale change on the cluster's team.
-async fn log_tailscale(s: &AppState, user: &User, cluster_id: &str, title: &str) -> ApiResult<()> {
+/// Logs a Tailscale change on the team.
+async fn log_tailscale(s: &AppState, user: &User, team: &str, title: &str) -> ApiResult<()> {
     let mut tx = s.db.begin().await?;
-    let (team, name): (String, String) =
-        sqlx::query_as("SELECT team_id, name FROM pyo.clusters WHERE id = $1")
-            .bind(cluster_id)
-            .fetch_one(&mut *tx)
-            .await?;
     log_activity(
         &mut tx,
-        &team,
+        team,
         &user.name,
         "settings.changed",
         "info",
-        &format!("{title} on {name}"),
-        json!({ "kind": "cluster", "id": cluster_id, "label": name }),
+        title,
+        json!({ "kind": "integration", "id": "tailscale", "label": "Tailscale" }),
         json!({}),
     )
     .await?;
@@ -3293,41 +3340,77 @@ async fn outside_tx(s: &AppState, user: &User, op: Op) -> ApiResult<Value> {
             crate::alerts::test(s, &id).await?;
             Ok(json!({ "ok": true }))
         }
-        Op::PlanTailscaleSetup { cluster_id, token } => {
-            let c = tailscale_cluster(s, user, cluster_id).await?;
-            crate::tailscale::plan(s, &c, token.into_inner()).await
+        Op::PlanTailscaleSetup {
+            team_id,
+            cluster_id,
+            token,
+        } => {
+            let (scope, _) = tailscale_scope(s, user, team_id, cluster_id).await?;
+            crate::tailscale::plan(s, &scope, token.into_inner()).await
         }
         Op::SetUpTailscale {
+            team_id,
             cluster_id,
             token,
             version,
         } => {
-            let c = tailscale_cluster(s, user, cluster_id).await?;
-            let out = crate::tailscale::set_up(s, &c, token.into_inner(), &version).await?;
+            let (scope, team) = tailscale_scope(s, user, team_id, cluster_id).await?;
+            let out = crate::tailscale::set_up(s, &scope, token.into_inner(), &version).await?;
             if out["changed"].as_array().is_some_and(|a| !a.is_empty()) {
-                log_tailscale(s, user, &c, "Set up Tailscale with an access token").await?;
+                log_tailscale(s, user, &team, "Set up Tailscale with an access token").await?;
             }
             Ok(out)
         }
         Op::SaveTailscale {
+            team_id,
             cluster_id,
             client_id,
             secret,
         } => {
-            let c = tailscale_cluster(s, user, cluster_id).await?;
-            let out = crate::tailscale::save_client(s, &c, &client_id, secret.as_deref()).await?;
-            log_tailscale(s, user, &c, "Connected Tailscale").await?;
+            let (scope, team) = tailscale_scope(s, user, team_id, cluster_id).await?;
+            let out =
+                crate::tailscale::save_client(s, &scope, &client_id, secret.as_deref()).await?;
+            log_tailscale(s, user, &team, "Connected Tailscale").await?;
             Ok(out)
         }
-        Op::TestTailscale { cluster_id } => {
-            let c = tailscale_cluster(s, user, cluster_id).await?;
-            crate::tailscale::test_saved(s, &c).await
+        Op::TestTailscale {
+            team_id,
+            cluster_id,
+        } => {
+            let (scope, _) = tailscale_scope(s, user, team_id, cluster_id).await?;
+            crate::tailscale::test_saved(s, &scope).await
         }
-        Op::RemoveTailscale { cluster_id } => {
-            let c = tailscale_cluster(s, user, cluster_id).await?;
-            crate::tailscale::remove(s, &c).await?;
-            log_tailscale(s, user, &c, "Removed Tailscale").await?;
+        Op::RemoveTailscale {
+            team_id,
+            cluster_id,
+        } => {
+            let (scope, team) = tailscale_scope(s, user, team_id, cluster_id).await?;
+            crate::tailscale::remove(s, &scope).await?;
+            log_tailscale(s, user, &team, "Disconnected Tailscale").await?;
             Ok(json!({ "ok": true }))
+        }
+        Op::MoveClusterToTailnet { cluster_id } => {
+            crate::tailscale::require_cluster_admin(s, user, &cluster_id).await?;
+            let out = crate::tailscale::move_cluster(s, &cluster_id).await?;
+            let mut tx = s.db.begin().await?;
+            let (team, name): (String, String) =
+                sqlx::query_as("SELECT team_id, name FROM pyo.clusters WHERE id = $1")
+                    .bind(&cluster_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            log_activity(
+                &mut tx,
+                &team,
+                &user.name,
+                "settings.changed",
+                "info",
+                &format!("Moved {name} to your tailnet"),
+                json!({ "kind": "cluster", "id": cluster_id, "label": name }),
+                json!({}),
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(out)
         }
         Op::RenameTailscaleName { kind, name } => {
             require_admin(user)?;
@@ -3388,6 +3471,7 @@ pub(crate) fn key_access_for(op: &Op) -> Option<KeyAccess> {
             | Op::SetUpTailscale { .. }
             | Op::TestTailscale { .. }
             | Op::RemoveTailscale { .. }
+            | Op::MoveClusterToTailnet { .. }
             | Op::RenameTailscaleName { .. }
             | Op::SetPublicDashboard { .. }
             | Op::CreateOriginPullCertificate { .. }
@@ -3544,6 +3628,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SetUpTailscale { .. }
         | Op::TestTailscale { .. }
         | Op::RemoveTailscale { .. }
+        | Op::MoveClusterToTailnet { .. }
         | Op::RenameTailscaleName { .. } => ("Integrations", ""),
         Op::SetPublicDashboard { .. } => ("Settings", ""),
         Op::ConnectCloudflare { .. }
@@ -8332,6 +8417,7 @@ async fn apply(
         | Op::SaveTailscale { .. }
         | Op::TestTailscale { .. }
         | Op::RemoveTailscale { .. }
+        | Op::MoveClusterToTailnet { .. }
         | Op::RenameTailscaleName { .. } => {
             Err(anyhow::anyhow!("tailscale runs outside the transaction").into())
         }

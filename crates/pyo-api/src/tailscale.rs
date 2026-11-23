@@ -601,7 +601,7 @@ pub(crate) fn holder_for_setup(clusters: &[Candidate]) -> Option<String> {
 /// holder while it's connected, else on the one Pyo picks now. A cluster
 /// with a client of its own on another tailnet than the team's sets its
 /// own up, as before (`false`).
-async fn setup_target(db: &PgPool, cluster_id: &str) -> ApiResult<(String, bool)> {
+async fn cluster_target(db: &PgPool, cluster_id: &str) -> ApiResult<(String, bool)> {
     let r = route(db, cluster_id).await?;
     let team_holder = r.team.as_ref().and_then(|t| t.holder.clone());
     if r.acting == Acting::Own && team_holder.is_some() {
@@ -616,11 +616,46 @@ async fn setup_target(db: &PgPool, cluster_id: &str) -> ApiResult<(String, bool)
     Ok((picked.unwrap_or_else(|| cluster_id.to_owned()), true))
 }
 
+/// What a Tailscale op is for: a team (Integrations › Tailscale), or one
+/// cluster, as the ops were before teams kept one client.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Scope {
+    Team(String),
+    Cluster(String),
+}
+
+/// Where a team's setup runs: its holder while it's connected, else the
+/// one Pyo picks now ([`holder_for_setup`]).
+async fn team_target(db: &PgPool, team_id: &str) -> ApiResult<String> {
+    if let Some(t) = team_tailnet(db, team_id).await?
+        && t.holder_connected
+        && let Some(h) = t.holder
+    {
+        return Ok(h);
+    }
+    let clusters = candidates(db, team_id, false).await?;
+    holder_for_setup(&clusters).ok_or_else(|| {
+        ApiError::conflict(if clusters.is_empty() {
+            "Connect a cluster first. Tailscale is set up on it."
+        } else {
+            "None of the team's clusters is connected. Tailscale is set up on one once it is."
+        })
+    })
+}
+
+/// Where a setup runs, and whether it's the team's (`true`).
+async fn setup_target(db: &PgPool, scope: &Scope) -> ApiResult<(String, bool)> {
+    match scope {
+        Scope::Team(team) => Ok((team_target(db, team).await?, true)),
+        Scope::Cluster(c) => cluster_target(db, c).await,
+    }
+}
+
 /// planTailscaleSetup: what setting the tailnet up would change. It runs on
 /// the team's holder (`clusterId` in the answer).
-pub async fn plan(s: &AppState, cluster_id: &str, token: String) -> ApiResult<Value> {
+pub async fn plan(s: &AppState, scope: &Scope, token: String) -> ApiResult<Value> {
     token_shape(&token)?;
-    let (target, _) = setup_target(&s.db, cluster_id).await?;
+    let (target, _) = setup_target(&s.db, scope).await?;
     let (_, r) = ask(
         s,
         &target,
@@ -636,14 +671,9 @@ pub async fn plan(s: &AppState, cluster_id: &str, token: String) -> ApiResult<Va
 
 /// setUpTailscale: sets the tailnet up as reviewed, on the team's holder.
 /// Pyo keeps the client's ID and hint the agent says it kept.
-pub async fn set_up(
-    s: &AppState,
-    cluster_id: &str,
-    token: String,
-    version: &str,
-) -> ApiResult<Value> {
+pub async fn set_up(s: &AppState, scope: &Scope, token: String, version: &str) -> ApiResult<Value> {
     token_shape(&token)?;
-    let (target, team_wide) = setup_target(&s.db, cluster_id).await?;
+    let (target, team_wide) = setup_target(&s.db, scope).await?;
     let (_, r) = ask(
         s,
         &target,
@@ -708,6 +738,33 @@ async fn keep_team(
     hint: &str,
     suffix: Option<&str>,
 ) -> ApiResult<()> {
+    // The client it replaces goes on the list to delete in the Tailscale
+    // console (the new client can't delete clients).
+    sqlx::query(
+        "UPDATE pyo.team_tailscale tt
+            SET old_clients = tt.old_clients || jsonb_build_array(jsonb_build_object(
+                  'clientId', tt.client_id, 'hint', tt.hint,
+                  'clusterId', coalesce(tt.holder_cluster_id, ''),
+                  'cluster', coalesce((SELECT name FROM pyo.clusters WHERE id = tt.holder_cluster_id), ''))),
+                updated_at = now()
+          WHERE tt.team_id = (SELECT team_id FROM pyo.clusters WHERE id = $1)
+            AND tt.client_id <> $2 AND tt.client_id <> ''
+            AND NOT tt.old_clients @> jsonb_build_array(jsonb_build_object('clientId', tt.client_id))",
+    )
+    .bind(holder)
+    .bind(client_id)
+    .execute(db)
+    .await?;
+    // And one it lists comes off once it's the team's client again.
+    sqlx::query(
+        "UPDATE pyo.team_tailscale tt
+            SET old_clients = coalesce((SELECT jsonb_agg(o) FROM jsonb_array_elements(tt.old_clients) o WHERE o->>'clientId' <> $2), '[]')
+          WHERE tt.team_id = (SELECT team_id FROM pyo.clusters WHERE id = $1)",
+    )
+    .bind(holder)
+    .bind(client_id)
+    .execute(db)
+    .await?;
     sqlx::query(
         "INSERT INTO pyo.team_tailscale (team_id, holder_cluster_id, client_id, hint, suffix)
          SELECT team_id, id, $2, $3, $4 FROM pyo.clusters WHERE id = $1
@@ -741,14 +798,14 @@ pub async fn ensure_members(db: &PgPool) -> ApiResult<()> {
 /// in. The secret goes to the agent sealed and is never kept by Pyo.
 pub async fn save_client(
     s: &AppState,
-    cluster_id: &str,
+    scope: &Scope,
     client_id: &str,
     secret: Option<&str>,
 ) -> ApiResult<Value> {
     let Some(secret) = secret.map(str::trim).filter(|x| !x.is_empty()) else {
         return Err(ApiError::bad_request("Paste the client secret too."));
     };
-    let (target, team_wide) = setup_target(&s.db, cluster_id).await?;
+    let (target, team_wide) = setup_target(&s.db, scope).await?;
     let (_, r) = ask(
         s,
         &target,
@@ -784,8 +841,20 @@ pub async fn save_client(
     Ok(json!({ "ok": state.ok, "checks": state.checks, "clusterId": target }))
 }
 
-/// The Test button: the client that acts for the cluster, check by check.
-pub async fn test_saved(s: &AppState, cluster_id: &str) -> ApiResult<Value> {
+/// The Test button: the team's client on its holder (or, for one cluster,
+/// the client that acts for it), check by check.
+pub async fn test_saved(s: &AppState, scope: &Scope) -> ApiResult<Value> {
+    let cluster_id = match scope {
+        Scope::Cluster(c) => c.clone(),
+        Scope::Team(team) => match team_tailnet(&s.db, team).await? {
+            Some(TeamTailnet {
+                holder: Some(h), ..
+            }) => h,
+            Some(_) => return Err(ApiError::bad_request(HOLDER_GONE)),
+            None => return Err(ApiError::bad_request("Tailscale isn't set up.")),
+        },
+    };
+    let cluster_id = cluster_id.as_str();
     let r = route(&s.db, cluster_id).await?;
     if r.acting == Acting::None {
         return Err(ApiError::bad_request(
@@ -818,7 +887,11 @@ pub async fn test_saved(s: &AppState, cluster_id: &str) -> ApiResult<Value> {
 /// tailnet: its own. Pyo's names there are deleted while it still can, and
 /// the servers take them off. Pyo forgets it even when no agent can be
 /// reached.
-pub async fn remove(s: &AppState, cluster_id: &str) -> ApiResult<()> {
+pub async fn remove(s: &AppState, scope: &Scope) -> ApiResult<()> {
+    let cluster_id = match scope {
+        Scope::Team(team) => return remove_team(s, team).await,
+        Scope::Cluster(c) => c.as_str(),
+    };
     let r = route(&s.db, cluster_id).await?;
     match r.acting {
         Acting::Holder(_) | Acting::Gone => remove_team(s, &r.team_id).await,
@@ -948,6 +1021,181 @@ async fn forget_cluster(db: &PgPool, cluster_id: &str) -> ApiResult<()> {
         }
     }
     Ok(())
+}
+
+/// Why a cluster can't move by itself: its servers move by hand.
+pub const MOVE_BY_HAND: &str = "Move its servers by hand. Steps in the docs.";
+
+/// moveClusterToTailnet: a single-server cluster on another tailnet than
+/// its team's moves to the team's. Pyo's names on the old tailnet are
+/// deleted and its own client forgotten (its ID goes on the team's list to
+/// delete), its services' tailnet domains move to the team's tailnet, and
+/// the holder acts for it from now on. The server leaves the old tailnet
+/// and joins the team's with the command that comes back (`commands`, one
+/// per server, with a fresh key from the holder). A cluster that moved
+/// already but whose server isn't on the team's tailnet yet gets a fresh
+/// command.
+pub async fn move_cluster(s: &AppState, cluster_id: &str) -> ApiResult<Value> {
+    let r = route(&s.db, cluster_id).await?;
+    let Some(team) = r.team.clone() else {
+        return Err(ApiError::bad_request(
+            "Set up Tailscale on Integrations first.",
+        ));
+    };
+    let Some(holder) = team.holder.clone() else {
+        return Err(ApiError::bad_request(HOLDER_GONE));
+    };
+    let Some(suffix) = team.suffix.clone() else {
+        return Err(ApiError::conflict(
+            "Pyo hasn't seen your tailnet yet. Try again in a minute.",
+        ));
+    };
+    let state = cluster_state(cluster_id, r.own.as_ref(), Some(&team));
+    let reported = servers(&s.db, cluster_id).await?;
+    let on_team = !reported.is_empty() && reported.iter().all(|x| x.suffix == suffix);
+    match state {
+        Some(ClusterTailnet::Elsewhere) => {}
+        Some(ClusterTailnet::Member) if !on_team => {}
+        Some(ClusterTailnet::Holder | ClusterTailnet::Member | ClusterTailnet::Moving) => {
+            return Err(ApiError::conflict(
+                "This cluster is on your tailnet already.",
+            ));
+        }
+        _ => return Err(ApiError::bad_request(HOLDER_GONE)),
+    }
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pyo.servers WHERE cluster_id = $1 ORDER BY name")
+            .bind(cluster_id)
+            .fetch_all(&s.db)
+            .await?;
+    let [server] = names.as_slice() else {
+        return Err(ApiError::conflict(MOVE_BY_HAND));
+    };
+    if !team.holder_connected {
+        return Err(ApiError::conflict(format!(
+            "{} keeps your Tailscale and isn't connected.",
+            team.holder_name
+        )));
+    }
+    // The key first: nothing changes when the holder can't make one.
+    let (id, k) = ask_as(
+        s,
+        &holder,
+        Some(cluster_id),
+        Command::TailscaleKey {
+            description: format!("Pyo: move {server}"),
+        },
+        Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e.message, "the holder made no key to move a cluster");
+        ApiError::bad_request(
+            "Couldn't get a Tailscale key to move it. Check Tailscale on Integrations.",
+        )
+    })?;
+    forget_command(&s.db, &id).await;
+    let key = k
+        .data
+        .as_ref()
+        .and_then(|d| d[ts::KEY_FIELD].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| ApiError::bad_request("Tailscale made no auth key."))?;
+
+    if let Some(own) = r.own.as_ref().filter(|t| t.own_client()) {
+        // Off the old tailnet: Pyo's names there, and the client.
+        let old_names: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pyo.cluster_tailnet_names WHERE cluster_id = $1")
+                .bind(cluster_id)
+                .fetch_all(&s.db)
+                .await?;
+        let marks = marks(&s.db, cluster_id, own).await?;
+        if let Err(e) = ask(
+            s,
+            cluster_id,
+            Command::TailscaleRemove {
+                names: old_names,
+                marks,
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        {
+            tracing::warn!(cluster = %cluster_id, error = %e.message, "the cluster couldn't remove its own Tailscale; it moves anyway");
+        }
+        let cluster_name: String =
+            sqlx::query_scalar("SELECT name FROM pyo.clusters WHERE id = $1")
+                .bind(cluster_id)
+                .fetch_one(&s.db)
+                .await?;
+        sqlx::query(
+            "UPDATE pyo.team_tailscale
+                SET old_clients = old_clients || jsonb_build_array(jsonb_build_object('clientId', $2::text, 'hint', $3::text, 'clusterId', $4::text, 'cluster', $5::text, 'suffix', $6::text)),
+                    updated_at = now()
+              WHERE team_id = $1 AND $2 <> client_id AND NOT old_clients @> jsonb_build_array(jsonb_build_object('clientId', $2::text))",
+        )
+        .bind(&team.team_id)
+        .bind(&own.client_id)
+        .bind(&own.hint)
+        .bind(cluster_id)
+        .bind(&cluster_name)
+        .bind(own.suffix.as_deref().unwrap_or(""))
+        .execute(&s.db)
+        .await?;
+        let old = own.suffix.clone().unwrap_or_default();
+        let mut tx = s.db.begin().await?;
+        sqlx::query("UPDATE pyo.cluster_tailnet_names SET retired_at = coalesce(retired_at, now()), updated_at = now() WHERE cluster_id = $1")
+            .bind(cluster_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE pyo.clusters SET tailscale = jsonb_build_object('clientId', '', 'suffix', $2::text) WHERE id = $1")
+            .bind(cluster_id)
+            .bind(&suffix)
+            .execute(&mut *tx)
+            .await?;
+        if !old.is_empty() {
+            for service in move_domains(&mut tx, cluster_id, &old, &suffix).await? {
+                crate::routes::changed(&mut tx, &service, true).await?;
+            }
+        }
+        tx.commit().await?;
+        s.wake(cluster_id).await;
+    }
+    let base = crate::join::scripts_url_before_tailnet();
+    Ok(json!({
+        "ok": true,
+        "suffix": suffix,
+        "commands": [{ "server": server, "command": crate::join::tailnet_move_command(&base, &key, &suffix) }],
+        "expiresAt": pyo_proto::now_ms() as i64 + 3_600_000,
+    }))
+}
+
+/// A cluster's services' tailnet domains on `old` move to `new`
+/// ("blog.tail1.ts.net" is "blog.tail2.ts.net" now), each set up again.
+/// The services whose domains moved.
+async fn move_domains(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cluster_id: &str,
+    old: &str,
+    new: &str,
+) -> ApiResult<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "UPDATE pyo.services s SET spec = jsonb_set(s.spec, '{domains}', (
+           SELECT coalesce(jsonb_agg(CASE WHEN lower(d->>'hostname') LIKE '%.' || $2
+                    THEN (d - 'error' - 'tlsError') || jsonb_build_object(
+                           'hostname', left(lower(d->>'hostname'), length(d->>'hostname') - length($2)) || $3,
+                           'status', 'pending_dns', 'tls', 'pending')
+                    ELSE d END), '[]')
+             FROM jsonb_array_elements(s.spec->'domains') d))
+          WHERE s.cluster_id = $1 AND NOT s.deleting
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(s.spec->'domains') d WHERE lower(d->>'hostname') LIKE '%.' || $2)
+          RETURNING s.id",
+    )
+    .bind(cluster_id)
+    .bind(old)
+    .bind(new)
+    .fetch_all(&mut **tx)
+    .await?)
 }
 
 /// Renames Pyo's own name on the tailnet ("dashboard", "registry" or
@@ -2495,6 +2743,70 @@ pub fn cluster_view(cluster_id: &str, t: &Tailnet, team: Option<&TeamTailnet>) -
             "state": cluster_state(cluster_id, Some(t), team),
         }),
     }
+}
+
+/// A team's Tailscale for the dashboard (getState `teams[].tailscale`):
+/// never a secret. `clusters`: the team's, oldest first, with their own
+/// Tailscale and their servers' (as reported). Each cluster with where it
+/// stands, its tailnet, its servers on a tailnet (`servers`) and on the
+/// team's (`onTailnet`). `leftovers`: servers of removed clusters still on
+/// a tailnet a while after.
+pub async fn team_view(
+    db: &mut sqlx::PgConnection,
+    team: &TeamTailnet,
+    clusters: &[(String, Option<Tailnet>, Vec<pyo_proto::ServerTailnet>)],
+) -> ApiResult<Value> {
+    let (devices, old): (i32, Value) = sqlx::query_as(
+        "SELECT jsonb_array_length(machines), old_clients FROM pyo.team_tailscale WHERE team_id = $1",
+    )
+    .bind(&team.team_id)
+    .fetch_optional(&mut *db)
+    .await?
+    .unwrap_or((0, json!([])));
+    let left: Vec<(String, Option<String>, Value)> = sqlx::query_as(
+        "SELECT cluster_name, suffix, machines FROM pyo.tailnet_leftovers
+          WHERE team_id = $1 AND jsonb_array_length(machines) > 0 AND created_at < now() - interval '15 minutes'
+          ORDER BY id",
+    )
+    .bind(&team.team_id)
+    .fetch_all(&mut *db)
+    .await?;
+    let leftovers: Vec<Value> = left
+        .into_iter()
+        .map(|(cluster, suffix, machines)| {
+            let m: Vec<LeftMachine> = serde_json::from_value(machines).unwrap_or_default();
+            json!({ "cluster": cluster, "suffix": suffix, "servers": m.into_iter().map(|m| m.server).collect::<Vec<_>>() })
+        })
+        .collect();
+    let list: Vec<Value> = clusters
+        .iter()
+        .filter_map(|(id, t, servers)| {
+            let state = cluster_state(id, t.as_ref(), Some(team))?;
+            let joined = servers.iter().filter(|x| !x.node_id.is_empty());
+            Some(json!({
+                "id": id,
+                "state": state,
+                "suffix": t.as_ref().and_then(|t| t.suffix.clone()),
+                "servers": joined.clone().count(),
+                "onTailnet": joined
+                    .filter(|x| team.suffix.as_deref().is_some_and(|s| x.suffix == s))
+                    .count(),
+            }))
+        })
+        .collect();
+    Ok(json!({
+        "suffix": team.suffix,
+        "holderId": team.holder,
+        "holderName": team.holder.as_ref().map(|_| team.holder_name.clone()),
+        "holderConnected": team.holder_connected,
+        "problem": team.problem,
+        "clientId": team.client_id,
+        "hint": team.hint,
+        "devices": devices,
+        "oldClients": old,
+        "leftovers": leftovers,
+        "clusters": list,
+    }))
 }
 
 /// Pyo's machines on a cluster's tailnet, as the last sync saw them: its

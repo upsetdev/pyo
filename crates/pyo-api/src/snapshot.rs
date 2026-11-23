@@ -104,7 +104,7 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     let db: &mut PgConnection = &mut tx;
     let team_ids = crate::rls::team_ids(db).await?;
 
-    let teams = values(
+    let mut teams = values(
         &mut *db,
         "SELECT jsonb_build_object(
             'id', id, 'name', name, 'slug', slug, 'description', description,
@@ -267,10 +267,11 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // The tailnet its tailnet domains are on: Tailscale set up on the
     // cluster, and a server of it on the tailnet. And the cluster's
     // Tailscale as the dashboard shows it (never a secret).
-    let tailnets: Vec<(String, String, Option<Value>, bool)> = sqlx::query_as(
+    let tailnets: Vec<(String, String, Option<Value>, bool, Value)> = sqlx::query_as(
         "SELECT id, team_id, tailscale,
-                EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(capabilities->'tailnet', '[]')) t WHERE t->>'state' = 'Running')
-           FROM pyo.clusters WHERE team_id = ANY($1)",
+                EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(capabilities->'tailnet', '[]')) t WHERE t->>'state' = 'Running'),
+                coalesce(capabilities->'tailnet', '[]')
+           FROM pyo.clusters WHERE team_id = ANY($1) ORDER BY created_at, id",
     )
     .bind(&team_ids)
     .fetch_all(&mut *db)
@@ -292,6 +293,28 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             (Some(r), Some(t)) => crate::tailscale::cluster_view(&r.0, t, teams_tailnets.get(&r.1)),
             _ => Value::Null,
         };
+    }
+    // Each team's Tailscale (Integrations › Tailscale), with where each of
+    // its clusters stands.
+    for team in &mut teams {
+        let Some(tt) = team["id"].as_str().and_then(|id| teams_tailnets.get(id)) else {
+            continue;
+        };
+        type Mine = (
+            String,
+            Option<crate::tailscale::Tailnet>,
+            Vec<pyo_proto::ServerTailnet>,
+        );
+        let mine: Vec<Mine> = tailnets
+            .iter()
+            .filter(|r| r.1 == tt.team_id)
+            .map(|r| {
+                let t = r.2.clone().and_then(|v| serde_json::from_value(v).ok());
+                let servers = serde_json::from_value(r.4.clone()).unwrap_or_default();
+                (r.0.clone(), t, servers)
+            })
+            .collect();
+        team["tailscale"] = crate::tailscale::team_view(&mut *db, tt, &mine).await?;
     }
 
     // Workloads come from each cluster's last heartbeat.

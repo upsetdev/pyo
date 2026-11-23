@@ -21,7 +21,9 @@
 #   --no-auto-update turns them off. Without either, the last choice stays
 #
 # Or only joins this machine to the tailnet (Pyo's own machine does this
-# once Tailscale is set up in Pyo): --tailnet-only, with TS_AUTHKEY.
+# once Tailscale is set up in Pyo): --tailnet-only, with TS_AUTHKEY. With
+# --tailnet SUFFIX too, a machine on another tailnet leaves it for that one
+# (a single-server cluster moving to its team's tailnet).
 #
 # Or removes what Pyo put into this cluster, leaving the cluster itself
 # (k3s stays):
@@ -243,7 +245,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 # >>> pyo:connect-args (connect.sh only; join.rs tests it)
 API="" TOKEN="" TS_AUTHKEY="${TS_AUTHKEY:-}" REGISTRY="" REGISTRY_TOKEN="" LOCAL_REGISTRY="" INSTALL_URL=""
-UNINSTALL="" KEEP_DATA="" YES="" DRY_RUN="" WITH_PYO="" TAILNET_ONLY="" AUTO_UPDATE=""
+UNINSTALL="" KEEP_DATA="" YES="" DRY_RUN="" WITH_PYO="" TAILNET_ONLY="" AUTO_UPDATE="" TAILNET=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --api) API="${2%/}"; shift 2 ;;
@@ -254,6 +256,7 @@ while [ $# -gt 0 ]; do
     --registry-token) REGISTRY_TOKEN="$2"; shift 2 ;;
     --local-registry) LOCAL_REGISTRY=1; shift ;;
     --tailnet-only) TAILNET_ONLY=1; shift ;;
+    --tailnet) TAILNET="${2%.}"; shift 2 ;;
     --auto-update) AUTO_UPDATE=on; shift ;;
     --no-auto-update) AUTO_UPDATE=off; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
@@ -1203,12 +1206,28 @@ k3s_move_to_tailnet() {
   echo "k3s couldn't move to the tailnet, so it's back as it was."
   exit 3
 }
+# >>> pyo:tailnet-switch (connect.sh only; join.rs tests it)
+# On another tailnet than --tailnet with a key for that one: logged out of
+# the old one first, so the key puts it on the new one. Run again once it's
+# there, nothing changes.
+tailnet_switch() {
+  local now
+  [ -n "$TAILNET" ] && [ -n "$TS_AUTHKEY" ] || return 0
+  [ -n "$(tailscale ip -4 2>/dev/null)" ] || return 0
+  now=$(tailscale status --json 2>/dev/null | sed -n 's/^ *"MagicDNSSuffix": *"\([^"]*\)",*$/\1/p' | head -n1 || true)
+  now=${now%.}
+  [ "$now" != "$TAILNET" ] || return 0
+  echo "Leaving ${now:-the old tailnet} for $TAILNET."
+  tailscale logout || true
+}
+# <<< pyo:tailnet-switch
 # Tailscale, when Pyo is on your tailnet (or this machine already is).
 # TS_NAME: this machine's MagicDNS name, when the tailnet has MagicDNS.
 TS_IP="" TS_NAME=""
 if [ -n "$TS_AUTHKEY" ] || [ -n "$TAILNET_ONLY" ] || command -v tailscale >/dev/null; then
   command -v tailscale >/dev/null || quietly "Installing Tailscale…" tailscale_install || exit 1
   systemctl enable --now tailscaled
+  tailnet_switch
   if [ -z "$(tailscale ip -4 2>/dev/null)" ]; then
     [ -n "$TS_AUTHKEY" ] || { echo "Not on the tailnet yet: copy the full command from Pyo." >&2; exit 1; }
     quietly "Joining your tailnet…" tailscale up --authkey "$TS_AUTHKEY" --hostname "$(hostname)" --timeout 120s || true
