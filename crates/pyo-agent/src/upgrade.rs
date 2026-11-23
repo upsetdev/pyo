@@ -463,6 +463,7 @@ pub fn check_release(path: &str) -> anyhow::Result<()> {
     let release: Release = serde_json::from_slice(&std::fs::read(path)?)?;
     let mut problems = release.problems();
     problems.extend(access_problem(&release));
+    problems.extend(database_pins_problem(&release));
     if !problems.is_empty() {
         anyhow::bail!(
             "Pyo {} can't be applied: {}",
@@ -487,6 +488,20 @@ fn access_problem(release: &Release) -> Option<String> {
         None => Some(format!(
             "It doesn't say which roles its agent has: agentAccess {ours} (pyo-agent access-hash)."
         )),
+    }
+}
+
+/// A release must name the database images its code pins (this agent's:
+/// it's the release's own), so installations know before they update
+/// whether their databases restart.
+fn database_pins_problem(release: &Release) -> Option<String> {
+    let ours = pyo_proto::bundles::database_pins();
+    match &release.database_pins {
+        Some(p) if *p == ours => None,
+        _ => Some(
+            "databasePins isn't what this release's databases run (pyo-agent database-pins)."
+                .into(),
+        ),
     }
 }
 
@@ -883,6 +898,21 @@ async fn restore(client: &Client, saved: &[(String, String, Value)]) -> anyhow::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nor one that doesn't name (rightly) the database images its code pins.
+    #[test]
+    fn a_release_names_the_database_images_its_code_pins() {
+        let with = |p: Option<std::collections::BTreeMap<String, String>>| Release {
+            database_pins: p,
+            ..Default::default()
+        };
+        let ours = pyo_proto::bundles::database_pins();
+        assert_eq!(database_pins_problem(&with(Some(ours.clone()))), None);
+        assert!(database_pins_problem(&with(None)).is_some());
+        let mut other = ours;
+        other.insert("mysql".into(), "mysql@sha256:00".into());
+        assert!(database_pins_problem(&with(Some(other))).is_some());
+    }
 
     /// The release workflow can't publish a release.json that doesn't say
     /// (rightly) which roles its agent has.

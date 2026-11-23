@@ -270,6 +270,7 @@ jobs:
             --mysql-operator "$(digest mysql-operator)" --mysql-backup "$(digest mysql-backup)" \
             --postgres-16 "$(tagged postgres 16-)" --postgres-17 "$(tagged postgres 17-)" --postgres-18 "$(tagged postgres 18-)" \
             --agent-access "$(docker run --rm "$IMAGES/agent:$VERSION@$(digest agent)" access-hash)" \
+            --database-pins "$(docker run --rm "$IMAGES/agent:$VERSION@$(digest agent)" database-pins)" \
             --sandbox-x86_64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-x86_64.tar.gz.sha256)" \
             --sandbox-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-linux-aarch64.tar.gz.sha256)" \
             --sandbox-gvisor-x86_64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-x86_64.tar.gz.sha256)" \
