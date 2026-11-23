@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use crate::{Agent, MANAGER};
 
 const NS: &str = "pyo-system";
-const BUILDKIT_IMAGE: &str = "moby/buildkit:v0.34.2";
+const BUILDKIT_IMAGE: &str = "moby/buildkit:v0.35.1";
 
 fn name(builder_id: &str) -> String {
     format!("pyo-builder-{}", builder_id.replace('_', "-"))
