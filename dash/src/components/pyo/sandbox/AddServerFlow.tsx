@@ -21,6 +21,7 @@ import { Callout, Panel } from "~/components/ui/Panel";
 import { DNS_LABEL } from "~/lib/pyo/format";
 import { sandboxApi } from "~/lib/pyo/sandbox";
 import { refresh, roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
+import { useHeld } from "~/lib/pyo/useHeld";
 import { AddSandboxServer, RuntimeBadge } from "./common";
 
 // Add a sandbox server: two square tiles first. "Hetzner" has Pyo buy the
@@ -101,11 +102,15 @@ function CloudServer({ onMade }: { onMade: (m: { id: string; name: string }) => 
   const { options } = useCloudOptions(connected && !!s.tailscale);
   const value = name || suggested;
   const edgeDomain = edge.trim().replace(/\.$/, "");
-  const nameError = !DNS_LABEL.test(value)
-    ? "Lowercase letters, digits and dashes."
-    : servers.some((x) => x.name === value && x.teamId === s.currentTeamId)
-      ? "A sandbox server has this name."
-      : "";
+  // Held from Create on: the server it makes doesn't take its own name.
+  const nameError = useHeld(
+    !DNS_LABEL.test(value)
+      ? "Lowercase letters, digits and dashes."
+      : servers.some((x) => x.name === value && x.teamId === s.currentTeamId)
+        ? "A sandbox server has this name."
+        : "",
+    creating,
+  );
   const edgeError = !edgeDomain || EDGE_DOMAIN.test(edgeDomain) ? "" : "A domain, like sbx.example.com.";
   const price = priceOf(options, choice);
 
