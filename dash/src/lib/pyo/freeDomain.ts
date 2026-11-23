@@ -1,5 +1,5 @@
 import type { PyoState } from "./store";
-import type { Application, ClusterServer } from "./types";
+import type { Application, Cluster, ClusterServer } from "./types";
 
 // Free domains through nip.io: "<anything>.<ip>.nip.io" resolves to <ip>
 // (e.g. "app.203.0.113.7.nip.io"), so a hostname works with no DNS record.
@@ -69,10 +69,21 @@ export function freeDomainIp(s: PyoState, clusterId: string) {
   return s.clusters.find((c) => c.id === clusterId)?.freeDomainIp ?? undefined;
 }
 
+/**
+ * What the name Pyo makes for a service is called on these clusters: a
+ * "Tunnel domain" when all of them take web traffic through Cloudflare
+ * Tunnel (it sits under the team's own domain), else a "Free domain".
+ */
+export function freeDomainNoun(clusters: (Pick<Cluster, "traffic"> | undefined)[]) {
+  return clusters.length && clusters.every((c) => c?.traffic === "tunnel")
+    ? "Tunnel domain"
+    : "Free domain";
+}
+
 /** Why there's no free domain (on the public IP) on the cluster, in a few words. */
 export function noFreeDomain(s: PyoState, clusterId: string) {
   const c = s.clusters.find((x) => x.id === clusterId);
-  if (c?.traffic === "tunnel") return "Pick a default domain first.";
+  if (c?.traffic === "tunnel") return "No default domain yet, so no tunnel domain.";
   return c?.publicTraffic === false
     ? "Public traffic is off, so no free domain."
     : "No public IP yet, so no free domain.";
