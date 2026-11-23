@@ -983,6 +983,10 @@ pub const INSTALL_ANNOTATION: &str = "pyo.dev/install";
 /// Optional: the agent may rewrite its own admission policy (and read its
 /// roles, to know they're current). Deleting its binding takes that away.
 pub const SELF_UPDATE_ROLE: &str = "pyo-agent-self-update";
+/// How a refresh's failure starts when the agent's roles aren't Pyo's
+/// (0.5.5's agent says the same): only the cluster's connect command
+/// changes them, so Pyo doesn't send that refresh again.
+pub const ROLES_OLDER: &str = "this agent's roles are older than Pyo's";
 /// The agent Deployment's env that pins system images: what a refresh
 /// changes of it, with its pods' priority and tolerations.
 pub const PINNED_ENV: [&str; 10] = [
