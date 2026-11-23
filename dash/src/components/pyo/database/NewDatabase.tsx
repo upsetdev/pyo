@@ -16,6 +16,7 @@ import {
   instancesOf,
   maxReadReplicas,
   replicasValid,
+  roomNote,
 } from "~/components/pyo/Databases";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { Field, Input, Select, Stepper, Switch } from "~/components/ui/Field";
@@ -210,9 +211,16 @@ export function NoCluster() {
 
 /** Size (with storage when custom) and availability. */
 export function SizeAndAvailability({ engine, draft: f }: { engine: Engine; draft: DatabaseDraft }) {
+  const s = usePyo();
+  const noRoom = f.cluster ? roomNote(s.servers, f.cluster, engine, f.size, f.mem) : null;
   return (
     <>
       <SizeFields engine={engine} size={f.size} cpu={f.cpu} mem={f.mem} onChange={f.setSize} />
+      {noRoom ? (
+        <Callout tone="warning" icon={WarningIcon}>
+          {noRoom}
+        </Callout>
+      ) : null}
       {f.custom ? (
         <Field label="Storage (GiB)" hint="Per instance. Only grows later." error={f.storage >= 1 && f.storage <= 1000 ? undefined : "1 to 1000 GiB."}>
           {(p) => <Input {...p} type="number" min={1} max={1000} value={f.storage} onChange={(e) => f.setStorage(Number(e.target.value))} />}
