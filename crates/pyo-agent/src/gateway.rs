@@ -1951,11 +1951,11 @@ static PUBLIC_PORTS_UNREAD: AtomicBool = AtomicBool::new(false);
 
 /// Whether to say that a state holds: only when it starts (`flag` goes on).
 /// [`settled`] turns it off again.
-fn first_time(flag: &AtomicBool) -> bool {
+pub(crate) fn first_time(flag: &AtomicBool) -> bool {
     !flag.swap(true, Ordering::Relaxed)
 }
 
-fn settled(flag: &AtomicBool) {
+pub(crate) fn settled(flag: &AtomicBool) {
     flag.store(false, Ordering::Relaxed);
 }
 
