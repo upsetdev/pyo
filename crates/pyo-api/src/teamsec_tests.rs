@@ -17,16 +17,22 @@ use tower::ServiceExt;
 
 use crate::ids::random_string;
 
+/// Runs a test on a thread with a big stack, on one runtime that every
+/// Postgres test shares and that lives as long as the process. The vault is
+/// the process's and keeps the pool of the test that set it up first. A
+/// runtime of the test's own would shut down when that test ends, and a
+/// query on one of its connections then fails in whichever test still
+/// runs ("A Tokio 1.x context was found, but it is being shutdown.").
 pub(crate) fn run_big<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
+    static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    });
     std::thread::Builder::new()
         .stack_size(64 << 20)
-        .spawn(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(f)
-        })
+        .spawn(|| RUNTIME.block_on(f))
         .unwrap()
         .join()
         .unwrap();

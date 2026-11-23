@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use super::*;
+use crate::teamsec_tests::run_big;
 
 fn pull(state: &str) -> PullRow {
     PullRow {
@@ -313,21 +314,6 @@ fn the_copy_runs_where_the_service_does() {
 }
 
 // ── Against Postgres ───────────────────────────────────────────────────────
-
-fn run_big<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
-    std::thread::Builder::new()
-        .stack_size(64 << 20)
-        .spawn(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(f)
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
 
 fn state(db: PgPool) -> AppState {
     let config = crate::Config {

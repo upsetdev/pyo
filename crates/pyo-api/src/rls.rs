@@ -107,25 +107,12 @@ pub(crate) mod tests {
     use serde_json::{Value, json};
     use sqlx::PgPool;
 
+    use crate::teamsec_tests::run_big;
+
     /// Tables with a team_id that row security doesn't cover, each with
     /// why. A new team-owned table gets a policy in its migration, or a
     /// place here with its reason.
     const NOT_COVERED: &[(&str, &str)] = &[];
-
-    fn run_big<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(f)
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
     async fn db() -> PgPool {
         let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
