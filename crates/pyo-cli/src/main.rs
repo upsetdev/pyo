@@ -353,7 +353,7 @@ enum DomainCommand {
         /// e.g. app.example.com.
         #[arg(required_unless_present = "free", conflicts_with = "free")]
         hostname: Option<String>,
-        /// A free nip.io domain instead (no DNS record needed).
+        /// A free nip.io domain instead, or a tunnel domain in tunnel mode (no DNS record needed).
         #[arg(long)]
         free: bool,
         /// The HTTP port to route to, by name or number (default: the first).

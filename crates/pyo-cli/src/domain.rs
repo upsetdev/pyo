@@ -270,7 +270,7 @@ pub async fn add(
             // name under the tunnel's default domain.
             let suffix = match cluster_ip(&t, "freeDomainSuffix") {
                 Some(s) => s,
-                None if tunnel => bail!("The cluster's Cloudflare Tunnel has no default domain, so there's no free domain for it. Pick a default domain first, or use your own hostname."),
+                None if tunnel => bail!("The cluster's Cloudflare Tunnel has no default domain, so there's no tunnel domain for it. Pick a default domain first, or use your own hostname."),
                 None => {
                     let ip = cluster_ip(&t, "freeDomainIp").context("The cluster has no address for free domains (its public or Tailscale IP, as its settings say), so there's no free domain for it. Use your own hostname.")?;
                     format!("{ip}.nip.io")
@@ -288,7 +288,7 @@ pub async fn add(
                 .collect();
             format!("{}.{suffix}", label.trim_end_matches('-'))
         }
-        None => bail!("Give a hostname, or --free for a free domain."),
+        None => bail!("Give a hostname, or --free for a free or tunnel domain."),
     };
     if let Some(other) = t.state.services().iter().find(|a| {
         a["domains"]

@@ -4894,7 +4894,7 @@ async fn apply(
                 }
                 // Never parsed from an address: it follows the cluster's traffic.
                 crate::freedomain::Mode::Tunnel => {
-                    format!("Free domains on {name} go through its Cloudflare Tunnel")
+                    format!("Domains on {name} go through its Cloudflare Tunnel")
                 }
             };
             log_activity(
