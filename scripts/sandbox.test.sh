@@ -31,6 +31,7 @@ check "every setting outside the functions is in SETTINGS" "$missing" "." lacks
 
 # shellcheck source=/dev/null
 source <(sed '$d' deploy/sandbox.sh)
+json_ok_early() { python3 -c 'import json,sys; json.load(open(sys.argv[1])); print("json")' "$1" 2>&1; }
 set +e
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -58,6 +59,28 @@ mkdir -p "$tmp/etc" && echo '{}' >"$tmp/etc/config.json"
 out=$( (defaults; ETC=$tmp/etc; parse_args --version 0.4.1 && echo updating) 2>&1)
 check "a joined server updates without a code" "$out" "^updating$" has
 rm -f "$tmp/etc/config.json"
+
+# ── Options on Pyo Cloud: --pyo-url and --command-key instead of --pyo ──
+ckey=$(printf 'k%.0s' {1..43})
+cloud=(--pyo-url https://agent.pyo.example --server sbs_abc123 --name sbx-1 --code "$code" --tailscale-key tskey-auth-x --command-key "$ckey,$ckey" --version 0.51.1)
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" && echo "parsed $PYO_URL $SERVER $NAME $COMMAND_KEY") 2>&1)
+check "the Cloud command parses" "$out" "^parsed https://agent.pyo.example sbs_abc123 sbx-1 $ckey,$ckey$" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --edge-domain sbx.example.com && echo "edge=$EDGE_DOMAIN") 2>&1)
+check "and takes an edge domain" "$out" "^edge=sbx.example.com$" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo x:1) 2>&1)
+check "--pyo and --pyo-url don't go together" "$out" "--pyo or --pyo-url, not both" has
+out=$( (defaults; ETC=$tmp/etc; parse_args --pyo-url https://agent.pyo.example --server sbs_a --name n --code "$code" --version 0.51.1) 2>&1)
+check "--pyo-url needs the command key" "$out" "it has --pyo-url, --command-key" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url http://agent.pyo.example) 2>&1)
+check "Pyo's address is HTTPS" "$out" "isn't Pyo's HTTPS address" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url http://127.0.0.1:8080 --dev && echo parsed) 2>&1)
+check "or HTTP with --dev" "$out" "^parsed$" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --command-key 'abc;rm -rf') 2>&1)
+check "the command key is base64url" "$out" "command key is wrong" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${args[@]}" --command-key "$ckey") 2>&1)
+check "--command-key goes with --pyo-url" "$out" "goes with --pyo-url" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url https://agent.pyo.example/ && echo "url=$PYO_URL") 2>&1)
+check "a trailing slash is dropped" "$out" "^url=https://agent.pyo.example$" has
 
 # ── The release's files ──
 defaults
@@ -270,7 +293,96 @@ out=$( (ts_fails=1 join_tailnet) 2>&1)
 check "a failed join says to run a fresh command" "$out" "didn't join your tailnet. Copy a fresh command from Pyo and run it again\.$" has
 out=$( (TS_AUTHKEY="" join_tailnet) 2>&1)
 check "no key, no join" "$out" "Not on your tailnet yet" has
+# On Pyo Cloud: one of Pyo's on the team's tailnet, and its names there.
+rm -f "$tmp/ts-up"
+defaults
+NAME=sbx-1 TS_AUTHKEY=tskey-auth-x PYO_URL=https://agent.pyo.example
+ts_status='{
+  "Version": "1.90.0",
+  "Self": {
+    "HostName": "sbx-1",
+    "DNSName": "sbx-1.tail1234.ts.net.",
+    "Tags": [
+      "tag:pyo"
+    ]
+  },
+  "CurrentTailnet": {
+    "MagicDNSSuffix": "tail1234.ts.net"
+  }
+}'
+tailscale() {
+  case "$1" in
+    ip) [ ! -f "$tmp/ts-up" ] || echo 100.64.0.9 ;;
+    up) echo "$*" >"$tmp/ts-up-args"; touch "$tmp/ts-up" ;;
+    status) echo "$ts_status" ;;
+    cert) echo "$*" >"$tmp/ts-cert-args"; [ -z "${cert_fails:-}" ] || { echo "500 Internal Server Error: your Tailscale account does not support getting TLS certs" >&2; return 1; } ;;
+  esac
+  return 0
+}
+out=$( (join_tailnet && echo "ip=$TS_IP host=$TS_HOST name=$TS_NAME") 2>&1)
+check "Cloud: it joins the tailnet with the key and its name" "$(cat "$tmp/ts-up-args")" "^up --authkey tskey-auth-x --hostname sbx-1 " has
+check "Cloud: and gets its names there" "$out" "^ip=100.64.0.9 host=sbx-1 name=sbx-1.tail1234.ts.net$" has
+ts_status='{"Self": {"HostName": "laptop", "DNSName": "laptop.tail9999.ts.net."}}'
+out=$( (join_tailnet && echo "went on") 2>&1)
+check "Cloud: a machine on a tailnet as someone else's isn't moved" "$out" "on a tailnet already, but not as one of Pyo's servers" has
+check "Cloud: and goes no further" "$out" "went on" lacks
+ETC=$tmp/etc-cert TS_NAME=sbx-1.tail1234.ts.net
+out=$( (tailnet_cert) 2>&1)
+check "Cloud: the certificate for its tailnet name" "$(cat "$tmp/ts-cert-args")" "^cert --cert-file $ETC/tailnet/cert.pem --key-file $ETC/tailnet/key.pem sbx-1.tail1234.ts.net$" has
+check "Cloud: shows progress" "$out" "^→ Getting an HTTPS certificate for sbx-1.tail1234.ts.net…$" has
+check "Cloud: then that it got it" "$out" "^✓ Got an HTTPS certificate for sbx-1.tail1234.ts.net$" has
+check "Cloud: its folder is root's only" "$(stat -c %a "$ETC/tailnet")" "^700$" has
+out=$( (cert_fails=1 tailnet_cert && echo "went on") 2>&1)
+check "Cloud: no certificate says what to do" "$out" "Turn on HTTPS certificates in your tailnet's DNS settings, then run the same command again\.$" has
+check "Cloud: and stops" "$out" "went on" lacks
+CERT_UNIT=$tmp/pyo-sandbox-cert
+write_cert_units
+check "Cloud: a timer renews the certificate" "$(cat "$CERT_UNIT.timer")" "^OnUnitActiveSec=12h$" has
+check "Cloud: with tailscale cert for its name" "$(cat "$CERT_UNIT.service")" "^ExecStart=/usr/bin/env tailscale cert --cert-file $ETC/tailnet/cert.pem --key-file $ETC/tailnet/key.pem sbx-1.tail1234.ts.net$" has
+check "Cloud: its key stays root's" "$(cat "$CERT_UNIT.service")" "^UMask=0077$" has
 unset -f systemctl tailscale tailnet_lock_wait
+
+# ── Joining Pyo on Pyo Cloud: the daemon joins over HTTPS ──
+sleep() { :; }
+defaults
+ETC=$tmp/etc-out WORK=$tmp/work-out BIN=$tmp/pyo-sandbox-out PYO_URL=https://agent.pyo.example SERVER=sbs_abc123 NAME=sbx-1
+CODE=$code COMMAND_KEY="$ckey" TS_IP=100.64.0.9 TS_HOST=sbx-1 TS_NAME=sbx-1.tail1234.ts.net JAIL_UID=998 JAIL_GID=997
+mkdir -p "$WORK"
+printf '{\n  "runtime": "firecracker"\n}\n' >"$WORK/capability.json"
+# The daemon's join, stubbed: what it got, then its config, or a refusal.
+cat >"$BIN" <<SH
+#!/usr/bin/env bash
+echo "\$*" >"$tmp/join-args"
+f=\${@: -1}
+stat -c %a "\$f" >"$tmp/join-mode"
+cp "\$f" "$tmp/join-asked.json"
+if [ -n "\${JOIN_FAILS:-}" ]; then
+  echo "2026-11-24T10:00:00Z  WARN pyo_sandbox: not listed yet, asking again" >&2
+  echo "Error: This join code expired. Make a new one in Pyo." >&2
+  exit 1
+fi
+echo '{"serverId": "sbs_abc123", "outbound": {"pyoUrl": "https://agent.pyo.example"}}' >"$ETC/config.json"
+SH
+chmod +x "$BIN"
+out=$( (join_outbound) 2>&1)
+check "Cloud: the daemon joins with the join file" "$(cat "$tmp/join-args")" "^join --config $ETC/config.json --join $ETC/join.json$" has
+check "Cloud: the code isn't in its arguments" "$(cat "$tmp/join-args")" "$code" lacks
+check "Cloud: the join file is root's only" "$(cat "$tmp/join-mode")" "^600$" has
+check "Cloud: and is gone after" "$(ls "$ETC")" "join.json" lacks
+check "Cloud: it's valid JSON" "$(json_ok_early "$tmp/join-asked.json")" "^json$" has
+check "Cloud: with Pyo, the server, code and command key" "$(cat "$tmp/join-asked.json")" "\"pyoUrl\": \"https://agent.pyo.example\", \"serverId\": \"sbs_abc123\", \"code\": \"$code\", \"commandKeys\": \"$ckey\"" has
+check "Cloud: and its tailnet address and names" "$(cat "$tmp/join-asked.json")" "\"address\": \"100.64.0.9\", \"hostname\": \"sbx-1\", \"tailnetName\": \"sbx-1.tail1234.ts.net\", \"jailUid\": 998, \"jailGid\": 997, \"capability\": \{" has
+check "Cloud: joining shows progress" "$out" "^→ Joining Pyo as sbx-1…$" has
+check "Cloud: then that it joined" "$out" "^✓ Joined Pyo as sbx-1$" has
+check "Cloud: it's in outbound mode from then on" "$( (PYO_URL=""; outbound && echo outbound) 2>&1)" "^outbound$" has
+rm -f "$ETC/config.json"
+out=$( (JOIN_FAILS=1 join_outbound && echo "went on") 2>&1)
+check "Cloud: a refusal shows the daemon's last line" "$out" $'^✗ Joining Pyo as sbx-1\nError: This join code expired. Make a new one in Pyo.$' has
+check "Cloud: and none of its log" "$out" "WARN|pyo_sandbox" lacks
+check "Cloud: and stops" "$out" "went on" lacks
+check "Cloud: the join file is gone after a refusal too" "$(ls "$ETC")" "join.json" lacks
+check "Cloud: self-hosted isn't outbound" "$( (PYO_URL=""; outbound || echo direct) 2>&1)" "^direct$" has
+unset -f sleep
 
 # ── Joining Pyo ──
 sleep() { :; }
@@ -404,6 +516,15 @@ rm -f "$tmp/ufw"
 out=$(firewall 2>&1)
 check "without ufw, it says which ports to open" "$out" "open TCP 80 and 443" has
 check "and changes no firewall" "$(cat "$tmp/ufw")" "allow" lacks
+# Outbound: the HTTPS port on the tailnet too.
+ufw_state=active
+echo '{"outbound": {}}' >"$ETC/config.json"
+rm -f "$tmp/ufw"
+firewall
+check "ufw: Cloud, HTTPS on the tailnet" "$(cat "$tmp/ufw")" "ufw allow in on tailscale0 to any port 7443 proto tcp" has
+rm -f "$ETC/config.json" "$tmp/ufw"
+firewall
+check "ufw: self-hosted, no 7443" "$(cat "$tmp/ufw")" "7443" lacks
 unset -f ufw
 
 # ── sudo: the root shell gets the functions, SETTINGS and PYO_* ──

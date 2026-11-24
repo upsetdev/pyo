@@ -18,6 +18,7 @@ import {
   act,
   RuntimeBadge,
   SandboxStatus,
+  useDesktopNotes,
   useNow,
   useSandboxes,
 } from "~/components/pyo/sandbox/common";
@@ -45,7 +46,6 @@ import {
   NO_LIFETIME,
   connectionFor,
   daemonApi,
-  desktopBlocked,
   openDesktop,
   ended,
   isDesktop,
@@ -80,7 +80,6 @@ function SandboxPage() {
   const { tab = "overview" } = Route.useSearch();
   const navigate = useNavigate();
   const s = usePyo();
-  const desktopNote = desktopBlocked(s.tailscale);
   const q = useQuery(
     `sandbox:${sandboxId}`,
     () =>
@@ -91,6 +90,11 @@ function SandboxPage() {
     { refreshMs: 4000 },
   );
   const tq = useQuery(`sandbox-templates:${s.currentTeamId}`, () => sandboxApi.templates(s.currentTeamId));
+  const desktopOf = useDesktopNotes(
+    q.status === "success" && isDesktop(templateOf(q.data, tq.status === "success" ? tq.data.templates : []))
+      ? [q.data]
+      : [],
+  );
   const [deleting, setDeleting] = useState(false);
   const [busy, setBusy] = useState(false);
   const canUse = roleIn(s) !== "viewer";
@@ -114,6 +118,7 @@ function SandboxPage() {
 
   const x = q.data;
   const template = templateOf(x, tq.status === "success" ? tq.data.templates : []);
+  const desktopNote = desktopOf(x);
   const run = async (what: "pause" | "resume") => {
     setBusy(true);
     await act(what, x);

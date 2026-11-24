@@ -21,6 +21,7 @@ import {
   SandboxStatus,
   ServerState,
   useNow,
+  useDesktopNotes,
   useSandboxes,
 } from "~/components/pyo/sandbox/common";
 import { Button, ButtonLink } from "~/components/ui/Button";
@@ -52,7 +53,6 @@ import {
   type SandboxInUse,
   type SandboxLimits,
   type SandboxTemplate,
-  desktopBlocked,
   isDesktop,
   openDesktop,
 } from "~/lib/pyo/sandbox";
@@ -320,7 +320,9 @@ function SandboxTable({
   onDelete: (x: Sandbox) => void;
 }) {
   const navigate = useNavigate();
-  const desktopNote = desktopBlocked(usePyo().tailscale);
+  const desktopOf = useDesktopNotes(
+    rows.filter((x) => x.state === "running" && isDesktop(templateOf(x, templates))),
+  );
   const open = (x: Sandbox, tab?: "terminal") =>
     void navigate({
       to: "/$team/sandboxes/$sandboxId",
@@ -370,13 +372,13 @@ function SandboxTable({
             <Td>
               <div className="flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
                 {canUse && x.state === "running" && isDesktop(templateOf(x, templates)) ? (
-                  <Tooltip content={desktopNote ?? "Desktop"} focusable={false}>
+                  <Tooltip content={desktopOf(x) ?? "Desktop"} focusable={false}>
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7"
                       aria-label={`Desktop for ${x.name}`}
-                      disabled={!!desktopNote}
+                      disabled={!!desktopOf(x)}
                       onClick={() => void openDesktop(x.id, { name: x.name })}
                     >
                       <MonitorIcon size={16} />
@@ -384,13 +386,13 @@ function SandboxTable({
                   </Tooltip>
                 ) : null}
                 {canUse && x.state === "running" && isDesktop(templateOf(x, templates)) ? (
-                  <Tooltip content={desktopNote ?? "Browser"} focusable={false}>
+                  <Tooltip content={desktopOf(x) ?? "Browser"} focusable={false}>
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7"
                       aria-label={`Browser in ${x.name}`}
-                      disabled={!!desktopNote}
+                      disabled={!!desktopOf(x)}
                       onClick={() => void openDesktop(x.id, { app: "chromium", name: x.name })}
                     >
                       <BrandMark icon={siGooglechrome} size={15} tone="mono" />

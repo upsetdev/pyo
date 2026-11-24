@@ -64,6 +64,19 @@ pub const TAILSCALE_NEEDED: &str =
     "Sandbox servers join your tailnet. Set up Tailscale on Integrations first.";
 /// Why there's no join for a server here.
 pub const SELF_HOSTED: &str = "This Pyo adds sandbox servers with addSandboxServer.";
+/// Where a server that joined over HTTPS answers browsers and SDKs on the
+/// team's tailnet: HTTPS on its tailnet name, with the certificate its
+/// `tailscaled` gets (sandbox.sh).
+pub const TAILNET_PORT: u16 = 7443;
+
+/// That address for a server's tailnet name (`sbx-1.tail1234.ts.net`).
+pub fn tailnet_url(tailnet_name: &str) -> String {
+    format!(
+        "https://{}:{TAILNET_PORT}",
+        tailnet_name.trim_end_matches('.')
+    )
+}
+
 /// Why commands can't be signed.
 pub const NO_SIGNER: &str = "Pyo can't sign commands for sandbox servers right now.";
 

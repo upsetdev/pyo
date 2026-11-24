@@ -38,9 +38,10 @@ impl Shell {
         };
         let nonce = nonce();
         let body = stamp(html, &nonce);
+        let connect = connect_src(crate::hosted());
         let csp = format!(
             "default-src 'self'; script-src 'nonce-{nonce}' 'strict-dynamic' 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; \
-             font-src 'self' data:; connect-src 'self'; frame-src http: https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com"
+             font-src 'self' data:; connect-src {connect}; frame-src http: https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com"
         );
         let mut res = ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response();
         if let Ok(v) = HeaderValue::from_str(&csp) {
@@ -48,6 +49,17 @@ impl Shell {
         }
         res
     }
+}
+
+/// Where the dashboard's own code may connect. On Pyo Cloud also the
+/// teams' sandbox servers, on their tailnet names over HTTPS (terminal,
+/// files), which answer only on the team's tailnet.
+fn connect_src(hosted: bool) -> String {
+    if !hosted {
+        return "'self'".into();
+    }
+    let port = crate::sandbox::outbound::TAILNET_PORT;
+    format!("'self' https://*.ts.net:{port} wss://*.ts.net:{port}")
 }
 
 fn nonce() -> String {
@@ -228,6 +240,15 @@ fn secure_cookies(hs: &mut axum::http::HeaderMap) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pyo_cloud_pages_reach_sandbox_servers_on_the_tailnet_only() {
+        assert_eq!(super::connect_src(false), "'self'");
+        assert_eq!(
+            super::connect_src(true),
+            "'self' https://*.ts.net:7443 wss://*.ts.net:7443"
+        );
+    }
+
     #[test]
     fn https_names_and_secure_cookies() {
         super::set_addresses(super::Addresses {

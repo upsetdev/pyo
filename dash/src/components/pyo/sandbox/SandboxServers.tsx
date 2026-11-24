@@ -3,19 +3,29 @@ import {
   CircleNotchIcon,
   DotsThreeIcon,
   GlobeIcon,
+  KeyIcon,
   PlusIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { CloudStateBadge, money } from "~/components/pyo/Hetzner";
 import { Button, ButtonLink } from "~/components/ui/Button";
-import { ConfirmDialog } from "~/components/ui/Dialog";
+import { ConfirmDialog, Dialog } from "~/components/ui/Dialog";
 import { Menu } from "~/components/ui/Menu";
 import { Meter } from "~/components/ui/Panel";
 import { cloudflareZoneFor, refresh, roleIn, sandboxServersIn, usePyo } from "~/lib/pyo/store";
 import { sandboxApi, type SandboxServer } from "~/lib/pyo/sandbox";
 import { toast } from "~/lib/pyo/toast";
-import { RuntimeBadge, ServerState, serverCapacity, serverUse } from "./common";
+import {
+  JoinCommandView,
+  RuntimeBadge,
+  ServerState,
+  joiningOf,
+  serverCapacity,
+  serverUse,
+  useJoined,
+  type Joining,
+} from "./common";
 
 /**
  * Sandbox servers on the servers page, next to the clusters: a third kind,
@@ -26,6 +36,9 @@ export function SandboxServers() {
   const servers = sandboxServersIn(s);
   const role = roleIn(s);
   const [removing, setRemoving] = useState<SandboxServer | null>(null);
+  const [resetting, setResetting] = useState<SandboxServer | null>(null);
+  const [rejoin, setRejoin] = useState<Joining | null>(null);
+  const [resetBusy, setResetBusy] = useState(false);
   const issuing = servers.some((x) => x.edge?.cert.state === "issuing");
   useEffect(() => {
     if (!issuing) return;
@@ -33,6 +46,18 @@ export function SandboxServers() {
     return () => clearInterval(t);
   }, [issuing]);
   if (!servers.length) return null;
+  // Pyo Cloud: a new key for the server, and the command that joins it again.
+  const reset = async (x: SandboxServer) => {
+    setResetBusy(true);
+    try {
+      setRejoin(joiningOf(await sandboxApi.resetAccess(x.id), x.name));
+      void refresh().catch(() => undefined);
+    } catch (e) {
+      toast({ tone: "error", title: (e as Error).message });
+    } finally {
+      setResetBusy(false);
+    }
+  };
   const canRemove = (x: SandboxServer) =>
     x.teamId ? role === "owner" || role === "admin" : !!s.user.isAdmin;
   // The installation's servers use this team's Cloudflare, so its admin
@@ -116,7 +141,11 @@ export function SandboxServers() {
                   {x.teamId ? null : <span className="text-[12px] text-muted-foreground">Installation</span>}
                 </div>
                 <p className="truncate text-[12px] text-muted-foreground">
-                  {x.address ? <span className="font-mono text-[11.5px]">{x.address} · </span> : null}
+                  {x.outbound && x.tailnetName ? (
+                    <span className="font-mono text-[11.5px]">{x.tailnetName} · </span>
+                  ) : x.address ? (
+                    <span className="font-mono text-[11.5px]">{x.address} · </span>
+                  ) : null}
                   {serverCapacity(x)}
                 </p>
                 {x.cloud ? (
@@ -148,6 +177,15 @@ export function SandboxServers() {
                     label={`Actions for ${x.name}`}
                     items={[
                       ...edgeItems(x),
+                      ...(x.outbound
+                        ? [
+                            {
+                              label: "Reset access",
+                              icon: <KeyIcon size={14} />,
+                              onSelect: () => setResetting(x),
+                            },
+                          ]
+                        : []),
                       {
                         label: "Remove server",
                         icon: <TrashIcon size={14} />,
@@ -168,6 +206,27 @@ export function SandboxServers() {
         })}
       </ul>
       <ConfirmDialog
+        open={!!resetting}
+        onClose={() => setResetting(null)}
+        title={`Reset access for ${resetting?.name ?? "server"}?`}
+        description="Pyo stops reaching it until you run a new command on it. Its sandboxes keep running."
+        confirmLabel="Reset access"
+        onConfirm={() => {
+          if (resetting) void reset(resetting);
+        }}
+      />
+      {rejoin ? (
+        <RejoinDialog
+          joining={rejoin}
+          busy={resetBusy}
+          onAgain={() => {
+            const x = servers.find((v) => v.id === rejoin.id);
+            if (x) void reset(x);
+          }}
+          onClose={() => setRejoin(null)}
+        />
+      ) : null}
+      <ConfirmDialog
         open={!!removing}
         onClose={() => setRemoving(null)}
         title={removing?.cloud ? `Delete ${removing.name} at Hetzner?` : `Remove ${removing?.name ?? "server"}?`}
@@ -184,6 +243,33 @@ export function SandboxServers() {
         }}
       />
     </section>
+  );
+}
+
+/** After Reset access: the command that joins the server again. */
+function RejoinDialog({
+  joining,
+  busy,
+  onAgain,
+  onClose,
+}: {
+  joining: Joining;
+  busy: boolean;
+  onAgain: () => void;
+  onClose: () => void;
+}) {
+  const joined = useJoined(joining, true);
+  return (
+    <Dialog open onClose={onClose} width="max-w-2xl" title={`Join ${joining.name} again`}>
+      <JoinCommandView
+        joining={joining}
+        joined={joined}
+        hint="Run this on the server."
+        busy={busy}
+        onAgain={onAgain}
+        onDone={onClose}
+      />
+    </Dialog>
   );
 }
 

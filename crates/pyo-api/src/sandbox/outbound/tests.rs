@@ -169,6 +169,41 @@ fn the_command_quotes_everything() {
 }
 
 #[test]
+fn browsers_reach_a_server_on_its_tailnet_name() {
+    assert_eq!(tailnet_url("sbx-1.tail1234.ts.net"), "https://sbx-1.tail1234.ts.net:7443");
+    assert_eq!(tailnet_url("sbx-1.tail1234.ts.net."), "https://sbx-1.tail1234.ts.net:7443");
+}
+
+/// A sandbox on a server that joined over HTTPS: its connection and its
+/// view give the server's HTTPS address on the tailnet, pages included.
+#[tokio::test]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+async fn sandboxes_on_it_open_on_its_tailnet_name() {
+    let s = state().await;
+    let signer = Local::new();
+    let t = team(&s.db, true).await;
+    let (j, _) = joined(&s, &signer, &t, "sbx-1").await;
+    let id = crate::sandbox::new_sandbox_id();
+    sqlx::query(
+        "INSERT INTO pyo.sandboxes (id, team_id, server_id, spec, state, created_by, expires_at, name)
+         VALUES ($1, $2, $3, '{}', 'running', 'test', now() + interval '1 hour', 'one')",
+    )
+    .bind(&id)
+    .bind(&t.id)
+    .bind(&j.server_id)
+    .execute(&s.db)
+    .await
+    .unwrap();
+    let want = format!("https://sbx-1.{}:7443", t.suffix);
+    let c = crate::sandbox::connection(&s, &id, &t.id, &j.server_id, "100.64.0.9").await.unwrap();
+    assert_eq!(c.url, want);
+    assert_eq!(c.web_url.as_deref(), Some(want.as_str()));
+    let v = crate::sandbox::sandbox_views(&s.db, std::slice::from_ref(&t.id), Some(id.as_str()), false).await.unwrap();
+    assert_eq!(v[0]["url"], want);
+    assert!(v[0].get("tailnetUrl").is_none());
+}
+
+#[test]
 fn kinds_are_the_commands_types() {
     assert_eq!(channel::kind_of(&DaemonCommand::Delete { id: "sbx_1".into() }), "delete");
     assert_eq!(channel::kind_of(&DaemonCommand::Report), "report");

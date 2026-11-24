@@ -367,12 +367,13 @@ pub async fn sandbox_views_matching<'e, E: sqlx::PgExecutor<'e>>(
                 )
             });
         }
-        // The server's tailnet address as its daemon's URL, and each open
+        // The server's tailnet address as its daemon's URL (HTTPS on its
+        // tailnet name for one that joined over HTTPS), and each open
         // port's URL on its edge proxy.
         for r in &mut rows {
-            r["url"] = match (r["url"].as_str(), r["tailnetUrl"].as_str()) {
-                (_, Some(name)) => json!(daemon::tailnet_url(name)),
-                (Some(a), None) => json!(daemon::base_url(a)),
+            r["url"] = match (r["tailnetUrl"].as_str(), r["url"].as_str()) {
+                (Some(name), _) => json!(outbound::tailnet_url(name)),
+                (None, Some(a)) => json!(daemon::base_url(a)),
                 (None, None) => Value::Null,
             };
             if let Some(o) = r.as_object_mut() {
@@ -817,16 +818,16 @@ async fn connection(
 ) -> ApiResult<Connection> {
     let key = keys::signing_key(&s.db, &s.sealer).await?;
     let t = keys::client_token(&key, sandbox, team, server);
-    // A server that works over HTTPS (Pyo Cloud) answers on its own
-    // tailnet name: its API and its ports' pages alike.
-    let tailnet: Option<String> = sqlx::query_scalar(
-        "SELECT tailnet_name FROM pyo.sandbox_servers WHERE id = $1 AND outbound AND tailnet_name IS NOT NULL",
+    // A server that joined over HTTPS (Pyo Cloud's) answers browsers and
+    // SDKs on its own tailnet name, pages included.
+    let name: Option<String> = sqlx::query_scalar(
+        "SELECT tailnet_name FROM pyo.sandbox_servers WHERE id = $1 AND outbound",
     )
     .bind(server)
     .fetch_optional(&s.db)
-    .await?;
-    if let Some(name) = tailnet {
-        let url = daemon::tailnet_url(&name);
+    .await?
+    .flatten();
+    if let Some(url) = name.as_deref().map(outbound::tailnet_url) {
         return Ok(Connection {
             url: url.clone(),
             sandbox_id: sandbox.to_owned(),
@@ -1354,8 +1355,9 @@ fn edge_domain(d: Option<&str>) -> ApiResult<Option<String>> {
     Ok(Some(d))
 }
 
-/// Why a hosted Pyo takes no sandbox servers.
-pub const NOT_ON_CLOUD: &str = "Sandbox servers aren't available on Pyo Cloud yet.";
+/// Why a hosted Pyo takes no sandbox servers at its door: they join over
+/// HTTPS there (outbound.rs).
+pub const NOT_ON_CLOUD: &str = "Pyo Cloud adds sandbox servers with createSandboxJoinCode.";
 
 /// A new sandbox server joins at Pyo's tailnet door (join.rs). A hosted Pyo
 /// that isn't on a tailnet (Pyo Cloud, which is on no team's) has no door,
@@ -1879,6 +1881,7 @@ mod tests {
         let e = hosted_door(true, "", None).unwrap_err();
         assert_eq!(e.status, StatusCode::CONFLICT);
         assert_eq!(e.message, NOT_ON_CLOUD);
+        assert!(e.message.contains("createSandboxJoinCode"));
         assert!(!e.message.contains("Tailscale"));
         assert!(hosted_door(true, "100.64.0.9:5006", None).is_err());
         assert!(hosted_door(true, "", api).is_err());
