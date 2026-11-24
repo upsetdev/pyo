@@ -26,7 +26,8 @@ use serde_json::{Value, json};
 use crate::{Agent, MANAGER};
 
 const NS: &str = "pyo-system";
-const BUILDKIT_IMAGE: &str = "moby/buildkit:v0.35.1";
+/// BuildKit, from Pyo's mirror (deploy/mirrors.txt).
+const BUILDKIT_IMAGE: &str = "ghcr.io/upsetdev/pyo/mirror/moby/buildkit:v0.35.1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c";
 
 fn name(builder_id: &str) -> String {
     format!("pyo-builder-{}", builder_id.replace('_', "-"))

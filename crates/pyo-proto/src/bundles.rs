@@ -562,7 +562,7 @@ pub fn databases_bundle(img: &crate::system::DbImages) -> SystemBundle {
                 "ghcr.io/cybozu-go/moco/fluent-bit:5.1.4.1@sha256:33895ebd0f7ba3d53d146b42a461ca6c05e51a78bed22cf158151bba059a5881",
                 "ghcr.io/cybozu-go/moco/mysqld_exporter:0.20.0.1@sha256:793f8c94a43d03a2d1a176e80bfa99fa1ba0e4c4a83161f24a511e38da0e57e6",
                 "ghcr.io/cybozu-go/moco/mysql:8.4.10.1@sha256:bdb88ae2023dcba0218bf900c7f39117c7a6e4101de6b5c8f62774c1d897b68a",
-                "docker.io/valkey/valkey-bundle:8.1.12@sha256:ca9d1c30a6b3c30de34691ff5ddff6fb77f5c8c727a63723c62d8ebd280e7921",
+                "ghcr.io/upsetdev/pyo/mirror/valkey/valkey-bundle:8.1.12@sha256:ca9d1c30a6b3c30de34691ff5ddff6fb77f5c8c727a63723c62d8ebd280e7921",
             ]
             .map(str::to_owned)
             .to_vec(),
@@ -1525,7 +1525,10 @@ mod tests {
                 && b.images
                     .contains(&"registry.example.com/pyo/kv:1".to_owned())
         );
-        let text = serde_json::to_string(&b.objects).unwrap();
+        // Pyo's mirrors of third-party images aren't the installation's.
+        let text = serde_json::to_string(&b.objects)
+            .unwrap()
+            .replace("ghcr.io/upsetdev/pyo/mirror/", "");
         assert!(
             !text.contains("__") && !text.contains("ghcr.io/upsetdev/"),
             "every placeholder filled"

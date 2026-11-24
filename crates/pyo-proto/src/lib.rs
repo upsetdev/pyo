@@ -2660,19 +2660,19 @@ pub const BACKUP_DB_USER: &str = "pyo_backup";
 /// servers as old as 9.2 but refuses newer ones, so it tracks the newest
 /// PostgreSQL. Restoring a PostgreSQL dump takes pg_restore 18 or newer.
 /// PostgreSQL's is the alpine image Pyo's own database runs, so a server
-/// already has it.
+/// already has it. All come from Pyo's mirror (deploy/mirrors.txt), pinned.
 pub fn db_tools_image(engine: &str) -> &'static str {
     match engine {
-        "postgres" => "docker.io/library/postgres:18.6-alpine",
-        "mysql" => "docker.io/library/mysql:8.4",
-        "mariadb" => "docker.io/library/mariadb:11.8",
-        "mongo" => "docker.io/library/mongo:8.0",
-        _ => "docker.io/valkey/valkey:8.0",
+        "postgres" => "ghcr.io/upsetdev/pyo/mirror/postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b",
+        "mysql" => "ghcr.io/upsetdev/pyo/mirror/mysql:8.4@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00",
+        "mariadb" => "ghcr.io/upsetdev/pyo/mirror/mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc",
+        "mongo" => "ghcr.io/upsetdev/pyo/mirror/mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01",
+        _ => "ghcr.io/upsetdev/pyo/mirror/valkey/valkey:8.0@sha256:fcb69dfef81599baefeee6cdd0b8339b61b7983a8ee08d307e44844db5bd7047",
     }
 }
 
-/// restic, pinned.
-pub const RESTIC_IMAGE: &str = "docker.io/restic/restic:0.17.3";
+/// restic, pinned, from Pyo's mirror (deploy/mirrors.txt).
+pub const RESTIC_IMAGE: &str = "ghcr.io/upsetdev/pyo/mirror/restic/restic:0.17.3@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a";
 
 /// One step of a rollout, posted as it happens.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -3077,6 +3077,9 @@ mod location_tests {
     fn pg_dump_is_new_enough() {
         // pg_dump refuses servers newer than itself.
         let tools: u32 = db_tools_image("postgres")
+            .split_once('@')
+            .unwrap()
+            .0
             .rsplit_once(':')
             .unwrap()
             .1
@@ -3347,6 +3350,42 @@ mod release_tests {
         fields.sort();
         named.sort();
         assert_eq!(fields, named);
+    }
+
+    /// The third-party images Pyo's code runs come from its mirror, pinned
+    /// by the digest deploy/mirrors.txt lists for them: never Docker Hub,
+    /// whose anonymous pulls are rate limited (scripts/check-images.sh
+    /// checks the rest).
+    #[test]
+    fn third_party_images_come_from_the_mirror() {
+        let listed: Vec<String> = include_str!("../../../deploy/mirrors.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|src| {
+                let path = src.split_once('/').unwrap().1;
+                let path = path.strip_prefix("library/").unwrap_or(path);
+                format!("ghcr.io/upsetdev/pyo/mirror/{path}")
+            })
+            .collect();
+        let mut images: Vec<&str> = ["postgres", "mysql", "mariadb", "mongo", "valkey"]
+            .map(db_tools_image)
+            .to_vec();
+        images.extend([
+            RESTIC_IMAGE,
+            system::CLOUDFLARED_IMAGE,
+            system::ENVOY_GATEWAY_IMAGE,
+            system::ENVOY_IMAGE,
+        ]);
+        for image in images {
+            assert!(
+                listed.iter().any(|l| l == image),
+                "{image} isn't a mirror in deploy/mirrors.txt"
+            );
+        }
+        // pg_dump's image is the one Pyo's own database runs.
+        let platform = include_str!("../../../deploy/k8s/platform.yaml");
+        assert!(platform.contains(&format!("image: {}\n", db_tools_image("postgres"))));
     }
 
     /// The images scripts/release-manifest.ts writes into release.json are
