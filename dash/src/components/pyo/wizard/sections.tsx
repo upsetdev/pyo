@@ -27,7 +27,7 @@ import { CaretRightIcon } from "@phosphor-icons/react";
 import { BLOCK } from "./style";
 import { getTemplate } from "~/lib/pyo/templates";
 import { BrandMark, DOCKER_LOGO, GIT_LOGO, IconTile, TemplateLogo } from "../common";
-import { imageHost } from "~/components/pyo/ProjectCard";
+import { imageHost, imageRefLabel } from "~/components/pyo/ProjectCard";
 import {
   DomainsStep,
   EnvStep,
@@ -195,7 +195,7 @@ export function useDraftSections(
   const repo = d.git.repoUrl
     .replace(/^https:\/\/(www\.)?github\.com\//, "")
     .replace(/\.git$/, "");
-  const imageShort = `${d.image.image.replace(/^docker\.io\/(library\/)?/, "")}${d.image.reference.startsWith("sha256:") ? "@" : ":"}${d.image.reference}`;
+  const imageShort = imageRefLabel(d.image.image, d.image.reference);
   const header =
     d.sourceType === "template"
       ? {

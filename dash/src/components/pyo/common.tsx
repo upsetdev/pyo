@@ -24,7 +24,7 @@ import {
   type SimpleIcon,
 } from "simple-icons";
 import type { ReactNode } from "react";
-import { dateTime, shortSha, timeAgo } from "~/lib/pyo/format";
+import { dateTime, fullImageRef, refLabel, shortSha, timeAgo } from "~/lib/pyo/format";
 import { getTemplate } from "~/lib/pyo/templates";
 import type {
   Application,
@@ -211,13 +211,14 @@ export function SourceSummary({
   return (
     <span className="flex min-w-0 max-w-full items-center gap-1.5">
       <PackageIcon size={12} className="shrink-0 text-muted-foreground" />
-      <span className="truncate font-mono text-[11.5px]">
+      <span
+        className="truncate font-mono text-[11.5px]"
+        title={fullImageRef(source.image, source.reference)}
+      >
         {t ? `${t.name} ` : ""}
         <span className={t ? "text-muted-foreground" : ""}>
           {t ? "" : source.image.replace(/^docker\.io\/(library\/)?/, "")}
-          {source.reference.startsWith("sha256:")
-            ? `@${shortSha(source.reference)}`
-            : `:${source.reference}`}
+          {refLabel(source.reference)}
         </span>
       </span>
     </span>

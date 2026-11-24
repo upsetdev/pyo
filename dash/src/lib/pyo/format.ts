@@ -97,6 +97,20 @@ export function shortSha(sha: string) {
     : sha.slice(0, 7);
 }
 
+/** A tag or digest as it follows an image: ":22", or "@sha256:" and the
+ * digest's first 12 characters. */
+export function refLabel(reference: string) {
+  return reference.startsWith("sha256:")
+    ? `@${shortSha(reference)}`
+    : `:${reference}`;
+}
+
+/** The full image reference, for tooltips and copying. */
+export function fullImageRef(image: string, reference: string) {
+  if (!reference) return image;
+  return `${image}${reference.startsWith("sha256:") ? "@" : ":"}${reference}`;
+}
+
 /** Deterministic PRNG (mulberry32) so mock series are stable across renders. */
 export function rng(seed: string | number) {
   let h = typeof seed === "number" ? seed : 0;

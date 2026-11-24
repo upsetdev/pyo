@@ -37,7 +37,7 @@ import {
   type Platform,
 } from "~/lib/pyo/platformImport";
 import { clustersIn, getState, projectPath, usePyo } from "~/lib/pyo/store";
-import { timeAgo } from "~/lib/pyo/format";
+import { refLabel, timeAgo } from "~/lib/pyo/format";
 import { toast } from "~/lib/pyo/toast";
 import { seo } from "~/lib/seo";
 
@@ -379,7 +379,7 @@ function describe(item: ImportService | ImportStack | ImportDatabase): { icon: R
       src.type === "git"
         ? `${src.repoUrl.replace(/^https:\/\//, "")} · ${src.branch}${item.builder === "dockerfile" ? " · Dockerfile" : ""}`
         : src.type === "image"
-          ? `${src.image}:${src.reference}`
+          ? `${src.image}${refLabel(src.reference)}`
           : item.sourceName;
     const badges = [
       ...item.domains.map((d) => d.hostname),

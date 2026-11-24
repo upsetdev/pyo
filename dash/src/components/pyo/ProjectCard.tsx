@@ -7,7 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { Link } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
-import { plural, timeAgo } from "~/lib/pyo/format";
+import { fullImageRef, plural, refLabel, timeAgo } from "~/lib/pyo/format";
 import { fetchAnalytics } from "~/lib/pyo/backend";
 import { useQuery } from "~/lib/pyo/query";
 import { isActive, STAGE_LABEL } from "~/lib/pyo/simulation";
@@ -124,6 +124,12 @@ export function imageLabel(image: string) {
   if (hosted) parts.shift();
   if (parts[0] === "library") parts.shift();
   return parts.join("/");
+}
+
+/** An image with its tag or short digest, as lists show it:
+ * "node:22", "ghcr.io/acme/api@sha256:0123456789ab". */
+export function imageRefLabel(image: string, reference: string) {
+  return `${imageLabel(image)}${reference ? refLabel(reference) : ""}`;
 }
 
 /** The registry host of an image ("docker.io" when it names none). */
@@ -270,7 +276,7 @@ export function SourcePill({
     source.type === "git"
       ? `${label}${revision ? `@${revision}` : ""}`
       : source.image
-        ? `${source.image}${source.reference ? `:${source.reference}` : ""}`
+        ? fullImageRef(source.image, source.reference)
         : label;
   return (
     <Pill href={href} title={full} className={className}>
