@@ -1230,6 +1230,8 @@ async fn apply_objects(
     r.stage("applying", &format!("Applying {name}'s settings"))
         .await;
 
+    // Never someone else's namespace that happens to have the project's name.
+    crate::scope::refuse_taken(&client, ns).await?;
     let namespace = project_namespace(ns, &spec.project_id, &spec.team_id);
     apply(&Api::<Namespace>::all(client.clone()), ns, &namespace).await?;
     // Labelled as Pyo's, with the agent's write role bound in it.
@@ -1567,6 +1569,7 @@ async fn apply_site(
     let name = spec.service.name.as_str();
     r.stage("applying", &format!("Publishing {name}'s files"))
         .await;
+    crate::scope::refuse_taken(&client, ns).await?;
     let namespace = project_namespace(ns, &spec.project_id, &spec.team_id);
     apply(&Api::<Namespace>::all(client.clone()), ns, &namespace).await?;
     crate::scope::ensure_managed(&client, ns).await?;

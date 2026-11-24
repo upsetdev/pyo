@@ -65,6 +65,23 @@ export function useTeamPathname(): string {
  */
 export const currentSlug = () => currentTeam(getState())?.slug ?? "";
 
+/** The cluster's namespaces and Pyo's own, never a project's (the API refuses them too). */
+export function systemNamespace(ns: string) {
+  return (
+    [
+      "default",
+      "pyo-system",
+      "pyo-gateway",
+      "pyo-waf",
+      "pyo-databases",
+      "pyo-static",
+      "cert-manager",
+    ].includes(ns) ||
+    ns.startsWith("kube-") ||
+    ns.startsWith("pyo-db-")
+  );
+}
+
 /**
  * Project namespaces that would shadow a team page in /<project>/... URLs
  * (the API refuses them too).

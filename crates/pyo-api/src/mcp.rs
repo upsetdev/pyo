@@ -1478,9 +1478,7 @@ async fn new_project_with(
         }
     };
     let taken = |ns: &str| {
-        ns == "default"
-            || ns == "pyo-system"
-            || ns.starts_with("kube-")
+        pyo_proto::rbac::system_namespace(ns)
             || projects
                 .iter()
                 .any(|p| p["teamId"] == json!(team) && p["namespace"] == json!(ns))

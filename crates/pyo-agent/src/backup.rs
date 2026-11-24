@@ -647,6 +647,7 @@ async fn run_setup(
 ) -> anyhow::Result<()> {
     let client = agent.kube.clone();
     // External databases' Jobs run in a namespace of their own.
+    crate::scope::refuse_foreign(&client, ns).await?;
     let _ = Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone())
         .patch(
             ns,
