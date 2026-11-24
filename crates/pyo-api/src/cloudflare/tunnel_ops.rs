@@ -538,35 +538,61 @@ pub async fn set_domain(
         if via == "tunnel" && status == "created" {
             return Ok(json!({ "ok": true, "status": "active" }));
         }
+        // What Cloudflare has on the name now. When it can't be asked, the
+        // loop's switch finds out.
+        let wildcard_case = under && row.is_none() && !d["tunnel"].is_string();
+        let found = if wildcard_case || !replace {
+            use tunnel::TunnelApi;
+            super::Http::new(&a.token)?.records_kept(&zone.id, &host).await.ok()
+        } else {
+            None
+        };
         // A new name under the default domain: the wildcard record has it,
         // so it needs no record of its own, whoever asks (dashboard, CLI,
         // MCP, API). Only when Cloudflare says nothing else answers for
-        // the name. When Cloudflare can't be asked, the switch below finds
-        // out.
-        if under && row.is_none() && !d["tunnel"].is_string() {
-            use tunnel::TunnelApi;
-            let found = super::Http::new(&a.token)?.records_kept(&zone.id, &host).await;
-            if found.is_ok_and(|f| left_to_wildcard(under, false, false, &host, &f)) {
-                set_tunnel(tx, service_id, domain_id, Some(pyo_proto::TUNNEL_ON)).await?;
-                sync(tx, service_id, wake).await?;
-                log_activity(
-                    tx,
-                    &team_id,
-                    &user.name,
-                    "domain.tunnel",
-                    "info",
-                    &format!("{host} goes through the Cloudflare Tunnel, under its default domain"),
-                    json!({ "kind": "service", "id": service_id, "label": host }),
-                    json!({ "serviceId": service_id }),
-                )
-                .await?;
-                return Ok(json!({ "ok": true, "status": "active" }));
-            }
+        // the name.
+        if wildcard_case && found.as_ref().is_some_and(|f| left_to_wildcard(under, false, false, &host, f)) {
+            set_tunnel(tx, service_id, domain_id, Some(pyo_proto::TUNNEL_ON)).await?;
+            sync(tx, service_id, wake).await?;
+            log_activity(
+                tx,
+                &team_id,
+                &user.name,
+                "domain.tunnel",
+                "info",
+                &format!("{host} goes through the Cloudflare Tunnel, under its default domain"),
+                json!({ "kind": "service", "id": service_id, "label": host }),
+                json!({ "serviceId": service_id }),
+            )
+            .await?;
+            return Ok(json!({ "ok": true, "status": "active" }));
         }
         // Already only through the tunnel: it stays gated while its own
         // record is made, and the agent has nothing new to apply.
         if begin_switch(tx, &team_id, service_id, domain_id, &host, &zone, replace, d["tunnel"].as_str()).await? {
             sync(tx, service_id, wake).await?;
+        }
+        // Records Pyo didn't make on the name: said now, as the loop would
+        // after the agent's routes and its next pass, so nobody waits a
+        // minute to be asked. Both paths answer meanwhile.
+        if !replace && let Some(found) = &found {
+            let mark = super::marker(&super::install_id(tx).await?);
+            let theirs: Vec<super::Record> = super::tunnel_loop::not_ours(found, &host, &mark)
+                .into_iter()
+                .map(|k| k.record())
+                .collect();
+            if !theirs.is_empty() {
+                sqlx::query(
+                    "UPDATE pyo.dns_records SET status = 'conflict', existing = $3, error = NULL, updated_at = now()
+                      WHERE service_id = $1 AND domain_id = $2",
+                )
+                .bind(service_id)
+                .bind(domain_id)
+                .bind(json!(theirs))
+                .execute(&mut **tx)
+                .await?;
+                return Ok(json!({ "ok": true, "status": "conflict", "existing": theirs }));
+            }
         }
         log_activity(
             tx,

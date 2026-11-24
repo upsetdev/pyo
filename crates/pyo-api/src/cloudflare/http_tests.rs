@@ -555,3 +555,82 @@ fn proof_records_pyo_made_are_cleaned_up() {
         q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
     });
 }
+
+/// Against a throwaway Postgres and the fake Cloudflare: moving a name to
+/// the tunnel when a record Pyo didn't make has it says "conflict" in the
+/// answer, at once, not after the agent's routes and the loop's next pass.
+#[test]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+fn a_record_in_the_way_is_a_conflict_at_once() {
+    run_big(async {
+        let _one = FAKE_API.lock().await;
+        let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
+        // SAFETY: set while FAKE_API is held; nothing else here reads them yet.
+        unsafe {
+            std::env::set_var("PYO_DEV_CLOUDFLARE_API", &cf.base);
+            if std::env::var("PYO_SECRET_KEY").is_err() {
+                std::env::set_var("PYO_SECRET_KEY", "11".repeat(32));
+            }
+        }
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(db.clone(), crate::vault::Provider::from_env()));
+        let s = crate::rls::tests::state(db.clone());
+        let run = crate::ids::random_string(8).to_lowercase();
+        let id = |p: &str| format!("{p}_cfl{run}");
+        let (team, cluster, project, svc, usr) = (id("team"), id("cl"), id("prj"), id("svc"), id("usr"));
+        let host = format!("shop-{run}.example.com");
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'ada', 'x')").bind(&usr).bind(format!("ada{run}@example.com")).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'admin', 'active')")
+            .bind(id("mem")).bind(&team).bind(&usr).bind(format!("ada{run}@example.com")).execute(&db).await.unwrap();
+        let user = crate::auth::User { id: usr.clone(), name: "ada".into(), email: format!("ada{run}@example.com"), timezone: "UTC".into(), is_admin: false, must_set_up: false, key: None };
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at, traffic) VALUES ($1, $2, $1, $1, 'connected', now(), 'tunnel')")
+            .bind(&cluster).bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)").bind(&project).bind(&team).execute(&db).await.unwrap();
+        let spec = json!({ "name": "web", "replicas": 1, "source": { "type": "image", "image": "nginx:1.27" },
+            "ports": [{ "name": "http", "containerPort": 80, "protocol": "HTTP", "exposure": "http" }],
+            "domains": [{ "id": "dom_1", "hostname": host, "portName": "http", "status": "active", "tls": "issued", "tlsMode": "auto" }] });
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', $5, 'stopped')")
+            .bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
+        let zones = json!([{ "id": ZONE, "name": "example.com", "canEdit": true, "accountId": ACCOUNT, "accountName": "Acme", "tunnel": { "ready": true } }]);
+        let sealed = crate::vault::get().seal_credential(&team, TOKEN).await.unwrap();
+        q("INSERT INTO pyo.cloudflare_accounts (team_id, token_sealed, zones) VALUES ($1, $2, $3)").bind(&team).bind(&sealed).bind(&zones).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.cluster_tunnels (cluster_id, team_id, account_id, tunnel_name) VALUES ($1, $2, $3, 'pending')")
+            .bind(&cluster).bind(&team).bind(ACCOUNT).execute(&db).await.unwrap();
+        // Someone's record on the name.
+        cf.put_record(ZONE, json!({ "id": format!("hand{run}"), "type": "A", "name": host, "content": "198.51.100.9", "proxied": false, "ttl": 300 }));
+        let row = |db: sqlx::PgPool, svc: String| async move {
+            sqlx::query_as::<_, (String, Value)>("SELECT status, existing FROM pyo.dns_records WHERE service_id = $1")
+                .bind(svc)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        };
+
+        let r = crate::ops::run_json(&s, &user, json!({ "op": "setDomainTunnel", "serviceId": svc, "domainId": "dom_1", "on": true })).await.unwrap();
+        assert_eq!(r["status"], "conflict", "{r}");
+        assert_eq!(r["existing"][0]["content"], "198.51.100.9");
+        let (status, existing) = row(db.clone(), svc.clone()).await;
+        assert_eq!((status.as_str(), existing[0]["content"].as_str()), ("conflict", Some("198.51.100.9")));
+        assert_eq!(domain(&db, &svc).await["tunnel"], "switching", "both paths answer while it waits for a yes");
+        assert_eq!(cf.records(ZONE).len(), 1, "someone's record, untouched");
+        // Sent again, the same: asked again at once.
+        let r = crate::ops::run_json(&s, &user, json!({ "op": "setDomainTunnel", "serviceId": svc, "domainId": "dom_1", "on": true })).await.unwrap();
+        assert_eq!(r["status"], "conflict");
+        // With replace, the loop goes on with the switch.
+        let r = crate::ops::run_json(&s, &user, json!({ "op": "setDomainTunnel", "serviceId": svc, "domainId": "dom_1", "on": true, "replace": true })).await.unwrap();
+        assert_eq!(r["status"], "switching");
+        assert_eq!(row(db.clone(), svc.clone()).await.0, "switching");
+        // A name nothing else has: switching, as before.
+        cf.state.lock().unwrap().records.clear();
+        q("DELETE FROM pyo.dns_records WHERE service_id = $1").bind(&svc).execute(&db).await.unwrap();
+        let r = crate::ops::run_json(&s, &user, json!({ "op": "setDomainTunnel", "serviceId": svc, "domainId": "dom_1", "on": true })).await.unwrap();
+        assert_eq!(r["status"], "switching");
+        q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
+        q("DELETE FROM pyo.users WHERE id = $1").bind(&usr).execute(&db).await.unwrap();
+    });
+}

@@ -460,16 +460,7 @@ pub async fn domain_tunnel(
     // A record already in the way, from an earlier try.
     let rec = &d["dnsRecord"];
     if on && !replace && rec["status"] == json!("conflict") {
-        println!("{}", ui::yellow(&format!("Cloudflare has a record for {host}:")));
-        for r in rec["existing"].as_array().into_iter().flatten() {
-            println!(
-                "  {}  {}  {}",
-                r["type"].as_str().unwrap_or(""),
-                r["name"].as_str().unwrap_or(""),
-                r["content"].as_str().unwrap_or("")
-            );
-        }
-        bail!("Run again with --replace to replace it. Pyo keeps a copy.");
+        return Err(in_the_way(&host, &rec["existing"]));
     }
     let v = api
         .op(
@@ -482,9 +473,25 @@ pub async fn domain_tunnel(
         "active" => ui::ok(&format!("{host} goes through the tunnel")),
         "switching" => ui::ok(&format!("Switching {host} to the tunnel. If Cloudflare has a record Pyo didn't make, pyo cloudflare tunnel status shows it.")),
         "reverting" => ui::ok(&format!("Switching {host} back")),
+        // Pyo asked Cloudflare: a record it didn't make has the name.
+        "conflict" => return Err(in_the_way(&host, &v["existing"])),
         _ => ui::ok(&format!("{host} doesn't go through the tunnel")),
     }
     Ok(())
+}
+
+/// Records Pyo didn't make on `host`, listed, and what to do about them.
+fn in_the_way(host: &str, existing: &Value) -> anyhow::Error {
+    println!("{}", ui::yellow(&format!("Cloudflare has a record for {host}:")));
+    for r in existing.as_array().into_iter().flatten() {
+        println!(
+            "  {}  {}  {}",
+            r["type"].as_str().unwrap_or(""),
+            r["name"].as_str().unwrap_or(""),
+            r["content"].as_str().unwrap_or("")
+        );
+    }
+    anyhow::anyhow!("Run again with --replace to replace it. Pyo keeps a copy.")
 }
 
 #[cfg(test)]
