@@ -4,8 +4,33 @@ Internal design for path routes, redirects and header rules in Pyo Gateway.
 Written 2026-11-25 against `dev` at 0f3e0f8. File references are to that
 commit.
 
-Status: **design only**. The estimate is over the 6 day budget, and a few
-choices need a decision first (see "Decisions needed"). Nothing is built.
+Status: **being built** for 0.51.1. Redirects and header rules first,
+then path routes.
+
+## Decisions (2026-11-25)
+
+The user decided:
+
+1. **Scope B.** Everything now: path routes with per-path WAF and
+   analytics, redirects and header rules.
+2. **Model:** a primary entry per hostname plus path entries.
+3. **Redirects always keep the query string.**
+4. **Release:** all of it goes in 0.51.1.
+5. **Naming:** the sections are **Routes** (which path goes to which
+   service), **Redirects** and **Headers**. Where one word is needed for
+   all three (a tab, a heading), **Rules**. Never "Page Rules".
+6. **UI:** set in the service's Domains section, where each domain row gets
+   an optional path. The team's **Domains** page has a row per hostname
+   (where it goes, tunnel or public, status). Opening one shows its routes
+   (read only, linking to each service), redirects and headers, with DNS,
+   certificate and tunnel.
+
+One change from the first draft, made while building: redirects are a list
+on a domain entry (`redirects: [{path, toHost, toPath, status, keepPath}]`)
+instead of entries of their own. A path redirect belongs to the hostname,
+so it sits on the entry that holds the hostname, and needs none of the
+sharing rules. A domain that only redirects (the `www` case) is an entry
+without a port whose list has a redirect of `/`.
 
 ## Contents
 
