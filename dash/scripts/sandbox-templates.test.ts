@@ -25,10 +25,10 @@ import {
 } from "../src/lib/pyo/sandboxTemplates";
 
 test("the new template form notices a swapped name and image", () => {
-  expect(fieldsSwapped("frans/sandbox-base", "sandbox-base")).toBe(true);
+  expect(fieldsSwapped("other/sandbox-base", "sandbox-base")).toBe(true);
   expect(fieldsSwapped("node:22", "node")).toBe(true);
   expect(fieldsSwapped("node-22", "node:22")).toBe(false);
-  expect(fieldsSwapped("base", "frans/sandbox-base")).toBe(false);
+  expect(fieldsSwapped("base", "other/sandbox-base")).toBe(false);
   expect(fieldsSwapped("node:22", "")).toBe(false);
 });
 

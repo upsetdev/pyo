@@ -302,7 +302,7 @@ async fn plain_http_only_to_private_networks_where_allowed() {
     // A LAN or tailnet address, plain or not, where the installation allows it.
     for url in [
         "http://192.168.1.20:8080/hook",
-        "https://100.101.102.103/hook",
+        "https://100.64.0.103/hook",
     ] {
         assert_eq!(check_target(&webhook(url), true).await, Ok(()), "{url}");
         assert!(check_target(&webhook(url), false).await.is_err(), "{url}");

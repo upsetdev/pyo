@@ -268,7 +268,7 @@ export function rate(bps: number | null | undefined) {
   return `${(bps / 1e9).toFixed(1)} GB/s`;
 }
 
-/** "Ports 80 and 443 are in use on misc-ten-sin4": a server where another
+/** "Ports 80 and 443 are in use on server-1": a server where another
  * program has the gateway's ports (pyo-proto `GatewayPortsTaken::text`). */
 export function portsTakenText(t: { server: string; ports: number[] }) {
   const ps = t.ports.map(String);

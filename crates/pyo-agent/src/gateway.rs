@@ -2432,7 +2432,7 @@ mod tests {
             node(
                 "a",
                 json!({}),
-                json!({ "pyo/tailnet-ipv4": "100.101.67.2" }),
+                json!({ "pyo/tailnet-ipv4": "100.64.0.2" }),
                 json!([{ "type": "InternalIP", "address": "10.3.8.13" }]),
             ),
             // Joined over Tailscale, not located yet.
@@ -2465,12 +2465,12 @@ mod tests {
             node(
                 "f",
                 json!({}),
-                json!({ "pyo/tailnet-ipv4": "100.101.67.2" }),
+                json!({ "pyo/tailnet-ipv4": "100.64.0.2" }),
                 json!([]),
             ),
         ];
         let ips = tailnet_web_ips(&nodes);
-        assert_eq!(ips, ["100.101.67.2", "100.64.0.7"]);
+        assert_eq!(ips, ["100.64.0.2", "100.64.0.7"]);
         let current = |ips: &[&str]| {
             Some((
                 ips.iter().map(|s| s.to_string()).collect(),
@@ -2483,12 +2483,12 @@ mod tests {
             Some(Some(ips.clone()))
         );
         assert_eq!(
-            tailnet_web_change(true, ips.clone(), current(&["100.101.67.2", "100.64.0.7"])),
+            tailnet_web_change(true, ips.clone(), current(&["100.64.0.2", "100.64.0.7"])),
             None
         );
         // A server more, or its ports changed by hand: written again.
         assert_eq!(
-            tailnet_web_change(true, ips.clone(), current(&["100.101.67.2"])),
+            tailnet_web_change(true, ips.clone(), current(&["100.64.0.2"])),
             Some(Some(ips.clone()))
         );
         assert_eq!(
@@ -2501,11 +2501,11 @@ mod tests {
         );
         // Public IP, or no Tailscale address at all: removed (if there).
         assert_eq!(
-            tailnet_web_change(false, vec![], current(&["100.101.67.2"])),
+            tailnet_web_change(false, vec![], current(&["100.64.0.2"])),
             Some(None)
         );
         assert_eq!(
-            tailnet_web_change(true, vec![], current(&["100.101.67.2"])),
+            tailnet_web_change(true, vec![], current(&["100.64.0.2"])),
             Some(None)
         );
         assert_eq!(tailnet_web_change(false, vec![], None), None);

@@ -816,12 +816,12 @@ mod tests {
         );
         // Its names on Pyo's own machine, which a server can't reach.
         assert_eq!(
-            in_pyos_registry("127.0.0.1:5005/frans/sandbox-base:1", &doors),
-            path("frans/sandbox-base:1")
+            in_pyos_registry("127.0.0.1:5005/other/sandbox-base:1", &doors),
+            path("other/sandbox-base:1")
         );
         assert_eq!(
-            in_pyos_registry("localhost:5005/frans/sandbox-base", &doors),
-            path("frans/sandbox-base")
+            in_pyos_registry("localhost:5005/other/sandbox-base", &doors),
+            path("other/sandbox-base")
         );
         assert_eq!(in_pyos_registry("localhost:8000/x", &doors), None);
         assert_eq!(in_pyos_registry("python:3.13", &doors), None);
@@ -837,19 +837,19 @@ mod tests {
         let p = plain_build_error;
         assert_eq!(
             p(
-                "TLS with asus.blue-pancake.ts.net: received corrupt message of type InvalidContentType"
+                "TLS with laptop.tail1234.ts.net: received corrupt message of type InvalidContentType"
             ),
             "That address isn't a registry."
         );
         assert_eq!(
             p(
-                "The registry answered 403 Forbidden for the manifest of frans/sandbox-base: Not one of this team's images."
+                "The registry answered 403 Forbidden for the manifest of other/sandbox-base: Not one of this team's images."
             ),
             "Push this image to Pyo's registry with your team's login first."
         );
         assert_eq!(
             p(
-                "The registry answered 403 Forbidden for the manifest of frans/sandbox-base: Not one of this team's images. Push it as acme/<project>/<name> first."
+                "The registry answered 403 Forbidden for the manifest of other/sandbox-base: Not one of this team's images. Push it as acme/<project>/<name> first."
             ),
             "Not one of this team's images. Push it as acme/<project>/<name> first."
         );

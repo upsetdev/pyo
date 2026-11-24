@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(c["ingressController"], "envoy");
         assert_eq!(c["loadBalancerIPs"], json!(["1.2.3.4"]));
         assert_eq!(c["certManager"], true);
-        let taken = json!([{ "server": "misc-ten-sin4", "ports": [80, 443], "by": "Traefik" }]);
+        let taken = json!([{ "server": "server-1", "ports": [80, 443], "by": "Traefik" }]);
         let c = capabilities(&json!({ "gatewayPortsTaken": taken }));
         assert_eq!(c["gatewayPortsTaken"], taken);
     }

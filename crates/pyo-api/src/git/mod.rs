@@ -1507,7 +1507,7 @@ mod tests {
             ("https://pyo.example.com", Reach::Public),
             ("https://203.0.113.9:8443", Reach::Public),
             ("https://pyo.tail1234.ts.net", Reach::Tailnet),
-            ("https://100.101.102.103", Reach::Tailnet),
+            ("https://100.64.0.103", Reach::Tailnet),
             ("http://192.168.1.20:8000", Reach::Private),
             ("http://localhost:8000", Reach::Private),
             ("https://pyo.lan", Reach::Private),

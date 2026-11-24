@@ -1812,10 +1812,10 @@ mod tests {
 
     #[test]
     fn status_reads_where_the_gateways_ports_are_taken() {
-        let c = json!({ "capabilities": { "gatewayPortsTaken": [{ "server": "misc-ten-sin4", "ports": [80, 443], "by": "Traefik" }] } });
+        let c = json!({ "capabilities": { "gatewayPortsTaken": [{ "server": "server-1", "ports": [80, 443], "by": "Traefik" }] } });
         let t = ports_taken(&c);
         assert_eq!(t.len(), 1);
-        assert_eq!(t[0].text(), "Ports 80 and 443 are in use on misc-ten-sin4");
+        assert_eq!(t[0].text(), "Ports 80 and 443 are in use on server-1");
         // An older Pyo's cluster says nothing of it.
         assert!(ports_taken(&json!({ "capabilities": {} })).is_empty());
         assert!(ports_taken(&json!({})).is_empty());

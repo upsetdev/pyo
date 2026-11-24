@@ -129,7 +129,7 @@ export function isPrivateHost(host: string) {
     )
   )
     return true;
-  // "app.100.101.67.2.nip.io", or the dashed "app.100-101-67-2.nip.io".
+  // "app.100.64.0.2.nip.io", or the dashed "app.100-64-0-2.nip.io".
   const m = /\.(\d+)[.-](\d+)[.-]\d+[.-]\d+\.(nip|sslip)\.io$/.exec(h);
   if (!m) return false;
   const [a, b] = [Number(m[1]), Number(m[2])];

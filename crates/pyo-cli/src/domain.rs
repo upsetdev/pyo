@@ -37,7 +37,7 @@ fn private_host(host: &str) -> bool {
     else {
         return false;
     };
-    // "app.100.101.67.2", or the dashed "app.100-101-67-2".
+    // "app.100.64.0.2", or the dashed "app.100-64-0-2".
     let labels: Vec<&str> = rest.rsplit('.').take(4).collect();
     let ip = if labels.len() == 4 && labels.iter().all(|l| l.parse::<u8>().is_ok()) {
         format!("{}.{}.{}.{}", labels[3], labels[2], labels[1], labels[0])
@@ -589,10 +589,10 @@ mod tests {
         assert!(private_host("app-ns.100-64-0-10.nip.io"));
         assert!(private_host("app-ns.192-168-1-2.nip.io"));
         assert!(!private_host("app-ns.95-216-1-2.nip.io"));
-        assert!(private_host("app-ns.100.101.67.2.nip.io"));
+        assert!(private_host("app-ns.100.64.0.2.nip.io"));
         assert!(private_host("app-ns.10.3.8.13.nip.io"));
-        assert!(!private_host("app-ns.129.226.158.31.nip.io"));
-        assert!(valid_hostname("app-ns.129.226.158.31.nip.io"));
+        assert!(!private_host("app-ns.203.0.113.31.nip.io"));
+        assert!(valid_hostname("app-ns.203.0.113.31.nip.io"));
         assert!(!private_host("app.example.com"));
     }
 

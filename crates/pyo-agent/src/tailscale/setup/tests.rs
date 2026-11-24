@@ -53,7 +53,7 @@ const DEFAULT_POLICY: &str = r#"// Example/default ACLs for unrestricted connect
 	//  	{
 	//  		"src": "alice@example.com",
 	//  		"accept": ["tag:example"],
-	//  		"deny": ["100.101.102.103:443"],
+	//  		"deny": ["100.64.0.103:443"],
 	//  	},
 	// ],
 }

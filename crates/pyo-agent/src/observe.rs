@@ -1399,15 +1399,15 @@ mod tests {
 
     #[test]
     fn the_gateway_sees_where_its_ports_are_taken() {
-        let gw = |server: &str, pending: bool| svclb("pyo-gateway", "envoy-pyo-695a31a2", server, &[80, 443], pending);
-        let traefik = svclb("kube-system", "traefik", "misc-ten-sin4", &[80, 443], false);
-        // As on misc-ten-sin4: k3s's Traefik has 80 and 443 there.
+        let gw = |server: &str, pending: bool| svclb("pyo-gateway", "envoy-pyo-0a1b2c3d", server, &[80, 443], pending);
+        let traefik = svclb("kube-system", "traefik", "server-1", &[80, 443], false);
+        // As on server-1: k3s's Traefik has 80 and 443 there.
         let live = [traefik.clone(), gw("other", false)];
         assert_eq!(
-            ports_taken(&[gw("misc-ten-sin4", true)], &live),
-            vec![pyo_proto::GatewayPortsTaken { server: "misc-ten-sin4".into(), ports: vec![80, 443], by: "Traefik".into() }]
+            ports_taken(&[gw("server-1", true)], &live),
+            vec![pyo_proto::GatewayPortsTaken { server: "server-1".into(), ports: vec![80, 443], by: "Traefik".into() }]
         );
-        assert_eq!(ports_taken(&[gw("misc-ten-sin4", true)], &live)[0].text(), "Ports 80 and 443 are in use on misc-ten-sin4");
+        assert_eq!(ports_taken(&[gw("server-1", true)], &live)[0].text(), "Ports 80 and 443 are in use on server-1");
         // ingress-nginx on host ports, 443 only.
         let nginx: Pod = serde_json::from_value(serde_json::json!({
             "metadata": { "name": "ingress-nginx-controller-5c9", "namespace": "ingress-nginx" },
@@ -1425,20 +1425,20 @@ mod tests {
         );
         // Pending for another reason (a server not ready), someone else's
         // pending pod, or nothing pending: nothing to say.
-        let mut other_reason = gw("misc-ten-sin4", true);
+        let mut other_reason = gw("server-1", true);
         other_reason.status.as_mut().unwrap().conditions.as_mut().unwrap()[0].message =
             Some("0/1 nodes are available: 1 node(s) had untolerated taint {node.kubernetes.io/not-ready: }.".into());
         assert!(ports_taken(&[other_reason], &live).is_empty());
-        assert!(ports_taken(&[svclb("shop", "lb", "misc-ten-sin4", &[80], true)], &live).is_empty());
+        assert!(ports_taken(&[svclb("shop", "lb", "server-1", &[80], true)], &live).is_empty());
         assert!(ports_taken(&[], &live).is_empty());
         // Two of the gateway's Services on one server: once, ports merged.
-        let tcp = svclb("pyo-gateway", "envoy-pyo-tcp", "misc-ten-sin4", &[5432], true);
+        let tcp = svclb("pyo-gateway", "envoy-pyo-tcp", "server-1", &[5432], true);
         let pg: Pod = serde_json::from_value(serde_json::json!({
             "metadata": { "name": "postgres-0", "namespace": "db" },
-            "spec": { "nodeName": "misc-ten-sin4", "hostNetwork": true, "containers": [{ "name": "pg", "ports": [{ "containerPort": 5432, "hostPort": 5432 }] }] }
+            "spec": { "nodeName": "server-1", "hostNetwork": true, "containers": [{ "name": "pg", "ports": [{ "containerPort": 5432, "hostPort": 5432 }] }] }
         }))
         .unwrap();
-        let both = ports_taken(&[gw("misc-ten-sin4", true), tcp], &[traefik, pg]);
+        let both = ports_taken(&[gw("server-1", true), tcp], &[traefik, pg]);
         assert_eq!(both.len(), 1);
         assert_eq!(both[0].ports, vec![80, 443, 5432]);
         assert_eq!(both[0].by, "Traefik");

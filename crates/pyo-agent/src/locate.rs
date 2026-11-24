@@ -269,7 +269,7 @@ async fn locate(client: &Client, node: &str, url: Option<&str>) -> anyhow::Resul
     result
 }
 
-/// "a 3: tailscale0 inet 100.101.67.2/32 …\nv4 ip=203.0.113.7\nv4 loc=DE\n
+/// "a 3: tailscale0 inet 100.64.0.2/32 …\nv4 ip=203.0.113.7\nv4 loc=DE\n
 /// v6 ip=2001:db8::7\n…": each family's public address (if it answered),
 /// the country and the Tailscale address. An answer that is just the
 /// address ("v4 203.0.113.7") counts too. None when nothing was found.
@@ -421,9 +421,9 @@ mod tests {
         assert_eq!(parse_trace("nope"), None);
         // A family whose request failed (no IPv6 here): just the other.
         assert_eq!(
-            parse_trace("v4 ip=129.226.158.31\nv4 loc=SG\n"),
+            parse_trace("v4 ip=203.0.113.31\nv4 loc=SG\n"),
             Some(Found {
-                v4: Some("129.226.158.31".into()),
+                v4: Some("203.0.113.31".into()),
                 v6: None,
                 country: "SG".into(),
                 tailnet: None,
@@ -433,9 +433,9 @@ mod tests {
         );
         // A lookup answering with just the address.
         assert_eq!(
-            parse_trace("v4 129.226.158.31\n"),
+            parse_trace("v4 203.0.113.31\n"),
             Some(Found {
-                v4: Some("129.226.158.31".into()),
+                v4: Some("203.0.113.31".into()),
                 v6: None,
                 country: String::new(),
                 tailnet: None,
@@ -444,7 +444,7 @@ mod tests {
             })
         );
         // An IPv4 answer over IPv6 (no IPv6 route, a proxy) isn't an IPv6 address.
-        assert_eq!(parse_trace("v6 129.226.158.31\n"), None);
+        assert_eq!(parse_trace("v6 203.0.113.31\n"), None);
     }
 
     /// What the pod printed on a cloud server behind NAT, on a tailnet.
@@ -452,25 +452,25 @@ mod tests {
     fn tailnet_and_public_addresses() {
         let out = "a 1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever\n\
                    a 2: eth0    inet 10.3.8.13/22 brd 10.3.11.255 scope global eth0\\       valid_lft forever\n\
-                   a 3: tailscale0    inet 100.101.67.2/32 scope global tailscale0\\       valid_lft forever\n\
+                   a 3: tailscale0    inet 100.64.0.2/32 scope global tailscale0\\       valid_lft forever\n\
                    a 5: cni0    inet 10.42.0.1/24 brd 10.42.0.255 scope global cni0\n\
-                   v4 ip=129.226.158.31\nv4 loc=SG\n";
+                   v4 ip=203.0.113.31\nv4 loc=SG\n";
         assert_eq!(
             parse_trace(out),
             Some(Found {
-                v4: Some("129.226.158.31".into()),
+                v4: Some("203.0.113.31".into()),
                 v6: None,
                 country: "SG".into(),
-                tailnet: Some("100.101.67.2".into()),
+                tailnet: Some("100.64.0.2".into()),
                 nic_public: vec![],
                 cloud: None
             })
         );
         // No internet (or the lookup off): the Tailscale address alone.
-        let tailnet_only = "a 3: tailscale0    inet 100.101.67.2/32 scope global tailscale0\n";
+        let tailnet_only = "a 3: tailscale0    inet 100.64.0.2/32 scope global tailscale0\n";
         assert_eq!(
             parse_trace(tailnet_only).unwrap().tailnet.as_deref(),
-            Some("100.101.67.2")
+            Some("100.64.0.2")
         );
         // A server with its public address on its own network card.
         let direct = "a 1: lo    inet 127.0.0.1/8 scope host lo\n\
@@ -535,7 +535,7 @@ mod tests {
         for junk in [
             "c <html>",
             "c 10.3.8.13",
-            "c 100.101.67.2",
+            "c 100.64.0.2",
             "c 999.1.2.3",
             "c 250.1.2.3",
         ] {
