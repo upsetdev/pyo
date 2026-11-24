@@ -1,13 +1,11 @@
 import { CaretRightIcon } from "@phosphor-icons/react";
-import { Link } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { AppLink } from "~/components/ui/AppLink";
 import { Dot, type Tone } from "~/components/ui/Badge";
 import { timeAgo } from "~/lib/pyo/format";
-import type { PyoState } from "~/lib/pyo/store";
+import { deploymentPath, type PyoState } from "~/lib/pyo/store";
 import type { ServiceStatus, Deployment } from "~/lib/pyo/types";
 import type { Issue } from "./widgets";
-import { currentSlug } from "~/lib/pyo/paths";
 
 // Vercel-style lists shared by the overview and project pages: one bordered
 // card, divided rows, a status dot plus a word.
@@ -105,9 +103,8 @@ export function DeploymentList({
         const ref = d.source.type === "git" ? d.source.branch : d.revisionLabel;
         return (
           <li key={d.id}>
-            <Link
-              to="/$team/deployments/$deploymentId"
-              params={{ team: currentSlug(), deploymentId: d.id }}
+            <AppLink
+              href={deploymentPath(d.id)}
               className="flex items-start gap-3 px-4 py-3 transition-colors hover:bg-accent/40"
             >
               <Dot tone={status.tone} className="mt-[7px] h-2 w-2" />
@@ -129,7 +126,7 @@ export function DeploymentList({
               <span className="shrink-0 pt-px text-[12px] text-muted-foreground">
                 {timeAgo(d.createdAt)}
               </span>
-            </Link>
+            </AppLink>
           </li>
         );
       })}

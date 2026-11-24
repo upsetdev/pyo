@@ -1,3 +1,4 @@
+import { AppLink } from "~/components/ui/AppLink";
 import { Layered } from "~/components/ui/Layered";
 import {
   ArrowsClockwiseIcon,
@@ -26,6 +27,7 @@ import { duration, timeAgo } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import { isActive } from "~/lib/pyo/simulation";
 import {
+  deploymentPath,
   api,
   buildersIn,
   usePyo,
@@ -236,9 +238,8 @@ function BuilderPage() {
                   : null;
               return (
                 <li key={d.id}>
-                  <Link
-                    to="/$team/deployments/$deploymentId"
-                    params={{ team: currentSlug(), deploymentId: d.id }}
+                  <AppLink
+                    href={deploymentPath(d.id)}
                     className="flex items-center gap-3 px-4 py-3 text-[13px] transition-colors hover:bg-accent/40"
                   >
                     <span className="w-28 shrink-0">
@@ -267,7 +268,7 @@ function BuilderPage() {
                     <span className="w-20 shrink-0 text-right text-[12.5px] tabular-nums text-muted-foreground">
                       {timeAgo(d.createdAt)}
                     </span>
-                  </Link>
+                  </AppLink>
                 </li>
               );
             })}
@@ -378,7 +379,7 @@ function BuilderStatus({
     body = "A build is running here now.";
     action = buildingId ? (
       <ButtonLink
-        href={`/deployments/${buildingId}`}
+        href={deploymentPath(buildingId)}
         size="xs"
         variant="secondary"
       >

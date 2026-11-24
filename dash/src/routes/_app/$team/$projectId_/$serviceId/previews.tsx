@@ -26,6 +26,7 @@ import { Table, Td, Th, Tr } from "~/components/ui/Table";
 import { type DraftEnv } from "~/lib/pyo/draft";
 import { ENV_KEY } from "~/lib/pyo/format";
 import {
+  deploymentPath,
   api,
   previewsOf,
   serviceIdOf,
@@ -236,7 +237,7 @@ function PreviewList({
                       ) : null}
                       {p.deploymentId ? (
                         <ButtonLink
-                          href={`/deployments/${p.deploymentId}`}
+                          href={deploymentPath(p.deploymentId)}
                           size="xs"
                           variant="ghost"
                         >

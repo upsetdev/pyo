@@ -137,6 +137,7 @@ import { Route as AppTeamPostgresDatabaseIdExtensionsRouteImport } from './route
 import { Route as AppTeamPostgresDatabaseIdLogsRouteImport } from './routes/_app/$team/postgres/$databaseId/logs'
 import { Route as AppTeamPostgresDatabaseIdSettingsRouteImport } from './routes/_app/$team/postgres/$databaseId/settings'
 import { Route as AppTeamSandboxesServersNewRouteImport } from './routes/_app/$team/sandboxes/servers/new'
+import { Route as AppTeamProjectIdServiceIdDeploymentsDeploymentIdRouteImport } from './routes/_app/$team/$projectId_/$serviceId/deployments_.$deploymentId'
 import { Route as AppTeamClustersClusterIdServersNewRouteImport } from './routes/_app/$team/clusters/$clusterId_/servers/new'
 
 const AppRoute = AppRouteImport.update({
@@ -835,6 +836,12 @@ const AppTeamSandboxesServersNewRoute =
     path: '/sandboxes/servers/new',
     getParentRoute: () => AppTeamRoute,
   } as any)
+const AppTeamProjectIdServiceIdDeploymentsDeploymentIdRoute =
+  AppTeamProjectIdServiceIdDeploymentsDeploymentIdRouteImport.update({
+    id: '/deployments_/$deploymentId',
+    path: '/deployments/$deploymentId',
+    getParentRoute: () => AppTeamProjectIdServiceIdRoute,
+  } as any)
 const AppTeamClustersClusterIdServersNewRoute =
   AppTeamClustersClusterIdServersNewRouteImport.update({
     id: '/clusters/$clusterId_/servers/new',
@@ -968,6 +975,7 @@ export interface FileRoutesByFullPath {
   '/$team/kv/$databaseId/': typeof AppTeamKvDatabaseIdIndexRoute
   '/$team/mysql/$databaseId/': typeof AppTeamMysqlDatabaseIdIndexRoute
   '/$team/postgres/$databaseId/': typeof AppTeamPostgresDatabaseIdIndexRoute
+  '/$team/$projectId/$serviceId/deployments/$deploymentId': typeof AppTeamProjectIdServiceIdDeploymentsDeploymentIdRoute
   '/$team/clusters/$clusterId/servers/new': typeof AppTeamClustersClusterIdServersNewRoute
 }
 export interface FileRoutesByTo {
@@ -1086,6 +1094,7 @@ export interface FileRoutesByTo {
   '/$team/kv/$databaseId': typeof AppTeamKvDatabaseIdIndexRoute
   '/$team/mysql/$databaseId': typeof AppTeamMysqlDatabaseIdIndexRoute
   '/$team/postgres/$databaseId': typeof AppTeamPostgresDatabaseIdIndexRoute
+  '/$team/$projectId/$serviceId/deployments/$deploymentId': typeof AppTeamProjectIdServiceIdDeploymentsDeploymentIdRoute
   '/$team/clusters/$clusterId/servers/new': typeof AppTeamClustersClusterIdServersNewRoute
 }
 export interface FileRoutesById {
@@ -1218,6 +1227,7 @@ export interface FileRoutesById {
   '/_app/$team/kv/$databaseId/': typeof AppTeamKvDatabaseIdIndexRoute
   '/_app/$team/mysql/$databaseId/': typeof AppTeamMysqlDatabaseIdIndexRoute
   '/_app/$team/postgres/$databaseId/': typeof AppTeamPostgresDatabaseIdIndexRoute
+  '/_app/$team/$projectId_/$serviceId/deployments_/$deploymentId': typeof AppTeamProjectIdServiceIdDeploymentsDeploymentIdRoute
   '/_app/$team/clusters/$clusterId_/servers/new': typeof AppTeamClustersClusterIdServersNewRoute
 }
 export interface FileRouteTypes {
@@ -1348,6 +1358,7 @@ export interface FileRouteTypes {
     | '/$team/kv/$databaseId/'
     | '/$team/mysql/$databaseId/'
     | '/$team/postgres/$databaseId/'
+    | '/$team/$projectId/$serviceId/deployments/$deploymentId'
     | '/$team/clusters/$clusterId/servers/new'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -1466,6 +1477,7 @@ export interface FileRouteTypes {
     | '/$team/kv/$databaseId'
     | '/$team/mysql/$databaseId'
     | '/$team/postgres/$databaseId'
+    | '/$team/$projectId/$serviceId/deployments/$deploymentId'
     | '/$team/clusters/$clusterId/servers/new'
   id:
     | '__root__'
@@ -1597,6 +1609,7 @@ export interface FileRouteTypes {
     | '/_app/$team/kv/$databaseId/'
     | '/_app/$team/mysql/$databaseId/'
     | '/_app/$team/postgres/$databaseId/'
+    | '/_app/$team/$projectId_/$serviceId/deployments_/$deploymentId'
     | '/_app/$team/clusters/$clusterId_/servers/new'
   fileRoutesById: FileRoutesById
 }
@@ -2503,6 +2516,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamSandboxesServersNewRouteImport
       parentRoute: typeof AppTeamRoute
     }
+    '/_app/$team/$projectId_/$serviceId/deployments_/$deploymentId': {
+      id: '/_app/$team/$projectId_/$serviceId/deployments_/$deploymentId'
+      path: '/deployments/$deploymentId'
+      fullPath: '/$team/$projectId/$serviceId/deployments/$deploymentId'
+      preLoaderRoute: typeof AppTeamProjectIdServiceIdDeploymentsDeploymentIdRouteImport
+      parentRoute: typeof AppTeamProjectIdServiceIdRoute
+    }
     '/_app/$team/clusters/$clusterId_/servers/new': {
       id: '/_app/$team/clusters/$clusterId_/servers/new'
       path: '/clusters/$clusterId/servers/new'
@@ -2588,6 +2608,7 @@ interface AppTeamProjectIdServiceIdRouteChildren {
   AppTeamProjectIdServiceIdTerminalRoute: typeof AppTeamProjectIdServiceIdTerminalRoute
   AppTeamProjectIdServiceIdVolumesRoute: typeof AppTeamProjectIdServiceIdVolumesRoute
   AppTeamProjectIdServiceIdIndexRoute: typeof AppTeamProjectIdServiceIdIndexRoute
+  AppTeamProjectIdServiceIdDeploymentsDeploymentIdRoute: typeof AppTeamProjectIdServiceIdDeploymentsDeploymentIdRoute
 }
 
 const AppTeamProjectIdServiceIdRouteChildren: AppTeamProjectIdServiceIdRouteChildren =
@@ -2615,6 +2636,8 @@ const AppTeamProjectIdServiceIdRouteChildren: AppTeamProjectIdServiceIdRouteChil
     AppTeamProjectIdServiceIdVolumesRoute:
       AppTeamProjectIdServiceIdVolumesRoute,
     AppTeamProjectIdServiceIdIndexRoute: AppTeamProjectIdServiceIdIndexRoute,
+    AppTeamProjectIdServiceIdDeploymentsDeploymentIdRoute:
+      AppTeamProjectIdServiceIdDeploymentsDeploymentIdRoute,
   }
 
 const AppTeamProjectIdServiceIdRouteWithChildren =

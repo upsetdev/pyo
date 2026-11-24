@@ -1,3 +1,4 @@
+import { AppLink } from "~/components/ui/AppLink";
 import { Segmented } from "~/components/ui/Field";
 import {
   FolderIcon,
@@ -12,6 +13,7 @@ import { fetchAnalytics } from "~/lib/pyo/backend";
 import { useQuery } from "~/lib/pyo/query";
 import { isActive, STAGE_LABEL } from "~/lib/pyo/simulation";
 import {
+  deploymentPath,
   activeDeploymentFor,
   deploymentsWhere,
   usePyo,
@@ -649,14 +651,13 @@ export function DeployingStatus({ serviceId }: { serviceId: string }) {
   if (!d) return <ServiceStatusBadge status="deploying" />;
   return (
     <Tooltip content={STAGE_LABEL[d.status]} focusable={false}>
-      <Link
-        to="/$team/deployments/$deploymentId"
-        params={{ team: currentSlug(), deploymentId: d.id }}
+      <AppLink
+        href={deploymentPath(d.id)}
         aria-label={`Deploying: ${STAGE_LABEL[d.status]}`}
         className="relative z-10 inline-flex rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
       >
         <ServiceStatusBadge status="deploying" />
-      </Link>
+      </AppLink>
     </Tooltip>
   );
 }

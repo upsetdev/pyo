@@ -7,6 +7,7 @@ import {
   addDatabaseBackup as addDatabaseBackupRequest,
 } from "./backend";
 import { draftServerTags, NEW_PROJECT, type DeployDraft } from "./draft";
+import { deploymentHref } from "./deploymentHome";
 import { newId, slugify } from "./format";
 import { isActive, revisionFor } from "./simulation";
 import { generateValue, getTemplate, templateArgs, templateRecord, templateRefs } from "./templates";
@@ -685,6 +686,10 @@ export const servicePath = (id: string, tab = "", s: PyoState = getState()) => {
   const { projectId, serviceId } = serviceParams(id, s);
   return `/${projectId}/${serviceId}${tab ? `/${tab}` : ""}`;
 };
+
+/** A deployment's page, team-relative: under its service's Deployments tab, or /deployments/<id> once the service is gone. */
+export const deploymentPath = (id: string, s: PyoState = getState()) =>
+  deploymentHref(s, id);
 
 /** Each engine's section of the dashboard: /postgres, /mysql, /kv. */
 export const DB_SECTION = { postgres: "postgres", mysql: "mysql", valkey: "kv" } as const;
