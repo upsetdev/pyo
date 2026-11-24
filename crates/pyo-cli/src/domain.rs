@@ -110,6 +110,10 @@ fn state(d: &Value, deployed: bool) -> (Tone, String) {
                 (Tone::Busy, "Setting up on Tailscale…".into())
             };
         }
+        // Through the Cloudflare Tunnel: Pyo says when Cloudflare points it there.
+        if d["tunnel"].is_string() {
+            return (Tone::Busy, "Moving to the tunnel…".into());
+        }
         if is_free(host) {
             return (Tone::Busy, "Checking DNS…".into());
         }
@@ -622,6 +626,10 @@ mod tests {
             state(&tn("pending_dns"), true).1,
             "Setting up on Tailscale…"
         );
+        // A tunnel domain doesn't wait for the cluster's DNS.
+        let mut through = d("pending_dns", "pending", "auto");
+        through["tunnel"] = json!("switching");
+        assert_eq!(state(&through, true).1, "Moving to the tunnel…");
         let failed = state(&tn("error"), true);
         assert!(failed.0 == Tone::Broken && failed.1 == "Tailscale failed");
         assert_eq!(state(&tn("active"), true).1, "Issuing certificate…");

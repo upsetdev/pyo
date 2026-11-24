@@ -324,6 +324,16 @@ fn domains_take_the_tunnel_certificate_and_give_it_back() {
 }
 
 #[test]
+fn a_domain_live_through_the_tunnel_drops_its_old_error() {
+    // The direct DNS check's error from before the switch.
+    let mut d = json!({ "id": "dom_1", "hostname": "blog.example.com", "status": "pending_dns", "tunnel": "on",
+                        "error": "blog.example.com doesn't resolve yet. Point it at the cluster's ingress." });
+    live(&mut d);
+    assert_eq!(d["status"], "active");
+    assert!(d.get("error").is_none(), "{d}");
+}
+
+#[test]
 fn free_names_are_one_label_under_the_default_domain() {
     assert!(under_default("web-shop.example.com", "example.com"));
     assert!(under_default("Web-Shop.Example.com", "example.com"));

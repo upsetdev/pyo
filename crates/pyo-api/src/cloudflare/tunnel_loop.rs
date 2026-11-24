@@ -810,7 +810,7 @@ async fn switch_one<C: Cloudflare + TunnelApi>(
             // Only through the tunnel now: the gate goes on, plain HTTP goes.
             set_domain(&mut tx, &w.service_id, &w.domain_id, |d| {
                 d["tunnel"] = json!(pyo_proto::TUNNEL_ON);
-                d["status"] = json!("active");
+                live(d);
             })
             .await?;
             let wake = crate::routes::changed(&mut tx, &w.service_id, true).await?;
@@ -934,6 +934,15 @@ async fn revert_one<C: Cloudflare + TunnelApi>(
 }
 
 /// A domain leaves the tunnel: no `tunnel`, and the certificate it had.
+/// A domain the tunnel answers for now: active, and an error from before
+/// (the direct DNS check's, say) no longer applies.
+pub(crate) fn live(d: &mut Value) {
+    d["status"] = json!("active");
+    if let Some(o) = d.as_object_mut() {
+        o.remove("error");
+    }
+}
+
 pub(crate) fn leave_tunnel(d: &mut Value) {
     if let Some(o) = d.as_object_mut() {
         o.remove("tunnel");
@@ -1027,8 +1036,8 @@ async fn free_domains_follow(
                 routes = true;
                 changed = true;
             }
-            if d["tunnel"] == json!(pyo_proto::TUNNEL_ON) && wildcard && d["status"] != json!("active") {
-                d["status"] = json!("active");
+            if d["tunnel"] == json!(pyo_proto::TUNNEL_ON) && wildcard && (d["status"] != json!("active") || d.get("error").is_some()) {
+                live(d);
                 changed = true;
             }
         }
