@@ -21,8 +21,6 @@ export type Team = {
   /** Default target for new deploys in this team. */
   defaultClusterId?: ID;
   preferences: {
-    requireDeployApproval: boolean;
-    autoDeployOnPush: boolean;
     retainDeployments: number;
     /** What each of the team's clusters keeps of its requests. */
     requestLogs?: { maxMb: number; maxDays: number };

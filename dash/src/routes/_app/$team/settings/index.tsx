@@ -52,7 +52,6 @@ function TeamSettings({ ws }: { ws: Team }) {
   const [defaultClusterId, setDefaultCluster] = useState(
     ws.defaultClusterId ?? "",
   );
-  const [prefs, setPrefs] = useState(ws.preferences);
   const [deleting, setDeleting] = useState(false);
   const hosted = useHosted();
   // Only owners and admins save. Everyone else sees the values.
@@ -63,8 +62,7 @@ function TeamSettings({ ws }: { ws: Team }) {
   const dirty =
     name !== ws.name ||
     description !== ws.description ||
-    defaultClusterId !== (ws.defaultClusterId ?? "") ||
-    JSON.stringify(prefs) !== JSON.stringify(ws.preferences);
+    defaultClusterId !== (ws.defaultClusterId ?? "");
   const nameError = !name.trim() ? "Name is required." : "";
 
   return (
@@ -106,27 +104,6 @@ function TeamSettings({ ws }: { ws: Team }) {
             )}
           </Field>
         </div>
-      </Panel>
-      <Panel
-        title="Deployment preferences"
-        description={admin ? undefined : READ_ONLY}
-      >
-        <div className="space-y-4 p-4">
-          <Switch
-            checked={prefs.autoDeployOnPush}
-            disabled={!admin}
-            onChange={(v) => setPrefs({ ...prefs, autoDeployOnPush: v })}
-            label="Deploy on Git push"
-            description="Needs a Git provider."
-          />
-          <Switch
-            checked={prefs.requireDeployApproval}
-            disabled={!admin}
-            onChange={(v) => setPrefs({ ...prefs, requireDeployApproval: v })}
-            label="Require approval for production deploys"
-            description="An admin approves each rollout."
-          />
-        </div>
         {admin ? (
           <div className="flex justify-end border-t border-border px-4 py-3">
             <Button
@@ -137,7 +114,6 @@ function TeamSettings({ ws }: { ws: Team }) {
                   name: name.trim(),
                   description,
                   defaultClusterId: defaultClusterId || undefined,
-                  preferences: prefs,
                 });
                 if (!res) return;
                 toast({ title: "Team saved" });
