@@ -197,10 +197,15 @@ fn unset_images(get: impl Fn(&str) -> Option<String>) -> Vec<&'static str> {
 
 /// A release build refuses to start on a local build's images: clusters
 /// would be handed images they can't pull. Debug builds (`cargo run`) keep
-/// the defaults.
-fn check_images(debug: bool, get: impl Fn(&str) -> Option<String>) -> anyhow::Result<()> {
+/// the defaults, unless Pyo is multi-tenant (Pyo Cloud): its clusters are
+/// never a laptop's, so it needs real images however it was built.
+fn check_images(
+    debug: bool,
+    multi_tenant: bool,
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<()> {
     let unset = unset_images(get);
-    if debug || unset.is_empty() {
+    if (debug && !multi_tenant) || unset.is_empty() {
         return Ok(());
     }
     anyhow::bail!(
@@ -228,7 +233,9 @@ pub struct Extensions {
     /// Turns on what keeps them apart: each team has only its own sandbox
     /// servers, backups go to the teams' own buckets, webhooks can't reach
     /// private addresses, and admins must use two-factor. Pyo's own
-    /// updates are left to whoever runs it. Off (self-hosted) by default.
+    /// updates are left to whoever runs it. It won't start without every
+    /// image it hands to clusters set, even in a debug build. Off
+    /// (self-hosted) by default.
     pub multi_tenant: bool,
     /// Checks before a team adds a server or deploys.
     pub entitlements: Option<Arc<dyn Entitlements>>,
@@ -488,7 +495,9 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "pyo_api=info,cloud_api=info,tower_http=info".into()),
         )
         .init();
-    check_images(cfg!(debug_assertions), |k| std::env::var(k).ok())?;
+    check_images(cfg!(debug_assertions), hosted(), |k| {
+        std::env::var(k).ok()
+    })?;
 
     let database_url =
         std::env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
@@ -948,11 +957,11 @@ mod tests {
             matches!(k, "PYO_AGENT_IMAGE" | "PYO_BUILDER_IMAGE")
                 .then(|| "ghcr.io/upsetdev/pyo/x:1@sha256:00".to_owned())
         };
-        assert!(check_images(false, all).is_ok());
-        assert!(check_images(true, |_| None).is_ok());
-        assert!(check_images(true, some).is_ok());
+        assert!(check_images(false, false, all).is_ok());
+        assert!(check_images(true, false, |_| None).is_ok());
+        assert!(check_images(true, false, some).is_ok());
 
-        let err = check_images(false, some).unwrap_err().to_string();
+        let err = check_images(false, false, some).unwrap_err().to_string();
         for v in pyo_proto::rbac::PINNED_ENV {
             assert!(err.contains(v), "{v} missing from: {err}");
         }
@@ -962,6 +971,27 @@ mod tests {
         let blank = |k: &str| Some(if k == "PYO_GEOIP_IMAGE" { " " } else { "img" }.to_owned());
         assert_eq!(unset_images(blank), ["PYO_GEOIP_IMAGE"]);
         assert_eq!(unset_images(|_| None).len(), 12);
+    }
+
+    /// A multi-tenant Pyo (Pyo Cloud) never starts on a local build's
+    /// images, debug build or not, and says which variables are missing on
+    /// one line.
+    #[test]
+    fn multi_tenant_needs_every_image_in_any_build() {
+        let all = |_: &str| Some("ghcr.io/upsetdev/pyo/x:1@sha256:00".to_owned());
+        let some = |k: &str| (k != "PYO_STATIC_IMAGE").then(|| "img".to_owned());
+        for debug in [true, false] {
+            assert!(check_images(debug, true, all).is_ok());
+            let err = check_images(debug, true, some).unwrap_err().to_string();
+            assert!(err.contains("Not set: PYO_STATIC_IMAGE."), "{err}");
+            assert!(!err.contains('\n') && !err.contains(';'), "{err}");
+            let err = check_images(debug, true, |_| None).unwrap_err().to_string();
+            for v in image_vars() {
+                assert!(err.contains(v), "{v} missing from: {err}");
+            }
+        }
+        // Self-hosted, a debug build (laptop dev) keeps the local images.
+        assert!(check_images(true, false, |_| None).is_ok());
     }
 
     /// The install sets every image the check asks for, on each of Pyo's
