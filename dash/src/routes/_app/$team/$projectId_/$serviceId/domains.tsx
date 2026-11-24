@@ -27,6 +27,7 @@ import { Tooltip } from "~/components/ui/Tooltip";
 import { DomainKind, DomainMark, DomainStatus } from "~/components/pyo/DomainState";
 import { AppLink } from "~/components/ui/AppLink";
 import { AddDomainDialog } from "~/components/pyo/AddDomainDialog";
+import { isPath, sharedWith } from "~/lib/pyo/hosts";
 import {
   HeadersDialog,
   onlyRedirects,
@@ -136,8 +137,22 @@ function Domains({ app }: { app: Application }) {
                     <span className="inline-flex min-w-0 items-center gap-1.5">
                       <span className="truncate font-mono text-[13px]">
                         {d.hostname}
+                        {d.path && d.path !== "/" ? (
+                          <span className="text-muted-foreground">{d.path}</span>
+                        ) : null}
                       </span>
                     </span>
+                    {sharedWith(s, app, d).length ? (
+                      <Tooltip
+                        content={`Also on ${sharedWith(s, app, d)
+                          .map((x) => x.name)
+                          .join(", ")}`}
+                      >
+                        <span className="rounded border border-border px-1.5 text-[11px] text-muted-foreground">
+                          Shared
+                        </span>
+                      </Tooltip>
+                    ) : null}
                     <DomainKind hostname={d.hostname} />
                     <Tooltip content={tlsLine(d, s.certificates)}>
                       <TlsBadge status={d.tls} />
@@ -157,6 +172,7 @@ function Domains({ app }: { app: Application }) {
                         <>
                           <ArrowRightIcon size={12} aria-label="routes to" />
                           <span className="font-mono">{d.portName}</span>
+                          {d.stripPrefix ? <span>without {d.path}</span> : null}
                         </>
                       )}
                     </span>
@@ -171,8 +187,10 @@ function Domains({ app }: { app: Application }) {
                     <span className="ml-auto flex gap-1">
                       <Menu
                         label={`Settings of ${d.hostname}`}
-                        items={tailnet ? [
-                          ...rules(d),
+                        items={tailnet || isPath(d) ? [
+                          // A path follows the entry that holds its
+                          // hostname: only its own header rules here.
+                          ...(isPath(d) ? rules(d).slice(1) : rules(d)),
                           { type: "separator" as const },
                           copyIdItem("Domain", d.id),
                           { type: "separator" as const },
@@ -296,8 +314,9 @@ function Domains({ app }: { app: Application }) {
                       {d.tlsError}
                     </p>
                   ) : null}
-                  <DnsRecordLine app={app} d={d} />
-                  {d.status !== "active" &&
+                  {isPath(d) ? null : <DnsRecordLine app={app} d={d} />}
+                  {!isPath(d) &&
+                  d.status !== "active" &&
                   !isFreeDomain(d.hostname) &&
                   !tunnelMode &&
                   !onTunnel(d) &&

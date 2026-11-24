@@ -24,10 +24,33 @@ export function hostsOf(s: PyoState): Host[] {
     }
   return [...by.entries()]
     .map(([hostname, entries]) => {
-      const sorted = [...entries].sort((x, y) => x.d.createdAt - y.d.createdAt);
-      return { hostname, entries: sorted, primary: sorted[0] };
+      const sorted = [...entries].sort(
+        (x, y) =>
+          (x.d.path || "/").localeCompare(y.d.path || "/") ||
+          x.d.createdAt - y.d.createdAt,
+      );
+      const primary = sorted.find((e) => e.d.primary !== false) ?? sorted[0];
+      return { hostname, entries: sorted, primary };
     })
     .sort((x, y) => x.hostname.localeCompare(y.hostname));
+}
+
+/** "example.com/api", or the hostname alone for "/". */
+export function shownPath(d: Domain): string {
+  return d.path && d.path !== "/" ? `${d.hostname}${d.path}` : d.hostname;
+}
+
+/** A path of a hostname another entry holds. */
+export function isPath(d: Domain): boolean {
+  return d.primary === false;
+}
+
+/** The team's other services on this domain's hostname. */
+export function sharedWith(s: PyoState, a: Application, d: Domain): Application[] {
+  const h = d.hostname.toLowerCase();
+  return servicesIn(s).filter(
+    (x) => x.id !== a.id && x.domains.some((y) => y.hostname.toLowerCase() === h),
+  );
 }
 
 /** One hostname of the team, or undefined. */

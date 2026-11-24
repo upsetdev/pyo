@@ -1015,6 +1015,15 @@ export type Domain = {
   redirects?: DomainRedirect[];
   /** Its header rules in Pyo Gateway. */
   headers?: HeaderRules;
+  /** Only this path of the hostname ("/" when absent). The longest path wins. */
+  path?: string;
+  /** Send /api/x to the service as /x. */
+  stripPrefix?: boolean;
+  /**
+   * false: a path of a hostname another entry holds (its DNS record,
+   * certificate, tunnel and redirects). Absent: it holds its hostname.
+   */
+  primary?: boolean;
 };
 
 /** Requests under `path` go to another hostname or path. The query is kept. */

@@ -2058,6 +2058,9 @@ export const api = {
       certificateId?: string;
       /** Only redirects (no port). */
       redirects?: DomainRedirect[];
+      /** Only this path of the hostname. */
+      path?: string;
+      stripPrefix?: boolean;
     },
     /** Create its DNS record in Cloudflare once it's saved, or switch it to the tunnel. */
     cloudflare?: { proxied: boolean } | { tunnel: true },

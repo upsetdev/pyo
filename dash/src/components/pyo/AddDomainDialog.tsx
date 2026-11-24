@@ -88,6 +88,9 @@ export function AddDomainDialog({
   /** Only redirect it (www to the apex): where to, else "". */
   const [redirectOnly, setRedirectOnly] = useState(false);
   const [redirectTo, setRedirectTo] = useState("");
+  /** Only this path of the hostname, as typed. */
+  const [pathInput, setPathInput] = useState("");
+  const [strip, setStrip] = useState(false);
   const [certificateId, setCertificateId] = useState("");
   const [uploading, setUploading] = useState(false);
   const [cf, setCf] = useState<CloudflareChoice>({
@@ -148,7 +151,16 @@ export function AddDomainDialog({
       (!hostname || covers(c, hostname)),
   );
   const cert = matching.find((c) => c.id === certificateId) ?? matching[0];
-  const taken = hostnameUsed(s, hostname);
+  const path = (() => {
+    const p = pathInput.trim().replace(/\/+$/, "");
+    return p === "" ? "/" : p;
+  })();
+  const pathOk = path === "/" || /^\/[A-Za-z0-9\-._~!$&'()+,;=:@%/]*$/.test(path) && !path.includes("//");
+  const routes = !(k === "own" && redirectOnly);
+  const taken = hostnameUsed(s, hostname, routes ? path : undefined);
+  // Another of the team's services has the hostname: this is a path of it,
+  // with that one's DNS record and certificate.
+  const held = path !== "/" && hostnameUsed(s, hostname);
   const error = missing
     ? "Pick another option."
     : k !== "own" && !LABEL.test(name)
@@ -157,11 +169,13 @@ export function AddDomainDialog({
         ? "Enter a valid hostname, e.g. app.example.com."
         : !app
           ? "Pick the service it routes to."
-          : taken
-            ? `${hostname} is already used.`
+          : routes && !pathOk
+            ? "Enter a path like /api."
+            : taken
+            ? `${path === "/" || !routes ? hostname : hostname + path} is already used.`
             : k === "own" && redirectOnly && !parseTarget(redirectTo).toHost
               ? "Enter where it redirects to, e.g. example.com."
-            : k !== "tailnet" && tlsMode === "custom" && !cert
+            : k !== "tailnet" && !held && tlsMode === "custom" && !cert
               ? `Upload a certificate valid for ${hostname}, or pick another HTTPS option.`
               : "";
   const close = () => {
@@ -174,6 +188,8 @@ export function AddDomainDialog({
     setCf({ create: true, proxied: false });
     setRedirectOnly(false);
     setRedirectTo("");
+    setPathInput("");
+    setStrip(false);
     onClose();
   };
   return (
@@ -204,13 +220,16 @@ export function AddDomainDialog({
                 hostname,
                 portName: only ? "" : port,
                 redirects,
+                ...(routes && path !== "/"
+                  ? { path, ...(strip ? { stripPrefix: true } : {}) }
+                  : {}),
                 redirectHttps: tlsMode !== "off" && redirect,
                 tlsMode,
                 ...(tlsMode === "custom" && cert
                   ? { certificateId: cert.id }
                   : {}),
               },
-          k !== "own"
+          k !== "own" || held
             ? undefined
             : viaTunnel
               ? { tunnel: true }
@@ -218,13 +237,14 @@ export function AddDomainDialog({
                 ? { proxied: cf.proxied }
                 : undefined,
         );
+        const added = routes && path !== "/" ? hostname + path : hostname;
         toast({
           title: fixed
-            ? `Added ${hostname}`
-            : `Added ${hostname} to ${app.name}`,
+            ? `Added ${added}`
+            : `Added ${added} to ${app.name}`,
           description: !app.currentDeploymentId
             ? "Live after the first deploy."
-            : k !== "own" || viaTunnel || (inCloudflare && cf.create)
+            : k !== "own" || held || viaTunnel || (inCloudflare && cf.create)
               ? undefined
               : "Create the DNS record, then check DNS.",
         });
@@ -390,7 +410,36 @@ export function AddDomainDialog({
                 )
               }
             </Field>
-            {k === "own" ? (
+            {routes ? (
+              <Field
+                label="Path"
+                optional
+                hint={
+                  held
+                    ? `${hostname} keeps its DNS record and certificate.`
+                    : "Only this path. Other services can serve the rest."
+                }
+              >
+                {(p) => (
+                  <Input
+                    {...p}
+                    mono
+                    value={pathInput}
+                    onChange={(e) => setPathInput(e.target.value.trim())}
+                    placeholder="/"
+                  />
+                )}
+              </Field>
+            ) : null}
+            {routes && path !== "/" ? (
+              <Switch
+                checked={strip}
+                onChange={setStrip}
+                label="Strip prefix"
+                description={`Send ${path}/x as /x.`}
+              />
+            ) : null}
+            {k === "own" && !held ? (
               <CloudflareFields
                 hostname={HOSTNAME.test(hostname) ? hostname : ""}
                 clusterId={app?.clusterId}
@@ -440,7 +489,7 @@ export function AddDomainDialog({
                 )}
               </Field>
             ) : null}
-            {k === "tailnet" ? null : (
+            {k === "tailnet" || held ? null : (
               <Field
                 label="HTTPS"
                 hint={TLS_MODES.find((m) => m.value === tlsMode)?.hint}
@@ -460,7 +509,7 @@ export function AddDomainDialog({
                 )}
               </Field>
             )}
-            {k !== "tailnet" && tlsMode === "custom" ? (
+            {k !== "tailnet" && !held && tlsMode === "custom" ? (
               <Field
                 label={
                   <>
@@ -502,7 +551,7 @@ export function AddDomainDialog({
                 )}
               </Field>
             ) : null}
-            {k !== "tailnet" && tlsMode !== "off" ? (
+            {k !== "tailnet" && !held && tlsMode !== "off" ? (
               <Switch
                 checked={redirect}
                 onChange={setRedirect}

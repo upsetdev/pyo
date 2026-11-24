@@ -31,8 +31,15 @@ export function clusterTailnet(s: PyoState, clusterId: string) {
 const hostOf = (x: string) => x.replace(/^[a-z]+:\/\//i, "").split(/[/:]/)[0].toLowerCase();
 
 /** A service has the hostname already, or Pyo's own dashboard or registry on the tailnet. */
-export function hostnameUsed(s: PyoState, hostname: string) {
+export function hostnameUsed(s: PyoState, hostname: string, path?: string) {
   const h = hostname.toLowerCase();
+  // A path of a hostname the team has: only that path counts.
+  if (path && path !== "/")
+    return s.services.some((a) =>
+      a.domains.some(
+        (d) => d.hostname.toLowerCase() === h && (d.path || "/") === path,
+      ),
+    );
   return (
     s.services.some((a) => a.domains.some((d) => d.hostname.toLowerCase() === h)) ||
     [s.tailscale?.dashboard, s.tailscale?.registry].some((x) => !!x && hostOf(x) === h)
