@@ -272,6 +272,26 @@ async fn cluster_of(api: &Api, team: Option<&str>, cluster: Option<&str>) -> Res
     Ok((id, name))
 }
 
+#[derive(Debug, PartialEq)]
+enum Connector {
+    Ready,
+    Starting,
+    /// Why it can't run, in plain words.
+    Problem(&'static str),
+}
+
+/// A connector as the dashboard says it. Its reason in plain words, from
+/// an older Pyo that passed on Kubernetes' word too.
+fn connector_state(c: &Value) -> Connector {
+    if c["ready"] == json!(true) {
+        return Connector::Ready;
+    }
+    match c["reason"].as_str().and_then(pyo_proto::pod_problem) {
+        Some(r) => Connector::Problem(r),
+        None => Connector::Starting,
+    }
+}
+
 /// A tunnel's state in one line, as the dashboard says it.
 pub fn tunnel_line(t: &Value) -> String {
     let n = t["connectors"].as_array().map_or(0, Vec::len);
@@ -321,10 +341,10 @@ pub async fn tunnel_status(api: &Api, team: Option<&str>, cluster: Option<&str>)
     }
     for c in t["connectors"].as_array().into_iter().flatten() {
         let server = c["server"].as_str().unwrap_or("?");
-        match c["reason"].as_str() {
-            Some(r) if c["ready"] != json!(true) => println!("  {server}  {}", ui::red(r)),
-            _ if c["ready"] == json!(true) => println!("  {server}  {}", ui::green("ready")),
-            _ => println!("  {server}  {}", ui::dim("starting")),
+        match connector_state(c) {
+            Connector::Ready => println!("  {server}  {}", ui::green("ready")),
+            Connector::Starting => println!("  {server}  {}", ui::dim("starting")),
+            Connector::Problem(r) => println!("  {server}  {}", ui::red(r)),
         }
     }
     if let Some(d) = t["defaultDomain"].as_str() {
@@ -498,6 +518,26 @@ mod tests {
         assert!(plain(json!({ "ready": false, "missing": ["a", "b"] })).contains("DNS only"));
         // Stored before the tunnel: DNS only.
         assert!(plain(Value::Null).contains("DNS only"));
+    }
+
+    #[test]
+    fn connectors_in_plain_words() {
+        assert_eq!(connector_state(&json!({ "ready": true })), Connector::Ready);
+        assert_eq!(connector_state(&json!({ "ready": false })), Connector::Starting);
+        assert_eq!(connector_state(&json!({ "ready": false, "reason": "ContainerCreating" })), Connector::Starting);
+        // An older Pyo passed on Kubernetes' word: never shown as it is.
+        assert_eq!(
+            connector_state(&json!({ "ready": false, "reason": "ImagePullBackOff" })),
+            Connector::Problem(pyo_proto::CANT_DOWNLOAD_IMAGE)
+        );
+        assert_eq!(
+            connector_state(&json!({ "ready": false, "reason": "OOMKilled" })),
+            Connector::Problem(pyo_proto::NOT_RUNNING_YET)
+        );
+        assert_eq!(
+            connector_state(&json!({ "ready": false, "reason": pyo_proto::SETTING_MISSING })),
+            Connector::Problem(pyo_proto::SETTING_MISSING)
+        );
     }
 
     #[test]

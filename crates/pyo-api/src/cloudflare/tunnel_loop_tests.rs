@@ -275,6 +275,30 @@ fn a_new_tunnel_shows_starting_until_cloudflare_is_read() {
 }
 
 #[test]
+fn connectors_say_why_in_plain_words() {
+    let pods = json!([
+        // An older agent sent Kubernetes' own word.
+        { "server": "server-1", "ready": false, "reason": "ImagePullBackOff" },
+        { "server": "server-2", "ready": false, "reason": pyo_proto::KEEPS_STOPPING },
+        { "server": "server-3", "ready": false, "reason": "OOMKilled" },
+        { "server": "server-4", "ready": false, "reason": "ContainerCreating" },
+        { "server": "server-5", "ready": true },
+    ]);
+    let row = json!({ "state": "ready", "error": null, "cfStatus": {}, "agentStatus": { "pods": pods } });
+    let reasons: Vec<Value> = shown(&row)["connectors"].as_array().unwrap().iter().map(|c| c["reason"].clone()).collect();
+    assert_eq!(
+        reasons,
+        [
+            json!(pyo_proto::CANT_DOWNLOAD_IMAGE),
+            json!(pyo_proto::KEEPS_STOPPING),
+            json!(pyo_proto::NOT_RUNNING_YET),
+            Value::Null,
+            Value::Null,
+        ]
+    );
+}
+
+#[test]
 fn domains_take_the_tunnel_certificate_and_give_it_back() {
     // Switching with a certificate already issued: kept, both paths answer.
     let mut d = json!({ "id": "dom_1", "hostname": "blog.example.com", "tlsMode": "auto", "tls": "issued", "tunnel": "switching" });

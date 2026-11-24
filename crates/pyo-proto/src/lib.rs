@@ -182,7 +182,8 @@ pub struct TunnelPod {
     pub ready: bool,
     #[serde(default)]
     pub restarts: i32,
-    /// Why it isn't ready ("ImagePullBackOff"), at most 200 characters.
+    /// Why it isn't ready, in plain words ([`pod_problem`]). Older agents
+    /// sent Kubernetes' word ("ImagePullBackOff").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -905,6 +906,39 @@ pub const KEEPS_STOPPING: &str = "Keeps stopping right after it starts.";
 /// ([`WorkloadReport::message`], and the gateway's
 /// [`Capabilities::gateway_error`]): never Kubernetes' own words.
 pub const WORKLOAD_PROBLEMS: [&str; 3] = [CANT_DOWNLOAD_IMAGE, SETTING_MISSING, KEEPS_STOPPING];
+/// A pod that isn't running for a reason none of [`WORKLOAD_PROBLEMS`]
+/// covers.
+pub const NOT_RUNNING_YET: &str = "Isn't running yet.";
+
+/// One of [`WORKLOAD_PROBLEMS`] for a container's waiting or terminated
+/// reason from Kubernetes ("ImagePullBackOff"). None for any other.
+pub fn workload_problem(reason: &str) -> Option<&'static str> {
+    match reason {
+        "ErrImagePull" | "ImagePullBackOff" | "InvalidImageName" | "ErrImageNeverPull"
+        | "RegistryUnavailable" | "ImageInspectError" => Some(CANT_DOWNLOAD_IMAGE),
+        "CreateContainerConfigError" | "CreateContainerError" => Some(SETTING_MISSING),
+        "CrashLoopBackOff" => Some(KEEPS_STOPPING),
+        _ => None,
+    }
+}
+
+/// Why a pod isn't ready, in plain words, from its container's reason:
+/// one of [`WORKLOAD_PROBLEMS`], else [`NOT_RUNNING_YET`]. None while it's
+/// still being made. Plain words already are kept, so an older agent's
+/// Kubernetes word and a newer one's text come out the same.
+pub fn pod_problem(reason: &str) -> Option<&'static str> {
+    match reason.trim() {
+        "" | "ContainerCreating" | "PodInitializing" => None,
+        r => Some(
+            WORKLOAD_PROBLEMS
+                .into_iter()
+                .chain([NOT_RUNNING_YET])
+                .find(|p| *p == r)
+                .or_else(|| workload_problem(r))
+                .unwrap_or(NOT_RUNNING_YET),
+        ),
+    }
+}
 
 /// Runtime state of a service Pyo manages, keyed by the service id label.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3598,5 +3632,38 @@ mod usage_compat {
         // And absent fields aren't written back out (an older API sees what it knew).
         let out = serde_json::to_value(&hb.servers[0].usage).unwrap();
         assert_eq!(out, serde_json::json!({ "cpu": 1.0, "memoryGi": 2.0 }));
+    }
+}
+
+#[cfg(test)]
+mod pod_problems {
+    use super::*;
+
+    #[test]
+    fn kubernetes_words_become_plain_ones() {
+        for r in ["ErrImagePull", "ImagePullBackOff", "InvalidImageName"] {
+            assert_eq!(pod_problem(r), Some(CANT_DOWNLOAD_IMAGE), "{r}");
+        }
+        for r in ["CreateContainerConfigError", "CreateContainerError"] {
+            assert_eq!(pod_problem(r), Some(SETTING_MISSING), "{r}");
+        }
+        assert_eq!(pod_problem("CrashLoopBackOff"), Some(KEEPS_STOPPING));
+        // Anything else gets a plain line, never the word itself.
+        for r in ["OOMKilled", "Error", "RunContainerError", "Something new"] {
+            assert_eq!(pod_problem(r), Some(NOT_RUNNING_YET), "{r}");
+        }
+        // Still being made: nothing to say.
+        for r in ["", " ", "ContainerCreating", "PodInitializing"] {
+            assert_eq!(pod_problem(r), None, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn plain_words_stay_as_they_are() {
+        for p in WORKLOAD_PROBLEMS.into_iter().chain([NOT_RUNNING_YET]) {
+            assert_eq!(pod_problem(p), Some(p));
+        }
+        assert_eq!(workload_problem(NOT_RUNNING_YET), None);
+        assert_eq!(workload_problem("ContainerCreating"), None);
     }
 }
