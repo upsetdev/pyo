@@ -1,3 +1,4 @@
+import { AppLink } from "~/components/ui/AppLink";
 import { ObservabilityOff, useObservabilityOn } from "~/components/pyo/ObservabilityOff";
 import { Segmented } from "~/components/ui/Field";
 import { fetchPreview } from "~/lib/pyo/backend";
@@ -42,9 +43,10 @@ import {
   rate,
   timeAgo,
 } from "~/lib/pyo/format";
-import { currentSlug } from "~/lib/pyo/paths";
+import { teamPath, currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
+  deploymentPath,
   activeDeploymentFor,
   desiredReplicas,
   usePyo,
@@ -129,10 +131,7 @@ function AppOverview() {
         to={rollbackTo}
         onClose={() => setRollbackTo(null)}
         onDone={(id) =>
-          void navigate({
-            to: "/$team/deployments/$deploymentId",
-            params: { team: currentSlug(), deploymentId: id },
-          })
+          void navigate({ href: teamPath(currentSlug(), deploymentPath(id)) })
         }
       />
     </div>
@@ -187,13 +186,12 @@ function Production({
             <div className="space-y-5">
               <Field label="Deployment">
                 {current ? (
-                  <Link
-                    to="/$team/deployments/$deploymentId"
-                    params={{ team, deploymentId: current.id }}
+                  <AppLink
+                    href={deploymentPath(current.id)}
                     className="font-mono text-[12.5px] hover:text-primary"
                   >
                     {current.id}
-                  </Link>
+                  </AppLink>
                 ) : (
                   <span className="text-muted-foreground">None yet</span>
                 )}
@@ -361,7 +359,7 @@ function Production({
             {current ? (
               <div className="flex flex-wrap gap-2 sm:col-span-2">
                 <ButtonLink
-                  href={`/deployments/${current.id}`}
+                  href={deploymentPath(current.id)}
                   size="xs"
                   variant="secondary"
                 >
@@ -873,7 +871,7 @@ function Attention({
       icon: <CircleNotchIcon size={15} className="animate-spin" />,
       title: "Deploying…",
       body: "Rolling out. The current version serves until it's ready.",
-      action: link(`/deployments/${activeId}`, "See logs"),
+      action: link(deploymentPath(activeId), "See logs"),
     };
   else if (
     latest &&
@@ -889,7 +887,7 @@ function Attention({
           ? "Last deploy failed, so it was rolled back"
           : "Deploy cancelled and rolled back",
       body: `${latest.failure?.message ? `${latest.failure.message} ` : ""}The previous version is serving, so nothing changed for your users.`,
-      action: link(`/deployments/${latest.id}`, "See what happened"),
+      action: link(deploymentPath(latest.id), "See what happened"),
     };
   else if (!current && app.status !== "running")
     note = {

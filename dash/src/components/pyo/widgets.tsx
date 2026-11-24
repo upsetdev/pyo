@@ -5,13 +5,13 @@ import {
   WarningCircleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { Link } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { Dot, DeploymentStatusBadge } from "~/components/ui/Badge";
 import { EmptyState, Meter, Panel } from "~/components/ui/Panel";
 import { duration, pct } from "~/lib/pyo/format";
 import { isActive } from "~/lib/pyo/simulation";
 import {
+  deploymentPath,
   clusterRef,
   getState,
   serverRef,
@@ -23,7 +23,6 @@ import {
 } from "~/lib/pyo/store";
 import type { ActivityEvent, Deployment } from "~/lib/pyo/types";
 import { SourceSummary, TimeAgo } from "./common";
-import { currentSlug } from "~/lib/pyo/paths";
 
 // Panels reused across overview, project, service and cluster pages.
 
@@ -47,9 +46,8 @@ export function DeploymentRows({
         const elapsed = (d.finishedAt ?? Date.now()) - d.createdAt;
         return (
           <li key={d.id}>
-            <Link
-              to="/$team/deployments/$deploymentId"
-              params={{ team: currentSlug(), deploymentId: d.id }}
+            <AppLink
+              href={deploymentPath(d.id)}
               className="flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-accent/40"
             >
               <div className="w-[150px] shrink-0">
@@ -74,7 +72,7 @@ export function DeploymentRows({
                   {isActive(d.status) ? "running" : duration(elapsed)}
                 </p>
               </div>
-            </Link>
+            </AppLink>
           </li>
         );
       })}
@@ -95,7 +93,7 @@ export function activityLink(e: ActivityEvent): {
   label?: string;
 } {
   if (e.target.kind === "deployment")
-    return { href: `/deployments/${e.target.id}`, label: "Open deployment" };
+    return { href: deploymentPath(e.target.id), label: "Open deployment" };
   if (e.target.kind === "server")
     return { href: serverHref(getState(), e.target.id), label: "Open server" };
   if (e.target.kind === "volume")
@@ -342,7 +340,7 @@ export function collectIssues(
         severity: "critical",
         title: `${a?.name ?? "Service"} deploy failed`,
         detail: d.failure?.message ?? "See logs",
-        href: `/deployments/${d.id}`,
+        href: deploymentPath(d.id),
       });
   }
   if (!projectId) {

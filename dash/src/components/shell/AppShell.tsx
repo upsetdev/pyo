@@ -54,6 +54,7 @@ import { Toaster } from "~/components/ui/Toaster";
 import { timeAgo } from "~/lib/pyo/format";
 import { auth } from "~/lib/pyo/backend";
 import {
+  deploymentPath,
   activityIn,
   api,
   sandboxServersIn,
@@ -565,7 +566,8 @@ export function crumbsFor(pathname: string, s: PyoState): Crumb[] {
     out.push({ label: "Projects", href: "/projects" });
     if (b === "new") out.push({ label: "New project", href: pathname });
   } else if (a === "deployments") {
-    // A deployment sits under its service: Projects / project / service / id.
+    // A deployment's own page, for one whose service was deleted. Links to
+    // one with a service forward there, so this mostly shows Projects / id.
     out.push({ label: "Projects", href: "/projects" });
     if (b) {
       const dep = s.deployments.find((x) => x.id === b);
@@ -656,7 +658,13 @@ export function crumbsFor(pathname: string, s: PyoState): Crumb[] {
         href: servicePath(app.id, "", s),
         switcher: { kind: "service", id: app.id, tab: c ?? "" },
       });
-      if (c) out.push({ label: TAB_LABELS[c] ?? c, href: pathname });
+      if (c)
+        out.push({
+          label: TAB_LABELS[c] ?? c,
+          href: d ? servicePath(app.id, c, s) : pathname,
+        });
+      // A deployment's details: Deployments / dpl_….
+      if (c === "deployments" && d) out.push({ label: d, href: pathname });
     } else if (b) out.push({ label: TAB_LABELS[b] ?? b, href: pathname });
   } else {
     out.push({
@@ -737,7 +745,7 @@ function Notifications() {
           ),
           href:
             e.target.kind === "deployment"
-              ? `/deployments/${e.target.id}`
+              ? deploymentPath(e.target.id)
               : e.serviceId
                 ? servicePath(e.serviceId, "", s)
                 : e.clusterId

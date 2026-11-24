@@ -1,3 +1,4 @@
+import { AppLink } from "~/components/ui/AppLink";
 import {
   ArrowClockwiseIcon,
   ArrowCounterClockwiseIcon,
@@ -10,7 +11,7 @@ import {
   StopIcon,
 } from "@phosphor-icons/react";
 import { copyIdItem } from "~/components/pyo/copyId";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { Dot } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
@@ -23,6 +24,7 @@ import { SearchInput } from "~/components/ui/Table";
 import { duration, timeAgo } from "~/lib/pyo/format";
 import { isActive, STAGE_LABEL } from "~/lib/pyo/simulation";
 import {
+  deploymentPath,
   activeDeploymentFor,
   api,
   membersIn,
@@ -36,7 +38,7 @@ import { getTemplate } from "~/lib/pyo/templates";
 import { deployStatus } from "./lists";
 import { imageLabel, SourceMark } from "./ProjectCard";
 import { uploadText } from "./common";
-import { currentSlug } from "~/lib/pyo/paths";
+import { teamPath, currentSlug } from "~/lib/pyo/paths";
 
 export const TRIGGER_LABEL: Record<Deployment["trigger"], string> = {
   manual: "Manual",
@@ -117,7 +119,7 @@ export function useDeploymentActions(s: PyoState) {
       {
         label: "View details",
         icon: <EyeIcon size={14} />,
-        href: `/deployments/${d.id}`,
+        href: deploymentPath(d.id),
       },
       copyIdItem("Deployment", d.id),
       ...(isActive(d.status)
@@ -138,10 +140,7 @@ export function useDeploymentActions(s: PyoState) {
               hint: why,
               onSelect: () => {
                 const id = api.retry(d.id);
-                void navigate({
-                  to: "/$team/deployments/$deploymentId",
-                  params: { team: currentSlug(), deploymentId: id },
-                });
+                void navigate({ href: teamPath(currentSlug(), deploymentPath(id)) });
               },
             },
           ]
@@ -179,10 +178,7 @@ export function useDeploymentActions(s: PyoState) {
         to={rollbackTo}
         onClose={() => setRollbackTo(null)}
         onDone={(id) =>
-          void navigate({
-            to: "/$team/deployments/$deploymentId",
-            params: { team: currentSlug(), deploymentId: id },
-          })
+          void navigate({ href: teamPath(currentSlug(), deploymentPath(id)) })
         }
       />
       <ConfirmDialog
@@ -422,13 +418,12 @@ export function DeploymentsTable({
                 className="relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6 gap-y-1 px-5 py-3.5 transition-colors hover:bg-accent/40 md:grid-cols-[minmax(0,1.3fr)_minmax(0,0.9fr)_minmax(0,1.2fr)_minmax(0,1fr)_32px]"
               >
                 <div className="min-w-0">
-                  <Link
-                    to="/$team/deployments/$deploymentId"
-                    params={{ team: currentSlug(), deploymentId: d.id }}
+                  <AppLink
+                    href={deploymentPath(d.id)}
                     className="block truncate font-mono text-[13px] font-medium after:absolute after:inset-0 focus:outline-none focus-visible:underline"
                   >
                     {d.id}
-                  </Link>
+                  </AppLink>
                   <p className="flex items-center gap-1.5 truncate text-[12.5px] text-muted-foreground">
                     {showService ? (
                       <span className="truncate">
