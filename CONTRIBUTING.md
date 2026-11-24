@@ -188,10 +188,28 @@ cargo test -p pyo-api --lib -- --ignored compose_sync::db_tests
 cargo test -p pyo-api --lib -- --ignored tailscale::tests
 cargo test -p pyo-api --lib -- --ignored sandbox::outbound::tests
 cargo test -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests
+cargo test -p pyo-api --lib -- --ignored agent:: agent_auth:: builders:: terminal:: jobs::
+cargo test -p pyo-api --lib -- --ignored ops:: routes:: source_uploads:: registrydoor::
+cargo test -p pyo-api --lib -- --ignored databases::tests database_imports::tests
+cargo test -p pyo-api --lib -- --ignored teambackup::tests backup::tests::export_real_db
+cargo test -p pyo-api --lib -- --ignored platform_import::tests previews::tests
+cargo test -p pyo-api --lib -- --ignored ratelimit::tests twofactor::tests cli::tests \
+  github::tests install:: cloud::bootstrap::tests
+cargo test -p pyo-api --lib -- --ignored sandbox::tests sandbox::join::tests \
+  sandbox::keys::tests sandbox::base::tests
+cargo test -p pyo-api --lib -- --ignored migrate::tests
 ```
 
-The first group needs `PYO_SECRET_KEY` from the start. The Compose sync group
-runs without it.
+The first group needs `PYO_SECRET_KEY` from the start. The others run without
+it. Keep the groups apart: some tests set environment variables for their
+whole process. The database imports group sets a backup store's address,
+and the backups group needs none.
+
+These ignored tests need more than Postgres, and CI doesn't run them: the
+Garage ones in `backup` and `backupstore` (a real store), the ClickHouse
+ones in `retention` and `totals`, `domainproof` and `sandbox::images` (the
+internet), and the WAF harness below. `mail::tests::write_previews` and
+`mcp::tests::print_tools` write files for people to look at.
 
 If you change the WAF's custom rules, also run the end-to-end harness. It
 runs the WAF behind a real Envoy in docker. See [`waf/README.md`](waf/README.md):
