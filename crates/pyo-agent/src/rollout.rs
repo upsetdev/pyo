@@ -2689,10 +2689,10 @@ mod gpu_tests {
 
     #[test]
     fn isolated_projects_let_in_their_teams_imports_only() {
-        let spec = super::isolation_spec("team_q9pnllqh1p5f");
+        let spec = super::isolation_spec("team_example123");
         let from = spec["ingress"][0]["from"].as_array().unwrap();
         assert_eq!(from.len(), 5);
-        let databases = json!({ "kubernetes.io/metadata.name": "pyo-db-q9pnllqh1p5f", "pyo/team-id": "team_q9pnllqh1p5f" });
+        let databases = json!({ "kubernetes.io/metadata.name": "pyo-db-example123", "pyo/team-id": "team_example123" });
         // From the team's databases namespace, only import pods: never a whole namespace.
         for f in &from[3..] {
             assert_eq!(f["namespaceSelector"]["matchLabels"], databases);

@@ -1641,7 +1641,7 @@ mod tests {
             "pyo-gateway",
             "pyo-waf",
             "pyo-databases",
-            "pyo-db-q9pnllqh1p5f",
+            "pyo-db-example123",
             "cert-manager",
         ] {
             assert!(
