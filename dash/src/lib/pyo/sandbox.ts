@@ -207,8 +207,10 @@ export type SandboxServer = {
   runtime?: "firecracker" | "gvisor" | null;
   /** The server Pyo made for it at a cloud provider, until it's deleted there. */
   cloud?: SandboxServerCloud | null;
-  /** It joined Pyo Cloud over HTTPS and gets its work from there. */
+  /** It joined Pyo over HTTPS and gets its work from there. */
   outbound?: boolean;
+  /** Self-hosted: it joined before 0.51.1 and moves to HTTPS when sandbox.sh runs again there (Update). */
+  needsUpdate?: boolean;
   /** Its name on the team's tailnet ("sbx-1.tail1234.ts.net"), once it joined over HTTPS. */
   tailnetName?: string | null;
   joinedAt?: number | null;
@@ -359,7 +361,7 @@ export const sandboxApi = {
   /** Pyo Cloud's add: the server joins the team's tailnet, then Pyo over HTTPS. */
   createJoinCode: (body: { teamId: string; name: string; edgeDomain?: string }) =>
     request<JoinCommand>("/api/v1/sandbox-servers/join-codes", { method: "POST", body }),
-  /** Pyo Cloud: the server's key stops working, and a new command joins it again. */
+  /** The server's key stops working, and a new command joins it again. On a server that needs an update: the command that updates it. */
   resetAccess: (id: string) =>
     request<JoinCommand>(`/api/v1/sandbox-servers/${enc(id)}/reset-access`, { method: "POST" }),
   addCloudServer: (body: AddCloudServer) =>

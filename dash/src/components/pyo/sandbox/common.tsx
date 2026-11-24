@@ -261,12 +261,9 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
   const nameError = DNS_LABEL.test(name) ? "" : "Lowercase letters, digits and dashes.";
   const edgeDomain = edge.trim().replace(/\.$/, "");
   const edgeError = !edgeDomain || EDGE_DOMAIN.test(edgeDomain) ? "" : "A domain, like sbx.example.com.";
-  const hostedJoined = useJoined(result, true);
-  const joined = hosted
-    ? hostedJoined
-    : result
-      ? s.sandboxServers.find((x) => x.id === result.id && x.state !== "joining")
-      : undefined;
+  // Every new server joins over HTTPS, self-hosted too: it's joined once
+  // Pyo saw it waiting, or it joined again since.
+  const joined = useJoined(result, true);
 
   const add = async () => {
     if (nameError || edgeError || busy) return;
@@ -276,7 +273,7 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
       const body = { teamId: s.currentTeamId, name, ...(edgeDomain ? { edgeDomain } : {}) };
       const r = hosted ? await sandboxApi.createJoinCode(body) : await sandboxApi.addServer(body);
       setResult(joiningOf(r, name));
-      if (hosted) void refresh().catch(() => undefined);
+      void refresh().catch(() => undefined);
     } catch (e) {
       setError((e as Error).message);
     } finally {

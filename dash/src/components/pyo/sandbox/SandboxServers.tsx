@@ -1,4 +1,5 @@
 import {
+  ArrowsClockwiseIcon,
   CertificateIcon,
   CircleNotchIcon,
   DotsThreeIcon,
@@ -37,7 +38,7 @@ export function SandboxServers() {
   const role = roleIn(s);
   const [removing, setRemoving] = useState<SandboxServer | null>(null);
   const [resetting, setResetting] = useState<SandboxServer | null>(null);
-  const [rejoin, setRejoin] = useState<Joining | null>(null);
+  const [rejoin, setRejoin] = useState<(Joining & { update: boolean }) | null>(null);
   const [resetBusy, setResetBusy] = useState(false);
   const issuing = servers.some((x) => x.edge?.cert.state === "issuing");
   useEffect(() => {
@@ -46,11 +47,12 @@ export function SandboxServers() {
     return () => clearInterval(t);
   }, [issuing]);
   if (!servers.length) return null;
-  // Pyo Cloud: a new key for the server, and the command that joins it again.
+  // A new key for the server and the command that joins it again. For a
+  // server that needs an update, the command that updates it.
   const reset = async (x: SandboxServer) => {
     setResetBusy(true);
     try {
-      setRejoin(joiningOf(await sandboxApi.resetAccess(x.id), x.name));
+      setRejoin({ ...joiningOf(await sandboxApi.resetAccess(x.id), x.name), update: !!x.needsUpdate });
       void refresh().catch(() => undefined);
     } catch (e) {
       toast({ tone: "error", title: (e as Error).message });
@@ -155,6 +157,16 @@ export function SandboxServers() {
                 ) : null}
                 {x.cloud?.error ? <p className="text-[12px] text-destructive">{x.cloud.error}</p> : null}
                 {x.edge ? <EdgeLine server={x} covered={!!zoneOf(x)} /> : null}
+                {x.needsUpdate ? (
+                  <p className="flex items-center gap-2 text-[12px] text-muted-foreground">
+                    Run sandbox.sh again to update this server.
+                    {canRemove(x) ? (
+                      <Button size="xs" variant="secondary" disabled={resetBusy} onClick={() => void reset(x)}>
+                        Update
+                      </Button>
+                    ) : null}
+                  </p>
+                ) : null}
                 {x.state !== "ready" && (x.error || x.summary) ? (
                   <p className={`text-[12px] ${x.state === "refused" || x.state === "unreachable" ? "text-destructive" : "text-muted-foreground"}`}>
                     {x.error ?? x.summary}
@@ -183,6 +195,15 @@ export function SandboxServers() {
                               label: "Reset access",
                               icon: <KeyIcon size={14} />,
                               onSelect: () => setResetting(x),
+                            },
+                          ]
+                        : []),
+                      ...(x.needsUpdate
+                        ? [
+                            {
+                              label: "Update",
+                              icon: <ArrowsClockwiseIcon size={14} />,
+                              onSelect: () => void reset(x),
                             },
                           ]
                         : []),
@@ -246,25 +267,31 @@ export function SandboxServers() {
   );
 }
 
-/** After Reset access: the command that joins the server again. */
+/** After Reset access: the command that joins the server again. After
+ * Update: the command that updates it. */
 function RejoinDialog({
   joining,
   busy,
   onAgain,
   onClose,
 }: {
-  joining: Joining;
+  joining: Joining & { update: boolean };
   busy: boolean;
   onAgain: () => void;
   onClose: () => void;
 }) {
   const joined = useJoined(joining, true);
   return (
-    <Dialog open onClose={onClose} width="max-w-2xl" title={`Join ${joining.name} again`}>
+    <Dialog
+      open
+      onClose={onClose}
+      width="max-w-2xl"
+      title={joining.update ? `Update ${joining.name}` : `Join ${joining.name} again`}
+    >
       <JoinCommandView
         joining={joining}
         joined={joined}
-        hint="Run this on the server."
+        hint={joining.update ? "Run this on the server as root. Its sandboxes keep running." : "Run this on the server."}
         busy={busy}
         onAgain={onAgain}
         onDone={onClose}
