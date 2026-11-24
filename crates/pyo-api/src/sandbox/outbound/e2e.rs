@@ -1,9 +1,9 @@
 //! A real `pyo-sandbox` daemon in its outbound mode against Pyo's channel,
 //! booting real Firecracker microVMs on this machine. Pyo Cloud's path from
 //! end to end, with a stand-in signer (tests.rs `Local`), a stand-in
-//! holder agent for the Tailscale key and a stand-in tailnet: a
-//! `tailscale` script that names the server, and a certificate of its own
-//! for the server's tailnet name. Runs only with `PYO_SANDBOX_E2E=1`, a
+//! holder agent for the Tailscale key and a stand-in tailnet: the
+//! server's tailnet address and names in the join file, as sandbox.sh
+//! writes them, and a certificate of its own for that name. Runs only with `PYO_SANDBOX_E2E=1`, a
 //! `/dev/kvm` this user can open and `DATABASE_URL` (a throwaway
 //! Postgres), so plain `cargo test` skips it. See sandbox/e2e.rs for the
 //! files it needs:
@@ -18,7 +18,6 @@
 //! daemon answers HTTPS on its tailnet name with a sandbox token. Reset
 //! access stops it.
 
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,19 +109,9 @@ async fn a_daemon_works_for_pyo_over_https() {
         .await
         .unwrap();
 
-    // The stand-in tailnet: its name for the server, and a certificate for
+    // The stand-in tailnet: the server's name on it, and a certificate for
     // that name.
     let name = format!("sbx-1.{}", t.suffix);
-    let tailscale = dir.join("tailscale");
-    std::fs::write(
-        &tailscale,
-        format!(
-            "#!/bin/sh\necho '{}'\n",
-            json!({ "Self": { "HostName": "sbx-1", "DNSName": format!("{name}."), "TailscaleIPs": ["100.64.0.20"] } })
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&tailscale, std::fs::Permissions::from_mode(0o755)).unwrap();
     let tls_key = rcgen::KeyPair::generate().unwrap();
     let tls_cert = rcgen::CertificateParams::new(vec![name.clone()])
         .unwrap()
@@ -138,7 +127,11 @@ async fn a_daemon_works_for_pyo_over_https() {
     let (port, https_port) = (base::free_port(), base::free_port());
     std::fs::write(
         dir.join("join.json"),
-        json!({ "pyoUrl": j.pyo_url, "serverId": j.server_id, "code": j.code, "commandKey": j.command_keys, "jailUid": 0, "jailGid": 0 }).to_string(),
+        json!({
+            "pyoUrl": j.pyo_url, "serverId": j.server_id, "code": j.code, "commandKeys": j.command_keys,
+            "address": "100.64.0.20", "hostname": "sbx-1", "tailnetName": name, "jailUid": 0, "jailGid": 0,
+        })
+        .to_string(),
     )
     .unwrap();
     std::fs::write(
@@ -157,7 +150,7 @@ async fn a_daemon_works_for_pyo_over_https() {
         .arg(&config_path)
         .arg("--join")
         .arg(dir.join("join.json"))
-        .env("PYO_SANDBOX_TAILSCALE", &tailscale)
+        .env("RUST_LOG", "off")
         .output()
         .unwrap();
     assert!(

@@ -67,6 +67,8 @@ struct Opts {
 
 struct Setup {
     cfg: Config,
+    /// The config's folder: the tailnet certificate is in `tailnet/` there.
+    dir: PathBuf,
     layout: Layout,
     fc: Firecracker,
 }
@@ -90,7 +92,18 @@ async fn setup(o: &Opts) -> anyhow::Result<Setup> {
         cpu_template: cfg.cpu_template.clone(),
         serial: std::env::var_os("PYO_SANDBOX_SERIAL").is_some(),
     };
-    Ok(Setup { cfg, layout, fc })
+    let dir = o
+        .config
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."))
+        .to_owned();
+    Ok(Setup {
+        cfg,
+        dir,
+        layout,
+        fc,
+    })
 }
 
 #[tokio::main]
@@ -124,26 +137,29 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Joins, or ends the process with one plain sentence on stderr: sandbox.sh
+/// shows the last line to the person who ran it.
 async fn join(o: JoinOpts) -> anyhow::Result<()> {
+    if let Err(e) = try_join(&o).await {
+        let line = e.to_string().replace('\n', " ");
+        eprintln!("{}", line.strip_prefix("Error: ").unwrap_or(&line));
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn try_join(o: &JoinOpts) -> anyhow::Result<()> {
     use pyo_sandbox::outbound::join;
     let capability = match &o.capability {
         Some(p) => Some(
-            serde_json::from_slice(
-                &std::fs::read(p).with_context(|| format!("reading {}", p.display()))?,
-            )
-            .with_context(|| format!("parsing {}", p.display()))?,
+            std::fs::read(p)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .with_context(|| format!("The report {} can't be read.", p.display()))?,
         ),
         None => None,
     };
-    let tailnet = join::tailnet().await?;
-    join::join(
-        &o.config,
-        &o.join,
-        capability,
-        &tailnet,
-        join::Options::default(),
-    )
-    .await?;
+    join::join(&o.config, &o.join, capability, join::Options::default()).await?;
     Ok(())
 }
 
@@ -206,7 +222,11 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
     let listen = s.cfg.listen;
     let edge_cfg = s.cfg.edge.clone();
     let outbound = s.cfg.outbound.clone();
-    let tailnet_https = s.cfg.tailnet_https.clone().unwrap_or_default();
+    let tailnet_https = s
+        .cfg
+        .tailnet_https
+        .clone()
+        .unwrap_or_else(|| tailnet::TailnetHttps::in_dir(&s.dir));
     let root = s.cfg.root.clone();
     // gVisor sandboxes live in the plain sandboxes directory: no jail.
     let gvisor = (capability.runtime == Runtime::Gvisor).then(|| {

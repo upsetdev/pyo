@@ -25,7 +25,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The `tailnetHttps` part of the config. Left out, an outbound server
 /// listens on its tailnet address at [`pyo_proto::sandbox::outbound::TAILNET_PORT`]
-/// with the certificate in `/etc/pyo-sandbox/tailnet`.
+/// with the certificate in `tailnet/` beside its config
+/// (`/etc/pyo-sandbox/tailnet`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TailnetHttps {
@@ -45,6 +46,18 @@ fn default_cert() -> PathBuf {
 
 fn default_key() -> PathBuf {
     PathBuf::from("/etc/pyo-sandbox/tailnet/key.pem")
+}
+
+impl TailnetHttps {
+    /// The certificate and key in `<dir>/tailnet`, where sandbox.sh's
+    /// `tailscale cert` puts them (`dir`: the config's folder).
+    pub fn in_dir(dir: &std::path::Path) -> TailnetHttps {
+        TailnetHttps {
+            listen: None,
+            cert: dir.join("tailnet/cert.pem"),
+            key: dir.join("tailnet/key.pem"),
+        }
+    }
 }
 
 impl Default for TailnetHttps {

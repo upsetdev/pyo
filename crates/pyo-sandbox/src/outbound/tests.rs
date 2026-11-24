@@ -166,6 +166,15 @@ async fn renew(
 
 async fn join(State(f): F, b: Bytes) -> Response {
     let ask: wire::JoinRequest = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        (
+            ask.address.as_str(),
+            ask.hostname.as_str(),
+            ask.tailnet_name.as_str()
+        ),
+        ("100.64.0.20", "sbx-1", "sbx-1.tail1234.ts.net")
+    );
+    assert!(ask.capability.is_some());
     if f.not_listed.load(Ordering::SeqCst) > 0 {
         f.not_listed.fetch_sub(1, Ordering::SeqCst);
         return (
@@ -634,13 +643,13 @@ async fn a_join_keeps_the_key_and_the_config() {
     fake.not_listed.store(2, Ordering::SeqCst);
     let join_file = d.join("join.json");
     let write_join = |code: &str, key: &str| {
-        let j = json!({ "pyoUrl": url, "serverId": SERVER, "code": code, "commandKey": key, "jailUid": 998, "jailGid": 997 });
+        // As sandbox.sh writes it: the join request without its key.
+        let j = json!({
+            "pyoUrl": url, "serverId": SERVER, "code": code, "commandKeys": key,
+            "address": "100.64.0.20", "hostname": "sbx-1", "tailnetName": "sbx-1.tail1234.ts.net",
+            "jailUid": 998, "jailGid": 997, "capability": CapabilityReport::default(),
+        });
         crate::edge::write_private(&join_file, j.to_string().as_bytes()).unwrap();
-    };
-    let tailnet = join::Tailnet {
-        address: "100.64.0.20".into(),
-        hostname: "sbx-1".into(),
-        name: "sbx-1.tail1234.ts.net".into(),
     };
     let opts = || join::Options {
         retry: Duration::from_millis(20),
@@ -648,9 +657,7 @@ async fn a_join_keeps_the_key_and_the_config() {
     };
     let config = d.join("config.json");
     write_join("the-code", &s.public_key());
-    let a = join::join(&config, &join_file, None, &tailnet, opts())
-        .await
-        .unwrap();
+    let a = join::join(&config, &join_file, None, opts()).await.unwrap();
     assert_eq!(a.key_id, "sbsk_joined");
     assert!(!join_file.exists());
     let store = Store::new(&pool);
@@ -678,7 +685,7 @@ async fn a_join_keeps_the_key_and_the_config() {
 
     // Pyo's refusal, in its words.
     write_join("wrong", &s.public_key());
-    let e = join::join(&config, &join_file, None, &tailnet, opts())
+    let e = join::join(&config, &join_file, None, opts())
         .await
         .unwrap_err();
     assert_eq!(
@@ -687,13 +694,13 @@ async fn a_join_keeps_the_key_and_the_config() {
     );
     // Command keys that aren't the join command's.
     write_join("the-code", &signer().public_key());
-    let e = join::join(&config, &join_file, None, &tailnet, opts())
+    let e = join::join(&config, &join_file, None, opts())
         .await
         .unwrap_err();
     assert!(e.to_string().contains("command keys"), "{e}");
     // A bad command key never reaches Pyo.
     write_join("the-code", "not a key");
-    let e = join::join(&config, &join_file, None, &tailnet, opts())
+    let e = join::join(&config, &join_file, None, opts())
         .await
         .unwrap_err();
     assert!(e.to_string().contains("command key"), "{e}");
@@ -704,7 +711,6 @@ async fn a_join_keeps_the_key_and_the_config() {
         &config,
         &join_file,
         None,
-        &tailnet,
         join::Options {
             retry: Duration::from_millis(20),
             deadline: Duration::from_millis(200),

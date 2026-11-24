@@ -1,9 +1,9 @@
 //! `pyo-sandbox join`: a server joins Pyo over HTTPS with its one-time
 //! code. sandbox.sh runs it once the server is on the team's tailnet.
 //!
-//! sandbox.sh hands over the code and the command key in a file only
-//! root can read ([`JoinFile`], `/etc/pyo-sandbox/join.json`), never in
-//! arguments. The daemon makes an Ed25519 key, posts its public half with
+//! sandbox.sh hands over the code, the command keys and the server's
+//! tailnet address and names in a file only root can read ([`JoinFile`],
+//! `/etc/pyo-sandbox/join.json`), never in arguments. The daemon makes an Ed25519 key, posts its public half with
 //! the code and the server's tailnet address and names, and gets its
 //! config back. It writes that config, its key and its state (store.rs),
 //! and removes the join file.
@@ -31,22 +31,51 @@ pub const JOIN_FILE: &str = "/etc/pyo-sandbox/join.json";
 /// How long a code works: the join stops asking then.
 const CODE_LIFE: Duration = Duration::from_secs(15 * 60);
 
-/// What sandbox.sh hands the daemon for its join (root only, 0600).
+/// What sandbox.sh hands the daemon for its join (root only, 0600): the
+/// join request without its public key, plus Pyo's URL and the command
+/// keys. Left out, the server's tailnet address and names come from
+/// `tailscale status`.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JoinFile {
     /// The join command's `--pyo-url`.
     pub pyo_url: String,
+    /// Its `--command-key`: the keys commands are signed with
+    /// (base64url, comma separated).
+    #[serde(alias = "commandKey")]
+    pub command_keys: String,
     /// Its `--server` (`sbs_…`).
     pub server_id: String,
     /// Its `--code`.
     pub code: String,
-    /// Its `--command-key`: the keys commands are signed with
-    /// (base64url, comma separated).
-    pub command_key: String,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub tailnet_name: Option<String>,
     /// The `pyo-sandbox` system user the jailer drops VMs to.
     pub jail_uid: u32,
     pub jail_gid: u32,
+    /// `pyo-sandbox detect`'s report.
+    #[serde(default)]
+    pub capability: Option<CapabilityReport>,
+}
+
+impl JoinFile {
+    /// The server on its tailnet, as the file names it.
+    fn tailnet(&self) -> Option<Tailnet> {
+        let (a, h, n) = (
+            self.address.as_deref()?.trim(),
+            self.hostname.as_deref()?.trim(),
+            self.tailnet_name.as_deref()?.trim().trim_end_matches('.'),
+        );
+        (!a.is_empty() && !h.is_empty() && !n.is_empty()).then(|| Tailnet {
+            address: a.to_owned(),
+            hostname: h.to_owned(),
+            name: n.to_ascii_lowercase(),
+        })
+    }
 }
 
 impl std::fmt::Debug for JoinFile {
@@ -158,16 +187,19 @@ pub async fn join(
     config: &Path,
     join_file: &Path,
     capability: Option<CapabilityReport>,
-    tailnet: &Tailnet,
     opts: Options,
 ) -> anyhow::Result<JoinAnswer> {
-    let j: JoinFile = serde_json::from_slice(
-        &std::fs::read(join_file).with_context(|| format!("reading {}", join_file.display()))?,
-    )
-    .with_context(|| format!("parsing {}", join_file.display()))?;
-    TrustedKeys::parse(&j.command_key)
+    let raw = std::fs::read(join_file)
+        .map_err(|e| anyhow::anyhow!("The join file {} can't be read: {e}", join_file.display()))?;
+    let j: JoinFile = serde_json::from_slice(&raw)
+        .map_err(|e| anyhow::anyhow!("The join file {} can't be read: {e}", join_file.display()))?;
+    TrustedKeys::parse(&j.command_keys)
         .map_err(|e| anyhow::anyhow!("The command key in the join command can't be read: {e}"))?;
     let http = Http::new(&j.pyo_url)?;
+    let tailnet = match j.tailnet() {
+        Some(t) => t,
+        None => tailnet().await?,
+    };
     let pkcs8 = RequestKey::generate_pkcs8().map_err(anyhow::Error::msg)?;
     let key = RequestKey::from_pkcs8(&pkcs8).map_err(anyhow::Error::msg)?;
     let ask = JoinRequest {
@@ -179,7 +211,7 @@ pub async fn join(
         tailnet_name: tailnet.name.clone(),
         jail_uid: j.jail_uid,
         jail_gid: j.jail_gid,
-        capability,
+        capability: j.capability.clone().or(capability),
     };
     let body = serde_json::to_vec(&ask)?;
     let path = http.path(wire::JOIN_PATH);
@@ -223,7 +255,7 @@ pub async fn join(
             "Pyo's answer is for another server. Copy a fresh command from Pyo and run it again."
         );
     }
-    if key_set(&answer.command_keys) != key_set(&j.command_key) {
+    if key_set(&answer.command_keys) != key_set(&j.command_keys) {
         bail!(
             "Pyo's command keys aren't the ones in the join command. Copy a fresh command from Pyo and run it again."
         );
@@ -256,7 +288,7 @@ pub async fn join(
     store.save_state(&State {
         server_id: answer.server_id.clone(),
         team_id: answer.team_id.clone(),
-        command_keys: j.command_key.clone(),
+        command_keys: j.command_keys.clone(),
         last_seq,
     })?;
     // The code is burnt: nothing in it is any use now.
