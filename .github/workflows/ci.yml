@@ -147,13 +147,15 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: cargo test --locked -p pyo-api --lib -- --ignored tailscale::tests
-      # Sandbox servers on Pyo Cloud: join codes, the join, the servers'
-      # keys and their command channel, with a stand-in holder agent and a
-      # local signer. A run of its own, as above.
+      # Sandbox servers on the outbound channel, on Pyo Cloud and
+      # self-hosted: join codes, the join, the servers' keys and their
+      # command channel, Pyo's own signer, the installation's servers and
+      # servers moving from the door, with a stand-in holder agent. A run
+      # of its own, as above.
       - name: Outbound sandbox servers (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
-        run: cargo test --locked -p pyo-api --lib -- --ignored sandbox::outbound::tests
+        run: cargo test --locked -p pyo-api --lib -- --ignored sandbox::outbound::tests sandbox::outbound::self_hosted_tests
 
   # Known CVEs in the locked dependencies: Cargo.lock, bun.lock (with the
   # dashboard's dev dependencies) and the WAF's go.mod. A CRITICAL one

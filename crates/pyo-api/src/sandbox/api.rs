@@ -391,14 +391,16 @@ pub(crate) async fn list_servers(
 /// Makes a server's one-time join code and the command to run on it. The
 /// code works once, for 15 minutes. The command joins your tailnet, installs
 /// Pyo's sandbox daemon, checks what the server can run (Firecracker where it
-/// has KVM, gVisor elsewhere) and joins. Adding a server that hasn't joined
-/// yet again makes a new code. Team owners and admins. Needs Tailscale.
+/// has KVM, gVisor elsewhere) and joins Pyo. The server then gets its work
+/// from Pyo over HTTPS: Pyo never calls it. Adding a server that hasn't
+/// joined yet again makes a new code. Team owners and admins. Needs
+/// Tailscale. On Pyo Cloud, use createSandboxJoinCode.
 #[utoipa::path(post, path = "/sandbox-servers", operation_id = "addSandboxServer", tag = "Sandboxes",
     request_body(content = AddServer),
     responses(
         (status = 200, description = "`server`, `command` (run it on the server as root) and `expiresAt` (when the code runs out).", body = Object),
         (status = 400, description = "A bad name, or Tailscale isn't set up.", body = ErrorBody),
-        (status = 409, description = "A server with that name has joined already, or Pyo isn't on the tailnet yet.", body = ErrorBody),
+        (status = 409, description = "A server with that name has joined already, Pyo isn't on the tailnet yet, or the server's tailnet can't reach Pyo.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("full"))))]
 pub(crate) async fn add_server(
@@ -438,13 +440,13 @@ pub(crate) async fn add_cloud_server(
 }
 
 /// What a server that joins over HTTPS runs, and when its code runs out.
-fn joining_view(s: &AppState, j: &super::outbound::Joining, server: Option<Value>) -> Value {
+fn joining_view(j: &super::outbound::Joining, server: Option<Value>) -> Value {
     let base = crate::join::scripts_url_before_tailnet();
     json!({
         "server": server,
         "command": j.command(&base, env!("CARGO_PKG_VERSION")),
         "expiresAt": j.expires_at,
-        "pyoUrl": s.config.agent_api_url,
+        "pyoUrl": j.pyo_url,
     })
 }
 
@@ -457,9 +459,10 @@ fn hosted_signer() -> ApiResult<&'static std::sync::Arc<dyn crate::CommandSigner
         .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, super::outbound::NO_SIGNER))
 }
 
-async fn server_view(s: &AppState, team: &str, id: &str) -> ApiResult<Option<Value>> {
+async fn server_view(s: &AppState, team: Option<&str>, id: &str) -> ApiResult<Option<Value>> {
     let mut c = s.db.acquire().await?;
-    Ok(super::server_views(&mut c, &[team.to_owned()], Some(id))
+    let teams: Vec<String> = team.iter().map(|t| (*t).to_owned()).collect();
+    Ok(super::server_views(&mut c, &teams, Some(id))
         .await?
         .into_iter()
         .next())
@@ -489,22 +492,24 @@ pub(crate) async fn create_join_code(
 ) -> ApiResult<Json<Value>> {
     let signer = hosted_signer()?;
     let j = super::outbound::create_join_code(&s, signer.as_ref(), &user, req).await?;
-    let server = server_view(&s, &j.team_id, &j.server_id).await?;
-    Ok(Json(joining_view(&s, &j, server)))
+    let server = server_view(&s, j.team_id.as_deref(), &j.server_id).await?;
+    Ok(Json(joining_view(&j, server)))
 }
 
 /// Reset a sandbox server's access
 ///
-/// On Pyo Cloud: the server's key stops working at once, and its waiting
-/// commands fail. Answers with a new command for the same server, which
-/// works once, for 15 minutes. Run it there to join again. Team owners and
-/// admins.
+/// The server's key stops working at once, and its waiting commands fail.
+/// Answers with a new command for the same server, which works once, for 15
+/// minutes. Run it there to join again. On a self-hosted Pyo, a server that
+/// shows `needsUpdate` gets the command that updates it instead: it keeps
+/// working until the command runs there. Team owners and admins, or the
+/// installation's admin for its own servers.
 #[utoipa::path(post, path = "/sandbox-servers/{id}/reset-access", operation_id = "resetSandboxServerAccess", tag = "Sandboxes",
     params(("id" = String, Path, description = "The sandbox server's id, `sbs_…`.")),
     responses(
         (status = 200, description = "`server`, `command` (run it on the server as root), `expiresAt` (when the code runs out) and `pyoUrl`.", body = Object),
         (status = 404, description = "No such sandbox server.", body = ErrorBody),
-        (status = 409, description = "The server doesn't join over HTTPS, or the cluster that keeps your Tailscale isn't connected.", body = ErrorBody),
+        (status = 409, description = "On Pyo Cloud, the server doesn't join over HTTPS. Or the cluster that keeps your Tailscale isn't connected, or the server's tailnet can't reach Pyo.", body = ErrorBody),
         (status = 429, description = "Too many codes for the team in an hour.", body = ErrorBody),
     ),
     extensions(("x-pyo-access" = json!("full"))))]
@@ -513,10 +518,11 @@ pub(crate) async fn reset_access(
     SessionUser(user): SessionUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let signer = hosted_signer()?;
-    let j = super::outbound::reset_access(&s, signer.as_ref(), &user, &id).await?;
-    let server = server_view(&s, &j.team_id, &j.server_id).await?;
-    Ok(Json(joining_view(&s, &j, server)))
+    let signer = super::outbound::signer::get()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, super::outbound::NO_SIGNER))?;
+    let j = super::outbound::reset_access(&s, signer.as_ref(), &user, &id, &super::outbound::Mode::now()).await?;
+    let server = server_view(&s, j.team_id.as_deref(), &j.server_id).await?;
+    Ok(Json(joining_view(&j, server)))
 }
 
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]

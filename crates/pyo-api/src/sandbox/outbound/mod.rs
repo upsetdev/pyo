@@ -19,12 +19,19 @@
 //!    ([`reset_access`]) revokes it and makes a new code for the same
 //!    server. Removing the server deletes its keys.
 //!
-//! Self-hosted Pyo keeps its own flow (join.rs, daemon.rs): this is only
-//! for a hosted Pyo, and only for a team with its own Tailscale.
+//! A self-hosted Pyo's servers work the same way from 0.51.1 ([`add`],
+//! docs/cloud-sandbox-servers.md "Self-hosted"): its own signer
+//! ([`signer::Local`]), its tailnet address or public address for the
+//! daemon ([`self_hosted_reach`]), and the installation's servers (no
+//! team) too. Servers that joined at its door before keep that path until
+//! **Update** ([`reset_access`]) moves them over.
 
 pub mod channel;
+pub mod signer;
 #[cfg(test)]
 mod e2e;
+#[cfg(test)]
+mod self_hosted_tests;
 #[cfg(test)]
 mod tests;
 
@@ -98,7 +105,8 @@ pub struct CreateJoinCode {
 #[derive(Debug, Clone)]
 pub struct Joining {
     pub server_id: String,
-    pub team_id: String,
+    /// None: the installation's server (self-hosted only).
+    pub team_id: Option<String>,
     pub name: String,
     pub code: String,
     pub tailscale_key: String,
@@ -216,9 +224,11 @@ pub async fn create_join_code(
     .await?;
     let id = match existing {
         Some((id, state, true)) if state == "joining" || state == "refused" => {
-            sqlx::query("UPDATE pyo.sandbox_servers SET state = 'joining', error = NULL, edge_domain = $2, updated_at = now() WHERE id = $1")
+            sqlx::query("UPDATE pyo.sandbox_servers SET state = 'joining', error = NULL, edge_domain = $2, via_cluster = $3, pyo_url = $4, updated_at = now() WHERE id = $1")
                 .bind(&id)
                 .bind(&edge)
+                .bind(&holder)
+                .bind(&s.config.agent_api_url)
                 .execute(&mut *tx)
                 .await?;
             id
@@ -231,14 +241,16 @@ pub async fn create_join_code(
         None => {
             let id = crate::ids::new_id("sbs");
             sqlx::query(
-                "INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain, outbound)
-                 VALUES ($1, $2, $3, 'joining', $4, $5, true)",
+                "INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain, outbound, via_cluster, pyo_url)
+                 VALUES ($1, $2, $3, 'joining', $4, $5, true, $6, $7)",
             )
             .bind(&id)
             .bind(&req.team_id)
             .bind(&req.name)
             .bind(&user.name)
             .bind(&edge)
+            .bind(&holder)
+            .bind(&s.config.agent_api_url)
             .execute(&mut *tx)
             .await?;
             id
@@ -259,7 +271,7 @@ pub async fn create_join_code(
     tx.commit().await?;
     Ok(Joining {
         server_id: id,
-        team_id: req.team_id,
+        team_id: Some(req.team_id),
         name: req.name,
         code,
         tailscale_key,
@@ -273,12 +285,20 @@ pub async fn create_join_code(
 /// Reset access: the server's keys stop working at once, its waiting
 /// commands fail, and it joins again with a new code. Its sandboxes keep
 /// their records.
+///
+/// On a self-hosted Pyo it's **Update** too, for a server that joined at
+/// the door before: a command that moves it to this channel. Nothing stops
+/// until it runs there: Pyo keeps calling the server until its join.
 pub async fn reset_access(
     s: &AppState,
     signer: &dyn CommandSigner,
     user: &User,
     id: &str,
+    mode: &Mode,
 ) -> ApiResult<Joining> {
+    let hosted = matches!(mode, Mode::Hosted);
+    // The installation's servers show to everyone (row security), and
+    // others' don't: not found.
     let mut tx = crate::rls::begin(&s.db, user).await?;
     let row: Option<(Option<String>, String, bool, Option<String>)> = sqlx::query_as(
         "SELECT team_id, name, outbound, edge_domain FROM pyo.sandbox_servers WHERE id = $1",
@@ -287,35 +307,69 @@ pub async fn reset_access(
     .fetch_optional(&mut *tx)
     .await?;
     let (team, name, outbound, edge) = row.ok_or_else(|| ApiError::not_found("Sandbox server"))?;
-    let Some(team) = team.filter(|_| outbound) else {
+    if hosted && (!outbound || team.is_none()) {
         return Err(ApiError::conflict(
             "Only a sandbox server that joined over HTTPS has access to reset.",
         ));
-    };
-    super::require(&mut tx, user, &team, Need::Manage).await?;
+    }
+    match &team {
+        Some(t) => super::require(&mut tx, user, t, Need::Manage).await?,
+        None => {
+            super::require_install_admin(user)?;
+            // Its row is no team's to change: outside the scope.
+            tx.rollback().await?;
+            tx = s.db.begin().await?;
+        }
+    }
+    if !s.sealer.enabled() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This installation has no PYO_SECRET_KEY, so it can't sign sandbox tokens.",
+        ));
+    }
     let command_keys = signer.public_keys();
     if command_keys.trim().is_empty() {
         return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, NO_SIGNER));
     }
-    let holder = team_holder(&s.db, &team).await?;
-    ratelimit::take(&s.db, &[(CODES_PER_TEAM, team.as_str())]).await?;
-    revoke(&mut tx, id, "Its access was reset.").await?;
-    sqlx::query("UPDATE pyo.sandbox_servers SET state = 'joining', error = NULL, updated_at = now() WHERE id = $1")
+    let (via, pyo_url) = match (mode, &team) {
+        (Mode::SelfHosted(at), _) => self_hosted_reach(&s.db, team.as_deref(), at).await?,
+        (Mode::Hosted, Some(t)) => (team_holder(&s.db, t).await?, s.config.agent_api_url.clone()),
+        (Mode::Hosted, None) => return Err(ApiError::not_found("Sandbox server")),
+    };
+    let limit_key = signer::claims_team(team.as_deref()).to_owned();
+    ratelimit::take(&s.db, &[(CODES_PER_TEAM, limit_key.as_str())]).await?;
+    if outbound {
+        revoke(&mut tx, id, "Its access was reset.").await?;
+        sqlx::query("UPDATE pyo.sandbox_servers SET state = 'joining', error = NULL, updated_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("UPDATE pyo.sandbox_servers SET via_cluster = $2, pyo_url = $3 WHERE id = $1")
         .bind(id)
+        .bind(&via)
+        .bind(&pyo_url)
         .execute(&mut *tx)
         .await?;
-    let (code, tailscale_key) = code_and_key(s, &mut tx, &holder, id, &name).await?;
-    crate::ops::log_activity(
-        &mut tx,
-        &team,
-        &user.name,
-        "sandbox.server",
-        "info",
-        &format!("Reset the access of the sandbox server {name}"),
-        json!({ "kind": "sandboxServer", "id": id, "label": name }),
-        json!({}),
-    )
-    .await?;
+    let (code, tailscale_key) = code_and_key(s, &mut tx, &via, id, &name).await?;
+    if let Some(t) = &team {
+        let title = if outbound {
+            format!("Reset the access of the sandbox server {name}")
+        } else {
+            format!("Made the command that updates the sandbox server {name}")
+        };
+        crate::ops::log_activity(
+            &mut tx,
+            t,
+            &user.name,
+            "sandbox.server",
+            "info",
+            &title,
+            json!({ "kind": "sandboxServer", "id": id, "label": name }),
+            json!({}),
+        )
+        .await?;
+    }
     tx.commit().await?;
     s.wake(id).await;
     Ok(Joining {
@@ -325,7 +379,218 @@ pub async fn reset_access(
         code,
         tailscale_key,
         command_keys,
-        pyo_url: s.config.agent_api_url.clone(),
+        pyo_url,
+        edge_domain: edge,
+        expires_at: expires_at(),
+    })
+}
+
+// ── Self-hosted ────────────────────────────────────────────────────────────
+
+/// Why a team's server on a tailnet of its own can't reach Pyo.
+pub const NOT_REACHABLE: &str =
+    "Pyo isn't reachable from your team's tailnet. Open Pyo's public dashboard in Settings, then add the server again.";
+/// Why there's no address on Pyo's tailnet yet.
+pub const NOT_ON_TAILNET: &str = "Pyo's server isn't on your tailnet yet. Try again in a minute.";
+
+/// Which Pyo this is, for the calls that differ.
+#[derive(Debug, Clone)]
+pub enum Mode {
+    /// Pyo Cloud: its build's signer, `PYO_AGENT_API_URL`, team servers.
+    Hosted,
+    /// A self-hosted Pyo, and where it answers.
+    SelfHosted(Where),
+}
+
+impl Mode {
+    pub fn now() -> Mode {
+        if crate::hosted() {
+            Mode::Hosted
+        } else {
+            Mode::SelfHosted(Where::now())
+        }
+    }
+}
+
+/// Where a self-hosted Pyo answers, for [`pick_pyo_url`].
+#[derive(Debug, Clone, Default)]
+pub struct Where {
+    /// Its full name on its tailnet.
+    pub pyo_name: Option<String>,
+    /// Pyo on its tailnet: `https://<name>`, or `http://<IP>:8000`.
+    pub tailnet_api: Option<String>,
+    /// Its public HTTPS address, when it has one.
+    pub public: Option<String>,
+}
+
+impl Where {
+    pub fn now() -> Where {
+        let a = crate::web::addresses();
+        Where {
+            pyo_name: a.tailnet.clone().or(a.host_name.clone()),
+            tailnet_api: crate::web::tailnet_api_url(),
+            public: std::env::var("PYO_PUBLIC_API_URL")
+                .ok()
+                .filter(|u| !u.trim().is_empty())
+                .or_else(|| a.public.as_ref().map(|h| format!("https://{h}"))),
+        }
+    }
+}
+
+/// The tailnet suffix of a full tailnet name: `tail1234.ts.net` of
+/// `pyo.tail1234.ts.net`.
+fn suffix_of(name: &str) -> Option<String> {
+    let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+    name.split_once('.').map(|(_, s)| s.to_owned()).filter(|s| s.contains('.'))
+}
+
+/// Where a self-hosted Pyo's new sandbox server reaches it, first of:
+/// Pyo's tailnet address when the server joins Pyo's own tailnet (its
+/// tailnet's suffix is Pyo's, or unknown), else Pyo's public HTTPS
+/// address. `pyo_name`: Pyo's full name on its tailnet. `tailnet_api`:
+/// Pyo on its tailnet (`https://<name>`, or `http://<IP>:8000`).
+pub fn pick_pyo_url(
+    server_suffix: Option<&str>,
+    pyo_name: Option<&str>,
+    tailnet_api: Option<&str>,
+    public: Option<&str>,
+) -> Result<String, &'static str> {
+    let pyo_suffix = pyo_name.and_then(suffix_of);
+    let ours = match (server_suffix, pyo_suffix.as_deref()) {
+        (Some(a), Some(b)) => a.trim().trim_end_matches('.').eq_ignore_ascii_case(b),
+        _ => true,
+    };
+    let public = public
+        .map(|u| u.trim().trim_end_matches('/'))
+        .filter(|u| u.starts_with("https://") && u.len() > "https://".len());
+    match (ours, tailnet_api, public) {
+        (true, Some(api), _) => Ok(api.trim().trim_end_matches('/').to_owned()),
+        (_, _, Some(p)) => Ok(p.to_owned()),
+        (true, None, None) => Err(NOT_ON_TAILNET),
+        (false, _, None) => Err(NOT_REACHABLE),
+    }
+}
+
+/// For a self-hosted Pyo's server of `team` (None: the installation's):
+/// the cluster whose Tailscale makes its key (`via_cluster`), and where
+/// the daemon reaches Pyo ([`pick_pyo_url`]).
+pub async fn self_hosted_reach(db: &PgPool, team: Option<&str>, at: &Where) -> ApiResult<(String, String)> {
+    let via = crate::tailscale::team_key_cluster(db, team).await?;
+    let via_team: Option<String> =
+        sqlx::query_scalar("SELECT team_id FROM pyo.clusters WHERE id = $1")
+            .bind(&via)
+            .fetch_optional(db)
+            .await?;
+    let suffix = match via_team {
+        Some(t) => crate::tailscale::team_tailnet(db, &t).await?.and_then(|t| t.suffix),
+        None => None,
+    };
+    let url = pick_pyo_url(
+        suffix.as_deref(),
+        at.pyo_name.as_deref(),
+        at.tailnet_api.as_deref(),
+        at.public.as_deref(),
+    )
+    .map_err(ApiError::conflict)?;
+    Ok((via, url))
+}
+
+/// A self-hosted Pyo's new sandbox server (`addSandboxServer`), or a new
+/// code for one that hasn't joined yet: a team's, or the installation's
+/// (None, its admin's). It joins over the channel.
+pub async fn add(
+    s: &AppState,
+    signer: &dyn CommandSigner,
+    user: &User,
+    team: Option<&str>,
+    name: &str,
+    edge: Option<String>,
+    at: &Where,
+) -> ApiResult<Joining> {
+    let mut tx = s.db.begin().await?;
+    match team {
+        Some(t) => super::require(&mut tx, user, t, Need::Manage).await?,
+        None => super::require_install_add(user)?,
+    }
+    if !s.sealer.enabled() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This installation has no PYO_SECRET_KEY, so it can't sign sandbox tokens.",
+        ));
+    }
+    let command_keys = signer.public_keys();
+    if command_keys.trim().is_empty() {
+        return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, NO_SIGNER));
+    }
+    let (via, pyo_url) = self_hosted_reach(&s.db, team, at).await?;
+    ratelimit::take(&s.db, &[(CODES_PER_TEAM, signer::claims_team(team))]).await?;
+    let existing: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, state FROM pyo.sandbox_servers WHERE coalesce(team_id, '') = coalesce($1, '') AND name = $2",
+    )
+    .bind(team)
+    .bind(name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let id = match existing {
+        Some((id, state)) if state == "joining" || state == "refused" => {
+            sqlx::query(
+                "UPDATE pyo.sandbox_servers SET state = 'joining', error = NULL, edge_domain = $2, outbound = true,
+                        via_cluster = $3, pyo_url = $4, updated_at = now() WHERE id = $1",
+            )
+            .bind(&id)
+            .bind(&edge)
+            .bind(&via)
+            .bind(&pyo_url)
+            .execute(&mut *tx)
+            .await?;
+            id
+        }
+        Some(_) => {
+            return Err(ApiError::conflict(
+                "A sandbox server has that name already.",
+            ));
+        }
+        None => {
+            let id = crate::ids::new_id("sbs");
+            sqlx::query(
+                "INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain, outbound, via_cluster, pyo_url)
+                 VALUES ($1, $2, $3, 'joining', $4, $5, true, $6, $7)",
+            )
+            .bind(&id)
+            .bind(team)
+            .bind(name)
+            .bind(&user.name)
+            .bind(&edge)
+            .bind(&via)
+            .bind(&pyo_url)
+            .execute(&mut *tx)
+            .await?;
+            id
+        }
+    };
+    let (code, tailscale_key) = code_and_key(s, &mut tx, &via, &id, name).await?;
+    if let Some(t) = team {
+        crate::ops::log_activity(
+            &mut tx,
+            t,
+            &user.name,
+            "sandbox.server",
+            "info",
+            &format!("Added the sandbox server {name}"),
+            json!({ "kind": "sandboxServer", "id": id, "label": name }),
+            json!({}),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Joining {
+        server_id: id,
+        team_id: team.map(str::to_owned),
+        name: name.to_owned(),
+        code,
+        tailscale_key,
+        command_keys,
+        pyo_url,
         edge_domain: edge,
         expires_at: expires_at(),
     })
@@ -394,8 +659,28 @@ struct Found {
     state: Option<String>,
     team_id: Option<String>,
     outbound: Option<bool>,
+    /// Where it reaches Pyo, as its command said. On a server that joined
+    /// at the door: set by **Update**, which lets it move here.
+    pyo_url: Option<String>,
+    /// The team whose tailnet its key came from.
+    tailnet_team: Option<String>,
     suffix: Option<String>,
     machines: Option<Value>,
+}
+
+impl Found {
+    /// Whether the server may join now: an outbound server that waits for
+    /// it, or (self-hosted) one that joined at the door before and has
+    /// its **Update** command. A hosted Pyo's server always has a team.
+    fn joinable(&self, hosted: bool) -> bool {
+        let state = self.state.as_deref();
+        let ok = match self.outbound {
+            Some(true) => state == Some("joining"),
+            Some(false) => !hosted && self.pyo_url.is_some() && state.is_some_and(|s| s != "refused"),
+            None => false,
+        };
+        ok && (self.team_id.is_some() || !hosted)
+    }
 }
 
 /// A full tailnet name, `<host>.<suffix>`, on the team's tailnet.
@@ -429,7 +714,7 @@ fn listed(machines: Option<&Value>, hostname: &str) -> bool {
 
 /// Checks a found code against the ask: Ok when it may join now. Every
 /// refusal but [`Refusal::NotSeen`] burns the code.
-fn check(f: &Found, ask: &wire::JoinRequest) -> Result<(), Refusal> {
+fn check(f: &Found, ask: &wire::JoinRequest, hosted: bool) -> Result<(), Refusal> {
     if f.used {
         return Err(Refusal::Door(join::Refusal::Used));
     }
@@ -439,7 +724,7 @@ fn check(f: &Found, ask: &wire::JoinRequest) -> Result<(), Refusal> {
     if f.server_id != ask.server_id {
         return Err(Refusal::Door(join::Refusal::WrongServer));
     }
-    if f.state.as_deref() != Some("joining") || f.outbound != Some(true) || f.team_id.is_none() {
+    if !f.joinable(hosted) {
         return Err(Refusal::Door(join::Refusal::Gone));
     }
     if !pyo_proto::agentauth::valid_public_key(&ask.public_key) {
@@ -480,7 +765,7 @@ async fn burn(conn: &mut PgConnection, hash: &str) -> sqlx::Result<bool> {
 pub(crate) async fn add_key(
     conn: &mut PgConnection,
     server_id: &str,
-    team_id: &str,
+    team_id: Option<&str>,
     public_key: &str,
 ) -> sqlx::Result<(String, i64)> {
     let id = crate::ids::new_id("sbsk");
@@ -501,11 +786,13 @@ pub(crate) async fn add_key(
 
 /// Checks a join and registers the server's key: the daemon's config, or
 /// why not. `command_keys`: the keys its commands are signed with.
+/// `pyo_url`: where the daemon reaches Pyo, unless its row says.
 pub async fn join(
     db: &PgPool,
     sealer: &Sealer,
     command_keys: &str,
     pyo_url: &str,
+    hosted: bool,
     ask: &wire::JoinRequest,
 ) -> ApiResult<wire::JoinAnswer> {
     let fits = |s: &str| {
@@ -533,13 +820,15 @@ pub async fn join(
     let hash = sha256_hex(code);
     let found: Option<Found> = sqlx::query_as(
         "SELECT c.server_id, c.expires_at <= now() AS expired, c.used_at IS NOT NULL AS used,
-                s.state, s.team_id, s.outbound, t.suffix, t.machines
+                s.state, s.team_id, s.outbound, s.pyo_url, t.team_id AS tailnet_team, t.suffix, t.machines
            FROM pyo.sandbox_join_codes c
            LEFT JOIN pyo.sandbox_servers s ON s.id = c.server_id
-           LEFT JOIN pyo.team_tailscale t ON t.team_id = s.team_id
+           LEFT JOIN pyo.clusters vc ON vc.id = s.via_cluster AND NOT $2
+           LEFT JOIN pyo.team_tailscale t ON t.team_id = coalesce(vc.team_id, s.team_id)
           WHERE c.code_hash = $1",
     )
     .bind(&hash)
+    .bind(hosted)
     .fetch_optional(db)
     .await?;
     let Some(found) = found else {
@@ -550,11 +839,11 @@ pub async fn join(
     for (l, k) in &limits {
         let _ = ratelimit::forgive(db, l, k).await;
     }
-    if let Err(r) = check(&found, ask) {
+    if let Err(r) = check(&found, ask, hosted) {
         tracing::warn!(server = %ask.server_id, "sandbox server join refused: {r:?}");
         match &r {
             Refusal::NotSeen => {
-                if let Some(team) = &found.team_id {
+                if let Some(team) = &found.tailnet_team {
                     let _ = crate::tailscale::refresh_machines(db, team).await;
                 }
             }
@@ -577,18 +866,22 @@ pub async fn join(
         }
         return Err(r.error());
     }
-    let team = found.team_id.clone().unwrap_or_default();
+    let team = found.team_id.clone();
+    let claims_team = signer::claims_team(team.as_deref()).to_owned();
     let keys = super::keys::verifying_keys(db, sealer).await?;
     let mut tx = db.begin().await?;
     if !burn(&mut tx, &hash).await? {
         return Err(Refusal::Door(join::Refusal::Used).error());
     }
-    // Still joining, in the same team, now that the code is ours.
+    // Still waiting for it, in the same team, now that the code is ours.
     let still: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM pyo.sandbox_servers WHERE id = $1 AND team_id = $2 AND outbound AND state = 'joining' FOR UPDATE",
+        "SELECT id FROM pyo.sandbox_servers WHERE id = $1 AND team_id IS NOT DISTINCT FROM $2
+            AND ((outbound AND state = 'joining') OR (NOT outbound AND NOT $3 AND pyo_url IS NOT NULL AND state <> 'refused'))
+            FOR UPDATE",
     )
     .bind(&found.server_id)
     .bind(&team)
+    .bind(hosted)
     .fetch_optional(&mut *tx)
     .await?;
     if still.is_none() {
@@ -597,12 +890,15 @@ pub async fn join(
     }
     // One server, one daemon: a new join ends the keys before it.
     revoke(&mut tx, &found.server_id, "The server joined again.").await?;
-    let (key_id, not_after) = add_key(&mut tx, &found.server_id, &team, &ask.public_key).await?;
+    let (key_id, not_after) =
+        add_key(&mut tx, &found.server_id, team.as_deref(), &ask.public_key).await?;
     let address = ask.address.trim();
     let tailnet_name = ask.tailnet_name.trim().trim_end_matches('.').to_ascii_lowercase();
+    // A server that joined at the door before works over this channel
+    // from now on: Pyo stops calling it.
     sqlx::query(
         "UPDATE pyo.sandbox_servers SET address = $2, tailnet_name = $3, capability = coalesce($4, capability),
-                joined_at = now(), error = NULL, updated_at = now() WHERE id = $1",
+                outbound = true, joined_at = now(), error = NULL, updated_at = now() WHERE id = $1",
     )
     .bind(&found.server_id)
     .bind(address)
@@ -611,16 +907,16 @@ pub async fn join(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    tracing::info!(server = %found.server_id, %team, key = %key_id, "sandbox server joined over HTTPS");
+    tracing::info!(server = %found.server_id, team = %claims_team, key = %key_id, "sandbox server joined over HTTPS");
     let mut config = join::daemon_config(&found.server_id, address, ask.jail_uid, ask.jail_gid, &keys);
     config["outbound"] = json!({
-        "pyoUrl": pyo_url,
-        "teamId": team,
+        "pyoUrl": found.pyo_url.as_deref().filter(|u| !u.is_empty()).unwrap_or(pyo_url),
+        "teamId": claims_team,
         "tailnetName": tailnet_name,
     });
     Ok(wire::JoinAnswer {
         server_id: found.server_id,
-        team_id: team,
+        team_id: claims_team,
         key_id,
         not_after,
         command_keys: command_keys.to_owned(),
