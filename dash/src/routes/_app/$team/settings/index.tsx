@@ -65,13 +65,14 @@ function TeamSettings({ ws }: { ws: Team }) {
 
   return (
     <div className="space-y-4">
-      <Panel title="General">
+      <Panel title="General" description={admin ? undefined : READ_ONLY}>
         <div className="space-y-4 p-4">
           <Field label="Team name" error={nameError || undefined}>
             {(p) => (
               <Input
                 {...p}
                 value={name}
+                disabled={!admin}
                 onChange={(e) => setName(e.target.value)}
               />
             )}
@@ -88,6 +89,7 @@ function TeamSettings({ ws }: { ws: Team }) {
               <Select
                 {...p}
                 value={defaultClusterId}
+                disabled={!admin}
                 onChange={(e) => setDefaultCluster(e.target.value)}
               >
                 <option value="">None</option>
@@ -101,48 +103,55 @@ function TeamSettings({ ws }: { ws: Team }) {
           </Field>
         </div>
       </Panel>
-      <Panel title="Deployment preferences">
+      <Panel
+        title="Deployment preferences"
+        description={admin ? undefined : READ_ONLY}
+      >
         <div className="space-y-4 p-4">
           <Switch
             checked={prefs.autoDeployOnPush}
+            disabled={!admin}
             onChange={(v) => setPrefs({ ...prefs, autoDeployOnPush: v })}
             label="Deploy on Git push"
             description="Needs a Git provider."
           />
           <Switch
             checked={prefs.requireDeployApproval}
+            disabled={!admin}
             onChange={(v) => setPrefs({ ...prefs, requireDeployApproval: v })}
             label="Require approval for production deploys"
             description="An admin approves each rollout."
           />
         </div>
-        <div className="flex justify-end border-t border-border px-4 py-3">
-          <Button
-            size="sm"
-            disabled={!dirty || !!nameError}
-            onClick={async () => {
-              const res = await api.updateTeam(ws.id, {
-                name: name.trim(),
-                description,
-                defaultClusterId: defaultClusterId || undefined,
-                preferences: prefs,
-              });
-              if (!res) return;
-              toast({ title: "Team saved" });
-              // A new name can mean a new slug; keep the URL in step.
-              const slug =
-                res.slug ?? getState().teams.find((t) => t.id === ws.id)?.slug;
-              if (slug && slug !== ws.slug)
-                void navigate({
-                  to: "/$team/settings",
-                  params: { team: slug },
-                  replace: true,
+        {admin ? (
+          <div className="flex justify-end border-t border-border px-4 py-3">
+            <Button
+              size="sm"
+              disabled={!dirty || !!nameError}
+              onClick={async () => {
+                const res = await api.updateTeam(ws.id, {
+                  name: name.trim(),
+                  description,
+                  defaultClusterId: defaultClusterId || undefined,
+                  preferences: prefs,
                 });
-            }}
-          >
-            Save changes
-          </Button>
-        </div>
+                if (!res) return;
+                toast({ title: "Team saved" });
+                // A new name can mean a new slug; keep the URL in step.
+                const slug =
+                  res.slug ?? getState().teams.find((t) => t.id === ws.id)?.slug;
+                if (slug && slug !== ws.slug)
+                  void navigate({
+                    to: "/$team/settings",
+                    params: { team: slug },
+                    replace: true,
+                  });
+              }}
+            >
+              Save changes
+            </Button>
+          </div>
+        ) : null}
       </Panel>
       <RequestLogsPanel ws={ws} admin={admin} />
       {ws.analyticsMonthsLimit ? (
@@ -154,10 +163,11 @@ function TeamSettings({ ws }: { ws: Team }) {
         />
       ) : null}
       {hosted ? (
-        <Panel title="Agents">
+        <Panel title="Agents" description={admin ? undefined : READ_ONLY}>
           <div className="p-4">
             <Switch
               checked={(ws.agentUpdates ?? "auto") === "auto"}
+              disabled={!admin}
               onChange={(v) => {
                 void api
                   .updateTeam(ws.id, { agentUpdates: v ? "auto" : "manual" })
