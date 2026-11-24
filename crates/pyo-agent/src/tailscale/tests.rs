@@ -21,6 +21,8 @@ struct Net {
     hidden: BTreeSet<String>,
     devices: Vec<(String, String, Vec<String>)>,
     approved: BTreeSet<(String, String)>,
+    /// Machines whose tags Pyo's client may not change at all.
+    locked_tags: BTreeSet<String>,
     writes: Vec<String>,
 }
 
@@ -67,7 +69,33 @@ async fn handle(State(st): State<Shared>, method: Method, uri: Uri, body: Bytes)
                 .trim_start_matches("/device/")
                 .trim_end_matches("/tags")
                 .to_owned();
-            n.writes.push(format!("tag {id}"));
+            let tags = serde_json::from_slice::<Value>(&body)
+                .map(|b| strings(&b["tags"]))
+                .unwrap_or_default();
+            n.writes.push(format!("tag {id} {}", tags.join(",")));
+            let bad = |msg: String| {
+                (StatusCode::BAD_REQUEST, Json(json!({ "message": msg }))).into_response()
+            };
+            if n.locked_tags.contains(&id) {
+                return bad("requested tags [tag:pyo] are invalid or not permitted".into());
+            }
+            let Some(device) = n.devices.iter_mut().find(|(d, _, _)| *d == id) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            // As Tailscale does: the list replaces the machine's tags, and
+            // a client that doesn't own a tag can't take it off.
+            let dropped: Vec<&String> = device
+                .2
+                .iter()
+                .filter(|t| *t != TAG && !tags.contains(t))
+                .collect();
+            if !dropped.is_empty() {
+                let msg = format!(
+                    "cannot remove current tags: requested tags {dropped:?} are invalid or not permitted"
+                );
+                return bad(msg);
+            }
+            device.2 = tags;
             Json(json!({})).into_response()
         }
         (m, p) if svc(p).is_some() => {
@@ -333,12 +361,67 @@ async fn servers_are_tagged_and_approved_once() {
         writes,
         [
             "PUT shop",
-            "tag n1",
+            "tag n1 tag:pyo",
             "approve shop n1",
             "approve shop n2",
-            "tag n1"
         ]
     );
+}
+
+/// A server already on the tailnet with tags of its own keeps them: Pyo
+/// only adds tag:pyo. One whose tags Pyo may not change is left as it is,
+/// tried again on the next sync, and said once in the logs.
+#[tokio::test]
+async fn a_servers_own_tags_are_kept() {
+    let mut net = Net::default();
+    net.devices.push((
+        "nb1".into(),
+        "box-1.tail1.ts.net".into(),
+        vec!["tag:docker".into()],
+    ));
+    net.devices.push((
+        "nb2".into(),
+        "box-2.tail1.ts.net".into(),
+        vec!["tag:lab".into()],
+    ));
+    net.locked_tags.insert("nb2".into());
+    let (c, st) = serve(net).await;
+    let server = |name: &str, node: &str| SyncServer {
+        server: name.into(),
+        node_id: node.into(),
+        advertised: vec![],
+    };
+    let w = TailnetSync {
+        mark: MARK.into(),
+        servers: vec![server("box-1", "nb1"), server("box-2", "nb2")],
+        ..Default::default()
+    };
+    sync(&c, &w).await.unwrap();
+    sync(&c, &w).await.unwrap();
+    let net = st.lock().unwrap();
+    assert_eq!(
+        net.writes,
+        [
+            "tag nb1 tag:docker,tag:pyo",
+            "tag nb2 tag:lab,tag:pyo",
+            "tag nb2 tag:lab,tag:pyo",
+        ]
+    );
+    assert_eq!(net.devices[0].2, ["tag:docker", "tag:pyo"]);
+    assert_eq!(net.devices[1].2, ["tag:lab"]);
+    // The refusal was logged on the first sync only.
+    assert!(!tag_refused("nb2"));
+    tag_taken("nb2");
+    assert!(tag_refused("nb2"));
+}
+
+#[test]
+fn adding_pyos_tag_keeps_the_others() {
+    assert_eq!(with_pyo_tag(&[]), [TAG]);
+    let mine = ["tag:docker".to_owned(), "tag:web".to_owned()];
+    assert_eq!(with_pyo_tag(&mine), ["tag:docker", "tag:web", TAG]);
+    let both = ["tag:docker".to_owned(), TAG.to_owned()];
+    assert_eq!(with_pyo_tag(&both), both);
 }
 
 #[tokio::test]

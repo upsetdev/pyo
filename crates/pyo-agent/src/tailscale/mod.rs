@@ -452,11 +452,14 @@ impl Client {
         }
     }
 
-    pub async fn tag(&self, node: &str) -> anyhow::Result<()> {
+    /// Adds `tag:pyo` to a machine. Tailscale's call sets the whole list,
+    /// so the machine's own tags (`current`) go with it: Pyo never takes
+    /// off a tag it didn't set.
+    pub async fn tag(&self, node: &str, current: &[String]) -> anyhow::Result<()> {
         self.call(
             reqwest::Method::POST,
             &format!("/device/{node}/tags"),
-            Some(&json!({ "tags": [TAG] })),
+            Some(&json!({ "tags": with_pyo_tag(current) })),
         )
         .await
         .map(|_| ())
@@ -666,6 +669,34 @@ pub async fn use_client(
 /// Approvals asked for already: (Service, node).
 static APPROVED: Mutex<BTreeSet<(String, String)>> = Mutex::new(BTreeSet::new());
 
+/// Machines Tailscale wouldn't add `tag:pyo` to, said once in the logs:
+/// syncs try again every few minutes, quietly, until it takes.
+static TAG_REFUSED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// A machine's tags with `tag:pyo` added, its own kept as they are.
+pub(crate) fn with_pyo_tag(current: &[String]) -> Vec<String> {
+    let mut tags = current.to_vec();
+    if !tags.iter().any(|t| t == TAG) {
+        tags.push(TAG.to_owned());
+    }
+    tags
+}
+
+/// Whether a refused tag on `node` is news (logged), or was said before.
+fn tag_refused(node: &str) -> bool {
+    TAG_REFUSED
+        .lock()
+        .map(|mut r| r.insert(node.to_owned()))
+        .unwrap_or(true)
+}
+
+/// `node` has `tag:pyo` now: a later refusal is news again.
+fn tag_taken(node: &str) {
+    if let Ok(mut r) = TAG_REFUSED.lock() {
+        r.remove(node);
+    }
+}
+
 const TAKEN: &str = "Taken on your tailnet";
 
 /// The cluster's names on the tailnet as Pyo wants them ([`TailnetSync`]).
@@ -767,20 +798,30 @@ pub async fn sync(c: &Client, w: &TailnetSync) -> anyhow::Result<TailnetSynced> 
         }
     }
 
-    // The servers: tagged, and approved as hosts of the names they advertise.
-    let tagged: BTreeMap<&str, bool> = devices
+    // The servers: tag:pyo added (their own tags kept), and approved as
+    // hosts of the names they advertise.
+    let tags: BTreeMap<&str, &[String]> = devices
         .iter()
-        .map(|(id, _, tags)| (id.as_str(), tags.iter().any(|t| t == TAG)))
+        .map(|(id, _, tags)| (id.as_str(), tags.as_slice()))
         .collect();
     for sv in &w.servers {
         let id = sv.node_id.as_str();
-        if !id.is_empty() && tagged.get(id) == Some(&false) {
-            match c.tag(id).await {
-                Ok(()) => tracing::info!(server = %sv.server, "tagged tag:pyo"),
-                Err(e) => {
-                    tracing::warn!(server = %sv.server, error = %e, "couldn't tag the server")
-                }
+        let Some(have) = tags.get(id).filter(|_| !id.is_empty()) else {
+            continue;
+        };
+        if have.iter().any(|t| t == TAG) {
+            tag_taken(id);
+            continue;
+        }
+        match c.tag(id, have).await {
+            Ok(()) => {
+                tag_taken(id);
+                tracing::info!(server = %sv.server, "added tag:pyo");
             }
+            Err(e) if tag_refused(id) => {
+                tracing::warn!(server = %sv.server, tags = ?have, error = %e, "couldn't add tag:pyo to the server (its own tags are kept, tried again quietly)")
+            }
+            Err(_) => {}
         }
     }
     for n in names.iter().filter(|n| n.error.is_none()) {
