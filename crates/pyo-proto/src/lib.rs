@@ -536,7 +536,8 @@ pub struct Capabilities {
     /// The gateway: "envoy", or "none" until it answers.
     pub ingress_controller: String,
     /// Why the gateway failed to install (Helm's error, shortened), while
-    /// it isn't answering; none while it's on its way or running.
+    /// it isn't answering; none while it's on its way or running. Or why
+    /// its pods don't run, one of [`WORKLOAD_PROBLEMS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_error: Option<String>,
     /// Servers where the gateway can't get its ports: another program in
@@ -888,7 +889,22 @@ pub struct WorkloadReport {
     /// Servers its running pods are on.
     pub servers: Vec<String>,
     pub created_at: i64,
+    /// Why it isn't running, in plain words, when Pyo knows: one of
+    /// [`WORKLOAD_PROBLEMS`]. None from older agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
+
+/// A workload whose pods can't download their image.
+pub const CANT_DOWNLOAD_IMAGE: &str = "Can't download its image.";
+/// One whose containers can't be made: a setting they need is missing.
+pub const SETTING_MISSING: &str = "Can't start. A setting it needs is missing.";
+/// One whose containers keep exiting.
+pub const KEEPS_STOPPING: &str = "Keeps stopping right after it starts.";
+/// Why a workload isn't running, as the agent says it
+/// ([`WorkloadReport::message`], and the gateway's
+/// [`Capabilities::gateway_error`]): never Kubernetes' own words.
+pub const WORKLOAD_PROBLEMS: [&str; 3] = [CANT_DOWNLOAD_IMAGE, SETTING_MISSING, KEEPS_STOPPING];
 
 /// Runtime state of a service Pyo manages, keyed by the service id label.
 #[derive(Debug, Clone, Serialize, Deserialize)]

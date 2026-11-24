@@ -51,10 +51,12 @@ export function ClusterNetworking({
                       </span>
                     ))}
                   </span>
+                ) : c.capabilities.gatewayError ? (
+                  <span className="text-destructive">
+                    <CodeText text={c.capabilities.gatewayError} />
+                  </span>
                 ) : c.capabilities.ingressController === "envoy" ? (
                   "Running"
-                ) : c.capabilities.gatewayError ? (
-                  <CodeText text={c.capabilities.gatewayError} />
                 ) : (
                   "Not running yet"
                 ),

@@ -30,14 +30,17 @@ export function ClusterChecklist({ clusterId }: { clusterId: string }) {
     },
     {
       label: "Gateway",
-      done: connected && c?.capabilities.ingressController !== "none",
+      done:
+        connected &&
+        c?.capabilities.ingressController !== "none" &&
+        !c?.capabilities.gatewayError,
       detail: connected ? (
         c?.capabilities.gatewayPortsTaken?.length ? (
           c.capabilities.gatewayPortsTaken.map(portsTakenText).join(". ")
-        ) : c?.capabilities.ingressController === "envoy" ? (
-          "Running"
         ) : c?.capabilities.gatewayError ? (
           <CodeText text={c.capabilities.gatewayError} />
+        ) : c?.capabilities.ingressController === "envoy" ? (
+          "Running"
         ) : (
           "Not running yet: domains won't answer"
         )

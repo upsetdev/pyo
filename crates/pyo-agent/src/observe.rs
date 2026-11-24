@@ -138,6 +138,49 @@ fn waiting_for_room(p: &Pod) -> bool {
             })
 }
 
+/// Why pods don't run, in plain words, when a container waits for
+/// something that won't fix itself: its image can't be downloaded, a
+/// setting it needs is missing, or it keeps exiting. The image first: it
+/// says the most. Kubernetes' own words stay out of it.
+pub fn pods_problem<'a>(pods: impl IntoIterator<Item = &'a Pod>) -> Option<&'static str> {
+    let mut found: Option<&'static str> = None;
+    for p in pods {
+        if p.metadata.deletion_timestamp.is_some() {
+            continue;
+        }
+        let Some(st) = &p.status else { continue };
+        let containers = st
+            .init_container_statuses
+            .iter()
+            .flatten()
+            .chain(st.container_statuses.iter().flatten());
+        for c in containers {
+            let reason = c
+                .state
+                .as_ref()
+                .and_then(|s| s.waiting.as_ref())
+                .and_then(|w| w.reason.as_deref())
+                .unwrap_or("");
+            let problem = match reason {
+                "ErrImagePull" | "ImagePullBackOff" | "InvalidImageName" | "ErrImageNeverPull"
+                | "RegistryUnavailable" | "ImageInspectError" => {
+                    return Some(pyo_proto::CANT_DOWNLOAD_IMAGE);
+                }
+                "CreateContainerConfigError" | "CreateContainerError" => {
+                    pyo_proto::SETTING_MISSING
+                }
+                "CrashLoopBackOff" => pyo_proto::KEEPS_STOPPING,
+                _ => continue,
+            };
+            // A missing setting says more than a crash.
+            if found != Some(pyo_proto::SETTING_MISSING) {
+                found = Some(problem);
+            }
+        }
+    }
+    found
+}
+
 /// What the pods placed on each server ask for (cores, bytes); finished
 /// pods hold nothing.
 fn requested_per_node(pods: &[Pod]) -> HashMap<String, (f64, f64)> {
@@ -724,6 +767,11 @@ pub async fn heartbeat(client: &Client) -> anyhow::Result<Heartbeat> {
             service_id,
             servers: on_nodes,
             created_at: meta.creation_timestamp.as_ref().map(ms).unwrap_or(0),
+            // Why it isn't running, while it isn't.
+            message: matches!(status, "failed" | "degraded")
+                .then(|| pods_problem(own.iter().copied()))
+                .flatten()
+                .map(str::to_owned),
         });
     };
     for d in &deployments {
@@ -916,7 +964,15 @@ async fn capabilities(
     } else {
         "none"
     };
-    let gateway_error = if proxy_service.is_some() {
+    // Its pods can't run (no image, a missing setting), else why it
+    // failed to install while it isn't answering.
+    let gateway_problem = pods_problem(
+        pods.iter()
+            .filter(|p| p.namespace().as_deref() == Some(pyo_proto::system::GATEWAY_NS)),
+    );
+    let gateway_error = if let Some(p) = gateway_problem {
+        Some(p.to_owned())
+    } else if proxy_service.is_some() {
         None
     } else {
         crate::gateway::install_problem(client).await
@@ -1513,5 +1569,47 @@ mod tests {
         assert!(!waiting_for_room(&pod(
             "0/2 nodes are available: 2 node(s) didn't match Pod's node affinity/selector."
         )));
+    }
+
+    #[test]
+    fn a_workload_that_cant_run_says_why_plainly() {
+        let waiting = |init: &str, main: &[&str]| -> Pod {
+            let c = |reason: &str| serde_json::json!({ "name": "c", "ready": false, "restartCount": 0, "image": "x", "imageID": "",
+                "state": { "waiting": { "reason": reason, "message": "Back-off pulling image \"registry.example.com/x:1\"" } } });
+            serde_json::from_value(serde_json::json!({
+                "metadata": { "name": "p", "namespace": "pyo-gateway" },
+                "spec": { "containers": [] },
+                "status": {
+                    "phase": "Pending",
+                    "initContainerStatuses": if init.is_empty() { vec![] } else { vec![c(init)] },
+                    "containerStatuses": main.iter().map(|r| c(r)).collect::<Vec<_>>(),
+                },
+            }))
+            .unwrap()
+        };
+        let one = |p: Pod| pods_problem(&[p]);
+        for r in ["ErrImagePull", "ImagePullBackOff", "InvalidImageName"] {
+            assert_eq!(one(waiting("", &[r])), Some(pyo_proto::CANT_DOWNLOAD_IMAGE));
+        }
+        // An init container's image counts too.
+        assert_eq!(one(waiting("ImagePullBackOff", &["PodInitializing"])), Some(pyo_proto::CANT_DOWNLOAD_IMAGE));
+        assert_eq!(one(waiting("", &["CreateContainerConfigError"])), Some(pyo_proto::SETTING_MISSING));
+        assert_eq!(one(waiting("", &["CrashLoopBackOff"])), Some(pyo_proto::KEEPS_STOPPING));
+        // The image says the most, then a missing setting.
+        assert_eq!(
+            one(waiting("", &["CrashLoopBackOff", "ImagePullBackOff"])),
+            Some(pyo_proto::CANT_DOWNLOAD_IMAGE)
+        );
+        assert_eq!(
+            pods_problem(&[waiting("", &["CreateContainerConfigError"]), waiting("", &["CrashLoopBackOff"])]),
+            Some(pyo_proto::SETTING_MISSING)
+        );
+        // On its way, or a reason Pyo has no words for: nothing said.
+        assert_eq!(one(waiting("", &["ContainerCreating"])), None);
+        assert_eq!(pods_problem(&[] as &[Pod]), None);
+        // Plain words only.
+        for m in pyo_proto::WORKLOAD_PROBLEMS {
+            assert!(!m.contains(';') && !m.contains(" - ") && !m.contains("pod") && !m.contains("Image"));
+        }
     }
 }

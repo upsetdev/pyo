@@ -325,10 +325,15 @@ async fn heartbeat(
         "connected"
     };
     let caps = &hb.capabilities;
+    // Why a system workload or the gateway isn't running, with the refresh
+    // command while the install is older than Pyo's.
+    let install_state = agent_install["state"].as_str().unwrap_or("current").to_owned();
+    let said = |m: &str| crate::install::workload_message(m, &install_state);
     let mut capabilities = json!({
         "ingressController": caps.ingress_controller,
-        // Why the gateway failed to install, while it isn't answering.
-        "gatewayError": caps.gateway_error,
+        // Why the gateway failed to install while it isn't answering, or
+        // why its pods don't run.
+        "gatewayError": caps.gateway_error.as_deref().map(said),
         // Servers where the gateway can't get its ports (another program there has them).
         "gatewayPortsTaken": caps.gateway_ports_taken,
         "loadBalancer": caps.load_balancer,
@@ -362,7 +367,11 @@ async fn heartbeat(
         // Each server's Tailscale (tailscale.rs).
         "tailnet": hb.tailnet,
     });
-    let workloads = serde_json::to_value(&hb.workloads).map_err(anyhow::Error::from)?;
+    let mut workloads = hb.workloads.clone();
+    for w in &mut workloads {
+        w.message = w.message.as_deref().map(said);
+    }
+    let workloads = serde_json::to_value(&workloads).map_err(anyhow::Error::from)?;
     let (was, routes_were): (String, Option<String>) = sqlx::query_as(
         "SELECT status, capabilities->>'routesVersion' FROM pyo.clusters WHERE id = $1 FOR UPDATE",
     )
