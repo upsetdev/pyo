@@ -261,6 +261,19 @@ function AppLayout() {
             You changed the settings. Redeploy to apply them.
           </StatusNote>
         ) : null}
+        {app.deleteError ? (
+          <StatusNote
+            label="Delete failed"
+            tone="danger"
+            icon={<WarningIcon size={14} weight="bold" />}
+            title={app.deleteError}
+            action={
+              <Button size="sm" variant="secondary" onClick={() => setConfirm("delete")}>
+                Delete
+              </Button>
+            }
+          />
+        ) : null}
         <RouteTabs
           label="Service sections"
           tabs={routeTabs(serviceTabs(app), base)}
@@ -301,12 +314,12 @@ function AppLayout() {
         open={confirm === "delete"}
         onClose={() => setConfirm(null)}
         app={app}
-        onDeleted={() => {
-          void navigate({
+        onDeleted={() =>
+          navigate({
             to: "/$team/$projectId",
             params: { team: currentSlug(), ...projectParams(app.projectId) },
-          });
-        }}
+          })
+        }
       />
     </Page>
   );

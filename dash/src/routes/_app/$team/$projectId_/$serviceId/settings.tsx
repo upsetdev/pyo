@@ -456,12 +456,12 @@ function AppSettings({ app }: { app: Application }) {
         open={confirm === "delete"}
         onClose={() => setConfirm(null)}
         app={app}
-        onDeleted={() => {
-          void navigate({
+        onDeleted={() =>
+          navigate({
             to: "/$team/$projectId",
             params: { team: currentSlug(), ...projectParams(app.projectId) },
-          });
-        }}
+          })
+        }
       />
     </div>
   );

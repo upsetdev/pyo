@@ -128,6 +128,11 @@ export function ServiceStatusBadge({
   return <Status tone={serviceTone[status]} label={serviceLabel[status]} />;
 }
 
+/** A service being deleted, until it's gone. */
+export function DeletingStatus() {
+  return <Status tone="progress" label="Deleting…" />;
+}
+
 export const deploymentTone = (s: DeploymentStatus): Tone =>
   s === "succeeded"
     ? "success"

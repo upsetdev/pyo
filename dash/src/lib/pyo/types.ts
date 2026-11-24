@@ -1498,6 +1498,10 @@ export type Application = {
   previews?: PreviewSettings;
   /** Set on a preview copy: the service it previews. Hidden from lists. */
   previewOf?: ID;
+  /** Being deleted: listed apart (PyoState.deletingServices) until it's gone. */
+  deleting?: boolean;
+  /** Why its last delete failed. */
+  deleteError?: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 };
@@ -1920,6 +1924,7 @@ export type ActivityType =
   | "service.created"
   | "service.updated"
   | "service.deleted"
+  | "service.delete_failed"
   | "service.restarted"
   | "service.stopped"
   | "service.scaled"

@@ -41,7 +41,7 @@ pub async fn run(agent: &Agent, command: Command) -> CommandResult {
             autoscale,
             replicas,
         } => set_autoscale(agent, &service, autoscale.as_ref(), replicas).await,
-        Command::DeleteService(service) => delete(agent, &service).await,
+        Command::DeleteService(service) => delete(&agent.kube, &service).await,
         Command::SetSchedulable {
             server,
             schedulable,
@@ -421,10 +421,26 @@ where
     }
 }
 
+/// Whether namespace `ns` is there. The agent may read namespaces, but
+/// has no rights in one that isn't: Kubernetes answers anything in it
+/// with 403, not 404, so "already gone" is asked here first.
+async fn namespace_exists(client: &kube::Client, ns: &str) -> anyhow::Result<bool> {
+    Ok(Api::<Namespace>::all(client.clone())
+        .get_opt(ns)
+        .await?
+        .is_some())
+}
+
 /// Removes the workload, Service, routes and env Secrets. Volumes stay.
-async fn delete(agent: &Agent, service: &ServiceRef) -> anyhow::Result<String> {
-    let c = agent.kube.clone();
+/// A service whose namespace was never made (its first deploy cancelled
+/// early) has nothing there: already gone.
+async fn delete(client: &kube::Client, service: &ServiceRef) -> anyhow::Result<String> {
+    let c = client.clone();
     let ns = service.namespace.as_str();
+    if !namespace_exists(&c, ns).await? {
+        crate::gateway::remove(&c, &service.service_id).await;
+        return Ok(format!("{} is already gone", service.name));
+    }
     delete_named(
         Api::<k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler>::namespaced(
             c.clone(),
@@ -610,6 +626,10 @@ async fn delete_volume(
     volume_id: &str,
     wait: std::time::Duration,
 ) -> anyhow::Result<String> {
+    // No namespace, no claim (and no rights to ask for one there).
+    if !namespace_exists(client, ns).await? {
+        return Ok(format!("{name} is already gone"));
+    }
     let claims = Api::<PersistentVolumeClaim>::namespaced(client.clone(), ns);
     let Some(claim) = claims.get_opt(name).await? else {
         return Ok(format!("{name} is already gone"));
@@ -892,6 +912,75 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    /// A service, or a volume, whose namespace was never made (its first
+    /// deploy cancelled early): Kubernetes answers the agent 403 there,
+    /// not 404, and the delete is done, not failed.
+    #[tokio::test]
+    async fn deletes_in_a_namespace_never_made_are_done() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        kube.forbid_missing_namespaces();
+        let ghost = ServiceRef {
+            service_id: "svc_ghost".into(),
+            name: "ghost".into(),
+            namespace: "pyo-t-never".into(),
+            workload_kind: "Deployment".into(),
+        };
+        // What the agent got before: refused, so the delete failed.
+        let e = Api::<Deployment>::namespaced(client.clone(), "pyo-t-never")
+            .delete("ghost", &DeleteParams::background())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, kube::Error::Api(ref s) if s.code == 403), "{e}");
+
+        assert_eq!(
+            delete(&client, &ghost).await.unwrap(),
+            "ghost is already gone"
+        );
+        let wait = std::time::Duration::from_secs(1);
+        assert_eq!(
+            delete_volume(&client, "pyo-t-never", "data", "vol_ghost", wait)
+                .await
+                .unwrap(),
+            "data is already gone"
+        );
+    }
+
+    /// In a namespace that is there, the service's objects go, and missing
+    /// ones count as gone.
+    #[tokio::test]
+    async fn deletes_a_services_objects_in_its_namespace() {
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        kube.forbid_missing_namespaces();
+        kube.put("api/v1/namespaces/pyo-t-shop", json!({}));
+        kube.put(
+            "apis/apps/v1/namespaces/pyo-t-shop/deployments/web",
+            json!({}),
+        );
+        kube.put("api/v1/namespaces/pyo-t-shop/services/web", json!({}));
+        let web = ServiceRef {
+            service_id: "svc_web".into(),
+            name: "web".into(),
+            namespace: "pyo-t-shop".into(),
+            workload_kind: "Deployment".into(),
+        };
+        assert_eq!(delete(&client, &web).await.unwrap(), "Deleted web");
+        assert!(
+            kube.get("apis/apps/v1/namespaces/pyo-t-shop/deployments/web")
+                .is_none()
+        );
+        assert!(
+            kube.get("api/v1/namespaces/pyo-t-shop/services/web")
+                .is_none()
+        );
+        let wait = std::time::Duration::from_secs(1);
+        assert_eq!(
+            delete_volume(&client, "pyo-t-shop", "data", "vol_web", wait)
+                .await
+                .unwrap(),
+            "data is already gone"
+        );
     }
 
     #[test]

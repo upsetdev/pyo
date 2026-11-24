@@ -20,7 +20,7 @@ import {
   serviceParams,
 } from "~/lib/pyo/store";
 import { getTemplate } from "~/lib/pyo/templates";
-import { serviceLabel, ServiceStatusBadge, serviceTone, Dot, waitingForRoom } from "~/components/ui/Badge";
+import { DeletingStatus, serviceLabel, ServiceStatusBadge, serviceTone, Dot, waitingForRoom } from "~/components/ui/Badge";
 import { Tooltip } from "~/components/ui/Tooltip";
 import { PlaceFlags } from "~/components/ui/Flag";
 import { placesOf } from "~/lib/pyo/location";
@@ -538,6 +538,18 @@ export function serviceSubtitle(a: Application, namespace: string) {
   );
 }
 
+/** Under a service's name in lists: why its delete failed, or its address. */
+export function ServiceSubtitle({ a, namespace }: { a: Application; namespace: string }) {
+  return a.deleteError ? (
+    <p className="truncate text-[13px] text-destructive">{a.deleteError}</p>
+  ) : (
+    <p className="truncate text-[13px] text-muted-foreground">{serviceSubtitle(a, namespace)}</p>
+  );
+}
+
+const dotLabel = (a: Application) =>
+  a.deleting ? "Deleting…" : waitingForRoom(a) ? "Waiting for room" : serviceLabel[a.status];
+
 /** One service inside a project, laid out like ProjectCard. */
 export function AppCard({
   a,
@@ -559,13 +571,13 @@ export function AppCard({
           <span className="relative shrink-0">
             <ServiceLogo app={a} />
             <span className="absolute -bottom-1 -right-1 z-10">
-              <Tooltip content={waitingForRoom(a) ? "Waiting for room" : serviceLabel[a.status]}>
+              <Tooltip content={dotLabel(a)}>
                 <span
                   role="img"
-                  aria-label={waitingForRoom(a) ? "Waiting for room" : serviceLabel[a.status]}
+                  aria-label={dotLabel(a)}
                   className="flex rounded-full bg-card p-[2px]"
                 >
-                  <Dot tone={serviceTone[a.status]} className="h-2 w-2" />
+                  <Dot tone={a.deleting ? "progress" : serviceTone[a.status]} className="h-2 w-2" />
                 </span>
               </Tooltip>
             </span>
@@ -573,20 +585,22 @@ export function AppCard({
           <div className="min-w-0">
             <h3 className="flex min-w-0 items-center gap-1.5 text-[14px] font-semibold">
               {/* The link covers the card; the menu sits above it. */}
-              <Link
-                to="/$team/$projectId/$serviceId"
-                params={{ team: currentSlug(), ...serviceParams(a.id) }}
-                className="truncate after:absolute after:inset-0 after:rounded-[14px] focus:outline-none focus-visible:underline"
-              >
-                {a.name}
-              </Link>
+              {a.deleting ? (
+                <span className="truncate">{a.name}</span>
+              ) : (
+                <Link
+                  to="/$team/$projectId/$serviceId"
+                  params={{ team: currentSlug(), ...serviceParams(a.id) }}
+                  className="truncate after:absolute after:inset-0 after:rounded-[14px] focus:outline-none focus-visible:underline"
+                >
+                  {a.name}
+                </Link>
+              )}
             </h3>
-            <p className="truncate text-[13px] text-muted-foreground">
-              {serviceSubtitle(a, namespace)}
-            </p>
+            <ServiceSubtitle a={a} namespace={namespace} />
           </div>
         </div>
-        {menu ? (
+        {menu && !a.deleting ? (
           <div className="relative z-10 -mr-2 -mt-1.5">{menu}</div>
         ) : null}
       </div>
@@ -598,7 +612,11 @@ export function AppCard({
         <div className="mt-2.5 flex min-w-0 items-center gap-2">
           <SourcePill source={a.source} className="min-w-0" />
           {/* Running is the norm: the dot says it. Anything else is worth a label. */}
-          {a.status === "running" ? null : (
+          {a.deleting ? (
+            <span className="flex shrink-0">
+              <DeletingStatus />
+            </span>
+          ) : a.status === "running" ? null : (
             <span className="flex shrink-0">
               {a.status === "deploying" ? (
                 <DeployingStatus serviceId={a.id} />

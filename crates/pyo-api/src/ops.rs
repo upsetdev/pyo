@@ -6478,7 +6478,7 @@ async fn apply(
             .await?;
             // The agent removes the objects; the row goes when it reports back.
             let source: Value = sqlx::query_scalar(
-                "UPDATE pyo.services SET deleting = true WHERE id = $1 RETURNING coalesce(spec->'source', 'null')",
+                "UPDATE pyo.services SET deleting = true, delete_error = NULL WHERE id = $1 RETURNING coalesce(spec->'source', 'null')",
             )
             .bind(&id)
             .fetch_one(&mut **tx)
@@ -6491,21 +6491,37 @@ async fn apply(
                 .bind(&id)
                 .execute(&mut **tx)
                 .await?;
-            deploy::enqueue(tx, &cluster_id, Command::DeleteService(service)).await?;
-            // The last service there with its WAF on: the WAF's engine goes too.
             let waf: Value = sqlx::query_scalar("SELECT waf FROM pyo.services WHERE id = $1")
                 .bind(&id)
                 .fetch_one(&mut **tx)
                 .await?;
+            // Never on its cluster (no command for it ever queued, so its
+            // namespace may not even be there): gone now, no agent needed.
+            let reached = reached_cluster(tx, &id).await?;
+            if reached {
+                deploy::enqueue(tx, &cluster_id, Command::DeleteService(service)).await?;
+            } else {
+                crate::volumes::service_deleted(tx, &cluster_id, &id, true).await?;
+                sqlx::query("DELETE FROM pyo.services WHERE id = $1 AND deleting")
+                    .bind(&id)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+            // The last service there with its WAF on: the WAF's engine goes too.
             if crate::waf::is_on(&waf) && !crate::waf::wanted(tx, &cluster_id).await? {
                 crate::firewall::sync(tx, &cluster_id).await?;
             }
             // The last static site there: pyo-static goes too, after it.
             crate::sites::sync(tx, &cluster_id).await?;
-            let title = match (volumes.len(), delete_volumes) {
-                (0, _) => format!("Deleted {name}"),
-                (_, true) => format!("Deleted {name} and its volumes"),
-                (_, false) => format!("Deleted {name}; kept its volumes {}", volumes.join(", ")),
+            let titles = delete_titles(&name, &volumes, delete_volumes);
+            // "Deleting …" until the agent says it's gone (service_delete_finished).
+            let (title, context) = if reached {
+                (
+                    titles.doing,
+                    json!({ "projectId": project_id, DONE_TITLE: titles.done }),
+                )
+            } else {
+                (titles.done, json!({ "projectId": project_id }))
             };
             log_activity(
                 tx,
@@ -6515,11 +6531,11 @@ async fn apply(
                 "warning",
                 &title,
                 json!({ "kind": "service", "id": id, "label": name }),
-                json!({ "projectId": project_id }),
+                context,
             )
             .await?;
             wake.push(cluster_id);
-            Ok(json!({ "ok": true, "volumes": volumes, "volumesDeleted": delete_volumes }))
+            Ok(json!({ "ok": true, "volumes": volumes, "volumesDeleted": delete_volumes, "deleted": !reached }))
         }
         Op::Deploy {
             service_id,
@@ -8539,6 +8555,137 @@ pub async fn service_ref(
         namespace,
         workload_kind: kind.into(),
     })
+}
+
+/// A service delete's activity entry keeps the title it gets once the
+/// agent says the service is gone, under this key, until then.
+const DONE_TITLE: &str = "doneTitle";
+
+/// A service delete's activity titles: while the agent removes it, and
+/// once it's gone.
+struct DeleteTitles {
+    doing: String,
+    done: String,
+}
+
+fn delete_titles(name: &str, volumes: &[String], delete_volumes: bool) -> DeleteTitles {
+    match (volumes.len(), delete_volumes) {
+        (0, _) => DeleteTitles {
+            doing: format!("Deleting {name}"),
+            done: format!("Deleted {name}"),
+        },
+        (_, true) => DeleteTitles {
+            doing: format!("Deleting {name} and its volumes"),
+            done: format!("Deleted {name} and its volumes"),
+        },
+        (_, false) => DeleteTitles {
+            doing: format!("Deleting {name}. Keeping its volumes {}.", volumes.join(", ")),
+            done: format!("Deleted {name}. Kept its volumes {}.", volumes.join(", ")),
+        },
+    }
+}
+
+/// What the team reads when the agent couldn't delete a service.
+pub(crate) fn delete_failed_text(name: &str) -> String {
+    format!("Couldn't delete {name}. Try again, or delete the project.")
+}
+
+/// Whether anything of a service may be on its cluster: it was deployed,
+/// or a command for it was ever queued. One that never was (its first
+/// deploy cancelled before it went out) has nothing there, maybe not
+/// even its namespace.
+async fn reached_cluster(tx: &mut Transaction<'_, Postgres>, service_id: &str) -> ApiResult<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT a.current_deployment_id IS NOT NULL OR EXISTS (
+                  SELECT 1 FROM pyo.commands c WHERE c.cluster_id = a.cluster_id
+                     AND (c.command->>'serviceId' = a.id OR c.command->'service'->>'serviceId' = a.id))
+           FROM pyo.services a WHERE a.id = $1",
+    )
+    .bind(service_id)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+/// The agent finished deleting a service (`delete_service`). Done: its
+/// row goes, the volumes deleted with it go next, and the activity entry
+/// says "Deleted …". Failed: it's back, its volumes are kept, and the
+/// team reads why on the service and in the activity.
+pub(crate) async fn service_delete_finished(
+    tx: &mut Transaction<'_, Postgres>,
+    cluster_id: &str,
+    service_id: &str,
+    ok: bool,
+    message: Option<&str>,
+) -> ApiResult<()> {
+    crate::volumes::service_deleted(tx, cluster_id, service_id, ok).await?;
+    if ok {
+        let gone: Option<String> = sqlx::query_scalar(
+            "DELETE FROM pyo.services WHERE id = $1 AND cluster_id = $2 AND deleting RETURNING team_id",
+        )
+        .bind(service_id)
+        .bind(cluster_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(team_id) = gone {
+            settle_delete_entry(tx, &team_id, service_id, true).await?;
+        }
+        return Ok(());
+    }
+    let back: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT team_id, name, project_id FROM pyo.services WHERE id = $1 AND cluster_id = $2 AND deleting",
+    )
+    .bind(service_id)
+    .bind(cluster_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((team_id, name, project_id)) = back else {
+        return Ok(());
+    };
+    tracing::warn!(cluster = %cluster_id, service = %service_id, error = message.unwrap_or(""), "the agent couldn't delete the service");
+    let why = delete_failed_text(&name);
+    sqlx::query("UPDATE pyo.services SET deleting = false, delete_error = $2 WHERE id = $1")
+        .bind(service_id)
+        .bind(&why)
+        .execute(&mut **tx)
+        .await?;
+    settle_delete_entry(tx, &team_id, service_id, false).await?;
+    log_activity(
+        tx,
+        &team_id,
+        "pyo",
+        "service.delete_failed",
+        "failure",
+        &why,
+        json!({ "kind": "service", "id": service_id, "label": name }),
+        json!({ "projectId": project_id, "serviceId": service_id }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// A service delete's activity entry ("Deleting …"), once the agent
+/// answered: its final title when `done`, else as it is.
+async fn settle_delete_entry(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    service_id: &str,
+    done: bool,
+) -> ApiResult<()> {
+    let set = if done {
+        "(data - $3) || jsonb_build_object('title', data->$3)"
+    } else {
+        "data - $3"
+    };
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE pyo.activity SET data = {set}
+          WHERE team_id = $1 AND data->>'type' = 'service.deleted' AND data->'target'->>'id' = $2 AND data ? $3"
+    )))
+    .bind(team_id)
+    .bind(service_id)
+    .bind(DONE_TITLE)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// Change a service's cron jobs and send the whole list to its cluster.
@@ -11045,5 +11192,291 @@ mod compose_import_tests {
         assert_eq!(ns, "default-2");
         let err = run_json(&s, &user, json!({ "op": "createProject", "id": format!("prj_x{run}"), "teamId": team, "name": "x", "namespace": "default" })).await.unwrap_err();
         assert_eq!(err.message, "That name is reserved.");
+    }
+}
+
+#[cfg(test)]
+mod delete_service_tests {
+    use super::*;
+
+    /// Deleting a service: one that never reached its cluster goes at once;
+    /// one that did goes when the agent says so, and comes back with why
+    /// when it can't. Needs Postgres:
+    /// DATABASE_URL=… cargo test -p pyo-api -- --ignored ops::delete_service_tests
+    #[test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    fn services_are_deleted_once_their_cluster_says_so() {
+        // The operations' future is large: a roomier stack than a test's.
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(deletes())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn deletes() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let db = sqlx::PgPool::connect(&url).await.unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(
+            db.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let config = crate::Config {
+            agent_api_url: String::new(),
+            agent_image: String::new(),
+            waf_image: pyo_proto::system::WAF_IMAGE_DEFAULT.into(),
+            geoip_image: pyo_proto::system::GEOIP_IMAGE_DEFAULT.into(),
+            cookie_secure: false,
+            allow_signup: false,
+            builder_image: String::new(),
+            relay_addr: None,
+        };
+        let (_stop, stopping) = tokio::sync::watch::channel(false);
+        let s = AppState {
+            db: db.clone(),
+            config: std::sync::Arc::new(config),
+            observability: crate::observability::Observability::from_env(db.clone()),
+            sealer: std::sync::Arc::new(crate::secrets::Sealer::from_env()),
+            wakers: Default::default(),
+            terminals: Default::default(),
+            stopping,
+        };
+        let run = crate::ids::new_id("t");
+        let (team, cluster, project) = (
+            format!("team_{run}"),
+            format!("cl_{run}"),
+            format!("prj_{run}"),
+        );
+        let namespace = format!("shop-{run}");
+        let [ghost, web] = ["ghost", "web"].map(|n| format!("svc_{n}{run}"));
+        let user = User {
+            id: format!("usr_{run}"),
+            name: "T".into(),
+            email: format!("{run}@t.test"),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'T', '')")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&db)
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'admin', 'active')").bind(format!("mem_{run}")).bind(&team).bind(&user.id).bind(&user.email).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $3)")
+            .bind(&project)
+            .bind(&team)
+            .bind(&namespace)
+            .execute(&db)
+            .await
+            .unwrap();
+        for (id, name) in [(&ghost, "ghost"), (&web, "web")] {
+            q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, $5, $6)")
+                .bind(id)
+                .bind(&team)
+                .bind(&project)
+                .bind(&cluster)
+                .bind(name)
+                .bind(json!({ "name": name }))
+                .execute(&db)
+                .await
+                .unwrap();
+            // Its first deploy, cancelled.
+            q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'cancelled', '{}', '{}')")
+                .bind(format!("dpl_{name}{run}"))
+                .bind(&team)
+                .bind(&project)
+                .bind(id)
+                .bind(&cluster)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        // ghost has a volume, never made on the cluster.
+        let vol = format!("vol_g{run}");
+        q("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, service_id, data) VALUES ($1, $2, $3, $4, $5, '{\"name\":\"ghost-data\"}')")
+            .bind(&vol)
+            .bind(&team)
+            .bind(&cluster)
+            .bind(&project)
+            .bind(&ghost)
+            .execute(&db)
+            .await
+            .unwrap();
+        // web's deploy went out to the agent before it was cancelled.
+        let sent = json!({ "kind": "deploy", "deploymentId": format!("dpl_web{run}"), "service": { "serviceId": web, "name": "web", "namespace": namespace, "workloadKind": "Deployment" } });
+        q("INSERT INTO pyo.commands (id, cluster_id, status, command, sent_at, done_at) VALUES ($1, $2, 'failed', $3, now(), now())")
+            .bind(format!("cmd_w{run}"))
+            .bind(&cluster)
+            .bind(&sent)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let exists = |id: String| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM pyo.services WHERE id = $1)")
+                    .bind(id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap()
+            }
+        };
+        let queued = || {
+            let db = db.clone();
+            let cluster = cluster.clone();
+            async move {
+                let rows: Vec<Value> = sqlx::query_scalar(
+                    "UPDATE pyo.commands SET status = 'done' WHERE cluster_id = $1 AND status = 'pending' RETURNING command",
+                )
+                .bind(&cluster)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+                rows
+            }
+        };
+        let titles = |id: String| {
+            let db = db.clone();
+            let team = team.clone();
+            async move {
+                sqlx::query_as::<_, (String, String, bool)>(
+                    "SELECT data->>'type', data->>'title', data ? 'doneTitle' FROM pyo.activity
+                      WHERE team_id = $1 AND data->'target'->>'id' = $2 ORDER BY at, id",
+                )
+                .bind(&team)
+                .bind(id)
+                .fetch_all(&db)
+                .await
+                .unwrap()
+            }
+        };
+
+        // Never on its cluster: gone at once, its volume deleted after it.
+        let r = run_json(
+            &s,
+            &user,
+            json!({ "op": "deleteService", "id": ghost, "deleteVolumes": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["deleted"], true);
+        assert!(!exists(ghost.clone()).await);
+        let sent_now = queued().await;
+        let kinds: Vec<&str> = sent_now.iter().filter_map(|c| c["kind"].as_str()).collect();
+        assert!(!kinds.contains(&"delete_service"), "{kinds:?}");
+        assert!(
+            sent_now
+                .iter()
+                .any(|c| c["kind"] == "delete_volume" && c["volume_id"] == json!(vol)),
+            "{sent_now:?}"
+        );
+        assert_eq!(
+            titles(ghost.clone()).await,
+            [(
+                "service.deleted".to_owned(),
+                "Deleted ghost and its volumes".to_owned(),
+                false
+            )]
+        );
+
+        // On its cluster: "Deleting" until the agent answers.
+        let r = run_json(&s, &user, json!({ "op": "deleteService", "id": web }))
+            .await
+            .unwrap();
+        assert_eq!(r["deleted"], false);
+        assert!(exists(web.clone()).await);
+        let sent_now = queued().await;
+        assert!(sent_now.iter().any(|c| c["kind"] == "delete_service" && c["serviceId"] == json!(web)));
+        assert_eq!(
+            titles(web.clone()).await,
+            [("service.deleted".to_owned(), "Deleting web".to_owned(), true)]
+        );
+        let shown = |snap: &Value, key: &str| -> Option<Value> {
+            snap[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["id"] == json!(web))
+                .cloned()
+        };
+        let snap = crate::snapshot::build(&db, &user, "").await.unwrap();
+        assert!(shown(&snap, "services").is_none());
+        assert_eq!(shown(&snap, "deletingServices").unwrap()["deleting"], true);
+
+        // The agent couldn't: it's back, with why, and nothing says "Deleted".
+        let mut tx = db.begin().await.unwrap();
+        service_delete_finished(&mut tx, &cluster, &web, false, Some("deployments.apps is forbidden"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let why = "Couldn't delete web. Try again, or delete the project.";
+        let snap = crate::snapshot::build(&db, &user, "").await.unwrap();
+        assert!(shown(&snap, "deletingServices").is_none());
+        let back = shown(&snap, "services").unwrap();
+        assert_eq!(back["deleteError"], why);
+        assert!(back.get("deleting").is_none());
+        assert_eq!(
+            titles(web.clone()).await,
+            [
+                ("service.deleted".to_owned(), "Deleting web".to_owned(), false),
+                ("service.delete_failed".to_owned(), why.to_owned(), false),
+            ]
+        );
+
+        // Again: the agent did it this time. Gone, and said so.
+        run_json(&s, &user, json!({ "op": "deleteService", "id": web }))
+            .await
+            .unwrap();
+        let mut tx = db.begin().await.unwrap();
+        service_delete_finished(&mut tx, &cluster, &web, true, Some("web is already gone"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(!exists(web.clone()).await);
+        assert_eq!(
+            titles(web.clone()).await,
+            [
+                ("service.deleted".to_owned(), "Deleting web".to_owned(), false),
+                ("service.delete_failed".to_owned(), why.to_owned(), false),
+                ("service.deleted".to_owned(), "Deleted web".to_owned(), false),
+            ]
+        );
+
+        for t in ["pyo.commands WHERE cluster_id", "pyo.volumes WHERE cluster_id"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM {t} = $1")))
+                .bind(&cluster)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        q("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        q("DELETE FROM pyo.users WHERE id = $1")
+            .bind(&user.id)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }

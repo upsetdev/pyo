@@ -567,7 +567,8 @@ export function DeleteServiceDialog({
   app: Application | null | undefined;
   open: boolean;
   onClose: () => void;
-  onDeleted?: () => void;
+  /** Leave its page first: it shows as deleting where you land. */
+  onDeleted?: () => unknown;
 }) {
   const s = usePyo();
   const [remove, setRemove] = useState(false);
@@ -585,11 +586,15 @@ export function DeleteServiceDialog({
       confirmLabel="Delete"
       onConfirm={() => {
         if (!app) return;
-        void api.deleteService(app.id, remove && volumes.length > 0).then((ok) => {
-          if (!ok) return;
-          toast({ title: `Deleted ${app.name}` });
-          onDeleted?.();
-        });
+        const withVolumes = remove && volumes.length > 0;
+        void Promise.resolve(onDeleted?.())
+          .then(() => api.deleteService(app.id, withVolumes))
+          .then((r) => {
+            if (r)
+              toast({
+                title: r === "deleted" ? `Deleted ${app.name}` : `Deleting ${app.name}`,
+              });
+          });
       }}
     >
       <VolumesChoice

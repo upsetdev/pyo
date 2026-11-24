@@ -1085,22 +1085,18 @@ async fn command_result(
     }
     crate::volumes::finished(&mut tx, &cluster.id, &command, r.ok, shown.as_deref()).await?;
     crate::routes::finished(&mut tx, &cluster.team_id, &command, r.ok, shown.as_deref()).await?;
-    // Volumes deleted with a service go once its objects are gone (or stay, if that failed).
+    // A finished delete removes the service's row (and its deployments),
+    // then the volumes deleted with it. A failed one brings it back, and
+    // says so.
     if command["kind"] == json!("delete_service") {
-        crate::volumes::service_deleted(
+        crate::ops::service_delete_finished(
             &mut tx,
             &cluster.id,
             command["serviceId"].as_str().unwrap_or(""),
             r.ok,
+            r.message.as_deref(),
         )
         .await?;
-    }
-    // A finished delete removes the service's row (and its deployments).
-    if command["kind"] == json!("delete_service") && r.ok {
-        sqlx::query("DELETE FROM pyo.services WHERE id = $1 AND deleting")
-            .bind(command["serviceId"].as_str().unwrap_or(""))
-            .execute(&mut *tx)
-            .await?;
     }
     if command["kind"] == json!("remove_server") {
         let node = command["server"].as_str().unwrap_or("");
@@ -1139,12 +1135,6 @@ async fn command_result(
                 .execute(&mut *tx)
                 .await?;
         }
-    }
-    if command["kind"] == json!("delete_service") && !r.ok {
-        sqlx::query("UPDATE pyo.services SET deleting = false WHERE id = $1")
-            .bind(command["serviceId"].as_str().unwrap_or(""))
-            .execute(&mut *tx)
-            .await?;
     }
     tx.commit().await?;
     Ok(Json(json!({ "ok": true })))

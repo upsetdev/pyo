@@ -40,6 +40,9 @@ struct Inner {
     objects: BTreeMap<Key, Value>,
     refused: Vec<Write>,
     admit: Admit,
+    /// Answer anything in a namespace that isn't there with 403, as the
+    /// agent's roles (bound per namespace) get from Kubernetes.
+    forbid_missing_namespaces: bool,
 }
 
 #[derive(Clone)]
@@ -158,6 +161,19 @@ async fn handle(
         return status(404, "NotFound", "no such path");
     };
     let mut inner = fake.0.lock().unwrap();
+    let ns_key = (
+        "api/v1".to_owned(),
+        "namespaces".to_owned(),
+        String::new(),
+        ns.clone(),
+    );
+    if inner.forbid_missing_namespaces && !ns.is_empty() && !inner.objects.contains_key(&ns_key) {
+        return status(
+            403,
+            "Forbidden",
+            &format!("{plural} is forbidden: the agent can't reach namespace \"{ns}\""),
+        );
+    }
     let key = (prefix.clone(), plural.clone(), ns.clone(), name.clone());
     if method == Method::GET {
         if !name.is_empty() {
@@ -246,6 +262,7 @@ impl FakeKube {
             objects: BTreeMap::new(),
             refused: vec![],
             admit: Arc::new(|_| None),
+            forbid_missing_namespaces: false,
         })));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -260,6 +277,12 @@ impl FakeKube {
     /// The admission check from now on.
     pub fn admit(&self, f: impl Fn(&Write) -> Option<(u16, String)> + Send + Sync + 'static) {
         self.0.lock().unwrap().admit = Arc::new(f);
+    }
+
+    /// From now on, anything in a namespace that isn't there is refused
+    /// with 403 (the agent's rights), not 404.
+    pub fn forbid_missing_namespaces(&self) {
+        self.0.lock().unwrap().forbid_missing_namespaces = true;
     }
 
     /// Put an object at its path ("apis/apps/v1/namespaces/shop/deployments/web").

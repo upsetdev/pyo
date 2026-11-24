@@ -102,6 +102,8 @@ export type PyoState = {
   /** Every workload the clusters' agents report (system and service). */
   systemWorkloads: Workload[];
   services: Application[];
+  /** Services being deleted, until Pyo says they're gone. */
+  deletingServices: Application[];
   /** Pull requests' previews of services (removed ones for a day). */
   previews: Preview[];
   deployments: Deployment[];
@@ -325,6 +327,7 @@ function empty(): PyoState {
     servers: [],
     systemWorkloads: [],
     services: [],
+    deletingServices: [],
     previews: [],
     deployments: [],
     volumes: [],
@@ -2280,20 +2283,29 @@ export const api = {
     });
     void send("stopService", { id });
   },
-  /** Resolves once the API has it (true) or refused it (false). */
+  /**
+   * Resolves once the API has it: "deleted" when it's gone at once,
+   * "deleting" while its cluster removes it, null when refused.
+   */
   deleteService(id: string, deleteVolumes = false) {
     update((s) => {
+      const a = s.services.find((x) => x.id === id);
       s.services = s.services.filter((x) => x.id !== id);
+      if (a)
+        s.deletingServices = [
+          ...s.deletingServices.filter((x) => x.id !== id),
+          { ...a, deleting: true, deleteError: undefined },
+        ];
       for (const v of s.volumes)
         if (v.serviceId === id) {
           v.serviceId = undefined;
           if (deleteVolumes) v.deleting = true;
         }
     });
-    return send(
+    return send<{ deleted?: boolean }>(
       "deleteService",
       deleteVolumes ? { id, deleteVolumes } : { id },
-    ).then((r) => !!r);
+    ).then((r) => (r ? (r.deleted ? "deleted" : "deleting") : null));
   },
 
   // Deployments

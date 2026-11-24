@@ -900,7 +900,7 @@ pub async fn create(
         })
         .execute(&mut **tx)
         .await?;
-    sqlx::query("UPDATE pyo.services SET status = 'deploying', pending_changes = false, updated_at = now() WHERE id = $1")
+    sqlx::query("UPDATE pyo.services SET status = 'deploying', pending_changes = false, delete_error = NULL, updated_at = now() WHERE id = $1")
         .bind(req.service_id)
         .execute(&mut **tx)
         .await?;
