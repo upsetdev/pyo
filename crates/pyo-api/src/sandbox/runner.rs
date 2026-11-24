@@ -263,6 +263,10 @@ async fn missed_report(db: &PgPool, srv: &Server, why: &str) -> sqlx::Result<()>
     Ok(())
 }
 
+/// A sandbox to end: its id, server and address, whether it's past its
+/// lifetime, and whether its server is outbound and not ready.
+type Due = (String, Option<String>, Option<String>, bool, bool);
+
 /// Ends what's past its lifetime, retries deletes that didn't reach their
 /// server, and fails creates that never finished.
 async fn sweep(s: &AppState) -> anyhow::Result<()> {
@@ -278,7 +282,7 @@ async fn sweep(s: &AppState) -> anyhow::Result<()> {
     }
     // An outbound server that isn't ready is asked nothing: its answer
     // would only come at its next poll.
-    let due: Vec<(String, Option<String>, Option<String>, bool, bool)> = sqlx::query_as(
+    let due: Vec<Due> = sqlx::query_as(
         "SELECT x.id, x.server_id, sv.address,
                 coalesce(x.expires_at < now() - make_interval(secs => $1), false),
                 coalesce(sv.outbound AND sv.state <> 'ready', false)

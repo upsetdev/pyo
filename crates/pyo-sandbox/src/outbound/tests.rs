@@ -63,6 +63,7 @@ fn gone() -> Response {
 
 impl Fake {
     /// Checks a signed request as Pyo does. Its key id, or the answer.
+    #[allow(clippy::result_large_err)]
     fn check(
         &self,
         h: &HeaderMap,

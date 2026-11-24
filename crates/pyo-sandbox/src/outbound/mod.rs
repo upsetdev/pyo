@@ -351,12 +351,21 @@ impl<W: Work> Client<W> {
         let headers = [(wire::INSTANCE_HEADER, self.instance.clone())];
         let timeout = Duration::from_secs(self.timing.poll_wait_secs + 20);
         while !self.stopped() {
+            let asked = tokio::time::Instant::now();
             match self
                 .signed(Method::GET, &path, vec![], &headers, timeout)
                 .await
             {
                 Ok((s, body)) if s.is_success() => {
                     match serde_json::from_slice::<Vec<CommandEnvelope>>(&body) {
+                        Ok(list) if list.is_empty() => {
+                            backoff.reset();
+                            // Pyo answered at once (it's stopping): not
+                            // again at once.
+                            if asked.elapsed() < self.timing.backoff_min {
+                                sleep_or_stop(self.timing.backoff_min, &mut stop).await;
+                            }
+                        }
                         Ok(list) => {
                             backoff.reset();
                             for env in list {
