@@ -17,10 +17,10 @@
 //! `PYO_DEV_TXT_DOH` a DNS over HTTPS endpoint to ask instead (one that
 //! answers `application/dns-json`, such as Cloudflare's).
 
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
 use hickory_resolver::{
-    config::{NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts},
+    config::{LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts},
     proto::rr::{Name, RData, RecordType},
 };
 use serde_json::Value;
@@ -74,7 +74,7 @@ async fn txt(name: &str) -> Vec<String> {
     match authoritative_txt(name).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::info!(%name, error = %e, "domain proof: no TXT record read");
+            tracing::warn!(%name, error = %format!("{e:#}"), "domain proof: no TXT record read");
             vec![]
         }
     }
@@ -98,7 +98,8 @@ pub async fn authoritative_txt(name: &str) -> anyhow::Result<Vec<String>> {
         let servers = zone_servers(&recursive, &name).await?;
         let config = ResolverConfig::from_name_servers(
             servers
-                .into_iter()
+                .iter()
+                .copied()
                 .map(NameServerConfig::udp_and_tcp)
                 .collect(),
         );
@@ -115,10 +116,10 @@ pub async fn authoritative_txt(name: &str) -> anyhow::Result<Vec<String>> {
                 match authoritative.lookup(name.clone(), RecordType::CNAME).await {
                     Ok(l) => l.answers().to_vec(),
                     Err(e) if e.is_no_records_found() || e.is_nx_domain() => return Ok(vec![]),
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(unanswered(&name, &servers, e).await),
                 }
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(unanswered(&name, &servers, e).await),
         };
         let txt: Vec<String> = answers
             .iter()
@@ -146,11 +147,44 @@ pub async fn authoritative_txt(name: &str) -> anyhow::Result<Vec<String>> {
     anyhow::bail!("too many CNAMEs")
 }
 
+/// No name server answered: what was asked, and why each address couldn't
+/// be reached when the host says why. The resolver itself only says it had
+/// no connection left, which hides a host without IPv6, say.
+async fn unanswered(name: &Name, servers: &[IpAddr], e: impl std::fmt::Display) -> anyhow::Error {
+    let mut asked = vec![];
+    for ip in servers {
+        asked.push(match reach(*ip).await {
+            Ok(()) => ip.to_string(),
+            Err(why) => format!("{ip} ({why})"),
+        });
+    }
+    anyhow::anyhow!(
+        "the name servers of {name} didn't answer: {e}. Asked {}",
+        asked.join(", ")
+    )
+}
+
+/// Whether this host has a route to a name server's address (a UDP socket
+/// connected to its port 53, which sends nothing).
+async fn reach(ip: IpAddr) -> std::io::Result<()> {
+    let local: std::net::SocketAddr = if ip.is_ipv4() {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    tokio::net::UdpSocket::bind(local)
+        .await?
+        .connect((ip, 53))
+        .await
+}
+
 fn dns_options(recursive: bool) -> ResolverOpts {
     let mut o = ResolverOpts::default();
     o.timeout = DNS_TIMEOUT;
     o.attempts = 2;
     o.use_hosts_file = ResolveHosts::Never;
+    // Name servers' addresses of both families, IPv4 first.
+    o.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
     if !recursive {
         // Ask the name servers themselves, fresh each time.
         o.recursion_desired = false;
@@ -159,11 +193,27 @@ fn dns_options(recursive: bool) -> ResolverOpts {
     o
 }
 
+/// Of one name server's addresses, the ones to ask: its first IPv4 and
+/// first IPv6 address, so a host with only one of the two reaches it.
+fn server_addresses(found: impl IntoIterator<Item = IpAddr>) -> Vec<IpAddr> {
+    let found: Vec<IpAddr> = found.into_iter().collect();
+    let v4 = found.iter().find(|a| a.is_ipv4());
+    let v6 = found.iter().find(|a| a.is_ipv6());
+    v4.into_iter().chain(v6).copied().collect()
+}
+
+/// Every name server's addresses, IPv4 first: hosts without IPv6 (most
+/// pods) try those first, and hosts with only IPv6 still have theirs.
+fn ipv4_first(mut ips: Vec<IpAddr>) -> Vec<IpAddr> {
+    ips.sort_by_key(IpAddr::is_ipv6);
+    ips
+}
+
 /// The addresses of the name servers of the zone `name` is in.
 async fn zone_servers(
     recursive: &hickory_resolver::TokioResolver,
     name: &Name,
-) -> anyhow::Result<Vec<std::net::IpAddr>> {
+) -> anyhow::Result<Vec<IpAddr>> {
     let mut zone = name.clone();
     loop {
         anyhow::ensure!(zone.num_labels() >= 2, "no zone found for {name}");
@@ -180,14 +230,14 @@ async fn zone_servers(
                 let mut ips = vec![];
                 for n in ns.into_iter().take(NAME_SERVERS) {
                     if let Ok(found) = recursive.lookup_ip(n).await {
-                        ips.extend(found.iter().take(2));
+                        ips.extend(server_addresses(found.iter()));
                     }
                 }
                 anyhow::ensure!(
                     !ips.is_empty(),
                     "the name servers of {zone} have no address"
                 );
-                return Ok(ips);
+                return Ok(ipv4_first(ips));
             }
         }
         zone = zone.base_name();
@@ -383,6 +433,57 @@ mod tests {
         assert_ne!(token("t1", "example.com"), token("t2", "example.com"));
         assert_ne!(token("t1", "example.com"), token("t1", "www.example.com"));
         assert!(how_to("t1", "a.com").contains("_pyo-verify.a.com"));
+    }
+
+    /// Name servers with both families (Cloudflare's, say) are asked over
+    /// IPv4 first, and keep their IPv6 address for hosts with only that.
+    /// Before, only the first two addresses were kept, both IPv6, so
+    /// IPv4-only pods could reach none of them.
+    #[test]
+    fn name_servers_are_asked_over_ipv4_first() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        // As a lookup gives them: IPv6 first.
+        let first = server_addresses([
+            ip("2001:db8::1"),
+            ip("2001:db8::2"),
+            ip("192.0.2.1"),
+            ip("192.0.2.2"),
+        ]);
+        assert_eq!(first, [ip("192.0.2.1"), ip("2001:db8::1")]);
+        let second = server_addresses([ip("2001:db8::3"), ip("198.51.100.1")]);
+        let all = ipv4_first(first.into_iter().chain(second).collect());
+        assert_eq!(
+            all,
+            [
+                ip("192.0.2.1"),
+                ip("198.51.100.1"),
+                ip("2001:db8::1"),
+                ip("2001:db8::3"),
+            ]
+        );
+        // One family only: that's what there is.
+        assert_eq!(
+            server_addresses([ip("2001:db8::1"), ip("2001:db8::2")]),
+            [ip("2001:db8::1")]
+        );
+        assert_eq!(server_addresses([ip("192.0.2.1")]), [ip("192.0.2.1")]);
+        assert!(server_addresses([]).is_empty());
+    }
+
+    /// A name server that can't be reached says why, with its address.
+    #[tokio::test]
+    async fn a_name_server_that_isnt_reached_is_named() {
+        let name = Name::from_ascii("_pyo-verify.example.com.").unwrap();
+        let servers = ["192.0.2.1".parse().unwrap()];
+        let m = unanswered(&name, &servers, "no connections available")
+            .await
+            .to_string();
+        assert!(
+            m.starts_with(
+                "the name servers of _pyo-verify.example.com. didn't answer: no connections available. Asked 192.0.2.1"
+            ),
+            "{m}"
+        );
     }
 
     /// Over the internet: a TXT record read from its zone's own name
