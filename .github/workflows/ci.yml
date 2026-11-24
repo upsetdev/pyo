@@ -167,6 +167,60 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: cargo test --locked -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests registry::tests
+      # Agents and builders: commands sent again to a restarted agent,
+      # servers' names, what an ended team's clusters get, the keys agents
+      # sign with, builds and their logs, and the terminal across replicas.
+      - name: Agents and builders (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: |
+          cargo test --locked -p pyo-api --lib -- --ignored agent:: agent_auth:: builders:: terminal:: jobs::
+      # Services: a Compose import, the WAF engine following its services,
+      # deleting services, removing servers and clusters, domains and
+      # routes, folders uploaded for builds, and Pyo registry's door.
+      - name: Services (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: |
+          cargo test --locked -p pyo-api --lib -- --ignored ops:: routes:: source_uploads:: registrydoor::
+      # Databases deleted and cleaned up, and dumps uploaded in parts to a
+      # fake store. A run of its own: the upload sets the store's address
+      # for the whole process.
+      - name: Databases (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api --lib -- --ignored databases::tests database_imports::tests
+      # Team backups without a store, volume backups' status and the
+      # export. A run of its own, without a store's address.
+      - name: Backups (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api --lib -- --ignored teambackup::tests backup::tests::export_real_db
+      # Imports from other platforms and pull request previews.
+      - name: Imports and previews (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api --lib -- --ignored platform_import::tests previews::tests
+      # Signing in and setting up: rate limits and lockouts, two-factor
+      # codes, the CLI's sign-in, GitHub installations, the first install
+      # and connect tokens, and Pyo Cloud's bootstrap codes.
+      - name: Sign-in and setup (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: |
+          cargo test --locked -p pyo-api --lib -- --ignored ratelimit::tests twofactor::tests cli::tests github::tests install:: cloud::bootstrap::tests
+      # Sandboxes: names, shared servers and templates, the door's join
+      # codes, the signing key and the base template (in a database of its
+      # own).
+      - name: Sandboxes (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api --lib -- --ignored sandbox::tests sandbox::join::tests sandbox::keys::tests sandbox::base::tests
+      # Every migration on a new database of its own.
+      - name: Migrations (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api --lib -- --ignored migrate::tests
 
   # Known CVEs in the locked dependencies: Cargo.lock, bun.lock (with the
   # dashboard's dev dependencies) and the WAF's go.mod. A CRITICAL one
