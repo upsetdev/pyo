@@ -160,12 +160,13 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: cargo test --locked -p pyo-api --lib -- --ignored sandbox::outbound::tests sandbox::outbound::self_hosted_tests
-      # Volumes kept, attached, moved and deleted, and which agents are due
-      # an update, in the database.
+      # Volumes kept, attached, moved and deleted, which agents are due an
+      # update, and which registry login a service's image is labeled with,
+      # in the database.
       - name: Volumes and updates (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
-        run: cargo test --locked -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests
+        run: cargo test --locked -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests registry::tests
 
   # Known CVEs in the locked dependencies: Cargo.lock, bun.lock (with the
   # dashboard's dev dependencies) and the WAF's go.mod. A CRITICAL one

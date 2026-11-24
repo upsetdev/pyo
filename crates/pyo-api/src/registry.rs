@@ -21,6 +21,49 @@ pub fn image_host(image: &str) -> String {
     }
 }
 
+/// An image source's registry, as services record it: the team's login for
+/// the image's host when it has one (a private image), else that host's
+/// public registry. Deploys pick the login by the image's host as well
+/// (deploy.rs), so this only names the one they use.
+pub fn label(source: &mut serde_json::Value, login: Option<String>) {
+    let host = image_host(source["image"].as_str().unwrap_or(""));
+    source["private"] = serde_json::json!(login.is_some());
+    source["registryId"] = serde_json::json!(login.unwrap_or_else(|| public_registry_id(&host)));
+}
+
+/// A host's public registry: the dashboard's built-in ones by their ids,
+/// any other by its host.
+fn public_registry_id(host: &str) -> String {
+    match host {
+        "docker.io" => "reg_dockerhub".into(),
+        "ghcr.io" => "reg_ghcr".into(),
+        "quay.io" => "reg_quay".into(),
+        h => format!("reg_public:{h}"),
+    }
+}
+
+/// [`label`] for a service's spec, with the team's logins. Sources other
+/// than images stay as they are.
+pub async fn label_source(
+    db: &mut sqlx::PgConnection,
+    team_id: &str,
+    spec: &mut serde_json::Value,
+) -> sqlx::Result<()> {
+    let source = &mut spec["source"];
+    let image = match source["image"].as_str() {
+        Some(i) if source["type"] == "image" && !i.trim().is_empty() => i.trim().to_owned(),
+        _ => return Ok(()),
+    };
+    let login: Option<String> =
+        sqlx::query_scalar("SELECT id FROM pyo.registry_logins WHERE team_id = $1 AND host = $2")
+            .bind(team_id)
+            .bind(image_host(&image))
+            .fetch_optional(db)
+            .await?;
+    label(source, login);
+    Ok(())
+}
+
 /// Where the registry's API answers (Docker Hub's isn't at docker.io).
 fn api_base(host: &str) -> String {
     match host {
@@ -365,6 +408,79 @@ mod tests {
             { "digest": "sha256:amd", "platform": { "os": "linux", "architecture": "amd64" } },
         ] });
         assert_eq!(platform_digest(&index).as_deref(), Some("sha256:amd"));
+    }
+
+    #[test]
+    fn labels() {
+        let labeled = |image: &str, login: Option<&str>| {
+            let mut s = json!({ "type": "image", "image": image, "registryId": "reg_dockerhub", "private": false });
+            label(&mut s, login.map(str::to_owned));
+            (s["registryId"].as_str().unwrap().to_owned(), s["private"] == json!(true))
+        };
+        // GitHub's registry: the team's login, or GitHub's public one. Never Docker Hub.
+        assert_eq!(labeled("ghcr.io/acme/web", Some("rgl_gh")), ("rgl_gh".into(), true));
+        assert_eq!(labeled("ghcr.io/acme/web", None), ("reg_ghcr".into(), false));
+        // Docker Hub, named or not.
+        assert_eq!(labeled("docker.io/acme/api", None), ("reg_dockerhub".into(), false));
+        assert_eq!(labeled("docker.io/acme/api", Some("rgl_hub")), ("rgl_hub".into(), true));
+        assert_eq!(labeled("nginx", None), ("reg_dockerhub".into(), false));
+        assert_eq!(labeled("valkey/valkey", None), ("reg_dockerhub".into(), false));
+        // A registry of its own: by its host.
+        assert_eq!(
+            labeled("registry.example.com:5000/team/web", None),
+            ("reg_public:registry.example.com:5000".into(), false)
+        );
+        assert_eq!(
+            labeled("registry.example.com:5000/team/web", Some("rgl_own")),
+            ("rgl_own".into(), true)
+        );
+        assert_eq!(labeled("quay.io/org/app", None), ("reg_quay".into(), false));
+    }
+
+    /// Against a throwaway Postgres: a service's image is labeled with the
+    /// team's login for its host, and only that team's.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn labels_with_the_teams_login() {
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let run = crate::ids::random_string(8).to_lowercase();
+        let (team, other) = (format!("team_rl{run}"), format!("team_rm{run}"));
+        for t in [&team, &other] {
+            sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(t)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let login = format!("rgl_{run}");
+        sqlx::query("INSERT INTO pyo.registry_logins (id, team_id, host, username, secret_sealed) VALUES ($1, $2, 'ghcr.io', 'acme', 'x')")
+            .bind(&login)
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut conn = db.acquire().await.unwrap();
+        let labeled = |image: &str| json!({ "source": { "type": "image", "image": image, "registryId": "reg_dockerhub", "private": false } });
+        let mut spec = labeled("ghcr.io/acme/web");
+        label_source(&mut conn, &team, &mut spec).await.unwrap();
+        assert_eq!(spec["source"]["registryId"], json!(login));
+        assert_eq!(spec["source"]["private"], json!(true));
+        // Another team has no login there: GitHub's public registry.
+        let mut spec = labeled("ghcr.io/acme/web");
+        label_source(&mut conn, &other, &mut spec).await.unwrap();
+        assert_eq!(spec["source"]["registryId"], json!("reg_ghcr"));
+        assert_eq!(spec["source"]["private"], json!(false));
+        let mut spec = labeled("nginx");
+        label_source(&mut conn, &team, &mut spec).await.unwrap();
+        assert_eq!(spec["source"]["registryId"], json!("reg_dockerhub"));
+        // A Git source stays as it is.
+        let mut spec = json!({ "source": { "type": "git", "repoUrl": "https://example.com/a/b", "private": true } });
+        label_source(&mut conn, &team, &mut spec).await.unwrap();
+        assert!(spec["source"].get("registryId").is_none());
+        assert_eq!(spec["source"]["private"], json!(true));
     }
 
     #[test]

@@ -440,8 +440,19 @@ export function parseImageInput(
   if (host === "docker.io" && !image.startsWith("docker.io/"))
     image = `docker.io/${image.includes("/") ? image : `library/${image}`}`;
   const registryId =
-    registries.find((r) => r.host === host)?.id ?? "reg_dockerhub";
+    registries.find((r) => r.host === host)?.id ?? publicRegistryId(host);
   return { image, reference, registryId };
+}
+
+/**
+ * A host's public registry, as Pyo labels images without a login: the
+ * built-in ones by their ids, any other by its host (registry.rs).
+ */
+export function publicRegistryId(host: string) {
+  if (host === "docker.io") return "reg_dockerhub";
+  if (host === "ghcr.io") return "reg_ghcr";
+  if (host === "quay.io") return "reg_quay";
+  return `reg_public:${host}`;
 }
 
 function check(step: Section, d: DeployDraft, ctx: ValidationContext): Issues {
