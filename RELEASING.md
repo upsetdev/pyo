@@ -758,6 +758,49 @@ the binary against the pinned checksum (or, for a joining server on another
 version, against that k3s release's own checksum list), and stop before
 installing anything when one doesn't match.
 
+k3s pulls its own images (CoreDNS, the pause image, its Helm and load
+balancer images) from `docker.io/rancher` when it first starts. Pyo
+doesn't mirror those. Docker Hub sends them without rate limit headers
+today, so they don't count toward its anonymous limit.
+
+## Third-party images
+
+Pyo doesn't pull from Docker Hub. Its anonymous pulls are rate limited,
+and an install on a shared address (an office, a cloud NAT, CI) failed
+when it hit the limit. The third-party images Pyo runs are copied to
+`ghcr.io/upsetdev/pyo/mirror`, and everything points there: the registry,
+BuildKit, Postgres, ClickHouse, Garage, Vector, curl, cloudflared, restic,
+the database client tools, Valkey, and Envoy Gateway's chart, controller
+and Envoy.
+
+- `deploy/mirrors.txt` lists each source by tag and digest. The mirror's
+  path is the source's without its registry and `library/`.
+  `docker.io/library/registry:3.1.2@sha256:…` becomes
+  `ghcr.io/upsetdev/pyo/mirror/registry:3.1.2`, with the same digest.
+- `scripts/mirror-images.sh copy` copies them with `crane copy`. It keeps
+  every platform and rebuilds nothing. It skips one that's there already,
+  checks each copy's digest is the source's, and checks anyone can pull
+  it. `.github/workflows/mirror.yml` runs it for each release, before the
+  release is published, and on `dev` and `main` when the list changes. On
+  a working branch it copies to `-test` tags, as a trial. By hand (Actions
+  › Mirror images › Run workflow) it takes a suffix.
+- A new package on ghcr.io may start private. The run fails and names it.
+  Make it public in its package settings on GitHub, then run it again.
+- The mirrors aren't signed, because Pyo didn't build them. They're
+  pinned by the source's digest wherever they're used, and `release.json`
+  (signed) lists them under `mirrors`.
+- `scripts/check-images.sh` (CI's **Image sources** job) fails when an
+  image Pyo ships comes from Docker Hub or a registry not on its list. A
+  bare name like `registry:3.1.2` is a Docker Hub image. It also fails
+  when a mirror in use isn't in `deploy/mirrors.txt` with that digest. The
+  same job checks each listed digest is still at its source.
+
+To add or bump one, write it in `deploy/mirrors.txt` with the digest of
+its multi-platform index, and use the mirror with that digest where it
+runs. Renovate updates both. A new image in `platform.yaml` restarts that
+part. A change to Envoy Gateway's chart needs each cluster's connect
+command, so say so in the release's notices (see [Notices](#notices)).
+
 ## Change the database
 
 Migrations run while the previous release is still serving, and it has to keep
