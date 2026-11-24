@@ -17,10 +17,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 use crate::ids::{random_string, sha256_hex};
-use crate::teamsec_tests::{Client, run_big};
-
-const INSIDE: &str = "203.0.113.7";
-const OUTSIDE: &str = "192.0.2.50";
+use crate::teamsec_tests::{Client, fresh_ip, run_big};
 
 /// GET /api/v1/me with an API key, from `ip`.
 async fn me_with_key(app: &Router, key: &str, ip: &str) -> (StatusCode, Value) {
@@ -49,6 +46,12 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
             .await
             .unwrap();
         crate::migrate::run(&db).await.unwrap();
+        // The limit is the installation's: one a run before left behind (it
+        // stopped halfway) would refuse this run's admin from the start.
+        sqlx::query("DELETE FROM pyo.settings WHERE key = 'admin_sign_in'")
+            .execute(&db)
+            .await
+            .unwrap();
         crate::vault::init(crate::vault::Vault::new(
             db.clone(),
             crate::vault::Provider::from_env(),
@@ -103,6 +106,12 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
             .execute(&db)
             .await
             .unwrap();
+        // Addresses of this run's own: sign-ins count against them.
+        let net = |ip: &str| ip.rsplit_once('.').unwrap().0.to_owned();
+        let inside_ip = fresh_ip();
+        let outside_ip = std::iter::repeat_with(fresh_ip)
+            .find(|ip| net(ip) != net(inside_ip))
+            .unwrap();
         let client = |ip: &'static str| Client {
             app: app.clone(),
             cookie: None,
@@ -123,11 +132,11 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
         };
 
         // Off: the admin signs in from anywhere.
-        let (st, _, mut inside) = sign_in("adm", INSIDE).await;
+        let (st, _, mut inside) = sign_in("adm", inside_ip).await;
         assert_eq!(st, StatusCode::OK);
         let (st, snap) = inside.call(Method::GET, "/api/v1/state", None).await;
-        assert_eq!(st, StatusCode::OK);
-        assert_eq!(snap["adminSignIn"]["here"], INSIDE);
+        assert_eq!(st, StatusCode::OK, "{snap}");
+        assert_eq!(snap["adminSignIn"]["here"], inside_ip);
         assert_eq!(snap["adminSignIn"]["addresses"], json!([]));
 
         // A limit that leaves out the admin's own address: refused.
@@ -137,7 +146,7 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
         assert_eq!(st, StatusCode::BAD_REQUEST);
         assert_eq!(
             body["error"],
-            format!("This would lock you out. Add your address {INSIDE} first.")
+            format!("This would lock you out. Add your address {inside_ip} first.")
         );
         let (st, body) = inside
             .op(json!({ "op": "saveAdminSignIn", "tailnet": true }))
@@ -145,12 +154,15 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
         // One that keeps it: saved plainly.
         let (st, body) = inside
-            .op(json!({ "op": "saveAdminSignIn", "addresses": ["203.0.113.9/24", "2001:db8::/48"] }))
+            .op(json!({ "op": "saveAdminSignIn", "addresses": [format!("{}.9/24", net(inside_ip)), "2001:db8::/48"] }))
             .await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        assert_eq!(body["addresses"], json!(["203.0.113.0/24", "2001:db8::/48"]));
+        assert_eq!(
+            body["addresses"],
+            json!([format!("{}.0/24", net(inside_ip)), "2001:db8::/48"])
+        );
         // A member can't change it.
-        let (_, _, mut member) = sign_in("mem", INSIDE).await;
+        let (_, _, mut member) = sign_in("mem", inside_ip).await;
         let (st, _) = member
             .op(json!({ "op": "saveAdminSignIn", "addresses": [] }))
             .await;
@@ -158,10 +170,10 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
 
         // From outside, the right password answers as a wrong one, and the
         // admin's teams see why.
-        let (st, refused, outside) = sign_in("adm", OUTSIDE).await;
+        let (st, refused, outside) = sign_in("adm", outside_ip).await;
         assert_eq!(st, StatusCode::UNAUTHORIZED);
         assert!(outside.cookie.is_none());
-        let mut wrong = client(OUTSIDE);
+        let mut wrong = client(outside_ip);
         let (_, wrong_body) = wrong
             .call(
                 Method::POST,
@@ -170,7 +182,7 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
             )
             .await;
         assert_eq!(refused, wrong_body);
-        let (_, nobody) = client(OUTSIDE)
+        let (_, nobody) = client(outside_ip)
             .call(
                 Method::POST,
                 "/api/auth/login",
@@ -182,7 +194,7 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
             "SELECT count(*) FROM pyo.audit_events WHERE team_id = $1 AND action = 'auth.sign_in_refused' AND outcome = 'failed' AND ip = $2",
         )
         .bind(&team)
-        .bind(OUTSIDE)
+        .bind(outside_ip)
         .fetch_one(&db)
         .await
         .unwrap();
@@ -193,7 +205,7 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
         let mut stolen = Client {
             app: app.clone(),
             cookie: inside.cookie.clone(),
-            ip: OUTSIDE,
+            ip: outside_ip,
         };
         let (st, _) = stolen.call(Method::GET, "/api/v1/state", None).await;
         assert_eq!(st, StatusCode::UNAUTHORIZED);
@@ -203,14 +215,14 @@ fn admins_sign_in_only_from_where_the_limit_allows() {
         assert_eq!(st, StatusCode::OK);
 
         // The admin's API key from outside: a member, not an admin.
-        let (st, me) = me_with_key(&app, &key, OUTSIDE).await;
+        let (st, me) = me_with_key(&app, &key, outside_ip).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(me["isAdmin"], false);
-        let (_, me) = me_with_key(&app, &key, INSIDE).await;
+        let (_, me) = me_with_key(&app, &key, inside_ip).await;
         assert_eq!(me["isAdmin"], true);
 
         // Everyone else, from anywhere.
-        let (st, _, mut member_outside) = sign_in("mem", OUTSIDE).await;
+        let (st, _, mut member_outside) = sign_in("mem", outside_ip).await;
         assert_eq!(st, StatusCode::OK);
         let (st, _) = member_outside.call(Method::GET, "/api/v1/state", None).await;
         assert_eq!(st, StatusCode::OK);

@@ -128,14 +128,18 @@ jobs:
       - run: cargo test --locked --workspace
       # Row security and teams against a real Postgres: what a person's
       # requests may see and change, signing up, creating and joining teams,
-      # and the Cloudflare Tunnel loop against a fake Cloudflare.
+      # where admins may sign in from, team keys in the vault, and the
+      # Cloudflare Tunnel loop against a fake Cloudflare. With a secret key
+      # for the whole run, so the vault seals whichever test comes first.
       - name: Teams and row security (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
-        run: cargo test --locked -p pyo-api --lib -- --ignored rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests cloudflare::http_tests
-      # What a Compose sync writes. A run of its own: the tests above set a
-      # secret key for the whole process, and its one vault then keeps its
-      # data keys in whichever test's database came first.
+        run: |
+          PYO_SECRET_KEY=$(openssl rand -hex 32) \
+            cargo test --locked -p pyo-api --lib -- --ignored rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests cloudflare::http_tests admin_sign_in_tests vault::tests
+      # What a Compose sync writes. A run of its own, without a secret key:
+      # one test syncs in a database of its own, and the process's one vault
+      # keeps its data keys in whichever test's database came first.
       - name: Compose sync (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
@@ -154,6 +158,12 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: cargo test --locked -p pyo-api --lib -- --ignored sandbox::outbound::tests
+      # Volumes kept, attached, moved and deleted, and which agents are due
+      # an update, in the database.
+      - name: Volumes and updates (Postgres)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests
 
   # Known CVEs in the locked dependencies: Cargo.lock, bun.lock (with the
   # dashboard's dev dependencies) and the WAF's go.mod. A CRITICAL one

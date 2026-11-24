@@ -18,7 +18,7 @@ use sqlx::PgPool;
 use sqlx::postgres::PgConnectOptions;
 
 use crate::ids::random_string;
-use crate::teamsec_tests::{Client, run_big};
+use crate::teamsec_tests::{Client, fresh_ip, run_big};
 
 /// Pyo's tables owned by a login that's neither a superuser nor bypasses
 /// row security, in a database of its own, as on Pyo Cloud. Dropped by
@@ -178,9 +178,9 @@ async fn teams_as_a_person(db: PgPool) {
         ip,
     };
     let (mut ada, mut bob, mut dee) = (
-        client("203.0.113.21"),
-        client("203.0.113.22"),
-        client("203.0.113.23"),
+        client(fresh_ip()),
+        client(fresh_ip()),
+        client(fresh_ip()),
     );
 
     // Signing up without an invite: a team of their own.
