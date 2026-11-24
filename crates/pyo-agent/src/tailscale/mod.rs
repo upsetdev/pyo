@@ -529,8 +529,8 @@ pub fn machines(devices: &[Device]) -> Vec<ts::Machine> {
 pub enum Claim {
     /// Pyo's (made by this cluster): its addresses.
     Ours(Vec<String>),
-    /// Someone else's, or one Pyo can't read.
-    Taken,
+    /// Someone else's, or one Pyo can't read: its comment.
+    Taken(String),
 }
 
 /// A wanted name: Pyo's own Service, made now (marked `mark`) if there's
@@ -539,7 +539,7 @@ pub enum Claim {
 pub async fn claim(c: &Client, name: &str, mark: &str, marks: &[&str]) -> anyhow::Result<Claim> {
     match c.service(name).await? {
         Some((comment, addrs)) if marks.contains(&comment.as_str()) => Ok(Claim::Ours(addrs)),
-        Some(_) => Ok(Claim::Taken),
+        Some((comment, _)) => Ok(Claim::Taken(comment)),
         None => {
             let addrs = c.create_service(name, mark).await?;
             tracing::info!(name, "tailnet name made");
@@ -697,8 +697,6 @@ fn tag_taken(node: &str) {
     }
 }
 
-const TAKEN: &str = "Taken on your tailnet";
-
 /// The cluster's names on the tailnet as Pyo wants them ([`TailnetSync`]).
 pub async fn sync(c: &Client, w: &TailnetSync) -> anyhow::Result<TailnetSynced> {
     let marks: Vec<&str> = std::iter::once(w.mark.as_str())
@@ -756,13 +754,15 @@ pub async fn sync(c: &Client, w: &TailnetSync) -> anyhow::Result<TailnetSynced> 
 
     let mut names = Vec::new();
     for (name, kind) in &wanted {
+        // Taken: said by what has it.
+        let taken_by = |by: &str| (Vec::new(), Some(ts::taken_text(Some(by)).to_owned()));
         let (addrs, error) = match remote.get(name.as_str()) {
             Some((_, addrs)) if ours(name) => (addrs.clone(), None),
-            Some(_) => (Vec::new(), Some(TAKEN.to_owned())),
-            None if machine(name) => (Vec::new(), Some(TAKEN.to_owned())),
+            Some((comment, _)) => taken_by(ts::made_by(comment, &w.mark)),
+            None if machine(name) => taken_by("device"),
             None => match claim(c, name, &w.mark, &marks).await {
                 Ok(Claim::Ours(a)) => (a, None),
-                Ok(Claim::Taken) => (Vec::new(), Some(TAKEN.to_owned())),
+                Ok(Claim::Taken(comment)) => taken_by(ts::made_by(&comment, &w.mark)),
                 Err(e) => {
                     tracing::warn!(name, error = %e, "couldn't make the tailnet name");
                     (
@@ -889,19 +889,22 @@ pub async fn check_name(c: &Client, name: &str, marks: &[&str]) -> anyhow::Resul
     let machine = devices
         .iter()
         .any(|(_, full, _)| full.split('.').next() == Some(name));
-    let state = if (remote.contains_key(name) && !mine) || machine {
-        "taken"
-    } else {
+    // What has it, by the cluster's own mark (the first of `marks`).
+    let mark = marks.first().copied().unwrap_or("");
+    let (state, by) = match remote.get(name) {
+        Some((comment, _)) if !mine => ("taken", Some(ts::made_by(comment, mark))),
+        _ if machine => ("taken", Some("device")),
         // The list can leave some out: the Service itself, read directly.
-        match c.service(name).await? {
-            None => "free",
-            Some((comment, _)) if marks.contains(&comment.as_str()) => "ours",
-            Some(_) => "taken",
-        }
+        _ => match c.service(name).await? {
+            None => ("free", None),
+            Some((comment, _)) if marks.contains(&comment.as_str()) => ("ours", None),
+            Some((comment, _)) => ("taken", Some(ts::made_by(&comment, mark))),
+        },
     };
     Ok(NameCheck {
         state: state.into(),
         suffix,
+        by: by.map(str::to_owned),
     })
 }
 

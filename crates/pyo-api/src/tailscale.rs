@@ -1386,11 +1386,8 @@ pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
     if others.iter().any(|o| o.as_deref() == Some(name.as_str())) || domain {
         return Err(ApiError::conflict("Pyo uses this name already."));
     }
-    if peer_names(&s.db, &cluster_id).await?.contains(&name)
-        || named_elsewhere(&s.db, &cluster_id, t.suffix.as_deref(), &name).await?
-        || check_name(s, &cluster_id, &t, &name).await? == "taken"
-    {
-        return Err(ApiError::conflict("Taken on your tailnet"));
+    if let Some(taken) = taken_by(s, &cluster_id, &t, t.suffix.as_deref(), &name).await? {
+        return Err(ApiError::conflict(taken));
     }
     match kind {
         "dashboard" => t.dashboard_name = Some(name),
@@ -1405,9 +1402,9 @@ pub async fn rename(s: &AppState, kind: &str, name: &str) -> ApiResult<()> {
     .await
 }
 
-/// What a name is on the cluster's tailnet: "free", "ours" or "taken". The
-/// holder checks it, with the cluster's marks.
-async fn check_name(s: &AppState, cluster_id: &str, t: &Tailnet, name: &str) -> ApiResult<String> {
+/// What a name is on the cluster's tailnet: "free", "ours" or "taken", and
+/// what has it. The holder checks it, with the cluster's marks.
+async fn check_name(s: &AppState, cluster_id: &str, t: &Tailnet, name: &str) -> ApiResult<ts::NameCheck> {
     let marks = marks(&s.db, cluster_id, t).await?;
     let unchecked =
         || ApiError::bad_request("Couldn't check the name on your tailnet. Try again in a minute.");
@@ -1429,11 +1426,9 @@ async fn check_name(s: &AppState, cluster_id: &str, t: &Tailnet, name: &str) -> 
             unchecked()
         }
     })?;
-    let c: ts::NameCheck = r
-        .data
+    r.data
         .and_then(|d| serde_json::from_value(d).ok())
-        .ok_or_else(unchecked)?;
-    Ok(c.state)
+        .ok_or_else(unchecked)
 }
 
 /// Whether another cluster on the same tailnet has a name, or wants it
@@ -1495,13 +1490,31 @@ pub async fn check_domain(s: &AppState, cluster_id: &str, host: &str) -> ApiResu
     {
         return Err(ApiError::bad_request("Pyo uses this name itself."));
     }
-    if peer_names(&s.db, cluster_id).await?.contains(label)
-        || named_elsewhere(&s.db, cluster_id, Some(suffix), label).await?
-        || check_name(s, cluster_id, &t, label).await? == "taken"
-    {
-        return Err(ApiError::conflict("Taken on your tailnet"));
+    if let Some(taken) = taken_by(s, cluster_id, &t, Some(suffix), label).await? {
+        return Err(ApiError::conflict(taken));
     }
     Ok(())
+}
+
+/// Why a name can't be had on the cluster's tailnet, by what has it: a
+/// device (a machine the servers see), another cluster on the same
+/// tailnet, or what the holder finds there. None when it's free (or the
+/// cluster's own).
+async fn taken_by(
+    s: &AppState,
+    cluster_id: &str,
+    t: &Tailnet,
+    suffix: Option<&str>,
+    name: &str,
+) -> ApiResult<Option<&'static str>> {
+    if peer_names(&s.db, cluster_id).await?.contains(name) {
+        return Ok(Some(ts::TAKEN_BY_DEVICE));
+    }
+    if named_elsewhere(&s.db, cluster_id, suffix, name).await? {
+        return Ok(Some(ts::TAKEN_BY_CLUSTER));
+    }
+    let c = check_name(s, cluster_id, t, name).await?;
+    Ok((c.state == "taken").then(|| ts::taken_text(c.by.as_deref())))
 }
 
 // ── Join keys ───────────────────────────────────────────────────────────────
@@ -3371,7 +3384,7 @@ mod tests {
                     name: "shop".into(),
                     kind: "domain".into(),
                     addrs: vec![],
-                    error: Some("Taken on your tailnet".into()),
+                    error: Some(ts::TAKEN.into()),
                 },
             ],
             forgotten: vec!["n1".into()],
@@ -3433,7 +3446,7 @@ mod tests {
         // The agent couldn't make it.
         assert_eq!(
             st(
-                Some((&[][..], Some("Taken on your tailnet"))),
+                Some((&[][..], Some(ts::TAKEN))),
                 false,
                 false,
                 false
@@ -3441,7 +3454,7 @@ mod tests {
             DomainState {
                 status: Some("error"),
                 tls: "failed",
-                error: Some("Taken on your tailnet".into())
+                error: Some(ts::TAKEN.into())
             }
         );
         // The sync failed: only names it never made say so.
@@ -3571,7 +3584,7 @@ mod tests {
             suffix: Some(suffix.clone()),
             names: vec![
                 name("blog", None),
-                name("shop", Some("Taken on your tailnet")),
+                name("shop", Some(ts::TAKEN)),
                 name("wiki", None),
             ],
             ..Default::default()
@@ -3591,7 +3604,7 @@ mod tests {
         let taken = (
             "error".to_owned(),
             "failed".to_owned(),
-            Some("Taken on your tailnet".to_owned()),
+            Some(ts::TAKEN.to_owned()),
         );
         assert_eq!(
             state().await,
@@ -3967,6 +3980,59 @@ mod tests {
                 return (cmd, for_cluster);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A tailnet domain someone types that's taken says what has it: a
+    /// device the servers see, another cluster on the same tailnet, or
+    /// what the agent finds there (something else when it doesn't say).
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    async fn a_taken_tailnet_domain_says_what_has_it() {
+        let (s, _, cl, suffix) = holder_team(2).await;
+        let (a, b) = (&cl[0], &cl[1]);
+        set_tailscale(&s.db, a, &own("kA", Some(&suffix))).await;
+        set_tailscale(&s.db, b, &own("kB", Some(&suffix))).await;
+        // A machine a's servers see on the tailnet.
+        sqlx::query("UPDATE pyo.clusters SET capabilities = jsonb_build_object('tailnet', $2::jsonb) WHERE id = $1")
+            .bind(a)
+            .bind(json!([{ "server": "web-1", "peers": ["laptop"] }]))
+            .execute(&s.db)
+            .await
+            .unwrap();
+        // A name b has.
+        sqlx::query("INSERT INTO pyo.cluster_tailnet_names (cluster_id, name, kind, addrs) VALUES ($1, 'shop', 'domain', '{100.100.1.1}')")
+            .bind(b)
+            .execute(&s.db)
+            .await
+            .unwrap();
+        let host = |label: &str| format!("{label}.{suffix}");
+        let taken = async |label: &str| {
+            check_domain(&s, a, &host(label))
+                .await
+                .map_err(|e| (e.status, e.message))
+        };
+        let conflict =
+            |m: &str| -> Result<(), _> { Err((axum::http::StatusCode::CONFLICT, m.to_owned())) };
+        assert_eq!(taken("laptop").await, conflict(ts::TAKEN_BY_DEVICE));
+        assert_eq!(taken("shop").await, conflict(ts::TAKEN_BY_CLUSTER));
+        // The agent's own check, as it says it, and as an older agent does.
+        for (answer, said) in [
+            (json!({ "state": "taken", "by": "device" }), Err(ts::TAKEN_BY_DEVICE)),
+            (json!({ "state": "taken", "by": "cluster" }), Err(ts::TAKEN_BY_CLUSTER)),
+            (json!({ "state": "taken", "by": "other" }), Err(ts::TAKEN)),
+            (json!({ "state": "taken" }), Err(ts::TAKEN)),
+            (json!({ "state": "free" }), Ok(())),
+        ] {
+            let agent = tokio::spawn(agent_answers(
+                s.db.clone(),
+                a.clone(),
+                "tailscale_check_name",
+                answer,
+            ));
+            assert_eq!(taken("docs").await, said.or_else(conflict));
+            let cmd = agent.await.unwrap();
+            assert_eq!(cmd["name"], "docs");
         }
     }
 
