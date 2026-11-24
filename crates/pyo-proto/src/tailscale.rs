@@ -35,6 +35,47 @@ pub fn install_marker(install: &str) -> String {
     format!("Made by Pyo ({install})")
 }
 
+/// A name on the tailnet that a device has (a machine, a server of
+/// another cluster or one outside Pyo).
+pub const TAKEN_BY_DEVICE: &str = "A device on your tailnet has this name. Pick another.";
+/// One another cluster of the same installation has.
+pub const TAKEN_BY_CLUSTER: &str = "Another of your clusters uses this name. Pick another.";
+/// One something else has (made outside Pyo, or by another Pyo), or
+/// when what has it isn't known.
+pub const TAKEN: &str = "Something else on your tailnet uses this name. Pick another.";
+
+/// What has a name on the tailnet: "device", "cluster" or "other"
+/// ([`NameCheck::by`]), as people read it.
+pub fn taken_text(by: Option<&str>) -> &'static str {
+    match by {
+        Some("device") => TAKEN_BY_DEVICE,
+        Some("cluster") => TAKEN_BY_CLUSTER,
+        _ => TAKEN,
+    }
+}
+
+/// What made a Service with this comment, for a cluster whose Services are
+/// marked `mark` ([`marker`]): "cluster" when another cluster of the same
+/// installation did (its own marker, or the installation's older one),
+/// else "other".
+pub fn made_by(comment: &str, mark: &str) -> &'static str {
+    let install = mark
+        .strip_prefix("Made by Pyo (")
+        .and_then(|r| r.strip_suffix(')'))
+        .and_then(|r| r.split_once(' '))
+        .map(|(install, _)| install)
+        .filter(|i| !i.is_empty());
+    match install {
+        Some(i)
+            if comment == install_marker(i)
+                || comment.starts_with(&format!("Made by Pyo ({i} ")) =>
+        {
+            "cluster"
+        }
+        _ => "other",
+    }
+}
+
 /// "server-1.tail1234.ts.net" → "tail1234.ts.net".
 pub fn suffix_of(name: &str) -> Option<String> {
     let (_, rest) = name.trim_end_matches('.').split_once('.')?;
@@ -115,7 +156,7 @@ pub struct OwnName {
     pub base: String,
     /// What makes it unique when `base` is taken (the cluster's name).
     pub more: String,
-    /// Kept even when someone else has it ("Taken on your tailnet"),
+    /// Kept even when someone else has it ([`TAKEN`] and the like),
     /// rather than picked again: the dashboard's and the registry's, which
     /// people may have bookmarked.
     #[serde(default)]
@@ -253,6 +294,10 @@ pub struct NameCheck {
     pub state: String,
     #[serde(default)]
     pub suffix: Option<String>,
+    /// What has it, when it's taken: "device", "cluster" or "other"
+    /// ([`taken_text`]). None from older agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 /// One check of the client (Test, or after saving it).
@@ -337,6 +382,31 @@ pub fn tailnet_ip(ip: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_taken_name_says_what_has_it() {
+        let mark = marker("ins1", "cl_a");
+        // Another cluster of this installation, now or from before each
+        // cluster had its own client.
+        assert_eq!(made_by(&marker("ins1", "cl_b"), &mark), "cluster");
+        assert_eq!(made_by(&install_marker("ins1"), &mark), "cluster");
+        // Another Pyo, or made outside Pyo.
+        assert_eq!(made_by(&marker("ins2", "cl_b"), &mark), "other");
+        assert_eq!(made_by("Made by Pyo (ins10 cl_b)", &mark), "other");
+        assert_eq!(made_by("the user's", &mark), "other");
+        assert_eq!(made_by("", ""), "other");
+        assert_eq!(taken_text(Some("device")), TAKEN_BY_DEVICE);
+        assert_eq!(taken_text(Some("cluster")), TAKEN_BY_CLUSTER);
+        assert_eq!(taken_text(Some("other")), TAKEN);
+        assert_eq!(taken_text(None), TAKEN);
+        for t in [TAKEN, TAKEN_BY_DEVICE, TAKEN_BY_CLUSTER] {
+            assert!(!t.contains(';') && !t.contains(" - ") && t.ends_with("Pick another."));
+            assert!(!t.contains("Service") && !t.contains("peer") && !t.contains("MagicDNS"));
+        }
+        // An older agent's check: no `by`.
+        let c: NameCheck = serde_json::from_str(r#"{"state":"taken"}"#).unwrap();
+        assert_eq!(c.by, None);
+    }
 
     #[test]
     fn key_descriptions_are_what_tailscale_takes() {

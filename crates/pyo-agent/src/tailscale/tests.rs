@@ -161,7 +161,7 @@ async fn a_service_the_list_leaves_out_is_never_written() {
     );
     assert_eq!(
         claim(&c, "docker", MARK, &[MARK]).await.unwrap(),
-        Claim::Taken
+        Claim::Taken("the user's".into())
     );
     assert!(!delete_if_ours(&c, "docker", &[MARK]).await.unwrap());
     assert_eq!(
@@ -264,7 +264,15 @@ async fn own_names_are_picked_around_what_is_taken() {
     };
     let s = sync(&c, &w).await.unwrap();
     assert_eq!(s.names[0].name, "pyo");
-    assert_eq!(s.names[0].error.as_deref(), Some(TAKEN));
+    assert_eq!(s.names[0].error.as_deref(), Some(ts::TAKEN));
+    // A kept name a device has: said so.
+    let w = TailnetSync {
+        own: vec![own("registry", Some("registry"), "registry", true)],
+        ..w
+    };
+    let s = sync(&c, &w).await.unwrap();
+    assert_eq!(s.names[0].name, "registry");
+    assert_eq!(s.names[0].error.as_deref(), Some(ts::TAKEN_BY_DEVICE));
     let writes = st.lock().unwrap().writes.clone();
     assert!(
         !writes
@@ -351,11 +359,14 @@ async fn a_name_check_reads_the_service_itself() {
     net.devices
         .push(("n1".into(), "laptop.tail1.ts.net".into(), vec![]));
     let (c, _) = serve(net).await;
-    let state = async |n: &str| check_name(&c, n, &[MARK]).await.unwrap().state;
-    assert_eq!(state("docker").await, "taken");
-    assert_eq!(state("laptop").await, "taken");
-    assert_eq!(state("blog").await, "ours");
-    assert_eq!(state("shop").await, "free");
+    let check = async |n: &str| {
+        let r = check_name(&c, n, &[MARK]).await.unwrap();
+        (r.state, r.by)
+    };
+    assert_eq!(check("docker").await, ("taken".into(), Some("other".into())));
+    assert_eq!(check("laptop").await, ("taken".into(), Some("device".into())));
+    assert_eq!(check("blog").await, ("ours".into(), None));
+    assert_eq!(check("shop").await, ("free".into(), None));
 }
 
 #[tokio::test]
@@ -408,7 +419,7 @@ async fn one_holder_syncs_every_cluster_of_its_team() {
         .await
         .unwrap();
     assert_eq!(s.names[1].name, "blog");
-    assert_eq!(s.names[1].error.as_deref(), Some(TAKEN));
+    assert_eq!(s.names[1].error.as_deref(), Some(ts::TAKEN_BY_CLUSTER));
     // cl_b no longer wants shop, and lists blog as made: only shop goes.
     let s = sync(&holder, &sync_of("cl_b", &[], &["shop", "blog"]))
         .await
