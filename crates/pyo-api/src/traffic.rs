@@ -157,6 +157,67 @@ pub fn serves<'a>(
     ("anywhere", ready)
 }
 
+/// Cloudflare's address ranges, as last fetched (cdn.rs).
+pub async fn cloudflare_ranges(db: &sqlx::PgPool) -> Vec<crate::ratelimit::Cidr> {
+    crate::cdn::current(db)
+        .await
+        .get("cloudflare")
+        .into_iter()
+        .flatten()
+        .filter_map(|c| crate::ratelimit::Cidr::parse(c))
+        .collect()
+}
+
+fn is_cloudflare(ip: &str, cloudflare: &[crate::ratelimit::Cidr]) -> bool {
+    ip.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| cloudflare.iter().any(|c| c.contains(&ip)))
+}
+
+/// What the name of the cluster's Cloudflare Tunnel is: its domains'
+/// records are proxied CNAMEs to it. None without a tunnel.
+pub async fn tunnel_target(db: &sqlx::PgPool, cluster_id: &str) -> Option<String> {
+    let id: Option<String> = sqlx::query_scalar(
+        "SELECT tunnel_id FROM pyo.cluster_tunnels WHERE cluster_id = $1 AND tunnel_id IS NOT NULL",
+    )
+    .bind(cluster_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    id.map(|i| crate::cloudflare::tunnel::cname_target(&i))
+}
+
+/// A domain only through the Cloudflare Tunnel answers on Cloudflare's
+/// addresses, never the cluster's servers: what's wrong with its DNS, if
+/// anything. `target`: the tunnel's name, when there is one.
+pub fn tunnel_warning(
+    host: &str,
+    resolved: &Resolved,
+    target: Option<&str>,
+    cloudflare: &[crate::ratelimit::Cidr],
+) -> Option<String> {
+    let record = match target {
+        Some(t) => format!("Its record in Cloudflare should be a proxied CNAME to {t}."),
+        None => "Its record in Cloudflare should point at the cluster's tunnel.".to_owned(),
+    };
+    match resolved {
+        Err(e) => Some(format!("{host}: {e} {record}")),
+        Ok(ips) => {
+            let other: Vec<&str> = ips
+                .iter()
+                .filter(|ip| !is_cloudflare(ip, cloudflare))
+                .map(String::as_str)
+                .collect();
+            (!other.is_empty()).then(|| {
+                format!(
+                    "{host} points at {}, not at Cloudflare. {record}",
+                    other.join(", ")
+                )
+            })
+        }
+    }
+}
+
 /// The plain-word warnings of the panel.
 /// Spread mode drops the one that's about keeping traffic in its region.
 pub fn warnings(
@@ -359,12 +420,53 @@ pub async fn get(
         .filter_map(|d| d["hostname"].as_str())
         .map(|h| h.to_lowercase())
         .collect();
+    // Through the Cloudflare Tunnel: "switching" (both paths answer) or "on".
+    let tunnel_of = |host: &str| {
+        spec["domains"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|d| d["hostname"].as_str().map(str::to_lowercase).as_deref() == Some(host))
+            .and_then(|d| d["tunnel"].as_str())
+            .map(str::to_owned)
+    };
     let mut domains = vec![];
     for h in &hosts {
         domains.push((h.clone(), resolve(h).await));
     }
     let lb_ips = crate::freedomain::ips(&caps, "loadBalancerIps");
-    let warnings = warnings(&cluster, &domains, &servers, &replicas, &lb_ips, &mode);
+    let through_tunnel = hosts.iter().any(|h| tunnel_of(h).is_some());
+    let (cloudflare, target) = if through_tunnel {
+        (
+            cloudflare_ranges(&s.db).await,
+            tunnel_target(&s.db, &cluster_id).await,
+        )
+    } else {
+        (vec![], None)
+    };
+    // A tunnel domain's own check; one still switching answers on both
+    // paths, so Cloudflare's addresses are fine for it too.
+    let mut tunnel_warnings = vec![];
+    let direct: Vec<(String, Resolved)> = domains
+        .iter()
+        .filter_map(|(h, r)| match tunnel_of(h).as_deref() {
+            Some(pyo_proto::TUNNEL_ON) => {
+                tunnel_warnings.extend(tunnel_warning(h, r, target.as_deref(), &cloudflare));
+                None
+            }
+            Some(_) => Some((
+                h.clone(),
+                r.clone().map(|ips| {
+                    ips.into_iter()
+                        .filter(|ip| !is_cloudflare(ip, &cloudflare))
+                        .collect()
+                }),
+            )),
+            None => Some((h.clone(), r.clone())),
+        })
+        .collect();
+    let mut warnings = warnings(&cluster, &direct, &servers, &replicas, &lb_ips, &mode);
+    warnings.splice(0..0, tunnel_warnings);
 
     // Requests per region, from the server that answered each one.
     let stats_available = s.observability.enabled().await;
@@ -474,8 +576,8 @@ pub async fn get(
         "cluster": cluster,
         "mode": mode,
         "domains": domains.iter().map(|(h, r)| match r {
-            Ok(ips) => json!({ "hostname": h, "addresses": ips, "error": null }),
-            Err(e) => json!({ "hostname": h, "addresses": [], "error": e }),
+            Ok(ips) => json!({ "hostname": h, "addresses": ips, "error": null, "tunnel": tunnel_of(h) }),
+            Err(e) => json!({ "hostname": h, "addresses": [], "error": e, "tunnel": tunnel_of(h) }),
         }).collect::<Vec<_>>(),
         "regions": regions,
         "warnings": warnings,
@@ -631,5 +733,32 @@ mod tests {
         // No regions yet: no region warnings.
         let plain = [srv("a", "", "1.1.1.1"), srv("b", "", "1.1.1.2")];
         assert!(warnings("main", &[], &plain, &[rep("w", "a")], &[], "region").is_empty());
+    }
+
+    #[test]
+    fn tunnel_domains_point_at_cloudflare() {
+        let cf: Vec<crate::ratelimit::Cidr> = ["104.16.0.0/13", "2606:4700::/32"]
+            .iter()
+            .filter_map(|c| crate::ratelimit::Cidr::parse(c))
+            .collect();
+        let target = Some("6ff42ae2-765d-4adf-8112-31c55c1551ef.cfargotunnel.com");
+        // Cloudflare's addresses: nothing to say.
+        let r: Resolved = Ok(vec!["104.21.1.1".into(), "2606:4700:3030::1".into()]);
+        assert_eq!(tunnel_warning("shop.example.com", &r, target, &cf), None);
+        // Pointed at a server directly.
+        let r: Resolved = Ok(vec!["203.0.113.7".into()]);
+        assert_eq!(
+            tunnel_warning("shop.example.com", &r, target, &cf).unwrap(),
+            "shop.example.com points at 203.0.113.7, not at Cloudflare. Its record in Cloudflare should be a proxied CNAME to 6ff42ae2-765d-4adf-8112-31c55c1551ef.cfargotunnel.com."
+        );
+        // Not yet.
+        let r: Resolved = Err("It doesn't resolve yet.".into());
+        assert_eq!(
+            tunnel_warning("shop.example.com", &r, None, &cf).unwrap(),
+            "shop.example.com: It doesn't resolve yet. Its record in Cloudflare should point at the cluster's tunnel."
+        );
+        // Never the cluster's servers, or "ingress".
+        let w = tunnel_warning("shop.example.com", &Ok(vec!["9.9.9.9".into()]), target, &cf).unwrap();
+        assert!(!w.contains("servers") && !w.contains("ingress"), "{w}");
     }
 }

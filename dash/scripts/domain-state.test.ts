@@ -39,3 +39,14 @@ test("other domains still wait for DNS", () => {
   expect(domainState(domain("app.203.0.113.7.nip.io"), []).text).toBe("Checking DNS…");
   expect(domainState(domain("shop.example.com"), []).text).toBe("Waiting for DNS");
 });
+
+test("a tunnel domain moves to the tunnel, not waiting for DNS", () => {
+  expect(domainState(domain("shop.example.com", { tunnel: "switching" }), [])).toEqual({
+    tone: "busy",
+    text: "Moving to the tunnel…",
+  });
+  // Live through the tunnel: its own status, no DNS wording.
+  expect(
+    domainState(domain("shop.example.com", { tunnel: "on", status: "active", tls: "issued", tlsMode: "auto" }), []).text,
+  ).toBe("HTTPS");
+});

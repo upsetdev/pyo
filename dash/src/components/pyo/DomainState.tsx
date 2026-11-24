@@ -42,6 +42,8 @@ export function domainState(
       return d.status === "error"
         ? { tone: "broken", text: "Tailscale failed", hint: d.error }
         : { tone: "busy", text: "Setting up on Tailscale…" };
+    // Cloudflare's address, not the cluster's: Pyo says when it's there.
+    if (d.tunnel) return { tone: "busy", text: "Moving to the tunnel…" };
     if (isFreeDomain(d.hostname))
       return { tone: "busy", text: "Checking DNS…" };
     return {

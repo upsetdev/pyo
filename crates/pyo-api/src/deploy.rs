@@ -2559,6 +2559,11 @@ pub async fn resolve(host: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Why a domain that doesn't go through a tunnel isn't live yet.
+pub fn not_resolving(host: &str) -> String {
+    format!("{host} doesn't resolve yet. Point its DNS at the cluster's servers.")
+}
+
 /// Record a domain's DNS check: active once it resolves, else still waiting.
 pub async fn set_domain_dns(
     db: &sqlx::PgPool,
@@ -2570,12 +2575,7 @@ pub async fn set_domain_dns(
     let (status, error) = if resolves {
         ("active", None)
     } else {
-        (
-            "pending_dns",
-            Some(format!(
-                "{host} doesn't resolve yet. Point it at the cluster's ingress."
-            )),
-        )
+        ("pending_dns", Some(not_resolving(host)))
     };
     sqlx::query(
         "UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', (

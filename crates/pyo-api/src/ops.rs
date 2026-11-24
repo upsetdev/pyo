@@ -7204,13 +7204,41 @@ async fn apply(
                 });
                 return Ok(json!({ "ok": live, "message": message, "addresses": [] }));
             }
-            // The DNS watcher does this on its own; this is the same check, now.
             let resolved = deploy::resolve(&host).await;
+            // Through the Cloudflare Tunnel: Cloudflare's addresses, and the
+            // tunnel loop says when it's live (tunnel_loop.rs).
+            match d["tunnel"].as_str() {
+                Some(pyo_proto::TUNNEL_ON) => {
+                    let cluster_id: String =
+                        sqlx::query_scalar("SELECT cluster_id FROM pyo.services WHERE id = $1")
+                            .bind(&service_id)
+                            .fetch_one(&mut **tx)
+                            .await?;
+                    let found = if resolved.is_empty() {
+                        Err("It doesn't resolve yet.".to_owned())
+                    } else {
+                        Ok(resolved.clone())
+                    };
+                    let message = crate::traffic::tunnel_warning(
+                        &host,
+                        &found,
+                        crate::traffic::tunnel_target(&s.db, &cluster_id).await.as_deref(),
+                        &crate::traffic::cloudflare_ranges(&s.db).await,
+                    );
+                    if message.is_none() {
+                        deploy::set_domain_dns(&s.db, &service_id, &domain_id, true, &host).await?;
+                    }
+                    return Ok(json!({ "ok": message.is_none(), "message": message, "addresses": resolved }));
+                }
+                Some(_) => {
+                    return Ok(json!({ "ok": false, "message": format!("{host} is moving to the Cloudflare Tunnel. It's live once Cloudflare points it there."), "addresses": resolved }));
+                }
+                None => {}
+            }
+            // The DNS watcher does this on its own; this is the same check, now.
             deploy::set_domain_dns(&s.db, &service_id, &domain_id, !resolved.is_empty(), &host)
                 .await?;
-            let message = resolved
-                .is_empty()
-                .then(|| format!("{host} doesn't resolve yet. Point it at the cluster's ingress."));
+            let message = resolved.is_empty().then(|| deploy::not_resolving(&host));
             Ok(json!({ "ok": message.is_none(), "message": message, "addresses": resolved }))
         }
 
