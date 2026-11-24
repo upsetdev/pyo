@@ -528,6 +528,10 @@ pub fn waf_service() -> Value {
 #[serde(rename_all = "camelCase")]
 pub struct WafRoute {
     pub hosts: Vec<String>,
+    /// The path its route matches ("/" for all of the hosts): a path of a
+    /// hostname shared by services goes by its own WAF.
+    #[serde(default, skip_serializing_if = "crate::rules::is_root")]
+    pub path: String,
     #[serde(default)]
     pub settings: crate::WafSettings,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -536,7 +540,9 @@ pub struct WafRoute {
 
 /// Its settings: each distinct combination of OWASP settings once (compiled
 /// once in pyo-waf) and each distinct list of custom rules once, and which
-/// host uses which. A host with neither isn't inspected.
+/// host uses which. A host with neither isn't inspected. A route of one
+/// path of a hostname goes in as "<host><path>" (`example.com/api`): the
+/// WAF picks the longest path that matches, then the host.
 pub fn waf_config(routes: &[WafRoute]) -> Value {
     // Sets by what's compiled.
     type Key<'a> = (&'a str, u8, &'a [u32], u32);
@@ -575,7 +581,11 @@ pub fn waf_config(routes: &[WafRoute]) -> Value {
     let (mut hosts, mut host_rules) = (serde_json::Map::new(), serde_json::Map::new());
     for r in routes {
         for h in &r.hosts {
-            let h = h.to_lowercase();
+            let h = if crate::rules::is_root(&r.path) {
+                h.to_lowercase()
+            } else {
+                format!("{}{}", h.to_lowercase(), r.path)
+            };
             if r.settings.on() {
                 let i = sets
                     .iter()
@@ -2288,11 +2298,26 @@ mod tests {
     /// A block-mode service's routes refuse requests when the WAF is
     /// unavailable, every other's pass them; the admission policy lets the
     /// agent write only that pairing, with this release's timeouts.
+    /// A path of a shared hostname goes in by hostname and path, so the
+    /// WAF tells it from the hostname's other paths.
+    #[test]
+    fn waf_settings_by_path() {
+        use crate::WafSettings;
+        let on = |mode: &str| WafSettings { mode: mode.into(), level: 1, ..Default::default() };
+        let cfg = waf_config(&[
+            WafRoute { hosts: vec!["Shop.example.com".into()], path: String::new(), settings: on("block"), rules: vec![] },
+            WafRoute { hosts: vec!["Shop.example.com".into()], path: "/API".into(), settings: on("log"), rules: vec![] },
+        ]);
+        assert_eq!(cfg["hosts"]["shop.example.com"], "s0");
+        assert_eq!(cfg["hosts"]["shop.example.com/API"], "s1");
+    }
+
     #[test]
     fn waf_fails_closed_in_block_mode_only() {
         use crate::{WafCondition, WafRule, WafSettings};
         let route = |mode: &str, rules: Vec<WafRule>| WafRoute {
             hosts: vec!["shop.example.com".into()],
+            path: String::new(),
             settings: WafSettings {
                 mode: mode.into(),
                 level: 2,

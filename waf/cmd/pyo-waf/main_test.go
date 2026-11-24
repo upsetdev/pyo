@@ -45,3 +45,34 @@ func TestThreshold(t *testing.T) {
 		t.Errorf("default threshold should be the rule set's own:\n%s", d)
 	}
 }
+
+// A path of a shared hostname goes by its own settings: the longest path a
+// request is under, by whole segments, else the hostname's.
+func TestPathsGoByTheirOwnSettings(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(p, []byte(`{"sets":{"a":{"engine":"On","level":1},"b":{"engine":"DetectionOnly","level":1}},
+		"hosts":{"Shop.Example.com":"a","Shop.Example.com/api":"b"},
+		"lists":{"r":[{"id":1,"name":"x","match":"all","action":"block","conditions":[{"field":"path","op":"contains","values":["x"]}]}]},
+		"hostRules":{"shop.example.com/api/v2":"r"}}`), 0o600)
+	c, _, err := load(p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"/":              "shop.example.com",
+		"/apix":          "shop.example.com",
+		"/api":           "shop.example.com/api",
+		"/api/x?q=/api2": "shop.example.com/api",
+		"/api/v2/y":      "shop.example.com/api/v2",
+	} {
+		if got := c.key("shop.example.com", path); got != want {
+			t.Errorf("%s: %s, want %s", path, got, want)
+		}
+	}
+	if c.blocking["shop.example.com/api"] || !c.blocking["shop.example.com"] {
+		t.Error("each path keeps its own engine")
+	}
+	if c.key("other.example.com", "/api") != "other.example.com" {
+		t.Error("other hostnames go by their name")
+	}
+}
