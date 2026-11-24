@@ -26,6 +26,22 @@ pub const REPORT_PATH: &str = "/report";
 /// Random per daemon process. A new one on a poll means the daemon
 /// restarted, so commands handed to the one before go out again.
 pub const INSTANCE_HEADER: &str = "x-pyo-sandbox-instance";
+/// Pyo's 401 for a key that opens nothing any more. The daemon stops
+/// polling and reporting when it gets it, and keeps its sandboxes.
+pub const KEY_GONE: &str =
+    "This server's key is unknown, expired or revoked. Join it again with a new command from Pyo.";
+/// Where the daemon answers HTTPS on its tailnet name: the same API and
+/// pages as [`super::DAEMON_PORT`], for browsers and SDKs on the tailnet.
+pub const TAILNET_PORT: u16 = 7443;
+/// The most of each output stream an exec over the channel keeps.
+pub const OUTPUT_CAP: usize = 1 << 20;
+/// The largest file read or written over the channel.
+pub const FILE_CAP: usize = 2 << 20;
+/// The longest an exec over the channel runs. One asking for longer is
+/// stopped then, with `timedOut`.
+pub const EXEC_MAX_MS: u64 = 5 * 60 * 1000;
+/// The largest command Pyo queues (its JSON).
+pub const MAX_COMMAND: usize = 3 << 20;
 
 /// What the daemon sends with its code, over HTTPS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +116,24 @@ pub struct CommandEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_commands_read_as_pyo_sends_them() {
+        use crate::sandbox::{DaemonCommand, DaemonResult};
+        let c: DaemonCommand = serde_json::from_value(serde_json::json!({
+            "type": "exec", "id": "sbx_1", "request": { "cmd": "echo hi", "timeoutMs": 1000 }
+        }))
+        .unwrap();
+        assert_eq!(c.sandbox_id(), Some("sbx_1"));
+        let c: DaemonCommand =
+            serde_json::from_value(serde_json::json!({ "type": "writeFile", "id": "sbx_1", "path": "/a", "data": "aGk=" }))
+                .unwrap();
+        assert!(matches!(c, DaemonCommand::WriteFile { .. }));
+        let r = serde_json::to_value(DaemonResult::Written { bytes: 2 }).unwrap();
+        assert_eq!(r, serde_json::json!({ "type": "written", "bytes": 2 }));
+        let r = serde_json::to_value(DaemonResult::File { data: "aGk=".into() }).unwrap();
+        assert_eq!(r["type"], "file");
+    }
 
     #[test]
     fn a_join_reads_as_the_daemon_sends_it() {

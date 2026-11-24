@@ -866,6 +866,27 @@ pub enum DaemonCommand {
     Template {
         template: String,
     },
+    /// Runs a command in the sandbox and waits for it, as
+    /// `POST /v1/sandboxes/{id}/exec` does. For a server that gets its
+    /// commands over HTTPS ([`outbound`]), whose output is kept to
+    /// [`outbound::OUTPUT_CAP`] a stream.
+    Exec {
+        id: String,
+        request: ExecRequest,
+    },
+    /// A file of the sandbox, as `GET .../files` reads it. Its bytes come
+    /// back base64 ([`DaemonResult::File`]), at most [`outbound::FILE_CAP`].
+    ReadFile {
+        id: String,
+        path: String,
+    },
+    /// Writes a file in the sandbox, as `PUT .../files` does. `data` is
+    /// base64, at most [`outbound::FILE_CAP`] once decoded.
+    WriteFile {
+        id: String,
+        path: String,
+        data: String,
+    },
 }
 
 /// A private key in a command: never printed.
@@ -903,7 +924,10 @@ impl DaemonCommand {
             | DaemonCommand::SetTtl { id, .. }
             | DaemonCommand::OpenPort { id, .. }
             | DaemonCommand::ClosePort { id, .. }
-            | DaemonCommand::Get { id } => Some(id),
+            | DaemonCommand::Get { id }
+            | DaemonCommand::Exec { id, .. }
+            | DaemonCommand::ReadFile { id, .. }
+            | DaemonCommand::WriteFile { id, .. } => Some(id),
             DaemonCommand::List
             | DaemonCommand::Report
             | DaemonCommand::SnapshotTemplate { .. }
@@ -947,6 +971,18 @@ pub enum DaemonResult {
     },
     TemplateDeleted {
         template: String,
+    },
+    /// An [`DaemonCommand::Exec`]'s answer.
+    Exec {
+        result: ExecResult,
+    },
+    /// A [`DaemonCommand::ReadFile`]'s answer: the file, base64.
+    File {
+        data: String,
+    },
+    /// A [`DaemonCommand::WriteFile`]'s answer: the bytes written.
+    Written {
+        bytes: u64,
     },
     Error {
         error: DaemonError,
