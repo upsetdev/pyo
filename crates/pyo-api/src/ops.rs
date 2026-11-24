@@ -747,14 +747,19 @@ async fn tailnet_domains_ok(s: &AppState, cluster_id: &str, domains: &Value) -> 
     Ok(())
 }
 
-/// A hostname routes to one service: two services claiming it would fight over the
-/// cluster's ingress. Checked across every team; another team's service isn't named.
+/// A hostname belongs to one team: two teams claiming it would fight over
+/// the cluster's ingress. Checked across every team; another team's
+/// service isn't named. Within a team, services share a hostname by path
+/// (paths.rs `share`), which also settles which entry holds it.
 async fn domains_unique(
     tx: &mut Transaction<'_, Postgres>,
     team_id: &str,
     service_id: &str,
-    spec: &Value,
+    cluster_id: &str,
+    spec: &mut Value,
+    old: &Value,
 ) -> ApiResult<()> {
+    crate::paths::share(tx, team_id, service_id, cluster_id, spec, old).await?;
     // Other teams' services, and a takeover of a claim they can't prove.
     let lifted = crate::rls::lift(tx).await?;
     let out = Box::pin(domains_unique_across_teams(tx, team_id, service_id, spec)).await;
@@ -778,35 +783,36 @@ async fn domains_unique_across_teams(
     if hosts.is_empty() {
         return Ok(());
     }
-    // Twice on the service itself.
-    if let Some(host) = hosts.iter().enumerate().find_map(|(i, h)| hosts[..i].contains(h).then_some(h)) {
-        return Err(ApiError::conflict(format!("{host} is already used.")));
-    }
+    let mut hosts = hosts;
+    hosts.sort();
+    hosts.dedup();
     // Teams that don't trust each other (Pyo Cloud): a new hostname needs
-    // proof of owning it, and one held without proof is taken over.
+    // proof of owning it, and one held without proof is taken over. One the
+    // team already has (a path of it) is proven once.
     if crate::verify_domains() {
         let current: Vec<String> = sqlx::query_scalar(
-            "SELECT lower(d->>'hostname') FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d WHERE a.id = $1",
+            "SELECT lower(d->>'hostname') FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
+              WHERE (a.id = $1 OR (a.team_id = $2 AND NOT a.deleting))",
         )
         .bind(service_id)
+        .bind(team_id)
         .fetch_all(&mut **tx)
         .await?;
         let new: Vec<String> = hosts.iter().filter(|h| !current.contains(h)).cloned().collect();
         crate::domainproof::check_claims(tx, team_id, service_id, &new).await?;
     }
-    let taken: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT lower(d->>'hostname'), a.team_id, a.name FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
-          WHERE a.id <> $1 AND NOT a.deleting AND lower(d->>'hostname') = ANY($2) LIMIT 1",
+    // Another team's.
+    let taken: Option<String> = sqlx::query_scalar(
+        "SELECT lower(d->>'hostname') FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
+          WHERE a.id <> $1 AND a.team_id <> $3 AND NOT a.deleting AND lower(d->>'hostname') = ANY($2) LIMIT 1",
     )
     .bind(service_id)
     .bind(&hosts)
+    .bind(team_id)
     .fetch_optional(&mut **tx)
     .await?;
     match taken {
-        Some((host, team, service)) if team == team_id => Err(ApiError::conflict(format!(
-            "{host} is already used by {service}."
-        ))),
-        Some((host, _, _)) => Err(ApiError::conflict(format!(
+        Some(host) => Err(ApiError::conflict(format!(
             "{host} is already used by another service."
         ))),
         None => Ok(()),
@@ -2528,7 +2534,7 @@ pub(crate) enum Op {
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
         /// Its `serveAs`, for a build Pyo detects as a static site: "static" (the default) serves the build's output as static files from the cluster's shared static server, "service" runs it as a service of its own. Takes effect with the next deploy.
-        /// Its `domains`: `id`, `hostname`, `portName` (the HTTP port it routes to), `tlsMode`, `redirectHttps`, and its rules in Pyo Gateway. `redirects` (at most 15): `[{"path": "/old", "toHost": …, "toPath": "/new", "status": 301 or 302, "keepPath": true}]`, each sending requests under `path` to another hostname or path, query kept. A domain without a `portName` only redirects, with a redirect of "/" (like www.example.com to example.com). `headers`: `{"response": {"set": [{"name": …, "value": …}], "remove": [names]}, "request": {…}}`, at most 16 per list. Hop-by-hop headers, `Host`, `X-Forwarded-*`, `X-Real-Ip`, `X-Envoy-*`, `Cf-*` and `X-Pyo-*` can't be changed. Rules go live in place.
+        /// Its `domains`: `id`, `hostname`, `portName` (the HTTP port it routes to), `tlsMode`, `redirectHttps`, and its rules in Pyo Gateway. `redirects` (at most 15): `[{"path": "/old", "toHost": …, "toPath": "/new", "status": 301 or 302, "keepPath": true}]`, each sending requests under `path` to another hostname or path, query kept. A domain without a `portName` only redirects, with a redirect of "/" (like www.example.com to example.com). `headers`: `{"response": {"set": [{"name": …, "value": …}], "remove": [names]}, "request": {…}}`, at most 16 per list. Hop-by-hop headers, `Host`, `X-Forwarded-*`, `X-Real-Ip`, `X-Envoy-*`, `Cf-*` and `X-Pyo-*` can't be changed. `path` (like "/api") routes only that path of the hostname, and `stripPrefix` sends it to the service without the prefix: services of one team on one cluster can share a hostname by path, and the longest path wins. The first entry for a hostname holds it (its DNS record, certificate, tunnel, redirects and HTTPS settings). The others show `"primary": false` and follow it. Rules go live in place.
         /// Its `placement`, where it runs: `{"servers": [...], "tags": [...]}` runs it only on the servers named and on every server with one of the tags, tagged now or later. Absent or null: any server of its cluster. A service with a volume keeps its volume's server, and one with a GPU needs a GPU server. A change goes live without a deploy. The older `serverTags` is read as its tags.
         #[schema(value_type = Object)]
         service: Value,
@@ -2558,7 +2564,7 @@ pub(crate) enum Op {
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
         /// Its `serveAs`, for a build Pyo detects as a static site: "static" (the default) serves the build's output as static files from the cluster's shared static server, "service" runs it as a service of its own. Takes effect with the next deploy.
-        /// Its `domains`: `id`, `hostname`, `portName` (the HTTP port it routes to), `tlsMode`, `redirectHttps`, and its rules in Pyo Gateway. `redirects` (at most 15): `[{"path": "/old", "toHost": …, "toPath": "/new", "status": 301 or 302, "keepPath": true}]`, each sending requests under `path` to another hostname or path, query kept. A domain without a `portName` only redirects, with a redirect of "/" (like www.example.com to example.com). `headers`: `{"response": {"set": [{"name": …, "value": …}], "remove": [names]}, "request": {…}}`, at most 16 per list. Hop-by-hop headers, `Host`, `X-Forwarded-*`, `X-Real-Ip`, `X-Envoy-*`, `Cf-*` and `X-Pyo-*` can't be changed. Rules go live in place.
+        /// Its `domains`: `id`, `hostname`, `portName` (the HTTP port it routes to), `tlsMode`, `redirectHttps`, and its rules in Pyo Gateway. `redirects` (at most 15): `[{"path": "/old", "toHost": …, "toPath": "/new", "status": 301 or 302, "keepPath": true}]`, each sending requests under `path` to another hostname or path, query kept. A domain without a `portName` only redirects, with a redirect of "/" (like www.example.com to example.com). `headers`: `{"response": {"set": [{"name": …, "value": …}], "remove": [names]}, "request": {…}}`, at most 16 per list. Hop-by-hop headers, `Host`, `X-Forwarded-*`, `X-Real-Ip`, `X-Envoy-*`, `Cf-*` and `X-Pyo-*` can't be changed. `path` (like "/api") routes only that path of the hostname, and `stripPrefix` sends it to the service without the prefix: services of one team on one cluster can share a hostname by path, and the longest path wins. The first entry for a hostname holds it (its DNS record, certificate, tunnel, redirects and HTTPS settings). The others show `"primary": false` and follow it. Rules go live in place.
         /// Its `placement`, where it runs: `{"servers": [...], "tags": [...]}` runs it only on the servers named and on every server with one of the tags, tagged now or later. Absent or null: any server of its cluster. A service with a volume keeps its volume's server, and one with a GPU needs a GPU server. A change goes live without a deploy. The older `serverTags` is read as its tags.
         #[schema(value_type = Object)]
         service: Value,
@@ -6360,11 +6366,11 @@ async fn apply(
             crate::git::source_ok(tx, &team_id, &spec).await?;
             crate::git::queue_sync_for(tx, &[&old_spec["source"], &spec["source"]]).await?;
             crate::certs::domains_ok(tx, &team_id, &spec).await?;
-            domains_unique(tx, &team_id, &id, &spec).await?;
             let on: String = sqlx::query_scalar("SELECT cluster_id FROM pyo.services WHERE id = $1")
                 .bind(&id)
                 .fetch_one(&mut **tx)
                 .await?;
+            domains_unique(tx, &team_id, &id, &on, &mut spec, &old_spec).await?;
             tailnet_domains_ok(s, &on, &spec["domains"]).await?;
             crate::routes::rules_ok(tx, &on, &spec, &old_spec).await?;
             let cluster_id: String =
@@ -6436,10 +6442,16 @@ async fn apply(
                 .bind(deployment_id.is_none() && (pending || changed))
                 .execute(&mut **tx)
                 .await?;
+            // A hostname it held that other services still route paths of:
+            // one of those takes it over, with its DNS record (so it isn't
+            // forgotten below).
+            let gone = crate::paths::held_and_gone(&old_spec, &spec);
+            wake.extend(crate::paths::settle(tx, &team_id, &id, &gone).await?);
             crate::cloudflare::forget_removed(tx, &id, &spec).await?;
-            // Proof records Pyo made for domains it no longer has.
+            // Proof records Pyo made for domains the team no longer has.
             if crate::verify_domains() {
                 let gone = crate::cloudflare::removed_hosts(&old_spec, &spec);
+                let gone = crate::paths::unused(tx, &team_id, &gone).await?;
                 crate::cloudflare::proofs_after_removal(tx, &team_id, &gone).await?;
             }
             // A new placement goes live now; with a deploy, it goes out with it.
@@ -6525,13 +6537,18 @@ async fn apply(
             .bind(&id)
             .fetch_one(&mut **tx)
             .await?;
-            // Proof records Pyo made for its domains.
+            let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&mut **tx)
+                .await?;
+            // Hostnames it held that other services route paths of: one of
+            // those takes each over, with its DNS record.
+            let held = crate::paths::held_and_gone(&spec, &json!({}));
+            wake.extend(crate::paths::settle(tx, &team_id, &id, &held).await?);
+            // Proof records Pyo made for its domains the team no longer has.
             if crate::verify_domains() {
-                let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
-                    .bind(&id)
-                    .fetch_one(&mut **tx)
-                    .await?;
                 let gone = crate::cloudflare::removed_hosts(&spec, &json!({}));
+                let gone = crate::paths::unused(tx, &team_id, &gone).await?;
                 crate::cloudflare::proofs_after_removal(tx, &team_id, &gone).await?;
             }
             // Its repository's webhook goes when no other service follows it.
@@ -8546,6 +8563,7 @@ async fn apply(
             proxied,
             replace,
         } => {
+            crate::paths::held_here(tx, &service_id, &domain_id).await?;
             crate::cloudflare::create_record(s, tx, user, &service_id, &domain_id, proxied, replace)
                 .await
         }
@@ -8598,6 +8616,7 @@ async fn apply(
             replace,
             restore,
         } => {
+            crate::paths::held_here(tx, &service_id, &domain_id).await?;
             crate::cloudflare::tunnel_ops::set_domain(
                 s,
                 tx,
@@ -8675,7 +8694,12 @@ async fn remove_domain(
     .fetch_optional(&mut **tx)
     .await?;
     let (mine, previous) = record.unwrap_or((false, json!([])));
-    let restore = restore_records && previous.as_array().is_some_and(|p| !p.is_empty());
+    // Other services still route paths of its hostname: its record (and
+    // the tunnel) stay, with the entry that takes it over.
+    let host = d["hostname"].as_str().unwrap_or("").to_lowercase();
+    let shared = crate::paths::shared(tx, &team_id, service_id, &domain_id, &host).await?;
+    let restore =
+        !shared && restore_records && previous.as_array().is_some_and(|p| !p.is_empty());
     if restore {
         // Putting back the old records replaces Pyo's own as well.
         nested(
@@ -8692,7 +8716,7 @@ async fn remove_domain(
             wake,
         )
         .await?;
-    } else if mine && !keep_dns_record {
+    } else if mine && !keep_dns_record && !shared {
         nested(
             s,
             tx,
@@ -9647,7 +9671,7 @@ pub(crate) async fn access_logs(
     SessionUser(user): SessionUser,
     crate::error::Query(q): crate::error::Query<AccessLogQuery>,
 ) -> ApiResult<Json<Value>> {
-    let hosts = team_hosts(
+    let (hosts, services) = team_hosts(
         &s,
         &user,
         &q.team,
@@ -9665,7 +9689,7 @@ pub(crate) async fn access_logs(
         q: q.q,
     };
     Ok(Json(
-        crate::requests::access_logs(&s, &q.team, &hosts, &f, q.path).await?,
+        crate::requests::access_logs(&s, &q.team, &hosts, &services, &f, q.path).await?,
     ))
 }
 
@@ -9675,7 +9699,9 @@ fn filter_value(v: Option<String>) -> Option<String> {
     v.filter(|p| !p.is_empty() && p != "all")
 }
 
-/// The hostnames of a team's websites: all, one project's, one domain, or one service's.
+/// The hostnames of a team's websites: all, one project's, one domain, or
+/// one service's. With a project or a service, also its services' ids: a
+/// hostname whose paths go to several services counts only theirs.
 async fn team_hosts(
     s: &AppState,
     user: &User,
@@ -9683,12 +9709,26 @@ async fn team_hosts(
     project: Option<String>,
     site: Option<String>,
     service: Option<String>,
-) -> ApiResult<Vec<String>> {
+) -> ApiResult<(Vec<String>, Vec<String>)> {
     let mut tx = crate::rls::begin(&s.db, user).await?;
     require_role(&mut tx, user, team, Role::Viewer).await?;
+    let (p, a) = (filter_value(project.clone()), filter_value(service.clone()));
     let hosts = hosts_of(&mut tx, team, project, site, service).await?;
+    let services: Vec<String> = if p.is_none() && a.is_none() {
+        vec![]
+    } else {
+        sqlx::query_scalar(
+            "SELECT id FROM pyo.services WHERE team_id = $1 AND ($2::text IS NULL OR project_id = $2)
+                AND ($3::text IS NULL OR id = $3 OR name = $3)",
+        )
+        .bind(team)
+        .bind(&p)
+        .bind(&a)
+        .fetch_all(&mut *tx)
+        .await?
+    };
     tx.commit().await?;
-    Ok(hosts)
+    Ok((hosts, services))
 }
 
 /// [`team_hosts`]' filters: a project by id, a domain by id or hostname,
@@ -9765,12 +9805,12 @@ pub(crate) async fn observability(
     SessionUser(user): SessionUser,
     crate::error::Query(q): crate::error::Query<ObservabilityQuery>,
 ) -> ApiResult<Json<Value>> {
-    let hosts = team_hosts(&s, &user, &q.team, q.project, q.site, q.service).await?;
+    let (hosts, services) = team_hosts(&s, &user, &q.team, q.project, q.site, q.service).await?;
     let range = match q.range.as_deref() {
         Some(r @ ("1h" | "24h" | "7d" | "30d")) => r.to_owned(),
         _ => "7d".to_owned(),
     };
-    Ok(Json(s.observability.query(&q.team, &hosts, &range).await?))
+    Ok(Json(s.observability.query(&q.team, &hosts, &services, &range).await?))
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -10080,7 +10120,7 @@ pub(crate) async fn create_service(
     crate::git::source_ok(tx, &team_id, &spec).await?;
     crate::git::queue_sync_for(tx, &[&spec["source"]]).await?;
     crate::certs::domains_ok(tx, &team_id, &spec).await?;
-    domains_unique(tx, &team_id, &id, &spec).await?;
+    domains_unique(tx, &team_id, &id, &cluster_id, &mut spec, &Value::Null).await?;
     crate::routes::rules_ok(tx, &cluster_id, &spec, &Value::Null).await?;
     ports_unique(tx, &team_id, &id, &cluster_id, &spec).await?;
     crate::secretstores::imports_ok(tx, &team_id, &spec).await?;

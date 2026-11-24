@@ -4,8 +4,8 @@ Internal design for path routes, redirects and header rules in Pyo Gateway.
 Written 2026-11-25 against `dev` at 0f3e0f8. File references are to that
 commit.
 
-Status: **being built** for 0.51.1. Redirects and header rules first,
-then path routes.
+Status: **being built** for 0.51.1. Redirects and header rules are on
+`dev` (2026-11-25). Path routes follow.
 
 ## Decisions (2026-11-25)
 
@@ -309,10 +309,9 @@ ranges.
   `traffic_1m` and `traffic_1h`, so no schema change there. Service pages
   filter by service id instead of host list. The cluster's raw request
   store gets the field with a default, so older rows read as before.
-- **Previews.** A preview copies the service's entries onto its own preview
-  hostname. A path entry becomes a primary at `/` on the preview host, with
-  its strip prefix kept, so the app sees the same paths. Redirect entries
-  are not copied.
+- **Previews.** A preview's copy gets one preview hostname of its own, at
+  `/`, as before. Its original's paths, redirects and header rules aren't
+  copied.
 - **Compose sync.** `x-pyo.domains` accepts `example.com/api`. A path
   without a primary in the team is refused with "Add example.com to a
   service first." Strip prefix and redirects stay dashboard, CLI and API

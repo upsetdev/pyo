@@ -348,11 +348,17 @@ enum Command {
 enum DomainCommand {
     /// The service's domains and their status.
     List,
-    /// Serve the service on a hostname. It applies without a redeploy.
+    /// Serve the service on a hostname, or on a path of one. It applies without a redeploy.
     Add {
-        /// e.g. app.example.com.
+        /// e.g. app.example.com, or app.example.com/api for a path.
         #[arg(required_unless_present = "free", conflicts_with = "free")]
         hostname: Option<String>,
+        /// Only this path of the hostname, like /api. Other services of the team can serve its other paths.
+        #[arg(long, conflicts_with = "redirect_to")]
+        path: Option<String>,
+        /// Send /api/x to the service as /x.
+        #[arg(long)]
+        strip_prefix: bool,
         /// A free nip.io domain instead, or a tunnel domain in tunnel mode (no DNS record needed).
         #[arg(long)]
         free: bool,
@@ -413,7 +419,7 @@ enum DomainCommand {
     },
     /// Stop serving the service on a hostname. Deletes the DNS record Pyo made for it in Cloudflare.
     Remove {
-        /// e.g. app.example.com.
+        /// e.g. app.example.com, or app.example.com/api for a path.
         hostname: String,
         /// Don't ask to confirm.
         #[arg(long, short = 'y')]
@@ -1160,6 +1166,8 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                 DomainCommand::List => domain::list(&api, s).await,
                 DomainCommand::Add {
                     hostname,
+                    path,
+                    strip_prefix,
                     free,
                     port,
                     wait,
@@ -1176,7 +1184,8 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                         Some(to) => Some(domain::redirect_to("/", &to, status.as_deref(), true)?),
                         None => None,
                     };
-                    domain::add(&api, s, hostname, free, port, wait, dns, redirect).await
+                    let route = domain::Route { path, strip_prefix };
+                    domain::add(&api, s, hostname, free, port, wait, dns, redirect, route).await
                 }
                 DomainCommand::Redirect {
                     from,

@@ -210,7 +210,7 @@ pub async fn used_by(
     id: &str,
 ) -> ApiResult<Vec<(String, String)>> {
     Ok(sqlx::query_as(
-        "SELECT a.id, d->>'hostname' FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+        "SELECT a.id, d->>'hostname' FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE d->>'tlsMode' = 'custom' AND d->>'certificateId' = $1 AND NOT a.deleting",
     )
     .bind(id)

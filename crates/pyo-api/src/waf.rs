@@ -544,6 +544,7 @@ mod tests {
             };
             let route = pyo_proto::system::WafRoute {
                 hosts: vec!["a.test".into()],
+                path: String::new(),
                 settings: WafSettings::default(),
                 rules: vec![rule],
             };
@@ -642,6 +643,7 @@ mod tests {
         let settings = own_settings(&json!({ "mode": "block", "level": 1 }));
         let routes = [pyo_proto::system::WafRoute {
             hosts: vec!["rules.test".into()],
+            path: String::new(),
             settings,
             rules: service,
         }];

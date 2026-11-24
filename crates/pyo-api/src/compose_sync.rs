@@ -471,9 +471,10 @@ pub fn merge(
                 break;
             };
             if domains.iter().any(|o| {
-                o["hostname"]
-                    .as_str()
-                    .is_some_and(|h| h.eq_ignore_ascii_case(d))
+                crate::paths::shown_key(
+                    &o["hostname"].as_str().unwrap_or("").to_lowercase(),
+                    crate::paths::path_of(o),
+                ) == *d
             }) {
                 continue;
             }

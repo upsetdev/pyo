@@ -2607,7 +2607,7 @@ pub async fn set_domain_dns(
            SELECT coalesce(jsonb_agg(CASE WHEN d->>'id' = $2
                     THEN (d - 'error') || jsonb_strip_nulls(jsonb_build_object('status', $3::text, 'error', $4::text, 'dnsCheckedAt', pyo.ms(now())))
                     ELSE d END), '[]')
-             FROM jsonb_array_elements(spec->'domains') d)) WHERE id = $1",
+             FROM jsonb_array_elements(CASE WHEN jsonb_typeof(spec->'domains') = 'array' THEN spec->'domains' ELSE '[]' END) d)) WHERE id = $1",
     )
     .bind(service_id)
     .bind(domain_id)
@@ -2642,7 +2642,7 @@ pub async fn dns_watcher(state: AppState) {
 pub(crate) async fn check_pending_dns(state: &AppState) -> ApiResult<()> {
     let due: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT a.id, a.team_id, d->>'id', d->>'hostname'
-           FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+           FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE NOT a.deleting AND d->>'status' IN ('pending_dns', 'verifying')
             AND lower(d->>'hostname') NOT LIKE '%.ts.net'
             -- Through the Cloudflare Tunnel: its address is Cloudflare's,

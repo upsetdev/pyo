@@ -456,6 +456,10 @@ pub struct HostTotals {
     /// The minute's start, in seconds since 1970.
     pub minute: i64,
     pub host: String,
+    /// The service the requests went to, on a hostname whose paths go to
+    /// several ([`TrafficContext::paths`]); "" otherwise (the hostname's).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub service_id: String,
     pub requests: u64,
     pub pageviews: u64,
     pub bytes: u64,
@@ -545,6 +549,10 @@ pub struct TotalsBatch {
 pub struct TrafficContext {
     /// Host -> service id.
     pub hosts: BTreeMap<String, String>,
+    /// Hostnames whose paths go to several services: host -> (path, service
+    /// id), longest path first.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub paths: BTreeMap<String, Vec<(String, String)>>,
     /// Port key (`port_key_string`) -> (service id, public port).
     pub ports: BTreeMap<String, (String, u16)>,
     /// Service id -> its firewall.
@@ -554,6 +562,26 @@ pub struct TrafficContext {
     /// The team's limits on what's kept here.
     pub max_mb: u64,
     pub max_days: u32,
+}
+
+impl TrafficContext {
+    /// The service a request to `host` at `path` went to: the longest path
+    /// of the hostname it's under, else the hostname's.
+    pub fn service_of(&self, host: &str, path: &str) -> Option<&String> {
+        self.paths
+            .get(host)
+            .and_then(|ps| {
+                ps.iter()
+                    .find(|(p, _)| crate::rules::under(path, p))
+                    .map(|(_, s)| s)
+            })
+            .or_else(|| self.hosts.get(host))
+    }
+
+    /// Whether `host` is one of the services'.
+    pub fn knows(&self, host: &str) -> bool {
+        self.hosts.contains_key(host) || self.paths.contains_key(host)
+    }
 }
 
 /// What's kept by default: 1 GB or 7 days, whichever comes first.
@@ -586,6 +614,9 @@ pub fn limits_from(prefs: &Value) -> (u64, u32) {
 pub struct RequestRow {
     pub at: i64,
     pub host: String,
+    /// The service it went to (several share a hostname by path).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub service_id: String,
     pub method: String,
     pub path: String,
     /// The path and query, sensitive values redacted.
@@ -632,6 +663,9 @@ pub struct ConnectionRow {
 pub struct WafRow {
     pub at: i64,
     pub host: String,
+    /// The service it was for (several share a hostname by path).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub service_id: String,
     pub method: String,
     pub path: String,
     pub url: String,
@@ -654,6 +688,10 @@ pub struct TrafficQuery {
     pub rows: String,
     /// Requests and WAF findings: only these hosts.
     pub hosts: Vec<String>,
+    /// And only these services' (on a hostname whose paths go to several).
+    /// Rows kept before rows said their service pass.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
     /// Connections: only these port keys.
     pub ports: Vec<String>,
     pub since_ms: i64,
@@ -707,8 +745,15 @@ impl TrafficQuery {
             .filter(|d| (1..=5).contains(d))
     }
 
+    fn service_ok(&self, service_id: &str) -> bool {
+        self.services.is_empty()
+            || service_id.is_empty()
+            || self.services.iter().any(|s| s == service_id)
+    }
+
     pub fn matches_request(&self, r: &RequestRow) -> bool {
         (self.hosts.is_empty() || self.hosts.iter().any(|h| h == &r.host))
+            && self.service_ok(&r.service_id)
             && self.status_class().is_none_or(|c| r.status / 100 == c)
             && self
                 .method
@@ -737,6 +782,7 @@ impl TrafficQuery {
 
     pub fn matches_waf(&self, r: &WafRow) -> bool {
         (self.hosts.is_empty() || self.hosts.iter().any(|h| h == &r.host))
+            && self.service_ok(&r.service_id)
             && self
                 .path
                 .as_deref()

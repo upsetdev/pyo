@@ -115,7 +115,7 @@ impl FromRequestParts<AppState> for AgentCluster {
 const CLUSTER_CERTIFICATE: &str = "SELECT c.chain_pem, c.key_sealed FROM pyo.certificates c
       WHERE c.id = $1 AND c.team_id = $2
         AND EXISTS (SELECT 1 FROM pyo.clusters k WHERE k.id = $3 AND k.team_id = c.team_id)
-        AND EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(coalesce(a.spec->'domains', '[]')) d
+        AND EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
                      WHERE a.cluster_id = $3 AND a.team_id = c.team_id AND d->>'certificateId' = c.id)";
 
 /// A registry login a deployment on this cluster pulls with, with its
@@ -599,7 +599,7 @@ async fn heartbeat(
             None
         } else {
             let dns_pending: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
+                "SELECT EXISTS (SELECT 1 FROM pyo.services s, jsonb_array_elements(CASE WHEN jsonb_typeof(s.spec->'domains') = 'array' THEN s.spec->'domains' ELSE '[]' END) d
                   WHERE s.id = $1 AND d->>'hostname' = $2 AND d->>'status' = 'pending_dns')",
             )
             .bind(&c.service_id)
@@ -625,7 +625,7 @@ async fn heartbeat(
         // One that was issued and now fails: it couldn't be renewed.
         let lost: Option<(String, String)> = if tls == "failed" {
             sqlx::query_as(
-                "SELECT d->>'id', s.project_id FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
+                "SELECT d->>'id', s.project_id FROM pyo.services s, jsonb_array_elements(CASE WHEN jsonb_typeof(s.spec->'domains') = 'array' THEN s.spec->'domains' ELSE '[]' END) d
                   WHERE s.id = $1 AND s.cluster_id = $2 AND NOT s.deleting AND d->>'hostname' = $3 AND d->>'tls' = 'issued'
                   LIMIT 1",
             )
@@ -642,9 +642,11 @@ async fn heartbeat(
                SELECT coalesce(jsonb_agg(CASE WHEN d->>'hostname' = $3 AND coalesce(d->>'tlsMode', 'auto') <> 'off'
                                               THEN (d - 'tlsError') || jsonb_strip_nulls(jsonb_build_object('tls', $4::text, 'tlsError', $5::text))
                                               ELSE d END), '[]')
-                 FROM jsonb_array_elements(spec->'domains') d))
-              WHERE id = $1 AND cluster_id = $2 AND NOT deleting
-                AND EXISTS (SELECT 1 FROM jsonb_array_elements(spec->'domains') d
+                 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(spec->'domains') = 'array' THEN spec->'domains' ELSE '[]' END) d))
+              WHERE cluster_id = $2 AND NOT deleting
+                -- Its paths on the team's other services show it too (paths.rs).
+                AND (id = $1 OR team_id = (SELECT team_id FROM pyo.services WHERE id = $1))
+                AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(spec->'domains') = 'array' THEN spec->'domains' ELSE '[]' END) d
                              WHERE d->>'hostname' = $3 AND (coalesce(d->>'tls', '') <> $4 OR coalesce(d->>'tlsError', '') <> coalesce($5, '')))",
         )
         .bind(&c.service_id)

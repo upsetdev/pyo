@@ -67,7 +67,7 @@ pub async fn hosts_by_cluster(
 ) -> ApiResult<BTreeMap<String, (String, Vec<String>)>> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT DISTINCT a.cluster_id, c.name, lower(d->>'hostname')
-           FROM pyo.services a JOIN pyo.clusters c ON c.id = a.cluster_id, jsonb_array_elements(a.spec->'domains') d
+           FROM pyo.services a JOIN pyo.clusters c ON c.id = a.cluster_id, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE a.team_id = $1 AND lower(d->>'hostname') = ANY($2)",
     )
     .bind(team_id)
@@ -139,7 +139,14 @@ fn range_ms(range: &str) -> i64 {
 /// on a self-hosted Pyo, from what Pyo kept itself before 0.5). The first
 /// page has the totals for the range when nothing but the website is
 /// filtered.
-pub async fn access_logs(s: &AppState, team_id: &str, hosts: &[String], f: &LogFilter, path: Option<String>) -> ApiResult<Value> {
+pub async fn access_logs(
+    s: &AppState,
+    team_id: &str,
+    hosts: &[String],
+    services: &[String],
+    f: &LogFilter,
+    path: Option<String>,
+) -> ApiResult<Value> {
     let obs = &s.observability;
     if !obs.enabled().await {
         return Err(crate::observability::off());
@@ -158,6 +165,7 @@ pub async fn access_logs(s: &AppState, team_id: &str, hosts: &[String], f: &LogF
         method: f.method.clone(),
         path: path.clone().filter(|p| !p.is_empty()),
         q: f.q.clone(),
+        services: services.to_vec(),
         ..Default::default()
     };
     let asks = clusters
@@ -185,7 +193,7 @@ pub async fn access_logs(s: &AppState, team_id: &str, hosts: &[String], f: &LogF
     let next = if more { logs.last().and_then(|l| l["at"].as_i64()) } else { None };
     let unfiltered = f.status.is_none() && f.method.is_none() && f.q.as_deref().unwrap_or("").trim().is_empty() && path.is_none();
     let summary = if f.before == 0 && unfiltered {
-        obs.request_summary(team_id, hosts, since / 1000).await.ok().flatten()
+        obs.request_summary(team_id, hosts, services, since / 1000).await.ok().flatten()
     } else {
         None
     };
@@ -209,7 +217,7 @@ pub async fn blocked_recent(s: &AppState, service_id: &str, range: &str, out: &m
     let since = pyo_proto::now_ms() - range_ms(range);
     let mut asks = vec![];
     if !hosts.is_empty() {
-        asks.push((cluster.clone(), String::new(), TrafficQuery { rows: "requests".into(), hosts, blocked: true, since_ms: since, limit: 500, ..Default::default() }));
+        asks.push((cluster.clone(), String::new(), TrafficQuery { rows: "requests".into(), hosts, services: vec![service_id.to_owned()], blocked: true, since_ms: since, limit: 500, ..Default::default() }));
     }
     if !ports.is_empty() {
         asks.push((cluster.clone(), String::new(), TrafficQuery { rows: "connections".into(), ports, outcome: Some("blocked".into()), since_ms: since, limit: 500, ..Default::default() }));
@@ -256,7 +264,7 @@ pub async fn waf_recent(s: &AppState, service_id: &str, range: &str, out: &mut V
         return Ok(());
     }
     let since = pyo_proto::now_ms() - range_ms(range);
-    let q = TrafficQuery { rows: "waf".into(), hosts, since_ms: since, limit: 500, ..Default::default() };
+    let q = TrafficQuery { rows: "waf".into(), hosts, services: vec![service_id.to_owned()], since_ms: since, limit: 500, ..Default::default() };
     let (rows, _, failed) = ask_all(s, vec![(cluster, String::new(), q)], 500).await;
     let mode = s.observability.current_ip_mode().await;
     let mut by_ip: BTreeMap<String, (String, f64, f64)> = BTreeMap::new();

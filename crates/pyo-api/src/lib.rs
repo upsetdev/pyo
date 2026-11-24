@@ -64,6 +64,7 @@ pub mod openapi;
 pub mod ops;
 mod outbound;
 mod passkeys;
+mod paths;
 mod twofactor;
 #[cfg(test)]
 mod teamsec_tests;

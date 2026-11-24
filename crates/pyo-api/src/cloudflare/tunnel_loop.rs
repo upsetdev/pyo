@@ -307,7 +307,7 @@ async fn tunnel_domains(
 ) -> ApiResult<Vec<TunnelDomain>> {
     let rows: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT a.id, d->>'id', lower(d->>'hostname'), d->>'tunnel'
-           FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+           FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE a.cluster_id = $1 AND NOT a.deleting AND d->>'tunnel' IN ('switching', 'on')
           ORDER BY 3",
     )
@@ -1016,7 +1016,7 @@ async fn free_domains_follow(
     let services: Vec<(String, Value)> = sqlx::query_as(
         "SELECT a.id, coalesce(a.spec->'domains', '[]') FROM pyo.services a
           WHERE a.cluster_id = $1 AND NOT a.deleting
-            AND EXISTS (SELECT 1 FROM jsonb_array_elements(a.spec->'domains') d
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
                          WHERE lower(d->>'hostname') LIKE '%.' || lower($2)
                            AND (NOT d ? 'tunnel' OR (d->>'tunnel' = 'on' AND d->>'status' <> 'active')))",
     )
@@ -1106,7 +1106,7 @@ async fn tls_follow(s: &AppState, cluster_id: &str, certificate_id: &str) -> Api
     let services: Vec<(String, Value)> = sqlx::query_as(
         "SELECT a.id, coalesce(a.spec->'domains', '[]') FROM pyo.services a
           WHERE a.cluster_id = $1 AND NOT a.deleting
-            AND EXISTS (SELECT 1 FROM jsonb_array_elements(a.spec->'domains') d WHERE d->>'tunnel' IN ('switching', 'on'))",
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d WHERE d->>'tunnel' IN ('switching', 'on'))",
     )
     .bind(cluster_id)
     .fetch_all(&s.db)
@@ -1536,7 +1536,7 @@ async fn remove<C: Cloudflare + TunnelApi>(
     // Domains that never had a record: no longer through the tunnel.
     let services: Vec<String> = sqlx::query_scalar(
         "SELECT a.id FROM pyo.services a WHERE a.cluster_id = $1
-            AND EXISTS (SELECT 1 FROM jsonb_array_elements(a.spec->'domains') d WHERE d ? 'tunnel')",
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d WHERE d ? 'tunnel')",
     )
     .bind(&row.cluster_id)
     .fetch_all(&s.db)

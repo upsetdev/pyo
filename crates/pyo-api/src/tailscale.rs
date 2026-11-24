@@ -1341,9 +1341,9 @@ async fn move_domains(
                            'hostname', left(lower(d->>'hostname'), length(d->>'hostname') - length($2)) || $3,
                            'status', 'pending_dns', 'tls', 'pending')
                     ELSE d END), '[]')
-             FROM jsonb_array_elements(s.spec->'domains') d))
+             FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.spec->'domains') = 'array' THEN s.spec->'domains' ELSE '[]' END) d))
           WHERE s.cluster_id = $1 AND NOT s.deleting
-            AND EXISTS (SELECT 1 FROM jsonb_array_elements(s.spec->'domains') d WHERE lower(d->>'hostname') LIKE '%.' || $2)
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.spec->'domains') = 'array' THEN s.spec->'domains' ELSE '[]' END) d WHERE lower(d->>'hostname') LIKE '%.' || $2)
           RETURNING s.id",
     )
     .bind(cluster_id)
@@ -1446,7 +1446,7 @@ async fn named_elsewhere(
         "SELECT EXISTS (SELECT 1 FROM pyo.cluster_tailnet_names n JOIN pyo.clusters c ON c.id = n.cluster_id
                          WHERE n.cluster_id <> $1 AND c.tailscale->>'suffix' = $2 AND n.name = $3 AND n.retired_at IS NULL)
              OR EXISTS (SELECT 1 FROM pyo.services s JOIN pyo.clusters c ON c.id = s.cluster_id
-                          CROSS JOIN LATERAL jsonb_array_elements(s.spec->'domains') d
+                          CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.spec->'domains') = 'array' THEN s.spec->'domains' ELSE '[]' END) d
                          WHERE s.cluster_id <> $1 AND c.tailscale->>'suffix' = $2 AND NOT s.deleting
                            AND lower(d->>'hostname') = $3 || '.' || $2)",
     )
@@ -1724,7 +1724,7 @@ async fn sync_for(
     let mut domains: Vec<String> = match &t.suffix {
         Some(suffix) => {
             let hosts: Vec<String> = sqlx::query_scalar(
-                "SELECT lower(d->>'hostname') FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
+                "SELECT lower(d->>'hostname') FROM pyo.services s, jsonb_array_elements(CASE WHEN jsonb_typeof(s.spec->'domains') = 'array' THEN s.spec->'domains' ELSE '[]' END) d
                   WHERE s.cluster_id = $1 AND NOT s.deleting AND lower(d->>'hostname') LIKE '%.' || $2",
             )
             .bind(cluster_id)
@@ -2264,7 +2264,7 @@ async fn follow_domains(db: &PgPool, cluster_id: &str, t: &Tailnet) -> ApiResult
     .fetch_all(db)
     .await?;
     let mut hosts: Vec<String> = sqlx::query_scalar(
-        "SELECT lower(d->>'hostname') FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d
+        "SELECT lower(d->>'hostname') FROM pyo.services s, jsonb_array_elements(CASE WHEN jsonb_typeof(s.spec->'domains') = 'array' THEN s.spec->'domains' ELSE '[]' END) d
           WHERE s.cluster_id = $1 AND NOT s.deleting AND lower(d->>'hostname') LIKE '%.' || $2",
     )
     .bind(cluster_id)
@@ -2292,7 +2292,7 @@ async fn follow_domains(db: &PgPool, cluster_id: &str, t: &Tailnet) -> ApiResult
             sqlx::query_as(
                 "SELECT s.id, s.team_id FROM pyo.services s
                   WHERE s.cluster_id = $1 AND NOT s.deleting
-                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(s.spec->'domains') d
+                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.spec->'domains') = 'array' THEN s.spec->'domains' ELSE '[]' END) d
                                  WHERE lower(d->>'hostname') = $2 AND d->>'status' IS DISTINCT FROM 'active')",
             )
             .bind(cluster_id)
@@ -2311,10 +2311,10 @@ async fn follow_domains(db: &PgPool, cluster_id: &str, t: &Tailnet) -> ApiResult
                                'status', coalesce(x.status, CASE WHEN d->>'status' = 'error' THEN 'pending_dns' ELSE d->>'status' END),
                                'tls', x.tls, 'tlsError', x.tls_error, 'error', x.error))
                         ELSE d END), '[]')
-                 FROM jsonb_array_elements(spec->'domains') d))
+                 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(spec->'domains') = 'array' THEN spec->'domains' ELSE '[]' END) d))
               FROM x
               WHERE cluster_id = $1 AND NOT deleting
-                AND EXISTS (SELECT 1 FROM jsonb_array_elements(spec->'domains') d
+                AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(spec->'domains') = 'array' THEN spec->'domains' ELSE '[]' END) d
                              WHERE lower(d->>'hostname') = x.host
                                AND (coalesce(d->>'tls', '') <> x.tls OR coalesce(d->>'tlsError', '') <> coalesce(x.tls_error, '')
                                     OR coalesce(d->>'error', '') <> coalesce(x.error, '')
@@ -3562,7 +3562,7 @@ mod tests {
             // The DNS watcher leaves them alone: Pyo can't look them up.
             crate::deploy::check_pending_dns(&s).await.unwrap();
             let checked: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pyo.services s, jsonb_array_elements(s.spec->'domains') d WHERE s.id = $1 AND d ? 'dnsCheckedAt'",
+                "SELECT count(*) FROM pyo.services s, jsonb_array_elements(CASE WHEN jsonb_typeof(s.spec->'domains') = 'array' THEN s.spec->'domains' ELSE '[]' END) d WHERE s.id = $1 AND d ? 'dnsCheckedAt'",
             )
             .bind(&service)
             .fetch_one(&s.db)

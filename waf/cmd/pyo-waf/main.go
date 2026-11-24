@@ -13,6 +13,10 @@
 //	 "lists": {"<name>": [<custom rule>, ...]},
 //	 "hostRules": {"<hostname>": "<list name>"}}
 //
+// A key can also be a hostname and a path ("example.com/api"): a path of a
+// hostname that several services share, each with its own WAF. A request
+// goes by the longest such path it's under, else by its hostname.
+//
 // A host's custom rules run first (rules.go), then its set's OWASP rules,
 // unless a custom rule said not to ("allow" or "skipOwasp": how a path is
 // left out of them). A host with neither isn't inspected. OWASP rules are compiled once per set
@@ -32,6 +36,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -77,10 +82,66 @@ type compiled struct {
 	// worth running before the body.
 	blocking map[string]bool
 	rules    map[string][]rule // host -> its custom rules, in order
+	// Hostnames with keys for their paths: the paths, longest first.
+	paths map[string][]string
 }
 
 func empty() *compiled {
-	return &compiled{hosts: map[string]coraza.WAF{}, names: map[string]string{}, blocking: map[string]bool{}, rules: map[string][]rule{}}
+	return &compiled{hosts: map[string]coraza.WAF{}, names: map[string]string{}, blocking: map[string]bool{}, rules: map[string][]rule{}, paths: map[string][]string{}}
+}
+
+// lower is a key with its hostname in lower case (a path keeps its case).
+func lower(key string) string {
+	if i := strings.IndexByte(key, '/'); i >= 0 {
+		return strings.ToLower(key[:i]) + key[i:]
+	}
+	return strings.ToLower(key)
+}
+
+// under says whether path is under prefix, by whole segments: "/api"
+// covers "/api" and "/api/x", not "/apix".
+func under(path, prefix string) bool {
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
+}
+
+// key is the settings a request goes by: its hostname and the longest
+// path with settings of its own that it's under, else its hostname.
+func (c *compiled) key(host, path string) string {
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	for _, p := range c.paths[host] {
+		if under(path, p) {
+			return host + p
+		}
+	}
+	return host
+}
+
+// index lists each hostname's paths, longest first.
+func (c *compiled) index() {
+	seen := map[string]bool{}
+	for _, keys := range []map[string]bool{keysOf(c.hosts), keysOf(c.rules)} {
+		for k := range keys {
+			i := strings.IndexByte(k, '/')
+			if i < 0 || seen[k] {
+				continue
+			}
+			seen[k] = true
+			c.paths[k[:i]] = append(c.paths[k[:i]], k[i:])
+		}
+	}
+	for h := range c.paths {
+		sort.Slice(c.paths[h], func(a, b int) bool { return len(c.paths[h][a]) > len(c.paths[h][b]) })
+	}
+}
+
+func keysOf[V any](m map[string]V) map[string]bool {
+	out := map[string]bool{}
+	for k := range m {
+		out[k] = true
+	}
+	return out
 }
 
 func directives(s Set) string {
@@ -153,9 +214,9 @@ func compile(raw []byte, prev map[string]coraza.WAF) (*compiled, map[string]cora
 	out := empty()
 	for host, set := range c.Hosts {
 		if w, ok := bySet[set]; ok {
-			out.hosts[strings.ToLower(host)] = w
-			out.names[strings.ToLower(host)] = set
-			out.blocking[strings.ToLower(host)] = c.Sets[set].Engine != "DetectionOnly"
+			out.hosts[lower(host)] = w
+			out.names[lower(host)] = set
+			out.blocking[lower(host)] = c.Sets[set].Engine != "DetectionOnly"
 		}
 	}
 	// A rule that doesn't check out is left out (and said so); the others
@@ -173,9 +234,10 @@ func compile(raw []byte, prev map[string]coraza.WAF) (*compiled, map[string]cora
 	}
 	for host, name := range c.HostRules {
 		if l, ok := lists[name]; ok {
-			out.rules[strings.ToLower(host)] = l
+			out.rules[lower(host)] = l
 		}
 	}
+	out.index()
 	return out, cache, nil
 }
 
@@ -462,8 +524,9 @@ func (s *server) Process(stream extproc.ExternalProcessor_ProcessServer) error {
 				host = host[:i]
 			}
 			c := s.cur.Load()
-			owasp := c.hosts[host]
-			rules := c.rules[host]
+			key := c.key(host, hdrs[":path"])
+			owasp := c.hosts[key]
+			rules := c.rules[key]
 			resp = cont()
 			if owasp == nil && len(rules) == 0 {
 				break
@@ -472,9 +535,9 @@ func (s *server) Process(stream extproc.ExternalProcessor_ProcessServer) error {
 			in = &inspection{
 				req:      request{method: hdrs[":method"], host: host, uri: hdrs[":path"], headers: hdrs, client: ip, geo: s.geo},
 				owasp:    owasp,
-				blocking: c.blocking[host],
+				blocking: c.blocking[key],
 				rules:    rules,
-				h:        hit{Host: host, Client: ip, Method: hdrs[":method"], URI: hdrs[":path"], Set: c.names[host]},
+				h:        hit{Host: host, Client: ip, Method: hdrs[":method"], URI: hdrs[":path"], Set: c.names[key]},
 			}
 			if v.RequestHeaders.GetEndOfStream() {
 				if st := in.decide(); st != 0 {

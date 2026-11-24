@@ -55,11 +55,13 @@ function HostPage() {
         side,
         text: `${x.name}: ${x.value}`,
         verb: "Set",
+        path: e.d.path || "/",
       })),
       ...(e.d.headers?.[side]?.remove ?? []).map((n) => ({
         side,
         text: n,
         verb: "Remove",
+        path: e.d.path || "/",
       })),
     ]),
   );
@@ -92,7 +94,14 @@ function HostPage() {
             <tbody>
               {routes.map((e) => (
                 <tr key={e.d.id}>
-                  <Td className="font-mono text-[12.5px]">/</Td>
+                  <Td className="font-mono text-[12.5px]">
+                    {e.d.path || "/"}
+                    {e.d.stripPrefix ? (
+                      <span className="ml-2 font-sans text-[11.5px] text-muted-foreground">
+                        Strip prefix
+                      </span>
+                    ) : null}
+                  </Td>
                   <Td>
                     <AppLink
                       href={servicePath(e.a.id, "domains")}
@@ -160,6 +169,7 @@ function HostPage() {
                 <span className="w-16 text-muted-foreground">{h.verb}</span>
                 <span className="font-mono">{h.text}</span>
                 <span className="ml-auto text-[12px] text-muted-foreground">
+                  {h.path === "/" ? "" : `${h.path} · `}
                   {h.side === "response" ? "Responses" : "Requests"}
                 </span>
               </li>

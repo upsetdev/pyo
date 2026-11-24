@@ -396,7 +396,7 @@ pub async fn check_claims(
         }
         // Held by another team: theirs while they can still prove it.
         let holders: Vec<(String, String, Value)> = sqlx::query_as(
-            "SELECT a.id, a.team_id, a.spec->'domains' FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+            "SELECT a.id, a.team_id, a.spec->'domains' FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
               WHERE a.id <> $1 AND a.team_id <> $2 AND NOT a.deleting AND lower(d->>'hostname') = $3",
         )
         .bind(service_id)

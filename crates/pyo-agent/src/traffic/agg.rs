@@ -34,9 +34,9 @@ struct HostAgg {
 }
 
 impl HostAgg {
-    fn new(minute: i64, host: &str) -> Self {
+    fn new(minute: i64, host: &str, service_id: &str) -> Self {
         HostAgg {
-            t: HostTotals { minute, host: host.to_owned(), ..Default::default() },
+            t: HostTotals { minute, host: host.to_owned(), service_id: service_id.to_owned(), ..Default::default() },
             paths: TopK::new(t::TOP_PATHS * TRACK),
             pages: TopK::new(t::TOP_PAGES * TRACK),
             referrers: TopK::new(t::TOP_REFERRERS * TRACK),
@@ -67,7 +67,9 @@ fn cut(s: &str) -> String {
 
 #[derive(Default)]
 pub struct Aggregator {
-    hosts: HashMap<(i64, String), HostAgg>,
+    /// By minute, host and service (on a hostname whose paths go to
+    /// several; "" otherwise).
+    hosts: HashMap<(i64, String, String), HostAgg>,
     ports: HashMap<(i64, String), PortTotals>,
     waf_messages: BTreeMap<String, String>,
 }
@@ -76,7 +78,7 @@ impl Aggregator {
     pub fn add(&mut self, c: &Cleaned) {
         match c {
             Cleaned::Request { row, visitor, pageview, params } => {
-                let Some(a) = self.host(row.at, &row.host) else { return };
+                let Some(a) = self.host(row.at, &row.host, &row.service_id) else { return };
                 let h = &mut a.t;
                 h.requests += 1;
                 h.bytes += row.bytes;
@@ -122,7 +124,7 @@ impl Aggregator {
                         self.waf_messages.insert(rule.to_string(), msg.clone());
                     }
                 }
-                let Some(a) = self.host(row.at, &row.host) else { return };
+                let Some(a) = self.host(row.at, &row.host, &row.service_id) else { return };
                 let h = &mut a.t;
                 let (map, mark) = if row.blocked { (&mut h.waf_blocked, "b") } else { (&mut h.waf_logged, "l") };
                 for rule in &row.rules {
@@ -158,20 +160,20 @@ impl Aggregator {
         }
     }
 
-    fn host(&mut self, at: i64, host: &str) -> Option<&mut HostAgg> {
+    fn host(&mut self, at: i64, host: &str, service_id: &str) -> Option<&mut HostAgg> {
         let minute = at.div_euclid(60_000) * 60;
-        let key = (minute, host.to_owned());
+        let key = (minute, host.to_owned(), service_id.to_owned());
         if !self.hosts.contains_key(&key) && self.hosts.len() >= MAX_KEYS {
             return None;
         }
-        Some(self.hosts.entry(key).or_insert_with(|| HostAgg::new(minute, host)))
+        Some(self.hosts.entry(key).or_insert_with(|| HostAgg::new(minute, host, service_id)))
     }
 
     /// The minutes that ended at least `LATE_SECS` before `now` (seconds),
     /// taken out. None when there's nothing.
     pub fn take_finished(&mut self, now: i64) -> Option<TotalsBatch> {
         let done = |m: i64| m + 60 + LATE_SECS <= now;
-        let hosts: Vec<(i64, String)> = self.hosts.keys().filter(|k| done(k.0)).cloned().collect();
+        let hosts: Vec<(i64, String, String)> = self.hosts.keys().filter(|k| done(k.0)).cloned().collect();
         let ports: Vec<(i64, String)> = self.ports.keys().filter(|k| done(k.0)).cloned().collect();
         if hosts.is_empty() && ports.is_empty() {
             return None;
@@ -182,7 +184,7 @@ impl Aggregator {
             waf_messages: std::mem::take(&mut self.waf_messages),
             ..Default::default()
         };
-        b.hosts.sort_by(|a, b| (a.minute, &a.host).cmp(&(b.minute, &b.host)));
+        b.hosts.sort_by(|a, b| (a.minute, &a.host, &a.service_id).cmp(&(b.minute, &b.host, &b.service_id)));
         b.ports.sort_by(|a, b| (a.minute, &a.key).cmp(&(b.minute, &b.key)));
         Some(b)
     }

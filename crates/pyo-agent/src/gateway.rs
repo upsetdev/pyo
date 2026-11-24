@@ -322,9 +322,13 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         .filter(reachable)
         .filter(public)
         .collect();
-    if !secure.is_empty() {
+    // The domains that hold their hostname: its listener and certificate.
+    // A path of a hostname another entry holds joins that entry's (its
+    // routes name that Gateway).
+    let holders: Vec<&DomainSpec> = secure.iter().copied().filter(|d| !d.shares()).collect();
+    if !holders.is_empty() {
         let mut listeners = vec![];
-        for d in &secure {
+        for d in &holders {
             let secret = tls_secret(spec, &d.hostname);
             listeners.push(json!({
                 "name": format!("h-{}", host_hash(&d.hostname)), "port": 443, "protocol": "HTTPS", "hostname": d.hostname,
@@ -349,15 +353,26 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
             "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway", "metadata": gw_meta,
             "spec": { "gatewayClassName": "pyo", "listeners": listeners },
         }));
+    }
+    // Its own Gateway, or for a path of a hostname another entry holds,
+    // that entry's listener.
+    let parents = |d: &DomainSpec| {
+        if d.shares() {
+            json!([{ "name": d.primary_of, "sectionName": format!("h-{}", host_hash(&d.hostname)) }])
+        } else {
+            json!([{ "name": base }])
+        }
+    };
+    if !secure.is_empty() {
         for p in &ports {
             let direct = secure
                 .iter()
                 .copied()
                 .filter(|d| d.port_name == *p && !d.via_tunnel());
-            for (v, rules, hosts) in grouped(direct) {
+            for (v, d, hosts) in grouped(direct) {
                 out.objects.push(json!({
                     "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(&format!("{base}-https-{p}{v}")),
-                    "spec": { "parentRefs": [{ "name": base }], "hostnames": hosts, "rules": [with_headers(web_rule(p), rules)] },
+                    "spec": { "parentRefs": parents(d), "hostnames": hosts, "rules": [rule_for(web_rule(p), d)] },
                 }));
             }
             // Through the Cloudflare Tunnel: routes of their own, so the
@@ -370,18 +385,18 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
                         && d.tunnel_only() == only
                         && d.redirect_https == redirect
                 });
-                for (v, header_rules, hosts) in grouped(tunneled) {
+                for (v, d, hosts) in grouped(tunneled) {
                     let mut rules = vec![];
                     if redirect {
-                        rules.push(tunnel_redirect_rule());
+                        rules.push(for_path_only(tunnel_redirect_rule(), d));
                     }
                     // X-Forwarded-For is the visitor alone, not the visitor
                     // and then the connector's pod.
-                    rules.push(system::tunnel_rule(with_headers(web_rule(p), header_rules)));
+                    rules.push(system::tunnel_rule(rule_for(web_rule(p), d)));
                     out.objects.push(json!({
                         "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
                         "metadata": meta(&format!("{}{v}", tunnel_route_name(&base, only, redirect, p))),
-                        "spec": { "parentRefs": [{ "name": base }], "hostnames": hosts, "rules": rules },
+                        "spec": { "parentRefs": parents(d), "hostnames": hosts, "rules": rules },
                     }));
                 }
             }
@@ -394,7 +409,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
     // reaches it directly any more (cloudflared speaks HTTPS).
     // (A domain that redirects as a whole sends plain HTTP straight to
     // where it redirects, below.)
-    let redirect: Vec<&str> = secure
+    let redirect: Vec<&str> = holders
         .iter()
         .filter(|d| d.redirect_https && !d.tunnel_only() && !redirects_root(d))
         .map(|d| d.hostname.as_str())
@@ -413,10 +428,10 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
             .filter(public)
             .filter(|d| d.port_name == *p && !(!d.tls.is_empty() && d.redirect_https))
             .filter(|d| !d.tunnel_only());
-        for (v, rules, hosts) in grouped(plain) {
+        for (v, d, hosts) in grouped(plain) {
             out.objects.push(json!({
                 "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(&format!("{base}-http-{p}{v}")),
-                "spec": { "parentRefs": http_parent, "hostnames": hosts, "rules": [with_headers(web_rule(p), rules)] },
+                "spec": { "parentRefs": http_parent, "hostnames": hosts, "rules": [rule_for(web_rule(p), d)] },
             }));
         }
     }
@@ -429,11 +444,11 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
             .iter()
             .filter(reachable)
             .filter(|d| d.port_name == *p && system::is_tailnet_host(&d.hostname));
-        for (v, rules, hosts) in grouped(tailnet) {
+        for (v, d, hosts) in grouped(tailnet) {
             let rule = json!({ "backendRefs": [backend_ref(p)], "timeouts": timeouts });
             out.objects.push(json!({
                 "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(&format!("{}{v}", tailnet_route_name(&base, p))),
-                "spec": { "parentRefs": [{ "name": system::TAILNET_GATEWAY, "sectionName": system::TAILNET_HTTPS_SECTION }], "hostnames": hosts, "rules": [with_headers(rule, rules)] },
+                "spec": { "parentRefs": [{ "name": system::TAILNET_GATEWAY, "sectionName": system::TAILNET_HTTPS_SECTION }], "hostnames": hosts, "rules": [rule_for(rule, d)] },
             }));
         }
     }
@@ -446,7 +461,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         .domains
         .iter()
         .filter(reachable)
-        .filter(|d| !d.redirects.is_empty())
+        .filter(|d| !d.redirects.is_empty() && !d.shares())
     {
         let tailnet = system::is_tailnet_host(&d.hostname);
         let mut parents = vec![];
@@ -536,7 +551,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
     // settings (origin pull, PROXY protocol) are filled in as the cluster
     // has them when it's applied (`apply`). Without the CDN's ranges
     // nothing is trusted, so the CDN check above refuses everyone.
-    let direct: Vec<&&DomainSpec> = secure.iter().filter(|d| !d.via_tunnel()).collect();
+    let direct: Vec<&&DomainSpec> = holders.iter().filter(|d| !d.via_tunnel()).collect();
     if let Some((cdn, ranges)) = fw.behind_ranges().filter(|(_, r)| !r.is_empty())
         && !direct.is_empty()
     {
@@ -558,7 +573,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
     // (their pods' addresses, filled in when it's applied). While a domain
     // switches, a service behind a CDN also still trusts the CDN, which
     // reaches it directly until the record moves.
-    let tunneled: Vec<&&DomainSpec> = secure.iter().filter(|d| d.via_tunnel()).collect();
+    let tunneled: Vec<&&DomainSpec> = holders.iter().filter(|d| d.via_tunnel()).collect();
     if !tunneled.is_empty() {
         let sections: Vec<String> = tunneled
             .iter()
@@ -584,7 +599,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
     // closed in block mode. The service's WAF rides on the policy, and the
     // processor's settings are rebuilt from every policy's (waf.rs).
     if let Some(waf) = spec.waf.as_ref().filter(|w| w.on()) {
-        let routes: Vec<(String, Vec<String>)> = out
+        let routes: Vec<(String, Vec<String>, String)> = out
             .objects
             .iter()
             .filter(|o| o["kind"] == "HTTPRoute" && reaches_service(o))
@@ -596,12 +611,16 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
                         .iter()
                         .filter_map(|h| h.as_str().map(str::to_owned))
                         .collect(),
+                    route_path(o),
                 ))
             })
             .collect();
-        for (name, hosts) in routes {
+        for (name, hosts, path) in routes {
+            // A path's route: the WAF tells it from the hostname's other
+            // paths by its path.
             let route = system::WafRoute {
                 hosts,
+                path,
                 settings: waf.settings.clone(),
                 rules: waf.rules.clone(),
             };
@@ -621,28 +640,50 @@ pub use system::WAF_ANNOTATION;
 
 /// Which of Pyo Gateway's rules this agent writes
 /// ([`pyo_proto::Capabilities::gateway_rules`]).
-pub const RULES: u8 = 1;
+pub const RULES: u8 = 2;
 
 /// A domain's routes go with the others of its port, unless it has rules
-/// of its own (header rules): then in a route of its own, named after its
-/// hostname (`-r<hash>` after the usual name). Groups of hostnames by that
-/// suffix, with their rules, in the domains' order.
+/// of its own (header rules, a path, another entry's listener): then in a
+/// route of its own, named after its hostname and path (`-r<hash>` after
+/// the usual name). Groups of hostnames by that suffix, with the first
+/// domain of each (the only one, for a route of its own), in the domains'
+/// order.
 fn grouped<'a>(
     domains: impl Iterator<Item = &'a DomainSpec>,
-) -> Vec<(String, &'a pyo_proto::rules::HeaderRules, Vec<&'a str>)> {
-    let mut out: Vec<(String, &pyo_proto::rules::HeaderRules, Vec<&str>)> = vec![];
+) -> Vec<(String, &'a DomainSpec, Vec<&'a str>)> {
+    let mut out: Vec<(String, &DomainSpec, Vec<&str>)> = vec![];
     for d in domains {
-        let v = if d.headers.is_empty() {
-            String::new()
-        } else {
-            format!("-r{}", host_hash(&d.hostname))
+        let own = !d.headers.is_empty() || d.path() != "/" || d.shares();
+        let v = match (own, d.path()) {
+            (false, _) => String::new(),
+            (true, "/") => format!("-r{}", host_hash(&d.hostname)),
+            (true, path) => format!("-r{}", host_hash(&format!("{}{path}", d.hostname))),
         };
         match out.iter_mut().find(|(x, _, _)| *x == v) {
             Some((_, _, hosts)) => hosts.push(d.hostname.as_str()),
-            None => out.push((v, &d.headers, vec![d.hostname.as_str()])),
+            None => out.push((v, d, vec![d.hostname.as_str()])),
         }
     }
     out
+}
+
+/// A domain's rule: its path (and the prefix stripped), then its header
+/// rules.
+fn rule_for(rule: Value, d: &DomainSpec) -> Value {
+    pyo_proto::rules::for_path(with_headers(rule, &d.headers), d.path(), d.strip_prefix)
+}
+
+/// A rule that only redirects (the tunnel's to HTTPS), for a domain's path:
+/// its match gets the path too.
+fn for_path_only(mut rule: Value, d: &DomainSpec) -> Value {
+    if d.path() != "/"
+        && let Some(m) = rule["matches"].as_array_mut()
+    {
+        for x in m {
+            x["path"] = json!({ "type": "PathPrefix", "value": d.path() });
+        }
+    }
+    rule
 }
 
 /// The route of a domain's redirects.
@@ -653,6 +694,18 @@ pub fn moved_route_name(base: &str, hostname: &str) -> String {
 /// A domain redirects as a whole (its "/").
 fn redirects_root(d: &DomainSpec) -> bool {
     d.redirects.iter().any(|r| r.path == "/")
+}
+
+/// The path a route's service rule matches: "/" without one.
+fn route_path(o: &Value) -> String {
+    o["spec"]["rules"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["backendRefs"].is_array())
+        .find_map(|r| r["matches"][0]["path"]["value"].as_str())
+        .unwrap_or("/")
+        .to_owned()
 }
 
 /// A route that reaches the service (not only redirects): what the
@@ -2871,6 +2924,87 @@ mod tests {
         assert!(!r.objects.iter().any(|o| o["kind"] == "HTTPRoute" && reaches_service(o)));
     }
 
+    /// Paths: a path of a hostname another service holds joins that
+    /// service's listener with routes of its own (its path, the prefix
+    /// stripped), and gets no listener, certificate or client policy of
+    /// its own. Its firewall and WAF are its own service's. The entry that
+    /// holds a hostname at a path other than "/" matches that path.
+    #[test]
+    fn paths_join_the_listener_of_the_service_that_holds_the_hostname() {
+        let api = DomainSpec {
+            path: "/api".into(),
+            strip_prefix: true,
+            primary_of: "shop-web".into(),
+            ..domain("example.com", "http", "letsencrypt", true)
+        };
+        let docs = DomainSpec {
+            path: "/docs".into(),
+            primary_of: "shop-web".into(),
+            tunnel: pyo_proto::TUNNEL_ON.into(),
+            ..domain("t.example.com", "http", "custom", true)
+        };
+        let tn = DomainSpec {
+            path: "/v1".into(),
+            ..domain("blog.tail1234.ts.net", "http", "", false)
+        };
+        let plain = DomainSpec {
+            path: "/p".into(),
+            primary_of: "shop-web".into(),
+            ..domain("plain.example.com", "http", "", false)
+        };
+        let mut s = spec(vec![api, docs, tn, plain]);
+        s.service.name = "api".into();
+        s.firewall = Some(Firewall {
+            rules: vec![pyo_proto::firewall::FirewallRule {
+                id: "fwr_1".into(),
+                action: "block".into(),
+                operator: "in".into(),
+                sources: vec!["203.0.113.0/24".into()],
+                limit: None,
+            }],
+            ..Default::default()
+        });
+        s.waf = Some(pyo_proto::Waf { settings: pyo_proto::WafSettings { mode: "block".into(), level: 1, ..Default::default() }, ..Default::default() });
+        let r = route_objects(&s);
+        // No listener, certificate, redirect to HTTPS or client policy.
+        for kind in ["Gateway", "Certificate", "ClientTrafficPolicy"] {
+            assert!(!r.objects.iter().any(|o| o["kind"] == kind), "{kind}");
+        }
+        assert!(r.uploaded.is_empty());
+        assert!(!r.objects.iter().any(|o| o["metadata"]["name"] == "shop-api-redirect"));
+        let v = |h: &str| format!("-r{}", host_hash(h));
+        let route = |name: String| find(&r, "HTTPRoute", &name).clone();
+        let a = route(format!("shop-api-https-http{}", v("example.com/api")));
+        assert_eq!(a["spec"]["parentRefs"], json!([{ "name": "shop-web", "sectionName": format!("h-{}", host_hash("example.com")) }]));
+        assert_eq!(a["spec"]["rules"][0]["matches"], json!([{ "path": { "type": "PathPrefix", "value": "/api" } }]));
+        assert_eq!(a["spec"]["rules"][0]["filters"][0]["type"], "URLRewrite");
+        // Through the tunnel: the tunnel's redirect and its rule, on the path.
+        let t = route(format!("shop-api-tunnel-http{}", v("t.example.com/docs")));
+        assert_eq!(t["spec"]["parentRefs"][0]["name"], "shop-web");
+        assert_eq!(t["spec"]["rules"][0]["matches"][0]["path"]["value"], "/docs");
+        assert_eq!(t["spec"]["rules"][0]["matches"][0]["headers"][0]["name"], "cf-visitor");
+        assert_eq!(t["spec"]["rules"][1]["matches"][0]["path"]["value"], "/docs");
+        // Plain HTTP and the tailnet: on the shared listeners, with the path.
+        let p = route(format!("shop-api-http-http{}", v("plain.example.com/p")));
+        assert_eq!(p["spec"]["rules"][0]["matches"][0]["path"]["value"], "/p");
+        let n = route(format!("tn--shop-api-http{}", v("blog.tail1234.ts.net/v1")));
+        assert_eq!(n["spec"]["rules"][0]["matches"][0]["path"]["value"], "/v1");
+        // Its own firewall and WAF on its routes (not on the tailnet's).
+        assert!(r.objects.iter().any(|o| o["kind"] == "SecurityPolicy" && o["metadata"]["name"] == a["metadata"]["name"]));
+        assert!(r.objects.iter().any(|o| o["kind"] == "EnvoyExtensionPolicy" && o["metadata"]["name"] == a["metadata"]["name"]));
+
+        // The holder at a path: its listener, and a match.
+        let held = spec(vec![DomainSpec { path: "/app".into(), ..domain("example.com", "http", "letsencrypt", true) }]);
+        let r = route_objects(&held);
+        assert_eq!(find(&r, "Gateway", "shop-web")["spec"]["listeners"].as_array().unwrap().len(), 1);
+        let app = find(&r, "HTTPRoute", &format!("shop-web-https-http{}", v("example.com/app")));
+        assert_eq!(app["spec"]["parentRefs"], json!([{ "name": "shop-web" }]));
+        assert_eq!(app["spec"]["rules"][0]["matches"][0]["path"]["value"], "/app");
+        assert!(app["spec"]["rules"][0]["filters"].is_null());
+        // Its redirect to HTTPS covers every path.
+        assert_eq!(find(&r, "HTTPRoute", "shop-web-redirect")["spec"]["hostnames"], json!(["example.com"]));
+    }
+
     /// Header rules: the domain gets routes of its own (`-r<hash>`), with
     /// its filters, everywhere it's reached; the others stay as they were.
     #[test]
@@ -3911,6 +4045,7 @@ mod tests {
         // Its settings: each distinct combination once.
         let route = |h: &str, set: WafSettings, rules: Vec<WafRule>| WafRoute {
             hosts: vec![h.to_owned()],
+            path: String::new(),
             settings: set,
             rules,
         };

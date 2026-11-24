@@ -512,7 +512,7 @@ pub async fn rehome(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> Api
 async fn taken(tx: &mut Transaction<'_, Postgres>, host: &str) -> ApiResult<bool> {
     let lifted = crate::rls::lift(tx).await?;
     let taken = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+        "SELECT EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
                          WHERE NOT a.deleting AND d->>'hostname' = $1)",
     )
     .bind(host)
