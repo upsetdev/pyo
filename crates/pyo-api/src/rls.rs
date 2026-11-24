@@ -176,9 +176,9 @@ pub(crate) mod tests {
             assert_eq!(hosts(None, None, Some("web")).await.unwrap(), web);
             assert_eq!(hosts(Some(&project), None, Some(&id("svc"))).await.unwrap(), web);
             // A domain by its id or hostname, any case.
-            assert_eq!(hosts(None, Some("dom_1"), None).await.unwrap(), [shop.clone()]);
-            assert_eq!(hosts(None, Some(&shop.to_uppercase()), None).await.unwrap(), [shop.clone()]);
-            assert_eq!(hosts(None, Some("dom_1"), Some(&id("svc"))).await.unwrap(), [shop.clone()]);
+            assert_eq!(hosts(None, Some("dom_1"), None).await.unwrap(), std::slice::from_ref(&shop));
+            assert_eq!(hosts(None, Some(&shop.to_uppercase()), None).await.unwrap(), std::slice::from_ref(&shop));
+            assert_eq!(hosts(None, Some("dom_1"), Some(&id("svc"))).await.unwrap(), std::slice::from_ref(&shop));
             // Everything, and "all".
             assert_eq!(hosts(None, Some("all"), Some("")).await.unwrap().len(), 3);
             // A service with no domains has none.
