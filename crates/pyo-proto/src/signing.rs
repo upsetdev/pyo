@@ -55,6 +55,20 @@
 //! trusted keys, then the signature against the session key, and takes it
 //! only when it was signed and expires inside the delegation's window.
 //! Kinds in [`ROOT_ONLY_KINDS`] are never taken from a session key.
+//!
+//! Commands to a sandbox server that works over HTTPS (Pyo Cloud,
+//! docs/cloud-sandbox-servers.md) are signed the same way under their own
+//! prefix, so a sandbox command never passes for an agent command or the
+//! other way round:
+//!
+//! ```text
+//! sig = Ed25519("pyosbx1." + base64url(sandbox claims JSON))
+//! ```
+//!
+//! Their claims name the sandbox server (`sbs_…`) and its team instead of
+//! a cluster, with a sequence number that only grows per server. A session
+//! key signs them only when its delegation names
+//! [`PURPOSE_SANDBOX_COMMANDS`].
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -80,6 +94,44 @@ pub const PURPOSE_COMMANDS: &str = "commands";
 /// Command kinds an agent takes only with a trusted key's own signature:
 /// an agent update names the image every customer's agent will run.
 pub const ROOT_ONLY_KINDS: &[&str] = &["update_agent"];
+pub const SANDBOX_PREFIX: &str = "pyosbx1";
+/// A session key may sign commands to sandbox servers.
+pub const PURPOSE_SANDBOX_COMMANDS: &str = "sandboxCommands";
+
+/// What the signer signs for a command to a sandbox server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxClaims {
+    pub v: u32,
+    /// The command's id (pyo.sandbox_commands).
+    pub id: String,
+    /// The sandbox server it's for (`sbs_…`).
+    pub server: String,
+    /// The team that server belongs to.
+    pub team: String,
+    /// Grows with every command signed for this server.
+    pub seq: u64,
+    /// Signed at, and expires at (ms since the epoch).
+    pub iat: u64,
+    pub exp: u64,
+    /// The command's `type`, so the signer can refuse kinds by policy.
+    pub kind: String,
+    /// Hex SHA-256 of [`SignedCommand::command`].
+    pub sha256: String,
+}
+
+impl SandboxClaims {
+    /// The claims as sent (base64url JSON), and the exact bytes signed.
+    pub fn signing_input(&self) -> (String, Vec<u8>) {
+        let c = B64.encode(serde_json::to_vec(self).unwrap_or_default());
+        let m = sandbox_message(&c);
+        (c, m)
+    }
+}
+
+fn sandbox_message(claims_b64: &str) -> Vec<u8> {
+    format!("{SANDBOX_PREFIX}.{claims_b64}").into_bytes()
+}
 
 /// What a trusted key signs to let a session key sign.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,6 +297,12 @@ impl Signer {
         (c, B64.encode(self.key.sign(&m).as_ref()))
     }
 
+    /// Signs a sandbox server's command claims ([`SandboxClaims`]).
+    pub fn sign_sandbox(&self, claims: &SandboxClaims) -> (String, String) {
+        let (c, m) = claims.signing_input();
+        (c, B64.encode(self.key.sign(&m).as_ref()))
+    }
+
     /// Signs a reply's claims (its JSON hashes to `claims.sha256`).
     pub fn sign_reply(&self, claims: &ReplyClaims) -> (String, String) {
         let (c, m) = claims.signing_input();
@@ -271,6 +329,10 @@ pub enum Refused {
     BadSignature,
     BadClaims,
     OtherCluster,
+    /// A sandbox command signed for another sandbox server.
+    OtherServer,
+    /// A sandbox command signed for another team.
+    OtherTeam,
     Replayed { seq: u64, last: u64 },
     Expired,
     NotYetValid,
@@ -297,6 +359,8 @@ impl std::fmt::Display for Refused {
             Refused::BadSignature => write!(f, "its signature doesn't match"),
             Refused::BadClaims => write!(f, "its signed details can't be read"),
             Refused::OtherCluster => write!(f, "it was signed for another cluster"),
+            Refused::OtherServer => write!(f, "it was signed for another sandbox server"),
+            Refused::OtherTeam => write!(f, "it was signed for another team"),
             Refused::Replayed { seq, last } => write!(f, "it was already used (number {seq}, last run {last})"),
             Refused::Expired => write!(f, "it expired"),
             Refused::NotYetValid => write!(f, "it's dated in the future"),
@@ -447,6 +511,61 @@ impl TrustedKeys {
         }
         if c.cluster != cluster {
             return Err(Refused::OtherCluster);
+        }
+        if c.id != envelope_id {
+            return Err(Refused::IdMismatch);
+        }
+        if sha256_hex(s.command.as_bytes()) != c.sha256 {
+            return Err(Refused::Tampered);
+        }
+        if now_ms > c.exp.saturating_add(LEEWAY_MS) {
+            return Err(Refused::Expired);
+        }
+        if c.iat > now_ms.saturating_add(LEEWAY_MS) {
+            return Err(Refused::NotYetValid);
+        }
+        if c.seq <= last_seq {
+            return Err(Refused::Replayed { seq: c.seq, last: last_seq });
+        }
+        Ok(c)
+    }
+
+    /// Checks a signed command for the sandbox server `server` of `team`,
+    /// given the last sequence number this server ran. On success, the
+    /// claims. The server runs the JSON in [`SignedCommand::command`].
+    pub fn verify_sandbox(
+        &self,
+        signed: Option<&SignedCommand>,
+        envelope_id: &str,
+        server: &str,
+        team: &str,
+        last_seq: u64,
+        now_ms: u64,
+    ) -> Result<SandboxClaims, Refused> {
+        let s = signed.ok_or(Refused::Unsigned)?;
+        let origin = self.check_signature(
+            &s.kid,
+            s.delegation.as_ref(),
+            PURPOSE_SANDBOX_COMMANDS,
+            &sandbox_message(&s.claims),
+            &s.sig,
+            now_ms,
+        )?;
+        let raw = B64.decode(&s.claims).map_err(|_| Refused::BadClaims)?;
+        let c: SandboxClaims = serde_json::from_slice(&raw).map_err(|_| Refused::BadClaims)?;
+        if c.v != 1 {
+            return Err(Refused::BadClaims);
+        }
+        if let Origin::Session(d) = &origin
+            && (c.iat < d.nbf || c.exp > d.exp)
+        {
+            return Err(Refused::OutsideDelegation);
+        }
+        if server.is_empty() || c.server != server {
+            return Err(Refused::OtherServer);
+        }
+        if team.is_empty() || c.team != team {
+            return Err(Refused::OtherTeam);
         }
         if c.id != envelope_id {
             return Err(Refused::IdMismatch);
@@ -731,6 +850,124 @@ mod tests {
         let mut c = signed(&k, "cl_a", 1, "{}", now + HOUR - 60_000);
         c.delegation = Some(d);
         assert_eq!(t.verify(Some(&c), "cmd_1", "cl_a", 0, now + HOUR - 60_000), Err(Refused::OutsideDelegation));
+    }
+
+    fn sandbox(s: &Signer, server: &str, team: &str, seq: u64, command: &str, now: u64) -> SignedCommand {
+        let claims = SandboxClaims {
+            v: 1,
+            id: "sbc_1".into(),
+            server: server.into(),
+            team: team.into(),
+            seq,
+            iat: now,
+            exp: now + TTL_MS,
+            kind: "delete".into(),
+            sha256: sha256_hex(command.as_bytes()),
+        };
+        let (c, sig) = s.sign_sandbox(&claims);
+        SignedCommand { claims: c, sig, kid: s.kid().into(), command: command.into(), delegation: None }
+    }
+
+    #[test]
+    fn a_sandbox_command_is_for_one_server_of_one_team() {
+        let (s, t) = setup();
+        let now = 1_000_000;
+        let body = r#"{"type":"delete","id":"sbx_1"}"#;
+        let x = sandbox(&s, "sbs_a", "team_a", 3, body, now);
+        assert_eq!(t.verify_sandbox(Some(&x), "sbc_1", "sbs_a", "team_a", 2, now).map(|c| c.seq), Ok(3));
+        assert_eq!(t.verify_sandbox(None, "sbc_1", "sbs_a", "team_a", 0, now), Err(Refused::Unsigned));
+        assert_eq!(t.verify_sandbox(Some(&x), "sbc_1", "sbs_b", "team_a", 0, now), Err(Refused::OtherServer));
+        assert_eq!(t.verify_sandbox(Some(&x), "sbc_1", "sbs_a", "team_b", 0, now), Err(Refused::OtherTeam));
+        assert_eq!(t.verify_sandbox(Some(&x), "sbc_1", "", "", 0, now), Err(Refused::OtherServer));
+        assert_eq!(t.verify_sandbox(Some(&x), "sbc_2", "sbs_a", "team_a", 0, now), Err(Refused::IdMismatch));
+        assert_eq!(
+            t.verify_sandbox(Some(&x), "sbc_1", "sbs_a", "team_a", 3, now),
+            Err(Refused::Replayed { seq: 3, last: 3 })
+        );
+        assert_eq!(
+            t.verify_sandbox(Some(&x), "sbc_1", "sbs_a", "team_a", 0, now + TTL_MS + LEEWAY_MS + 1),
+            Err(Refused::Expired)
+        );
+        let ahead = sandbox(&s, "sbs_a", "team_a", 4, body, now + LEEWAY_MS + 60_000);
+        assert_eq!(t.verify_sandbox(Some(&ahead), "sbc_1", "sbs_a", "team_a", 0, now), Err(Refused::NotYetValid));
+        let mut tampered = x.clone();
+        tampered.command = r#"{"type":"delete","id":"sbx_2"}"#.into();
+        assert_eq!(t.verify_sandbox(Some(&tampered), "sbc_1", "sbs_a", "team_a", 0, now), Err(Refused::Tampered));
+        let (other, _) = setup();
+        let mut forged = sandbox(&other, "sbs_a", "team_a", 5, body, now);
+        assert_eq!(t.verify_sandbox(Some(&forged), "sbc_1", "sbs_a", "team_a", 0, now), Err(Refused::UnknownKey));
+        forged.kid = s.kid().into();
+        assert_eq!(t.verify_sandbox(Some(&forged), "sbc_1", "sbs_a", "team_a", 0, now), Err(Refused::BadSignature));
+    }
+
+    #[test]
+    fn sandbox_and_agent_signatures_never_pass_for_each_other() {
+        let (s, t) = setup();
+        let now = 1_000_000;
+        let body = r#"{"type":"delete","id":"sbx_1"}"#;
+        // Sandbox claims signed under the agent prefix.
+        let (c, _) = SandboxClaims {
+            v: 1,
+            id: "sbc_1".into(),
+            server: "sbs_a".into(),
+            team: "team_a".into(),
+            seq: 1,
+            iat: now,
+            exp: now + TTL_MS,
+            kind: "delete".into(),
+            sha256: sha256_hex(body.as_bytes()),
+        }
+        .signing_input();
+        let sig = B64.encode(s.sign_raw(format!("{PREFIX}.{c}").as_bytes()));
+        let as_agent = SignedCommand { claims: c, sig, kid: s.kid().into(), command: body.into(), delegation: None };
+        assert_eq!(t.verify_sandbox(Some(&as_agent), "sbc_1", "sbs_a", "team_a", 0, now), Err(Refused::BadSignature));
+        // Agent claims signed under the sandbox prefix.
+        let (c, _) = Claims {
+            v: 1,
+            id: "cmd_1".into(),
+            cluster: "cl_a".into(),
+            seq: 1,
+            iat: now,
+            exp: now + TTL_MS,
+            kind: "restart".into(),
+            sha256: sha256_hex(body.as_bytes()),
+        }
+        .signing_input();
+        let sig = B64.encode(s.sign_raw(format!("{SANDBOX_PREFIX}.{c}").as_bytes()));
+        let as_sandbox = SignedCommand { claims: c, sig, kid: s.kid().into(), command: body.into(), delegation: None };
+        assert_eq!(t.verify(Some(&as_sandbox), "cmd_1", "cl_a", 0, now), Err(Refused::BadSignature));
+        // Each passes only as itself.
+        let x = sandbox(&s, "sbs_a", "team_a", 1, body, now);
+        assert_eq!(t.verify(Some(&x), "sbc_1", "sbs_a", 0, now), Err(Refused::BadSignature));
+        let a = signed(&s, "cl_a", 1, body, now);
+        assert_eq!(t.verify_sandbox(Some(&a), "cmd_1", "cl_a", "team_a", 0, now), Err(Refused::BadSignature));
+    }
+
+    #[test]
+    fn a_session_key_signs_sandbox_commands_only_when_given_them() {
+        let (root, t) = setup();
+        let now = 10 * HOUR;
+        let body = r#"{"type":"report"}"#;
+        // A delegation for agent commands doesn't cover sandbox commands.
+        let (k, d) = session(&root, &[PURPOSE_COMMANDS, PURPOSE_REPLIES], now - 1000, now + HOUR);
+        let mut x = sandbox(&k, "sbs_a", "team_a", 1, body, now);
+        x.delegation = Some(d);
+        assert_eq!(t.verify_sandbox(Some(&x), "sbc_1", "sbs_a", "team_a", 0, now), Err(Refused::NotDelegated));
+        // One for sandbox commands does, inside its window.
+        let (k, d) = session(&root, &[PURPOSE_SANDBOX_COMMANDS], now - 1000, now + HOUR);
+        let mut x = sandbox(&k, "sbs_a", "team_a", 1, body, now);
+        x.delegation = Some(d.clone());
+        assert!(t.verify_sandbox(Some(&x), "sbc_1", "sbs_a", "team_a", 0, now).is_ok());
+        let mut late = sandbox(&k, "sbs_a", "team_a", 2, body, now + HOUR - 60_000);
+        late.delegation = Some(d.clone());
+        assert_eq!(
+            t.verify_sandbox(Some(&late), "sbc_1", "sbs_a", "team_a", 0, now + HOUR - 60_000),
+            Err(Refused::OutsideDelegation)
+        );
+        // And never agent commands.
+        let mut c = signed(&k, "cl_a", 1, "{}", now);
+        c.delegation = Some(d);
+        assert_eq!(t.verify(Some(&c), "cmd_1", "cl_a", 0, now), Err(Refused::NotDelegated));
     }
 
     #[test]

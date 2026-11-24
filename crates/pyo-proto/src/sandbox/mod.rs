@@ -7,6 +7,8 @@
 //! - [`DaemonCommand`] and [`DaemonResult`] are what Pyo sends the daemon.
 //! - [`token`] is the short-lived signed token clients show the daemon.
 //! - [`wire`] is the framed protocol between the daemon and `pyo-envd`.
+//! - [`outbound`] is how a sandbox server on Pyo Cloud joins and gets its
+//!   commands over HTTPS.
 //!
 //! JSON is camelCase with timestamps in epoch milliseconds, like the rest of
 //! pyo-proto.
@@ -15,6 +17,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod outbound;
 #[cfg(feature = "sandbox-token")]
 pub mod token;
 pub mod wire;
