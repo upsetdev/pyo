@@ -345,12 +345,17 @@ pub async fn reset_access(
             .execute(&mut *tx)
             .await?;
     }
-    sqlx::query("UPDATE pyo.sandbox_servers SET via_cluster = $2, pyo_url = $3 WHERE id = $1")
-        .bind(id)
-        .bind(&via)
-        .bind(&pyo_url)
-        .execute(&mut *tx)
-        .await?;
+    // A server Pyo still calls keeps its route until it joins here: its
+    // cluster stays, and one Pyo called straight takes the key's.
+    sqlx::query(
+        "UPDATE pyo.sandbox_servers SET via_cluster = CASE WHEN outbound THEN $2 ELSE coalesce(via_cluster, $2) END,
+                pyo_url = $3 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&via)
+    .bind(&pyo_url)
+    .execute(&mut *tx)
+    .await?;
     let (code, tailscale_key) = code_and_key(s, &mut tx, &via, id, &name).await?;
     if let Some(t) = &team {
         let title = if outbound {

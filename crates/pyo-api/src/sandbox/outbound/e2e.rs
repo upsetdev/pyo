@@ -449,14 +449,14 @@ fn a_self_hosted_server_moves_from_the_door_to_the_channel() {
             assert!(t0.elapsed() < Duration::from_secs(30), "the daemon didn't come up");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        // Pyo on the same tailnet calls it straight.
         sqlx::query(
-            "INSERT INTO pyo.sandbox_servers (id, team_id, name, address, state, created_by, joined_at, via_cluster)
-             VALUES ($1, $2, 'sbx-old', $3, 'joining', 'test', now() - interval '1 hour', $4)",
+            "INSERT INTO pyo.sandbox_servers (id, team_id, name, address, state, created_by, joined_at)
+             VALUES ($1, $2, 'sbx-old', $3, 'joining', 'test', now() - interval '1 hour')",
         )
         .bind(&server)
         .bind(&t.id)
         .bind(&address)
-        .bind(&t.holder)
         .execute(&s.db)
         .await
         .unwrap();
