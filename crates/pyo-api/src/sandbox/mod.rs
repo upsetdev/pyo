@@ -1324,6 +1324,20 @@ fn edge_domain(d: Option<&str>) -> ApiResult<Option<String>> {
     Ok(Some(d))
 }
 
+/// Why a hosted Pyo takes no sandbox servers.
+pub const NOT_ON_CLOUD: &str = "Sandbox servers aren't available on Pyo Cloud yet.";
+
+/// A new sandbox server joins at Pyo's tailnet door (join.rs). A hosted Pyo
+/// that isn't on a tailnet (Pyo Cloud, which is on no team's) has no door,
+/// whatever the team's Tailscale, so it says that before anything about
+/// Tailscale. A self-hosted Pyo goes on to ask for Tailscale first.
+fn hosted_door(hosted: bool, door: &str, api: Option<&str>) -> ApiResult<()> {
+    if hosted && (door.is_empty() || api.is_none()) {
+        return Err(ApiError::conflict(NOT_ON_CLOUD));
+    }
+    Ok(())
+}
+
 /// Adds a sandbox server, or makes a new code for one that hasn't joined
 /// yet: its row, a one-time code and the command to run on it.
 pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<Value> {
@@ -1334,9 +1348,11 @@ pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<
         Some(t) => require(&mut tx, user, t, Need::Manage).await?,
         None => require_install_add(user)?,
     }
-    let via = crate::tailscale::team_key_cluster(&s.db, req.team_id.as_deref()).await?;
     let door = crate::deploy::registry_push();
-    let (false, Some(_)) = (door.is_empty(), crate::web::tailnet_api_url()) else {
+    let api = crate::web::tailnet_api_url();
+    hosted_door(crate::hosted(), &door, api.as_deref())?;
+    let via = crate::tailscale::team_key_cluster(&s.db, req.team_id.as_deref()).await?;
+    let (false, Some(_)) = (door.is_empty(), api) else {
         return Err(ApiError::conflict(
             "Pyo's server isn't on your tailnet yet. Try again in a minute.",
         ));
@@ -1597,9 +1613,10 @@ pub async fn add_cloud_server(s: &AppState, user: &User, req: AddCloudServer) ->
     };
     let mut tx = s.db.begin().await?;
     require(&mut tx, user, &req.team_id, Need::Manage).await?;
-    let via = crate::tailscale::team_key_cluster(&s.db, Some(&req.team_id)).await?;
     let door = crate::deploy::registry_push();
     let api = crate::web::tailnet_api_url();
+    hosted_door(crate::hosted(), &door, api.as_deref())?;
+    let via = crate::tailscale::team_key_cluster(&s.db, Some(&req.team_id)).await?;
     let (false, Some(api)) = (door.is_empty(), api) else {
         return Err(ApiError::conflict(
             "Pyo's server isn't on your tailnet yet. Try again in a minute.",
@@ -1818,6 +1835,24 @@ pub async fn delete_template(s: &AppState, user: &User, id: &str) -> ApiResult<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pyo Cloud is on no team's tailnet: adding a sandbox server says so,
+    /// with or without the team's Tailscale, and never sends the team to
+    /// set up Tailscale. A self-hosted Pyo goes on to its Tailscale checks.
+    #[test]
+    fn a_hosted_pyo_off_any_tailnet_takes_no_sandbox_servers() {
+        let api = Some("https://pyo.tail0000.ts.net");
+        let e = hosted_door(true, "", None).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert_eq!(e.message, NOT_ON_CLOUD);
+        assert!(!e.message.contains("Tailscale"));
+        assert!(hosted_door(true, "100.64.0.9:5006", None).is_err());
+        assert!(hosted_door(true, "", api).is_err());
+        assert!(hosted_door(true, "100.64.0.9:5006", api).is_ok());
+        for (door, api) in [("", None), ("100.64.0.9:5006", api)] {
+            assert!(hosted_door(false, door, api).is_ok(), "self-hosted");
+        }
+    }
 
     #[test]
     fn lifetimes() {

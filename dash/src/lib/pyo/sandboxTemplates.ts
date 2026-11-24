@@ -244,3 +244,19 @@ export function serverRefusal(x: ServerLike, memoryMib: number, network: "intern
   if (freeMemory(x) < memoryMib * 1024 ** 2) return "No room";
   return "";
 }
+
+/**
+ * Why a sandbox server can't be added yet, or "" when it can. A new one
+ * joins at Pyo's own door on the tailnet (`pyoTailnet`: Pyo's server is on
+ * Tailscale). Pyo Cloud is on no team's tailnet, so it takes none yet,
+ * whatever the team's Tailscale (`teamTailscale`). Self-hosted, a team
+ * without its own Tailscale uses Pyo's.
+ * - "cloud": not on Pyo Cloud yet.
+ * - "pyo": the team has Tailscale, but Pyo's own server isn't on Tailscale.
+ * - "tailscale": neither has Tailscale. NeedsTailscale says so.
+ */
+export function addServerBlock(x: { hosted: boolean; pyoTailnet: boolean; teamTailscale: boolean }) {
+  if (x.pyoTailnet) return "";
+  if (x.hosted) return "cloud";
+  return x.teamTailscale ? "pyo" : "tailscale";
+}
