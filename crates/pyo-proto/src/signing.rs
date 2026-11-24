@@ -2,9 +2,20 @@
 //! signed it for its own cluster.
 //!
 //! A hosted Pyo (Pyo Cloud) keeps its signing key out of the API: a separate
-//! signer signs each command, so a database write or a bug in the API alone
-//! can't send work to a customer's cluster. The agent is told the signer's
-//! public key at install (`PYO_COMMAND_KEY`) and refuses anything else.
+//! signer signs each command. The agent is told the signer's public key at
+//! install (`PYO_COMMAND_KEY`) and refuses anything else.
+//!
+//! What signing protects against: a stolen copy of the database (it holds
+//! no signing key), a command changed or played again on its way to the
+//! agent, a command signed for one cluster run on another, kinds that would
+//! widen the agent's roles (the signer refuses them), and agent images that
+//! weren't released (`update_agent`, when the signer has
+//! `SIGNER_AGENT_IMAGES`).
+//!
+//! What it doesn't protect against: a write to the database, or an API that
+//! was broken into. When an agent polls, the API reads its waiting commands
+//! from `pyo.commands` and asks the signer to sign them. So such a write can
+//! get any command signed that the signer doesn't refuse.
 //!
 //! ```text
 //! sig = Ed25519("pyocmd1." + base64url(claims JSON))
@@ -12,9 +23,10 @@
 //!
 //! The claims name the command (its id and kind), the cluster it's for, a
 //! sequence number that only grows per cluster, when it was signed and when
-//! it expires, and the SHA-256 of the command's exact JSON. The signer never
-//! sees the command itself, so the secrets in it (sealed env values opened
-//! for the agent) never reach it.
+//! it expires, and the SHA-256 of the command's exact JSON. The signer sees
+//! only the command's kind and hash, so the secrets in it (sealed env values
+//! opened for the agent) never reach it. The exception is `update_agent`,
+//! which carries no secrets: the signer reads it whole to check the image.
 //!
 //! Answers the agent acts on (the heartbeat's reply: labels, taints, public
 //! traffic, observability; a certificate; a registry login) are signed the
