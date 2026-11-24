@@ -17,25 +17,42 @@ use tower::ServiceExt;
 
 use crate::ids::random_string;
 
+thread_local! {
+    static ON_SHARED_RUNTIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Runs a test on a thread with a big stack, on one runtime that every
 /// Postgres test shares and that lives as long as the process. The vault is
-/// the process's and keeps the pool of the test that set it up first. A
+/// the process's and keeps the pool of the test that set it up first, and
+/// a connection belongs to the runtime of the test that opened it. A
 /// runtime of the test's own would shut down when that test ends, and a
 /// query on one of its connections then fails in whichever test still
-/// runs ("A Tokio 1.x context was found, but it is being shutdown.").
+/// runs ("A Tokio 1.x context was found, but it is being shutdown."). So
+/// every test that uses the vault runs here, and [`crate::vault::get`]
+/// fails one that doesn't.
 pub(crate) fn run_big<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
     static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
         tokio::runtime::Builder::new_multi_thread()
+            .thread_stack_size(64 << 20)
+            .on_thread_start(|| ON_SHARED_RUNTIME.set(true))
             .enable_all()
             .build()
             .unwrap()
     });
     std::thread::Builder::new()
         .stack_size(64 << 20)
-        .spawn(|| RUNTIME.block_on(f))
+        .spawn(|| {
+            ON_SHARED_RUNTIME.set(true);
+            RUNTIME.block_on(f)
+        })
         .unwrap()
         .join()
         .unwrap();
+}
+
+/// Whether this thread runs the runtime [`run_big`] shares.
+pub(crate) fn on_shared_runtime() -> bool {
+    ON_SHARED_RUNTIME.get()
 }
 
 pub(crate) struct Client {

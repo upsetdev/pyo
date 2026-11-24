@@ -626,6 +626,7 @@ async fn owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     #[test]
     fn requests_are_scoped_to_the_team() {
@@ -858,18 +859,7 @@ mod tests {
     #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
     fn a_clusters_door_gets_hashes_only() {
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(hashes_only())
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        run_big(hashes_only());
     }
 
     async fn hashes_only() {

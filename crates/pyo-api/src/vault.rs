@@ -32,6 +32,13 @@ static VAULT: OnceLock<Vault> = OnceLock::new();
 
 /// The process's vault; set once at startup.
 pub fn get() -> &'static Vault {
+    // Tests share one vault, and so its pool. A connection opened on a
+    // test's own runtime dies with it, under whichever test uses it next.
+    #[cfg(test)]
+    assert!(
+        crate::teamsec_tests::on_shared_runtime(),
+        "a test that uses the vault runs on the shared runtime: wrap it in teamsec_tests::run_big"
+    );
     VAULT.get().expect("vault isn't initialised")
 }
 
@@ -612,6 +619,7 @@ fn visit_env(doc: &mut Value, f: &mut impl FnMut(&mut Value)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     #[test]
     fn secretbox_round_trip() {
@@ -695,18 +703,7 @@ mod tests {
     #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
     fn team_credentials_are_sealed_with_the_teams_key() {
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(team_credentials())
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        run_big(team_credentials());
     }
 
     async fn team_credentials() {

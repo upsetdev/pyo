@@ -548,6 +548,7 @@ async fn fetched(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     #[test]
     fn parts_cover_the_archive() {
@@ -596,350 +597,352 @@ mod tests {
     /// build job names it; the builder running the job fetches exactly the
     /// archive and lets it go, and Pyo deletes it. A deploy without an
     /// upload reuses the image built last; a viewer can't upload.
-    #[tokio::test]
+    #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
-    async fn a_folder_goes_through_pyo_to_the_builder() {
-        use axum::http::{Method, Request};
-        use sha2::Digest;
-        use tower::ServiceExt as _;
+    fn a_folder_goes_through_pyo_to_the_builder() {
+        run_big(async {
+            use axum::http::{Method, Request};
+            use sha2::Digest;
+            use tower::ServiceExt as _;
 
-        let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-        crate::migrate::run(&db).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            db.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        let run = crate::ids::random_string(8).to_lowercase();
-        let id = |p: &str| format!("{p}_{run}");
-        let (team, cluster, project, svc) = (id("team"), id("cl"), id("prj"), id("svc"));
-        let q = |sql: &'static str| sqlx::query(sql);
-        let user = |uid: String| crate::auth::User {
-            id: uid.clone(),
-            name: uid,
-            email: String::new(),
-            timezone: "UTC".into(),
-            is_admin: false,
-            must_set_up: false,
-            key: None,
-        };
-        for u in [id("usr"), id("view")] {
-            q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@t.test', $1, '')").bind(&u).execute(&db).await.unwrap();
-        }
-        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
-        for (u, role) in [(id("usr"), "developer"), (id("view"), "viewer")] {
-            q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1 || 'm', $2, $1, $1 || '@t.test', $3, 'active')").bind(&u).bind(&team).bind(role).execute(&db).await.unwrap();
-        }
-        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
-        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)")
-            .bind(&project)
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
-        let spec = json!({
-            "name": "web", "source": { "type": "upload", "dockerfilePath": "Dockerfile", "buildContext": ".", "buildArgs": [] },
-            "env": [], "replicas": 1,
-            "resources": { "cpuRequest": 100, "cpuLimit": 500, "memoryRequest": 128, "memoryLimit": 256 },
-            "healthCheck": { "type": "tcp", "path": "", "port": 8080, "command": "", "initialDelaySeconds": 10, "periodSeconds": 10, "auto": "default" },
-            "ports": [{ "id": "port_1", "name": "http", "containerPort": 8080, "protocol": "HTTP", "exposure": "internal" }],
-            "domains": [],
-        });
-        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', $5, 'stopped')").bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
-        let token = format!("tok{run}");
-        q("INSERT INTO pyo.builders (id, team_id, name, kind, cluster_id, server, token_hash, status) VALUES ($1, $2, $1, 'cluster', $3, 's', $4, 'ready')")
-            .bind(id("bld")).bind(&team).bind(&cluster).bind(crate::ids::sha256_hex(&token)).execute(&db).await.unwrap();
-        let s = state(db.clone());
-        let dev = user(id("usr"));
+            let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+                .await
+                .unwrap();
+            crate::migrate::run(&db).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                db.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            let run = crate::ids::random_string(8).to_lowercase();
+            let id = |p: &str| format!("{p}_{run}");
+            let (team, cluster, project, svc) = (id("team"), id("cl"), id("prj"), id("svc"));
+            let q = |sql: &'static str| sqlx::query(sql);
+            let user = |uid: String| crate::auth::User {
+                id: uid.clone(),
+                name: uid,
+                email: String::new(),
+                timezone: "UTC".into(),
+                is_admin: false,
+                must_set_up: false,
+                key: None,
+            };
+            for u in [id("usr"), id("view")] {
+                q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@t.test', $1, '')").bind(&u).execute(&db).await.unwrap();
+            }
+            q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+            for (u, role) in [(id("usr"), "developer"), (id("view"), "viewer")] {
+                q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1 || 'm', $2, $1, $1 || '@t.test', $3, 'active')").bind(&u).bind(&team).bind(role).execute(&db).await.unwrap();
+            }
+            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+            q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)")
+                .bind(&project)
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+            let spec = json!({
+                "name": "web", "source": { "type": "upload", "dockerfilePath": "Dockerfile", "buildContext": ".", "buildArgs": [] },
+                "env": [], "replicas": 1,
+                "resources": { "cpuRequest": 100, "cpuLimit": 500, "memoryRequest": 128, "memoryLimit": 256 },
+                "healthCheck": { "type": "tcp", "path": "", "port": 8080, "command": "", "initialDelaySeconds": 10, "periodSeconds": 10, "auto": "default" },
+                "ports": [{ "id": "port_1", "name": "http", "containerPort": 8080, "protocol": "HTTP", "exposure": "internal" }],
+                "domains": [],
+            });
+            q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', $5, 'stopped')").bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
+            let token = format!("tok{run}");
+            q("INSERT INTO pyo.builders (id, team_id, name, kind, cluster_id, server, token_hash, status) VALUES ($1, $2, $1, 'cluster', $3, 's', $4, 'ready')")
+                .bind(id("bld")).bind(&team).bind(&cluster).bind(crate::ids::sha256_hex(&token)).execute(&db).await.unwrap();
+            let s = state(db.clone());
+            let dev = user(id("usr"));
 
-        // An archive of two parts and a bit.
-        let mut archive = vec![0u8; (PART_SIZE * 2 + 5) as usize];
-        rand::fill(&mut archive[..]);
-        let sha = hex::encode(sha2::Sha256::digest(&archive));
-        let new = |sha: &str| NewSourceUpload {
-            team_id: team.clone(),
-            size: archive.len() as u64,
-            sha256: sha.to_owned(),
-            files: 2,
-            folder: "shop".into(),
-            machine: "laptop\n".into(),
-        };
-        let e = create(
-            State(s.clone()),
-            SessionUser(user(id("view"))),
-            Json(new(&sha)),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(e.status, StatusCode::FORBIDDEN, "viewers can't upload");
-        let started = create(State(s.clone()), SessionUser(dev.clone()), Json(new(&sha)))
+            // An archive of two parts and a bit.
+            let mut archive = vec![0u8; (PART_SIZE * 2 + 5) as usize];
+            rand::fill(&mut archive[..]);
+            let sha = hex::encode(sha2::Sha256::digest(&archive));
+            let new = |sha: &str| NewSourceUpload {
+                team_id: team.clone(),
+                size: archive.len() as u64,
+                sha256: sha.to_owned(),
+                files: 2,
+                folder: "shop".into(),
+                machine: "laptop\n".into(),
+            };
+            let e = create(
+                State(s.clone()),
+                SessionUser(user(id("view"))),
+                Json(new(&sha)),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(e.status, StatusCode::FORBIDDEN, "viewers can't upload");
+            let started = create(State(s.clone()), SessionUser(dev.clone()), Json(new(&sha)))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(started["parts"], 3);
+            let up = started["uploadId"].as_str().unwrap().to_owned();
+            let chunk = |n: usize| {
+                Bytes::copy_from_slice(
+                    &archive[n * PART_SIZE as usize..((n + 1) * PART_SIZE as usize).min(archive.len())],
+                )
+            };
+            let send = |n: usize, b: Bytes| {
+                part(
+                    State(s.clone()),
+                    SessionUser(dev.clone()),
+                    Path((up.clone(), n as u64)),
+                    b,
+                )
+            };
+            assert_eq!(
+                send(0, Bytes::from_static(b"short"))
+                    .await
+                    .unwrap_err()
+                    .status,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                send(3, chunk(2)).await.unwrap_err().status,
+                StatusCode::BAD_REQUEST
+            );
+            send(0, chunk(0)).await.unwrap();
+            send(2, chunk(2)).await.unwrap();
+            // Not all there yet.
+            let st = status(State(s.clone()), SessionUser(dev.clone()), Path(up.clone()))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(st["received"], json!([0, 2]));
+            assert!(
+                complete(State(s.clone()), SessionUser(dev.clone()), Path(up.clone()))
+                    .await
+                    .is_err()
+            );
+            send(1, chunk(1)).await.unwrap();
+            send(1, chunk(1)).await.unwrap();
+            complete(State(s.clone()), SessionUser(dev.clone()), Path(up.clone()))
+                .await
+                .unwrap();
+
+            // A wrong checksum: refused, and the upload is gone.
+            let bad = create(
+                State(s.clone()),
+                SessionUser(dev.clone()),
+                Json(new(&"0".repeat(64))),
+            )
             .await
             .unwrap()
             .0;
-        assert_eq!(started["parts"], 3);
-        let up = started["uploadId"].as_str().unwrap().to_owned();
-        let chunk = |n: usize| {
-            Bytes::copy_from_slice(
-                &archive[n * PART_SIZE as usize..((n + 1) * PART_SIZE as usize).min(archive.len())],
-            )
-        };
-        let send = |n: usize, b: Bytes| {
-            part(
-                State(s.clone()),
-                SessionUser(dev.clone()),
-                Path((up.clone(), n as u64)),
-                b,
-            )
-        };
-        assert_eq!(
-            send(0, Bytes::from_static(b"short"))
+            let bad = bad["uploadId"].as_str().unwrap().to_owned();
+            for n in 0..3 {
+                part(
+                    State(s.clone()),
+                    SessionUser(dev.clone()),
+                    Path((bad.clone(), n)),
+                    chunk(n as usize),
+                )
+                .await
+                .unwrap();
+            }
+            assert_eq!(
+                complete(
+                    State(s.clone()),
+                    SessionUser(dev.clone()),
+                    Path(bad.clone())
+                )
                 .await
                 .unwrap_err()
                 .status,
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            send(3, chunk(2)).await.unwrap_err().status,
-            StatusCode::BAD_REQUEST
-        );
-        send(0, chunk(0)).await.unwrap();
-        send(2, chunk(2)).await.unwrap();
-        // Not all there yet.
-        let st = status(State(s.clone()), SessionUser(dev.clone()), Path(up.clone()))
-            .await
-            .unwrap()
-            .0;
-        assert_eq!(st["received"], json!([0, 2]));
-        assert!(
-            complete(State(s.clone()), SessionUser(dev.clone()), Path(up.clone()))
-                .await
-                .is_err()
-        );
-        send(1, chunk(1)).await.unwrap();
-        send(1, chunk(1)).await.unwrap();
-        complete(State(s.clone()), SessionUser(dev.clone()), Path(up.clone()))
-            .await
-            .unwrap();
+                StatusCode::BAD_REQUEST
+            );
+            assert!(
+                status(State(s.clone()), SessionUser(dev.clone()), Path(bad))
+                    .await
+                    .is_err()
+            );
 
-        // A wrong checksum: refused, and the upload is gone.
-        let bad = create(
-            State(s.clone()),
-            SessionUser(dev.clone()),
-            Json(new(&"0".repeat(64))),
-        )
-        .await
-        .unwrap()
-        .0;
-        let bad = bad["uploadId"].as_str().unwrap().to_owned();
-        for n in 0..3 {
-            part(
-                State(s.clone()),
-                SessionUser(dev.clone()),
-                Path((bad.clone(), n)),
-                chunk(n as usize),
+            // Deployed: the build job names it, the deployment says where it came from.
+            let dep = id("dpl");
+            let mut tx = db.begin().await.unwrap();
+            crate::deploy::create(
+                &mut tx,
+                crate::deploy::DeployRequest {
+                    deployment_id: &dep,
+                    service_id: &svc,
+                    trigger: "manual",
+                    actor: "t",
+                    rollback_of: None,
+                    retry_of: None,
+                    commit: None,
+                    upload: Some(&up),
+                },
             )
             .await
             .unwrap();
-        }
-        assert_eq!(
-            complete(
-                State(s.clone()),
-                SessionUser(dev.clone()),
-                Path(bad.clone())
-            )
-            .await
-            .unwrap_err()
-            .status,
-            StatusCode::BAD_REQUEST
-        );
-        assert!(
-            status(State(s.clone()), SessionUser(dev.clone()), Path(bad))
-                .await
-                .is_err()
-        );
-
-        // Deployed: the build job names it, the deployment says where it came from.
-        let dep = id("dpl");
-        let mut tx = db.begin().await.unwrap();
-        crate::deploy::create(
-            &mut tx,
-            crate::deploy::DeployRequest {
-                deployment_id: &dep,
-                service_id: &svc,
-                trigger: "manual",
-                actor: "t",
-                rollback_of: None,
-                retry_of: None,
-                commit: None,
-                upload: Some(&up),
-            },
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        let (job_id, job): (String, Value) =
-            sqlx::query_as("SELECT id, job FROM pyo.build_jobs WHERE deployment_id = $1")
+            tx.commit().await.unwrap();
+            let (job_id, job): (String, Value) =
+                sqlx::query_as("SELECT id, job FROM pyo.build_jobs WHERE deployment_id = $1")
+                    .bind(&dep)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(job["sourceUpload"]["id"], json!(up));
+            assert_eq!(job["repoUrl"], "");
+            let data: Value = sqlx::query_scalar("SELECT data FROM pyo.deployments WHERE id = $1")
                 .bind(&dep)
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert_eq!(job["sourceUpload"]["id"], json!(up));
-        assert_eq!(job["repoUrl"], "");
-        let data: Value = sqlx::query_scalar("SELECT data FROM pyo.deployments WHERE id = $1")
-            .bind(&dep)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-        assert_eq!(
-            (
-                data["source"]["type"].as_str(),
-                data["source"]["machine"].as_str()
-            ),
-            (Some("upload"), Some("laptop"))
-        );
-        assert_eq!(data["revisionLabel"], json!(&sha[..7]));
-        // Used once.
-        let mut tx = db.begin().await.unwrap();
-        assert!(claim(&mut tx, &up, &team, "dpl_other").await.is_err());
-        tx.rollback().await.unwrap();
-
-        // The builder: only while it runs the job.
-        let app = axum::Router::new()
-            .nest(
-                "/api/builder/v1",
-                crate::builders::routes().merge(builder_routes()),
-            )
-            .with_state(s.clone());
-        let call = |method: Method, path: String| {
-            let app = app.clone();
-            let token = token.clone();
-            async move {
-                let req = Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap();
-                let res = app.oneshot(req).await.unwrap();
-                let st = res.status();
+            assert_eq!(
                 (
-                    st,
-                    axum::body::to_bytes(res.into_body(), 64 << 20)
-                        .await
-                        .unwrap(),
+                    data["source"]["type"].as_str(),
+                    data["source"]["machine"].as_str()
+                ),
+                (Some("upload"), Some("laptop"))
+            );
+            assert_eq!(data["revisionLabel"], json!(&sha[..7]));
+            // Used once.
+            let mut tx = db.begin().await.unwrap();
+            assert!(claim(&mut tx, &up, &team, "dpl_other").await.is_err());
+            tx.rollback().await.unwrap();
+
+            // The builder: only while it runs the job.
+            let app = axum::Router::new()
+                .nest(
+                    "/api/builder/v1",
+                    crate::builders::routes().merge(builder_routes()),
                 )
-            }
-        };
-        let path = format!("/api/builder/v1/jobs/{job_id}/source");
-        assert_eq!(
-            call(Method::GET, path.clone()).await.0,
-            StatusCode::GONE,
-            "not claimed yet"
-        );
-        q("UPDATE pyo.build_jobs SET status = 'running', builder_id = $2 WHERE id = $1")
-            .bind(&job_id)
-            .bind(id("bld"))
-            .execute(&db)
-            .await
-            .unwrap();
-        let (st, body) = call(Method::GET, path.clone()).await;
-        assert_eq!(st, StatusCode::OK);
-        assert_eq!(body.len(), archive.len());
-        assert!(body == archive, "the same bytes");
-        assert_eq!(call(Method::DELETE, path.clone()).await.0, StatusCode::OK);
-        let left: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM pyo.source_upload_parts WHERE upload_id = $1")
-                .bind(&up)
-                .fetch_one(&db)
-                .await
-                .unwrap();
-        assert_eq!(left, 0, "deleted from Pyo once the builder has it");
-        assert_eq!(
-            call(Method::GET, path).await.0,
-            StatusCode::GONE,
-            "gone once fetched"
-        );
-
-        // Built: deployed again without a folder, the image built last.
-        let image = format!(
-            "{}/pyo/services/{svc}@sha256:{}",
-            crate::deploy::registry().pull,
-            "a".repeat(64)
-        );
-        q("UPDATE pyo.build_jobs SET status = 'succeeded' WHERE id = $1")
-            .bind(&job_id)
-            .execute(&db)
-            .await
-            .unwrap();
-        q("UPDATE pyo.deployments SET status = 'succeeded', spec = spec || jsonb_build_object('image', $2::text) WHERE id = $1").bind(&dep).bind(&image).execute(&db).await.unwrap();
-        q("UPDATE pyo.services SET current_deployment_id = $2 WHERE id = $1")
-            .bind(&svc)
-            .bind(&dep)
-            .execute(&db)
-            .await
-            .unwrap();
-        let again = id("dpla");
-        let mut tx = db.begin().await.unwrap();
-        crate::deploy::create(
-            &mut tx,
-            crate::deploy::DeployRequest {
-                deployment_id: &again,
-                service_id: &svc,
-                trigger: "redeploy",
-                actor: "t",
-                rollback_of: None,
-                retry_of: None,
-                commit: None,
-                upload: None,
-            },
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        let (spec, data): (Value, Value) =
-            sqlx::query_as("SELECT spec, data FROM pyo.deployments WHERE id = $1")
-                .bind(&again)
-                .fetch_one(&db)
-                .await
-                .unwrap();
-        assert_eq!(spec["image"], json!(image));
-        assert_eq!(data["source"]["folder"], "shop");
-        let jobs: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM pyo.build_jobs WHERE deployment_id = $1")
-                .bind(&again)
-                .fetch_one(&db)
-                .await
-                .unwrap();
-        assert_eq!(jobs, 0, "nothing to build");
-
-        // Expired uploads go.
-        let old = create(State(s.clone()), SessionUser(dev.clone()), Json(new(&sha)))
-            .await
-            .unwrap()
-            .0;
-        q("UPDATE pyo.source_uploads SET expires_at = now() - interval '1 minute' WHERE id = $1")
-            .bind(old["uploadId"].as_str().unwrap())
-            .execute(&db)
-            .await
-            .unwrap();
-        assert!(sweep(&db).await.unwrap() >= 1);
-
-        q("DELETE FROM pyo.teams WHERE id = $1")
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
-        for u in [id("usr"), id("view")] {
-            q("DELETE FROM pyo.users WHERE id = $1")
-                .bind(u)
+                .with_state(s.clone());
+            let call = |method: Method, path: String| {
+                let app = app.clone();
+                let token = token.clone();
+                async move {
+                    let req = Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap();
+                    let res = app.oneshot(req).await.unwrap();
+                    let st = res.status();
+                    (
+                        st,
+                        axum::body::to_bytes(res.into_body(), 64 << 20)
+                            .await
+                            .unwrap(),
+                    )
+                }
+            };
+            let path = format!("/api/builder/v1/jobs/{job_id}/source");
+            assert_eq!(
+                call(Method::GET, path.clone()).await.0,
+                StatusCode::GONE,
+                "not claimed yet"
+            );
+            q("UPDATE pyo.build_jobs SET status = 'running', builder_id = $2 WHERE id = $1")
+                .bind(&job_id)
+                .bind(id("bld"))
                 .execute(&db)
                 .await
                 .unwrap();
-        }
+            let (st, body) = call(Method::GET, path.clone()).await;
+            assert_eq!(st, StatusCode::OK);
+            assert_eq!(body.len(), archive.len());
+            assert!(body == archive, "the same bytes");
+            assert_eq!(call(Method::DELETE, path.clone()).await.0, StatusCode::OK);
+            let left: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pyo.source_upload_parts WHERE upload_id = $1")
+                    .bind(&up)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(left, 0, "deleted from Pyo once the builder has it");
+            assert_eq!(
+                call(Method::GET, path).await.0,
+                StatusCode::GONE,
+                "gone once fetched"
+            );
+
+            // Built: deployed again without a folder, the image built last.
+            let image = format!(
+                "{}/pyo/services/{svc}@sha256:{}",
+                crate::deploy::registry().pull,
+                "a".repeat(64)
+            );
+            q("UPDATE pyo.build_jobs SET status = 'succeeded' WHERE id = $1")
+                .bind(&job_id)
+                .execute(&db)
+                .await
+                .unwrap();
+            q("UPDATE pyo.deployments SET status = 'succeeded', spec = spec || jsonb_build_object('image', $2::text) WHERE id = $1").bind(&dep).bind(&image).execute(&db).await.unwrap();
+            q("UPDATE pyo.services SET current_deployment_id = $2 WHERE id = $1")
+                .bind(&svc)
+                .bind(&dep)
+                .execute(&db)
+                .await
+                .unwrap();
+            let again = id("dpla");
+            let mut tx = db.begin().await.unwrap();
+            crate::deploy::create(
+                &mut tx,
+                crate::deploy::DeployRequest {
+                    deployment_id: &again,
+                    service_id: &svc,
+                    trigger: "redeploy",
+                    actor: "t",
+                    rollback_of: None,
+                    retry_of: None,
+                    commit: None,
+                    upload: None,
+                },
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            let (spec, data): (Value, Value) =
+                sqlx::query_as("SELECT spec, data FROM pyo.deployments WHERE id = $1")
+                    .bind(&again)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(spec["image"], json!(image));
+            assert_eq!(data["source"]["folder"], "shop");
+            let jobs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pyo.build_jobs WHERE deployment_id = $1")
+                    .bind(&again)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(jobs, 0, "nothing to build");
+
+            // Expired uploads go.
+            let old = create(State(s.clone()), SessionUser(dev.clone()), Json(new(&sha)))
+                .await
+                .unwrap()
+                .0;
+            q("UPDATE pyo.source_uploads SET expires_at = now() - interval '1 minute' WHERE id = $1")
+                .bind(old["uploadId"].as_str().unwrap())
+                .execute(&db)
+                .await
+                .unwrap();
+            assert!(sweep(&db).await.unwrap() >= 1);
+
+            q("DELETE FROM pyo.teams WHERE id = $1")
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+            for u in [id("usr"), id("view")] {
+                q("DELETE FROM pyo.users WHERE id = $1")
+                    .bind(u)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+        })
     }
 }

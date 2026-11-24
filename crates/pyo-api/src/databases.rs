@@ -2419,6 +2419,7 @@ pub(crate) async fn get(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     #[test]
     fn a_prefix_names_every_variable_once() {
@@ -3051,150 +3052,152 @@ mod tests {
     /// Against a real Postgres (DATABASE_URL, a throwaway one): the
     /// deletion is asked until confirmed, the row goes with its id kept, and
     /// a Database brought back with that id is deleted again.
-    #[tokio::test]
+    #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
-    async fn deletions_are_retried_and_orphans_cleaned_up() {
-        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-        crate::migrate::run(&pool).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            pool.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        let run = crate::ids::new_id("t");
-        let (team, cluster, ns) = (
-            format!("team_{run}"),
-            format!("cl_{run}"),
-            format!("pyo-db-{run}"),
-        );
-        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-            .bind(&team)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)").bind(&cluster).bind(&team).execute(&pool).await.unwrap();
-        for (id, name, state) in [("mdb_a", "a", "deleting"), ("mdb_b", "b", "active")] {
-            sqlx::query("INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, namespace, password, state) VALUES ($1 || $5, $2, $3, $4, 'postgres', '18', 'small', 5, 1, $6, '', $7)")
-                .bind(id).bind(&team).bind(&cluster).bind(name).bind(&run).bind(&ns).bind(state)
-                .execute(&pool).await.unwrap();
-        }
-        let a_id = format!("mdb_a{run}");
-        let rep = |name: &str, id: &str| DatabaseReport {
-            namespace: ns.clone(),
-            name: name.into(),
-            id: id.into(),
-            status: json!({}),
-        };
-        let deletes = || async {
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'delete_database' AND command->>'name' = 'a'").bind(&cluster).fetch_one(&pool).await.unwrap()
-        };
-        // A pending change of "a" goes with its deletion.
-        let mut tx = pool.begin().await.unwrap();
-        deploy::enqueue(
-            &mut tx,
-            &cluster,
-            Command::DeleteDatabase {
-                namespace: "x".into(),
-                name: "unrelated".into(),
-            },
-        )
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO pyo.commands (id, cluster_id, command) VALUES ($1, $2, $3)")
-            .bind(format!("cmd_apply{run}"))
-            .bind(&cluster)
-            .bind(json!({ "kind": "apply_database", "namespace": ns, "name": "a" }))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        drop_pending_applies(&mut tx, &cluster, &ns, "a")
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
-        let st: String = sqlx::query_scalar("SELECT status FROM pyo.commands WHERE id = $1")
-            .bind(format!("cmd_apply{run}"))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(st, "failed");
-
-        // "a" deleting, still on the cluster, nothing on its way: asked once.
-        for _ in 0..2 {
+    fn deletions_are_retried_and_orphans_cleaned_up() {
+        run_big(async {
+            let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+                .await
+                .unwrap();
+            crate::migrate::run(&pool).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                pool.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            let run = crate::ids::new_id("t");
+            let (team, cluster, ns) = (
+                format!("team_{run}"),
+                format!("cl_{run}"),
+                format!("pyo-db-{run}"),
+            );
+            sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(&team)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)").bind(&cluster).bind(&team).execute(&pool).await.unwrap();
+            for (id, name, state) in [("mdb_a", "a", "deleting"), ("mdb_b", "b", "active")] {
+                sqlx::query("INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, namespace, password, state) VALUES ($1 || $5, $2, $3, $4, 'postgres', '18', 'small', 5, 1, $6, '', $7)")
+                    .bind(id).bind(&team).bind(&cluster).bind(name).bind(&run).bind(&ns).bind(state)
+                    .execute(&pool).await.unwrap();
+            }
+            let a_id = format!("mdb_a{run}");
+            let rep = |name: &str, id: &str| DatabaseReport {
+                namespace: ns.clone(),
+                name: name.into(),
+                id: id.into(),
+                status: json!({}),
+            };
+            let deletes = || async {
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'delete_database' AND command->>'name' = 'a'").bind(&cluster).fetch_one(&pool).await.unwrap()
+            };
+            // A pending change of "a" goes with its deletion.
             let mut tx = pool.begin().await.unwrap();
-            reported(&mut tx, &cluster, &[rep("a", &a_id), rep("b", "")], true)
+            deploy::enqueue(
+                &mut tx,
+                &cluster,
+                Command::DeleteDatabase {
+                    namespace: "x".into(),
+                    name: "unrelated".into(),
+                },
+            )
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO pyo.commands (id, cluster_id, command) VALUES ($1, $2, $3)")
+                .bind(format!("cmd_apply{run}"))
+                .bind(&cluster)
+                .bind(json!({ "kind": "apply_database", "namespace": ns, "name": "a" }))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            drop_pending_applies(&mut tx, &cluster, &ns, "a")
                 .await
                 .unwrap();
             tx.commit().await.unwrap();
-        }
-        assert_eq!(deletes().await, 1);
-        // The agent failed it; tried long ago: asked again.
-        sqlx::query("UPDATE pyo.commands SET status = 'failed', created_at = now() - interval '5 minutes' WHERE cluster_id = $1 AND command->>'name' = 'a'").bind(&cluster).execute(&pool).await.unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        reported(&mut tx, &cluster, &[rep("a", &a_id)], true)
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
-        assert_eq!(deletes().await, 2);
-        // Confirmed: the row goes, its id is kept.
-        let mut tx = pool.begin().await.unwrap();
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "delete_database", "namespace": ns, "name": "a" }),
-            true,
-            None,
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.databases WHERE id = $1")
-            .bind(&a_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(left, 0);
-        // Back on the cluster (a late apply): deleted again, once the last try is old.
-        sqlx::query("UPDATE pyo.commands SET status = 'done', created_at = now() - interval '5 minutes' WHERE cluster_id = $1 AND command->>'name' = 'a'").bind(&cluster).execute(&pool).await.unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        reported(
-            &mut tx,
-            &cluster,
-            &[
-                rep("a", &a_id),
-                rep("b", ""),
-                rep("stranger", "mdb_unknown"),
-            ],
-            true,
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        assert_eq!(deletes().await, 3);
-        let strangers: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'name' = 'stranger'").bind(&cluster).fetch_one(&pool).await.unwrap();
-        assert_eq!(strangers, 0);
-        // A row being deleted that the cluster no longer has goes on a heartbeat.
-        sqlx::query("UPDATE pyo.databases SET state = 'deleting' WHERE id = $1")
-            .bind(format!("mdb_b{run}"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        reported(&mut tx, &cluster, &[], true).await.unwrap();
-        tx.commit().await.unwrap();
-        let left: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM pyo.databases WHERE cluster_id = $1")
-                .bind(&cluster)
+            let st: String = sqlx::query_scalar("SELECT status FROM pyo.commands WHERE id = $1")
+                .bind(format!("cmd_apply{run}"))
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(left, 0);
-        let kept: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM pyo.deleted_databases WHERE cluster_id = $1")
-                .bind(&cluster)
+            assert_eq!(st, "failed");
+
+            // "a" deleting, still on the cluster, nothing on its way: asked once.
+            for _ in 0..2 {
+                let mut tx = pool.begin().await.unwrap();
+                reported(&mut tx, &cluster, &[rep("a", &a_id), rep("b", "")], true)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+            assert_eq!(deletes().await, 1);
+            // The agent failed it; tried long ago: asked again.
+            sqlx::query("UPDATE pyo.commands SET status = 'failed', created_at = now() - interval '5 minutes' WHERE cluster_id = $1 AND command->>'name' = 'a'").bind(&cluster).execute(&pool).await.unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            reported(&mut tx, &cluster, &[rep("a", &a_id)], true)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            assert_eq!(deletes().await, 2);
+            // Confirmed: the row goes, its id is kept.
+            let mut tx = pool.begin().await.unwrap();
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "delete_database", "namespace": ns, "name": "a" }),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            let left: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.databases WHERE id = $1")
+                .bind(&a_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(kept, 2);
+            assert_eq!(left, 0);
+            // Back on the cluster (a late apply): deleted again, once the last try is old.
+            sqlx::query("UPDATE pyo.commands SET status = 'done', created_at = now() - interval '5 minutes' WHERE cluster_id = $1 AND command->>'name' = 'a'").bind(&cluster).execute(&pool).await.unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            reported(
+                &mut tx,
+                &cluster,
+                &[
+                    rep("a", &a_id),
+                    rep("b", ""),
+                    rep("stranger", "mdb_unknown"),
+                ],
+                true,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            assert_eq!(deletes().await, 3);
+            let strangers: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'name' = 'stranger'").bind(&cluster).fetch_one(&pool).await.unwrap();
+            assert_eq!(strangers, 0);
+            // A row being deleted that the cluster no longer has goes on a heartbeat.
+            sqlx::query("UPDATE pyo.databases SET state = 'deleting' WHERE id = $1")
+                .bind(format!("mdb_b{run}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            reported(&mut tx, &cluster, &[], true).await.unwrap();
+            tx.commit().await.unwrap();
+            let left: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pyo.databases WHERE cluster_id = $1")
+                    .bind(&cluster)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(left, 0);
+            let kept: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pyo.deleted_databases WHERE cluster_id = $1")
+                    .bind(&cluster)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(kept, 2);
+        })
     }
 }
