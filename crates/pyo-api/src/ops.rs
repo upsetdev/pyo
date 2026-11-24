@@ -6289,6 +6289,9 @@ async fn apply(
             let mut spec = service_spec_from(&service);
             // Where it came from stays, and a secret field's value never does.
             crate::template_source::keep_record(&mut spec, &old_spec);
+            // Which registry its image comes from, and with which login. A
+            // label sent by a client, or saved by an older Pyo, is redone.
+            crate::registry::label_source(tx, &team_id, &mut spec).await?;
             crate::template_source::scrub_fields(&mut spec);
             // What it remembers of the Compose file it was made from stays
             // when a client leaves it out.
@@ -6385,6 +6388,12 @@ async fn apply(
                     o.remove("serverTags");
                     if let Some(src) = o.get_mut("source").and_then(|x| x.as_object_mut()) {
                         src.remove("autoDeploy");
+                        // An image's registry labels: deploys pick the login
+                        // by its host.
+                        if src.get("type") == Some(&json!("image")) {
+                            src.remove("registryId");
+                            src.remove("private");
+                        }
                     }
                     for p in o
                         .get_mut("ports")
@@ -10048,6 +10057,8 @@ pub(crate) async fn create_service(
     let mut spec = service_spec_from(&service);
     // Nothing saved yet: a hidden value (•••) is refused.
     crate::masked::keep_hidden_env(&mut spec, &Value::Null).await?;
+    // Which registry its image comes from, and with which login.
+    crate::registry::label_source(tx, &team_id, &mut spec).await?;
     crate::template_source::scrub_fields(&mut spec);
     crate::placement::normalize(&mut spec)?;
     validate_service_spec(&spec)?;

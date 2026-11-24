@@ -1940,7 +1940,7 @@ pub fn service_spec(
             "private": s.source.private, "installationId": s.source.installation_id, "webhook": "inactive", "autoDeploy": s.source.installation_id.is_some(),
         })
     } else {
-        json!({ "type": "image", "image": s.source.image, "reference": s.source.reference, "registryId": "reg_dockerhub", "private": false })
+        json!({ "type": "image", "image": s.source.image, "reference": s.source.reference })
     };
     let mut spec = json!({
         "id": id, "teamId": team_id, "projectId": project_id, "clusterId": cluster_id,

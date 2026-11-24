@@ -1229,7 +1229,7 @@ pub(crate) async fn run_tool(
                 "name": name, "description": "", "kind": "application", "workloadKind": "Deployment",
                 "location": if pin.is_empty() { Value::Null } else { json!(pin) },
                 "placement": placement_arg(args),
-                "source": { "type": "image", "image": image, "reference": reference, "registryId": "reg_dockerhub", "private": false },
+                "source": { "type": "image", "image": image, "reference": reference },
                 "env": env,
                 "ports": [{ "id": new_id("port"), "name": "http", "protocol": "HTTP", "containerPort": port, "exposure": if domains.is_empty() { "internal" } else { "http" } }],
                 "domains": domains,

@@ -187,7 +187,7 @@ PYO_SECRET_KEY=$(openssl rand -hex 32) cargo test -p pyo-api --lib -- --ignored 
 cargo test -p pyo-api --lib -- --ignored compose_sync::db_tests
 cargo test -p pyo-api --lib -- --ignored tailscale::tests
 cargo test -p pyo-api --lib -- --ignored sandbox::outbound::tests
-cargo test -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests
+cargo test -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests registry::tests
 ```
 
 The first group needs `PYO_SECRET_KEY` from the start. The Compose sync group

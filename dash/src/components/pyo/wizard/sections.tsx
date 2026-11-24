@@ -27,6 +27,7 @@ import { CaretRightIcon } from "@phosphor-icons/react";
 import { BLOCK } from "./style";
 import { getTemplate } from "~/lib/pyo/templates";
 import { BrandMark, DOCKER_LOGO, GIT_LOGO, IconTile, TemplateLogo } from "../common";
+import { imageHost } from "~/components/pyo/ProjectCard";
 import {
   DomainsStep,
   EnvStep,
@@ -216,8 +217,8 @@ export function useDraftSections(
             icon: <LogoTile icon={DOCKER_LOGO} />,
             title: imageShort,
             sub:
-              s.registries.find((r) => r.id === d.image.registryId)?.name ??
-              "",
+              s.registries.find((r) => r.host === imageHost(d.image.image))
+                ?.name ?? imageHost(d.image.image),
           };
 
   const secrets = d.env.filter((e) => e.secret).length;

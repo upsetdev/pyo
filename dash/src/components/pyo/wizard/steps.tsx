@@ -66,6 +66,7 @@ import {
   draftId,
   draftServerTags,
   NEW_PROJECT,
+  publicRegistryId,
   syncTemplateEnv,
   type DeployDraft,
   type Issues,
@@ -1907,8 +1908,9 @@ function ImageReference({
   const digest = reference.startsWith("sha256:");
   const setPath = (raw: string) => {
     const parts = splitReference(raw, host);
-    const r = registries.find((x) => x.host === imageHost(parts.image));
-    onChange(parts.image, parts.reference ?? reference, r?.id);
+    const h = imageHost(parts.image);
+    const r = registries.find((x) => x.host === h);
+    onChange(parts.image, parts.reference ?? reference, r?.id ?? publicRegistryId(h));
   };
   const setHost = (h: string, id: string) =>
     onChange(
