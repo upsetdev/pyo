@@ -571,6 +571,16 @@ pub(crate) enum Switched {
 /// the name go without asking. Anyone else's stop it, unless `replace`:
 /// then they go and come back as `previous`. Never touches records of
 /// other names, or types other than A, AAAA and CNAME.
+/// The records at `host` in the way of the tunnel's CNAME: A, AAAA and
+/// CNAME records this installation didn't make (`mark`).
+pub(crate) fn not_ours<'a>(found: &'a [Kept], host: &str, mark: &str) -> Vec<&'a Kept> {
+    found
+        .iter()
+        .filter(|k| matches!(k.kind.as_str(), "A" | "AAAA" | "CNAME") && same_name(&k.name, host))
+        .filter(|k| !ours(&k.record(), mark, host))
+        .collect()
+}
+
 pub(crate) async fn switch_record<C: Cloudflare + TunnelApi>(
     cf: &C,
     zone_id: &str,
@@ -593,11 +603,7 @@ pub(crate) async fn switch_record<C: Cloudflare + TunnelApi>(
         .copied()
         .filter(|k| have.as_ref().is_none_or(|h| h.id != k.id))
         .collect();
-    let theirs: Vec<&Kept> = others
-        .iter()
-        .copied()
-        .filter(|k| !ours(&k.record(), mark, host))
-        .collect();
+    let theirs: Vec<&Kept> = not_ours(&found, host, mark);
     if !theirs.is_empty() && !replace {
         return Ok(Switched::Confirm(theirs.iter().map(|k| k.record()).collect()));
     }
