@@ -1060,8 +1060,8 @@ Health is computed by the control plane from both views:
 | connected | Cloudflare `healthy`, and the agent reports every replica ready | "Tunnel connected · 2 connectors · FRA, AMS" |
 | degraded | Cloudflare `degraded`, or fewer ready replicas than wanted | "Tunnel degraded · 1 of 2 connectors" |
 | down | Cloudflare `down` or `inactive` for over a minute while wanted | "Tunnel down. Its websites don't answer." |
-| starting | Created in the last 5 minutes and not yet healthy | "Starting the tunnel…" |
-| unknown | No token, or Cloudflare unreachable | "Pyo can't reach Cloudflare. Websites keep working." |
+| starting | Created in the last 5 minutes and not yet healthy, or no read of Cloudflare's view yet and no failed pass | "Starting the tunnel…" |
+| unknown | No read of Cloudflare's view: a pass failed (no token, or Cloudflare unreachable), or none came in 5 minutes (the loop reads it every 2) | "Pyo can't reach Cloudflare. Websites keep working." |
 
 Extra lines under the status, only when true:
 

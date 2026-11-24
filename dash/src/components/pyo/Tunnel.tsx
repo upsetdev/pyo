@@ -54,12 +54,14 @@ function healthLine(t: ClusterTunnel): { tone: Tone; text: string } {
       };
     case "down":
       return { tone: "danger", text: "Tunnel down. Its websites don't answer." };
-    case "starting":
-      return { tone: "progress", text: "Starting the tunnel…" };
+    // Pyo tried Cloudflare and failed, or no read came in time.
+    case "unknown":
+      return { tone: "neutral", text: "Pyo can't reach Cloudflare. Websites keep working." };
     case "removing":
       return { tone: "progress", text: "Removing the tunnel…" };
+    // "starting", and no health yet.
     default:
-      return { tone: "neutral", text: "Pyo can't reach Cloudflare. Websites keep working." };
+      return { tone: "progress", text: "Starting the tunnel…" };
   }
 }
 
