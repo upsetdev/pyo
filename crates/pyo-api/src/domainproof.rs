@@ -304,7 +304,8 @@ async fn own_free_domain(
 
 /// Not proven yet: the team's Cloudflare writes the record when it can
 /// (cloudflare.rs `write_proof`), and it's read again for a few seconds
-/// while Cloudflare's name servers take it.
+/// while Cloudflare's name servers take it. Proven or not, the record has
+/// done its job then: Pyo deletes it again.
 async fn prove_with_cloudflare(
     tx: &mut Transaction<'_, Postgres>,
     team_id: &str,
@@ -315,16 +316,29 @@ async fn prove_with_cloudflare(
         Ok(false) => return false,
         Err(e) => {
             tracing::info!(%host, error = ?e.message, "domain proof: Cloudflare didn't write it");
+            // It may have been made before the error.
+            clean_up(tx, team_id, host).await;
             return false;
         }
     }
+    let mut done = false;
     for _ in 0..5 {
         if proven(team_id, host).await {
-            return true;
+            done = true;
+            break;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    false
+    clean_up(tx, team_id, host).await;
+    done
+}
+
+/// The proof records Pyo made for `host` go (only Pyo's, never one made by
+/// hand). Best effort: one left behind goes when the domain is removed.
+async fn clean_up(tx: &mut Transaction<'_, Postgres>, team_id: &str, host: &str) {
+    if let Err(e) = crate::cloudflare::remove_proof(tx, team_id, host).await {
+        tracing::info!(%host, error = ?e.message, "domain proof: Pyo's record stays for now");
+    }
 }
 
 /// One label under the default domain of a Cloudflare Tunnel of the
@@ -374,7 +388,10 @@ pub async fn check_claims(
             }
             None => {}
         }
-        if !proven(team_id, host).await && !prove_with_cloudflare(tx, team_id, host).await {
+        if proven(team_id, host).await {
+            // One Pyo wrote before (it stays when it couldn't be deleted).
+            clean_up(tx, team_id, host).await;
+        } else if !prove_with_cloudflare(tx, team_id, host).await {
             return Err(ApiError::forbidden(how_to(team_id, host)));
         }
         // Held by another team: theirs while they can still prove it.

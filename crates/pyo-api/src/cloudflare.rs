@@ -751,15 +751,13 @@ pub async fn forget_removed(
 
 // ── Proof of a domain (Pyo Cloud) ──────────────────────────────────────────
 
-/// Pyo Cloud's proof of owning `host` (domainproof.rs), written by Pyo:
-/// the TXT record `_pyo-verify.<host>` with the team's token, when the
-/// team's Cloudflare token can edit DNS in a zone that covers it. So Cloud
-/// teams with Cloudflare don't add it by hand. Whether it's there now.
-pub(crate) async fn write_proof(
+/// The team's Cloudflare, for its proof of `host`: the client and the zone
+/// that covers the host, when the team's token can edit DNS there.
+async fn proof_access(
     tx: &mut Transaction<'_, Postgres>,
     team_id: &str,
     host: &str,
-) -> ApiResult<bool> {
+) -> ApiResult<Option<(Http, String)>> {
     let row: Option<(String, Value)> = sqlx::query_as(
         "SELECT token_sealed, zones FROM pyo.cloudflare_accounts WHERE team_id = $1",
     )
@@ -767,11 +765,11 @@ pub(crate) async fn write_proof(
     .fetch_optional(&mut **tx)
     .await?;
     let Some((sealed, zones)) = row else {
-        return Ok(false);
+        return Ok(None);
     };
     let zones: Vec<Zone> = serde_json::from_value(zones).unwrap_or_default();
     let Some(zone) = zone_for(host, &zones).filter(|z| z.can_edit).cloned() else {
-        return Ok(false);
+        return Ok(None);
     };
     // Sealed by the vault, or (older keys) with PYO_SECRET_KEY.
     let token = if sealed.starts_with(crate::secrets::PREFIX) {
@@ -780,13 +778,28 @@ pub(crate) async fn write_proof(
         crate::vault::get().open(&sealed).await
     };
     let Ok(token) = token else {
+        return Ok(None);
+    };
+    Ok(Some((Http::new(&token)?, zone.id)))
+}
+
+/// Pyo Cloud's proof of owning `host` (domainproof.rs), written by Pyo:
+/// the TXT record `_pyo-verify.<host>` with the team's token, when the
+/// team's Cloudflare token can edit DNS in a zone that covers it. So Cloud
+/// teams with Cloudflare don't add it by hand. Whether it's there now.
+/// Pyo deletes it again once the proof is done ([`remove_proof`]).
+pub(crate) async fn write_proof(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    host: &str,
+) -> ApiResult<bool> {
+    let Some((cf, zone_id)) = proof_access(tx, team_id, host).await? else {
         return Ok(false);
     };
     let name = crate::domainproof::record(host);
     let value = crate::domainproof::token(team_id, host);
     let mark = marker(&install_id(tx).await?);
-    let cf = Http::new(&token)?;
-    let found = cf.records(&zone.id, &name).await.map_err(api_error)?;
+    let found = cf.records(&zone_id, &name).await.map_err(api_error)?;
     if found
         .iter()
         .any(|r| r.kind == "TXT" && r.content.trim_matches('"') == value)
@@ -794,7 +807,7 @@ pub(crate) async fn write_proof(
         return Ok(true);
     }
     cf.create(
-        &zone.id,
+        &zone_id,
         &NewRecord {
             kind: "TXT".into(),
             name,
@@ -806,6 +819,119 @@ pub(crate) async fn write_proof(
     .await
     .map_err(api_error)?;
     Ok(true)
+}
+
+/// Delete the proof records this installation made for a team's `host`:
+/// TXT records at `_pyo-verify.<host>` with Pyo's comment and the team's
+/// token (`value`). One made by hand, by another installation or for
+/// another team stays. How many went.
+pub(crate) async fn delete_proofs<C: Cloudflare>(
+    cf: &C,
+    zone_id: &str,
+    host: &str,
+    value: &str,
+    mark: &str,
+) -> Result<usize, CfError> {
+    let name = crate::domainproof::record(host);
+    let mut gone = 0;
+    for r in cf.records(zone_id, &name).await? {
+        if r.kind != "TXT" || !ours(&r, mark, &name) || r.content.trim_matches('"') != value {
+            continue;
+        }
+        match cf.delete(zone_id, &r.id).await {
+            Ok(()) | Err(CfError::NotFound) => gone += 1,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(gone)
+}
+
+/// The proof of `host` is done, abandoned, or the domain is gone: the
+/// records Pyo made for it go ([`delete_proofs`]). How many went; none
+/// without the team's Cloudflare.
+pub(crate) async fn remove_proof(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    host: &str,
+) -> ApiResult<usize> {
+    let Some((cf, zone_id)) = proof_access(tx, team_id, host).await? else {
+        return Ok(0);
+    };
+    let mark = marker(&install_id(tx).await?);
+    let value = crate::domainproof::token(team_id, host);
+    delete_proofs(&cf, &zone_id, host, &value, &mark)
+        .await
+        .map_err(api_error)
+}
+
+/// The hostnames `old` has and `new` doesn't, lowercase.
+pub(crate) fn removed_hosts(old: &Value, new: &Value) -> Vec<String> {
+    let hosts = |spec: &Value| -> Vec<String> {
+        spec["domains"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d["hostname"].as_str())
+            .map(|h| h.trim().to_lowercase())
+            .collect()
+    };
+    let now = hosts(new);
+    let mut gone: Vec<String> = hosts(old).into_iter().filter(|h| !now.contains(h)).collect();
+    gone.sort();
+    gone.dedup();
+    gone
+}
+
+/// Domains a team no longer has: the proof records Pyo made for them go,
+/// in the background (the `domain.proofs` job), when the team has
+/// Cloudflare. `hosts`: the hostnames removed.
+pub(crate) async fn proofs_after_removal(
+    tx: &mut Transaction<'_, Postgres>,
+    team_id: &str,
+    hosts: &[String],
+) -> ApiResult<()> {
+    if hosts.is_empty() {
+        return Ok(());
+    }
+    let connected: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pyo.cloudflare_accounts WHERE team_id = $1)",
+    )
+    .bind(team_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if connected {
+        crate::jobs::enqueue(
+            &mut **tx,
+            "domain.proofs",
+            json!({ "teamId": team_id, "hosts": hosts }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The `domain.proofs` job: each removed host's proof records, unless the
+/// team uses the host again by now.
+pub(crate) async fn proofs_job(s: &AppState, p: &Value) -> anyhow::Result<()> {
+    let team_id = p["teamId"].as_str().unwrap_or("");
+    for host in p["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        let mut tx = s.db.begin().await?;
+        let used: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+                             WHERE a.team_id = $1 AND NOT a.deleting AND lower(d->>'hostname') = lower($2))",
+        )
+        .bind(team_id)
+        .bind(host)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !used {
+            remove_proof(&mut tx, team_id, host)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+        }
+        tx.commit().await?;
+    }
+    Ok(())
 }
 
 // ── The connection ─────────────────────────────────────────────────────────

@@ -126,6 +126,8 @@ async fn run(s: &AppState, kind: &str, p: &Value) -> anyhow::Result<()> {
             .await
         }
         "alert.send" => crate::alerts::run_job(s, p).await,
+        // The domain proof records Pyo made for removed domains (cloudflare.rs).
+        "domain.proofs" => crate::cloudflare::proofs_job(s, p).await,
         // Previews (previews/): the bot, a service's settings, a redeploy.
         "preview.report" => crate::previews::report(s, &str_of("pullId")).await,
         "preview.sync" => crate::previews::sync_service(s, &str_of("serviceId")).await,

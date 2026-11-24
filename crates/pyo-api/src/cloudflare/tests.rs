@@ -1125,3 +1125,37 @@ fn reads_cloudflares_tunnels() {
     assert!(gone.deleted);
     assert!(tunnel::tunnel_from(&json!({ "id": "../x" })).is_err());
 }
+
+// ── Domain proofs ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn only_pyos_own_proof_records_are_deleted() {
+    let name = "_pyo-verify.shop.example.com";
+    let value = crate::domainproof::token("team_a", "shop.example.com");
+    let other_team = crate::domainproof::token("team_b", "shop.example.com");
+    let cf = Fake::new(&[("z1", "example.com", Dns::Edit)])
+        // Pyo's, for this team: goes.
+        .with("z1", rec("p1", "TXT", name, &format!("\"{value}\""), Some(MARK)))
+        // The same token added by hand: stays.
+        .with("z1", rec("h1", "TXT", name, &value, None))
+        // Another team's proof, by this installation: stays.
+        .with("z1", rec("p2", "TXT", name, &format!("\"{other_team}\""), Some(MARK)))
+        // Another installation's: stays.
+        .with("z1", rec("p3", "TXT", name, &value, Some("Made by Pyo (zzz999)")))
+        // Something else on another name: stays.
+        .with("z1", rec("a1", "A", "shop.example.com", "203.0.113.7", Some(MARK)));
+    assert_eq!(delete_proofs(&cf, "z1", "shop.example.com", &value, MARK).await.unwrap(), 1);
+    let left: Vec<String> = cf.at("z1").into_iter().map(|r| r.id).collect();
+    assert_eq!(left, ["h1", "p2", "p3", "a1"]);
+    // Nothing of Pyo's left: nothing deleted.
+    assert_eq!(delete_proofs(&cf, "z1", "shop.example.com", &value, MARK).await.unwrap(), 0);
+}
+
+#[test]
+fn removed_domains_are_the_ones_the_service_no_longer_has() {
+    let old = json!({ "domains": [{ "hostname": "Shop.example.com" }, { "hostname": "blog.example.com" }, { "hostname": "api.example.com" }] });
+    let new = json!({ "domains": [{ "hostname": "blog.example.com" }] });
+    assert_eq!(removed_hosts(&old, &new), ["api.example.com", "shop.example.com"]);
+    assert!(removed_hosts(&new, &old).is_empty());
+    assert_eq!(removed_hosts(&new, &json!({})), ["blog.example.com"], "a deleted service's");
+}
