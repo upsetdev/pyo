@@ -1011,7 +1011,29 @@ export type Domain = {
   dnsRecord?: DnsRecordState;
   /** Through the cluster's Cloudflare Tunnel: "switching" (both ways work) or "on". */
   tunnel?: "switching" | "on";
+  /** Its redirects in Pyo Gateway. A domain without a port only redirects. */
+  redirects?: DomainRedirect[];
+  /** Its header rules in Pyo Gateway. */
+  headers?: HeaderRules;
 };
+
+/** Requests under `path` go to another hostname or path. The query is kept. */
+export type DomainRedirect = {
+  path: string;
+  toHost?: string;
+  toPath?: string;
+  status: 301 | 302;
+  /** Keep the rest of the path after `path`. */
+  keepPath: boolean;
+};
+
+export type HeaderSet = {
+  set?: { name: string; value: string }[];
+  remove?: string[];
+};
+
+/** Headers set or removed on a domain's responses, and on requests to its service. */
+export type HeaderRules = { response?: HeaderSet; request?: HeaderSet };
 
 /** A domain's DNS record in Cloudflare, as Pyo left it. */
 export type DnsRecordState = {

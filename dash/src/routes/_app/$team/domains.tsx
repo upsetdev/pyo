@@ -17,12 +17,15 @@ import {
   Th,
   Tr,
 } from "~/components/ui/Table";
+import { onlyRedirects, redirectTarget } from "~/components/pyo/DomainRules";
+import { hostsOf } from "~/lib/pyo/hosts";
 import { currentSlug } from "~/lib/pyo/paths";
-import { servicesIn, usePyo, serviceParams, servicePath } from "~/lib/pyo/store";
+import { usePyo, servicePath } from "~/lib/pyo/store";
 import { seo } from "~/lib/seo";
 
-// Every hostname the team serves, with the service behind it. Add one here
-// (picking its service) or on the service; configure it on the service.
+// Every hostname the team serves, a row each, with where it goes. Opening
+// one shows its routes, redirects and headers. Add one here (picking its
+// service) or on the service.
 export const Route = createFileRoute("/_app/$team/domains")({
   head: () => ({ meta: seo({ title: "Domains" }) }),
   component: Domains,
@@ -39,15 +42,17 @@ function Domains() {
   );
   const rows = useMemo(
     () =>
-      servicesIn(s)
-        .flatMap((a) =>
-          a.domains.map((d) => ({
-            d,
-            a,
-            project: s.projects.find((p) => p.id === a.projectId),
-          })),
-        )
-        .sort((x, y) => x.d.hostname.localeCompare(y.d.hostname)),
+      hostsOf(s).map((h) => ({
+        h,
+        d: h.primary.d,
+        a: h.primary.a,
+        project: s.projects.find((p) => p.id === h.primary.a.projectId),
+        services: [
+          ...new Set(
+            h.entries.filter((e) => !onlyRedirects(e.d)).map((e) => e.a.id),
+          ),
+        ],
+      })),
     [s],
   );
   const waiting = rows.filter((r) => r.d.status !== "active").length;
@@ -59,7 +64,7 @@ function Domains() {
       (r) =>
         (filter === "all" || r.d.status !== "active") &&
         (!needle ||
-          [r.d.hostname, r.a.name, r.project?.name ?? ""].some((x) =>
+          [r.d.hostname, ...r.h.entries.map((e) => e.a.name), r.project?.name ?? ""].some((x) =>
             x.toLowerCase().includes(needle),
           )),
     )
@@ -132,19 +137,19 @@ function Domains() {
               <thead>
                 <tr>
                   <Th>Domain</Th>
-                  <Th>Service</Th>
+                  <Th>Goes to</Th>
                   <Th>Status</Th>
                   <Th>Added</Th>
                 </tr>
               </thead>
               <tbody>
-                {shown.map(({ d, a, project }) => (
+                {shown.map(({ h, d, a, project, services }) => (
                   <Tr
-                    key={`${a.id}:${d.id}`}
+                    key={h.hostname}
                     onClick={() =>
                       void navigate({
-                        to: "/$team/$projectId/$serviceId/domains",
-                        params: { team: currentSlug(), ...serviceParams(a.id) },
+                        to: "/$team/domains/$hostname",
+                        params: { team: currentSlug(), hostname: h.hostname },
                       })
                     }
                   >
@@ -158,18 +163,34 @@ function Domains() {
                       </span>
                     </Td>
                     <Td>
-                      <AppLink
-                        href={servicePath(a.id)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="font-medium hover:text-primary"
-                      >
-                        {a.name}
-                      </AppLink>
-                      {project ? (
-                        <span className="block text-[11.5px] text-muted-foreground">
-                          {project.name}
+                      {services.length > 1 ? (
+                        <span className="font-medium">
+                          {services.length} services
                         </span>
-                      ) : null}
+                      ) : onlyRedirects(d) ? (
+                        <span className="font-mono text-[12.5px] text-muted-foreground">
+                          →{" "}
+                          {redirectTarget(
+                            d.redirects!.find((r) => r.path === "/") ??
+                              d.redirects![0],
+                          )}
+                        </span>
+                      ) : (
+                        <>
+                          <AppLink
+                            href={servicePath(a.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="font-medium hover:text-primary"
+                          >
+                            {a.name}
+                          </AppLink>
+                          {project ? (
+                            <span className="block text-[11.5px] text-muted-foreground">
+                              {project.name}
+                            </span>
+                          ) : null}
+                        </>
+                      )}
                     </Td>
                     <Td>
                       <DomainStatus
