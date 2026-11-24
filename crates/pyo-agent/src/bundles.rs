@@ -29,9 +29,10 @@ use kube::{
 };
 use pyo_proto::{
     bundles::{
-        BINDINGS_ANNOTATION, BUNDLE_LABEL, BundleReport, DATABASES_ID, FIELD_MANAGER,
-        IN_USE_ANNOTATION, KindRef, NamespaceBinding, ObjectRef, POLICY_REFUSED, SystemBundle,
-        VERSION_LABEL, WAF_ID, bindings_in, never_pruned,
+        BINDINGS_ANNOTATION, BUNDLE_LABEL, BundleReport, CLUSTER_KINDS, DATABASES_ID,
+        FIELD_MANAGER, IN_USE_ANNOTATION, KindRef, NamespaceBinding, ObjectRef, POLICY_REFUSED,
+        SystemBundle, VERSION_LABEL, WAF_ID, bindings_in, foreign_message, foreign_object,
+        never_pruned,
     },
     rbac,
 };
@@ -240,11 +241,34 @@ async fn namespace_gone_or_live(
     }
 }
 
+/// The bundle's cluster-wide objects that are on the cluster already and
+/// aren't Pyo's (another install of the same operator): their refs. One
+/// the agent may not read is left to the apply, which says so.
+async fn foreign_objects(client: &Client, bundle: &SystemBundle) -> anyhow::Result<Vec<ObjectRef>> {
+    let mut out = vec![];
+    for r in bundle.refs().into_iter().filter(|r| r.namespace.is_none() && CLUSTER_KINDS.contains(&r.kind.as_str())) {
+        match api_for(client, &r).get_opt(&r.name).await {
+            Ok(Some(have)) if foreign_object(&bundle.id, have.labels()) => out.push(r),
+            Ok(_) => {}
+            Err(kube::Error::Api(e)) if e.code == 403 => {}
+            Err(e) => return Err(object_error(&r, e)),
+        }
+    }
+    Ok(out)
+}
+
 async fn apply_once(
     client: &Client,
     bundle: &SystemBundle,
     prune: &[ObjectRef],
 ) -> anyhow::Result<String> {
+    // Never over an install Pyo didn't make (CloudNativePG from Helm, say):
+    // checked before anything is written.
+    let foreign = foreign_objects(client, bundle).await?;
+    if let Some(why) = foreign_message(bundle, &foreign) {
+        tracing::warn!(bundle = %bundle.id, objects = ?foreign, "objects Pyo didn't install are in the way");
+        anyhow::bail!(why);
+    }
     let objects = bundle.objects();
     apply_one(client, &objects[0]).await?;
     apply_one(client, &bundle.write_binding()).await?;

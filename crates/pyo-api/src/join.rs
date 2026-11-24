@@ -1627,6 +1627,102 @@ if web_ports_busy; then echo "busy [$WEB_PORTS] [$WEB_BY] $(web_ports_line)"; el
         out.trim().to_owned()
     }
 
+    /// connect.sh's foreign_operators with k3s stubbed (`stubs` sets what
+    /// it answers): its lines, or "none".
+    fn foreign(stubs: &str) -> String {
+        let block = script_block("foreign-operators", CONNECT_SCRIPT);
+        let (code, out, err) = bash(&format!(
+            r#"set -euo pipefail
+CM_CHART="" EG_CHART="" CM_DEPLOYS="" EG_DEPLOYS="" CM_CRD="" EG_CRD=""
+{stubs}
+k3s() {{
+  case "$*" in
+    "kubectl -n kube-system get helmcharts.helm.cattle.io cert-manager -o jsonpath="*) [ -n "$CM_CHART" ] && printf '%s' "$CM_CHART" ;;
+    "kubectl -n kube-system get helmcharts.helm.cattle.io envoy-gateway -o jsonpath="*) [ -n "$EG_CHART" ] && printf '%s' "$EG_CHART" ;;
+    "kubectl get deployments -A -l app.kubernetes.io/name=cert-manager "*) printf '%b' "$CM_DEPLOYS" ;;
+    "kubectl get deployments -A -l control-plane=envoy-gateway "*) printf '%b' "$EG_DEPLOYS" ;;
+    "kubectl get crd certificates.cert-manager.io") [ -n "$CM_CRD" ] ;;
+    "kubectl get crd envoyproxies.gateway.envoyproxy.io -o jsonpath="*) [ -n "$EG_CRD" ] && printf '%s' "$EG_CRD" ;;
+    *) echo "unexpected: k3s $*" >&2; exit 9 ;;
+  esac
+}}
+{block}
+if foreign_operators; then :; else echo none; fi
+"#
+        ));
+        assert_eq!(code, 0, "{err}");
+        out.trim().to_owned()
+    }
+
+    const CM_LINE: &str = "This server already runs cert-manager that Pyo didn't install. Pyo won't change it. Remove it, or connect a server without it.";
+    const EG_LINE: &str = "This server already runs Envoy Gateway that Pyo didn't install. Pyo won't change it. Remove it, or connect a server without it.";
+
+    #[test]
+    fn connect_passes_a_clean_server_and_pyos_own() {
+        // Nothing there yet.
+        assert_eq!(foreign(""), "none");
+        // Pyo's own, as every version installs it: its charts labelled
+        // managed-by=pyo, cert-manager in its namespace, Envoy Gateway in
+        // pyo-gateway, Envoy Gateway's CRDs labelled too.
+        let own = r#"CM_CHART="cert-manager|pyo" EG_CHART="envoy-gateway|pyo"
+CM_DEPLOYS="cert-manager\n" EG_DEPLOYS="pyo-gateway\n" CM_CRD=1
+EG_CRD="envoyproxies.gateway.envoyproxy.io|pyo""#;
+        assert_eq!(foreign(own), "none");
+        // Pyo's charts while they install: nothing running yet.
+        assert_eq!(
+            foreign(r#"CM_CHART="cert-manager|pyo" EG_CHART="envoy-gateway|pyo" CM_CRD=1"#),
+            "none"
+        );
+        // A first connect that stopped after the gateway's CRDs.
+        assert_eq!(foreign(r#"EG_CRD="envoyproxies.gateway.envoyproxy.io|pyo""#), "none");
+    }
+
+    #[test]
+    fn connect_stops_for_operators_pyo_didnt_install() {
+        // cert-manager from Helm or a manifest: running, with its CRDs.
+        assert_eq!(foreign(r#"CM_DEPLOYS="cert-manager\n" CM_CRD=1"#), CM_LINE);
+        // k3s's own chart of that name, not Pyo's.
+        assert_eq!(foreign(r#"CM_CHART="cert-manager|""#), CM_LINE);
+        // Only its CRDs.
+        assert_eq!(foreign("CM_CRD=1"), CM_LINE);
+        // A second one beside Pyo's.
+        assert_eq!(
+            foreign(r#"CM_CHART="cert-manager|pyo" CM_DEPLOYS="cert-manager\nsecurity\n" CM_CRD=1"#),
+            CM_LINE
+        );
+        // Envoy Gateway from its Helm chart: elsewhere, CRDs without Pyo's label.
+        assert_eq!(
+            foreign(r#"EG_DEPLOYS="envoy-gateway-system\n" EG_CRD="envoyproxies.gateway.envoyproxy.io|Helm""#),
+            EG_LINE
+        );
+        assert_eq!(foreign(r#"EG_CRD="envoyproxies.gateway.envoyproxy.io|""#), EG_LINE);
+        assert_eq!(foreign(r#"EG_CHART="envoy-gateway|""#), EG_LINE);
+        // Both: a line each.
+        assert_eq!(
+            foreign(r#"CM_CRD=1 EG_DEPLOYS="envoy-gateway-system\n""#),
+            format!("{CM_LINE}\n{EG_LINE}")
+        );
+    }
+
+    /// The check runs before the manifest is fetched (which uses the
+    /// token) and before anything is applied, and again once k3s is up.
+    #[test]
+    fn connect_checks_for_foreign_operators_first() {
+        let at = |s: &str| CONNECT_SCRIPT.find(s).unwrap_or_else(|| panic!("no {s}"));
+        let first = at("\n  no_foreign_operators\n");
+        assert!(first < at("/install/agent.yaml?token="));
+        let again = at("\nno_foreign_operators\n");
+        assert!(at("wait_until -f \"Starting k3s…\"") < again);
+        assert!(again < at("\ngateway_crds\n"));
+        assert!(again < at("\nif ! apply_agent; then"));
+        // Stopped with the line, before anything else.
+        let block = script_block("foreign-operators", CONNECT_SCRIPT);
+        let (code, _, err) = bash(&format!(
+            "set -euo pipefail\nk3s() {{ case \"$*\" in \"kubectl get crd certificates.cert-manager.io\") return 0 ;; *) return 1 ;; esac; }}\n{block}\nno_foreign_operators\necho went on"
+        ));
+        assert_eq!((code, err.trim()), (1, CM_LINE));
+    }
+
     #[test]
     fn connect_finds_what_already_answers_on_80_and_443() {
         let line = |ports: &str, by: &str, text: &str| {

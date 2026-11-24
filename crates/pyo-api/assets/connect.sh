@@ -1372,6 +1372,61 @@ API=$(tailnet_url "$API")
 INSTALL_URL=$(tailnet_url "${INSTALL_URL:-$API}")
 [ -z "$REGISTRY" ] || REGISTRY=$(tailnet_hostport "$REGISTRY")
 
+# >>> pyo:foreign-operators (connect.sh only; join.rs tests it)
+# cert-manager and Envoy Gateway that Pyo didn't install. Pyo installs its
+# own through the agent's manifest (HelmCharts in kube-system) and Envoy
+# Gateway's CRDs before it. Every version labels those
+# app.kubernetes.io/managed-by=pyo. Another install would be replaced, or
+# fight with Pyo's. Prints a line for each one found, and fails when there's
+# none.
+foreign_operators() {
+  local found="" owner ns
+  # A chart of Pyo's names in kube-system: "" (none), "pyo" (Pyo's) or "other".
+  chart_owner() {
+    local got
+    got=$(k3s kubectl -n kube-system get helmcharts.helm.cattle.io "$1" -o jsonpath='{.metadata.name}|{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+    case "$got" in "") echo "" ;; "$1|pyo") echo pyo ;; *) echo other ;; esac
+  }
+  # Namespaces with a Deployment of these labels.
+  deployed_in() { k3s kubectl get deployments -A -l "$1" -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>/dev/null || true; }
+  # cert-manager: another chart of its name, one running outside Pyo's
+  # namespace, or its CRDs without Pyo's chart.
+  owner=$(chart_owner cert-manager) found=""
+  [ "$owner" != other ] || found=1
+  while read -r ns; do
+    [ -n "$ns" ] || continue
+    [ "$owner" = pyo ] && [ "$ns" = cert-manager ] && continue
+    found=1
+  done < <(deployed_in app.kubernetes.io/name=cert-manager)
+  if [ -z "$owner" ] && k3s kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; then found=1; fi
+  [ -z "$found" ] || echo "This server already runs cert-manager that Pyo didn't install. Pyo won't change it. Remove it, or connect a server without it."
+  local any=$found
+  # Envoy Gateway: another chart of its name, a controller outside Pyo's
+  # namespace, or its CRDs without Pyo's label.
+  owner=$(chart_owner envoy-gateway) found=""
+  [ "$owner" != other ] || found=1
+  while read -r ns; do
+    [ -n "$ns" ] || continue
+    [ "$ns" = pyo-gateway ] && [ "$owner" != other ] && continue
+    found=1
+  done < <(deployed_in control-plane=envoy-gateway)
+  local label
+  label=$(k3s kubectl get crd envoyproxies.gateway.envoyproxy.io -o jsonpath='{.metadata.name}|{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+  case "$label" in "" | *"|pyo") ;; *) found=1 ;; esac
+  [ -z "$found" ] || echo "This server already runs Envoy Gateway that Pyo didn't install. Pyo won't change it. Remove it, or connect a server without it."
+  [ -n "$any$found" ]
+}
+# Stops the connect, before anything is installed, when foreign_operators
+# finds one.
+no_foreign_operators() {
+  local found
+  if found=$(foreign_operators); then
+    echo "$found" >&2
+    exit 1
+  fi
+}
+# <<< pyo:foreign-operators
+
 # Ports 80 and 443 already in use here (k3s's Traefik, nginx…), on a first
 # connect: Pyo connects with public traffic off, so the sites here keep
 # working. Pyo turns it off before the agent's first word (install.rs).
@@ -1379,6 +1434,12 @@ WEB_QUERY=""
 if ! { command -v k3s >/dev/null && k3s kubectl -n pyo-system get deployment pyo-agent >/dev/null 2>&1; } &&
   web_ports_busy; then
   WEB_QUERY="&webPorts=busy"
+fi
+
+# cert-manager or Envoy Gateway that Pyo didn't install, on a k3s that's
+# here already: stopped before Pyo installs anything, or uses this token.
+if command -v k3s >/dev/null && k3s kubectl get --raw=/readyz --request-timeout=10s >/dev/null 2>&1; then
+  no_foreign_operators
 fi
 
 # Pyo answers, and knows this token, before anything is installed.
@@ -1629,6 +1690,8 @@ fi
 
 k3s_up() { k3s kubectl get nodes >/dev/null 2>&1; }
 wait_until -f "Starting k3s…" 180 k3s_up || { echo "k3s didn't start. Restart this machine, then run the same command again." >&2; exit 1; }
+# The same check, for a k3s that wasn't answering before.
+no_foreign_operators
 # An existing k3s didn't get the labels at registration: add them now.
 if [ -n "$GPU_LABELS" ] && k3s kubectl get node "$(hostname)" >/dev/null 2>&1; then
   # shellcheck disable=SC2086 # one label per word
