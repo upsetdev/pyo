@@ -55,6 +55,17 @@ pub(crate) fn on_shared_runtime() -> bool {
     ON_SHARED_RUNTIME.get()
 }
 
+/// A client address of its own for a test's browser. Rate limits count by
+/// address in Postgres, which outlives the test and its process: a fixed
+/// one adds up over runs and the tests beside it, until a sign-in gets a
+/// 429. From 198.18.0.0/15, a range no real visitor has.
+pub(crate) fn fresh_ip() -> &'static str {
+    let n: u32 = rand::random();
+    let host = 2 + (n & 0xff) % 253;
+    let ip = format!("198.{}.{}.{host}", 18 + (n >> 31), (n >> 8) & 0xff);
+    Box::leak(ip.into_boxed_str())
+}
+
 pub(crate) struct Client {
     pub(crate) app: Router,
     pub(crate) cookie: Option<String>,
@@ -221,15 +232,16 @@ fn two_factor_required_teams_and_the_audit_log() {
                 .await
                 .unwrap();
         }
+        let (ada_ip, bob_ip) = (fresh_ip(), fresh_ip());
         let mut a = Client {
             app: app.clone(),
             cookie: None,
-            ip: "203.0.113.7",
+            ip: ada_ip,
         };
         let mut b = Client {
             app: app.clone(),
             cookie: None,
-            ip: "198.51.100.9",
+            ip: bob_ip,
         };
 
         // ── Signing in: recorded with address, browser and how.
@@ -267,7 +279,7 @@ fn two_factor_required_teams_and_the_audit_log() {
             (sign_in.1.as_str(), sign_in.2.as_str()),
             ("ok", "dashboard")
         );
-        assert_eq!(sign_in.3.as_deref(), Some("203.0.113.7"));
+        assert_eq!(sign_in.3.as_deref(), Some(ada_ip));
         assert_eq!(sign_in.4, "TestBrowser/1.0");
         assert_eq!(sign_in.6.as_deref(), Some(ada.as_str()));
         let failed = rows
@@ -343,7 +355,7 @@ fn two_factor_required_teams_and_the_audit_log() {
         let mut a2 = Client {
             app: app.clone(),
             cookie: None,
-            ip: "203.0.113.7",
+            ip: ada_ip,
         };
         let (st, first) = a2
             .call(
@@ -378,7 +390,7 @@ fn two_factor_required_teams_and_the_audit_log() {
         let mut a3 = Client {
             app: app.clone(),
             cookie: None,
-            ip: "203.0.113.7",
+            ip: ada_ip,
         };
         let (_, first) = a3
             .call(
@@ -414,7 +426,7 @@ fn two_factor_required_teams_and_the_audit_log() {
         let (st, _) = Client {
             app: app.clone(),
             cookie: None,
-            ip: "203.0.113.7",
+            ip: ada_ip,
         }
         .call(Method::GET, "/api/v1/state", None)
         .await;
@@ -490,7 +502,8 @@ fn two_factor_required_teams_and_the_audit_log() {
             .iter()
             .find(|r| r.0 == "member.role_changed")
             .expect("role change");
-        assert_eq!(role.3.as_deref(), Some("203.0.113.0"), "anonymized");
+        let ada_net = format!("{}.0", ada_ip.rsplit_once('.').unwrap().0);
+        assert_eq!(role.3.as_deref(), Some(ada_net.as_str()), "anonymized");
         assert!(has(&rows, "api_key.created"));
         assert!(
             !has(&audit_rows(&db, &team_b).await, "api_key.created"),
@@ -507,7 +520,7 @@ fn two_factor_required_teams_and_the_audit_log() {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
-            .insert(ConnectInfo("192.0.2.1:1".parse::<SocketAddr>().unwrap()));
+            .insert(ConnectInfo(format!("{}:1", fresh_ip()).parse::<SocketAddr>().unwrap()));
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(
             res.status(),
