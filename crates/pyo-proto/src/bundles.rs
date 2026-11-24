@@ -1143,6 +1143,48 @@ pub fn guarded_resources() -> Vec<String> {
     CLUSTER_KINDS.iter().map(|k| plural(k)).collect()
 }
 
+/// Whether a cluster-wide object a bundle would write, already on the
+/// cluster with these labels, is someone else's: another install of the
+/// same software (CloudNativePG from Helm, say). Every version of Pyo
+/// labels a bundle's objects [`BUNDLE_LABEL`]`=<id>` and
+/// `app.kubernetes.io/managed-by=pyo`.
+pub fn foreign_object(bundle_id: &str, labels: &BTreeMap<String, String>) -> bool {
+    let label = |k: &str| labels.get(k).map(String::as_str);
+    label(BUNDLE_LABEL) != Some(bundle_id) && label("app.kubernetes.io/managed-by") != Some("pyo")
+}
+
+/// Why a bundle won't install, in plain words, when objects it would write
+/// are someone else's ([`foreign_object`]): what runs there already, a
+/// line each. None when there are none. Pyo never changes them.
+pub fn foreign_message(bundle: &SystemBundle, objects: &[ObjectRef]) -> Option<String> {
+    let mut lines: Vec<String> = vec![];
+    let mut add = |line: String| {
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    };
+    let runs = |what: &str| {
+        format!("This cluster already runs {what} that Pyo didn't install. Pyo won't change it. Remove it, or use a cluster without it.")
+    };
+    for r in objects {
+        if r.name.contains("cnpg") {
+            add(runs("CloudNativePG"));
+        } else if r.name.contains("moco") {
+            add(runs("a MySQL operator"));
+        } else if bundle.id == DATABASES_ID {
+            add(runs("database software"));
+        } else {
+            let what = match bundle.id.as_str() {
+                WAF_ID => "the web application firewall",
+                STATIC_ID => "Pyo Static",
+                _ => bundle.name.as_str(),
+            };
+            add(format!("Something Pyo didn't install is in the way of {what} on this cluster. Pyo won't change it. Remove it, or use a cluster without it."));
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1804,5 +1846,38 @@ mod tests {
                 && at("Role") < at("DaemonSet")
                 && at("ServiceAccount") < at("DaemonSet")
         );
+    }
+
+    #[test]
+    fn objects_pyo_didnt_install_stop_a_bundle() {
+        let labels = |kv: &[(&str, &str)]| -> BTreeMap<String, String> {
+            kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        };
+        // Pyo's own, as every version labels them.
+        assert!(!foreign_object(DATABASES_ID, &labels(&[(BUNDLE_LABEL, "databases"), ("app.kubernetes.io/managed-by", "pyo")])));
+        assert!(!foreign_object(DATABASES_ID, &labels(&[(BUNDLE_LABEL, "databases")])));
+        assert!(!foreign_object(DATABASES_ID, &labels(&[("app.kubernetes.io/managed-by", "pyo")])));
+        // CloudNativePG's Helm chart, or a manifest with no labels.
+        assert!(foreign_object(DATABASES_ID, &labels(&[("app.kubernetes.io/managed-by", "Helm"), ("app.kubernetes.io/name", "cloudnative-pg")])));
+        assert!(foreign_object(DATABASES_ID, &labels(&[])));
+
+        let db = databases_bundle(&images("ctl"));
+        let r = |kind: &str, name: &str| ObjectRef { api_version: "v1".into(), kind: kind.into(), namespace: None, name: name.into() };
+        assert_eq!(foreign_message(&db, &[]), None, "a clean cluster");
+        let cnpg = "This cluster already runs CloudNativePG that Pyo didn't install. Pyo won't change it. Remove it, or use a cluster without it.";
+        assert_eq!(
+            foreign_message(&db, &[r("CustomResourceDefinition", "clusters.postgresql.cnpg.io"), r("MutatingWebhookConfiguration", "cnpg-mutating-webhook-configuration")]).as_deref(),
+            Some(cnpg),
+            "one line per operator"
+        );
+        let both = foreign_message(&db, &[r("CustomResourceDefinition", "clusters.postgresql.cnpg.io"), r("CustomResourceDefinition", "mysqlclusters.moco.cybozu.com")]).unwrap();
+        assert_eq!(both, format!("{cnpg} This cluster already runs a MySQL operator that Pyo didn't install. Pyo won't change it. Remove it, or use a cluster without it."));
+        assert!(!both.to_lowercase().contains("moco"), "never named");
+        // Every cluster-wide object of the bundle is one of the two
+        // operators', or Pyo's own databases kind.
+        for o in db.objects().iter().map(ObjectRef::of).filter(|o| o.namespace.is_none() && CLUSTER_KINDS.contains(&o.kind.as_str())) {
+            let m = foreign_message(&db, std::slice::from_ref(&o)).unwrap();
+            assert!(m.contains("CloudNativePG") || m.contains("MySQL") || o.name.ends_with(".pyo.dev") || o.name.starts_with("pyo-"), "{o:?}: {m}");
+        }
     }
 }
