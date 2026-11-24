@@ -181,6 +181,11 @@ async fn commands(db: &sqlx::PgPool, cluster: &str) -> Vec<String> {
 #[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
 fn the_tunnel_loop_end_to_end() {
     secret_key();
+    // A pass logs Pyo's own errors and goes on: they show with a failure.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("pyo_api::cloudflare=warn,pyo_api::error=error")
+        .with_test_writer()
+        .try_init();
     run_big(async {
         let _one = FAKE_API.lock().await;
         let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
@@ -241,7 +246,8 @@ fn the_tunnel_loop_end_to_end() {
         let config = cf.state.lock().unwrap().configs.iter().find(|c| c.0 == tunnel_id).map(|c| c.2.clone()).expect("routes");
         assert_eq!(config["ingress"][0]["hostname"], json!(host));
         let d = domain(&db, &svc).await;
-        assert_eq!((d["tlsMode"].as_str(), d["tunnel"].as_str()), (Some("custom"), Some("switching")), "the tunnel's certificate before its record moves: {d}");
+        let error: Option<String> = sqlx::query_scalar("SELECT error FROM pyo.cluster_tunnels WHERE cluster_id = $1").bind(&cluster).fetch_one(&db).await.unwrap();
+        assert_eq!((d["tlsMode"].as_str(), d["tunnel"].as_str()), (Some("custom"), Some("switching")), "the tunnel's certificate before its record moves: {d}, the tunnel's error: {error:?}");
         assert!(commands(&db, &cluster).await.contains(&"tunnel_set".to_owned()), "the agent's token");
         // The record waits for the agent's routes (both paths answer first).
         assert_eq!(record(db.clone(), svc.clone()).await.unwrap().0, "switching");
