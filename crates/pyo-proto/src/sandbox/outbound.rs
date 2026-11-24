@@ -30,6 +30,9 @@ pub const INSTANCE_HEADER: &str = "x-pyo-sandbox-instance";
 /// polling and reporting when it gets it, and keeps its sandboxes.
 pub const KEY_GONE: &str =
     "This server's key is unknown, expired or revoked. Join it again with a new command from Pyo.";
+/// How a daemon's answer to a command it refused starts (code
+/// `forbidden`), followed by ": <why>.". Pyo passes it on as it is.
+pub const COMMAND_REFUSED: &str = "The sandbox server refused the command";
 /// Where the daemon answers HTTPS on its tailnet name: the same API and
 /// pages as [`super::DAEMON_PORT`], for browsers and SDKs on the tailnet.
 pub const TAILNET_PORT: u16 = 7443;

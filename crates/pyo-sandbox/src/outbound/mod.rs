@@ -426,7 +426,7 @@ impl<W: Work> Client<W> {
                     tracing::warn!(command = %env.id, kind = %env.kind, "refused a command from Pyo: {why}");
                     Err(error_result(
                         ErrorCode::Forbidden,
-                        format!("The sandbox server refused the command: {why}."),
+                        format!("{}: {why}.", pyo_proto::sandbox::outbound::COMMAND_REFUSED),
                     ))
                 }
             }

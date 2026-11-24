@@ -216,9 +216,13 @@ fn install_add(user: &User, shared: bool) -> ApiResult<()> {
 }
 
 /// A daemon's error as the API's. A token the server refuses is Pyo's
-/// problem, not the caller's.
+/// problem, not the caller's. So is a command it refused over the channel,
+/// which says why itself.
 pub fn daemon_error(e: DaemonError) -> ApiError {
     let status = match e.code {
+        ErrorCode::Forbidden if e.message.starts_with(proto::outbound::COMMAND_REFUSED) => {
+            return ApiError::new(StatusCode::BAD_GATEWAY, e.message);
+        }
         ErrorCode::Unauthorized | ErrorCode::Forbidden => {
             return ApiError::new(
                 StatusCode::BAD_GATEWAY,
@@ -1799,6 +1803,19 @@ pub async fn delete_template(s: &AppState, user: &User, id: &str) -> ApiResult<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command the server refused over the channel reads as the server
+    /// said it, not as a refused token. A refused token still says so.
+    #[test]
+    fn a_refused_command_isnt_called_a_refused_token() {
+        let why = format!("{}: it was changed after it was signed.", proto::outbound::COMMAND_REFUSED);
+        let e = daemon_error(DaemonError::new(ErrorCode::Forbidden, why.clone()));
+        assert_eq!(e.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(e.message, why);
+        let e = daemon_error(DaemonError::new(ErrorCode::Forbidden, "Not this sandbox."));
+        assert_eq!(e.status, StatusCode::BAD_GATEWAY);
+        assert!(e.message.starts_with("The sandbox server refused Pyo's token."));
+    }
 
     /// Pyo Cloud is on no team's tailnet: adding a sandbox server says so,
     /// with or without the team's Tailscale, and never sends the team to
