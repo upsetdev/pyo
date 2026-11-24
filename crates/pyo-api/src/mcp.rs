@@ -155,7 +155,7 @@ fn curated() -> Vec<Value> {
             "server_tags": { "type": "array", "items": { "type": "string" }, "description": "Older form of placement.tags" },
         }), &["name", "image"]), "annotations": write }),
         json!({ "name": "set_service_placement", "title": "Set service placement", "description": "Choose where a service runs: any server of its cluster (servers and tags both empty), or only the servers named and every server with one of the tags, including servers tagged later (see list_servers). A service with a volume has to keep its volume's server, and one with a GPU needs a GPU server. It changes in place, without a redeploy: its replicas move over with the same image. Refused with the reason when no server picked can run it.", "inputSchema": schema(json!({ "service_id": service, "servers": { "type": "array", "items": { "type": "string" }, "description": "Server names" }, "tags": { "type": "array", "items": { "type": "string" }, "description": "Server tags" } }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
-        json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain (a tunnel domain in tunnel mode). It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" }, "tunnel": { "type": "boolean", "description": "Through the cluster's Cloudflare Tunnel when a tunnel-ready zone covers the hostname (default: on in tunnel mode)." }, "redirect_to": { "type": "string", "description": "Only redirect this hostname, like www.example.com to example.com: the hostname (and path) to send visitors to. The path and query are kept." }, "status": { "type": "integer", "enum": [301, 302], "description": "The redirect's status (default 301)" } }), &["service_id"]), "annotations": write }),
+        json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain (a tunnel domain in tunnel mode). It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" }, "tunnel": { "type": "boolean", "description": "Through the cluster's Cloudflare Tunnel when a tunnel-ready zone covers the hostname (default: on in tunnel mode)." }, "path": { "type": "string", "description": "Only this path of the hostname, like /api. Other services of the team can serve its other paths. The longest path wins." }, "strip_prefix": { "type": "boolean", "description": "Send /api/x to the service as /x (with path)." }, "redirect_to": { "type": "string", "description": "Only redirect this hostname, like www.example.com to example.com: the hostname (and path) to send visitors to. The path and query are kept." }, "status": { "type": "integer", "enum": [301, 302], "description": "The redirect's status (default 301)" } }), &["service_id"]), "annotations": write }),
         json!({ "name": "set_domain_redirects", "title": "Set domain redirects", "description": "Replace a domain's redirects. Each sends requests under a path to another path or hostname, with 301 (default) or 302. keep_path (default true) keeps the rest of the path after the matched one. The query is always kept. A domain that routes to a port can't redirect \"/\" as a whole. They go live in place.", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "redirects": { "type": "array", "items": { "type": "object", "properties": { "path": { "type": "string", "description": "Path prefix, like /old (default /)" }, "to_host": { "type": "string" }, "to_path": { "type": "string", "description": "Path prefix to send to, like /new" }, "status": { "type": "integer", "enum": [301, 302] }, "keep_path": { "type": "boolean" } } } } }), &["service_id", "hostname", "redirects"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "set_domain_headers", "title": "Set domain headers", "description": "Replace a domain's header rules: headers to set or remove on its responses (like Strict-Transport-Security or X-Powered-By), and on requests to the service. Hop-by-hop headers, X-Forwarded-*, X-Pyo-* and Pyo Gateway's other own headers can't be changed. At most 16 per list. They go live in place.", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "response_set": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Header name to value" }, "response_remove": { "type": "array", "items": { "type": "string" } }, "request_set": { "type": "object", "additionalProperties": { "type": "string" } }, "request_remove": { "type": "array", "items": { "type": "string" } } }), &["service_id", "hostname"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "set_static_serving", "title": "Set static serving", "description": "For a service whose build is a static site: serve its build as static files from the cluster's shared static server (\"static\", the default), or run it as a service of its own (\"service\"). Takes effect with the next deploy.", "inputSchema": schema(json!({ "service_id": service, "serve_as": { "type": "string", "enum": ["static", "service"] } }), &["service_id", "serve_as"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
@@ -1273,13 +1273,27 @@ pub(crate) async fn run_tool(
                 }
                 None => return Err("Give a hostname, or free_domain: true".into()),
             };
-            if a["domains"]
-                .as_array()
-                .is_some_and(|ds| ds.iter().any(|d| d["hostname"] == json!(host)))
-            {
-                return Err(format!("{host} is already used."));
+            let path = args["path"].as_str().map(str::trim).filter(|p| !p.is_empty() && *p != "/").map(str::to_owned);
+            if a["domains"].as_array().is_some_and(|ds| {
+                ds.iter().any(|d| {
+                    d["hostname"] == json!(host) && crate::paths::path_of(d) == path.as_deref().unwrap_or("/")
+                })
+            }) {
+                return Err(format!("{host}{} is already used.", path.as_deref().unwrap_or("")));
             }
+            // Another of the team's services has the hostname: this is a
+            // path of it, with that one's DNS record and certificate.
+            let held = list("services").iter().any(|o| {
+                o["teamId"] == a["teamId"]
+                    && o["domains"].as_array().is_some_and(|ds| ds.iter().any(|d| d["hostname"] == json!(host)))
+            });
             let mut d = domain(&host, now_ms());
+            if let Some(p) = &path {
+                d["path"] = json!(p);
+                if args["strip_prefix"].as_bool().unwrap_or(false) {
+                    d["stripPrefix"] = json!(true);
+                }
+            }
             match args["redirect_to"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
                 // Only a redirect: no port.
                 Some(to) => {
@@ -1310,12 +1324,13 @@ pub(crate) async fn run_tool(
                 .map(|ds| ds.push(d.clone()))
                 .ok_or("Bad service")?;
             let url = format!(
-                "{}://{host}",
+                "{}://{host}{}",
                 if crate::deploy::private_host(&host) {
                     "http"
                 } else {
                     "https"
-                }
+                },
+                path.as_deref().unwrap_or("")
             );
             // Domains go live in place, without a redeploy; a service never
             // deployed gets them with its first deploy.
@@ -1352,8 +1367,10 @@ pub(crate) async fn run_tool(
                             && !n.is_empty()
                             && (host == n || host.ends_with(&format!(".{n}")))
                     });
-            let tunnel = tunnel_ready && args["tunnel"].as_bool().unwrap_or(tunnel_mode);
-            let dns_record = if tunnel {
+            let tunnel = !held && tunnel_ready && args["tunnel"].as_bool().unwrap_or(tunnel_mode);
+            let dns_record = if held {
+                Value::Null
+            } else if tunnel {
                 op(json!({ "op": "setDomainTunnel", "serviceId": id, "domainId": d["id"], "on": true }))
                     .await
                     .unwrap_or_else(|e| json!({ "status": "failed", "error": e }))

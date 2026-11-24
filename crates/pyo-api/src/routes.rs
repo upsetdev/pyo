@@ -44,6 +44,14 @@ pub fn domain_specs(domains: &Value) -> Vec<DomainSpec> {
                 // Its rules in Pyo Gateway (checked when they were saved).
                 redirects: serde_json::from_value(d["redirects"].clone()).unwrap_or_default(),
                 headers: serde_json::from_value(d["headers"].clone()).unwrap_or_default(),
+                // Its path (paths.rs): saved tidy.
+                path: match crate::paths::path_of(d) {
+                    "/" => String::new(),
+                    p => p.to_owned(),
+                },
+                strip_prefix: d["stripPrefix"] == json!(true),
+                // Filled in when it's handed out (paths.rs `specs`).
+                primary_of: String::new(),
             }
         })
         .collect()
@@ -85,9 +93,18 @@ pub fn tidy_rules(d: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The rules a domain has: what an agent needs to write them.
+/// The rules a domain has: what an agent needs to write them (pyo-proto's
+/// `Capabilities::gateway_rules`): 2 for paths, 1 for redirects and header
+/// rules, else 0.
 fn rules_level(domains: &Value) -> u8 {
-    let any = domains.as_array().into_iter().flatten().any(|d| {
+    let all: Vec<&Value> = domains.as_array().into_iter().flatten().collect();
+    if all
+        .iter()
+        .any(|d| crate::paths::path_of(d) != "/" || !crate::paths::holds(d))
+    {
+        return 2;
+    }
+    let any = all.iter().any(|d| {
         d["redirects"].as_array().is_some_and(|r| !r.is_empty())
             || d["headers"].as_object().is_some_and(|h| !h.is_empty())
     });
@@ -115,9 +132,11 @@ pub async fn rules_ok(
     .await?;
     match row {
         Some((Some(_), level)) if level.unwrap_or(0) < i64::from(wanted) => {
-            Err(crate::error::ApiError::conflict(
-                "This cluster's agent doesn't apply redirects and header rules yet. Update the agent first.",
-            ))
+            Err(crate::error::ApiError::conflict(if wanted >= 2 {
+                "This cluster's agent doesn't apply paths yet. Update the agent first."
+            } else {
+                "This cluster's agent doesn't apply redirects and header rules yet. Update the agent first."
+            }))
         }
         _ => Ok(()),
     }
@@ -136,7 +155,14 @@ pub fn request_timeout(spec: &Value) -> Option<u32> {
 /// certificate status).
 pub fn differ(a: &Value, b: &Value) -> bool {
     let v = |d: &Value| serde_json::to_value(domain_specs(d)).unwrap_or(Value::Null);
-    v(a) != v(b)
+    let held = |d: &Value| -> Vec<bool> {
+        d.as_array()
+            .into_iter()
+            .flatten()
+            .map(crate::paths::holds)
+            .collect()
+    };
+    v(a) != v(b) || held(a) != held(b)
 }
 
 /// Whether a cluster's routes are sent again after a heartbeat: its agent
@@ -186,11 +212,24 @@ pub async fn changed(
         .bind(service_id)
         .execute(&mut **tx)
         .await?;
+    // The services on its hostnames follow: what they take from it (a
+    // hostname it holds), or which service holds them, may have changed.
+    let mut wake = None;
+    for other in crate::paths::sharers(tx, service_id).await? {
+        sqlx::query("UPDATE pyo.services SET routes_revision = routes_revision + 1 WHERE id = $1")
+            .bind(&other)
+            .execute(&mut **tx)
+            .await?;
+        if let Some((cluster_id, target)) = target(tx, &other).await? {
+            crate::deploy::enqueue(tx, &cluster_id, Command::SyncRoutes(Box::new(target))).await?;
+            wake = Some(cluster_id);
+        }
+    }
     if !sync {
-        return Ok(None);
+        return Ok(wake);
     }
     let Some((cluster_id, target)) = target(tx, service_id).await? else {
-        return Ok(None);
+        return Ok(wake);
     };
     crate::deploy::enqueue(tx, &cluster_id, Command::SyncRoutes(Box::new(target))).await?;
     Ok(Some(cluster_id))
@@ -302,7 +341,9 @@ async fn current(db: &PgPool, o: &mut Value) -> anyhow::Result<()> {
     .fetch_optional(db)
     .await?;
     if let Some((routing, revision)) = row {
-        o["domains"] = serde_json::to_value(domain_specs(&routing["domains"])).unwrap_or(json!([]));
+        let mut conn = db.acquire().await?;
+        let specs = crate::paths::specs(&mut conn, id, &routing["domains"]).await?;
+        o["domains"] = serde_json::to_value(specs).unwrap_or(json!([]));
         o["requestTimeout"] = json!(request_timeout(&routing));
         o["routesRevision"] = json!(revision);
     }
@@ -466,6 +507,286 @@ mod lifecycle_tests {
     #[ignore]
     fn domain_changes_sync_and_deploys_use_the_current_domains() {
         run_big(lifecycle());
+    }
+
+    /// Paths: services of a team share a hostname by path, the first
+    /// holds it, the others follow it, and when the holder goes another
+    /// takes it over with its DNS record.
+    /// Needs Postgres: DATABASE_URL=… cargo test -p pyo-api -- --ignored routes::lifecycle_tests
+    #[test]
+    #[ignore]
+    fn services_share_a_hostname_by_path() {
+        run_big(paths());
+    }
+
+    async fn paths() {
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(
+            db.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let (_stop, stopping) = tokio::sync::watch::channel(false);
+        let s = AppState {
+            db: db.clone(),
+            config: std::sync::Arc::new(crate::Config {
+                agent_api_url: String::new(),
+                agent_image: String::new(),
+                waf_image: pyo_proto::system::WAF_IMAGE_DEFAULT.into(),
+                geoip_image: pyo_proto::system::GEOIP_IMAGE_DEFAULT.into(),
+                cookie_secure: false,
+                allow_signup: false,
+                builder_image: String::new(),
+                relay_addr: None,
+            }),
+            observability: crate::observability::Observability::from_env(db.clone()),
+            sealer: std::sync::Arc::new(crate::secrets::Sealer::from_env()),
+            wakers: Default::default(),
+            terminals: Default::default(),
+            stopping,
+        };
+        let run = crate::ids::new_id("t");
+        let label = run.replace('_', "-");
+        let host = format!("shop-{label}.example.com");
+        let (team, other_team) = (format!("team_{run}"), format!("team_o{run}"));
+        let (cluster, far) = (format!("cl_{run}"), format!("cl_f{run}"));
+        let project = format!("prj_{run}");
+        let ns = format!("shop-{label}");
+        let user = User {
+            id: format!("usr_{run}"),
+            name: "T".into(),
+            email: format!("{run}@t.test"),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'T', '')")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&db)
+            .await
+            .unwrap();
+        for t in [&team, &other_team] {
+            q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(t)
+                .execute(&db)
+                .await
+                .unwrap();
+            q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'developer', 'active')")
+                .bind(format!("mem_{t}")).bind(t).bind(&user.id).bind(&user.email).execute(&db).await.unwrap();
+        }
+        for (c, t) in [
+            (&cluster, &team),
+            (&far, &team),
+            (&format!("cl_o{run}"), &other_team),
+        ] {
+            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())")
+                .bind(c).bind(t).execute(&db).await.unwrap();
+        }
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $3)")
+            .bind(&project)
+            .bind(&team)
+            .bind(&ns)
+            .execute(&db)
+            .await
+            .unwrap();
+        let other_project = format!("prj_o{run}");
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $3)")
+            .bind(&other_project)
+            .bind(&other_team)
+            .bind(format!("o-{label}"))
+            .execute(&db)
+            .await
+            .unwrap();
+        let domain = |id: &str, path: &str| {
+            let mut d = json!({ "id": id, "hostname": host, "portName": "http", "status": "pending_dns", "tls": "pending", "tlsMode": "letsencrypt", "redirectHttps": true, "createdAt": 1 });
+            if path != "/" {
+                d["path"] = json!(path);
+            }
+            d
+        };
+        let service = |id: &str, name: &str, project: &str, cluster: &str, domains: Value| {
+            json!({
+                "id": id, "projectId": project, "clusterId": cluster, "name": name, "source": { "type": "image", "image": "nginx", "reference": "1.27" },
+                "replicas": 1, "env": [], "ports": [{ "id": "port_1", "name": "http", "protocol": "HTTP", "containerPort": 80, "exposure": "http" }],
+                "domains": domains, "resources": {}, "healthCheck": { "type": "none" },
+            })
+        };
+        let (web, api, docs) = (
+            format!("svc_w{run}"),
+            format!("svc_a{run}"),
+            format!("svc_d{run}"),
+        );
+        let create = |svc: Value| {
+            let (s, user) = (&s, &user);
+            async move {
+                crate::ops::run_json(s, user, json!({ "op": "createService", "service": svc, "deploymentId": crate::ids::new_id("dpl") })).await
+            }
+        };
+        let save = |svc: Value| {
+            let (s, user) = (&s, &user);
+            async move {
+                crate::ops::run_json(s, user, json!({ "op": "saveService", "service": svc })).await
+            }
+        };
+        let domains_of = |id: String| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, Value>(
+                    "SELECT spec->'domains' FROM pyo.services WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        // web holds the hostname.
+        create(service(
+            &web,
+            "web",
+            &project,
+            &cluster,
+            json!([domain("dom_w", "/")]),
+        ))
+        .await
+        .unwrap();
+        // api routes /api of it, stripped: a path of it, with web's HTTPS settings.
+        let mut a = domain("dom_a", "/api/");
+        a["stripPrefix"] = json!(true);
+        a["tlsMode"] = json!("selfsigned");
+        a["tunnel"] = json!("on");
+        create(service(&api, "api", &project, &cluster, json!([a])))
+            .await
+            .unwrap();
+        let d = domains_of(api.clone()).await;
+        assert_eq!(
+            (
+                d[0]["path"].as_str(),
+                d[0]["primary"].as_bool(),
+                d[0]["tlsMode"].as_str()
+            ),
+            (Some("/api"), Some(false), Some("letsencrypt"))
+        );
+        assert!(d[0].get("tunnel").is_none());
+        // Handed out: it joins web's listener.
+        let mut conn = db.acquire().await.unwrap();
+        let specs = crate::paths::specs(&mut conn, &api, &d).await.unwrap();
+        drop(conn);
+        assert_eq!(
+            (
+                specs[0].primary_of.clone(),
+                specs[0].path.clone(),
+                specs[0].strip_prefix,
+                specs[0].tls.clone()
+            ),
+            (
+                format!("{ns}-web"),
+                "/api".to_owned(),
+                true,
+                "letsencrypt".to_owned()
+            )
+        );
+        // The same path again, another cluster, another team, redirects on a path.
+        let taken = create(service(
+            &docs,
+            "docs",
+            &project,
+            &cluster,
+            json!([domain("dom_d", "/api")]),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(taken.message, format!("{host}/api is already used by api."));
+        let far_svc = create(service(
+            &format!("svc_f{run}"),
+            "far",
+            &project,
+            &far,
+            json!([domain("dom_f", "/far")]),
+        ))
+        .await
+        .unwrap_err();
+        assert!(
+            far_svc.message.contains("on another cluster"),
+            "{}",
+            far_svc.message
+        );
+        let theirs = create(service(
+            &format!("svc_o{run}"),
+            "other",
+            &other_project,
+            &format!("cl_o{run}"),
+            json!([domain("dom_o", "/x")]),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            theirs.message,
+            format!("{host} is already used by another service.")
+        );
+        let mut r = domain("dom_d", "/docs");
+        r["redirects"] = json!([{ "path": "/old", "toPath": "/new" }]);
+        let redirected = create(service(&docs, "docs", &project, &cluster, json!([r])))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            redirected.message,
+            format!("Redirects of {host} are set on web.")
+        );
+        // A redirect of web where api routes: refused.
+        let mut w = domain("dom_w", "/");
+        w["redirects"] = json!([{ "path": "/api", "toHost": "elsewhere.example.com" }]);
+        let both = save(service(&web, "web", &project, &cluster, json!([w])))
+            .await
+            .unwrap_err();
+        assert!(both.message.contains("routes to api"), "{}", both.message);
+
+        // web's DNS record; then web stops serving the hostname: api takes
+        // it over, with the record and web's HTTPS settings.
+        q("INSERT INTO pyo.dns_records (service_id, domain_id, team_id, hostname, zone_id, zone_name, status) VALUES ($1, 'dom_w', $2, $3, 'z1', 'example.com', 'created')")
+            .bind(&web).bind(&team).bind(&host).execute(&db).await.unwrap();
+        save(service(&web, "web", &project, &cluster, json!([])))
+            .await
+            .unwrap();
+        let d = domains_of(api.clone()).await;
+        assert!(d[0].get("primary").is_none(), "api holds it: {d}");
+        assert_eq!(d[0]["tlsMode"], "letsencrypt");
+        let moved: (String, String) =
+            sqlx::query_as("SELECT service_id, domain_id FROM pyo.dns_records WHERE team_id = $1")
+                .bind(&team)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(moved, (api.clone(), "dom_a".to_owned()));
+        // web comes back at "/": a path of it now. Then api is deleted:
+        // web takes it over.
+        save(service(
+            &web,
+            "web",
+            &project,
+            &cluster,
+            json!([domain("dom_w2", "/")]),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(domains_of(web.clone()).await[0]["primary"], json!(false));
+        crate::ops::run_json(&s, &user, json!({ "op": "deleteService", "id": api }))
+            .await
+            .unwrap();
+        let d = domains_of(web.clone()).await;
+        assert!(d[0].get("primary").is_none(), "web holds it again: {d}");
+        let moved: (String, String) =
+            sqlx::query_as("SELECT service_id, domain_id FROM pyo.dns_records WHERE team_id = $1")
+                .bind(&team)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(moved, (web.clone(), "dom_w2".to_owned()));
     }
 
     async fn lifecycle() {

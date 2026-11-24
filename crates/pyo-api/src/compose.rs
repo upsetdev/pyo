@@ -805,18 +805,23 @@ fn x_pyo(v: Option<&Value>, sn: Option<&str>, w: &mut Warnings) -> XPyo {
             "domains" => match texts(v) {
                 Some(ds) => {
                     for d in ds {
-                        let d = d.trim().trim_end_matches('.').to_lowercase();
+                        let d = d.trim();
                         if d.is_empty() {
                             continue;
                         }
-                        if !crate::util::hostname(&d) {
-                            w.add(
+                        // A path of it ("example.com/api") goes there only.
+                        match split_domain(d) {
+                            None => w.add(
                                 sn,
                                 &field,
-                                format!("{d} isn't a domain like app.example.com, so it's left out."),
-                            );
-                        } else if !x.domains.contains(&d) {
-                            x.domains.push(d);
+                                format!("{d} isn't a domain like app.example.com or app.example.com/api, so it's left out."),
+                            ),
+                            Some((host, path)) => {
+                                let d = crate::paths::shown_key(&host, &path);
+                                if !x.domains.contains(&d) {
+                                    x.domains.push(d);
+                                }
+                            }
                         }
                     }
                 }
@@ -1871,10 +1876,29 @@ pub fn exposure(p: &PlanPort) -> &'static str {
     }
 }
 
-/// A new domain of a service, on its port `port`.
+/// "app.example.com" or "app.example.com/api": the hostname (lower case)
+/// and the path ("/" without one). None when either isn't one.
+pub fn split_domain(d: &str) -> Option<(String, String)> {
+    let d = d.trim();
+    let (host, path) = match d.find('/') {
+        Some(i) => (&d[..i], &d[i..]),
+        None => (d, "/"),
+    };
+    let host = host.trim_end_matches('.').to_lowercase();
+    let path = pyo_proto::rules::normalize_path(path).ok()?;
+    crate::util::hostname(&host).then_some((host, path))
+}
+
+/// A new domain of a service, on its port `port`: a hostname, or a path of
+/// one ("app.example.com/api").
 pub fn domain_json(hostname: &str, port: &str, id: String, now: i64) -> Value {
-    let private = crate::deploy::private_host(hostname);
-    json!({ "id": id, "hostname": hostname, "portName": port, "status": "pending_dns", "tls": "pending", "tlsMode": "auto", "redirectHttps": !private, "createdAt": now })
+    let (host, path) = split_domain(hostname).unwrap_or_else(|| (hostname.to_owned(), "/".into()));
+    let private = crate::deploy::private_host(&host);
+    let mut d = json!({ "id": id, "hostname": host, "portName": port, "status": "pending_dns", "tls": "pending", "tlsMode": "auto", "redirectHttps": !private, "createdAt": now });
+    if path != "/" {
+        d["path"] = json!(path);
+    }
+    d
 }
 
 /// What a service made from a Compose file remembers of it: the file, and

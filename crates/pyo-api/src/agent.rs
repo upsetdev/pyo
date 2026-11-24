@@ -643,7 +643,9 @@ async fn heartbeat(
                                               THEN (d - 'tlsError') || jsonb_strip_nulls(jsonb_build_object('tls', $4::text, 'tlsError', $5::text))
                                               ELSE d END), '[]')
                  FROM jsonb_array_elements(spec->'domains') d))
-              WHERE id = $1 AND cluster_id = $2 AND NOT deleting
+              WHERE cluster_id = $2 AND NOT deleting
+                -- Its paths on the team's other services show it too (paths.rs).
+                AND (id = $1 OR team_id = (SELECT team_id FROM pyo.services WHERE id = $1))
                 AND EXISTS (SELECT 1 FROM jsonb_array_elements(spec->'domains') d
                              WHERE d->>'hostname' = $3 AND (coalesce(d->>'tls', '') <> $4 OR coalesce(d->>'tlsError', '') <> coalesce($5, '')))",
         )
