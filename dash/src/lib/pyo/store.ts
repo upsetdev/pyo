@@ -755,6 +755,8 @@ export const roleIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.find((m) => m.teamId === wsId && m.email === s.user.email)?.role;
 /** Owners and admins: they change the team's settings. Others see them read only. */
 export const isTeamAdmin = (role?: string) => role === "owner" || role === "admin";
+/** Owners only: they delete the team. Others don't see Delete team. */
+export const isTeamOwner = (role?: string) => role === "owner";
 export const membersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.filter((m) => m.teamId === wsId);
 
