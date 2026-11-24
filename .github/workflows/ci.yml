@@ -164,6 +164,38 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: cargo test --locked -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests
+      # TEMPORARY: the Postgres tests in a loop, in shuffled orders, to show
+      # rate limits and the secret key no longer depend on order or on the
+      # runs before. Removed before merge.
+      - name: Postgres tests in a loop (temporary)
+        env:
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: |
+          bin=$(cargo test --locked -p pyo-api --lib --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.name == "pyo_api" and .executable != null) | .executable' | head -1)
+          fail=0; runs=0
+          run() {
+            runs=$((runs + 1))
+            if ! RUSTC_BOOTSTRAP=1 "$bin" --ignored "$@" -Z unstable-options --shuffle > run.log 2>&1; then
+              fail=$((fail + 1))
+              echo "::error::round $i failed: $*"
+              grep -E -A3 "shuffle seed|panicked at" run.log | head -40
+            fi
+          }
+          key=$(openssl rand -hex 32)
+          for i in $(seq 1 30); do
+            PYO_SECRET_KEY=$key run rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests cloudflare::http_tests admin_sign_in_tests vault::tests
+          done
+          for i in $(seq 1 5); do
+            run volumes::tests
+            run updates::hosted_tests
+            PYO_SECRET_KEY=$key run admin_sign_in_tests
+            run compose_sync::db_tests
+            run tailscale::tests
+            run sandbox::outbound::tests
+          done
+          echo "failed runs: $fail of $runs"
+          test "$fail" -eq 0
 
   # Known CVEs in the locked dependencies: Cargo.lock, bun.lock (with the
   # dashboard's dev dependencies) and the WAF's go.mod. A CRITICAL one
