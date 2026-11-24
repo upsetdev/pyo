@@ -9578,7 +9578,7 @@ pub(crate) struct AccessLogQuery {
 #[utoipa::path(get, path = "/access-logs", operation_id = "getAccessLogs", tag = "Observability",
     params(AccessLogQuery),
     responses(
-        (status = 200, description = "`logs` (newest first: time, method, host, path, status, duration, size, country, device and address as the IP setting allows), `next` (the `before` for the next page, or null), `ipMode`, `unavailable` (clusters that didn't answer, with why), and on the first page without filters a `summary` of the range.", body = Object),
+        (status = 200, description = "`logs` (newest first: time, method, host, path, status, duration, size, country, device and address as the IP setting allows), `next` (the `before` for the next page, or null), `ipMode`, `unavailable` (clusters that didn't answer, with why), and on the first page without filters a `summary` of the range: requests, bytes, errors and response times, counted per minute from `summary.from` to `summary.to` (ms). A minute is counted once it's over and its cluster has sent it, so the newest requests in `logs` come after `summary.to`, which is null until a minute is counted.", body = Object),
         (status = 400, description = "No `team`.", body = ErrorBody),
         (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
         (status = 503, description = "Observability is off on this installation.", body = ErrorBody),

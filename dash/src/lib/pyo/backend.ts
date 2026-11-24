@@ -573,6 +573,9 @@ export type AccessLogSummary = {
   clientErrors: number;
   p50: number;
   p95: number;
+  /** Counted per minute, from `from` to `to` (ms). A minute counts once it's over, so the newest requests come after `to`, which is null until one has. */
+  from: number;
+  to: number | null;
 };
 
 /** The web server's request log, newest first; `next` pages back from there. */

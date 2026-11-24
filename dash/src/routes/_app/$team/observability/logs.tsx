@@ -313,7 +313,11 @@ function Summary({ s }: { s: AccessLogSummary | null }) {
   const rate = s.requests ? s.serverErrors / s.requests : 0;
   return (
     <MetricStrip cols="grid-cols-2 lg:grid-cols-4">
-      <Metric label="Requests" value={compact(s.requests)} />
+      <Metric
+        label="Requests"
+        value={compact(s.requests)}
+        sub={s.to ? `Up to ${clock(s.to)}` : "Counted each minute"}
+      />
       <Metric label="Bandwidth" value={bandwidth(s.bytes)} />
       <Metric
         label="Errors"
@@ -331,6 +335,12 @@ function Summary({ s }: { s: AccessLogSummary | null }) {
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
+
+/** "14:05", in your time zone. */
+const clock = (ms: number) => {
+  const d = new Date(ms);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
 const MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ");
 
 /** "Oct 31 01:50:38", syslog style, in your time zone. */
