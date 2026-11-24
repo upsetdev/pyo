@@ -295,6 +295,15 @@ jobs:
           PYO_SANDBOX_E2E: "1"
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: cargo test --locked -p pyo-api sandbox::e2e -- --nocapture
+      # A sandbox server on Pyo Cloud: the daemon joins over HTTPS, takes
+      # signed commands from Pyo's channel and serves HTTPS on its tailnet
+      # name, with a stand-in signer and tailnet. A run of its own: it
+      # sends Pyo's calls to sandbox servers through the channel.
+      - name: pyo-api outbound sandbox e2e
+        env:
+          PYO_SANDBOX_E2E: "1"
+          DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
+        run: cargo test --locked -p pyo-api sandbox::outbound::e2e -- --nocapture
       # As root, jailed like on a real server. cargo isn't on root's PATH,
       # so the runner user builds the test binary and sudo -E runs only it.
       - name: Networking e2e (root)
