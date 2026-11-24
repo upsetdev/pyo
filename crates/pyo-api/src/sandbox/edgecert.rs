@@ -747,7 +747,7 @@ async fn deliver(s: &AppState, id: &str) -> Result<(), String> {
         cert,
         key: SecretPem(key),
     };
-    match Daemon::new(&address)
+    match Daemon::new(id, &address)
         .command(&keys::admin_token(&signing, id), &cmd)
         .await
     {

@@ -24,6 +24,8 @@
 
 pub mod channel;
 #[cfg(test)]
+mod e2e;
+#[cfg(test)]
 mod tests;
 
 use std::time::Duration;

@@ -3335,8 +3335,9 @@ mod tests {
             rand::random::<u8>() % 64,
             1 + rand::random::<u8>() % 250
         );
+        let server = crate::ids::new_id("sbs");
         sqlx::query("INSERT INTO pyo.sandbox_servers (id, name, state, created_by, address, via_cluster) VALUES ($1, $1, 'ready', 'test', $2, $3)")
-            .bind(crate::ids::new_id("sbs"))
+            .bind(&server)
             .bind(&address)
             .bind(&cluster)
             .execute(&s.db)
@@ -3349,7 +3350,7 @@ mod tests {
             // Bytes both ways: the agent answers in base64 too.
             json!({ "status": 200, "body": "eyJieXRlcyI6IDV9" }),
         ));
-        let d = crate::sandbox::daemon::Daemon::new(&address);
+        let d = crate::sandbox::daemon::Daemon::new(&server, &address);
         let n = d
             .write_file("tok", "sbx_1", "/a b", b"hello".to_vec())
             .await

@@ -273,7 +273,7 @@ pub async fn sync_server(
     if prepare.is_empty() && stale.is_empty() {
         return Ok(());
     }
-    let d = Daemon::new(address);
+    let d = Daemon::new(server_id, address);
     let token = keys::admin_token(key, server_id);
     for id in prepare {
         let Some(t) = templates.iter().find(|t| t.server_name() == id) else {
@@ -352,7 +352,7 @@ pub async fn push(s: AppState, template_id: String) {
                 continue;
             };
             let token = keys::admin_token(&key, &id);
-            match Daemon::new(&address).command(&token, &cmd).await {
+            match Daemon::new(&id, &address).command(&token, &cmd).await {
                 // Saved at once, so the list shows it building before
                 // the next round.
                 Ok(DaemonResult::Template { template }) => {
@@ -417,7 +417,7 @@ pub async fn forget(s: AppState, template_id: String) {
             .iter()
             .filter(|r| is_revision_of(&r.name, &template_id))
         {
-            let _ = Daemon::new(&address)
+            let _ = Daemon::new(&id, &address)
                 .command(
                     &token,
                     &DaemonCommand::DeleteTemplate {

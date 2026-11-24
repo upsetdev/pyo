@@ -90,7 +90,7 @@ pub async fn round(s: &AppState) -> anyhow::Result<()> {
                 let key = key.clone();
                 async move {
                     let token = keys::admin_token(&key, &srv.id);
-                    let r = Daemon::new(&srv.address).report(&token).await;
+                    let r = Daemon::new(&srv.id, &srv.address).report(&token).await;
                     let res = match r {
                         Ok(report) => {
                             let applied = apply_report(&s.db, &srv, &report).await;
@@ -119,9 +119,10 @@ pub async fn round(s: &AppState) -> anyhow::Result<()> {
                 }
             })
             .await;
-        if let Err(e) = super::templates::update_states(&s.db).await {
-            tracing::warn!(error = %e, "sandboxes: couldn't update template states");
-        }
+    }
+    // Outbound servers' reports come in over their channel: theirs count too.
+    if let Err(e) = super::templates::update_states(&s.db).await {
+        tracing::warn!(error = %e, "sandboxes: couldn't update template states");
     }
     sweep(s).await?;
     super::edgecert::run(s).await
@@ -275,8 +276,13 @@ async fn sweep(s: &AppState) -> anyhow::Result<()> {
     for id in stuck {
         end(&mut c, &id, "failed", Some("It didn't start in time.")).await?;
     }
-    let due: Vec<(String, Option<String>, Option<String>, bool)> = sqlx::query_as(
-        "SELECT x.id, x.server_id, sv.address, coalesce(x.expires_at < now() - make_interval(secs => $1), false) FROM pyo.sandboxes x LEFT JOIN pyo.sandbox_servers sv ON sv.id = x.server_id
+    // An outbound server that isn't ready is asked nothing: its answer
+    // would only come at its next poll.
+    let due: Vec<(String, Option<String>, Option<String>, bool, bool)> = sqlx::query_as(
+        "SELECT x.id, x.server_id, sv.address,
+                coalesce(x.expires_at < now() - make_interval(secs => $1), false),
+                coalesce(sv.outbound AND sv.state <> 'ready', false)
+           FROM pyo.sandboxes x LEFT JOIN pyo.sandbox_servers sv ON sv.id = x.server_id
           WHERE x.state NOT IN ('stopped', 'failed')
             AND (x.state = 'stopping' OR x.expires_at < now() - make_interval(secs => $1))
           LIMIT 200",
@@ -290,11 +296,12 @@ async fn sweep(s: &AppState) -> anyhow::Result<()> {
     let key = keys::signing_key(&s.db, &s.sealer)
         .await
         .map_err(|e| anyhow::anyhow!(e.message))?;
-    for (id, server, address, expired) in due {
+    for (id, server, address, expired, asleep) in due {
         let gone = match (server, address) {
+            _ if asleep => false,
             (Some(server), Some(address)) => {
                 let token = keys::admin_token(&key, &server);
-                match Daemon::new(&address)
+                match Daemon::new(&server, &address)
                     .command(&token, &DaemonCommand::Delete { id: id.clone() })
                     .await
                 {
