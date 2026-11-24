@@ -125,6 +125,16 @@ mod tests {
                 "the installation's ACME account and its own sandbox servers' certificates",
             ),
             (
+                "sandbox/outbound/signer.rs",
+                1,
+                "the key a self-hosted Pyo signs its sandbox servers' commands with",
+            ),
+            (
+                "sandbox/outbound/channel.rs",
+                1,
+                "commands to the installation's own sandbox servers, which belong to no team",
+            ),
+            (
                 "cloud/bootstrap.rs",
                 1,
                 "a new cloud server's one-time join material, burned when used or after 15 minutes",
