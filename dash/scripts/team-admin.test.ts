@@ -1,6 +1,6 @@
-// Who changes a team's settings (General, Deployment preferences, Logs,
-// Analytics, Agents): owners and admins. The API's updateTeam refuses
-// everyone else. Developers and viewers see them read only, with no Save.
+// Who changes a team's settings (General, Logs, Analytics, Agents): owners
+// and admins. The API's updateTeam refuses everyone else. Developers and
+// viewers see them read only, with no Save.
 // Who deletes a team: its owners only. The API's deleteTeam refuses
 // everyone else, so only owners see Delete team.
 // bun test dash/scripts/team-admin.test.ts

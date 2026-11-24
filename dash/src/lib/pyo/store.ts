@@ -1035,8 +1035,6 @@ export const api = {
         description: input.description.trim(),
         createdAt: now,
         preferences: {
-          requireDeployApproval: false,
-          autoDeployOnPush: true,
           retainDeployments: 20,
         },
         // The installation's, the same for every team.
