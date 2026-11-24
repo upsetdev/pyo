@@ -748,3 +748,112 @@ fn two_factor_required_teams_and_the_audit_log() {
         }
     });
 }
+
+/// The installation's settings are its admins' only: a team owner who isn't
+/// one (a Pyo Cloud customer) reads whether observability is on, and the
+/// analytics limit with its team, never the installation's details.
+#[test]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+fn only_installation_admins_read_installation_settings() {
+    run_big(async {
+        let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(
+            db.clone(),
+            crate::vault::Provider::from_env(),
+        ));
+        let state = crate::sandbox::e2e::test_state(db.clone());
+        let app = Router::new()
+            .nest("/api/auth", crate::auth::routes())
+            .nest("/api/v1", crate::ops::routes())
+            .layer(axum::middleware::from_fn(crate::audit::middleware))
+            .with_state(state);
+        let run = random_string(8).to_lowercase();
+        let id = |p: &str, t: &str| format!("{p}_{t}{run}");
+        let (adm, own) = (id("usr", "adm"), id("usr", "own"));
+        let team = id("team", "vis");
+        let email = |who: &str| format!("{who}{run}@settings.test");
+        let password = "correct horse battery";
+        let hash = crate::auth::hash_password(password).await.unwrap();
+        for (u, n, admin) in [(&adm, "adm", true), (&own, "own", false)] {
+            sqlx::query("INSERT INTO pyo.users (id, email, name, password_hash, is_admin) VALUES ($1, $2, $3, $4, $5)")
+                .bind(u)
+                .bind(email(n))
+                .bind(n)
+                .bind(&hash)
+                .bind(admin)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        for (m, u, n) in [("a", &adm, "adm"), ("o", &own, "own")] {
+            sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'active')")
+                .bind(id("mem", m))
+                .bind(&team)
+                .bind(u)
+                .bind(email(n))
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let signed_in = |who: &'static str, ip: &'static str| {
+            let e = email(who);
+            let mut c = Client { app: app.clone(), cookie: None, ip };
+            async move {
+                let (st, _) = c
+                    .call(Method::POST, "/api/auth/login", Some(json!({ "email": e, "password": password })))
+                    .await;
+                assert_eq!(st, StatusCode::OK, "{who} signs in");
+                c
+            }
+        };
+        let mut admin = signed_in("adm", "203.0.113.7").await;
+        let mut owner = signed_in("own", "198.51.100.9").await;
+
+        // The admin reads everything.
+        let (st, all) = admin.call(Method::GET, "/api/v1/observability/settings", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(all["ipMode"].is_string());
+        let limit = all["retention"]["analyticsMonths"].as_u64().expect("retention");
+        let (_, snap) = admin.call(Method::GET, "/api/v1/state", None).await;
+        assert!(snap["observabilitySettings"]["retention"].is_object());
+        assert!(snap["securitySettings"].is_object());
+
+        // The team's owner: whether it's on, and the limit with the team.
+        let (st, mine) = owner.call(Method::GET, "/api/v1/observability/settings", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(mine, json!({ "enabled": all["enabled"] }));
+        let (st, snap) = owner.call(Method::GET, "/api/v1/state", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(snap["observabilitySettings"], json!({ "enabled": all["enabled"] }));
+        assert!(snap["securitySettings"].is_null());
+        assert!(snap["adminSignIn"].is_null());
+        let t = snap["teams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == json!(team))
+            .expect("the team");
+        assert_eq!(t["analyticsMonthsLimit"], json!(limit));
+
+        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        for u in [&adm, &own] {
+            sqlx::query("DELETE FROM pyo.users WHERE id = $1")
+                .bind(u)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+    });
+}

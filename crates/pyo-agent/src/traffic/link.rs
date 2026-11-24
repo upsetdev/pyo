@@ -75,7 +75,15 @@ pub async fn run(agent: Agent) {
 }
 
 async fn push_context(agent: &Agent) -> anyhow::Result<()> {
-    let ctx = agent.api.traffic_context().await?;
+    let mut ctx = agent.api.traffic_context().await?;
+    // Room for what the team keeps: the store's volume grows, or the store
+    // keeps less on one that can't.
+    if ctx.max_mb > 0 {
+        match crate::observability::fit_traffic_volume(&agent.kube, ctx.max_mb).await {
+            Ok(mb) => ctx.max_mb = mb,
+            Err(e) => tracing::debug!(error = %format!("{e:#}"), "kept requests' volume not checked"),
+        }
+    }
     call(reqwest::Method::PUT, "/context", Some(serde_json::to_vec(&ctx)?), Duration::from_secs(10)).await?;
     Ok(())
 }

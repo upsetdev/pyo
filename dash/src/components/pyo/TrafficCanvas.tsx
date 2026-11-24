@@ -13,7 +13,7 @@ import { Panel } from "~/components/ui/Panel";
 import { fetchMeta, fetchTraffic, type ServiceTraffic } from "~/lib/pyo/backend";
 import { compact } from "~/lib/pyo/format";
 import { locationLabel, regionCountry } from "~/lib/pyo/location";
-import { currentSlug } from "~/lib/pyo/paths";
+import { currentSlug, opensInstallationSettings } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import { usePyo } from "~/lib/pyo/store";
 import type { Application } from "~/lib/pyo/types";
@@ -466,13 +466,20 @@ function CompactFlow({ t, tail, address }: { t: ServiceTraffic; tail: Map<string
 /** A region's numbers as small aligned stats, with the 24h sparkline. */
 function Numbers({ t, r }: { t: ServiceTraffic; r: Region }) {
   const st = r.stats;
+  // The setting is the installation's: only its admins get the link.
+  const admin = opensInstallationSettings(usePyo().user);
   if (!t.statsAvailable)
     return (
       <p className="text-[12px] text-muted-foreground">
-        Request numbers need observability storage.{" "}
-        <Link to="/observability" className="font-medium text-foreground hover:text-primary">
-          Set it up
-        </Link>
+        Request numbers need observability storage.
+        {admin ? (
+          <>
+            {" "}
+            <Link to="/observability" className="font-medium text-foreground hover:text-primary">
+              Set it up
+            </Link>
+          </>
+        ) : null}
       </p>
     );
   return (

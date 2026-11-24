@@ -9,12 +9,15 @@ import {
   clustersIn,
   currentTeam,
   getState,
+  isTeamAdmin,
+  roleIn,
   sandboxServersIn,
   usePyo,
 } from "~/lib/pyo/store";
 import { SandboxLimitsPanel } from "~/components/pyo/sandbox/SandboxLimits";
 import { useHosted } from "~/components/pyo/Managed";
 import { toast } from "~/lib/pyo/toast";
+import { REQUEST_LOG_DAYS } from "~/lib/pyo/requestLogs";
 import type { Team } from "~/lib/pyo/types";
 import { CopyButton } from "~/components/ui/Table";
 
@@ -51,6 +54,8 @@ function TeamSettings({ ws }: { ws: Team }) {
   const [prefs, setPrefs] = useState(ws.preferences);
   const [deleting, setDeleting] = useState(false);
   const hosted = useHosted();
+  // Only owners and admins save. Everyone else sees the values.
+  const admin = isTeamAdmin(roleIn(s, ws.id));
   const dirty =
     name !== ws.name ||
     description !== ws.description ||
@@ -139,12 +144,15 @@ function TeamSettings({ ws }: { ws: Team }) {
           </Button>
         </div>
       </Panel>
-      <RequestLogsPanel ws={ws} />
-      <AnalyticsPanel
-        key={`${ws.analyticsMonths}:${s.observabilitySettings.retention.analyticsMonths}`}
-        ws={ws}
-        installation={s.observabilitySettings.retention.analyticsMonths}
-      />
+      <RequestLogsPanel ws={ws} admin={admin} />
+      {ws.analyticsMonthsLimit ? (
+        <AnalyticsPanel
+          key={`${ws.analyticsMonths}:${ws.analyticsMonthsLimit}`}
+          ws={ws}
+          installation={ws.analyticsMonthsLimit}
+          admin={admin}
+        />
+      ) : null}
       {hosted ? (
         <Panel title="Agents">
           <div className="p-4">
@@ -213,23 +221,26 @@ function TeamSettings({ ws }: { ws: Team }) {
 }
 
 const SIZES = [500, 1024, 2048, 5120, 10240];
-const DAYS = [1, 3, 7, 14, 31];
 const sizeLabel = (mb: number) => (mb < 1024 ? `${mb} MB` : `${mb / 1024} GB`);
 
+/** Shown to members who can't change a panel's settings. */
+const READ_ONLY = "An owner or admin can change this.";
+
 /** How much of its requests each of the team's clusters keeps. */
-function RequestLogsPanel({ ws }: { ws: Team }) {
+function RequestLogsPanel({ ws, admin }: { ws: Team; admin: boolean }) {
   const saved = ws.preferences.requestLogs ?? { maxMb: 1024, maxDays: 7 };
   const [limits, setLimits] = useState(saved);
   const dirty =
     limits.maxMb !== saved.maxMb || limits.maxDays !== saved.maxDays;
   return (
-    <Panel title="Logs">
+    <Panel title="Logs" description={admin ? undefined : READ_ONLY}>
       <div className="grid gap-4 p-4 sm:grid-cols-2">
         <Field label="Size" hint="Kept on your servers, per cluster.">
           {(p) => (
             <Select
               {...p}
               value={String(limits.maxMb)}
+              disabled={!admin}
               onChange={(e) =>
                 setLimits({ ...limits, maxMb: Number(e.target.value) })
               }
@@ -249,11 +260,12 @@ function RequestLogsPanel({ ws }: { ws: Team }) {
             <Select
               {...p}
               value={String(limits.maxDays)}
+              disabled={!admin}
               onChange={(e) =>
                 setLimits({ ...limits, maxDays: Number(e.target.value) })
               }
             >
-              {[...new Set([...DAYS, saved.maxDays])]
+              {[...new Set([...REQUEST_LOG_DAYS, saved.maxDays])]
                 .sort((a, b) => a - b)
                 .map((d) => (
                   <option key={d} value={d}>
@@ -264,20 +276,22 @@ function RequestLogsPanel({ ws }: { ws: Team }) {
           )}
         </Field>
       </div>
-      <div className="flex justify-end border-t border-border px-4 py-3">
-        <Button
-          size="sm"
-          disabled={!dirty}
-          onClick={async () => {
-            const res = await api.updateTeam(ws.id, {
-              preferences: { ...ws.preferences, requestLogs: limits },
-            });
-            if (res) toast({ title: "Logs saved" });
-          }}
-        >
-          Save changes
-        </Button>
-      </div>
+      {admin ? (
+        <div className="flex justify-end border-t border-border px-4 py-3">
+          <Button
+            size="sm"
+            disabled={!dirty}
+            onClick={async () => {
+              const res = await api.updateTeam(ws.id, {
+                preferences: { ...ws.preferences, requestLogs: limits },
+              });
+              if (res) toast({ title: "Logs saved" });
+            }}
+          >
+            Save changes
+          </Button>
+        </div>
+      ) : null}
     </Panel>
   );
 }
@@ -289,9 +303,11 @@ const ANALYTICS_MONTHS = [3, 6, 12];
 function AnalyticsPanel({
   ws,
   installation,
+  admin,
 }: {
   ws: Team;
   installation: number;
+  admin: boolean;
 }) {
   const saved = Math.min(ws.analyticsMonths ?? installation, installation);
   const [months, setMonths] = useState(saved);
@@ -300,13 +316,14 @@ function AnalyticsPanel({
     installation,
   ];
   return (
-    <Panel title="Analytics">
+    <Panel title="Analytics" description={admin ? undefined : READ_ONLY}>
       <div className="grid gap-4 p-4 sm:grid-cols-2">
         <Field label="Kept for" hint="Older analytics go each night.">
           {(p) => (
             <Select
               {...p}
               value={String(months)}
+              disabled={!admin}
               onChange={(e) => setMonths(Number(e.target.value))}
             >
               {choices.map((m) => (
@@ -318,20 +335,22 @@ function AnalyticsPanel({
           )}
         </Field>
       </div>
-      <div className="flex justify-end border-t border-border px-4 py-3">
-        <Button
-          size="sm"
-          disabled={months === saved}
-          onClick={async () => {
-            const res = await api.updateTeam(ws.id, {
-              analyticsMonths: months === installation ? null : months,
-            });
-            if (res) toast({ title: "Analytics saved" });
-          }}
-        >
-          Save changes
-        </Button>
-      </div>
+      {admin ? (
+        <div className="flex justify-end border-t border-border px-4 py-3">
+          <Button
+            size="sm"
+            disabled={months === saved}
+            onClick={async () => {
+              const res = await api.updateTeam(ws.id, {
+                analyticsMonths: months === installation ? null : months,
+              });
+              if (res) toast({ title: "Analytics saved" });
+            }}
+          >
+            Save changes
+          </Button>
+        </div>
+      ) : null}
     </Panel>
   );
 }

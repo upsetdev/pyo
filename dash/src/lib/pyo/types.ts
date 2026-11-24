@@ -31,6 +31,8 @@ export type Team = {
   agentUpdates?: "auto" | "manual";
   /** Analytics kept shorter than the installation does (3, 6 or 12 months). Null: as long as the installation. */
   analyticsMonths?: number | null;
+  /** The longest the team may keep its analytics, in months (the installation's). */
+  analyticsMonthsLimit?: number;
   /** Members must use two-factor authentication to open the team. */
   requireTwoFactor?: boolean;
   /** What the audit log keeps of addresses. */

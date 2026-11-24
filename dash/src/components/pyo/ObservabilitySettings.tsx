@@ -4,6 +4,7 @@ import { Field, optionClass, Select, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
+import { REQUEST_LOG_MAX_DAYS } from "~/lib/pyo/requestLogs";
 import type { IpMode, Retention } from "~/lib/pyo/types";
 
 // Observability on or off (installation-wide; a new install on a small
@@ -13,7 +14,7 @@ import type { IpMode, Retention } from "~/lib/pyo/types";
 // Countries, cities and unique visitors work in every mode: they're worked
 // out when each request comes in, then the address is dropped or kept.
 
-const MODES: { value: IpMode; label: string; hint: string }[] = [
+export const MODES: { value: IpMode; label: string; hint: string }[] = [
   {
     value: "none",
     label: "Don't store IP addresses",
@@ -27,14 +28,17 @@ const MODES: { value: IpMode; label: string; hint: string }[] = [
   {
     value: "full",
     label: "Store full IP addresses",
-    hint: "Kept for 180 days. May need consent under laws like GDPR.",
+    // Addresses stay with the requests on each cluster, never longer.
+    hint: `Kept with each team's request logs, up to ${REQUEST_LOG_MAX_DAYS} days. May need consent under laws like GDPR.`,
   },
 ];
 
 export function ObservabilitySettingsSection() {
   const s = usePyo();
-  const { ipMode: current, enabled, small } = s.observabilitySettings;
+  const { ipMode: current, enabled, small, retention } = s.observabilitySettings;
   const admin = !!s.user.isAdmin;
+  // Only the installation's admins get these, and only they open this page.
+  if (!current || !retention) return null;
   // The server's memory now, against the setting: a hint, never a change.
   const hint =
     small === true && enabled
@@ -94,8 +98,8 @@ export function ObservabilitySettingsSection() {
         </div>
       </Panel>
       <RetentionPanel
-        key={JSON.stringify(s.observabilitySettings.retention)}
-        saved={s.observabilitySettings.retention}
+        key={JSON.stringify(retention)}
+        saved={retention}
         admin={admin}
         note={note}
       />

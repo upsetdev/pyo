@@ -199,7 +199,7 @@ pub async fn resize(
 }
 
 /// "5Gi", "5368709120", "5G": in GiB.
-fn gib_of(q: &str) -> Option<f64> {
+pub(crate) fn gib_of(q: &str) -> Option<f64> {
     let q = q.trim();
     let split = q.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(q.len());
     let (n, unit) = q.split_at(split);

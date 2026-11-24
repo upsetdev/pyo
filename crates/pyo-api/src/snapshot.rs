@@ -88,14 +88,11 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     };
     // Tailscale (Integrations › Tailscale): the client only for admins.
     let tailscale = crate::tailscale::snapshot(db, user.is_admin).await?;
-    // `small`: the server Pyo runs on has under 3.5 GB of memory now (the
-    // dashboard suggests turning observability off, or on when it isn't).
-    let observability_settings = json!({
-        "ipMode": crate::observability::ip_mode(db).await?,
-        "enabled": crate::observability::setting(db).await?,
-        "retention": crate::retention::load(db).await?,
-        "small": pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
-    });
+    // Observability: all of it for the installation's admin, only whether
+    // it's on for everyone else. Each team gets the analytics limit it picks
+    // within (below).
+    let observability_settings = crate::observability::settings_for(db, user.is_admin).await?;
+    let analytics_months_limit = crate::retention::load(db).await?.analytics_months;
 
     // The teams' rows through one transaction lowered to the teams the
     // user (or the API key) may see (rls.rs): a query here that forgot its
@@ -116,6 +113,10 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         &team_ids,
     )
     .await?;
+    // The longest a team may keep its analytics (the installation's).
+    for t in &mut teams {
+        t["analyticsMonthsLimit"] = json!(analytics_months_limit);
+    }
 
     let members = values(
         &mut *db,
@@ -591,7 +592,8 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "cloudflare": cloudflare,
         "agentApiUrl": agent_api_url,
         // Whether email goes out; the settings themselves only for admins.
-        // What analytics keeps of visitors' IPs (installation-wide).
+        // Observability: whether it's on, the rest for the installation's
+        // admin only.
         "observabilitySettings": observability_settings,
         // Two-factor for everyone, and how long the audit log is kept: the
         // installation's admin only.

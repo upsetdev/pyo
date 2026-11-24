@@ -503,6 +503,42 @@ pub async fn setting(db: &PgPool) -> ApiResult<bool> {
     Ok(v.and_then(|v| v["enabled"].as_bool()).unwrap_or(true))
 }
 
+/// The installation's observability settings as one person may read them.
+/// Its admin gets them all: on or off, `ipMode`, `retention` and `small`
+/// (Pyo's server has under 3.5 GB of memory now). Everyone else only
+/// whether it's on. The rest is the installation's (on Pyo Cloud, the
+/// operator's), and the limit a team picks within comes with each team
+/// (`analyticsMonthsLimit` in the snapshot).
+pub async fn settings_for(db: &PgPool, admin: bool) -> ApiResult<serde_json::Value> {
+    let enabled = setting(db).await?;
+    if !admin {
+        return Ok(visible_settings(false, enabled, None));
+    }
+    let rest = (
+        ip_mode(db).await?,
+        crate::retention::load(db).await?,
+        pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
+    );
+    Ok(visible_settings(true, enabled, Some(rest)))
+}
+
+/// `settings_for`'s answer: the installation's details only for its admin.
+fn visible_settings(
+    admin: bool,
+    enabled: bool,
+    rest: Option<(IpMode, crate::retention::Retention, Option<bool>)>,
+) -> serde_json::Value {
+    match rest {
+        Some((ip_mode, retention, small)) if admin => serde_json::json!({
+            "enabled": enabled,
+            "ipMode": ip_mode,
+            "retention": retention,
+            "small": small,
+        }),
+        _ => serde_json::json!({ "enabled": enabled }),
+    }
+}
+
 /// A fresh install's observability: off on a small server (under
 /// 3.5 GB of memory, as the installers count it), else on. Saved once, with
 /// the first admin. Later it's the admin's: a server given more memory gets
@@ -1422,6 +1458,20 @@ mod tests {
         );
         assert_eq!(IpMode::Full.apply("203.0.113.7"), "203.0.113.7");
         assert_eq!(IpMode::Full.apply("not-an-ip"), "");
+    }
+
+    #[test]
+    fn only_the_installation_admin_reads_its_observability_settings() {
+        use serde_json::json;
+        let retention = crate::retention::Retention::default();
+        let rest = Some((IpMode::Full, retention, Some(false)));
+        let admin = super::visible_settings(true, true, rest);
+        assert_eq!(admin["ipMode"], "full");
+        assert_eq!(admin["retention"]["analyticsMonths"], 12);
+        assert_eq!(admin["small"], false);
+        // Everyone else: whether it's on, nothing of the installation's.
+        assert_eq!(super::visible_settings(false, true, rest), json!({ "enabled": true }));
+        assert_eq!(super::visible_settings(false, false, None), json!({ "enabled": false }));
     }
 
     #[test]

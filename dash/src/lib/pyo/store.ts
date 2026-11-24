@@ -150,13 +150,15 @@ export type PyoState = {
   securitySettings: SecuritySettings | null;
   /** Where admins may sign in from; null unless you're the installation's admin. */
   adminSignIn: AdminSignIn | null;
-  /** Installation-wide analytics settings. */
-  /** Installation-wide. `small`: Pyo's server has under 3.5 GB of memory now. */
+  /**
+   * Installation-wide. Whether it's on for everyone, the rest only for the
+   * installation's admin. `small`: Pyo's server has under 3.5 GB of memory now.
+   */
   observabilitySettings: {
-    ipMode: IpMode;
     enabled: boolean;
-    small: boolean | null;
-    retention: Retention;
+    ipMode?: IpMode;
+    small?: boolean | null;
+    retention?: Retention;
   };
   /** Uploaded TLS certificates of the user's teams. */
   certificates: Certificate[];
@@ -355,12 +357,7 @@ function empty(): PyoState {
     registryLogins: [],
     securitySettings: null,
     adminSignIn: null,
-    observabilitySettings: {
-      ipMode: "none",
-      enabled: true,
-      small: null,
-      retention: { analyticsMonths: 12, metricsDays: 30, buildLogDays: 90 },
-    },
+    observabilitySettings: { enabled: true },
     builders: [],
     tailscale: null,
     cloudConnections: [],
@@ -756,6 +753,8 @@ export function tunnelZoneFor(s: PyoState, hostname: string, c?: Cluster) {
 /** Your role in a team. */
 export const roleIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.find((m) => m.teamId === wsId && m.email === s.user.email)?.role;
+/** Owners and admins: they change the team's settings. Others see them read only. */
+export const isTeamAdmin = (role?: string) => role === "owner" || role === "admin";
 export const membersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.filter((m) => m.teamId === wsId);
 
@@ -1038,6 +1037,8 @@ export const api = {
           autoDeployOnPush: true,
           retainDeployments: 20,
         },
+        // The installation's, the same for every team.
+        analyticsMonthsLimit: s.teams[0]?.analyticsMonthsLimit,
       });
       s.members.push({
         id: newId("mem"),
