@@ -134,6 +134,63 @@ pub(crate) mod tests {
         db
     }
 
+    /// Against a throwaway Postgres: the request log's and analytics'
+    /// filters find a team's hosts by a service's id or name and a
+    /// domain's id or hostname (a tunnel domain too), and refuse a value
+    /// that names nothing of the team's instead of finding no requests.
+    #[test]
+    #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+    fn request_filters_find_a_services_hosts() {
+        run_big(async {
+            let db = db().await;
+            let run = crate::ids::random_string(8).to_lowercase();
+            let id = |p: &str| format!("{p}_flt{run}");
+            let (team, cluster, project) = (id("team"), id("cl"), id("prj"));
+            let q = |sql: &'static str| sqlx::query(sql);
+            q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&team).execute(&db).await.unwrap();
+            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at, traffic) VALUES ($1, $2, $1, $1, 'connected', now(), 'tunnel')").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+            q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)").bind(&project).bind(&team).execute(&db).await.unwrap();
+            let (shop, blog, api) = (format!("shop-{run}.example.com"), format!("blog-{run}.example.com"), format!("api-{run}.example.com"));
+            for (svc, name, domains) in [
+                (id("svc"), "web", json!([{ "id": "dom_1", "hostname": shop, "tunnel": "on", "status": "active" }, { "id": "dom_2", "hostname": blog.to_uppercase() }])),
+                (format!("svc_api{run}"), "api", json!([{ "id": "dom_3", "hostname": api }])),
+                (format!("svc_wrk{run}"), "worker", json!(null)),
+            ] {
+                q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, $5, jsonb_build_object('domains', $6::jsonb), 'running')")
+                    .bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(name).bind(&domains).execute(&db).await.unwrap();
+            }
+            let hosts = |project: Option<&str>, site: Option<&str>, service: Option<&str>| {
+                let (db, team) = (db.clone(), team.clone());
+                let (project, site, service) = (project.map(str::to_owned), site.map(str::to_owned), service.map(str::to_owned));
+                async move {
+                    let mut c = db.acquire().await.unwrap();
+                    crate::ops::hosts_of(&mut c, &team, project, site, service).await.map(|mut h| {
+                        h.sort();
+                        h
+                    })
+                }
+            };
+            let web = { let mut w = vec![blog.clone(), shop.clone()]; w.sort(); w };
+            // A service by its id or its name.
+            assert_eq!(hosts(None, None, Some(&id("svc"))).await.unwrap(), web);
+            assert_eq!(hosts(None, None, Some("web")).await.unwrap(), web);
+            assert_eq!(hosts(Some(&project), None, Some(&id("svc"))).await.unwrap(), web);
+            // A domain by its id or hostname, any case.
+            assert_eq!(hosts(None, Some("dom_1"), None).await.unwrap(), std::slice::from_ref(&shop));
+            assert_eq!(hosts(None, Some(&shop.to_uppercase()), None).await.unwrap(), std::slice::from_ref(&shop));
+            assert_eq!(hosts(None, Some("dom_1"), Some(&id("svc"))).await.unwrap(), std::slice::from_ref(&shop));
+            // Everything, and "all".
+            assert_eq!(hosts(None, Some("all"), Some("")).await.unwrap().len(), 3);
+            // A service with no domains has none.
+            assert!(hosts(None, None, Some("worker")).await.unwrap().is_empty());
+            // What names nothing of the team's is refused.
+            assert_eq!(hosts(None, None, Some("svc_gone")).await.unwrap_err().message, "Service not found.");
+            assert_eq!(hosts(None, Some("dom_gone"), None).await.unwrap_err().message, "Domain not found.");
+            assert_eq!(hosts(Some("prj_gone"), None, None).await.unwrap_err().message, "Project not found.");
+            q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
+        });
+    }
+
     /// Against a throwaway Postgres: every table with a team_id has row
     /// security, or is one of [`NOT_COVERED`].
     #[test]
