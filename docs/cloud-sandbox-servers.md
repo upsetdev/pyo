@@ -1,6 +1,6 @@
 # Sandbox servers on Pyo Cloud
 
-Design for 0.51.1. Status: approved 2026-11-24. Stage 1 (the API) and stage 2 (the daemon) are built. Stages 3 (sandbox.sh and the dashboard) and 4 (Pyo Cloud's signer, then end to end on staging) are next. The chosen approach is (b): the sandbox server calls out to Pyo Cloud.
+Design for 0.51.1. Status: approved 2026-11-24. Stages 1 to 3 (the API, the daemon, sandbox.sh and the dashboard) are built. Stage 4 (Pyo Cloud's signer, then end to end on staging) is next. The chosen approach is (b): the sandbox server calls out to Pyo Cloud.
 
 ## Goal
 
@@ -133,7 +133,7 @@ Self-hosted keeps today's flow. This is only for a multi-tenant Pyo (`hosted()`)
 
 1. **API** (built): join codes, the join, the server's keys, the command queue and long poll, results, reports, Reset access, tests.
 2. **Daemon** (built): the outbound client and its HTTPS listener. In the API, a `Daemon` that queues instead of calling for outbound servers, so placement, templates, edge certificates and exec work over the channel.
-3. **sandbox.sh and the dashboard**, with the docs.
+3. **sandbox.sh and the dashboard** (built), with the docs.
 4. **Pyo Cloud's signer**, then end to end on staging.
 
 ### What stage 1 settled
@@ -183,11 +183,12 @@ Self-hosted keeps today's flow. This is only for a multi-tenant Pyo (`hosted()`)
 - Takes the flags above. `--pyo-url` instead of `--pyo` means the outbound mode.
 - Joins the tailnet with the key (`tag:pyo`, hostname = the name), gets the certificate for its tailnet name with `tailscale cert` and sets a renewal timer, installs the daemon.
 - Hands the code and the command key to the daemon in a root-only file, never in its arguments.
-- What the daemon takes (built in stage 2):
-  - The join file, `/etc/pyo-sandbox/join.json`, root only (0600): `{"pyoUrl", "serverId", "code", "commandKey", "jailUid", "jailGid"}`, from `--pyo-url`, `--server`, `--code`, `--command-key` and the `pyo-sandbox` user. The join removes it once it worked.
-  - `pyo-sandbox join --config /etc/pyo-sandbox/config.json --join /etc/pyo-sandbox/join.json --capability <detect's report>`. It reads `tailscale status --json` (another binary with `PYO_SANDBOX_TAILSCALE`), prints "Waiting for your tailnet to list this server…" while Pyo answers 409, and "Joined Pyo as <id>." at the end. It exits 1 with "Pyo refused this server. <why>" on a refusal, and when the code runs out. Run it after `local.json` is written: the key goes in the pool that names.
-  - The certificate for the tailnet name in `/etc/pyo-sandbox/tailnet/cert.pem` and `key.pem` (`tailscale cert --cert-file … --key-file … <name>`). The daemon reads them again within 30 seconds of a change, so the renewal timer needs no restart. `tailnetHttps` in `local.json` (`{listen, cert, key}`) changes the defaults.
-  - Then `pyo-sandbox serve`, as today. It listens on `<tailnet IP>:7070` as before and on `<tailnet IP>:7443` with HTTPS.
+- The daemon's side of this handoff is below, under "What stage 3 settled". Beyond that, the daemon:
+  - Prints "Waiting for your tailnet to list this server…" on stdout while Pyo answers 409, and "Joined Pyo as <id>." once it's done.
+  - Keeps its key in the pool `local.json` names (`/var/lib/pyo-sandbox` by default).
+  - Reads `tailscale status --json` for the address and names when the join file has none. It takes `commandKey` for `commandKeys` too.
+  - Takes `tailnetHttps` (`{listen, cert, key}`) in `local.json` in place of the defaults: `<tailnet IP>:7443` and the config's folder plus `tailnet/`.
+  - Keeps listening on `<tailnet IP>:7070` as before.
 
 What stage 3 settled, for the daemon's side (stage 2):
 
@@ -219,11 +220,6 @@ Wire types are pyo-proto `sandbox::outbound`. Paths are under `<url>/api/sandbox
 6. **Report** `POST /report` with the `ServerReport` every 15 seconds.
 7. **401** with "This server's key is unknown, expired or revoked…": stop polling and reporting, keep the sandboxes, and log that it needs a new join command. Other failures: back off from 1 to 30 seconds.
 8. **HTTPS** on `<tailnetName>:7443` with the `tailscale cert` certificate (reloaded when it changes), the same API and pages as :7070, CORS and Private Network Access for the dashboard's origin.
-
-### The dashboard (stage 3)
-
-- For a server with `outbound`, the terminal, files and desktop use the sandbox's `connection.url` and `webUrl` (`https://<tailnetName>:7443`) as they use the plain URL today. Off the tailnet that address doesn't answer: show "Opens on your tailnet."
-- API and MCP exec, `read_file` and `write_file` work from anywhere, through the channel, within the limits in "What stage 2 settled".
 
 ### Pyo Cloud (stage 4)
 
