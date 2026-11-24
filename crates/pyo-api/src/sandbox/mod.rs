@@ -331,7 +331,8 @@ pub async fn sandbox_views_matching<'e, E: sqlx::PgExecutor<'e>>(
             'labels', coalesce(x.spec->'labels', '{}'),
             'pauseWhenIdleSecs', x.spec->'pauseWhenIdleSecs',
             'env', (SELECT coalesce(jsonb_agg(k ORDER BY k), '[]') FROM jsonb_object_keys(coalesce(x.spec->'env', '{}')) k),
-            'url', sv.address, 'edgeUrl', sv.capability->>'edgeUrl', 'ports', x.ports,
+            'url', sv.address, 'tailnetUrl', CASE WHEN sv.outbound THEN sv.tailnet_name END,
+            'edgeUrl', sv.capability->>'edgeUrl', 'ports', x.ports,
             'error', x.error, 'createdBy', x.created_by,
             'createdAt', pyo.ms(x.created_at), 'startedAt', pyo.ms(x.started_at),
             'expiresAt', pyo.ms(x.expires_at), 'pausedAt', pyo.ms(x.paused_at), 'endedAt', pyo.ms(x.ended_at))
@@ -366,13 +367,18 @@ pub async fn sandbox_views_matching<'e, E: sqlx::PgExecutor<'e>>(
                 )
             });
         }
-        // The server's tailnet address as its daemon's URL, and each open
+        // The server's tailnet address as its daemon's URL (HTTPS on its
+        // tailnet name for one that joined over HTTPS), and each open
         // port's URL on its edge proxy.
         for r in &mut rows {
-            r["url"] = match r["url"].as_str() {
-                Some(a) => json!(daemon::base_url(a)),
-                None => Value::Null,
+            r["url"] = match (r["tailnetUrl"].as_str(), r["url"].as_str()) {
+                (Some(name), _) => json!(outbound::tailnet_url(name)),
+                (None, Some(a)) => json!(daemon::base_url(a)),
+                (None, None) => Value::Null,
             };
+            if let Some(o) = r.as_object_mut() {
+                o.remove("tailnetUrl");
+            }
             let edge = proto::CapabilityReport {
                 edge_url: r["edgeUrl"].as_str().map(str::to_owned),
                 ..Default::default()
@@ -813,6 +819,24 @@ async fn connection(
 ) -> ApiResult<Connection> {
     let key = keys::signing_key(&s.db, &s.sealer).await?;
     let t = keys::client_token(&key, sandbox, team, server);
+    // A server that joined over HTTPS (Pyo Cloud's) answers browsers and
+    // SDKs on its own tailnet name, pages included.
+    let name: Option<String> = sqlx::query_scalar(
+        "SELECT tailnet_name FROM pyo.sandbox_servers WHERE id = $1 AND outbound",
+    )
+    .bind(server)
+    .fetch_optional(&s.db)
+    .await?
+    .flatten();
+    if let Some(url) = name.as_deref().map(outbound::tailnet_url) {
+        return Ok(Connection {
+            url: url.clone(),
+            sandbox_id: sandbox.to_owned(),
+            token: t.token,
+            expires_at: t.expires_at,
+            web_url: Some(url),
+        });
+    }
     Ok(Connection {
         url: daemon::base_url(address),
         sandbox_id: sandbox.to_owned(),
@@ -1332,8 +1356,9 @@ fn edge_domain(d: Option<&str>) -> ApiResult<Option<String>> {
     Ok(Some(d))
 }
 
-/// Why a hosted Pyo takes no sandbox servers.
-pub const NOT_ON_CLOUD: &str = "Sandbox servers aren't available on Pyo Cloud yet.";
+/// Why a hosted Pyo takes no sandbox servers at its door: they join over
+/// HTTPS there (outbound.rs).
+pub const NOT_ON_CLOUD: &str = "Pyo Cloud adds sandbox servers with createSandboxJoinCode.";
 
 /// A new sandbox server joins at Pyo's tailnet door (join.rs). A hosted Pyo
 /// that isn't on a tailnet (Pyo Cloud, which is on no team's) has no door,
@@ -1857,6 +1882,7 @@ mod tests {
         let e = hosted_door(true, "", None).unwrap_err();
         assert_eq!(e.status, StatusCode::CONFLICT);
         assert_eq!(e.message, NOT_ON_CLOUD);
+        assert!(e.message.contains("createSandboxJoinCode"));
         assert!(!e.message.contains("Tailscale"));
         assert!(hosted_door(true, "100.64.0.9:5006", None).is_err());
         assert!(hosted_door(true, "", api).is_err());
