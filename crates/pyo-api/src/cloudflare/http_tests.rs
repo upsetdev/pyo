@@ -22,6 +22,14 @@ const ACCOUNT: &str = "699d98642c564d2e855e9661899b7252";
 /// `PYO_DEV_CLOUDFLARE_API` is one for the whole process.
 static FAKE_API: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The tests here that store a Cloudflare token seal it with the vault,
+/// so their run needs PYO_SECRET_KEY. From the run's environment, never set
+/// here: the vault is the process's, made by whichever test starts first,
+/// so a key set by one test would count only when that test came first.
+fn secret_key() {
+    std::env::var("PYO_SECRET_KEY").expect("PYO_SECRET_KEY: these tests seal a token with the vault");
+}
+
 async fn fake() -> (FakeCf, Http) {
     let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
     let http = Http::at(TOKEN, &cf.base);
@@ -170,17 +178,15 @@ async fn commands(db: &sqlx::PgPool, cluster: &str) -> Vec<String> {
 /// record moved, goes back with the record it replaced, a deleted
 /// service's record is cleaned up, and the tunnel is taken apart.
 #[test]
-#[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
 fn the_tunnel_loop_end_to_end() {
+    secret_key();
     run_big(async {
         let _one = FAKE_API.lock().await;
         let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
-        // SAFETY: set before anything here reads them; this test owns its runtime.
+        // SAFETY: set while FAKE_API is held; nothing else here reads it yet.
         unsafe {
             std::env::set_var("PYO_DEV_CLOUDFLARE_API", &cf.base);
-            if std::env::var("PYO_SECRET_KEY").is_err() {
-                std::env::set_var("PYO_SECRET_KEY", "11".repeat(32));
-            }
         }
         let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
             .await
@@ -349,17 +355,15 @@ fn the_tunnel_loop_end_to_end() {
 /// values, and `removeDomain` takes a domain off with Pyo's record, without
 /// a whole-service save from the client.
 #[test]
-#[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
 fn hidden_values_are_kept_and_domains_come_off() {
+    secret_key();
     run_big(async {
         let _one = FAKE_API.lock().await;
         let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
-        // SAFETY: set while FAKE_API is held; nothing else here reads them yet.
+        // SAFETY: set while FAKE_API is held; nothing else here reads it yet.
         unsafe {
             std::env::set_var("PYO_DEV_CLOUDFLARE_API", &cf.base);
-            if std::env::var("PYO_SECRET_KEY").is_err() {
-                std::env::set_var("PYO_SECRET_KEY", "11".repeat(32));
-            }
         }
         let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
             .await
@@ -478,17 +482,15 @@ fn hidden_values_are_kept_and_domains_come_off() {
 /// gone, and only Pyo's own: one made by hand, for another team or by
 /// another installation stays.
 #[test]
-#[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
 fn proof_records_pyo_made_are_cleaned_up() {
+    secret_key();
     run_big(async {
         let _one = FAKE_API.lock().await;
         let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
-        // SAFETY: set while FAKE_API is held; nothing else here reads them yet.
+        // SAFETY: set while FAKE_API is held; nothing else here reads it yet.
         unsafe {
             std::env::set_var("PYO_DEV_CLOUDFLARE_API", &cf.base);
-            if std::env::var("PYO_SECRET_KEY").is_err() {
-                std::env::set_var("PYO_SECRET_KEY", "11".repeat(32));
-            }
         }
         let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
             .await
