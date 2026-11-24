@@ -6417,6 +6417,11 @@ async fn apply(
                 .execute(&mut **tx)
                 .await?;
             crate::cloudflare::forget_removed(tx, &id, &spec).await?;
+            // Proof records Pyo made for domains it no longer has.
+            if crate::verify_domains() {
+                let gone = crate::cloudflare::removed_hosts(&old_spec, &spec);
+                crate::cloudflare::proofs_after_removal(tx, &team_id, &gone).await?;
+            }
             // A new placement goes live now; with a deploy, it goes out with it.
             if placement_changed {
                 if deployment_id.is_none()
@@ -6500,6 +6505,15 @@ async fn apply(
             .bind(&id)
             .fetch_one(&mut **tx)
             .await?;
+            // Proof records Pyo made for its domains.
+            if crate::verify_domains() {
+                let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+                    .bind(&id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                let gone = crate::cloudflare::removed_hosts(&spec, &json!({}));
+                crate::cloudflare::proofs_after_removal(tx, &team_id, &gone).await?;
+            }
             // Its repository's webhook goes when no other service follows it.
             crate::git::queue_sync_for(tx, &[&source]).await?;
             // Its previews go with it (or, for a preview's copy, its preview).

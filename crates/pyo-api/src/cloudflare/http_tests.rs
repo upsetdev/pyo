@@ -472,3 +472,84 @@ fn hidden_values_are_kept_and_domains_come_off() {
         q("DELETE FROM pyo.users WHERE id = $1").bind(&usr).execute(&db).await.unwrap();
     });
 }
+
+/// Against a throwaway Postgres and the fake Cloudflare: the domain proof
+/// records Pyo writes go once it's done with them, or once the domain is
+/// gone, and only Pyo's own: one made by hand, for another team or by
+/// another installation stays.
+#[test]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+fn proof_records_pyo_made_are_cleaned_up() {
+    run_big(async {
+        let _one = FAKE_API.lock().await;
+        let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
+        // SAFETY: set while FAKE_API is held; nothing else here reads them yet.
+        unsafe {
+            std::env::set_var("PYO_DEV_CLOUDFLARE_API", &cf.base);
+            if std::env::var("PYO_SECRET_KEY").is_err() {
+                std::env::set_var("PYO_SECRET_KEY", "11".repeat(32));
+            }
+        }
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(db.clone(), crate::vault::Provider::from_env()));
+        let s = crate::rls::tests::state(db.clone());
+        let run = crate::ids::random_string(8).to_lowercase();
+        let id = |p: &str| format!("{p}_prf{run}");
+        let (team, cluster, project) = (id("team"), id("cl"), id("prj"));
+        let host = format!("shop-{run}.example.com");
+        let name = crate::domainproof::record(&host);
+        let value = crate::domainproof::token(&team, &host);
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&team).execute(&db).await.unwrap();
+        let zones = json!([{ "id": ZONE, "name": "example.com", "canEdit": true, "accountId": ACCOUNT, "accountName": "Acme", "tunnel": { "ready": true } }]);
+        let sealed = crate::vault::get().seal_credential(&team, TOKEN).await.unwrap();
+        q("INSERT INTO pyo.cloudflare_accounts (team_id, token_sealed, zones) VALUES ($1, $2, $3)").bind(&team).bind(&sealed).bind(&zones).execute(&db).await.unwrap();
+        let proofs = || -> Vec<Value> { cf.records(ZONE).into_iter().filter(|r| r["name"] == json!(name)).collect() };
+        let write = |db: sqlx::PgPool, team: String, host: String| async move {
+            let mut tx = db.begin().await.unwrap();
+            assert!(write_proof(&mut tx, &team, &host).await.unwrap());
+            tx.commit().await.unwrap();
+        };
+
+        // Written by Pyo, with its comment and the team's token.
+        write(db.clone(), team.clone(), host.clone()).await;
+        let mut tx = db.begin().await.unwrap();
+        let mark = marker(&install_id(&mut tx).await.unwrap());
+        tx.commit().await.unwrap();
+        let p = proofs();
+        assert_eq!(p.len(), 1);
+        assert_eq!((p[0]["comment"].as_str(), p[0]["content"].as_str()), (Some(mark.as_str()), Some(format!("\"{value}\"").as_str())));
+
+        // The domain removed: the job deletes it.
+        let job = json!({ "teamId": team, "hosts": [host] });
+        proofs_job(&s, &job).await.unwrap();
+        assert!(proofs().is_empty());
+        // Not while the team uses the domain again.
+        write(db.clone(), team.clone(), host.clone()).await;
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status) VALUES ($1, $2, $1, $1, 'connected')").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)").bind(&project).bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', jsonb_build_object('domains', $5::jsonb), 'running')")
+            .bind(id("svc")).bind(&team).bind(&project).bind(&cluster).bind(json!([{ "id": "dom_1", "hostname": host }])).execute(&db).await.unwrap();
+        proofs_job(&s, &job).await.unwrap();
+        assert_eq!(proofs().len(), 1, "the team uses it again");
+
+        // Done with: only Pyo's own goes. By hand (no comment, or another
+        // installation's), and another team's, stay.
+        cf.put_record(ZONE, json!({ "id": "hand", "type": "TXT", "name": name, "content": value, "ttl": 1 }));
+        cf.put_record(ZONE, json!({ "id": "other-team", "type": "TXT", "name": name, "content": format!("\"{}\"", crate::domainproof::token("team_other", &host)), "ttl": 1, "comment": mark }));
+        cf.put_record(ZONE, json!({ "id": "other-install", "type": "TXT", "name": name, "content": value, "ttl": 1, "comment": "Made by Pyo (zzz999)" }));
+        let mut tx = db.begin().await.unwrap();
+        assert_eq!(remove_proof(&mut tx, &team, &host).await.unwrap(), 1);
+        tx.commit().await.unwrap();
+        let left: Vec<Value> = proofs().iter().map(|r| r["id"].clone()).collect();
+        assert_eq!(left, [json!("hand"), json!("other-team"), json!("other-install")]);
+        // Without a record of Pyo's, nothing to do.
+        let mut tx = db.begin().await.unwrap();
+        assert_eq!(remove_proof(&mut tx, &team, &host).await.unwrap(), 0);
+        tx.commit().await.unwrap();
+        q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
+    });
+}
