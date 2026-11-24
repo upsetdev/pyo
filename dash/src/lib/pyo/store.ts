@@ -2735,7 +2735,7 @@ export const api = {
           error: null,
         };
     });
-    return send<{ status: "switching" | "active" | "reverting" | "direct" }>(
+    return send<{ status: "switching" | "active" | "reverting" | "direct" | "conflict" }>(
       "setDomainTunnel",
       { serviceId, domainId, ...opts },
     );
