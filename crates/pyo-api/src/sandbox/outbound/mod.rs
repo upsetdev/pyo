@@ -67,7 +67,7 @@ pub const SELF_HOSTED: &str = "This Pyo adds sandbox servers with addSandboxServ
 /// Where a server that joined over HTTPS answers browsers and SDKs on the
 /// team's tailnet: HTTPS on its tailnet name, with the certificate its
 /// `tailscaled` gets (sandbox.sh).
-pub const TAILNET_PORT: u16 = 7443;
+pub const TAILNET_PORT: u16 = wire::TAILNET_PORT;
 
 /// That address for a server's tailnet name (`sbx-1.tail1234.ts.net`).
 pub fn tailnet_url(tailnet_name: &str) -> String {

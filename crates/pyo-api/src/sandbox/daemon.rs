@@ -42,15 +42,6 @@ pub fn base_url(address: &str) -> String {
     }
 }
 
-/// The daemon's HTTPS URL on its tailnet name, for an outbound server.
-pub fn tailnet_url(name: &str) -> String {
-    format!(
-        "https://{}:{}",
-        name.trim_end_matches('.'),
-        pyo_proto::sandbox::outbound::TAILNET_PORT
-    )
-}
-
 pub struct Daemon {
     pub base: String,
     /// The server's tailnet address, as Pyo keeps it.
@@ -475,6 +466,5 @@ mod tests {
             "http://[fd7a:115c:a1e0::1]:7070"
         );
         assert_eq!(base_url("127.0.0.1:9999"), "http://127.0.0.1:9999");
-        assert_eq!(tailnet_url("sbx-1.tail1234.ts.net."), "https://sbx-1.tail1234.ts.net:7443");
     }
 }
