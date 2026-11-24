@@ -119,7 +119,8 @@ export type Connection = {
   token: string;
   /** Milliseconds since 1970. */
   expiresAt: number;
-  /** Sandboxes' web pages over HTTPS on the tailnet, once Tailscale is set up. */
+  /** Sandboxes' web pages over HTTPS on the tailnet, once Tailscale is set
+   * up. A self-hosted Pyo's terminal and files go there too. */
   webUrl?: string;
 };
 
@@ -450,6 +451,12 @@ export function reachable(url: string): Promise<boolean> {
   return ok;
 }
 
+/** Where this page calls the daemon. A self-hosted Pyo's servers answer
+ * plain HTTP on their tailnet address, which a page on HTTPS can't call and
+ * its CSP doesn't list, so the calls go through Pyo's sandboxes name
+ * (`webUrl`), which passes them on. Pyo Cloud's answer on HTTPS already. */
+const daemonBase = (c: Connection) => (c.url.startsWith("http:") && c.webUrl ? c.webUrl : c.url);
+
 async function daemon<T>(
   id: string,
   path: string,
@@ -457,7 +464,7 @@ async function daemon<T>(
 ): Promise<T> {
   const c = await connectionFor(id);
   const q = new URLSearchParams(init.query ?? {});
-  const url = `${c.url}/v1/sandboxes/${enc(id)}${path}${q.size ? `?${q}` : ""}`;
+  const url = `${daemonBase(c)}/v1/sandboxes/${enc(id)}${path}${q.size ? `?${q}` : ""}`;
   let res: Response;
   try {
     res = await fetch(url, {
@@ -565,7 +572,7 @@ export const parseFrame = <T>(f: Frame): T =>
  */
 export async function connectSocket(id: string) {
   const c = await connectionFor(id);
-  const base = c.url.replace(/^http/, "ws");
+  const base = daemonBase(c).replace(/^http/, "ws");
   const ws = new WebSocket(`${base}/v1/sandboxes/${enc(id)}/connect`, [
     "pyo",
     `pyo.token.${c.token}`,
