@@ -1,7 +1,7 @@
 import { CheckCircleIcon, CircleNotchIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { useHosted } from "~/components/pyo/Managed";
-import { NeedsTailscale } from "~/components/pyo/Tailscale";
+import { NeedsTailscale, teamTailscale } from "~/components/pyo/Tailscale";
 import { TailnetLockWait } from "~/components/pyo/TailnetLock";
 import { AppLink } from "~/components/ui/AppLink";
 import { LiveCommand } from "~/components/pyo/LiveCommand";
@@ -11,6 +11,7 @@ import { Field, Input } from "~/components/ui/Field";
 import { Callout } from "~/components/ui/Panel";
 import { Tooltip } from "~/components/ui/Tooltip";
 import { DNS_LABEL } from "~/lib/pyo/format";
+import { addServerBlock } from "~/lib/pyo/sandboxTemplates";
 import {
   RUNTIME_LABEL,
   SANDBOX_STATE,
@@ -136,6 +137,12 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
     }
   };
 
+  // Wait for what decides the form: Pyo Cloud takes no sandbox servers yet.
+  if (hosted === undefined) return null;
+  const block = addServerBlock({ hosted, pyoTailnet: !!s.tailscale, teamTailscale: !!teamTailscale(s) });
+  if (block === "cloud")
+    return <p className="text-[13px] text-muted-foreground">Sandbox servers aren't available on Pyo Cloud yet.</p>;
+
   if (!canManage)
     return (
       <p className="text-[13px] text-muted-foreground">
@@ -235,23 +242,15 @@ export function AddSandboxServer({ onDone }: { onDone?: () => void }) {
               )}
             </Callout>
           ) : null}
-          {/* A hosted Pyo shows no NeedsTailscale above, so the reason the button is off goes here. */}
-          {hosted && !s.tailscale ? (
+          {/* The team has Tailscale, so NeedsTailscale above shows nothing: the reason the button is off goes here. */}
+          {block === "pyo" ? (
             <Callout tone="warning">
-              {s.user.isAdmin ? (
-                <>
-                  Set up{" "}
-                  <AppLink href="/integrations#tailscale" className="font-medium underline">
-                    Tailscale
-                  </AppLink>{" "}
-                  first.
-                </>
-              ) : (
-                "Tailscale isn't set up yet. Ask an installation admin."
-              )}
+              {s.user.isAdmin
+                ? "Pyo's own server isn't on Tailscale yet. Set up Tailscale in the team that runs Pyo."
+                : "Pyo's own server isn't on Tailscale yet. Ask an installation admin."}
             </Callout>
           ) : null}
-          <Button type="submit" size="sm" disabled={busy || !!nameError || !!edgeError || !s.tailscale}>
+          <Button type="submit" size="sm" disabled={busy || !!nameError || !!edgeError || !!block}>
             {busy ? "Preparing…" : "Get the command"}
           </Button>
         </form>

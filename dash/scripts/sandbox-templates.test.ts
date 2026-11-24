@@ -3,6 +3,7 @@
 // bun test scripts/sandbox-templates.test.ts
 import { expect, test } from "bun:test";
 import {
+  addServerBlock,
   defaultTemplate,
   desktopBlocked,
   desktopUrl,
@@ -202,4 +203,18 @@ test("the create button counts up over every step", () => {
   expect(overallPercent(b("unpacking", { unpacked: 0 }))).toBe(60);
   expect(overallPercent(b("snapshotting"))).toBe(90);
   expect(gettingReady("desktop", "sandbox-1", 42)).toBe("Getting desktop ready on sandbox-1… 42%");
+});
+
+test("adding a sandbox server: self-hosted and Pyo Cloud, with or without the team's Tailscale", () => {
+  const block = (hosted: boolean, pyoTailnet: boolean, teamTailscale: boolean) =>
+    addServerBlock({ hosted, pyoTailnet, teamTailscale });
+  // Self-hosted, on Pyo's tailnet: the team's own Tailscale or Pyo's.
+  expect(block(false, true, true)).toBe("");
+  expect(block(false, true, false)).toBe("");
+  // Self-hosted, Pyo's server off Tailscale.
+  expect(block(false, false, true)).toBe("pyo");
+  expect(block(false, false, false)).toBe("tailscale");
+  // Pyo Cloud: never "ask an installation admin", with or without the team's Tailscale.
+  expect(block(true, false, true)).toBe("cloud");
+  expect(block(true, false, false)).toBe("cloud");
 });
