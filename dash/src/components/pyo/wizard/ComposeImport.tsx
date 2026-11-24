@@ -23,6 +23,7 @@ import {
   type ComposePlan,
   type ComposeService,
 } from "~/lib/pyo/backend";
+import { fullImageRef, refLabel } from "~/lib/pyo/format";
 import { currentSlug } from "~/lib/pyo/paths";
 import { clustersIn, currentTeam, projectParams, refresh, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
@@ -359,12 +360,19 @@ function Preview({
                     onChange={(e) => edit(i, (s) => ({ ...s, name: e.target.value }))}
                     className="h-8 w-48 font-medium"
                   />
-                  <span className="min-w-0 truncate font-mono text-[12px] text-muted-foreground">
+                  <span
+                    className="min-w-0 truncate font-mono text-[12px] text-muted-foreground"
+                    title={
+                      svc.source.type === "git"
+                        ? undefined
+                        : fullImageRef(svc.source.image, svc.source.reference)
+                    }
+                  >
                     {svc.source.type === "git"
                       ? svc.source.repoUrl
                         ? `built from ${svc.source.buildContext || "the repository root"}`
                         : "built from source: needs its repository"
-                      : `${svc.source.image}:${svc.source.reference}`}
+                      : `${svc.source.image}${refLabel(svc.source.reference)}`}
                   </span>
                   {svc.replicas !== 1 ? <Badge tone="neutral">{svc.replicas} replicas</Badge> : null}
                 </div>

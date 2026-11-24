@@ -23,7 +23,7 @@ import {
   TRIGGER_LABEL,
   useDeploymentActions,
 } from "~/components/pyo/DeploymentsTable";
-import { imageLabel, SourceMark } from "~/components/pyo/ProjectCard";
+import { imageRefLabel, SourceMark } from "~/components/pyo/ProjectCard";
 import { uploadText } from "~/components/pyo/common";
 import {
   LogLines,
@@ -43,6 +43,7 @@ import {
   cpu,
   domainUrl,
   duration,
+  fullImageRef,
   mem,
   timeAgo,
 } from "~/lib/pyo/format";
@@ -201,10 +202,13 @@ function DeploymentPage() {
               "Deleted service"
             )}
           </h1>
-          <p className="mt-1 flex flex-wrap items-center gap-x-2 text-[13px] text-muted-foreground">
+          {/* One row from sm up, where a long source truncates. Phones put the trigger on its own line. */}
+          <p className="mt-1 flex flex-col items-start gap-y-0.5 text-[13px] text-muted-foreground sm:flex-row sm:items-center sm:gap-x-2">
             <Source d={d} />
-            <span aria-hidden>·</span>
-            <span className="inline-flex items-center gap-1.5">
+            <span aria-hidden className="hidden shrink-0 sm:inline">
+              ·
+            </span>
+            <span className="inline-flex shrink-0 items-center gap-1.5">
               {TRIGGER_LABEL[d.trigger]} by{" "}
               <DeployActor name={d.actor} size={18} /> {timeAgo(d.createdAt)}
             </span>
@@ -320,17 +324,21 @@ function Source({ d }: { d: Deployment }) {
       .replace(/^https?:\/\/(www\.)?/, "")
       .replace(/\.git$/, "");
     return (
-      <span className="inline-flex min-w-0 items-center gap-1.5">
+      <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
         <SourceMark source={src} />
         <span className="truncate">{repo}</span>
-        <span className="text-foreground">{src.branch}</span>
+        <span className="shrink-0 whitespace-nowrap text-foreground">
+          {src.branch}
+        </span>
         {d.revisionLabel ? (
-          <span className="font-mono text-[12px]">{d.revisionLabel}</span>
+          <span className="shrink-0 font-mono text-[12px]">
+            {d.revisionLabel}
+          </span>
         ) : null}
         {/* How the builder built it: the repo's Dockerfile or Containerfile, or what Railpack detected. */}
         {src.buildpackLanguage ? (
           <span
-            className="rounded-md bg-muted px-1.5 py-px text-[11.5px]"
+            className="shrink-0 whitespace-nowrap rounded-md bg-muted px-1.5 py-px text-[11.5px]"
             title={
               src.builder === "railpack"
                 ? "No Dockerfile, so Railpack detected how to build it"
@@ -347,14 +355,16 @@ function Source({ d }: { d: Deployment }) {
   }
   if (src.type === "upload") {
     return (
-      <span className="inline-flex min-w-0 items-center gap-1.5">
+      <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
         <SourceMark source={src} />
         <span className="truncate">{uploadText(src)}</span>
         {d.revisionLabel ? (
-          <span className="font-mono text-[12px]">{d.revisionLabel}</span>
+          <span className="shrink-0 font-mono text-[12px]">
+            {d.revisionLabel}
+          </span>
         ) : null}
         {src.buildpackLanguage ? (
-          <span className="rounded-md bg-muted px-1.5 py-px text-[11.5px]">
+          <span className="shrink-0 whitespace-nowrap rounded-md bg-muted px-1.5 py-px text-[11.5px]">
             {src.builder === "railpack"
               ? `${src.buildpackLanguage} · zero config`
               : buildFileOf(src.buildpackLanguage)}
@@ -364,13 +374,21 @@ function Source({ d }: { d: Deployment }) {
     );
   }
   return (
-    <span className="inline-flex min-w-0 items-center gap-1.5">
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
       <SourceMark source={src} />
-      <span className="truncate font-mono text-[12.5px] text-foreground">
-        {imageLabel(src.image)}
-        {src.reference.startsWith("sha256:") ? "@" : ":"}
-        {src.reference}
+      <span
+        className="truncate font-mono text-[12.5px] text-foreground"
+        title={fullImageRef(src.image, src.reference)}
+      >
+        {imageRefLabel(src.image, src.reference)}
       </span>
+      {src.image ? (
+        <CopyButton
+          value={fullImageRef(src.image, src.reference)}
+          label="Copy image"
+          className="-my-1"
+        />
+      ) : null}
     </span>
   );
 }
