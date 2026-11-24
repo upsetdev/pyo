@@ -38,7 +38,7 @@ impl Shell {
         };
         let nonce = nonce();
         let body = stamp(html, &nonce);
-        let connect = connect_src(crate::hosted());
+        let connect = connect_src(crate::hosted(), addresses().sandboxes.as_deref());
         let csp = format!(
             "default-src 'self'; script-src 'nonce-{nonce}' 'strict-dynamic' 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; \
              font-src 'self' data:; connect-src {connect}; frame-src http: https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com"
@@ -51,15 +51,28 @@ impl Shell {
     }
 }
 
-/// Where the dashboard's own code may connect. On Pyo Cloud also the
-/// teams' sandbox servers, on their tailnet names over HTTPS (terminal,
-/// files), which answer only on the team's tailnet.
-fn connect_src(hosted: bool) -> String {
-    if !hosted {
-        return "'self'".into();
+/// Where the dashboard's own code may connect, beyond its own origin, for
+/// sandboxes' terminals and files. On Pyo Cloud: the teams' sandbox
+/// servers, on their tailnet names over HTTPS, which answer only on the
+/// team's tailnet. Self-hosted: Pyo's own sandboxes name on the tailnet
+/// (`sandboxes`, the [`Addresses`] one), which passes the calls on to the
+/// servers (sandbox/pages.rs). Not their own plain HTTP addresses: a page
+/// on HTTPS can't reach those, and servers join after the page loaded.
+fn connect_src(hosted: bool, sandboxes: Option<&str>) -> String {
+    if hosted {
+        let port = crate::sandbox::outbound::TAILNET_PORT;
+        return format!("'self' https://*.ts.net:{port} wss://*.ts.net:{port}");
     }
-    let port = crate::sandbox::outbound::TAILNET_PORT;
-    format!("'self' https://*.ts.net:{port} wss://*.ts.net:{port}")
+    // A name the header can't carry would drop the whole policy.
+    let name = sandboxes.filter(|n| {
+        !n.is_empty()
+            && n.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    });
+    match name {
+        Some(n) => format!("'self' https://{n} wss://{n}"),
+        None => "'self'".into(),
+    }
 }
 
 fn nonce() -> String {
@@ -242,11 +255,29 @@ fn secure_cookies(hs: &mut axum::http::HeaderMap) {
 mod tests {
     #[test]
     fn pyo_cloud_pages_reach_sandbox_servers_on_the_tailnet_only() {
-        assert_eq!(super::connect_src(false), "'self'");
+        let cloud = "'self' https://*.ts.net:7443 wss://*.ts.net:7443";
+        assert_eq!(super::connect_src(true, None), cloud);
+        // Pyo Cloud's own name isn't how its pages reach sandboxes.
         assert_eq!(
-            super::connect_src(true),
-            "'self' https://*.ts.net:7443 wss://*.ts.net:7443"
+            super::connect_src(true, Some("sandboxes.tail1234.ts.net")),
+            cloud
         );
+    }
+
+    #[test]
+    fn self_hosted_pages_reach_sandbox_servers_through_pyos_sandboxes_name() {
+        // Tailscale set up, so sandbox servers can join: their terminals
+        // and files go through Pyo's sandboxes name, and nowhere else.
+        assert_eq!(
+            super::connect_src(false, Some("sandboxes.tail1234.ts.net")),
+            "'self' https://sandboxes.tail1234.ts.net wss://sandboxes.tail1234.ts.net"
+        );
+        // No Tailscale, so no sandbox servers: the page's own origin only.
+        assert_eq!(super::connect_src(false, None), "'self'");
+        // Never a name that would break or widen the policy.
+        for bad in ["", "*", "a.ts.net; script-src *", "a.ts.net http:", "a/b"] {
+            assert_eq!(super::connect_src(false, Some(bad)), "'self'", "{bad}");
+        }
     }
 
     #[test]

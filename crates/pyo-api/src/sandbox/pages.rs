@@ -22,13 +22,22 @@
 //! goes to the daemon with the token as `Authorization: Bearer`, and
 //! without the cookie. WebSocket upgrades pass through, for as long as
 //! they stay open.
+//!
+//! The dashboard's terminal, files and commands come the same way on a
+//! self-hosted Pyo (`/v1/sandboxes/{id}/connect`, `.../files…`,
+//! `.../exec`): its pages may be on HTTPS, and they connect only to names
+//! its Content-Security-Policy lists (web.rs), so they can't call the
+//! daemon's plain HTTP on each server's tailnet address. These take the
+//! token only in `Authorization: Bearer` or the WebSocket's
+//! `pyo.token.<token>` subprotocol, never a cookie, so a sandbox's page on
+//! this name can't use them for its visitor.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -86,8 +95,7 @@ impl Target {
             Some((port, rest)) => (port, Some(rest.to_owned())),
             None => (p, None),
         };
-        let ok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
-        if id.is_empty() || id.len() > 64 || !id.chars().all(ok) {
+        if !sandbox_id(id) {
             return None;
         }
         Some(Target {
@@ -106,6 +114,26 @@ impl Target {
     fn cookie_path(&self) -> String {
         format!("/v1/sandboxes/{}/web/", self.id)
     }
+}
+
+/// Whether `id` can be a sandbox's ID (letters, digits, `_` and `-`).
+fn sandbox_id(id: &str) -> bool {
+    let ok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    !id.is_empty() && id.len() <= 64 && id.chars().all(ok)
+}
+
+/// The dashboard's call on the daemon in `path`: the sandbox and the scope
+/// its token needs. The daemon checks the token again, each request on the
+/// terminal's WebSocket too.
+fn daemon_call(path: &str) -> Option<(String, Scope)> {
+    let (id, rest) = path.strip_prefix("/v1/sandboxes/")?.split_once('/')?;
+    let scope = match rest {
+        "connect" => Scope::Pty,
+        "files" | "files/list" | "files/stat" | "files/mkdir" => Scope::Files,
+        "exec" => Scope::Exec,
+        _ => return None,
+    };
+    sandbox_id(id).then(|| (id.to_owned(), scope))
 }
 
 fn text(status: StatusCode, msg: &str) -> Response {
@@ -182,9 +210,9 @@ fn take_token(req: &mut Request) -> Option<(String, bool)> {
 /// Why a request is refused: its status and a short message.
 type Refusal = (StatusCode, &'static str);
 
-/// Checks the token for this sandbox's ports and finds its server's
+/// Checks the token for this sandbox and scope, and finds its server's
 /// address.
-async fn check(s: &AppState, id: &str, token: &str) -> Result<String, Refusal> {
+async fn check(s: &AppState, id: &str, token: &str, scope: Scope) -> Result<String, Refusal> {
     let refused = || {
         (
             StatusCode::UNAUTHORIZED,
@@ -229,7 +257,7 @@ async fn check(s: &AppState, id: &str, token: &str) -> Result<String, Refusal> {
         Expect {
             server: &server,
             sandbox: Some(id),
-            scope: Scope::Ports,
+            scope,
             now,
         },
     )
@@ -246,6 +274,9 @@ fn token_cookie(t: &Target, token: &str) -> String {
 }
 
 async fn serve(s: &AppState, mut req: Request) -> Response {
+    if let Some((id, scope)) = daemon_call(req.uri().path()) {
+        return call(s, &id, scope, req).await;
+    }
     let Some(target) = Target::parse(req.uri().path()) else {
         return text(StatusCode::NOT_FOUND, "Not found.");
     };
@@ -255,7 +286,7 @@ async fn serve(s: &AppState, mut req: Request) -> Response {
             "This needs a sandbox token. Open it from Pyo.",
         );
     };
-    let address = match check(s, &target.id, &token).await {
+    let address = match check(s, &target.id, &token, Scope::Ports).await {
         Ok(a) => a,
         Err((status, msg)) => return text(status, msg),
     };
@@ -287,6 +318,84 @@ async fn serve(s: &AppState, mut req: Request) -> Response {
         return res;
     }
     proxy(&address, req, &token).await
+}
+
+/// The dashboard's call on the daemon, passed on as it is. Other sites may
+/// ask too, as they may the daemon: a call needs its token.
+async fn call(s: &AppState, id: &str, scope: Scope, mut req: Request) -> Response {
+    if req.method() == Method::OPTIONS {
+        return any_origin(preflight());
+    }
+    let Some(token) = call_token(req.headers_mut()) else {
+        return any_origin(text(
+            StatusCode::UNAUTHORIZED,
+            "This needs a sandbox token. Open it from Pyo.",
+        ));
+    };
+    let address = match check(s, id, &token, scope).await {
+        Ok(a) => a,
+        Err((status, msg)) => return any_origin(text(status, msg)),
+    };
+    // The daemon's answer has its own CORS headers.
+    proxy(&address, req, &token).await
+}
+
+/// The token of a call: `Authorization: Bearer`, or the WebSocket's
+/// `pyo.token.<token>` subprotocol (left in place: the daemon answers it).
+/// Cookies never go on, Pyo's session or a page's token.
+fn call_token(h: &mut HeaderMap) -> Option<String> {
+    h.remove(header::COOKIE);
+    let prefix = format!("{TOKEN_PREFIX}.");
+    if let Some(t) = h
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|t| t.starts_with(&prefix))
+        .map(str::to_owned)
+    {
+        h.remove(header::AUTHORIZATION);
+        return Some(t);
+    }
+    h.get_all(header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .find_map(|p| p.trim().strip_prefix(WS_TOKEN_PROTOCOL))
+        .filter(|t| t.starts_with(&prefix))
+        .map(str::to_owned)
+}
+
+/// The WebSocket subprotocol that carries a token (pyo-sandbox api.rs).
+const WS_TOKEN_PROTOCOL: &str = "pyo.token.";
+
+/// The answer to a browser's preflight, as the daemon's.
+fn preflight() -> Response {
+    let mut res = StatusCode::NO_CONTENT.into_response();
+    let h = res.headers_mut();
+    for (k, v) in [
+        (
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            "GET, POST, PUT, DELETE",
+        ),
+        (
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            "authorization, content-type",
+        ),
+        (header::ACCESS_CONTROL_MAX_AGE, "600"),
+    ] {
+        h.insert(k, HeaderValue::from_static(v));
+    }
+    res
+}
+
+/// Pyo's own answers to a call are readable from the dashboard's origin.
+fn any_origin(mut res: Response) -> Response {
+    res.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    res
 }
 
 /// The daemon's address for a server's tailnet address ("100.64.0.2:7070").
@@ -401,6 +510,98 @@ mod tests {
         ] {
             assert_eq!(Target::parse(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn the_dashboards_calls() {
+        let call = daemon_call;
+        assert_eq!(
+            call("/v1/sandboxes/sbx_a1/connect"),
+            Some(("sbx_a1".into(), Scope::Pty))
+        );
+        for p in ["files", "files/list", "files/stat", "files/mkdir"] {
+            assert_eq!(
+                call(&format!("/v1/sandboxes/sbx_a1/{p}")),
+                Some(("sbx_a1".into(), Scope::Files)),
+                "{p}"
+            );
+        }
+        assert_eq!(
+            call("/v1/sandboxes/sbx_a1/exec"),
+            Some(("sbx_a1".into(), Scope::Exec))
+        );
+        // Pages, the lifecycle and Pyo's own calls aren't the dashboard's.
+        for bad in [
+            "/v1/sandboxes/sbx_a1/web/6080/",
+            "/v1/sandboxes/sbx_a1",
+            "/v1/sandboxes/sbx_a1/pause",
+            "/v1/sandboxes/sbx_a1/ttl",
+            "/v1/sandboxes/sbx_a1/ports",
+            "/v1/sandboxes/sbx_a1/files/../exec",
+            "/v1/sandboxes/sbx_a1/connect/",
+            "/v1/sandboxes//connect",
+            "/v1/sandboxes/../connect",
+            "/v1/report",
+            "/v1/commands",
+        ] {
+            assert_eq!(call(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_calls_token_never_from_a_cookie() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer pyosbx1.a.b"),
+        );
+        h.insert(
+            header::COOKIE,
+            HeaderValue::from_static("pyo_session=s; pyo_token=pyosbx1.c.d"),
+        );
+        assert_eq!(call_token(&mut h).as_deref(), Some("pyosbx1.a.b"));
+        assert!(!h.contains_key(header::AUTHORIZATION));
+        assert!(!h.contains_key(header::COOKIE));
+        // The terminal's WebSocket: the subprotocol stays for the daemon.
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("pyo, pyo.token.pyosbx1.e.f"),
+        );
+        assert_eq!(call_token(&mut h).as_deref(), Some("pyosbx1.e.f"));
+        assert_eq!(
+            h[header::SEC_WEBSOCKET_PROTOCOL],
+            "pyo, pyo.token.pyosbx1.e.f"
+        );
+        // A page's token cookie or its own bearer token isn't a call's.
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::COOKIE,
+            HeaderValue::from_static("pyo_token=pyosbx1.c.d"),
+        );
+        assert_eq!(call_token(&mut h), None);
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer app-token"),
+        );
+        assert_eq!(call_token(&mut h), None);
+    }
+
+    #[test]
+    fn calls_answer_the_dashboards_preflight() {
+        let res = any_origin(preflight());
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let h = res.headers();
+        assert_eq!(h[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        assert_eq!(
+            h[header::ACCESS_CONTROL_ALLOW_METHODS],
+            "GET, POST, PUT, DELETE"
+        );
+        assert_eq!(
+            h[header::ACCESS_CONTROL_ALLOW_HEADERS],
+            "authorization, content-type"
+        );
     }
 
     #[test]
