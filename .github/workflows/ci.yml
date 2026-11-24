@@ -172,14 +172,16 @@ jobs:
       - name: Agents and builders (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
-        run: cargo test --locked -p pyo-api --lib -- --ignored agent:: agent_auth:: builders:: terminal:: jobs::
+        run: |
+          cargo test --locked -p pyo-api --lib -- --ignored agent:: agent_auth:: builders:: terminal:: jobs::
       # Services: a Compose import, the WAF engine following its services,
       # deleting services, removing servers and clusters, domains and
       # routes, folders uploaded for builds, and Pyo registry's door.
       - name: Services (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
-        run: cargo test --locked -p pyo-api --lib -- --ignored ops:: routes:: source_uploads:: registrydoor::
+        run: |
+          cargo test --locked -p pyo-api --lib -- --ignored ops:: routes:: source_uploads:: registrydoor::
       # Databases deleted and cleaned up, and dumps uploaded in parts to a
       # fake store. A run of its own: the upload sets the store's address
       # for the whole process.
@@ -204,7 +206,8 @@ jobs:
       - name: Sign-in and setup (Postgres)
         env:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
-        run: cargo test --locked -p pyo-api --lib -- --ignored ratelimit::tests twofactor::tests cli::tests github::tests install:: cloud::bootstrap::tests
+        run: |
+          cargo test --locked -p pyo-api --lib -- --ignored ratelimit::tests twofactor::tests cli::tests github::tests install:: cloud::bootstrap::tests
       # Sandboxes: names, shared servers and templates, the door's join
       # codes, the signing key and the base template (in a database of its
       # own).
