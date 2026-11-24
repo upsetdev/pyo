@@ -9575,9 +9575,9 @@ pub(crate) struct ObservabilityQuery {
     team: String,
     /// Only this project's sites: its id, or "all".
     project: Option<String>,
-    /// Only this domain: its id, or "all".
+    /// Only this domain: its id or hostname, or "all".
     site: Option<String>,
-    /// Only this service's domains: its id.
+    /// Only this service's domains: its id or name.
     service: Option<String>,
     /// "1h", "24h", "7d" (the default) or "30d".
     range: Option<String>,
@@ -9590,9 +9590,9 @@ pub(crate) struct AccessLogQuery {
     team: String,
     /// Only this project's sites: its id, or "all".
     project: Option<String>,
-    /// Only this domain: its id, or "all".
+    /// Only this domain: its id or hostname, or "all".
     site: Option<String>,
-    /// Only this service's domains: its id.
+    /// Only this service's domains: its id or name.
     service: Option<String>,
     /// "1h", "24h" (the default), "7d" or "30d".
     range: Option<String>,
@@ -9671,21 +9671,60 @@ async fn team_hosts(
 ) -> ApiResult<Vec<String>> {
     let mut tx = crate::rls::begin(&s.db, user).await?;
     require_role(&mut tx, user, team, Role::Viewer).await?;
+    let hosts = hosts_of(&mut tx, team, project, site, service).await?;
+    tx.commit().await?;
+    Ok(hosts)
+}
+
+/// [`team_hosts`]' filters: a project by id, a domain by id or hostname,
+/// a service by id or name. One that names nothing of the team's is
+/// refused, so a wrong value never reads as "no requests".
+pub(crate) async fn hosts_of(
+    conn: &mut sqlx::PgConnection,
+    team: &str,
+    project: Option<String>,
+    site: Option<String>,
+    service: Option<String>,
+) -> ApiResult<Vec<String>> {
     let project = filter_value(project);
-    let site = filter_value(site);
-    let service = filter_value(service);
+    let site = filter_value(site).map(|v| v.trim().trim_end_matches('.').to_owned());
+    let service = filter_value(service).map(|v| v.trim().to_owned());
+    if let Some(p) = &project {
+        let found: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pyo.projects WHERE team_id = $1 AND id = $2)")
+            .bind(team)
+            .bind(p)
+            .fetch_one(&mut *conn)
+            .await?;
+        if !found {
+            return Err(ApiError::not_found("Project"));
+        }
+    }
+    if let Some(a) = &service {
+        let found: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pyo.services WHERE team_id = $1 AND (id = $2 OR name = $2))")
+            .bind(team)
+            .bind(a)
+            .fetch_one(&mut *conn)
+            .await?;
+        if !found {
+            return Err(ApiError::not_found("Service"));
+        }
+    }
     let hosts: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT lower(d->>'hostname')
-           FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
-          WHERE a.team_id = $1 AND ($2::text IS NULL OR a.project_id = $2) AND ($3::text IS NULL OR d->>'id' = $3) AND ($4::text IS NULL OR a.id = $4)",
+           FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
+          WHERE a.team_id = $1 AND ($2::text IS NULL OR a.project_id = $2)
+            AND ($3::text IS NULL OR d->>'id' = $3 OR lower(d->>'hostname') = lower($3))
+            AND ($4::text IS NULL OR a.id = $4 OR a.name = $4)",
     )
     .bind(team)
     .bind(&project)
     .bind(&site)
     .bind(&service)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
-    tx.commit().await?;
+    if site.is_some() && hosts.is_empty() {
+        return Err(ApiError::not_found("Domain"));
+    }
     Ok(hosts)
 }
 
