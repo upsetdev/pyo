@@ -273,17 +273,75 @@ async fn list(State(st): S, h: HeaderMap, Query(q): Q) -> ApiResult<impl IntoRes
     }))
 }
 
+/// A file past what a files command moves.
+fn too_big(cap: usize) -> ApiError {
+    fail(
+        ErrorCode::InvalidSpec,
+        format!("The file is bigger than {} MiB.", cap >> 20),
+    )
+}
+
+/// Who asks for a command.
+#[derive(Clone, Copy)]
+pub enum Caller<'a> {
+    /// A request with this token (or none): checked for the command.
+    Token(Option<&'a str>),
+    /// Pyo, in a command its signer signed for this server and team
+    /// (outbound.rs checked it). Like an admin token.
+    Pyo,
+}
+
+impl Caller<'_> {
+    /// Checks the caller for `scope` on `sandbox` (or the whole server):
+    /// whether it acts for the whole server, like an admin.
+    fn check(
+        self,
+        st: &AppState,
+        sandbox: Option<&str>,
+        scope: Scope,
+    ) -> ApiResult<Option<Claims>> {
+        match self {
+            Caller::Token(t) => st.authorize(t, sandbox, scope).map(Some),
+            Caller::Pyo => Ok(None),
+        }
+    }
+
+    fn check_any(self, st: &AppState, sandbox: &str) -> ApiResult<()> {
+        match self {
+            Caller::Token(t) => st.authorize_any(t, sandbox).map(|_| ()),
+            Caller::Pyo => Ok(()),
+        }
+    }
+
+    /// The largest file a files command moves.
+    fn file_cap(self) -> usize {
+        match self {
+            Caller::Token(_) => FILE_CAP,
+            Caller::Pyo => pyo_proto::sandbox::outbound::FILE_CAP,
+        }
+    }
+}
+
 /// Runs one command from Pyo, after checking the token for it.
 pub async fn run_command(
     st: &AppState,
     token: Option<&str>,
     cmd: DaemonCommand,
 ) -> ApiResult<DaemonResult> {
+    run(st, Caller::Token(token), cmd).await
+}
+
+/// Runs one command, after checking `who` may.
+pub async fn run(st: &AppState, who: Caller<'_>, cmd: DaemonCommand) -> ApiResult<DaemonResult> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
     let mgr = &st.mgr;
     Ok(match cmd {
         DaemonCommand::Create { spec } => {
-            let claims = st.authorize(token, Some(&spec.id), Scope::Create)?;
-            if !claims.has(Scope::Admin) && claims.team != spec.team {
+            if let Some(claims) = who.check(st, Some(&spec.id), Scope::Create)?
+                && !claims.has(Scope::Admin)
+                && claims.team != spec.team
+            {
                 return Err(fail(
                     ErrorCode::Forbidden,
                     "The sandbox token is for another team.",
@@ -294,54 +352,54 @@ pub async fn run_command(
             }
         }
         DaemonCommand::Delete { id } => {
-            st.authorize(token, Some(&id), Scope::Lifecycle)?;
+            who.check(st, Some(&id), Scope::Lifecycle)?;
             mgr.delete(&id).await?;
             DaemonResult::Deleted { id }
         }
         DaemonCommand::Pause { id } => {
-            st.authorize(token, Some(&id), Scope::Lifecycle)?;
+            who.check(st, Some(&id), Scope::Lifecycle)?;
             DaemonResult::Sandbox {
                 sandbox: mgr.pause(&id).await?,
             }
         }
         DaemonCommand::Resume { id } => {
-            st.authorize(token, Some(&id), Scope::Lifecycle)?;
+            who.check(st, Some(&id), Scope::Lifecycle)?;
             DaemonResult::Sandbox {
                 sandbox: mgr.resume(&id).await?,
             }
         }
         DaemonCommand::SetTtl { id, ttl_secs } => {
-            st.authorize(token, Some(&id), Scope::Lifecycle)?;
+            who.check(st, Some(&id), Scope::Lifecycle)?;
             DaemonResult::Sandbox {
                 sandbox: mgr.set_ttl(&id, ttl_secs).await?,
             }
         }
         DaemonCommand::OpenPort { id, port, public } => {
-            st.authorize(token, Some(&id), Scope::Ports)?;
+            who.check(st, Some(&id), Scope::Ports)?;
             DaemonResult::Sandbox {
                 sandbox: mgr.open_port(&id, port, public).await?,
             }
         }
         DaemonCommand::ClosePort { id, port } => {
-            st.authorize(token, Some(&id), Scope::Ports)?;
+            who.check(st, Some(&id), Scope::Ports)?;
             DaemonResult::Sandbox {
                 sandbox: mgr.close_port(&id, port).await?,
             }
         }
         DaemonCommand::Get { id } => {
-            st.authorize_any(token, &id)?;
+            who.check_any(st, &id)?;
             DaemonResult::Sandbox {
                 sandbox: mgr.status(&id)?,
             }
         }
         DaemonCommand::List => {
-            st.authorize(token, None, Scope::Admin)?;
+            who.check(st, None, Scope::Admin)?;
             DaemonResult::Sandboxes {
                 sandboxes: mgr.list(),
             }
         }
         DaemonCommand::Report => {
-            st.authorize(token, None, Scope::Admin)?;
+            who.check(st, None, Scope::Admin)?;
             DaemonResult::Report {
                 report: Box::new(mgr.report()),
             }
@@ -353,7 +411,7 @@ pub async fn run_command(
             disk_mib,
             network,
         } => {
-            st.authorize(token, None, Scope::Admin)?;
+            who.check(st, None, Scope::Admin)?;
             let (key, took_ms) = mgr
                 .snapshot_template(&template, cpus, memory_mib, disk_mib, network)
                 .await?;
@@ -364,7 +422,7 @@ pub async fn run_command(
             }
         }
         DaemonCommand::SetEdgeCert { cert, key } => {
-            st.authorize(token, None, Scope::Admin)?;
+            who.check(st, None, Scope::Admin)?;
             let Some(tls) = mgr.edge_tls() else {
                 return Err(fail(
                     ErrorCode::Conflict,
@@ -383,18 +441,18 @@ pub async fn run_command(
             auth,
             max_mib,
         } => {
-            st.authorize(token, None, Scope::Admin)?;
+            who.check(st, None, Scope::Admin)?;
             DaemonResult::Template {
                 template: mgr.prepare_template(&template, &image, plain_http, auth, max_mib)?,
             }
         }
         DaemonCommand::DeleteTemplate { template } => {
-            st.authorize(token, None, Scope::Admin)?;
+            who.check(st, None, Scope::Admin)?;
             mgr.delete_template(&template).await?;
             DaemonResult::TemplateDeleted { template }
         }
         DaemonCommand::Template { template } => {
-            st.authorize(token, None, Scope::Admin)?;
+            who.check(st, None, Scope::Admin)?;
             DaemonResult::Template {
                 template: mgr.template_progress(&template).ok_or_else(|| {
                     fail(
@@ -403,6 +461,47 @@ pub async fn run_command(
                     )
                 })?,
             }
+        }
+        DaemonCommand::Exec { id, request } => {
+            who.check(st, Some(&id), Scope::Exec)?;
+            DaemonResult::Exec {
+                result: mgr.exec(&id, &request).await?,
+            }
+        }
+        DaemonCommand::ReadFile { id, path } => {
+            who.check(st, Some(&id), Scope::Files)?;
+            if path.is_empty() {
+                return Err(fail(ErrorCode::InvalidSpec, "The path is missing."));
+            }
+            let (_, mut conn) = mgr.envd(&id).await?;
+            let data = conn
+                .read_file(&path, who.file_cap() as u64)
+                .await
+                .map_err(|e| match e.downcast_ref::<FileTooBig>() {
+                    Some(_) => too_big(who.file_cap()),
+                    None => file_error(e),
+                })?;
+            DaemonResult::File {
+                data: b64.encode(data),
+            }
+        }
+        DaemonCommand::WriteFile { id, path, data } => {
+            who.check(st, Some(&id), Scope::Files)?;
+            if path.is_empty() {
+                return Err(fail(ErrorCode::InvalidSpec, "The path is missing."));
+            }
+            let data = b64
+                .decode(data.as_bytes())
+                .map_err(|_| fail(ErrorCode::InvalidSpec, "The file's data isn't base64."))?;
+            if data.len() > who.file_cap() {
+                return Err(too_big(who.file_cap()));
+            }
+            let (_, mut conn) = mgr.envd(&id).await?;
+            let bytes = conn
+                .write_file(&path, &data, None)
+                .await
+                .map_err(file_error)?;
+            DaemonResult::Written { bytes }
         }
     })
 }

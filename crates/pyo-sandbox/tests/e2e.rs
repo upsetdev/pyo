@@ -885,6 +885,8 @@ async fn boots_real_microvms() {
         network: Default::default(),
         edge: None,
         dev: true,
+        outbound: None,
+        tailnet_https: None,
     };
     let layout = Layout::new(&run, false);
     layout.create().await.unwrap();

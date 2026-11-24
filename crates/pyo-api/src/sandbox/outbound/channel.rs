@@ -89,9 +89,8 @@ fn refused(why: &str) -> Response {
     (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": why }))).into_response()
 }
 
-/// Why a key doesn't open anything.
-pub const KEY_GONE: &str =
-    "This server's key is unknown, expired or revoked. Join it again with a new command from Pyo.";
+/// Why a key doesn't open anything. The daemon stops when it gets it.
+pub const KEY_GONE: &str = wire::KEY_GONE;
 
 /// Checks a signed request: the server's key (live, for an outbound
 /// server of its team), its signature over the method, path, time, nonce
@@ -204,7 +203,6 @@ pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const ALLOWED_WHEN_HELD: &[&str] = &["get", "list", "report", "template", "delete", "closePort", "deleteTemplate"];
 
 /// A command's `type`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn kind_of(command: &DaemonCommand) -> String {
     serde_json::to_value(command)
         .ok()
@@ -215,9 +213,7 @@ pub fn kind_of(command: &DaemonCommand) -> String {
 /// Queues a command for an outbound server of `team_id`, sealed with the
 /// team's data key (vault.rs). Its id.
 /// Wake the server after the transaction commits (`AppState::wake` with
-/// the server's id).
-// Called by the outbound Daemon (docs/cloud-sandbox-servers.md, stage 2).
-#[cfg_attr(not(test), allow(dead_code))]
+/// the server's id). A command past [`wire::MAX_COMMAND`] is refused.
 pub async fn enqueue(
     conn: &mut PgConnection,
     server_id: &str,
@@ -225,6 +221,9 @@ pub async fn enqueue(
     command: &DaemonCommand,
 ) -> ApiResult<String> {
     let json = serde_json::to_string(command).map_err(anyhow::Error::from)?;
+    if json.len() > wire::MAX_COMMAND {
+        return Err(ApiError::bad_request(TOO_BIG));
+    }
     let sealed = crate::vault::get().seal_credential(team_id, &json).await?;
     let id = crate::ids::new_id("sbc");
     let n = sqlx::query(
@@ -245,6 +244,10 @@ pub async fn enqueue(
     }
     Ok(id)
 }
+
+/// Why a command can't go to a server over its channel.
+pub const TOO_BIG: &str =
+    "That's too big to send to the sandbox server through Pyo. Send it from a device on your tailnet.";
 
 fn error_result(code: ErrorCode, message: &str) -> DaemonResult {
     DaemonResult::Error { error: DaemonError::new(code, message) }
@@ -491,7 +494,35 @@ async fn report(
     };
     super::super::runner::apply_in(&mut tx, &srv, &r).await?;
     tx.commit().await?;
+    // Templates it lacks, and ones Pyo dropped, as the runner does for a
+    // server it calls. Through the channel, so not while this answers.
+    tokio::spawn(sync_templates(s.clone(), server, srv.address, r));
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Servers whose templates are being synced now.
+static SYNCING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// After an outbound server's report: asks it to prepare the templates it
+/// lacks and delete the ones Pyo dropped. One at a time per server: a
+/// report that comes in meanwhile is skipped.
+async fn sync_templates(s: AppState, server: SandboxServer, address: String, r: ServerReport) {
+    if !SYNCING.lock().unwrap_or_else(|p| p.into_inner()).insert(server.id.clone()) {
+        return;
+    }
+    let res = async {
+        let key = crate::sandbox::keys::signing_key(&s.db, &s.sealer)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.message))?;
+        crate::sandbox::templates::sync_server(&s.db, &key, &server.id, Some(&server.team_id), &address, &r).await?;
+        anyhow::Ok(())
+    }
+    .await;
+    if let Err(e) = res {
+        tracing::warn!(server = %server.id, error = %format!("{e:#}"), "sandboxes: couldn't sync an outbound server's templates");
+    }
+    SYNCING.lock().unwrap_or_else(|p| p.into_inner()).remove(&server.id);
 }
 
 // ── Asking ─────────────────────────────────────────────────────────────────
@@ -499,7 +530,6 @@ async fn report(
 /// Queues `command` for an outbound server and waits up to `wait` for its
 /// answer. One still waiting then is taken back. One out with the server
 /// keeps going, and the answer says it didn't come in time.
-#[cfg_attr(not(test), allow(dead_code))]
 pub async fn ask(
     s: &AppState,
     server_id: &str,
@@ -521,7 +551,13 @@ pub async fn ask(
         return Err(DaemonError::new(ErrorCode::Runtime, "The sandbox server hasn't joined yet."));
     };
     let mut c = s.db.acquire().await.map_err(|e| internal(e.into()))?;
-    let id = enqueue(&mut c, server_id, &team, command).await.map_err(internal)?;
+    let id = enqueue(&mut c, server_id, &team, command).await.map_err(|e| {
+        if e.message == TOO_BIG {
+            DaemonError::new(ErrorCode::InvalidSpec, TOO_BIG)
+        } else {
+            internal(e)
+        }
+    })?;
     drop(c);
     s.wake(server_id).await;
     let deadline = tokio::time::Instant::now() + wait;

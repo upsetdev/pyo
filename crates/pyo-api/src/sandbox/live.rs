@@ -114,7 +114,7 @@ async fn ask(s: &AppState, keys_: Vec<(String, String)>) {
                         let cmd = DaemonCommand::Template {
                             template: name.clone(),
                         };
-                        match tokio::time::timeout(WAIT, Daemon::new(&a).command(&token, &cmd))
+                        match tokio::time::timeout(WAIT, Daemon::new(&id, &a).command(&token, &cmd))
                             .await
                         {
                             Ok(Ok(DaemonResult::Template { template })) => Some(template),

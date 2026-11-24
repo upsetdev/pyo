@@ -32,14 +32,14 @@ use sqlx::PgPool;
 
 use super::{daemon::Daemon, keys, scheduler};
 
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .unwrap()
 }
 
-fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     if std::env::var("PYO_SANDBOX_E2E").as_deref() != Ok("1") {
         eprintln!("skipping: set PYO_SANDBOX_E2E=1 to boot real microVMs");
         return false;
@@ -56,14 +56,14 @@ fn enabled() -> bool {
     true
 }
 
-fn input(var: &str, default: PathBuf) -> PathBuf {
+pub(crate) fn input(var: &str, default: PathBuf) -> PathBuf {
     std::env::var_os(var).map(PathBuf::from).unwrap_or(default)
 }
 
 /// The daemon process and this run's files, gone when the test ends.
-struct Run {
-    dir: PathBuf,
-    daemon: Option<Child>,
+pub(crate) struct Run {
+    pub(crate) dir: PathBuf,
+    pub(crate) daemon: Option<Child>,
 }
 
 impl Drop for Run {
@@ -89,7 +89,7 @@ impl Drop for Run {
 }
 
 /// A template root disk: the host's static busybox and envd.
-fn busybox_rootfs(dir: &Path, envd: &Path, out: &Path) {
+pub(crate) fn busybox_rootfs(dir: &Path, envd: &Path, out: &Path) {
     let src = dir.join("template-src");
     for d in [
         "bin", "sbin", "proc", "sys", "dev", "tmp", "run", "root", "mnt", "etc",
@@ -126,7 +126,7 @@ fn busybox_rootfs(dir: &Path, envd: &Path, out: &Path) {
     std::fs::remove_dir_all(&src).unwrap();
 }
 
-fn free_port() -> u16 {
+pub(crate) fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -217,7 +217,7 @@ async fn start_daemon(server: &str, template: &str, key: &SigningKey) -> (Run, S
     panic!("the daemon didn't come up on {address}");
 }
 
-fn exec_req(cmd: &str) -> ExecRequest {
+pub(crate) fn exec_req(cmd: &str) -> ExecRequest {
     ExecRequest {
         cmd: Cmd::Shell(cmd.into()),
         cwd: None,
@@ -237,7 +237,7 @@ async fn pyo_drives_a_real_daemon() {
     let team = "tm_e2e";
     let key = SigningKey::generate("sbk_e2e");
     let (_run, address) = start_daemon(server, template, &key).await;
-    let d = Daemon::new(&address);
+    let d = Daemon::new(server, &address);
 
     // The report, as the runner reads it, and the scheduler's pick.
     let report = d.report(&keys::admin_token(&key, server)).await.unwrap();
@@ -462,7 +462,7 @@ async fn the_control_plane_drives_a_real_daemon() {
     let conn = &out["connection"];
     assert_eq!(conn["url"], format!("http://{address}"));
     let token = conn["token"].as_str().unwrap();
-    let r = Daemon::new(&address)
+    let r = Daemon::new(&server, &address)
         .exec(token, &id, &exec_req("echo $GREETING from $(hostname)"))
         .await
         .unwrap();
@@ -483,7 +483,7 @@ async fn the_control_plane_drives_a_real_daemon() {
     // A new token, then the runner meters it.
     let t2 = super::token(&s, &user, &id).await.unwrap();
     assert!(
-        Daemon::new(&address)
+        Daemon::new(&server, &address)
             .exec(&t2.token, &id, &exec_req("true"))
             .await
             .is_ok()
@@ -578,7 +578,7 @@ async fn the_control_plane_drives_a_real_daemon() {
     .unwrap();
     let out = super::create(&s, &user, tmpl_req).await.unwrap();
     let id3 = out["sandbox"]["id"].as_str().unwrap().to_owned();
-    let r = Daemon::new(&address)
+    let r = Daemon::new(&server, &address)
         .exec(
             out["connection"]["token"].as_str().unwrap(),
             &id3,
@@ -710,7 +710,7 @@ async fn the_control_plane_drives_a_real_daemon() {
     assert_eq!(first["sandbox"]["template"], "base", "{first}");
     assert_eq!(first["sandbox"]["preparing"], false, "{first}");
     assert_eq!(other["sandbox"]["state"], "running", "{other}");
-    let builds: Vec<serde_json::Value> = Daemon::new(&address)
+    let builds: Vec<serde_json::Value> = Daemon::new(&server, &address)
         .report(&keys::admin_token(&key, &server))
         .await
         .unwrap()
@@ -746,7 +746,7 @@ async fn the_control_plane_drives_a_real_daemon() {
             .await
             .unwrap();
     assert_eq!(on, old_name);
-    let r = Daemon::new(&address)
+    let r = Daemon::new(&server, &address)
         .exec(
             first["connection"]["token"].as_str().unwrap(),
             &first_id,
@@ -769,7 +769,7 @@ async fn the_control_plane_drives_a_real_daemon() {
     wait_for(&s, &team, &server, &new_name, false).await;
     let second = super::create(&s, &user, no_template).await.unwrap();
     let second_id = second["sandbox"]["id"].as_str().unwrap().to_owned();
-    let r = Daemon::new(&address)
+    let r = Daemon::new(&server, &address)
         .exec(
             second["connection"]["token"].as_str().unwrap(),
             &second_id,
@@ -781,7 +781,7 @@ async fn the_control_plane_drives_a_real_daemon() {
     // The running sandbox keeps the old disk, which goes once it ends.
     super::runner::round(&s).await.unwrap();
     assert!(ready_on(&db, &team, &server).await.contains(&old_name));
-    let r = Daemon::new(&address)
+    let r = Daemon::new(&server, &address)
         .exec(
             first["connection"]["token"].as_str().unwrap(),
             &first_id,

@@ -82,6 +82,8 @@ pub struct Edge {
 
 /// The edge's certificate: loaded from its files, replaced in place.
 pub struct EdgeTls {
+    /// What serves it, for the log: "the edge" or "the tailnet listener".
+    what: &'static str,
     pub domain: String,
     pub cert: PathBuf,
     pub key: PathBuf,
@@ -100,7 +102,13 @@ struct Loaded {
 
 impl EdgeTls {
     pub fn new(domain: &str, cert: PathBuf, key: PathBuf) -> EdgeTls {
+        EdgeTls::named("the edge", domain, cert, key)
+    }
+
+    /// The same for another listener, named `what` in the log.
+    pub fn named(what: &'static str, domain: &str, cert: PathBuf, key: PathBuf) -> EdgeTls {
         let t = EdgeTls {
+            what,
             domain: domain.to_owned(),
             cert,
             key,
@@ -108,13 +116,13 @@ impl EdgeTls {
             bound: Mutex::new(Bound::default()),
         };
         if let Err(e) = t.reload() {
-            tracing::warn!(error = %format!("{e:#}"), "the edge serves HTTPS once it has a certificate");
+            tracing::warn!(error = %format!("{e:#}"), "{} serves HTTPS once it has a certificate", t.what);
         }
         t
     }
 
     /// The acceptor for a new connection, if there's a certificate.
-    fn acceptor(&self) -> Option<tokio_rustls::TlsAcceptor> {
+    pub(crate) fn acceptor(&self) -> Option<tokio_rustls::TlsAcceptor> {
         self.read().as_ref().map(|l| l.acceptor.clone())
     }
 
@@ -159,7 +167,7 @@ impl EdgeTls {
             fingerprint: fingerprint.clone(),
             stamp,
         });
-        tracing::info!(%fingerprint, "the edge serves a new certificate");
+        tracing::info!(%fingerprint, "{} serves a new certificate", self.what);
         Ok(true)
     }
 
@@ -205,7 +213,7 @@ fn read_capped(p: &Path) -> anyhow::Result<Vec<u8>> {
 
 /// Writes a file only root can read, through a temporary file and a
 /// rename, so a reader never sees half of it.
-fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let dir = path

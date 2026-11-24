@@ -739,10 +739,9 @@ async fn candidates_on(
         templates: Value,
         age: Option<i64>,
         pending_mib: i64,
-        outbound: bool,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT s.id, s.name, s.team_id, s.address, s.state, s.enabled, s.capability, s.capacity, s.templates, s.outbound,
+        "SELECT s.id, s.name, s.team_id, s.address, s.state, s.enabled, s.capability, s.capacity, s.templates,
                 extract(epoch FROM now() - s.last_report_at)::bigint AS age,
                 coalesce((SELECT sum((x.spec->>'memoryMib')::bigint) FROM pyo.sandboxes x
                            WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed', 'paused')
@@ -762,10 +761,9 @@ async fn candidates_on(
                 name: r.name,
                 team_id: r.team_id,
                 enabled: r.enabled,
-                // An outbound server (Pyo Cloud) gets its work only as
-                // commands it polls for (outbound/channel.rs), which
-                // placement doesn't send yet.
-                ready: r.state == "ready" && r.address.is_some() && !r.outbound,
+                // An outbound server (Pyo Cloud) gets its work as commands
+                // it polls for (outbound/channel.rs), through daemon.rs.
+                ready: r.state == "ready" && r.address.is_some(),
                 report_age_secs: r.age.unwrap_or(i64::MAX),
                 capability: r
                     .capability
@@ -794,7 +792,8 @@ pub fn new_sandbox_id() -> String {
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Connection {
-    /// The sandbox server's daemon, on your tailnet.
+    /// The sandbox server's daemon, on your tailnet. HTTPS on the server's
+    /// tailnet name when it joined Pyo Cloud.
     pub url: String,
     pub sandbox_id: String,
     /// `Authorization: Bearer <token>` for exec, terminals, files and ports.
@@ -1016,7 +1015,7 @@ pub async fn create(s: &AppState, user: &User, req: CreateSandbox) -> ApiResult<
         }
     }
     let token = keys::create_token(&key, &spec.id, &team_id, &server_id);
-    let d = daemon::Daemon::new(&address);
+    let d = daemon::Daemon::new(&server_id, &address);
     let st = match d
         .sandbox(&token, &DaemonCommand::Create { spec: spec.clone() })
         .await
@@ -1091,7 +1090,7 @@ impl Found {
         };
         let key = keys::signing_key(&s.db, &s.sealer).await?;
         Ok((
-            daemon::Daemon::new(address),
+            daemon::Daemon::new(server, address),
             keys::admin_token(&key, server),
             server.clone(),
         ))
@@ -1556,7 +1555,7 @@ pub async fn remove_server(s: &AppState, user: &User, id: &str, confirm: bool) -
         && !live.is_empty()
         && let Ok(key) = keys::signing_key(&s.db, &s.sealer).await
     {
-        let d = daemon::Daemon::new(address);
+        let d = daemon::Daemon::new(id, address);
         let token = keys::admin_token(&key, id);
         for x in &live {
             if let Err(e) = d

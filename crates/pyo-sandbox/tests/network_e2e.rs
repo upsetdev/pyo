@@ -407,6 +407,8 @@ async fn sandbox_networking() {
         network: NetworkConfig::default(),
         edge: None,
         dev: !jailed,
+        outbound: None,
+        tailnet_https: None,
     };
     let layout = Layout::new(&root, jailed);
     layout.create().await.unwrap();

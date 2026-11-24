@@ -15,8 +15,10 @@ pub mod gvisor;
 pub mod manager;
 pub mod network;
 pub mod oci;
+pub mod outbound;
 pub mod rootfs;
 pub mod storage;
+pub mod tailnet;
 pub mod templates;
 
 /// Epoch milliseconds.

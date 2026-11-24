@@ -196,7 +196,7 @@ pub async fn on_server(
     let host = Server {
         db,
         id: server_id,
-        daemon: Daemon::new(address),
+        daemon: Daemon::new(server_id, address),
         token: keys::admin_token(key, server_id),
         prepare,
         name: name.to_owned(),
