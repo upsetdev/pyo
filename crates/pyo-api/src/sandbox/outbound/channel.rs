@@ -37,7 +37,6 @@ use crate::{
     AppState, CommandSigner,
     error::{ApiError, ApiResult, Json, Query},
     ids::sha256_hex,
-    secrets::Sealer,
 };
 
 /// The signer, for the routes (None: commands can't be signed here).
@@ -213,20 +212,20 @@ pub fn kind_of(command: &DaemonCommand) -> String {
         .unwrap_or_default()
 }
 
-/// Queues a command for an outbound server of `team_id`, sealed. Its id.
+/// Queues a command for an outbound server of `team_id`, sealed with the
+/// team's data key (vault.rs). Its id.
 /// Wake the server after the transaction commits (`AppState::wake` with
 /// the server's id).
 // Called by the outbound Daemon (docs/cloud-sandbox-servers.md, stage 2).
 #[cfg_attr(not(test), allow(dead_code))]
 pub async fn enqueue(
     conn: &mut PgConnection,
-    sealer: &Sealer,
     server_id: &str,
     team_id: &str,
     command: &DaemonCommand,
 ) -> ApiResult<String> {
     let json = serde_json::to_string(command).map_err(anyhow::Error::from)?;
-    let sealed = sealer.seal(&json)?;
+    let sealed = crate::vault::get().seal_credential(team_id, &json).await?;
     let id = crate::ids::new_id("sbc");
     let n = sqlx::query(
         "INSERT INTO pyo.sandbox_commands (id, server_id, team_id, kind, command_sealed)
@@ -369,8 +368,12 @@ async fn take(
             crate::gate::mark_held(&s.db, &server.team_id).await;
             continue;
         }
-        match sealed.as_deref().map(|x| s.sealer.open(x)) {
-            Some(Ok(json)) => ready.push((id, kind, json)),
+        let opened = match sealed.as_deref() {
+            Some(x) => crate::vault::get().open_credential(&s.sealer, x).await.ok(),
+            None => None,
+        };
+        match opened {
+            Some(json) => ready.push((id, kind, json)),
             _ => {
                 tracing::error!(server = %server.id, %id, "can't open a sandbox command");
                 fail(&mut c, &server.id, &id, "Pyo couldn't open it.").await?;
@@ -518,7 +521,7 @@ pub async fn ask(
         return Err(DaemonError::new(ErrorCode::Runtime, "The sandbox server hasn't joined yet."));
     };
     let mut c = s.db.acquire().await.map_err(|e| internal(e.into()))?;
-    let id = enqueue(&mut c, &s.sealer, server_id, &team, command).await.map_err(internal)?;
+    let id = enqueue(&mut c, server_id, &team, command).await.map_err(internal)?;
     drop(c);
     s.wake(server_id).await;
     let deadline = tokio::time::Instant::now() + wait;

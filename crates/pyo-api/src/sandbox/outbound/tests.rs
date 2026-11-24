@@ -262,7 +262,13 @@ struct Team {
 async fn state() -> AppState {
     let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL")).await.unwrap();
     crate::migrate::run(&db).await.unwrap();
-    crate::vault::init(crate::vault::Vault::new(db.clone(), crate::vault::Provider::from_env()));
+    // Commands are sealed with the team's data key: a key of its own here
+    // when the process has none.
+    let provider = crate::vault::Provider::from_env().or(Some(crate::vault::Provider::Local {
+        current: zeroize::Zeroizing::new([7u8; 32]),
+        previous: None,
+    }));
+    crate::vault::init(crate::vault::Vault::new(db.clone(), provider));
     crate::sandbox::e2e::test_state(db)
 }
 
@@ -694,14 +700,14 @@ async fn a_key_opens_only_its_own_servers_channel() {
 
     // Each key gets its own server's commands only.
     let mut c = s.db.acquire().await.unwrap();
-    let cmd_a = channel::enqueue(&mut c, &s.sealer, &a.server_id, &ta.id, &DaemonCommand::Delete { id: "sbx_a1".into() })
+    let cmd_a = channel::enqueue(&mut c, &a.server_id, &ta.id, &DaemonCommand::Delete { id: "sbx_a1".into() })
         .await
         .unwrap();
-    let cmd_b = channel::enqueue(&mut c, &s.sealer, &b.server_id, &tb.id, &DaemonCommand::Delete { id: "sbx_b1".into() })
+    let cmd_b = channel::enqueue(&mut c, &b.server_id, &tb.id, &DaemonCommand::Delete { id: "sbx_b1".into() })
         .await
         .unwrap();
     // Not for a server of another team.
-    assert!(channel::enqueue(&mut c, &s.sealer, &a.server_id, &tb.id, &DaemonCommand::Report).await.is_err());
+    assert!(channel::enqueue(&mut c, &a.server_id, &tb.id, &DaemonCommand::Report).await.is_err());
     drop(c);
     let (_, v) = call(&app, Method::GET, poll, Some(&ka), b"").await;
     let got: Vec<wire::CommandEnvelope> = serde_json::from_value(v).unwrap();
@@ -746,8 +752,8 @@ async fn row_security_keeps_teams_apart() {
     let (a, _) = joined(&s, &signer, &ta, "sbx-a").await;
     let (b, _) = joined(&s, &signer, &tb, "sbx-b").await;
     let mut c = s.db.acquire().await.unwrap();
-    channel::enqueue(&mut c, &s.sealer, &a.server_id, &ta.id, &DaemonCommand::Report).await.unwrap();
-    channel::enqueue(&mut c, &s.sealer, &b.server_id, &tb.id, &DaemonCommand::Report).await.unwrap();
+    channel::enqueue(&mut c, &a.server_id, &ta.id, &DaemonCommand::Report).await.unwrap();
+    channel::enqueue(&mut c, &b.server_id, &tb.id, &DaemonCommand::Report).await.unwrap();
     drop(c);
     let mut tx = s.db.begin().await.unwrap();
     crate::rls::scope_team(&mut tx, &ta.id).await.unwrap();
@@ -785,10 +791,10 @@ async fn the_long_poll_hands_out_signed_commands() {
 
     // Two commands, in the order they were queued, signed for this server.
     let mut c = s.db.acquire().await.unwrap();
-    let one = channel::enqueue(&mut c, &s.sealer, &j.server_id, &t.id, &DaemonCommand::Delete { id: "sbx_1".into() })
+    let one = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::Delete { id: "sbx_1".into() })
         .await
         .unwrap();
-    let two = channel::enqueue(&mut c, &s.sealer, &j.server_id, &t.id, &DaemonCommand::Report).await.unwrap();
+    let two = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::Report).await.unwrap();
     drop(c);
     let sealed: Option<String> = sqlx::query_scalar("SELECT command_sealed FROM pyo.sandbox_commands WHERE id = $1")
         .bind(&one)
@@ -856,8 +862,8 @@ async fn the_long_poll_hands_out_signed_commands() {
     // The signer refuses one: it fails with the reason, the rest go out.
     let mut c = s.db.acquire().await.unwrap();
     let edge = DaemonCommand::SetEdgeCert { cert: "c".into(), key: pyo_proto::sandbox::SecretPem("k".into()) };
-    let refused = channel::enqueue(&mut c, &s.sealer, &j.server_id, &t.id, &edge).await.unwrap();
-    let fine = channel::enqueue(&mut c, &s.sealer, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+    let refused = channel::enqueue(&mut c, &j.server_id, &t.id, &edge).await.unwrap();
+    let fine = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
     drop(c);
     let (_, v) = call(&app, Method::GET, "/commands?wait=0", Some(&k), b"").await;
     assert_eq!(v.as_array().unwrap().len(), 1);
@@ -873,7 +879,7 @@ async fn the_long_poll_hands_out_signed_commands() {
     // The signer is down: back to the queue, out again once it's up.
     signer.down.store(true, Ordering::SeqCst);
     let mut c = s.db.acquire().await.unwrap();
-    let later = channel::enqueue(&mut c, &s.sealer, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+    let later = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
     drop(c);
     assert_eq!(call(&app, Method::GET, "/commands?wait=0", Some(&k), b"").await.0, StatusCode::SERVICE_UNAVAILABLE);
     signer.down.store(false, Ordering::SeqCst);
@@ -883,7 +889,7 @@ async fn the_long_poll_hands_out_signed_commands() {
     // A restarted daemon: what went to the process before fails.
     let (_, v) = {
         let mut c = s.db.acquire().await.unwrap();
-        channel::enqueue(&mut c, &s.sealer, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+        channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
         drop(c);
         call_at(&app, Method::GET, "/commands?wait=0", Some(&k), b"", None, &[(wire::INSTANCE_HEADER, "one")]).await
     };
@@ -898,7 +904,7 @@ async fn the_long_poll_hands_out_signed_commands() {
 
     // Waiting too long fails a command, in the runner's sweep.
     let mut c = s.db.acquire().await.unwrap();
-    let old = channel::enqueue(&mut c, &s.sealer, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+    let old = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
     drop(c);
     sqlx::query("UPDATE pyo.sandbox_commands SET created_at = now() - interval '1 hour' WHERE id = $1")
         .bind(&old)
@@ -948,7 +954,7 @@ async fn keys_renew_and_are_revoked() {
     // Reset access: every key stops, waiting commands fail, a new code
     // joins the same server again.
     let mut c = s.db.acquire().await.unwrap();
-    let waiting = channel::enqueue(&mut c, &s.sealer, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+    let waiting = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
     drop(c);
     let e = reset_access(&s, signer.as_ref(), &t.developer, &j.server_id).await.unwrap_err();
     assert_eq!(e.status, StatusCode::FORBIDDEN);
