@@ -18,6 +18,10 @@ const INSTALL: &str = "abc123";
 const ZONE: &str = "023e105f4ecef8ad9ca31a8372d0c353";
 const ACCOUNT: &str = "699d98642c564d2e855e9661899b7252";
 
+/// The tests here that point Pyo at a fake Cloudflare run one at a time:
+/// `PYO_DEV_CLOUDFLARE_API` is one for the whole process.
+static FAKE_API: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn fake() -> (FakeCf, Http) {
     let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
     let http = Http::at(TOKEN, &cf.base);
@@ -169,6 +173,7 @@ async fn commands(db: &sqlx::PgPool, cluster: &str) -> Vec<String> {
 #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
 fn the_tunnel_loop_end_to_end() {
     run_big(async {
+        let _one = FAKE_API.lock().await;
         let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
         // SAFETY: set before anything here reads them; this test owns its runtime.
         unsafe {
@@ -336,5 +341,134 @@ fn the_tunnel_loop_end_to_end() {
         let leftovers: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.tunnel_leftovers WHERE team_id = $1").bind(&team).fetch_one(&db).await.unwrap();
         assert_eq!(leftovers, 0);
         q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
+    });
+}
+
+/// Against a throwaway Postgres and the fake Cloudflare: a service saved
+/// back the way the MCP tools show it (values as `•••`) keeps its real
+/// values, and `removeDomain` takes a domain off with Pyo's record, without
+/// a whole-service save from the client.
+#[test]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+fn hidden_values_are_kept_and_domains_come_off() {
+    run_big(async {
+        let _one = FAKE_API.lock().await;
+        let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
+        // SAFETY: set while FAKE_API is held; nothing else here reads them yet.
+        unsafe {
+            std::env::set_var("PYO_DEV_CLOUDFLARE_API", &cf.base);
+            if std::env::var("PYO_SECRET_KEY").is_err() {
+                std::env::set_var("PYO_SECRET_KEY", "11".repeat(32));
+            }
+        }
+        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+            .await
+            .unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        crate::vault::init(crate::vault::Vault::new(db.clone(), crate::vault::Provider::from_env()));
+        let s = crate::rls::tests::state(db.clone());
+        let run = crate::ids::random_string(8).to_lowercase();
+        let id = |p: &str| format!("{p}_dom{run}");
+        let (team, cluster, project, svc, usr) = (id("team"), id("cl"), id("prj"), id("svc"), id("usr"));
+        let q = |sql: &'static str| sqlx::query(sql);
+        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)").bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'ada', 'x')")
+            .bind(&usr).bind(format!("ada{run}@example.com")).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'developer', 'active')")
+            .bind(id("mem")).bind(&team).bind(&usr).bind(format!("ada{run}@example.com")).execute(&db).await.unwrap();
+        let user = crate::auth::User {
+            id: usr.clone(),
+            name: "ada".into(),
+            email: format!("ada{run}@example.com"),
+            timezone: "UTC".into(),
+            is_admin: false,
+            must_set_up: false,
+            key: None,
+        };
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())")
+            .bind(&cluster).bind(&team).execute(&db).await.unwrap();
+        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)").bind(&project).bind(&team).execute(&db).await.unwrap();
+        let (a, b) = (format!("a-{run}.example.com"), format!("b-{run}.example.com"));
+        let mut spec = json!({
+            "name": "web", "replicas": 1, "source": { "type": "image", "image": "nginx:1.27" },
+            "ports": [{ "name": "http", "containerPort": 80, "protocol": "HTTP", "exposure": "http" }],
+            "domains": [
+                { "id": "dom_a", "hostname": a, "portName": "http", "status": "active", "tls": "active", "tlsMode": "auto" },
+                { "id": "dom_b", "hostname": b, "portName": "http", "status": "active", "tls": "active", "tlsMode": "auto" },
+            ],
+            "env": [
+                { "id": "e1", "key": "API_URL", "value": "https://api.example.com" },
+                { "id": "e2", "key": "TOKEN", "value": "s3cret-token", "secret": true },
+            ],
+        });
+        crate::vault::get().seal_env(&team, &mut spec).await.unwrap();
+        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', $5, 'stopped')")
+            .bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
+        // The team's Cloudflare, and the record Pyo made for the first domain.
+        let zones = json!([{ "id": ZONE, "name": "example.com", "canEdit": true, "accountId": ACCOUNT, "accountName": "Acme", "tunnel": { "ready": true } }]);
+        let sealed = crate::vault::get().seal_credential(&team, TOKEN).await.unwrap();
+        q("INSERT INTO pyo.cloudflare_accounts (team_id, token_sealed, zones) VALUES ($1, $2, $3)").bind(&team).bind(&sealed).bind(&zones).execute(&db).await.unwrap();
+        let mut tx = db.begin().await.unwrap();
+        let mark = marker(&install_id(&mut tx).await.unwrap());
+        tx.commit().await.unwrap();
+        let rec = format!("rec{run}");
+        cf.put_record(ZONE, json!({ "id": rec, "type": "A", "name": a, "content": "203.0.113.7", "proxied": false, "ttl": 1, "comment": mark }));
+        q("INSERT INTO pyo.dns_records (service_id, domain_id, team_id, hostname, zone_id, zone_name, record_id, type, content, status) VALUES ($1, 'dom_a', $2, $3, $4, 'example.com', $5, 'A', '203.0.113.7', 'created')")
+            .bind(&svc).bind(&team).bind(&a).bind(ZONE).bind(&rec).execute(&db).await.unwrap();
+        let stored = |db: sqlx::PgPool, svc: String| async move {
+            let mut spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1").bind(svc).fetch_one(&db).await.unwrap();
+            crate::vault::get().open_env(&mut spec).await.unwrap();
+            spec
+        };
+        let values = |spec: &Value| -> Vec<String> {
+            spec["env"].as_array().unwrap().iter().map(|e| e["value"].as_str().unwrap().to_owned()).collect()
+        };
+
+        // Saved back as get_state shows it: every value kept.
+        let mut shown = stored(db.clone(), svc.clone()).await;
+        shown["id"] = json!(svc);
+        shown["env"] = json!([
+            { "id": "e1", "key": "API_URL", "value": "•••" },
+            { "id": "e2", "key": "TOKEN", "value": "•••", "secret": true, "hasValue": true },
+        ]);
+        shown["description"] = json!("moved");
+        crate::ops::run_json(&s, &user, json!({ "op": "saveService", "service": shown })).await.unwrap();
+        let now = stored(db.clone(), svc.clone()).await;
+        assert_eq!(now["description"], "moved");
+        assert_eq!(values(&now), ["https://api.example.com", "s3cret-token"]);
+        // A hidden value with nothing saved, or a hidden part: refused, nothing changed.
+        let mut bad = shown.clone();
+        bad["env"].as_array_mut().unwrap().push(json!({ "key": "NEW_KEY", "value": "•••" }));
+        let e = crate::ops::run_json(&s, &user, json!({ "op": "saveService", "service": bad })).await.unwrap_err();
+        assert_eq!(e.message, "NEW_KEY's value is hidden (•••). Send its real value.");
+        let mut bad = shown.clone();
+        bad["env"][0]["value"] = json!("https://••••••••@api.example.com");
+        let e = crate::ops::run_json(&s, &user, json!({ "op": "saveService", "service": bad })).await.unwrap_err();
+        assert_eq!(e.message, "API_URL has a hidden part (•••). Send its full value.");
+        assert_eq!(values(&stored(db.clone(), svc.clone()).await), ["https://api.example.com", "s3cret-token"]);
+
+        // Removed by hostname: Pyo's record goes too, the port stays public for the other.
+        let r = crate::ops::run_json(&s, &user, json!({ "op": "removeDomain", "serviceId": svc, "domainId": a.to_uppercase() })).await.unwrap();
+        assert_eq!(r["removed"], json!(a));
+        let now = stored(db.clone(), svc.clone()).await;
+        let hosts: Vec<&str> = now["domains"].as_array().unwrap().iter().map(|d| d["hostname"].as_str().unwrap()).collect();
+        assert_eq!(hosts, [b.as_str()]);
+        assert_eq!(now["ports"][0]["exposure"], "http");
+        assert!(cf.records(ZONE).iter().all(|r| r["id"] != json!(rec)), "Pyo's record is deleted");
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.dns_records WHERE service_id = $1").bind(&svc).fetch_one(&db).await.unwrap();
+        assert_eq!(left, 0);
+        assert_eq!(values(&now), ["https://api.example.com", "s3cret-token"], "the variables are untouched");
+        // A record someone made by hand is never touched.
+        cf.put_record(ZONE, json!({ "id": format!("hand{run}"), "type": "A", "name": b, "content": "198.51.100.9", "proxied": false, "ttl": 300, "comment": "by hand" }));
+        crate::ops::run_json(&s, &user, json!({ "op": "removeDomain", "serviceId": svc, "domainId": "dom_b" })).await.unwrap();
+        let now = stored(db.clone(), svc.clone()).await;
+        assert_eq!(now["domains"], json!([]));
+        assert_eq!(now["ports"][0]["exposure"], "internal", "no domain uses it anymore");
+        assert!(cf.records(ZONE).iter().any(|r| r["id"] == json!(format!("hand{run}"))));
+        // One it doesn't have.
+        let e = crate::ops::run_json(&s, &user, json!({ "op": "removeDomain", "serviceId": svc, "domainId": "dom_zz" })).await.unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::NOT_FOUND);
+        q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
+        q("DELETE FROM pyo.users WHERE id = $1").bind(&usr).execute(&db).await.unwrap();
     });
 }

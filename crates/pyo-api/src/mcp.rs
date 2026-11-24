@@ -1918,6 +1918,16 @@ mod tests {
         );
         assert_eq!(by("create_service").run, Run::Written);
         assert_eq!(by("remove_server").run, Run::Op("removeServer".into()));
+        // A domain comes off without a whole-service save_service.
+        let rd = by("remove_domain");
+        assert_eq!(rd.run, Run::Op("removeDomain".into()));
+        assert_eq!(rd.access, KeyAccess::Full);
+        assert_eq!(rd.def["annotations"]["destructiveHint"], true);
+        let required = rd.def["inputSchema"]["required"].as_array().unwrap();
+        assert!(required.contains(&json!("serviceId")) && required.contains(&json!("domainId")));
+        for k in ["keepDnsRecord", "restoreRecords"] {
+            assert!(rd.def["inputSchema"]["properties"][k].is_object(), "{k}");
+        }
         assert_eq!(
             by("cancel_server_removal").def["annotations"]["destructiveHint"],
             false
