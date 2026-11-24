@@ -577,6 +577,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     #[test]
     fn names() {
@@ -927,74 +928,76 @@ mod tests {
     /// key is made once, even asked for twice at once, and [`sweep`]
     /// removes a deleted team's key and bucket (any other `pyo-team-*` the
     /// database doesn't know of as well).
-    #[tokio::test]
+    #[test]
     #[ignore = "needs DATABASE_URL and a Garage (PYO_BACKUP_STORE_*)"]
-    async fn garage_e2e_team_lifecycle() {
-        let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-        crate::migrate::run(&db).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            db.clone(),
-            Some(crate::vault::Provider::Local {
-                current: zeroize::Zeroizing::new([6u8; 32]),
-                previous: None,
-            }),
-        ));
-        let run = crate::ids::new_id("t").to_lowercase();
-        let (x, y) = (format!("tx_{run}"), format!("ty_{run}"));
-        for t in [&x, &y] {
-            sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-                .bind(t)
+    fn garage_e2e_team_lifecycle() {
+        run_big(async {
+            let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+                .await
+                .unwrap();
+            crate::migrate::run(&db).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                db.clone(),
+                Some(crate::vault::Provider::Local {
+                    current: zeroize::Zeroizing::new([6u8; 32]),
+                    previous: None,
+                }),
+            ));
+            let run = crate::ids::new_id("t").to_lowercase();
+            let (x, y) = (format!("tx_{run}"), format!("ty_{run}"));
+            for t in [&x, &y] {
+                sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                    .bind(t)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+            let first = team_login(&db, &x).await.unwrap();
+            assert_eq!(team_login(&db, &x).await.unwrap(), first, "made once");
+            let (a, b) = tokio::join!(team_login(&db, &y), team_login(&db, &y));
+            assert_eq!(a.unwrap(), b.unwrap(), "two at once: one key");
+            let admin = admin().unwrap();
+            let keys = admin.ok(list_keys()).await.unwrap();
+            let named = |name: String| {
+                keys.as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|k| k["name"] == name.as_str())
+                    .count()
+            };
+            assert_eq!(named(team_bucket(&y)), 1, "the losing key was deleted");
+            sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+                .bind(&y)
                 .execute(&db)
                 .await
                 .unwrap();
-        }
-        let first = team_login(&db, &x).await.unwrap();
-        assert_eq!(team_login(&db, &x).await.unwrap(), first, "made once");
-        let (a, b) = tokio::join!(team_login(&db, &y), team_login(&db, &y));
-        assert_eq!(a.unwrap(), b.unwrap(), "two at once: one key");
-        let admin = admin().unwrap();
-        let keys = admin.ok(list_keys()).await.unwrap();
-        let named = |name: String| {
-            keys.as_array()
-                .unwrap()
-                .iter()
-                .filter(|k| k["name"] == name.as_str())
-                .count()
-        };
-        assert_eq!(named(team_bucket(&y)), 1, "the losing key was deleted");
-        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
-            .bind(&y)
-            .execute(&db)
-            .await
-            .unwrap();
-        sweep(&db).await.unwrap();
-        assert_eq!(
-            admin.send(bucket_info(&team_bucket(&y))).await.unwrap().0,
-            404,
-            "the deleted team's bucket"
-        );
-        let keys = admin.ok(list_keys()).await.unwrap();
-        assert!(
-            !keys
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|k| k["name"] == team_bucket(&y).as_str()),
-            "and key"
-        );
-        let x_bucket = admin.ok(bucket_info(&team_bucket(&x))).await.unwrap();
-        assert!(
-            has_access(&x_bucket, &first.0, false),
-            "the other team keeps its own"
-        );
-        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
-            .bind(&x)
-            .execute(&db)
-            .await
-            .unwrap();
-        sweep(&db).await.unwrap();
+            sweep(&db).await.unwrap();
+            assert_eq!(
+                admin.send(bucket_info(&team_bucket(&y))).await.unwrap().0,
+                404,
+                "the deleted team's bucket"
+            );
+            let keys = admin.ok(list_keys()).await.unwrap();
+            assert!(
+                !keys
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|k| k["name"] == team_bucket(&y).as_str()),
+                "and key"
+            );
+            let x_bucket = admin.ok(bucket_info(&team_bucket(&x))).await.unwrap();
+            assert!(
+                has_access(&x_bucket, &first.0, false),
+                "the other team keeps its own"
+            );
+            sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+                .bind(&x)
+                .execute(&db)
+                .await
+                .unwrap();
+            sweep(&db).await.unwrap();
+        })
     }
 
     /// Another process applied the next layout version between our read

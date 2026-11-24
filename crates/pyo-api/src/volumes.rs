@@ -1563,6 +1563,7 @@ pub async fn reported(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     fn report(id: &str, name: &str) -> VolumeReport {
         VolumeReport {
@@ -1769,704 +1770,708 @@ mod tests {
     }
 
     /// Needs Postgres: DATABASE_URL=… cargo test -p pyo-api -- --ignored volumes::tests
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn volume_lifecycle_in_the_database() {
-        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        crate::migrate::run(&pool).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            pool.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        let run = crate::ids::new_id("t");
-        let (team, cluster, project, service, other) = (
-            format!("team_{run}"),
-            format!("cl_{run}"),
-            format!("prj_{run}"),
-            format!("svc_{run}"),
-            format!("svc_o{run}"),
-        );
-        let user = User {
-            id: format!("usr_{run}"),
-            name: "T".into(),
-            email: format!("{run}@t.test"),
-            timezone: "UTC".into(),
-            is_admin: false,
-            must_set_up: false,
-            key: None,
-        };
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::query(
-            "INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'T', '')",
-        )
-        .bind(&user.id)
-        .bind(&user.email)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-            .bind(&team)
+    fn volume_lifecycle_in_the_database() {
+        run_big(async {
+            let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+            let pool = sqlx::PgPool::connect(&url).await.unwrap();
+            crate::migrate::run(&pool).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                pool.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            let run = crate::ids::new_id("t");
+            let (team, cluster, project, service, other) = (
+                format!("team_{run}"),
+                format!("cl_{run}"),
+                format!("prj_{run}"),
+                format!("svc_{run}"),
+                format!("svc_o{run}"),
+            );
+            let user = User {
+                id: format!("usr_{run}"),
+                name: "T".into(),
+                email: format!("{run}@t.test"),
+                timezone: "UTC".into(),
+                is_admin: false,
+                must_set_up: false,
+                key: None,
+            };
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query(
+                "INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'T', '')",
+            )
+            .bind(&user.id)
+            .bind(&user.email)
             .execute(&mut *tx)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'active')").bind(format!("mem_{run}")).bind(&team).bind(&user.id).bind(&user.email).execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)").bind(&cluster).bind(&team).execute(&mut *tx).await.unwrap();
-        sqlx::query(
-            "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $3)",
-        )
-        .bind(&project)
-        .bind(&team)
-        .bind(format!("shop-{run}"))
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        for (id, name, spec) in [
-            (&service, "web", json!({ "name": "web" })),
-            (&other, "api", json!({ "name": "api", "servers": ["b"] })),
-        ] {
-            sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, $5, $6)").bind(id).bind(&team).bind(&project).bind(&cluster).bind(name).bind(spec).execute(&mut *tx).await.unwrap();
-        }
-        let vol = format!("vol_{run}");
-        sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, service_id, data, namespace) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-            .bind(&vol)
-            .bind(&team)
-            .bind(&cluster)
-            .bind(&project)
-            .bind(&service)
-            .bind(json!({ "name": "web-data", "mountPath": "/data", "sizeGi": 5, "storageClass": "local-path", "accessMode": "ReadWriteOnce", "server": "a" }))
-            .bind(format!("shop-{run}"))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        let mut wake = vec![];
-        // Attached: can't be deleted.
-        assert!(
-            delete(&mut tx, &user, &vol, None, &mut wake)
-                .await
-                .unwrap_err()
-                .message
-                .contains("Detach it first")
-        );
-        // Detached: kept, unmounted from the next deploy.
-        detach(&mut tx, &user, &vol).await.unwrap();
-        let service_id: Option<String> =
-            sqlx::query_scalar("SELECT service_id FROM pyo.volumes WHERE id = $1")
-                .bind(&vol)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-        assert!(service_id.is_none());
-        // Its data is on server a; api only runs on b.
-        assert!(
-            attach(&mut tx, &user, &vol, &other, "/srv", &mut wake)
-                .await
-                .unwrap_err()
-                .message
-                .contains("only runs on b")
-        );
-        attach(&mut tx, &user, &vol, &service, "/files/", &mut wake)
-            .await
-            .unwrap();
-        let path: String =
-            sqlx::query_scalar("SELECT data->>'mountPath' FROM pyo.volumes WHERE id = $1")
-                .bind(&vol)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-        assert_eq!(path, "/files");
-        detach(&mut tx, &user, &vol).await.unwrap();
-        // Deleted: kept until the cluster confirms; asked once.
-        delete(&mut tx, &user, &vol, None, &mut wake).await.unwrap();
-        assert_eq!(wake, std::slice::from_ref(&cluster));
-        assert!(
-            attach(&mut tx, &user, &vol, &service, "/data", &mut wake)
-                .await
-                .is_err(),
-            "being deleted"
-        );
-        assert_eq!(asked(&mut tx, &cluster, &vol).await, 1);
-        // Still on the cluster, the deletion on its way: not asked again.
-        reported(&mut tx, &cluster, &[report(&vol, "web-data")])
-            .await
-            .unwrap();
-        assert_eq!(asked(&mut tx, &cluster, &vol).await, 1);
-        // A failure shows on the volume.
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "delete_volume", "volume_id": vol }),
-            false,
-            Some("web-data is still in use by web-1."),
-        )
-        .await
-        .unwrap();
-        let err: Option<String> =
-            sqlx::query_scalar("SELECT data->>'deleteError' FROM pyo.volumes WHERE id = $1")
-                .bind(&vol)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-        assert_eq!(err.as_deref(), Some("web-data is still in use by web-1."));
-        // Gone from the cluster's list: the row goes, the id stays.
-        reported(&mut tx, &cluster, &[report("vol_stray", "left-over")])
-            .await
-            .unwrap();
-        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.volumes WHERE id = $1")
-            .bind(&vol)
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        assert_eq!(rows, 0);
-        let kept: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM pyo.deleted_volumes WHERE id = $1")
-                .bind(&vol)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-        assert_eq!(kept, 1);
-        // The claim with no volume is listed, and can be deleted by its id.
-        let strays: Value =
-            sqlx::query_scalar("SELECT stray_volumes FROM pyo.clusters WHERE id = $1")
-                .bind(&cluster)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-        assert_eq!(strays[0]["name"], "left-over");
-        assert!(
-            delete(&mut tx, &user, "vol_stray", None, &mut wake)
-                .await
-                .is_err(),
-            "needs its cluster"
-        );
-        delete(&mut tx, &user, "vol_stray", Some(&cluster), &mut wake)
-            .await
-            .unwrap();
-        let strays: Value =
-            sqlx::query_scalar("SELECT stray_volumes FROM pyo.clusters WHERE id = $1")
-                .bind(&cluster)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-        assert_eq!(strays[0]["deleting"], true);
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "delete_volume", "volume_id": "vol_stray" }),
-            true,
-            None,
-        )
-        .await
-        .unwrap();
-        let strays: Value =
-            sqlx::query_scalar("SELECT stray_volumes FROM pyo.clusters WHERE id = $1")
-                .bind(&cluster)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-        assert_eq!(strays, json!([]));
-
-        // Deleted with its service: asked only once the service's objects
-        // are gone; a failed service deletion keeps it.
-        let vol2 = format!("vol_b{run}");
-        sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, service_id, data, namespace) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-            .bind(&vol2)
-            .bind(&team)
-            .bind(&cluster)
-            .bind(&project)
-            .bind(&service)
-            .bind(json!({ "name": "web-files", "mountPath": "/files", "sizeGi": 1 }))
-            .bind(format!("shop-{run}"))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        assert_eq!(
-            delete_with_service(&mut tx, &user, &team, &service)
-                .await
-                .unwrap(),
-            ["web-files"]
-        );
-        sqlx::query("UPDATE pyo.services SET deleting = true WHERE id = $1")
-            .bind(&service)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        reported(&mut tx, &cluster, &[report(&vol2, "web-files")])
-            .await
-            .unwrap();
-        assert_eq!(
-            asked(&mut tx, &cluster, &vol2).await,
-            0,
-            "the service is still there"
-        );
-        service_deleted(&mut tx, &cluster, &service, false)
-            .await
-            .unwrap();
-        let deleting: bool = sqlx::query_scalar("SELECT deleting FROM pyo.volumes WHERE id = $1")
-            .bind(&vol2)
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        assert!(!deleting);
-        delete_with_service(&mut tx, &user, &team, &service)
-            .await
-            .unwrap();
-        service_deleted(&mut tx, &cluster, &service, true)
-            .await
-            .unwrap();
-        assert_eq!(asked(&mut tx, &cluster, &vol2).await, 1);
-        sqlx::query("DELETE FROM pyo.services WHERE id = $1")
-            .bind(&service)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        // The project goes, keeping a volume that holds its namespace; the
-        // last volume confirmed gone lets the namespace go.
-        sqlx::query("DELETE FROM pyo.services WHERE project_id = $1")
-            .bind(&project)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM pyo.projects WHERE id = $1")
-            .bind(&project)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        let count_ns = "SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'delete_namespace'";
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "delete_volume", "volume_id": vol2 }),
-            true,
-            None,
-        )
-        .await
-        .unwrap();
-        let n: i64 = sqlx::query_scalar(count_ns)
-            .bind(&cluster)
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-
-        // A project deleted with its services: a volume already being
-        // deleted with one goes now (its service's row goes with the
-        // project); the others are kept, or all deleted.
-        let (project2, service2) = (format!("prj_2{run}"), format!("svc_2{run}"));
-        sqlx::query(
-            "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'blog', $3)",
-        )
-        .bind(&project2)
-        .bind(&team)
-        .bind(format!("blog-{run}"))
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, deleting) VALUES ($1, $2, $3, $4, 'blog', '{}', true)").bind(&service2).bind(&team).bind(&project2).bind(&cluster).execute(&mut *tx).await.unwrap();
-        let (going, kept) = (format!("vol_g{run}"), format!("vol_k{run}"));
-        for (id, name, deleting) in [(&going, "blog-cache", true), (&kept, "blog-data", false)] {
-            sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, service_id, data, deleting) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-                .bind(id)
+            sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
                 .bind(&team)
-                .bind(&cluster)
-                .bind(&project2)
-                .bind(&service2)
-                .bind(json!({ "name": name, "mountPath": "/data", "sizeGi": 1 }))
-                .bind(deleting)
                 .execute(&mut *tx)
                 .await
                 .unwrap();
-        }
-        assert_eq!(
-            project_deleted(&mut tx, &project2, &format!("blog-{run}"), false)
+            sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'active')").bind(format!("mem_{run}")).bind(&team).bind(&user.id).bind(&user.email).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, $1, $1)").bind(&cluster).bind(&team).execute(&mut *tx).await.unwrap();
+            sqlx::query(
+                "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $3)",
+            )
+            .bind(&project)
+            .bind(&team)
+            .bind(format!("shop-{run}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            for (id, name, spec) in [
+                (&service, "web", json!({ "name": "web" })),
+                (&other, "api", json!({ "name": "api", "servers": ["b"] })),
+            ] {
+                sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, $5, $6)").bind(id).bind(&team).bind(&project).bind(&cluster).bind(name).bind(spec).execute(&mut *tx).await.unwrap();
+            }
+            let vol = format!("vol_{run}");
+            sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, service_id, data, namespace) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+                .bind(&vol)
+                .bind(&team)
+                .bind(&cluster)
+                .bind(&project)
+                .bind(&service)
+                .bind(json!({ "name": "web-data", "mountPath": "/data", "sizeGi": 5, "storageClass": "local-path", "accessMode": "ReadWriteOnce", "server": "a" }))
+                .bind(format!("shop-{run}"))
+                .execute(&mut *tx)
                 .await
-                .unwrap(),
-            ["blog-data"]
-        );
-        assert_eq!(asked(&mut tx, &cluster, &going).await, 1);
-        assert_eq!(asked(&mut tx, &cluster, &kept).await, 0);
-        assert_eq!(
-            project_deleted(&mut tx, &project2, &format!("blog-{run}"), true)
+                .unwrap();
+            let mut wake = vec![];
+            // Attached: can't be deleted.
+            assert!(
+                delete(&mut tx, &user, &vol, None, &mut wake)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("Detach it first")
+            );
+            // Detached: kept, unmounted from the next deploy.
+            detach(&mut tx, &user, &vol).await.unwrap();
+            let service_id: Option<String> =
+                sqlx::query_scalar("SELECT service_id FROM pyo.volumes WHERE id = $1")
+                    .bind(&vol)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert!(service_id.is_none());
+            // Its data is on server a; api only runs on b.
+            assert!(
+                attach(&mut tx, &user, &vol, &other, "/srv", &mut wake)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("only runs on b")
+            );
+            attach(&mut tx, &user, &vol, &service, "/files/", &mut wake)
                 .await
-                .unwrap(),
-            ["blog-cache", "blog-data"]
-        );
-        assert_eq!(asked(&mut tx, &cluster, &kept).await, 1);
-        tx.rollback().await.unwrap();
+                .unwrap();
+            let path: String =
+                sqlx::query_scalar("SELECT data->>'mountPath' FROM pyo.volumes WHERE id = $1")
+                    .bind(&vol)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert_eq!(path, "/files");
+            detach(&mut tx, &user, &vol).await.unwrap();
+            // Deleted: kept until the cluster confirms; asked once.
+            delete(&mut tx, &user, &vol, None, &mut wake).await.unwrap();
+            assert_eq!(wake, std::slice::from_ref(&cluster));
+            assert!(
+                attach(&mut tx, &user, &vol, &service, "/data", &mut wake)
+                    .await
+                    .is_err(),
+                "being deleted"
+            );
+            assert_eq!(asked(&mut tx, &cluster, &vol).await, 1);
+            // Still on the cluster, the deletion on its way: not asked again.
+            reported(&mut tx, &cluster, &[report(&vol, "web-data")])
+                .await
+                .unwrap();
+            assert_eq!(asked(&mut tx, &cluster, &vol).await, 1);
+            // A failure shows on the volume.
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "delete_volume", "volume_id": vol }),
+                false,
+                Some("web-data is still in use by web-1."),
+            )
+            .await
+            .unwrap();
+            let err: Option<String> =
+                sqlx::query_scalar("SELECT data->>'deleteError' FROM pyo.volumes WHERE id = $1")
+                    .bind(&vol)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert_eq!(err.as_deref(), Some("web-data is still in use by web-1."));
+            // Gone from the cluster's list: the row goes, the id stays.
+            reported(&mut tx, &cluster, &[report("vol_stray", "left-over")])
+                .await
+                .unwrap();
+            let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.volumes WHERE id = $1")
+                .bind(&vol)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(rows, 0);
+            let kept: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pyo.deleted_volumes WHERE id = $1")
+                    .bind(&vol)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert_eq!(kept, 1);
+            // The claim with no volume is listed, and can be deleted by its id.
+            let strays: Value =
+                sqlx::query_scalar("SELECT stray_volumes FROM pyo.clusters WHERE id = $1")
+                    .bind(&cluster)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert_eq!(strays[0]["name"], "left-over");
+            assert!(
+                delete(&mut tx, &user, "vol_stray", None, &mut wake)
+                    .await
+                    .is_err(),
+                "needs its cluster"
+            );
+            delete(&mut tx, &user, "vol_stray", Some(&cluster), &mut wake)
+                .await
+                .unwrap();
+            let strays: Value =
+                sqlx::query_scalar("SELECT stray_volumes FROM pyo.clusters WHERE id = $1")
+                    .bind(&cluster)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert_eq!(strays[0]["deleting"], true);
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "delete_volume", "volume_id": "vol_stray" }),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            let strays: Value =
+                sqlx::query_scalar("SELECT stray_volumes FROM pyo.clusters WHERE id = $1")
+                    .bind(&cluster)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert_eq!(strays, json!([]));
+
+            // Deleted with its service: asked only once the service's objects
+            // are gone; a failed service deletion keeps it.
+            let vol2 = format!("vol_b{run}");
+            sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, service_id, data, namespace) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+                .bind(&vol2)
+                .bind(&team)
+                .bind(&cluster)
+                .bind(&project)
+                .bind(&service)
+                .bind(json!({ "name": "web-files", "mountPath": "/files", "sizeGi": 1 }))
+                .bind(format!("shop-{run}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(
+                delete_with_service(&mut tx, &user, &team, &service)
+                    .await
+                    .unwrap(),
+                ["web-files"]
+            );
+            sqlx::query("UPDATE pyo.services SET deleting = true WHERE id = $1")
+                .bind(&service)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            reported(&mut tx, &cluster, &[report(&vol2, "web-files")])
+                .await
+                .unwrap();
+            assert_eq!(
+                asked(&mut tx, &cluster, &vol2).await,
+                0,
+                "the service is still there"
+            );
+            service_deleted(&mut tx, &cluster, &service, false)
+                .await
+                .unwrap();
+            let deleting: bool = sqlx::query_scalar("SELECT deleting FROM pyo.volumes WHERE id = $1")
+                .bind(&vol2)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert!(!deleting);
+            delete_with_service(&mut tx, &user, &team, &service)
+                .await
+                .unwrap();
+            service_deleted(&mut tx, &cluster, &service, true)
+                .await
+                .unwrap();
+            assert_eq!(asked(&mut tx, &cluster, &vol2).await, 1);
+            sqlx::query("DELETE FROM pyo.services WHERE id = $1")
+                .bind(&service)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            // The project goes, keeping a volume that holds its namespace; the
+            // last volume confirmed gone lets the namespace go.
+            sqlx::query("DELETE FROM pyo.services WHERE project_id = $1")
+                .bind(&project)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM pyo.projects WHERE id = $1")
+                .bind(&project)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let count_ns = "SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'delete_namespace'";
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "delete_volume", "volume_id": vol2 }),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            let n: i64 = sqlx::query_scalar(count_ns)
+                .bind(&cluster)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(n, 1);
+
+            // A project deleted with its services: a volume already being
+            // deleted with one goes now (its service's row goes with the
+            // project); the others are kept, or all deleted.
+            let (project2, service2) = (format!("prj_2{run}"), format!("svc_2{run}"));
+            sqlx::query(
+                "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'blog', $3)",
+            )
+            .bind(&project2)
+            .bind(&team)
+            .bind(format!("blog-{run}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, deleting) VALUES ($1, $2, $3, $4, 'blog', '{}', true)").bind(&service2).bind(&team).bind(&project2).bind(&cluster).execute(&mut *tx).await.unwrap();
+            let (going, kept) = (format!("vol_g{run}"), format!("vol_k{run}"));
+            for (id, name, deleting) in [(&going, "blog-cache", true), (&kept, "blog-data", false)] {
+                sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, service_id, data, deleting) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+                    .bind(id)
+                    .bind(&team)
+                    .bind(&cluster)
+                    .bind(&project2)
+                    .bind(&service2)
+                    .bind(json!({ "name": name, "mountPath": "/data", "sizeGi": 1 }))
+                    .bind(deleting)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                project_deleted(&mut tx, &project2, &format!("blog-{run}"), false)
+                    .await
+                    .unwrap(),
+                ["blog-data"]
+            );
+            assert_eq!(asked(&mut tx, &cluster, &going).await, 1);
+            assert_eq!(asked(&mut tx, &cluster, &kept).await, 0);
+            assert_eq!(
+                project_deleted(&mut tx, &project2, &format!("blog-{run}"), true)
+                    .await
+                    .unwrap(),
+                ["blog-cache", "blog-data"]
+            );
+            assert_eq!(asked(&mut tx, &cluster, &kept).await, 1);
+            tx.rollback().await.unwrap();
+        })
     }
 
     /// Needs Postgres: DATABASE_URL=… cargo test -p pyo-api -- --ignored volumes::tests
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn moves_restores_and_growth_in_the_database() {
-        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        crate::migrate::run(&pool).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            pool.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        let run = crate::ids::new_id("t");
-        let (team, cluster) = (format!("team_{run}"), format!("cl_{run}"));
-        let user = User {
-            id: format!("usr_{run}"),
-            name: "T".into(),
-            email: format!("{run}@t.test"),
-            timezone: "UTC".into(),
-            is_admin: false,
-            must_set_up: false,
-            key: None,
-        };
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::query(
-            "INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'T', '')",
-        )
-        .bind(&user.id)
-        .bind(&user.email)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-            .bind(&team)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'active')").bind(format!("mem_{run}")).bind(&team).bind(&user.id).bind(&user.email).execute(&mut *tx).await.unwrap();
-        let caps = json!({ "storageClasses": [
-            { "name": "local-path", "provisioner": "rancher.io/local-path", "replicated": false },
-            { "name": "longhorn", "provisioner": "driver.longhorn.io", "replicated": true, "allowVolumeExpansion": true },
-            { "name": "fixed", "provisioner": "example.com/fixed", "replicated": true },
-        ] });
-        sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, capabilities) VALUES ($1, $2, $1, $1, $3)").bind(&cluster).bind(&team).bind(&caps).execute(&mut *tx).await.unwrap();
-        let (pa, pb, pc) = (
-            format!("prj_a{run}"),
-            format!("prj_b{run}"),
-            format!("prj_c{run}"),
-        );
-        for (id, name) in [(&pa, "shop"), (&pb, "blog"), (&pc, "old")] {
+    fn moves_restores_and_growth_in_the_database() {
+        run_big(async {
+            let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+            let pool = sqlx::PgPool::connect(&url).await.unwrap();
+            crate::migrate::run(&pool).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                pool.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            let run = crate::ids::new_id("t");
+            let (team, cluster) = (format!("team_{run}"), format!("cl_{run}"));
+            let user = User {
+                id: format!("usr_{run}"),
+                name: "T".into(),
+                email: format!("{run}@t.test"),
+                timezone: "UTC".into(),
+                is_admin: false,
+                must_set_up: false,
+                key: None,
+            };
+            let mut tx = pool.begin().await.unwrap();
             sqlx::query(
-                "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, $3, $4)",
+                "INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'T', '')",
             )
-            .bind(id)
-            .bind(&team)
-            .bind(name)
-            .bind(format!("{name}-{run}"))
+            .bind(&user.id)
+            .bind(&user.email)
             .execute(&mut *tx)
             .await
             .unwrap();
-        }
-        let (sa, sb) = (format!("svc_a{run}"), format!("svc_b{run}"));
-        for (id, project, name) in [(&sa, &pa, "web"), (&sb, &pb, "api")] {
-            sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, $5, '{}')").bind(id).bind(&team).bind(project).bind(&cluster).bind(name).execute(&mut *tx).await.unwrap();
-        }
-        let add = |id: String, project: String, name: &'static str, class: &'static str| json!({ "id": id, "project": project, "data": { "name": name, "sizeGi": 5, "storageClass": class, "accessMode": "ReadWriteOnce", "status": "bound", "mountPath": "/data" } });
-        let (v1, v2, v3) = (
-            format!("vol_1{run}"),
-            format!("vol_2{run}"),
-            format!("vol_3{run}"),
-        );
-        for v in [
-            add(v1.clone(), pa.clone(), "web-data", "local-path"),
-            add(v2.clone(), pc.clone(), "old-data", "longhorn"),
-            add(v3.clone(), pa.clone(), "api-data", "fixed"),
-        ] {
-            sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, data) VALUES ($1, $2, $3, $4, $5)")
-                .bind(v["id"].as_str())
+            sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
                 .bind(&team)
-                .bind(&cluster)
-                .bind(v["project"].as_str())
-                .bind(&v["data"])
                 .execute(&mut *tx)
                 .await
                 .unwrap();
-        }
-        const COUNT: &str = "SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = $2 AND ($3 = '' OR command->>'namespace' = $3)";
-        let mut wake = vec![];
-
-        // Same project: attached at once.
-        attach(&mut tx, &user, &v1, &sa, "/data", &mut wake)
-            .await
-            .unwrap();
-        detach(&mut tx, &user, &v1).await.unwrap();
-        // Another project: moved first, then attached.
-        let r = attach(&mut tx, &user, &v1, &sb, "/files", &mut wake)
-            .await
-            .unwrap();
-        assert_eq!(r["moving"], true);
-        assert_eq!(wake, std::slice::from_ref(&cluster));
-        let n: i64 = sqlx::query_scalar(COUNT)
-            .bind(&cluster)
-            .bind("move_volume")
-            .bind("")
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-        let again = attach(&mut tx, &user, &v1, &sb, "/files", &mut wake)
-            .await
-            .unwrap_err();
-        assert!(again.message.contains("being moved"), "{}", again.message);
-        assert!(
-            delete(&mut tx, &user, &v1, None, &mut wake)
+            sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'active')").bind(format!("mem_{run}")).bind(&team).bind(&user.id).bind(&user.email).execute(&mut *tx).await.unwrap();
+            let caps = json!({ "storageClasses": [
+                { "name": "local-path", "provisioner": "rancher.io/local-path", "replicated": false },
+                { "name": "longhorn", "provisioner": "driver.longhorn.io", "replicated": true, "allowVolumeExpansion": true },
+                { "name": "fixed", "provisioner": "example.com/fixed", "replicated": true },
+            ] });
+            sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, capabilities) VALUES ($1, $2, $1, $1, $3)").bind(&cluster).bind(&team).bind(&caps).execute(&mut *tx).await.unwrap();
+            let (pa, pb, pc) = (
+                format!("prj_a{run}"),
+                format!("prj_b{run}"),
+                format!("prj_c{run}"),
+            );
+            for (id, name) in [(&pa, "shop"), (&pb, "blog"), (&pc, "old")] {
+                sqlx::query(
+                    "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, $3, $4)",
+                )
+                .bind(id)
+                .bind(&team)
+                .bind(name)
+                .bind(format!("{name}-{run}"))
+                .execute(&mut *tx)
                 .await
-                .unwrap_err()
-                .message
-                .contains("being moved")
-        );
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "move_volume", "volumeId": v1 }),
-            true,
-            None,
-        )
-        .await
-        .unwrap();
-        let (project, ns, service, data): (String, String, Option<String>, Value) = sqlx::query_as(
-            "SELECT project_id, namespace, service_id, data FROM pyo.volumes WHERE id = $1",
-        )
-        .bind(&v1)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap();
-        assert_eq!(
-            (project.as_str(), ns, service.as_deref()),
-            (pb.as_str(), format!("blog-{run}"), Some(sb.as_str()))
-        );
-        assert_eq!(data["mountPath"], "/files");
-        assert!(data.get("moving").is_none());
-        let pending: bool =
-            sqlx::query_scalar("SELECT pending_changes FROM pyo.services WHERE id = $1")
-                .bind(&sb)
+                .unwrap();
+            }
+            let (sa, sb) = (format!("svc_a{run}"), format!("svc_b{run}"));
+            for (id, project, name) in [(&sa, &pa, "web"), (&sb, &pb, "api")] {
+                sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, $5, '{}')").bind(id).bind(&team).bind(project).bind(&cluster).bind(name).execute(&mut *tx).await.unwrap();
+            }
+            let add = |id: String, project: String, name: &'static str, class: &'static str| json!({ "id": id, "project": project, "data": { "name": name, "sizeGi": 5, "storageClass": class, "accessMode": "ReadWriteOnce", "status": "bound", "mountPath": "/data" } });
+            let (v1, v2, v3) = (
+                format!("vol_1{run}"),
+                format!("vol_2{run}"),
+                format!("vol_3{run}"),
+            );
+            for v in [
+                add(v1.clone(), pa.clone(), "web-data", "local-path"),
+                add(v2.clone(), pc.clone(), "old-data", "longhorn"),
+                add(v3.clone(), pa.clone(), "api-data", "fixed"),
+            ] {
+                sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, data) VALUES ($1, $2, $3, $4, $5)")
+                    .bind(v["id"].as_str())
+                    .bind(&team)
+                    .bind(&cluster)
+                    .bind(v["project"].as_str())
+                    .bind(&v["data"])
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+            const COUNT: &str = "SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = $2 AND ($3 = '' OR command->>'namespace' = $3)";
+            let mut wake = vec![];
+
+            // Same project: attached at once.
+            attach(&mut tx, &user, &v1, &sa, "/data", &mut wake)
+                .await
+                .unwrap();
+            detach(&mut tx, &user, &v1).await.unwrap();
+            // Another project: moved first, then attached.
+            let r = attach(&mut tx, &user, &v1, &sb, "/files", &mut wake)
+                .await
+                .unwrap();
+            assert_eq!(r["moving"], true);
+            assert_eq!(wake, std::slice::from_ref(&cluster));
+            let n: i64 = sqlx::query_scalar(COUNT)
+                .bind(&cluster)
+                .bind("move_volume")
+                .bind("")
                 .fetch_one(&mut *tx)
                 .await
                 .unwrap();
-        assert!(pending, "deploy to mount it");
-
-        // A deleted project's volume goes to any project; its namespace
-        // goes once it's empty.
-        sqlx::query("UPDATE pyo.volumes SET namespace = $2 WHERE id = $1")
-            .bind(&v2)
-            .bind(format!("old-{run}"))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM pyo.projects WHERE id = $1")
-            .bind(&pc)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        // The name is taken in shop already? No: web-data moved out. A clash:
-        sqlx::query(
-            "UPDATE pyo.volumes SET data = data || '{\"name\": \"api-data\"}' WHERE id = $1",
-        )
-        .bind(&v2)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        let clash = attach(&mut tx, &user, &v2, &sa, "/old", &mut wake)
-            .await
-            .unwrap_err();
-        assert!(
-            clash
-                .message
-                .contains("already has a volume named api-data"),
-            "{}",
-            clash.message
-        );
-        sqlx::query(
-            "UPDATE pyo.volumes SET data = data || '{\"name\": \"old-data\"}' WHERE id = $1",
-        )
-        .bind(&v2)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        attach(&mut tx, &user, &v2, &sa, "/old", &mut wake)
-            .await
-            .unwrap();
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "move_volume", "volumeId": v2 }),
-            true,
-            None,
-        )
-        .await
-        .unwrap();
-        let ns_gone: i64 = sqlx::query_scalar(COUNT)
-            .bind(&cluster)
-            .bind("delete_namespace")
-            .bind(format!("old-{run}"))
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        assert_eq!(ns_gone, 1);
-
-        // A failed move leaves it where it was, with why.
-        detach(&mut tx, &user, &v2).await.unwrap();
-        attach(&mut tx, &user, &v2, &sb, "/old", &mut wake)
-            .await
-            .unwrap();
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "move_volume", "volumeId": v2 }),
-            false,
-            Some("old-data is still in use by web-1."),
-        )
-        .await
-        .unwrap();
-        let (project, service, data): (String, Option<String>, Value) =
-            sqlx::query_as("SELECT project_id, service_id, data FROM pyo.volumes WHERE id = $1")
-                .bind(&v2)
-                .fetch_one(&mut *tx)
+            assert_eq!(n, 1);
+            let again = attach(&mut tx, &user, &v1, &sb, "/files", &mut wake)
                 .await
-                .unwrap();
-        assert_eq!((project.as_str(), service), (pa.as_str(), None));
-        assert_eq!(data["moveError"], "old-data is still in use by web-1.");
-
-        // Growing: never on local-path or a class that can't; only up.
-        assert!(
-            resize(&mut tx, &user, &v1, 10, &mut wake)
-                .await
-                .unwrap_err()
-                .message
-                .contains("local-path")
-        );
-        assert!(
-            resize(&mut tx, &user, &v3, 10, &mut wake)
-                .await
-                .unwrap_err()
-                .message
-                .contains("can't grow")
-        );
-        assert!(
-            resize(&mut tx, &user, &v2, 5, &mut wake)
-                .await
-                .unwrap_err()
-                .message
-                .contains("only grow")
-        );
-        resize(&mut tx, &user, &v2, 8, &mut wake).await.unwrap();
-        let n: i64 = sqlx::query_scalar(COUNT)
-            .bind(&cluster)
-            .bind("resize_volume")
-            .bind("")
-            .fetch_one(&mut *tx)
+                .unwrap_err();
+            assert!(again.message.contains("being moved"), "{}", again.message);
+            assert!(
+                delete(&mut tx, &user, &v1, None, &mut wake)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("being moved")
+            );
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "move_volume", "volumeId": v1 }),
+                true,
+                None,
+            )
             .await
             .unwrap();
-        assert_eq!(n, 1);
-        // Not yet: the cluster still reports 5.
-        let rep = |cap: i64| VolumeReport {
-            capacity_gi: Some(cap),
-            size_gi: Some(8),
-            ..report(&v2, "old-data")
-        };
-        reported(&mut tx, &cluster, &[rep(5)]).await.unwrap();
-        let data: Value = sqlx::query_scalar("SELECT data FROM pyo.volumes WHERE id = $1")
-            .bind(&v2)
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        assert_eq!(
-            (data["sizeGi"].as_i64(), data["resizeTo"].as_i64()),
-            (Some(5), Some(8))
-        );
-        reported(&mut tx, &cluster, &[rep(8)]).await.unwrap();
-        let data: Value = sqlx::query_scalar("SELECT data FROM pyo.volumes WHERE id = $1")
-            .bind(&v2)
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        assert_eq!(
-            (data["sizeGi"].as_i64(), data.get("resizeTo")),
-            (Some(8), None)
-        );
-        // A failed one says why.
-        resize(&mut tx, &user, &v2, 9, &mut wake).await.unwrap();
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "resize_volume", "volume_id": v2 }),
-            false,
-            Some("quota"),
-        )
-        .await
-        .unwrap();
-        let data: Value = sqlx::query_scalar("SELECT data FROM pyo.volumes WHERE id = $1")
-            .bind(&v2)
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        assert_eq!(
-            (data["resizeError"].as_str(), data.get("resizeTo")),
-            (Some("quota"), None)
-        );
-
-        // Restoring: its service can't deploy meanwhile; the answer settles it.
-        sqlx::query("UPDATE pyo.volumes SET data = data || '{\"restore\": {\"id\": \"rst_1\", \"snapshotId\": \"abcdef12\"}}' WHERE id = $1").bind(&v1).execute(&mut *tx).await.unwrap();
-        assert!(
-            not_restoring(&mut tx, &sb)
-                .await
-                .unwrap_err()
-                .message
-                .contains("being restored")
-        );
-        assert!(
-            detach(&mut tx, &user, &v1)
-                .await
-                .unwrap_err()
-                .message
-                .contains("being restored")
-        );
-        // An older restore's late answer changes nothing.
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "restore_volume", "volumeId": v1, "restoreId": "rst_0" }),
-            true,
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(not_restoring(&mut tx, &sb).await.is_err());
-        finished(
-            &mut tx,
-            &cluster,
-            &json!({ "kind": "restore_volume", "volumeId": v1, "restoreId": "rst_1" }),
-            false,
-            Some("That snapshot isn't one of this volume's."),
-        )
-        .await
-        .unwrap();
-        not_restoring(&mut tx, &sb).await.unwrap();
-        let data: Value = sqlx::query_scalar("SELECT data FROM pyo.volumes WHERE id = $1")
+            let (project, ns, service, data): (String, String, Option<String>, Value) = sqlx::query_as(
+                "SELECT project_id, namespace, service_id, data FROM pyo.volumes WHERE id = $1",
+            )
             .bind(&v1)
             .fetch_one(&mut *tx)
             .await
             .unwrap();
-        assert_eq!(
-            data["restoreError"],
-            "That snapshot isn't one of this volume's."
-        );
-        let kinds: Vec<String> = sqlx::query_scalar(
-            "SELECT data->>'type' FROM pyo.activity WHERE team_id = $1 ORDER BY at",
-        )
-        .bind(&team)
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
-        for k in [
-            "volume.moving",
-            "volume.attached",
-            "volume.move_failed",
-            "volume.resized",
-            "volume.resize_failed",
-            "volume.restore_failed",
-        ] {
-            assert!(kinds.iter().any(|x| x == k), "{k} in {kinds:?}");
-        }
-        tx.rollback().await.unwrap();
+            assert_eq!(
+                (project.as_str(), ns, service.as_deref()),
+                (pb.as_str(), format!("blog-{run}"), Some(sb.as_str()))
+            );
+            assert_eq!(data["mountPath"], "/files");
+            assert!(data.get("moving").is_none());
+            let pending: bool =
+                sqlx::query_scalar("SELECT pending_changes FROM pyo.services WHERE id = $1")
+                    .bind(&sb)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert!(pending, "deploy to mount it");
+
+            // A deleted project's volume goes to any project; its namespace
+            // goes once it's empty.
+            sqlx::query("UPDATE pyo.volumes SET namespace = $2 WHERE id = $1")
+                .bind(&v2)
+                .bind(format!("old-{run}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM pyo.projects WHERE id = $1")
+                .bind(&pc)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            // The name is taken in shop already? No: web-data moved out. A clash:
+            sqlx::query(
+                "UPDATE pyo.volumes SET data = data || '{\"name\": \"api-data\"}' WHERE id = $1",
+            )
+            .bind(&v2)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            let clash = attach(&mut tx, &user, &v2, &sa, "/old", &mut wake)
+                .await
+                .unwrap_err();
+            assert!(
+                clash
+                    .message
+                    .contains("already has a volume named api-data"),
+                "{}",
+                clash.message
+            );
+            sqlx::query(
+                "UPDATE pyo.volumes SET data = data || '{\"name\": \"old-data\"}' WHERE id = $1",
+            )
+            .bind(&v2)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            attach(&mut tx, &user, &v2, &sa, "/old", &mut wake)
+                .await
+                .unwrap();
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "move_volume", "volumeId": v2 }),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            let ns_gone: i64 = sqlx::query_scalar(COUNT)
+                .bind(&cluster)
+                .bind("delete_namespace")
+                .bind(format!("old-{run}"))
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(ns_gone, 1);
+
+            // A failed move leaves it where it was, with why.
+            detach(&mut tx, &user, &v2).await.unwrap();
+            attach(&mut tx, &user, &v2, &sb, "/old", &mut wake)
+                .await
+                .unwrap();
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "move_volume", "volumeId": v2 }),
+                false,
+                Some("old-data is still in use by web-1."),
+            )
+            .await
+            .unwrap();
+            let (project, service, data): (String, Option<String>, Value) =
+                sqlx::query_as("SELECT project_id, service_id, data FROM pyo.volumes WHERE id = $1")
+                    .bind(&v2)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert_eq!((project.as_str(), service), (pa.as_str(), None));
+            assert_eq!(data["moveError"], "old-data is still in use by web-1.");
+
+            // Growing: never on local-path or a class that can't; only up.
+            assert!(
+                resize(&mut tx, &user, &v1, 10, &mut wake)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("local-path")
+            );
+            assert!(
+                resize(&mut tx, &user, &v3, 10, &mut wake)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("can't grow")
+            );
+            assert!(
+                resize(&mut tx, &user, &v2, 5, &mut wake)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("only grow")
+            );
+            resize(&mut tx, &user, &v2, 8, &mut wake).await.unwrap();
+            let n: i64 = sqlx::query_scalar(COUNT)
+                .bind(&cluster)
+                .bind("resize_volume")
+                .bind("")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(n, 1);
+            // Not yet: the cluster still reports 5.
+            let rep = |cap: i64| VolumeReport {
+                capacity_gi: Some(cap),
+                size_gi: Some(8),
+                ..report(&v2, "old-data")
+            };
+            reported(&mut tx, &cluster, &[rep(5)]).await.unwrap();
+            let data: Value = sqlx::query_scalar("SELECT data FROM pyo.volumes WHERE id = $1")
+                .bind(&v2)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(
+                (data["sizeGi"].as_i64(), data["resizeTo"].as_i64()),
+                (Some(5), Some(8))
+            );
+            reported(&mut tx, &cluster, &[rep(8)]).await.unwrap();
+            let data: Value = sqlx::query_scalar("SELECT data FROM pyo.volumes WHERE id = $1")
+                .bind(&v2)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(
+                (data["sizeGi"].as_i64(), data.get("resizeTo")),
+                (Some(8), None)
+            );
+            // A failed one says why.
+            resize(&mut tx, &user, &v2, 9, &mut wake).await.unwrap();
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "resize_volume", "volume_id": v2 }),
+                false,
+                Some("quota"),
+            )
+            .await
+            .unwrap();
+            let data: Value = sqlx::query_scalar("SELECT data FROM pyo.volumes WHERE id = $1")
+                .bind(&v2)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(
+                (data["resizeError"].as_str(), data.get("resizeTo")),
+                (Some("quota"), None)
+            );
+
+            // Restoring: its service can't deploy meanwhile; the answer settles it.
+            sqlx::query("UPDATE pyo.volumes SET data = data || '{\"restore\": {\"id\": \"rst_1\", \"snapshotId\": \"abcdef12\"}}' WHERE id = $1").bind(&v1).execute(&mut *tx).await.unwrap();
+            assert!(
+                not_restoring(&mut tx, &sb)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("being restored")
+            );
+            assert!(
+                detach(&mut tx, &user, &v1)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("being restored")
+            );
+            // An older restore's late answer changes nothing.
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "restore_volume", "volumeId": v1, "restoreId": "rst_0" }),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(not_restoring(&mut tx, &sb).await.is_err());
+            finished(
+                &mut tx,
+                &cluster,
+                &json!({ "kind": "restore_volume", "volumeId": v1, "restoreId": "rst_1" }),
+                false,
+                Some("That snapshot isn't one of this volume's."),
+            )
+            .await
+            .unwrap();
+            not_restoring(&mut tx, &sb).await.unwrap();
+            let data: Value = sqlx::query_scalar("SELECT data FROM pyo.volumes WHERE id = $1")
+                .bind(&v1)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(
+                data["restoreError"],
+                "That snapshot isn't one of this volume's."
+            );
+            let kinds: Vec<String> = sqlx::query_scalar(
+                "SELECT data->>'type' FROM pyo.activity WHERE team_id = $1 ORDER BY at",
+            )
+            .bind(&team)
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+            for k in [
+                "volume.moving",
+                "volume.attached",
+                "volume.move_failed",
+                "volume.resized",
+                "volume.resize_failed",
+                "volume.restore_failed",
+            ] {
+                assert!(kinds.iter().any(|x| x == k), "{k} in {kinds:?}");
+            }
+            tx.rollback().await.unwrap();
+        })
     }
 
     #[test]

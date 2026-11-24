@@ -2063,268 +2063,273 @@ mod reply_tests {
 #[cfg(test)]
 mod gate_tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
     use pyo_proto::Command;
 
     /// Against a throwaway Postgres: a person's request for a change to an
     /// ended team's cluster is refused with the plain message, a removal
     /// isn't. The agent then gets only the removal: what Pyo queued itself
     /// fails unsigned, with the same message. Other teams are untouched.
-    #[tokio::test]
+    #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
-    async fn an_ended_teams_clusters_get_only_reads_and_removals() {
-        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-        crate::migrate::run(&db).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            db.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        crate::gate::test_plans::install();
-        let run = crate::ids::random_string(8).to_lowercase();
-        let s = crate::rls::tests::state(db.clone());
-        let mut teams = vec![];
-        for (t, ended) in [("a", true), ("b", false)] {
-            let team = if ended {
-                format!("team_ended_{run}")
-            } else {
-                format!("team_ok_{run}")
-            };
-            let (user, cluster, project, svc) = (
-                format!("usr_{t}{run}"),
-                format!("cl_{t}{run}"),
-                format!("prj_{t}{run}"),
-                format!("svc_{t}{run}"),
-            );
-            let q = |sql: &'static str| sqlx::query(sql);
-            q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@gate.test', $1, '')").bind(&user).execute(&db).await.unwrap();
-            q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-                .bind(&team)
-                .execute(&db)
+    fn an_ended_teams_clusters_get_only_reads_and_removals() {
+        run_big(async {
+            let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
                 .await
                 .unwrap();
-            q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $3 || '@gate.test', 'admin', 'active')").bind(format!("mem_{t}{run}")).bind(&team).bind(&user).execute(&db).await.unwrap();
-            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
-            q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)").bind(&project).bind(&team).execute(&db).await.unwrap();
-            q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', '{}', 'running')").bind(&svc).bind(&team).bind(&project).bind(&cluster).execute(&db).await.unwrap();
-            let person = crate::auth::User {
-                id: user,
-                name: t.into(),
-                email: format!("{t}@gate.test"),
-                timezone: "UTC".into(),
-                is_admin: false,
-                must_set_up: false,
-                key: None,
-            };
-            let service = pyo_proto::ServiceRef {
-                service_id: svc,
-                name: "web".into(),
-                namespace: project,
-                workload_kind: "Deployment".into(),
-            };
-            teams.push((team, cluster, person, service, ended));
-        }
-        for (team, cluster, person, service, ended) in &teams {
-            // A person's restart: refused for the ended team, with why.
-            let mut tx = crate::rls::begin(&db, person).await.unwrap();
-            let restart =
-                deploy::enqueue(&mut tx, cluster, Command::Restart(service.clone())).await;
-            if *ended {
-                let e = restart.expect_err("refused");
-                assert_eq!(e.status, StatusCode::PAYMENT_REQUIRED);
-                assert_eq!(e.message, crate::gate::STOPPED);
-            } else {
-                restart.unwrap();
-            }
-            // Removals and their follow-ons are queued.
-            deploy::enqueue(&mut tx, cluster, Command::DeleteService(service.clone()))
-                .await
-                .unwrap();
-            deploy::enqueue(
-                &mut tx,
-                cluster,
-                Command::SyncCronJobs {
-                    service: service.clone(),
-                    jobs: vec![],
-                },
-            )
-            .await
-            .unwrap();
-            tx.commit().await.unwrap();
-            // Pyo's own, queued outside a request.
-            let mut tx = db.begin().await.unwrap();
-            deploy::enqueue(&mut tx, cluster, Command::Stop(service.clone()))
-                .await
-                .unwrap();
-            tx.commit().await.unwrap();
-
-            let Json(got) = poll(
-                State(s.clone()),
-                AgentCluster {
-                    id: cluster.clone(),
-                    team_id: team.clone(),
-                },
-                axum::http::HeaderMap::new(),
-                Query(PollQuery { wait: Some(0) }),
-            )
-            .await
-            .unwrap();
-            let kinds: Vec<String> = got.iter().map(|e| command_kind(&e.command)).collect();
-            let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
-                "SELECT command->>'kind', status, result->>'message' FROM pyo.commands WHERE cluster_id = $1 ORDER BY created_at",
-            )
-            .bind(cluster)
-            .fetch_all(&db)
-            .await
-            .unwrap();
-            if *ended {
-                assert_eq!(kinds, ["delete_service"]);
-                for (kind, status, message) in &rows {
-                    if kind != "delete_service" {
-                        assert_eq!(
-                            (status.as_str(), message.as_deref()),
-                            ("failed", Some(crate::gate::STOPPED)),
-                            "{kind}"
-                        );
-                    }
-                }
-            } else {
-                assert_eq!(
-                    kinds,
-                    ["restart", "delete_service", "sync_cron_jobs", "stop"]
+            crate::migrate::run(&db).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                db.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            crate::gate::test_plans::install();
+            let run = crate::ids::random_string(8).to_lowercase();
+            let s = crate::rls::tests::state(db.clone());
+            let mut teams = vec![];
+            for (t, ended) in [("a", true), ("b", false)] {
+                let team = if ended {
+                    format!("team_ended_{run}")
+                } else {
+                    format!("team_ok_{run}")
+                };
+                let (user, cluster, project, svc) = (
+                    format!("usr_{t}{run}"),
+                    format!("cl_{t}{run}"),
+                    format!("prj_{t}{run}"),
+                    format!("svc_{t}{run}"),
                 );
-                assert!(rows.iter().all(|(_, status, _)| status == "sent"));
+                let q = |sql: &'static str| sqlx::query(sql);
+                q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@gate.test', $1, '')").bind(&user).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                    .bind(&team)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+                q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $3 || '@gate.test', 'admin', 'active')").bind(format!("mem_{t}{run}")).bind(&team).bind(&user).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)").bind(&project).bind(&team).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', '{}', 'running')").bind(&svc).bind(&team).bind(&project).bind(&cluster).execute(&db).await.unwrap();
+                let person = crate::auth::User {
+                    id: user,
+                    name: t.into(),
+                    email: format!("{t}@gate.test"),
+                    timezone: "UTC".into(),
+                    is_admin: false,
+                    must_set_up: false,
+                    key: None,
+                };
+                let service = pyo_proto::ServiceRef {
+                    service_id: svc,
+                    name: "web".into(),
+                    namespace: project,
+                    workload_kind: "Deployment".into(),
+                };
+                teams.push((team, cluster, person, service, ended));
             }
-        }
-        for (team, ..) in &teams {
-            sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
-                .bind(team)
-                .execute(&db)
+            for (team, cluster, person, service, ended) in &teams {
+                // A person's restart: refused for the ended team, with why.
+                let mut tx = crate::rls::begin(&db, person).await.unwrap();
+                let restart =
+                    deploy::enqueue(&mut tx, cluster, Command::Restart(service.clone())).await;
+                if *ended {
+                    let e = restart.expect_err("refused");
+                    assert_eq!(e.status, StatusCode::PAYMENT_REQUIRED);
+                    assert_eq!(e.message, crate::gate::STOPPED);
+                } else {
+                    restart.unwrap();
+                }
+                // Removals and their follow-ons are queued.
+                deploy::enqueue(&mut tx, cluster, Command::DeleteService(service.clone()))
+                    .await
+                    .unwrap();
+                deploy::enqueue(
+                    &mut tx,
+                    cluster,
+                    Command::SyncCronJobs {
+                        service: service.clone(),
+                        jobs: vec![],
+                    },
+                )
                 .await
                 .unwrap();
-        }
+                tx.commit().await.unwrap();
+                // Pyo's own, queued outside a request.
+                let mut tx = db.begin().await.unwrap();
+                deploy::enqueue(&mut tx, cluster, Command::Stop(service.clone()))
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+
+                let Json(got) = poll(
+                    State(s.clone()),
+                    AgentCluster {
+                        id: cluster.clone(),
+                        team_id: team.clone(),
+                    },
+                    axum::http::HeaderMap::new(),
+                    Query(PollQuery { wait: Some(0) }),
+                )
+                .await
+                .unwrap();
+                let kinds: Vec<String> = got.iter().map(|e| command_kind(&e.command)).collect();
+                let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                    "SELECT command->>'kind', status, result->>'message' FROM pyo.commands WHERE cluster_id = $1 ORDER BY created_at",
+                )
+                .bind(cluster)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+                if *ended {
+                    assert_eq!(kinds, ["delete_service"]);
+                    for (kind, status, message) in &rows {
+                        if kind != "delete_service" {
+                            assert_eq!(
+                                (status.as_str(), message.as_deref()),
+                                ("failed", Some(crate::gate::STOPPED)),
+                                "{kind}"
+                            );
+                        }
+                    }
+                } else {
+                    assert_eq!(
+                        kinds,
+                        ["restart", "delete_service", "sync_cron_jobs", "stop"]
+                    );
+                    assert!(rows.iter().all(|(_, status, _)| status == "sent"));
+                }
+            }
+            for (team, ..) in &teams {
+                sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+                    .bind(team)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+        })
     }
 
     /// Against a throwaway Postgres: a sync Pyo queued while a team's plan
     /// was paused is held back. Once the team may get commands again, its
     /// clusters get their syncs sent once more, once.
-    #[tokio::test]
+    #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
-    async fn held_back_syncs_go_out_again_once_a_team_resumes() {
-        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-        crate::migrate::run(&db).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            db.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        crate::gate::test_plans::install();
-        let run = crate::ids::random_string(8).to_lowercase();
-        let s = crate::rls::tests::state(db.clone());
-        let (team, cluster, project, svc, dpl) = (
-            format!("team_pause_{run}"),
-            format!("cl_p{run}"),
-            format!("prj_p{run}"),
-            format!("svc_p{run}"),
-            format!("dpl_p{run}"),
-        );
-        crate::gate::test_plans::PAUSED
-            .lock()
-            .unwrap()
-            .insert(team.clone());
-        let q = |sql: &'static str| sqlx::query(sql);
-        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
-        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
-        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)")
-            .bind(&project)
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
-        let cron = json!([{ "id": "crn_1", "name": "nightly", "schedule": "0 3 * * *", "command": "true" }]);
-        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', jsonb_build_object('cronJobs', $5::jsonb), 'running')").bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&cron).execute(&db).await.unwrap();
-        let service = pyo_proto::ServiceRef {
-            service_id: svc.clone(),
-            name: "web".into(),
-            namespace: project.clone(),
-            workload_kind: "Deployment".into(),
-        };
-        let spec = json!({ "service": service, "projectId": project, "ports": [] });
-        q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'running', '{}', $6)").bind(&dpl).bind(&team).bind(&project).bind(&svc).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
-        q("UPDATE pyo.services SET current_deployment_id = $2 WHERE id = $1")
-            .bind(&svc)
-            .bind(&dpl)
-            .execute(&db)
-            .await
-            .unwrap();
-        let agent = || AgentCluster {
-            id: cluster.clone(),
-            team_id: team.clone(),
-        };
-        let polled = || async {
-            let Json(got) = poll(
-                State(s.clone()),
-                agent(),
-                axum::http::HeaderMap::new(),
-                Query(PollQuery { wait: Some(0) }),
+    fn held_back_syncs_go_out_again_once_a_team_resumes() {
+        run_big(async {
+            let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+                .await
+                .unwrap();
+            crate::migrate::run(&db).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                db.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            crate::gate::test_plans::install();
+            let run = crate::ids::random_string(8).to_lowercase();
+            let s = crate::rls::tests::state(db.clone());
+            let (team, cluster, project, svc, dpl) = (
+                format!("team_pause_{run}"),
+                format!("cl_p{run}"),
+                format!("prj_p{run}"),
+                format!("svc_p{run}"),
+                format!("dpl_p{run}"),
+            );
+            crate::gate::test_plans::PAUSED
+                .lock()
+                .unwrap()
+                .insert(team.clone());
+            let q = |sql: &'static str| sqlx::query(sql);
+            q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+            q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)")
+                .bind(&project)
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+            let cron = json!([{ "id": "crn_1", "name": "nightly", "schedule": "0 3 * * *", "command": "true" }]);
+            q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', jsonb_build_object('cronJobs', $5::jsonb), 'running')").bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&cron).execute(&db).await.unwrap();
+            let service = pyo_proto::ServiceRef {
+                service_id: svc.clone(),
+                name: "web".into(),
+                namespace: project.clone(),
+                workload_kind: "Deployment".into(),
+            };
+            let spec = json!({ "service": service, "projectId": project, "ports": [] });
+            q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'running', '{}', $6)").bind(&dpl).bind(&team).bind(&project).bind(&svc).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
+            q("UPDATE pyo.services SET current_deployment_id = $2 WHERE id = $1")
+                .bind(&svc)
+                .bind(&dpl)
+                .execute(&db)
+                .await
+                .unwrap();
+            let agent = || AgentCluster {
+                id: cluster.clone(),
+                team_id: team.clone(),
+            };
+            let polled = || async {
+                let Json(got) = poll(
+                    State(s.clone()),
+                    agent(),
+                    axum::http::HeaderMap::new(),
+                    Query(PollQuery { wait: Some(0) }),
+                )
+                .await
+                .unwrap();
+                got.iter()
+                    .map(|e| command_kind(&e.command))
+                    .collect::<Vec<_>>()
+            };
+            let marked = || async {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT commands_held_at IS NOT NULL FROM pyo.teams WHERE id = $1",
+                )
+                .bind(&team)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            };
+
+            // Pyo syncs the firewall while the plan is paused: held back.
+            let mut tx = db.begin().await.unwrap();
+            crate::firewall::sync(&mut tx, &cluster).await.unwrap();
+            tx.commit().await.unwrap();
+            assert!(polled().await.is_empty());
+            assert!(marked().await);
+            // Still paused: nothing is sent again.
+            crate::gate::resume(&s).await.unwrap();
+            assert!(polled().await.is_empty());
+            assert!(marked().await);
+
+            // Paid: the cluster's syncs go out again, once.
+            crate::gate::test_plans::PAUSED
+                .lock()
+                .unwrap()
+                .remove(&team);
+            crate::gate::resume(&s).await.unwrap();
+            assert!(!marked().await);
+            let got = polled().await;
+            assert_eq!(got, ["sync_firewall", "sync_cron_jobs"]);
+            let jobs: Value = sqlx::query_scalar(
+                "SELECT command->'jobs' FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'sync_cron_jobs'",
             )
-            .await
-            .unwrap();
-            got.iter()
-                .map(|e| command_kind(&e.command))
-                .collect::<Vec<_>>()
-        };
-        let marked = || async {
-            sqlx::query_scalar::<_, bool>(
-                "SELECT commands_held_at IS NOT NULL FROM pyo.teams WHERE id = $1",
-            )
-            .bind(&team)
+            .bind(&cluster)
             .fetch_one(&db)
             .await
-            .unwrap()
-        };
-
-        // Pyo syncs the firewall while the plan is paused: held back.
-        let mut tx = db.begin().await.unwrap();
-        crate::firewall::sync(&mut tx, &cluster).await.unwrap();
-        tx.commit().await.unwrap();
-        assert!(polled().await.is_empty());
-        assert!(marked().await);
-        // Still paused: nothing is sent again.
-        crate::gate::resume(&s).await.unwrap();
-        assert!(polled().await.is_empty());
-        assert!(marked().await);
-
-        // Paid: the cluster's syncs go out again, once.
-        crate::gate::test_plans::PAUSED
-            .lock()
-            .unwrap()
-            .remove(&team);
-        crate::gate::resume(&s).await.unwrap();
-        assert!(!marked().await);
-        let got = polled().await;
-        assert_eq!(got, ["sync_firewall", "sync_cron_jobs"]);
-        let jobs: Value = sqlx::query_scalar(
-            "SELECT command->'jobs' FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'sync_cron_jobs'",
-        )
-        .bind(&cluster)
-        .fetch_one(&db)
-        .await
-        .unwrap();
-        assert_eq!(jobs[0]["name"], "nightly");
-        crate::gate::resume(&s).await.unwrap();
-        assert!(polled().await.is_empty());
-
-        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
-            .bind(&team)
-            .execute(&db)
-            .await
             .unwrap();
+            assert_eq!(jobs[0]["name"], "nightly");
+            crate::gate::resume(&s).await.unwrap();
+            assert!(polled().await.is_empty());
+
+            sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+        })
     }
 
     fn command_kind(c: &Command) -> String {
@@ -2338,136 +2343,139 @@ mod gate_tests {
 #[cfg(test)]
 mod routes_resend_tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     /// Against a throwaway Postgres: an agent that writes routes
     /// differently (an update) gets every running service's routes again,
     /// once. The same agent again, or one too old to say, gets nothing more.
-    #[tokio::test]
+    #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
-    async fn an_updated_agent_gets_every_services_routes_again() {
-        let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-        crate::migrate::run(&db).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            db.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        let run = crate::ids::random_string(8).to_lowercase();
-        let s = crate::rls::tests::state(db.clone());
-        let (team, cluster, project, svc, dpl) = (
-            format!("team_routes_{run}"),
-            format!("cl_r{run}"),
-            format!("prj_r{run}"),
-            format!("svc_r{run}"),
-            format!("dpl_r{run}"),
-        );
-        let q = |sql: &'static str| sqlx::query(sql);
-        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
-        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
-        q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)")
-            .bind(&project)
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
-        let domains = json!([{ "id": "dom_1", "hostname": format!("web-{run}.tail1.ts.net"), "portName": "http", "tlsMode": "auto" }]);
-        q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', jsonb_build_object('domains', $5::jsonb), 'running')").bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&domains).execute(&db).await.unwrap();
-        let service = pyo_proto::ServiceRef {
-            service_id: svc.clone(),
-            name: "web".into(),
-            namespace: project.clone(),
-            workload_kind: "Deployment".into(),
-        };
-        let spec = json!({ "service": service, "projectId": project, "ports": [{ "name": "http", "containerPort": 80, "protocol": "HTTP", "exposure": "http", "publicPort": null }] });
-        q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'running', '{}', $6)").bind(&dpl).bind(&team).bind(&project).bind(&svc).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
-        q("UPDATE pyo.services SET current_deployment_id = $2 WHERE id = $1")
-            .bind(&svc)
-            .bind(&dpl)
-            .execute(&db)
-            .await
-            .unwrap();
-
-        let beat = |routes_version: &str| {
-            let hb = Heartbeat {
-                protocol: PROTOCOL_VERSION,
-                agent_version: "0.5.2".into(),
-                routes_version: routes_version.into(),
-                ..Default::default()
-            };
-            let (s, cluster, team) = (s.clone(), cluster.clone(), team.clone());
-            async move {
-                heartbeat(
-                    State(s),
-                    AgentCluster {
-                        id: cluster,
-                        team_id: team,
-                    },
-                    axum::http::HeaderMap::new(),
-                    Json(hb),
-                )
+    fn an_updated_agent_gets_every_services_routes_again() {
+        run_big(async {
+            let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
                 .await
                 .unwrap();
-            }
-        };
-        let syncs = || async {
-            sqlx::query_scalar::<_, Value>(
-                "SELECT command FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'sync_firewall' ORDER BY created_at",
-            )
-            .bind(&cluster)
-            .fetch_all(&db)
-            .await
-            .unwrap()
-        };
-        let seen = || async {
-            sqlx::query_scalar::<_, Option<String>>(
-                "SELECT capabilities->>'routesVersion' FROM pyo.clusters WHERE id = $1",
-            )
-            .bind(&cluster)
-            .fetch_one(&db)
-            .await
-            .unwrap()
-        };
+            crate::migrate::run(&db).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                db.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            let run = crate::ids::random_string(8).to_lowercase();
+            let s = crate::rls::tests::state(db.clone());
+            let (team, cluster, project, svc, dpl) = (
+                format!("team_routes_{run}"),
+                format!("cl_r{run}"),
+                format!("prj_r{run}"),
+                format!("svc_r{run}"),
+                format!("dpl_r{run}"),
+            );
+            let q = |sql: &'static str| sqlx::query(sql);
+            q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+            q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&db).await.unwrap();
+            q("INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $1)")
+                .bind(&project)
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+            let domains = json!([{ "id": "dom_1", "hostname": format!("web-{run}.tail1.ts.net"), "portName": "http", "tlsMode": "auto" }]);
+            q("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec, status) VALUES ($1, $2, $3, $4, 'web', jsonb_build_object('domains', $5::jsonb), 'running')").bind(&svc).bind(&team).bind(&project).bind(&cluster).bind(&domains).execute(&db).await.unwrap();
+            let service = pyo_proto::ServiceRef {
+                service_id: svc.clone(),
+                name: "web".into(),
+                namespace: project.clone(),
+                workload_kind: "Deployment".into(),
+            };
+            let spec = json!({ "service": service, "projectId": project, "ports": [{ "name": "http", "containerPort": 80, "protocol": "HTTP", "exposure": "http", "publicPort": null }] });
+            q("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'running', '{}', $6)").bind(&dpl).bind(&team).bind(&project).bind(&svc).bind(&cluster).bind(&spec).execute(&db).await.unwrap();
+            q("UPDATE pyo.services SET current_deployment_id = $2 WHERE id = $1")
+                .bind(&svc)
+                .bind(&dpl)
+                .execute(&db)
+                .await
+                .unwrap();
 
-        // The first agent that says: its routes go out as they stand.
-        beat("1111111111111111").await;
-        let got = syncs().await;
-        assert_eq!(got.len(), 1);
-        let target = &got[0]["targets"][0];
-        assert_eq!(target["service"]["serviceId"], json!(svc));
-        assert_eq!(
-            target["domains"][0]["hostname"],
-            json!(format!("web-{run}.tail1.ts.net"))
-        );
-        assert_eq!(seen().await.as_deref(), Some("1111111111111111"));
-        // The same agent again, and one too old to say: nothing more.
-        beat("1111111111111111").await;
-        beat("").await;
-        assert_eq!(syncs().await.len(), 1);
-        assert_eq!(seen().await.as_deref(), Some("1111111111111111"));
-        // Updated: once more.
-        beat("2222222222222222").await;
-        beat("2222222222222222").await;
-        assert_eq!(syncs().await.len(), 2);
+            let beat = |routes_version: &str| {
+                let hb = Heartbeat {
+                    protocol: PROTOCOL_VERSION,
+                    agent_version: "0.5.2".into(),
+                    routes_version: routes_version.into(),
+                    ..Default::default()
+                };
+                let (s, cluster, team) = (s.clone(), cluster.clone(), team.clone());
+                async move {
+                    heartbeat(
+                        State(s),
+                        AgentCluster {
+                            id: cluster,
+                            team_id: team,
+                        },
+                        axum::http::HeaderMap::new(),
+                        Json(hb),
+                    )
+                    .await
+                    .unwrap();
+                }
+            };
+            let syncs = || async {
+                sqlx::query_scalar::<_, Value>(
+                    "SELECT command FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'sync_firewall' ORDER BY created_at",
+                )
+                .bind(&cluster)
+                .fetch_all(&db)
+                .await
+                .unwrap()
+            };
+            let seen = || async {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT capabilities->>'routesVersion' FROM pyo.clusters WHERE id = $1",
+                )
+                .bind(&cluster)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            };
 
-        // A cluster without running services just notes it.
-        q("UPDATE pyo.services SET current_deployment_id = NULL WHERE id = $1")
-            .bind(&svc)
-            .execute(&db)
-            .await
-            .unwrap();
-        beat("3333333333333333").await;
-        assert_eq!(syncs().await.len(), 2);
-        assert_eq!(seen().await.as_deref(), Some("3333333333333333"));
+            // The first agent that says: its routes go out as they stand.
+            beat("1111111111111111").await;
+            let got = syncs().await;
+            assert_eq!(got.len(), 1);
+            let target = &got[0]["targets"][0];
+            assert_eq!(target["service"]["serviceId"], json!(svc));
+            assert_eq!(
+                target["domains"][0]["hostname"],
+                json!(format!("web-{run}.tail1.ts.net"))
+            );
+            assert_eq!(seen().await.as_deref(), Some("1111111111111111"));
+            // The same agent again, and one too old to say: nothing more.
+            beat("1111111111111111").await;
+            beat("").await;
+            assert_eq!(syncs().await.len(), 1);
+            assert_eq!(seen().await.as_deref(), Some("1111111111111111"));
+            // Updated: once more.
+            beat("2222222222222222").await;
+            beat("2222222222222222").await;
+            assert_eq!(syncs().await.len(), 2);
 
-        q("DELETE FROM pyo.teams WHERE id = $1")
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
+            // A cluster without running services just notes it.
+            q("UPDATE pyo.services SET current_deployment_id = NULL WHERE id = $1")
+                .bind(&svc)
+                .execute(&db)
+                .await
+                .unwrap();
+            beat("3333333333333333").await;
+            assert_eq!(syncs().await.len(), 2);
+            assert_eq!(seen().await.as_deref(), Some("3333333333333333"));
+
+            q("DELETE FROM pyo.teams WHERE id = $1")
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+        })
     }
 }

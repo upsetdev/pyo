@@ -537,6 +537,7 @@ async fn watch_once(s: &AppState) -> anyhow::Result<()> {
 #[cfg(test)]
 pub(crate) mod first_builder_tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     pub(crate) fn node(name: &str, roles: &[&str], status: &str) -> pyo_proto::ServerReport {
         serde_json::from_value(json!({
@@ -583,58 +584,60 @@ pub(crate) mod first_builder_tests {
     /// Against a real Postgres (DATABASE_URL, a throwaway one): a team
     /// without builders gets one on its server, named after it; a team
     /// that has one gets none.
-    #[tokio::test]
+    #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
-    async fn a_new_team_gets_its_first_builder_on_this_server() {
-        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-        crate::migrate::run(&pool).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            pool.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        let run = crate::ids::new_id("t");
-        let (team, cluster) = (format!("team_{run}"), format!("cl_{run}"));
-        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-            .bind(&team)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, 'local', $1)").bind(&cluster).bind(&team).execute(&pool).await.unwrap();
-        let nodes = [node("Server-1.lan", &["control-plane", "worker"], "ready")];
-
-        for _ in 0..2 {
-            let mut tx = pool.begin().await.unwrap();
-            first_on_this_server(&mut tx, &config(), &cluster, &team, &nodes)
+    fn a_new_team_gets_its_first_builder_on_this_server() {
+        run_big(async {
+            let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
                 .await
                 .unwrap();
-            tx.commit().await.unwrap();
-        }
-        let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT name, kind, status, server FROM pyo.builders WHERE team_id = $1",
-        )
-        .bind(&team)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            rows,
-            vec![(
-                "server-1".into(),
-                "cluster".into(),
-                "provisioning".into(),
-                Some("Server-1.lan".into())
-            )]
-        );
-        let sent: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'ensure_builder'").bind(&cluster).fetch_one(&pool).await.unwrap();
-        assert_eq!(sent, 1);
+            crate::migrate::run(&pool).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                pool.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            let run = crate::ids::new_id("t");
+            let (team, cluster) = (format!("team_{run}"), format!("cl_{run}"));
+            sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(&team)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash) VALUES ($1, $2, 'local', $1)").bind(&cluster).bind(&team).execute(&pool).await.unwrap();
+            let nodes = [node("Server-1.lan", &["control-plane", "worker"], "ready")];
 
-        sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+            for _ in 0..2 {
+                let mut tx = pool.begin().await.unwrap();
+                first_on_this_server(&mut tx, &config(), &cluster, &team, &nodes)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+            let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+                "SELECT name, kind, status, server FROM pyo.builders WHERE team_id = $1",
+            )
             .bind(&team)
-            .execute(&pool)
+            .fetch_all(&pool)
             .await
             .unwrap();
+            assert_eq!(
+                rows,
+                vec![(
+                    "server-1".into(),
+                    "cluster".into(),
+                    "provisioning".into(),
+                    Some("Server-1.lan".into())
+                )]
+            );
+            let sent: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.commands WHERE cluster_id = $1 AND command->>'kind' = 'ensure_builder'").bind(&cluster).fetch_one(&pool).await.unwrap();
+            assert_eq!(sent, 1);
+
+            sqlx::query("DELETE FROM pyo.teams WHERE id = $1")
+                .bind(&team)
+                .execute(&pool)
+                .await
+                .unwrap();
+        })
     }
 
     /// Against a real Postgres: a long build isn't a stuck rollout while

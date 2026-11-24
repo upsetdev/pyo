@@ -739,6 +739,7 @@ pub async fn snapshot(db: &mut sqlx::PgConnection, team_ids: &[String]) -> ApiRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     #[test]
     fn a_hosted_pyo_keeps_no_teams_backups() {
@@ -759,18 +760,7 @@ mod tests {
             eprintln!("PYO_BACKUP_STORE_* is set: skipped");
             return;
         }
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(without_a_store())
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        run_big(without_a_store());
     }
 
     async fn without_a_store() {

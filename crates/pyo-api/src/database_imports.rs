@@ -2437,6 +2437,7 @@ pub async fn runner(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     #[test]
     fn counted() {
@@ -2722,283 +2723,285 @@ mod tests {
     /// is gone. The one-request upload still works. An upload left half
     /// sent goes after the retention, its parts with it. A developer can't
     /// upload.
-    #[tokio::test]
+    #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
-    async fn a_dump_goes_up_in_parts() {
-        use sha2::Digest;
-        let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-        crate::migrate::run(&db).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            db.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        let (url, store) = fake_store().await;
-        // SAFETY: set before any store is used, and only this test reads them.
-        unsafe {
-            std::env::set_var("PYO_BACKUP_STORE_URL", &url);
-            std::env::set_var("PYO_BACKUP_STORE_ACCESS_KEY", "pyo");
-            std::env::set_var("PYO_BACKUP_STORE_SECRET_KEY", "pyo-secret");
-        }
-        let run = crate::ids::random_string(8).to_lowercase();
-        let id = |p: &str| format!("{p}_{run}");
-        let team = id("team");
-        let q = |sql: &'static str| sqlx::query(sql);
-        let user = |uid: String| User {
-            id: uid.clone(),
-            name: uid,
-            email: String::new(),
-            timezone: "UTC".into(),
-            is_admin: false,
-            must_set_up: false,
-            key: None,
-        };
-        q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
-        for (u, role) in [(id("adm"), "admin"), (id("dev"), "developer")] {
-            q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@t.test', $1, '')").bind(&u).execute(&db).await.unwrap();
-            q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1 || 'm', $2, $1, $1 || '@t.test', $3, 'active')").bind(&u).bind(&team).bind(role).execute(&db).await.unwrap();
-        }
-        let sealed = crate::vault::get()
-            .seal(&team, "team-secret")
-            .await
-            .unwrap();
-        q("INSERT INTO pyo.backup_store_logins (team_id, access_key, secret_sealed) VALUES ($1, 'team-key', $2)")
-            .bind(&team)
-            .bind(sealed)
-            .execute(&db)
-            .await
-            .unwrap();
-        let s = state(db.clone());
-        let adm = user(id("adm"));
-        let new = |name: &str, size: usize| NewUpload {
-            team_id: team.clone(),
-            engine: Some("postgres".into()),
-            filename: name.into(),
-            size: size as u64,
-            content_type: None,
-        };
-        let start = |who: &User, name: &str, size: usize| {
-            create_upload(
-                State(s.clone()),
-                SessionUser(who.clone()),
-                Json(new(name, size)),
-            )
-        };
-        let send = |up: &str, n: u64, b: &[u8], sha: Option<&str>| {
-            let mut h = HeaderMap::new();
-            if let Some(sha) = sha {
-                h.insert("x-pyo-sha256", sha.parse().unwrap());
+    fn a_dump_goes_up_in_parts() {
+        run_big(async {
+            use sha2::Digest;
+            let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+                .await
+                .unwrap();
+            crate::migrate::run(&db).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                db.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            let (url, store) = fake_store().await;
+            // SAFETY: set before any store is used, and only this test reads them.
+            unsafe {
+                std::env::set_var("PYO_BACKUP_STORE_URL", &url);
+                std::env::set_var("PYO_BACKUP_STORE_ACCESS_KEY", "pyo");
+                std::env::set_var("PYO_BACKUP_STORE_SECRET_KEY", "pyo-secret");
             }
-            upload_part(
-                State(s.clone()),
-                SessionUser(adm.clone()),
-                Path((up.to_owned(), n)),
-                h,
-                Bytes::copy_from_slice(b),
-            )
-        };
-        let finish = |up: &str, sha: Option<&str>| {
-            complete_upload(
-                State(s.clone()),
-                SessionUser(adm.clone()),
-                Path(up.to_owned()),
-                Json(CompleteUpload {
-                    sha256: sha.map(str::to_owned),
-                }),
-            )
-        };
-        let status_of = |up: &str| {
-            upload_status(
-                State(s.clone()),
-                SessionUser(adm.clone()),
-                Path(up.to_owned()),
-            )
-        };
+            let run = crate::ids::random_string(8).to_lowercase();
+            let id = |p: &str| format!("{p}_{run}");
+            let team = id("team");
+            let q = |sql: &'static str| sqlx::query(sql);
+            let user = |uid: String| User {
+                id: uid.clone(),
+                name: uid,
+                email: String::new(),
+                timezone: "UTC".into(),
+                is_admin: false,
+                must_set_up: false,
+                key: None,
+            };
+            q("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+            for (u, role) in [(id("adm"), "admin"), (id("dev"), "developer")] {
+                q("INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $1 || '@t.test', $1, '')").bind(&u).execute(&db).await.unwrap();
+                q("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1 || 'm', $2, $1, $1 || '@t.test', $3, 'active')").bind(&u).bind(&team).bind(role).execute(&db).await.unwrap();
+            }
+            let sealed = crate::vault::get()
+                .seal(&team, "team-secret")
+                .await
+                .unwrap();
+            q("INSERT INTO pyo.backup_store_logins (team_id, access_key, secret_sealed) VALUES ($1, 'team-key', $2)")
+                .bind(&team)
+                .bind(sealed)
+                .execute(&db)
+                .await
+                .unwrap();
+            let s = state(db.clone());
+            let adm = user(id("adm"));
+            let new = |name: &str, size: usize| NewUpload {
+                team_id: team.clone(),
+                engine: Some("postgres".into()),
+                filename: name.into(),
+                size: size as u64,
+                content_type: None,
+            };
+            let start = |who: &User, name: &str, size: usize| {
+                create_upload(
+                    State(s.clone()),
+                    SessionUser(who.clone()),
+                    Json(new(name, size)),
+                )
+            };
+            let send = |up: &str, n: u64, b: &[u8], sha: Option<&str>| {
+                let mut h = HeaderMap::new();
+                if let Some(sha) = sha {
+                    h.insert("x-pyo-sha256", sha.parse().unwrap());
+                }
+                upload_part(
+                    State(s.clone()),
+                    SessionUser(adm.clone()),
+                    Path((up.to_owned(), n)),
+                    h,
+                    Bytes::copy_from_slice(b),
+                )
+            };
+            let finish = |up: &str, sha: Option<&str>| {
+                complete_upload(
+                    State(s.clone()),
+                    SessionUser(adm.clone()),
+                    Path(up.to_owned()),
+                    Json(CompleteUpload {
+                        sha256: sha.map(str::to_owned),
+                    }),
+                )
+            };
+            let status_of = |up: &str| {
+                upload_status(
+                    State(s.clone()),
+                    SessionUser(adm.clone()),
+                    Path(up.to_owned()),
+                )
+            };
 
-        // A dump of two parts and a bit.
-        let mut file = vec![0u8; 2 * PART + 5];
-        rand::fill(&mut file[..]);
-        let start_text =
-            b"-- Dumped from database version 16.4\nCREATE EXTENSION IF NOT EXISTS citext;\n";
-        file[..start_text.len()].copy_from_slice(start_text);
-        let sha = hex::encode(sha2::Sha256::digest(&file));
-        let part = |n: usize| &file[n * PART..((n + 1) * PART).min(file.len())];
-        let part_sha = |n: usize| hex::encode(sha2::Sha256::digest(part(n)));
+            // A dump of two parts and a bit.
+            let mut file = vec![0u8; 2 * PART + 5];
+            rand::fill(&mut file[..]);
+            let start_text =
+                b"-- Dumped from database version 16.4\nCREATE EXTENSION IF NOT EXISTS citext;\n";
+            file[..start_text.len()].copy_from_slice(start_text);
+            let sha = hex::encode(sha2::Sha256::digest(&file));
+            let part = |n: usize| &file[n * PART..((n + 1) * PART).min(file.len())];
+            let part_sha = |n: usize| hex::encode(sha2::Sha256::digest(part(n)));
 
-        let e = start(&user(id("dev")), "shop.sql", file.len())
+            let e = start(&user(id("dev")), "shop.sql", file.len())
+                .await
+                .unwrap_err();
+            assert_eq!(e.status, StatusCode::FORBIDDEN, "developers can't import");
+            let t = start(&adm, "shop.sql", file.len()).await.unwrap().0;
+            assert_eq!(
+                (t["partSize"].as_u64(), t["parts"].as_u64()),
+                (Some(PART as u64), Some(3))
+            );
+            let up = t["uploadId"].as_str().unwrap().to_owned();
+            let token = t["uploadUrl"]
+                .as_str()
+                .unwrap()
+                .split("token=")
+                .nth(1)
+                .unwrap()
+                .to_owned();
+
+            let e = send(&up, 1, part(1), None).await.unwrap_err();
+            assert!(e.message.contains("Send part 0 first"), "{}", e.message);
+            let e = send(&up, 0, part(0), Some(part_sha(1).as_str()))
+                .await
+                .unwrap_err();
+            assert!(e.message.contains("damaged"), "{}", e.message);
+            let e = send(&up, 0, &b"short"[..], None).await.unwrap_err();
+            assert_eq!(e.status, StatusCode::BAD_REQUEST);
+            let r = send(&up, 0, part(0), Some(part_sha(0).as_str()))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(r["received"], 1);
+            let puts = store.lock().unwrap().part_puts;
+            // Sent again after its answer got lost: taken once.
+            let r = send(&up, 0, part(0), None).await.unwrap().0;
+            assert_eq!(r["received"], 1);
+            assert_eq!(store.lock().unwrap().part_puts, puts);
+            let e = send(&up, 0, part(1), None).await.unwrap_err();
+            assert_eq!(e.status, StatusCode::CONFLICT);
+            // The one-request URL is used up once parts go.
+            let e = upload_content(
+                State(s.clone()),
+                Path(up.clone()),
+                Query(ContentQuery { token }),
+                HeaderMap::new(),
+                Body::from(file.clone()),
+            )
             .await
             .unwrap_err();
-        assert_eq!(e.status, StatusCode::FORBIDDEN, "developers can't import");
-        let t = start(&adm, "shop.sql", file.len()).await.unwrap().0;
-        assert_eq!(
-            (t["partSize"].as_u64(), t["parts"].as_u64()),
-            (Some(PART as u64), Some(3))
-        );
-        let up = t["uploadId"].as_str().unwrap().to_owned();
-        let token = t["uploadUrl"]
-            .as_str()
-            .unwrap()
-            .split("token=")
-            .nth(1)
-            .unwrap()
-            .to_owned();
+            assert_eq!(e.status, StatusCode::FORBIDDEN);
+            let e = finish(&up, Some(sha.as_str())).await.unwrap_err();
+            assert!(e.message.contains("2 of 3 parts"), "{}", e.message);
+            let st = status_of(&up).await.unwrap().0;
+            assert_eq!(
+                (st["state"].as_str(), st["received"].as_u64()),
+                (Some("uploading"), Some(1))
+            );
+            send(&up, 1, part(1), Some(part_sha(1).as_str()))
+                .await
+                .unwrap();
+            send(&up, 2, part(2), Some(part_sha(2).as_str()))
+                .await
+                .unwrap();
+            let done = finish(&up, Some(sha.as_str())).await.unwrap().0;
+            assert_eq!(done["sha256"], json!(sha));
+            assert_eq!(done["size"], json!(file.len()));
+            assert_eq!(done["extensions"], json!(["citext"]));
+            assert_eq!(done["sourceVersion"], "16.4");
+            let key = format!("/{}/imports/{up}", crate::backupstore::team_bucket(&team));
+            assert!(
+                store.lock().unwrap().objects.get(&key) == Some(&file),
+                "the store has the file"
+            );
+            assert!(store.lock().unwrap().uploads.is_empty());
+            // Asked again: the same answer.
+            assert_eq!(finish(&up, None).await.unwrap().0, done);
+            let e = send(&up, 2, part(2), None).await.unwrap_err();
+            assert_eq!(e.status, StatusCode::CONFLICT);
+            let st = status_of(&up).await.unwrap().0;
+            assert_eq!(
+                (st["state"].as_str(), st["received"].as_u64()),
+                (Some("uploaded"), Some(3))
+            );
+            let ready: String =
+                sqlx::query_scalar("SELECT state FROM pyo.database_import_uploads WHERE id = $1")
+                    .bind(&up)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(ready, "uploaded", "an import can use it");
 
-        let e = send(&up, 1, part(1), None).await.unwrap_err();
-        assert!(e.message.contains("Send part 0 first"), "{}", e.message);
-        let e = send(&up, 0, part(0), Some(part_sha(1).as_str()))
-            .await
-            .unwrap_err();
-        assert!(e.message.contains("damaged"), "{}", e.message);
-        let e = send(&up, 0, &b"short"[..], None).await.unwrap_err();
-        assert_eq!(e.status, StatusCode::BAD_REQUEST);
-        let r = send(&up, 0, part(0), Some(part_sha(0).as_str()))
+            // Not the file that was sent: gone.
+            let small = b"-- a small dump\n".to_vec();
+            let t = start(&adm, "small.sql", small.len()).await.unwrap().0;
+            let up2 = t["uploadId"].as_str().unwrap().to_owned();
+            send(&up2, 0, &small[..], None).await.unwrap();
+            let e = finish(&up2, Some(sha.as_str())).await.unwrap_err();
+            assert!(e.message.contains("isn't the one sent"), "{}", e.message);
+            assert_eq!(
+                status_of(&up2).await.unwrap_err().status,
+                StatusCode::NOT_FOUND
+            );
+            assert!(store.lock().unwrap().uploads.is_empty());
+
+            // Not what its name says: gone at its first part.
+            let t = start(&adm, "small.sql.gz", small.len()).await.unwrap().0;
+            let up3 = t["uploadId"].as_str().unwrap().to_owned();
+            let e = send(&up3, 0, &small[..], None).await.unwrap_err();
+            assert!(e.message.contains("gzip"), "{}", e.message);
+            assert_eq!(
+                status_of(&up3).await.unwrap_err().status,
+                StatusCode::NOT_FOUND
+            );
+
+            // In one request, as before.
+            let t = start(&adm, "one.sql", small.len()).await.unwrap().0;
+            let up4 = t["uploadId"].as_str().unwrap().to_owned();
+            let token = t["uploadUrl"]
+                .as_str()
+                .unwrap()
+                .split("token=")
+                .nth(1)
+                .unwrap()
+                .to_owned();
+            let r = upload_content(
+                State(s.clone()),
+                Path(up4.clone()),
+                Query(ContentQuery { token }),
+                HeaderMap::new(),
+                Body::from(small.clone()),
+            )
             .await
             .unwrap()
             .0;
-        assert_eq!(r["received"], 1);
-        let puts = store.lock().unwrap().part_puts;
-        // Sent again after its answer got lost: taken once.
-        let r = send(&up, 0, part(0), None).await.unwrap().0;
-        assert_eq!(r["received"], 1);
-        assert_eq!(store.lock().unwrap().part_puts, puts);
-        let e = send(&up, 0, part(1), None).await.unwrap_err();
-        assert_eq!(e.status, StatusCode::CONFLICT);
-        // The one-request URL is used up once parts go.
-        let e = upload_content(
-            State(s.clone()),
-            Path(up.clone()),
-            Query(ContentQuery { token }),
-            HeaderMap::new(),
-            Body::from(file.clone()),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(e.status, StatusCode::FORBIDDEN);
-        let e = finish(&up, Some(sha.as_str())).await.unwrap_err();
-        assert!(e.message.contains("2 of 3 parts"), "{}", e.message);
-        let st = status_of(&up).await.unwrap().0;
-        assert_eq!(
-            (st["state"].as_str(), st["received"].as_u64()),
-            (Some("uploading"), Some(1))
-        );
-        send(&up, 1, part(1), Some(part_sha(1).as_str()))
-            .await
-            .unwrap();
-        send(&up, 2, part(2), Some(part_sha(2).as_str()))
-            .await
-            .unwrap();
-        let done = finish(&up, Some(sha.as_str())).await.unwrap().0;
-        assert_eq!(done["sha256"], json!(sha));
-        assert_eq!(done["size"], json!(file.len()));
-        assert_eq!(done["extensions"], json!(["citext"]));
-        assert_eq!(done["sourceVersion"], "16.4");
-        let key = format!("/{}/imports/{up}", crate::backupstore::team_bucket(&team));
-        assert!(
-            store.lock().unwrap().objects.get(&key) == Some(&file),
-            "the store has the file"
-        );
-        assert!(store.lock().unwrap().uploads.is_empty());
-        // Asked again: the same answer.
-        assert_eq!(finish(&up, None).await.unwrap().0, done);
-        let e = send(&up, 2, part(2), None).await.unwrap_err();
-        assert_eq!(e.status, StatusCode::CONFLICT);
-        let st = status_of(&up).await.unwrap().0;
-        assert_eq!(
-            (st["state"].as_str(), st["received"].as_u64()),
-            (Some("uploaded"), Some(3))
-        );
-        let ready: String =
-            sqlx::query_scalar("SELECT state FROM pyo.database_import_uploads WHERE id = $1")
-                .bind(&up)
-                .fetch_one(&db)
+            assert_eq!(
+                r["sha256"],
+                json!(hex::encode(sha2::Sha256::digest(&small)))
+            );
+            let key4 = format!("/{}/imports/{up4}", crate::backupstore::team_bucket(&team));
+            assert!(store.lock().unwrap().objects.get(&key4) == Some(&small));
+            let e = send(&up4, 0, &small[..], None).await.unwrap_err();
+            assert_eq!(e.status, StatusCode::CONFLICT);
+
+            // Left half sent: gone after the retention, its parts with it.
+            let t = start(&adm, "half.sql", file.len()).await.unwrap().0;
+            let up5 = t["uploadId"].as_str().unwrap().to_owned();
+            send(&up5, 0, part(0), None).await.unwrap();
+            assert_eq!(store.lock().unwrap().uploads.len(), 1);
+            sweep(&db).await.unwrap();
+            assert_eq!(
+                status_of(&up5).await.unwrap().0["received"],
+                1,
+                "kept while it may go on"
+            );
+            q("UPDATE pyo.database_import_uploads SET created_at = now() - interval '25 hours' WHERE id = $1")
+                .bind(&up5)
+                .execute(&db)
                 .await
                 .unwrap();
-        assert_eq!(ready, "uploaded", "an import can use it");
+            sweep(&db).await.unwrap();
+            assert_eq!(
+                status_of(&up5).await.unwrap_err().status,
+                StatusCode::NOT_FOUND
+            );
+            assert!(store.lock().unwrap().uploads.is_empty());
 
-        // Not the file that was sent: gone.
-        let small = b"-- a small dump\n".to_vec();
-        let t = start(&adm, "small.sql", small.len()).await.unwrap().0;
-        let up2 = t["uploadId"].as_str().unwrap().to_owned();
-        send(&up2, 0, &small[..], None).await.unwrap();
-        let e = finish(&up2, Some(sha.as_str())).await.unwrap_err();
-        assert!(e.message.contains("isn't the one sent"), "{}", e.message);
-        assert_eq!(
-            status_of(&up2).await.unwrap_err().status,
-            StatusCode::NOT_FOUND
-        );
-        assert!(store.lock().unwrap().uploads.is_empty());
-
-        // Not what its name says: gone at its first part.
-        let t = start(&adm, "small.sql.gz", small.len()).await.unwrap().0;
-        let up3 = t["uploadId"].as_str().unwrap().to_owned();
-        let e = send(&up3, 0, &small[..], None).await.unwrap_err();
-        assert!(e.message.contains("gzip"), "{}", e.message);
-        assert_eq!(
-            status_of(&up3).await.unwrap_err().status,
-            StatusCode::NOT_FOUND
-        );
-
-        // In one request, as before.
-        let t = start(&adm, "one.sql", small.len()).await.unwrap().0;
-        let up4 = t["uploadId"].as_str().unwrap().to_owned();
-        let token = t["uploadUrl"]
-            .as_str()
-            .unwrap()
-            .split("token=")
-            .nth(1)
-            .unwrap()
-            .to_owned();
-        let r = upload_content(
-            State(s.clone()),
-            Path(up4.clone()),
-            Query(ContentQuery { token }),
-            HeaderMap::new(),
-            Body::from(small.clone()),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(
-            r["sha256"],
-            json!(hex::encode(sha2::Sha256::digest(&small)))
-        );
-        let key4 = format!("/{}/imports/{up4}", crate::backupstore::team_bucket(&team));
-        assert!(store.lock().unwrap().objects.get(&key4) == Some(&small));
-        let e = send(&up4, 0, &small[..], None).await.unwrap_err();
-        assert_eq!(e.status, StatusCode::CONFLICT);
-
-        // Left half sent: gone after the retention, its parts with it.
-        let t = start(&adm, "half.sql", file.len()).await.unwrap().0;
-        let up5 = t["uploadId"].as_str().unwrap().to_owned();
-        send(&up5, 0, part(0), None).await.unwrap();
-        assert_eq!(store.lock().unwrap().uploads.len(), 1);
-        sweep(&db).await.unwrap();
-        assert_eq!(
-            status_of(&up5).await.unwrap().0["received"],
-            1,
-            "kept while it may go on"
-        );
-        q("UPDATE pyo.database_import_uploads SET created_at = now() - interval '25 hours' WHERE id = $1")
-            .bind(&up5)
-            .execute(&db)
-            .await
-            .unwrap();
-        sweep(&db).await.unwrap();
-        assert_eq!(
-            status_of(&up5).await.unwrap_err().status,
-            StatusCode::NOT_FOUND
-        );
-        assert!(store.lock().unwrap().uploads.is_empty());
-
-        q("DELETE FROM pyo.teams WHERE id = $1")
-            .bind(&team)
-            .execute(&db)
-            .await
-            .unwrap();
+            q("DELETE FROM pyo.teams WHERE id = $1")
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+        })
     }
 }

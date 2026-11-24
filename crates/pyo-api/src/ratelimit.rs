@@ -620,6 +620,7 @@ pub async fn prune(db: &PgPool) -> sqlx::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     #[test]
     fn ipv6_by_64() {
@@ -1079,18 +1080,7 @@ mod tests {
     #[test]
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
     fn api_limits_trip_and_reset() {
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(api_limits())
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        run_big(api_limits());
     }
 
     async fn api_limits() {

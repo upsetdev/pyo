@@ -4,6 +4,7 @@
 //! comes from).
 
 use super::*;
+use crate::teamsec_tests::run_big;
 use crate::compose::PlanEnv;
 
 fn fixture(name: &str) -> Responses {
@@ -1265,176 +1266,38 @@ async fn drop_team(db: &sqlx::PgPool, team: &str, user: &crate::auth::User) {
 }
 
 /// Needs Postgres: DATABASE_URL=… [PYO_SECRET_KEY=<64 hex>] cargo test -p pyo-api -- --ignored platform_import
-#[tokio::test]
+#[test]
 #[ignore]
-async fn importing_twice_makes_nothing_twice() {
-    let (s, user, team, db) = test_team().await;
-    let run = team.trim_start_matches("team_").to_owned();
-    // Each run is its own Coolify, with its own domains.
-    let mut plan = coolify::plan(&fixture("coolify"), &format!("{run}.example.com"));
-    let host = run.replace('_', "-");
-    for p in &mut plan.projects {
-        for svc in &mut p.services {
-            for d in &mut svc.domains {
-                d.hostname = format!("{host}.{}", d.hostname);
-            }
-        }
-        for st in &mut p.stacks {
-            for d in &mut st.domains {
-                d.hostname = format!("{host}.{}", d.hostname);
-            }
-        }
-    }
-    let items: Vec<String> = [
-        "app:a1web",
-        "app:a2api",
-        "app:a3img",
-        "app:a4paste",
-        "app:a5stage",
-        "compose:s1umami",
-    ]
-    .map(String::from)
-    .to_vec();
-
-    let first = create(
-        &s,
-        &user,
-        &team,
-        None,
-        plan.clone(),
-        Some(&items),
-        false,
-        None,
-    )
-    .await
-    .unwrap();
-    let by = |k: &str| first.results.iter().find(|r| r.key == k).unwrap();
-    assert_eq!(by("app:a1web").state, "created", "{:?}", first.results);
-    assert_eq!(by("app:a3img").state, "created", "{:?}", first.results);
-    assert_eq!(by("app:a4paste").state, "skipped");
-    assert_eq!(
-        by("compose:s1umami").state,
-        "created",
-        "{:?}",
-        first.results
-    );
-    // Saved, not deployed; secret values sealed; where it came from recorded.
-    let web = by("app:a1web").id.clone().unwrap();
-    let (status, spec): (String, Value) =
-        sqlx::query_as("SELECT status, spec FROM pyo.services WHERE id = $1")
-            .bind(&web)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-    assert_eq!(status, "stopped");
-    assert_eq!(spec["source"]["importedFrom"]["id"], "app:a1web");
-    assert_eq!(spec["source"]["importedFrom"]["platform"], "coolify");
-    assert_eq!(spec["source"]["builder"], "railpack");
-    let deployments: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM pyo.deployments WHERE service_id = $1")
-            .bind(&web)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-    assert_eq!(deployments, 0);
-    let dburl = spec["env"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["key"] == "DATABASE_URL")
-        .unwrap();
-    if std::env::var("PYO_SECRET_KEY").is_ok() {
-        assert!(
-            crate::vault::Vault::is_sealed(dburl["value"].as_str().unwrap()),
-            "sealed"
-        );
-    }
-    // Production's services share one project.
-    let web_project = by("app:a1web").project_id.clone();
-    assert_eq!(web_project, by("app:a2api").project_id);
-
-    let count = |table: &'static str| {
-        let (db, team) = (db.clone(), team.clone());
-        async move {
-            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
-                "SELECT count(*) FROM pyo.{table} WHERE team_id = $1"
-            )))
-            .bind(&team)
-            .fetch_one(&db)
-            .await
-            .unwrap()
-        }
-    };
-    let (p1, s1) = (count("projects").await, count("services").await);
-
-    // Again: nothing new.
-    let second = create(
-        &s,
-        &user,
-        &team,
-        None,
-        plan.clone(),
-        Some(&items),
-        false,
-        None,
-    )
-    .await
-    .unwrap();
-    for r in &second.results {
-        assert!(matches!(r.state.as_str(), "exists" | "skipped"), "{r:?}");
-    }
-    assert_eq!((count("projects").await, count("services").await), (p1, s1));
-
-    // A service new there joins the project the first import made.
-    let mut more = plan.clone();
-    let mut extra = more.projects[0].services[2].clone();
-    extra.key = "app:a9new".into();
-    extra.service.name = "admin-two".into();
-    extra.domains.clear();
-    more.projects[0].services.push(extra);
-    let third = create(
-        &s,
-        &user,
-        &team,
-        None,
-        more,
-        Some(&["app:a9new".to_owned()]),
-        false,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(third.results[0].state, "created", "{:?}", third.results);
-    assert_eq!(third.results[0].project_id, web_project);
-    assert_eq!(count("projects").await, p1);
-
-    drop_team(&db, &team, &user).await;
-}
-
-/// Railway and Vercel: a second import makes nothing new, and the source
-/// is recorded with the platform's own host.
-/// Needs Postgres, as above.
-#[tokio::test]
-#[ignore]
-async fn hosted_imports_make_nothing_twice() {
-    let (s, user, team, db) = test_team().await;
-    let host = team.trim_start_matches("team_").replace('_', "-");
-    for (platform, mut plan) in [
-        ("railway", railway::plan(&fixture("railway"))),
-        ("vercel", vercel::plan(&fixture("vercel"))),
-    ] {
+fn importing_twice_makes_nothing_twice() {
+    run_big(async {
+        let (s, user, team, db) = test_team().await;
+        let run = team.trim_start_matches("team_").to_owned();
+        // Each run is its own Coolify, with its own domains.
+        let mut plan = coolify::plan(&fixture("coolify"), &format!("{run}.example.com"));
+        let host = run.replace('_', "-");
         for p in &mut plan.projects {
             for svc in &mut p.services {
                 for d in &mut svc.domains {
-                    d.hostname = format!("{platform}-{host}.{}", d.hostname);
+                    d.hostname = format!("{host}.{}", d.hostname);
+                }
+            }
+            for st in &mut p.stacks {
+                for d in &mut st.domains {
+                    d.hostname = format!("{host}.{}", d.hostname);
                 }
             }
         }
-        let items: Vec<String> = plan
-            .projects
-            .iter()
-            .flat_map(|p| p.services.iter().map(|s| s.key.clone()))
-            .collect();
+        let items: Vec<String> = [
+            "app:a1web",
+            "app:a2api",
+            "app:a3img",
+            "app:a4paste",
+            "app:a5stage",
+            "compose:s1umami",
+        ]
+        .map(String::from)
+        .to_vec();
+
         let first = create(
             &s,
             &user,
@@ -1447,29 +1310,66 @@ async fn hosted_imports_make_nothing_twice() {
         )
         .await
         .unwrap();
-        let made: Vec<&ImportResult> = first
-            .results
+        let by = |k: &str| first.results.iter().find(|r| r.key == k).unwrap();
+        assert_eq!(by("app:a1web").state, "created", "{:?}", first.results);
+        assert_eq!(by("app:a3img").state, "created", "{:?}", first.results);
+        assert_eq!(by("app:a4paste").state, "skipped");
+        assert_eq!(
+            by("compose:s1umami").state,
+            "created",
+            "{:?}",
+            first.results
+        );
+        // Saved, not deployed; secret values sealed; where it came from recorded.
+        let web = by("app:a1web").id.clone().unwrap();
+        let (status, spec): (String, Value) =
+            sqlx::query_as("SELECT status, spec FROM pyo.services WHERE id = $1")
+                .bind(&web)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(status, "stopped");
+        assert_eq!(spec["source"]["importedFrom"]["id"], "app:a1web");
+        assert_eq!(spec["source"]["importedFrom"]["platform"], "coolify");
+        assert_eq!(spec["source"]["builder"], "railpack");
+        let deployments: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pyo.deployments WHERE service_id = $1")
+                .bind(&web)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(deployments, 0);
+        let dburl = spec["env"]
+            .as_array()
+            .unwrap()
             .iter()
-            .filter(|r| r.state == "created")
-            .collect();
-        assert!(!made.is_empty(), "{platform}: {:?}", first.results);
-        for r in &first.results {
+            .find(|e| e["key"] == "DATABASE_URL")
+            .unwrap();
+        if std::env::var("PYO_SECRET_KEY").is_ok() {
             assert!(
-                matches!(r.state.as_str(), "created" | "skipped"),
-                "{platform}: {r:?}"
+                crate::vault::Vault::is_sealed(dburl["value"].as_str().unwrap()),
+                "sealed"
             );
         }
-        let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
-            .bind(made[0].id.as_deref().unwrap())
-            .fetch_one(&db)
-            .await
-            .unwrap();
-        assert_eq!(spec["source"]["importedFrom"]["platform"], platform);
-        assert_eq!(
-            spec["source"]["importedFrom"]["host"],
-            format!("{platform}.com")
-        );
-        assert!(spec["source"]["builder"].as_str().is_some());
+        // Production's services share one project.
+        let web_project = by("app:a1web").project_id.clone();
+        assert_eq!(web_project, by("app:a2api").project_id);
+
+        let count = |table: &'static str| {
+            let (db, team) = (db.clone(), team.clone());
+            async move {
+                sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM pyo.{table} WHERE team_id = $1"
+                )))
+                .bind(&team)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let (p1, s1) = (count("projects").await, count("services").await);
+
+        // Again: nothing new.
         let second = create(
             &s,
             &user,
@@ -1483,13 +1383,118 @@ async fn hosted_imports_make_nothing_twice() {
         .await
         .unwrap();
         for r in &second.results {
-            assert!(
-                matches!(r.state.as_str(), "exists" | "skipped"),
-                "{platform}: {r:?}"
-            );
+            assert!(matches!(r.state.as_str(), "exists" | "skipped"), "{r:?}");
         }
-    }
-    drop_team(&db, &team, &user).await;
+        assert_eq!((count("projects").await, count("services").await), (p1, s1));
+
+        // A service new there joins the project the first import made.
+        let mut more = plan.clone();
+        let mut extra = more.projects[0].services[2].clone();
+        extra.key = "app:a9new".into();
+        extra.service.name = "admin-two".into();
+        extra.domains.clear();
+        more.projects[0].services.push(extra);
+        let third = create(
+            &s,
+            &user,
+            &team,
+            None,
+            more,
+            Some(&["app:a9new".to_owned()]),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(third.results[0].state, "created", "{:?}", third.results);
+        assert_eq!(third.results[0].project_id, web_project);
+        assert_eq!(count("projects").await, p1);
+
+        drop_team(&db, &team, &user).await;
+    })
+}
+
+/// Railway and Vercel: a second import makes nothing new, and the source
+/// is recorded with the platform's own host.
+/// Needs Postgres, as above.
+#[test]
+#[ignore]
+fn hosted_imports_make_nothing_twice() {
+    run_big(async {
+        let (s, user, team, db) = test_team().await;
+        let host = team.trim_start_matches("team_").replace('_', "-");
+        for (platform, mut plan) in [
+            ("railway", railway::plan(&fixture("railway"))),
+            ("vercel", vercel::plan(&fixture("vercel"))),
+        ] {
+            for p in &mut plan.projects {
+                for svc in &mut p.services {
+                    for d in &mut svc.domains {
+                        d.hostname = format!("{platform}-{host}.{}", d.hostname);
+                    }
+                }
+            }
+            let items: Vec<String> = plan
+                .projects
+                .iter()
+                .flat_map(|p| p.services.iter().map(|s| s.key.clone()))
+                .collect();
+            let first = create(
+                &s,
+                &user,
+                &team,
+                None,
+                plan.clone(),
+                Some(&items),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            let made: Vec<&ImportResult> = first
+                .results
+                .iter()
+                .filter(|r| r.state == "created")
+                .collect();
+            assert!(!made.is_empty(), "{platform}: {:?}", first.results);
+            for r in &first.results {
+                assert!(
+                    matches!(r.state.as_str(), "created" | "skipped"),
+                    "{platform}: {r:?}"
+                );
+            }
+            let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+                .bind(made[0].id.as_deref().unwrap())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(spec["source"]["importedFrom"]["platform"], platform);
+            assert_eq!(
+                spec["source"]["importedFrom"]["host"],
+                format!("{platform}.com")
+            );
+            assert!(spec["source"]["builder"].as_str().is_some());
+            let second = create(
+                &s,
+                &user,
+                &team,
+                None,
+                plan.clone(),
+                Some(&items),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            for r in &second.results {
+                assert!(
+                    matches!(r.state.as_str(), "exists" | "skipped"),
+                    "{platform}: {r:?}"
+                );
+            }
+        }
+        drop_team(&db, &team, &user).await;
+    })
 }
 
 /// Databases: a second import finds the one it made by where it came from,
@@ -1497,96 +1502,98 @@ async fn hosted_imports_make_nothing_twice() {
 /// taken for it: the new one gets the platform in front (`shop-2` would
 /// meet `shop`'s pods). Every platform.
 /// Needs Postgres, as above.
-#[tokio::test]
+#[test]
 #[ignore]
-async fn databases_match_by_where_they_came_from() {
-    let (s, user, team, db) = test_team().await;
-    let cluster = format!("cl_{}", team.trim_start_matches("team_"));
-    for (platform, mut plan) in [
-        (
-            "coolify",
-            coolify::plan(&fixture("coolify"), "coolify.example.com"),
-        ),
-        (
-            "dokploy",
-            dokploy::plan(&fixture("dokploy"), "dokploy.example.com"),
-        ),
-        ("railway", railway::plan(&fixture("railway"))),
-        ("vercel", vercel::plan(&fixture("vercel"))),
-    ] {
-        // Made empty here: copying data needs a cluster to reach the source.
-        for d in plan.projects.iter_mut().flat_map(|p| &mut p.databases) {
-            if d.action == "import" {
-                d.action = "create".into();
-                d.url = None;
+fn databases_match_by_where_they_came_from() {
+    run_big(async {
+        let (s, user, team, db) = test_team().await;
+        let cluster = format!("cl_{}", team.trim_start_matches("team_"));
+        for (platform, mut plan) in [
+            (
+                "coolify",
+                coolify::plan(&fixture("coolify"), "coolify.example.com"),
+            ),
+            (
+                "dokploy",
+                dokploy::plan(&fixture("dokploy"), "dokploy.example.com"),
+            ),
+            ("railway", railway::plan(&fixture("railway"))),
+            ("vercel", vercel::plan(&fixture("vercel"))),
+        ] {
+            // Made empty here: copying data needs a cluster to reach the source.
+            for d in plan.projects.iter_mut().flat_map(|p| &mut p.databases) {
+                if d.action == "import" {
+                    d.action = "create".into();
+                    d.url = None;
+                }
             }
-        }
-        let wanted: Vec<ImportDatabase> = plan
-            .projects
-            .iter()
-            .flat_map(|p| &p.databases)
-            .filter(|d| d.action == "create")
-            .cloned()
-            .collect();
-        assert!(!wanted.is_empty(), "{platform}: no database to make");
-        let items: Vec<String> = wanted.iter().map(|d| d.key.clone()).collect();
-        // The team's own database, with the first one's name, made by hand.
-        let mine = crate::ids::new_id("mdb");
-        let name = wanted[0].name.clone();
-        sqlx::query("INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, namespace, password) VALUES ($1, $2, $3, $4, 'postgres', '18', 'small', 5, 1, 'pyo-db-t', '')")
-            .bind(&mine).bind(&team).bind(&cluster).bind(&name).execute(&db).await.unwrap();
+            let wanted: Vec<ImportDatabase> = plan
+                .projects
+                .iter()
+                .flat_map(|p| &p.databases)
+                .filter(|d| d.action == "create")
+                .cloned()
+                .collect();
+            assert!(!wanted.is_empty(), "{platform}: no database to make");
+            let items: Vec<String> = wanted.iter().map(|d| d.key.clone()).collect();
+            // The team's own database, with the first one's name, made by hand.
+            let mine = crate::ids::new_id("mdb");
+            let name = wanted[0].name.clone();
+            sqlx::query("INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, namespace, password) VALUES ($1, $2, $3, $4, 'postgres', '18', 'small', 5, 1, 'pyo-db-t', '')")
+                .bind(&mine).bind(&team).bind(&cluster).bind(&name).execute(&db).await.unwrap();
 
-        let first = create(
-            &s,
-            &user,
-            &team,
-            None,
-            plan.clone(),
-            Some(&items),
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        for r in &first.results {
-            assert_eq!(r.state, "created", "{platform}: {r:?}");
-            assert_ne!(r.id.as_deref(), Some(mine.as_str()), "{platform}");
-        }
-        let made = &first.results[0];
-        assert_eq!(made.name, format!("{platform}-{name}"), "{platform}");
-        let from: Value =
-            sqlx::query_scalar("SELECT imported_from FROM pyo.databases WHERE id = $1")
-                .bind(made.id.as_deref().unwrap())
-                .fetch_one(&db)
-                .await
-                .unwrap();
-        assert_eq!(from["platform"], platform);
-        assert_eq!(from["id"], wanted[0].key);
-
-        let second = create(
-            &s,
-            &user,
-            &team,
-            None,
-            plan.clone(),
-            Some(&items),
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        for (a, b) in first.results.iter().zip(&second.results) {
-            assert_eq!(b.state, "exists", "{platform}: {b:?}");
-            assert_eq!(a.id, b.id, "{platform}");
-            assert_eq!(a.name, b.name, "{platform}");
-        }
-        sqlx::query("DELETE FROM pyo.databases WHERE team_id = $1")
-            .bind(&team)
-            .execute(&db)
+            let first = create(
+                &s,
+                &user,
+                &team,
+                None,
+                plan.clone(),
+                Some(&items),
+                false,
+                None,
+            )
             .await
             .unwrap();
-    }
-    drop_team(&db, &team, &user).await;
+            for r in &first.results {
+                assert_eq!(r.state, "created", "{platform}: {r:?}");
+                assert_ne!(r.id.as_deref(), Some(mine.as_str()), "{platform}");
+            }
+            let made = &first.results[0];
+            assert_eq!(made.name, format!("{platform}-{name}"), "{platform}");
+            let from: Value =
+                sqlx::query_scalar("SELECT imported_from FROM pyo.databases WHERE id = $1")
+                    .bind(made.id.as_deref().unwrap())
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(from["platform"], platform);
+            assert_eq!(from["id"], wanted[0].key);
+
+            let second = create(
+                &s,
+                &user,
+                &team,
+                None,
+                plan.clone(),
+                Some(&items),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            for (a, b) in first.results.iter().zip(&second.results) {
+                assert_eq!(b.state, "exists", "{platform}: {b:?}");
+                assert_eq!(a.id, b.id, "{platform}");
+                assert_eq!(a.name, b.name, "{platform}");
+            }
+            sqlx::query("DELETE FROM pyo.databases WHERE team_id = $1")
+                .bind(&team)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        drop_team(&db, &team, &user).await;
+    })
 }
 
 /// A Railway plan whose databases are made empty (copying data needs a
@@ -1641,158 +1648,162 @@ async fn ended(s: &AppState, id: &str) -> ImportRun {
 /// dropped connection): its request's future is dropped. The import still
 /// makes the databases and records every result.
 /// Needs Postgres: DATABASE_URL=… cargo test -p pyo-api -- --ignored platform_import
-#[tokio::test]
+#[test]
 #[ignore]
-async fn an_import_finishes_when_its_client_goes_away() {
-    let (s, user, team, db) = test_team().await;
-    let host = team.trim_start_matches("team_").replace('_', "-");
-    let (plan, items) = railway_plan_to_make(&host);
-    let databases: Vec<String> = items
-        .iter()
-        .filter(|k| k.starts_with("db:"))
-        .cloned()
-        .collect();
-    assert!(!databases.is_empty());
+fn an_import_finishes_when_its_client_goes_away() {
+    run_big(async {
+        let (s, user, team, db) = test_team().await;
+        let host = team.trim_start_matches("team_").replace('_', "-");
+        let (plan, items) = railway_plan_to_make(&host);
+        let databases: Vec<String> = items
+            .iter()
+            .filter(|k| k.starts_with("db:"))
+            .cloned()
+            .collect();
+        assert!(!databases.is_empty());
 
-    let id = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-    // As apply runs it, then waits as a client would until it's dropped.
-    let request = {
-        let (s, user, team, id, items) = (
-            s.clone(),
-            user.clone(),
-            team.clone(),
-            id.clone(),
-            items.clone(),
-        );
-        async move {
-            let run = new_run(&s, &user, &team, Platform::Railway, false)
-                .await
-                .unwrap();
-            *id.lock().unwrap() = Some(run.clone());
-            spawn_run(
-                &s,
-                &user,
-                &run,
-                &team,
-                None,
-                Some(items),
-                false,
-                async move { Ok(plan) },
+        let id = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        // As apply runs it, then waits as a client would until it's dropped.
+        let request = {
+            let (s, user, team, id, items) = (
+                s.clone(),
+                user.clone(),
+                team.clone(),
+                id.clone(),
+                items.clone(),
             );
-            std::future::pending::<()>().await;
-        }
-    };
-    let services_made = async {
-        loop {
-            let n: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.services WHERE team_id = $1")
-                .bind(&team)
-                .fetch_one(&db)
-                .await
-                .unwrap();
-            if n > 0 {
-                return;
+            async move {
+                let run = new_run(&s, &user, &team, Platform::Railway, false)
+                    .await
+                    .unwrap();
+                *id.lock().unwrap() = Some(run.clone());
+                spawn_run(
+                    &s,
+                    &user,
+                    &run,
+                    &team,
+                    None,
+                    Some(items),
+                    false,
+                    async move { Ok(plan) },
+                );
+                std::future::pending::<()>().await;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        let services_made = async {
+            loop {
+                let n: i64 = sqlx::query_scalar("SELECT count(*) FROM pyo.services WHERE team_id = $1")
+                    .bind(&team)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+                if n > 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            _ = request => unreachable!(),
+            _ = tokio::time::timeout(Duration::from_secs(30), services_made) => {}
         }
-    };
-    tokio::select! {
-        _ = request => unreachable!(),
-        _ = tokio::time::timeout(Duration::from_secs(30), services_made) => {}
-    }
-    // The request is gone. The import isn't.
-    let id = id.lock().unwrap().clone().unwrap();
-    let run = ended(&s, &id).await;
-    assert_eq!(run.status, "done", "{run:?}");
-    assert_eq!(run.items.len(), items.len());
-    for key in &items {
-        let r = run.results.iter().find(|r| &r.key == key);
-        assert!(
-            r.is_some_and(|r| r.state == "created"),
-            "{key}: {:?}",
-            run.results
-        );
-    }
-    for key in &databases {
-        let made: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pyo.databases WHERE team_id = $1 AND imported_from->>'id' = $2",
-        )
-        .bind(&team)
-        .bind(key)
-        .fetch_one(&db)
-        .await
-        .unwrap();
-        assert_eq!(made, 1, "{key}");
-    }
+        // The request is gone. The import isn't.
+        let id = id.lock().unwrap().clone().unwrap();
+        let run = ended(&s, &id).await;
+        assert_eq!(run.status, "done", "{run:?}");
+        assert_eq!(run.items.len(), items.len());
+        for key in &items {
+            let r = run.results.iter().find(|r| &r.key == key);
+            assert!(
+                r.is_some_and(|r| r.state == "created"),
+                "{key}: {:?}",
+                run.results
+            );
+        }
+        for key in &databases {
+            let made: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pyo.databases WHERE team_id = $1 AND imported_from->>'id' = $2",
+            )
+            .bind(&team)
+            .bind(key)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert_eq!(made, 1, "{key}");
+        }
 
-    // Again, as after a crash: nothing twice.
-    let (plan, _) = railway_plan_to_make(&host);
-    let again = new_run(&s, &user, &team, Platform::Railway, false)
-        .await
-        .unwrap();
-    spawn_run(
-        &s,
-        &user,
-        &again,
-        &team,
-        None,
-        Some(items.clone()),
-        false,
-        async move { Ok(plan) },
-    );
-    let run = ended(&s, &again).await;
-    assert_eq!(run.status, "done");
-    for r in &run.results {
-        assert_eq!(r.state, "exists", "{r:?}");
-    }
-    sqlx::query("DELETE FROM pyo.databases WHERE team_id = $1")
-        .bind(&team)
-        .execute(&db)
-        .await
-        .unwrap();
-    drop_team(&db, &team, &user).await;
+        // Again, as after a crash: nothing twice.
+        let (plan, _) = railway_plan_to_make(&host);
+        let again = new_run(&s, &user, &team, Platform::Railway, false)
+            .await
+            .unwrap();
+        spawn_run(
+            &s,
+            &user,
+            &again,
+            &team,
+            None,
+            Some(items.clone()),
+            false,
+            async move { Ok(plan) },
+        );
+        let run = ended(&s, &again).await;
+        assert_eq!(run.status, "done");
+        for r in &run.results {
+            assert_eq!(r.state, "exists", "{r:?}");
+        }
+        sqlx::query("DELETE FROM pyo.databases WHERE team_id = $1")
+            .bind(&team)
+            .execute(&db)
+            .await
+            .unwrap();
+        drop_team(&db, &team, &user).await;
+    })
 }
 
 /// A platform that can't be read fails the import with its reason. One
 /// whose process stopped (no heartbeat) shows as interrupted.
 /// Needs Postgres, as above.
-#[tokio::test]
+#[test]
 #[ignore]
-async fn imports_say_how_they_ended() {
-    let (s, user, team, db) = test_team().await;
-    let id = new_run(&s, &user, &team, Platform::Coolify, false)
-        .await
-        .unwrap();
-    spawn_run(&s, &user, &id, &team, None, None, false, async {
-        Err(ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            "Coolify refused the token.",
-        ))
-    });
-    let run = ended(&s, &id).await;
-    assert_eq!(run.status, "failed");
-    assert_eq!(run.error, "Coolify refused the token.");
-    assert!(run.finished_at.is_some());
+fn imports_say_how_they_ended() {
+    run_big(async {
+        let (s, user, team, db) = test_team().await;
+        let id = new_run(&s, &user, &team, Platform::Coolify, false)
+            .await
+            .unwrap();
+        spawn_run(&s, &user, &id, &team, None, None, false, async {
+            Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "Coolify refused the token.",
+            ))
+        });
+        let run = ended(&s, &id).await;
+        assert_eq!(run.status, "failed");
+        assert_eq!(run.error, "Coolify refused the token.");
+        assert!(run.finished_at.is_some());
 
-    let cut = new_run(&s, &user, &team, Platform::Coolify, false)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE pyo.platform_imports SET status = 'importing', updated_at = now() - interval '5 minutes' WHERE id = $1")
-        .bind(&cut)
-        .execute(&db)
-        .await
-        .unwrap();
-    assert_eq!(
-        load_run(&db, &cut).await.unwrap().unwrap().status,
-        "interrupted"
-    );
-    let fresh = new_run(&s, &user, &team, Platform::Coolify, false)
-        .await
-        .unwrap();
-    assert_eq!(
-        load_run(&db, &fresh).await.unwrap().unwrap().status,
-        "reading"
-    );
-    drop_team(&db, &team, &user).await;
+        let cut = new_run(&s, &user, &team, Platform::Coolify, false)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE pyo.platform_imports SET status = 'importing', updated_at = now() - interval '5 minutes' WHERE id = $1")
+            .bind(&cut)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_run(&db, &cut).await.unwrap().unwrap().status,
+            "interrupted"
+        );
+        let fresh = new_run(&s, &user, &team, Platform::Coolify, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_run(&db, &fresh).await.unwrap().unwrap().status,
+            "reading"
+        );
+        drop_team(&db, &team, &user).await;
+    })
 }
 
 /// With deploy on: a service whose DATABASE_URL points at a database of
@@ -1801,199 +1812,201 @@ async fn imports_say_how_they_ended() {
 /// or at one the import doesn't bring, is held. Importing again connects
 /// nothing twice and deploys nothing again.
 /// Needs Postgres, as above.
-#[tokio::test]
+#[test]
 #[ignore]
-async fn imports_connect_databases_before_the_first_deploy() {
-    let (s, user, team, db) = test_team().await;
-    let run = team.trim_start_matches("team_").to_owned();
-    let host = run.replace('_', "-");
-    let mut r = fixture("coolify");
-    let var =
-        |k: &str, v: &str| json!({ "key": k, "value": v, "real_value": v, "is_runtime": true });
-    r.insert(
-        "/applications/a2api/envs".into(),
-        json!([var("OLD_URL", "postgres://u:p@x9gone:5432/app")]),
-    );
-    // The image's service (a Git one needs a builder to deploy).
-    r.insert(
-        "/applications/a3img/envs".into(),
-        json!([
-            var(
-                "DATABASE_URL",
-                "postgres://postgres:s3cret@d1pg:5432/postgres"
-            ),
-            var("LOG_LEVEL", "info")
-        ]),
-    );
-    r.insert(
-        "/applications/a1web/envs".into(),
-        json!([var("CACHE_URL", "redis://default:x@d4redis:6379")]),
-    );
-    let plan = || {
-        let mut plan = coolify::plan(&r, &format!("{run}.example.com"));
-        for p in &mut plan.projects {
-            for svc in &mut p.services {
-                for d in &mut svc.domains {
-                    d.hostname = format!("{host}.{}", d.hostname);
+fn imports_connect_databases_before_the_first_deploy() {
+    run_big(async {
+        let (s, user, team, db) = test_team().await;
+        let run = team.trim_start_matches("team_").to_owned();
+        let host = run.replace('_', "-");
+        let mut r = fixture("coolify");
+        let var =
+            |k: &str, v: &str| json!({ "key": k, "value": v, "real_value": v, "is_runtime": true });
+        r.insert(
+            "/applications/a2api/envs".into(),
+            json!([var("OLD_URL", "postgres://u:p@x9gone:5432/app")]),
+        );
+        // The image's service (a Git one needs a builder to deploy).
+        r.insert(
+            "/applications/a3img/envs".into(),
+            json!([
+                var(
+                    "DATABASE_URL",
+                    "postgres://postgres:s3cret@d1pg:5432/postgres"
+                ),
+                var("LOG_LEVEL", "info")
+            ]),
+        );
+        r.insert(
+            "/applications/a1web/envs".into(),
+            json!([var("CACHE_URL", "redis://default:x@d4redis:6379")]),
+        );
+        let plan = || {
+            let mut plan = coolify::plan(&r, &format!("{run}.example.com"));
+            for p in &mut plan.projects {
+                for svc in &mut p.services {
+                    for d in &mut svc.domains {
+                        d.hostname = format!("{host}.{}", d.hostname);
+                    }
+                }
+                // Made empty here: copying data needs a cluster.
+                for d in &mut p.databases {
+                    if d.action == "import" {
+                        d.action = "create".into();
+                        d.url = None;
+                    }
                 }
             }
-            // Made empty here: copying data needs a cluster.
-            for d in &mut p.databases {
-                if d.action == "import" {
-                    d.action = "create".into();
-                    d.url = None;
+            plan
+        };
+        // d4redis isn't picked.
+        let items: Vec<String> = ["app:a1web", "app:a2api", "app:a3img", "db:d1pg"]
+            .map(String::from)
+            .to_vec();
+        // The cluster says the database is ready once it's there.
+        let ready = {
+            let (db, team) = (db.clone(), team.clone());
+            tokio::spawn(async move {
+                loop {
+                    let _ = sqlx::query("UPDATE pyo.databases SET status = '{\"phase\": \"Ready\"}' WHERE team_id = $1 AND status = '{}'")
+                        .bind(&team)
+                        .execute(&db)
+                        .await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
+            })
+        };
+        let go = |plan: ImportPlan| {
+            let (s, user, team, items) = (s.clone(), user.clone(), team.clone(), items.clone());
+            async move {
+                let id = new_run(&s, &user, &team, Platform::Coolify, true)
+                    .await
+                    .unwrap();
+                spawn_run(&s, &user, &id, &team, None, Some(items), true, async move {
+                    Ok(plan)
+                });
+                ended(&s, &id).await
             }
-        }
-        plan
-    };
-    // d4redis isn't picked.
-    let items: Vec<String> = ["app:a1web", "app:a2api", "app:a3img", "db:d1pg"]
-        .map(String::from)
-        .to_vec();
-    // The cluster says the database is ready once it's there.
-    let ready = {
-        let (db, team) = (db.clone(), team.clone());
-        tokio::spawn(async move {
-            loop {
-                let _ = sqlx::query("UPDATE pyo.databases SET status = '{\"phase\": \"Ready\"}' WHERE team_id = $1 AND status = '{}'")
-                    .bind(&team)
-                    .execute(&db)
-                    .await;
-                tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        let first = go(plan()).await;
+        assert_eq!(first.status, "done", "{first:?}");
+        let by = |run: &ImportRun, k: &str| run.results.iter().find(|r| r.key == k).cloned().unwrap();
+        let pg = by(&first, "db:d1pg");
+        assert_eq!(pg.state, "created", "{pg:?}");
+        let pg_id = pg.id.clone().unwrap();
+
+        // Connected, in place of the old URL, and deployed.
+        let web = by(&first, "app:a3img");
+        assert_eq!(web.state, "created", "{web:?}");
+        assert_eq!(
+            web.connected,
+            [ImportConnected {
+                database: pg.name.clone(),
+                database_id: pg_id.clone(),
+                variables: vec!["DATABASE_URL".into(), "DATABASE_URL_DIRECT".into()],
+            }]
+        );
+        let web_id = web.id.clone().unwrap();
+        let env_of = |id: String| {
+            let db = db.clone();
+            async move {
+                let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+                    .bind(&id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+                let mut keys: Vec<(String, bool)> = spec["env"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| {
+                        (
+                            e["key"].as_str().unwrap().to_owned(),
+                            e["secret"].as_bool().unwrap_or(false),
+                        )
+                    })
+                    .collect();
+                keys.sort();
+                keys
             }
-        })
-    };
-    let go = |plan: ImportPlan| {
-        let (s, user, team, items) = (s.clone(), user.clone(), team.clone(), items.clone());
-        async move {
-            let id = new_run(&s, &user, &team, Platform::Coolify, true)
-                .await
-                .unwrap();
-            spawn_run(&s, &user, &id, &team, None, Some(items), true, async move {
-                Ok(plan)
-            });
-            ended(&s, &id).await
-        }
-    };
-
-    let first = go(plan()).await;
-    assert_eq!(first.status, "done", "{first:?}");
-    let by = |run: &ImportRun, k: &str| run.results.iter().find(|r| r.key == k).cloned().unwrap();
-    let pg = by(&first, "db:d1pg");
-    assert_eq!(pg.state, "created", "{pg:?}");
-    let pg_id = pg.id.clone().unwrap();
-
-    // Connected, in place of the old URL, and deployed.
-    let web = by(&first, "app:a3img");
-    assert_eq!(web.state, "created", "{web:?}");
-    assert_eq!(
-        web.connected,
-        [ImportConnected {
-            database: pg.name.clone(),
-            database_id: pg_id.clone(),
-            variables: vec!["DATABASE_URL".into(), "DATABASE_URL_DIRECT".into()],
-        }]
-    );
-    let web_id = web.id.clone().unwrap();
-    let env_of = |id: String| {
-        let db = db.clone();
-        async move {
-            let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+        };
+        let deployments = |id: String| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM pyo.deployments WHERE service_id = $1",
+                )
                 .bind(&id)
                 .fetch_one(&db)
                 .await
-                .unwrap();
-            let mut keys: Vec<(String, bool)> = spec["env"]
-                .as_array()
                 .unwrap()
-                .iter()
-                .map(|e| {
-                    (
-                        e["key"].as_str().unwrap().to_owned(),
-                        e["secret"].as_bool().unwrap_or(false),
-                    )
-                })
-                .collect();
-            keys.sort();
-            keys
+            }
+        };
+        let env = env_of(web_id.clone()).await;
+        assert_eq!(
+            env.iter()
+                .filter(|(k, _)| k.starts_with("DATABASE_URL"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                ("DATABASE_URL".to_owned(), true),
+                ("DATABASE_URL_DIRECT".to_owned(), true)
+            ]
+        );
+        let links: Vec<String> =
+            sqlx::query_scalar("SELECT database_id FROM pyo.database_links WHERE service_id = $1")
+                .bind(&web_id)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(links.as_slice(), std::slice::from_ref(&pg_id));
+        assert_eq!(deployments(web_id.clone()).await, 1);
+
+        // Held, saying why, and not deployed.
+        let api = by(&first, "app:a2api");
+        assert_eq!(api.state, "held", "{api:?}");
+        assert_eq!(
+            api.message,
+            "OLD_URL points at a database Pyo couldn't match. Connect one, then deploy."
+        );
+        assert_eq!(deployments(api.id.clone().unwrap()).await, 0);
+        let img = by(&first, "app:a1web");
+        assert_eq!(img.state, "held", "{img:?}");
+        assert!(
+            img.message.contains("which this import doesn't bring"),
+            "{img:?}"
+        );
+        assert_eq!(deployments(img.id.clone().unwrap()).await, 0);
+
+        // Again: nothing twice.
+        let second = go(plan()).await;
+        assert_eq!(second.status, "done", "{second:?}");
+        for r in &second.results {
+            assert_eq!(r.state, "exists", "{r:?}");
+            assert!(r.connected.is_empty(), "{r:?}");
         }
-    };
-    let deployments = |id: String| {
-        let db = db.clone();
-        async move {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM pyo.deployments WHERE service_id = $1",
-            )
-            .bind(&id)
-            .fetch_one(&db)
-            .await
-            .unwrap()
-        }
-    };
-    let env = env_of(web_id.clone()).await;
-    assert_eq!(
-        env.iter()
-            .filter(|(k, _)| k.starts_with("DATABASE_URL"))
-            .cloned()
-            .collect::<Vec<_>>(),
-        [
-            ("DATABASE_URL".to_owned(), true),
-            ("DATABASE_URL_DIRECT".to_owned(), true)
-        ]
-    );
-    let links: Vec<String> =
-        sqlx::query_scalar("SELECT database_id FROM pyo.database_links WHERE service_id = $1")
-            .bind(&web_id)
-            .fetch_all(&db)
+        assert_eq!(env_of(web_id.clone()).await, env);
+        assert_eq!(deployments(web_id.clone()).await, 1);
+        let n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pyo.database_links WHERE service_id = $1")
+                .bind(&web_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(n, 1);
+
+        ready.abort();
+        sqlx::query("DELETE FROM pyo.deployments WHERE team_id = $1")
+            .bind(&team)
+            .execute(&db)
             .await
             .unwrap();
-    assert_eq!(links.as_slice(), std::slice::from_ref(&pg_id));
-    assert_eq!(deployments(web_id.clone()).await, 1);
-
-    // Held, saying why, and not deployed.
-    let api = by(&first, "app:a2api");
-    assert_eq!(api.state, "held", "{api:?}");
-    assert_eq!(
-        api.message,
-        "OLD_URL points at a database Pyo couldn't match. Connect one, then deploy."
-    );
-    assert_eq!(deployments(api.id.clone().unwrap()).await, 0);
-    let img = by(&first, "app:a1web");
-    assert_eq!(img.state, "held", "{img:?}");
-    assert!(
-        img.message.contains("which this import doesn't bring"),
-        "{img:?}"
-    );
-    assert_eq!(deployments(img.id.clone().unwrap()).await, 0);
-
-    // Again: nothing twice.
-    let second = go(plan()).await;
-    assert_eq!(second.status, "done", "{second:?}");
-    for r in &second.results {
-        assert_eq!(r.state, "exists", "{r:?}");
-        assert!(r.connected.is_empty(), "{r:?}");
-    }
-    assert_eq!(env_of(web_id.clone()).await, env);
-    assert_eq!(deployments(web_id.clone()).await, 1);
-    let n: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM pyo.database_links WHERE service_id = $1")
-            .bind(&web_id)
-            .fetch_one(&db)
+        sqlx::query("DELETE FROM pyo.databases WHERE team_id = $1")
+            .bind(&team)
+            .execute(&db)
             .await
             .unwrap();
-    assert_eq!(n, 1);
-
-    ready.abort();
-    sqlx::query("DELETE FROM pyo.deployments WHERE team_id = $1")
-        .bind(&team)
-        .execute(&db)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM pyo.databases WHERE team_id = $1")
-        .bind(&team)
-        .execute(&db)
-        .await
-        .unwrap();
-    drop_team(&db, &team, &user).await;
+        drop_team(&db, &team, &user).await;
+    })
 }

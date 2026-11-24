@@ -342,6 +342,7 @@ mod tests {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
     use crate::{AppState, auth::User};
 
     /// Domains go live in place, and deploys use the service's current ones.
@@ -349,18 +350,7 @@ mod lifecycle_tests {
     #[test]
     #[ignore]
     fn domain_changes_sync_and_deploys_use_the_current_domains() {
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(lifecycle())
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        run_big(lifecycle());
     }
 
     async fn lifecycle() {

@@ -10207,197 +10207,200 @@ mod op_name_tests {
 #[cfg(test)]
 mod removal_tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     /// Needs Postgres: DATABASE_URL=… cargo test -p pyo-api -- --ignored ops::removal_tests
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn removing_servers_and_clusters_in_the_database() {
-        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        crate::migrate::run(&pool).await.unwrap();
-        crate::vault::init(crate::vault::Vault::new(
-            pool.clone(),
-            crate::vault::Provider::from_env(),
-        ));
-        let run = crate::ids::new_id("t");
-        let (team, cluster, project, service) = (
-            format!("team_{run}"),
-            format!("cl_{run}"),
-            format!("prj_{run}"),
-            format!("svc_{run}"),
-        );
-        let user = User {
-            id: format!("usr_{run}"),
-            name: "T".into(),
-            email: format!("{run}@t.test"),
-            timezone: "UTC".into(),
-            is_admin: false,
-            must_set_up: false,
-            key: None,
-        };
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::query(
-            "INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'T', '')",
-        )
-        .bind(&user.id)
-        .bind(&user.email)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
-            .bind(&team)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'active')").bind(format!("mem_{run}")).bind(&team).bind(&user.id).bind(&user.email).execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&mut *tx).await.unwrap();
-        sqlx::query("UPDATE pyo.teams SET default_cluster_id = $2 WHERE id = $1")
-            .bind(&team)
-            .bind(&cluster)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        for n in ["a", "b"] {
-            sqlx::query(
-                "INSERT INTO pyo.servers (id, cluster_id, name, report) VALUES ($1, $2, $3, $4)",
-            )
-            .bind(format!("nd_{n}{run}"))
-            .bind(&cluster)
-            .bind(n)
-            .bind(json!({ "status": "ready", "roles": [] }))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        }
-        sqlx::query(
-            "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $3)",
-        )
-        .bind(&project)
-        .bind(&team)
-        .bind(format!("shop-{run}"))
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, 'web', '{\"name\":\"web\"}')").bind(&service).bind(&team).bind(&project).bind(&cluster).execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'succeeded', '{}', '{}')")
-            .bind(format!("dpl_{run}"))
-            .bind(&team)
-            .bind(&project)
-            .bind(&service)
-            .bind(&cluster)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        let vol = format!("vol_{run}");
-        sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, data, namespace) VALUES ($1, $2, $3, $4, $5, $6)")
-            .bind(&vol)
-            .bind(&team)
-            .bind(&cluster)
-            .bind(&project)
-            .bind(json!({ "name": "old-data", "sizeGi": 5, "storageClass": "local-path", "server": "a" }))
-            .bind(format!("shop-{run}"))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, namespace, password) VALUES ($1, $2, $3, 'main', 'postgres', '17', 'small', 5, 1, $4, '')")
-            .bind(format!("mdb_{run}"))
-            .bind(&team)
-            .bind(&cluster)
-            .bind(format!("shop-{run}"))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        deploy::enqueue(
-            &mut tx,
-            &cluster,
-            Command::DeleteNamespace {
-                namespace: "x".into(),
-                project_id: "y".into(),
-            },
-        )
-        .await
-        .unwrap();
-
-        // A detached volume's data is on server a: a can't go, b can.
-        let mut wake = vec![];
-        let err = remove_node(&mut tx, &user, &format!("nd_a{run}"), false, &mut wake)
-            .await
-            .unwrap_err();
-        assert!(
-            err.message.contains("Delete these volumes first") && err.message.contains("old-data"),
-            "{}",
-            err.message
-        );
-        assert_eq!(
-            detached_volumes_on(&mut tx, &cluster, "b").await.unwrap(),
-            Vec::<String>::new()
-        );
-
-        // Reachable: only the normal path, which waits for its services.
-        assert!(
-            remove_cluster(&mut tx, &user, &cluster, false)
-                .await
-                .unwrap_err()
-                .message
-                .contains("Delete or move")
-        );
-        assert!(
-            remove_cluster(&mut tx, &user, &cluster, true)
-                .await
-                .unwrap_err()
-                .message
-                .contains("is reachable")
-        );
-        sqlx::query("UPDATE pyo.clusters SET status = 'unreachable', last_seen_at = now() - interval '9 minutes' WHERE id = $1").bind(&cluster).execute(&mut *tx).await.unwrap();
-        assert!(
-            remove_cluster(&mut tx, &user, &cluster, true)
-                .await
-                .is_err(),
-            "not gone long enough"
-        );
-
-        // Gone for 10 minutes: forced, Pyo forgets all of it.
-        sqlx::query(
-            "UPDATE pyo.clusters SET last_seen_at = now() - interval '11 minutes' WHERE id = $1",
-        )
-        .bind(&cluster)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        remove_cluster(&mut tx, &user, &cluster, true)
-            .await
-            .unwrap();
-        for table in [
-            "clusters",
-            "services",
-            "deployments",
-            "volumes",
-            "databases",
-            "commands",
-            "servers",
-        ] {
-            let col = if table == "clusters" {
-                "id"
-            } else {
-                "cluster_id"
+    fn removing_servers_and_clusters_in_the_database() {
+        run_big(async {
+            let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+            let pool = sqlx::PgPool::connect(&url).await.unwrap();
+            crate::migrate::run(&pool).await.unwrap();
+            crate::vault::init(crate::vault::Vault::new(
+                pool.clone(),
+                crate::vault::Provider::from_env(),
+            ));
+            let run = crate::ids::new_id("t");
+            let (team, cluster, project, service) = (
+                format!("team_{run}"),
+                format!("cl_{run}"),
+                format!("prj_{run}"),
+                format!("svc_{run}"),
+            );
+            let user = User {
+                id: format!("usr_{run}"),
+                name: "T".into(),
+                email: format!("{run}@t.test"),
+                timezone: "UTC".into(),
+                is_admin: false,
+                must_set_up: false,
+                key: None,
             };
-            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "SELECT count(*) FROM pyo.{table} WHERE {col} = $1"
-            )))
-            .bind(&cluster)
-            .fetch_one(&mut *tx)
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query(
+                "INSERT INTO pyo.users (id, email, name, password_hash) VALUES ($1, $2, 'T', '')",
+            )
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&mut *tx)
             .await
             .unwrap();
-            assert_eq!(n, 0, "{table}");
-        }
-        let default: Option<String> =
-            sqlx::query_scalar("SELECT default_cluster_id FROM pyo.teams WHERE id = $1")
+            sqlx::query("INSERT INTO pyo.teams (id, name, slug) VALUES ($1, $1, $1)")
                 .bind(&team)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO pyo.members (id, team_id, user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'active')").bind(format!("mem_{run}")).bind(&team).bind(&user.id).bind(&user.email).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status, last_seen_at) VALUES ($1, $2, $1, $1, 'connected', now())").bind(&cluster).bind(&team).execute(&mut *tx).await.unwrap();
+            sqlx::query("UPDATE pyo.teams SET default_cluster_id = $2 WHERE id = $1")
+                .bind(&team)
+                .bind(&cluster)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            for n in ["a", "b"] {
+                sqlx::query(
+                    "INSERT INTO pyo.servers (id, cluster_id, name, report) VALUES ($1, $2, $3, $4)",
+                )
+                .bind(format!("nd_{n}{run}"))
+                .bind(&cluster)
+                .bind(n)
+                .bind(json!({ "status": "ready", "roles": [] }))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO pyo.projects (id, team_id, name, namespace) VALUES ($1, $2, 'shop', $3)",
+            )
+            .bind(&project)
+            .bind(&team)
+            .bind(format!("shop-{run}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO pyo.services (id, team_id, project_id, cluster_id, name, spec) VALUES ($1, $2, $3, $4, 'web', '{\"name\":\"web\"}')").bind(&service).bind(&team).bind(&project).bind(&cluster).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO pyo.deployments (id, team_id, project_id, service_id, cluster_id, status, data, spec) VALUES ($1, $2, $3, $4, $5, 'succeeded', '{}', '{}')")
+                .bind(format!("dpl_{run}"))
+                .bind(&team)
+                .bind(&project)
+                .bind(&service)
+                .bind(&cluster)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let vol = format!("vol_{run}");
+            sqlx::query("INSERT INTO pyo.volumes (id, team_id, cluster_id, project_id, data, namespace) VALUES ($1, $2, $3, $4, $5, $6)")
+                .bind(&vol)
+                .bind(&team)
+                .bind(&cluster)
+                .bind(&project)
+                .bind(json!({ "name": "old-data", "sizeGi": 5, "storageClass": "local-path", "server": "a" }))
+                .bind(format!("shop-{run}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO pyo.databases (id, team_id, cluster_id, name, engine, version, size, storage_gi, instances, namespace, password) VALUES ($1, $2, $3, 'main', 'postgres', '17', 'small', 5, 1, $4, '')")
+                .bind(format!("mdb_{run}"))
+                .bind(&team)
+                .bind(&cluster)
+                .bind(format!("shop-{run}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            deploy::enqueue(
+                &mut tx,
+                &cluster,
+                Command::DeleteNamespace {
+                    namespace: "x".into(),
+                    project_id: "y".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+            // A detached volume's data is on server a: a can't go, b can.
+            let mut wake = vec![];
+            let err = remove_node(&mut tx, &user, &format!("nd_a{run}"), false, &mut wake)
+                .await
+                .unwrap_err();
+            assert!(
+                err.message.contains("Delete these volumes first") && err.message.contains("old-data"),
+                "{}",
+                err.message
+            );
+            assert_eq!(
+                detached_volumes_on(&mut tx, &cluster, "b").await.unwrap(),
+                Vec::<String>::new()
+            );
+
+            // Reachable: only the normal path, which waits for its services.
+            assert!(
+                remove_cluster(&mut tx, &user, &cluster, false)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("Delete or move")
+            );
+            assert!(
+                remove_cluster(&mut tx, &user, &cluster, true)
+                    .await
+                    .unwrap_err()
+                    .message
+                    .contains("is reachable")
+            );
+            sqlx::query("UPDATE pyo.clusters SET status = 'unreachable', last_seen_at = now() - interval '9 minutes' WHERE id = $1").bind(&cluster).execute(&mut *tx).await.unwrap();
+            assert!(
+                remove_cluster(&mut tx, &user, &cluster, true)
+                    .await
+                    .is_err(),
+                "not gone long enough"
+            );
+
+            // Gone for 10 minutes: forced, Pyo forgets all of it.
+            sqlx::query(
+                "UPDATE pyo.clusters SET last_seen_at = now() - interval '11 minutes' WHERE id = $1",
+            )
+            .bind(&cluster)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            remove_cluster(&mut tx, &user, &cluster, true)
+                .await
+                .unwrap();
+            for table in [
+                "clusters",
+                "services",
+                "deployments",
+                "volumes",
+                "databases",
+                "commands",
+                "servers",
+            ] {
+                let col = if table == "clusters" {
+                    "id"
+                } else {
+                    "cluster_id"
+                };
+                let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM pyo.{table} WHERE {col} = $1"
+                )))
+                .bind(&cluster)
                 .fetch_one(&mut *tx)
                 .await
                 .unwrap();
-        assert!(default.is_none());
-        tx.rollback().await.unwrap();
+                assert_eq!(n, 0, "{table}");
+            }
+            let default: Option<String> =
+                sqlx::query_scalar("SELECT default_cluster_id FROM pyo.teams WHERE id = $1")
+                    .bind(&team)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert!(default.is_none());
+            tx.rollback().await.unwrap();
+        })
     }
 }
 
@@ -10460,6 +10463,7 @@ mod secret_tests {
 #[cfg(test)]
 mod waf_lifecycle_tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     /// The WAF's engine follows a cluster's services: installed with the
     /// first one that turns its WAF on, kept while any has it on, removed
@@ -10470,18 +10474,7 @@ mod waf_lifecycle_tests {
     #[ignore]
     fn the_waf_engine_follows_the_services_in_the_database() {
         // The operations' future is large: a roomier stack than a test's.
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(lifecycle())
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        run_big(lifecycle());
     }
 
     async fn lifecycle() {
@@ -11014,6 +11007,7 @@ mod waf_lifecycle_tests {
 #[cfg(test)]
 mod compose_import_tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     /// A Compose import creates its project and services as createProject
     /// and createService would, in one transaction; on Tokio's default
@@ -11023,12 +11017,7 @@ mod compose_import_tests {
     #[test]
     #[ignore]
     fn a_compose_import_in_the_database() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .thread_stack_size(64 << 20)
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async { tokio::spawn(import()).await.unwrap() });
+        run_big(async { tokio::spawn(import()).await.unwrap() });
     }
 
     async fn import() {
@@ -11197,6 +11186,7 @@ mod compose_import_tests {
 #[cfg(test)]
 mod delete_service_tests {
     use super::*;
+    use crate::teamsec_tests::run_big;
 
     /// Deleting a service: one that never reached its cluster goes at once;
     /// one that did goes when the agent says so, and comes back with why
@@ -11206,18 +11196,7 @@ mod delete_service_tests {
     #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
     fn services_are_deleted_once_their_cluster_says_so() {
         // The operations' future is large: a roomier stack than a test's.
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(deletes())
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        run_big(deletes());
     }
 
     async fn deletes() {
