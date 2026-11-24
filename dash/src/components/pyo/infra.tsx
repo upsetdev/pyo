@@ -597,7 +597,11 @@ function systemRows(workloads: Workload[]): Workload[] {
     r.replicas.ready += w.replicas.ready;
     r.cpuMillis += w.cpuMillis;
     r.memoryMi += w.memoryMi;
-    if (WORST.indexOf(w.status) < WORST.indexOf(r.status)) r.status = w.status;
+    // The worst one's reason, else the first reason found.
+    if (WORST.indexOf(w.status) < WORST.indexOf(r.status)) {
+      r.status = w.status;
+      r.message = w.message ?? r.message;
+    } else if (!r.message) r.message = w.message;
   }
   return [...rows.values()];
 }
@@ -704,6 +708,11 @@ export function WorkloadTable({
                     {system ? null : <Td>{w.kind}</Td>}
                     <Td>
                       <WorkloadStatusBadge status={w.status} />
+                      {w.message && w.status !== "healthy" ? (
+                        <p className="mt-1 max-w-64 text-[12px] text-destructive">
+                          {w.message}
+                        </p>
+                      ) : null}
                     </Td>
                     <Td className="tabular-nums">
                       {w.kind === "CronJob" && !system

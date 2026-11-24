@@ -546,6 +546,18 @@ pub fn shown(message: Option<&str>, install: &str) -> Option<String> {
     }
 }
 
+/// Why a system workload or the gateway isn't running, as the agent said
+/// it ([`pyo_proto::WORKLOAD_PROBLEMS`]), with the command that fixes it
+/// while the cluster's install (`install`, its state) is older than Pyo's:
+/// a refresh brings this Pyo's images and settings. Other words as they are.
+pub fn workload_message(message: &str, install: &str) -> String {
+    if install == "outdated" && pyo_proto::WORKLOAD_PROBLEMS.contains(&message) {
+        format!("{message} Run the command under Refresh this cluster in the cluster's settings.")
+    } else {
+        message.to_owned()
+    }
+}
+
 /// The cluster's install as its last heartbeat found: "current",
 /// "updating", "outdated" or "roles" (current when it never said).
 pub async fn state_of(db: impl sqlx::PgExecutor<'_>, cluster_id: &str) -> ApiResult<String> {
@@ -1197,6 +1209,22 @@ mod tests {
             attempts: 1,
             agent_changed: false,
         }
+    }
+
+    #[test]
+    fn a_workload_that_cant_run_gets_the_refresh_command_on_an_older_install() {
+        let image = pyo_proto::CANT_DOWNLOAD_IMAGE;
+        assert_eq!(
+            workload_message(image, "outdated"),
+            "Can't download its image. Run the command under Refresh this cluster in the cluster's settings."
+        );
+        // A current install, or one Pyo refreshes now: the plain reason only.
+        for state in ["current", "updating", "roles"] {
+            assert_eq!(workload_message(image, state), image);
+        }
+        // Words the agent didn't pick (Helm's error): as they are.
+        assert_eq!(workload_message("chart failed", "outdated"), "chart failed");
+        assert!(!workload_message(image, "outdated").contains(';'));
     }
 
     #[test]

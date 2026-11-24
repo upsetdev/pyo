@@ -733,6 +733,8 @@ export type Workload = {
   system?: boolean;
   /** Servers its pods run on, as the agent last saw them. */
   servers?: string[];
+  /** Why it isn't running, in plain words, when Pyo knows. */
+  message?: string | null;
   createdAt: Timestamp;
 };
 
