@@ -12,12 +12,17 @@ import {
   createFileRoute,
   Link,
   Outlet,
+  redirect,
   useRouterState,
 } from "@tanstack/react-router";
 import { useUpdateAvailable } from "~/components/pyo/UpdateSettings";
 import { AppShell } from "~/components/shell/AppShell";
 import { Page, PageHeader } from "~/components/ui/Panel";
-import type { SETTINGS_PAGES } from "~/lib/pyo/paths";
+import {
+  opensInstallationSettings,
+  type SETTINGS_PAGES,
+} from "~/lib/pyo/paths";
+import { getState } from "~/lib/pyo/store";
 import { seo } from "~/lib/seo";
 
 // Settings of this Pyo installation, for every team: backups of its own
@@ -27,7 +32,14 @@ import { seo } from "~/lib/seo";
 // (/backups, /email) and /settings opens the first. The old
 // /settings/<page> URLs redirect here.
 // Team settings stay under each team (/:team/settings).
+// Only the installation's admins open them, self-hosted and on Pyo Cloud.
+// Anyone else is sent to their team, before anything renders (the
+// snapshot, with the account, loads in /_app first).
 export const Route = createFileRoute("/_app/_settings")({
+  beforeLoad: () => {
+    if (!opensInstallationSettings(getState().user))
+      throw redirect({ to: "/", replace: true });
+  },
   head: () => ({ meta: seo({ title: "Settings" }) }),
   component: InstallationSettings,
 });

@@ -9516,26 +9516,21 @@ pub(crate) struct MetricsQuery {
 /// Observability settings
 ///
 /// Whether observability is on for this installation (it's off on a new
-/// install on a server with under 3.5 GB of memory), what it keeps of
-/// visitors' IP addresses, and how long it keeps data (`retention`:
-/// `analyticsMonths`, `metricsDays`, `buildLogDays`). `small`: the server
-/// Pyo runs on has under 3.5 GB of memory now. The installation's admin
-/// turns it on or off with `setObservability`.
+/// install on a server with under 3.5 GB of memory). For the installation's
+/// admin also what it keeps of visitors' IP addresses, how long it keeps
+/// data (`retention`: `analyticsMonths`, `metricsDays`, `buildLogDays`) and
+/// `small`: the server Pyo runs on has under 3.5 GB of memory now. The
+/// installation's admin turns it on or off with `setObservability`.
 #[utoipa::path(get, path = "/observability/settings", operation_id = "getObservabilitySettings", tag = "Observability",
     responses(
-        (status = 200, description = "`enabled`, `ipMode`, `retention` and `small`.", body = Object),
+        (status = 200, description = "`enabled`. For the installation's admin also `ipMode`, `retention` and `small`.", body = Object),
     ),
     extensions(("x-pyo-access" = json!("read"))))]
 pub(crate) async fn observability_settings(
     State(s): State<AppState>,
-    SessionUser(_user): SessionUser,
+    SessionUser(user): SessionUser,
 ) -> ApiResult<Json<Value>> {
-    Ok(Json(json!({
-        "enabled": crate::observability::setting(&s.db).await?,
-        "ipMode": crate::observability::ip_mode(&s.db).await?,
-        "retention": crate::retention::load(&s.db).await?,
-        "small": pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
-    })))
+    Ok(Json(crate::observability::settings_for(&s.db, user.is_admin).await?))
 }
 
 /// Server and service usage

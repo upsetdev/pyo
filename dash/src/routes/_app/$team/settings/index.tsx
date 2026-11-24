@@ -140,11 +140,13 @@ function TeamSettings({ ws }: { ws: Team }) {
         </div>
       </Panel>
       <RequestLogsPanel ws={ws} />
-      <AnalyticsPanel
-        key={`${ws.analyticsMonths}:${s.observabilitySettings.retention.analyticsMonths}`}
-        ws={ws}
-        installation={s.observabilitySettings.retention.analyticsMonths}
-      />
+      {ws.analyticsMonthsLimit ? (
+        <AnalyticsPanel
+          key={`${ws.analyticsMonths}:${ws.analyticsMonthsLimit}`}
+          ws={ws}
+          installation={ws.analyticsMonthsLimit}
+        />
+      ) : null}
       {hosted ? (
         <Panel title="Agents">
           <div className="p-4">

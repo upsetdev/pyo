@@ -31,6 +31,15 @@ export const SETTINGS_PAGES = [
   "/updates",
 ] as const;
 
+/**
+ * Whether someone may open the installation's settings: its admins only,
+ * self-hosted and on Pyo Cloud. Everyone else gets no link, and a direct
+ * URL opens their team.
+ */
+export function opensInstallationSettings(user: { isAdmin?: boolean }) {
+  return !!user.isAdmin;
+}
+
 /** For an old /settings/<page> URL: the same page at the root, query and hash kept. */
 export function movedSettingsHref(
   page: (typeof SETTINGS_PAGES)[number],

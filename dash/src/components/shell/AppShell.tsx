@@ -31,7 +31,13 @@ import {
 } from "@phosphor-icons/react";
 import { ProjectIcon } from "~/components/ui/ProjectIcon";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { currentSlug, useTeamPathname, CLUSTER_TABS, SETTINGS_PAGES } from "~/lib/pyo/paths";
+import {
+  currentSlug,
+  useTeamPathname,
+  CLUSTER_TABS,
+  opensInstallationSettings,
+  SETTINGS_PAGES,
+} from "~/lib/pyo/paths";
 import { AppLink } from "~/components/ui/AppLink";
 import { UserAvatar } from "~/components/ui/UserAvatar";
 import { Fragment, useEffect, useState, type ReactNode } from "react";
@@ -267,7 +273,9 @@ function AccountNav({
           </li>
         ) : null}
         {item("/profile", "Profile", UserCircleIcon)}
-        {item("/settings", "Settings", GearSixIcon, updateAvailable)}
+        {opensInstallationSettings(s.user)
+          ? item("/settings", "Settings", GearSixIcon, updateAvailable)
+          : null}
       </ul>
       <p className={`mt-8 ${NAV_LABEL}`}>Developers</p>
       <ul className="flex flex-col gap-1">
@@ -929,17 +937,22 @@ export function ProfileMenu() {
           href: "/profile",
         },
         // Installation settings (/settings), not the team's; teams have theirs in the sidebar.
-        {
-          label: "Settings",
-          icon: <GearSixIcon size={14} />,
-          hint: updateAvailable ? (
-            <span className="text-[11px] text-info">Update available</span>
-          ) : undefined,
-          onSelect: () =>
-            void navigate({
-              to: updateAvailable ? "/updates" : "/settings",
-            }),
-        },
+        // Its admins only.
+        ...(opensInstallationSettings(s.user)
+          ? [
+              {
+                label: "Settings",
+                icon: <GearSixIcon size={14} />,
+                hint: updateAvailable ? (
+                  <span className="text-[11px] text-info">Update available</span>
+                ) : undefined,
+                onSelect: () =>
+                  void navigate({
+                    to: updateAvailable ? "/updates" : "/settings",
+                  }),
+              },
+            ]
+          : []),
         {
           label: "API keys",
           icon: <KeyIcon size={14} />,

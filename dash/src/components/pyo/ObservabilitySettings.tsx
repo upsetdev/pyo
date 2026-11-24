@@ -33,8 +33,10 @@ const MODES: { value: IpMode; label: string; hint: string }[] = [
 
 export function ObservabilitySettingsSection() {
   const s = usePyo();
-  const { ipMode: current, enabled, small } = s.observabilitySettings;
+  const { ipMode: current, enabled, small, retention } = s.observabilitySettings;
   const admin = !!s.user.isAdmin;
+  // Only the installation's admins get these, and only they open this page.
+  if (!current || !retention) return null;
   // The server's memory now, against the setting: a hint, never a change.
   const hint =
     small === true && enabled
@@ -94,8 +96,8 @@ export function ObservabilitySettingsSection() {
         </div>
       </Panel>
       <RetentionPanel
-        key={JSON.stringify(s.observabilitySettings.retention)}
-        saved={s.observabilitySettings.retention}
+        key={JSON.stringify(retention)}
+        saved={retention}
         admin={admin}
         note={note}
       />
