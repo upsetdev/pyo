@@ -4,8 +4,9 @@
 //!
 //! A library with one entry point, [`run`]: the `pyo-api` binary calls it
 //! with [`Extensions::default()`]. A hosted build can pass its own routes,
-//! background tasks, migrations, dashboard features and entitlement checks
-//! (see [`Extensions`]); self-hosted Pyo has none of those.
+//! background tasks, migrations, dashboard features and entitlement checks,
+//! and says it's multi-tenant (see [`Extensions`]); self-hosted Pyo has
+//! none of those.
 
 mod admin_sign_in;
 #[cfg(test)]
@@ -220,7 +221,15 @@ pub struct Extensions {
     /// migrations table (`create_schema`, `dangerous_set_table_name`).
     pub migrator: Option<sqlx::migrate::Migrator>,
     /// Dashboard features to turn on, listed by `GET /api/v1/meta`.
+    /// Any of them needs [`Extensions::multi_tenant`]: Pyo won't start
+    /// without it.
     pub features: Vec<String>,
+    /// One Pyo for many teams that don't trust each other (Pyo Cloud).
+    /// Turns on what keeps them apart: each team has only its own sandbox
+    /// servers, backups go to the teams' own buckets, webhooks can't reach
+    /// private addresses, and admins must use two-factor. Pyo's own
+    /// updates are left to whoever runs it. Off (self-hosted) by default.
+    pub multi_tenant: bool,
     /// Checks before a team adds a server or deploys.
     pub entitlements: Option<Arc<dyn Entitlements>>,
     /// Signs every command before an agent gets it, with a key this
@@ -378,6 +387,7 @@ pub(crate) fn verify_domains() -> bool {
     VERIFY_DOMAINS.get().copied().unwrap_or(false)
 }
 static FEATURES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+static MULTI_TENANT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Fails with 402 and the entitlement's message when a team may not add a server.
 pub(crate) async fn check_add_server(
@@ -414,9 +424,24 @@ pub(crate) fn features() -> &'static [String] {
 }
 
 /// Whether this Pyo is hosted (Pyo Cloud): one Pyo for many teams, outside
-/// their clusters. A hosted build turns dashboard features on.
+/// their clusters, that don't trust each other. A hosted build says so
+/// with [`Extensions::multi_tenant`].
 pub(crate) fn hosted() -> bool {
-    !features().is_empty()
+    MULTI_TENANT.get().copied().unwrap_or(false)
+}
+
+/// Whether this Pyo is multi-tenant, from its build's `features` and
+/// `multi_tenant`. Fails closed: a build with features but without the
+/// flag would keep teams apart only as a self-hosted Pyo does, so it
+/// doesn't start.
+fn tenancy(features: &[String], multi_tenant: bool) -> anyhow::Result<bool> {
+    if !features.is_empty() && !multi_tenant {
+        anyhow::bail!(
+            "Pyo won't start: this build turns on features ({}) but not multi_tenant. Set multi_tenant: true in its pyo_api::Extensions.",
+            features.join(", ")
+        );
+    }
+    Ok(multi_tenant)
 }
 
 /// Runs Pyo: migrates, starts the background work, and serves until a
@@ -432,11 +457,13 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
         tasks,
         migrator: extra_migrator,
         features,
+        multi_tenant,
         entitlements,
         command_signer,
         verify_domains,
         agent_ca,
     } = ext;
+    let _ = MULTI_TENANT.set(tenancy(&features, multi_tenant)?);
     let _ = FEATURES.set(features);
     let _ = VERIFY_DOMAINS.set(verify_domains);
     let dev_txt = std::env::var("PYO_DEV_TXT_FILE").is_ok_and(|v| !v.trim().is_empty());
@@ -834,6 +861,41 @@ async fn max_connections(connect: &PgConnectOptions) -> anyhow::Result<u32> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// Self-hosted: no features, no flag. Nothing to keep apart, and
+    /// nothing set until a hosted build says so.
+    #[test]
+    fn self_hosted_by_default() {
+        let ext = Extensions::default();
+        assert!(!ext.multi_tenant);
+        assert!(ext.features.is_empty());
+        assert!(!tenancy(&ext.features, ext.multi_tenant).unwrap());
+        assert!(!hosted());
+    }
+
+    /// A hosted build that says it's multi-tenant starts so, with or
+    /// without dashboard features.
+    #[test]
+    fn multi_tenant_when_the_build_says_so() {
+        assert!(tenancy(&names(&["billing", "managed"]), true).unwrap());
+        assert!(tenancy(&[], true).unwrap());
+    }
+
+    /// Features without the flag: Pyo refuses to start rather than keep
+    /// teams apart only as a self-hosted Pyo does.
+    #[test]
+    fn features_without_multi_tenant_refuse_to_start() {
+        let e = tenancy(&names(&["billing", "managed"]), false).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "Pyo won't start: this build turns on features (billing, managed) but not multi_tenant. Set multi_tenant: true in its pyo_api::Extensions."
+        );
+        assert!(tenancy(&names(&["managed"]), false).is_err());
+    }
 
     fn refused() -> sqlx::Error {
         sqlx::Error::Io(std::io::ErrorKind::ConnectionRefused.into())
