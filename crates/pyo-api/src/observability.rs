@@ -400,6 +400,11 @@ impl ClickHouse {
     }
 }
 
+/// [`Observability::owners`]' key for a service on one of its hostnames.
+pub(crate) fn path_owner_key(host: &str, service_id: &str) -> String {
+    format!("{host} {service_id}")
+}
+
 #[derive(Clone)]
 pub(crate) struct Owner {
     pub team_id: String,
@@ -708,6 +713,9 @@ impl Observability {
     }
 
     /// hostname -> owning service, from the domains of every service (cached 30s).
+    /// A hostname whose paths go to several services is its "/" route's (or
+    /// its holder's), and each of them is also there by
+    /// [`path_owner_key`].
     pub(crate) async fn owners(&self) -> anyhow::Result<HashMap<String, Owner>> {
         {
             let g = self.hosts.read().await;
@@ -715,27 +723,27 @@ impl Observability {
                 return Ok(g.1.clone());
             }
         }
+        // The hostname's own last, so it's the one kept: its "/" route, then
+        // the entry that holds it.
         let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
             "SELECT lower(d->>'hostname'), a.team_id, a.project_id, a.id, a.cluster_id
                FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
-              WHERE NOT a.deleting",
+              WHERE NOT a.deleting
+              ORDER BY coalesce(d->>'path', '/') = '/', coalesce(d->>'primary', 'true') <> 'false'",
         )
         .fetch_all(&self.db)
         .await?;
-        let map: HashMap<String, Owner> = rows
-            .into_iter()
-            .map(|(h, team_id, project_id, service_id, cluster_id)| {
-                (
-                    h,
-                    Owner {
-                        team_id,
-                        project_id,
-                        service_id,
-                        cluster_id,
-                    },
-                )
-            })
-            .collect();
+        let mut map: HashMap<String, Owner> = HashMap::new();
+        for (h, team_id, project_id, service_id, cluster_id) in rows {
+            let o = Owner {
+                team_id,
+                project_id,
+                service_id,
+                cluster_id,
+            };
+            map.insert(path_owner_key(&h, &o.service_id), o.clone());
+            map.insert(h, o);
+        }
         *self.hosts.write().await = (Instant::now(), map.clone());
         Ok(map)
     }

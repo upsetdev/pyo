@@ -70,6 +70,15 @@ pub fn day_of(ms: i64) -> String {
 }
 
 impl Cleaner<'_> {
+    /// The service a request went to, on a hostname whose paths go to
+    /// several; "" on any other (its hostname says).
+    fn shared_service(&self, host: &str, path: &str) -> String {
+        if !self.ctx.paths.contains_key(host) {
+            return String::new();
+        }
+        self.ctx.service_of(host, path).cloned().unwrap_or_default()
+    }
+
     /// The rule behind a refusal: behind a CDN, a connection that didn't
     /// come from it (`peer`) is the CDN check's ("cdn"); else the rule that
     /// matches the address (or its country), else what the proxy said.
@@ -98,7 +107,7 @@ impl Cleaner<'_> {
         // The WAF's finding for one request (pyo-waf's line).
         if l.get("waf").is_some() {
             let host = l["host"].as_str().unwrap_or("").to_lowercase();
-            if self.known && !self.ctx.hosts.contains_key(&host) {
+            if self.known && !self.ctx.knows(&host) {
                 return None;
             }
             let at = l["time"]
@@ -111,6 +120,7 @@ impl Cleaner<'_> {
             let row = WafRow {
                 at,
                 host: host.clone(),
+                service_id: self.shared_service(&host, &path),
                 method: capped(l["method"].as_str().unwrap_or(""), 16),
                 path,
                 url,
@@ -164,7 +174,8 @@ impl Cleaner<'_> {
             return Some(Cleaned::Connection { row, visitor });
         }
         let host = l.host.split(':').next().unwrap_or("").to_lowercase();
-        let service_id = match self.ctx.hosts.get(&host) {
+        let raw_path = l.path.split(['?', '#']).next().unwrap_or("/");
+        let service_id = match self.ctx.service_of(&host, raw_path) {
             Some(s) => s.clone(),
             None if self.known => return None,
             None => String::new(),
@@ -210,6 +221,7 @@ impl Cleaner<'_> {
         let row = RequestRow {
             at,
             host: host.clone(),
+            service_id: if self.ctx.paths.contains_key(&host) { service_id.clone() } else { String::new() },
             method,
             path,
             url,

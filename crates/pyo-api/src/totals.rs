@@ -219,7 +219,12 @@ impl Observability {
         let mut teams: Vec<String> = vec![];
         for h in b.hosts.iter().take(MAX_ROWS) {
             let host = h.host.to_lowercase();
-            let Some(o) = owners.get(&host).filter(|o| o.cluster_id == cluster_id) else { continue };
+            // A path's service, when it has one of the hostname's paths.
+            let owner = match h.service_id.as_str() {
+                "" => owners.get(&host),
+                s => owners.get(&crate::observability::path_owner_key(&host, s)),
+            };
+            let Some(o) = owner.filter(|o| o.cluster_id == cluster_id) else { continue };
             if !fresh(h.minute) {
                 continue;
             }
@@ -284,10 +289,18 @@ pub async fn context(db: &sqlx::PgPool, cluster_id: &str, team_id: &str) -> ApiR
     .fetch_all(&mut *tx)
     .await?;
     let mut ctx = TrafficContext::default();
+    // Every path of each hostname, to tell the services apart on one whose
+    // paths go to several (paths.rs).
+    let mut paths: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (id, ns, name, domains, ports) in rows {
         for d in domains.as_array().into_iter().flatten() {
             if let Some(h) = d["hostname"].as_str() {
-                ctx.hosts.insert(h.to_lowercase(), id.clone());
+                let h = h.to_lowercase();
+                // The hostname's own: its "/" route, else the entry that holds it.
+                if crate::paths::path_of(d) == "/" || (crate::paths::holds(d) && !ctx.hosts.contains_key(&h)) {
+                    ctx.hosts.insert(h.clone(), id.clone());
+                }
+                paths.entry(h).or_default().push((crate::paths::path_of(d).to_owned(), id.clone()));
             }
         }
         for (key, port) in port_keys(&ns, &name, &ports) {
@@ -296,6 +309,15 @@ pub async fn context(db: &sqlx::PgPool, cluster_id: &str, team_id: &str) -> ApiR
         let f = crate::firewall::for_service(&mut tx, &id).await?;
         if !f.is_unrestricted() {
             ctx.firewalls.insert(id, f);
+        }
+    }
+    for (host, mut ps) in paths {
+        let mut services: Vec<&String> = ps.iter().map(|(_, s)| s).collect();
+        services.sort();
+        services.dedup();
+        if services.len() > 1 {
+            ps.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
+            ctx.paths.insert(host, ps);
         }
     }
     let prefs: Value = sqlx::query_scalar("SELECT preferences FROM pyo.teams WHERE id = $1")
@@ -406,7 +428,7 @@ pub fn array_param(items: &[String]) -> String {
 impl Observability {
     /// The analytics page's data for a set of hostnames of one team, from
     /// the totals.
-    pub async fn query(&self, team_id: &str, hosts: &[String], range: &str) -> ApiResult<Value> {
+    pub async fn query(&self, team_id: &str, hosts: &[String], services: &[String], range: &str) -> ApiResult<Value> {
         let ch = self.reader().await?;
         let (table, points, step, start, end) = window(range, pyo_proto::now_ms() / 1000);
         let prev_start = start - points * step;
@@ -415,13 +437,14 @@ impl Observability {
             vec![
                 ("team", team_id.to_owned()),
                 ("hosts", hosts_param.clone()),
+                ("services", array_param(services)),
                 ("start", s.to_string()),
                 ("end", e.to_string()),
                 ("step", step.to_string()),
             ]
         };
         let from = format!("pyo_observability.traffic_{table}");
-        const W: &str = "team_id = {team:String} AND has({hosts:Array(String)}, host) AND ts >= toDateTime({start:Int64}) AND ts < toDateTime({end:Int64})";
+        const W: &str = "team_id = {team:String} AND has({hosts:Array(String)}, host) AND (empty({services:Array(String)}) OR has({services:Array(String)}, service_id)) AND ts >= toDateTime({start:Int64}) AND ts < toDateTime({end:Int64})";
         let visitors = hll_sql("maxMap(visitors)");
         let summary_sql = format!(
             "SELECT sum(requests) AS requests, sum(pageviews) AS pageviews, sum(bytes) / 1e6 AS mb, sum(errors) AS errors,
@@ -516,7 +539,7 @@ impl Observability {
     /// a cluster sends a minute once it's over ([`summary_window`]): `from`
     /// and `to` (ms) say which whole minutes are counted, `to` null while
     /// none has come. The newest requests in the log come after `to`.
-    pub async fn request_summary(&self, team_id: &str, hosts: &[String], since_s: i64) -> ApiResult<Option<Value>> {
+    pub async fn request_summary(&self, team_id: &str, hosts: &[String], services: &[String], since_s: i64) -> ApiResult<Option<Value>> {
         let Some(ch) = self.store().await else { return Ok(None) };
         let step = summary_step(pyo_proto::now_ms() / 1000, since_s);
         let table = if step == 60 { "1m" } else { "1h" };
@@ -527,9 +550,10 @@ impl Observability {
                     "SELECT sum(requests) AS requests, sum(bytes) AS bytes, sumMap(statuses) AS statuses, sumMap(latency) AS latency,
                             toUnixTimestamp(max(ts)) AS last
                        FROM pyo_observability.traffic_{table}
-                      WHERE team_id = {{team:String}} AND has({{hosts:Array(String)}}, host) AND ts >= toDateTime({{from:Int64}})"
+                      WHERE team_id = {{team:String}} AND has({{hosts:Array(String)}}, host)
+                        AND (empty({{services:Array(String)}}) OR has({{services:Array(String)}}, service_id)) AND ts >= toDateTime({{from:Int64}})"
                 ),
-                vec![("team", team_id.to_owned()), ("hosts", array_param(hosts)), ("from", from.to_string())],
+                vec![("team", team_id.to_owned()), ("hosts", array_param(hosts)), ("services", array_param(services)), ("from", from.to_string())],
             )
             .await?;
         let r = r.first().cloned().unwrap_or_default();
@@ -547,7 +571,7 @@ impl Observability {
 
     /// Requests, server errors and response times per answering server,
     /// for some hostnames over the last `hours`. Empty without storage.
-    pub async fn per_server(&self, team_id: &str, hosts: &[String], hours: i64) -> ApiResult<Vec<Value>> {
+    pub async fn per_server(&self, team_id: &str, hosts: &[String], services: &[String], hours: i64) -> ApiResult<Vec<Value>> {
         let Some(ch) = self.store().await else { return Ok(vec![]) };
         if hosts.is_empty() {
             return Ok(vec![]);
@@ -557,9 +581,9 @@ impl Observability {
             .rows(
                 "SELECT sumMap(servers) AS servers, sumMap(server_errors) AS errors, sumMap(server_latency) AS latency
                    FROM pyo_observability.traffic_1h
-                  WHERE team_id = {team:String} AND has({hosts:Array(String)}, host) AND ts >= toStartOfHour(toDateTime({since:Int64}))"
+                  WHERE team_id = {team:String} AND has({hosts:Array(String)}, host) AND (empty({services:Array(String)}) OR has({services:Array(String)}, service_id)) AND ts >= toStartOfHour(toDateTime({since:Int64}))"
                     .into(),
-                vec![("team", team_id.to_owned()), ("hosts", array_param(hosts)), ("since", since.to_string())],
+                vec![("team", team_id.to_owned()), ("hosts", array_param(hosts)), ("services", array_param(services)), ("since", since.to_string())],
             )
             .await?;
         let r = r.first().cloned().unwrap_or_default();
@@ -591,7 +615,7 @@ impl Observability {
 
     /// Requests per answering server per hour, for the last `hours`
     /// (sparklines). Empty without storage.
-    pub async fn per_server_hourly(&self, team_id: &str, hosts: &[String], hours: i64) -> ApiResult<Vec<Value>> {
+    pub async fn per_server_hourly(&self, team_id: &str, hosts: &[String], services: &[String], hours: i64) -> ApiResult<Vec<Value>> {
         let Some(ch) = self.store().await else { return Ok(vec![]) };
         if hosts.is_empty() {
             return Ok(vec![]);
@@ -601,10 +625,10 @@ impl Observability {
             .rows(
                 "SELECT toUnixTimestamp(ts) AS hour, sumMap(servers) AS servers
                    FROM pyo_observability.traffic_1h
-                  WHERE team_id = {team:String} AND has({hosts:Array(String)}, host) AND ts >= toStartOfHour(toDateTime({since:Int64}))
+                  WHERE team_id = {team:String} AND has({hosts:Array(String)}, host) AND (empty({services:Array(String)}) OR has({services:Array(String)}, service_id)) AND ts >= toStartOfHour(toDateTime({since:Int64}))
                   GROUP BY hour"
                     .into(),
-                vec![("team", team_id.to_owned()), ("hosts", array_param(hosts)), ("since", since.to_string())],
+                vec![("team", team_id.to_owned()), ("hosts", array_param(hosts)), ("services", array_param(services)), ("since", since.to_string())],
             )
             .await?;
         Ok(rows
@@ -945,7 +969,7 @@ mod tests {
 
         let hosts = vec!["a.example".to_owned()];
         for range in ["1h", "7d"] {
-            let a = obs.query("team_1", &hosts, range).await.unwrap();
+            let a = obs.query("team_1", &hosts, &[], range).await.unwrap();
             let s = &a["summary"];
             assert_eq!(s["requests"], 30.0, "{range}: stored once");
             assert_eq!(s["pageviews"], 12.0);
@@ -961,13 +985,13 @@ mod tests {
             let points: f64 = a["series"].as_array().unwrap().iter().map(|p| p["requests"].as_f64().unwrap()).sum();
             assert_eq!(points, 30.0, "{range}");
         }
-        let sum = obs.request_summary("team_1", &hosts, now - 3600).await.unwrap().unwrap();
+        let sum = obs.request_summary("team_1", &hosts, &[], now - 3600).await.unwrap().unwrap();
         assert_eq!((sum["requests"].as_f64(), sum["serverErrors"].as_f64()), (Some(30.0), Some(3.0)));
-        let servers = obs.per_server("team_1", &hosts, 24).await.unwrap();
+        let servers = obs.per_server("team_1", &hosts, &[], 24).await.unwrap();
         assert_eq!(servers[0]["node"], "sg-1");
         assert_eq!(servers[0]["errors"], 3.0);
         assert!(servers[0]["p95Ms"].as_f64().unwrap() > 15.0);
-        let hourly = obs.per_server_hourly("team_1", &hosts, 24).await.unwrap();
+        let hourly = obs.per_server_hourly("team_1", &hosts, &[], 24).await.unwrap();
         assert_eq!(hourly.iter().map(|r| r["requests"].as_f64().unwrap()).sum::<f64>(), 30.0);
         let services = vec!["svc_1".to_owned()];
         let b = obs.blocked("team_1", &services, "24h").await.unwrap();

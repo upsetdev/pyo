@@ -472,12 +472,12 @@ pub async fn get(
     let stats_available = s.observability.enabled().await;
     let per_server = s
         .observability
-        .per_server(&team, &hosts, 24)
+        .per_server(&team, &hosts, std::slice::from_ref(&id), 24)
         .await
         .unwrap_or_default();
     let hourly = s
         .observability
-        .per_server_hourly(&team, &hosts, 24)
+        .per_server_hourly(&team, &hosts, std::slice::from_ref(&id), 24)
         .await
         .unwrap_or_default();
     let num = |v: &Value| {
