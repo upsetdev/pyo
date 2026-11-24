@@ -18,14 +18,14 @@ import { NoMatches } from "~/components/ui/Panel";
 import { plural } from "~/lib/pyo/format";
 import {
   AppCard,
-  serviceSubtitle,
+  ServiceSubtitle,
   LastDeploy,
   SourcePill,
   useStoredView,
   ViewToggle,
 } from "~/components/pyo/ProjectCard";
 import { collectIssues } from "~/components/pyo/widgets";
-import { ServiceStatusBadge } from "~/components/ui/Badge";
+import { DeletingStatus, ServiceStatusBadge } from "~/components/ui/Badge";
 import { Button, ButtonLink } from "~/components/ui/Button";
 import { Select } from "~/components/ui/Field";
 import { Menu, type MenuItem } from "~/components/ui/Menu";
@@ -59,10 +59,17 @@ function ProjectOverview() {
   const [deleting, setDeleting] = useState<Application | null>(null);
   const project = s.projects.find((p) => p.id === projectId);
 
+  // Services being deleted stay in place, as such, until they're gone.
+  const services = useMemo(
+    () =>
+      [...listedServices(s), ...s.deletingServices.filter((a) => !a.previewOf)].filter(
+        (a) => a.projectId === projectId,
+      ),
+    [projectId, s],
+  );
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return listedServices(s)
-      .filter((a) => a.projectId === projectId)
+    return services
       .map((a) => ({ a, latest: deploymentsWhere(s, { serviceId: a.id })[0] }))
       .filter(
         ({ a }) =>
@@ -80,10 +87,10 @@ function ProjectOverview() {
             : (y.latest?.createdAt ?? y.a.updatedAt) -
               (x.latest?.createdAt ?? x.a.updatedAt),
       );
-  }, [projectId, query, s, sort]);
+  }, [query, s, services, sort]);
 
   if (!project) return null;
-  const total = listedServices(s).filter((a) => a.projectId === projectId).length;
+  const total = services.length;
   const issues = collectIssues(s, project.teamId, project.id);
 
   if (!total)
@@ -225,20 +232,26 @@ function ProjectOverview() {
                 <div className="flex min-w-0 items-center gap-3">
                   <ServiceIcon app={a} size="sm" />
                   <div className="min-w-0">
-                    <Link
-                      to="/$team/$projectId/$serviceId"
-                      params={{ team: currentSlug(), ...serviceParams(a.id) }}
-                      className="block truncate text-[14px] font-semibold after:absolute after:inset-0 focus:outline-none focus-visible:underline"
-                    >
-                      {a.name}
-                    </Link>
-                    <p className="truncate text-[13px] text-muted-foreground">
-                      {serviceSubtitle(a, project.namespace)}
-                    </p>
+                    {a.deleting ? (
+                      <p className="truncate text-[14px] font-semibold">{a.name}</p>
+                    ) : (
+                      <Link
+                        to="/$team/$projectId/$serviceId"
+                        params={{ team: currentSlug(), ...serviceParams(a.id) }}
+                        className="block truncate text-[14px] font-semibold after:absolute after:inset-0 focus:outline-none focus-visible:underline"
+                      >
+                        {a.name}
+                      </Link>
+                    )}
+                    <ServiceSubtitle a={a} namespace={project.namespace} />
                   </div>
                 </div>
                 <div className="hidden md:block">
-                  <ServiceStatusBadge status={a.status} waiting={a.runtime.waiting} />
+                  {a.deleting ? (
+                    <DeletingStatus />
+                  ) : (
+                    <ServiceStatusBadge status={a.status} waiting={a.runtime.waiting} />
+                  )}
                 </div>
                 <div className="hidden min-w-0 md:block">
                   <SourcePill source={a.source} />
@@ -246,7 +259,7 @@ function ProjectOverview() {
                 <p className="hidden truncate text-right text-[12.5px] md:block">
                   <LastDeploy st={{ latest }} settled />
                 </p>
-                <div className="relative z-10 justify-self-end">{menu(a)}</div>
+                <div className="relative z-10 justify-self-end">{a.deleting ? null : menu(a)}</div>
               </li>
             ))}
           </ul>
