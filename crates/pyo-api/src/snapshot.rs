@@ -342,7 +342,10 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             -- A preview's copy: the service it previews (previews/).
             'previewOf', a.preview_of,
             'createdAt', pyo.ms(a.created_at), 'updatedAt', pyo.ms(a.updated_at))
-           FROM pyo.services a WHERE a.team_id = ANY($1) AND NOT a.deleting ORDER BY a.created_at",
+           -- Being deleted (kept apart below), or why the last delete failed.
+           || CASE WHEN a.deleting THEN jsonb_build_object('deleting', true) ELSE '{}' END
+           || CASE WHEN a.delete_error IS NULL THEN '{}' ELSE jsonb_build_object('deleteError', a.delete_error) END
+           FROM pyo.services a WHERE a.team_id = ANY($1) ORDER BY a.created_at",
         &team_ids,
     )
     .await?;
@@ -552,6 +555,12 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // Sealed values open through the vault's own connections, now that
     // the transaction is done.
     let services = for_dashboard(services).await?;
+    // Services being deleted, apart: shown as such until the agent says
+    // they're gone (or brings them back with why not). Scripts and
+    // assistants read `services` as before.
+    let (deleting_services, services): (Vec<Value>, Vec<Value>) = services
+        .into_iter()
+        .partition(|a| a["deleting"] == json!(true));
     // How teams' values are encrypted; the security overview.
     let encryption = crate::vault::get().status(&team_ids).await?;
 
@@ -611,6 +620,9 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
         "controlBackup": control_backup,
         "updates": updates,
     });
+    // Services being deleted (set here: the object above is at json!'s
+    // recursion limit).
+    snapshot["deletingServices"] = json!(deleting_services);
     // Where admins may sign in from: the installation's admin only.
     snapshot["adminSignIn"] = admin_sign_in;
     Ok(snapshot)
