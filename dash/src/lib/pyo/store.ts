@@ -753,6 +753,8 @@ export function tunnelZoneFor(s: PyoState, hostname: string, c?: Cluster) {
 /** Your role in a team. */
 export const roleIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.find((m) => m.teamId === wsId && m.email === s.user.email)?.role;
+/** Owners and admins: they change the team's settings. Others see them read only. */
+export const isTeamAdmin = (role?: string) => role === "owner" || role === "admin";
 export const membersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.filter((m) => m.teamId === wsId);
 
