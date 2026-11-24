@@ -6,7 +6,8 @@
 //! A server's key opens only that server's channel: never another
 //! server's, team's, agent's or person's route. Every query here is bound
 //! to the key's server and team, and runs in a transaction lowered to that
-//! team (rls.rs).
+//! team (rls.rs). An installation's server (no team, self-hosted only) has
+//! no team to lower to: its queries are bound to its server alone.
 //!
 //! Commands are queued per server ([`enqueue`], sealed at rest), signed by
 //! the signer when the server takes them (`pyosbx1`, the signer picks the
@@ -43,7 +44,8 @@ use crate::{
 #[derive(Clone)]
 pub struct Signer(pub Option<Arc<dyn CommandSigner>>);
 
-/// The channel's routes, for `/api/sandbox-agent/v1` on a hosted Pyo.
+/// The channel's routes, for `/api/sandbox-agent/v1` (signer.rs picks the
+/// signer: the build's when hosted, else Pyo's own).
 pub fn routes(state: AppState, signer: Option<Arc<dyn CommandSigner>>) -> Router<AppState> {
     let signed = Router::new()
         .route(wire::RENEW_KEY_PATH, post(renew_key))
@@ -66,8 +68,16 @@ pub fn routes(state: AppState, signer: Option<Arc<dyn CommandSigner>>) -> Router
 #[derive(Clone, Debug)]
 pub struct SandboxServer {
     pub id: String,
-    pub team_id: String,
+    /// None: the installation's server (self-hosted only).
+    pub team_id: Option<String>,
     pub key_id: String,
+}
+
+impl SandboxServer {
+    /// The team its commands are signed for.
+    pub fn claims_team(&self) -> &str {
+        super::signer::claims_team(self.team_id.as_deref())
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for SandboxServer {
@@ -115,12 +125,16 @@ pub async fn verify(State(s): State<AppState>, req: Request, next: Next) -> Resp
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
         return refused("The request's body is too large.");
     };
-    let row: sqlx::Result<Option<(String, String, String)>> = sqlx::query_as(
+    // A hosted Pyo has no installation's servers: a key without a team
+    // opens nothing there.
+    let row: sqlx::Result<Option<(String, Option<String>, String)>> = sqlx::query_as(
         "SELECT k.server_id, k.team_id, k.public_key FROM pyo.sandbox_server_keys k
-           JOIN pyo.sandbox_servers s ON s.id = k.server_id AND s.team_id = k.team_id
-          WHERE k.id = $1 AND k.revoked_at IS NULL AND k.expires_at > now() AND s.outbound",
+           JOIN pyo.sandbox_servers s ON s.id = k.server_id AND s.team_id IS NOT DISTINCT FROM k.team_id
+          WHERE k.id = $1 AND k.revoked_at IS NULL AND k.expires_at > now() AND s.outbound
+            AND (k.team_id IS NOT NULL OR NOT $2)",
     )
     .bind(&key_id)
+    .bind(crate::hosted())
     .fetch_optional(&s.db)
     .await;
     let (server_id, team_id, public_key) = match row {
@@ -147,10 +161,13 @@ pub async fn verify(State(s): State<AppState>, req: Request, next: Next) -> Resp
     next.run(Request::from_parts(parts, Body::from(bytes))).await
 }
 
-/// A transaction lowered to the server's team.
+/// A transaction lowered to the server's team. An installation's server
+/// has none: its queries are bound to its server alone.
 async fn team_tx(s: &AppState, server: &SandboxServer) -> ApiResult<sqlx::Transaction<'static, sqlx::Postgres>> {
     let mut tx = s.db.begin().await?;
-    crate::rls::scope_team(&mut tx, &server.team_id).await?;
+    if let Some(team) = &server.team_id {
+        crate::rls::scope_team(&mut tx, team).await?;
+    }
     Ok(tx)
 }
 
@@ -163,7 +180,7 @@ async fn join(
 ) -> ApiResult<Json<wire::JoinAnswer>> {
     let keys = signer.0.as_ref().map(|k| k.public_keys()).unwrap_or_default();
     Ok(Json(
-        super::join(&s.db, &s.sealer, &keys, &s.config.agent_api_url, &ask).await?,
+        super::join(&s.db, &s.sealer, &keys, &s.config.agent_api_url, crate::hosted(), &ask).await?,
     ))
 }
 
@@ -180,14 +197,15 @@ async fn renew_key(
     let mut tx = team_tx(&s, &server).await?;
     sqlx::query(
         "UPDATE pyo.sandbox_server_keys SET expires_at = least(expires_at, now() + make_interval(secs => $3))
-          WHERE server_id = $1 AND team_id = $2 AND revoked_at IS NULL",
+          WHERE server_id = $1 AND team_id IS NOT DISTINCT FROM $2 AND revoked_at IS NULL",
     )
     .bind(&server.id)
     .bind(&server.team_id)
     .bind(super::RENEWED_KEY_GRACE.as_secs_f64())
     .execute(&mut *tx)
     .await?;
-    let (key_id, not_after) = super::add_key(&mut tx, &server.id, &server.team_id, &b.public_key).await?;
+    let (key_id, not_after) =
+        super::add_key(&mut tx, &server.id, server.team_id.as_deref(), &b.public_key).await?;
     tx.commit().await?;
     tracing::info!(server = %server.id, key = %key_id, old = %server.key_id, "sandbox server renewed its key");
     Ok(Json(wire::KeyAnswer { key_id, not_after }))
@@ -211,25 +229,30 @@ pub fn kind_of(command: &DaemonCommand) -> String {
 }
 
 /// Queues a command for an outbound server of `team_id`, sealed with the
-/// team's data key (vault.rs). Its id.
+/// team's data key (vault.rs), or for an installation's server (None) with
+/// the installation's key. Its id.
 /// Wake the server after the transaction commits (`AppState::wake` with
 /// the server's id). A command past [`wire::MAX_COMMAND`] is refused.
 pub async fn enqueue(
     conn: &mut PgConnection,
+    sealer: &crate::secrets::Sealer,
     server_id: &str,
-    team_id: &str,
+    team_id: Option<&str>,
     command: &DaemonCommand,
 ) -> ApiResult<String> {
     let json = serde_json::to_string(command).map_err(anyhow::Error::from)?;
     if json.len() > wire::MAX_COMMAND {
         return Err(ApiError::bad_request(TOO_BIG));
     }
-    let sealed = crate::vault::get().seal_credential(team_id, &json).await?;
+    let sealed = match team_id {
+        Some(t) => crate::vault::get().seal_credential(t, &json).await?,
+        None => sealer.seal(&json)?,
+    };
     let id = crate::ids::new_id("sbc");
     let n = sqlx::query(
         "INSERT INTO pyo.sandbox_commands (id, server_id, team_id, kind, command_sealed)
          SELECT $1, s.id, s.team_id, $4, $5 FROM pyo.sandbox_servers s
-          WHERE s.id = $2 AND s.team_id = $3 AND s.outbound",
+          WHERE s.id = $2 AND s.team_id IS NOT DISTINCT FROM $3 AND s.outbound",
     )
     .bind(&id)
     .bind(server_id)
@@ -311,7 +334,7 @@ async fn poll(
     if !instance.is_empty() {
         sqlx::query(
             "UPDATE pyo.sandbox_commands SET status = 'failed', result = $4, command_sealed = NULL, done_at = now()
-              WHERE server_id = $1 AND team_id = $2 AND status = 'sent' AND sent_to IS DISTINCT FROM $3",
+              WHERE server_id = $1 AND team_id IS NOT DISTINCT FROM $2 AND status = 'sent' AND sent_to IS DISTINCT FROM $3",
         )
         .bind(&server.id)
         .bind(&server.team_id)
@@ -346,7 +369,7 @@ async fn take(
     let mut tx = team_tx(s, server).await?;
     let mut rows: Vec<(String, String, Option<String>, i64)> = sqlx::query_as(
         "UPDATE pyo.sandbox_commands SET status = 'sent', sent_at = now(), sent_to = nullif($3, '')
-          WHERE id IN (SELECT id FROM pyo.sandbox_commands WHERE server_id = $1 AND team_id = $2 AND status = 'pending'
+          WHERE id IN (SELECT id FROM pyo.sandbox_commands WHERE server_id = $1 AND team_id IS NOT DISTINCT FROM $2 AND status = 'pending'
                         ORDER BY created_at LIMIT 20 FOR UPDATE SKIP LOCKED)
           RETURNING id, kind, command_sealed, (extract(epoch FROM created_at) * 1000000)::bigint",
     )
@@ -360,7 +383,12 @@ async fn take(
         return Ok(vec![]);
     }
     rows.sort_by_key(|r| r.3);
-    let held = crate::gate::held_back(&s.db, &server.team_id).await?;
+    // A plan holds back a team's commands. The installation's servers
+    // have no plan.
+    let held = match &server.team_id {
+        Some(t) => crate::gate::held_back(&s.db, t).await?,
+        None => None,
+    };
     let mut c = s.db.acquire().await?;
     let mut ready: Vec<(String, String, String)> = Vec::with_capacity(rows.len());
     for (id, kind, sealed, _) in rows {
@@ -368,7 +396,9 @@ async fn take(
             && !ALLOWED_WHEN_HELD.contains(&kind.as_str())
         {
             fail(&mut c, &server.id, &id, why).await?;
-            crate::gate::mark_held(&s.db, &server.team_id).await;
+            if let Some(t) = &server.team_id {
+                crate::gate::mark_held(&s.db, t).await;
+            }
             continue;
         }
         let opened = match sealed.as_deref() {
@@ -395,7 +425,7 @@ async fn take(
             command: None,
         })
         .collect();
-    match signer.sign_sandbox(&server.id, &server.team_id, &items).await {
+    match signer.sign_sandbox(&server.id, server.claims_team(), &items).await {
         Ok(sigs) if sigs.len() == ready.len() => {
             let mut out = Vec::with_capacity(ready.len());
             for ((id, kind, json), sig) in ready.into_iter().zip(sigs) {
@@ -449,7 +479,7 @@ async fn result(
     let mut tx = team_tx(&s, &server).await?;
     let n = sqlx::query(
         "UPDATE pyo.sandbox_commands SET status = $4, result = $5, command_sealed = NULL, done_at = now()
-          WHERE id = $1 AND server_id = $2 AND team_id = $3 AND status = 'sent'",
+          WHERE id = $1 AND server_id = $2 AND team_id IS NOT DISTINCT FROM $3 AND status = 'sent'",
     )
     .bind(&id)
     .bind(&server.id)
@@ -479,7 +509,7 @@ async fn report(
     }
     let mut tx = team_tx(&s, &server).await?;
     let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT address, state FROM pyo.sandbox_servers WHERE id = $1 AND team_id = $2 AND outbound AND address IS NOT NULL",
+        "SELECT address, state FROM pyo.sandbox_servers WHERE id = $1 AND team_id IS NOT DISTINCT FROM $2 AND outbound AND address IS NOT NULL",
     )
     .bind(&server.id)
     .bind(&server.team_id)
@@ -488,7 +518,7 @@ async fn report(
     let (address, state) = row.ok_or_else(|| ApiError::not_found("Sandbox server"))?;
     let srv = super::super::runner::Server {
         id: server.id.clone(),
-        team_id: Some(server.team_id.clone()),
+        team_id: server.team_id.clone(),
         address,
         state,
     };
@@ -515,7 +545,7 @@ async fn sync_templates(s: AppState, server: SandboxServer, address: String, r: 
         let key = crate::sandbox::keys::signing_key(&s.db, &s.sealer)
             .await
             .map_err(|e| anyhow::anyhow!(e.message))?;
-        crate::sandbox::templates::sync_server(&s.db, &key, &server.id, Some(&server.team_id), &address, &r).await?;
+        crate::sandbox::templates::sync_server(&s.db, &key, &server.id, server.team_id.as_deref(), &address, &r).await?;
         anyhow::Ok(())
     }
     .await;
@@ -537,7 +567,7 @@ pub async fn ask(
     wait: Duration,
 ) -> Result<DaemonResult, DaemonError> {
     let internal = |e: ApiError| DaemonError::new(ErrorCode::Internal, e.message);
-    let team: Option<String> = sqlx::query_scalar(
+    let team: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT s.team_id FROM pyo.sandbox_servers s WHERE s.id = $1 AND s.outbound
             AND EXISTS (SELECT 1 FROM pyo.sandbox_server_keys k
                          WHERE k.server_id = s.id AND k.revoked_at IS NULL AND k.expires_at > now())",
@@ -545,13 +575,12 @@ pub async fn ask(
     .bind(server_id)
     .fetch_optional(&s.db)
     .await
-    .map_err(|e| internal(e.into()))?
-    .flatten();
-    let Some(team) = team else {
+    .map_err(|e| internal(e.into()))?;
+    let Some((team,)) = team else {
         return Err(DaemonError::new(ErrorCode::Runtime, "The sandbox server hasn't joined yet."));
     };
     let mut c = s.db.acquire().await.map_err(|e| internal(e.into()))?;
-    let id = enqueue(&mut c, server_id, &team, command).await.map_err(|e| {
+    let id = enqueue(&mut c, &s.sealer, server_id, team.as_deref(), command).await.map_err(|e| {
         if e.message == TOO_BIG {
             DaemonError::new(ErrorCode::InvalidSpec, TOO_BIG)
         } else {

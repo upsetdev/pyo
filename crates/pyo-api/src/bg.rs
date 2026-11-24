@@ -85,6 +85,8 @@ pub const LOCK_DATABASE_IMPORTS: i64 = 7_031;
 pub const LOCK_SANDBOXES: i64 = 7_061;
 /// Not a loop's: making the sandbox signing key, once.
 pub const LOCK_SANDBOX_KEY: i64 = 7_062;
+/// Not a loop's: making a self-hosted Pyo's sandbox command key, once.
+pub const LOCK_SANDBOX_COMMAND_KEY: i64 = 7_063;
 
 /// Run `f` if this process gets the loop's lock; another process holding it
 /// means it's that one's turn. The lock lives on one connection for the run.

@@ -60,7 +60,7 @@ out=$( (defaults; ETC=$tmp/etc; parse_args --version 0.4.1 && echo updating) 2>&
 check "a joined server updates without a code" "$out" "^updating$" has
 rm -f "$tmp/etc/config.json"
 
-# ── Options on Pyo Cloud: --pyo-url and --command-key instead of --pyo ──
+# ── New servers: --pyo-url and --command-key instead of --pyo ──
 ckey=$(printf 'k%.0s' {1..43})
 cloud=(--pyo-url https://agent.pyo.example --server sbs_abc123 --name sbx-1 --code "$code" --tailscale-key tskey-auth-x --command-key "$ckey,$ckey" --version 0.51.1)
 out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" && echo "parsed $PYO_URL $SERVER $NAME $COMMAND_KEY") 2>&1)
@@ -75,6 +75,12 @@ out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url http://agent.
 check "Pyo's address is HTTPS" "$out" "isn't Pyo's HTTPS address" has
 out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url http://127.0.0.1:8080 --dev && echo parsed) 2>&1)
 check "or HTTP with --dev" "$out" "^parsed$" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url http://100.101.102.103:8000 && echo parsed) 2>&1)
+check "or HTTP to Pyo's tailnet IP (self-hosted)" "$out" "^parsed$" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url http://100.200.1.2:8000) 2>&1)
+check "but not to another 100.x address" "$out" "isn't Pyo's HTTPS address" has
+out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --pyo-url http://100.64.0.1:8000/x) 2>&1)
+check "nor with a path" "$out" "isn't Pyo's HTTPS address" has
 out=$( (defaults; ETC=$tmp/etc; parse_args "${cloud[@]}" --command-key 'abc;rm -rf') 2>&1)
 check "the command key is base64url" "$out" "command key is wrong" has
 out=$( (defaults; ETC=$tmp/etc; parse_args "${args[@]}" --command-key "$ckey") 2>&1)

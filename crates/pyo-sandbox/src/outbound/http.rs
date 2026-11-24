@@ -1,6 +1,8 @@
 //! A small HTTPS client for Pyo's channel: one connection per request,
 //! the public web's roots, no proxy. Plain HTTP only to this machine
-//! (tests and a Pyo on the same host).
+//! (tests and a Pyo on the same host) or to a tailnet address (a
+//! self-hosted Pyo without its HTTPS name yet), where WireGuard encrypts
+//! it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,8 +41,29 @@ fn loopback(host: &str) -> bool {
             .is_ok_and(|a| a.is_loopback())
 }
 
+/// Whether `host` is a Tailscale address: 100.64.0.0/10 or
+/// fd7a:115c:a1e0::/48.
+fn tailnet(host: &str) -> bool {
+    match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
+        Ok(std::net::IpAddr::V4(v)) => {
+            let [a, b, ..] = v.octets();
+            a == 100 && (64..=127).contains(&b)
+        }
+        Ok(std::net::IpAddr::V6(v)) => {
+            let s = v.segments();
+            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+        }
+        Err(_) => false,
+    }
+}
+
 impl Http {
-    /// For Pyo at `url` (`https://…`, or `http://` to this machine).
+    /// For Pyo at `url` (`https://…`, or `http://` to this machine or a
+    /// tailnet address).
     pub fn new(url: &str) -> anyhow::Result<Http> {
         let uri: Uri = url
             .trim()
@@ -50,7 +73,7 @@ impl Http {
         let host = uri.host().context("The Pyo URL has no host.")?.to_owned();
         let https = match uri.scheme_str() {
             Some("https") => true,
-            Some("http") if loopback(&host) => false,
+            Some("http") if loopback(&host) || tailnet(&host) => false,
             Some("http") => bail!("Pyo's URL must be HTTPS."),
             _ => bail!("{url} isn't an HTTPS URL."),
         };
@@ -173,6 +196,10 @@ mod tests {
         assert!(Http::new("http://127.0.0.1:8080").is_ok());
         assert!(Http::new("http://localhost:8080").is_ok());
         assert!(Http::new("http://agent.example.com").is_err());
+        assert!(Http::new("http://100.64.0.1:8000").is_ok());
+        assert!(Http::new("http://[fd7a:115c:a1e0::1]:8000").is_ok());
+        assert!(Http::new("http://100.128.0.1:8000").is_err());
+        assert!(Http::new("http://10.0.0.1:8000").is_err());
         assert!(Http::new("ftp://agent.example.com").is_err());
         let p = Http::new("https://example.com/pyo").unwrap();
         assert_eq!(p.path("/report"), "/pyo/api/sandbox-agent/v1/report");

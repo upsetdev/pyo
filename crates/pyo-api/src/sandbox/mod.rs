@@ -414,6 +414,7 @@ pub async fn server_views(
             'error', s.error, 'createdBy', s.created_by, 'createdAt', pyo.ms(s.created_at),
             'joinedAt', pyo.ms(s.joined_at), 'edgeDomain', s.edge_domain,
             'outbound', s.outbound, 'tailnetName', s.tailnet_name,
+            'needsUpdate', NOT s.outbound AND NOT $4,
             'sandboxes', (SELECT count(*) FROM pyo.sandboxes x WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed')),
             'cloud', (SELECT jsonb_build_object('id', c.id, 'provider', c.provider, 'location', c.location,
                         'serverType', c.server_type, 'monthly', c.monthly, 'currency', c.currency, 'ipv4', c.ipv4,
@@ -428,6 +429,7 @@ pub async fn server_views(
     .bind(team_ids)
     .bind(id)
     .bind(shared())
+    .bind(crate::hosted())
     .fetch_all(&mut *db)
     .await?;
     for r in &mut rows {
@@ -793,7 +795,8 @@ pub fn new_sandbox_id() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct Connection {
     /// The sandbox server's daemon, on your tailnet. HTTPS on the server's
-    /// tailnet name when it joined Pyo Cloud.
+    /// tailnet name when it joined over HTTPS (every server added from
+    /// 0.51.1).
     pub url: String,
     pub sandbox_id: String,
     /// `Authorization: Bearer <token>` for exec, terminals, files and ports.
@@ -1359,10 +1362,11 @@ fn edge_domain(d: Option<&str>) -> ApiResult<Option<String>> {
 /// HTTPS there (outbound.rs).
 pub const NOT_ON_CLOUD: &str = "Pyo Cloud adds sandbox servers with createSandboxJoinCode.";
 
-/// A new sandbox server joins at Pyo's tailnet door (join.rs). A hosted Pyo
-/// that isn't on a tailnet (Pyo Cloud, which is on no team's) has no door,
-/// whatever the team's Tailscale, so it says that before anything about
-/// Tailscale. A self-hosted Pyo goes on to ask for Tailscale first.
+/// A sandbox server Pyo makes at a cloud provider fetches its details at
+/// Pyo's tailnet door (cloud/bootstrap.rs). A hosted Pyo that isn't on a
+/// tailnet (Pyo Cloud, which is on no team's) has no door, whatever the
+/// team's Tailscale, so it says that before anything about Tailscale. A
+/// self-hosted Pyo goes on to ask for Tailscale first.
 fn hosted_door(hosted: bool, door: &str, api: Option<&str>) -> ApiResult<()> {
     if hosted && (door.is_empty() || api.is_none()) {
         return Err(ApiError::conflict(NOT_ON_CLOUD));
@@ -1371,117 +1375,30 @@ fn hosted_door(hosted: bool, door: &str, api: Option<&str>) -> ApiResult<()> {
 }
 
 /// Adds a sandbox server, or makes a new code for one that hasn't joined
-/// yet: its row, a one-time code and the command to run on it.
+/// yet: its row, a one-time code and the command to run on it. It joins
+/// and gets its work over the outbound channel (outbound.rs `add`), on a
+/// self-hosted Pyo. A hosted one adds them with `createSandboxJoinCode`.
 pub async fn add_server(s: &AppState, user: &User, req: AddServer) -> ApiResult<Value> {
     crate::util::require_dns_label(&req.name, "Server name")?;
     let edge = edge_domain(req.edge_domain.as_deref())?;
-    let mut tx = s.db.begin().await?;
-    match &req.team_id {
-        Some(t) => require(&mut tx, user, t, Need::Manage).await?,
-        None => require_install_add(user)?,
+    if crate::hosted() {
+        return Err(ApiError::conflict(NOT_ON_CLOUD));
     }
-    let door = crate::deploy::registry_push();
-    let api = crate::web::tailnet_api_url();
-    hosted_door(crate::hosted(), &door, api.as_deref())?;
-    let via = crate::tailscale::team_key_cluster(&s.db, req.team_id.as_deref()).await?;
-    let (false, Some(_)) = (door.is_empty(), api) else {
-        return Err(ApiError::conflict(
-            "Pyo's server isn't on your tailnet yet. Try again in a minute.",
-        ));
-    };
-    if !s.sealer.enabled() {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "This installation has no PYO_SECRET_KEY, so it can't sign sandbox tokens.",
-        ));
-    }
-    let existing: Option<(String, String)> = sqlx::query_as(
-        "SELECT id, state FROM pyo.sandbox_servers WHERE coalesce(team_id, '') = coalesce($1, '') AND name = $2",
-    )
-    .bind(&req.team_id)
-    .bind(&req.name)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let id = match existing {
-        Some((id, state)) if state == "joining" || state == "refused" => {
-            sqlx::query("UPDATE pyo.sandbox_servers SET state = 'joining', error = NULL, edge_domain = $2, updated_at = now() WHERE id = $1")
-                .bind(&id)
-                .bind(&edge)
-                .execute(&mut *tx)
-                .await?;
-            id
-        }
-        Some(_) => {
-            return Err(ApiError::conflict(
-                "A sandbox server has that name already.",
-            ));
-        }
-        None => {
-            let id = crate::ids::new_id("sbs");
-            sqlx::query("INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain) VALUES ($1, $2, $3, 'joining', $4, $5)")
-                .bind(&id)
-                .bind(&req.team_id)
-                .bind(&req.name)
-                .bind(&user.name)
-                .bind(&edge)
-                .execute(&mut *tx)
-                .await?;
-            id
-        }
-    };
-    let code = join::new_code();
-    join::keep(&mut tx, &id, &code).await?;
-    // Pyo reaches it through that cluster's agent.
-    sqlx::query("UPDATE pyo.sandbox_servers SET via_cluster = $2 WHERE id = $1")
-        .bind(&id)
-        .bind(&via)
-        .execute(&mut *tx)
-        .await?;
-    let ts_key = crate::tailscale::join_key(
-        s,
-        &via,
-        &format!("Pyo: sandbox server {}", req.name),
-        "a sandbox server",
-    )
-    .await?;
-    if let Some(t) = &req.team_id {
-        crate::ops::log_activity(
-            &mut tx,
-            t,
-            &user.name,
-            "sandbox.server",
-            "info",
-            &format!("Added the sandbox server {}", req.name),
-            json!({ "kind": "sandboxServer", "id": id, "label": req.name }),
-            json!({}),
-        )
-        .await?;
-    }
-    tx.commit().await?;
-    // The server joins the tailnet in sandbox.sh, so it fetches the script
-    // off the tailnet.
+    let signer = outbound::signer::get()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, outbound::NO_SIGNER))?;
+    let at = outbound::Where::now();
+    let j = outbound::add(s, signer.as_ref(), user, req.team_id.as_deref(), &req.name, edge, &at).await?;
     let base = crate::join::scripts_url_before_tailnet();
-    let door = crate::join::friendly(&door);
-    let command = join::Command {
-        base: &base,
-        door: &door,
-        server_id: &id,
-        name: &req.name,
-        code: &code,
-        tailscale_key: &ts_key,
-        version: env!("CARGO_PKG_VERSION"),
-        edge_domain: edge.as_deref(),
-    }
-    .render();
+    let command = j.command(&base, env!("CARGO_PKG_VERSION"));
     let teams: Vec<String> = req.team_id.iter().cloned().collect();
-    let server = server_views(&mut *s.db.acquire().await?, &teams, Some(&id))
+    let server = server_views(&mut *s.db.acquire().await?, &teams, Some(&j.server_id))
         .await?
         .into_iter()
         .next();
     Ok(json!({
         "server": server,
         "command": command,
-        "expiresAt": pyo_proto::now_ms() as u64 + join::CODE_TTL.as_millis() as u64,
+        "expiresAt": j.expires_at,
     }))
 }
 
@@ -1652,7 +1569,8 @@ pub async fn add_cloud_server(s: &AppState, user: &User, req: AddCloudServer) ->
     let door = crate::deploy::registry_push();
     let api = crate::web::tailnet_api_url();
     hosted_door(crate::hosted(), &door, api.as_deref())?;
-    let via = crate::tailscale::team_key_cluster(&s.db, Some(&req.team_id)).await?;
+    // It fetches its details at the door, then joins over the outbound
+    // channel like any new sandbox server.
     let (false, Some(api)) = (door.is_empty(), api) else {
         return Err(ApiError::conflict(
             "Pyo's server isn't on your tailnet yet. Try again in a minute.",
@@ -1664,6 +1582,12 @@ pub async fn add_cloud_server(s: &AppState, user: &User, req: AddCloudServer) ->
             "This installation has no PYO_SECRET_KEY, so it can't sign sandbox tokens.",
         ));
     }
+    let command_keys = outbound::signer::get()
+        .map(|x| x.public_keys())
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, outbound::NO_SIGNER))?;
+    let (via, pyo_url) =
+        outbound::self_hosted_reach(&s.db, Some(&req.team_id), &outbound::Where::now()).await?;
     let taken: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pyo.sandbox_servers WHERE team_id = $1 AND name = $2)",
     )
@@ -1687,15 +1611,19 @@ pub async fn add_cloud_server(s: &AppState, user: &User, req: AddCloudServer) ->
         )));
     }
     let id = crate::ids::new_id("sbs");
-    sqlx::query("INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain, via_cluster) VALUES ($1, $2, $3, 'joining', $4, $5, $6)")
-        .bind(&id)
-        .bind(&req.team_id)
-        .bind(&req.name)
-        .bind(&user.name)
-        .bind(&edge)
-        .bind(&via)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO pyo.sandbox_servers (id, team_id, name, state, created_by, edge_domain, via_cluster, outbound, pyo_url)
+         VALUES ($1, $2, $3, 'joining', $4, $5, $6, true, $7)",
+    )
+    .bind(&id)
+    .bind(&req.team_id)
+    .bind(&req.name)
+    .bind(&user.name)
+    .bind(&edge)
+    .bind(&via)
+    .bind(&pyo_url)
+    .execute(&mut *tx)
+    .await?;
     let ts_key = crate::tailscale::join_key(
         s,
         &via,
@@ -1706,9 +1634,9 @@ pub async fn add_cloud_server(s: &AppState, user: &User, req: AddCloudServer) ->
     // It's on the tailnet before it asks. Its join code comes with the
     // details, made when it asks (cloud/bootstrap.rs).
     let base = crate::join::scripts_url(Some(&crate::join::friendly(&api)));
-    let door = crate::join::friendly(&door);
     let mut args: Vec<(&str, Option<String>)> = vec![
-        ("--pyo", Some(door)),
+        ("--pyo-url", Some(pyo_url)),
+        ("--command-key", Some(command_keys)),
         ("--server", Some(id.clone())),
         ("--name", Some(req.name.clone())),
         ("--version", Some(env!("CARGO_PKG_VERSION").into())),

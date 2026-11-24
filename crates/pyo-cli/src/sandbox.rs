@@ -677,7 +677,8 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
                 body["edgeDomain"] = json!(d);
             }
             // Pyo Cloud: the server joins the team's tailnet, then Pyo
-            // over HTTPS. A self-hosted Pyo takes it at its tailnet door.
+            // over HTTPS. A self-hosted Pyo adds it with addSandboxServer,
+            // and it joins over HTTPS there too.
             let (r, hint) = match api.post("/api/v1/sandbox-servers/join-codes", &body).await {
                 Ok(r) => (r, "Run this on the server."),
                 Err(e) if at_the_door(&e) => (
@@ -709,10 +710,14 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
                 .map(|x| {
                     let c = &x["capability"];
                     // A server Pyo is still making at Hetzner says how far it is.
-                    let state = match x["cloud"]["state"].as_str() {
+                    let mut state = match x["cloud"]["state"].as_str() {
                         Some(cs) if cs != "ready" => format!("{cs} (Hetzner)"),
                         _ => x["state"].as_str().unwrap_or("").to_owned(),
                     };
+                    // Joined at the door before: Update in the dashboard.
+                    if x["needsUpdate"] == json!(true) {
+                        state.push_str(", needs update");
+                    }
                     [
                         x["name"].as_str().unwrap_or("").to_owned(),
                         state,

@@ -6,9 +6,9 @@
 #     --pyo pyo.tail1234.ts.net:5006 --server sbs_abc123 --name sbx-1 \
 #     --code 9f2c... --tailscale-key tskey-auth-... --version 0.4.0
 #
-#   --pyo            Pyo's tailnet door, where the server joins
-#   --pyo-url        Pyo's HTTPS address instead, on Pyo Cloud: the server
-#                    joins and gets its work over HTTPS (outbound mode)
+#   --pyo            Pyo's tailnet door, where servers joined before 0.51.1
+#   --pyo-url        Pyo's address instead: the server joins and gets its
+#                    work over HTTPS (outbound mode, every new server)
 #   --command-key    with --pyo-url: the keys Pyo signs its commands with
 #   --server         this server's ID in Pyo
 #   --name           its name on the tailnet
@@ -31,11 +31,12 @@
 #                    KVM. Checked against the signed release.json of
 #                    --version, or not at all with --dev.
 #
-# On Pyo Cloud the command has --pyo-url and --command-key instead of
-# --pyo. The server joins the team's tailnet with the key, gets an HTTPS
-# certificate for its name there (renewed by a timer), and the daemon joins
-# Pyo over HTTPS. It answers browsers on the tailnet at
-# https://<name>.<tailnet>.ts.net:7443.
+# New servers get --pyo-url and --command-key instead of --pyo. The server
+# joins the tailnet with the key, gets an HTTPS certificate for its name
+# there (renewed by a timer), and the daemon joins Pyo over HTTPS. It
+# answers browsers on the tailnet at https://<name>.<tailnet>.ts.net:7443.
+# A server that joined with --pyo before moves over when it runs such a
+# command (Update in Pyo).
 #
 # Run it again with --version to update the daemon. A server that has joined
 # needs no code then. Running sandboxes keep running.
@@ -430,6 +431,7 @@ parse_args() {
       fail "Copy the full command from Pyo: it has --pyo-url, --command-key, --server, --name and --code."
     PYO_URL=${PYO_URL%/}
     [[ $PYO_URL =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]] ||
+      tailnet_url "$PYO_URL" ||
       { [ -n "$DEV" ] && [[ $PYO_URL =~ ^http://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]]; } ||
       fail "\"$PYO_URL\" isn't Pyo's HTTPS address. Copy the full command from Pyo."
     [[ $COMMAND_KEY =~ ^[A-Za-z0-9_-]{16,128}(,[A-Za-z0-9_-]{16,128}){0,7}$ ]] || fail "The command key is wrong. Copy the full command from Pyo."
@@ -440,6 +442,13 @@ parse_args() {
   [[ $SERVER =~ ^[a-z0-9_]{1,64}$ ]] || fail "\"$SERVER\" isn't a sandbox server ID."
   [[ $CODE =~ ^[0-9a-f]{16,256}$ ]] || fail "The join code is wrong. Copy the full command from Pyo."
   [[ $NAME =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || fail "\"$NAME\" isn't a server name: lowercase letters, digits and dashes."
+}
+
+# Plain http:// to a tailnet IPv4 address (100.64.0.0/10): a self-hosted
+# Pyo before it has its HTTPS name. WireGuard encrypts it.
+tailnet_url() {
+  [[ $1 =~ ^http://100\.([0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}(:[0-9]{1,5})?$ ]] &&
+    [ "${BASH_REMATCH[1]}" -ge 64 ] && [ "${BASH_REMATCH[1]}" -le 127 ]
 }
 
 # Joined before: the daemon's config is there.

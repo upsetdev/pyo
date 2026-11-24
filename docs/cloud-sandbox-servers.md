@@ -2,6 +2,8 @@
 
 Design for 0.51.1. Status: approved 2026-11-24. Stages 1 to 3 (the API, the daemon, sandbox.sh and the dashboard) are built. Stage 4 (Pyo Cloud's signer, then end to end on staging) is next. The chosen approach is (b): the sandbox server calls out to Pyo Cloud.
 
+Self-hosted Pyo moves to the same channel in 0.51.1 too (decided 2026-11-24). See [Self-hosted](#self-hosted) at the end.
+
 ## Goal
 
 - A Pyo Cloud team adds a sandbox server with one command, the same as a self-hosted team.
@@ -10,7 +12,7 @@ Design for 0.51.1. Status: approved 2026-11-24. Stages 1 to 3 (the API, the daem
 - After that it keeps an outbound connection to Pyo Cloud for its work. Pyo Cloud never reaches into the tailnet.
 - Commands are signed and scoped like agent commands.
 - The desktop and private ports are reachable from the team's tailnet devices.
-- Self-hosted keeps today's direct flow.
+- Self-hosted keeps today's direct flow. (Changed in 0.51.1: see [Self-hosted](#self-hosted).)
 
 ## Why it doesn't work today
 
@@ -233,3 +235,89 @@ Wire types are pyo-proto `sandbox::outbound`. Paths are under `<url>/api/sandbox
 
 - **(a) Relay through the team's clusters.** Pyo calls the daemon through a team cluster's agent (`SandboxCall`, which exists), and the server joins over HTTPS without a credential of its own. About 7 days, no signer change, and no credential on a machine that runs untrusted code. Not chosen: the relay puts a team cluster in the sandbox path, and each call costs a signed command.
 - **A sandbox server as a server of a team cluster.** Firecracker and gVisor run on the host, outside k3s, and a cluster server would run the cluster's workloads and secrets next to untrusted code.
+
+## Self-hosted
+
+Status: built 2026-11-24, with unit, Postgres and end-to-end tests (KVM, in CI). The staging test on throwaway servers is next.
+
+Decided 2026-11-24: in 0.51.1 a self-hosted Pyo's sandbox servers use the same channel as Pyo Cloud's. New servers join and get their work over `/api/sandbox-agent/v1`. Pyo stops calling daemons for them. Servers that joined before keep the direct path for one release.
+
+### Signing
+
+- **A local signer.** `sandbox::outbound::signer::Local` implements `CommandSigner::sign_sandbox` and nothing else. Its `sign` and `sign_reply` refuse. It is never the build's command signer (`command_signer()`), so agents keep their token auth and get no `PYO_COMMAND_KEY`. Nothing changes for clusters.
+- **Its own key.** An Ed25519 key (pyo-proto `KeySigner`), made on first use under an advisory lock. Its PKCS#8 is kept in `pyo.sandbox_command_keys`, sealed with the installation's key (`PYO_SECRET_KEY`), as the sandbox token key is. It's the installation's key, not a team's, so a team's data key doesn't fit. Without `PYO_SECRET_KEY` there are no sandbox servers, as today.
+- **Never the token key.** Sandbox tokens and sandbox commands both sign `pyosbx1.<claims>`. With one key for both, a token's signature could be read as a command's, or the other way. Their claims don't parse as each other's today, but that is luck, not design.
+- **Sequence and expiry.** Each command gets the server's next number from `sandbox_servers.command_seq`, raised in the statement that reads it. It's never reset, so a server that joins again keeps working with the last number it kept. Commands expire after 10 minutes, as on Cloud.
+- **How the daemon trusts it.** As on Cloud. The join command carries `--command-key` with the local signer's public key, and the daemon refuses a join answer with other keys. Trust on first use, from the person who ran the command as root.
+- **Rotation.** None in 0.51.1. The key lives as long as the installation, like the token key. Whoever can read it can already sign tokens for every daemon. A rotation would make a new key and have each server run its command again (**Update**, below, gives the current keys). A later release can let the old key sign the new one over, so servers learn it without a new command.
+
+### Where the server reaches Pyo
+
+The join command's `--pyo-url` is, first of:
+
+1. **Pyo's tailnet address**, when the server joins Pyo's own tailnet: the installation's servers, and teams with no Tailscale of their own or whose tailnet is Pyo's. That's `https://<Pyo's name>.<tailnet>.ts.net`, or `http://<Pyo's tailnet IP>:8000` before Pyo has its HTTPS name. Clusters' agents reach Pyo there too.
+2. **Pyo's public HTTPS address**, for a team on a tailnet of its own: the public dashboard while it's open, or `PYO_PUBLIC_API_URL`.
+3. **Neither:** the add is refused with "Pyo isn't reachable from your team's tailnet. Turn on Public dashboard on the Tailscale card, then add the server again." Such a server can't reach Pyo's door today either, so nothing that works now stops working.
+
+Why the tailnet first: a self-hosted Pyo may have no public address. Sandbox servers need a tailnet anyway. Traffic stays inside WireGuard. And an admin can close the public dashboard at any time.
+
+- The chosen URL is kept on the server's row (`pyo_url`), and the join answer names the same one.
+- The daemon and `sandbox.sh` take plain `http://` to a tailnet address (100.64.0.0/10, fd7a:115c:a1e0::/48) as well as to this machine. WireGuard encrypts it. It's the rule `secure_transport` already has for agents.
+
+### The routes
+
+- `/api/sandbox-agent/v1` is mounted on every Pyo. Hosted: with the build's signer. Self-hosted: with the local signer.
+- On a self-hosted Pyo they answer wherever the API does: the tailnet name, the public dashboard while it's open, and port 8000.
+- The join needs a live code (15 minutes, one use, rate-limited) and a `tag:pyo` machine the tailnet lists. Every other route needs a server's key. That's the same exposure as on Cloud.
+- The door's `/sandbox/join` stays for one release, for servers that got a code before the upgrade.
+
+### Teams
+
+- **A team's server.** As on Cloud. The claims, its keys and its commands carry the team. Its requests run lowered to the team (rls.rs). Its commands are sealed with the team's data key.
+- **The installation's server** (no team, self-hosted only, every team may use it, `shared()`):
+  - Its claims carry the team `installation`. Team ids start with `team_`, so it's never a team's.
+  - Its keys and commands have no team. The migration lets their `team_id` be empty. Row security shows such rows to no team.
+  - Its requests aren't lowered, since there's no team to lower to. Every query is bound to the server's id.
+  - Its commands are sealed with the installation's key, like Pyo's other secrets.
+  - Only the installation's admin adds it, updates it or resets its access, as today.
+  - A hosted Pyo never has one. The channel refuses a key whose server has no team there.
+- **The tailnet the join checks** is the one its Tailscale key came from: the tailnet of `via_cluster`'s team. That's the team's own holder, else the installation's (`team_key_cluster`). On Cloud it's the team's, as before.
+- **Sharing doesn't change.** Every team may place sandboxes on the installation's servers. Sandbox tokens still name the sandbox's team. A daemon refuses a command for another server, whatever its team.
+
+### Migration
+
+- **New servers.** In 0.51.1, `addSandboxServer` and a Hetzner sandbox server made by a self-hosted Pyo both make outbound servers. `createSandboxJoinCode` stays Cloud's: self-hosted keeps its one add operation, with the same answer.
+- **Servers that joined before** keep working. Pyo calls them as now, straight or through a cluster's agent. The runner reads their reports. The dashboard shows "Run sandbox.sh again to update this server." with **Update**.
+- **Update** (`resetSandboxServerAccess`, now for these servers too, self-hosted only) gives a fresh command for the same server. It doesn't stop the server. Run on the server, it joins over the channel. At the join the row turns outbound and Pyo stops calling it. Its sandboxes keep their records and keep running: the daemon restarts with its new config, as on any update. The API marks such a server `needsUpdate`.
+- **Removal of the direct path:** 0.52.0 at the earliest, in the release that moves Cloud's Hetzner sandbox servers (decision 5). It removes Pyo's direct and relayed calls to sandbox servers, the runner's calls, the door's `/sandbox/join` and `sandbox.sh --pyo`. That release's notes say at the top: "Run sandbox.sh again on each sandbox server that shows Update."
+- **Removing an outbound server** stops its key at once but doesn't delete its sandboxes, as on Cloud. They end at their lifetime, or with `sandbox.sh --uninstall` there. The docs say so.
+
+### The four contexts
+
+| | Self-hosted | Pyo Cloud |
+|---|---|---|
+| **Team** | New servers join outbound. The URL is Pyo's tailnet address when the team uses Pyo's tailnet, else Pyo's public address. Commands signed by the local signer, for that server and team. Older servers keep the direct path until **Update** | Unchanged from stage 3: the build's signer, `PYO_AGENT_API_URL`, `createSandboxJoinCode` |
+| **Global** | The installation's servers join outbound on Pyo's tailnet, with the team `installation` in their claims and no team on their rows. Every team may use them, as today | None, as before |
+
+### What building it settled
+
+- **`Mode`.** `resetSandboxServerAccess` and the join take hosted or self-hosted as an input (`outbound::Mode`, `hosted` on `join`), and self-hosted's addresses as `Where`, so tests cover both on one Pyo.
+- **The CLI** shows "needs update" next to the state of such a server in `pyo sandbox servers ls`.
+- **The door** reads an outbound server's code as gone, so a code for the channel never makes a door config.
+- **The installation's servers** in the e2e: they're covered against Postgres. The e2e moves a team's server.
+
+### Work
+
+| Part | Days |
+|---|---|
+| Local signer: key table, sealed key, sequence per server | 0.5 |
+| Channel for servers with no team, the migration | 0.75 |
+| `addSandboxServer`, Hetzner and **Update** on self-hosted, the URL choice, the join's tailnet | 1 |
+| Daemon and `sandbox.sh`: plain HTTP to a tailnet address | 0.25 |
+| Dashboard: add flow, the notice, **Update**, Reset access on self-hosted | 0.5 |
+| Tests: unit, throwaway Postgres, the e2e extended (KVM, in CI) | 1 |
+| Docs (pyo-docs) | 0.5 |
+| CI fixes | 0.5 |
+| **Total** | **about 5 days** |
+
+The staging test on throwaway servers comes after this and isn't counted.

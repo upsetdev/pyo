@@ -54,7 +54,7 @@ fn only_listed_machines() {
     assert!(!listed(None, "sbx-1"));
 }
 
-fn found() -> Found {
+pub(super) fn found() -> Found {
     Found {
         server_id: "sbs_one".into(),
         expired: false,
@@ -62,12 +62,14 @@ fn found() -> Found {
         state: Some("joining".into()),
         team_id: Some("team_one".into()),
         outbound: Some(true),
+        pyo_url: None,
+        tailnet_team: Some("team_one".into()),
         suffix: Some("tail1234.ts.net".into()),
         machines: Some(json!([{ "nodeId": "n1", "hostname": "sbx-1" }])),
     }
 }
 
-fn ask(server: &str, code: &str, public_key: &str, hostname: &str, tailnet_name: &str) -> wire::JoinRequest {
+pub(super) fn ask(server: &str, code: &str, public_key: &str, hostname: &str, tailnet_name: &str) -> wire::JoinRequest {
     wire::JoinRequest {
         server_id: server.into(),
         code: code.into(),
@@ -89,7 +91,7 @@ fn capability(runtime: pyo_proto::sandbox::Runtime) -> CapabilityReport {
     .unwrap()
 }
 
-fn public_key() -> String {
+pub(super) fn public_key() -> String {
     RequestKey::from_pkcs8(&RequestKey::generate_pkcs8().unwrap()).unwrap().public_key()
 }
 
@@ -97,16 +99,16 @@ fn public_key() -> String {
 fn a_join_is_checked_in_order() {
     let pk = public_key();
     let good = ask("sbs_one", "c", &pk, "sbx-1", "sbx-1.tail1234.ts.net");
-    assert_eq!(check(&found(), &good), Ok(()));
+    assert_eq!(check(&found(), &good, true), Ok(()));
     let door = |r| Err(Refusal::Door(r));
     let mut f = found();
     f.used = true;
-    assert_eq!(check(&f, &good), door(join::Refusal::Used));
+    assert_eq!(check(&f, &good, true), door(join::Refusal::Used));
     let mut f = found();
     f.expired = true;
-    assert_eq!(check(&f, &good), door(join::Refusal::Expired));
+    assert_eq!(check(&f, &good, true), door(join::Refusal::Expired));
     assert_eq!(
-        check(&found(), &ask("sbs_two", "c", &pk, "sbx-1", "sbx-1.tail1234.ts.net")),
+        check(&found(), &ask("sbs_two", "c", &pk, "sbx-1", "sbx-1.tail1234.ts.net"), true),
         door(join::Refusal::WrongServer)
     );
     for f in [
@@ -115,27 +117,27 @@ fn a_join_is_checked_in_order() {
         Found { outbound: Some(false), ..found() },
         Found { team_id: None, ..found() },
     ] {
-        assert_eq!(check(&f, &good), door(join::Refusal::Gone));
+        assert_eq!(check(&f, &good, true), door(join::Refusal::Gone));
     }
     assert_eq!(
-        check(&found(), &ask("sbs_one", "c", "not-a-key", "sbx-1", "sbx-1.tail1234.ts.net")),
+        check(&found(), &ask("sbs_one", "c", "not-a-key", "sbx-1", "sbx-1.tail1234.ts.net"), true),
         Err(Refusal::BadKey)
     );
     let mut a = good.clone();
     a.address = "10.0.0.1".into();
-    assert_eq!(check(&found(), &a), door(join::Refusal::BadAddress));
+    assert_eq!(check(&found(), &a, true), door(join::Refusal::BadAddress));
     let mut a = good.clone();
     a.capability = Some(capability(pyo_proto::sandbox::Runtime::None));
-    assert!(matches!(check(&found(), &a), Err(Refusal::Door(join::Refusal::NoRuntime(_)))));
+    assert!(matches!(check(&found(), &a, true), Err(Refusal::Door(join::Refusal::NoRuntime(_)))));
     assert_eq!(
-        check(&found(), &ask("sbs_one", "c", &pk, "sbx-1", "sbx-1.tail9999.ts.net")),
+        check(&found(), &ask("sbs_one", "c", &pk, "sbx-1", "sbx-1.tail9999.ts.net"), true),
         Err(Refusal::OtherTailnet)
     );
     assert_eq!(
-        check(&found(), &ask("sbs_one", "c", &pk, "sbx-2", "sbx-2.tail1234.ts.net")),
+        check(&found(), &ask("sbs_one", "c", &pk, "sbx-2", "sbx-2.tail1234.ts.net"), true),
         Err(Refusal::NotSeen)
     );
-    assert_eq!(check(&Found { suffix: None, ..found() }, &good), Err(Refusal::NotSeen));
+    assert_eq!(check(&Found { suffix: None, ..found() }, &good, true), Err(Refusal::NotSeen));
 }
 
 #[test]
@@ -152,7 +154,7 @@ fn refusals_are_plain() {
 fn the_command_quotes_everything() {
     let j = Joining {
         server_id: "sbs_one".into(),
-        team_id: "team_one".into(),
+        team_id: Some("team_one".into()),
         name: "it's sbx".into(),
         code: "abc".into(),
         tailscale_key: "tskey-auth-1".into(),
@@ -416,7 +418,7 @@ fn join_ask(j: &Joining, t: &Team, key: &RequestKey) -> wire::JoinRequest {
 async fn joined(s: &AppState, signer: &Local, t: &Team, name: &str) -> (Joining, Key) {
     let j = code_for(s, signer, t, name).await;
     let k = RequestKey::from_pkcs8(&RequestKey::generate_pkcs8().unwrap()).unwrap();
-    let a = join(&s.db, &s.sealer, &signer.public_keys(), "https://agent.example.com", &join_ask(&j, t, &k))
+    let a = join(&s.db, &s.sealer, &signer.public_keys(), "https://agent.example.com", true, &join_ask(&j, t, &k))
         .await
         .unwrap();
     (j, Key(a.key_id, k))
@@ -424,7 +426,7 @@ async fn joined(s: &AppState, signer: &Local, t: &Team, name: &str) -> (Joining,
 
 use crate::CommandSigner as _;
 
-struct Key(String, RequestKey);
+pub(super) struct Key(pub(super) String, pub(super) RequestKey);
 
 fn app(s: &AppState, signer: Arc<Local>) -> Router {
     Router::new()
@@ -433,7 +435,7 @@ fn app(s: &AppState, signer: Arc<Local>) -> Router {
 }
 
 /// A request to the channel, signed at `t` (now when None) with `key`.
-async fn call_at(
+pub(super) async fn call_at(
     app: &Router,
     method: Method,
     path: &str,
@@ -459,11 +461,11 @@ async fn call_at(
     (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
-async fn call(app: &Router, method: Method, path: &str, key: Option<&Key>, body: &[u8]) -> (StatusCode, Value) {
+pub(super) async fn call(app: &Router, method: Method, path: &str, key: Option<&Key>, body: &[u8]) -> (StatusCode, Value) {
     call_at(app, method, path, key, body, None, &[]).await
 }
 
-fn report_of(server: &str) -> Vec<u8> {
+pub(super) fn report_of(server: &str) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "protocol": 1, "daemonVersion": "0.51.1", "serverId": server,
         "capability": capability(pyo_proto::sandbox::Runtime::Firecracker),
@@ -522,7 +524,7 @@ fn join_codes_work_once_for_a_while() {
         let keys = signer.public_keys();
         let try_join = |a: wire::JoinRequest| {
             let (db, sealer, keys) = (s.db.clone(), s.sealer.clone(), keys.clone());
-            async move { join(&db, &sealer, &keys, "https://agent.example.com", &a).await }
+            async move { join(&db, &sealer, &keys, "https://agent.example.com", true, &a).await }
         };
         let e = try_join(join_ask(&j, &t, &k)).await.unwrap_err();
         assert_eq!(e.message, join::Refusal::Used.message());
@@ -608,9 +610,9 @@ fn a_join_registers_the_servers_key() {
         let j = code_for(&s, &signer, &t, "sbx-1").await;
         let mut a = join_ask(&j, &t, &k);
         a.tailnet_name = "sbx-1.tail0000.ts.net".into();
-        let e = join(&s.db, &s.sealer, &keys, "https://agent.example.com", &a).await.unwrap_err();
+        let e = join(&s.db, &s.sealer, &keys, "https://agent.example.com", true, &a).await.unwrap_err();
         assert_eq!(e.message, Refusal::OtherTailnet.message());
-        let e = join(&s.db, &s.sealer, &keys, "https://agent.example.com", &join_ask(&j, &t, &k)).await.unwrap_err();
+        let e = join(&s.db, &s.sealer, &keys, "https://agent.example.com", true, &join_ask(&j, &t, &k)).await.unwrap_err();
         assert_eq!(e.message, join::Refusal::Used.message());
 
         // Not listed yet: asked to wait, the code still works, and the holder
@@ -619,7 +621,7 @@ fn a_join_registers_the_servers_key() {
         let mut a = join_ask(&j, &t, &k);
         a.hostname = "sbx-2".into();
         a.tailnet_name = format!("sbx-2.{}", t.suffix);
-        let e = join(&s.db, &s.sealer, &keys, "https://agent.example.com", &a).await.unwrap_err();
+        let e = join(&s.db, &s.sealer, &keys, "https://agent.example.com", true, &a).await.unwrap_err();
         assert_eq!((e.status, e.message.clone()), (StatusCode::CONFLICT, Refusal::NotSeen.message()));
         let sent_at: Value = sqlx::query_scalar("SELECT tailscale->'sentAt' FROM pyo.clusters WHERE id = $1")
             .bind(&t.holder)
@@ -632,7 +634,7 @@ fn a_join_registers_the_servers_key() {
             .execute(&s.db)
             .await
             .unwrap();
-        let answer = join(&s.db, &s.sealer, &keys, "https://agent.example.com", &a).await.unwrap();
+        let answer = join(&s.db, &s.sealer, &keys, "https://agent.example.com", true, &a).await.unwrap();
         assert_eq!(answer.server_id, j.server_id);
         assert_eq!(answer.team_id, t.id);
         assert_eq!(answer.command_keys, keys);
@@ -661,7 +663,7 @@ fn a_join_registers_the_servers_key() {
         let j = code_for(&s, &signer, &t, "sbx-3").await;
         let mut a = join_ask(&j, &t, &k);
         a.capability = Some(capability(pyo_proto::sandbox::Runtime::None));
-        let e = join(&s.db, &s.sealer, &keys, "https://agent.example.com", &a).await.unwrap_err();
+        let e = join(&s.db, &s.sealer, &keys, "https://agent.example.com", true, &a).await.unwrap_err();
         assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
         let state: String = sqlx::query_scalar("SELECT state FROM pyo.sandbox_servers WHERE id = $1")
             .bind(&j.server_id)
@@ -743,14 +745,14 @@ fn a_key_opens_only_its_own_servers_channel() {
 
         // Each key gets its own server's commands only.
         let mut c = s.db.acquire().await.unwrap();
-        let cmd_a = channel::enqueue(&mut c, &a.server_id, &ta.id, &DaemonCommand::Delete { id: "sbx_a1".into() })
+        let cmd_a = channel::enqueue(&mut c, &s.sealer, &a.server_id, Some(&ta.id), &DaemonCommand::Delete { id: "sbx_a1".into() })
             .await
             .unwrap();
-        let cmd_b = channel::enqueue(&mut c, &b.server_id, &tb.id, &DaemonCommand::Delete { id: "sbx_b1".into() })
+        let cmd_b = channel::enqueue(&mut c, &s.sealer, &b.server_id, Some(&tb.id), &DaemonCommand::Delete { id: "sbx_b1".into() })
             .await
             .unwrap();
         // Not for a server of another team.
-        assert!(channel::enqueue(&mut c, &a.server_id, &tb.id, &DaemonCommand::Report).await.is_err());
+        assert!(channel::enqueue(&mut c, &s.sealer, &a.server_id, Some(&tb.id), &DaemonCommand::Report).await.is_err());
         drop(c);
         let (_, v) = call(&app, Method::GET, poll, Some(&ka), b"").await;
         let got: Vec<wire::CommandEnvelope> = serde_json::from_value(v).unwrap();
@@ -797,8 +799,8 @@ fn row_security_keeps_teams_apart() {
         let (a, _) = joined(&s, &signer, &ta, "sbx-a").await;
         let (b, _) = joined(&s, &signer, &tb, "sbx-b").await;
         let mut c = s.db.acquire().await.unwrap();
-        channel::enqueue(&mut c, &a.server_id, &ta.id, &DaemonCommand::Report).await.unwrap();
-        channel::enqueue(&mut c, &b.server_id, &tb.id, &DaemonCommand::Report).await.unwrap();
+        channel::enqueue(&mut c, &s.sealer, &a.server_id, Some(&ta.id), &DaemonCommand::Report).await.unwrap();
+        channel::enqueue(&mut c, &s.sealer, &b.server_id, Some(&tb.id), &DaemonCommand::Report).await.unwrap();
         drop(c);
         let mut tx = s.db.begin().await.unwrap();
         crate::rls::scope_team(&mut tx, &ta.id).await.unwrap();
@@ -838,10 +840,10 @@ fn the_long_poll_hands_out_signed_commands() {
 
         // Two commands, in the order they were queued, signed for this server.
         let mut c = s.db.acquire().await.unwrap();
-        let one = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::Delete { id: "sbx_1".into() })
+        let one = channel::enqueue(&mut c, &s.sealer, &j.server_id, Some(&t.id), &DaemonCommand::Delete { id: "sbx_1".into() })
             .await
             .unwrap();
-        let two = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::Report).await.unwrap();
+        let two = channel::enqueue(&mut c, &s.sealer, &j.server_id, Some(&t.id), &DaemonCommand::Report).await.unwrap();
         drop(c);
         let sealed: Option<String> = sqlx::query_scalar("SELECT command_sealed FROM pyo.sandbox_commands WHERE id = $1")
             .bind(&one)
@@ -909,8 +911,8 @@ fn the_long_poll_hands_out_signed_commands() {
         // The signer refuses one: it fails with the reason, the rest go out.
         let mut c = s.db.acquire().await.unwrap();
         let edge = DaemonCommand::SetEdgeCert { cert: "c".into(), key: pyo_proto::sandbox::SecretPem("k".into()) };
-        let refused = channel::enqueue(&mut c, &j.server_id, &t.id, &edge).await.unwrap();
-        let fine = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+        let refused = channel::enqueue(&mut c, &s.sealer, &j.server_id, Some(&t.id), &edge).await.unwrap();
+        let fine = channel::enqueue(&mut c, &s.sealer, &j.server_id, Some(&t.id), &DaemonCommand::List).await.unwrap();
         drop(c);
         let (_, v) = call(&app, Method::GET, "/commands?wait=0", Some(&k), b"").await;
         assert_eq!(v.as_array().unwrap().len(), 1);
@@ -926,7 +928,7 @@ fn the_long_poll_hands_out_signed_commands() {
         // The signer is down: back to the queue, out again once it's up.
         signer.down.store(true, Ordering::SeqCst);
         let mut c = s.db.acquire().await.unwrap();
-        let later = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+        let later = channel::enqueue(&mut c, &s.sealer, &j.server_id, Some(&t.id), &DaemonCommand::List).await.unwrap();
         drop(c);
         assert_eq!(call(&app, Method::GET, "/commands?wait=0", Some(&k), b"").await.0, StatusCode::SERVICE_UNAVAILABLE);
         signer.down.store(false, Ordering::SeqCst);
@@ -936,7 +938,7 @@ fn the_long_poll_hands_out_signed_commands() {
         // A restarted daemon: what went to the process before fails.
         let (_, v) = {
             let mut c = s.db.acquire().await.unwrap();
-            channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+            channel::enqueue(&mut c, &s.sealer, &j.server_id, Some(&t.id), &DaemonCommand::List).await.unwrap();
             drop(c);
             call_at(&app, Method::GET, "/commands?wait=0", Some(&k), b"", None, &[(wire::INSTANCE_HEADER, "one")]).await
         };
@@ -951,7 +953,7 @@ fn the_long_poll_hands_out_signed_commands() {
 
         // Waiting too long fails a command, in the runner's sweep.
         let mut c = s.db.acquire().await.unwrap();
-        let old = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+        let old = channel::enqueue(&mut c, &s.sealer, &j.server_id, Some(&t.id), &DaemonCommand::List).await.unwrap();
         drop(c);
         sqlx::query("UPDATE pyo.sandbox_commands SET created_at = now() - interval '1 hour' WHERE id = $1")
             .bind(&old)
@@ -1003,12 +1005,12 @@ fn keys_renew_and_are_revoked() {
         // Reset access: every key stops, waiting commands fail, a new code
         // joins the same server again.
         let mut c = s.db.acquire().await.unwrap();
-        let waiting = channel::enqueue(&mut c, &j.server_id, &t.id, &DaemonCommand::List).await.unwrap();
+        let waiting = channel::enqueue(&mut c, &s.sealer, &j.server_id, Some(&t.id), &DaemonCommand::List).await.unwrap();
         drop(c);
-        let e = reset_access(&s, signer.as_ref(), &t.developer, &j.server_id).await.unwrap_err();
+        let e = reset_access(&s, signer.as_ref(), &t.developer, &j.server_id, &Mode::Hosted).await.unwrap_err();
         assert_eq!(e.status, StatusCode::FORBIDDEN);
         let agent = holder_agent(s.db.clone(), t.holder.clone());
-        let again = reset_access(&s, signer.as_ref(), &t.admin, &j.server_id).await;
+        let again = reset_access(&s, signer.as_ref(), &t.admin, &j.server_id, &Mode::Hosted).await;
         agent.abort();
         let again = again.unwrap();
         assert_eq!(again.server_id, j.server_id);
@@ -1023,7 +1025,7 @@ fn keys_renew_and_are_revoked() {
             .unwrap();
         assert_eq!(status, "failed");
         let fresh = RequestKey::from_pkcs8(&RequestKey::generate_pkcs8().unwrap()).unwrap();
-        let a = join(&s.db, &s.sealer, &signer.public_keys(), "https://agent.example.com", &join_ask(&again, &t, &fresh))
+        let a = join(&s.db, &s.sealer, &signer.public_keys(), "https://agent.example.com", true, &join_ask(&again, &t, &fresh))
             .await
             .unwrap();
         let k3 = Key(a.key_id, fresh);
@@ -1039,7 +1041,7 @@ fn keys_renew_and_are_revoked() {
             .unwrap();
         assert_eq!(keys, 0);
         // Not for a self-hosted server.
-        let e = reset_access(&s, signer.as_ref(), &t.admin, "sbs_none").await.unwrap_err();
+        let e = reset_access(&s, signer.as_ref(), &t.admin, "sbs_none", &Mode::Hosted).await.unwrap_err();
         assert_eq!(e.status, StatusCode::NOT_FOUND);
     })
 }

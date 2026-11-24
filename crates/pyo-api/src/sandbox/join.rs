@@ -17,6 +17,10 @@
 //!
 //! A server that can run neither Firecracker nor gVisor is refused, with
 //! the detection's reason.
+//!
+//! From 0.51.1 new sandbox servers join over the outbound channel instead
+//! (outbound/, also on a self-hosted Pyo). The door's join stays one more
+//! release, for servers that got a code before.
 
 use crate::error::Query;
 use std::net::{IpAddr, SocketAddr};
@@ -175,14 +179,15 @@ pub fn tailnet_address(a: &str) -> bool {
     }
 }
 
-/// Burns a code on its first use.
+/// Burns a code on its first use. A server that joins over the outbound
+/// channel (outbound/) is no server of the door's: it reads as gone.
 async fn claim(db: &PgPool, code: &str) -> sqlx::Result<Result<Claimed, Refusal>> {
     let hash = sha256_hex(code);
     let claimed: Option<Claimed> = sqlx::query_as(
         "UPDATE pyo.sandbox_join_codes c SET used_at = now()
           WHERE c.code_hash = $1 AND c.used_at IS NULL
          RETURNING c.server_id, c.expires_at <= now() AS expired,
-                   (SELECT state FROM pyo.sandbox_servers WHERE id = c.server_id) AS state",
+                   (SELECT state FROM pyo.sandbox_servers WHERE id = c.server_id AND NOT outbound) AS state",
     )
     .bind(&hash)
     .fetch_optional(db)
@@ -380,47 +385,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Single-quoted for the shell.
-fn q(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// The command that makes a machine a sandbox server.
-pub struct Command<'a> {
-    /// Where scripts come from, off the tailnet the server isn't on yet
-    /// ([`crate::join::scripts_url_before_tailnet`]).
-    pub base: &'a str,
-    /// Pyo's tailnet door, "pyo.tail1234.ts.net:5006".
-    pub door: &'a str,
-    pub server_id: &'a str,
-    pub name: &'a str,
-    pub code: &'a str,
-    pub tailscale_key: &'a str,
-    /// The Pyo release whose daemon it installs.
-    pub version: &'a str,
-    /// Serves sandbox ports at `<port>-<sandbox>.<domain>`.
-    pub edge_domain: Option<&'a str>,
-}
-
-impl Command<'_> {
-    pub fn render(&self) -> String {
-        let mut c = format!(
-            "curl -fsSL {}/sandbox.sh | bash -s -- --pyo {} --server {} --name {} --code {} --tailscale-key {} --version {}",
-            self.base,
-            q(self.door),
-            q(self.server_id),
-            q(self.name),
-            q(self.code),
-            q(self.tailscale_key),
-            q(self.version),
-        );
-        if let Some(d) = self.edge_domain {
-            c.push_str(&format!(" --edge-domain {}", q(d)));
-        }
-        c
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,53 +446,20 @@ mod tests {
     }
 
     #[test]
-    fn the_command_quotes_everything() {
-        // The server isn't on the tailnet yet: this release's scripts on
-        // pyo.dev.
-        let base = crate::join::pick_scripts_url_before_tailnet(None);
-        assert_eq!(base, crate::join::published_scripts_url());
-        let c = Command {
-            base: &base,
-            door: "pyo.tail1234.ts.net:5006",
-            server_id: "sbs_one",
-            name: "it's sbx",
-            code: "abc",
-            tailscale_key: "tskey-auth-1",
-            version: "0.4.0",
-            edge_domain: None,
-        };
-        assert_eq!(
-            c.render(),
-            format!(
-                "curl -fsSL {base}/sandbox.sh | bash -s -- --pyo 'pyo.tail1234.ts.net:5006' --server 'sbs_one' --name 'it'\\''s sbx' --code 'abc' --tailscale-key 'tskey-auth-1' --version '0.4.0'"
-            )
-        );
-        let c = Command {
-            edge_domain: Some("sbx.example.com"),
-            ..c
-        };
-        assert!(
-            c.render()
-                .ends_with(" --version '0.4.0' --edge-domain 'sbx.example.com'"),
-            "{}",
-            c.render()
-        );
-    }
-
-    #[test]
     fn a_new_server_fetches_sandbox_sh_off_the_tailnet() {
         let render = |base: &str| {
-            Command {
-                base,
-                door: "pyo.tail1234.ts.net:5006",
-                server_id: "sbs_one",
-                name: "sbx",
-                code: "abc",
-                tailscale_key: "tskey-auth-1",
-                version: "0.4.0",
+            crate::sandbox::outbound::Joining {
+                server_id: "sbs_one".into(),
+                team_id: None,
+                name: "sbx".into(),
+                code: "abc".into(),
+                tailscale_key: "tskey-auth-1".into(),
+                command_keys: "KEY1".into(),
+                pyo_url: "https://pyo.tail1234.ts.net".into(),
                 edge_domain: None,
+                expires_at: 0,
             }
-            .render()
+            .command(base, "0.4.0")
         };
         let pick = crate::join::pick_scripts_url_before_tailnet;
         // PYO_SCRIPTS_URL wins.

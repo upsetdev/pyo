@@ -608,6 +608,9 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
     // Every process: the worker sends sandbox servers images through the
     // registry door's tailnet address (sandbox/templates.rs).
     sandbox::daemon::init(state.clone());
+    // Who signs sandbox servers' commands: the build's signer when hosted,
+    // else Pyo's own key (made on first start).
+    sandbox::outbound::signer::init(&state).await;
     tokio::spawn(tailscale::addresses_follower(state.db.clone()));
     if role.worker() {
         // Each loop runs on one worker at a time (leader lock); jobs on any.
@@ -727,15 +730,11 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                     agent_auth::signed,
                 )),
             )
-            // Sandbox servers that work over HTTPS (sandbox/outbound): a
-            // hosted Pyo's only. They sign with keys of their own.
+            // Sandbox servers that work over HTTPS (sandbox/outbound), on
+            // every Pyo. They sign with keys of their own.
             .nest(
                 pyo_proto::sandbox::outbound::API_PREFIX,
-                if hosted() {
-                    sandbox::outbound::channel::routes(state.clone(), crate::command_signer().cloned())
-                } else {
-                    Router::new()
-                },
+                sandbox::outbound::channel::routes(state.clone(), sandbox::outbound::signer::get()),
             )
             .merge(extra_routes)
             .route("/api/{*rest}", get(error::not_found).post(error::not_found))
