@@ -1656,7 +1656,7 @@ mod tests {
             pod["containers"][0]["image"]
                 .as_str()
                 .unwrap()
-                .starts_with("dxflrs/garage@sha256:")
+                .starts_with("ghcr.io/upsetdev/pyo/mirror/dxflrs/garage:v2.5.0@sha256:")
         );
         assert_eq!(pod["securityContext"]["runAsNonRoot"], true);
         assert_eq!(

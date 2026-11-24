@@ -1,10 +1,12 @@
 name: Release
 
 # Pushing a tag like v0.1.0 publishes that version: signed images at
-# ghcr.io/upsetdev/pyo, and a GitHub release with the CLI for each
-# platform, the verifier, the sandbox server files, the install scripts
-# and release.json (what the dashboard's updates apply). Then pyo.dev is
-# rebuilt, to serve the release's install scripts. See RELEASING.md.
+# ghcr.io/upsetdev/pyo, the third-party images Pyo runs copied to
+# ghcr.io/upsetdev/pyo/mirror (mirror.yml), and a GitHub release with
+# the CLI for each platform, the verifier, the sandbox server files, the
+# install scripts and release.json (what the dashboard's updates apply).
+# Then pyo.dev is rebuilt, to serve the release's install scripts. See
+# RELEASING.md.
 #
 # A tag like v0.1.0-rc.1 is a release candidate, for testing the verifier:
 # the same build, published as a pre-release (never GitHub's latest, so
@@ -133,6 +135,17 @@ jobs:
           path: out/
           if-no-files-found: error
 
+  # The third-party images the release runs, copied from Docker Hub to
+  # ghcr.io/upsetdev/pyo/mirror (mirror.yml). They're there before the
+  # release is: installs pull them from there.
+  mirrors:
+    name: Mirror images
+    needs: verify
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/mirror.yml
+
   # A sandbox server's files for each architecture (sandbox.yml).
   sandbox:
     name: Sandbox
@@ -256,7 +269,7 @@ jobs:
 
   release:
     name: GitHub release
-    needs: [verify, images, cli, verifier, sandbox]
+    needs: [verify, images, mirrors, cli, verifier, sandbox]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -348,7 +361,7 @@ jobs:
             --sandbox-gvisor-x86_64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-x86_64.tar.gz.sha256)" \
             --sandbox-gvisor-aarch64 "$(cut -d' ' -f1 sandbox/pyo-sandbox-gvisor-linux-aarch64.tar.gz.sha256)" \
             --verifier verifier --scripts release-scripts > release.json
-          jq '{version, images, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, sandbox, sandboxGvisor, verifier, scripts, migrations: (.migrations | length)}' release.json
+          jq '{version, images, mirrors, k3s, minFrom, manualOnly, beforeYouUpdate, agentAccess, sandbox, sandboxGvisor, verifier, scripts, migrations: (.migrations | length)}' release.json
       # The verifier's sums are the files', and connect.sh carries them.
       - name: Check release.json's verifier
         env:

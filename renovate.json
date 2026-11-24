@@ -58,10 +58,26 @@
       "managerFilePatterns": [
         "/^crates/pyo-proto/system/.+\\.ya?ml$/",
         "/^crates/pyo-proto/src/bundles\\.rs$/",
-        "/^crates/pyo-db-controller/src/main\\.rs$/"
+        "/^crates/pyo-db-controller/src/main\\.rs$/",
+        "/^deploy/mirrors\\.txt$/"
       ],
       "matchStrings": [
         "(?<depName>(?:docker\\.io|ghcr\\.io|quay\\.io|registry\\.k8s\\.io)/[a-z0-9._/-]+):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Images from Pyo's mirror (deploy/mirrors.txt) wherever they're used, looked up at their source, so they move with the list.",
+      "managerFilePatterns": [
+        "/^deploy/k8s/.+\\.yaml$/",
+        "/^crates/.+/src/.+\\.rs$/",
+        "/^crates/pyo-proto/system/.+\\.ya?ml$/",
+        "/^crates/pyo-api/assets/.+\\.sh$/",
+        "/^docs/.+\\.md$/"
+      ],
+      "matchStrings": [
+        "ghcr\\.io/upsetdev/pyo/mirror/(?<depName>[a-z0-9._/-]+):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
       ],
       "datasourceTemplate": "docker"
     },

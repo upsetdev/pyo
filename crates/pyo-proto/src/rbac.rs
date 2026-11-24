@@ -2478,18 +2478,23 @@ mod tests {
     /// move [`access_hash`], so clusters that can't refresh are told to run
     /// the connect command. And the role that reads the customer's policy
     /// also reads their verifier's status (`pyo-system/pyo-verifier`).
+    /// 0.51.1 changes no role, but Envoy Gateway's chart (installed with
+    /// the agent) comes from Pyo's mirror, with its controller's image:
+    /// a refresh can't bring a chart, so a cluster gets it with its connect
+    /// command (the one Pyo runs on runs it by itself). Until then its
+    /// gateway runs on the chart it has.
     /// Change this only with a release that means to
     /// change the roles: from 0.51.0 on a cluster with the self-update role
     /// gets them with a refresh, any other with its connect command.
     #[test]
-    fn the_roles_are_as_0_51_0s() {
+    fn the_roles_are_as_0_51_1s() {
         assert_eq!(
             short_hash(&json!([
                 objects(false),
                 objects(true),
                 self_update_objects()
             ])),
-            "0dcaac0328ee92f9"
+            "d0b4b36254d0ae62"
         );
     }
 
@@ -2525,8 +2530,10 @@ mod tests {
         );
         assert_eq!(access_hash_of(&policy), h);
         // Whatever images the installation runs (third-party images the
-        // code pins are part of the rules).
-        let text = json!(policy).to_string();
+        // code pins are part of the rules, Pyo's mirrors of them too).
+        let text = json!(policy)
+            .to_string()
+            .replace("ghcr.io/upsetdev/pyo/mirror/", "");
         assert!(
             !text.contains("ghcr.io/upsetdev/") && !text.contains("127.0.0.1:5005"),
             "{text}"

@@ -45,7 +45,8 @@ use serde_json::json;
 use crate::MANAGER;
 
 const NS: &str = "pyo-system";
-const IMAGE: &str = "curlimages/curl:8.11.1";
+/// curl, from Pyo's mirror (deploy/mirrors.txt).
+const IMAGE: &str = "ghcr.io/upsetdev/pyo/mirror/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69";
 /// Where a server asks for its public address (see the module's notes).
 const LOOKUP: &str = "https://cloudflare.com/cdn-cgi/trace";
 const LOOKUP_ENV: &str = "PYO_PUBLIC_IP_LOOKUP";

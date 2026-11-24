@@ -1,0 +1,23 @@
+name: crane
+description: >
+  Installs crane (google/go-containerregistry) at the pinned version,
+  checked against the SHA-256 its release publishes in checksums.txt.
+
+runs:
+  using: composite
+  steps:
+    - name: Install crane
+      shell: bash
+      env:
+        VERSION: v0.22.1 # google/go-containerregistry
+        SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0 # go-containerregistry_Linux_x86_64.tar.gz
+      run: |
+        set -euo pipefail
+        dir=$(mktemp -d)
+        curl -fsSL --retry 3 -o "$dir/crane.tar.gz" \
+          "https://github.com/google/go-containerregistry/releases/download/$VERSION/go-containerregistry_Linux_x86_64.tar.gz"
+        echo "$SHA256  $dir/crane.tar.gz" | sha256sum -c --quiet
+        tar -xzf "$dir/crane.tar.gz" -C "$dir" crane
+        sudo install -m 755 "$dir/crane" /usr/local/bin/crane
+        rm -rf "$dir"
+        crane version
