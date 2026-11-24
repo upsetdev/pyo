@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Checks Pyo Gateway's rules on a real install, end to end: redirects and
-# header rules (and, once they're in, path routes), as a visitor sees them
-# (docs/gateway-routes.md).
+# Checks Pyo Gateway's rules on a real install, end to end: redirects,
+# header rules and routes (paths of one hostname on two services), as a
+# visitor sees them (docs/gateway-routes.md).
 #
 # It deploys a throwaway project of two small echo services with free
 # nip.io domains, sets rules with the pyo CLI, checks them with curl, and
@@ -123,6 +123,25 @@ if "$PYO" domain header "$WEB" --request --set 'X-Forwarded-For: 1.2.3.4' -s "$R
 else
   ok "Pyo Gateway's own headers can't be changed"
 fi
+
+say "Routes"
+"$PYO" domain add "$WEB/api" --strip-prefix -s "$RUN/api" >/dev/null
+sleep 5
+fetch "https://$WEB/api/users?x=1" >/dev/null
+grep -qi '^GET /users?x=1 ' "$DIR/body" && ok "/api goes to api, prefix stripped" || bad "api didn't get /users: $(head -1 "$DIR/body")"
+api_name=$(grep -i '^Hostname:' "$DIR/body" | cut -d' ' -f2 | tr -d '\r')
+fetch "https://$WEB/apix" >/dev/null
+web_name=$(grep -i '^Hostname:' "$DIR/body" | cut -d' ' -f2 | tr -d '\r')
+[ -n "$api_name" ] && [ "$api_name" != "$web_name" ] && ok "/apix stays on web" || bad "/apix went to the same service as /api"
+grep -qi '^GET /apix ' "$DIR/body" && ok "web gets its path as it was" || bad "web got $(head -1 "$DIR/body")"
+# web's header rules apply to the whole hostname, api's paths included.
+out=$(fetch "https://$WEB/api/x")
+[ "$(header_of x-frame-options <<<"$out")" = DENY ] && ok "the hostname's header rules on a path" || bad "no X-Frame-Options on /api"
+# web stops serving the hostname: api takes it over, and it keeps answering.
+"$PYO" domain remove "$WEB" --yes --keep-dns-record -s "$RUN/web" >/dev/null
+sleep 10
+fetch "https://$WEB/api/users" >/dev/null
+grep -qi '^GET /users ' "$DIR/body" && ok "api keeps the hostname when web leaves it" || bad "after web left: $(head -1 "$DIR/body")"
 
 if [ "$FAILED" = 0 ]; then
   say "All checks passed."
