@@ -16,6 +16,7 @@
 use k8s_openapi::api::{
     apps::v1::{DaemonSet, Deployment, StatefulSet},
     core::v1::{PersistentVolumeClaim, Secret, Service, ServiceAccount},
+    storage::v1::StorageClass,
 };
 use kube::{
     Api, Client,
@@ -295,10 +296,93 @@ fn vector_daemonset(config: &str) -> serde_json::Value {
     })
 }
 
-/// The traffic store's volume: the kept requests. Asked for once, never
-/// resized (the store keeps to the team's limit itself) and kept when
-/// observability is off.
-const TRAFFIC_VOLUME: &str = "2Gi";
+/// The traffic store's volume when it's made, in GiB: the kept requests.
+/// It grows with the team's request log size (`fit_traffic_volume`) and is
+/// kept when observability is off.
+const TRAFFIC_VOLUME_GI: u64 = 2;
+
+/// local-path's provisioner: its volumes can use all the free disk on their
+/// server, whatever size they asked for.
+const LOCAL_PATH: &str = "rancher.io/local-path";
+
+/// The volume the store needs to keep `max_mb` of requests: a quarter more
+/// for the hour being written and the filesystem's own, and never less
+/// than it starts with.
+pub fn traffic_volume_gi(max_mb: u64) -> u64 {
+    (max_mb * 5 / 4).div_ceil(1024).max(TRAFFIC_VOLUME_GI)
+}
+
+/// What the store's volume needs for what the team keeps.
+#[derive(Debug, PartialEq)]
+enum VolumePlan {
+    /// It's big enough, or its storage doesn't hold it to its size.
+    Fits,
+    /// Grow it to this many GiB.
+    Grow(u64),
+    /// It can't grow: the store keeps this many MB at most.
+    Keep(u64),
+}
+
+/// `size_gi`: what the claim asks for now. `capped`: its storage holds it
+/// to that size (local-path doesn't). `can_grow`: its storage class can
+/// grow volumes.
+fn traffic_volume_plan(max_mb: u64, size_gi: f64, capped: bool, can_grow: bool) -> VolumePlan {
+    let need = traffic_volume_gi(max_mb);
+    if !capped || size_gi >= need as f64 {
+        VolumePlan::Fits
+    } else if can_grow {
+        VolumePlan::Grow(need)
+    } else {
+        // The inverse of `traffic_volume_gi`.
+        VolumePlan::Keep(((size_gi * 1024.0 * 4.0 / 5.0) as u64).min(max_mb))
+    }
+}
+
+/// Makes room for `max_mb` of kept requests: the store's volume grows
+/// (never shrinks), on a storage class that can grow it, as volumes grow
+/// elsewhere (volumes.rs `resize`). Returns what the store may keep:
+/// `max_mb`, or less on a volume that can't grow, so it never fills up.
+pub async fn fit_traffic_volume(client: &Client, max_mb: u64) -> anyhow::Result<u64> {
+    let name = crate::traffic::NAME;
+    let claims = Api::<PersistentVolumeClaim>::namespaced(client.clone(), NS);
+    let Some(claim) = claims.get_opt(name).await? else {
+        return Ok(max_mb);
+    };
+    // Kubernetes grows a claim only once it's bound.
+    if claim.status.as_ref().and_then(|s| s.phase.as_deref()) != Some("Bound") {
+        return Ok(max_mb);
+    }
+    let spec = claim.spec.unwrap_or_default();
+    let size_gi = spec
+        .resources
+        .as_ref()
+        .and_then(|r| r.requests.as_ref())
+        .and_then(|r| r.get("storage"))
+        .and_then(|q| crate::volumes::gib_of(&q.0))
+        .unwrap_or(TRAFFIC_VOLUME_GI as f64);
+    let Some(class) = spec.storage_class_name else {
+        return Ok(max_mb);
+    };
+    let Some(sc) = Api::<StorageClass>::all(client.clone()).get_opt(&class).await? else {
+        return Ok(max_mb);
+    };
+    let capped = sc.provisioner != LOCAL_PATH;
+    match traffic_volume_plan(max_mb, size_gi, capped, sc.allow_volume_expansion == Some(true)) {
+        VolumePlan::Fits => Ok(max_mb),
+        VolumePlan::Grow(gi) => {
+            claims
+                .patch(
+                    name,
+                    &PatchParams::default(),
+                    &Patch::Merge(json!({ "spec": { "resources": { "requests": { "storage": format!("{gi}Gi") } } } })),
+                )
+                .await?;
+            tracing::info!(size = %format!("{gi}Gi"), "growing the kept requests' volume");
+            Ok(max_mb)
+        }
+        VolumePlan::Keep(mb) => Ok(mb),
+    }
+}
 
 /// The cluster's traffic store (traffic/): one pod on the agent's own image,
 /// its volume, and its Service for Vector and the agent.
@@ -316,7 +400,7 @@ async fn traffic_store(client: &Client) -> anyhow::Result<()> {
                 &serde_json::from_value(json!({
                     "apiVersion": "v1", "kind": "PersistentVolumeClaim",
                     "metadata": { "name": name, "labels": labels },
-                    "spec": { "accessModes": ["ReadWriteOnce"], "resources": { "requests": { "storage": TRAFFIC_VOLUME } } },
+                    "spec": { "accessModes": ["ReadWriteOnce"], "resources": { "requests": { "storage": format!("{TRAFFIC_VOLUME_GI}Gi") } } },
                 }))?,
             )
             .await?;
@@ -437,5 +521,31 @@ mod tests {
                 .clone()
         };
         assert_ne!(hash("a: 1"), hash("a: 2"));
+    }
+
+    #[test]
+    fn the_kept_requests_volume_fits_the_teams_size() {
+        // The sizes a team can pick (dash, team settings), with room to spare.
+        let sizes: Vec<_> = [500, 1024, 2048, 5120, 10240, 20480].into_iter().map(traffic_volume_gi).collect();
+        assert_eq!(sizes, [2, 2, 3, 7, 13, 25]);
+        for mb in [500, 1024, 2048, 5120, 10240, 20480] {
+            assert!(traffic_volume_gi(mb) as f64 * 1024.0 >= mb as f64 * 1.25);
+        }
+    }
+
+    #[test]
+    fn the_kept_requests_volume_grows_or_the_store_keeps_less() {
+        // 1 GB fits the 2 GiB it starts with.
+        assert_eq!(traffic_volume_plan(1024, 2.0, true, true), VolumePlan::Fits);
+        // 5 and 10 GB, picked before it grew: it grows, never shrinks.
+        assert_eq!(traffic_volume_plan(5120, 2.0, true, true), VolumePlan::Grow(7));
+        assert_eq!(traffic_volume_plan(10240, 2.0, true, true), VolumePlan::Grow(13));
+        assert_eq!(traffic_volume_plan(1024, 13.0, true, true), VolumePlan::Fits);
+        // local-path uses the server's free disk: nothing to grow.
+        assert_eq!(traffic_volume_plan(10240, 2.0, false, false), VolumePlan::Fits);
+        // Storage that can't grow: the store keeps what fits.
+        assert_eq!(traffic_volume_plan(10240, 2.0, true, false), VolumePlan::Keep(1638));
+        assert_eq!(traffic_volume_plan(10240, 10.0, true, false), VolumePlan::Keep(8192));
+        assert_eq!(traffic_volume_plan(5120, 10.0, true, false), VolumePlan::Fits);
     }
 }
