@@ -1039,6 +1039,7 @@ async fn capabilities(
         waf_active,
         tailnet_web_ips: tailnet_web_ips(client).await,
         tunnel: true,
+        gateway_rules: crate::gateway::RULES,
     }
 }
 
