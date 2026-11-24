@@ -1865,7 +1865,7 @@ mod tests {
                     .await
                     .unwrap_err()
                     .message
-                    .contains("only runs on b")
+                    .contains("api doesn't run on a")
             );
             attach(&mut tx, &user, &vol, &service, "/files/", &mut wake)
                 .await
