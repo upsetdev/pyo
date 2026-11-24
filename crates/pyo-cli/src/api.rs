@@ -263,12 +263,48 @@ impl State {
         )
     }
 
+    /// A deployment's page on the dashboard: in its service's Deployments
+    /// tab. The team's own deployment page when the project isn't known.
     pub fn deployment_url(&self, base: &str, service: &Value, deployment_id: &str) -> String {
+        if self
+            .project(service["projectId"].as_str().unwrap_or(""))
+            .and_then(|p| p["namespace"].as_str())
+            .is_some()
+        {
+            return format!(
+                "{}/deployments/{deployment_id}",
+                self.service_url(base, service)
+            );
+        }
         let t = self.team(service["teamId"].as_str().unwrap_or(""));
         format!(
             "{base}/{}/deployments/{deployment_id}",
             t.and_then(|t| t["slug"].as_str()).unwrap_or("")
         )
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn deployment_links_open_in_the_service() {
+        let state = State(json!({
+            "teams": [{ "id": "tm_1", "slug": "acme" }],
+            "projects": [{ "id": "prj_1", "namespace": "shop" }],
+        }));
+        let web = json!({ "id": "svc_1", "teamId": "tm_1", "projectId": "prj_1", "name": "web" });
+        assert_eq!(
+            state.deployment_url("https://pyo.example.com", &web, "dpl_1"),
+            "https://pyo.example.com/acme/shop/web/deployments/dpl_1"
+        );
+        // Its project isn't in the state: the team's page, which forwards.
+        let lost = json!({ "id": "svc_2", "teamId": "tm_1", "projectId": "prj_9", "name": "api" });
+        assert_eq!(
+            state.deployment_url("https://pyo.example.com", &lost, "dpl_2"),
+            "https://pyo.example.com/acme/deployments/dpl_2"
+        );
     }
 }
 

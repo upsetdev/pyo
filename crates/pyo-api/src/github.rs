@@ -876,11 +876,11 @@ pub(crate) struct TeamQuery {
 
 /// Report a deployment of a GitHub App repository on its commit (for the
 /// "git.status" job, git.rs `report`). "running" is GitHub's "pending".
+/// `page`: the deployment's dashboard page, "/acme/shop/web/deployments/dpl_1".
 pub async fn report(
     s: &AppState,
     data: &Value,
-    slug: &str,
-    deployment_id: &str,
+    page: &str,
     state: &str,
     description: &str,
 ) -> anyhow::Result<()> {
@@ -904,7 +904,7 @@ pub async fn report(
         .post(format!("{}/repos/{repo}/statuses/{sha}", api_base()))
         .bearer_auth(tok)
         .header("accept", "application/vnd.github+json")
-        .json(&json!({ "state": state, "description": description.chars().take(140).collect::<String>(), "context": "Pyo", "target_url": format!("{}/{slug}/deployments/{deployment_id}", app.public_url) }))
+        .json(&json!({ "state": state, "description": description.chars().take(140).collect::<String>(), "context": "Pyo", "target_url": format!("{}{page}", app.public_url) }))
         .send()
         .await?;
     if !res.status().is_success() {
