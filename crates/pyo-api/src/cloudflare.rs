@@ -917,7 +917,7 @@ pub(crate) async fn proofs_job(s: &AppState, p: &Value) -> anyhow::Result<()> {
     for host in p["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str) {
         let mut tx = s.db.begin().await?;
         let used: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+            "SELECT EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
                              WHERE a.team_id = $1 AND NOT a.deleting AND lower(d->>'hostname') = lower($2))",
         )
         .bind(team_id)
@@ -1495,7 +1495,7 @@ pub async fn delete_record(
 pub async fn proxy_ready(s: &AppState) -> ApiResult<()> {
     let due: Vec<(String, String, String, String, String, Value)> = sqlx::query_as(
         "SELECT r.service_id, r.domain_id, r.team_id, r.zone_id, r.record_id, d
-           FROM pyo.dns_records r JOIN pyo.services a ON a.id = r.service_id, jsonb_array_elements(a.spec->'domains') d
+           FROM pyo.dns_records r JOIN pyo.services a ON a.id = r.service_id, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE r.proxy AND NOT r.proxied AND r.status = 'created' AND r.record_id IS NOT NULL
             AND d->>'id' = r.domain_id AND NOT a.deleting
           LIMIT 50",

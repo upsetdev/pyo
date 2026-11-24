@@ -67,7 +67,7 @@ pub async fn hosts_by_cluster(
 ) -> ApiResult<BTreeMap<String, (String, Vec<String>)>> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT DISTINCT a.cluster_id, c.name, lower(d->>'hostname')
-           FROM pyo.services a JOIN pyo.clusters c ON c.id = a.cluster_id, jsonb_array_elements(a.spec->'domains') d
+           FROM pyo.services a JOIN pyo.clusters c ON c.id = a.cluster_id, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE a.team_id = $1 AND lower(d->>'hostname') = ANY($2)",
     )
     .bind(team_id)

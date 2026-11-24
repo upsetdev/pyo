@@ -727,7 +727,7 @@ impl Observability {
         // the entry that holds it.
         let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
             "SELECT lower(d->>'hostname'), a.team_id, a.project_id, a.id, a.cluster_id
-               FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+               FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
               WHERE NOT a.deleting
               ORDER BY coalesce(d->>'path', '/') = '/', coalesce(d->>'primary', 'true') <> 'false'",
         )

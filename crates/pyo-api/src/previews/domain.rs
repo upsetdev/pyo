@@ -138,7 +138,7 @@ async fn taken(
 ) -> ApiResult<bool> {
     let lifted = crate::rls::lift(tx).await?;
     let taken: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(coalesce(a.spec->'domains', '[]')) d
+        "SELECT EXISTS (SELECT 1 FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
                          WHERE NOT a.deleting AND lower(d->>'hostname') = $1 AND a.id IS DISTINCT FROM $3)
              OR EXISTS (SELECT 1 FROM pyo.previews WHERE hostname = $1 AND id <> $2 AND state <> 'removed')",
     )

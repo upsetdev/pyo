@@ -368,7 +368,7 @@ pub async fn mark_routed(
                            CASE WHEN coalesce(d->>'tlsMode', 'auto') = 'off' THEN 'disabled'
                                 WHEN d->>'tlsMode' = 'custom' OR d->>'tls' = 'issued' THEN 'issued' ELSE 'pending' END)
                            - CASE WHEN d->>'status' IN ('pending_dns', 'verifying') THEN '' ELSE 'error' END END)
-                    FROM jsonb_array_elements(spec->'domains') d), '[]'))
+                    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(spec->'domains') = 'array' THEN spec->'domains' ELSE '[]' END) d), '[]'))
           WHERE id = $1 AND ($2::bigint IS NULL OR routes_revision = $2)",
     )
     .bind(service_id)

@@ -75,7 +75,7 @@ pub async fn entries(
 ) -> ApiResult<Vec<Entry>> {
     let rows: Vec<(String, String, String, Value, bool)> = sqlx::query_as(
         "SELECT a.id, a.name, a.cluster_id, d, a.current_deployment_id IS NOT NULL
-           FROM pyo.services a, jsonb_array_elements(coalesce(a.spec->'domains', '[]')) d
+           FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE a.team_id = $1 AND a.id <> $2 AND NOT a.deleting AND lower(d->>'hostname') = ANY($3)
           ORDER BY coalesce((d->>'createdAt')::bigint, 0), a.id",
     )
@@ -284,7 +284,7 @@ pub async fn specs(
     let holders: Vec<(String, Value)> = sqlx::query_as(
         "SELECT p.namespace || '-' || a.name, d
            FROM pyo.services a JOIN pyo.projects p ON p.id = a.project_id,
-                jsonb_array_elements(coalesce(a.spec->'domains', '[]')) d
+                jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE a.team_id = (SELECT team_id FROM pyo.services WHERE id = $1) AND NOT a.deleting
             AND lower(d->>'hostname') = ANY($2) AND coalesce(d->>'primary', 'true') <> 'false'",
     )
@@ -315,8 +315,8 @@ pub async fn specs(
 pub async fn sharers(conn: &mut PgConnection, service_id: &str) -> ApiResult<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT DISTINCT b.id
-           FROM pyo.services a, jsonb_array_elements(coalesce(a.spec->'domains', '[]')) d,
-                pyo.services b, jsonb_array_elements(coalesce(b.spec->'domains', '[]')) e
+           FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d,
+                pyo.services b, jsonb_array_elements(CASE WHEN jsonb_typeof(b.spec->'domains') = 'array' THEN b.spec->'domains' ELSE '[]' END) e
           WHERE a.id = $1 AND b.team_id = a.team_id AND b.id <> a.id AND NOT b.deleting
             AND lower(e->>'hostname') = lower(d->>'hostname')",
     )
@@ -424,7 +424,7 @@ pub async fn held_here(
     domain_id: &str,
 ) -> ApiResult<()> {
     let row: Option<(String, Value)> = sqlx::query_as(
-        "SELECT a.team_id, d FROM pyo.services a, jsonb_array_elements(coalesce(a.spec->'domains', '[]')) d
+        "SELECT a.team_id, d FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE a.id = $1 AND d->>'id' = $2",
     )
     .bind(service_id)

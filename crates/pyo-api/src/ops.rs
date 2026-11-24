@@ -791,7 +791,7 @@ async fn domains_unique_across_teams(
     // team already has (a path of it) is proven once.
     if crate::verify_domains() {
         let current: Vec<String> = sqlx::query_scalar(
-            "SELECT lower(d->>'hostname') FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+            "SELECT lower(d->>'hostname') FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
               WHERE (a.id = $1 OR (a.team_id = $2 AND NOT a.deleting))",
         )
         .bind(service_id)
@@ -803,7 +803,7 @@ async fn domains_unique_across_teams(
     }
     // Another team's.
     let taken: Option<String> = sqlx::query_scalar(
-        "SELECT lower(d->>'hostname') FROM pyo.services a, jsonb_array_elements(a.spec->'domains') d
+        "SELECT lower(d->>'hostname') FROM pyo.services a, jsonb_array_elements(CASE WHEN jsonb_typeof(a.spec->'domains') = 'array' THEN a.spec->'domains' ELSE '[]' END) d
           WHERE a.id <> $1 AND a.team_id <> $3 AND NOT a.deleting AND lower(d->>'hostname') = ANY($2) LIMIT 1",
     )
     .bind(service_id)
