@@ -1,6 +1,6 @@
 # Sandbox servers on Pyo Cloud
 
-Design for 0.51.1. Status: proposed, for review before any code. The chosen approach is (b): the sandbox server calls out to Pyo Cloud.
+Design for 0.51.1. Status: approved 2026-11-24. Stage 1 (the API) is built. The chosen approach is (b): the sandbox server calls out to Pyo Cloud.
 
 ## Goal
 
@@ -27,9 +27,9 @@ Design for 0.51.1. Status: proposed, for review before any code. The chosen appr
  team's tailnet                                 Pyo Cloud (public HTTPS)
  ┌──────────────────────────┐                   ┌────────────────────────┐
  │ sandbox server           │  1 join (code)    │ cloud-api              │
- │  sandbox.sh ─────────────┼──────────────────▶│  /sandbox-agent/join   │
- │  pyo-sandbox daemon      │  2 long poll      │  /sandbox-agent/poll   │
- │   (its own key) ─────────┼──────────────────▶│  /sandbox-agent/report │
+ │  sandbox.sh ─────────────┼──────────────────▶│  …/join                │
+ │  pyo-sandbox daemon      │  2 long poll      │  …/commands            │
+ │   (its own key) ─────────┼──────────────────▶│  …/report              │
  │                          │◀── signed cmds ───│  signer (KMS) signs    │
  │  :7443 HTTPS on its      │                   └────────────────────────┘
  │  tailnet name            │
@@ -40,8 +40,8 @@ Design for 0.51.1. Status: proposed, for review before any code. The chosen appr
 
 1. **Add.** A team owner or admin adds a sandbox server. Pyo Cloud makes its row (joining), a one-time join code and a single-use Tailscale auth key from the team's holder (`join_key`, as today). The dashboard shows one command with both, plus Pyo Cloud's command key (below).
 2. **Join the tailnet.** `sandbox.sh` joins with the key, gets a certificate for the server's tailnet name (`tailscale cert`) and installs the daemon.
-3. **Register.** The daemon makes an Ed25519 key on the server and posts its public half with the code to `POST /api/v1/sandbox-agent/join`, over HTTPS. Pyo Cloud checks the code, keeps the public key and answers with the daemon's config: its server id, the key id, Pyo's sandbox token keys and the command key.
-4. **Work.** The daemon long-polls `POST /api/v1/sandbox-agent/poll` for its commands, and posts its report every 15 seconds and each command's result. Every request is signed with its key (pyo-proto `agentauth`, as agents do on Cloud).
+3. **Register.** The daemon makes an Ed25519 key on the server and posts its public half with the code to `POST /api/sandbox-agent/v1/join`, over HTTPS. Pyo Cloud checks the code, keeps the public key and answers with the daemon's config: its server id, the key id, Pyo's sandbox token keys and the command key.
+4. **Work.** The daemon long-polls `GET /api/sandbox-agent/v1/commands` for its commands, and posts its report every 15 seconds and each command's result. Every request is signed with its key (pyo-proto `agentauth`, as agents do on Cloud).
 5. **Use.** Browsers and SDKs on the tailnet call the daemon at `https://<server>.<tailnet>.ts.net:7443` with sandbox tokens from Pyo Cloud, as they call `http://<ip>:7070` today.
 
 Self-hosted keeps today's flow: the door join, and Pyo calling the daemon. The outbound mode is on when `sandbox.sh` gets `--pyo-url` instead of `--pyo`. Pyo gives `--pyo-url` only on a hosted Pyo.
@@ -60,7 +60,7 @@ Self-hosted keeps today's flow: the door join, and Pyo calling the daemon. The o
 
 - **What it is.** An Ed25519 key made on the server (`/var/lib/pyo-sandbox/key`, root, mode 0600, outside every sandbox). Pyo Cloud keeps only its public half.
 - **What it can do.** Fetch that server's own commands, post that server's report and results, renew its own key. Nothing else: no team API, no other server, no agent route.
-- **Lifetime.** Good for a day. The daemon swaps in a new key at half that (`/sandbox-agent/renew-key`). The old one stays good for a few minutes, as for agents.
+- **Lifetime.** Good for a day. The daemon swaps in a new key at half that (`/api/sandbox-agent/v1/renew-key`). The old one stays good for a few minutes, as for agents.
 - **Revocation.** Removing the server deletes its keys at once. **Reset access** on the server's menu revokes its keys and gives a new join command for the same server. A server that stays offline past its key's day has to join again with a new code.
 
 ### The join code
@@ -119,13 +119,80 @@ Hetzner sandbox servers on Cloud are not in this. Their first boot uses Pyo's do
 - **Exec through the channel.** API and MCP exec wait for the daemon's next poll. Long polls keep this under a second, but long-running execs need a cap and a clear timeout message.
 - **Metering trust.** Usage comes from the server's own report. A breached server could under-report. It matters only if sandboxes are billed by use.
 
-## Decisions needed
+## Decisions (2026-11-24)
 
-1. The signer signs sandbox commands with a new prefix and `sbs_` subjects. Yes?
-2. A machine that runs untrusted code holds a short-lived, revocable credential for Pyo Cloud, scoped to its own channel. Accept?
-3. The command key comes in the join command, as for agents (trust on first use). Or pin Pyo Cloud's signer key in the release, which is stronger but needs a release to rotate it?
-4. Desktop off the tailnet stays unavailable for now. Yes?
-5. Hetzner sandbox servers on Cloud: in 0.51.1 or after?
+1. The signer signs sandbox commands under a new prefix (`pyosbx1.`), for one server (`sbs_…`) and its team, with a sequence number per server and an expiry.
+2. A sandbox server holds its own short-lived, revocable credential: an Ed25519 key it makes and registers at join, good for about a day, renewed by itself, revoked by **Reset access** or when the server is removed. It opens only that server's command channel.
+3. The command key comes in the join command (trust on first use), as for agents.
+4. The desktop works only from devices on the team's tailnet for now.
+5. Hetzner sandbox servers on Cloud are out of scope (0.52.0).
+
+Self-hosted keeps today's flow. This is only for a multi-tenant Pyo (`hosted()`), and only for teams with their own Tailscale.
+
+## Stages
+
+1. **API** (built): join codes, the join, the server's keys, the command queue and long poll, results, reports, Reset access, tests.
+2. **Daemon**: the outbound client and its HTTPS listener. In the API, a `Daemon` that queues instead of calling for outbound servers, so placement, templates, edge certificates and exec work over the channel.
+3. **sandbox.sh and the dashboard**, with the docs.
+4. **Pyo Cloud's signer**, then end to end on staging.
+
+### What stage 1 settled
+
+- The channel lives at `/api/sandbox-agent/v1`, beside `/api/agent/v1`, not under `/api/v1` (that's for people and API keys). Pyo mounts it only when it's hosted.
+- The Tailscale key is made with the join code, as in step 1 above. The server is on the tailnet before it joins Pyo, so the join can check it's there.
+- The `tag:pyo` check: the join's tailnet name must end in the team's tailnet suffix, and its hostname must be one of the `tag:pyo` machines in the holder's last sync. A server not listed yet gets 409 and the code keeps working. Pyo asks the holder to read the tailnet again with its next pass (about 20 seconds). Every other refusal burns the code.
+- Commands are kept sealed (they carry env values and certificate keys) and dropped once answered. A command waits at most 10 minutes for the server, then 10 more for its answer. Answered ones go after a day.
+- A daemon that restarts (a new `x-pyo-sandbox-instance`) gets nothing again: what went to the process before fails with "The sandbox server restarted before it answered." Running a create twice is worse than asking again.
+- Until stage 2, an outbound server takes no new sandboxes (placement skips it), and the runner doesn't call it. Its report comes in over the channel.
+
+## Interface for stages 2 to 4
+
+### The API (stage 1, for the dashboard)
+
+| Operation | Request | Answer |
+|---|---|---|
+| `createSandboxJoinCode` | `POST /api/v1/sandbox-servers/join-codes` `{teamId, name, edgeDomain?}` | `{server, command, expiresAt, pyoUrl}` |
+| `resetSandboxServerAccess` | `POST /api/v1/sandbox-servers/{id}/reset-access` | the same, for the same server |
+
+- Owners and admins, full API keys. Not MCP tools: the command carries a Tailscale key.
+- Self-hosted answers 409 ("This Pyo adds sandbox servers with addSandboxServer"). A team without Tailscale gets 400. At most 20 codes per team an hour (429).
+- `server` (as `listSandboxServers` shows it) has `outbound` and `tailnetName`.
+- The command is, exactly:
+
+  ```text
+  curl -fsSL <scripts>/sandbox.sh | bash -s -- --pyo-url '<url>' --server '<sbs_…>' --name '<name>' --code '<code>' --tailscale-key '<key>' --command-key '<keys>' --version '<version>' [--edge-domain '<domain>']
+  ```
+
+  `<url>` is Pyo's `PYO_AGENT_API_URL`. `<keys>` are the signer's public keys, base64url and comma separated.
+
+### sandbox.sh (stage 3)
+
+- Takes the flags above. `--pyo-url` instead of `--pyo` means the outbound mode.
+- Joins the tailnet with the key (`tag:pyo`, hostname = the name), gets the certificate for its tailnet name with `tailscale cert` and sets a renewal timer, installs the daemon.
+- Hands the code and the command key to the daemon in a root-only file, never in its arguments.
+
+### The daemon (stage 2)
+
+Wire types are pyo-proto `sandbox::outbound`. Paths are under `<url>/api/sandbox-agent/v1`.
+
+1. **Join.** Make an Ed25519 key (`/var/lib/pyo-sandbox/key`, root, 0600). `POST /join` with `JoinRequest`: `serverId`, `code`, `publicKey`, `address` (tailnet IP), `hostname` (`tailscale status` Self.HostName), `tailnetName` (Self.DNSName), `jailUid`, `jailGid`, `capability`.
+   - 200: `JoinAnswer` with `serverId`, `teamId`, `keyId`, `notAfter`, `commandKeys` and `config` (the self-hosted config, plus `outbound: {pyoUrl, teamId, tailnetName}`). Refuse to go on when `commandKeys` differ from `--command-key`.
+   - 409: not listed on the tailnet yet. Ask again every 5 seconds until the code runs out.
+   - 403, 422, 429: stop and print the message.
+2. **Sign every other request** as agents do (pyo-proto `agentauth`): `pyo-agent-key: <keyId>` and `pyo-agent-signature: t=…,n=…,s=…` over the method, the path with its query, the time, a new nonce and the body's SHA-256. The clock must be within a minute of Pyo's.
+3. **Renew** at half the key's life: `POST /renew-key {publicKey}` with the current key, answer `{keyId, notAfter}`. The old key works 15 more minutes.
+4. **Poll** `GET /commands?wait=25` with `x-pyo-sandbox-instance: <random per process>`. Each `CommandEnvelope` is `{id, kind, signed}`. Check it with pyo-proto `TrustedKeys::verify_sandbox(signed, id, serverId, teamId, lastSeq, now)` (the `command-signing` feature, new for pyo-sandbox), keep `lastSeq` on disk, run the `DaemonCommand` in `signed.command`. Refused: answer an `error` result with code `forbidden` and the reason.
+5. **Answer** `POST /commands/{id}` with the `DaemonResult`. A 404 means it isn't wanted any more: drop it.
+6. **Report** `POST /report` with the `ServerReport` every 15 seconds.
+7. **401** with "This server's key is unknown, expired or revoked…": stop polling and reporting, keep the sandboxes, and log that it needs a new join command. Other failures: back off from 1 to 30 seconds.
+8. **HTTPS** on `<tailnetName>:7443` with the `tailscale cert` certificate (reloaded when it changes), the same API and pages as :7070, CORS and Private Network Access for the dashboard's origin.
+
+### Pyo Cloud (stage 4)
+
+- `RemoteSigner` implements `CommandSigner::sign_sandbox(server_id, team_id, items)`. Until then the default refuses, so polls answer 503 and commands wait.
+- The signer gets an endpoint like `/v1/sign-sandbox {serverId, teamId, items}` → `{signatures}`. It checks `serverId` starts with `sbs_` and `teamId` is set, keeps a sequence per server that only grows, signs `pyosbx1.` + base64url(`SandboxClaims`) for 10 minutes, rate-limits per server, and keeps its deny list by kind. Its session key's delegation adds the purpose `sandboxCommands`.
+- The agent host's Cloudflare rule allows `/api/sandbox-agent/` next to `/api/agent/`, `/api/builder/` and `/api/static/`.
+- `PYO_AGENT_API_URL` is the public agent URL: it's what `--pyo-url` carries.
 
 ## Considered and not chosen
 
