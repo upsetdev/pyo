@@ -238,6 +238,8 @@ Wire types are pyo-proto `sandbox::outbound`. Paths are under `<url>/api/sandbox
 
 ## Self-hosted
 
+Status: built 2026-11-24, with unit, Postgres and end-to-end tests (KVM, in CI). The staging test on throwaway servers is next.
+
 Decided 2026-11-24: in 0.51.1 a self-hosted Pyo's sandbox servers use the same channel as Pyo Cloud's. New servers join and get their work over `/api/sandbox-agent/v1`. Pyo stops calling daemons for them. Servers that joined before keep the direct path for one release.
 
 ### Signing
@@ -255,7 +257,7 @@ The join command's `--pyo-url` is, first of:
 
 1. **Pyo's tailnet address**, when the server joins Pyo's own tailnet: the installation's servers, and teams with no Tailscale of their own or whose tailnet is Pyo's. That's `https://<Pyo's name>.<tailnet>.ts.net`, or `http://<Pyo's tailnet IP>:8000` before Pyo has its HTTPS name. Clusters' agents reach Pyo there too.
 2. **Pyo's public HTTPS address**, for a team on a tailnet of its own: the public dashboard while it's open, or `PYO_PUBLIC_API_URL`.
-3. **Neither:** the add is refused with "Pyo isn't reachable from your team's tailnet. Open Pyo's public dashboard in Settings, then add the server again." Such a server can't reach Pyo's door today either, so nothing that works now stops working.
+3. **Neither:** the add is refused with "Pyo isn't reachable from your team's tailnet. Turn on Public dashboard on the Tailscale card, then add the server again." Such a server can't reach Pyo's door today either, so nothing that works now stops working.
 
 Why the tailnet first: a self-hosted Pyo may have no public address. Sandbox servers need a tailnet anyway. Traffic stays inside WireGuard. And an admin can close the public dashboard at any time.
 
@@ -296,6 +298,13 @@ Why the tailnet first: a self-hosted Pyo may have no public address. Sandbox ser
 |---|---|---|
 | **Team** | New servers join outbound. The URL is Pyo's tailnet address when the team uses Pyo's tailnet, else Pyo's public address. Commands signed by the local signer, for that server and team. Older servers keep the direct path until **Update** | Unchanged from stage 3: the build's signer, `PYO_AGENT_API_URL`, `createSandboxJoinCode` |
 | **Global** | The installation's servers join outbound on Pyo's tailnet, with the team `installation` in their claims and no team on their rows. Every team may use them, as today | None, as before |
+
+### What building it settled
+
+- **`Mode`.** `resetSandboxServerAccess` and the join take hosted or self-hosted as an input (`outbound::Mode`, `hosted` on `join`), and self-hosted's addresses as `Where`, so tests cover both on one Pyo.
+- **The CLI** shows "needs update" next to the state of such a server in `pyo sandbox servers ls`.
+- **The door** reads an outbound server's code as gone, so a code for the channel never makes a door config.
+- **The installation's servers** in the e2e: they're covered against Postgres. The e2e moves a team's server.
 
 ### Work
 
