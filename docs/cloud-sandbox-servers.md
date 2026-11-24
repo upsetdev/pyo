@@ -1,6 +1,6 @@
 # Sandbox servers on Pyo Cloud
 
-Design for 0.51.1. Status: approved 2026-11-24. Stage 1 (the API) is built. The chosen approach is (b): the sandbox server calls out to Pyo Cloud.
+Design for 0.51.1. Status: approved 2026-11-24. Stage 1 (the API) and stage 2 (the daemon) are built. Stages 3 (sandbox.sh and the dashboard) and 4 (Pyo Cloud's signer, then end to end on staging) are next. The chosen approach is (b): the sandbox server calls out to Pyo Cloud.
 
 ## Goal
 
@@ -132,7 +132,7 @@ Self-hosted keeps today's flow. This is only for a multi-tenant Pyo (`hosted()`)
 ## Stages
 
 1. **API** (built): join codes, the join, the server's keys, the command queue and long poll, results, reports, Reset access, tests.
-2. **Daemon**: the outbound client and its HTTPS listener. In the API, a `Daemon` that queues instead of calling for outbound servers, so placement, templates, edge certificates and exec work over the channel.
+2. **Daemon** (built): the outbound client and its HTTPS listener. In the API, a `Daemon` that queues instead of calling for outbound servers, so placement, templates, edge certificates and exec work over the channel.
 3. **sandbox.sh and the dashboard**, with the docs.
 4. **Pyo Cloud's signer**, then end to end on staging.
 
@@ -144,6 +144,19 @@ Self-hosted keeps today's flow. This is only for a multi-tenant Pyo (`hosted()`)
 - Commands are kept sealed (they carry env values and certificate keys) and dropped once answered. A command waits at most 10 minutes for the server, then 10 more for its answer. Answered ones go after a day.
 - A daemon that restarts (a new `x-pyo-sandbox-instance`) gets nothing again: what went to the process before fails with "The sandbox server restarted before it answered." Running a create twice is worse than asking again.
 - Until stage 2, an outbound server takes no new sandboxes (placement skips it), and the runner doesn't call it. Its report comes in over the channel.
+
+### What stage 2 settled
+
+- **The join is its own step.** `pyo-sandbox join` joins and writes the config, then `pyo-sandbox serve` works. sandbox.sh runs the join, so it can show Pyo's answer to the person who ran the command.
+- **The server's files.** Its key, the key's id and when it ends are in `/var/lib/pyo-sandbox/key`. Its server, team, command keys and last sequence are in `/var/lib/pyo-sandbox/outbound.json`. Both are root's, mode 0600, and replaced whole by a rename. The sequence is kept before a command runs, so a crash never runs it twice. A new join of the same server keeps its last sequence.
+- **Commands run side by side.** The daemon checks them one at a time, in order, then runs each in its own task. A long exec doesn't hold up a delete.
+- **A refused command** is answered with an `error` result, code `forbidden`, and "The sandbox server refused the command: <why>." The daemon logs it too.
+- **New command kinds** for Pyo's own calls that aren't commands on a self-hosted server: `exec` (`{id, request}`, answered `{type: exec, result}`), `readFile` (`{id, path}`, answered `{type: file, data}` in base64) and `writeFile` (`{id, path, data}` in base64, answered `{type: written, bytes}`). A self-hosted daemon takes them on `POST /v1/commands` too, with the token's `exec` or `files` scope.
+- **Limits over the channel.** An exec runs at most 5 minutes and keeps 1 MiB of each output (`truncated` past that). Files go up to 2 MiB. A command's JSON goes up to 3 MiB. Bigger files go from a device on the tailnet, and the error says so.
+- **Where clients reach it.** For an outbound server, `connection.url` and `connection.webUrl` are `https://<tailnetName>:7443`, and so is a sandbox's `url` in lists.
+- **Templates.** After each report over the channel, Pyo asks the server for the templates it lacks and to delete the ones Pyo dropped, as the runner does for the servers it calls. A server pulls template images from their registries itself. Images in Pyo's own registry don't reach it, as that registry is on Pyo's tailnet. Public images do, `base` among them.
+- **Revocation.** On the 401 with "This server's key is unknown, expired or revoked…" (pyo-proto `outbound::KEY_GONE`), or once its key's time is over, the daemon stops polling, reporting and renewing, and logs "Pyo no longer takes this server's key…". It keeps serving its sandboxes on the tailnet.
+- **Removing an outbound server** doesn't delete its sandboxes, as in stage 1: its key stops working at once. They end at their lifetime, or with `sandbox.sh --uninstall`.
 
 ## Interface for stages 2 to 4
 
@@ -170,6 +183,11 @@ Self-hosted keeps today's flow. This is only for a multi-tenant Pyo (`hosted()`)
 - Takes the flags above. `--pyo-url` instead of `--pyo` means the outbound mode.
 - Joins the tailnet with the key (`tag:pyo`, hostname = the name), gets the certificate for its tailnet name with `tailscale cert` and sets a renewal timer, installs the daemon.
 - Hands the code and the command key to the daemon in a root-only file, never in its arguments.
+- What the daemon takes (built in stage 2):
+  - The join file, `/etc/pyo-sandbox/join.json`, root only (0600): `{"pyoUrl", "serverId", "code", "commandKey", "jailUid", "jailGid"}`, from `--pyo-url`, `--server`, `--code`, `--command-key` and the `pyo-sandbox` user. The join removes it once it worked.
+  - `pyo-sandbox join --config /etc/pyo-sandbox/config.json --join /etc/pyo-sandbox/join.json --capability <detect's report>`. It reads `tailscale status --json` (another binary with `PYO_SANDBOX_TAILSCALE`), prints "Waiting for your tailnet to list this server…" while Pyo answers 409, and "Joined Pyo as <id>." at the end. It exits 1 with "Pyo refused this server. <why>" on a refusal, and when the code runs out. Run it after `local.json` is written: the key goes in the pool that names.
+  - The certificate for the tailnet name in `/etc/pyo-sandbox/tailnet/cert.pem` and `key.pem` (`tailscale cert --cert-file … --key-file … <name>`). The daemon reads them again within 30 seconds of a change, so the renewal timer needs no restart. `tailnetHttps` in `local.json` (`{listen, cert, key}`) changes the defaults.
+  - Then `pyo-sandbox serve`, as today. It listens on `<tailnet IP>:7070` as before and on `<tailnet IP>:7443` with HTTPS.
 
 ### The daemon (stage 2)
 
@@ -187,10 +205,16 @@ Wire types are pyo-proto `sandbox::outbound`. Paths are under `<url>/api/sandbox
 7. **401** with "This server's key is unknown, expired or revoked…": stop polling and reporting, keep the sandboxes, and log that it needs a new join command. Other failures: back off from 1 to 30 seconds.
 8. **HTTPS** on `<tailnetName>:7443` with the `tailscale cert` certificate (reloaded when it changes), the same API and pages as :7070, CORS and Private Network Access for the dashboard's origin.
 
+### The dashboard (stage 3)
+
+- For a server with `outbound`, the terminal, files and desktop use the sandbox's `connection.url` and `webUrl` (`https://<tailnetName>:7443`) as they use the plain URL today. Off the tailnet that address doesn't answer: show "Opens on your tailnet."
+- API and MCP exec, `read_file` and `write_file` work from anywhere, through the channel, within the limits in "What stage 2 settled".
+
 ### Pyo Cloud (stage 4)
 
 - `RemoteSigner` implements `CommandSigner::sign_sandbox(server_id, team_id, items)`. Until then the default refuses, so polls answer 503 and commands wait.
 - The signer gets an endpoint like `/v1/sign-sandbox {serverId, teamId, items}` → `{signatures}`. It checks `serverId` starts with `sbs_` and `teamId` is set, keeps a sequence per server that only grows, signs `pyosbx1.` + base64url(`SandboxClaims`) for 10 minutes, rate-limits per server, and keeps its deny list by kind. Its session key's delegation adds the purpose `sandboxCommands`.
+- The kinds it signs are the `type`s of pyo-proto's `DaemonCommand`: `create`, `delete`, `pause`, `resume`, `setTtl`, `get`, `list`, `report`, `snapshotTemplate`, `openPort`, `closePort`, `setEdgeCert`, `prepareTemplate`, `deleteTemplate`, `template`, and from stage 2 `exec`, `readFile` and `writeFile`.
 - The agent host's Cloudflare rule allows `/api/sandbox-agent/` next to `/api/agent/`, `/api/builder/` and `/api/static/`.
 - `PYO_AGENT_API_URL` is the public agent URL: it's what `--pyo-url` carries.
 
