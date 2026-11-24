@@ -2595,7 +2595,7 @@ services:
     x-pyo:
       domains: [w.example.com]
       health: tcp
-      placement: { servers: [fal1], tags: [eu] }
+      placement: { servers: [server-1], tags: [eu] }
       behindCdn: none
 "#;
         let p = plan(&Input {
@@ -2629,7 +2629,7 @@ services:
         assert!(warned(&p, Some("worker"), "x-pyo.health"), "no port to check");
         assert_eq!(
             worker.placement,
-            Some(json!({ "servers": ["fal1"], "tags": ["eu"] }))
+            Some(json!({ "servers": ["server-1"], "tags": ["eu"] }))
         );
         assert!(worker.manages("behindCdn") && worker.behind_cdn.is_none());
     }

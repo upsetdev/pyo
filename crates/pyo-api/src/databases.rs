@@ -2642,7 +2642,7 @@ mod tests {
 
     #[test]
     fn connection_variables() {
-        assert_eq!(namespace_for("team_q9pnllqh1p5f"), "pyo-db-q9pnllqh1p5f");
+        assert_eq!(namespace_for("team_example123"), "pyo-db-example123");
         let v = variables(&db("postgres", true, false), "pw", "", "");
         assert_eq!(
             v[0],

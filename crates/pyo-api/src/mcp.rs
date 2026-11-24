@@ -2094,15 +2094,15 @@ mod tests {
                            "servers": [{ "clusterId": "c1", "location": "Yogyakarta, ID" }, { "clusterId": "c1", "location": "Frankfurt, DE" }] });
         assert_eq!(cluster_at(&snap, "t", "DE").unwrap().1, "Frankfurt, DE");
         // The cluster's free-domain address, never its load balancer's private one.
-        let c = json!({ "freeDomainAddress": "public", "freeDomainIp": "129.226.158.31", "capabilities": { "loadBalancerIPs": ["10.3.8.13"] } });
+        let c = json!({ "freeDomainAddress": "public", "freeDomainIp": "203.0.113.31", "capabilities": { "loadBalancerIPs": ["10.3.8.13"] } });
         assert_eq!(
             free_hostname(&c, "nginx", "web").unwrap(),
-            "nginx-web.129.226.158.31.nip.io"
+            "nginx-web.203.0.113.31.nip.io"
         );
-        let c = json!({ "freeDomainAddress": "tailscale", "freeDomainIp": "100.101.67.2" });
+        let c = json!({ "freeDomainAddress": "tailscale", "freeDomainIp": "100.64.0.2" });
         assert_eq!(
             free_hostname(&c, "nginx", "web").unwrap(),
-            "nginx-web.100.101.67.2.nip.io"
+            "nginx-web.100.64.0.2.nip.io"
         );
         let c = json!({ "freeDomainAddress": "public", "freeDomainIp": null, "capabilities": { "loadBalancerIPs": ["10.3.8.13"] } });
         assert!(

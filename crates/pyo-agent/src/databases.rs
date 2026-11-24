@@ -762,8 +762,8 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(
-            team_of(&ns("pyo-db-q9pnllqh1p5f", json!({}))),
-            "team_q9pnllqh1p5f"
+            team_of(&ns("pyo-db-example123", json!({}))),
+            "team_example123"
         );
         assert_eq!(
             team_of(&ns("pyo-db-x", json!({ "pyo/team-id": "team_real" }))),

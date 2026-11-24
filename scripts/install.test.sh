@@ -242,7 +242,7 @@ reset() {
 lo='1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever'
 k3s_cards='5: cni0    inet 10.42.0.1/24 brd 10.42.0.255 scope global cni0\       valid_lft forever preferred_lft forever
 6: flannel.1    inet 10.42.0.0/32 scope global flannel.1\       valid_lft forever preferred_lft forever'
-ts_card='3: tailscale0    inet 100.101.67.2/32 scope global tailscale0\       valid_lft forever preferred_lft forever'
+ts_card='3: tailscale0    inet 100.64.0.2/32 scope global tailscale0\       valid_lft forever preferred_lft forever'
 
 # A Tencent Cloud server: a private address on its card, the public IP in
 # front of it (1:1 NAT) from the metadata, on a tailnet already, the HTTPS
@@ -252,10 +252,10 @@ cards="$lo
 2: eth0    inet 10.3.8.13/22 brd 10.3.11.255 scope global eth0\       valid_lft forever preferred_lft forever
 $ts_card
 $k3s_cards"
-route=eth0 cloud=tencent cloud_ip=43.156.1.2 ts_ip=100.101.67.2 ts_answers=1
+route=eth0 cloud=tencent cloud_ip=43.156.1.2 ts_ip=100.64.0.2 ts_answers=1
 cert="pyo.43.156.1.2.nip.io True- Issued- 2026-11-17T09:00:00Z "
 out=$(pyo_addresses 300)
-want=$'\nOpen Pyo:\n  ➜  Public:   https://pyo.43.156.1.2.nip.io\n  ➜  Tailnet:  http://100.101.67.2:8000\n  ➜  Network:  http://10.3.8.13:8000\n  ➜  Local:    http://localhost:8000'
+want=$'\nOpen Pyo:\n  ➜  Public:   https://pyo.43.156.1.2.nip.io\n  ➜  Tailnet:  http://100.64.0.2:8000\n  ➜  Network:  http://10.3.8.13:8000\n  ➜  Local:    http://localhost:8000'
 same() { if [ "$1" = "$2" ]; then echo same; else printf '%s\n--- wanted:\n%s\n' "$1" "$2"; fi; }
 check "a cloud server behind NAT: the whole block" "$(same "$out" "$want")" "^same$" has
 check "issued: no wait" "$out" "Waiting" lacks
@@ -344,7 +344,7 @@ for c in alibaba:47.88.1.2 scaleway:51.15.1.2; do
   cloud=${c%%:*} cloud_ip=${c#*:}
   check "$cloud: the public IP from the metadata" "$(addr_cloud_ip)" "^${cloud_ip//./\\.}$" has
 done
-for junk in "<html>404</html>" 999.1.2.3 10.3.8.13 100.101.67.2 ""; do
+for junk in "<html>404</html>" 999.1.2.3 10.3.8.13 100.64.0.2 ""; do
   reset
   cloud=tencent cloud_ip=$junk
   check "metadata answering \"$junk\" is no public IP" "$(addr_cloud_ip)" "." lacks
@@ -391,7 +391,7 @@ $k3s_cards
 10: lxdbr0    inet 10.10.10.1/24 scope global lxdbr0
 11: veth12ab@if10    inet 10.42.0.9/32 scope global veth12ab
 $ts_card"
-route=wlp0s20f3 ts_ip=100.101.67.2
+route=wlp0s20f3 ts_ip=100.64.0.2
 out=$(pyo_addresses 300)
 want=$'\nOpen Pyo:\n  ➜  Network:  http://192.168.1.23:8000\n  ➜  Local:    http://localhost:8000\nFor an HTTPS address, set up Tailscale in Pyo.'
 check "a laptop: one Network line, the hint" "$(same "$out" "$want")" "^same$" has
@@ -400,7 +400,7 @@ check "a laptop: no public line" "$out" "Public" lacks
 # Pyo answers on its Tailscale address.
 ts_answers=1
 out=$(pyo_addresses 300)
-check "a laptop on a tailnet: the Tailnet line" "$out" "^  ➜  Tailnet:  http://100\.101\.67\.2:8000$" has
+check "a laptop on a tailnet: the Tailnet line" "$out" "^  ➜  Tailnet:  http://100\.64\.0\.2:8000$" has
 check "a laptop on a tailnet: no Tailscale hint" "$out" "set up Tailscale" lacks
 # Pyo's own name on the tailnet comes first.
 meta='{"version":"9.9.9","publicUrl":"https://pyo.tail1234.ts.net"}'
@@ -410,7 +410,7 @@ check "only one Tailnet line" "$(grep -c Tailnet <<<"$out")" "^1$" has
 
 # No ip command: hostname -I, without k3s's or docker's addresses.
 reset
-ips="10.0.2.15 10.42.0.0 10.42.0.1 172.17.0.1 100.101.67.2 fd7a:115c::1"
+ips="10.0.2.15 10.42.0.0 10.42.0.1 172.17.0.1 100.64.0.2 fd7a:115c::1"
 out=$(pyo_addresses 300)
 check "hostname -I: the network address" "$out" "^  ➜  Network:  http://10\.0\.2\.15:8000$" has
 check "hostname -I: one Network line" "$(grep -c Network <<<"$out")" "^1$" has
@@ -458,7 +458,7 @@ check "colors" "$out" $'^  \033\\[32m➜\033\\[0m  \033\\[1mPublic:\033\\[0m   \
 out=$(NO_COLOR=1 addr_line Local http://localhost:8000)
 check "NO_COLOR" "$out" "^  ➜  Local:    http://localhost:8000$" has
 eval "$addr_color_was"
-out=$(addr_line Tailnet http://100.101.67.2:8000)
+out=$(addr_line Tailnet http://100.64.0.2:8000)
 check "no terminal: plain" "$out" $'\033' lacks
 
 # pyo-reset-login's links: only addresses that work now.

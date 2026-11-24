@@ -1641,7 +1641,7 @@ mod tests {
             "pyo-gateway",
             "pyo-waf",
             "pyo-databases",
-            "pyo-db-q9pnllqh1p5f",
+            "pyo-db-example123",
             "cert-manager",
         ] {
             assert!(
@@ -2211,7 +2211,7 @@ mod tests {
             "10.3.8.13",
             "172.17.0.1",
             "192.168.1.5",
-            "100.101.67.2",
+            "100.64.0.2",
             "127.0.0.1",
             "169.254.169.254",
             "0.1.2.3",

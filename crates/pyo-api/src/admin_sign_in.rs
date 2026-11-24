@@ -399,20 +399,20 @@ mod tests {
         // No address: nothing to match.
         assert!(!l.allows(&Source::default()));
         // The tailnet isn't on the list.
-        assert!(!l.allows(&src("100.101.102.103", true)));
+        assert!(!l.allows(&src("100.64.0.103", true)));
     }
 
     #[test]
     fn tailnet_only() {
         let l = limit(true, &[]);
         assert!(l.is_on());
-        assert!(l.allows(&src("100.101.102.103", true)));
+        assert!(l.allows(&src("100.64.0.103", true)));
         // A Tailscale address that didn't come over the tailnet.
-        assert!(!l.allows(&src("100.101.102.103", false)));
+        assert!(!l.allows(&src("100.64.0.103", false)));
         assert!(!l.allows(&src("203.0.113.7", false)));
         // Both: either will do.
         let both = limit(true, &["203.0.113.7"]);
-        assert!(both.allows(&src("100.101.102.103", true)));
+        assert!(both.allows(&src("100.64.0.103", true)));
         assert!(both.allows(&src("203.0.113.7", false)));
         assert!(!both.allows(&src("203.0.113.9", false)));
     }
@@ -441,7 +441,7 @@ mod tests {
         let e = keeps(&limit(true, &[]), &here).unwrap_err();
         assert_eq!(e.message, "This would lock you out. Add your address 203.0.113.7 first.");
         assert!(keeps(&limit(false, &["198.51.100.1"]), &here).is_err());
-        assert!(keeps(&limit(true, &[]), &src("100.101.102.103", true)).is_ok());
+        assert!(keeps(&limit(true, &[]), &src("100.64.0.103", true)).is_ok());
         assert!(keeps(&limit(true, &[]), &Source::default()).is_err());
     }
 
@@ -485,8 +485,8 @@ mod tests {
     fn the_tailnet_through_the_tailnet_gateway() {
         // The tailnet Gateway (a pod) appends the device's own address.
         assert_eq!(
-            source("10.42.0.7:5000", TS, &[("x-forwarded-for", "100.101.102.103")]),
-            src("100.101.102.103", true)
+            source("10.42.0.7:5000", TS, &[("x-forwarded-for", "100.64.0.103")]),
+            src("100.64.0.103", true)
         );
         assert_eq!(
             source("10.42.0.7:5000", TS, &[("x-forwarded-for", "fd7a:115c:a1e0::5")]),
@@ -494,28 +494,28 @@ mod tests {
         );
         // Port and a trailing dot in the host name.
         assert_eq!(
-            source("10.42.0.7:5000", "pyo.tail1234.ts.net.:443", &[("x-forwarded-for", "100.101.102.103")]),
-            src("100.101.102.103", true)
+            source("10.42.0.7:5000", "pyo.tail1234.ts.net.:443", &[("x-forwarded-for", "100.64.0.103")]),
+            src("100.64.0.103", true)
         );
         // HTTP/2: no Host header, the URI's authority.
         let mut r = axum::http::Request::builder()
             .uri(format!("https://{TS}/api/auth/login"))
-            .header("x-forwarded-for", "100.101.102.103")
+            .header("x-forwarded-for", "100.64.0.103")
             .body(())
             .unwrap();
         r.extensions_mut()
             .insert(ConnectInfo("10.42.0.7:5000".parse::<SocketAddr>().unwrap()));
-        assert_eq!(Source::from_parts(&r.into_parts().0), src("100.101.102.103", true));
+        assert_eq!(Source::from_parts(&r.into_parts().0), src("100.64.0.103", true));
     }
 
     #[test]
     fn spoofed_headers_from_an_untrusted_peer_never_count() {
         // Straight from the internet, whatever it claims.
         for h in [
-            ("x-forwarded-for", "100.101.102.103"),
-            ("cf-connecting-ip", "100.101.102.103"),
-            ("x-real-ip", "100.101.102.103"),
-            ("forwarded", "for=100.101.102.103"),
+            ("x-forwarded-for", "100.64.0.103"),
+            ("cf-connecting-ip", "100.64.0.103"),
+            ("x-real-ip", "100.64.0.103"),
+            ("forwarded", "for=100.64.0.103"),
         ] {
             assert_eq!(source("203.0.113.9:5000", TS, &[h]), src("203.0.113.9", false), "{h:?}");
         }
@@ -535,7 +535,7 @@ mod tests {
         // A server's own end of the pod network (pyo-forward's :8000, which
         // admits local and private peers too) passes on nothing, and isn't
         // the tailnet even with a tailnet name.
-        let s = source("10.42.0.1:5000", TS, &[("x-forwarded-for", "100.101.102.103")]);
+        let s = source("10.42.0.1:5000", TS, &[("x-forwarded-for", "100.64.0.103")]);
         assert_eq!(s, src("10.42.0.1", false));
     }
 
@@ -554,7 +554,7 @@ mod tests {
         );
     }
 
-    /// Pyo Cloud: cloudflared, then Pyo Ops' Gateway, both pods. The
+    /// Pyo Cloud: cloudflared, then its Gateway, both pods. The
     /// visitor is what Cloudflare's edge put last in X-Forwarded-For, the
     /// address it also sends as CF-Connecting-IP.
     #[test]

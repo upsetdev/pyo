@@ -602,7 +602,7 @@ pub struct GatewayPortsTaken {
 }
 
 impl GatewayPortsTaken {
-    /// "Ports 80 and 443 are in use on misc-ten-sin4", as Pyo shows it.
+    /// "Ports 80 and 443 are in use on server-1", as Pyo shows it.
     pub fn text(&self) -> String {
         let ports: Vec<String> = self.ports.iter().map(u16::to_string).collect();
         let list = match ports.as_slice() {
@@ -2889,12 +2889,12 @@ mod location_tests {
     #[test]
     fn gateway_ports_taken_reads_plainly() {
         let t = |ports: &[u16]| {
-            GatewayPortsTaken { server: "misc-ten-sin4".into(), ports: ports.to_vec(), by: String::new() }.text()
+            GatewayPortsTaken { server: "server-1".into(), ports: ports.to_vec(), by: String::new() }.text()
         };
-        assert_eq!(t(&[80, 443]), "Ports 80 and 443 are in use on misc-ten-sin4");
-        assert_eq!(t(&[443]), "Port 443 is in use on misc-ten-sin4");
-        assert_eq!(t(&[80, 443, 8443]), "Ports 80, 443 and 8443 are in use on misc-ten-sin4");
-        assert_eq!(t(&[]), "The gateway's ports are in use on misc-ten-sin4");
+        assert_eq!(t(&[80, 443]), "Ports 80 and 443 are in use on server-1");
+        assert_eq!(t(&[443]), "Port 443 is in use on server-1");
+        assert_eq!(t(&[80, 443, 8443]), "Ports 80, 443 and 8443 are in use on server-1");
+        assert_eq!(t(&[]), "The gateway's ports are in use on server-1");
         // Older agents send none.
         let caps: Capabilities = serde_json::from_value(serde_json::json!({
             "ingressController": "envoy", "loadBalancer": "servicelb", "loadBalancerIps": [],

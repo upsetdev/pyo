@@ -703,12 +703,12 @@ mod tests {
         };
         // Through the gateway (a pod): the address it appended.
         let ClientIp(ip) = ClientIp::from_request_parts(
-            &mut req("10.42.0.7:5000", "1.2.3.4, 100.101.102.103"),
+            &mut req("10.42.0.7:5000", "1.2.3.4, 100.64.0.103"),
             &(),
         )
         .await
         .unwrap();
-        assert_eq!(ip, "100.101.102.103");
+        assert_eq!(ip, "100.64.0.103");
         // Straight from the internet: the header is the client's own claim.
         let ClientIp(ip) =
             ClientIp::from_request_parts(&mut req("203.0.113.7:5000", "198.51.100.9"), &())
@@ -790,7 +790,7 @@ mod tests {
             .collect();
         let ip = |peer: &str, xff: &str| request_ip(peer, xff, &proxies);
         // A tailnet device, or anything on a private network, names nobody.
-        assert_eq!(ip("100.101.102.103", "198.51.100.9"), "100.101.102.103");
+        assert_eq!(ip("100.64.0.103", "198.51.100.9"), "100.64.0.103");
         assert_eq!(ip("192.168.1.20", "198.51.100.9"), "192.168.1.20");
         assert_eq!(ip("127.0.0.1", "198.51.100.9"), "127.0.0.1");
         // The server's end of the pod network (pyo-forward's port forward)

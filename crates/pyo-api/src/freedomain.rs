@@ -559,7 +559,7 @@ mod tests {
             "172.31.255.255",
             "192.168.1.48",
             "100.64.0.1",
-            "100.101.67.2",
+            "100.64.0.2",
             "100.127.255.255",
             "127.0.0.1",
             "169.254.169.254",
@@ -573,7 +573,7 @@ mod tests {
             assert!(!p(ip), "{ip} isn't public");
         }
         for ip in [
-            "129.226.158.31",
+            "203.0.113.31",
             "172.15.0.1",
             "172.32.0.1",
             "100.63.255.255",
@@ -583,17 +583,17 @@ mod tests {
         ] {
             assert!(p(ip), "{ip} is public");
         }
-        assert_eq!(public_v4(" 129.226.158.31 "), Some(v4("129.226.158.31")));
+        assert_eq!(public_v4(" 203.0.113.31 "), Some(v4("203.0.113.31")));
         assert_eq!(public_v4("10.3.8.13"), None);
         // nip.io names need IPv4.
         assert_eq!(public_v4("2606:4700::1111"), None);
         assert_eq!(public_v4("lb.example.com"), None);
-        assert_eq!(tailnet_v4("100.101.67.2"), Some(v4("100.101.67.2")));
+        assert_eq!(tailnet_v4("100.64.0.2"), Some(v4("100.64.0.2")));
         for ip in [
             "100.128.0.1",
             "100.63.0.1",
             "10.3.8.13",
-            "129.226.158.31",
+            "203.0.113.31",
             "fd7a:115c:a1e0::1",
         ] {
             assert_eq!(tailnet_v4(ip), None, "{ip}");
@@ -604,8 +604,8 @@ mod tests {
     /// gateway's load balancer has the private address, the agent found
     /// the public and the Tailscale ones.
     fn nat_server() -> Value {
-        json!({ "name": "dev-ten-sin0", "status": "ready", "internalIP": "10.3.8.13", "addresses": ["10.3.8.13"],
-                "publicIp": "129.226.158.31", "publicIpv4": "129.226.158.31", "tailnetIp": "100.101.67.2" })
+        json!({ "name": "server-2", "status": "ready", "internalIP": "10.3.8.13", "addresses": ["10.3.8.13"],
+                "publicIp": "203.0.113.31", "publicIpv4": "203.0.113.31", "tailnetIp": "100.64.0.2" })
     }
 
     fn cluster(public_traffic: bool, set: Option<&str>, servers: Vec<Value>) -> Cluster {
@@ -663,7 +663,7 @@ mod tests {
     fn public_mode_uses_the_public_address_never_a_private_one() {
         let c = cluster(true, Some("public"), vec![nat_server()]);
         assert_eq!(c.mode(), Mode::Public);
-        assert_eq!(c.address(), Some(v4("129.226.158.31")));
+        assert_eq!(c.address(), Some(v4("203.0.113.31")));
         // No public address known: none, never the private one.
         let private = json!({ "name": "a", "status": "ready", "internalIP": "10.3.8.13" });
         let c = cluster(true, Some("public"), vec![private]);
@@ -688,7 +688,7 @@ mod tests {
     fn tailscale_mode_uses_the_tailnet_address() {
         let c = cluster(true, Some("tailscale"), vec![nat_server()]);
         assert_eq!(c.mode(), Mode::Tailscale);
-        assert_eq!(c.address(), Some(v4("100.101.67.2")));
+        assert_eq!(c.address(), Some(v4("100.64.0.2")));
         // A server joined over Tailscale: its node address.
         let joined = json!({ "name": "b", "status": "ready", "internalIP": "100.64.0.7" });
         assert_eq!(
@@ -698,14 +698,14 @@ mod tests {
         // Public traffic off: the agent publishes the websites there all the same.
         assert_eq!(
             cluster(false, Some("tailscale"), vec![nat_server()]).address(),
-            Some(v4("100.101.67.2"))
+            Some(v4("100.64.0.2"))
         );
         // Where the agent published them comes first.
         let mut c = cluster(false, None, vec![joined, nat_server()]);
-        c.tailnet_web = vec!["100.101.67.2".into()];
+        c.tailnet_web = vec!["100.64.0.2".into()];
         assert_eq!(
             (c.mode(), c.address()),
-            (Mode::Tailscale, Some(v4("100.101.67.2")))
+            (Mode::Tailscale, Some(v4("100.64.0.2")))
         );
         // Not on a server that runs a proxy (build-only).
         let builder =
@@ -743,28 +743,28 @@ mod tests {
         let c = cluster(true, None, vec![nat_server()]);
         assert_eq!(
             (c.mode(), c.address(), c.behind_nat()),
-            (Mode::Tailscale, Some(v4("100.101.67.2")), true)
+            (Mode::Tailscale, Some(v4("100.64.0.2")), true)
         );
         assert_eq!(
             c.shown(),
-            json!({ "publicIp": "129.226.158.31", "tailnetIp": "100.101.67.2", "freeDomainAddress": "tailscale",
-                    "freeDomainIp": "100.101.67.2", "freeDomainSuffix": "100.101.67.2.nip.io", "behindNat": true })
+            json!({ "publicIp": "203.0.113.31", "tailnetIp": "100.64.0.2", "freeDomainAddress": "tailscale",
+                    "freeDomainIp": "100.64.0.2", "freeDomainSuffix": "100.64.0.2.nip.io", "behindNat": true })
         );
         // Public can still be chosen there.
         let c = cluster(true, Some("public"), vec![nat_server()]);
         assert_eq!(
             (c.mode(), c.address()),
-            (Mode::Public, Some(v4("129.226.158.31")))
+            (Mode::Public, Some(v4("203.0.113.31")))
         );
         // Public traffic off.
         let c = cluster(false, None, vec![direct_server()]);
         assert_eq!((c.mode(), c.behind_nat()), (Mode::Tailscale, false));
         // No public address known (yet).
-        let tailnet_only = json!({ "name": "a", "status": "ready", "internalIP": "10.3.8.13", "tailnetIp": "100.101.67.2" });
+        let tailnet_only = json!({ "name": "a", "status": "ready", "internalIP": "10.3.8.13", "tailnetIp": "100.64.0.2" });
         let c = cluster(true, None, vec![tailnet_only]);
         assert_eq!(
             (c.mode(), c.address(), c.behind_nat()),
-            (Mode::Tailscale, Some(v4("100.101.67.2")), false)
+            (Mode::Tailscale, Some(v4("100.64.0.2")), false)
         );
         // A choice stays, whatever is known.
         assert_eq!(
@@ -779,7 +779,7 @@ mod tests {
     #[test]
     fn the_clouds_public_ip_counts_once_reached() {
         let cloud = json!({ "name": "lighthouse", "status": "ready", "internalIP": "10.3.8.13", "addresses": ["10.3.8.13"],
-                            "cloudPublicIp": "43.156.1.2", "publicIpv4": "43.156.1.2", "tailnetIp": "100.101.67.2" });
+                            "cloudPublicIp": "43.156.1.2", "publicIpv4": "43.156.1.2", "tailnetIp": "100.64.0.2" });
         let mut c = cluster(true, None, vec![cloud.clone()]);
         assert_eq!((c.mode(), c.behind_nat()), (Mode::Tailscale, true));
         assert_eq!(c.dashboard_ip(), Some(v4("43.156.1.2")));
@@ -836,12 +836,12 @@ mod tests {
     #[test]
     fn hostnames() {
         assert_eq!(
-            hostname("whoami", "web", v4("129.226.158.31")),
-            "whoami-web.129.226.158.31.nip.io"
+            hostname("whoami", "web", v4("203.0.113.31")),
+            "whoami-web.203.0.113.31.nip.io"
         );
         assert_eq!(
-            hostname("app-", "", v4("100.101.67.2")),
-            "app.100.101.67.2.nip.io"
+            hostname("app-", "", v4("100.64.0.2")),
+            "app.100.64.0.2.nip.io"
         );
         let h = hostname(&"a".repeat(300), "ns", v4("255.255.255.255"));
         assert_eq!(h.split('.').next().unwrap().len(), 63);
@@ -850,53 +850,53 @@ mod tests {
         assert!(!crate::deploy::private_host(&hostname(
             "a",
             "b",
-            v4("129.226.158.31")
+            v4("203.0.113.31")
         )));
         assert!(crate::deploy::private_host(&hostname(
             "a",
             "b",
-            v4("100.101.67.2")
+            v4("100.64.0.2")
         )));
     }
 
     #[test]
     fn free_domains_follow_the_clusters_address() {
-        let known: Vec<IpAddr> = ["10.3.8.13", "100.101.67.2", "129.226.158.31"]
+        let known: Vec<IpAddr> = ["10.3.8.13", "100.64.0.2", "203.0.113.31"]
             .iter()
             .map(|s| s.parse().unwrap())
             .collect();
-        let public = v4("129.226.158.31");
+        let public = v4("203.0.113.31");
         let m = |h: &str, to| moved(h, &known, |_| Some(to));
         // The private address, in either form, and the older dashed form.
         assert_eq!(
             m("whoami-web.10-3-8-13.nip.io", public).as_deref(),
-            Some("whoami-web.129.226.158.31.nip.io")
+            Some("whoami-web.203.0.113.31.nip.io")
         );
         assert_eq!(
             m("whoami-web.10.3.8.13.nip.io", public).as_deref(),
-            Some("whoami-web.129.226.158.31.nip.io")
+            Some("whoami-web.203.0.113.31.nip.io")
         );
         assert_eq!(
-            m("whoami-web.129-226-158-31.nip.io", public).as_deref(),
-            Some("whoami-web.129.226.158.31.nip.io")
+            m("whoami-web.203-0-113-31.nip.io", public).as_deref(),
+            Some("whoami-web.203.0.113.31.nip.io")
         );
         // Switched to Tailscale, and back.
-        let tailnet = v4("100.101.67.2");
+        let tailnet = v4("100.64.0.2");
         assert_eq!(
-            m("app.129.226.158.31.nip.io", tailnet).as_deref(),
-            Some("app.100.101.67.2.nip.io")
+            m("app.203.0.113.31.nip.io", tailnet).as_deref(),
+            Some("app.100.64.0.2.nip.io")
         );
         assert_eq!(
-            m("app.100.101.67.2.nip.io", public).as_deref(),
-            Some("app.129.226.158.31.nip.io")
+            m("app.100.64.0.2.nip.io", public).as_deref(),
+            Some("app.203.0.113.31.nip.io")
         );
         // Labels with dots stay whole.
         assert_eq!(
             m("a.b.10.3.8.13.nip.io", public).as_deref(),
-            Some("a.b.129.226.158.31.nip.io")
+            Some("a.b.203.0.113.31.nip.io")
         );
         // Already there, someone else's address, or not a free domain: stays.
-        assert_eq!(m("whoami-web.129.226.158.31.nip.io", public), None);
+        assert_eq!(m("whoami-web.203.0.113.31.nip.io", public), None);
         assert_eq!(m("app.192.168.1.2.nip.io", public), None);
         assert_eq!(m("app.192-168-1-2.nip.io", public), None);
         assert_eq!(m("shop.example.com", public), None);
@@ -906,8 +906,8 @@ mod tests {
 
     #[test]
     fn a_free_domain_on_the_public_ip_stays_there() {
-        let public = v4("129.226.158.31");
-        let tailnet = v4("100.101.67.2");
+        let public = v4("203.0.113.31");
+        let tailnet = v4("100.64.0.2");
         let private = v4("10.3.8.13");
         // Behind NAT, so Tailscale: one added on the public IP stays, any
         // other follows the Tailscale IP.
@@ -927,10 +927,10 @@ mod tests {
         let c = cluster(true, None, vec![nat_server()]);
         let known = c.known();
         let m = |h: &str| moved(h, &known, |ip| c.home(ip));
-        assert_eq!(m("app.129.226.158.31.nip.io"), None);
+        assert_eq!(m("app.203.0.113.31.nip.io"), None);
         assert_eq!(
             m("app.10.3.8.13.nip.io").as_deref(),
-            Some("app.100.101.67.2.nip.io")
+            Some("app.100.64.0.2.nip.io")
         );
     }
 
@@ -938,18 +938,18 @@ mod tests {
     fn a_moved_domain_starts_over_on_https() {
         let mut d = json!({ "id": "dom_1", "hostname": "a.10-3-8-13.nip.io", "status": "active", "tls": "issued", "tlsMode": "auto",
                             "redirectHttps": false, "dnsCheckedAt": 1, "error": "x", "createdAt": 5 });
-        move_domain(&mut d, "a.10-3-8-13.nip.io", "a.129.226.158.31.nip.io");
+        move_domain(&mut d, "a.10-3-8-13.nip.io", "a.203.0.113.31.nip.io");
         assert_eq!(
             d,
-            json!({ "id": "dom_1", "hostname": "a.129.226.158.31.nip.io", "status": "pending_dns", "tls": "pending", "tlsMode": "auto",
+            json!({ "id": "dom_1", "hostname": "a.203.0.113.31.nip.io", "status": "pending_dns", "tls": "pending", "tlsMode": "auto",
                     "redirectHttps": true, "createdAt": 5 })
         );
         // To the tailnet: no redirect to a self-signed certificate.
-        move_domain(&mut d, "a.129.226.158.31.nip.io", "a.100.101.67.2.nip.io");
+        move_domain(&mut d, "a.203.0.113.31.nip.io", "a.100.64.0.2.nip.io");
         assert_eq!(d["redirectHttps"], false);
         // Public to public: the choice stays.
         d["redirectHttps"] = json!(false);
-        move_domain(&mut d, "a.129-226-158-31.nip.io", "a.129.226.158.31.nip.io");
+        move_domain(&mut d, "a.203-0-113-31.nip.io", "a.203.0.113.31.nip.io");
         assert_eq!(d["redirectHttps"], false);
     }
 }

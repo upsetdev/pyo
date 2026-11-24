@@ -1689,7 +1689,7 @@ SS='LISTEN 0      511          0.0.0.0:80        0.0.0.0:*    users:(("nginx",pi
         // Only this machine, or only the tailnet, reaches them: free.
         assert_eq!(
             web_ports(
-                r#"SS='LISTEN 0 4096 127.0.0.1:80 0.0.0.0:* users:(("x",pid=1,fd=3))\nLISTEN 0 4096 [::1]:443 [::]:* users:(("x",pid=1,fd=4))\nLISTEN 0 4096 100.101.102.103:443 0.0.0.0:* users:(("y",pid=2,fd=3))\nLISTEN 0 4096 [fd7a:115c:a1e0::9]:80 [::]:* users:(("y",pid=2,fd=4))\n'"#
+                r#"SS='LISTEN 0 4096 127.0.0.1:80 0.0.0.0:* users:(("x",pid=1,fd=3))\nLISTEN 0 4096 [::1]:443 [::]:* users:(("x",pid=1,fd=4))\nLISTEN 0 4096 100.64.0.103:443 0.0.0.0:* users:(("y",pid=2,fd=3))\nLISTEN 0 4096 [fd7a:115c:a1e0::9]:80 [::]:* users:(("y",pid=2,fd=4))\n'"#
             ),
             "free"
         );

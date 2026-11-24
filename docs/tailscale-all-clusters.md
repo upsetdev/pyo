@@ -39,7 +39,7 @@ The one cost of (c) is the holder going away. That's management only. Servers st
 - Names are unique per tailnet (the path is `/services/{serviceName}`), so two clusters of a team can't both have `blog` any more.
 - **Plan device count:** no API returns a tailnet's plan or allowance. Pricing says plans include 50 tagged resources, with more at $1/month (4). Pyo sees only `tag:pyo` devices (the client's tag).
 
-**Cloud signer allowlist:** it's a **deny list**, not an allowlist. `pyo-cloud/crates/cloud-signer/src/main.rs`: `SIGNER_DENY_KINDS` (default `refresh_install,upgrade_pyo`, line 242), checked in `refusal()` (line 364). Nothing in `deploy/` overrides it. `tailscale_*` kinds are already signed. `update_agent` is root-key only (`ROOT_ONLY_KINDS`, pyo-proto `signing.rs`) and limited to `SIGNER_AGENT_IMAGES`. Rate limit: `SIGNER_RATE_COMMANDS` 120 a minute, 300 burst, per cluster.
+**Cloud signer:** it signs `tailscale_*` kinds already. `update_agent` is root-key only (`ROOT_ONLY_KINDS`, pyo-proto `signing.rs`).
 
 **Sealing:** agents have no encryption key today. The `signed` mode (Cloud) has a daily Ed25519 key enrolled at `/enroll-key` (`agent_auth.rs`, `pyo.agent_keys`), and the `mtls` mode has a client certificate key (`trust.rs`, rcgen). Both only sign. Self-hosted `token` mode has no key. If sealing is ever needed (see Later), the smallest sound choice is **HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256) with ChaCha20-Poly1305**, through `rustls::crypto::aws_lc_rs::hpke` (5). rustls 0.23.46 with `aws_lc_rs` is already a direct dependency of pyo-agent, so no new crate is needed. The agent would keep the private key in a pyo-system Secret and report the public key in its heartbeat.
 

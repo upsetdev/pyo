@@ -562,7 +562,7 @@ mod tests {
     fn pods_report_their_server_and_why_they_wait() {
         let pod: Pod = serde_json::from_value(json!({
             "metadata": { "name": "pyo-tunnel-1" },
-            "spec": { "nodeName": "fal2", "containers": [] },
+            "spec": { "nodeName": "server-2", "containers": [] },
             "status": {
                 "podIP": "10.42.1.7", "podIPs": [{ "ip": "10.42.1.7" }, { "ip": "fd00::7" }],
                 "conditions": [{ "type": "Ready", "status": "False" }],
@@ -572,7 +572,7 @@ mod tests {
         }))
         .unwrap();
         let r = pod_reports(std::slice::from_ref(&pod));
-        assert_eq!(r[0].server, "fal2");
+        assert_eq!(r[0].server, "server-2");
         assert!(!r[0].ready);
         assert_eq!(r[0].restarts, 3);
         assert_eq!(r[0].reason.as_deref(), Some("ImagePullBackOff"));

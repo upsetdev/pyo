@@ -2156,7 +2156,7 @@ mod tests {
     /// those addresses only, Local (the proxy sees the visitor's address).
     #[test]
     fn websites_on_the_tailnet_are_the_agents_own_service() {
-        let ips = vec!["100.64.0.1".to_owned(), "100.101.67.2".to_owned()];
+        let ips = vec!["100.64.0.1".to_owned(), "100.64.0.2".to_owned()];
         let svc = tailnet_web_service(&ips);
         assert_eq!(svc["metadata"]["name"], TAILNET_WEB_SERVICE);
         assert_ne!(TAILNET_WEB_SERVICE, TAILNET_VIP_SERVICE);
@@ -2176,7 +2176,7 @@ mod tests {
         let v6 = regex::Regex::new(TAILNET_IPV6_RE).unwrap();
         for ip in [
             "100.64.0.0",
-            "100.101.67.2",
+            "100.64.0.2",
             "100.127.255.255",
             "100.99.0.9",
         ] {
@@ -2186,7 +2186,7 @@ mod tests {
             "100.63.255.255",
             "100.128.0.1",
             "10.0.0.1",
-            "129.226.158.31",
+            "203.0.113.31",
             "100.64.0.256",
             "100.64.0.01",
             "100.64.0",

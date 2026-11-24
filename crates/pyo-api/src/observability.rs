@@ -1397,7 +1397,7 @@ mod tests {
         let t = super::ingress_sample(&heartbeat(json!([
             workload("web", "shop"),
             controller,
-            workload("envoy-pyo-695a31a2", "pyo-gateway")
+            workload("envoy-pyo-0a1b2c3d", "pyo-gateway")
         ])))
         .unwrap();
         assert_eq!(

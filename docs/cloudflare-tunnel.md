@@ -8,7 +8,7 @@ connector (cloudflared) in the cluster like Envoy and Vector. The last
 section is a draft for the pyo-docs page.
 
 Written 2026-11-22 against `dev` at b2f92aa. File and line references are to
-that commit. Pyo Cloud references are to pyo-cloud at 94956c8.
+that commit.
 
 ## Contents
 
@@ -51,17 +51,14 @@ below are updated to match.
    default, since the user asked for them per service. The Traffic panel
    says they don't go through the tunnel.
 4. **Default domain**: optional. Only a zone apex, as `*.example.com`. A
-   cluster can be in tunnel mode with only domains switched by hand (Pyo
-   Ops needs that). Without a default domain there are no free domains in
-   tunnel mode.
+   cluster can be in tunnel mode with only domains switched by hand.
+   Without a default domain there are no free domains in tunnel mode.
 5. **Removing a domain** that replaced a record: the old record isn't put
    back by default. The remove dialog offers "Put back the old record"
    (off by default).
 6. **One Cloudflare account per tunnel**: yes.
 7. **Pyo's own dashboard through the tunnel**: not in 0.51.0.
-8. **Pyo Ops**: cloud.pyo.dev and agent.pyo.dev move onto it right after
-   0.51.0, with no default domain. Planned in §14, not done as part of
-   this work.
+8. **Pyo Cloud's own domains**: planned outside this repo.
 9. **HTTPS redirect**: at the Gateway, from `cf-visitor`.
 10. **Who may switch a domain**: developers when nothing is in the way,
     owners and admins when it replaces an existing record.
@@ -77,7 +74,7 @@ Decisions made while building (not in the first draft):
   tunnel's account. A domain with nothing in the way (no record, or only
   Pyo's own) switches. A domain with someone else's record stops at
   "confirm" and waits for **Replace and switch**. So records made by hand
-  or by Terraform (Pyo Ops) are never replaced without a yes. Pyo's own
+  or by other tools are never replaced without a yes. Pyo's own
   direct record isn't kept in `previous`: Switch back makes a new one.
 - **Both paths only while a domain switches** (user, 2026-11-22). A
   domain's `tunnel` is `"switching"` or `"on"`:
@@ -227,8 +224,8 @@ Decisions after the real-Cloudflare test (2026-11-22):
 - Each domain shows whether it goes **via Tunnel**, with **Switch to Tunnel**
   and **Switch back**. An existing DNS record is shown, replaced only after
   the user says yes, and kept so Switch back restores it. This is the
-  zero-downtime path off Traefik (real case: misc-ten-sin4, k3s Traefik on
-  80/443 with 8 sites).
+  zero-downtime path off Traefik (for example k3s's Traefik on 80/443 with
+  several sites).
 - Works the same on Pyo Cloud: the token stays on the control plane, the
   agent only gets the tunnel token.
 
@@ -506,7 +503,7 @@ Snapshot (`crates/pyo-api/src/snapshot.rs:140-170`) per cluster:
   "state": "ready", "error": null,
   "accountId": "…", "accountName": "Acme",
   "tunnelId": "1f2e…", "defaultDomain": "example.com", "portsPublic": true,
-  "connectors": [{ "server": "fal1", "ready": true, "colo": "FRA", "since": 1763800000000 }],
+  "connectors": [{ "server": "server-1", "ready": true, "colo": "FRA", "since": 1763800000000 }],
   "health": "connected",          // connected | degraded | down | starting | unknown
   "certificate": { "id": "crt_…", "notAfter": 1795300000000 },
   "checkedAt": 1763800000000
@@ -656,14 +653,11 @@ Tunnel ids are UUIDs: `id_ok` gains `-`, or a separate `uuid_ok`.
 - No wildcard route for the default domain (see Decisions). Each free name
   under it has its own rule, and any other name gets the catch-all's 404.
 - `matchSNItoHost` sends the visitor's host as SNI. Go's TLS then checks
-  the Origin CA certificate against that host. Pyo Cloud's Terraform uses
-  `origin_server_name = h` per name (`pyo-cloud deploy/terraform/cloudflare/tunnel.tf:22-27`),
-  which can't express a wildcard. Verify in e2e (§17.2).
-- cloudflared trusts Cloudflare's Origin CA itself (Pyo Cloud runs that way
-  today without `caPool`, `main.tf:7-9`), so no CA file in the pod.
+  the Origin CA certificate against that host. Verify in e2e (§17.2).
+- cloudflared trusts Cloudflare's Origin CA itself, so no CA file in the
+  pod.
 - The origin is a Service Pyo owns (§8.2), not Envoy Gateway's generated
-  `envoy-pyo-<hash>` (Pyo Cloud's Terraform hardcodes
-  `envoy-pyo-695a31a2`, `variables.tf:44-48`).
+  `envoy-pyo-<hash>`.
 - Hash: sha256 of the canonical JSON. PUT only when it changes or
   Cloudflare's `config_version` moved under Pyo (someone edited it in
   Cloudflare). Pyo's config wins.
@@ -815,13 +809,12 @@ metadata: { name: pyo-tunnel, namespace: pyo-system }
 spec: { minAvailable: 1, selector: { matchLabels: { app.kubernetes.io/name: pyo-tunnel } } }
 ```
 
-- Image constant `CLOUDFLARED_IMAGE` in `system.rs`, the same digest
-  Pyo Cloud runs today (`deploy/pyo-ops/compose.yaml:137`), kept current by
+- Image constant `CLOUDFLARED_IMAGE` in `system.rs`, kept current by
   Renovate. Same treatment as Vector's image
   (`pyo-agent/src/observability.rs:32`).
 - `--protocol http2`: QUIC (UDP 7844) is often blocked, and cloudflared's
-  fallback is slow enough that the liveness probe restarts it first (seen
-  on Pyo Ops, `compose.yaml:147-149`). HTTP/2 needs outbound TCP 7844 to
+  fallback is slow enough that the liveness probe restarts it first.
+  HTTP/2 needs outbound TCP 7844 to
   Cloudflare's edge.
 - Replicas: 2 always. On a one-server cluster both run there, which still
   covers a crash and a rollout.
@@ -998,8 +991,6 @@ and listeners behind Cloudflare (ClientTrafficPolicy
 `headers.earlyRequestHeaders.remove`, Envoy Gateway 1.2+), with the
 admission policy's client policy variants updated. Through the tunnel the
 header is Cloudflare's own, so audit and rate limits see the real visitor.
-This also closes the Pyo Cloud item "checking real client IPs in the audit
-log".
 
 **Done** in 0.5.5 (branch `fix/client-ip-headers`, decision 11):
 
@@ -1074,7 +1065,7 @@ Health is computed by the control plane from both views:
 
 Extra lines under the status, only when true:
 
-- "pyo-tunnel can't start on fal2: ImagePullBackOff" (from the agent's pod reason).
+- "pyo-tunnel can't start on server-2: ImagePullBackOff" (from the agent's pod reason).
 - "Connect Cloudflare again to change the tunnel." (token gone or refused).
 - "Certificate: <reason>" (the last issue failed).
 - "Run the command under Refresh this cluster in the cluster's settings."
@@ -1232,39 +1223,7 @@ when in tunnel mode, warning tone when degraded or down.
   is held like other changes. `TunnelRemove` and removing a tunnel are
   always allowed, so a team can always take its records back.
 - Load on Cloudflare per team: each team's own token and rate limit.
-- Cloud e2e: `pyo-cloud/scripts/e2e-multipass.sh` with the fake Cloudflare
-  API (§17.3).
-
-**Pyo Cloud's own tunnel** (cloud.pyo.dev and agent.pyo.dev on Pyo Ops)
-could move to this once 0.51.0 runs on Pyo Ops:
-
-1. In Pyo Ops (team frans), replace the Cloudflare token with one that also
-   has Cloudflare Tunnel:Edit and SSL and Certificates:Edit on pyo.dev.
-2. Cluster `cl_eavb3paccm12` › Traffic › Cloudflare Tunnel, no default
-   domain (decision 8: a wildcard on pyo.dev would catch unknown names).
-   The default domain is optional (decision 4).
-3. Switch cloud.pyo.dev and agent.pyo.dev to the tunnel. Pyo shows the
-   Terraform CNAMEs to the old tunnel and asks. After the switch, traffic
-   goes through Pyo's tunnel. The old one stays up until removed, so this
-   is zero downtime.
-4. In pyo-cloud:
-   - `deploy/terraform/cloudflare/tunnel.tf`: delete the tunnel, its
-     config, its token data source and the DNS records
-     (`terraform state rm` the records first so Terraform doesn't delete
-     Pyo's).
-   - `deploy/terraform/cloudflare/main.tf:37-66`: delete the origin key,
-     CSR and `cloudflare_origin_ca_certificate`. Keep zone settings, cache
-     and WAF rulesets, R2 buckets.
-   - `variables.tf`: drop `tunnel_name`, `gateway_service`.
-     `outputs.tf`: drop the token and certificate outputs.
-   - `deploy/pyo-ops/compose.yaml:133-149`: remove the `cloudflared`
-     service (and `TUNNEL_TOKEN` from setup).
-   - `scripts/ops/setup.sh`: remove the `certificate` step (`:174-182`) and
-     the origin certificate on cloud-api's domains (`:284-291`).
-   - README: Cloudflare section points at the dashboard.
-5. Two open ops items close: "spreading cloudflared across both servers"
-   (2 replicas, spread) and "checking real client IPs in the audit log"
-   (§8.3, §8.4).
+- Cloud e2e with the fake Cloudflare API (§17.3).
 
 Cloud customers get the feature with no Cloud-only code. The pyo-cloud
 repo needs no change for them.
@@ -1320,7 +1279,7 @@ Changed:
 - `mcp/tools.mdx`: the new tools (generated from the API if that page is
   generated).
 - New how-to section on the tunnel page: "Move sites from Traefik with no
-  downtime" (the misc-ten-sin4 path).
+  downtime".
 
 Copy rules for all of it: "Pyo Gateway", "servers", "services", plain
 sentences, no semicolons, no dash-joined clauses.
@@ -1387,8 +1346,8 @@ sentences, no semicolons, no dash-joined clauses.
 A debug-only override `PYO_DEV_CLOUDFLARE_API` (like `PYO_DEV_TXT_FILE`),
 refused in release builds, pointing `Http` at a small fake in
 `scripts/fake-cloudflare/` that keeps zones, records, tunnels and
-certificates in memory. Used by the dashboard e2e and the Cloud e2e
-(`pyo-cloud/scripts/e2e-multipass.sh`): a Cloud team enables a tunnel and
+certificates in memory. Used by the dashboard e2e and the Cloud e2e: a
+Cloud team enables a tunnel and
 switches a domain, the agent runs a stub connector image, everything
 through signed commands.
 
@@ -1396,10 +1355,9 @@ through signed commands.
 
 - Only on a throwaway test zone the user names and approves, with a
   token made for the test. Never pyo.dev, never the user's existing
-  records or tunnels, never misc-ten-sin4 (tests never touch user
-  resources).
-- Test machine: dev-ten-sin0, only after asking (the user tests their own
-  install there).
+  records or tunnels, never the user's own servers (tests never touch
+  user resources).
+- Test machine: a throwaway server, only after asking.
 - Checks: permission checks report the right missing permission for each
   of four tokens (each missing one permission), tunnel up with 2
   connectors in two colos, Switch to Tunnel and Switch back on a record
@@ -1508,13 +1466,11 @@ shippable behind the capability flag.
 - `crates/pyo-api/assets/connect.sh` `web_ports_line`: mention the tunnel.
 - `crates/pyo-api/src/install.rs` `web_ports_busy`: set `traffic`.
 
-**Phase 6: docs, tests, Pyo Ops**
+**Phase 6: docs, tests**
 
 - pyo-docs pages (§16).
 - `scripts/tunnel-gate-e2e.sh`, `scripts/fake-cloudflare/`, Cloud e2e.
 - Real-zone test with the user's approval (§17.4).
-- After 0.51.0 is on Pyo Ops: move cloud.pyo.dev and agent.pyo.dev
-  (§14), then the pyo-cloud cleanup commit.
 - Release notes (Features: Cloudflare Tunnel). The CF-Connecting-IP fix
   shipped in 0.5.5.
 
@@ -1528,21 +1484,20 @@ record.
    made in the cluster with only the CSR sent up (key never leaves the
    cluster, two more commands)? Spec picks the control plane.
 2. **Origin certificate validity**: 1 year renewed at 30 days (spec), or
-   15 years like Pyo Cloud's Terraform with no renewals?
+   15 years with no renewals?
 3. **TCP and UDP ports in tunnel mode**: published on the servers by
    default (spec), or off by default for a "no open ports" promise?
 4. **Default domain**: only a zone apex with `*.zone` (spec, works with
    free Universal SSL), or also a subdomain with a warning about Advanced
    Certificate Manager? Should it be optional when every domain is
-   switched by hand (needed for Pyo Ops)?
+   switched by hand?
 5. **Removing a domain** that replaced a record: put the old record back
    by default (spec), or leave the name empty?
 6. **One Cloudflare account per tunnel**: fine for 0.51.0? Teams with zones
    in two accounts would need two tokens or a second cluster.
 7. **Pyo's own dashboard through the tunnel** (e.g. pyo.example.com on the
    cluster Pyo runs on): in 0.51.0 or later?
-8. **Pyo Ops**: move cloud.pyo.dev and agent.pyo.dev to this right after
-   0.51.0, and with or without a default domain on pyo.dev?
+8. **Pyo Cloud's own domains**: planned outside this repo.
 9. **HTTPS redirect** through `cf-visitor` at the Gateway (spec), or ask
    users to turn on Always Use HTTPS in Cloudflare?
 10. **Who may switch a domain**: developers when nothing is in the way,
@@ -1551,9 +1506,8 @@ record.
     with 0.51.0?
 12. **Release number**: 0.51.0 as the first feature release after 0.5.x
     (versioning memory notes this wasn't confirmed)?
-13. **`pyo deploy` uploads** to cloud.pyo.dev already pass Cloudflare's
-    100 MB limit on Free. Is the zone on a plan that allows the ~500 MB
-    folder upload, or should uploads be chunked?
+13. **`pyo deploy` uploads** through Cloudflare can pass its 100 MB limit
+    on Free. Should uploads be chunked?
 
 ## 20. Draft docs page: `/docs/cloudflare-tunnel`
 
@@ -1638,7 +1592,7 @@ records it made.
 ## 21. Build status
 
 Kept current as each phase lands, so the work can be picked up from here.
-Branch `feat/cloudflare-tunnel`, worktree `/home/frx/workspace/upsetdev/pyo-tunnel`.
+Branch `feat/cloudflare-tunnel`.
 Not merged into `dev` until the feature is complete and tested.
 
 | Phase | State |
@@ -1649,7 +1603,7 @@ Not merged into `dev` until the feature is complete and tested.
 | 3. Control plane | Done (3b9ae43): migration 0040, tunnel_loop.rs, heartbeat and snapshot. Unit tested, and end to end against the fake Cloudflare and a throwaway Postgres in CI |
 | 4. Traffic choice, switching | API, MCP and CLI written (3b9ae43, a47f92e). Dashboard merged (06dfbba, `tsc` passes): Traffic panel, tunnel badge, record line, add and remove domain |
 | 5. Ports, connect.sh, alerts | Public ports Service and tunnel alerts written. connect.sh keeps its line (see Decisions) |
-| 6. Docs, e2e, gaps, free domains | Done except the real-zone test and Pyo Ops (both need the user): fake Cloudflare and the loop test (0394f36), gaps and free domains (e36141e, d135ff0), gate e2e written, not run (d8e1a16), pyo-docs branch `docs/cloudflare-tunnel` (011a38f, ec36fd2) |
+| 6. Docs, e2e, gaps, free domains | Done except the real-zone test (needs the user): fake Cloudflare and the loop test (0394f36), gaps and free domains (e36141e, d135ff0), gate e2e written, not run (d8e1a16), pyo-docs branch `docs/cloudflare-tunnel` (011a38f, ec36fd2) |
 
 Where things are:
 
@@ -1712,7 +1666,7 @@ Next:
    domain is added (the user may change that).
 2. With the user's OK: the real-zone test (§17.4) on a throwaway zone.
 3. After 0.51.0 merges: regenerate pyo-docs' generated pages, merge
-   pyo-docs' `docs/cloudflare-tunnel`, then the Pyo Ops move (§14).
+   pyo-docs' `docs/cloudflare-tunnel`.
 4. Dashboard: no warning for deeper names (a.b.example.com) when
    switching, and "Certificate: <reason>" shows only through `tunnel.error`.
 
