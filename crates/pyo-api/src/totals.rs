@@ -342,6 +342,23 @@ pub fn window(range: &str, now: i64) -> (&'static str, i64, i64, i64, i64) {
     (table, points, step, end - points * step, end)
 }
 
+/// The request summary's buckets, in seconds: minutes for ranges up to two
+/// days, else hours (the tables kept that long).
+fn summary_step(now_s: i64, since_s: i64) -> i64 {
+    if now_s - since_s <= 2 * 86400 { 60 } else { 3600 }
+}
+
+/// Which time the request summary covers (ms): from the start of the bucket
+/// `since_s` is in, to the end of the newest bucket stored (`last_s`, its
+/// start; 0 when none is). A bucket is stored once its minute is over and
+/// the cluster has sent it, so the newest minute or two of requests come
+/// after `to`, which is null while nothing is counted.
+fn summary_window(since_s: i64, step: i64, last_s: i64) -> (i64, Option<i64>) {
+    let from = since_s / step * step;
+    let to = (last_s >= from && last_s > 0).then(|| (last_s + step) * 1000);
+    (from * 1000, to)
+}
+
 fn num(v: &Value, k: &str) -> f64 {
     v[k].as_f64()
         .or_else(|| v[k].as_str().and_then(|s| s.parse().ok()))
@@ -494,27 +511,37 @@ impl Observability {
 
     /// The request explorer's totals for some hosts over a range: requests,
     /// bytes, errors and response times. None without storage.
+    ///
+    /// They're added up per minute (an hour for ranges over two days), and
+    /// a cluster sends a minute once it's over ([`summary_window`]): `from`
+    /// and `to` (ms) say which whole minutes are counted, `to` null while
+    /// none has come. The newest requests in the log come after `to`.
     pub async fn request_summary(&self, team_id: &str, hosts: &[String], since_s: i64) -> ApiResult<Option<Value>> {
         let Some(ch) = self.store().await else { return Ok(None) };
-        let table = if pyo_proto::now_ms() / 1000 - since_s <= 2 * 86400 { "1m" } else { "1h" };
+        let step = summary_step(pyo_proto::now_ms() / 1000, since_s);
+        let table = if step == 60 { "1m" } else { "1h" };
+        let from = since_s / step * step;
         let r = ch
             .rows(
                 format!(
-                    "SELECT sum(requests) AS requests, sum(bytes) AS bytes, sumMap(statuses) AS statuses, sumMap(latency) AS latency
+                    "SELECT sum(requests) AS requests, sum(bytes) AS bytes, sumMap(statuses) AS statuses, sumMap(latency) AS latency,
+                            toUnixTimestamp(max(ts)) AS last
                        FROM pyo_observability.traffic_{table}
-                      WHERE team_id = {{team:String}} AND has({{hosts:Array(String)}}, host) AND ts >= toDateTime({{since:Int64}})"
+                      WHERE team_id = {{team:String}} AND has({{hosts:Array(String)}}, host) AND ts >= toDateTime({{from:Int64}})"
                 ),
-                vec![("team", team_id.to_owned()), ("hosts", array_param(hosts)), ("since", since_s.to_string())],
+                vec![("team", team_id.to_owned()), ("hosts", array_param(hosts)), ("from", from.to_string())],
             )
             .await?;
         let r = r.first().cloned().unwrap_or_default();
         let s = pairs(&r["statuses"]);
         let count = |c: &str| s.iter().find(|x| x.0 == c).map(|x| x.1).unwrap_or(0.0);
         let h = histogram(&r["latency"]);
+        let (from_ms, to_ms) = summary_window(since_s, step, num(&r, "last") as i64);
         Ok(Some(json!({
             "requests": num(&r, "requests"), "bytes": num(&r, "bytes"),
             "serverErrors": count("5xx"), "clientErrors": count("4xx"),
             "p50": q(&h, 0.5), "p95": q(&h, 0.95),
+            "from": from_ms, "to": to_ms,
         })))
     }
 
@@ -802,6 +829,29 @@ mod tests {
             assert_eq!(end - start, points * step);
             assert!(start <= now && now < end && end - step <= now);
         }
+    }
+
+    #[test]
+    fn the_request_summary_says_which_minutes_it_counts() {
+        let now = 1_700_000_000;
+        // A day: minutes, from the start of the minute the range starts in.
+        let since = now - 86_400;
+        assert_eq!(summary_step(now, since), 60);
+        let (from, to) = summary_window(since, 60, (now / 60 - 2) * 60);
+        assert_eq!(from, since / 60 * 60 * 1000);
+        assert!(from <= since * 1000, "every request in the log's range is in it");
+        // Up to the end of the newest minute stored: the last minute or two
+        // of the log come after it.
+        assert_eq!(to, Some((now / 60 - 1) * 60 * 1000));
+        assert!(to.unwrap() < now * 1000);
+        // Nothing stored yet (requests only just began): no end to show.
+        assert_eq!(summary_window(since, 60, 0).1, None);
+        // A week: hours.
+        let since = now - 7 * 86_400;
+        assert_eq!(summary_step(now, since), 3600);
+        let (from, to) = summary_window(since, 3600, now / 3600 * 3600);
+        assert_eq!(from, since / 3600 * 3600 * 1000);
+        assert_eq!(to, Some((now / 3600 + 1) * 3600 * 1000));
     }
 
     #[test]
