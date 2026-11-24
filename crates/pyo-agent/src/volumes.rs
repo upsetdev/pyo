@@ -354,6 +354,7 @@ pub async fn move_claim(client: &kube::Client, spec: &MoveVolumeSpec) -> anyhow:
         );
     }
     // The new project's namespace, as a deploy makes it.
+    crate::scope::refuse_taken(client, &spec.to_namespace).await?;
     let ns_body =
         crate::rollout::project_namespace(&spec.to_namespace, &spec.project_id, &spec.team_id);
     Api::<Namespace>::all(client.clone())

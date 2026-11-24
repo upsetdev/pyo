@@ -285,6 +285,55 @@ pub fn project_namespace_refusal(
     None
 }
 
+/// Whether a namespace is the cluster's or Pyo's own, so never a project's:
+/// the kept ones, Pyo's static sites', and `kube-*` and `pyo-db-*`.
+pub fn system_namespace(name: &str) -> bool {
+    KEPT_NAMESPACES.contains(&name)
+        || name == system::STATIC_NS
+        || KEPT_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+/// Whether a namespace that's already there is one Pyo made, by its labels.
+/// Every version labels what it creates `app.kubernetes.io/managed-by=pyo`
+/// (projects', since 0.1.0) or `pyo.dev/managed=true` (any it writes in,
+/// databases' included). The admission policy goes by the same two.
+pub fn made_by_pyo(labels: &std::collections::BTreeMap<String, String>) -> bool {
+    labels.get(MANAGED_LABEL).is_some_and(|v| v == "true")
+        || labels
+            .get("app.kubernetes.io/managed-by")
+            .is_some_and(|v| v == "pyo")
+}
+
+/// Why Pyo won't write in namespace `name`, given its labels as the
+/// cluster has them (none when there's no such namespace yet): it's there
+/// and Pyo didn't make it. Pyo never takes over someone else's namespace,
+/// where its objects could replace theirs.
+pub fn foreign_namespace(
+    name: &str,
+    labels: Option<&std::collections::BTreeMap<String, String>>,
+) -> Option<String> {
+    match labels {
+        Some(l) if !made_by_pyo(l) => Some(format!(
+            "A namespace named {name} already exists on this cluster. Pyo didn't create it, so it won't change it."
+        )),
+        _ => None,
+    }
+}
+
+/// Why namespace `name` can't be a project's, as [`foreign_namespace`],
+/// and never the cluster's or Pyo's own whatever its labels say.
+pub fn project_namespace_taken(
+    name: &str,
+    labels: Option<&std::collections::BTreeMap<String, String>>,
+) -> Option<String> {
+    if system_namespace(name) {
+        return Some(format!(
+            "{name} is a system namespace. Use a project with another name."
+        ));
+    }
+    foreign_namespace(name, labels).map(|why| format!("{why} Use a project with another name."))
+}
+
 /// The labels a namespace the agent manages carries.
 pub fn managed_namespace(ns: &str) -> Value {
     let mut labels = json!({ MANAGED_LABEL: "true" });
@@ -1669,6 +1718,71 @@ mod tests {
         );
         assert!(policy.contains("(variables.reqName in [dyn('pyo-waf'), dyn('pyo-static'), dyn('pyo-databases')] && oldObject.metadata.labels[?'pyo.dev/bundle'].orValue('') != '')"));
         assert!(policy.contains("oldObject.metadata.labels[?'pyo/project-id'].orValue('') != ''"));
+    }
+
+    /// A namespace Pyo didn't make is never taken over: a project slugged
+    /// like a site the server already runs mustn't replace it.
+    #[test]
+    fn a_namespace_pyo_didnt_make_is_never_taken_over() {
+        let labels = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        // Someone else's: bare, or another tool's.
+        for theirs in [
+            labels(&[]),
+            labels(&[("kubernetes.io/metadata.name", "whoami")]),
+            labels(&[("app.kubernetes.io/managed-by", "Helm")]),
+            labels(&[(MANAGED_LABEL, "false"), (PROJECT_LABEL, "")]),
+        ] {
+            assert_eq!(
+                foreign_namespace("whoami", Some(&theirs)).as_deref(),
+                Some(
+                    "A namespace named whoami already exists on this cluster. Pyo didn't create it, so it won't change it."
+                ),
+                "{theirs:?}"
+            );
+            assert_eq!(
+                project_namespace_taken("whoami", Some(&theirs)).as_deref(),
+                Some(
+                    "A namespace named whoami already exists on this cluster. Pyo didn't create it, so it won't change it. Use a project with another name."
+                )
+            );
+        }
+        // None yet: Pyo creates it.
+        assert_eq!(foreign_namespace("whoami", None), None);
+        assert_eq!(project_namespace_taken("whoami", None), None);
+        // One a deploy of this version makes.
+        let ours = labels(&[
+            (MANAGED_LABEL, "true"),
+            ("app.kubernetes.io/managed-by", "pyo"),
+            (PROJECT_LABEL, "prj_1"),
+            ("pyo/team-id", "team_1"),
+        ]);
+        assert_eq!(project_namespace_taken("whoami", Some(&ours)), None);
+        // Ones earlier versions made, from 0.1.0 on: a project's with only
+        // its deploy's labels (a deploy that stopped before the managed
+        // label), and a team's databases' with only the managed label.
+        let older = labels(&[
+            ("app.kubernetes.io/managed-by", "pyo"),
+            (PROJECT_LABEL, "prj_1"),
+        ]);
+        assert_eq!(project_namespace_taken("whoami", Some(&older)), None);
+        assert_eq!(
+            foreign_namespace("pyo-db-team1", Some(&labels(&[(MANAGED_LABEL, "true")]))),
+            None
+        );
+        // Never a project's: the cluster's and Pyo's own, Pyo's labels or not.
+        for ns in ["default", "kube-system", "pyo-system", "pyo-gateway", "pyo-static", "pyo-db-team1", "cert-manager"] {
+            assert_eq!(
+                project_namespace_taken(ns, Some(&ours)),
+                Some(format!("{ns} is a system namespace. Use a project with another name.")),
+            );
+            assert!(system_namespace(ns));
+        }
+        assert!(!system_namespace("whoami") && !system_namespace("pyo-web"));
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //! customer's switches in `pyo-system/pyo-policy`.
 //!
 //! - Each namespace it writes in is labelled `pyo.dev/managed=true` and gets
-//!   a RoleBinding to the write role (`ensure_managed`).
+//!   a RoleBinding to the write role (`ensure_managed`). One that's there
+//!   already and that Pyo didn't make is refused, never taken over.
 //! - Every heartbeat it finds out what it may do (`detect`) and reads the
 //!   policy, which `refusal` applies to commands.
 //! - Every heartbeat it also reads what the server's verifier says of its
@@ -16,7 +17,7 @@ use std::sync::{
 
 use k8s_openapi::api::{
     authorization::v1::{ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec},
-    core::v1::ConfigMap,
+    core::v1::{ConfigMap, Namespace},
 };
 use kube::{
     Api, Client, ResourceExt,
@@ -106,9 +107,42 @@ where
     }
 }
 
+/// A namespace's labels as the cluster has them; none when there's no
+/// such namespace.
+async fn namespace_labels(
+    client: &Client,
+    ns: &str,
+) -> anyhow::Result<Option<std::collections::BTreeMap<String, String>>> {
+    let have = Api::<Namespace>::all(client.clone())
+        .get_opt(ns)
+        .await
+        .map_err(|e| anyhow::anyhow!("couldn't read namespace {ns}: {e}"))?;
+    Ok(have.map(|n| n.labels().clone()))
+}
+
+/// Refuse a namespace that's there and that Pyo didn't make
+/// (`rbac::foreign_namespace`): the agent never takes one over.
+pub async fn refuse_foreign(client: &Client, ns: &str) -> anyhow::Result<()> {
+    match rbac::foreign_namespace(ns, namespace_labels(client, ns).await?.as_ref()) {
+        Some(why) => Err(anyhow::anyhow!(why)),
+        None => Ok(()),
+    }
+}
+
+/// The same for a project's namespace, before a deploy (or a volume
+/// moving in) writes it. It also can't be the cluster's or Pyo's own.
+pub async fn refuse_taken(client: &Client, ns: &str) -> anyhow::Result<()> {
+    match rbac::project_namespace_taken(ns, namespace_labels(client, ns).await?.as_ref()) {
+        Some(why) => Err(anyhow::anyhow!(why)),
+        None => Ok(()),
+    }
+}
+
 /// A namespace the agent writes in: labelled, with the write role bound.
-/// A new binding takes a moment to apply; this waits until it does.
+/// One that's there already only when Pyo made it. A new binding takes a
+/// moment to apply; this waits until it does.
 pub async fn ensure_managed(client: &Client, ns: &str) -> anyhow::Result<()> {
+    refuse_foreign(client, ns).await?;
     apply(client, &rbac::managed_namespace(ns)).await?;
     let binding = rbac::write_binding(ns);
     retry_unlabelled(|| apply(client, &binding)).await?;

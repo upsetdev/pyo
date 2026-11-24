@@ -9691,7 +9691,8 @@ pub(crate) async fn create_project(
     require_role(tx, user, team_id, Role::Developer).await?;
     let name = require_text(name, "Project name", 60)?;
     require_dns_label(namespace, "Slug")?;
-    if namespace.starts_with("kube-") || namespace == "default" || namespace == "pyo-system" {
+    // The cluster's namespaces and Pyo's own.
+    if pyo_proto::rbac::system_namespace(namespace) {
         return Err(ApiError::bad_request("That name is reserved."));
     }
     // It's the project's address (/<namespace>/...), so it can't be a team page's.
@@ -9739,9 +9740,7 @@ pub(crate) async fn free_namespace(
         .bind(&namespace)
         .fetch_one(&mut **tx)
         .await?;
-        let reserved = namespace.starts_with("kube-")
-            || namespace == "default"
-            || namespace == "pyo-system"
+        let reserved = pyo_proto::rbac::system_namespace(&namespace)
             || RESERVED_PROJECT_SLUGS.contains(&namespace.as_str());
         if !taken && !reserved {
             return Ok(namespace);

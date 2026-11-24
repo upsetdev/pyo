@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { RESERVED_PROJECT_SLUGS } from "~/lib/pyo/paths";
+import { RESERVED_PROJECT_SLUGS, systemNamespace } from "~/lib/pyo/paths";
 import { useEffect, useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { Dialog } from "~/components/ui/Dialog";
@@ -10,14 +10,6 @@ import { toast } from "~/lib/pyo/toast";
 import { useHeld } from "~/lib/pyo/useHeld";
 import type { Project } from "~/lib/pyo/types";
 import { currentSlug } from "~/lib/pyo/paths";
-
-const RESERVED = [
-  "default",
-  "kube-system",
-  "kube-public",
-  "kube-node-lease",
-  "pyo-system",
-];
 
 export function useProjectForm(project?: Project) {
   const s = usePyo();
@@ -47,7 +39,7 @@ export function useProjectForm(project?: Project) {
         ? "Slug is required."
         : !DNS_LABEL.test(ns)
           ? "Lowercase letters, digits and dashes."
-          : RESERVED.includes(ns) || RESERVED_PROJECT_SLUGS.includes(ns)
+          : systemNamespace(ns) || RESERVED_PROJECT_SLUGS.includes(ns)
             ? "This name is reserved."
             : others.some((p) => p.namespace === ns)
               ? "Another project already uses this name."

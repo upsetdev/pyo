@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { RESERVED_PROJECT_SLUGS } from "./paths";
+import { RESERVED_PROJECT_SLUGS, systemNamespace } from "./paths";
 import {
   ApiError,
   fetchState,
@@ -564,9 +564,6 @@ function teamSlug(s: PyoState, name: string, selfId?: string) {
   return slug;
 }
 
-/** Namespaces the API refuses (kube-* is refused too). */
-const RESERVED_NAMESPACES = new Set(["default", "pyo-system"]);
-
 /** The project a deploy creates when it doesn't pick one: named after the app, on a free namespace. */
 export function newProjectFor(
   s: PyoState,
@@ -576,9 +573,8 @@ export function newProjectFor(
   const projects = projectsIn(s, teamId);
   const base = slugify(serviceName) || "project";
   const taken = (x: string) =>
-    RESERVED_NAMESPACES.has(x) ||
+    systemNamespace(x) ||
     RESERVED_PROJECT_SLUGS.includes(x) ||
-    x.startsWith("kube-") ||
     projects.some((p) => p.namespace === x || p.name.toLowerCase() === x);
   let ns = base;
   for (let i = 2; taken(ns); i++) ns = `${base.slice(0, 36)}-${i}`;
