@@ -163,17 +163,26 @@ jobs:
           bin=$(cargo test --locked -p pyo-api --lib --no-run --message-format=json \
             | jq -r 'select(.profile.test == true and .target.name == "pyo_api" and .executable != null) | .executable' | head -1)
           fail=0
-          for i in $(seq 1 40); do
-            for group in "rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests cloudflare::http_tests" "compose_sync::db_tests" "tailscale::tests" "sandbox::outbound::tests"; do
-              # shellcheck disable=SC2086
-              if ! RUSTC_BOOTSTRAP=1 "$bin" --ignored $group -Z unstable-options --shuffle > run.log 2>&1; then
-                fail=$((fail + 1))
-                echo "::error::round $i failed: $group"
-                grep -E "shuffle seed|panicked|Err|---- " run.log | head -40
-              fi
-            done
+          run() {
+            if ! RUSTC_BOOTSTRAP=1 "$bin" --ignored "$@" > run.log 2>&1; then
+              fail=$((fail + 1))
+              echo "::error::round $i failed: $*"
+              grep -E -A2 "shuffle seed|panicked|---- " run.log | head -40
+            fi
+          }
+          # The teams group in CI's own order: shuffled, its tests' rate
+          # limits and the vault's secret key depend on which runs first.
+          for i in $(seq 1 20); do
+            run rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests cloudflare::http_tests
           done
-          echo "failed runs: $fail of 160"
+          for i in $(seq 1 40); do
+            run compose_sync::db_tests -Z unstable-options --shuffle
+            run tailscale::tests -Z unstable-options --shuffle
+          done
+          for i in $(seq 1 80); do
+            run sandbox::outbound::tests -Z unstable-options --shuffle
+          done
+          echo "failed runs: $fail of 180"
           # The other tests that use the vault, once each, for the record.
           for t in database_imports::tests::a_dump_goes_up_in_parts volumes::tests databases::tests::deletions builders::first_builder_tests agent::gate_tests agent::routes_resend_tests ops::removal_tests ops::waf_lifecycle_tests ops::compose_import_tests ops::delete_service_tests ratelimit::tests::api_limits registrydoor::tests::a_clusters_door routes::lifecycle_tests source_uploads::tests::a_folder teambackup::tests::without_a_store platform_import::tests previews::tests admin_sign_in_tests; do
             if "$bin" --ignored "$t" > one.log 2>&1; then echo "ok: $t ($(grep -o '[0-9]* passed' one.log))"; else echo "FAILED: $t"; grep -E "panicked|---- " one.log | head -10; fi
