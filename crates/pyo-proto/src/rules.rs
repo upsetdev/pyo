@@ -309,6 +309,52 @@ pub fn under(path: &str, prefix: &str) -> bool {
     prefix == "/" || path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
+/// The whole hostname: "" or "/".
+pub fn is_root(path: &str) -> bool {
+    path.is_empty() || path == "/"
+}
+
+/// A route's rule for one path of a hostname: its `PathPrefix` match (none
+/// for "/", as routes have always been), and with `strip` the prefix taken
+/// off before the request goes on.
+pub fn for_path(mut rule: Value, path: &str, strip: bool) -> Value {
+    if is_root(path) {
+        return rule;
+    }
+    rule["matches"] = json!([{ "path": { "type": "PathPrefix", "value": path } }]);
+    if strip {
+        let rewrite = json!({ "type": "URLRewrite", "urlRewrite": { "path": { "type": "ReplacePrefixMatch", "replacePrefixMatch": "/" } } });
+        match rule["filters"].as_array_mut() {
+            Some(f) => f.insert(0, rewrite),
+            None => rule["filters"] = json!([rewrite]),
+        }
+    }
+    rule
+}
+
+/// A hostname's header rules, then a path's own on top: a name the path
+/// sets or removes is the path's alone. Each list keeps at most
+/// [`MAX_HEADERS`].
+pub fn merged(host: &HeaderRules, own: &HeaderRules) -> HeaderRules {
+    let side = |h: &HeaderSet, o: &HeaderSet| {
+        let mine = |n: &str| {
+            o.set.iter().any(|x| x.name.eq_ignore_ascii_case(n))
+                || o.remove.iter().any(|x| x.eq_ignore_ascii_case(n))
+        };
+        let mut set: Vec<Header> = h.set.iter().filter(|x| !mine(&x.name)).cloned().collect();
+        set.extend(o.set.iter().cloned());
+        let mut remove: Vec<String> = h.remove.iter().filter(|x| !mine(x)).cloned().collect();
+        remove.extend(o.remove.iter().cloned());
+        set.truncate(MAX_HEADERS);
+        remove.truncate(MAX_HEADERS);
+        HeaderSet { set, remove }
+    };
+    HeaderRules {
+        response: side(&host.response, &own.response),
+        request: side(&host.request, &own.request),
+    }
+}
+
 /// "example.com/old", or "example.com" for "/".
 pub fn shown(host: &str, path: &str) -> String {
     if path == "/" {
@@ -567,6 +613,68 @@ mod tests {
         assert_eq!(
             redirect_rule(&home, false)["filters"][0]["requestRedirect"]["path"],
             json!({ "type": "ReplaceFullPath", "replaceFullPath": "/" })
+        );
+    }
+
+    #[test]
+    fn a_paths_header_rules_go_on_top_of_its_hostnames() {
+        let h = |n: &str, v: &str| Header {
+            name: n.into(),
+            value: v.into(),
+        };
+        let host = HeaderRules {
+            response: HeaderSet {
+                set: vec![h("X-Frame-Options", "DENY"), h("X-A", "1")],
+                remove: vec!["Server".into()],
+            },
+            request: HeaderSet::default(),
+        };
+        let own = HeaderRules {
+            response: HeaderSet {
+                set: vec![h("x-frame-options", "SAMEORIGIN")],
+                remove: vec!["X-A".into()],
+            },
+            request: HeaderSet {
+                set: vec![h("X-R", "1")],
+                remove: vec![],
+            },
+        };
+        let m = merged(&host, &own);
+        assert_eq!(m.response.set, vec![h("x-frame-options", "SAMEORIGIN")]);
+        assert_eq!(
+            m.response.remove,
+            vec!["Server".to_owned(), "X-A".to_owned()]
+        );
+        assert_eq!(m.request.set, vec![h("X-R", "1")]);
+        assert_eq!(merged(&host, &HeaderRules::default()), host);
+    }
+
+    #[test]
+    fn paths_match_by_prefix_and_strip_it() {
+        let rule = json!({ "backendRefs": [] });
+        assert_eq!(for_path(rule.clone(), "/", true), rule);
+        assert_eq!(for_path(rule.clone(), "", false), rule);
+        let api = for_path(rule.clone(), "/api", false);
+        assert_eq!(
+            api["matches"],
+            json!([{ "path": { "type": "PathPrefix", "value": "/api" } }])
+        );
+        assert!(api["filters"].is_null());
+        let stripped = for_path(
+            json!({ "backendRefs": [], "filters": [{ "type": "RequestHeaderModifier" }] }),
+            "/api",
+            true,
+        );
+        assert_eq!(
+            stripped["filters"][0]["urlRewrite"]["path"]["replacePrefixMatch"],
+            "/"
+        );
+        assert_eq!(stripped["filters"][1]["type"], "RequestHeaderModifier");
+        assert!(
+            under("/api/x", "/api")
+                && under("/api", "/api")
+                && !under("/apix", "/api")
+                && under("/x", "/")
         );
     }
 

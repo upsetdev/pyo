@@ -591,7 +591,7 @@ pub struct Capabilities {
     #[serde(default)]
     pub tunnel: bool,
     /// Which of Pyo Gateway's rules the agent writes (rules.rs): 1 for
-    /// redirects and header rules. 0 from older agents.
+    /// redirects and header rules, 2 for paths too. 0 from older agents.
     #[serde(default)]
     pub gateway_rules: u8,
 }
@@ -2458,12 +2458,39 @@ pub struct DomainSpec {
     /// the service.
     #[serde(default, skip_serializing_if = "rules::HeaderRules::is_empty")]
     pub headers: rules::HeaderRules,
+    /// The path prefix it routes ("" or "/" for the whole hostname). Paths
+    /// of one hostname can go to several services of a team: the longest
+    /// prefix wins.
+    #[serde(default, skip_serializing_if = "rules::is_root")]
+    pub path: String,
+    /// Send `/api/x` to the service as `/x`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strip_prefix: bool,
+    /// A path of a hostname another entry holds (its listener, certificate,
+    /// tunnel and CDN): the base name (`<namespace>-<service>`) of that
+    /// entry's service, whose Gateway its routes join. Its `tls`,
+    /// `redirect_https` and `tunnel` are that entry's, filled in by the API.
+    /// "" for the entry that holds it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub primary_of: String,
 }
 
 impl DomainSpec {
     /// Only redirects: no port to route to.
     pub fn redirect_only(&self) -> bool {
         self.port_name.is_empty() && !self.redirects.is_empty()
+    }
+    /// The path it routes: "/" for the whole hostname.
+    pub fn path(&self) -> &str {
+        if rules::is_root(&self.path) {
+            "/"
+        } else {
+            &self.path
+        }
+    }
+    /// A path of a hostname another entry holds.
+    pub fn shares(&self) -> bool {
+        !self.primary_of.is_empty()
     }
     /// Served through the tunnel ("switching" or "on").
     pub fn via_tunnel(&self) -> bool {
