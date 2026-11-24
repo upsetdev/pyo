@@ -2977,6 +2977,16 @@ pub async fn team_view(
     }))
 }
 
+/// The team's tailnet machines are read again with the holder's next sync,
+/// without waiting out [`RESYNC_MS`]: a new sandbox server waits to be
+/// listed there (sandbox/outbound).
+pub async fn refresh_machines(db: &PgPool, team_id: &str) -> ApiResult<()> {
+    if let Some(h) = holder(db, team_id).await? {
+        patch(db, &h, json!({ "sentAt": 0 })).await?;
+    }
+    Ok(())
+}
+
 /// Pyo's machines on a cluster's tailnet, as the last sync saw them: its
 /// team's, when the holder acts for it. None without Tailscale there.
 pub async fn machines_of(db: &PgPool, cluster_id: &str) -> ApiResult<Option<Vec<ts::Machine>>> {

@@ -40,6 +40,18 @@ pub async fn scope(conn: &mut PgConnection, user: &User) -> sqlx::Result<()> {
     Ok(())
 }
 
+/// Lowers the transaction to one team: for requests that act for that
+/// team only, like a sandbox server's own (sandbox/outbound).
+pub async fn scope_team(conn: &mut PgConnection, team_id: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "SELECT set_config('pyo.team_ids', $1, true), set_config('role', 'pyo_team', true)",
+    )
+    .bind(team_id.replace(',', ""))
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// A transaction for a person's or API key's request, lowered to their
 /// teams ([`scope`]). Reads go through it too, so a query that forgot its
 /// team check still sees only theirs. Hold it only for the request's own

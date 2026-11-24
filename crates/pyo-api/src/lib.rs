@@ -340,6 +340,22 @@ pub trait CommandSigner: Send + Sync {
     ) -> futures::future::BoxFuture<'a, anyhow::Result<Signature>>;
     /// The public keys agents trust (`PYO_COMMAND_KEY`: base64url, comma separated).
     fn public_keys(&self) -> String;
+    /// Signs commands for one sandbox server of `team_id` that works over
+    /// HTTPS (sandbox/outbound), in this order, under pyo-proto's sandbox
+    /// prefix (`pyosbx1`, [`pyo_proto::signing::SandboxClaims`]). The
+    /// signer picks each command's sequence number (per server) and
+    /// expiry. Sandbox servers trust [`CommandSigner::public_keys`] too.
+    /// A signer that doesn't sign them leaves this as it is: such servers
+    /// get no commands.
+    fn sign_sandbox<'a>(
+        &'a self,
+        server_id: &'a str,
+        team_id: &'a str,
+        items: &'a [ToSign],
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<Vec<Signature>>> {
+        let _ = (server_id, team_id, items);
+        Box::pin(async { anyhow::bail!("this signer doesn't sign sandbox server commands") })
+    }
 }
 
 /// A background task: given the app state, runs until the process stops.
@@ -709,6 +725,16 @@ pub async fn run(ext: Extensions) -> anyhow::Result<()> {
                     state.clone(),
                     agent_auth::signed,
                 )),
+            )
+            // Sandbox servers that work over HTTPS (sandbox/outbound): a
+            // hosted Pyo's only. They sign with keys of their own.
+            .nest(
+                pyo_proto::sandbox::outbound::API_PREFIX,
+                if hosted() {
+                    sandbox::outbound::channel::routes(state.clone(), crate::command_signer().cloned())
+                } else {
+                    Router::new()
+                },
             )
             .merge(extra_routes)
             .route("/api/{*rest}", get(error::not_found).post(error::not_found))

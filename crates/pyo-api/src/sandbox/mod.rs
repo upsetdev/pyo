@@ -5,6 +5,8 @@
 //!
 //! - [`keys`]: the installation's signing key and the tokens.
 //! - [`join`]: a sandbox server's one-time join code and sandbox.sh.
+//!   [`outbound`]: a hosted Pyo's servers, which join and get their work
+//!   over HTTPS.
 //!   [`add_cloud_server`] makes one at a cloud provider instead, which runs
 //!   sandbox.sh from its first boot (cloud/bootstrap.rs).
 //! - [`scheduler`]: which server a new sandbox runs on.
@@ -37,6 +39,7 @@ pub mod limits;
 mod live;
 pub mod mcp;
 pub mod names;
+pub mod outbound;
 pub mod pages;
 pub mod runner;
 pub mod scheduler;
@@ -404,6 +407,7 @@ pub async fn server_views(
             'daemonVersion', s.daemon_version, 'lastReportAt', pyo.ms(s.last_report_at),
             'error', s.error, 'createdBy', s.created_by, 'createdAt', pyo.ms(s.created_at),
             'joinedAt', pyo.ms(s.joined_at), 'edgeDomain', s.edge_domain,
+            'outbound', s.outbound, 'tailnetName', s.tailnet_name,
             'sandboxes', (SELECT count(*) FROM pyo.sandboxes x WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed')),
             'cloud', (SELECT jsonb_build_object('id', c.id, 'provider', c.provider, 'location', c.location,
                         'serverType', c.server_type, 'monthly', c.monthly, 'currency', c.currency, 'ipv4', c.ipv4,
@@ -729,9 +733,10 @@ async fn candidates_on(
         templates: Value,
         age: Option<i64>,
         pending_mib: i64,
+        outbound: bool,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT s.id, s.name, s.team_id, s.address, s.state, s.enabled, s.capability, s.capacity, s.templates,
+        "SELECT s.id, s.name, s.team_id, s.address, s.state, s.enabled, s.capability, s.capacity, s.templates, s.outbound,
                 extract(epoch FROM now() - s.last_report_at)::bigint AS age,
                 coalesce((SELECT sum((x.spec->>'memoryMib')::bigint) FROM pyo.sandboxes x
                            WHERE x.server_id = s.id AND x.state NOT IN ('stopped', 'failed', 'paused')
@@ -751,7 +756,10 @@ async fn candidates_on(
                 name: r.name,
                 team_id: r.team_id,
                 enabled: r.enabled,
-                ready: r.state == "ready" && r.address.is_some(),
+                // An outbound server (Pyo Cloud) gets its work only as
+                // commands it polls for (outbound/channel.rs), which
+                // placement doesn't send yet.
+                ready: r.state == "ready" && r.address.is_some() && !r.outbound,
                 report_age_secs: r.age.unwrap_or(i64::MAX),
                 capability: r
                     .capability
@@ -1483,12 +1491,14 @@ pub async fn forget_server(
 /// provider is deleted there too, which takes `confirm` (409 with the
 /// monthly cost that stops until then).
 pub async fn remove_server(s: &AppState, user: &User, id: &str, confirm: bool) -> ApiResult<Value> {
-    let row: Option<(Option<String>, Option<String>, String)> =
-        sqlx::query_as("SELECT team_id, address, name FROM pyo.sandbox_servers WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&s.db)
-            .await?;
-    let (team_id, address, name) = row.ok_or_else(|| ApiError::not_found("Sandbox server"))?;
+    let row: Option<(Option<String>, Option<String>, String, bool)> = sqlx::query_as(
+        "SELECT team_id, address, name, outbound FROM pyo.sandbox_servers WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&s.db)
+    .await?;
+    let (team_id, address, name, outbound) =
+        row.ok_or_else(|| ApiError::not_found("Sandbox server"))?;
     let mut tx = s.db.begin().await?;
     match &team_id {
         Some(t) => require(&mut tx, user, t, Need::Manage).await?,
@@ -1515,7 +1525,9 @@ pub async fn remove_server(s: &AppState, user: &User, id: &str, confirm: bool) -
     .bind(id)
     .fetch_all(&mut *tx)
     .await?;
-    if let Some(address) = &address
+    // An outbound server isn't called: its keys and commands go with its
+    // row, and its daemon stops at its next request.
+    if let Some(address) = address.as_ref().filter(|_| !outbound)
         && !live.is_empty()
         && let Ok(key) = keys::signing_key(&s.db, &s.sealer).await
     {
