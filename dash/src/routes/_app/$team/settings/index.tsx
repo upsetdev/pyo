@@ -15,6 +15,7 @@ import {
 import { SandboxLimitsPanel } from "~/components/pyo/sandbox/SandboxLimits";
 import { useHosted } from "~/components/pyo/Managed";
 import { toast } from "~/lib/pyo/toast";
+import { REQUEST_LOG_DAYS } from "~/lib/pyo/requestLogs";
 import type { Team } from "~/lib/pyo/types";
 import { CopyButton } from "~/components/ui/Table";
 
@@ -215,7 +216,6 @@ function TeamSettings({ ws }: { ws: Team }) {
 }
 
 const SIZES = [500, 1024, 2048, 5120, 10240];
-const DAYS = [1, 3, 7, 14, 31];
 const sizeLabel = (mb: number) => (mb < 1024 ? `${mb} MB` : `${mb / 1024} GB`);
 
 /** How much of its requests each of the team's clusters keeps. */
@@ -255,7 +255,7 @@ function RequestLogsPanel({ ws }: { ws: Team }) {
                 setLimits({ ...limits, maxDays: Number(e.target.value) })
               }
             >
-              {[...new Set([...DAYS, saved.maxDays])]
+              {[...new Set([...REQUEST_LOG_DAYS, saved.maxDays])]
                 .sort((a, b) => a - b)
                 .map((d) => (
                   <option key={d} value={d}>
