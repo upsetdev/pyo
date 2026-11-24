@@ -18,6 +18,7 @@ import {
   serverProgress,
   serverRefusal,
   shortImage,
+  tailnetUrl,
   templateImage,
   templateOs,
   templateProgress,
@@ -159,6 +160,23 @@ test("the desktop waits for its name on the tailnet", () => {
   expect(desktopBlocked({ suffix: null })).toContain("Set up Tailscale");
   expect(desktopBlocked({ suffix: "tail1234.ts.net", sandboxes: null })).toContain("isn't ready");
   expect(desktopBlocked({ suffix: "tail1234.ts.net", sandboxes: "sandboxes.tail1234.ts.net" })).toBe(null);
+  // Self-hosted servers follow Pyo's own name, whatever the server.
+  expect(desktopBlocked(null, { outbound: false, tailnetName: null })).toContain("Set up Tailscale");
+  // Pyo Cloud: the server's own name, with no Tailscale of Pyo's.
+  const cloud = { outbound: true, tailnetName: "sbx-1.tail1234.ts.net" };
+  expect(desktopBlocked(null, cloud)).toBe(null);
+  expect(desktopBlocked(null, { outbound: true, tailnetName: null })).toContain("isn't ready");
+});
+
+test("a Pyo Cloud sandbox server answers browsers on its tailnet name", () => {
+  expect(tailnetUrl({ outbound: true, tailnetName: "sbx-1.tail1234.ts.net" })).toBe("https://sbx-1.tail1234.ts.net:7443");
+  expect(tailnetUrl({ outbound: true, tailnetName: null })).toBe(null);
+  expect(tailnetUrl({ outbound: false, tailnetName: "sbx-1.tail1234.ts.net" })).toBe(null);
+  expect(tailnetUrl(null)).toBe(null);
+  // The desktop opens there as on Pyo's own name.
+  expect(desktopUrl("https://sbx-1.tail1234.ts.net:7443", "sbx_1", "tok")).toMatch(
+    /^https:\/\/sbx-1\.tail1234\.ts\.net:7443\/v1\/sandboxes\/sbx_1\/web\/6080\/vnc\.html\?/,
+  );
 });
 
 test("a server making a template says how far it got", () => {
@@ -214,7 +232,9 @@ test("adding a sandbox server: self-hosted and Pyo Cloud, with or without the te
   // Self-hosted, Pyo's server off Tailscale.
   expect(block(false, false, true)).toBe("pyo");
   expect(block(false, false, false)).toBe("tailscale");
-  // Pyo Cloud: never "ask an installation admin", with or without the team's Tailscale.
-  expect(block(true, false, true)).toBe("cloud");
-  expect(block(true, false, false)).toBe("cloud");
+  // Pyo Cloud: the team's own Tailscale only, never "ask an installation admin".
+  expect(block(true, false, true)).toBe("");
+  expect(block(true, false, false)).toBe("tailscale");
+  expect(block(true, true, false)).toBe("tailscale");
+  expect(block(true, true, true)).toBe("");
 });

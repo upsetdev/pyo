@@ -118,9 +118,25 @@ export function desktopUrl(
 
 type TailscaleLike = { suffix?: string | null; sandboxes?: string | null } | null | undefined;
 
+type OutboundLike = { outbound?: boolean; tailnetName?: string | null } | null | undefined;
+
+/** Where a sandbox server that joined over HTTPS (Pyo Cloud's) answers
+ * browsers: HTTPS on its own tailnet name. */
+export const TAILNET_PORT = 7443;
+
+/** That server's address for browsers, or null for any other server. */
+export function tailnetUrl(x: OutboundLike) {
+  return x?.outbound && x.tailnetName ? `https://${x.tailnetName}:${TAILNET_PORT}` : null;
+}
+
+/** On Pyo Cloud the desktop, terminal and files open only from the team's tailnet. */
+export const OFF_TEAM_TAILNET = "Opens from devices on your team's tailnet.";
+
 /** Why the desktop can't open yet, or null when it can: it opens over
- * HTTPS on the tailnet only, at sandboxes' own name there. */
-export function desktopBlocked(ts: TailscaleLike) {
+ * HTTPS on the tailnet only. Self-hosted, at sandboxes' own name there.
+ * On Pyo Cloud, at the sandbox's server's own name (`server`). */
+export function desktopBlocked(ts: TailscaleLike, server?: OutboundLike) {
+  if (server?.outbound) return server.tailnetName ? null : "Its address on your tailnet isn't ready yet.";
   if (ts?.sandboxes) return null;
   if (!ts?.suffix) return "Opens over your tailnet. Set up Tailscale in Integrations first.";
   return "Its address on your tailnet isn't ready yet.";
@@ -246,17 +262,16 @@ export function serverRefusal(x: ServerLike, memoryMib: number, network: "intern
 }
 
 /**
- * Why a sandbox server can't be added yet, or "" when it can. A new one
- * joins at Pyo's own door on the tailnet (`pyoTailnet`: Pyo's server is on
- * Tailscale). Pyo Cloud is on no team's tailnet, so it takes none yet,
- * whatever the team's Tailscale (`teamTailscale`). Self-hosted, a team
- * without its own Tailscale uses Pyo's.
- * - "cloud": not on Pyo Cloud yet.
+ * Why a sandbox server can't be added yet, or "" when it can.
+ * Self-hosted, a new one joins at Pyo's own door on the tailnet
+ * (`pyoTailnet`: Pyo's server is on Tailscale), and a team without its own
+ * Tailscale (`teamTailscale`) uses Pyo's. On Pyo Cloud it joins the team's
+ * own tailnet, then Pyo over HTTPS: only the team's Tailscale counts.
  * - "pyo": the team has Tailscale, but Pyo's own server isn't on Tailscale.
- * - "tailscale": neither has Tailscale. NeedsTailscale says so.
+ * - "tailscale": no Tailscale to join. Self-hosted, NeedsTailscale says so.
  */
 export function addServerBlock(x: { hosted: boolean; pyoTailnet: boolean; teamTailscale: boolean }) {
+  if (x.hosted) return x.teamTailscale ? "" : "tailscale";
   if (x.pyoTailnet) return "";
-  if (x.hosted) return "cloud";
   return x.teamTailscale ? "pyo" : "tailscale";
 }

@@ -5,7 +5,7 @@
 // ports are served on the server's edge proxy instead.
 
 import { request } from "./backend";
-import { BASE_TEMPLATE, desktopBlocked, desktopUrl, type DesktopApp } from "./sandboxTemplates";
+import { BASE_TEMPLATE, OFF_TEAM_TAILNET, desktopBlocked, desktopUrl, type DesktopApp } from "./sandboxTemplates";
 import { toast } from "./toast";
 import type { CloudServerState } from "./types";
 
@@ -27,6 +27,7 @@ export {
   isDesktop,
   isPyos,
   minSize,
+  OFF_TEAM_TAILNET,
   overallPercent,
   pyosFirst,
   serverProgress,
@@ -36,6 +37,7 @@ export {
   templateOs,
   templateProgress,
   templateStatus,
+  tailnetUrl,
   usable,
   type Progress,
 } from "./sandboxTemplates";
@@ -75,7 +77,8 @@ export type Sandbox = {
   pauseWhenIdleSecs: number | null;
   /** Names only: Pyo never keeps the values. */
   env: string[];
-  /** Its server's daemon, `http://<tailnet ip>:7070`. */
+  /** Its server's daemon, `http://<tailnet ip>:7070`. On Pyo Cloud,
+   * `https://<server>.<tailnet>.ts.net:7443`. */
   url: string | null;
   /** Its server's edge proxy, where open ports are served. */
   edgeUrl: string | null;
@@ -203,7 +206,15 @@ export type SandboxServer = {
   runtime?: "firecracker" | "gvisor" | null;
   /** The server Pyo made for it at a cloud provider, until it's deleted there. */
   cloud?: SandboxServerCloud | null;
+  /** It joined Pyo Cloud over HTTPS and gets its work from there. */
+  outbound?: boolean;
+  /** Its name on the team's tailnet ("sbx-1.tail1234.ts.net"), once it joined over HTTPS. */
+  tailnetName?: string | null;
+  joinedAt?: number | null;
 };
+
+/** A command that makes a machine a sandbox server, and when its code runs out. */
+export type JoinCommand = { server: SandboxServer | null; command: string; expiresAt: number };
 
 export type SandboxServerCloud = {
   /** The cloud server's id, `cs_…`. */
@@ -344,6 +355,12 @@ export const sandboxApi = {
       "/api/v1/sandbox-servers",
       { method: "POST", body },
     ),
+  /** Pyo Cloud's add: the server joins the team's tailnet, then Pyo over HTTPS. */
+  createJoinCode: (body: { teamId: string; name: string; edgeDomain?: string }) =>
+    request<JoinCommand>("/api/v1/sandbox-servers/join-codes", { method: "POST", body }),
+  /** Pyo Cloud: the server's key stops working, and a new command joins it again. */
+  resetAccess: (id: string) =>
+    request<JoinCommand>(`/api/v1/sandbox-servers/${enc(id)}/reset-access`, { method: "POST" }),
   addCloudServer: (body: AddCloudServer) =>
     request<{ server: SandboxServer | null; cloudServer: { id: string; name: string } }>(
       "/api/v1/sandbox-servers/cloud",
@@ -413,6 +430,26 @@ export class DaemonError extends Error {
 export const OFF_TAILNET =
   "Can't reach the sandbox server. It answers only on your tailnet for now.";
 
+/** Why the daemon at `url` didn't answer: Pyo Cloud's servers (HTTPS on
+ * their tailnet name) open from the team's tailnet only. */
+export const offTailnet = (url: string | null | undefined) =>
+  url?.startsWith("https:") ? OFF_TEAM_TAILNET : OFF_TAILNET;
+
+const reach = new Map<string, { at: number; ok: Promise<boolean> }>();
+
+/** Whether this browser reaches a Pyo Cloud sandbox server at `url`
+ * (https://<name>:7443): a tailnet name answers only from devices on the
+ * tailnet. Asked again after 30 seconds. */
+export function reachable(url: string): Promise<boolean> {
+  const had = reach.get(url);
+  if (had && Date.now() - had.at < 30_000) return had.ok;
+  const ok = fetch(`${url}/v1/health`, { mode: "no-cors", cache: "no-store", signal: AbortSignal.timeout(5000) })
+    .then(() => true)
+    .catch(() => false);
+  reach.set(url, { at: Date.now(), ok });
+  return ok;
+}
+
 async function daemon<T>(
   id: string,
   path: string,
@@ -432,7 +469,7 @@ async function daemon<T>(
       body: init.json !== undefined ? JSON.stringify(init.json) : init.body,
     });
   } catch {
-    throw new DaemonError(OFF_TAILNET, 0);
+    throw new DaemonError(offTailnet(c.url), 0);
   }
   if (!res.ok) {
     const data = await res.json().catch(() => null);
@@ -673,6 +710,8 @@ export async function openDesktop(id: string, opts: { app?: DesktopApp; name?: s
       c = await connectionFor(id);
     }
     if (!c.webUrl) throw new Error(desktopBlocked(null) ?? "");
+    // Pyo Cloud's servers: a tab there from off the tailnet would only fail.
+    if (c.url.startsWith("https:") && !(await reachable(c.url))) throw new Error(OFF_TEAM_TAILNET);
     const url = desktopUrl(c.webUrl, id, c.token, opts);
     if (tab) tab.location.href = url;
     else window.location.href = url;

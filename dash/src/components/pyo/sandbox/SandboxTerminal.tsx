@@ -5,7 +5,7 @@ import { Button } from "~/components/ui/Button";
 import { ZoomButton, Zoomable } from "~/components/ui/Zoom";
 import {
   Kind,
-  OFF_TAILNET,
+  offTailnet,
   connectSocket,
   decodeFrame,
   encodeFrame,
@@ -77,12 +77,12 @@ export function SandboxTerminal({
       .then((socket) => {
         if (disposed) return socket.close();
         ws = socket;
-        socket.onerror = () => !started && end(OFF_TAILNET, true);
+        socket.onerror = () => !started && end(offTailnet(sandbox.url), true);
         // A refused connection closes with code 4000 + the HTTP status and the reason.
         socket.onclose = (e) =>
           e.code >= 4000 && e.reason
             ? end(e.reason, true)
-            : end(started ? "Disconnected." : OFF_TAILNET, !started);
+            : end(started ? "Disconnected." : offTailnet(sandbox.url), !started);
         socket.onmessage = (e) => {
           if (typeof e.data === "string") return;
           let f;
