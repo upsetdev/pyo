@@ -2,7 +2,9 @@ import {
   ArrowBendDownRightIcon,
   ArrowRightIcon,
   ArrowsClockwiseIcon,
+  ArrowUUpRightIcon,
   DotsThreeIcon,
+  ListBulletsIcon,
   GlobeIcon,
   LockSimpleIcon,
   MagnifyingGlassIcon,
@@ -25,6 +27,13 @@ import { Tooltip } from "~/components/ui/Tooltip";
 import { DomainKind, DomainMark, DomainStatus } from "~/components/pyo/DomainState";
 import { AppLink } from "~/components/ui/AppLink";
 import { AddDomainDialog } from "~/components/pyo/AddDomainDialog";
+import {
+  HeadersDialog,
+  onlyRedirects,
+  redirectTarget,
+  RedirectsDialog,
+  RulesLines,
+} from "~/components/pyo/DomainRules";
 import {
   DeleteRecordSwitch,
   DnsRecordLine,
@@ -57,6 +66,21 @@ function Domains({ app }: { app: Application }) {
   const [restoreRecord, setRestoreRecord] = useState(false);
   const [picking, setPicking] = useState<Domain | null>(null);
   const [replacing, setReplacing] = useState<Certificate | null>(null);
+  const [redirecting, setRedirecting] = useState<Domain | null>(null);
+  const [heading, setHeading] = useState<Domain | null>(null);
+  // Its rules in Pyo Gateway, on every domain's menu.
+  const rules = (d: Domain) => [
+    {
+      label: "Redirects",
+      icon: <ArrowUUpRightIcon size={14} />,
+      onSelect: () => setRedirecting(d),
+    },
+    {
+      label: "Headers",
+      icon: <ListBulletsIcon size={14} />,
+      onSelect: () => setHeading(d),
+    },
+  ];
   const certOf = (d: Domain) =>
     d.tlsMode === "custom"
       ? s.certificates.find((c) => c.id === d.certificateId)
@@ -119,8 +143,22 @@ function Domains({ app }: { app: Application }) {
                       <TlsBadge status={d.tls} />
                     </Tooltip>
                     <span className="ml-2 inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">
-                      <ArrowRightIcon size={12} aria-label="routes to" />
-                      <span className="font-mono">{d.portName}</span>
+                      {onlyRedirects(d) ? (
+                        <>
+                          <ArrowUUpRightIcon size={12} aria-label="redirects to" />
+                          <span className="font-mono">
+                            {redirectTarget(
+                              d.redirects!.find((r) => r.path === "/") ??
+                                d.redirects![0],
+                            )}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <ArrowRightIcon size={12} aria-label="routes to" />
+                          <span className="font-mono">{d.portName}</span>
+                        </>
+                      )}
                     </span>
                     {/* Only while it isn't live yet; a live domain needs no status. */}
                     {!app.currentDeploymentId || d.status !== "active" ? (
@@ -134,6 +172,8 @@ function Domains({ app }: { app: Application }) {
                       <Menu
                         label={`Settings of ${d.hostname}`}
                         items={tailnet ? [
+                          ...rules(d),
+                          { type: "separator" as const },
                           copyIdItem("Domain", d.id),
                           { type: "separator" as const },
                           {
@@ -197,6 +237,8 @@ function Domains({ app }: { app: Application }) {
                               });
                             },
                           },
+                          { type: "separator" as const },
+                          ...rules(d),
                           copyIdItem("Domain", d.id),
                           { type: "separator" as const },
                           {
@@ -223,6 +265,7 @@ function Domains({ app }: { app: Application }) {
                       />
                     </span>
                   </div>
+                  <RulesLines d={d} />
                   {/* Inline only when something needs doing. */}
                   {d.tlsMode === "custom" && !cert ? (
                     <p className="mt-1.5 text-[12px] text-destructive">
@@ -312,6 +355,16 @@ function Domains({ app }: { app: Application }) {
         app={app}
         open={adding}
         onClose={() => setAdding(false)}
+      />
+      <RedirectsDialog
+        app={app}
+        domain={redirecting}
+        onClose={() => setRedirecting(null)}
+      />
+      <HeadersDialog
+        app={app}
+        domain={heading}
+        onClose={() => setHeading(null)}
       />
       <PickCertificateDialog
         app={app}

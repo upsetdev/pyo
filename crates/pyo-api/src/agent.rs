@@ -356,6 +356,8 @@ async fn heartbeat(
         "wafActive": caps.waf_active,
         // It runs a Cloudflare Tunnel connector (cloudflare/tunnel_loop.rs).
         "tunnel": caps.tunnel,
+        // Which of Pyo Gateway's rules it writes (routes.rs `rules_ok`).
+        "gatewayRules": caps.gateway_rules,
         // Whether this agent can update Pyo and itself (updates.rs).
         "updates": hb.updates,
         // Its builders and pyo-static sign their requests (agent_auth.rs).

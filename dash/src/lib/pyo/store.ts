@@ -45,6 +45,8 @@ import type {
   Deployment,
   DeploymentTrigger,
   Domain,
+  DomainRedirect,
+  HeaderRules,
   EmailSettings,
   EncryptionStatus,
   EnvironmentVariable,
@@ -2054,6 +2056,8 @@ export const api = {
       redirectHttps: boolean;
       tlsMode?: TlsMode;
       certificateId?: string;
+      /** Only redirects (no port). */
+      redirects?: DomainRedirect[];
     },
     /** Create its DNS record in Cloudflare once it's saved, or switch it to the tunnel. */
     cloudflare?: { proxied: boolean } | { tunnel: true },
@@ -2077,6 +2081,31 @@ export const api = {
         ? api.setDomainTunnel(id, domainId, { on: true })
         : api.createDnsRecord(id, domainId, { proxied: cloudflare.proxied }));
     return res;
+  },
+  /**
+   * A domain's redirects or header rules. Saved before they're shown, so a
+   * refused one stays in its form with why.
+   */
+  async saveDomainRules(
+    id: string,
+    domainId: string,
+    patch: { redirects?: DomainRedirect[]; headers?: HeaderRules },
+  ): Promise<string | null> {
+    const app = get().services.find((a) => a.id === id);
+    if (!app) return "The service is gone.";
+    const service = {
+      ...app,
+      domains: app.domains.map((d) =>
+        d.id === domainId ? { ...d, ...patch } : d,
+      ),
+    };
+    const r = await attempt("saveService", { service });
+    if ("error" in r) return r.error;
+    update((s) => {
+      const d = findService(s, id).domains.find((x) => x.id === domainId);
+      if (d) Object.assign(d, patch);
+    });
+    return null;
   },
   /** HTTPS settings of a domain; applied live once the service is deployed. */
   updateDomain(

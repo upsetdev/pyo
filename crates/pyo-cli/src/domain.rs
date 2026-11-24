@@ -196,7 +196,10 @@ pub async fn list(api: &Api, service: Option<&str>) -> Result<()> {
                 d["hostname"].as_str().unwrap_or("").to_owned(),
                 paint(&tone, &text),
                 https(d).to_owned(),
-                port_of(s, d["portName"].as_str().unwrap_or("")),
+                match d["portName"].as_str().unwrap_or("") {
+                    "" => "redirect".to_owned(),
+                    p => port_of(s, p),
+                },
             ]
         })
         .collect();
@@ -238,6 +241,20 @@ pub async fn list(api: &Api, service: Option<&str>) -> Result<()> {
         {
             println!("  {}", ui::red(e));
         }
+        for r in d["redirects"].as_array().into_iter().flatten() {
+            println!(
+                "  {}",
+                ui::dim(&format!(
+                    "{} → {} ({})",
+                    r["path"].as_str().unwrap_or("/"),
+                    redirect_target(r),
+                    r["status"].as_u64().unwrap_or(301)
+                ))
+            );
+        }
+        for l in header_lines(&d["headers"]) {
+            println!("  {}", ui::dim(&l));
+        }
     }
     Ok(())
 }
@@ -249,6 +266,7 @@ pub struct Dns {
     pub proxied: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn add(
     api: &Api,
     service: Option<&str>,
@@ -257,6 +275,7 @@ pub async fn add(
     port: Option<String>,
     wait: bool,
     dns: Dns,
+    redirect: Option<Value>,
 ) -> Result<()> {
     let t = service::target(api, service).await?;
     let mut s = t.service().clone();
@@ -303,6 +322,29 @@ pub async fn add(
     }) {
         bail!("{host} is already on {}.", t.state.path_of(other));
     }
+    let private = private_host(&host);
+    let mut domain = json!({
+        "id": new_id("dom"), "hostname": host, "portName": "", "status": "pending_dns",
+        "tls": "pending", "tlsMode": "auto", "redirectHttps": !private, "createdAt": now_ms(),
+    });
+    match redirect {
+        // Only a redirect: no port.
+        Some(r) => domain["redirects"] = json!([r]),
+        None => domain["portName"] = http_port(&mut s, &t, port.as_deref())?,
+    }
+    let id = domain["id"].as_str().unwrap_or("").to_owned();
+    s["domains"]
+        .as_array_mut()
+        .context("service has no domains list")?
+        .push(domain);
+    api.op("saveService", json!({ "service": s })).await?;
+    ui::ok(&format!("Added {host}"));
+    after_add(api, &t, &s, &host, &id, wait, dns).await
+}
+
+/// The HTTP port a new domain routes to (the first, or the one named),
+/// made public. Its name.
+fn http_port(s: &mut Value, t: &Target, port: Option<&str>) -> Result<Value> {
     let ports = s["ports"]
         .as_array_mut()
         .context("service has no ports list")?;
@@ -315,7 +357,7 @@ pub async fn add(
             t.state.path_of(t.service())
         );
     }
-    let i = match &port {
+    let i = match port {
         None => http[0],
         Some(p) => *http
             .iter()
@@ -340,19 +382,21 @@ pub async fn add(
             })?,
     };
     ports[i]["exposure"] = json!("http");
-    let port_name = ports[i]["name"].clone();
-    let private = private_host(&host);
-    let domain = json!({
-        "id": new_id("dom"), "hostname": host, "portName": port_name, "status": "pending_dns",
-        "tls": "pending", "tlsMode": "auto", "redirectHttps": !private, "createdAt": now_ms(),
-    });
-    let id = domain["id"].as_str().unwrap_or("").to_owned();
-    s["domains"]
-        .as_array_mut()
-        .context("service has no domains list")?
-        .push(domain);
-    api.op("saveService", json!({ "service": s })).await?;
-    ui::ok(&format!("Added {host}"));
+    Ok(ports[i]["name"].clone())
+}
+
+/// After a domain is added: its DNS record (or the tunnel), then what's
+/// left to do, or its progress with `wait`.
+async fn after_add(
+    api: &Api,
+    t: &Target,
+    s: &Value,
+    host: &str,
+    id: &str,
+    wait: bool,
+    dns: Dns,
+) -> Result<()> {
+    let host = host.to_owned();
     // Its record in the team's Cloudflare account, when a zone there covers it.
     let team_id = s["teamId"].as_str().unwrap_or("");
     let in_cloudflare = !is_free(&host)
@@ -361,9 +405,9 @@ pub async fn add(
     // Through the cluster's Cloudflare Tunnel: Pyo makes the switch. A name
     // under the tunnel's default domain gets no record of its own (its
     // wildcard has it), unless a record on that name is in the way.
-    let tunnel = cluster_ip(&t, "traffic").as_deref() == Some("tunnel");
+    let tunnel = cluster_ip(t, "traffic").as_deref() == Some("tunnel");
     let free_tunnel = tunnel
-        && cluster_ip(&t, "freeDomainSuffix")
+        && cluster_ip(t, "freeDomainSuffix")
             .is_some_and(|s| host.strip_suffix(&format!(".{s}")).is_some_and(|l| !l.contains('.')));
     let made = if tunnel && in_cloudflare && dns.cloudflare {
         crate::cloudflare::domain_tunnel(api, Some(&t.id), &host, true, false, true)
@@ -373,14 +417,14 @@ pub async fn add(
     } else if free_tunnel {
         true
     } else if in_cloudflare && dns.cloudflare {
-        crate::cloudflare::create_record(api, &t.id, &id, &host, dns.proxied, false)
+        crate::cloudflare::create_record(api, &t.id, id, &host, dns.proxied, false)
             .await
             .map_err(|e| eprintln!("{}", ui::red(&e.to_string())))
             .is_ok()
     } else {
         false
     };
-    if !deployed(&s) {
+    if !deployed(s) {
         println!("{}", ui::dim("Live after the first deploy: pyo deploy"));
         return Ok(());
     }
@@ -391,7 +435,7 @@ pub async fn add(
         println!("Create this DNS record at your DNS provider:");
         println!(
             "  {}",
-            dns_record(&host, cluster_ip(&t, "publicIp").as_deref())
+            dns_record(&host, cluster_ip(t, "publicIp").as_deref())
         );
     }
     if !wait {
@@ -405,7 +449,210 @@ pub async fn add(
         );
         return Ok(());
     }
-    follow(api, &t.id, &id, &host).await
+    follow(api, &t.id, id, &host).await
+}
+
+/// A redirect of `path` to `to`: a hostname, a hostname and path, or a
+/// path ("https://" left off).
+pub fn redirect_to(path: &str, to: &str, status: Option<&str>, keep_path: bool) -> Result<Value> {
+    let to = to
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let (to_host, to_path) = match to.find('/') {
+        Some(i) => (&to[..i], &to[i..]),
+        None => (to, ""),
+    };
+    let to_host = to_host.trim_end_matches('.').to_lowercase();
+    if !to_host.is_empty() && !valid_hostname(&to_host) {
+        bail!("\"{to_host}\" isn't a hostname, like example.com.");
+    }
+    if to_host.is_empty() && to_path.is_empty() {
+        bail!("Say where to: --to example.com or --to /new.");
+    }
+    Ok(json!({
+        "path": path, "toHost": to_host, "toPath": to_path,
+        "status": status.and_then(|s| s.parse::<u16>().ok()).unwrap_or(301),
+        "keepPath": keep_path,
+    }))
+}
+
+/// "example.com/old": the hostname and the path ("/" without one).
+fn split_source(from: &str) -> (String, String) {
+    let from = from
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let (host, path) = match from.find('/') {
+        Some(i) => (&from[..i], &from[i..]),
+        None => (from, "/"),
+    };
+    let path = match path.trim_end_matches('/') {
+        "" => "/",
+        p => p,
+    };
+    (host.trim_end_matches('.').to_lowercase(), path.to_owned())
+}
+
+/// `pyo domain redirect`: a redirect added, replaced or removed. A hostname
+/// the service doesn't have yet becomes a domain that only redirects.
+pub async fn redirect(
+    api: &Api,
+    service: Option<&str>,
+    from: &str,
+    to: Option<&str>,
+    status: Option<&str>,
+    keep_path: bool,
+    remove: bool,
+) -> Result<()> {
+    let (host, path) = split_source(from);
+    if !valid_hostname(&host) {
+        bail!("\"{host}\" isn't a hostname, like www.example.com.");
+    }
+    let t = service::target(api, service).await?;
+    let mut s = t.service().clone();
+    let has = s["domains"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|d| d["hostname"] == json!(host));
+    if !has {
+        if remove {
+            bail!("{host} isn't one of {}'s domains.", t.state.path_of(t.service()));
+        }
+        if path != "/" {
+            bail!("Add {host} first: pyo domain add {host}");
+        }
+        let r = redirect_to("/", to.unwrap_or(""), status, keep_path)?;
+        let dns = Dns { cloudflare: true, proxied: false };
+        return add(api, service, Some(host), false, None, false, dns, Some(r)).await;
+    }
+    let d = s["domains"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .find(|d| d["hostname"] == json!(host))
+        .context("no such domain")?;
+    let mut list: Vec<Value> = d["redirects"].as_array().cloned().unwrap_or_default();
+    let at = list.iter().position(|r| r["path"] == json!(path));
+    let shown = if path == "/" { host.clone() } else { format!("{host}{path}") };
+    if remove {
+        let Some(i) = at else {
+            bail!("{shown} has no redirect.");
+        };
+        if d["portName"].as_str().unwrap_or("").is_empty() && list.len() == 1 {
+            bail!("{host} only redirects. Remove the domain instead: pyo domain remove {host}");
+        }
+        list.remove(i);
+    } else {
+        let r = redirect_to(&path, to.unwrap_or(""), status, keep_path)?;
+        match at {
+            Some(i) => list[i] = r,
+            None => list.push(r),
+        }
+    }
+    d["redirects"] = json!(list);
+    api.op("saveService", json!({ "service": s })).await?;
+    ui::ok(&if remove {
+        format!("Removed the redirect of {shown}")
+    } else {
+        format!("{shown} redirects to {}", to.unwrap_or("").trim())
+    });
+    Ok(())
+}
+
+/// "Name: value", as `--set` takes it.
+fn header_pair(s: &str) -> Result<(String, String)> {
+    let (name, value) = s
+        .split_once(':')
+        .with_context(|| format!("\"{s}\" isn't \"Name: value\"."))?;
+    Ok((name.trim().to_owned(), value.trim().to_owned()))
+}
+
+/// `pyo domain header`: header rules changed, or listed without changes.
+pub async fn header(
+    api: &Api,
+    service: Option<&str>,
+    hostname: &str,
+    set: &[String],
+    remove: &[String],
+    unset: &[String],
+    request: bool,
+) -> Result<()> {
+    let host = hostname.trim().trim_end_matches('.').to_lowercase();
+    let t = service::target(api, service).await?;
+    let mut s = t.service().clone();
+    let d = s["domains"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .find(|d| d["hostname"] == json!(host))
+        .with_context(|| format!("{host} isn't one of this service's domains."))?;
+    if set.is_empty() && remove.is_empty() && unset.is_empty() {
+        let lines = header_lines(&d["headers"]);
+        if lines.is_empty() {
+            println!("No header rules. Add one: pyo domain header {host} --set 'Name: value'");
+        }
+        for l in lines {
+            println!("{l}");
+        }
+        return Ok(());
+    }
+    let side = if request { "request" } else { "response" };
+    let mut rules = d["headers"].clone();
+    if !rules.is_object() {
+        rules = json!({});
+    }
+    let mut sets: Vec<Value> = rules[side]["set"].as_array().cloned().unwrap_or_default();
+    let mut removes: Vec<Value> = rules[side]["remove"].as_array().cloned().unwrap_or_default();
+    let same = |a: &Value, b: &str| a.as_str().is_some_and(|a| a.eq_ignore_ascii_case(b));
+    let gone: Vec<&str> = unset
+        .iter()
+        .chain(remove)
+        .map(String::as_str)
+        .chain(set.iter().filter_map(|x| x.split_once(':').map(|p| p.0.trim())))
+        .collect();
+    sets.retain(|x| !gone.iter().any(|g| same(&x["name"], g)));
+    removes.retain(|x| !gone.iter().any(|g| same(x, g)));
+    for x in set {
+        let (name, value) = header_pair(x)?;
+        sets.push(json!({ "name": name, "value": value }));
+    }
+    for r in remove {
+        removes.push(json!(r.trim()));
+    }
+    rules[side] = json!({ "set": sets, "remove": removes });
+    d["headers"] = rules;
+    api.op("saveService", json!({ "service": s })).await?;
+    ui::ok(&format!("Saved the header rules of {host}"));
+    Ok(())
+}
+
+/// A domain's header rules, a line each: "response  set  Name: value".
+fn header_lines(h: &Value) -> Vec<String> {
+    let mut out = vec![];
+    for side in ["response", "request"] {
+        for x in h[side]["set"].as_array().into_iter().flatten() {
+            out.push(format!(
+                "{side:<8}  set     {}: {}",
+                x["name"].as_str().unwrap_or(""),
+                x["value"].as_str().unwrap_or("")
+            ));
+        }
+        for x in h[side]["remove"].as_array().into_iter().flatten() {
+            out.push(format!("{side:<8}  remove  {}", x.as_str().unwrap_or("")));
+        }
+    }
+    out
+}
+
+/// Where a domain's redirect goes: "example.com/new", "/new".
+fn redirect_target(r: &Value) -> String {
+    format!(
+        "{}{}",
+        r["toHost"].as_str().unwrap_or(""),
+        r["toPath"].as_str().unwrap_or("")
+    )
 }
 
 /// A tailnet name's DNS is Tailscale's: there's no record to create.
@@ -559,6 +806,22 @@ pub async fn remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redirects_as_typed() {
+        assert_eq!(split_source("www.example.com"), ("www.example.com".into(), "/".into()));
+        assert_eq!(split_source("https://Example.com/old/"), ("example.com".into(), "/old".into()));
+        let r = redirect_to("/", "https://example.com", None, true).unwrap();
+        assert_eq!(r, json!({ "path": "/", "toHost": "example.com", "toPath": "", "status": 301, "keepPath": true }));
+        let r = redirect_to("/old", "/new", Some("302"), false).unwrap();
+        assert_eq!((r["toHost"].as_str(), r["toPath"].as_str(), r["status"].as_u64()), (Some(""), Some("/new"), Some(302)));
+        assert!(redirect_to("/", "", None, true).is_err());
+        assert_eq!(redirect_target(&json!({ "toHost": "example.com", "toPath": "/new" })), "example.com/new");
+        assert_eq!(header_pair("X-Frame-Options: DENY").unwrap(), ("X-Frame-Options".into(), "DENY".into()));
+        assert!(header_pair("nope").is_err());
+        let lines = header_lines(&json!({ "response": { "set": [{ "name": "A", "value": "1" }], "remove": ["B"] } }));
+        assert_eq!(lines, ["response  set     A: 1", "response  remove  B"]);
+    }
 
     #[test]
     fn hostnames() {

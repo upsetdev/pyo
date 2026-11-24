@@ -12,6 +12,7 @@ import {
   useTunnelChoice,
   type CloudflareChoice,
 } from "~/components/pyo/Cloudflare";
+import { parseTarget } from "~/components/pyo/DomainRules";
 import { SetUpTailscaleLink } from "~/components/pyo/Tailscale";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
@@ -84,6 +85,9 @@ export function AddDomainDialog({
   const [touched, setTouched] = useState(false);
   const [tlsMode, setTlsMode] = useState<TlsMode>("auto");
   const [redirect, setRedirect] = useState(true);
+  /** Only redirect it (www to the apex): where to, else "". */
+  const [redirectOnly, setRedirectOnly] = useState(false);
+  const [redirectTo, setRedirectTo] = useState("");
   const [certificateId, setCertificateId] = useState("");
   const [uploading, setUploading] = useState(false);
   const [cf, setCf] = useState<CloudflareChoice>({
@@ -155,6 +159,8 @@ export function AddDomainDialog({
           ? "Pick the service it routes to."
           : taken
             ? `${hostname} is already used.`
+            : k === "own" && redirectOnly && !parseTarget(redirectTo).toHost
+              ? "Enter where it redirects to, e.g. example.com."
             : k !== "tailnet" && tlsMode === "custom" && !cert
               ? `Upload a certificate valid for ${hostname}, or pick another HTTPS option.`
               : "";
@@ -166,6 +172,8 @@ export function AddDomainDialog({
     setPortName("");
     setTouched(false);
     setCf({ create: true, proxied: false });
+    setRedirectOnly(false);
+    setRedirectTo("");
     onClose();
   };
   return (
@@ -176,6 +184,17 @@ export function AddDomainDialog({
       onSubmit={() => {
         setTouched(true);
         if (error || !app) return;
+        const only = k === "own" && redirectOnly;
+        const redirects = only
+          ? [
+              {
+                path: "/",
+                ...parseTarget(redirectTo),
+                status: 301 as const,
+                keepPath: true,
+              },
+            ]
+          : undefined;
         void api.addDomain(
           app.id,
           k === "tailnet"
@@ -183,7 +202,8 @@ export function AddDomainDialog({
               { hostname, portName: port, redirectHttps: true, tlsMode: "auto" }
             : {
                 hostname,
-                portName: port,
+                portName: only ? "" : port,
+                redirects,
                 redirectHttps: tlsMode !== "off" && redirect,
                 tlsMode,
                 ...(tlsMode === "custom" && cert
@@ -379,7 +399,31 @@ export function AddDomainDialog({
                 tunnel
               />
             ) : null}
-            {httpPorts.length > 1 ? (
+            {k === "own" ? (
+              <Switch
+                checked={redirectOnly}
+                onChange={setRedirectOnly}
+                label="Only redirect"
+                description="Like www to your main domain."
+              />
+            ) : null}
+            {k === "own" && redirectOnly ? (
+              <Field
+                label="Redirect to"
+                hint="The path and query are kept."
+              >
+                {(p) => (
+                  <Input
+                    {...p}
+                    mono
+                    value={redirectTo}
+                    onChange={(e) => setRedirectTo(e.target.value)}
+                    placeholder="example.com"
+                  />
+                )}
+              </Field>
+            ) : null}
+            {httpPorts.length > 1 && !(k === "own" && redirectOnly) ? (
               <Field label="Route to port">
                 {(p) => (
                   <Select

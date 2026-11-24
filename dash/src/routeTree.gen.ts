@@ -74,6 +74,7 @@ import { Route as AppTeamClustersWorkloadsRouteImport } from './routes/_app/$tea
 import { Route as AppTeamCronJobsNewRouteImport } from './routes/_app/$team/cron-jobs_.new'
 import { Route as AppTeamDeployNewRouteImport } from './routes/_app/$team/deploy/new'
 import { Route as AppTeamDeploymentsDeploymentIdRouteImport } from './routes/_app/$team/deployments/$deploymentId'
+import { Route as AppTeamDomainsHostnameRouteImport } from './routes/_app/$team/domains_.$hostname'
 import { Route as AppTeamImportPlatformRouteImport } from './routes/_app/$team/import_.platform'
 import { Route as AppTeamKvIndexRouteImport } from './routes/_app/$team/kv/index'
 import { Route as AppTeamKvDatabaseIdRouteImport } from './routes/_app/$team/kv/$databaseId'
@@ -473,6 +474,11 @@ const AppTeamDeploymentsDeploymentIdRoute =
     path: '/deployments/$deploymentId',
     getParentRoute: () => AppTeamRoute,
   } as any)
+const AppTeamDomainsHostnameRoute = AppTeamDomainsHostnameRouteImport.update({
+  id: '/domains_/$hostname',
+  path: '/domains/$hostname',
+  getParentRoute: () => AppTeamRoute,
+} as any)
 const AppTeamImportPlatformRoute = AppTeamImportPlatformRouteImport.update({
   id: '/import_/platform',
   path: '/import/platform',
@@ -901,6 +907,7 @@ export interface FileRoutesByFullPath {
   '/$team/cron-jobs/new': typeof AppTeamCronJobsNewRoute
   '/$team/deploy/new': typeof AppTeamDeployNewRoute
   '/$team/deployments/$deploymentId': typeof AppTeamDeploymentsDeploymentIdRoute
+  '/$team/domains/$hostname': typeof AppTeamDomainsHostnameRoute
   '/$team/import/platform': typeof AppTeamImportPlatformRoute
   '/$team/kv/$databaseId': typeof AppTeamKvDatabaseIdRouteWithChildren
   '/$team/kv/new': typeof AppTeamKvNewRoute
@@ -1022,6 +1029,7 @@ export interface FileRoutesByTo {
   '/$team/cron-jobs/new': typeof AppTeamCronJobsNewRoute
   '/$team/deploy/new': typeof AppTeamDeployNewRoute
   '/$team/deployments/$deploymentId': typeof AppTeamDeploymentsDeploymentIdRoute
+  '/$team/domains/$hostname': typeof AppTeamDomainsHostnameRoute
   '/$team/import/platform': typeof AppTeamImportPlatformRoute
   '/$team/kv/new': typeof AppTeamKvNewRoute
   '/$team/mysql/new': typeof AppTeamMysqlNewRoute
@@ -1151,6 +1159,7 @@ export interface FileRoutesById {
   '/_app/$team/cron-jobs_/new': typeof AppTeamCronJobsNewRoute
   '/_app/$team/deploy/new': typeof AppTeamDeployNewRoute
   '/_app/$team/deployments/$deploymentId': typeof AppTeamDeploymentsDeploymentIdRoute
+  '/_app/$team/domains_/$hostname': typeof AppTeamDomainsHostnameRoute
   '/_app/$team/import_/platform': typeof AppTeamImportPlatformRoute
   '/_app/$team/kv/$databaseId': typeof AppTeamKvDatabaseIdRouteWithChildren
   '/_app/$team/kv/new': typeof AppTeamKvNewRoute
@@ -1281,6 +1290,7 @@ export interface FileRouteTypes {
     | '/$team/cron-jobs/new'
     | '/$team/deploy/new'
     | '/$team/deployments/$deploymentId'
+    | '/$team/domains/$hostname'
     | '/$team/import/platform'
     | '/$team/kv/$databaseId'
     | '/$team/kv/new'
@@ -1402,6 +1412,7 @@ export interface FileRouteTypes {
     | '/$team/cron-jobs/new'
     | '/$team/deploy/new'
     | '/$team/deployments/$deploymentId'
+    | '/$team/domains/$hostname'
     | '/$team/import/platform'
     | '/$team/kv/new'
     | '/$team/mysql/new'
@@ -1530,6 +1541,7 @@ export interface FileRouteTypes {
     | '/_app/$team/cron-jobs_/new'
     | '/_app/$team/deploy/new'
     | '/_app/$team/deployments/$deploymentId'
+    | '/_app/$team/domains_/$hostname'
     | '/_app/$team/import_/platform'
     | '/_app/$team/kv/$databaseId'
     | '/_app/$team/kv/new'
@@ -2060,6 +2072,13 @@ declare module '@tanstack/react-router' {
       path: '/deployments/$deploymentId'
       fullPath: '/$team/deployments/$deploymentId'
       preLoaderRoute: typeof AppTeamDeploymentsDeploymentIdRouteImport
+      parentRoute: typeof AppTeamRoute
+    }
+    '/_app/$team/domains_/$hostname': {
+      id: '/_app/$team/domains_/$hostname'
+      path: '/domains/$hostname'
+      fullPath: '/$team/domains/$hostname'
+      preLoaderRoute: typeof AppTeamDomainsHostnameRouteImport
       parentRoute: typeof AppTeamRoute
     }
     '/_app/$team/import_/platform': {
@@ -2762,6 +2781,7 @@ interface AppTeamRouteChildren {
   AppTeamCronJobsNewRoute: typeof AppTeamCronJobsNewRoute
   AppTeamDeployNewRoute: typeof AppTeamDeployNewRoute
   AppTeamDeploymentsDeploymentIdRoute: typeof AppTeamDeploymentsDeploymentIdRoute
+  AppTeamDomainsHostnameRoute: typeof AppTeamDomainsHostnameRoute
   AppTeamImportPlatformRoute: typeof AppTeamImportPlatformRoute
   AppTeamKvDatabaseIdRoute: typeof AppTeamKvDatabaseIdRouteWithChildren
   AppTeamKvNewRoute: typeof AppTeamKvNewRoute
@@ -2817,6 +2837,7 @@ const AppTeamRouteChildren: AppTeamRouteChildren = {
   AppTeamCronJobsNewRoute: AppTeamCronJobsNewRoute,
   AppTeamDeployNewRoute: AppTeamDeployNewRoute,
   AppTeamDeploymentsDeploymentIdRoute: AppTeamDeploymentsDeploymentIdRoute,
+  AppTeamDomainsHostnameRoute: AppTeamDomainsHostnameRoute,
   AppTeamImportPlatformRoute: AppTeamImportPlatformRoute,
   AppTeamKvDatabaseIdRoute: AppTeamKvDatabaseIdRouteWithChildren,
   AppTeamKvNewRoute: AppTeamKvNewRoute,

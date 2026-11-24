@@ -17,6 +17,7 @@ pub mod firewall;
 pub mod flows;
 pub mod memory;
 pub mod rbac;
+pub mod rules;
 pub mod registry_door;
 pub mod sandbox;
 #[cfg(feature = "command-signing")]
@@ -589,6 +590,10 @@ pub struct Capabilities {
     /// writes tunnel domains' routes.
     #[serde(default)]
     pub tunnel: bool,
+    /// Which of Pyo Gateway's rules the agent writes (rules.rs): 1 for
+    /// redirects and header rules. 0 from older agents.
+    #[serde(default)]
+    pub gateway_rules: u8,
 }
 
 /// A server where the gateway can't get some of its ports.
@@ -2423,7 +2428,7 @@ pub fn proxy_listen_port(public: i32) -> i32 {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DomainSpec {
     pub hostname: String,
@@ -2445,9 +2450,21 @@ pub struct DomainSpec {
     /// "": direct only.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tunnel: String,
+    /// Its redirects (rules.rs): requests under a path go elsewhere. A
+    /// domain without a port (`port_name` "") only redirects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirects: Vec<rules::Redirect>,
+    /// Its header rules (rules.rs), on its responses and on requests to
+    /// the service.
+    #[serde(default, skip_serializing_if = "rules::HeaderRules::is_empty")]
+    pub headers: rules::HeaderRules,
 }
 
 impl DomainSpec {
+    /// Only redirects: no port to route to.
+    pub fn redirect_only(&self) -> bool {
+        self.port_name.is_empty() && !self.redirects.is_empty()
+    }
     /// Served through the tunnel ("switching" or "on").
     pub fn via_tunnel(&self) -> bool {
         matches!(self.tunnel.as_str(), TUNNEL_SWITCHING | TUNNEL_ON)

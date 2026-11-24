@@ -1671,7 +1671,7 @@ fn check_build_args(args: &Value) -> ApiResult<()> {
     Ok(())
 }
 
-fn validate_service_spec(spec: &Value) -> ApiResult<()> {
+fn validate_service_spec(spec: &mut Value) -> ApiResult<()> {
     if spec["workloadKind"] == json!("CronJob") {
         check_schedule(spec["schedule"].as_str().unwrap_or(""))?;
         if spec["command"].as_str().is_some_and(|c| c.len() > 4096) {
@@ -1751,19 +1751,27 @@ fn validate_service_spec(spec: &Value) -> ApiResult<()> {
         }
         inside.push(key);
     }
-    for d in spec["domains"].as_array().cloned().unwrap_or_default() {
-        let host = d["hostname"].as_str().unwrap_or("");
-        if !hostname(host) {
+    for d in spec["domains"].as_array_mut().into_iter().flatten() {
+        let host = d["hostname"].as_str().unwrap_or("").to_owned();
+        if !hostname(&host) {
             return Err(ApiError::bad_request(format!(
                 "{host} isn't a valid hostname."
             )));
         }
         let port = d["portName"].as_str().unwrap_or("");
-        if !ports.iter().any(|p| p["name"] == json!(port)) {
+        // A domain that only redirects has no port.
+        let redirects = d["redirects"].as_array().is_some_and(|r| !r.is_empty());
+        if port.is_empty() && !redirects {
+            return Err(ApiError::bad_request(format!(
+                "{host} needs a port to route to, or a redirect."
+            )));
+        }
+        if !port.is_empty() && !ports.iter().any(|p| p["name"] == json!(port)) {
             return Err(ApiError::bad_request(format!(
                 "{host} points at a port the service doesn't have."
             )));
         }
+        crate::routes::tidy_rules(d).map_err(ApiError::bad_request)?;
     }
     for e in spec["env"].as_array().cloned().unwrap_or_default() {
         let key = e["key"].as_str().unwrap_or("");
@@ -2520,6 +2528,7 @@ pub(crate) enum Op {
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
         /// Its `serveAs`, for a build Pyo detects as a static site: "static" (the default) serves the build's output as static files from the cluster's shared static server, "service" runs it as a service of its own. Takes effect with the next deploy.
+        /// Its `domains`: `id`, `hostname`, `portName` (the HTTP port it routes to), `tlsMode`, `redirectHttps`, and its rules in Pyo Gateway. `redirects` (at most 15): `[{"path": "/old", "toHost": …, "toPath": "/new", "status": 301 or 302, "keepPath": true}]`, each sending requests under `path` to another hostname or path, query kept. A domain without a `portName` only redirects, with a redirect of "/" (like www.example.com to example.com). `headers`: `{"response": {"set": [{"name": …, "value": …}], "remove": [names]}, "request": {…}}`, at most 16 per list. Hop-by-hop headers, `Host`, `X-Forwarded-*`, `X-Real-Ip`, `X-Envoy-*`, `Cf-*` and `X-Pyo-*` can't be changed. Rules go live in place.
         /// Its `placement`, where it runs: `{"servers": [...], "tags": [...]}` runs it only on the servers named and on every server with one of the tags, tagged now or later. Absent or null: any server of its cluster. A service with a volume keeps its volume's server, and one with a GPU needs a GPU server. A change goes live without a deploy. The older `serverTags` is read as its tags.
         #[schema(value_type = Object)]
         service: Value,
@@ -2549,6 +2558,7 @@ pub(crate) enum Op {
         /// Its `healthCheck`, which says when a replica is ready: `type` ("http" for a request to `path` on `port` answered with 2xx or 3xx, "tcp" for `port` accepting connections, "exec" to run `command`, or "none" so deploys don't wait for it), `initialDelaySeconds` and `periodSeconds`. With `auto` ("default" or "static") Pyo picks it from what each build finds: a static site or single-page app gets an HTTP check of `/`. A check without `auto` is kept as it is.
         /// A Git `source` has `buildArgs` (`[{"key": …, "value": …}]`), used by its next build: Dockerfile build arguments, or Railpack settings such as `RAILPACK_BUILD_CMD`. They can end up in the image, so no secrets.
         /// Its `serveAs`, for a build Pyo detects as a static site: "static" (the default) serves the build's output as static files from the cluster's shared static server, "service" runs it as a service of its own. Takes effect with the next deploy.
+        /// Its `domains`: `id`, `hostname`, `portName` (the HTTP port it routes to), `tlsMode`, `redirectHttps`, and its rules in Pyo Gateway. `redirects` (at most 15): `[{"path": "/old", "toHost": …, "toPath": "/new", "status": 301 or 302, "keepPath": true}]`, each sending requests under `path` to another hostname or path, query kept. A domain without a `portName` only redirects, with a redirect of "/" (like www.example.com to example.com). `headers`: `{"response": {"set": [{"name": …, "value": …}], "remove": [names]}, "request": {…}}`, at most 16 per list. Hop-by-hop headers, `Host`, `X-Forwarded-*`, `X-Real-Ip`, `X-Envoy-*`, `Cf-*` and `X-Pyo-*` can't be changed. Rules go live in place.
         /// Its `placement`, where it runs: `{"servers": [...], "tags": [...]}` runs it only on the servers named and on every server with one of the tags, tagged now or later. Absent or null: any server of its cluster. A service with a volume keeps its volume's server, and one with a GPU needs a GPU server. A change goes live without a deploy. The older `serverTags` is read as its tags.
         #[schema(value_type = Object)]
         service: Value,
@@ -6323,7 +6333,7 @@ async fn apply(
                 }
             }
             crate::placement::normalize(&mut spec)?;
-            validate_service_spec(&spec)?;
+            validate_service_spec(&mut spec)?;
             crate::previews::check_settings(&mut spec)?;
             let placed = crate::placement::Placement::of(&spec);
             let placement_changed = placed != crate::placement::Placement::of(&old_spec);
@@ -6356,6 +6366,7 @@ async fn apply(
                 .fetch_one(&mut **tx)
                 .await?;
             tailnet_domains_ok(s, &on, &spec["domains"]).await?;
+            crate::routes::rules_ok(tx, &on, &spec, &old_spec).await?;
             let cluster_id: String =
                 sqlx::query_scalar("SELECT cluster_id FROM pyo.services WHERE id = $1")
                     .bind(&id)
@@ -10061,7 +10072,7 @@ pub(crate) async fn create_service(
     crate::registry::label_source(tx, &team_id, &mut spec).await?;
     crate::template_source::scrub_fields(&mut spec);
     crate::placement::normalize(&mut spec)?;
-    validate_service_spec(&spec)?;
+    validate_service_spec(&mut spec)?;
     crate::previews::check_settings(&mut spec)?;
     gpu_ok(tx, &cluster_id, &spec).await?;
     crate::placement::check(tx, &cluster_id, None, &spec, true).await?;
@@ -10070,6 +10081,7 @@ pub(crate) async fn create_service(
     crate::git::queue_sync_for(tx, &[&spec["source"]]).await?;
     crate::certs::domains_ok(tx, &team_id, &spec).await?;
     domains_unique(tx, &team_id, &id, &spec).await?;
+    crate::routes::rules_ok(tx, &cluster_id, &spec, &Value::Null).await?;
     ports_unique(tx, &team_id, &id, &cluster_id, &spec).await?;
     crate::secretstores::imports_ok(tx, &team_id, &spec).await?;
     let name = spec["name"].as_str().unwrap_or("").to_owned();

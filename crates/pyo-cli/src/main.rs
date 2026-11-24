@@ -368,6 +368,48 @@ enum DomainCommand {
         /// Proxied by Cloudflare (once its certificate is issued).
         #[arg(long, conflicts_with = "no_cloudflare")]
         proxied: bool,
+        /// Only redirect it, like www.example.com to example.com. No port.
+        #[arg(long, value_name = "HOST[/PATH]", conflicts_with_all = ["free", "port"])]
+        redirect_to: Option<String>,
+        /// The redirect's status: 301 (default) or 302.
+        #[arg(long, requires = "redirect_to", value_parser = ["301", "302"])]
+        status: Option<String>,
+    },
+    /// Redirect a domain, or a path of it, to another hostname or path.
+    /// The query is kept. Live without a redeploy.
+    Redirect {
+        /// What to redirect: www.example.com, or example.com/old.
+        from: String,
+        /// Where to: example.com, example.com/new or /new.
+        #[arg(long, required_unless_present = "remove")]
+        to: Option<String>,
+        /// 301 (default) or 302.
+        #[arg(long, value_parser = ["301", "302"])]
+        status: Option<String>,
+        /// Send every request to the target path itself, not the rest of its path.
+        #[arg(long)]
+        no_keep_path: bool,
+        /// Remove the redirect.
+        #[arg(long, conflicts_with_all = ["to", "status", "no_keep_path"])]
+        remove: bool,
+    },
+    /// Header rules of a domain: headers to set or remove on its responses,
+    /// or with --request on requests to the service. Without changes, lists them.
+    Header {
+        /// e.g. example.com.
+        hostname: String,
+        /// "Name: value". Repeat for more.
+        #[arg(long, value_name = "NAME: VALUE")]
+        set: Vec<String>,
+        /// A header to remove. Repeat for more.
+        #[arg(long, value_name = "NAME")]
+        remove: Vec<String>,
+        /// On requests to the service instead of responses.
+        #[arg(long)]
+        request: bool,
+        /// Stop setting or removing these headers (by name).
+        #[arg(long, value_name = "NAME")]
+        unset: Vec<String>,
     },
     /// Stop serving the service on a hostname. Deletes the DNS record Pyo made for it in Cloudflare.
     Remove {
@@ -1123,13 +1165,33 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                     wait,
                     no_cloudflare,
                     proxied,
+                    redirect_to,
+                    status,
                 } => {
                     let dns = domain::Dns {
                         cloudflare: !no_cloudflare,
                         proxied,
                     };
-                    domain::add(&api, s, hostname, free, port, wait, dns).await
+                    let redirect = match redirect_to {
+                        Some(to) => Some(domain::redirect_to("/", &to, status.as_deref(), true)?),
+                        None => None,
+                    };
+                    domain::add(&api, s, hostname, free, port, wait, dns, redirect).await
                 }
+                DomainCommand::Redirect {
+                    from,
+                    to,
+                    status,
+                    no_keep_path,
+                    remove,
+                } => domain::redirect(&api, s, &from, to.as_deref(), status.as_deref(), !no_keep_path, remove).await,
+                DomainCommand::Header {
+                    hostname,
+                    set,
+                    remove,
+                    request,
+                    unset,
+                } => domain::header(&api, s, &hostname, &set, &remove, &unset, request).await,
                 DomainCommand::Remove {
                     hostname,
                     yes,
