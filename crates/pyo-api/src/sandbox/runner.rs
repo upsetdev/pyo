@@ -58,22 +58,26 @@ async fn any_servers(db: &PgPool) -> sqlx::Result<bool> {
 }
 
 #[derive(sqlx::FromRow)]
-struct Server {
-    id: String,
-    team_id: Option<String>,
-    address: String,
-    state: String,
+pub(crate) struct Server {
+    pub id: String,
+    pub team_id: Option<String>,
+    pub address: String,
+    pub state: String,
 }
 
 /// One round: reports, then lifetimes.
 pub async fn round(s: &AppState) -> anyhow::Result<()> {
     let _ = super::join::prune(&s.db).await;
+    if let Err(e) = super::outbound::channel::sweep(&s.db).await {
+        tracing::warn!(error = %e, "sandboxes: couldn't sweep outbound servers' commands");
+    }
     // Pyo's own templates, at the images it has now.
     if let Err(e) = super::base::ensure_all(s).await {
         tracing::warn!(error = %format!("{e:#}"), "sandboxes: couldn't keep Pyo's templates");
     }
     let servers: Vec<Server> = sqlx::query_as(
-        "SELECT id, team_id, address, state FROM pyo.sandbox_servers WHERE address IS NOT NULL AND state <> 'refused'",
+        // Outbound servers (Pyo Cloud) post their reports (outbound/channel.rs).
+        "SELECT id, team_id, address, state FROM pyo.sandbox_servers WHERE address IS NOT NULL AND state <> 'refused' AND NOT outbound",
     )
     .fetch_all(&s.db)
     .await?;
@@ -135,6 +139,16 @@ async fn apply_report(db: &PgPool, srv: &Server, r: &ServerReport) -> sqlx::Resu
         .await;
     }
     let mut tx = db.begin().await?;
+    apply_in(&mut tx, srv, r).await?;
+    tx.commit().await
+}
+
+/// [`apply_report`] in a transaction, for a report that is the server's own.
+pub(crate) async fn apply_in(
+    tx: &mut sqlx::PgConnection,
+    srv: &Server,
+    r: &ServerReport,
+) -> sqlx::Result<()> {
     let since: Option<f64> = sqlx::query_scalar(
         "SELECT extract(epoch FROM now() - last_report_at)::double precision FROM pyo.sandbox_servers WHERE id = $1",
     )
@@ -180,10 +194,10 @@ async fn apply_report(db: &PgPool, srv: &Server, r: &ServerReport) -> sqlx::Resu
     for (id, team, state, age) in ours {
         match theirs.get(id.as_str()) {
             Some(st) => {
-                save_status(&mut tx, st).await?;
+                save_status(&mut *tx, st).await?;
                 if st.state == SandboxState::Running && seconds > 0 {
                     meter(
-                        &mut tx,
+                        &mut *tx,
                         &id,
                         &team,
                         &srv.id,
@@ -197,10 +211,10 @@ async fn apply_report(db: &PgPool, srv: &Server, r: &ServerReport) -> sqlx::Resu
             // Still being made, or not reported yet.
             None if state == "creating" && age < CREATE_TIMEOUT_SECS => {}
             // The server ended it (its lifetime ran out) or lost it.
-            None => end(&mut tx, &id, "stopped", None).await?,
+            None => end(&mut *tx, &id, "stopped", None).await?,
         }
     }
-    tx.commit().await
+    Ok(())
 }
 
 async fn meter(
