@@ -574,13 +574,19 @@ fn list_tools(user: &User, sandboxes: bool, params: &Value) -> Result<Value, (i6
 }
 
 /// Env values out of a snapshot: listings show names only, like get_service.
+/// A value is shown as `•••`, and saving it back keeps it (masked.rs). An
+/// empty one stays empty, and so does a secret's (`hasValue` says it has one).
 fn without_env_values(mut snap: Value) -> Value {
-    for a in snap["services"].as_array_mut().into_iter().flatten() {
-        for e in a["env"].as_array_mut().into_iter().flatten() {
-            if e.get("value").is_some() {
+    fn hide(env: Option<&mut Value>) {
+        for e in env.and_then(Value::as_array_mut).into_iter().flatten() {
+            if e["value"].as_str().is_some_and(|v| !v.is_empty()) {
                 e["value"] = json!("•••");
             }
         }
+    }
+    for a in snap["services"].as_array_mut().into_iter().flatten() {
+        hide(a.get_mut("env"));
+        hide(a.get_mut("previews").and_then(|p| p.get_mut("env")));
     }
     snap
 }
@@ -1720,6 +1726,13 @@ mod tests {
             json!({ "key": "API_URL", "value": "•••" })
         );
         assert_eq!(snap["services"][0]["env"][1]["key"], "TOKEN");
+        // A secret and an empty value stay empty; previews' values are hidden too.
+        let snap = without_env_values(
+            json!({ "services": [{ "env": [{ "key": "TOKEN", "value": "", "secret": true, "hasValue": true }, { "key": "EMPTY", "value": "" }], "previews": { "env": [{ "key": "STAGE", "value": "preview" }] } }] }),
+        );
+        assert_eq!(snap["services"][0]["env"][0]["value"], "");
+        assert_eq!(snap["services"][0]["env"][1]["value"], "");
+        assert_eq!(snap["services"][0]["previews"]["env"][0]["value"], "•••");
     }
 
     #[test]

@@ -2540,7 +2540,7 @@ pub(crate) enum Op {
         #[serde(default)]
         upload_id: Option<String>,
     },
-    /// Save a service's configuration. With `deploymentId`, roll it out too. Changes to its `domains` go live without a deploy once it has been deployed.
+    /// Save a service's configuration. With `deploymentId`, roll it out too. Changes to its `domains` go live without a deploy once it has been deployed. A variable sent back hidden (`•••`, as reads show it) keeps its saved value.
     #[serde(rename = "saveService")]
     SaveService {
         /// The whole service, as in the snapshot.
@@ -3071,6 +3071,7 @@ async fn run(
 /// Run an operation as `user` from anywhere else (MCP tools): `op` is the
 /// same JSON the dashboard sends, e.g. {"op": "scaleService", "id": …}.
 pub async fn run_json(s: &AppState, user: &User, op: Value) -> ApiResult<Value> {
+    crate::masked::no_hidden_credentials(&op)?;
     let op: Op =
         serde_json::from_value(op).map_err(|e| ApiError::bad_request(op_error(&e.to_string())))?;
     run_op(s, user, op).await
@@ -6234,7 +6235,10 @@ async fn apply(
             // The dashboard never gets secret values back, so a secret it
             // sends without one keeps the stored (sealed) value.
             let mut service = service;
-            let mut unhidden = keep_secret_values(&mut service, &old_spec);
+            // A value sent back as a read showed it hidden (•••) keeps the
+            // saved one. It's never stored as the value.
+            let mut unhidden = crate::masked::keep_hidden_env(&mut service, &old_spec).await?;
+            unhidden.extend(keep_secret_values(&mut service, &old_spec));
             // And the same for the previews' variables.
             if service["previews"].is_object() {
                 unhidden.extend(keep_secret_values(
@@ -9828,6 +9832,8 @@ pub(crate) async fn create_service(
         return Err(ApiError::bad_request("Pick one of this team's clusters."));
     }
     let mut spec = service_spec_from(&service);
+    // Nothing saved yet: a hidden value (•••) is refused.
+    crate::masked::keep_hidden_env(&mut spec, &Value::Null).await?;
     crate::template_source::scrub_fields(&mut spec);
     crate::placement::normalize(&mut spec)?;
     validate_service_spec(&spec)?;
