@@ -175,6 +175,24 @@ bun run scripts/check-migrations.ts --base origin/main
 waf/build.sh
 ```
 
+The tests that need a real Postgres are ignored by default. CI runs them in
+groups against a throwaway database, each group in a process of its own.
+Run them the same way:
+
+```bash
+export DATABASE_URL=postgres://postgres:pyo@localhost:5432/pyo
+PYO_SECRET_KEY=$(openssl rand -hex 32) cargo test -p pyo-api --lib -- --ignored \
+  rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests \
+  cloudflare::http_tests admin_sign_in_tests vault::tests
+cargo test -p pyo-api --lib -- --ignored compose_sync::db_tests
+cargo test -p pyo-api --lib -- --ignored tailscale::tests
+cargo test -p pyo-api --lib -- --ignored sandbox::outbound::tests
+cargo test -p pyo-api --lib -- --ignored volumes::tests updates::hosted_tests
+```
+
+The first group needs `PYO_SECRET_KEY` from the start. The Compose sync group
+runs without it.
+
 If you change the WAF's custom rules, also run the end-to-end harness. It
 runs the WAF behind a real Envoy in docker. See [`waf/README.md`](waf/README.md):
 
