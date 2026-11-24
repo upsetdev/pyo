@@ -66,6 +66,11 @@ pub(crate) fn fresh_ip() -> &'static str {
     Box::leak(ip.into_boxed_str())
 }
 
+/// The admin sign-in limit is the installation's, one setting for every
+/// test in the run: the test that sets it and a test whose admin signs in
+/// take turns, or the admin's sign-in is refused while the limit is on.
+pub(crate) static ADMIN_SIGN_IN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub(crate) struct Client {
     pub(crate) app: Router,
     pub(crate) cookie: Option<String>,
@@ -769,6 +774,7 @@ fn two_factor_required_teams_and_the_audit_log() {
 #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
 fn only_installation_admins_read_installation_settings() {
     run_big(async {
+        let _turn = ADMIN_SIGN_IN.lock().await;
         let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
             .await
             .unwrap();
