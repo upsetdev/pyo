@@ -193,7 +193,14 @@ pub async fn list(api: &Api, service: Option<&str>) -> Result<()> {
         .map(|d| {
             let (tone, text) = state(d, deployed(s));
             [
-                d["hostname"].as_str().unwrap_or("").to_owned(),
+                format!(
+                    "{}{}",
+                    d["hostname"].as_str().unwrap_or(""),
+                    match path_of(d) {
+                        "/" => "",
+                        p => p,
+                    }
+                ),
                 paint(&tone, &text),
                 https(d).to_owned(),
                 match d["portName"].as_str().unwrap_or("") {
@@ -266,6 +273,14 @@ pub struct Dns {
     pub proxied: bool,
 }
 
+/// Which path of the hostname a new domain routes (`--path`), and whether
+/// the service gets it without the prefix (`--strip-prefix`).
+#[derive(Default)]
+pub struct Route {
+    pub path: Option<String>,
+    pub strip_prefix: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn add(
     api: &Api,
@@ -276,12 +291,26 @@ pub async fn add(
     wait: bool,
     dns: Dns,
     redirect: Option<Value>,
+    route: Route,
 ) -> Result<()> {
     let t = service::target(api, service).await?;
     let mut s = t.service().clone();
+    // "app.example.com/api": the path, unless --path says it.
+    let (hostname, typed_path) = match hostname.as_deref().map(split_source) {
+        Some((h, p)) => (Some(h), p),
+        None => (None, "/".to_owned()),
+    };
+    let path = match route.path.as_deref().map(|p| p.trim().trim_end_matches('/')) {
+        Some("") => "/".to_owned(),
+        Some(p) if p.starts_with('/') => p.to_owned(),
+        Some(p) => bail!("\"{p}\" isn't a path. Paths start with /, like /api."),
+        None => typed_path,
+    };
+    if route.strip_prefix && path == "/" {
+        bail!("--strip-prefix needs a path, like --path /api.");
+    }
     let host = match hostname {
         Some(h) => {
-            let h = h.trim().trim_end_matches('.').to_lowercase();
             if !valid_hostname(&h) {
                 bail!("\"{h}\" isn't a hostname, like app.example.com.");
             }
@@ -313,15 +342,25 @@ pub async fn add(
         }
         None => bail!("Give a hostname, or --free for a free or tunnel domain."),
     };
+    let shown = if path == "/" { host.clone() } else { format!("{host}{path}") };
     if let Some(other) = t.state.services().iter().find(|a| {
         a["domains"]
             .as_array()
             .into_iter()
             .flatten()
-            .any(|d| d["hostname"] == json!(host))
+            .any(|d| d["hostname"] == json!(host) && path_of(d) == path)
     }) {
-        bail!("{host} is already on {}.", t.state.path_of(other));
+        bail!("{shown} is already on {}.", t.state.path_of(other));
     }
+    // Another of the team's services already serves the hostname: this is
+    // a path of it, with that one's DNS record and certificate.
+    let held = t.state.services().iter().any(|a| {
+        a["domains"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|d| d["hostname"] == json!(host))
+    });
     let private = private_host(&host);
     let mut domain = json!({
         "id": new_id("dom"), "hostname": host, "portName": "", "status": "pending_dns",
@@ -332,14 +371,32 @@ pub async fn add(
         Some(r) => domain["redirects"] = json!([r]),
         None => domain["portName"] = http_port(&mut s, &t, port.as_deref())?,
     }
+    if path != "/" {
+        domain["path"] = json!(path);
+        if route.strip_prefix {
+            domain["stripPrefix"] = json!(true);
+        }
+    }
     let id = domain["id"].as_str().unwrap_or("").to_owned();
     s["domains"]
         .as_array_mut()
         .context("service has no domains list")?
         .push(domain);
     api.op("saveService", json!({ "service": s })).await?;
-    ui::ok(&format!("Added {host}"));
+    ui::ok(&format!("Added {shown}"));
+    if held {
+        println!("{}", ui::dim(&format!("{host} keeps its DNS record and certificate.")));
+        return Ok(());
+    }
     after_add(api, &t, &s, &host, &id, wait, dns).await
+}
+
+/// A domain's path: "/" without one.
+fn path_of(d: &Value) -> &str {
+    match d["path"].as_str() {
+        Some(p) if !p.is_empty() => p,
+        _ => "/",
+    }
 }
 
 /// The HTTP port a new domain routes to (the first, or the one named),
@@ -525,7 +582,7 @@ pub async fn redirect(
         }
         let r = redirect_to("/", to.unwrap_or(""), status, keep_path)?;
         let dns = Dns { cloudflare: true, proxied: false };
-        return add(api, service, Some(host), false, None, false, dns, Some(r)).await;
+        return add(api, service, Some(host), false, None, false, dns, Some(r), Route::default()).await;
     }
     let d = s["domains"]
         .as_array_mut()
@@ -740,12 +797,23 @@ pub async fn remove(
 ) -> Result<()> {
     let t = service::target(api, service).await?;
     let mut s = t.service().clone();
-    let host = hostname.trim().trim_end_matches('.').to_lowercase();
+    let (host, path) = split_source(hostname);
     let name = s["name"].as_str().unwrap_or("").to_owned();
+    // Others of the team on the same hostname keep its record.
+    let entries = t
+        .state
+        .services()
+        .iter()
+        .flat_map(|a| a["domains"].as_array().cloned().unwrap_or_default())
+        .filter(|d| d["hostname"] == json!(host))
+        .count();
     let domains = s["domains"]
         .as_array_mut()
         .context("service has no domains list")?;
-    let Some(i) = domains.iter().position(|d| d["hostname"] == json!(host)) else {
+    let Some(i) = domains
+        .iter()
+        .position(|d| d["hostname"] == json!(host) && path_of(d) == path)
+    else {
         if let Some(other) = t.state.services().iter().find(|a| {
             a["domains"]
                 .as_array()
@@ -774,7 +842,7 @@ pub async fn remove(
     }
     // The record Pyo made in Cloudflare goes first, unless it's kept.
     let d = domains[i].clone();
-    if d["dnsRecord"]["mine"] == json!(true) && !keep_dns_record {
+    if d["dnsRecord"]["mine"] == json!(true) && !keep_dns_record && entries <= 1 {
         api.op(
             "deleteDnsRecord",
             json!({ "serviceId": t.id, "domainId": d["id"] }),
