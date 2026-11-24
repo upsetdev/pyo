@@ -300,8 +300,9 @@ async fn follow_pods(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Why a pod isn't ready, at most 200 characters: a container's waiting
-/// or last terminated reason.
+/// Why a pod isn't ready, in plain words ([`pyo_proto::pod_problem`]) from
+/// a container's waiting or last terminated reason. Never Kubernetes' own
+/// word.
 fn not_ready_reason(p: &Pod) -> Option<String> {
     let statuses = p.status.as_ref()?.container_statuses.as_ref()?;
     statuses.iter().find_map(|c| {
@@ -317,7 +318,7 @@ fn not_ready_reason(p: &Pod) -> Option<String> {
                     .and_then(|l| l.terminated.as_ref())
                     .and_then(|t| t.reason.clone())
             })?;
-        Some(r.chars().take(200).collect())
+        pyo_proto::pod_problem(&r).map(str::to_owned)
     })
 }
 
@@ -575,8 +576,39 @@ mod tests {
         assert_eq!(r[0].server, "server-2");
         assert!(!r[0].ready);
         assert_eq!(r[0].restarts, 3);
-        assert_eq!(r[0].reason.as_deref(), Some("ImagePullBackOff"));
+        assert_eq!(r[0].reason.as_deref(), Some(pyo_proto::CANT_DOWNLOAD_IMAGE));
         assert_eq!(pod_cidrs(&[pod]), ["10.42.1.7/32", "fd00::7/128"]);
         assert!(id_ok(ID) && !id_ok("x"));
+    }
+
+    #[test]
+    fn pods_never_report_kubernetes_words() {
+        let pod = |state: serde_json::Value| -> Pod {
+            serde_json::from_value(json!({
+                "metadata": { "name": "pyo-tunnel-1" },
+                "spec": { "nodeName": "server-2", "containers": [] },
+                "status": {
+                    "conditions": [{ "type": "Ready", "status": "False" }],
+                    "containerStatuses": [{ "name": "cloudflared", "ready": false, "restartCount": 0, "image": "x", "imageID": "",
+                        "state": state }],
+                },
+            }))
+            .unwrap()
+        };
+        let reason = |state| pod_reports(&[pod(state)])[0].reason.clone();
+        assert_eq!(
+            reason(json!({ "waiting": { "reason": "CreateContainerConfigError" } })).as_deref(),
+            Some(pyo_proto::SETTING_MISSING)
+        );
+        assert_eq!(
+            reason(json!({ "waiting": { "reason": "CrashLoopBackOff" } })).as_deref(),
+            Some(pyo_proto::KEEPS_STOPPING)
+        );
+        assert_eq!(
+            reason(json!({ "terminated": { "reason": "OOMKilled", "exitCode": 137 } })).as_deref(),
+            Some(pyo_proto::NOT_RUNNING_YET)
+        );
+        // Still being made: nothing to say yet.
+        assert_eq!(reason(json!({ "waiting": { "reason": "ContainerCreating" } })), None);
     }
 }

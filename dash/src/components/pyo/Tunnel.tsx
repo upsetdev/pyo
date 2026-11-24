@@ -74,7 +74,7 @@ export function TunnelStatus({ c }: { c: Cluster }) {
   const notes = [
     ...t.connectors
       .filter((x) => !x.ready && x.reason)
-      .map((x) => `pyo-tunnel can't start on ${x.server}: ${x.reason}`),
+      .map((x) => `pyo-tunnel on ${x.server}: ${x.reason}`),
     t.state !== "failed" && t.error
       ? t.error
       : !cloudflareIn(s, c.teamId)

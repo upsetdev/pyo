@@ -1413,7 +1413,11 @@ pub fn shown(row: &Value) -> Value {
     let pods = agent["pods"].as_array().cloned().unwrap_or_default();
     let connectors: Vec<Value> = pods
         .iter()
-        .map(|p| json!({ "server": p["server"], "ready": p["ready"], "reason": p["reason"] }))
+        .map(|p| {
+            // Plain words, whichever agent sent them.
+            let reason = p["reason"].as_str().and_then(pyo_proto::pod_problem);
+            json!({ "server": p["server"], "ready": p["ready"], "reason": reason })
+        })
         .collect();
     json!({
         "state": row["state"], "error": row["error"],

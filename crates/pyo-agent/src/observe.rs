@@ -161,17 +161,12 @@ pub fn pods_problem<'a>(pods: impl IntoIterator<Item = &'a Pod>) -> Option<&'sta
                 .and_then(|s| s.waiting.as_ref())
                 .and_then(|w| w.reason.as_deref())
                 .unwrap_or("");
-            let problem = match reason {
-                "ErrImagePull" | "ImagePullBackOff" | "InvalidImageName" | "ErrImageNeverPull"
-                | "RegistryUnavailable" | "ImageInspectError" => {
-                    return Some(pyo_proto::CANT_DOWNLOAD_IMAGE);
-                }
-                "CreateContainerConfigError" | "CreateContainerError" => {
-                    pyo_proto::SETTING_MISSING
-                }
-                "CrashLoopBackOff" => pyo_proto::KEEPS_STOPPING,
-                _ => continue,
+            let Some(problem) = pyo_proto::workload_problem(reason) else {
+                continue;
             };
+            if problem == pyo_proto::CANT_DOWNLOAD_IMAGE {
+                return Some(problem);
+            }
             // A missing setting says more than a crash.
             if found != Some(pyo_proto::SETTING_MISSING) {
                 found = Some(problem);
