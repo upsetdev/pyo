@@ -31,8 +31,9 @@ import {
 } from "~/lib/pyo/draft";
 import { freeHostname, freeDomainIp, freeHostnameIn, reachOf } from "~/lib/pyo/freeDomain";
 import { DNS_LABEL } from "~/lib/pyo/format";
-import { currentSlug } from "~/lib/pyo/paths";
+import { teamPath, currentSlug } from "~/lib/pyo/paths";
 import {
+  deploymentPath,
   api,
   buildersIn,
   clustersIn,
@@ -536,10 +537,7 @@ function DeployStep({
       return;
     }
     toast({ tone: "info", title: `Deploying ${name}` });
-    void navigate({
-      to: "/$team/deployments/$deploymentId",
-      params: { team: currentSlug(), deploymentId },
-    });
+    void navigate({ href: teamPath(currentSlug(), deploymentPath(deploymentId)) });
   };
 
   const problem = Object.entries(errors).find(([k]) => k !== "name")?.[1];

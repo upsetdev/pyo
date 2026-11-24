@@ -34,6 +34,7 @@ import { Menu } from "~/components/ui/Menu";
 import { EmptyState, Page } from "~/components/ui/Panel";
 import { StatusNote } from "~/components/ui/StatusNote";
 import {
+  deploymentPath,
   activeDeploymentFor,
   api,
   desiredReplicas,
@@ -46,7 +47,7 @@ import { toast } from "~/lib/pyo/toast";
 import type { Application } from "~/lib/pyo/types";
 import { cpu, domainUrl, mem } from "~/lib/pyo/format";
 import { seo } from "~/lib/seo";
-import { currentSlug } from "~/lib/pyo/paths";
+import { teamPath, currentSlug } from "~/lib/pyo/paths";
 
 export const Route = createFileRoute("/_app/$team/$projectId_/$serviceId")({
   head: () => ({ meta: seo({ title: "Service" }) }),
@@ -100,10 +101,7 @@ function AppLayout() {
     const id = api.deploy(app.id, {
       trigger: app.pendingChanges ? "config_change" : "redeploy",
     });
-    void navigate({
-      to: "/$team/deployments/$deploymentId",
-      params: { team: currentSlug(), deploymentId: id },
-    });
+    void navigate({ href: teamPath(currentSlug(), deploymentPath(id)) });
   };
 
   const domain = app.domains.find((d) => d.status === "active");
@@ -197,7 +195,7 @@ function AppLayout() {
             ) : null}
             {active ? (
               <ButtonLink
-                href={`/deployments/${active.id}`}
+                href={deploymentPath(active.id)}
                 size="sm"
                 variant="secondary"
               >

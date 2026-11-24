@@ -190,6 +190,16 @@ pub fn is_final(status: &str) -> bool {
     FINAL.contains(&status)
 }
 
+/// A deployment's page on the dashboard, under the team: in its service's
+/// Deployments tab, "/shop/web/deployments/dpl_1". Without a service, the
+/// team's own deployment page, "/deployments/dpl_1".
+pub fn deployment_page(project_namespace: Option<&str>, service: Option<&str>, id: &str) -> String {
+    match (project_namespace, service) {
+        (Some(p), Some(s)) => format!("/{p}/{s}/deployments/{id}"),
+        _ => format!("/deployments/{id}"),
+    }
+}
+
 fn str_at<'a>(v: &'a Value, path: &[&str]) -> &'a str {
     let mut cur = v;
     for p in path {
@@ -2140,6 +2150,21 @@ pub fn auto_health_check(service: &Value, static_site: bool) -> Option<Value> {
     new["command"] = json!("");
     new["auto"] = json!(auto);
     (new != *h).then_some(new)
+}
+
+#[cfg(test)]
+mod deployment_page_tests {
+    use super::deployment_page;
+
+    #[test]
+    fn deployment_pages_sit_in_the_service() {
+        assert_eq!(
+            deployment_page(Some("shop"), Some("web"), "dpl_1"),
+            "/shop/web/deployments/dpl_1"
+        );
+        assert_eq!(deployment_page(None, None, "dpl_1"), "/deployments/dpl_1");
+        assert_eq!(deployment_page(Some("shop"), None, "dpl_1"), "/deployments/dpl_1");
+    }
 }
 
 #[cfg(test)]

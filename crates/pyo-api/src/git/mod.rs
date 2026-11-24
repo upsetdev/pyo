@@ -1021,20 +1021,29 @@ pub async fn report(
     state: &str,
     description: &str,
 ) -> anyhow::Result<()> {
-    let row: Option<(Value, String)> = sqlx::query_as("SELECT d.data, t.slug FROM pyo.deployments d JOIN pyo.teams t ON t.id = d.team_id WHERE d.id = $1")
-        .bind(deployment_id)
-        .fetch_optional(&s.db)
-        .await?;
-    let Some((data, slug)) = row else {
+    let row: Option<(Value, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT d.data, t.slug, p.namespace, sv.name FROM pyo.deployments d JOIN pyo.teams t ON t.id = d.team_id
+           LEFT JOIN pyo.services sv ON sv.id = d.service_id LEFT JOIN pyo.projects p ON p.id = sv.project_id
+          WHERE d.id = $1",
+    )
+    .bind(deployment_id)
+    .fetch_optional(&s.db)
+    .await?;
+    let Some((data, slug, namespace, service)) = row else {
         return Ok(());
     };
+    // Its page on the dashboard: "/acme/shop/web/deployments/dpl_1".
+    let page = format!(
+        "/{slug}{}",
+        crate::deploy::deployment_page(namespace.as_deref(), service.as_deref(), deployment_id)
+    );
     // A preview's deployment: its pull request's bot says it instead.
     if crate::previews::deployment_changed(s, deployment_id).await? {
         return Ok(());
     }
     let src = &data["source"];
     if src["installationId"].is_i64() {
-        return crate::github::report(s, &data, &slug, deployment_id, state, description).await;
+        return crate::github::report(s, &data, &page, state, description).await;
     }
     let (Some(id), Some(sha)) = (
         src["gitConnectionId"].as_str(),
@@ -1052,7 +1061,7 @@ pub async fn report(
     };
     let link = match public_url(Some(&conn.public_url)) {
         u if u.is_empty() => String::new(),
-        u => format!("{u}/{slug}/deployments/{deployment_id}"),
+        u => format!("{u}{page}"),
     };
     let api = conn
         .api()

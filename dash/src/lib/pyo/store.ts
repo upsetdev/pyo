@@ -7,6 +7,7 @@ import {
   addDatabaseBackup as addDatabaseBackupRequest,
 } from "./backend";
 import { draftServerTags, NEW_PROJECT, type DeployDraft } from "./draft";
+import { deploymentHref } from "./deploymentHome";
 import { newId, slugify } from "./format";
 import { isActive, revisionFor } from "./simulation";
 import { generateValue, getTemplate, templateArgs, templateRecord, templateRefs } from "./templates";
@@ -688,6 +689,10 @@ export const servicePath = (id: string, tab = "", s: PyoState = getState()) => {
   return `/${projectId}/${serviceId}${tab ? `/${tab}` : ""}`;
 };
 
+/** A deployment's page, team-relative: under its service's Deployments tab, or /deployments/<id> once the service is gone. */
+export const deploymentPath = (id: string, s: PyoState = getState()) =>
+  deploymentHref(s, id);
+
 /** Each engine's section of the dashboard: /postgres, /mysql, /kv. */
 export const DB_SECTION = { postgres: "postgres", mysql: "mysql", valkey: "kv" } as const;
 export type DbSection = (typeof DB_SECTION)[keyof typeof DB_SECTION];
@@ -757,6 +762,8 @@ export const roleIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.find((m) => m.teamId === wsId && m.email === s.user.email)?.role;
 /** Owners and admins: they change the team's settings. Others see them read only. */
 export const isTeamAdmin = (role?: string) => role === "owner" || role === "admin";
+/** Owners only: they delete the team. Others don't see Delete team. */
+export const isTeamOwner = (role?: string) => role === "owner";
 export const membersIn = (s: PyoState, wsId = s.currentTeamId) =>
   s.members.filter((m) => m.teamId === wsId);
 
@@ -1035,8 +1042,6 @@ export const api = {
         description: input.description.trim(),
         createdAt: now,
         preferences: {
-          requireDeployApproval: false,
-          autoDeployOnPush: true,
           retainDeployments: 20,
         },
         // The installation's, the same for every team.

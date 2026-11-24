@@ -1,13 +1,12 @@
+import { AppLink } from "~/components/ui/AppLink";
 import { CopyIcon, PauseIcon, PlayIcon } from "@phosphor-icons/react";
-import { Link } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { ZoomButton, Zoomable } from "~/components/ui/Zoom";
 import { Select } from "~/components/ui/Field";
 import { SearchInput } from "~/components/ui/Table";
 import { clockMs } from "~/lib/pyo/format";
-import { currentSlug } from "~/lib/pyo/paths";
-import { usePyo } from "~/lib/pyo/store";
+import { deploymentPath, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { senderColor } from "~/lib/pyo/logColors";
 import type { Application, LogEntry, LogLevel } from "~/lib/pyo/types";
@@ -369,13 +368,12 @@ export function ServiceLogViewer({ app }: { app: Application }) {
             !running && failed ? (
               <>
                 The last deploy failed.{" "}
-                <Link
-                  to="/$team/deployments/$deploymentId"
-                  params={{ team: currentSlug(), deploymentId: failed.id }}
+                <AppLink
+                  href={deploymentPath(failed.id)}
                   className="font-medium text-foreground hover:text-primary"
                 >
                   See its logs
-                </Link>
+                </AppLink>
               </>
             ) : !running
               ? "Not running. Deploy it to see logs."

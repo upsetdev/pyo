@@ -178,7 +178,7 @@ pub struct Alert {
     pub team_slug: String,
     /// More about it, in order: [("Project", "shop")].
     pub facts: Vec<(String, String)>,
-    /// Its dashboard page under the team: "/deployments/dpl_1".
+    /// Its dashboard page under the team: "/shop/web/deployments/dpl_1".
     pub path: String,
     /// When it happened (unix ms).
     pub at: i64,
@@ -904,8 +904,8 @@ async fn build(
     Ok(Some(match event {
         Event::DeployFailed => {
             let service_id = s(&context["serviceId"]);
-            let Some((service, project)): Option<(String, String)> = sqlx::query_as(
-                "SELECT s.name, p.name FROM pyo.services s JOIN pyo.projects p ON p.id = s.project_id WHERE s.id = $1",
+            let Some((service, project, namespace)): Option<(String, String, String)> = sqlx::query_as(
+                "SELECT s.name, p.name, p.namespace FROM pyo.services s JOIN pyo.projects p ON p.id = s.project_id WHERE s.id = $1",
             )
             .bind(&service_id)
             .fetch_optional(&mut **tx)
@@ -917,7 +917,7 @@ async fn build(
                 format!("deploy:{service_id}"),
                 format!("Deploy failed: {service}"),
                 vec![("Project", project)],
-                format!("/deployments/{target_id}"),
+                crate::deploy::deployment_page(Some(&namespace), Some(&service), &target_id),
             )
         }
         Event::ServerOffline | Event::ServerOnline if target["kind"] == "cluster" => {

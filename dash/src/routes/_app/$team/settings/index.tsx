@@ -10,6 +10,7 @@ import {
   currentTeam,
   getState,
   isTeamAdmin,
+  isTeamOwner,
   roleIn,
   sandboxServersIn,
   usePyo,
@@ -51,16 +52,17 @@ function TeamSettings({ ws }: { ws: Team }) {
   const [defaultClusterId, setDefaultCluster] = useState(
     ws.defaultClusterId ?? "",
   );
-  const [prefs, setPrefs] = useState(ws.preferences);
   const [deleting, setDeleting] = useState(false);
   const hosted = useHosted();
   // Only owners and admins save. Everyone else sees the values.
-  const admin = isTeamAdmin(roleIn(s, ws.id));
+  const role = roleIn(s, ws.id);
+  const admin = isTeamAdmin(role);
+  // Only owners delete the team. The API refuses everyone else.
+  const owner = isTeamOwner(role);
   const dirty =
     name !== ws.name ||
     description !== ws.description ||
-    defaultClusterId !== (ws.defaultClusterId ?? "") ||
-    JSON.stringify(prefs) !== JSON.stringify(ws.preferences);
+    defaultClusterId !== (ws.defaultClusterId ?? "");
   const nameError = !name.trim() ? "Name is required." : "";
 
   return (
@@ -102,27 +104,6 @@ function TeamSettings({ ws }: { ws: Team }) {
             )}
           </Field>
         </div>
-      </Panel>
-      <Panel
-        title="Deployment preferences"
-        description={admin ? undefined : READ_ONLY}
-      >
-        <div className="space-y-4 p-4">
-          <Switch
-            checked={prefs.autoDeployOnPush}
-            disabled={!admin}
-            onChange={(v) => setPrefs({ ...prefs, autoDeployOnPush: v })}
-            label="Deploy on Git push"
-            description="Needs a Git provider."
-          />
-          <Switch
-            checked={prefs.requireDeployApproval}
-            disabled={!admin}
-            onChange={(v) => setPrefs({ ...prefs, requireDeployApproval: v })}
-            label="Require approval for production deploys"
-            description="An admin approves each rollout."
-          />
-        </div>
         {admin ? (
           <div className="flex justify-end border-t border-border px-4 py-3">
             <Button
@@ -133,7 +114,6 @@ function TeamSettings({ ws }: { ws: Team }) {
                   name: name.trim(),
                   description,
                   defaultClusterId: defaultClusterId || undefined,
-                  preferences: prefs,
                 });
                 if (!res) return;
                 toast({ title: "Team saved" });
@@ -189,43 +169,49 @@ function TeamSettings({ ws }: { ws: Team }) {
       {s.user.isAdmin && sandboxServersIn(s, ws.id).length ? (
         <SandboxLimitsPanel teamId={ws.id} />
       ) : null}
-      <Panel title="Danger zone" tone="danger">
-        <ul className="list-rows">
-          <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <div>
-              <p className="text-[13px] font-medium">Delete team</p>
-              <p className="text-[12px] text-muted-foreground">
-                Delete its services first.
-              </p>
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              className="text-destructive"
-              disabled={s.teams.length < 2}
-              title={
-                s.teams.length < 2 ? "You need at least one team" : undefined
-              }
-              onClick={() => setDeleting(true)}
-            >
-              Delete team
-            </Button>
-          </li>
-        </ul>
-      </Panel>
-      <ConfirmDialog
-        open={deleting}
-        onClose={() => setDeleting(false)}
-        title={`Delete ${ws.name}?`}
-        description="Nothing on the clusters is touched."
-        confirmText={ws.slug}
-        confirmLabel="Delete team"
-        onConfirm={async () => {
-          if (!(await api.deleteTeam(ws.id))) return;
-          toast({ title: `Deleted ${ws.name}` });
-          void navigate({ to: "/" });
-        }}
-      />
+      {owner ? (
+        <>
+          <Panel title="Danger zone" tone="danger">
+            <ul className="list-rows">
+              <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                <div>
+                  <p className="text-[13px] font-medium">Delete team</p>
+                  <p className="text-[12px] text-muted-foreground">
+                    Delete its services first.
+                  </p>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="text-destructive"
+                  disabled={s.teams.length < 2}
+                  title={
+                    s.teams.length < 2
+                      ? "You need at least one team"
+                      : undefined
+                  }
+                  onClick={() => setDeleting(true)}
+                >
+                  Delete team
+                </Button>
+              </li>
+            </ul>
+          </Panel>
+          <ConfirmDialog
+            open={deleting}
+            onClose={() => setDeleting(false)}
+            title={`Delete ${ws.name}?`}
+            description="Nothing on the clusters is touched."
+            confirmText={ws.slug}
+            confirmLabel="Delete team"
+            onConfirm={async () => {
+              if (!(await api.deleteTeam(ws.id))) return;
+              toast({ title: `Deleted ${ws.name}` });
+              void navigate({ to: "/" });
+            }}
+          />
+        </>
+      ) : null}
     </div>
   );
 }

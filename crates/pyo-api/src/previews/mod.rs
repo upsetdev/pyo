@@ -1243,6 +1243,10 @@ pub struct View {
     pub row: PreviewRow,
     pub service: String,
     pub deployment_status: Option<String>,
+    /// Where its deployment's page is: the project's namespace and the
+    /// service's name.
+    pub deployment_project: Option<String>,
+    pub deployment_service: Option<String>,
     pub copy_left: bool,
     pub updated_ms: i64,
 }
@@ -1264,9 +1268,12 @@ impl View {
 async fn views(tx: &mut Transaction<'_, Postgres>, pull_id: &str) -> sqlx::Result<Vec<View>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {}, s.name AS service, d.status AS deployment_status,
+                dp.namespace AS deployment_project, ds.name AS deployment_service,
                 (c.id IS NOT NULL) AS copy_left, pyo.ms(greatest(p.updated_at, coalesce(d.finished_at, d.created_at, p.updated_at))) AS updated_ms
            FROM pyo.previews p JOIN pyo.services s ON s.id = p.service_id
            LEFT JOIN pyo.deployments d ON d.id = p.deployment_id
+           LEFT JOIN pyo.services ds ON ds.id = d.service_id
+           LEFT JOIN pyo.projects dp ON dp.id = ds.project_id
            LEFT JOIN pyo.services c ON c.id = p.preview_service_id
           WHERE p.pull_id = $1 ORDER BY s.name",
         PREVIEW_COLS
@@ -1365,7 +1372,14 @@ pub async fn say<F: Forge>(
             .deployment_id
             .as_ref()
             .filter(|_| base.starts_with("http"))
-            .map(|d| format!("{base}/deployments/{d}"))
+            .map(|d| {
+                let page = crate::deploy::deployment_page(
+                    v.deployment_project.as_deref(),
+                    v.deployment_service.as_deref(),
+                    d,
+                );
+                format!("{base}{page}")
+            })
     };
     let rows: Vec<bot::Row> = views
         .iter()

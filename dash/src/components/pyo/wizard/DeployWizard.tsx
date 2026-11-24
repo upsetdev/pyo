@@ -1,4 +1,4 @@
-import { currentSlug } from "~/lib/pyo/paths";
+import { teamPath, currentSlug } from "~/lib/pyo/paths";
 import { Layered } from "~/components/ui/Layered";
 import {
   ArrowLeftIcon,
@@ -52,6 +52,7 @@ import {
 import { cpu, mem } from "~/lib/pyo/format";
 import { STAGE_LABEL, stagePlan } from "~/lib/pyo/simulation";
 import {
+  deploymentPath,
   api,
   buildersIn,
   clustersIn,
@@ -746,10 +747,7 @@ function Configure({
       return;
     }
     toast({ tone: "info", title: `Deploying ${d.name}` });
-    void navigate({
-      to: "/$team/deployments/$deploymentId",
-      params: { team: currentSlug(), deploymentId },
-    });
+    void navigate({ href: teamPath(currentSlug(), deploymentPath(deploymentId)) });
   };
 
   const plan = stagePlan(
