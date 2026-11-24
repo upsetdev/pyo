@@ -2,11 +2,36 @@ name: CI
 
 on:
   pull_request:
+  # Pushes to the working branches run it too, so a branch is checked
+  # before its pull request. Changes to docs alone don't.
   push:
-    branches: [main]
+    branches:
+      - main
+      - dev
+      - "fix/**"
+      - "feat/**"
+      - "chore/**"
+      - "test/**"
+      - "docs/**"
+      - "ci/**"
+      - "refactor/**"
+      - "perf/**"
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - LICENSE
 
 permissions:
   contents: read
+
+# One run per branch. A push to a branch with an open pull request starts
+# a run for each, and the later one cancels the earlier, as does a newer
+# push. The key is the branch and the repository it's in, so a fork's
+# pull request never cancels a run here. Every push to main runs to the
+# end.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || format('{0}/{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   migrations:
