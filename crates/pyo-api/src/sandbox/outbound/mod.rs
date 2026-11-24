@@ -389,7 +389,7 @@ pub async fn reset_access(
 
 /// Why a team's server on a tailnet of its own can't reach Pyo.
 pub const NOT_REACHABLE: &str =
-    "Pyo isn't reachable from your team's tailnet. Open Pyo's public dashboard in Settings, then add the server again.";
+    "Pyo isn't reachable from your team's tailnet. Turn on Public dashboard on the Tailscale card, then add the server again.";
 /// Why there's no address on Pyo's tailnet yet.
 pub const NOT_ON_TAILNET: &str = "Pyo's server isn't on your tailnet yet. Try again in a minute.";
 
