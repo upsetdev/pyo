@@ -19,7 +19,7 @@
 //! access stops it.
 
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -175,7 +175,8 @@ async fn a_daemon_works_for_pyo_over_https() {
             .args(["serve", "--dev", "--config"])
             .arg(&config_path)
             .env("RUST_LOG", "info")
-            .stdout(Stdio::null())
+            // The daemon logs to stdout.
+            .stdout(log.try_clone().unwrap())
             .stderr(log)
             .spawn()
             .unwrap(),
