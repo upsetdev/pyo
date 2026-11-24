@@ -41,9 +41,86 @@ pub fn domain_specs(domains: &Value) -> Vec<DomainSpec> {
                     Some(t @ (pyo_proto::TUNNEL_SWITCHING | pyo_proto::TUNNEL_ON)) => t.to_owned(),
                     _ => String::new(),
                 },
+                // Its rules in Pyo Gateway (checked when they were saved).
+                redirects: serde_json::from_value(d["redirects"].clone()).unwrap_or_default(),
+                headers: serde_json::from_value(d["headers"].clone()).unwrap_or_default(),
             }
         })
         .collect()
+}
+
+/// A domain's rules in Pyo Gateway (pyo-proto's rules.rs), as they're
+/// saved: checked, then written back tidied (paths without a trailing "/",
+/// hostnames in lower case). None leaves no empty fields behind.
+pub fn tidy_rules(d: &mut Value) -> Result<(), String> {
+    use pyo_proto::rules::{HeaderRules, Redirect};
+    let host = d["hostname"].as_str().unwrap_or("").to_owned();
+    let routes = !d["portName"].as_str().unwrap_or("").is_empty();
+    let redirects: Vec<Redirect> = match &d["redirects"] {
+        Value::Null => vec![],
+        v => serde_json::from_value(v.clone())
+            .map_err(|_| format!("The redirects of {host} aren't valid."))?,
+    };
+    let headers: HeaderRules = match &d["headers"] {
+        Value::Null => HeaderRules::default(),
+        v => serde_json::from_value(v.clone())
+            .map_err(|_| format!("The header rules of {host} aren't valid."))?,
+    };
+    let redirects = pyo_proto::rules::check_redirects(&host, &redirects, routes)?;
+    let headers = pyo_proto::rules::tidy_headers(headers);
+    pyo_proto::rules::check_headers(&headers)?;
+    let Some(o) = d.as_object_mut() else {
+        return Ok(());
+    };
+    if redirects.is_empty() {
+        o.remove("redirects");
+    } else {
+        o.insert("redirects".into(), json!(redirects));
+    }
+    if headers.is_empty() {
+        o.remove("headers");
+    } else {
+        o.insert("headers".into(), json!(headers));
+    }
+    Ok(())
+}
+
+/// The rules a domain has: what an agent needs to write them.
+fn rules_level(domains: &Value) -> u8 {
+    let any = domains.as_array().into_iter().flatten().any(|d| {
+        d["redirects"].as_array().is_some_and(|r| !r.is_empty())
+            || d["headers"].as_object().is_some_and(|h| !h.is_empty())
+    });
+    u8::from(any)
+}
+
+/// Rules a cluster's agent doesn't write yet are refused, when they're new
+/// (a save that keeps them as they were still goes through). A cluster
+/// whose agent never reported can have them: its agent is this release's.
+pub async fn rules_ok(
+    tx: &mut Transaction<'_, Postgres>,
+    cluster_id: &str,
+    spec: &Value,
+    old: &Value,
+) -> ApiResult<()> {
+    let wanted = rules_level(&spec["domains"]);
+    if wanted == 0 || wanted <= rules_level(&old["domains"]) {
+        return Ok(());
+    }
+    let row: Option<(Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT agent_version, (capabilities->>'gatewayRules')::bigint FROM pyo.clusters WHERE id = $1",
+    )
+    .bind(cluster_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match row {
+        Some((Some(_), level)) if level.unwrap_or(0) < i64::from(wanted) => {
+            Err(crate::error::ApiError::conflict(
+                "This cluster's agent doesn't apply redirects and header rules yet. Update the agent first.",
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// A service's own request timeout (its `spec.requestTimeout`, seconds,
@@ -336,6 +413,44 @@ mod tests {
         assert!(differ(&a, &c), "certificate");
         assert_eq!(domain_specs(&c)[0].certificate_id, "crt_1");
         assert_eq!(domain_specs(&json!(null)).len(), 0);
+        // Rules change routes.
+        let mut r = a.clone();
+        r[0]["redirects"] = json!([{ "path": "/old", "toPath": "/new" }]);
+        assert!(differ(&a, &r), "redirects");
+        assert_eq!(domain_specs(&r)[0].redirects[0].to_path, "/new");
+        let mut h = a.clone();
+        h[0]["headers"] = json!({ "response": { "remove": ["X-Powered-By"] } });
+        assert!(differ(&a, &h), "headers");
+    }
+
+    /// Rules are saved checked and tidied, and empty ones leave nothing.
+    #[test]
+    fn rules_are_saved_tidy() {
+        let mut d = json!({ "hostname": "www.example.com", "portName": "", "redirects": [{ "toHost": "Example.com" }], "headers": { "response": { "set": [], "remove": [] } } });
+        tidy_rules(&mut d).unwrap();
+        assert_eq!(
+            d["redirects"],
+            json!([{ "path": "/", "toHost": "example.com", "status": 301, "keepPath": true }])
+        );
+        assert!(d.get("headers").is_none());
+        assert_eq!(rules_level(&json!([d])), 1);
+        assert_eq!(rules_level(&json!([{ "hostname": "a.example.com" }])), 0);
+        let mut bad = json!({ "hostname": "example.com", "portName": "http", "redirects": [{ "toHost": "other.example" }] });
+        assert!(
+            tidy_rules(&mut bad)
+                .unwrap_err()
+                .contains("routes to a port")
+        );
+        let mut odd = json!({ "hostname": "example.com", "portName": "http", "redirects": "nope" });
+        assert_eq!(
+            tidy_rules(&mut odd).unwrap_err(),
+            "The redirects of example.com aren't valid."
+        );
+        let mut own = json!({ "hostname": "example.com", "portName": "http", "headers": { "request": { "set": [{ "name": "X-Forwarded-For", "value": "1.2.3.4" }] } } });
+        assert_eq!(
+            tidy_rules(&mut own).unwrap_err(),
+            "X-Forwarded-For is set by Pyo Gateway and can't be changed."
+        );
     }
 }
 
@@ -648,6 +763,100 @@ mod lifecycle_tests {
             (1, Some("sync_routes"), &json!(false))
         );
         assert!(!row(&live).await.1, "no pending change");
+
+        // Redirects and header rules: refused while the cluster's agent
+        // says it doesn't write them, then live in place, saved tidy.
+        sqlx::query(
+            "UPDATE pyo.clusters SET agent_version = '0.51.0', capabilities = '{}' WHERE id = $1",
+        )
+        .bind(&cluster)
+        .execute(&db)
+        .await
+        .unwrap();
+        let www_host = format!("www-{host}.example.com");
+        let mut ruled = service(
+            &live,
+            "web",
+            json!([domain("dom_new", &new_host), domain("dom_www", &www_host)]),
+        );
+        ruled["domains"][0]["redirects"] =
+            json!([{ "path": "/old/", "toPath": "/new", "status": 302 }]);
+        ruled["domains"][0]["headers"] = json!({ "response": { "set": [{ "name": "X-Frame-Options", "value": " DENY " }], "remove": ["X-Powered-By"] } });
+        ruled["domains"][1]["portName"] = json!("");
+        ruled["domains"][1]["redirects"] = json!([{ "toHost": new_host.to_uppercase() }]);
+        let refused =
+            crate::ops::run_json(&s, &user, json!({ "op": "saveService", "service": ruled }))
+                .await
+                .unwrap_err();
+        assert!(
+            refused.message.contains("Update the agent first"),
+            "{}",
+            refused.message
+        );
+        assert!(queued().await.is_empty());
+        sqlx::query("UPDATE pyo.clusters SET capabilities = '{\"gatewayRules\": 1}' WHERE id = $1")
+            .bind(&cluster)
+            .execute(&db)
+            .await
+            .unwrap();
+        crate::ops::run_json(&s, &user, json!({ "op": "saveService", "service": ruled }))
+            .await
+            .unwrap();
+        let q = queued().await;
+        assert_eq!((q.len(), q[0]["kind"].as_str()), (1, Some("sync_routes")));
+        assert_eq!(
+            q[0]["domains"][0]["redirects"],
+            json!([{ "path": "/old", "toPath": "/new", "status": 302, "keepPath": true }])
+        );
+        assert_eq!(
+            q[0]["domains"][0]["headers"]["response"]["set"][0]["value"],
+            "DENY"
+        );
+        assert_eq!(
+            (
+                q[0]["domains"][1]["portName"].as_str(),
+                q[0]["domains"][1]["redirects"][0]["toHost"].as_str()
+            ),
+            (Some(""), Some(new_host.as_str()))
+        );
+        let spec: Value = sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1")
+            .bind(&live)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            spec["domains"][0]["redirects"][0]["path"], "/old",
+            "stored tidy"
+        );
+        // A redirect of the whole domain on one that routes to a port.
+        let mut hiding = ruled.clone();
+        hiding["domains"][0]["redirects"] = json!([{ "toHost": www_host }]);
+        let refused =
+            crate::ops::run_json(&s, &user, json!({ "op": "saveService", "service": hiding }))
+                .await
+                .unwrap_err();
+        assert!(
+            refused.message.contains("can't redirect as a whole"),
+            "{}",
+            refused.message
+        );
+        // A domain with neither a port nor a redirect.
+        let mut nowhere = ruled.clone();
+        nowhere["domains"][1]["redirects"] = json!([]);
+        let refused = crate::ops::run_json(
+            &s,
+            &user,
+            json!({ "op": "saveService", "service": nowhere }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            refused
+                .message
+                .contains("needs a port to route to, or a redirect"),
+            "{}",
+            refused.message
+        );
 
         // Every domain removed, so its port is no longer "http": its routes
         // go now, still no redeploy.

@@ -155,7 +155,9 @@ fn curated() -> Vec<Value> {
             "server_tags": { "type": "array", "items": { "type": "string" }, "description": "Older form of placement.tags" },
         }), &["name", "image"]), "annotations": write }),
         json!({ "name": "set_service_placement", "title": "Set service placement", "description": "Choose where a service runs: any server of its cluster (servers and tags both empty), or only the servers named and every server with one of the tags, including servers tagged later (see list_servers). A service with a volume has to keep its volume's server, and one with a GPU needs a GPU server. It changes in place, without a redeploy: its replicas move over with the same image. Refused with the reason when no server picked can run it.", "inputSchema": schema(json!({ "service_id": service, "servers": { "type": "array", "items": { "type": "string" }, "description": "Server names" }, "tags": { "type": "array", "items": { "type": "string" }, "description": "Server tags" } }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
-        json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain (a tunnel domain in tunnel mode). It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" }, "tunnel": { "type": "boolean", "description": "Through the cluster's Cloudflare Tunnel when a tunnel-ready zone covers the hostname (default: on in tunnel mode)." } }), &["service_id"]), "annotations": write }),
+        json!({ "name": "add_domain", "title": "Add domain", "description": "Serve a service on a hostname, or on a free nip.io domain (a tunnel domain in tunnel mode). It goes live in place, without a redeploy (a service never deployed gets it with its first deploy).", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "free_domain": { "type": "boolean" }, "cloudflare_dns": { "type": "boolean", "description": "Create its DNS record in the team's Cloudflare account when a connected zone covers the hostname (default true). Never overwrites a record." }, "proxied": { "type": "boolean", "description": "Proxied by Cloudflare, once its certificate is issued (default false)" }, "tunnel": { "type": "boolean", "description": "Through the cluster's Cloudflare Tunnel when a tunnel-ready zone covers the hostname (default: on in tunnel mode)." }, "redirect_to": { "type": "string", "description": "Only redirect this hostname, like www.example.com to example.com: the hostname (and path) to send visitors to. The path and query are kept." }, "status": { "type": "integer", "enum": [301, 302], "description": "The redirect's status (default 301)" } }), &["service_id"]), "annotations": write }),
+        json!({ "name": "set_domain_redirects", "title": "Set domain redirects", "description": "Replace a domain's redirects. Each sends requests under a path to another path or hostname, with 301 (default) or 302. keep_path (default true) keeps the rest of the path after the matched one. The query is always kept. A domain that routes to a port can't redirect \"/\" as a whole. They go live in place.", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "redirects": { "type": "array", "items": { "type": "object", "properties": { "path": { "type": "string", "description": "Path prefix, like /old (default /)" }, "to_host": { "type": "string" }, "to_path": { "type": "string", "description": "Path prefix to send to, like /new" }, "status": { "type": "integer", "enum": [301, 302] }, "keep_path": { "type": "boolean" } } } } }), &["service_id", "hostname", "redirects"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
+        json!({ "name": "set_domain_headers", "title": "Set domain headers", "description": "Replace a domain's header rules: headers to set or remove on its responses (like Strict-Transport-Security or X-Powered-By), and on requests to the service. Hop-by-hop headers, X-Forwarded-*, X-Pyo-* and Pyo Gateway's other own headers can't be changed. At most 16 per list. They go live in place.", "inputSchema": schema(json!({ "service_id": service, "hostname": { "type": "string" }, "response_set": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Header name to value" }, "response_remove": { "type": "array", "items": { "type": "string" } }, "request_set": { "type": "object", "additionalProperties": { "type": "string" } }, "request_remove": { "type": "array", "items": { "type": "string" } } }), &["service_id", "hostname"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "set_static_serving", "title": "Set static serving", "description": "For a service whose build is a static site: serve its build as static files from the cluster's shared static server (\"static\", the default), or run it as a service of its own (\"service\"). Takes effect with the next deploy.", "inputSchema": schema(json!({ "service_id": service, "serve_as": { "type": "string", "enum": ["static", "service"] } }), &["service_id", "serve_as"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "set_request_timeout", "title": "Set request timeout", "description": "How long the gateway waits for the service to answer a request on its domains before it returns 504, in seconds: 1 to 3600, or 0 for no limit. Without one it's 300. WebSockets aren't cut by it. It changes in place, without a redeploy.", "inputSchema": schema(json!({ "service_id": service, "seconds": { "type": ["integer", "null"], "minimum": 0, "maximum": 3600, "description": "null goes back to the default" } }), &["service_id", "seconds"]), "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true } }),
         json!({ "name": "stop_service", "title": "Stop service", "description": "Stop the service (scale to zero). Settings and data are kept.", "inputSchema": schema(json!({ "service_id": service }), &["service_id"]), "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true } }),
@@ -253,6 +255,8 @@ const CURATED_RUNS: &[(&str, &str)] = &[
     ("create_project", "createProject"),
     ("create_service", "createService"),
     ("add_domain", "saveService"),
+    ("set_domain_redirects", "saveService"),
+    ("set_domain_headers", "saveService"),
     ("set_static_serving", "saveService"),
     ("set_request_timeout", "saveService"),
     ("set_service_placement", "saveService"),
@@ -1275,19 +1279,32 @@ pub(crate) async fn run_tool(
             {
                 return Err(format!("{host} is already used."));
             }
-            let ports = a["ports"]
-                .as_array_mut()
-                .ok_or("The service has no ports to serve")?;
-            let Some(port) = ports
-                .iter_mut()
-                .find(|p| p["protocol"] != json!("TCP") && p["protocol"] != json!("UDP"))
-            else {
-                return Err("The service has no HTTP port to serve".into());
-            };
-            port["exposure"] = json!("http");
-            let port_name = port["name"].clone();
             let mut d = domain(&host, now_ms());
-            d["portName"] = port_name;
+            match args["redirect_to"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+                // Only a redirect: no port.
+                Some(to) => {
+                    let to = to.trim_start_matches("https://").trim_start_matches("http://");
+                    let (to_host, to_path) = match to.find('/') {
+                        Some(i) => (&to[..i], &to[i..]),
+                        None => (to, ""),
+                    };
+                    d["portName"] = json!("");
+                    d["redirects"] = json!([{ "path": "/", "toHost": to_host, "toPath": to_path, "status": args["status"].as_u64().unwrap_or(301), "keepPath": true }]);
+                }
+                None => {
+                    let ports = a["ports"]
+                        .as_array_mut()
+                        .ok_or("The service has no ports to serve")?;
+                    let Some(port) = ports
+                        .iter_mut()
+                        .find(|p| p["protocol"] != json!("TCP") && p["protocol"] != json!("UDP"))
+                    else {
+                        return Err("The service has no HTTP port to serve".into());
+                    };
+                    port["exposure"] = json!("http");
+                    d["portName"] = port["name"].clone();
+                }
+            }
             a["domains"]
                 .as_array_mut()
                 .map(|ds| ds.push(d.clone()))
@@ -1393,6 +1410,64 @@ pub(crate) async fn run_tool(
             Ok(
                 json!({ "serveAs": serve_as, "next": "Saved. It takes effect with the next deploy (deploy_service)." }),
             )
+        }
+        "set_domain_redirects" | "set_domain_headers" => {
+            let id = service_id(args)?;
+            let mut a = find_service(id)?;
+            let host = arg(args, "hostname")?.trim().to_lowercase();
+            let d = a["domains"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .find(|d| d["hostname"].as_str().map(str::to_lowercase).as_deref() == Some(host.as_str()))
+                .ok_or(format!("{host} isn't a domain of this service. Add it first (add_domain)."))?;
+            if name == "set_domain_redirects" {
+                let redirects: Vec<Value> = args["redirects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| {
+                        json!({
+                            "path": r["path"].as_str().unwrap_or("/"),
+                            "toHost": r["to_host"].as_str().unwrap_or(""),
+                            "toPath": r["to_path"].as_str().unwrap_or(""),
+                            "status": r["status"].as_u64().unwrap_or(301),
+                            "keepPath": r["keep_path"].as_bool().unwrap_or(true),
+                        })
+                    })
+                    .collect();
+                if redirects.is_empty() && d["portName"].as_str().unwrap_or("").is_empty() {
+                    return Err(format!("{host} only redirects. Remove the domain instead."));
+                }
+                d["redirects"] = json!(redirects);
+            } else {
+                let set = |k: &str| -> Vec<Value> {
+                    args[k]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(n, v)| json!({ "name": n, "value": v.as_str().unwrap_or("") }))
+                        .collect()
+                };
+                let remove = |k: &str| args[k].clone();
+                d["headers"] = json!({
+                    "response": { "set": set("response_set"), "remove": remove("response_remove") },
+                    "request": { "set": set("request_set"), "remove": remove("request_remove") },
+                });
+                for side in ["response", "request"] {
+                    if d["headers"][side]["remove"].is_null() {
+                        d["headers"][side]["remove"] = json!([]);
+                    }
+                }
+            }
+            let saved = d.clone();
+            op(json!({ "op": "saveService", "service": a })).await?;
+            Ok(json!({
+                "hostname": host,
+                "redirects": saved["redirects"],
+                "headers": saved["headers"],
+                "next": "Saved. It goes live in place, without a redeploy.",
+            }))
         }
         "set_request_timeout" => {
             let id = service_id(args)?;
