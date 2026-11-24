@@ -167,6 +167,8 @@ async fn rig(name: &str) -> Rig {
         network: Default::default(),
         edge: None,
         dev: true,
+        outbound: None,
+        tailnet_https: None,
     };
     let layout = Layout::new(&run, false);
     layout.create().await.unwrap();

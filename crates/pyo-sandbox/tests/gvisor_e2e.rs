@@ -283,6 +283,8 @@ async fn gvisor_end_to_end() {
         network: NetworkConfig::default(),
         edge: None,
         dev: false,
+        outbound: None,
+        tailnet_https: None,
     };
     let layout = Layout::new(&root, false);
     layout.create().await.unwrap();

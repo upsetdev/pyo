@@ -69,6 +69,13 @@ pub struct Config {
     /// jailer, seccomp per jail or cgroups. Never on a real server.
     #[serde(default)]
     pub dev: bool,
+    /// A server that works for Pyo over HTTPS (Pyo Cloud): it polls Pyo for
+    /// its commands instead of Pyo calling it. See `outbound`.
+    #[serde(default)]
+    pub outbound: Option<crate::outbound::OutboundConfig>,
+    /// HTTPS on the tailnet name, for an outbound server. See `tailnet`.
+    #[serde(default)]
+    pub tailnet_https: Option<crate::tailnet::TailnetHttps>,
 }
 
 fn default_root() -> PathBuf {

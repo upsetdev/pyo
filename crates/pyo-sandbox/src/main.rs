@@ -13,6 +13,7 @@ use pyo_sandbox::gvisor::Gvisor;
 use pyo_sandbox::manager::Manager;
 use pyo_sandbox::network::{LinkKind, Network};
 use pyo_sandbox::storage::Layout;
+use pyo_sandbox::{outbound, tailnet};
 
 #[derive(Parser)]
 #[command(name = "pyo-sandbox", version, about = "The Pyo Sandbox daemon")]
@@ -27,6 +28,27 @@ enum Cmd {
     Serve(Opts),
     /// Detect the runtime and print the capability report as JSON.
     Detect(Opts),
+    /// Join Pyo over HTTPS with the one-time code in the join file (Pyo
+    /// Cloud), and write the config `serve` reads.
+    Join(JoinOpts),
+}
+
+#[derive(clap::Args)]
+struct JoinOpts {
+    /// Where the config goes.
+    #[arg(
+        long,
+        env = "PYO_SANDBOX_CONFIG",
+        default_value = "/etc/pyo-sandbox/config.json"
+    )]
+    config: PathBuf,
+    /// The join file sandbox.sh wrote: Pyo's URL, the server, the code and
+    /// the command key. Removed once the server joined.
+    #[arg(long, default_value = pyo_sandbox::outbound::join::JOIN_FILE)]
+    join: PathBuf,
+    /// `pyo-sandbox detect`'s report, sent with the join.
+    #[arg(long)]
+    capability: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -98,7 +120,31 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Serve(o) => serve(setup(&o).await?).await,
+        Cmd::Join(o) => join(o).await,
     }
+}
+
+async fn join(o: JoinOpts) -> anyhow::Result<()> {
+    use pyo_sandbox::outbound::join;
+    let capability = match &o.capability {
+        Some(p) => Some(
+            serde_json::from_slice(
+                &std::fs::read(p).with_context(|| format!("reading {}", p.display()))?,
+            )
+            .with_context(|| format!("parsing {}", p.display()))?,
+        ),
+        None => None,
+    };
+    let tailnet = join::tailnet().await?;
+    join::join(
+        &o.config,
+        &o.join,
+        capability,
+        &tailnet,
+        join::Options::default(),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Sandbox networking, when this server can have it, and the check for the
@@ -159,6 +205,9 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
     let server_id = s.cfg.server_id.clone();
     let listen = s.cfg.listen;
     let edge_cfg = s.cfg.edge.clone();
+    let outbound = s.cfg.outbound.clone();
+    let tailnet_https = s.cfg.tailnet_https.clone().unwrap_or_default();
+    let root = s.cfg.root.clone();
     // gVisor sandboxes live in the plain sandboxes directory: no jail.
     let gvisor = (capability.runtime == Runtime::Gvisor).then(|| {
         Gvisor::new(
@@ -185,7 +234,7 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         mgr: mgr.clone(),
         keys,
-        server_id,
+        server_id: server_id.clone(),
     });
     if let Some(cfg) = edge_cfg {
         let domain = cfg.domain.clone();
@@ -195,7 +244,24 @@ async fn serve(s: Setup) -> anyhow::Result<()> {
         tracing::info!(https = ?bound.https, http = ?bound.http, url = ?url, "the edge proxy is serving");
         mgr.set_edge_url(url);
     }
-    let app = api::router(state);
+    let app = api::router(state.clone());
+    if let Some(o) = outbound {
+        // Pyo can't call this server: it calls Pyo, and serves browsers
+        // and SDKs on the tailnet over HTTPS.
+        let at = tailnet_https.listen.unwrap_or(std::net::SocketAddr::new(
+            listen.ip(),
+            pyo_proto::sandbox::outbound::TAILNET_PORT,
+        ));
+        tailnet::serve(app.clone(), at, &o.tailnet_name, &tailnet_https).await?;
+        let client = outbound::Client::load(
+            state.clone(),
+            outbound::store::Store::new(&root),
+            &o,
+            &server_id,
+            outbound::Timing::default(),
+        )?;
+        tokio::spawn(client.run());
+    }
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("listening on {listen}"))?;
