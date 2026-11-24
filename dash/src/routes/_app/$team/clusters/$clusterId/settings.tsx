@@ -8,8 +8,7 @@ import {
   useAutoUpdate,
 } from "~/components/pyo/AgentInstall";
 import { ClusterMtls } from "~/components/pyo/Mtls";
-import { TailnetBadge, teamTailscale } from "~/components/pyo/Tailscale";
-import { AppLink } from "~/components/ui/AppLink";
+import { teamTailscale } from "~/components/pyo/Tailscale";
 import { DATABASES_RESTART } from "~/components/pyo/UpdateSettings";
 import {
   olderVersion,
@@ -138,17 +137,6 @@ function ClusterSettings({ c }: { c: Cluster }) {
           </div>
         </Panel>
         <ClusterTraffic cluster={c} />
-        <Panel title="Tailscale">
-          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <TailnetBadge clusterId={c.id} />
-            <AppLink
-              href="/integrations#tailscale"
-              className="text-[12.5px] font-medium text-primary hover:text-primary/80"
-            >
-              Integrations
-            </AppLink>
-          </div>
-        </Panel>
         <ClusterTrafficMode cluster={c} />
         <ClusterMtls cluster={c} />
         <Panel title="Danger zone" tone="danger">

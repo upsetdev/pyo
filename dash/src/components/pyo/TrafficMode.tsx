@@ -1,5 +1,7 @@
 import { useState, type ReactNode } from "react";
+import { TailnetBadge, teamTailscale } from "~/components/pyo/Tailscale";
 import { TunnelSettings, tunnelUnavailable } from "~/components/pyo/Tunnel";
+import { AppLink } from "~/components/ui/AppLink";
 import { LearnMore } from "~/components/ui/LearnMore";
 import { optionClass, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
@@ -115,6 +117,8 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
   const [picked, setPicked] = useState<Traffic | null>(null);
   const shown = picked ?? current;
   const unavailable = current === "tunnel" ? null : tunnelUnavailable(s, c);
+  // The team's Tailscale covers this cluster (set up once, on Integrations).
+  const tailscale = teamTailscale(s)?.clusters.some((x) => x.id === c.id);
   const hint = (m: Traffic) =>
     m === "public"
       ? "Ports 80 and 443 on every server except build-only servers."
@@ -145,6 +149,20 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
             onSelect={() => void pick(m.value)}
           />
         ))}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3">
+        <span className="text-[13px] font-medium">Tailscale</span>
+        <span className="flex items-center gap-3">
+          <TailnetBadge clusterId={c.id} />
+          {tailscale ? null : (
+            <AppLink
+              href="/integrations#tailscale"
+              className="text-[12.5px] font-medium text-primary hover:text-primary/80"
+            >
+              Integrations
+            </AppLink>
+          )}
+        </span>
       </div>
       {shown === "tunnel" || c.tunnel ? (
         <TunnelSettings
