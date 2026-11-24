@@ -1289,11 +1289,18 @@ async fn ensure_certificate<C: TunnelApi>(
 
 /// The tunnel's health from Cloudflare's view and the agent's:
 /// "connected", "degraded", "down", "starting" or "unknown".
-pub fn health(cf: &Value, agent: &Value, young: bool) -> &'static str {
+///
+/// `young`: made in the last 5 minutes. `failed`: Pyo's last
+/// pass at Cloudflare failed (the tunnel has an error). Without a read of
+/// Cloudflare's view yet, it's "starting" while young, and "unknown" (Pyo
+/// can't reach Cloudflare) once a pass failed or none read it in time. The
+/// loop reads it every 2 minutes, so 5 minutes is two reads missed.
+pub fn health(cf: &Value, agent: &Value, young: bool, failed: bool) -> &'static str {
     let status = cf["status"].as_str().unwrap_or("");
     let wanted = agent["replicas"].as_i64().unwrap_or(0);
     let ready = agent["readyReplicas"].as_i64().unwrap_or(0);
     match status {
+        "" if young && !failed => "starting",
         "" => "unknown",
         "healthy" if wanted > 0 && ready < wanted => "degraded",
         "healthy" => "connected",
@@ -1416,7 +1423,11 @@ pub fn shown(row: &Value) -> Value {
         "connectors": connectors,
         "colos": colos,
         "connections": connections.len(),
-        "health": if row["state"] == "removing" { "removing" } else { health(cf, agent, row["young"] == json!(true)) },
+        "health": if row["state"] == "removing" {
+            "removing"
+        } else {
+            health(cf, agent, row["young"] == json!(true), !row["error"].is_null())
+        },
         // The cluster's install refused the connector: its connect command
         // brings the newer one.
         "refused": agent["refused"] == json!(true),

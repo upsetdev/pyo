@@ -287,14 +287,16 @@ pub fn tunnel_line(t: &Value) -> String {
         .flatten()
         .filter_map(Value::as_str)
         .collect();
-    match t["health"].as_str().unwrap_or("unknown") {
+    // No health yet: starting. Pyo says "unknown" only once it tried
+    // Cloudflare and failed, or no read came in time.
+    match t["health"].as_str().unwrap_or("starting") {
         "connected" if colos.is_empty() => format!("Tunnel connected · {ready} connectors"),
         "connected" => format!("Tunnel connected · {ready} connectors · {}", colos.join(", ")),
         "degraded" => format!("Tunnel degraded · {ready} of {n} connectors"),
         "down" => "Tunnel down. Its websites don't answer.".into(),
-        "starting" => "Starting the tunnel…".into(),
+        "unknown" => "Pyo can't reach Cloudflare. Websites keep working.".into(),
         "removing" => "Removing the tunnel…".into(),
-        _ => "Pyo can't reach Cloudflare. Websites keep working.".into(),
+        _ => "Starting the tunnel…".into(),
     }
 }
 
@@ -505,7 +507,11 @@ mod tests {
         let t = json!({ "health": "degraded", "connectors": [{ "ready": true }, { "ready": false }] });
         assert_eq!(tunnel_line(&t), "Tunnel degraded · 1 of 2 connectors");
         assert_eq!(tunnel_line(&json!({ "health": "down" })), "Tunnel down. Its websites don't answer.");
-        assert_eq!(tunnel_line(&json!({})), "Pyo can't reach Cloudflare. Websites keep working.");
+        assert_eq!(tunnel_line(&json!({ "health": "starting" })), "Starting the tunnel…");
+        // No health yet: starting, not a false "can't reach".
+        assert_eq!(tunnel_line(&json!({})), "Starting the tunnel…");
+        assert_eq!(tunnel_line(&json!({ "health": null })), "Starting the tunnel…");
+        assert_eq!(tunnel_line(&json!({ "health": "unknown" })), "Pyo can't reach Cloudflare. Websites keep working.");
     }
 
     #[test]

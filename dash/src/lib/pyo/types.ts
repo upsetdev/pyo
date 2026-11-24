@@ -561,6 +561,10 @@ export type Cluster = {
 /** How a cluster takes web traffic. */
 export type ClusterTraffic = "public" | "tailscale" | "tunnel";
 
+/**
+ * "starting" until Cloudflare's first report. "unknown": Pyo tried
+ * Cloudflare and failed, or no report came in 5 minutes.
+ */
 export type TunnelHealth =
   "connected" | "degraded" | "down" | "starting" | "unknown" | "removing";
 

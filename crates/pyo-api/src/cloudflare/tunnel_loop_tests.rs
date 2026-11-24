@@ -244,13 +244,34 @@ async fn the_certificate_is_issued_for_the_names_with_a_key_kept_here() {
 #[test]
 fn health_from_both_views() {
     let agent = |w: i64, r: i64| json!({ "replicas": w, "readyReplicas": r });
-    assert_eq!(health(&json!({}), &agent(2, 2), false), "unknown");
-    assert_eq!(health(&json!({ "status": "healthy" }), &agent(2, 2), false), "connected");
-    assert_eq!(health(&json!({ "status": "healthy" }), &agent(2, 1), false), "degraded");
-    assert_eq!(health(&json!({ "status": "degraded" }), &agent(2, 2), false), "degraded");
-    assert_eq!(health(&json!({ "status": "inactive" }), &agent(2, 0), true), "starting");
-    assert_eq!(health(&json!({ "status": "down" }), &agent(2, 0), false), "down");
-    assert_eq!(health(&json!({ "status": "inactive" }), &json!({}), false), "down");
+    // No read of Cloudflare's view yet: starting while it's new, then Pyo
+    // can't reach Cloudflare (a pass failed, or none read it in time).
+    assert_eq!(health(&json!({}), &json!({}), true, false), "starting");
+    assert_eq!(health(&json!({}), &agent(2, 2), true, true), "unknown");
+    assert_eq!(health(&json!({}), &agent(2, 2), false, false), "unknown");
+    assert_eq!(health(&json!({ "status": "healthy" }), &agent(2, 2), false, false), "connected");
+    assert_eq!(health(&json!({ "status": "healthy" }), &agent(2, 2), true, true), "connected");
+    assert_eq!(health(&json!({ "status": "healthy" }), &agent(2, 1), false, false), "degraded");
+    assert_eq!(health(&json!({ "status": "degraded" }), &agent(2, 2), false, false), "degraded");
+    assert_eq!(health(&json!({ "status": "inactive" }), &agent(2, 0), true, false), "starting");
+    assert_eq!(health(&json!({ "status": "down" }), &agent(2, 0), false, false), "down");
+    assert_eq!(health(&json!({ "status": "inactive" }), &json!({}), false, false), "down");
+}
+
+#[test]
+fn a_new_tunnel_shows_starting_until_cloudflare_is_read() {
+    let row = |young: bool, error: Value| {
+        json!({ "state": "creating", "error": error, "cfStatus": {}, "agentStatus": {}, "young": young })
+    };
+    // Just turned on: starting, never "can't reach Cloudflare".
+    assert_eq!(shown(&row(true, Value::Null))["health"], "starting");
+    // Pyo tried and Cloudflare said no, or no read came in 5 minutes.
+    assert_eq!(shown(&row(true, json!("Cloudflare refused the token.")))["health"], "unknown");
+    assert_eq!(shown(&row(false, Value::Null))["health"], "unknown");
+    // Being removed: says so, whatever Cloudflare said.
+    let mut r = row(true, Value::Null);
+    r["state"] = json!("removing");
+    assert_eq!(shown(&r)["health"], "removing");
 }
 
 #[test]
