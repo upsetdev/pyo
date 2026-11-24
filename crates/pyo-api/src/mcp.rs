@@ -574,13 +574,19 @@ fn list_tools(user: &User, sandboxes: bool, params: &Value) -> Result<Value, (i6
 }
 
 /// Env values out of a snapshot: listings show names only, like get_service.
+/// A value is shown as `•••`, and saving it back keeps it (masked.rs). An
+/// empty one stays empty, and so does a secret's (`hasValue` says it has one).
 fn without_env_values(mut snap: Value) -> Value {
-    for a in snap["services"].as_array_mut().into_iter().flatten() {
-        for e in a["env"].as_array_mut().into_iter().flatten() {
-            if e.get("value").is_some() {
+    fn hide(env: Option<&mut Value>) {
+        for e in env.and_then(Value::as_array_mut).into_iter().flatten() {
+            if e["value"].as_str().is_some_and(|v| !v.is_empty()) {
                 e["value"] = json!("•••");
             }
         }
+    }
+    for a in snap["services"].as_array_mut().into_iter().flatten() {
+        hide(a.get_mut("env"));
+        hide(a.get_mut("previews").and_then(|p| p.get_mut("env")));
     }
     snap
 }
@@ -1720,6 +1726,13 @@ mod tests {
             json!({ "key": "API_URL", "value": "•••" })
         );
         assert_eq!(snap["services"][0]["env"][1]["key"], "TOKEN");
+        // A secret and an empty value stay empty; previews' values are hidden too.
+        let snap = without_env_values(
+            json!({ "services": [{ "env": [{ "key": "TOKEN", "value": "", "secret": true, "hasValue": true }, { "key": "EMPTY", "value": "" }], "previews": { "env": [{ "key": "STAGE", "value": "preview" }] } }] }),
+        );
+        assert_eq!(snap["services"][0]["env"][0]["value"], "");
+        assert_eq!(snap["services"][0]["env"][1]["value"], "");
+        assert_eq!(snap["services"][0]["previews"]["env"][0]["value"], "•••");
     }
 
     #[test]
@@ -1905,6 +1918,16 @@ mod tests {
         );
         assert_eq!(by("create_service").run, Run::Written);
         assert_eq!(by("remove_server").run, Run::Op("removeServer".into()));
+        // A domain comes off without a whole-service save_service.
+        let rd = by("remove_domain");
+        assert_eq!(rd.run, Run::Op("removeDomain".into()));
+        assert_eq!(rd.access, KeyAccess::Full);
+        assert_eq!(rd.def["annotations"]["destructiveHint"], true);
+        let required = rd.def["inputSchema"]["required"].as_array().unwrap();
+        assert!(required.contains(&json!("serviceId")) && required.contains(&json!("domainId")));
+        for k in ["keepDnsRecord", "restoreRecords"] {
+            assert!(rd.def["inputSchema"]["properties"][k].is_object(), "{k}");
+        }
         assert_eq!(
             by("cancel_server_removal").def["annotations"]["destructiveHint"],
             false

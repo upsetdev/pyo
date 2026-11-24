@@ -53,6 +53,7 @@ mod jobs;
 mod join;
 mod logfollow;
 mod mail;
+mod masked;
 mod mcp;
 mod migrate;
 mod oauth;

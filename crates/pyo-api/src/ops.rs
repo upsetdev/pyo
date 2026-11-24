@@ -2540,7 +2540,7 @@ pub(crate) enum Op {
         #[serde(default)]
         upload_id: Option<String>,
     },
-    /// Save a service's configuration. With `deploymentId`, roll it out too. Changes to its `domains` go live without a deploy once it has been deployed.
+    /// Save a service's configuration. With `deploymentId`, roll it out too. Changes to its `domains` go live without a deploy once it has been deployed. A variable sent back hidden (`•••`, as reads show it) keeps its saved value. `removeDomain` removes a domain without sending the whole service.
     #[serde(rename = "saveService")]
     SaveService {
         /// The whole service, as in the snapshot.
@@ -2979,6 +2979,18 @@ pub(crate) enum Op {
         service_id: String,
         domain_id: String,
     },
+    /// Remove a domain from a service. Traffic to it stops, in place, without a redeploy. A port no other domain uses stops being public. The DNS record Pyo made for it in Cloudflare is deleted too, unless `keepDnsRecord`. Only a record Pyo made, still with its comment, is deleted. For a domain through the Cloudflare Tunnel, `restoreRecords` puts back the records the tunnel replaced (team owners and admins).
+    RemoveDomain {
+        service_id: String,
+        /// The domain's `id`, or its hostname.
+        domain_id: String,
+        /// Leave the DNS record Pyo made in Cloudflare.
+        #[serde(default)]
+        keep_dns_record: bool,
+        /// Put back the records the tunnel replaced.
+        #[serde(default)]
+        restore_records: bool,
+    },
     /// How a cluster takes web traffic: "public" (ports 80 and 443 on every server but build-only ones), "tailscale" (only from the tailnet, or only inside the cluster without Tailscale) or "tunnel" (through Cloudflare Tunnel, with no ports 80 and 443 open). For "tunnel", the team's Cloudflare token needs Cloudflare Tunnel:Edit and SSL and Certificates:Edit, and the cluster's install must be Pyo's (run its connect command first when it's older). Domains in zones of the tunnel's account move to the tunnel. Those with a DNS record Pyo didn't make wait for `setDomainTunnel` with `replace`. Pyo does the Cloudflare work in the background: the cluster's `tunnel` shows how it's going. Team owners and admins.
     SetClusterTraffic {
         cluster_id: String,
@@ -3071,6 +3083,7 @@ async fn run(
 /// Run an operation as `user` from anywhere else (MCP tools): `op` is the
 /// same JSON the dashboard sends, e.g. {"op": "scaleService", "id": …}.
 pub async fn run_json(s: &AppState, user: &User, op: Value) -> ApiResult<Value> {
+    crate::masked::no_hidden_credentials(&op)?;
     let op: Op =
         serde_json::from_value(op).map_err(|e| ApiError::bad_request(op_error(&e.to_string())))?;
     run_op(s, user, op).await
@@ -3544,6 +3557,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         Op::VerifyDomain { .. }
         | Op::CreateDnsRecord { .. }
         | Op::DeleteDnsRecord { .. }
+        | Op::RemoveDomain { .. }
         | Op::SetDomainTunnel { .. } => ("Domains", "dom"),
         Op::UploadCertificate { .. }
         | Op::ReplaceCertificate { .. }
@@ -6234,7 +6248,10 @@ async fn apply(
             // The dashboard never gets secret values back, so a secret it
             // sends without one keeps the stored (sealed) value.
             let mut service = service;
-            let mut unhidden = keep_secret_values(&mut service, &old_spec);
+            // A value sent back as a read showed it hidden (•••) keeps the
+            // saved one. It's never stored as the value.
+            let mut unhidden = crate::masked::keep_hidden_env(&mut service, &old_spec).await?;
+            unhidden.extend(keep_secret_values(&mut service, &old_spec));
             // And the same for the previews' variables.
             if service["previews"].is_object() {
                 unhidden.extend(keep_secret_values(
@@ -8474,6 +8491,24 @@ async fn apply(
             service_id,
             domain_id,
         } => crate::cloudflare::delete_record(s, tx, user, &service_id, &domain_id).await,
+        Op::RemoveDomain {
+            service_id,
+            domain_id,
+            keep_dns_record,
+            restore_records,
+        } => {
+            remove_domain(
+                s,
+                tx,
+                user,
+                &service_id,
+                &domain_id,
+                keep_dns_record,
+                restore_records,
+                wake,
+            )
+            .await
+        }
         Op::SetClusterTraffic {
             cluster_id,
             mode,
@@ -8533,6 +8568,113 @@ async fn apply(
             Ok(ok)
         }
     }
+}
+
+/// `removeDomain`: what the dashboard does when a domain is removed. The
+/// records first (put back, or Pyo's own deleted), then the service saved
+/// without the domain, so it goes live in place.
+#[allow(clippy::too_many_arguments)]
+async fn remove_domain(
+    s: &AppState,
+    tx: &mut Transaction<'_, Postgres>,
+    user: &User,
+    service_id: &str,
+    domain: &str,
+    keep_dns_record: bool,
+    restore_records: bool,
+    wake: &mut Vec<String>,
+) -> ApiResult<Value> {
+    let team_id = team_of(tx, "services", service_id).await?;
+    require_role(tx, user, &team_id, Role::Developer).await?;
+    let spec: Value =
+        sqlx::query_scalar("SELECT spec FROM pyo.services WHERE id = $1 AND NOT deleting")
+            .bind(service_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| ApiError::not_found("Service"))?;
+    let want = domain.trim().to_lowercase();
+    let d = spec["domains"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|d| {
+            d["id"] == json!(domain)
+                || d["hostname"].as_str().map(str::to_lowercase).as_deref() == Some(&want)
+        })
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("Domain"))?;
+    let domain_id = d["id"].as_str().unwrap_or("").to_owned();
+    // Pyo's record of it in Cloudflare: whether Pyo made one, and what it replaced.
+    let record: Option<(bool, Value)> = sqlx::query_as(
+        "SELECT record_id IS NOT NULL, coalesce(previous, '[]'::jsonb) FROM pyo.dns_records WHERE service_id = $1 AND domain_id = $2",
+    )
+    .bind(service_id)
+    .bind(&domain_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let (mine, previous) = record.unwrap_or((false, json!([])));
+    let restore = restore_records && previous.as_array().is_some_and(|p| !p.is_empty());
+    if restore {
+        // Putting back the old records replaces Pyo's own as well.
+        nested(
+            s,
+            tx,
+            user,
+            Op::SetDomainTunnel {
+                service_id: service_id.to_owned(),
+                domain_id: domain_id.clone(),
+                on: false,
+                replace: false,
+                restore: true,
+            },
+            wake,
+        )
+        .await?;
+    } else if mine && !keep_dns_record {
+        nested(
+            s,
+            tx,
+            user,
+            Op::DeleteDnsRecord {
+                service_id: service_id.to_owned(),
+                domain_id: domain_id.clone(),
+            },
+            wake,
+        )
+        .await?;
+    }
+    // The service as saved, without the domain. A port no domain routes to
+    // anymore isn't public.
+    let mut service = spec;
+    if let Some(ds) = service["domains"].as_array_mut() {
+        ds.retain(|x| x["id"] != json!(domain_id));
+    }
+    let used: Vec<Value> = service["domains"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|x| x["portName"].clone())
+        .collect();
+    for p in service["ports"].as_array_mut().into_iter().flatten() {
+        if p["exposure"] == json!("http") && !used.contains(&p["name"]) {
+            p["exposure"] = json!("internal");
+        }
+    }
+    service["id"] = json!(service_id);
+    nested(
+        s,
+        tx,
+        user,
+        Op::SaveService {
+            service,
+            deployment_id: None,
+            trigger: None,
+            confirm: false,
+        },
+        wake,
+    )
+    .await?;
+    Ok(json!({ "ok": true, "removed": d["hostname"] }))
 }
 
 pub async fn service_ref(
@@ -9828,6 +9970,8 @@ pub(crate) async fn create_service(
         return Err(ApiError::bad_request("Pick one of this team's clusters."));
     }
     let mut spec = service_spec_from(&service);
+    // Nothing saved yet: a hidden value (•••) is refused.
+    crate::masked::keep_hidden_env(&mut spec, &Value::Null).await?;
     crate::template_source::scrub_fields(&mut spec);
     crate::placement::normalize(&mut spec)?;
     validate_service_spec(&spec)?;
