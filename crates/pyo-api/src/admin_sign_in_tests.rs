@@ -42,6 +42,7 @@ async fn me_with_key(app: &Router, key: &str, ip: &str) -> (StatusCode, Value) {
 #[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
 fn admins_sign_in_only_from_where_the_limit_allows() {
     run_big(async {
+        let _turn = crate::teamsec_tests::ADMIN_SIGN_IN.lock().await;
         let db = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
             .await
             .unwrap();
