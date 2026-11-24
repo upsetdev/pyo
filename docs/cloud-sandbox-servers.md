@@ -171,6 +171,21 @@ Self-hosted keeps today's flow. This is only for a multi-tenant Pyo (`hosted()`)
 - Joins the tailnet with the key (`tag:pyo`, hostname = the name), gets the certificate for its tailnet name with `tailscale cert` and sets a renewal timer, installs the daemon.
 - Hands the code and the command key to the daemon in a root-only file, never in its arguments.
 
+What stage 3 settled, for the daemon's side (stage 2):
+
+- **The certificate.** `tailscale cert` writes `/etc/pyo-sandbox/tailnet/cert.pem` and `key.pem` (the folder 0700, the key 0600). A timer (`pyo-sandbox-cert.timer`, every 12 hours) runs it again, and `tailscale cert` gets a new one only near the end. The daemon serves :7443 on its tailnet address with them, and reloads them when they change. The folder is the config's folder plus `tailnet/`.
+- **The join.** `sandbox.sh` writes `/etc/pyo-sandbox/join.json` (root, 0600), then runs `pyo-sandbox join --config /etc/pyo-sandbox/config.json --join /etc/pyo-sandbox/join.json` with `RUST_LOG=off`. The file is the `JoinRequest` without `publicKey`, plus `pyoUrl` and `commandKeys`:
+
+  ```json
+  {"pyoUrl": "https://agent.pyo.example", "serverId": "sbs_…", "code": "…", "commandKeys": "<base64url>,<base64url>",
+   "address": "100.64.0.9", "hostname": "sbx-1", "tailnetName": "sbx-1.tail1234.ts.net",
+   "jailUid": 998, "jailGid": 997, "capability": { …pyo-sandbox detect's report… }}
+  ```
+
+  The daemon makes its key, posts the join (409: again every 5 seconds until the code runs out), checks `commandKeys`, and writes its key, `outbound.json` and `config.json` (the answer's `config`, 0600). It exits 0 once they're written. Otherwise it exits non-zero, and its last line on stderr is one plain sentence for people (a leading `Error: ` is dropped), such as Pyo's refusal. `sandbox.sh` deletes the join file either way, and takes a written `config.json` as joined.
+- **Outbound from then on.** `config.json` has `outbound`, so a run without a code updates the daemon, the certificate timer and the firewall (7070 and 7443 on `tailscale0`), as on self-hosted.
+- **Already on a tailnet.** A machine that's on a tailnet without `tag:pyo` isn't moved: `sandbox.sh` stops and says to log out of Tailscale first.
+
 ### The daemon (stage 2)
 
 Wire types are pyo-proto `sandbox::outbound`. Paths are under `<url>/api/sandbox-agent/v1`.
