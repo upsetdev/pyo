@@ -7,7 +7,8 @@ name: Security scan
 #   the databases system's images (crates/pyo-proto/system/databases:
 #   CloudNativePG, MOCO and its sidecars, MySQL, valkey-bundle) and the
 #   CloudNativePG bases of deploy/images/postgres.Dockerfile, plus plain
-#   Valkey 8.1, which isn't pinned (it follows a database's version)
+#   Valkey 8.1 (it follows a database's version, so it's pinned in
+#   deploy/mirrors.txt, not with the others)
 #
 # An image with HIGH or CRITICAL CVEs that have a fix gets one issue,
 # labelled security, listing them with their fixed versions. Each scan
@@ -55,7 +56,7 @@ jobs:
             # Not MOCO's fluent-bit: it never runs (pyo-db-controller sets disableSlowQueryLogContainer).
             git grep -hoE '(docker\.io|ghcr\.io)/[a-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' -- \
               crates/pyo-proto/system deploy/images/postgres.Dockerfile | grep -v '^ghcr\.io/cybozu-go/moco/fluent-bit:' | sort -u
-            echo docker.io/valkey/valkey:8.1
+            scripts/mirror-images.sh list | cut -d' ' -f2 | grep '^ghcr\.io/upsetdev/pyo/mirror/valkey/valkey:8\.1@'
           } | jq -Rnc '[inputs | select(length > 0) | {key: sub("@.*$"; ""), ref: .}]' > third-party.json
           echo "images=$(jq -sc 'add' pyo.json third-party.json)" >> "$GITHUB_OUTPUT"
           echo "$tag: $(jq length pyo.json) of Pyo's images and $(jq length third-party.json) third-party images."
