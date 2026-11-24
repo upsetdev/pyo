@@ -24,9 +24,8 @@ CREATE TABLE pyo.sandbox_server_keys (
 CREATE INDEX sandbox_server_keys_server ON pyo.sandbox_server_keys (server_id);
 
 -- An outbound server's commands, in the order they were queued. The
--- command is sealed with the team's data key (it may carry env values or
--- a certificate's key) and dropped once answered. The signer signs it
--- when the server takes it.
+-- command is sealed (it may carry env values or a certificate's key) and
+-- dropped once answered. The signer signs it when the server takes it.
 CREATE TABLE pyo.sandbox_commands (
   id               text PRIMARY KEY,
   server_id        text NOT NULL REFERENCES pyo.sandbox_servers (id) ON DELETE CASCADE,
