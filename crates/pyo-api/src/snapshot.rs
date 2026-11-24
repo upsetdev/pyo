@@ -669,6 +669,7 @@ fn capabilities(stored: &Value) -> Value {
 async fn for_dashboard(mut services: Vec<Value>) -> ApiResult<Vec<Value>> {
     for service in services.iter_mut() {
         crate::template_source::show(service);
+        live_without_error(service);
         let service_id = service["id"].clone();
         // The service's variables, then its previews' (the same rules).
         if let Some(env) = service.get_mut("env").and_then(Value::as_array_mut) {
@@ -683,6 +684,18 @@ async fn for_dashboard(mut services: Vec<Value>) -> ApiResult<Vec<Value>> {
         }
     }
     Ok(services)
+}
+
+/// A live domain has no error to show: one left from before it went live
+/// (a DNS check's, before it moved to the Cloudflare Tunnel) is stale.
+fn live_without_error(service: &mut Value) {
+    for d in service["domains"].as_array_mut().into_iter().flatten() {
+        if d["status"] == json!("active")
+            && let Some(o) = d.as_object_mut()
+        {
+            o.remove("error");
+        }
+    }
 }
 
 /// Variables as the dashboard gets them: a secret's value never (only that
@@ -710,6 +723,17 @@ async fn shown_env(env: &mut [Value], service_id: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_domain_shows_no_stale_error() {
+        let mut service = json!({ "domains": [
+            { "hostname": "a.example.com", "status": "active", "tunnel": "on", "error": "a.example.com doesn't resolve yet." },
+            { "hostname": "b.example.com", "status": "pending_dns", "error": "b.example.com doesn't resolve yet." },
+        ] });
+        live_without_error(&mut service);
+        assert!(service["domains"][0].get("error").is_none());
+        assert!(service["domains"][1]["error"].is_string());
+    }
 
     #[test]
     fn capabilities_pass_the_install_and_updates_through() {

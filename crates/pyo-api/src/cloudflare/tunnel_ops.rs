@@ -249,8 +249,12 @@ async fn set_tunnel(
             Some(s) => {
                 d["tunnel"] = json!(s);
                 // Cloudflare's address, not the cluster's: the loop says
-                // when it's ready.
+                // when it's ready. The direct DNS check's error no longer
+                // applies.
                 d["status"] = json!("pending_dns");
+                if let Some(o) = d.as_object_mut() {
+                    o.remove("error");
+                }
             }
             None => super::tunnel_loop::leave_tunnel(d),
         }
