@@ -26,8 +26,8 @@ import { AddSandboxServer, RuntimeBadge } from "./common";
 
 // Add a sandbox server: two square tiles first. "Hetzner" has Pyo buy the
 // server and set it up (or connects Hetzner first). "Command line" is the
-// one-line sandbox.sh for a server you have. Pyo Cloud takes no sandbox
-// servers yet, so there only AddSandboxServer shows, which says so.
+// one-line sandbox.sh for a server you have. On Pyo Cloud only the command
+// shows: the server joins the team's tailnet, then Pyo over HTTPS.
 
 type How = "hetzner" | "command";
 

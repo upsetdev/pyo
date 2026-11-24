@@ -659,6 +659,15 @@ async fn ports(api: &Api, cmd: PortsCommand) -> Result<()> {
 
 // ── Servers and templates ──────────────────────────────────────────────────
 
+/// Whether this Pyo adds sandbox servers at its tailnet door
+/// (`addSandboxServer`): a self-hosted Pyo answers the Pyo Cloud way
+/// (`createSandboxJoinCode`) so, or doesn't have it.
+fn at_the_door(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::api::Refused>().is_some_and(|r| {
+        r.status == 404 || r.status == 405 || (r.status == 409 && r.message.contains("addSandboxServer"))
+    })
+}
+
 async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<()> {
     let team = team_id(api, team).await?;
     match cmd {
@@ -667,9 +676,18 @@ async fn servers(api: &Api, team: Option<&str>, cmd: ServersCommand) -> Result<(
             if let Some(d) = edge_domain {
                 body["edgeDomain"] = json!(d);
             }
-            let r = api.post("/api/v1/sandbox-servers", &body).await?;
+            // Pyo Cloud: the server joins the team's tailnet, then Pyo
+            // over HTTPS. A self-hosted Pyo takes it at its tailnet door.
+            let (r, hint) = match api.post("/api/v1/sandbox-servers/join-codes", &body).await {
+                Ok(r) => (r, "Run this on the server."),
+                Err(e) if at_the_door(&e) => (
+                    api.post("/api/v1/sandbox-servers", &body).await?,
+                    "Run this on the server as root.",
+                ),
+                Err(e) => return Err(e),
+            };
             let mins = (r["expiresAt"].as_i64().unwrap_or(0) - crate::api::now_ms()) / 60_000;
-            println!("Run this on the server as root. It works once, for {mins} minutes:\n");
+            println!("{hint} It works once, for {mins} minutes:\n");
             println!("{}", r["command"].as_str().unwrap_or(""));
             Ok(())
         }
@@ -1089,6 +1107,22 @@ async fn shell(api: &Api, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_hosted_adds_servers_at_its_door() {
+        let refused = |status, message: &str| {
+            anyhow::Error::new(crate::api::Refused {
+                status,
+                message: message.into(),
+            })
+        };
+        assert!(at_the_door(&refused(409, "This Pyo adds sandbox servers with addSandboxServer.")));
+        assert!(at_the_door(&refused(404, "Not found")));
+        assert!(at_the_door(&refused(405, "Method not allowed")));
+        assert!(!at_the_door(&refused(409, "A sandbox server has that name already.")));
+        assert!(!at_the_door(&refused(400, "Sandbox servers join your tailnet. Set up Tailscale on Integrations first.")));
+        assert!(!at_the_door(&anyhow::anyhow!("Couldn't reach Pyo.")));
+    }
 
     #[test]
     fn create_sends_only_what_was_given() {
