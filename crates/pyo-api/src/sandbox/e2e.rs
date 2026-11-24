@@ -530,7 +530,11 @@ async fn the_control_plane_drives_a_real_daemon() {
     )
     .await
     .unwrap();
-    assert_eq!(made["state"], "pending", "{made}");
+    // The push to the server runs in the background, so it may already be building.
+    assert!(
+        made["state"] == "pending" || made["state"] == "building",
+        "{made}"
+    );
     let tid = made["id"].as_str().unwrap().to_owned();
     let dup = super::create_template(
         &s,
