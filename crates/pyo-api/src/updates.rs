@@ -586,7 +586,7 @@ async fn clusters(db: &PgPool) -> ApiResult<Vec<ClusterRow>> {
     Ok(sqlx::query_as(
         "SELECT c.id, c.team_id, c.name, t.name AS team_name, c.agent_version,
                 coalesce((c.capabilities->>'updates')::int, 0) AS updates, coalesce(c.same_cluster, false) AS same_cluster,
-                (c.last_seen_at > now() - interval '2 minutes') AS online,
+                coalesce(c.last_seen_at > now() - interval '2 minutes', false) AS online,
                 c.capabilities->'agentScope' AS scope
            FROM pyo.clusters c JOIN pyo.teams t ON t.id = c.team_id
           WHERE c.status <> 'pending'
@@ -1995,5 +1995,18 @@ mod hosted_tests {
         for not in [&current_one, &offline, &too_old, &sent, &failed_now] {
             assert!(!due(false).await.contains(not), "{not} isn't due");
         }
+
+        // Out of pending without ever reporting: offline, and the admin's
+        // Updates (in every snapshot) still loads.
+        let never = format!("cl_x{run}");
+        q("INSERT INTO pyo.clusters (id, team_id, name, agent_token_hash, status) VALUES ($1, $2, $1, $1, 'connected')")
+            .bind(&never)
+            .bind(&auto)
+            .execute(&db)
+            .await
+            .unwrap();
+        let all = clusters(&db).await.unwrap();
+        assert!(!all.iter().find(|c| c.id == never).unwrap().online);
+        snapshot(&db).await.unwrap();
     }
 }
