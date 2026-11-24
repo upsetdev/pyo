@@ -181,6 +181,11 @@ async fn commands(db: &sqlx::PgPool, cluster: &str) -> Vec<String> {
 #[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
 fn the_tunnel_loop_end_to_end() {
     secret_key();
+    // A pass logs Pyo's own errors and goes on: they show with a failure.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("pyo_api::cloudflare=warn,pyo_api::error=error")
+        .with_test_writer()
+        .try_init();
     run_big(async {
         let _one = FAKE_API.lock().await;
         let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
