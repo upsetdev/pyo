@@ -560,17 +560,15 @@ fn proof_records_pyo_made_are_cleaned_up() {
 /// the tunnel when a record Pyo didn't make has it says "conflict" in the
 /// answer, at once, not after the agent's routes and the loop's next pass.
 #[test]
-#[ignore = "needs DATABASE_URL (a throwaway Postgres)"]
+#[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
 fn a_record_in_the_way_is_a_conflict_at_once() {
+    secret_key();
     run_big(async {
         let _one = FAKE_API.lock().await;
         let cf = FakeCf::start(TOKEN, &[(ZONE, "example.com", ACCOUNT)]).await;
-        // SAFETY: set while FAKE_API is held; nothing else here reads them yet.
+        // SAFETY: set while FAKE_API is held; nothing else here reads it yet.
         unsafe {
             std::env::set_var("PYO_DEV_CLOUDFLARE_API", &cf.base);
-            if std::env::var("PYO_SECRET_KEY").is_err() {
-                std::env::set_var("PYO_SECRET_KEY", "11".repeat(32));
-            }
         }
         let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
             .await
