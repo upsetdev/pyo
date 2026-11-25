@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Choice, Choices } from "~/components/pyo/Databases";
 import {
   CertificateDialog,
@@ -26,6 +26,7 @@ import {
   Switch,
 } from "~/components/ui/Field";
 import { HOSTNAME } from "~/lib/pyo/format";
+import { isPath, type HostEntry } from "~/lib/pyo/hosts";
 import {
   clusterTailnet,
   freeDomainNoun,
@@ -50,26 +51,46 @@ const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
  * Add a domain: your own, a free one (a tunnel one in tunnel mode) or a Tailscale one, its hostname, the service it routes to (asked when it isn't
  * given, e.g. from the team's Domains page), the port when there's a
  * choice, and how HTTPS works.
+ *
+ * With a hostname of the team, it adds a path of it. With a route, it
+ * edits that route's path, strip prefix, port and, for a path, its service.
  */
 export function AddDomainDialog({
   app: fixed,
   open,
   onClose,
+  hostname: lockedHost,
+  editing,
 }: {
   /** The service it's for; without one, the dialog asks which. */
   app?: Application;
   open: boolean;
   onClose: () => void;
+  /** Add a path to this hostname: it's fixed, and the cursor starts on Path. */
+  hostname?: string;
+  /** Edit this route instead. Its hostname is fixed. */
+  editing?: HostEntry | null;
 }) {
   const s = usePyo();
+  const fixedHost = editing?.d.hostname ?? lockedHost;
+  const locked = !!fixedHost;
+  // A hostname's paths are on one cluster.
+  const hostCluster = locked
+    ? s.services.find((a) =>
+        a.domains.some(
+          (d) => d.hostname.toLowerCase() === fixedHost.toLowerCase(),
+        ),
+      )?.clusterId
+    : undefined;
   const services = servicesIn(s)
     .map((a) => ({
       a,
       label: `${s.projects.find((p) => p.id === a.projectId)?.name ?? "?"} / ${a.name}`,
       http: a.ports.some((p) => p.protocol === "HTTP"),
+      elsewhere: !!hostCluster && a.clusterId !== hostCluster,
     }))
     .sort((x, y) => x.label.localeCompare(y.label));
-  const usable = services.filter((x) => x.http);
+  const usable = services.filter((x) => x.http && !x.elsewhere);
   const [picked, setPicked] = useState("");
   // One service that can take a domain: no need to ask.
   const app =
@@ -97,6 +118,24 @@ export function AddDomainDialog({
     create: true,
     proxied: false,
   });
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  /** The route the fields were filled from. */
+  const [loaded, setLoaded] = useState<string | null>(null);
+  if (open && editing && loaded !== editing.d.id) {
+    setLoaded(editing.d.id);
+    setPicked(editing.a.id);
+    setPortName(editing.d.portName);
+    setPathInput(editing.d.path && editing.d.path !== "/" ? editing.d.path : "");
+    setStrip(!!editing.d.stripPrefix);
+    setTouched(false);
+    setSaveError("");
+  }
+  const pathRef = useRef<HTMLInputElement>(null);
+  // Adding a path: the hostname is known, so the cursor goes to Path.
+  useEffect(() => {
+    if (open && lockedHost && !editing) pathRef.current?.focus();
+  }, [open, lockedHost, editing]);
   const port = portName || httpPorts[0]?.name || "";
   const cluster = s.clusters.find((c) => c.id === app?.clusterId);
   // Free domains go on the public IP, whatever the cluster's free domains
@@ -118,10 +157,11 @@ export function AddDomainDialog({
     s.projects.find((p) => p.id === app?.projectId)?.namespace ?? "app";
   // Picked, but the service's cluster has none: a note says why.
   const missing =
+    !locked &&
     !!app &&
     ((kind === "public" && !freeEnd) || (kind === "tailnet" && !tailnet));
   // No service yet: only your own domain, the free ones are named after it.
-  const k: Kind = app ? kind : "own";
+  const k: Kind = app && !locked ? kind : "own";
   const suffix =
     k === "public" ? freeEnd : k === "tailnet" ? tailnet : "";
   const suggested =
@@ -134,14 +174,18 @@ export function AddDomainDialog({
           suffix!,
         ).slice(0, -suffix!.length - 1);
   const name = label ?? suggested;
-  const hostname = k === "own" ? ownHost : `${name}.${suffix}`;
+  const hostname = locked
+    ? fixedHost
+    : k === "own"
+      ? ownHost
+      : `${name}.${suffix}`;
   const inCloudflare = useCloudflareFor(
-    k === "own" ? hostname : "",
+    k === "own" && !locked ? hostname : "",
     app?.clusterId,
   );
   // Through the cluster's Cloudflare Tunnel instead of a direct record.
   const viaTunnel = useTunnelChoice(
-    k === "own" && HOSTNAME.test(hostname) ? hostname : "",
+    k === "own" && !locked && HOSTNAME.test(hostname) ? hostname : "",
     app?.clusterId,
     cf,
   ).on;
@@ -157,10 +201,20 @@ export function AddDomainDialog({
   })();
   const pathOk = path === "/" || /^\/[A-Za-z0-9\-._~!$&'()+,;=:@%/]*$/.test(path) && !path.includes("//");
   const routes = !(k === "own" && redirectOnly);
-  const taken = hostnameUsed(s, hostname, routes ? path : undefined);
+  const taken = locked
+    ? // This exact path, on another route.
+      s.services.some((a) =>
+        a.domains.some(
+          (d) =>
+            d.id !== editing?.d.id &&
+            d.hostname.toLowerCase() === hostname.toLowerCase() &&
+            (d.path || "/") === path,
+        ),
+      )
+    : hostnameUsed(s, hostname, routes ? path : undefined);
   // Another of the team's services has the hostname: this is a path of it,
   // with that one's DNS record and certificate.
-  const held = path !== "/" && hostnameUsed(s, hostname);
+  const held = locked || (path !== "/" && hostnameUsed(s, hostname));
   const error = missing
     ? "Pick another option."
     : k !== "own" && !LABEL.test(name)
@@ -190,16 +244,60 @@ export function AddDomainDialog({
     setRedirectTo("");
     setPathInput("");
     setStrip(false);
+    setLoaded(null);
+    setSaving(false);
+    setSaveError("");
     onClose();
+  };
+  /** Save the edited route, or move it to the picked service. */
+  const saveEdit = async (e: HostEntry, to: Application) => {
+    const route = {
+      path,
+      stripPrefix: path !== "/" && strip,
+      portName: port,
+    };
+    const was = e.d.path || "/";
+    if (
+      to.id === e.a.id &&
+      was === route.path &&
+      !!e.d.stripPrefix === route.stripPrefix &&
+      e.d.portName === route.portName
+    )
+      return close();
+    const shown = path === "/" ? hostname : hostname + path;
+    setSaving(true);
+    setSaveError("");
+    if (to.id === e.a.id) {
+      const why = await api.saveRoute(to.id, e.d.id, route);
+      setSaving(false);
+      if (why) return setSaveError(why);
+      toast({ title: `Saved ${shown}` });
+      return close();
+    }
+    const r = await api.moveRoute(e.a.id, e.d.id, to.id, route);
+    setSaving(false);
+    if (r && !r.partial) return setSaveError(r.error);
+    toast(
+      r
+        ? {
+            tone: "error",
+            title: "The move didn't finish",
+            description: r.error,
+            timeout: null,
+          }
+        : { title: `Moved ${shown} to ${to.name}` },
+    );
+    close();
   };
   return (
     <Dialog
       open={open}
       onClose={close}
-      title="Add domain"
+      title={editing ? "Edit route" : lockedHost ? "Add path" : "Add domain"}
       onSubmit={() => {
         setTouched(true);
-        if (error || !app) return;
+        if (error || !app || saving) return;
+        if (editing) return void saveEdit(editing, app);
         const only = k === "own" && redirectOnly;
         const redirects = only
           ? [
@@ -255,14 +353,15 @@ export function AddDomainDialog({
           <Button variant="ghost" size="sm" onClick={close}>
             Cancel
           </Button>
-          <Button type="submit" size="sm" disabled={missing}>
-            Add domain
+          <Button type="submit" size="sm" disabled={missing || saving}>
+            {editing ? "Save" : lockedHost ? "Add path" : "Add domain"}
           </Button>
         </>
       }
     >
       <div className="space-y-4">
-        {fixed ? null : (
+        {/* The route that holds its hostname stays on its service. */}
+        {fixed || (editing && !isPath(editing.d)) ? null : (
           <Field
             label="Service"
             error={
@@ -283,49 +382,59 @@ export function AddDomainDialog({
                   Pick a service
                 </option>
                 {services.map((x) => (
-                  <option key={x.a.id} value={x.a.id} disabled={!x.http}>
+                  <option
+                    key={x.a.id}
+                    value={x.a.id}
+                    disabled={!x.http || x.elsewhere}
+                  >
                     {x.label}
-                    {x.http ? "" : " (no HTTP port)"}
+                    {!x.http
+                      ? " (no HTTP port)"
+                      : x.elsewhere
+                        ? " (another cluster)"
+                        : ""}
                   </option>
                 ))}
               </Select>
             )}
           </Field>
         )}
-        <Choices label="Domain" cols="sm:grid-cols-3">
-          <Choice
-            label="Your domain"
-            detail="Needs a DNS record"
-            selected={k === "own"}
-            onSelect={() => setKind("own")}
-          />
-          <Choice
-            label={freeNoun}
-            detail={
-              !app
-                ? "Pick a service first"
-                : tunnelMode
-                  ? "Ready instantly"
-                  : "Public, on nip.io"
-            }
-            selected={k === "public"}
-            disabled={!app}
-            onSelect={() => {
-              setKind("public");
-              setLabel(null);
-            }}
-          />
-          <Choice
-            label="Tailscale"
-            detail={app ? "Private, on ts.net" : "Pick a service first"}
-            selected={k === "tailnet"}
-            disabled={!app}
-            onSelect={() => {
-              setKind("tailnet");
-              setLabel(null);
-            }}
-          />
-        </Choices>
+        {locked ? null : (
+          <Choices label="Domain" cols="sm:grid-cols-3">
+            <Choice
+              label="Your domain"
+              detail="Needs a DNS record"
+              selected={k === "own"}
+              onSelect={() => setKind("own")}
+            />
+            <Choice
+              label={freeNoun}
+              detail={
+                !app
+                  ? "Pick a service first"
+                  : tunnelMode
+                    ? "Ready instantly"
+                    : "Public, on nip.io"
+              }
+              selected={k === "public"}
+              disabled={!app}
+              onSelect={() => {
+                setKind("public");
+                setLabel(null);
+              }}
+            />
+            <Choice
+              label="Tailscale"
+              detail={app ? "Private, on ts.net" : "Pick a service first"}
+              selected={k === "tailnet"}
+              disabled={!app}
+              onSelect={() => {
+                setKind("tailnet");
+                setLabel(null);
+              }}
+            />
+          </Choices>
+        )}
         {missing && cluster ? (
           <p className="rounded-lg border border-border bg-muted/40 px-3.5 py-3 text-[12.5px] text-muted-foreground">
             {k === "tailnet" ? (
@@ -381,7 +490,9 @@ export function AddDomainDialog({
               }
             >
               {(p) =>
-                k === "own" ? (
+                locked ? (
+                  <Input {...p} mono value={hostname} disabled />
+                ) : k === "own" ? (
                   <Input
                     {...p}
                     mono
@@ -415,7 +526,7 @@ export function AddDomainDialog({
                 label="Path"
                 optional
                 hint={
-                  held
+                  held && !editing
                     ? `${hostname} keeps its DNS record and certificate.`
                     : "Only this path. Other services can serve the rest."
                 }
@@ -423,6 +534,7 @@ export function AddDomainDialog({
                 {(p) => (
                   <Input
                     {...p}
+                    ref={pathRef}
                     mono
                     value={pathInput}
                     onChange={(e) => setPathInput(e.target.value.trim())}
@@ -448,7 +560,7 @@ export function AddDomainDialog({
                 tunnel
               />
             ) : null}
-            {k === "own" ? (
+            {k === "own" && !locked ? (
               <Switch
                 checked={redirectOnly}
                 onChange={setRedirectOnly}
@@ -557,6 +669,9 @@ export function AddDomainDialog({
                 onChange={setRedirect}
                 label="Redirect HTTP to HTTPS"
               />
+            ) : null}
+            {saveError ? (
+              <p className="text-[12px] text-destructive">{saveError}</p>
             ) : null}
           </>
         )}

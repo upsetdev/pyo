@@ -1022,6 +1022,55 @@ function saveService(
   });
 }
 
+/** What a route sets: its path ("/" for none), strip prefix and port. */
+export type RouteInput = { path: string; stripPrefix: boolean; portName: string };
+
+function withRoute(d: Domain, r: RouteInput): Domain {
+  const next: Domain = { ...d, portName: r.portName };
+  delete next.path;
+  delete next.stripPrefix;
+  if (r.path !== "/") {
+    next.path = r.path;
+    if (r.stripPrefix) next.stripPrefix = true;
+  }
+  return next;
+}
+
+/** A service with other domains, its ports' exposure to match. */
+function withDomains(a: Application, f: (ds: Domain[]) => Domain[]): Application {
+  const domains = f(a.domains);
+  const ports = a.ports.map((p) =>
+    domains.some((d) => d.portName === p.name)
+      ? { ...p, exposure: "http" as const }
+      : p.exposure === "http"
+        ? { ...p, exposure: "internal" as const }
+        : p,
+  );
+  return { ...a, domains, ports };
+}
+
+/** Save a service as given: the error, or null once it's saved. */
+async function trySave(service: Application): Promise<string | null> {
+  const r = await attempt("saveService", { service });
+  return "error" in r ? r.error : null;
+}
+
+/** Show a saved service's domains and ports before the next refresh. */
+function keepService(next: Application) {
+  update((s) => {
+    const a = findService(s, next.id);
+    a.domains = next.domains;
+    a.ports = next.ports;
+  });
+}
+
+/** "example.com/api", or the hostname alone for "/". */
+const shownRoute = (d: Domain) =>
+  d.path && d.path !== "/" ? `${d.hostname}${d.path}` : d.hostname;
+
+/** An error as a sentence, to go before another. */
+const sentence = (e: string) => (/[.!?]$/.test(e.trim()) ? e.trim() : `${e.trim()}.`);
+
 // ── Public operations ──────────────────────────────────────────────────────
 
 export const api = {
@@ -2114,6 +2163,86 @@ export const api = {
       if (d) Object.assign(d, patch);
     });
     return null;
+  },
+  /**
+   * A route's path, strip prefix and port. Saved before it shows, so a
+   * refused one stays in its form with why.
+   */
+  async saveRoute(
+    id: string,
+    domainId: string,
+    route: RouteInput,
+  ): Promise<string | null> {
+    const app = get().services.find((a) => a.id === id);
+    if (!app) return "The service is gone.";
+    const next = withDomains(app, (ds) =>
+      ds.map((d) => (d.id === domainId ? withRoute(d, route) : d)),
+    );
+    const why = await trySave(next);
+    if (!why) keepService(next);
+    return why;
+  },
+  /**
+   * A path of a hostname to another service. A hostname and path is used
+   * once in a team, so a new path is added there first and then removed
+   * here, and the same path is removed here first and put back when adding
+   * it fails. partial: something changed, and the error says what's where.
+   */
+  async moveRoute(
+    fromId: string,
+    domainId: string,
+    toId: string,
+    route: RouteInput,
+  ): Promise<{ error: string; partial: boolean } | null> {
+    const svc = (id: string) => get().services.find((a) => a.id === id);
+    const from = svc(fromId);
+    const to = svc(toId);
+    const d = from?.domains.find((x) => x.id === domainId);
+    if (!from || !to || !d)
+      return { error: "The service is gone.", partial: false };
+    const moved = withRoute(
+      { ...d, id: newId("dom"), createdAt: Date.now() },
+      route,
+    );
+    // Pyo sets which entry holds the hostname.
+    delete moved.primary;
+    delete moved.dnsRecord;
+    const oldShown = shownRoute(d);
+    const newShown = shownRoute(moved);
+    const save = async (id: string, f: (ds: Domain[]) => Domain[]) => {
+      const now = svc(id);
+      if (!now) return "The service is gone.";
+      const next = withDomains(now, f);
+      const why = await trySave(next);
+      if (!why) keepService(next);
+      return why;
+    };
+    const add = () => save(toId, (ds) => [...ds, moved]);
+    const remove = () => save(fromId, (ds) => ds.filter((x) => x.id !== d.id));
+    if ((d.path || "/") !== (moved.path || "/")) {
+      const added = await add();
+      if (added) return { error: added, partial: false };
+      const removed = await remove();
+      if (!removed) return null;
+      return {
+        error: `${newShown} now goes to ${to.name}. ${oldShown} still goes to ${from.name}, because removing it failed: ${sentence(removed)} Remove it from its menu.`,
+        partial: true,
+      };
+    }
+    const removed = await remove();
+    if (removed) return { error: removed, partial: false };
+    const added = await add();
+    if (!added) return null;
+    // Put it back as it was.
+    if (!(await save(fromId, (ds) => [...ds, d])))
+      return {
+        error: `${sentence(added)} ${oldShown} still goes to ${from.name}.`,
+        partial: false,
+      };
+    return {
+      error: `${oldShown} was removed from ${from.name}, and adding it to ${to.name} failed: ${sentence(added)} Add it again with Add path.`,
+      partial: true,
+    };
   },
   /** HTTPS settings of a domain; applied live once the service is deployed. */
   updateDomain(
