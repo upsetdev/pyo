@@ -3,7 +3,7 @@ import { ListSection } from "~/components/ui/Layered";
 import { GlobeIcon, PlusIcon } from "@phosphor-icons/react";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { DomainKind, DomainMark, DomainStatus } from "~/components/pyo/DomainState";
+import { DomainKind, DomainLock, DomainMark } from "~/components/pyo/DomainState";
 import { TimeAgo } from "~/components/pyo/common";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
@@ -172,13 +172,12 @@ function Domains() {
                         >
                           {r.d.hostname}
                         </Link>
-                        <DomainStatus
+                        <DomainLock
                           d={r.d}
                           certs={s.certificates}
                           notDeployed={!r.a.currentDeploymentId}
-                          inline
                         />
-                        <DomainMark d={r.d} clusterId={r.a.clusterId} logoOnly />
+                        <DomainMark d={r.d} clusterId={r.a.clusterId} />
                         <DomainKind hostname={r.d.hostname} />
                       </span>
                       <span className="mt-1 block truncate text-[12px] text-muted-foreground sm:hidden">

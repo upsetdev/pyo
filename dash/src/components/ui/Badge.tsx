@@ -5,7 +5,6 @@ import type {
   ClusterStatus,
   DeploymentStatus,
   ServerStatus,
-  TlsStatus,
   WorkloadStatus,
 } from "~/lib/pyo/types";
 
@@ -225,15 +224,4 @@ export function SimulatedBadge({ className = "" }: { className?: string }) {
       Simulated
     </Badge>
   );
-}
-
-export function TlsBadge({ status }: { status: TlsStatus }) {
-  const map: Record<TlsStatus, [Tone, string]> = {
-    issued: ["success", "TLS issued"],
-    pending: ["neutral", "TLS pending"],
-    failed: ["danger", "TLS failed"],
-    disabled: ["neutral", "No TLS"],
-  };
-  const [tone, label] = map[status];
-  return <Badge tone={tone}>{label}</Badge>;
 }

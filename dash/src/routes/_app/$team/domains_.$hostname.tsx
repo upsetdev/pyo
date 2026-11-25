@@ -93,7 +93,7 @@ function HostPage() {
         title={<span className="font-mono">{host.hostname}</span>}
         meta={
           <span className="inline-flex items-center gap-2">
-            <DomainMark d={d} clusterId={a.clusterId} logoOnly />
+            <DomainMark d={d} clusterId={a.clusterId} />
             <DomainKind hostname={d.hostname} />
             <DomainStatus
               d={d}

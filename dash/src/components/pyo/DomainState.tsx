@@ -1,6 +1,5 @@
 import {
   CircleDashedIcon,
-  GlobeIcon,
   LockSimpleIcon,
   WarningCircleIcon,
   XCircleIcon,
@@ -8,7 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { siTailscale } from "simple-icons";
-import { expiry } from "~/components/pyo/Certificates";
+import { expiry, tlsLine } from "~/components/pyo/Certificates";
 import { BrandMark, CLOUDFLARE_LOGO } from "~/components/pyo/common";
 import { throughTunnel, tunnelNote } from "~/components/pyo/TunnelRecord";
 import {
@@ -96,37 +95,44 @@ const BADGE: Record<DomainTone, Tone> = {
   broken: "danger",
 };
 
-const INLINE: Record<Exclude<DomainTone, "ok">, { icon: Icon; className: string }> = {
+const PROBLEM: Record<Exclude<DomainTone, "ok">, { icon: Icon; className: string }> = {
   busy: { icon: CircleDashedIcon, className: "text-muted-foreground" },
   attention: { icon: WarningCircleIcon, className: "text-warning" },
   broken: { icon: XCircleIcon, className: "text-destructive" },
 };
 
-/**
- * The status as one label, in the app's badge style (details in a
- * tooltip). `inline`: for after a hostname in a list. A green lock when
- * HTTPS works, nothing for a working domain without HTTPS, else an icon
- * and a few words.
- */
+/** The status as one label, in the app's badge style (details in a tooltip). */
 export function DomainStatus({
   d,
   certs,
   notDeployed,
-  inline,
 }: {
   d: Domain;
   certs: Certificate[];
   notDeployed?: boolean;
-  inline?: boolean;
 }) {
   const st = domainState(d, certs, notDeployed);
-  if (!inline) {
-    const badge = <Badge tone={BADGE[st.tone]}>{st.text}</Badge>;
-    return st.hint ? <Tooltip content={st.hint}>{badge}</Tooltip> : badge;
-  }
+  const badge = <Badge tone={BADGE[st.tone]}>{st.text}</Badge>;
+  return st.hint ? <Tooltip content={st.hint}>{badge}</Tooltip> : badge;
+}
+
+/**
+ * For after a hostname in a list: a green lock when HTTPS works, nothing
+ * for a working domain without HTTPS, else an icon and a few words.
+ */
+export function DomainLock({
+  d,
+  certs,
+  notDeployed,
+}: {
+  d: Domain;
+  certs: Certificate[];
+  notDeployed?: boolean;
+}) {
+  const st = domainState(d, certs, notDeployed);
   if (st.tone === "ok")
     return st.text === "HTTPS" ? (
-      <Tooltip content={st.hint ? `HTTPS · ${st.hint}` : "HTTPS"}>
+      <Tooltip content={tlsLine(d, certs)}>
         <span
           role="img"
           aria-label="HTTPS"
@@ -136,7 +142,7 @@ export function DomainStatus({
         </span>
       </Tooltip>
     ) : null;
-  const p = INLINE[st.tone];
+  const p = PROBLEM[st.tone];
   const hint = st.hint ?? (st.short ? st.text : undefined);
   const label = (
     <span
@@ -165,7 +171,7 @@ export function DomainKind({ hostname }: { hostname: string }) {
   );
 }
 
-/** A logo in the lock's box, so hostnames stay in a column. */
+/** A logo in a box the size of the lock. */
 function Logo({
   label,
   hint,
@@ -189,19 +195,16 @@ function Logo({
 }
 
 /**
- * What a domain goes through, before its name: the Tailscale logo on the
- * tailnet, the Cloudflare logo through the cluster's tunnel or a record
- * Cloudflare proxies, else the lock (the globe without HTTPS). `logoOnly`:
- * nothing for the rest.
+ * What a domain goes through: the Tailscale logo on the tailnet, the
+ * Cloudflare logo through the cluster's tunnel or a record Cloudflare
+ * proxies. Nothing for the rest.
  */
 export function DomainMark({
   d,
   clusterId,
-  logoOnly,
 }: {
   d: Domain;
   clusterId: string;
-  logoOnly?: boolean;
 }) {
   const s = usePyo();
   if (isTailnetDomain(d.hostname))
@@ -239,10 +242,5 @@ export function DomainMark({
   const r = d.dnsRecord;
   if (r?.proxied && (r.status === "created" || r.status === "exists"))
     return <Logo label="Cloudflare" icon={CLOUDFLARE_LOGO} hint="Cloudflare · Proxied" />;
-  if (logoOnly) return null;
-  return d.tls === "issued" ? (
-    <LockSimpleIcon size={14} className="text-success" aria-label="HTTPS" />
-  ) : (
-    <GlobeIcon size={14} className="text-muted-foreground" aria-label="HTTP only" />
-  );
+  return null;
 }

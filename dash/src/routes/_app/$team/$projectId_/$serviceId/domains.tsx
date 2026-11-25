@@ -21,11 +21,9 @@ import {
   expiry,
   PickCertificateDialog,
   TLS_MODES,
-  tlsLine,
 } from "~/components/pyo/Certificates";
-import { TlsBadge } from "~/components/ui/Badge";
 import { Tooltip } from "~/components/ui/Tooltip";
-import { DomainKind, DomainMark, DomainStatus } from "~/components/pyo/DomainState";
+import { DomainKind, DomainLock, DomainMark } from "~/components/pyo/DomainState";
 import { AppLink } from "~/components/ui/AppLink";
 import { AddDomainDialog } from "~/components/pyo/AddDomainDialog";
 import { hostOf, isPath, sharedWith, shownPath } from "~/lib/pyo/hosts";
@@ -149,14 +147,19 @@ function Domains({ app }: { app: Application }) {
               return (
                 <li key={d.id} className="px-4 py-3.5">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                    <DomainMark d={d} clusterId={app.clusterId} />
-                    <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <span className="inline-flex min-w-0 items-center gap-2">
                       <span className="truncate font-mono text-[13px]">
                         {d.hostname}
                         {d.path && d.path !== "/" ? (
                           <span className="text-muted-foreground">{d.path}</span>
                         ) : null}
                       </span>
+                      <DomainLock
+                        d={d}
+                        certs={s.certificates}
+                        notDeployed={!app.currentDeploymentId}
+                      />
+                      <DomainMark d={d} clusterId={app.clusterId} />
                     </span>
                     {sharedWith(s, app, d).length ? (
                       <Tooltip
@@ -170,9 +173,6 @@ function Domains({ app }: { app: Application }) {
                       </Tooltip>
                     ) : null}
                     <DomainKind hostname={d.hostname} />
-                    <Tooltip content={tlsLine(d, s.certificates)}>
-                      <TlsBadge status={d.tls} />
-                    </Tooltip>
                     <span className="ml-2 inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">
                       {onlyRedirects(d) ? (
                         <>
@@ -192,14 +192,6 @@ function Domains({ app }: { app: Application }) {
                         </>
                       )}
                     </span>
-                    {/* Only while it isn't live yet; a live domain needs no status. */}
-                    {!app.currentDeploymentId || d.status !== "active" ? (
-                      <DomainStatus
-                        d={d}
-                        certs={s.certificates}
-                        notDeployed={!app.currentDeploymentId}
-                      />
-                    ) : null}
                     <span className="ml-auto flex gap-1">
                       <Menu
                         label={`Settings of ${d.hostname}`}
