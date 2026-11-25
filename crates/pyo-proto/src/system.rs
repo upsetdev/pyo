@@ -1632,6 +1632,10 @@ pub const AGENT_APP: &str = "pyo-agent";
 /// The longest a new connector waits for its address to be trusted. Then
 /// it starts anyway, so an agent that's down never holds the tunnel back.
 pub const TUNNEL_GATE_SECONDS: u64 = 120;
+/// How long cloudflared lets requests finish after it stopped taking new
+/// ones (it leaves Cloudflare's edge at once), and the pod's whole stop.
+pub const TUNNEL_GRACE_SECONDS: i64 = 20;
+pub const TUNNEL_STOP_SECONDS: i64 = 35;
 /// Connectors: two, spread across servers where it can.
 pub const TUNNEL_REPLICAS: i32 = 2;
 /// Where cloudflared serves `/ready` (nothing reaches it: pyo-system
@@ -1700,6 +1704,10 @@ pub fn tunnel_gate_address() -> String {
 /// addresses, so Cloudflare never sends it a request the gateway would
 /// refuse. Without `gate_image` (an agent that can't tell its own image)
 /// there's no gate. Neither container gets a service account token.
+///
+/// On stop, cloudflared leaves Cloudflare's edge at once and lets requests
+/// finish for [`TUNNEL_GRACE_SECONDS`], inside the pod's
+/// [`TUNNEL_STOP_SECONDS`].
 pub fn tunnel_deployment(image: &str, gate_image: Option<&str>, token_hash: &str) -> Value {
     let app = json!({ "app.kubernetes.io/name": TUNNEL_APP });
     let locked = json!({ "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": { "drop": ["ALL"] } });
@@ -1715,13 +1723,15 @@ pub fn tunnel_deployment(image: &str, gate_image: Option<&str>, token_hash: &str
                 "metadata": { "labels": app, "annotations": { TUNNEL_TOKEN_HASH_ANNOTATION: token_hash } },
                 "spec": {
                     "automountServiceAccountToken": false,
+                    "terminationGracePeriodSeconds": TUNNEL_STOP_SECONDS,
                     "affinity": gateway_affinity(),
                     "topologySpreadConstraints": [{ "maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "ScheduleAnyway", "labelSelector": { "matchLabels": app } }],
                     "securityContext": { "runAsNonRoot": true, "runAsUser": 65532, "seccompProfile": { "type": "RuntimeDefault" } },
                     "containers": [{
                         "name": "cloudflared",
                         "image": image,
-                        "args": ["tunnel", "--no-autoupdate", "--protocol", "http2", "--metrics", format!("0.0.0.0:{TUNNEL_METRICS_PORT}"), "--loglevel", "info", "run"],
+                        // --grace-period is the tunnel command's own: before `run`.
+                        "args": ["tunnel", "--no-autoupdate", "--protocol", "http2", "--grace-period", format!("{TUNNEL_GRACE_SECONDS}s"), "--metrics", format!("0.0.0.0:{TUNNEL_METRICS_PORT}"), "--loglevel", "info", "run"],
                         "env": [{ "name": "TUNNEL_TOKEN", "valueFrom": { "secretKeyRef": { "name": TUNNEL_NAME, "key": TUNNEL_TOKEN_KEY } } }],
                         "readinessProbe": { "httpGet": probe["httpGet"], "periodSeconds": 10 },
                         "livenessProbe": { "httpGet": probe["httpGet"], "initialDelaySeconds": 60, "periodSeconds": 30, "failureThreshold": 6 },
@@ -2039,6 +2049,32 @@ mod tests {
         let shutdown = &p["spec"]["shutdown"];
         assert!(secs(&shutdown["minDrainDuration"]) < secs(&shutdown["drainTimeout"]));
         assert!(secs(&shutdown["drainTimeout"]) + 2 < 10);
+    }
+
+    /// A connector's stop: cloudflared leaves Cloudflare's edge at once and
+    /// finishes its requests well inside the pod's time to stop, and a
+    /// rollout always starts the new one first.
+    #[test]
+    fn connectors_stop_inside_their_grace() {
+        let d = tunnel_deployment("c", Some("a"), "h");
+        let pod = &d["spec"]["template"]["spec"];
+        let stop = pod["terminationGracePeriodSeconds"].as_i64().unwrap();
+        assert_eq!(stop, 35);
+        let args: Vec<&str> = pod["containers"][0]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect();
+        let at = |flag: &str| args.iter().position(|a| *a == flag).unwrap();
+        let grace = args[at("--grace-period") + 1];
+        assert_eq!(grace, "20s");
+        // The tunnel command's own flag: before `run`.
+        assert!(at("--grace-period") < at("run"));
+        let grace: i64 = grace.trim_end_matches('s').parse().unwrap();
+        assert!(grace + 10 <= stop, "cloudflared ends before it's killed");
+        let roll = &d["spec"]["strategy"]["rollingUpdate"];
+        assert_eq!((&roll["maxSurge"], &roll["maxUnavailable"]), (&json!(1), &json!(0)));
     }
 
     /// The tailnet listeners: their own ports, tailnet sources only. Public
