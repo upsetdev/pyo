@@ -144,10 +144,20 @@ RUN bun run build
 
 # GeoLite2 City, bundled so visitor locations work without a MaxMind key
 # (as Umami does); with MAXMIND_LICENSE_KEY set, the API also keeps a fresh
-# copy (crates/pyo-api/src/geoip.rs).
-FROM alpine:3.24.3 AS geo
-RUN wget -qO- https://raw.githubusercontent.com/GitSquared/node-geolite2-redist/master/redist/GeoLite2-City.tar.gz | tar xz -C /tmp \
- && mkdir -p /geo && mv /tmp/GeoLite2-City_*/GeoLite2-City.mmdb /geo/
+# copy (crates/pyo-api/src/geoip.rs). Pinned like the proxies' GeoLite2
+# Country (geoip.Dockerfile): the same date and upstream commit, and the
+# tarball's SHA-256 as that commit's GeoLite2-City.tar.gz.sha256 gives it.
+# scripts/geoip-pin.sh moves both files' lines together.
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS geo
+ARG GEOIP_DATE=2026-11-06
+ARG GEOIP_COMMIT=dc0190a06c54571fb68c4f171de9b11da1ed3cc3
+ARG GEOIP_CITY_SHA256=33757060f58b99cffaf14c2e04a39265e35a5427acf82ca7f0c8fbd6dac62c65
+ADD --checksum=sha256:${GEOIP_CITY_SHA256} \
+    https://raw.githubusercontent.com/GitSquared/node-geolite2-redist/${GEOIP_COMMIT}/redist/GeoLite2-City.tar.gz /tmp/city.tar.gz
+RUN d="/tmp/GeoLite2-City_$(echo "$GEOIP_DATE" | tr -d -)" \
+ && tar xzf /tmp/city.tar.gz -C /tmp \
+ && { [ -d "$d" ] || { echo "The tarball isn't the database of $GEOIP_DATE: $(ls /tmp)" >&2; exit 1; }; } \
+ && mkdir -p /geo && mv "$d/GeoLite2-City.mmdb" /geo/
 
 # The control plane: the API and the dashboard it serves.
 FROM runtime AS pyo
