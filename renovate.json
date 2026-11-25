@@ -373,7 +373,7 @@
       ]
     },
     {
-      "description": "Railpack's frontend must match the railpack CLI, pinned with its checksum in pyo.Dockerfile and scripts/install-railpack.sh: updated by hand.",
+      "description": "Railpack's frontend (pyo-builder source.rs, by tag and digest) must match the railpack CLI, pinned with its checksum in pyo.Dockerfile and scripts/install-railpack.sh: updated by hand.",
       "matchDepNames": [
         "ghcr.io/railwayapp/railpack-frontend"
       ],
