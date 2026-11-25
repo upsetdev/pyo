@@ -2990,7 +2990,7 @@ pub(crate) enum Op {
         #[serde(default)]
         replace: bool,
     },
-    /// Delete the DNS record Pyo made for a domain in Cloudflare. Only a record Pyo made, still with its comment, is deleted. Remove the domain after this.
+    /// Delete the DNS record Pyo made for a domain in Cloudflare. Only a record Pyo made, still with its comment, is deleted. Refused while other paths of the hostname still use it. Remove the domain after this.
     DeleteDnsRecord {
         service_id: String,
         domain_id: String,

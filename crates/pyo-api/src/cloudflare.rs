@@ -1460,6 +1460,13 @@ pub async fn delete_record(
             "Pyo didn't make this domain's DNS record, so it leaves it.",
         ));
     };
+    // Other paths of the hostname still need it: the entry that takes the
+    // hostname over keeps it (paths.rs `settle`).
+    if crate::paths::shared(tx, &team_id, service_id, domain_id, &host).await? {
+        return Err(ApiError::conflict(format!(
+            "Other paths still use {host}, so its DNS record stays. Remove those paths first."
+        )));
+    }
     let a = account(s, tx, &team_id).await?.ok_or_else(no_account)?;
     let marker = marker(&install_id(tx).await?);
     let deleted = delete_ours(&Http::new(&a.token)?, &zone_id, &record_id, &host, &marker)
