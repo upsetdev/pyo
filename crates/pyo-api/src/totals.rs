@@ -532,6 +532,38 @@ impl Observability {
         }))
     }
 
+    /// Requests per hostname over a range, each with its series (the
+    /// domains list): `range`, `step` (seconds per point), `start` (ms, the
+    /// first point) and `domains`. One query for all of them. No domains
+    /// while observability is off or not set up.
+    pub async fn domain_traffic(&self, team_id: &str, hosts: &[String], range: &str) -> ApiResult<Value> {
+        let (table, points, step, start, end) = window(range, pyo_proto::now_ms() / 1000);
+        let out = |domains: Vec<Value>| json!({ "range": range, "step": step, "start": start * 1000, "domains": domains });
+        let Some(ch) = self.store().await else { return Ok(out(vec![])) };
+        if hosts.is_empty() {
+            return Ok(out(vec![]));
+        }
+        let rows = ch
+            .rows(
+                format!(
+                    "SELECT host, toUnixTimestamp(toStartOfInterval(ts, toIntervalSecond({{step:Int64}}))) AS b, sum(requests) AS n
+                       FROM pyo_observability.traffic_{table}
+                      WHERE team_id = {{team:String}} AND has({{hosts:Array(String)}}, host)
+                        AND ts >= toDateTime({{start:Int64}}) AND ts < toDateTime({{end:Int64}})
+                      GROUP BY host, b"
+                ),
+                vec![
+                    ("team", team_id.to_owned()),
+                    ("hosts", array_param(hosts)),
+                    ("start", start.to_string()),
+                    ("end", end.to_string()),
+                    ("step", step.to_string()),
+                ],
+            )
+            .await?;
+        Ok(out(per_host(&rows, hosts, start, step, points)))
+    }
+
     /// The request explorer's totals for some hosts over a range: requests,
     /// bytes, errors and response times. None without storage.
     ///
@@ -802,6 +834,32 @@ impl Observability {
     }
 }
 
+/// Rows of (host, bucket `b`, requests `n`) as one entry per host asked
+/// for that had requests: its total and one point per bucket (0 where
+/// none came), busiest first.
+fn per_host(rows: &[Value], hosts: &[String], start: i64, step: i64, points: i64) -> Vec<Value> {
+    let mut by_host: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    for r in rows {
+        let host = r["host"].as_str().unwrap_or("");
+        let b = r["b"].as_i64().or_else(|| r["b"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0);
+        let i = (b - start).div_euclid(step);
+        if !hosts.iter().any(|h| h == host) || !(0..points).contains(&i) {
+            continue;
+        }
+        by_host.entry(host).or_insert_with(|| vec![0.0; points as usize])[i as usize] += num(r, "n");
+    }
+    let mut out: Vec<(f64, Value)> = by_host
+        .into_iter()
+        .map(|(host, series)| {
+            let total: f64 = series.iter().sum();
+            (total, json!({ "host": host, "requests": total, "series": series }))
+        })
+        .filter(|(total, _)| *total > 0.0)
+        .collect();
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
 /// The firewall's, WAF's and connections' windows: like `window`, ending
 /// now (`bar_steps`).
 fn bar_window(range: &str) -> (&'static str, i64, i64, i64, i64) {
@@ -897,6 +955,32 @@ mod tests {
     }
 
     #[test]
+    fn domain_traffic_keeps_to_the_hosts_and_the_window() {
+        let (start, step) = (1_800_000, 1800);
+        let hosts = vec!["a.example.com".to_owned(), "b.example.com".to_owned(), "quiet.example.com".to_owned()];
+        let rows = [
+            json!({ "host": "a.example.com", "b": start, "n": "3" }),
+            json!({ "host": "a.example.com", "b": start + 2 * step, "n": 4 }),
+            json!({ "host": "b.example.com", "b": (start + step).to_string(), "n": 40 }),
+            // Not asked for (another team's, or a host it no longer has).
+            json!({ "host": "other.example.net", "b": start, "n": 9 }),
+            // Outside the window.
+            json!({ "host": "a.example.com", "b": start - step, "n": 100 }),
+            json!({ "host": "a.example.com", "b": start + 3 * step, "n": 100 }),
+            json!({ "host": "quiet.example.com", "b": start, "n": 0 }),
+        ];
+        let out = per_host(&rows, &hosts, start, step, 3);
+        assert_eq!(
+            out,
+            [
+                json!({ "host": "b.example.com", "requests": 40.0, "series": [0.0, 40.0, 0.0] }),
+                json!({ "host": "a.example.com", "requests": 7.0, "series": [3.0, 0.0, 4.0] }),
+            ],
+            "busiest first, no host without requests"
+        );
+    }
+
+    #[test]
     fn port_keys_are_the_clusters() {
         let ports = json!([{ "name": "db", "containerPort": 5432, "protocol": "TCP", "exposure": "loadbalancer", "publicPort": 5432 },
                            { "name": "web", "containerPort": 80, "protocol": "TCP", "exposure": "public" }]);
@@ -985,6 +1069,16 @@ mod tests {
             let points: f64 = a["series"].as_array().unwrap().iter().map(|p| p["requests"].as_f64().unwrap()).sum();
             assert_eq!(points, 30.0, "{range}");
         }
+        // The domains list: per host, its own team's only.
+        let both = vec!["a.example".to_owned(), "b.example".to_owned()];
+        let d = obs.domain_traffic("team_1", &both, "24h").await.unwrap()["domains"].clone();
+        assert_eq!(d.as_array().unwrap().len(), 2, "{d}");
+        assert_eq!((d[0]["host"].as_str(), d[0]["requests"].as_f64()), (Some("a.example"), Some(30.0)));
+        assert_eq!(d[0]["series"].as_array().unwrap().len(), 48);
+        assert_eq!(d[1]["requests"], 10.0);
+        assert_eq!(obs.domain_traffic("team_2", &both, "24h").await.unwrap()["domains"], json!([]), "another team's hosts");
+        let d = obs.domain_traffic("team_1", &both, "7d").await.unwrap()["domains"].clone();
+        assert_eq!(d[0]["requests"], 30.0, "from the hours");
         let sum = obs.request_summary("team_1", &hosts, &[], now - 3600).await.unwrap().unwrap();
         assert_eq!((sum["requests"].as_f64(), sum["serverErrors"].as_f64()), (Some(30.0), Some(3.0)));
         let servers = obs.per_server("team_1", &hosts, &[], 24).await.unwrap();

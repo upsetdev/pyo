@@ -43,6 +43,7 @@ use crate::{auth::KeyAccess, error::ErrorBody, ops::Op};
         crate::ops::metrics,
         crate::ops::observability_settings,
         crate::ops::observability,
+        crate::ops::domain_traffic,
         crate::ops::access_logs,
         crate::ops::connections,
         crate::ops::firewall_blocked,

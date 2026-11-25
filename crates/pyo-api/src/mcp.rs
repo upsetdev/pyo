@@ -658,6 +658,7 @@ async fn run_endpoint(s: &AppState, user: &User, id: &str, args: &Value) -> Resu
         "getMetrics" => json_of(ops::metrics(st(), me(), Query(args_as(args)?)).await),
         "getObservabilitySettings" => json_of(ops::observability_settings(st(), me()).await),
         "getObservability" => json_of(ops::observability(st(), me(), Query(args_as(args)?)).await),
+        "getDomainTraffic" => json_of(ops::domain_traffic(st(), me(), Query(args_as(args)?)).await),
         "getAccessLogs" => json_of(ops::access_logs(st(), me(), Query(args_as(args)?)).await),
         "listImages" => json_of(crate::images::list(st(), me(), Query(args_as(args)?)).await),
         "getRegistry" => json_of(crate::images::registry(st(), me(), Query(args_as(args)?)).await),
