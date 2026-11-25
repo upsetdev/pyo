@@ -46,9 +46,8 @@ export const throughTunnel = (d: Domain) =>
     (d.dnsRecord.status === "created" || d.dnsRecord.status === "exists"));
 
 /**
- * What a settled tunnel domain says when there's nothing to do, for the
- * logo's tooltip: the wildcard or record it goes through. None while
- * TunnelRecordLine has something to show.
+ * What a settled tunnel domain goes through, for the logo's tooltip: the
+ * wildcard or its record. None while it's switching, in the way or failed.
  */
 export function tunnelNote(
   d: Domain,
@@ -61,16 +60,82 @@ export function tunnelNote(
   if (r.error || (r.status !== "created" && r.status !== "exists")) return undefined;
   const name = `${r.type} ${shortTarget(r.content)}`;
   const kept = r.previous?.length ?? 0;
-  if (wildcard && !kept) return { name };
-  // Switch back is a button: the line stays.
-  return kept && !admin ? { name, more: "An owner or admin can switch it back." } : undefined;
+  return kept && !admin ? { name, more: "An owner or admin can switch it back." } : { name };
+}
+
+/**
+ * Whether a tunnel domain offers Switch back: its record is in place, it
+ * isn't a name the default domain always covers, and a kept record needs
+ * an owner or admin.
+ */
+export function canSwitchBack(d: Domain, cluster: Cluster | undefined, admin: boolean) {
+  const r = d.dnsRecord;
+  if (!onTunnel(d) || !r || (r.status !== "created" && r.status !== "exists")) return false;
+  const kept = r.previous?.length ?? 0;
+  if (defaultDomainOver(cluster, d.hostname) && !kept) return false;
+  return !kept || admin;
+}
+
+/** Switch back's confirmation: puts back the kept record, the cluster's address, or no record. */
+export function SwitchBackDialog({
+  app,
+  d,
+  open,
+  onClose,
+  onConfirm,
+}: {
+  app: Application;
+  d: Domain | null;
+  open: boolean;
+  onClose: () => void;
+  /** Runs the switch. Defaults to calling the API. */
+  onConfirm?: (opts: { on: boolean; restore: boolean }) => void;
+}) {
+  const s = usePyo();
+  const cluster = s.clusters.find((c) => c.id === app.clusterId);
+  const kept = d?.dnsRecord?.previous ?? [];
+  const ip = cluster && clusterTraffic(cluster) === "public" ? cluster.publicIp : null;
+  const opts = { on: false, restore: kept.length > 0 };
+  const host = d?.hostname ?? "";
+  return (
+    <ConfirmDialog
+      open={open}
+      onClose={onClose}
+      tone="primary"
+      title={
+        kept.length
+          ? `Put back ${kept[0].type} ${kept[0].content} for ${host}?`
+          : ip
+            ? `Point ${host} at ${ip}?`
+            : `Remove Pyo's record for ${host}?`
+      }
+      description={null}
+      confirmLabel="Switch back"
+      onConfirm={() => {
+        if (onConfirm) onConfirm(opts);
+        else if (d) void api.setDomainTunnel(app.id, d.id, opts);
+      }}
+    />
+  );
 }
 
 const lineClass =
   "mt-1.5 inline-flex flex-wrap items-center gap-1.5 text-[12px] text-muted-foreground";
 
-/** Switching, in the way, failed, or with a Switch back. Nothing for a settled one with nothing to do. */
-export function TunnelRecordLine({ app, d }: { app: Application; d: Domain }) {
+/**
+ * Switching, in the way, failed, or with a Switch back. Nothing for a
+ * settled one with nothing to do. `noSwitchBack`: the caller offers Switch
+ * back elsewhere, so a settled one shows only its error.
+ */
+export function TunnelRecordLine({
+  app,
+  d,
+  noSwitchBack,
+}: {
+  app: Application;
+  d: Domain;
+  noSwitchBack?: boolean;
+}) {
   const s = usePyo();
   const r = d.dnsRecord;
   const admin = isAdmin(roleIn(s));
@@ -134,7 +199,7 @@ export function TunnelRecordLine({ app, d }: { app: Application; d: Domain }) {
     );
 
   // Nothing to do: the row's Cloudflare logo says it.
-  if (tunnelNote(d, cluster, admin)) return null;
+  if (tunnelNote(d, cluster, admin) && !canSwitchBack(d, cluster, admin)) return null;
 
   if (!r || r.status === "switching" || back)
     return (
@@ -145,7 +210,10 @@ export function TunnelRecordLine({ app, d }: { app: Application; d: Domain }) {
     );
 
   const kept = r.previous ?? [];
-  const ip = cluster && clusterTraffic(cluster) === "public" ? cluster.publicIp : null;
+  if (noSwitchBack)
+    return r.error ? (
+      <p className="mt-1.5 text-[12px] text-destructive">Cloudflare: {r.error}</p>
+    ) : null;
   return (
     <>
       <p className={lineClass}>
@@ -169,20 +237,12 @@ export function TunnelRecordLine({ app, d }: { app: Application; d: Domain }) {
           </Button>
         )}
       </p>
-      <ConfirmDialog
+      <SwitchBackDialog
+        app={app}
+        d={d}
         open={confirming}
         onClose={() => setConfirming(false)}
-        tone="primary"
-        title={
-          kept.length
-            ? `Put back ${kept[0].type} ${kept[0].content} for ${d.hostname}?`
-            : ip
-              ? `Point ${d.hostname} at ${ip}?`
-              : `Remove Pyo's record for ${d.hostname}?`
-        }
-        description={null}
-        confirmLabel="Switch back"
-        onConfirm={() => void run({ on: false, restore: kept.length > 0 })}
+        onConfirm={(opts) => void run(opts)}
       />
     </>
   );

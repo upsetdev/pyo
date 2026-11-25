@@ -371,13 +371,21 @@ export function useCloudflareFor(hostname: string, clusterId?: string) {
 }
 
 /**
- * A domain's record in Cloudflare on the service's Domains: how it stands,
- * and what to do. Through the cluster's tunnel or not.
+ * A domain's record in Cloudflare: how it stands, and what to do. Through
+ * the cluster's tunnel or not. `noSwitchBack`: the caller's menu has it.
  */
-export function DnsRecordLine({ app, d }: { app: Application; d: Domain }) {
+export function DnsRecordLine({
+  app,
+  d,
+  noSwitchBack,
+}: {
+  app: Application;
+  d: Domain;
+  noSwitchBack?: boolean;
+}) {
   const s = usePyo();
   const cluster = s.clusters.find((c) => c.id === app.clusterId);
-  if (onTunnel(d)) return <TunnelRecordLine app={app} d={d} />;
+  if (onTunnel(d)) return <TunnelRecordLine app={app} d={d} noSwitchBack={noSwitchBack} />;
   const tunnelMode = !!cluster && clusterTraffic(cluster) === "tunnel";
   const zone = isFreeDomain(d.hostname)
     ? undefined
