@@ -97,10 +97,12 @@ pub const ACCESS_LOG_CONTENT_TYPE: (&str, &str) = ("content_type", "%RESP(CONTEN
 
 /// The GeoIP country database the proxies place visitors with, for the
 /// firewall's country rules (GeoLite2 Country): an image with just the file
-/// (deploy/images/geoip.Dockerfile, built with each release), mounted
+/// (deploy/images/geoip.Dockerfile, tagged with the database's date and
+/// built when that changes, not with each release), mounted
 /// read-only as an image volume, so the proxies need no credentials or
 /// downloads for it. The WAF and the traffic store (pyo-agent's traffic/,
 /// for analytics' countries) mount the same image: one copy per cluster.
+/// All of them restart when its reference changes.
 ///
 /// Its image comes from the installation (`PYO_GEOIP_IMAGE`), like the
 /// WAF's: the agent's install manifest gives it to the agent and pins it in
@@ -143,7 +145,9 @@ pub fn proxy_pods() -> Value {
 /// Its image comes from the installation (`PYO_WAF_IMAGE`, like the agent's
 /// and builder's): the API sends it with the WAF's settings, the agent's
 /// install manifest gives it to the agent, and the admission policy pins
-/// it. This is the default where none is set: a local build.
+/// it. A release tags it with a hash of its sources, so its pods restart
+/// only when those change (scripts/image-tags.sh). This is the default
+/// where none is set: a local build.
 pub const WAF_IMAGE_DEFAULT: &str = "127.0.0.1:5005/pyo/waf:dev";
 
 /// The WAF's image: `PYO_WAF_IMAGE`, else the default.

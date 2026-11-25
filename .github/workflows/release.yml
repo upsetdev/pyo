@@ -195,6 +195,44 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      # The image's tag: the release's version, except for waf and geoip,
+      # which have a tag of their own (scripts/image-tags.sh: a hash of
+      # the WAF's sources, the GeoIP database's date). The pods that run
+      # those two restart when their image's reference changes, so one
+      # that's published under its tag already is used again as it is:
+      # checked to be signed by this workflow, scanned, and not built,
+      # pushed or signed again. Only "not found" counts as not published.
+      - name: Tag
+        id: tag
+        env:
+          IMAGE: ${{ matrix.image }}
+          REPO: ${{ env.IMAGES }}/${{ matrix.repo || matrix.image }}
+          VERSIONED: ${{ matrix.tag }}${{ needs.verify.outputs.version }}
+          SCAN: pyo-scan/${{ matrix.image }}:${{ needs.verify.outputs.version }}
+        run: |
+          case "$IMAGE" in
+            waf | geoip) tag=$(scripts/image-tags.sh "$IMAGE") ;;
+            *) tag=$VERSIONED ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          [ "$tag" != "$VERSIONED" ] || exit 0
+          if out=$(docker buildx imagetools inspect "$REPO:$tag" --format '{{json .Manifest}}' 2>&1); then
+            digest=$(jq -r .digest <<<"$out")
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Couldn't read the digest of $REPO:$tag: $out"; exit 1; }
+            cosign verify "$REPO@$digest" \
+              --certificate-identity-regexp '^https://github\.com/upsetdev/pyo/\.github/workflows/release\.yml@refs/tags/v' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null ||
+              { echo "::error::$REPO:$tag is published, but not signed by this workflow. Find out who pushed it before releasing."; exit 1; }
+            docker pull -q "$REPO@$digest"
+            docker tag "$REPO@$digest" "$SCAN"
+            echo "published=$digest" >> "$GITHUB_OUTPUT"
+            echo "::notice::$IMAGE:$tag is published already ($digest). This release uses it as it is."
+          elif grep -qiE 'not found|manifest unknown' <<<"$out"; then
+            echo "$IMAGE:$tag isn't published yet. Building it."
+          else
+            echo "::error::Couldn't tell whether $REPO:$tag is published: $out"
+            exit 1
+          fi
       # Scanned before anything is pushed or signed. The image is built
       # into the runner's Docker first (amd64), and the push below takes
       # its layers from the same builder's cache. A CRITICAL CVE that has
@@ -202,6 +240,7 @@ jobs:
       # summary and in code scanning. .trivyignore lists the CVEs checked
       # and found not to apply.
       - name: Build for the scan
+        if: steps.tag.outputs.published == ''
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.context || '.' }}
@@ -234,6 +273,7 @@ jobs:
           exit 1
       - name: Build and push
         id: build
+        if: steps.tag.outputs.published == ''
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.context || '.' }}
@@ -243,10 +283,11 @@ jobs:
           platforms: ${{ matrix.platforms || 'linux/amd64' }}
           cache-from: ${{ matrix.rust && format('type=gha,scope=rust-{0}', github.run_id) || '' }}
           push: true
-          tags: ${{ env.IMAGES }}/${{ matrix.repo || matrix.image }}:${{ matrix.tag }}${{ needs.verify.outputs.version }}
+          tags: ${{ env.IMAGES }}/${{ matrix.repo || matrix.image }}:${{ steps.tag.outputs.tag }}
           provenance: mode=max
           sbom: true
       - name: Sign
+        if: steps.tag.outputs.published == ''
         env:
           IMAGE: ${{ env.IMAGES }}/${{ matrix.repo || matrix.image }}@${{ steps.build.outputs.digest }}
         run: cosign sign --yes "$IMAGE"
@@ -256,7 +297,7 @@ jobs:
       - name: Anyone can pull it
         env:
           REPO: upsetdev/pyo/${{ matrix.repo || matrix.image }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.tag.outputs.published }}
         run: |
           token=$(curl -fsS "https://ghcr.io/token?scope=repository:$REPO:pull" | jq -r .token)
           code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
@@ -337,7 +378,8 @@ jobs:
           done
           sha256sum verifier/pyo-verify-linux-*
       # What Pyo needs to update itself from the dashboard: the images
-      # pinned by the digests that were just signed, and the manifests.
+      # pinned by the digests that were just signed (waf's and geoip's may
+      # be an earlier release's, signed then), and the manifests.
       # Also the install scripts as the release publishes them, written to
       # release-scripts/ (connect.sh, join.sh and sandbox.sh with this
       # version on their pyo:release-version line, connect.sh with the
@@ -347,7 +389,9 @@ jobs:
         env:
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          digest() { docker buildx imagetools inspect "$IMAGES/$1:$VERSION" --format '{{json .Manifest}}' | jq -r .digest; }
+          # waf and geoip under their own tags (scripts/image-tags.sh).
+          tag() { case "$1" in waf | geoip) scripts/image-tags.sh "$1" ;; *) echo "$VERSION" ;; esac; }
+          digest() { docker buildx imagetools inspect "$IMAGES/$1:$(tag "$1")" --format '{{json .Manifest}}' | jq -r .digest; }
           tagged() { docker buildx imagetools inspect "$IMAGES/$1:$2$VERSION" --format '{{json .Manifest}}' | jq -r .digest; }
           bun run scripts/release-manifest.ts --version "$VERSION" --images "$IMAGES" \
             --pyo "$(digest pyo)" --agent "$(digest agent)" --builder "$(digest builder)" --flows "$(digest flows)" --waf "$(digest waf)" --geoip "$(digest geoip)" \
