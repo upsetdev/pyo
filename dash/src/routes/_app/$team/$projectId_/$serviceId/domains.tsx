@@ -23,7 +23,7 @@ import {
   TLS_MODES,
 } from "~/components/pyo/Certificates";
 import { Tooltip } from "~/components/ui/Tooltip";
-import { DomainKind, DomainLock, DomainMark } from "~/components/pyo/DomainState";
+import { DomainKind, DomainLock, DomainMark, DomainNote } from "~/components/pyo/DomainState";
 import { AppLink } from "~/components/ui/AppLink";
 import { AddDomainDialog } from "~/components/pyo/AddDomainDialog";
 import { hostOf, isPath, sharedWith, shownPath } from "~/lib/pyo/hosts";
@@ -148,13 +148,18 @@ function Domains({ app }: { app: Application }) {
                 <li key={d.id} className="px-4 py-3.5">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                     <span className="inline-flex min-w-0 items-center gap-2">
+                      <DomainLock
+                        d={d}
+                        certs={s.certificates}
+                        notDeployed={!app.currentDeploymentId}
+                      />
                       <span className="truncate font-mono text-[13px]">
                         {d.hostname}
                         {d.path && d.path !== "/" ? (
                           <span className="text-muted-foreground">{d.path}</span>
                         ) : null}
                       </span>
-                      <DomainLock
+                      <DomainNote
                         d={d}
                         certs={s.certificates}
                         notDeployed={!app.currentDeploymentId}
