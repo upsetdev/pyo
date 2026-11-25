@@ -126,8 +126,9 @@ latest one. Only the latest release gets fixes (see `SECURITY.md`).
 What asks for one:
 
 - the daily **Security scan** (`security-scan.yml`): an issue labelled
-  `security` for each image, Pyo's or a third-party database image, with
-  HIGH or CRITICAL CVEs that have a fix
+  `security` for each image with HIGH or CRITICAL CVEs that have a fix.
+  It scans Pyo's images, the sandbox templates' images, the database
+  images, Railpack's frontend and every image in Pyo's mirror
 - the weekly **Postgres rebuild check** (`postgres-rebuild.yml`): an issue
   when a fresh build of Pyo's Postgres images would have fewer of them
 - Renovate's security pull requests, which it opens right away
