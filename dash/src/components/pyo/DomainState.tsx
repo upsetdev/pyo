@@ -1,7 +1,5 @@
 import {
-  CheckIcon,
   CircleDashedIcon,
-  GlobeIcon,
   LockSimpleIcon,
   WarningCircleIcon,
   XCircleIcon,
@@ -9,7 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { siTailscale } from "simple-icons";
-import { expiry } from "~/components/pyo/Certificates";
+import { expiry, tlsLine } from "~/components/pyo/Certificates";
 import { BrandMark, CLOUDFLARE_LOGO } from "~/components/pyo/common";
 import { throughTunnel, tunnelNote } from "~/components/pyo/TunnelRecord";
 import {
@@ -36,14 +34,15 @@ const selfSigned = (d: Domain) =>
 /**
  * Domain changes go live without a redeploy; `notDeployed`: the service has
  * never been deployed, so its domains go live with its first deploy.
- * `hint`: more detail, for a tooltip.
+ * `hint`: more detail, for a tooltip. `short`: fewer words, for a list.
  */
 export function domainState(
   d: Domain,
   certs: Certificate[],
   notDeployed = false,
-): { tone: DomainTone; text: string; hint?: string } {
-  if (notDeployed) return { tone: "busy", text: "Live after first deploy" };
+): { tone: DomainTone; text: string; hint?: string; short?: string } {
+  if (notDeployed)
+    return { tone: "busy", text: "Live after first deploy", short: "Not deployed" };
   if (d.status !== "active") {
     // No DNS to wait for: Pyo sets it up on the cluster's tailnet.
     if (isTailnetDomain(d.hostname))
@@ -57,6 +56,7 @@ export function domainState(
     return {
       tone: d.status === "error" ? "broken" : "attention",
       text: `Waiting for DNS${d.dnsCheckedAt ? ` · checked ${timeAgo(d.dnsCheckedAt)}` : ""}`,
+      short: "Waiting for DNS",
     };
   }
   if (d.tlsMode === "off") return { tone: "ok", text: "HTTP only" };
@@ -69,6 +69,7 @@ export function domainState(
         tone: e.tone === "text-destructive" ? "broken" : "attention",
         text: "HTTPS",
         hint: `Your certificate ${c.name}. ${e.text}.`,
+        short: c.notAfter <= Date.now() ? "Certificate expired" : "Certificate expiring",
       };
   }
   if (d.tls === "failed")
@@ -94,41 +95,64 @@ const BADGE: Record<DomainTone, Tone> = {
   broken: "danger",
 };
 
-const PLAIN: Record<DomainTone, { icon: Icon; className: string }> = {
-  ok: { icon: CheckIcon, className: "text-muted-foreground" },
+const PROBLEM: Record<Exclude<DomainTone, "ok">, { icon: Icon; className: string }> = {
   busy: { icon: CircleDashedIcon, className: "text-muted-foreground" },
   attention: { icon: WarningCircleIcon, className: "text-warning" },
   broken: { icon: XCircleIcon, className: "text-destructive" },
 };
 
-/**
- * The status as one label, in the app's badge style (details in a
- * tooltip). `plain`: an icon and the words, for calm lists.
- */
+/** The status as one label, in the app's badge style (details in a tooltip). */
 export function DomainStatus({
   d,
   certs,
   notDeployed,
-  plain,
 }: {
   d: Domain;
   certs: Certificate[];
   notDeployed?: boolean;
-  plain?: boolean;
 }) {
   const st = domainState(d, certs, notDeployed);
-  const p = PLAIN[st.tone];
-  const label = plain ? (
+  const badge = <Badge tone={BADGE[st.tone]}>{st.text}</Badge>;
+  return st.hint ? <Tooltip content={st.hint}>{badge}</Tooltip> : badge;
+}
+
+/**
+ * For after a hostname in a list: a green lock when HTTPS works, nothing
+ * for a working domain without HTTPS, else an icon and a few words.
+ */
+export function DomainLock({
+  d,
+  certs,
+  notDeployed,
+}: {
+  d: Domain;
+  certs: Certificate[];
+  notDeployed?: boolean;
+}) {
+  const st = domainState(d, certs, notDeployed);
+  if (st.tone === "ok")
+    return st.text === "HTTPS" ? (
+      <Tooltip content={tlsLine(d, certs)}>
+        <span
+          role="img"
+          aria-label="HTTPS"
+          className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-success"
+        >
+          <LockSimpleIcon size={14} weight="bold" />
+        </span>
+      </Tooltip>
+    ) : null;
+  const p = PROBLEM[st.tone];
+  const hint = st.hint ?? (st.short ? st.text : undefined);
+  const label = (
     <span
-      className={`inline-flex items-center gap-1.5 text-[13px] ${st.tone === "busy" ? "text-muted-foreground" : "text-foreground"}`}
+      className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[12.5px] ${p.className}`}
     >
-      <p.icon size={14} weight="bold" className={`shrink-0 ${p.className}`} />
-      {st.text}
+      <p.icon size={14} weight="bold" className="shrink-0" />
+      {st.short ?? st.text}
     </span>
-  ) : (
-    <Badge tone={BADGE[st.tone]}>{st.text}</Badge>
   );
-  return st.hint ? <Tooltip content={st.hint}>{label}</Tooltip> : label;
+  return hint ? <Tooltip content={hint}>{label}</Tooltip> : label;
 }
 
 const KINDS = {
@@ -147,7 +171,7 @@ export function DomainKind({ hostname }: { hostname: string }) {
   );
 }
 
-/** A logo in the lock's box, so hostnames stay in a column. */
+/** A logo in a box the size of the lock. */
 function Logo({
   label,
   hint,
@@ -171,19 +195,16 @@ function Logo({
 }
 
 /**
- * What a domain goes through, before its name: the Tailscale logo on the
- * tailnet, the Cloudflare logo through the cluster's tunnel or a record
- * Cloudflare proxies, else the lock (the globe without HTTPS). `logoOnly`:
- * nothing for the rest.
+ * What a domain goes through: the Tailscale logo on the tailnet, the
+ * Cloudflare logo through the cluster's tunnel or a record Cloudflare
+ * proxies. Nothing for the rest.
  */
 export function DomainMark({
   d,
   clusterId,
-  logoOnly,
 }: {
   d: Domain;
   clusterId: string;
-  logoOnly?: boolean;
 }) {
   const s = usePyo();
   if (isTailnetDomain(d.hostname))
@@ -221,10 +242,5 @@ export function DomainMark({
   const r = d.dnsRecord;
   if (r?.proxied && (r.status === "created" || r.status === "exists"))
     return <Logo label="Cloudflare" icon={CLOUDFLARE_LOGO} hint="Cloudflare · Proxied" />;
-  if (logoOnly) return null;
-  return d.tls === "issued" ? (
-    <LockSimpleIcon size={14} className="text-success" aria-label="HTTPS" />
-  ) : (
-    <GlobeIcon size={14} className="text-muted-foreground" aria-label="HTTP only" />
-  );
+  return null;
 }

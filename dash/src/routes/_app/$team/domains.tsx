@@ -3,7 +3,7 @@ import { ListSection } from "~/components/ui/Layered";
 import { GlobeIcon, PlusIcon } from "@phosphor-icons/react";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { DomainKind, DomainMark, DomainStatus } from "~/components/pyo/DomainState";
+import { DomainKind, DomainLock, DomainMark } from "~/components/pyo/DomainState";
 import { TimeAgo } from "~/components/pyo/common";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
@@ -144,7 +144,6 @@ function Domains() {
                 <tr>
                   <Th>Domain</Th>
                   <Th className="hidden sm:table-cell">Routed to</Th>
-                  <Th>Status</Th>
                   <Th className="hidden md:table-cell">Requests, 24h</Th>
                   <Th className="hidden lg:table-cell">Added</Th>
                 </tr>
@@ -160,7 +159,7 @@ function Domains() {
                       })
                     }
                   >
-                    <Td className="py-4">
+                    <Td className="py-4 max-sm:w-full max-sm:max-w-0">
                       <span className="flex min-w-0 items-center gap-2">
                         <Link
                           to="/$team/domains/$hostname"
@@ -169,11 +168,16 @@ function Domains() {
                             hostname: r.h.hostname,
                           }}
                           onClick={(e) => e.stopPropagation()}
-                          className="min-w-0 truncate text-[14px] text-foreground underline decoration-foreground/30 underline-offset-4 transition-colors hover:decoration-foreground"
+                          className="min-w-0 truncate text-[14px] text-foreground transition-colors hover:text-primary"
                         >
                           {r.d.hostname}
                         </Link>
-                        <DomainMark d={r.d} clusterId={r.a.clusterId} logoOnly />
+                        <DomainLock
+                          d={r.d}
+                          certs={s.certificates}
+                          notDeployed={!r.a.currentDeploymentId}
+                        />
+                        <DomainMark d={r.d} clusterId={r.a.clusterId} />
                         <DomainKind hostname={r.d.hostname} />
                       </span>
                       <span className="mt-1 block truncate text-[12px] text-muted-foreground sm:hidden">
@@ -183,14 +187,6 @@ function Domains() {
                     <Td className="hidden py-4 text-[13px] sm:table-cell">
                       <RoutedTo {...r} />
                     </Td>
-                    <Td className="py-4">
-                      <DomainStatus
-                        d={r.d}
-                        certs={s.certificates}
-                        notDeployed={!r.a.currentDeploymentId}
-                        plain
-                      />
-                    </Td>
                     <Td className="hidden w-[200px] py-4 md:table-cell">
                       <Traffic
                         hostname={r.h.hostname}
@@ -198,7 +194,7 @@ function Domains() {
                         byHost={traffic.byHost}
                       />
                     </Td>
-                    <Td className="hidden py-4 text-[13px] text-muted-foreground lg:table-cell">
+                    <Td className="hidden whitespace-nowrap py-4 text-[13px] text-muted-foreground lg:table-cell">
                       <TimeAgo at={r.d.createdAt} />
                     </Td>
                   </Tr>
@@ -206,7 +202,7 @@ function Domains() {
                 {!shown.length ? (
                   <tr>
                     <Td
-                      colSpan={5}
+                      colSpan={4}
                       className="py-8 text-center text-muted-foreground"
                     >
                       No domains match.
