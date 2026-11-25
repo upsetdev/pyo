@@ -1,8 +1,15 @@
-import { GlobeIcon } from "@phosphor-icons/react";
-import { createFileRoute } from "@tanstack/react-router";
+import {
+  DotsThreeIcon,
+  GlobeIcon,
+  PencilSimpleIcon,
+  PlusIcon,
+  TrashIcon,
+} from "@phosphor-icons/react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
+import { AddDomainDialog } from "~/components/pyo/AddDomainDialog";
 import { tlsLine } from "~/components/pyo/Certificates";
-import { DnsRecordLine } from "~/components/pyo/Cloudflare";
+import { DeleteRecordSwitch, DnsRecordLine } from "~/components/pyo/Cloudflare";
 import { DomainKind, DomainMark, DomainStatus } from "~/components/pyo/DomainState";
 import {
   HeadersDialog,
@@ -10,12 +17,17 @@ import {
   redirectTarget,
   RedirectsDialog,
 } from "~/components/pyo/DomainRules";
+import { RestoreRecordSwitch } from "~/components/pyo/TunnelRecord";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
+import { ConfirmDialog } from "~/components/ui/Dialog";
+import { Menu } from "~/components/ui/Menu";
 import { EmptyState, Page, PageHeader, Panel } from "~/components/ui/Panel";
 import { Table, Td, Th } from "~/components/ui/Table";
-import { hostOf } from "~/lib/pyo/hosts";
-import { servicePath, usePyo } from "~/lib/pyo/store";
+import { hostOf, shownPath, type HostEntry } from "~/lib/pyo/hosts";
+import { currentSlug } from "~/lib/pyo/paths";
+import { api, roleIn, servicePath, usePyo } from "~/lib/pyo/store";
+import { toast } from "~/lib/pyo/toast";
 import type { Domain } from "~/lib/pyo/types";
 import { seo } from "~/lib/seo";
 
@@ -32,6 +44,14 @@ function HostPage() {
   const host = hostOf(s, hostname);
   const [redirecting, setRedirecting] = useState<Domain | null>(null);
   const [heading, setHeading] = useState<Domain | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<HostEntry | null>(null);
+  const [removing, setRemoving] = useState<HostEntry | null>(null);
+  const [deleteRecord, setDeleteRecord] = useState(true);
+  const [restoreRecord, setRestoreRecord] = useState(false);
+  const navigate = useNavigate();
+  // Viewers see the rules; developers and up change them.
+  const editable = roleIn(s) !== "viewer";
   if (!host)
     return (
       <Page>
@@ -46,6 +66,8 @@ function HostPage() {
     );
   const { d, a } = host.primary;
   const routes = host.entries.filter((e) => !onlyRedirects(e.d));
+  // The hostname's only entry: removing it removes the domain.
+  const last = host.entries.length === 1;
   const redirects = host.entries.flatMap((e) =>
     (e.d.redirects ?? []).map((r) => ({ r, e })),
   );
@@ -81,7 +103,16 @@ function HostPage() {
           </span>
         }
       />
-      <Panel title="Routes">
+      <Panel
+        title="Routes"
+        actions={
+          editable ? (
+            <Button size="xs" variant="secondary" onClick={() => setAdding(true)}>
+              <PlusIcon size={12} weight="bold" /> Add path
+            </Button>
+          ) : undefined
+        }
+      >
         {routes.length ? (
           <Table>
             <thead>
@@ -89,6 +120,11 @@ function HostPage() {
                 <Th>Path</Th>
                 <Th>Service</Th>
                 <Th>Port</Th>
+                {editable ? (
+                  <Th className="w-10">
+                    <span className="sr-only">Actions</span>
+                  </Th>
+                ) : null}
               </tr>
             </thead>
             <tbody>
@@ -113,6 +149,42 @@ function HostPage() {
                   <Td className="font-mono text-[12.5px] text-muted-foreground">
                     {e.d.portName}
                   </Td>
+                  {editable ? (
+                    <Td>
+                      <Menu
+                        label={`Actions for ${e.d.path || "/"}`}
+                        items={[
+                          {
+                            label: "Edit",
+                            icon: <PencilSimpleIcon size={14} />,
+                            onSelect: () => setEditing(e),
+                          },
+                          { type: "separator" as const },
+                          {
+                            label: "Remove",
+                            icon: <TrashIcon size={14} />,
+                            danger: true,
+                            onSelect: () => {
+                              setDeleteRecord(true);
+                              setRestoreRecord(false);
+                              setRemoving(e);
+                            },
+                          },
+                        ]}
+                        trigger={(t) => (
+                          <Button
+                            {...t}
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            aria-label={`Actions for ${e.d.path || "/"}`}
+                          >
+                            <DotsThreeIcon size={16} weight="bold" />
+                          </Button>
+                        )}
+                      />
+                    </Td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
@@ -126,9 +198,11 @@ function HostPage() {
       <Panel
         title="Redirects"
         actions={
-          <Button size="xs" variant="secondary" onClick={() => setRedirecting(d)}>
-            Edit
-          </Button>
+          editable ? (
+            <Button size="xs" variant="secondary" onClick={() => setRedirecting(d)}>
+              Edit
+            </Button>
+          ) : undefined
         }
       >
         {redirects.length ? (
@@ -154,9 +228,11 @@ function HostPage() {
       <Panel
         title="Headers"
         actions={
-          <Button size="xs" variant="secondary" onClick={() => setHeading(d)}>
-            Edit
-          </Button>
+          editable ? (
+            <Button size="xs" variant="secondary" onClick={() => setHeading(d)}>
+              Edit
+            </Button>
+          ) : undefined
         }
       >
         {headers.length ? (
@@ -207,6 +283,63 @@ function HostPage() {
         domain={heading}
         onClose={() => setHeading(null)}
       />
+      <AddDomainDialog
+        open={adding}
+        onClose={() => setAdding(false)}
+        hostname={host.hostname}
+      />
+      <AddDomainDialog
+        open={!!editing}
+        onClose={() => setEditing(null)}
+        editing={editing}
+      />
+      <ConfirmDialog
+        open={!!removing}
+        onClose={() => setRemoving(null)}
+        title={`Remove ${removing ? shownPath(removing.d) : ""}?`}
+        description={
+          last
+            ? "Traffic to this hostname stops."
+            : `It stops going to ${removing?.a.name}.${removing?.d.id === d.id ? " The other paths keep working." : ""}`
+        }
+        confirmLabel={last ? "Remove domain" : "Remove route"}
+        onConfirm={async () => {
+          if (!removing) return;
+          const { d: gone, a: from } = removing;
+          // Putting back the old record replaces Pyo's own as well.
+          const restore =
+            last && !!gone.dnsRecord?.previous?.length && restoreRecord;
+          // This page goes with the hostname's last entry.
+          if (last)
+            await navigate({
+              to: "/$team/domains",
+              params: { team: currentSlug() },
+            });
+          const res = await api.removeDomain(from.id, gone.id, {
+            deleteDnsRecord:
+              last && !restore && !!gone.dnsRecord?.mine && deleteRecord,
+            restoreRecord: restore,
+          });
+          if (res) toast({ title: `Removed ${shownPath(gone)}` });
+        }}
+      >
+        {last ? (
+          <>
+            <RestoreRecordSwitch
+              d={removing?.d ?? null}
+              checked={restoreRecord}
+              onChange={setRestoreRecord}
+            />
+            {restoreRecord && removing?.d.dnsRecord?.previous?.length ? null : (
+              <DeleteRecordSwitch
+                d={removing?.d ?? null}
+                checked={deleteRecord}
+                onChange={setDeleteRecord}
+              />
+            )}
+          </>
+        ) : null}
+      </ConfirmDialog>
     </Page>
   );
 }
