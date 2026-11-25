@@ -148,6 +148,13 @@ vm() {
   multipass exec "$n" -- sudo "$@"
 }
 kc() { vm "$VM1" k3s kubectl "$@"; }
+# send FILE PATH: a file to the first VM. multipass exec cuts its input off
+# after about 2 MB, and multipass can't read this machine's /tmp itself.
+send() {
+  multipass transfer - "$VM1:/home/ubuntu/e2e-sent" <"$1"
+  vm "$VM1" install -m 644 /home/ubuntu/e2e-sent "$2"
+  vm "$VM1" rm -f /home/ubuntu/e2e-sent
+}
 ip_of() { multipass info "$1" --format json | jq -r --arg n "$1" '.info[$n].ipv4[0]'; }
 
 # wait_for SECONDS WHAT COMMAND...: 1 when it didn't happen in time.
@@ -329,7 +336,7 @@ service_id() {
 
 start_watch() {
   vm "$VM1" mkdir -p /var/tmp/e2e
-  multipass exec "$VM1" -- sudo tee /var/tmp/e2e/e2e.py >/dev/null <"$PY"
+  send "$PY" /var/tmp/e2e/e2e.py
   vm "$VM1" systemd-run --quiet --unit e2e-watch --collect python3 /var/tmp/e2e/e2e.py watch /var/tmp/e2e/pods.log
   # The VM's clock against this machine's, for matching the two logs.
   local a b v
@@ -504,7 +511,11 @@ prepare_update() {
 
 push_build() {
   say "Copying the dev build to $VM1's registry ($(du -sh "$DIR/images" | cut -f1))"
-  tar -C "$DIR" -cf - images release | multipass exec "$VM1" -- sudo tar -C /var/tmp/e2e -xf -
+  tar -C "$DIR" -cf "$DIR/build.tar" images release
+  send "$DIR/build.tar" /var/tmp/e2e/build.tar
+  rm -f "$DIR/build.tar"
+  vm "$VM1" tar -C /var/tmp/e2e -xf /var/tmp/e2e/build.tar
+  vm "$VM1" rm -f /var/tmp/e2e/build.tar
   vm "$VM1" python3 /var/tmp/e2e/e2e.py images-push "$VM_IMAGES" /var/tmp/e2e/images
   vm "$VM1" rm -rf /var/tmp/e2e/images
 }
@@ -591,7 +602,7 @@ touch "$DIR/stop"
 wait "$LOAD_PID" || true
 LOAD_PID=""
 vm "$VM1" systemctl stop e2e-watch || true
-multipass exec "$VM1" -- sudo cat /var/tmp/e2e/pods.log >"$DIR/pods.log"
+multipass transfer "$VM1:/var/tmp/e2e/pods.log" - >"$DIR/pods.log"
 
 rc=0
 python3 "$PY" summary "$DIR" | tee "$DIR/summary.txt" || rc=$?

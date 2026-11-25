@@ -417,7 +417,10 @@ def why(result, detail):
     """A failure in a word: the status, or the error's kind."""
     if result != "err":
         return result
-    kind = detail.removeprefix("post:").split(":")[0]
+    kind, _, text = detail.removeprefix("post:").partition(":")
+    if kind == "OSError" and "]_" in text:
+        # OSError:[Errno_113]_No_route_to_host
+        return text.split("]_", 1)[1].replace("_", " ").lower()
     return {
         "ConnectionResetError": "connection reset",
         "ConnectionRefusedError": "connection refused",
@@ -470,7 +473,8 @@ def cmd_summary(args):
         print("  none")
     for start, end, key in rolls:
         a = [x[2] for x in overlapping(actions, start, end, 0)]
-        print(f"  {clock(start)} to {clock(end)}  {workload_name(key)}  ({key})" + (f"  during: {', '.join(a)}" if a else ""))
+        name = workload_name(key)
+        print(f"  {clock(start)} to {clock(end)}  {key if name == key else f'{name} ({key})'}" + (f"  during: {', '.join(a)}" if a else ""))
 
     print()
     print("Actions")
