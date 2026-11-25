@@ -1375,9 +1375,8 @@ through signed commands.
 ## 18. Build plan
 
 Built on one branch, `feat/cloudflare-tunnel` (worktree `pyo-tunnel`),
-merged to `dev` only when the feature is complete and tested. Rust builds
-one at a time under the laptop guardrails. Each phase ends green and
-shippable behind the capability flag.
+merged to `dev` only when the feature is complete and tested. Each phase
+ends green and shippable behind the capability flag.
 
 **Phase 0 (0.5.5, separate fixes, done)**
 
@@ -1679,8 +1678,7 @@ Known gaps:
 - Nothing tested against a real Cloudflare account (needs the user's
   approval and a throwaway zone, §17.4).
 - The loop's end-to-end test (`cloudflare::http_tests::the_tunnel_loop_end_to_end`)
-  needs a throwaway Postgres: CI runs it (ci.yml's Postgres job), it
-  wasn't run on the laptop.
+  needs a throwaway Postgres. CI runs it in ci.yml's Postgres job.
 - pyo-docs' generated pages (`openapi/pyo.json`, `content/cli/commands.mdx`,
   `content/mcp/tools.mdx`) are regenerated once all 0.51.0 branches are
   merged. `openapi::tests::docs_copy_is_current` stays red until then.
