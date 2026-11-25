@@ -2403,13 +2403,19 @@ pub fn with_pods(have: Vec<String>, old: &[String], pods: &[String]) -> Vec<Stri
     pyo_proto::firewall::trusted_or_nothing(out)
 }
 
+/// Every service's tunnel policy, as the cluster has it (its status too).
+pub async fn tunnel_policies(client: &Client) -> kube::Result<Vec<DynamicObject>> {
+    Ok(api_of(client, "ClientTrafficPolicy")
+        .list(&ListParams::default().labels(&format!("{}={}", system::CDN_LABEL, system::TUNNEL_CDN)))
+        .await?
+        .items)
+}
+
 /// The connectors' pods moved (`old` → `pods`): every tunnel policy
 /// trusts the new ones. Refused by an older install: said, and kept.
 pub async fn set_tunnel_pods(client: &Client, old: &[String], pods: &[String]) -> anyhow::Result<()> {
     let policies = api_of(client, "ClientTrafficPolicy");
-    let found = policies
-        .list(&ListParams::default().labels(&format!("{}={}", system::CDN_LABEL, system::TUNNEL_CDN)))
-        .await?;
+    let found = tunnel_policies(client).await?;
     for p in found {
         let name = p.name_any();
         let mut o = json!({

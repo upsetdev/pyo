@@ -1617,6 +1617,21 @@ pub const TUNNEL_TOKEN_KEY: &str = "token";
 /// cloudflared reads its token only when it starts, so a new token changes
 /// the Deployment and its pods restart with it.
 pub const TUNNEL_TOKEN_HASH_ANNOTATION: &str = "pyo.dev/token-hash";
+/// The connector's init container: `pyo-agent tunnel-gate`, on the agent's
+/// image. It asks the agent, through [`TUNNEL_GATE_SERVICE`], whether the
+/// tunnel listeners trust its pod's addresses yet (`POD_IPS`).
+pub const TUNNEL_GATE: &str = "tunnel-gate";
+/// The agent's Service for the gate's question, in pyo-system, its port
+/// (the agent's own, apart from Vector's relay) and the path asked.
+pub const TUNNEL_GATE_SERVICE: &str = "pyo-tunnel-gate";
+pub const TUNNEL_GATE_PORT: u16 = 8092;
+pub const TUNNEL_GATE_PATH: &str = "/tunnel/trusted";
+/// The agent's pods, as its Deployment labels them (the connect command's
+/// manifest).
+pub const AGENT_APP: &str = "pyo-agent";
+/// The longest a new connector waits for its address to be trusted. Then
+/// it starts anyway, so an agent that's down never holds the tunnel back.
+pub const TUNNEL_GATE_SECONDS: u64 = 120;
 /// Connectors: two, spread across servers where it can.
 pub const TUNNEL_REPLICAS: i32 = 2;
 /// Where cloudflared serves `/ready` (nothing reaches it: pyo-system
@@ -1651,15 +1666,45 @@ pub fn tunnel_token_hash(token: &str) -> String {
         .collect()
 }
 
-/// The connector: cloudflared over HTTP/2 (QUIC is often blocked, and its
-/// fallback is slow enough that the probe restarts it first), with no
-/// service account token, non-root, read only, no capabilities. Never on
-/// build-only servers, spread across servers where it can be. `token_hash`
-/// is [`tunnel_token_hash`] of the token in its Secret.
-pub fn tunnel_deployment(image: &str, token_hash: &str) -> Value {
-    let app = json!({ "app.kubernetes.io/name": TUNNEL_APP });
-    let probe = json!({ "httpGet": { "path": "/ready", "port": TUNNEL_METRICS_PORT } });
+/// The Service [`TUNNEL_GATE`] asks the agent through: inside the cluster
+/// only. On the cluster Pyo runs on, only the connectors' pods reach it
+/// (deploy/k8s/platform.yaml, the agent's network policy).
+pub fn tunnel_gate_service() -> Value {
     json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": TUNNEL_GATE_SERVICE, "namespace": crate::rbac::NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
+        "spec": {
+            "type": "ClusterIP",
+            "selector": { "app.kubernetes.io/name": AGENT_APP },
+            "ports": [{ "name": "gate", "port": TUNNEL_GATE_PORT, "targetPort": TUNNEL_GATE_PORT, "protocol": "TCP" }],
+        },
+    })
+}
+
+/// Where [`TUNNEL_GATE`] asks: the Service's name and port.
+pub fn tunnel_gate_address() -> String {
+    format!(
+        "{TUNNEL_GATE_SERVICE}.{}.svc.cluster.local:{TUNNEL_GATE_PORT}",
+        crate::rbac::NS
+    )
+}
+
+/// The connector: cloudflared over HTTP/2 (QUIC is often blocked, and its
+/// fallback is slow enough that the probe restarts it first), non-root,
+/// read only, no capabilities. Never on build-only servers, spread across
+/// servers where it can be. `token_hash` is [`tunnel_token_hash`] of the
+/// token in its Secret.
+///
+/// Before cloudflared starts, [`TUNNEL_GATE`] (on `gate_image`, the
+/// agent's own) waits until the tunnel listeners trust the pod's
+/// addresses, so Cloudflare never sends it a request the gateway would
+/// refuse. Without `gate_image` (an agent that can't tell its own image)
+/// there's no gate. Neither container gets a service account token.
+pub fn tunnel_deployment(image: &str, gate_image: Option<&str>, token_hash: &str) -> Value {
+    let app = json!({ "app.kubernetes.io/name": TUNNEL_APP });
+    let locked = json!({ "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": { "drop": ["ALL"] } });
+    let probe = json!({ "httpGet": { "path": "/ready", "port": TUNNEL_METRICS_PORT } });
+    let mut deployment = json!({
         "apiVersion": "apps/v1", "kind": "Deployment",
         "metadata": { "name": TUNNEL_NAME, "namespace": crate::rbac::NS, "labels": { "app.kubernetes.io/name": TUNNEL_APP, "app.kubernetes.io/managed-by": "pyo" } },
         "spec": {
@@ -1681,12 +1726,26 @@ pub fn tunnel_deployment(image: &str, token_hash: &str) -> Value {
                         "readinessProbe": { "httpGet": probe["httpGet"], "periodSeconds": 10 },
                         "livenessProbe": { "httpGet": probe["httpGet"], "initialDelaySeconds": 60, "periodSeconds": 30, "failureThreshold": 6 },
                         "resources": { "requests": { "cpu": "10m", "memory": "32Mi" }, "limits": { "memory": "128Mi" } },
-                        "securityContext": { "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": { "drop": ["ALL"] } },
+                        "securityContext": locked,
                     }],
                 },
             },
         },
-    })
+    });
+    if let Some(gate_image) = gate_image {
+        deployment["spec"]["template"]["spec"]["initContainers"] = json!([{
+            "name": TUNNEL_GATE,
+            "image": gate_image,
+            "args": [TUNNEL_GATE],
+            "env": [
+                { "name": "RUST_LOG", "value": "pyo_agent=info" },
+                { "name": "POD_IPS", "valueFrom": { "fieldRef": { "fieldPath": "status.podIPs" } } },
+            ],
+            "resources": { "requests": { "cpu": "5m", "memory": "16Mi" }, "limits": { "memory": "64Mi" } },
+            "securityContext": locked,
+        }]);
+    }
+    deployment
 }
 
 /// One connector stays up through a server's drain or a rollout.
