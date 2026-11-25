@@ -144,7 +144,6 @@ function Domains() {
                 <tr>
                   <Th>Domain</Th>
                   <Th className="hidden sm:table-cell">Routed to</Th>
-                  <Th>Status</Th>
                   <Th className="hidden md:table-cell">Requests, 24h</Th>
                   <Th className="hidden lg:table-cell">Added</Th>
                 </tr>
@@ -160,7 +159,7 @@ function Domains() {
                       })
                     }
                   >
-                    <Td className="py-4">
+                    <Td className="py-4 max-sm:w-full max-sm:max-w-0">
                       <span className="flex min-w-0 items-center gap-2">
                         <Link
                           to="/$team/domains/$hostname"
@@ -169,10 +168,16 @@ function Domains() {
                             hostname: r.h.hostname,
                           }}
                           onClick={(e) => e.stopPropagation()}
-                          className="min-w-0 truncate text-[14px] text-foreground underline decoration-foreground/30 underline-offset-4 transition-colors hover:decoration-foreground"
+                          className="min-w-0 truncate text-[14px] text-foreground transition-colors hover:text-primary"
                         >
                           {r.d.hostname}
                         </Link>
+                        <DomainStatus
+                          d={r.d}
+                          certs={s.certificates}
+                          notDeployed={!r.a.currentDeploymentId}
+                          inline
+                        />
                         <DomainMark d={r.d} clusterId={r.a.clusterId} logoOnly />
                         <DomainKind hostname={r.d.hostname} />
                       </span>
@@ -183,14 +188,6 @@ function Domains() {
                     <Td className="hidden py-4 text-[13px] sm:table-cell">
                       <RoutedTo {...r} />
                     </Td>
-                    <Td className="py-4">
-                      <DomainStatus
-                        d={r.d}
-                        certs={s.certificates}
-                        notDeployed={!r.a.currentDeploymentId}
-                        plain
-                      />
-                    </Td>
                     <Td className="hidden w-[200px] py-4 md:table-cell">
                       <Traffic
                         hostname={r.h.hostname}
@@ -198,7 +195,7 @@ function Domains() {
                         byHost={traffic.byHost}
                       />
                     </Td>
-                    <Td className="hidden py-4 text-[13px] text-muted-foreground lg:table-cell">
+                    <Td className="hidden whitespace-nowrap py-4 text-[13px] text-muted-foreground lg:table-cell">
                       <TimeAgo at={r.d.createdAt} />
                     </Td>
                   </Tr>
@@ -206,7 +203,7 @@ function Domains() {
                 {!shown.length ? (
                   <tr>
                     <Td
-                      colSpan={5}
+                      colSpan={4}
                       className="py-8 text-center text-muted-foreground"
                     >
                       No domains match.

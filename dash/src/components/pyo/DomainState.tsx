@@ -1,5 +1,4 @@
 import {
-  CheckIcon,
   CircleDashedIcon,
   GlobeIcon,
   LockSimpleIcon,
@@ -36,14 +35,15 @@ const selfSigned = (d: Domain) =>
 /**
  * Domain changes go live without a redeploy; `notDeployed`: the service has
  * never been deployed, so its domains go live with its first deploy.
- * `hint`: more detail, for a tooltip.
+ * `hint`: more detail, for a tooltip. `short`: fewer words, for a list.
  */
 export function domainState(
   d: Domain,
   certs: Certificate[],
   notDeployed = false,
-): { tone: DomainTone; text: string; hint?: string } {
-  if (notDeployed) return { tone: "busy", text: "Live after first deploy" };
+): { tone: DomainTone; text: string; hint?: string; short?: string } {
+  if (notDeployed)
+    return { tone: "busy", text: "Live after first deploy", short: "Not deployed" };
   if (d.status !== "active") {
     // No DNS to wait for: Pyo sets it up on the cluster's tailnet.
     if (isTailnetDomain(d.hostname))
@@ -57,6 +57,7 @@ export function domainState(
     return {
       tone: d.status === "error" ? "broken" : "attention",
       text: `Waiting for DNS${d.dnsCheckedAt ? ` · checked ${timeAgo(d.dnsCheckedAt)}` : ""}`,
+      short: "Waiting for DNS",
     };
   }
   if (d.tlsMode === "off") return { tone: "ok", text: "HTTP only" };
@@ -69,6 +70,7 @@ export function domainState(
         tone: e.tone === "text-destructive" ? "broken" : "attention",
         text: "HTTPS",
         hint: `Your certificate ${c.name}. ${e.text}.`,
+        short: c.notAfter <= Date.now() ? "Certificate expired" : "Certificate expiring",
       };
   }
   if (d.tls === "failed")
@@ -94,8 +96,7 @@ const BADGE: Record<DomainTone, Tone> = {
   broken: "danger",
 };
 
-const PLAIN: Record<DomainTone, { icon: Icon; className: string }> = {
-  ok: { icon: CheckIcon, className: "text-muted-foreground" },
+const INLINE: Record<Exclude<DomainTone, "ok">, { icon: Icon; className: string }> = {
   busy: { icon: CircleDashedIcon, className: "text-muted-foreground" },
   attention: { icon: WarningCircleIcon, className: "text-warning" },
   broken: { icon: XCircleIcon, className: "text-destructive" },
@@ -103,32 +104,49 @@ const PLAIN: Record<DomainTone, { icon: Icon; className: string }> = {
 
 /**
  * The status as one label, in the app's badge style (details in a
- * tooltip). `plain`: an icon and the words, for calm lists.
+ * tooltip). `inline`: for after a hostname in a list. A green lock when
+ * HTTPS works, nothing for a working domain without HTTPS, else an icon
+ * and a few words.
  */
 export function DomainStatus({
   d,
   certs,
   notDeployed,
-  plain,
+  inline,
 }: {
   d: Domain;
   certs: Certificate[];
   notDeployed?: boolean;
-  plain?: boolean;
+  inline?: boolean;
 }) {
   const st = domainState(d, certs, notDeployed);
-  const p = PLAIN[st.tone];
-  const label = plain ? (
+  if (!inline) {
+    const badge = <Badge tone={BADGE[st.tone]}>{st.text}</Badge>;
+    return st.hint ? <Tooltip content={st.hint}>{badge}</Tooltip> : badge;
+  }
+  if (st.tone === "ok")
+    return st.text === "HTTPS" ? (
+      <Tooltip content={st.hint ? `HTTPS · ${st.hint}` : "HTTPS"}>
+        <span
+          role="img"
+          aria-label="HTTPS"
+          className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-success"
+        >
+          <LockSimpleIcon size={14} weight="bold" />
+        </span>
+      </Tooltip>
+    ) : null;
+  const p = INLINE[st.tone];
+  const hint = st.hint ?? (st.short ? st.text : undefined);
+  const label = (
     <span
-      className={`inline-flex items-center gap-1.5 text-[13px] ${st.tone === "busy" ? "text-muted-foreground" : "text-foreground"}`}
+      className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[12.5px] ${p.className}`}
     >
-      <p.icon size={14} weight="bold" className={`shrink-0 ${p.className}`} />
-      {st.text}
+      <p.icon size={14} weight="bold" className="shrink-0" />
+      {st.short ?? st.text}
     </span>
-  ) : (
-    <Badge tone={BADGE[st.tone]}>{st.text}</Badge>
   );
-  return st.hint ? <Tooltip content={st.hint}>{label}</Tooltip> : label;
+  return hint ? <Tooltip content={hint}>{label}</Tooltip> : label;
 }
 
 const KINDS = {
