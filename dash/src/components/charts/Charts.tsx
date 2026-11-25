@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 // Lightweight SVG charts. Drawn in pixel space from a measured width so text
 // never stretches. Every chart has a hover layer (crosshair + tooltip for
@@ -451,6 +451,7 @@ export function Sparkline({
   label,
   domain,
   fill = false,
+  area = false,
 }: {
   values: (number | null)[];
   color?: string;
@@ -460,7 +461,10 @@ export function Sparkline({
   domain?: [number, number];
   /** Stretch to the container's width (the line keeps its thickness). */
   fill?: boolean;
+  /** A soft fill under the line. */
+  area?: boolean;
 }) {
+  const gradient = `spark${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const have = known(values);
   if (values.length < 2 || !have.length) return null;
   const max = domain ? domain[1] : Math.max(...have) || 1;
@@ -486,6 +490,17 @@ export function Sparkline({
       aria-label={label}
       className={fill ? "block" : "shrink-0"}
     >
+      {area ? (
+        <>
+          <defs>
+            <linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity={0.28} />
+              <stop offset="100%" stopColor={color} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <path d={`${d}L${width},${height}L0,${height}Z`} fill={`url(#${gradient})`} />
+        </>
+      ) : null}
       <path
         d={d}
         fill="none"

@@ -431,6 +431,22 @@ export const fetchAnalytics = (q: {
   service?: string;
 }) => request<AnalyticsResponse>(`/api/v1/observability?${new URLSearchParams(q)}`);
 
+/** Requests per domain over a range, for the domains list. No domains while observability is off. */
+export type DomainTrafficResponse = {
+  range: string;
+  /** Seconds per point. */
+  step: number;
+  /** The first point (ms). */
+  start: number;
+  /** Only domains that had requests. */
+  domains: { host: string; requests: number; series: number[] }[];
+};
+
+export const fetchDomainTraffic = (team: string, range = "24h") =>
+  request<DomainTrafficResponse>(
+    `/api/v1/observability/domains?${new URLSearchParams({ team, range })}`,
+  );
+
 /** Connections to a service's public TCP and UDP ports through the gateway. */
 export type ConnectionsResponse = {
   range: string;

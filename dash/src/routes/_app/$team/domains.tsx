@@ -1,6 +1,7 @@
+import { Sparkline } from "~/components/charts/Charts";
 import { ListSection } from "~/components/ui/Layered";
 import { GlobeIcon, PlusIcon } from "@phosphor-icons/react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { DomainKind, DomainMark, DomainStatus } from "~/components/pyo/DomainState";
 import { TimeAgo } from "~/components/pyo/common";
@@ -18,14 +19,18 @@ import {
   Tr,
 } from "~/components/ui/Table";
 import { onlyRedirects, redirectTarget } from "~/components/pyo/DomainRules";
+import { fetchDomainTraffic } from "~/lib/pyo/backend";
+import { compact } from "~/lib/pyo/format";
 import { hostsOf } from "~/lib/pyo/hosts";
 import { currentSlug } from "~/lib/pyo/paths";
-import { usePyo, servicePath } from "~/lib/pyo/store";
+import { useQuery } from "~/lib/pyo/query";
+import { servicePath, usePyo, type PyoState } from "~/lib/pyo/store";
+import type { Application, Domain, Project } from "~/lib/pyo/types";
 import { seo } from "~/lib/seo";
 
-// Every hostname the team serves, a row each, with where it goes. Opening
-// one shows its routes, redirects and headers. Add one here (picking its
-// service) or on the service.
+// Every hostname the team serves, a row each, with where it goes and its
+// requests over the last day. Opening one shows its routes, redirects and
+// headers. Add one here (picking its service) or on the service.
 export const Route = createFileRoute("/_app/$team/domains")({
   head: () => ({ meta: seo({ title: "Domains" }) }),
   component: Domains,
@@ -55,6 +60,7 @@ function Domains() {
       })),
     [s],
   );
+  const traffic = useDomainTraffic(s, rows.length > 0);
   const waiting = rows.filter((r) => r.d.status !== "active").length;
   const needle = q.trim().toLowerCase();
   const byHost = (x: (typeof rows)[number], y: (typeof rows)[number]) =>
@@ -133,81 +139,74 @@ function Domains() {
             </div>
           ) : null}
           <Panel>
-            <Table>
+            <Table fluid>
               <thead>
                 <tr>
                   <Th>Domain</Th>
-                  <Th>Goes to</Th>
+                  <Th className="hidden sm:table-cell">Routed to</Th>
                   <Th>Status</Th>
-                  <Th>Added</Th>
+                  <Th className="hidden md:table-cell">Requests, 24h</Th>
+                  <Th className="hidden lg:table-cell">Added</Th>
                 </tr>
               </thead>
               <tbody>
-                {shown.map(({ h, d, a, project, services }) => (
+                {shown.map((r) => (
                   <Tr
-                    key={h.hostname}
+                    key={r.h.hostname}
                     onClick={() =>
                       void navigate({
                         to: "/$team/domains/$hostname",
-                        params: { team: currentSlug(), hostname: h.hostname },
+                        params: { team: currentSlug(), hostname: r.h.hostname },
                       })
                     }
                   >
-                    <Td>
-                      <span className="inline-flex items-center gap-2">
-                        <span className="font-mono text-[12.5px]">
-                          {d.hostname}
-                        </span>
-                        <DomainMark d={d} clusterId={a.clusterId} logoOnly />
-                        <DomainKind hostname={d.hostname} />
+                    <Td className="py-4">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <Link
+                          to="/$team/domains/$hostname"
+                          params={{
+                            team: currentSlug(),
+                            hostname: r.h.hostname,
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="min-w-0 truncate text-[14px] text-foreground underline decoration-foreground/30 underline-offset-4 transition-colors hover:decoration-foreground"
+                        >
+                          {r.d.hostname}
+                        </Link>
+                        <DomainMark d={r.d} clusterId={r.a.clusterId} logoOnly />
+                        <DomainKind hostname={r.d.hostname} />
+                      </span>
+                      <span className="mt-1 block truncate text-[12px] text-muted-foreground sm:hidden">
+                        <RoutedTo {...r} />
                       </span>
                     </Td>
-                    <Td>
-                      {services.length > 1 ? (
-                        <span className="font-medium">
-                          {services.length} services
-                        </span>
-                      ) : onlyRedirects(d) ? (
-                        <span className="font-mono text-[12.5px] text-muted-foreground">
-                          →{" "}
-                          {redirectTarget(
-                            d.redirects!.find((r) => r.path === "/") ??
-                              d.redirects![0],
-                          )}
-                        </span>
-                      ) : (
-                        <>
-                          <AppLink
-                            href={servicePath(a.id)}
-                            onClick={(e) => e.stopPropagation()}
-                            className="font-medium hover:text-primary"
-                          >
-                            {a.name}
-                          </AppLink>
-                          {project ? (
-                            <span className="block text-[11.5px] text-muted-foreground">
-                              {project.name}
-                            </span>
-                          ) : null}
-                        </>
-                      )}
+                    <Td className="hidden py-4 text-[13px] sm:table-cell">
+                      <RoutedTo {...r} />
                     </Td>
-                    <Td>
+                    <Td className="py-4">
                       <DomainStatus
-                        d={d}
+                        d={r.d}
                         certs={s.certificates}
-                        notDeployed={!a.currentDeploymentId}
+                        notDeployed={!r.a.currentDeploymentId}
+                        plain
                       />
                     </Td>
-                    <Td className="text-muted-foreground">
-                      <TimeAgo at={d.createdAt} />
+                    <Td className="hidden w-[200px] py-4 md:table-cell">
+                      <Traffic
+                        hostname={r.h.hostname}
+                        loading={traffic.loading}
+                        byHost={traffic.byHost}
+                      />
+                    </Td>
+                    <Td className="hidden py-4 text-[13px] text-muted-foreground lg:table-cell">
+                      <TimeAgo at={r.d.createdAt} />
                     </Td>
                   </Tr>
                 ))}
                 {!shown.length ? (
                   <tr>
                     <Td
-                      colSpan={4}
+                      colSpan={5}
                       className="py-8 text-center text-muted-foreground"
                     >
                       No domains match.
@@ -234,5 +233,110 @@ function Domains() {
       )}
       <AddDomainDialog open={adding} onClose={() => setAdding(false)} />
     </Page>
+  );
+}
+
+type Row = {
+  d: Domain;
+  a: Application;
+  project?: Project;
+  services: string[];
+};
+
+/** Where a hostname goes: its service and project, several services, or a redirect. */
+function RoutedTo({ d, a, project, services }: Row) {
+  if (services.length > 1) return <>{services.length} services</>;
+  if (onlyRedirects(d))
+    return (
+      <span className="font-mono text-[12.5px] text-muted-foreground">
+        →{" "}
+        {redirectTarget(
+          d.redirects!.find((x) => x.path === "/") ?? d.redirects![0],
+        )}
+      </span>
+    );
+  return (
+    <>
+      <AppLink
+        href={servicePath(a.id)}
+        onClick={(e) => e.stopPropagation()}
+        className="text-foreground hover:text-primary"
+      >
+        {a.name}
+      </AppLink>
+      {project ? (
+        <span className="text-muted-foreground"> · {project.name}</span>
+      ) : null}
+    </>
+  );
+}
+
+const SPARK_W = 112;
+
+/**
+ * Requests per hostname over the last day, one request for the whole list.
+ * None while analytics is off, and a failed load shows as no data.
+ */
+function useDomainTraffic(s: PyoState, any: boolean) {
+  const team = s.currentTeamId;
+  const on = s.observabilitySettings.enabled && any;
+  const q = useQuery(
+    `domain-traffic:${team}:${on}`,
+    () => (on ? fetchDomainTraffic(team, "24h") : Promise.resolve(null)),
+    { refreshMs: 60_000 },
+  );
+  const byHost = useMemo(
+    () =>
+      new Map(
+        (q.status === "success" ? (q.data?.domains ?? []) : []).map((x) => [
+          x.host,
+          x,
+        ]),
+      ),
+    [q],
+  );
+  return { loading: on && q.status === "loading", byHost };
+}
+
+/**
+ * A sparkline and the total, in a box of fixed size: a faint line while
+ * loading, a dash without requests. `hostname` in lower case, as the API
+ * sends it.
+ */
+function Traffic({
+  hostname,
+  loading,
+  byHost,
+}: {
+  hostname: string;
+  loading: boolean;
+  byHost: Map<string, { requests: number; series: number[] }>;
+}) {
+  const t = byHost.get(hostname);
+  return (
+    <span className="flex h-7 items-center gap-3">
+      {loading ? (
+        <span
+          aria-hidden
+          className="block h-px bg-divider"
+          style={{ width: SPARK_W }}
+        />
+      ) : t ? (
+        <>
+          <Sparkline
+            values={t.series}
+            width={SPARK_W}
+            height={28}
+            area
+            label={`${hostname}, requests over the last 24 hours`}
+          />
+          <span className="text-[13px] tabular-nums">
+            {compact(t.requests, true)}
+          </span>
+        </>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      )}
+    </span>
   );
 }
