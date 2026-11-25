@@ -3,7 +3,7 @@ import { ListSection } from "~/components/ui/Layered";
 import { GlobeIcon, PlusIcon } from "@phosphor-icons/react";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { DomainKind, DomainLock, DomainMark } from "~/components/pyo/DomainState";
+import { DomainKind, DomainLock, DomainMark, DomainNote } from "~/components/pyo/DomainState";
 import { TimeAgo } from "~/components/pyo/common";
 import { AppLink } from "~/components/ui/AppLink";
 import { Button } from "~/components/ui/Button";
@@ -161,6 +161,11 @@ function Domains() {
                   >
                     <Td className="py-4 max-sm:w-full max-sm:max-w-0">
                       <span className="flex min-w-0 items-center gap-2">
+                        <DomainLock
+                          d={r.d}
+                          certs={s.certificates}
+                          notDeployed={!r.a.currentDeploymentId}
+                        />
                         <Link
                           to="/$team/domains/$hostname"
                           params={{
@@ -172,7 +177,7 @@ function Domains() {
                         >
                           {r.d.hostname}
                         </Link>
-                        <DomainLock
+                        <DomainNote
                           d={r.d}
                           certs={s.certificates}
                           notDeployed={!r.a.currentDeploymentId}

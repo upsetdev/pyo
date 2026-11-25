@@ -116,9 +116,13 @@ export function DomainStatus({
   return st.hint ? <Tooltip content={st.hint}>{badge}</Tooltip> : badge;
 }
 
+/** The width of the slot DomainLock keeps before a hostname. */
+const SLOT = "inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center";
+
 /**
- * For after a hostname in a list: a green lock when HTTPS works, nothing
- * for a working domain without HTTPS, else an icon and a few words.
+ * For before a hostname in a list: a green lock when HTTPS works, an icon
+ * for a problem, an empty slot for a working domain without HTTPS. The slot
+ * keeps its width so hostnames line up. DomainNote says the problem in words.
  */
 export function DomainLock({
   d,
@@ -133,26 +137,42 @@ export function DomainLock({
   if (st.tone === "ok")
     return st.text === "HTTPS" ? (
       <Tooltip content={tlsLine(d, certs)}>
-        <span
-          role="img"
-          aria-label="HTTPS"
-          className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-success"
-        >
+        <span role="img" aria-label="HTTPS" className={`${SLOT} text-success`}>
           <LockSimpleIcon size={14} weight="bold" />
         </span>
       </Tooltip>
-    ) : null;
+    ) : (
+      <span aria-hidden className={SLOT} />
+    );
   const p = PROBLEM[st.tone];
   const hint = st.hint ?? (st.short ? st.text : undefined);
-  const label = (
+  const icon = (
+    <span role="img" aria-label={st.text} className={`${SLOT} ${p.className}`}>
+      <p.icon size={14} weight="bold" />
+    </span>
+  );
+  return hint ? <Tooltip content={hint}>{icon}</Tooltip> : icon;
+}
+
+/** For after a hostname in a list: a problem in a few words, in its icon's colour. */
+export function DomainNote({
+  d,
+  certs,
+  notDeployed,
+}: {
+  d: Domain;
+  certs: Certificate[];
+  notDeployed?: boolean;
+}) {
+  const st = domainState(d, certs, notDeployed);
+  if (st.tone === "ok") return null;
+  return (
     <span
-      className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[12.5px] ${p.className}`}
+      className={`shrink-0 whitespace-nowrap text-[12.5px] ${PROBLEM[st.tone].className}`}
     >
-      <p.icon size={14} weight="bold" className="shrink-0" />
       {st.short ?? st.text}
     </span>
   );
-  return hint ? <Tooltip content={hint}>{label}</Tooltip> : label;
 }
 
 const KINDS = {
