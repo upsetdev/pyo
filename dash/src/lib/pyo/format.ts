@@ -61,9 +61,10 @@ export const mem = (mi: number) =>
 export const gib = (g: number) => `${+g.toFixed(1)} GiB`;
 export const cores = (c: number) => `${+c.toFixed(1)} cores`;
 
-export function compact(n: number) {
-  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
+/** `fine`: one decimal from 10k up too (143.5k, not 144k). */
+export function compact(n: number, fine = false) {
+  if (n >= (fine ? 999_950 : 1_000_000)) return `${+(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 10_000 && !fine) return `${Math.round(n / 1000)}k`;
   if (n >= 1000) return `${+(n / 1000).toFixed(1)}k`;
   return String(Math.round(n));
 }

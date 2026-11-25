@@ -81,6 +81,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/services/{id}/preview", get(service_preview))
         .route("/observability", get(observability))
+        .route("/observability/domains", get(domain_traffic))
         .route("/access-logs", get(access_logs))
         .route("/metrics", get(metrics))
         .route("/observability/settings", get(observability_settings))
@@ -9811,6 +9812,42 @@ pub(crate) async fn observability(
         _ => "7d".to_owned(),
     };
     Ok(Json(s.observability.query(&q.team, &hosts, &services, &range).await?))
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct DomainTrafficQuery {
+    /// The team's id.
+    team: String,
+    /// "1h", "24h" (the default), "7d" or "30d".
+    range: Option<String>,
+}
+
+/// Domain traffic
+///
+/// Requests per domain of a team over a range, each with its series: a
+/// point per minute for an hour, per half hour for a day, per four hours
+/// for a week, per day for 30 days. Only domains that had requests are
+/// listed, busiest first. No domains while observability is off.
+#[utoipa::path(get, path = "/observability/domains", operation_id = "getDomainTraffic", tag = "Observability",
+    params(DomainTrafficQuery),
+    responses(
+        (status = 200, description = "`range`, `step` (seconds per point), `start` (ms, the first point) and `domains`: `host`, `requests` and `series` for each.", body = Object),
+        (status = 404, description = "No such team, or you aren't in it.", body = ErrorBody),
+    ),
+    extensions(("x-pyo-access" = json!("read"))))]
+pub(crate) async fn domain_traffic(
+    State(s): State<AppState>,
+    SessionUser(user): SessionUser,
+    crate::error::Query(q): crate::error::Query<DomainTrafficQuery>,
+) -> ApiResult<Json<Value>> {
+    let (hosts, _) = team_hosts(&s, &user, &q.team, None, None, None).await?;
+    let range = q
+        .range
+        .as_deref()
+        .filter(|r| matches!(*r, "1h" | "7d" | "30d"))
+        .unwrap_or("24h");
+    Ok(Json(s.observability.domain_traffic(&q.team, &hosts, range).await?))
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]

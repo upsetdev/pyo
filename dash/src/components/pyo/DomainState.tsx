@@ -1,4 +1,12 @@
-import { GlobeIcon, LockSimpleIcon } from "@phosphor-icons/react";
+import {
+  CheckIcon,
+  CircleDashedIcon,
+  GlobeIcon,
+  LockSimpleIcon,
+  WarningCircleIcon,
+  XCircleIcon,
+  type Icon,
+} from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { siTailscale } from "simple-icons";
 import { expiry } from "~/components/pyo/Certificates";
@@ -86,18 +94,40 @@ const BADGE: Record<DomainTone, Tone> = {
   broken: "danger",
 };
 
-/** The status as one label, in the app's badge style (details in a tooltip). */
+const PLAIN: Record<DomainTone, { icon: Icon; className: string }> = {
+  ok: { icon: CheckIcon, className: "text-muted-foreground" },
+  busy: { icon: CircleDashedIcon, className: "text-muted-foreground" },
+  attention: { icon: WarningCircleIcon, className: "text-warning" },
+  broken: { icon: XCircleIcon, className: "text-destructive" },
+};
+
+/**
+ * The status as one label, in the app's badge style (details in a
+ * tooltip). `plain`: an icon and the words, for calm lists.
+ */
 export function DomainStatus({
   d,
   certs,
   notDeployed,
+  plain,
 }: {
   d: Domain;
   certs: Certificate[];
   notDeployed?: boolean;
+  plain?: boolean;
 }) {
   const st = domainState(d, certs, notDeployed);
-  const label = <Badge tone={BADGE[st.tone]}>{st.text}</Badge>;
+  const p = PLAIN[st.tone];
+  const label = plain ? (
+    <span
+      className={`inline-flex items-center gap-1.5 text-[13px] ${st.tone === "busy" ? "text-muted-foreground" : "text-foreground"}`}
+    >
+      <p.icon size={14} weight="bold" className={`shrink-0 ${p.className}`} />
+      {st.text}
+    </span>
+  ) : (
+    <Badge tone={BADGE[st.tone]}>{st.text}</Badge>
+  );
   return st.hint ? <Tooltip content={st.hint}>{label}</Tooltip> : label;
 }
 
