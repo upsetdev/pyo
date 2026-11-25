@@ -24,7 +24,7 @@
 #   PYO_UP_SANDBOX_IMAGES=local scripts/pyo-up.sh
 #
 # The dashboard ends up on http://localhost:8000. While it waits (for the
-# builds, a rollout, ...), it shows what for and for how long; a pod that
+# builds, a rollout, ...), it shows what for and for how long; a new pod that
 # can't start (image pull, crash) is shown with its last log lines.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -222,23 +222,34 @@ run_step() { # label command...
   return "$rc"
 }
 
-# A workload's pods that can't run: each problem (image pull, crash, error)
-# is shown once, with what the pod says about it.
+# When this run started: a pod that had already stopped (Failed or
+# Completed) before it isn't this run's problem.
+RUN_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# The current rollout's pods that can't run: each (image pull, crash,
+# error) is shown once, with what the pod says about it. Pods of older
+# revisions, and ones that stopped before this run, are left out, so
+# their old logs don't show up as this run's errors.
 declare -A SEEN_PROBLEM=()
-WAIT_SELECTOR=""
+WAIT_SELECTOR="" WAIT_REV="" WAIT_REV_KNOWN=""
 pod_problems() {
-  local line pod gone c name reason msg key
-  [ -n "$WAIT_SELECTOR" ] || return 0
+  local line head pod gone phase created c name reason msg key
+  [ -n "$WAIT_SELECTOR" ] && [ -n "$WAIT_REV_KNOWN" ] || return 0
   while read -r line; do
-    pod=${line%% *} gone=${pod#*|} pod=${pod%%|*}
+    head=${line%% *}
+    IFS='|' read -r pod gone phase created <<<"$head"
     [ -z "$gone" ] || continue # being deleted: its old containers' errors don't count
+    case "$phase" in
+      Failed|Succeeded) [[ ! "$created" < "$RUN_START" ]] || continue ;;
+    esac
+    [ "$line" != "$head" ] || continue
     for c in ${line#* }; do
       name=${c%%=*} reason=${c#*=}
       case "$reason" in
         ImagePullBackOff|ErrImagePull|InvalidImageName|CrashLoopBackOff|Error|OOMKilled|CreateContainerConfigError|CreateContainerError|RunContainerError) ;;
         *) continue ;;
       esac
-      key="$pod/$name/$reason"
+      key="$pod/$name"
       [ -z "${SEEN_PROBLEM[$key]:-}" ] || continue
       SEEN_PROBLEM[$key]=1
       spin_clear
@@ -254,11 +265,34 @@ pod_problems() {
           ;;
       esac
     done
-  done < <(kubectl -n "$NS" get pods -l "$WAIT_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.deletionTimestamp}{range .status.initContainerStatuses[*]}{" "}{.name}{"="}{.state.waiting.reason}{.state.terminated.reason}{end}{range .status.containerStatuses[*]}{" "}{.name}{"="}{.state.waiting.reason}{.state.terminated.reason}{end}{"\n"}{end}' 2>/dev/null || true)
+  done < <(kubectl -n "$NS" get pods -l "$WAIT_SELECTOR${WAIT_REV:+,$WAIT_REV}" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.phase}{"|"}{.metadata.creationTimestamp}{range .status.initContainerStatuses[*]}{" "}{.name}{"="}{.state.waiting.reason}{.state.terminated.reason}{end}{range .status.containerStatuses[*]}{" "}{.name}{"="}{.state.waiting.reason}{.state.terminated.reason}{end}{"\n"}{end}' 2>/dev/null || true)
 }
 
-# The ready replicas of $WAIT_RES, in the spinner's label, and its pods'
-# problems.
+# The label of $WAIT_RES's current revision (WAIT_REV), once its
+# controller has seen the latest spec: a deployment's newest ReplicaSet's
+# pod-template-hash, a statefulset's update revision.
+rollout_revision() {
+  local gen seen rev hash
+  case "$WAIT_RES" in
+    deployment/*)
+      read -r gen seen rev < <(kubectl -n "$NS" get "$WAIT_RES" -o jsonpath='{.metadata.generation} {.status.observedGeneration} {.metadata.annotations.deployment\.kubernetes\.io/revision}{"\n"}' 2>/dev/null || true) || true
+      [ -n "$rev" ] && [ "${seen:-0}" -ge "${gen:-1}" ] || return 0
+      hash=$(kubectl -n "$NS" get replicasets -l "$WAIT_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.annotations.deployment\.kubernetes\.io/revision}{" "}{.metadata.labels.pod-template-hash}{" "}{.metadata.ownerReferences[0].name}{"\n"}{end}' 2>/dev/null |
+        awk -v r="$rev" -v o="${WAIT_RES#*/}" '$1 == r && $3 == o { print $2; exit }' || true)
+      [ -n "$hash" ] || return 0
+      WAIT_REV="pod-template-hash=$hash" WAIT_REV_KNOWN=1
+      ;;
+    statefulset/*)
+      read -r gen seen rev < <(kubectl -n "$NS" get "$WAIT_RES" -o jsonpath='{.metadata.generation} {.status.observedGeneration} {.status.updateRevision}{"\n"}' 2>/dev/null || true) || true
+      [ -n "$rev" ] && [ "${seen:-0}" -ge "${gen:-1}" ] || return 0
+      WAIT_REV="controller-revision-hash=$rev" WAIT_REV_KNOWN=1
+      ;;
+    *) WAIT_REV="" WAIT_REV_KNOWN=1 ;;
+  esac
+}
+
+# The ready replicas of $WAIT_RES, in the spinner's label, and its current
+# pods' problems.
 WAIT_RES=""
 rollout_hook() {
   local counts updated ready want sel
@@ -275,14 +309,16 @@ rollout_hook() {
     sel=$(kubectl -n "$NS" get "$WAIT_RES" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null || true)
     WAIT_SELECTOR=$(sed -e 's/[{}"]//g' -e 's/:/=/g' <<<"$sel")
   fi
+  [ -z "$WAIT_SELECTOR" ] || [ -n "$WAIT_REV_KNOWN" ] || rollout_revision
   pod_problems
 }
 
-# `kubectl rollout status`, showing the ready replicas and the pods'
-# problems as it goes; on a timeout, what it said and the pods.
+# `kubectl rollout status`, showing the ready replicas and the current
+# pods' problems as it goes; on a timeout, what it said and the pods. Once
+# ready, older revisions' Failed pods are deleted, so they don't pile up.
 wait_rollout() { # kind/name timeout
   local rc=0 out
-  WAIT_RES=$1 WAIT_SELECTOR=""
+  WAIT_RES=$1 WAIT_SELECTOR="" WAIT_REV="" WAIT_REV_KNOWN=""
   out=$(mktemp)
   CLEANUP+=("$out")
   spin_start "Waiting for ${1#*/}"
@@ -290,11 +326,17 @@ wait_rollout() { # kind/name timeout
   spin_while "$!" rollout_hook || rc=$?
   if [ "$rc" -eq 0 ]; then
     spin_stop ok "${1#*/} ready"
+    if [ -n "$WAIT_SELECTOR" ]; then
+      [ -n "$WAIT_REV_KNOWN" ] || rollout_revision
+      [ -z "$WAIT_REV" ] || kubectl -n "$NS" delete pods -l "$WAIT_SELECTOR,${WAIT_REV/=/!=}" \
+        --field-selector=status.phase=Failed --wait=false >/dev/null 2>&1 || true
+    fi
     return 0
   fi
   spin_stop fail "${1#*/} isn't ready after $2"
   sed 's/^/    | /' "$out" >&2
-  [ -z "$WAIT_SELECTOR" ] || kubectl -n "$NS" get pods -l "$WAIT_SELECTOR" -o wide 2>&1 | sed 's/^/    | /' >&2 || true
+  [ -z "$WAIT_SELECTOR" ] || kubectl -n "$NS" get pods -l "$WAIT_SELECTOR" \
+    --field-selector=status.phase!=Failed,status.phase!=Succeeded -o wide 2>&1 | sed 's/^/    | /' >&2 || true
   return "$rc"
 }
 
