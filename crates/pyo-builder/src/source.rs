@@ -17,10 +17,11 @@ use anyhow::{Context, bail};
 use serde_json::Value;
 use tokio::process::Command;
 
-/// Railpack's BuildKit frontend; must match the railpack CLI's version.
+/// Railpack's BuildKit frontend, by tag and digest. Its tag is the railpack
+/// CLI's version.
 pub fn railpack_frontend() -> String {
     std::env::var("RAILPACK_FRONTEND")
-        .unwrap_or_else(|_| "ghcr.io/railwayapp/railpack-frontend:v0.40.1".into())
+        .unwrap_or_else(|_| "ghcr.io/railwayapp/railpack-frontend:v0.43.1@sha256:1f0bb3015946a77d33555756abdceb31885025763c63363ccfb27d83ad919ff9".into())
 }
 
 /// A directory for one build, removed on drop.

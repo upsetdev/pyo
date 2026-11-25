@@ -20,8 +20,13 @@ case "$kind" in
   *) echo "trivy-scan.sh: image or fs, not $kind" >&2; exit 2 ;;
 esac
 
-trivy "$kind" --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL \
-  "${args[@]}" --format json --output "$out.json" "$target"
+# 15 minutes, not Trivy's 5: a big image, or a slow pull from the
+# registry, takes longer. A scan that fails all the same runs once more.
+scan() {
+  trivy "$kind" --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --timeout 15m \
+    "${args[@]}" --format json --output "$out.json" "$target"
+}
+scan || { echo "The scan of $target failed. Trying once more." >&2; scan; }
 trivy convert --format sarif --output "$out.sarif" "$out.json"
 
 # One row per CVE and package, CRITICAL first.

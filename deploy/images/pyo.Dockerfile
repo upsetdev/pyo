@@ -118,8 +118,8 @@ FROM moby/buildkit:v0.35.1 AS buildkit
 # Railpack's CLI; its BuildKit frontend image must be the same version
 # (RAILPACK_FRONTEND in pyo-builder).
 FROM debian:trixie-20261104-slim AS railpack
-ADD --checksum=sha256:2842de93e68713af9037e0bc0a398d7da78f3b96aa4804303a638db2bc69bd30 \
-    https://github.com/railwayapp/railpack/releases/download/v0.40.1/railpack-v0.40.1-x86_64-unknown-linux-musl.tar.gz /tmp/railpack.tgz
+ADD --checksum=sha256:7a3849a68b2f142dcd9cfae68c91c5d5cb3bab4b1e749fc796cd9190a3811ea0 \
+    https://github.com/railwayapp/railpack/releases/download/v0.43.1/railpack-v0.43.1-x86_64-unknown-linux-musl.tar.gz /tmp/railpack.tgz
 RUN mkdir /tmp/rp && tar -xzf /tmp/railpack.tgz -C /tmp/rp && install -m 0755 "$(find /tmp/rp -type f -name railpack | head -n1)" /railpack
 
 FROM debian:trixie-20261104-slim AS builder

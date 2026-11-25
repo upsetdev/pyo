@@ -1237,9 +1237,10 @@ mod railpack_tests {
                 .find(|l| l.starts_with("https://github.com/railwayapp/railpack/"))
                 .map(|l| l.split_whitespace().next().unwrap().to_owned())
         );
-        assert!(
-            source::railpack_frontend()
-                .ends_with(pin(&script, "url=").unwrap().split('/').nth(7).unwrap())
-        );
+        // The frontend: the CLI's version, pinned by digest too.
+        let frontend = source::railpack_frontend();
+        let (tag, digest) = frontend.split_once('@').unwrap();
+        assert!(tag.ends_with(pin(&script, "url=").unwrap().split('/').nth(7).unwrap()));
+        assert!(digest.starts_with("sha256:") && digest.len() == 71, "{frontend}");
     }
 }
