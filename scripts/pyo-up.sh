@@ -1294,11 +1294,11 @@ if kubectl -n "$NS" get deployment pyo-agent >/dev/null 2>&1; then
   wait_rollout deployment/pyo-agent 180s
 fi
 
-# In-cluster builders also run the image they were created with; move them on.
-for b in $(kubectl -n "$NS" get deployments -l app.kubernetes.io/name=pyo-builder -o name 2>/dev/null); do
-  log "Updating ${b#deployment.apps/} to builder:${TAG_OF[builder]}"
-  kubectl -n "$NS" set image "$b" "builder=$IMAGES/builder:${TAG_OF[builder]}" >/dev/null
-done
+# In-cluster builders move to this build's builder image on their own:
+# PYO_BUILDER_IMAGE changed with it, and Pyo re-sends the builders it
+# owns to the agent after their current build (builders.rs,
+# OUTDATED_BUILDERS). Builder deployments Pyo doesn't know, such as ones
+# left from an install whose database was reset, are left alone.
 
 # This machine as a cluster: its gateway serves Pyo over HTTPS on the
 # public IP, which the addresses wait for.
