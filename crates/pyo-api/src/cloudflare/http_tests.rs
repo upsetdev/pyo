@@ -359,7 +359,8 @@ fn the_tunnel_loop_end_to_end() {
 /// Against a throwaway Postgres and the fake Cloudflare: a service saved
 /// back the way the MCP tools show it (values as `•••`) keeps its real
 /// values, and `removeDomain` takes a domain off with Pyo's record, without
-/// a whole-service save from the client.
+/// a whole-service save from the client. A record other paths still use
+/// isn't deleted.
 #[test]
 #[ignore = "needs DATABASE_URL (a throwaway Postgres) and PYO_SECRET_KEY"]
 fn hidden_values_are_kept_and_domains_come_off() {
@@ -478,6 +479,27 @@ fn hidden_values_are_kept_and_domains_come_off() {
         // One it doesn't have.
         let e = crate::ops::run_json(&s, &user, json!({ "op": "removeDomain", "serviceId": svc, "domainId": "dom_zz" })).await.unwrap_err();
         assert_eq!(e.status, axum::http::StatusCode::NOT_FOUND);
+        // A record other paths of its hostname still use stays: deleting it
+        // is refused until they're gone.
+        let c = format!("c-{run}.example.com");
+        let shared = json!([
+            { "id": "dom_c", "hostname": c, "portName": "http", "status": "active", "tls": "active", "tlsMode": "auto", "createdAt": 1 },
+            { "id": "dom_d", "hostname": c, "path": "/api", "primary": false, "portName": "http", "status": "active", "tls": "active", "tlsMode": "auto", "createdAt": 2 },
+        ]);
+        q("UPDATE pyo.services SET spec = jsonb_set(spec, '{domains}', $2) WHERE id = $1").bind(&svc).bind(&shared).execute(&db).await.unwrap();
+        let rec_c = format!("recc{run}");
+        cf.put_record(ZONE, json!({ "id": rec_c, "type": "A", "name": c, "content": "203.0.113.7", "proxied": false, "ttl": 1, "comment": mark }));
+        q("INSERT INTO pyo.dns_records (service_id, domain_id, team_id, hostname, zone_id, zone_name, record_id, type, content, status) VALUES ($1, 'dom_c', $2, $3, $4, 'example.com', $5, 'A', '203.0.113.7', 'created')")
+            .bind(&svc).bind(&team).bind(&c).bind(ZONE).bind(&rec_c).execute(&db).await.unwrap();
+        let delete = json!({ "op": "deleteDnsRecord", "serviceId": svc, "domainId": "dom_c" });
+        let e = crate::ops::run_json(&s, &user, delete.clone()).await.unwrap_err();
+        assert_eq!(e.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(e.message, format!("Other paths still use {c}, so its DNS record stays. Remove those paths first."));
+        assert!(cf.records(ZONE).iter().any(|r| r["id"] == json!(rec_c)), "the shared record stays");
+        // Its last path gone, the record can go.
+        crate::ops::run_json(&s, &user, json!({ "op": "removeDomain", "serviceId": svc, "domainId": "dom_d" })).await.unwrap();
+        crate::ops::run_json(&s, &user, delete).await.unwrap();
+        assert!(cf.records(ZONE).iter().all(|r| r["id"] != json!(rec_c)), "Pyo's record is deleted");
         q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&db).await.unwrap();
         q("DELETE FROM pyo.users WHERE id = $1").bind(&usr).execute(&db).await.unwrap();
     });

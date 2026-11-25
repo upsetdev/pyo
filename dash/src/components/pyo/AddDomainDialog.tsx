@@ -313,7 +313,15 @@ export function AddDomainDialog({
           app.id,
           k === "tailnet"
             ? // Tailscale serves its HTTPS.
-              { hostname, portName: port, redirectHttps: true, tlsMode: "auto" }
+              {
+                hostname,
+                portName: port,
+                ...(path !== "/"
+                  ? { path, ...(strip ? { stripPrefix: true } : {}) }
+                  : {}),
+                redirectHttps: true,
+                tlsMode: "auto",
+              }
             : {
                 hostname,
                 portName: only ? "" : port,
@@ -526,7 +534,7 @@ export function AddDomainDialog({
                 label="Path"
                 optional
                 hint={
-                  held && !editing
+                  held && !editing && k !== "tailnet"
                     ? `${hostname} keeps its DNS record and certificate.`
                     : "Only this path. Other services can serve the rest."
                 }
