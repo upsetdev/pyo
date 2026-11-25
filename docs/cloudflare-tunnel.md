@@ -32,14 +32,14 @@ that commit.
 18. Build plan (phases, file:line)
 19. Open questions (answered)
 20. Draft docs page
-21. Build status
+21. Implementation
 
 ---
 
 ## Decisions (2026-11-22)
 
-The user accepted these answers to the open questions (§19). The sections
-below are updated to match.
+Answers to the open questions (§19). The sections below are updated to
+match.
 
 1. **Origin certificate key**: made by the control plane (rcgen) and kept
    sealed with the team's certificates.
@@ -76,7 +76,7 @@ Decisions made while building (not in the first draft):
   "confirm" and waits for **Replace and switch**. So records made by hand
   or by other tools are never replaced without a yes. Pyo's own
   direct record isn't kept in `previous`: Switch back makes a new one.
-- **Both paths only while a domain switches** (user, 2026-11-22). A
+- **Both paths only while a domain switches** (2026-11-22). A
   domain's `tunnel` is `"switching"` or `"on"`:
   - `"switching"`: the Gateway has the tunnel listener and route, the
     tunnel route has no 403 gate, and the domain keeps its plain-HTTP
@@ -166,7 +166,7 @@ Decisions after the real-Cloudflare test (2026-11-22):
   as "Via Tunnel · *.example.com" and offers Switch back only with a kept
   record.
 - **A new name under the default domain gets no record of its own**
-  (user, 2026-11-23). `setDomainTunnel` with `on: true` for a name one
+  (2026-11-23). `setDomainTunnel` with `on: true` for a name one
   level under the default domain that isn't on the tunnel yet reads the
   records on that exact name at Cloudflare. With no A, AAAA or CNAME
   there, the domain takes `tunnel: "on"` at once and the answer is
@@ -1119,7 +1119,7 @@ when in tunnel mode, warning tone when degraded or down.
   (§8.3), whatever the zone's Always Use HTTPS.
 - **Pyo's own dashboard** on the cluster Pyo runs on: its nip.io address
   closes in tunnel mode (no public 80/443). The confirm dialog says so.
-  Reach Pyo over Tailscale or LAN HTTP (tailscale-first decision).
+  Reach Pyo over Tailscale or LAN HTTP.
 - **Preview environments** on a tunnel cluster: previews use the default
   domain (`web-pr-42.example.com`), covered by the wildcard. The preview
   domain setting and its DNS-01 wildcard certificate aren't used in tunnel
@@ -1207,7 +1207,7 @@ when in tunnel mode, warning tone when degraded or down.
 
 ## 14. Pyo Cloud
 
-**Works on Cloud** (checklist from works-on-cloud-too):
+**Works on Cloud**:
 
 - No reliance on the control plane being in the customer's cluster: all
   cluster work goes through `TunnelSet`/`TunnelRemove` (signed commands)
@@ -1355,13 +1355,11 @@ Cloud team enables a tunnel and
 switches a domain, the agent runs a stub connector image, everything
 through signed commands.
 
-### 17.4 Real Cloudflare (only with the user's approval)
+### 17.4 Real Cloudflare
 
-- Only on a throwaway test zone the user names and approves, with a
-  token made for the test. Never pyo.dev, never the user's existing
-  records or tunnels, never the user's own servers (tests never touch
-  user resources).
-- Test machine: a throwaway server, only after asking.
+- Only on a throwaway test zone, with a token made for the test. Never
+  pyo.dev, never existing records or tunnels, never servers in use.
+- Test machine: a throwaway server.
 - Checks: permission checks report the right missing permission for each
   of four tokens (each missing one permission), tunnel up with 2
   connectors in two colos, Switch to Tunnel and Switch back on a record
@@ -1374,9 +1372,9 @@ through signed commands.
 
 ## 18. Build plan
 
-Built on one branch, `feat/cloudflare-tunnel` (worktree `pyo-tunnel`),
-merged to `dev` only when the feature is complete and tested. Each phase
-ends green and shippable behind the capability flag.
+Built on one branch, `feat/cloudflare-tunnel`, merged to `dev` only when
+the feature is complete and tested. Each phase ends green
+and shippable behind the capability flag.
 
 **Phase 0 (0.5.5, separate fixes, done)**
 
@@ -1457,9 +1455,6 @@ ends green and shippable behind the capability flag.
     `setDomainTunnel`, `removeClusterTunnel`, `rotateTunnelToken`),
     `:2575` area.
   - `dash/src/lib/pyo/types.ts:391-430`, `:907`.
-  - Merge to `dev` in the main checkout so the user sees it on :5173
-    (type-check with `dash/node_modules/.bin/tsc`, no pnpm while :5173
-    runs).
 - CLI: `crates/pyo-cli/src/main.rs:267-508` (enums),
   `crates/pyo-cli/src/cloudflare.rs`, `crates/pyo-cli/src/domain.rs`.
 
@@ -1473,7 +1468,7 @@ ends green and shippable behind the capability flag.
 
 - pyo-docs pages (§16).
 - `scripts/tunnel-gate-e2e.sh`, `scripts/fake-cloudflare/`, Cloud e2e.
-- Real-zone test with the user's approval (§17.4).
+- Real-zone test (§17.4).
 - Release notes (Features: Cloudflare Tunnel). The CF-Connecting-IP fix
   shipped in 0.5.5.
 
@@ -1507,8 +1502,7 @@ record.
     admins to replace (spec, same as DNS records today)?
 11. **CF-Connecting-IP fix** (§8.4): ship in 0.5.5 as a security fix, or
     with 0.51.0?
-12. **Release number**: 0.51.0 as the first feature release after 0.5.x
-    (versioning memory notes this wasn't confirmed)?
+12. **Release number**: 0.51.0 as the first feature release after 0.5.x?
 13. **`pyo deploy` uploads** through Cloudflare can pass its 100 MB limit
     on Free. Should uploads be chunked?
 
@@ -1592,21 +1586,7 @@ each domain, and **Remove tunnel**. Pyo deletes the tunnel and only the
 records it made.
 ```
 
-## 21. Build status
-
-Kept current as each phase lands, so the work can be picked up from here.
-Branch `feat/cloudflare-tunnel`.
-Not merged into `dev` until the feature is complete and tested.
-
-| Phase | State |
-|---|---|
-| Decisions applied to this spec | Done (b145440, 5284a70, bf1cc78) |
-| 1. Token and zones | Done, tested (e3d91dd api, adc8e62 cli, 12cf81f dash) |
-| 2. Agent and Gateway | Done, tested (eadce05 proto, 4db8b6f agent) |
-| 3. Control plane | Done (3b9ae43): migration 0040, tunnel_loop.rs, heartbeat and snapshot. Unit tested, and end to end against the fake Cloudflare and a throwaway Postgres in CI |
-| 4. Traffic choice, switching | API, MCP and CLI written (3b9ae43, a47f92e). Dashboard merged (06dfbba, `tsc` passes): Traffic panel, tunnel badge, record line, add and remove domain |
-| 5. Ports, connect.sh, alerts | Public ports Service and tunnel alerts written. connect.sh keeps its line (see Decisions) |
-| 6. Docs, e2e, gaps, free domains | Done except the real-zone test (needs the user): fake Cloudflare and the loop test (0394f36), gaps and free domains (e36141e, d135ff0), gate e2e written, not run (d8e1a16), pyo-docs branch `docs/cloudflare-tunnel` (011a38f, ec36fd2) |
+## 21. Implementation
 
 Where things are:
 
@@ -1622,21 +1602,7 @@ Where things are:
 - `crates/pyo-proto/src/system.rs` (Cloudflare Tunnel section), `rbac.rs`
   (origin and public ports Services, `tunnel` client policies).
 
-Tests (2026-11-22): the full pyo-proto (167), pyo-agent (216), pyo-api
-(611) and pyo-cli (80) suites pass, except `openapi::docs_copy_is_current`,
-which compares with pyo-docs' `openapi/pyo.json` (regenerate it with the
-docs in Phase 6). `cargo clippy -p pyo-proto -p pyo-agent -p pyo-api
--p pyo-cli --tests -- -D warnings` is clean on 928ac34, and the API and
-CLI tunnel tests pass on it.
-
-Phase 6 checks (2026-11-22): `cargo clippy -p pyo-api -p pyo-cli --tests
--- -D warnings` clean, pyo-api 617 passed (only `docs_copy_is_current`
-red), pyo-cli 80 passed. `scripts/tunnel-gate-e2e.sh` passes all 11
-checks against Envoy 1.39.5. Previews in tunnel mode go under the
-default domain (3cb5c75).
-
-Fixes after the real-Cloudflare test (2026-11-22, branch
-`worktree-agent-a1e523da2ad53df3d`, see "Decisions after the
+Fixes after the real-Cloudflare test (2026-11-22, see "Decisions after the
 real-Cloudflare test"):
 
 | Bug | Fix | Tested by |
@@ -1647,40 +1613,13 @@ real-Cloudflare test"):
 | X-Forwarded-For ended with the connector's pod | Tunnel routes set it to the visitor (`system::tunnel_rule`) | `gateway::tests::tunnel_domains_switch_then_close_the_direct_path`, `rbac::tests::a_static_sites_routes_may_only_name_its_folder`, `scripts/tunnel-gate-e2e.sh` (17 checks, Envoy 1.39.5) |
 | The gate opened on a redundant switch | A name already `"on"` stays `"on"` (`tunnel_ops::switch_state`) | `tunnel_ops::tests::a_name_already_on_the_tunnel_stays_gated_while_its_record_is_made` |
 
-The admission policy changed (HTTPRoute header filter), so the access
-hash moves and a cluster connected before this needs **Refresh this
-cluster** before its tunnel routes are accepted. The roles hash
-(`the_roles_are_as_0_51_0s`) is unchanged.
+Known limits:
 
-Checks (2026-11-23): `cargo clippy -p pyo-proto -p pyo-agent -p pyo-api
--p pyo-cli --tests -- -D warnings` clean. Suites pass: pyo-proto 171,
-pyo-agent 221, pyo-api 655, pyo-cli 81. `scripts/tunnel-gate-e2e.sh`
-passes all 17 checks, and its six new ones fail without the header fix.
-The loop's end-to-end test still needs CI's Postgres.
-
-Not checked against a real Envoy Gateway or Cloudflare: that Envoy
-Gateway 1.9.3 accepts the route's header value and hands it to Envoy as
-it is (read from its source, not run), and Cloudflare's 404 for a name
-with no route.
-
-Next:
-
-1. Merge into `dev` when asked. Pyo writes Cloud's domain proof when a
-   domain is added (the user may change that).
-2. With the user's OK: the real-zone test (§17.4) on a throwaway zone.
-3. After 0.51.0 merges: regenerate pyo-docs' generated pages, merge
-   pyo-docs' `docs/cloudflare-tunnel`.
-4. Dashboard: no warning for deeper names (a.b.example.com) when
-   switching, and "Certificate: <reason>" shows only through `tunnel.error`.
-
-Known gaps:
-
-- Nothing tested against a real Cloudflare account (needs the user's
-  approval and a throwaway zone, §17.4).
+- Not checked against a real Envoy Gateway or Cloudflare: that Envoy
+  Gateway 1.9.3 accepts the route's header value and hands it to Envoy as
+  it is (read from its source, not run), and Cloudflare's 404 for a name
+  with no route.
+- The dashboard shows no warning for deeper names (a.b.example.com) when
+  switching, and shows "Certificate: <reason>" only through `tunnel.error`.
 - The loop's end-to-end test (`cloudflare::http_tests::the_tunnel_loop_end_to_end`)
-  needs a throwaway Postgres. CI runs it in ci.yml's Postgres job.
-- pyo-docs' generated pages (`openapi/pyo.json`, `content/cli/commands.mdx`,
-  `content/mcp/tools.mdx`) are regenerated once all 0.51.0 branches are
-  merged. `openapi::tests::docs_copy_is_current` stays red until then.
-- `dash/node_modules` in the worktrees is a symlink to the main
-  checkout's, for `tsc` only (ignored by git).
+  needs Postgres. CI runs it in ci.yml's Postgres job.
