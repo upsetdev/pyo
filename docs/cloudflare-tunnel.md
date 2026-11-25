@@ -327,8 +327,12 @@ Confirm dialog before switching to Cloudflare Tunnel:
 
 The record line gets a tunnel variant:
 
-- Via Tunnel: `[cf] Via Tunnel · CNAME 1f2e….cfargotunnel.com` and a
-  **Switch back** button.
+- Via Tunnel: no line on the service's Domains (2026-11-25). The
+  Cloudflare logo's tooltip shows `Cloudflare Tunnel · CNAME
+  1f2e….cfargotunnel.com`, and **Switch back from Tunnel** is in the
+  domain's ⋯ menu. The domain page's DNS and HTTPS panel still shows
+  `[cf] Via Tunnel · CNAME 1f2e….cfargotunnel.com` and a **Switch back**
+  button.
 - Not via Tunnel, cluster has a tunnel, zone is tunnel-ready: a
   **Switch to Tunnel** button.
 - Existing record found (needs OK), warning box, like today's conflict box:

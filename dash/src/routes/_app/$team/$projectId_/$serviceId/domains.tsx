@@ -1,5 +1,6 @@
 import {
   ArrowBendDownRightIcon,
+  ArrowCounterClockwiseIcon,
   ArrowRightIcon,
   ArrowsClockwiseIcon,
   ArrowUUpRightIcon,
@@ -39,13 +40,18 @@ import {
   DeleteRecordSwitch,
   DnsRecordLine,
 } from "~/components/pyo/Cloudflare";
-import { onTunnel, RestoreRecordSwitch } from "~/components/pyo/TunnelRecord";
+import {
+  canSwitchBack,
+  onTunnel,
+  RestoreRecordSwitch,
+  SwitchBackDialog,
+} from "~/components/pyo/TunnelRecord";
 import { useState } from "react";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
 import { Callout, EmptyState, Panel } from "~/components/ui/Panel";
 import { CopyButton } from "~/components/ui/Table";
-import { api, clusterTraffic, usePyo, serviceIdOf } from "~/lib/pyo/store";
+import { api, clusterTraffic, roleIn, usePyo, serviceIdOf } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Application, Certificate, Domain } from "~/lib/pyo/types";
 
@@ -69,6 +75,9 @@ function Domains({ app }: { app: Application }) {
   const [replacing, setReplacing] = useState<Certificate | null>(null);
   const [redirecting, setRedirecting] = useState<Domain | null>(null);
   const [heading, setHeading] = useState<Domain | null>(null);
+  const [switchingBack, setSwitchingBack] = useState<Domain | null>(null);
+  const role = roleIn(s);
+  const admin = role === "owner" || role === "admin";
   // Its rules in Pyo Gateway, on every domain's menu.
   const rules = (d: Domain) => [
     {
@@ -215,6 +224,15 @@ function Domains({ app }: { app: Application }) {
                             disabled: d.status === "verifying",
                             onSelect: () => void api.verifyDomain(app.id, d.id),
                           },
+                          ...(canSwitchBack(d, cluster, admin)
+                            ? [
+                                {
+                                  label: "Switch back from Tunnel",
+                                  icon: <ArrowCounterClockwiseIcon size={14} />,
+                                  onSelect: () => setSwitchingBack(d),
+                                },
+                              ]
+                            : []),
                           { type: "separator" as const },
                           { type: "label", label: "HTTPS" },
                           ...TLS_MODES.map((m) => ({
@@ -321,7 +339,7 @@ function Domains({ app }: { app: Application }) {
                       {d.tlsError}
                     </p>
                   ) : null}
-                  {isPath(d) ? null : <DnsRecordLine app={app} d={d} />}
+                  {isPath(d) ? null : <DnsRecordLine app={app} d={d} noSwitchBack />}
                   {!isPath(d) &&
                   d.status !== "active" &&
                   !isFreeDomain(d.hostname) &&
@@ -396,6 +414,12 @@ function Domains({ app }: { app: Application }) {
         app={app}
         domain={picking}
         onClose={() => setPicking(null)}
+      />
+      <SwitchBackDialog
+        app={app}
+        d={switchingBack}
+        open={!!switchingBack}
+        onClose={() => setSwitchingBack(null)}
       />
       <CertificateDialog
         open={!!replacing}
