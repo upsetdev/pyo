@@ -27,7 +27,7 @@ import { Tooltip } from "~/components/ui/Tooltip";
 import { DomainKind, DomainMark, DomainStatus } from "~/components/pyo/DomainState";
 import { AppLink } from "~/components/ui/AppLink";
 import { AddDomainDialog } from "~/components/pyo/AddDomainDialog";
-import { isPath, sharedWith } from "~/lib/pyo/hosts";
+import { hostOf, isPath, sharedWith, shownPath } from "~/lib/pyo/hosts";
 import {
   HeadersDialog,
   onlyRedirects,
@@ -91,6 +91,13 @@ function Domains({ app }: { app: Application }) {
   // In tunnel mode no direct record helps: the tunnel line says what to do.
   const tunnelMode = !!cluster && clusterTraffic(cluster) === "tunnel";
   const httpPorts = app.ports.filter((p) => p.protocol === "HTTP");
+  // The hostname's only entry: its DNS record can go with it. Otherwise
+  // another path takes the hostname over, with its record.
+  const last =
+    !removing || (hostOf(s, removing.hostname)?.entries.length ?? 1) <= 1;
+  const keepsRecord =
+    !last &&
+    (!!removing?.dnsRecord?.mine || !!removing?.dnsRecord?.previous?.length);
 
   return (
     <div className="space-y-4">
@@ -398,34 +405,42 @@ function Domains({ app }: { app: Application }) {
       <ConfirmDialog
         open={!!removing}
         onClose={() => setRemoving(null)}
-        title={`Remove ${removing?.hostname}?`}
-        description="Traffic to this hostname stops."
+        title={`Remove ${removing ? shownPath(removing) : ""}?`}
+        description={
+          last
+            ? "Traffic to this hostname stops."
+            : `It stops going to ${app.name}.${keepsRecord ? " Other paths still use this hostname, so its DNS record stays." : ""}`
+        }
         confirmLabel="Remove domain"
         onConfirm={async () => {
           if (!removing) return;
           // Putting back the old record replaces Pyo's own as well.
           const restore =
-            !!removing.dnsRecord?.previous?.length && restoreRecord;
+            last && !!removing.dnsRecord?.previous?.length && restoreRecord;
           const res = await api.removeDomain(app.id, removing.id, {
             deleteDnsRecord:
-              !restore && !!removing.dnsRecord?.mine && deleteRecord,
+              last && !restore && !!removing.dnsRecord?.mine && deleteRecord,
             restoreRecord: restore,
           });
-          if (res) toast({ title: `Removed ${removing.hostname}` });
+          if (res) toast({ title: `Removed ${shownPath(removing)}` });
         }}
       >
-        <RestoreRecordSwitch
-          d={removing}
-          checked={restoreRecord}
-          onChange={setRestoreRecord}
-        />
-        {restoreRecord && removing?.dnsRecord?.previous?.length ? null : (
-          <DeleteRecordSwitch
-            d={removing}
-            checked={deleteRecord}
-            onChange={setDeleteRecord}
-          />
-        )}
+        {last ? (
+          <>
+            <RestoreRecordSwitch
+              d={removing}
+              checked={restoreRecord}
+              onChange={setRestoreRecord}
+            />
+            {restoreRecord && removing?.dnsRecord?.previous?.length ? null : (
+              <DeleteRecordSwitch
+                d={removing}
+                checked={deleteRecord}
+                onChange={setDeleteRecord}
+              />
+            )}
+          </>
+        ) : null}
       </ConfirmDialog>
     </div>
   );
