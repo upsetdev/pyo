@@ -3705,6 +3705,8 @@ mod tests {
     /// the rest of the deploy still goes on, and it's said.
     #[tokio::test]
     async fn a_refused_tunnel_policy_leaves_the_rest_of_the_routes() {
+        // The refusal is kept with the tunnel's state, which its tests read.
+        let _one = crate::tunnel::SERIAL.lock().await;
         let (kube, client) = crate::fakekube::FakeKube::start().await;
         kube.admit(|w| {
             (w.plural == "clienttrafficpolicies" && w.name.ends_with("-tunnel")).then(|| (403, "clienttrafficpolicies.gateway.envoyproxy.io \"shop-web-tunnel\" is forbidden: ValidatingAdmissionPolicy 'pyo-agent' with binding 'pyo-agent' denied request".into()))

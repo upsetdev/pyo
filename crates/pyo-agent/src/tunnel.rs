@@ -52,6 +52,11 @@ static KEPT: Mutex<Kept> = Mutex::new(Kept {
 });
 static REFUSED_NOW: AtomicBool = AtomicBool::new(false);
 
+/// Tests that change what the agent keeps of the tunnel (gateway.rs has
+/// one too) share it: one at a time.
+#[cfg(test)]
+pub(crate) static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn kept() -> std::sync::MutexGuard<'static, Kept> {
     KEPT.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -402,9 +407,6 @@ mod tests {
     const DEPLOYMENT: &str = "apis/apps/v1/namespaces/pyo-system/deployments/pyo-tunnel";
     const BUDGET: &str = "apis/policy/v1/namespaces/pyo-system/poddisruptionbudgets/pyo-tunnel";
     const ORIGIN: &str = "api/v1/namespaces/pyo-gateway/services/pyo-tunnel-origin";
-
-    /// The tests share the agent's kept state: one at a time.
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn reset() {
         let mut k = kept();
