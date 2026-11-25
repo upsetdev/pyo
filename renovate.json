@@ -9,6 +9,7 @@
   "baseBranchPatterns": [
     "dev"
   ],
+  "useBaseBranchConfig": "merge",
   "labels": [
     "dependencies"
   ],
@@ -284,6 +285,19 @@
         "digest"
       ],
       "groupName": "Database images"
+    },
+    {
+      "description": "Valkey by version (deploy/mirrors.txt, pyo-proto db_tools_image): each tag is a release line Pyo offers, so only its digest moves. A new line is added by hand.",
+      "matchDepNames": [
+        "docker.io/valkey/valkey",
+        "valkey/valkey"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "enabled": false
     },
     {
       "description": "Toolchains move together wherever they're pinned.",
