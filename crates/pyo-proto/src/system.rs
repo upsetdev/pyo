@@ -36,9 +36,9 @@ pub const ENVOY_GATEWAY_VERSION: &str = "v1.9.3";
 /// (deploy/mirrors.txt), never Docker Hub itself. The controller's is in
 /// [`ENVOY_GATEWAY_VALUES`] too. A chart is pulled by tag: Helm takes no
 /// digest.
-pub const ENVOY_GATEWAY_CHART: &str = "oci://ghcr.io/upsetdev/pyo/mirror/envoyproxy/gateway-helm";
-pub const ENVOY_GATEWAY_IMAGE: &str = "ghcr.io/upsetdev/pyo/mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f";
-pub const ENVOY_IMAGE: &str = "ghcr.io/upsetdev/pyo/mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:9d84a586119a27b50437dbb01eccd4722832741539b1ed53c8e9d6da6067a6e0";
+pub const ENVOY_GATEWAY_CHART: &str = "oci://ghcr.io/upsetdev/pyo-mirror/envoyproxy/gateway-helm";
+pub const ENVOY_GATEWAY_IMAGE: &str = "ghcr.io/upsetdev/pyo-mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f";
+pub const ENVOY_IMAGE: &str = "ghcr.io/upsetdev/pyo-mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:9d84a586119a27b50437dbb01eccd4722832741539b1ed53c8e9d6da6067a6e0";
 
 /// The agent's relay for Vector's server figures (pyo-agent's relay.rs), on
 /// its pod's address. platform.yaml's pyo-agent policy lets Vector in here.
@@ -626,7 +626,7 @@ pub const ENVOY_GATEWAY_VALUES: &str = r#"crds:
 global:
   images:
     envoyGateway:
-      image: ghcr.io/upsetdev/pyo/mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f
+      image: ghcr.io/upsetdev/pyo-mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f
 config:
   envoyGateway:
     gateway:
@@ -1604,7 +1604,7 @@ pub fn cel_literal(v: &Value) -> String {
 
 /// cloudflared 2026.10.7, as Pyo Cloud runs it, from Pyo's mirror
 /// (deploy/mirrors.txt). Renovate keeps it current.
-pub const CLOUDFLARED_IMAGE: &str = "ghcr.io/upsetdev/pyo/mirror/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba";
+pub const CLOUDFLARED_IMAGE: &str = "ghcr.io/upsetdev/pyo-mirror/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba";
 /// The connector's Deployment, Secret and disruption budget in pyo-system.
 pub const TUNNEL_NAME: &str = "pyo-tunnel";
 /// The label on its pods (and the selector).
@@ -1852,7 +1852,7 @@ mod tests {
     /// proxies' settings. The controller's at the chart's version.
     #[test]
     fn gateway_pulls_from_the_mirror() {
-        let mirror = "ghcr.io/upsetdev/pyo/mirror/envoyproxy/";
+        let mirror = "ghcr.io/upsetdev/pyo-mirror/envoyproxy/";
         let chart = super::envoy_gateway_chart();
         assert_eq!(chart["spec"]["chart"], format!("oci://{mirror}gateway-helm"));
         let values: serde_json::Value =

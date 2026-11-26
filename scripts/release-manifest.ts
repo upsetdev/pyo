@@ -38,7 +38,7 @@
 // `mirrors` lists the third-party images the release runs, from Pyo's
 // mirror (deploy/mirrors.txt, which the release copies there first), by
 // path and tag: "envoyproxy/envoy:distroless-v1.39.5" →
-// "ghcr.io/upsetdev/pyo/mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:…",
+// "ghcr.io/upsetdev/pyo-mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:…",
 // pinned by the source's digest.
 //
 // `verifier` lists the SHA-256 of the release's verifier for each
@@ -142,7 +142,7 @@ for (const major of ["16", "17", "18"]) {
 // Pyo's mirrors of third-party images (deploy/mirrors.txt): the mirror's
 // path is the source's without its registry and "library/", with the
 // source's digest. scripts/mirror-images.sh copies them the same way.
-const MIRROR = "ghcr.io/upsetdev/pyo/mirror";
+const MIRROR = "ghcr.io/upsetdev/pyo-mirror";
 const mirrors: Record<string, string> = {};
 for (const line of readFileSync("deploy/mirrors.txt", "utf8").split("\n")) {
   const src = line.trim();

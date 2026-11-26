@@ -1,9 +1,9 @@
-# Third-party images Pyo runs, copied to ghcr.io/upsetdev/pyo/mirror so
+# Third-party images Pyo runs, copied to ghcr.io/upsetdev/pyo-mirror so
 # installs never pull from Docker Hub, whose anonymous pulls are rate
 # limited. One source per line, by tag and digest:
 #
 #   docker.io/library/registry:3.1.2@sha256:…
-#   → ghcr.io/upsetdev/pyo/mirror/registry:3.1.2 (the same digest)
+#   → ghcr.io/upsetdev/pyo-mirror/registry:3.1.2 (the same digest)
 #
 # The mirror's path is the source's without its registry and "library/".
 # scripts/mirror-images.sh copies them (all platforms, never rebuilt) and
