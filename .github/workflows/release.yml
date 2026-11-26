@@ -2,7 +2,7 @@ name: Release
 
 # Pushing a tag like v0.1.0 publishes that version: signed images at
 # ghcr.io/upsetdev/pyo, the third-party images Pyo runs copied to
-# ghcr.io/upsetdev/pyo/mirror (mirror.yml), and a GitHub release with
+# ghcr.io/upsetdev/pyo-mirror (mirror.yml), and a GitHub release with
 # the CLI for each platform, the verifier, the sandbox server files, the
 # install scripts and release.json (what the dashboard's updates apply).
 # Then pyo.dev is rebuilt, to serve the release's install scripts. See
@@ -136,7 +136,7 @@ jobs:
           if-no-files-found: error
 
   # The third-party images the release runs, copied from Docker Hub to
-  # ghcr.io/upsetdev/pyo/mirror (mirror.yml). They're there before the
+  # ghcr.io/upsetdev/pyo-mirror (mirror.yml). They're there before the
   # release is: installs pull them from there.
   mirrors:
     name: Mirror images

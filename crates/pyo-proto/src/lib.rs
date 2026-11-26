@@ -2707,16 +2707,16 @@ pub const BACKUP_DB_USER: &str = "pyo_backup";
 /// already has it. All come from Pyo's mirror (deploy/mirrors.txt), pinned.
 pub fn db_tools_image(engine: &str) -> &'static str {
     match engine {
-        "postgres" => "ghcr.io/upsetdev/pyo/mirror/postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b",
-        "mysql" => "ghcr.io/upsetdev/pyo/mirror/mysql:8.4@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00",
-        "mariadb" => "ghcr.io/upsetdev/pyo/mirror/mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc",
-        "mongo" => "ghcr.io/upsetdev/pyo/mirror/mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01",
-        _ => "ghcr.io/upsetdev/pyo/mirror/valkey/valkey:8.0@sha256:fcb69dfef81599baefeee6cdd0b8339b61b7983a8ee08d307e44844db5bd7047",
+        "postgres" => "ghcr.io/upsetdev/pyo-mirror/postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b",
+        "mysql" => "ghcr.io/upsetdev/pyo-mirror/mysql:8.4@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00",
+        "mariadb" => "ghcr.io/upsetdev/pyo-mirror/mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc",
+        "mongo" => "ghcr.io/upsetdev/pyo-mirror/mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01",
+        _ => "ghcr.io/upsetdev/pyo-mirror/valkey/valkey:8.0@sha256:fcb69dfef81599baefeee6cdd0b8339b61b7983a8ee08d307e44844db5bd7047",
     }
 }
 
 /// restic, pinned, from Pyo's mirror (deploy/mirrors.txt).
-pub const RESTIC_IMAGE: &str = "ghcr.io/upsetdev/pyo/mirror/restic/restic:0.17.3@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a";
+pub const RESTIC_IMAGE: &str = "ghcr.io/upsetdev/pyo-mirror/restic/restic:0.17.3@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a";
 
 /// One step of a rollout, posted as it happens.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -3409,7 +3409,7 @@ mod release_tests {
             .map(|src| {
                 let path = src.split_once('/').unwrap().1;
                 let path = path.strip_prefix("library/").unwrap_or(path);
-                format!("ghcr.io/upsetdev/pyo/mirror/{path}")
+                format!("ghcr.io/upsetdev/pyo-mirror/{path}")
             })
             .collect();
         let mut images: Vec<&str> = ["postgres", "mysql", "mariadb", "mongo", "valkey"]

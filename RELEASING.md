@@ -769,7 +769,7 @@ today, so they don't count toward its anonymous limit.
 Pyo doesn't pull from Docker Hub. Its anonymous pulls are rate limited,
 and an install on a shared address (an office, a cloud NAT, CI) failed
 when it hit the limit. The third-party images Pyo runs are copied to
-`ghcr.io/upsetdev/pyo/mirror`, and everything points there: the registry,
+`ghcr.io/upsetdev/pyo-mirror`, and everything points there: the registry,
 BuildKit, Postgres, ClickHouse, Garage, Vector, curl, cloudflared, restic,
 the database client tools, Valkey, and Envoy Gateway's chart, controller
 and Envoy.
@@ -777,7 +777,7 @@ and Envoy.
 - `deploy/mirrors.txt` lists each source by tag and digest. The mirror's
   path is the source's without its registry and `library/`.
   `docker.io/library/registry:3.1.2@sha256:…` becomes
-  `ghcr.io/upsetdev/pyo/mirror/registry:3.1.2`, with the same digest.
+  `ghcr.io/upsetdev/pyo-mirror/registry:3.1.2`, with the same digest.
 - `scripts/mirror-images.sh copy` copies them with `crane copy`. It keeps
   every platform and rebuilds nothing. It skips one that's there already,
   checks each copy's digest is the source's, and checks anyone can pull

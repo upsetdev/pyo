@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 # - nvcr.io: NVIDIA's device plugin, on GPU servers only
 # - 127.0.0.1:5005: the local registry, in development (scripts/pyo-up.sh)
 ALLOWED='^(ghcr\.io/|nvcr\.io/|127\.0\.0\.1:5005/)'
-MIRROR=ghcr.io/upsetdev/pyo/mirror
+MIRROR=ghcr.io/upsetdev/pyo-mirror
 
 # Rust files that handle the images of users' services (parsing a
 # reference, logging in to its registry), so they name Docker Hub, and

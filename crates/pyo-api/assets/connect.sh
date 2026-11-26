@@ -1783,7 +1783,7 @@ spec:
     spec:
       containers:
         - name: registry
-          image: ghcr.io/upsetdev/pyo/mirror/registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+          image: ghcr.io/upsetdev/pyo-mirror/registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
           env:
             - { name: REGISTRY_HTTP_ADDR, value: "0.0.0.0:5000" }
             - { name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true" }
@@ -1836,7 +1836,7 @@ spec:
         - { operator: Exists }
       containers:
         - name: forward
-          image: ghcr.io/upsetdev/pyo/mirror/alpine/socat:1.8.1.3@sha256:5aa280c6fc5bee94dbd2bbdf2a58d30f50396eaa110be84b03636945b157ae68
+          image: ghcr.io/upsetdev/pyo-mirror/alpine/socat:1.8.1.3@sha256:5aa280c6fc5bee94dbd2bbdf2a58d30f50396eaa110be84b03636945b157ae68
           args: ["TCP-LISTEN:5005,bind=127.0.0.1,fork,reuseaddr", "TCP:pyo-registry.pyo-system.svc.cluster.local:5000"]
           resources:
             requests: { cpu: 5m, memory: 8Mi }
