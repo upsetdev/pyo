@@ -510,6 +510,18 @@ function Loaded({ data }: { data: AnalyticsResponse }) {
                 })),
               },
               {
+                id: "paths",
+                label: "Paths",
+                mono: true,
+                column: "Requests",
+                note: "Every request, including images, files and API calls.",
+                rows: a.topPaths.map((p) => ({
+                  key: p.path,
+                  label: p.path,
+                  value: p.requests,
+                })),
+              },
+              {
                 id: "params",
                 label: "Query params",
                 mono: true,
