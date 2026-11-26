@@ -590,6 +590,10 @@ wait_for 600 "$VM1 is connected as a cluster" cluster_connected || die "$VM1 did
 CLUSTER=$(state | jq -r '.clusters[0].id')
 # A deploy before the cluster can make certificates fails.
 wait_for 420 "the cluster can make certificates" kc get clusterissuer pyo-selfsigned pyo-letsencrypt || die "cert-manager didn't start on $VM1."
+# The issuers come before cert-manager's webhook answers. A Certificate
+# written before then is refused, and the deploy fails.
+wait_for 300 "cert-manager's webhook answers" kc -n cert-manager wait --for=condition=Available deployment/cert-manager-webhook --timeout=5s ||
+  die "cert-manager's webhook didn't start on $VM1."
 [ "$SERVERS" = 1 ] || join_second
 if [ -n "$IP2" ]; then
   wait_for 300 "Envoy runs on both servers" envoy_on_both || die "Envoy didn't start on $VM2."
