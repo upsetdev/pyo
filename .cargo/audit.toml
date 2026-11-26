@@ -15,4 +15,10 @@ ignore = [
     # libsqlite3-sys --target all` prints nothing). sqlx 0.9.0 caps it
     # below the fixed 0.39.
     "RUSTSEC-2026-0459",
+    # kube-client (openssl-tls connector trusts OpenSSL's default store
+    # next to the cluster CA). Pyo's kube dependencies turn default
+    # features off and use rustls-tls only, and the openssl crate isn't in
+    # Cargo.lock. The fixed kube-client 4.2.1 (2026-11-24) is taken as a
+    # normal update once it is two weeks old.
+    "RUSTSEC-2026-0600",
 ]
