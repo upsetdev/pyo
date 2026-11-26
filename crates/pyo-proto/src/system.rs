@@ -2433,6 +2433,11 @@ mod tests {
             all.contains("'allowModeOverride': dyn(true)"),
             "the mode override is pinned"
         );
+        // A website route's idle rate limit: exactly that one.
+        assert!(all.contains(&format!(
+            "object.spec.rateLimit == {}",
+            cel_literal(&crate::firewall::idle_rate_limit())
+        )));
     }
 
     #[test]

@@ -865,7 +865,7 @@ pub fn admission_with(
                 ((variables.toPortRoute && object.spec.all(k, k in ['targetRefs', 'proxyProtocol']) && object.spec.proxyProtocol.all(k, k == 'version') && object.spec.proxyProtocol.version in ['V1', 'V2']) || \
                  (variables.toWebRoute && object.spec.all(k, k in ['targetRefs', 'rateLimit', 'responseOverride']) && (has(object.spec.rateLimit) || has(object.spec.responseOverride)) && \
                     (!has(object.spec.responseOverride) || object.spec.responseOverride == {fw_override}) && \
-                    (!has(object.spec.rateLimit) || (object.spec.rateLimit.all(k, k in ['type', 'local']) && object.spec.rateLimit.type == 'Local' && \
+                    (!has(object.spec.rateLimit) || object.spec.rateLimit == {fw_idle_rate} || (object.spec.rateLimit.all(k, k in ['type', 'local']) && object.spec.rateLimit.type == 'Local' && \
                     object.spec.rateLimit.local.all(k, k == 'rules') && size(object.spec.rateLimit.local.rules) >= 1 && size(object.spec.rateLimit.local.rules) <= 16 && object.spec.rateLimit.local.rules.all(r, r.all(k, k in ['clientSelectors', 'limit']) && \
                     size(r.clientSelectors) == 1 && r.clientSelectors.all(c, c.all(k, k == 'sourceCIDR') && c.sourceCIDR.all(k, k in ['type', 'value', 'invert']) && c.sourceCIDR.type == 'Distinct' && c.sourceCIDR.value.matches('^[0-9a-fA-F:.]+/[0-9]{{1,3}}$')) && \
                     r.limit.all(k, k in ['requests', 'unit']) && r.limit.unit in ['Second', 'Minute'] && r.limit.requests >= 1))))))) || \
@@ -1018,6 +1018,8 @@ pub fn admission_with(
             pp_optional = cel_literal(&json!({ "optional": true })),
             fw_policy = system::FIREWALL_POLICY,
             fw_override = cel_literal(&system::firewall_response_override()),
+            // A website route's rate limit while it has none (firewall.rs).
+            fw_idle_rate = cel_literal(&crate::firewall::idle_rate_limit()),
             waf = system::WAF_NAME,
             waf_backend = cel_literal(&system::waf_backend_spec()),
             waf_keys = cel_literal(&json!(system::waf_ext_proc(true).as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default())),

@@ -527,23 +527,28 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         };
         let route_ref =
             json!([{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": name }]);
-        if let Some(a) = authorization {
+        // Each route has its policies whatever its firewall holds (one that
+        // refuses no one, a rate limit no one reaches), so a firewall change
+        // changes only the route, never the listener's HTTP filters: a
+        // listener whose filters change drops its open connections.
+        if !on_tailnet {
+            let a = authorization
+                .clone()
+                .unwrap_or_else(pyo_proto::firewall::open_web_authorization);
             out.objects.push(json!({
                 "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "SecurityPolicy", "metadata": meta(&name),
                 "spec": { "targetRefs": route_ref, "authorization": a },
             }));
         }
         // Its rate limits, and the message a refused visitor gets.
-        if rate.is_some() || authorization.is_some() {
-            let mut spec = json!({ "targetRefs": route_ref });
-            if let Some(r) = rate {
-                spec["rateLimit"] = r.clone();
-            }
-            if authorization.is_some() {
-                spec["responseOverride"] = system::firewall_response_override();
-            }
-            out.objects.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(&name), "spec": spec }));
+        let mut spec = json!({
+            "targetRefs": route_ref,
+            "rateLimit": rate.cloned().unwrap_or_else(pyo_proto::firewall::idle_rate_limit),
+        });
+        if !on_tailnet {
+            spec["responseOverride"] = system::firewall_response_override();
         }
+        out.objects.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(&name), "spec": spec }));
     }
 
     // Behind a CDN: its HTTPS listeners read the visitor from what the CDN
@@ -2827,6 +2832,19 @@ mod tests {
             r.objects.iter().any(|o| o["kind"] == "BackendTrafficPolicy"
                 && o["metadata"]["name"] == "tn--shop-web-http")
         );
+        // Without a firewall: the idle rate limit, so a first one changes
+        // only the route; no message (no access rules there).
+        s.firewall = None;
+        let r = route_objects(&s);
+        let btp = &find(&r, "BackendTrafficPolicy", "tn--shop-web-http")["spec"];
+        assert_eq!(btp["rateLimit"], pyo_proto::firewall::idle_rate_limit());
+        assert!(btp.get("responseOverride").is_none());
+        assert!(
+            !r.objects
+                .iter()
+                .any(|o| o["kind"] == "SecurityPolicy"
+                    && o["metadata"]["name"] == "tn--shop-web-http")
+        );
     }
 
     fn domain(host: &str, port: &str, tls: &str, redirect: bool) -> DomainSpec {
@@ -3583,8 +3601,10 @@ mod tests {
         assert!(r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
             && o["metadata"]["name"] == "shop-web-tunnel-plain-http"));
         // Switching: no gate, both paths answer.
-        assert!(!r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
-            && o["metadata"]["name"] == "shop-web-switching-http"));
+        assert_eq!(
+            find(&r, "SecurityPolicy", "shop-web-switching-http")["spec"]["authorization"],
+            pyo_proto::firewall::open_web_authorization()
+        );
         // The tunnel's listeners trust its connectors only (filled in when
         // applied), with Cloudflare's own headers kept.
         let ctp = find(&r, "ClientTrafficPolicy", "shop-web-tunnel");
@@ -3779,10 +3799,9 @@ mod tests {
             http["spec"]["authorization"]["rules"][1]["principal"]["clientCIDRs"],
             json!(cf)
         );
-        assert!(
-            find(&r, "BackendTrafficPolicy", "shop-web-http-http")["spec"]
-                .get("rateLimit")
-                .is_none()
+        assert_eq!(
+            find(&r, "BackendTrafficPolicy", "shop-web-http-http")["spec"]["rateLimit"],
+            pyo_proto::firewall::idle_rate_limit()
         );
         // Not behind it: no client policy of its own.
         s.firewall.as_mut().unwrap().behind = None;
@@ -3914,23 +3933,49 @@ mod tests {
             blocks[0],
             ("0.0.0.0/0".to_owned(), vec!["203.0.113.0/24".to_owned()])
         );
-        // Access rules alone: the message, no rate limit.
+        // Access rules alone: the message, and the idle rate limit.
         s.firewall = Some(Firewall {
             rules: vec![rule("fwr_bad", "block", "203.0.113.0/24")],
             ..Default::default()
         });
         let r = route_objects(&s);
         let btp = find(&r, "BackendTrafficPolicy", "shop-web-https-http");
-        assert!(
-            btp["spec"].get("rateLimit").is_none()
-                && btp["spec"]["responseOverride"] == system::firewall_response_override()
-        );
-        // No firewall: no policies.
+        assert_eq!(btp["spec"]["rateLimit"], pyo_proto::firewall::idle_rate_limit());
+        assert_eq!(btp["spec"]["responseOverride"], system::firewall_response_override());
+        // No firewall: the same policies, refusing and limiting no one. So
+        // a firewall change changes only the routes' policies: the route
+        // policies' kinds, names and HTTP filters stay as they are.
+        let with = r;
         s.firewall = None;
         let r = route_objects(&s);
-        assert!(!r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
-            || (o["kind"] == "BackendTrafficPolicy"
-                && !o["metadata"]["name"].as_str().unwrap().contains("tcp"))));
+        let policies = |r: &Routes| -> Vec<(String, String)> {
+            r.objects
+                .iter()
+                .filter(|o| o["kind"] == "SecurityPolicy" || o["kind"] == "BackendTrafficPolicy")
+                // Websites': a port's are its own (no HTTP filters).
+                .filter(|o| !o["metadata"]["name"].as_str().unwrap().contains("-tcp-"))
+                .map(|o| (o["kind"].as_str().unwrap().to_owned(), o["metadata"]["name"].as_str().unwrap().to_owned()))
+                .collect()
+        };
+        assert_eq!(policies(&r), policies(&with));
+        for o in r.objects.iter().filter(|o| {
+            o["kind"] == "HTTPRoute" && reaches_service(o)
+        }) {
+            let name = o["metadata"]["name"].as_str().unwrap();
+            assert_eq!(
+                find(&r, "SecurityPolicy", name)["spec"]["authorization"],
+                pyo_proto::firewall::open_web_authorization(),
+                "{name}"
+            );
+            let btp = &find(&r, "BackendTrafficPolicy", name)["spec"];
+            assert_eq!(btp["rateLimit"], pyo_proto::firewall::idle_rate_limit(), "{name}");
+            assert_eq!(btp["responseOverride"], system::firewall_response_override(), "{name}");
+        }
+        assert!(
+            !r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
+                && o["metadata"]["name"] == "shop-web-redirect"),
+            "the redirect to HTTPS stays open"
+        );
     }
 
     #[test]
@@ -4455,6 +4500,21 @@ mod tests {
         let mut hourly = btp.clone();
         hourly["spec"]["rateLimit"]["local"]["rules"][0]["limit"]["unit"] = json!("Hour");
         assert!(apply(hourly).await.is_err(), "another unit");
+        // The idle rate limit, exactly: no other count for every client.
+        let mut idle = btp.clone();
+        idle["spec"]["rateLimit"] = pyo_proto::firewall::idle_rate_limit();
+        apply(idle.clone())
+            .await
+            .unwrap_or_else(|e| panic!("the idle rate limit: {e}"));
+        let mut low = idle.clone();
+        low["spec"]["rateLimit"]["local"]["rules"][0]["limit"]["requests"] = json!(10);
+        assert!(apply(low).await.is_err(), "one count for every client, reachable");
+        let mut headers_on = idle.clone();
+        headers_on["spec"]["rateLimit"]["local"]["rules"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("xRateLimitHeaders");
+        assert!(apply(headers_on).await.is_err(), "the idle limit's headers");
         let mut header = btp.clone();
         header["spec"]["rateLimit"]["local"]["rules"][0]["clientSelectors"] =
             json!([{ "headers": [{ "name": "x", "type": "Distinct" }] }]);

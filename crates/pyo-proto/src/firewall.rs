@@ -544,6 +544,34 @@ pub fn acme_rule() -> Value {
     json!({ "name": "acme", "action": "Allow", "operation": { "path": { "type": "PathPrefix", "value": ACME_PREFIX, "invert": false } }, "principal": Term::ALL.principal() })
 }
 
+/// A website route's authorization while its firewall refuses no one: Let's
+/// Encrypt's rule, and everyone else allowed too. Every website route
+/// (but tailnet ones) has a SecurityPolicy, so a first rule, or the last
+/// one gone, changes only the route. Envoy Gateway adds an HTTP filter to
+/// a listener only while some route there needs it, and a listener whose
+/// filters change drops its open connections (after the drain timeout).
+pub fn open_web_authorization() -> Value {
+    json!({ "defaultAction": "Allow", "rules": [acme_rule()] })
+}
+
+/// A website route's rate limit while it has none, for the same reason as
+/// [`open_web_authorization`]: Envoy's local rate limit (never Envoy
+/// Gateway's global one, which needs a rate limit service). One count for
+/// all IPv4 clients and one for all IPv6 ones (`Exact`, not a count per
+/// client), at 2^32-1 requests a second, which no proxy reaches. Without
+/// x-ratelimit-* headers: a rule that matched no one would leave a request
+/// to the default count, whose headers Envoy Gateway always turns on.
+pub fn idle_rate_limit() -> Value {
+    let rule = |cidr: &str| {
+        json!({
+            "clientSelectors": [{ "sourceCIDR": { "type": "Exact", "value": cidr } }],
+            "limit": { "requests": u32::MAX, "unit": "Second" },
+            "xRateLimitHeaders": "Off",
+        })
+    };
+    json!({ "type": "Local", "local": { "rules": [rule("0.0.0.0/0"), rule("::/0")] } })
+}
+
 /// The behind-a-CDN rule for HTTPS ([`BEHIND_GATE_CEL`]).
 pub fn behind_gate_rule() -> Value {
     json!({ "name": BEHIND_RULE, "action": "Deny", "cel": BEHIND_GATE_CEL })
