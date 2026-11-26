@@ -1626,9 +1626,15 @@ nvidia_gpu
 
 # k3s server, unless this machine already runs k3s.
 mkdir -p /etc/rancher/k3s
-if [ -n "$REGISTRY" ]; then
-  # Images Pyo builds, through its registry door with this cluster's login.
-  (umask 077 && cat > /etc/rancher/k3s/registries.yaml <<REG
+# >>> pyo:registry-login (connect.sh only; join.rs tests it)
+# Images Pyo builds, through its registry door with this cluster's login.
+# k3s reads the file only when it starts. REGISTRY_CHANGED is set when this
+# wrote something else than was there, so a k3s that's running restarts
+# for a new address or login and not on every run.
+REGISTRY_CHANGED=""
+registry_login() {
+  local file=/etc/rancher/k3s/registries.yaml want
+  want=$(cat <<REG
 mirrors:
   "127.0.0.1:5005":
     endpoint:
@@ -1640,8 +1646,14 @@ configs:
       password: "$REGISTRY_TOKEN"
 REG
   )
-  chmod 600 /etc/rancher/k3s/registries.yaml
-fi
+  if [ "$want" != "$(cat "$file" 2>/dev/null)" ]; then
+    (umask 077 && printf '%s\n' "$want" > "$file")
+    REGISTRY_CHANGED=1
+  fi
+  chmod 600 "$file"
+}
+# <<< pyo:registry-login
+[ -z "$REGISTRY" ] || registry_login
 # Its own registry (--local-registry): this machine pulls the images built
 # here from 127.0.0.1:5005, which pyo-registry-host forwards to the registry.
 LOCAL_REGISTRY_NEW=""
@@ -1684,8 +1696,9 @@ CFG
 else
   # Its memory reserve brought up to date; k3s restarts below if it changed.
   k3s_memory_refresh later
-  # k3s finds a newly installed NVIDIA toolkit only when it starts.
-  if [ -n "$REGISTRY" ] || [ -n "$LOCAL_REGISTRY_NEW" ] || [ -n "$GPU_TOOLKIT_NEW" ] || [ -n "$K3S_MEMORY_CHANGED" ]; then systemctl restart k3s 2>/dev/null || true; fi
+  # k3s finds a newly installed NVIDIA toolkit only when it starts, and the
+  # registry's login too. It doesn't restart when none of them changed.
+  if [ -n "$REGISTRY_CHANGED" ] || [ -n "$LOCAL_REGISTRY_NEW" ] || [ -n "$GPU_TOOLKIT_NEW" ] || [ -n "$K3S_MEMORY_CHANGED" ]; then systemctl restart k3s 2>/dev/null || true; fi
 fi
 
 k3s_up() { k3s kubectl get nodes >/dev/null 2>&1; }

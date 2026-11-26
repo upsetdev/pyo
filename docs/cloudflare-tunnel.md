@@ -88,9 +88,10 @@ Decisions made while building (not in the first draft):
     hostname gets 403, and the :80 route is removed.
   - Switch back goes through `"switching"` again before the record
     moves back, so direct visitors are let in before DNS sends them.
-  - A new connector pod whose address isn't trusted yet is refused by
-    the gate (403) for those few seconds, never let through with the
-    wrong visitor.
+  - A connector pod whose address isn't trusted is refused by the gate
+    (403), never let through with the wrong visitor. Since 2026-11-25 a
+    new pod doesn't get that far: it connects to Cloudflare only after
+    its address is trusted (§7.3).
 - **A behind-Cloudflare service with tunnel domains**: its CDN client
   policy covers only its direct HTTPS listeners. The tunnel policy covers
   the tunnel ones (Envoy Gateway allows one section policy per listener).
@@ -789,18 +790,33 @@ spec:
   selector: { matchLabels: { app.kubernetes.io/name: pyo-tunnel } }
   strategy: { type: RollingUpdate, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }
   template:
-    metadata: { labels: { app.kubernetes.io/name: pyo-tunnel } }
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-tunnel }
+      annotations:
+        pyo.dev/token-hash: <system::tunnel_token_hash(token)>
+        pyo.dev/tunnel-gate-version: "1"    # §7.3
+        pyo.dev/tunnel-template: <system::tunnel_template_hash>   # §7.3
     spec:
       automountServiceAccountToken: false
       affinity: <system::gateway_affinity()>   # not on build-only servers
       topologySpreadConstraints:
         - { maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway,
             labelSelector: { matchLabels: { app.kubernetes.io/name: pyo-tunnel } } }
+      terminationGracePeriodSeconds: 35
       securityContext: { runAsNonRoot: true, runAsUser: 65532, seccompProfile: { type: RuntimeDefault } }
+      initContainers:
+        - name: tunnel-gate               # §7.3
+          image: <an agent image: the one it runs, or the agent's own (§7.3)>
+          args: [tunnel-gate]
+          env:
+            - { name: RUST_LOG, value: pyo_agent=info }
+            - { name: POD_IPS, valueFrom: { fieldRef: { fieldPath: status.podIPs } } }
+          resources: { requests: { cpu: 5m, memory: 16Mi }, limits: { memory: 64Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
       containers:
         - name: cloudflared
           image: ghcr.io/upsetdev/pyo-mirror/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba
-          args: [tunnel, --no-autoupdate, --protocol, http2, --metrics, 0.0.0.0:2000, --loglevel, info, run]
+          args: [tunnel, --no-autoupdate, --protocol, http2, --grace-period, 20s, --metrics, 0.0.0.0:2000, --loglevel, info, run]
           env: [{ name: TUNNEL_TOKEN, valueFrom: { secretKeyRef: { name: pyo-tunnel, key: token } } }]
           readinessProbe: { httpGet: { path: /ready, port: 2000 }, periodSeconds: 10 }
           livenessProbe:  { httpGet: { path: /ready, port: 2000 }, initialDelaySeconds: 60, periodSeconds: 30, failureThreshold: 6 }
@@ -811,6 +827,14 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata: { name: pyo-tunnel, namespace: pyo-system }
 spec: { minAvailable: 1, selector: { matchLabels: { app.kubernetes.io/name: pyo-tunnel } } }
+---
+apiVersion: v1
+kind: Service                             # the gate asks the agent through it (§7.3)
+metadata: { name: pyo-tunnel-gate, namespace: pyo-system }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: pyo-agent }
+  ports: [{ name: gate, port: 8092, targetPort: 8092, protocol: TCP }]
 ```
 
 - Image constant `CLOUDFLARED_IMAGE` in `system.rs`, kept current by
@@ -822,13 +846,22 @@ spec: { minAvailable: 1, selector: { matchLabels: { app.kubernetes.io/name: pyo-
   Cloudflare's edge.
 - Replicas: 2 always. On a one-server cluster both run there, which still
   covers a crash and a rollout.
-- No Service, no ports: nothing connects to cloudflared. The pyo-system
-  default-deny ingress policy (`deploy/k8s/platform.yaml:27-32`) stays as is.
-  Kubelet probes are allowed by k3s's network policy controller.
+- No Service, no ports for cloudflared: nothing connects to it. The
+  pyo-system default-deny ingress policy (`deploy/k8s/platform.yaml:27-32`)
+  stays as is. Kubelet probes are allowed by k3s's network policy
+  controller.
+- Stopping: on SIGTERM cloudflared leaves Cloudflare's edge at once and
+  lets open requests finish for 20 s (`--grace-period`, a flag of the
+  `tunnel` command, so it goes before `run`). The pod has 35 s, so
+  cloudflared ends by itself before it would be killed.
 - The Deployment is reapplied on each heartbeat reply that wants a tunnel
-  and the Secret exists with that tunnel id, so an agent update moves the
-  image. Without the Secret, the agent reports `tunnelId: null` and the
-  control plane sends `TunnelSet` (§6.3 step 6).
+  and the Secret exists with that tunnel id, so an agent update moves
+  cloudflared's image. The gate keeps the agent image it runs, so an
+  agent update alone doesn't roll the connector out (§7.3). A first gate
+  takes the agent's image, read from the agent's Deployment.
+  An agent with no Deployment (run outside the cluster) starts the
+  connector without a gate, unless one runs already. Without the Secret, the agent reports
+  `tunnelId: null` and the control plane sends `TunnelSet` (§6.3 step 6).
 - Admission: a Deployment in pyo-system with no host paths, no host
   network, no privilege passes the generic pod rules (`rbac.rs:718-723`).
   Check this in the rbac tests. The PDB name is added to the agent's
@@ -836,16 +869,108 @@ spec: { minAvailable: 1, selector: { matchLabels: { app.kubernetes.io/name: pyo-
 
 ### 7.3 Trusted addresses
 
-The agent watches pods with `app.kubernetes.io/name=pyo-tunnel` (all their
-`podIPs`, ready or not) and keeps `TUNNEL_IPS` (sorted, deduped, `/32` and
-`/128`). A change rewrites the client policies of services with tunnel
-domains (§8.3), the same way the websites' settings rewrite CDN policies
-today (`gateway.rs:1914`). A new pod's first requests can arrive before its
-address is trusted. For those few seconds the gate refuses them (403) on
-switched domains (see Decisions). The readiness probe keeps Cloudflare from
-sending it traffic until cloudflared is connected, which usually takes
-longer than the policy update, and the agent watches pods as soon as
-they have an address, ready or not.
+The tunnel listeners trust X-Forwarded-For only from the connectors' pod
+addresses (§8.3). On a switched domain the gate refuses any other
+connection with 403. A new connector connects to Cloudflare within
+seconds, so its address must be trusted before cloudflared starts.
+`crates/pyo-agent/src/tunnel.rs` does that in three parts.
+
+**The watch** (`tunnel::run`). The agent watches pods with
+`app.kubernetes.io/name=pyo-tunnel` and also looks every 30 s.
+
+- The trusted list is every `podIPs` entry of those pods, as `/32` and
+  `/128`, sorted and deduped. Ready or not, stopping or not. A pod in
+  phase `Succeeded` or `Failed` doesn't count: Kubernetes gives its
+  address to another pod.
+- A new address is written into every tunnel client policy at once
+  (`gateway::set_tunnel_pods`).
+- An address is removed only after its pod object is gone. A stopping
+  pod still finishes requests. The removal goes out with the next new
+  address, or 60 s after the last pod went. Each rewrite makes Envoy
+  drain the tunnel listeners' connections, so a rollout of both
+  connectors costs about 3 rewrites.
+- A policy found without the connectors' addresses is rewritten, at most
+  every 10 s.
+
+**In effect.** An address counts as in effect when every tunnel client
+policy has it, Envoy Gateway's status on each policy (`Accepted`, on every
+ancestor) carries the policy's current `metadata.generation`, and 2 s
+have passed since the agent first saw that. The 2 s are for the proxies
+to take the new configuration. A policy Envoy Gateway refuses also counts
+as answered: waiting doesn't change it. With no tunnel policy at all
+(no tunnel domain yet) an address is in effect 2 s after the agent saw
+it.
+
+**The gate** (`tunnel::gate`, `tunnel::serve_gate`). The connector's init
+container `tunnel-gate` runs `pyo-agent tunnel-gate` on an agent image,
+so there's no extra image to mirror or pin.
+
+- It reads its pod's addresses from `POD_IPS` (downward API).
+- Every second it asks the agent:
+  `GET http://pyo-tunnel-gate.pyo-system.svc.cluster.local:8092/tunnel/trusted?ip=<addresses>`.
+  The answer is `yes` or `no`. `yes` means every address asked for is in
+  effect.
+- On `yes` it exits and cloudflared starts.
+- After 120 s without a `yes` it exits anyway and logs that, so an agent
+  that's down never keeps the tunnel from starting.
+- It always exits 0.
+
+During a rollout the old connectors keep serving while a new pod waits
+(`maxUnavailable: 0`), so the wait costs time, not requests.
+
+**The gate's image** (`tunnel::gate_image`). The agent's image changes
+every release. If the gate always took it, every agent update would roll
+the connector and drop the WebSockets on tunnel domains. So the agent
+keeps the gate image the connector already runs, and writes its own only
+when the connector rolls anyway.
+
+- The pod template carries `pyo.dev/tunnel-template`: a hash of the
+  template without the gate's image (`system::tunnel_template_hash`). It
+  changes with cloudflared's image, the token's hash, the gate's version
+  and anything else in the template.
+- The pod template also carries `pyo.dev/tunnel-gate-version`
+  (`system::TUNNEL_GATE_VERSION`, now `1`). Bump it when the gate's
+  question or answer changes. That changes the hash, so connectors get
+  the new agent image.
+- On each apply the agent reads the live Deployment. It keeps the live
+  gate image when the template with that image has the same hash as the
+  live one, and the connector's pods show the image starts: at least one
+  pod's `tunnel-gate` has an image id (it was pulled), and none waits
+  with `ErrImagePull`, `ImagePullBackOff`, `InvalidImageName` or
+  `ErrImageNeverPull`.
+- Otherwise it writes its own image: a first install, an update from
+  0.51.0 (no gate yet, it rolls once), a template change, or an old
+  image that can't be pulled.
+- An old image gone from both the node and the registry is caught the
+  same way. A new pod that can't pull it waits in `ImagePullBackOff`,
+  the old pods keep serving (`maxUnavailable: 0`), and the next
+  heartbeat writes the agent's own image. Agent release images on
+  ghcr.io stay pullable: every tag from 0.1.0 to 0.51.0 still resolved
+  on 2026-11-26.
+- An agent with no Deployment of its own (run outside the cluster)
+  keeps a live gate it can reuse, and adds none otherwise.
+
+**Access.** The gate needs no Kubernetes permission.
+
+- The pod has no service account token
+  (`automountServiceAccountToken: false`), and the gate never calls the
+  Kubernetes API.
+- The agent already reads pods cluster-wide (`pyo-agent-read`) and
+  already writes Services and Deployments in pyo-system
+  (`pyo-agent-write`). No role and no admission policy rule changed, so
+  `agentAccess` is the same and nothing here needs the connect command.
+- The agent's answer says only whether an address is a trusted
+  connector's. It takes no other input and changes nothing.
+- On the cluster Pyo runs on, the `pyo-agent` network policy
+  (`deploy/k8s/platform.yaml`) lets only `pyo-tunnel` pods reach port
+  8092. k3s's network policy controller can take a few seconds to learn
+  a new pod. The gate just asks again.
+- On other clusters pyo-system has no ingress policy, so any pod can ask.
+
+**Not verified yet.** That Envoy Gateway's status plus 2 s means every
+proxy has the address is reasoning, not a measurement.
+`scripts/update-traffic-e2e.sh` has to show 0 responses with 403 during a
+connector rollout.
 
 ### 7.4 Heartbeat
 
@@ -1149,7 +1274,8 @@ when in tunnel mode, warning tone when degraded or down.
 | Origin certificate revoked by hand | 502 from cloudflared | Rotate issues a new one. Issue failures shown on the status line |
 | Agent too old (no `tunnel` capability) | Choice greyed out | "Not reported yet." |
 | Cluster install older than the agent | Tunnel mode refused, or a running connector kept as it is | "Run the command under Refresh this cluster…" (see Decisions) |
-| New cloudflared pod not yet trusted | Its requests get 403 for a few seconds | Pod watch updates the policy |
+| New cloudflared pod not yet trusted | Nothing: cloudflared hasn't started, the other connectors serve | The pod's gate waits until the agent says its address is in effect (§7.3) |
+| Agent down while a connector pod starts | The pod waits 120 s, then starts untrusted. On switched domains its requests get 403 until the agent is back | The agent's watch trusts it as soon as the agent runs |
 | Record conflict | Switch stops at "confirm" | User replaces or cancels |
 | Cloudflare 429 or 5xx | Pass retried later | Backoff per team |
 
@@ -1324,7 +1450,10 @@ sentences, no semicolons, no dash-joined clauses.
   certificate. Mixed service (one tunnel, one direct domain). Pod IP change
   rewrites only the client policies.
 - **pyo-agent `tunnel.rs`**: Secret label → report, Deployment applied
-  only with matching Secret, `TunnelRemove` deletes all three objects.
+  only with matching Secret, `TunnelRemove` deletes all its objects. A new
+  address is written at once and a gone one late, the gate's answer
+  follows Envoy Gateway's status, and the init container gives up in
+  time (§7.3).
 - **Heartbeat N/N-1**: a reply without `tunnel` leaves the connector, an
   old heartbeat without `tunnel` parses.
 
@@ -1596,9 +1725,9 @@ Where things are:
   switching and reverting records, certificates, health, removal, the
   snapshot's `tunnel`.
 - `cloudflare/tunnel_ops.rs`: the ops and `GET /clusters/{id}/tunnel`.
-- `crates/pyo-agent/src/tunnel.rs`: the connector, its report, trusted
-  pod addresses. `gateway.rs`: tunnel routes, policies, public ports
-  Service.
+- `crates/pyo-agent/src/tunnel.rs`: the connector, its report, the watch
+  on its pods, trusted pod addresses and the start gate (§7.3).
+  `gateway.rs`: tunnel routes, policies, public ports Service.
 - `crates/pyo-proto/src/system.rs` (Cloudflare Tunnel section), `rbac.rs`
   (origin and public ports Services, `tunnel` client policies).
 

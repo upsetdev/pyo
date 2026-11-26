@@ -227,8 +227,10 @@ spec:
         - { port: 8090 }
 ---
 # The agent: its relay, for each server's figures from Vector, from any
-# server. Nothing else comes in (its registry door is only on clusters
-# Pyo doesn't run on).
+# server, and a new Cloudflare Tunnel connector asking whether the tunnel
+# trusts its address yet (pyo-tunnel's init container; it asks again until
+# this policy knows its pod). Nothing else comes in (its registry door is
+# only on clusters Pyo doesn't run on).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -245,6 +247,11 @@ spec:
             matchLabels: { app.kubernetes.io/name: pyo-vector }
       ports:
         - { port: 8089 }
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: pyo-tunnel }
+      ports:
+        - { port: 8092 }
 ---
 # ── Image registry: in the cluster only (pyo-registry:5000), for Pyo's
 # door and its own clean-up; on the node as 127.0.0.1:5005 through pyo-host
