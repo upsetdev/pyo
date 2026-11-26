@@ -4023,6 +4023,92 @@ mod tests {
         );
     }
 
+    /// Writes the gateway objects of a cluster before and after each kind
+    /// of firewall and WAF change, one JSON file (a list of objects) per
+    /// state, into `PYO_DRAIN_SCENARIOS`, for
+    /// `scripts/gateway-drain-check.sh`: it translates each with Envoy
+    /// Gateway's `egctl` and says which changes alter a listener's HTTP
+    /// filters (which drops its open connections).
+    #[test]
+    #[ignore]
+    fn drain_scenarios() {
+        use pyo_proto::firewall::{FirewallRule, RateLimit};
+        use pyo_proto::rules::{Header, HeaderRules, HeaderSet, Redirect};
+        let dir = std::env::var("PYO_DRAIN_SCENARIOS").expect("PYO_DRAIN_SCENARIOS");
+        let rule = |id: &str, action: &str, source: &str| FirewallRule {
+            id: id.into(),
+            action: action.into(),
+            operator: "in".into(),
+            sources: if source.is_empty() { vec![] } else { vec![source.into()] },
+            limit: (action == "rateLimit").then(|| RateLimit { requests: 100, per: "minute".into() }),
+        };
+        let waf = |mode: &str| pyo_proto::Waf {
+            settings: pyo_proto::WafSettings { mode: mode.into(), level: 1, ..Default::default() },
+            rules: vec![],
+        };
+        // Another service on the same proxies, as it is throughout: its
+        // WAF on and an address rule.
+        let mut other = spec(vec![domain("blog.example.com", "http", "letsencrypt", false), domain("blog-plain.example.com", "http", "", false)]);
+        other.service.service_id = "svc_blog".into();
+        other.service.namespace = "blog".into();
+        other.waf = Some(waf("block"));
+        other.firewall = Some(Firewall { rules: vec![rule("fwr_o", "block", "198.51.100.0/24")], ..Default::default() });
+        let shop = |f: &dyn Fn(&mut DeploySpec)| {
+            let mut s = spec(vec![domain("shop.example.com", "http", "letsencrypt", false), domain("plain.example.com", "http", "", false)]);
+            f(&mut s);
+            s
+        };
+        let fw = |rules: Vec<FirewallRule>| move |s: &mut DeploySpec| s.firewall = Some(Firewall { rules: rules.clone(), ..Default::default() });
+        let limited = rule("fwr_r", "rateLimit", "");
+        let mut limited_more = limited.clone();
+        limited_more.limit = Some(RateLimit { requests: 200, per: "minute".into() });
+        let states: Vec<(&str, DeploySpec)> = vec![
+            ("base", shop(&|_| {})),
+            ("ip_rule", shop(&fw(vec![rule("fwr_1", "block", "203.0.113.0/24")]))),
+            ("ip_rule_changed", shop(&fw(vec![rule("fwr_1", "block", "203.0.113.7/32")]))),
+            ("country_rule", shop(&fw(vec![rule("fwr_2", "block", "RU")]))),
+            ("rate_limit", shop(&fw(vec![limited.clone()]))),
+            ("rate_limit_changed", shop(&fw(vec![limited_more]))),
+            ("all_rules", shop(&fw(vec![rule("fwr_1", "block", "203.0.113.0/24"), rule("fwr_2", "block", "RU"), limited.clone()]))),
+            ("redirect", shop(&|s| s.domains[0].redirects = vec![Redirect { path: "/old".into(), to_path: "/new".into(), status: 301, ..Default::default() }])),
+            ("waf_block", shop(&|s| s.waf = Some(waf("block")))),
+            ("waf_log", shop(&|s| s.waf = Some(waf("log")))),
+            ("header_rule", shop(&|s| {
+                s.domains[0].headers = HeaderRules {
+                    response: HeaderSet { set: vec![Header { name: "X-Frame-Options".into(), value: "DENY".into() }], remove: vec![] },
+                    request: HeaderSet::default(),
+                }
+            })),
+            ("domain_added", shop(&|s| {
+                s.domains.push(domain("shop2.example.com", "http", "letsencrypt", false));
+                s.domains.push(domain("plain2.example.com", "http", "", false));
+            })),
+            ("service_added", shop(&|_| {})),
+        ];
+        // A third service, new on the cluster, with a plain HTTP domain.
+        let mut added = spec(vec![domain("new.example.com", "http", "", false)]);
+        added.service.service_id = "svc_new".into();
+        added.service.namespace = "new".into();
+        let fixed = vec![
+            system::gateway_class(),
+            system::envoy_proxy("geoip", true),
+            system::http_gateway(),
+            system::waf_backend(),
+            system::client_policy(false, system::WebSettings::default()),
+            system::client_policy(true, system::WebSettings::default()),
+        ];
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, s) in states {
+            let mut objects = fixed.clone();
+            objects.extend(route_objects(&other).objects);
+            objects.extend(route_objects(&s).objects);
+            if name == "service_added" {
+                objects.extend(route_objects(&added).objects);
+            }
+            std::fs::write(format!("{dir}/{name}.json"), serde_json::to_string_pretty(&objects).unwrap()).unwrap();
+        }
+    }
+
     /// An install older than the agent refuses the WAF's mode override and
     /// the idle rate limit: they're written as it had them, and nothing
     /// else changes.
