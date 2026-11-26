@@ -87,6 +87,31 @@ pub fn split_url(raw: &str) -> (String, String, Vec<String>, Vec<String>) {
     (path.clone(), format!("{path}?{}", parts.join("&")), keys, redacted)
 }
 
+/// A URL as a team's query string setting keeps it: "names" keeps the
+/// parameters' names only ("/a?token&page"), "none" drops the query ("/a"),
+/// anything else ("keep", or "" from a Pyo before teams chose) keeps it as
+/// it is. For a URL `split_url` made (sensitive values already redacted),
+/// and again when Pyo reads one.
+pub fn shape_url(url: &str, query_strings: &str) -> String {
+    let Some((path, query)) = url.split_once('?') else {
+        return url.to_owned();
+    };
+    match query_strings {
+        "none" => path.to_owned(),
+        "names" => {
+            let mut keys: Vec<&str> = vec![];
+            for kv in query.split('&').filter(|kv| !kv.is_empty()) {
+                let k = kv.split_once('=').map(|(k, _)| k).unwrap_or(kv);
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+            if keys.is_empty() { path.to_owned() } else { format!("{path}?{}", keys.join("&")) }
+        }
+        _ => url.to_owned(),
+    }
+}
+
 /// Whether a query parameter's values are never kept (by its name, any case).
 pub fn sensitive(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
@@ -557,8 +582,16 @@ pub struct TrafficContext {
     pub ports: BTreeMap<String, (String, u16)>,
     /// Service id -> its firewall.
     pub firewalls: BTreeMap<String, crate::firewall::Firewall>,
-    /// The installation's IP setting: "none", "anonymized" or "full".
+    /// What's kept of visitors' addresses: "none", "anonymized" or "full"
+    /// (the team's setting within the installation's limit).
     pub ip_mode: String,
+    /// What's kept of query strings: "keep", "names" or "none" (the team's
+    /// setting within the installation's limit). Empty from a Pyo before
+    /// teams chose: kept.
+    pub query_strings: String,
+    /// No requests or connections are kept here (the team turned request
+    /// logs or observability off). Totals still go to Pyo.
+    pub request_logs_off: bool,
     /// The team's limits on what's kept here.
     pub max_mb: u64,
     pub max_days: u32,
@@ -1006,6 +1039,20 @@ mod tests {
         assert_eq!(limits_from(&json!({})), (DEFAULT_MAX_MB, DEFAULT_MAX_DAYS));
         assert_eq!(limits_from(&json!({ "requestLogs": { "maxMb": 5, "maxDays": 90 } })), (100, 31));
         assert_eq!(limits_from(&json!({ "requestLogs": { "maxMb": 2048, "maxDays": 3 } })), (2048, 3));
+    }
+
+    #[test]
+    fn query_strings_as_the_team_keeps_them() {
+        let url = "/a?token=[redacted]&page=2&page=3&flag";
+        assert_eq!(shape_url(url, "keep"), url);
+        assert_eq!(shape_url(url, ""), url, "a Pyo before teams chose");
+        assert_eq!(shape_url(url, "names"), "/a?token&page&flag");
+        assert_eq!(shape_url(url, "none"), "/a");
+        assert_eq!(shape_url("/a", "names"), "/a");
+        assert_eq!(shape_url("/a?", "names"), "/a");
+        // A context from a Pyo before teams chose keeps what it kept.
+        let old: TrafficContext = serde_json::from_value(json!({ "ipMode": "full", "maxMb": 1024, "maxDays": 7 })).unwrap();
+        assert_eq!((old.query_strings.as_str(), old.request_logs_off), ("", false));
     }
 
     /// The query rides in a command tagged by `kind`.

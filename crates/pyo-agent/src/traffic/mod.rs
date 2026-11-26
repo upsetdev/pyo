@@ -3,8 +3,9 @@
 //!
 //! Vector posts the gateway's access log lines here, inside the cluster.
 //! Each line is cleaned (clean.rs: redaction, country, salted visitor
-//! hash, the IP setting), kept in hourly files on this pod's small volume
-//! (files.rs, capped by the team's size and age limits), and added to
+//! hash, the team's IP and query string settings), kept in hourly files
+//! on this pod's small volume (files.rs, capped by the team's size and age
+//! limits, and not at all while its request logs are off), and added to
 //! per-minute totals (agg.rs). The agent takes the finished totals and sends
 //! them to Pyo as its own signed requests; it brings Pyo's context (which
 //! hosts and ports are services', firewalls, limits) and Pyo's queries for
@@ -193,10 +194,13 @@ impl Store {
                 agg.add(c);
             }
         }
-        // Rows by kind and hour, one gzip member each.
+        // Rows by kind and hour, one gzip member each. With request logs
+        // off, only the WAF's findings: requests and connections are
+        // counted in the totals and not kept.
         let mut groups: std::collections::BTreeMap<(&str, i64), String> = Default::default();
         for c in &cleaned {
             let (kind, at, json) = match c {
+                Cleaned::Request { .. } | Cleaned::Connection { .. } if ctx.request_logs_off => continue,
                 Cleaned::Request { row, .. } => ("requests", row.at, serde_json::to_string(row)),
                 Cleaned::Connection { row, .. } => ("connections", row.at, serde_json::to_string(row)),
                 Cleaned::Waf { row, .. } => ("waf", row.at, serde_json::to_string(row)),
@@ -415,6 +419,17 @@ mod tests {
         // With Pyo's context: other hosts aren't kept.
         *s.ctx.write().unwrap() = Some(TrafficContext { ip_mode: "full".into(), ..Default::default() });
         assert_eq!(s.ingest(line("/", 200).as_bytes(), now), 0);
+        // Request logs off: counted, not kept.
+        let mut ctx = TrafficContext { request_logs_off: true, ..Default::default() };
+        ctx.hosts.insert("a.example".into(), "svc_1".into());
+        *s.ctx.write().unwrap() = Some(ctx);
+        let before = s.files.query(&TrafficQuery { rows: "requests".into(), limit: 10, ..Default::default() }).rows.len();
+        assert_eq!(s.ingest(line("/off", 200).as_bytes(), now), 1);
+        let after = s.files.query(&TrafficQuery { rows: "requests".into(), limit: 10, ..Default::default() });
+        assert_eq!(after.rows.len(), before, "not kept");
+        assert!(after.rows.iter().all(|r| r["path"] != "/off"));
+        s.tick(now + 180_000);
+        assert_eq!(s.pending(10)[0]["batch"]["hosts"][0]["requests"], 1, "still counted");
         let _ = std::fs::remove_dir_all(&d);
     }
 
