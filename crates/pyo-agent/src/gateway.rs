@@ -643,6 +643,38 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
 
 pub use system::WAF_ANNOTATION;
 
+/// Said in the deploy's log when the install refuses a route policy for
+/// being older than this agent ([`older_form`]).
+pub const OLDER_INSTALL: &str = "This cluster's install is older than Pyo's. Run the command under Refresh this cluster in the cluster's settings. Until then WebSockets don't open on services with the WAF on, and firewall changes can drop open connections.";
+
+/// A route policy as an install older than this agent's admission policy
+/// takes it (before 0.51.1), for when that refuses it: the WAF's without
+/// `allowModeOverride` (WebSockets wait, as before), the idle rate limit
+/// left out. `Some(None)`: no such object there. `None`: no older form.
+fn older_form(o: &Value) -> Option<Option<Value>> {
+    match o["kind"].as_str()? {
+        "EnvoyExtensionPolicy"
+            if o["spec"]["extProc"][0]["processingMode"]
+                .get("allowModeOverride")
+                .is_some() =>
+        {
+            let mut o = o.clone();
+            o["spec"]["extProc"][0]["processingMode"]
+                .as_object_mut()?
+                .remove("allowModeOverride");
+            Some(Some(o))
+        }
+        "BackendTrafficPolicy"
+            if o["spec"]["rateLimit"] == pyo_proto::firewall::idle_rate_limit() =>
+        {
+            let mut o = o.clone();
+            o["spec"].as_object_mut()?.remove("rateLimit");
+            Some(o["spec"].get("responseOverride").is_some().then_some(o))
+        }
+        _ => None,
+    }
+}
+
 /// Which of Pyo Gateway's rules this agent writes
 /// ([`pyo_proto::Capabilities::gateway_rules`]).
 pub const RULES: u8 = 2;
@@ -1003,8 +1035,21 @@ pub async fn apply(
         };
         let tunnel_policy = kind == "ClientTrafficPolicy"
             && o["metadata"]["labels"][system::CDN_LABEL] == system::TUNNEL_CDN;
+        let older = older_form(o);
         match written {
             Ok(()) => {}
+            // An install older than this agent: the object as it had it,
+            // and it's said.
+            Err(e) if older.is_some() && crate::refused::is_refusal(&e) => {
+                tracing::warn!(error = %e, kind = %kind, name = %name, "the install is older than the agent: written as it had it");
+                if !notes.iter().any(|n| n == OLDER_INSTALL) {
+                    notes.push(OLDER_INSTALL.into());
+                }
+                let Some(Some(older)) = older else { continue };
+                api.patch(&name, &pp(), &Patch::Apply(&older))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{kind} {name}: {e}"))?;
+            }
             // An install older than this agent doesn't know the tunnel's
             // policy: the rest of the routes still go on, and it's said.
             Err(e) if tunnel_policy && crate::refused::is_refusal(&e) => {
@@ -3976,6 +4021,42 @@ mod tests {
                 && o["metadata"]["name"] == "shop-web-redirect"),
             "the redirect to HTTPS stays open"
         );
+    }
+
+    /// An install older than the agent refuses the WAF's mode override and
+    /// the idle rate limit: they're written as it had them, and nothing
+    /// else changes.
+    #[test]
+    fn older_installs_get_the_policies_as_they_had_them() {
+        let mut s = spec(vec![domain("shop.example.com", "http", "", false)]);
+        s.waf = Some(pyo_proto::Waf {
+            settings: pyo_proto::WafSettings {
+                mode: "block".into(),
+                level: 1,
+                ..Default::default()
+            },
+            rules: vec![],
+        });
+        let r = route_objects(&s);
+        let eep = find(&r, "EnvoyExtensionPolicy", "shop-web-http-http");
+        let older = older_form(eep).unwrap().unwrap();
+        let mut want = eep.clone();
+        want["spec"]["extProc"][0]["processingMode"] =
+            json!({ "request": { "body": "BufferedPartial", "attributes": ["source.address"] } });
+        assert_eq!(older, want);
+        // The message stays, the idle rate limit goes.
+        let btp = find(&r, "BackendTrafficPolicy", "shop-web-http-http");
+        let older = older_form(btp).unwrap().unwrap();
+        assert!(older["spec"].get("rateLimit").is_none());
+        assert_eq!(older["spec"]["responseOverride"], system::firewall_response_override());
+        // On a tailnet route that's all it has: none there.
+        let tn = json!({ "kind": "BackendTrafficPolicy", "spec": { "targetRefs": [], "rateLimit": pyo_proto::firewall::idle_rate_limit() } });
+        assert_eq!(older_form(&tn), Some(None));
+        // A real rate limit, and the open authorization, have no older form.
+        let mut limited = btp.clone();
+        limited["spec"]["rateLimit"] = json!({ "type": "Local", "local": { "rules": [] } });
+        assert_eq!(older_form(&limited), None);
+        assert_eq!(older_form(find(&r, "SecurityPolicy", "shop-web-http-http")), None);
     }
 
     #[test]
