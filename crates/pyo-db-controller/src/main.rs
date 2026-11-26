@@ -5,8 +5,8 @@
 //! ```text
 //! PYO_DB_POSTGRES_IMAGE     Postgres image repository; the version is the tag (ghcr.io/cloudnative-pg/postgresql)
 //! PYO_DB_POSTGRES_IMAGE_<major>  Pyo's Postgres image for that version (16, 17, 18), used instead
-//! PYO_DB_VALKEY_IMAGE       Valkey image repository (ghcr.io/upsetdev/pyo/mirror/valkey/valkey)
-//! PYO_DB_VALKEY_BUNDLE_IMAGE  Valkey 8.1 with its modules, run while a Database loads any (ghcr.io/upsetdev/pyo/mirror/valkey/valkey-bundle:8.1.12@sha256:...)
+//! PYO_DB_VALKEY_IMAGE       Valkey image repository (ghcr.io/upsetdev/pyo-mirror/valkey/valkey)
+//! PYO_DB_VALKEY_BUNDLE_IMAGE  Valkey 8.1 with its modules, run while a Database loads any (ghcr.io/upsetdev/pyo-mirror/valkey/valkey-bundle:8.1.12@sha256:...)
 //! PYO_DB_PYO_KV_IMAGE       pyo-kv image (ghcr.io/upsetdev/pyo-kv:latest)
 //! PYO_DB_MYSQL_IMAGE        MySQL 8.4's mysqld image (ghcr.io/cybozu-go/moco/mysql:8.4.10.1)
 //! PYO_DB_DEFAULT_POSTGRES   version when a Database doesn't say (18)
@@ -44,7 +44,7 @@ use tokio::io::AsyncWriteExt;
 /// valkey-bundle 8.1.12 (Valkey 8.1.12 with valkey-json 1.0.3, valkey-bloom
 /// 1.0.1 and valkey-search 1.0.3), the multi-platform index, from Pyo's
 /// mirror (deploy/mirrors.txt).
-const VALKEY_BUNDLE: &str = "ghcr.io/upsetdev/pyo/mirror/valkey/valkey-bundle:8.1.12@sha256:ca9d1c30a6b3c30de34691ff5ddff6fb77f5c8c727a63723c62d8ebd280e7921";
+const VALKEY_BUNDLE: &str = "ghcr.io/upsetdev/pyo-mirror/valkey/valkey-bundle:8.1.12@sha256:ca9d1c30a6b3c30de34691ff5ddff6fb77f5c8c727a63723c62d8ebd280e7921";
 
 fn env(k: &str, def: &str) -> String {
     std::env::var(k)
@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
                         .map(|v| (m.to_string(), v))
                 })
                 .collect(),
-            valkey_repo: env("PYO_DB_VALKEY_IMAGE", "ghcr.io/upsetdev/pyo/mirror/valkey/valkey"),
+            valkey_repo: env("PYO_DB_VALKEY_IMAGE", "ghcr.io/upsetdev/pyo-mirror/valkey/valkey"),
             valkey_bundle: env("PYO_DB_VALKEY_BUNDLE_IMAGE", VALKEY_BUNDLE),
             pyo_kv: env("PYO_DB_PYO_KV_IMAGE", "ghcr.io/upsetdev/pyo-kv:latest"),
             mysql_84: env(

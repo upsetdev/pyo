@@ -1,7 +1,7 @@
 name: Mirror images
 
 # Copies the third-party images Pyo runs (deploy/mirrors.txt) to
-# ghcr.io/upsetdev/pyo/mirror, so installs never pull from Docker Hub,
+# ghcr.io/upsetdev/pyo-mirror, so installs never pull from Docker Hub,
 # whose anonymous pulls are rate limited (scripts/mirror-images.sh). Each
 # copy keeps every platform and the source's digest, and is checked
 # against it. Nothing is rebuilt, and the mirrors aren't signed: Pyo

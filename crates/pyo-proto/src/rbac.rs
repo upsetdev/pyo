@@ -2523,7 +2523,7 @@ mod tests {
                 objects(true),
                 self_update_objects()
             ])),
-            "d0b4b36254d0ae62"
+            "23f5a5f8c4118bbd"
         );
     }
 
@@ -2562,7 +2562,7 @@ mod tests {
         // code pins are part of the rules, Pyo's mirrors of them too).
         let text = json!(policy)
             .to_string()
-            .replace("ghcr.io/upsetdev/pyo/mirror/", "");
+            .replace("ghcr.io/upsetdev/pyo-mirror/", "");
         assert!(
             !text.contains("ghcr.io/upsetdev/") && !text.contains("127.0.0.1:5005"),
             "{text}"

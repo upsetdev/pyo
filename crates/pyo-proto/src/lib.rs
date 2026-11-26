@@ -2707,16 +2707,16 @@ pub const BACKUP_DB_USER: &str = "pyo_backup";
 /// already has it. All come from Pyo's mirror (deploy/mirrors.txt), pinned.
 pub fn db_tools_image(engine: &str) -> &'static str {
     match engine {
-        "postgres" => "ghcr.io/upsetdev/pyo/mirror/postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b",
-        "mysql" => "ghcr.io/upsetdev/pyo/mirror/mysql:8.4@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00",
-        "mariadb" => "ghcr.io/upsetdev/pyo/mirror/mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc",
-        "mongo" => "ghcr.io/upsetdev/pyo/mirror/mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01",
-        _ => "ghcr.io/upsetdev/pyo/mirror/valkey/valkey:8.0@sha256:fcb69dfef81599baefeee6cdd0b8339b61b7983a8ee08d307e44844db5bd7047",
+        "postgres" => "ghcr.io/upsetdev/pyo-mirror/postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b",
+        "mysql" => "ghcr.io/upsetdev/pyo-mirror/mysql:8.4@sha256:8c233bad33d520a7aae1c1e619c3a9775f4a1ba2d463d692fada04ec7f40be00",
+        "mariadb" => "ghcr.io/upsetdev/pyo-mirror/mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc",
+        "mongo" => "ghcr.io/upsetdev/pyo-mirror/mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01",
+        _ => "ghcr.io/upsetdev/pyo-mirror/valkey/valkey:8.0@sha256:fcb69dfef81599baefeee6cdd0b8339b61b7983a8ee08d307e44844db5bd7047",
     }
 }
 
 /// restic, pinned, from Pyo's mirror (deploy/mirrors.txt).
-pub const RESTIC_IMAGE: &str = "ghcr.io/upsetdev/pyo/mirror/restic/restic:0.17.3@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a";
+pub const RESTIC_IMAGE: &str = "ghcr.io/upsetdev/pyo-mirror/restic/restic:0.17.3@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a";
 
 /// One step of a rollout, posted as it happens.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -3409,7 +3409,7 @@ mod release_tests {
             .map(|src| {
                 let path = src.split_once('/').unwrap().1;
                 let path = path.strip_prefix("library/").unwrap_or(path);
-                format!("ghcr.io/upsetdev/pyo/mirror/{path}")
+                format!("ghcr.io/upsetdev/pyo-mirror/{path}")
             })
             .collect();
         let mut images: Vec<&str> = ["postgres", "mysql", "mariadb", "mongo", "valkey"]
@@ -3638,6 +3638,109 @@ mod release_tests {
             collect_env(d, SANDBOX_DESKTOP_ENV, &mut refs);
         }
         assert_eq!(refs, vec!["__SANDBOX_DESKTOP_REF__".to_string()]);
+    }
+
+    /// The release this tree would publish, as scripts/release-manifest.ts
+    /// writes it: deploy/k8s's manifests with Pyo's images pinned under
+    /// ghcr.io/upsetdev/pyo/, and the sandbox overrides left empty.
+    fn release_of_this_tree() -> Release {
+        let tag = format!("0.0.0@sha256:{D}");
+        let ours = |n: &str| format!("ghcr.io/upsetdev/pyo/{n}:{tag}");
+        let manifests = |text: &str| -> Vec<serde_json::Value> {
+            let text = text
+                .replace("__IMAGES__/", "ghcr.io/upsetdev/pyo/")
+                .replace("__TAG__", &tag)
+                .replace("__SANDBOX_BASE_REF__", "")
+                .replace("__SANDBOX_DESKTOP_REF__", "");
+            for left in ["__IMAGES__", "__TAG__", "__SANDBOX_"] {
+                assert!(!text.contains(left), "a manifest still has {left}");
+            }
+            text.split("\n---")
+                .filter_map(|d| serde_norway::from_str::<serde_json::Value>(d).ok())
+                .filter(|d| d.is_object())
+                .collect()
+        };
+        Release {
+            version: "0.0.0".into(),
+            images: ReleaseImages {
+                pyo: ours("pyo"),
+                agent: ours("agent"),
+                builder: ours("builder"),
+                flows: ours("flows"),
+                waf: ours("waf"),
+                geoip: ours("geoip"),
+                db_controller: ours("db-controller"),
+                kv: ours("kv"),
+                pyo_static: ours("static"),
+                mysql_operator: ours("mysql-operator"),
+                mysql_backup: ours("mysql-backup"),
+                postgres16: format!("ghcr.io/upsetdev/pyo/postgres:16-{tag}"),
+                postgres17: format!("ghcr.io/upsetdev/pyo/postgres:17-{tag}"),
+                postgres18: format!("ghcr.io/upsetdev/pyo/postgres:18-{tag}"),
+                sandbox_base: format!("ghcr.io/upsetdev/pyo-sandbox-images/base@sha256:{D}"),
+                sandbox_desktop: format!("ghcr.io/upsetdev/pyo-sandbox-images/desktop@sha256:{D}"),
+            },
+            manifests: ReleaseManifests {
+                platform: manifests(include_str!("../../../deploy/k8s/platform.yaml")),
+                pyo: manifests(include_str!("../../../deploy/k8s/pyo.yaml")),
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Installed Pyos check a release with their own rule before they
+    /// update to it, and can't be changed once shipped. Every Pyo from
+    /// 0.1.0 to 0.51.0 refuses a release whose manifests use an image
+    /// under ghcr.io/upsetdev/pyo/ that the release doesn't pin. So the
+    /// release this tree makes must pass that rule. cargo test runs in CI
+    /// and in the release workflow's first job, before anything is
+    /// published.
+    #[test]
+    fn installed_pyos_accept_the_release_this_tree_makes() {
+        let r = release_of_this_tree();
+        assert!(r.manifests.platform.len() > 3 && r.manifests.pyo.len() > 1);
+        let problems = r.problems();
+        assert!(
+            problems.is_empty(),
+            "Installed Pyos would refuse to update to this release:\n{}",
+            problems.join("\n")
+        );
+        // v0.51.0's rule as it shipped, kept here as is: a change to
+        // problems() mustn't hide what installed Pyos refuse.
+        let pinned: Vec<&str> = r.images.all().iter().map(|(_, i)| *i).collect();
+        let mut images = vec![];
+        for o in r.manifests.platform.iter().chain(&r.manifests.pyo) {
+            collect_images(o, &mut images);
+        }
+        let refused: Vec<&String> = images
+            .iter()
+            .filter(|i| i.starts_with("ghcr.io/upsetdev/pyo/") && !pinned.contains(&i.as_str()))
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "Pyo 0.51.0 would refuse to update to this release. These images are under \
+             ghcr.io/upsetdev/pyo/ but aren't Pyo's own: {refused:?}. Third-party images \
+             go under ghcr.io/upsetdev/pyo-mirror/ (deploy/mirrors.txt)."
+        );
+        // The manifests do use the mirror, so the rule had something to see.
+        assert!(
+            images
+                .iter()
+                .any(|i| i.starts_with("ghcr.io/upsetdev/pyo-mirror/")),
+            "{images:?}"
+        );
+        // And a mirror under Pyo's own prefix is refused.
+        let mut bad = r.clone();
+        bad.manifests.platform.push(json!({ "kind": "Pod", "spec": { "containers": [{
+            "name": "x", "image": format!("ghcr.io/upsetdev/pyo/mirror/registry:3.1.2@sha256:{D}"),
+        }] } }));
+        assert!(
+            bad.problems()
+                .iter()
+                .any(|p| p.contains("pyo/mirror/registry") && p.contains("isn't one of")),
+            "{:?}",
+            bad.problems()
+        );
     }
 
     #[test]
