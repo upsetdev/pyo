@@ -23,14 +23,15 @@
 # fast    restarts each part in turn, with a quiet gap between: Envoy, the
 #         WAF, the tunnel connector, Envoy Gateway's controller, the agent
 #         and pyo-tailnet (kubectl rollout restart). Then it changes a
-#         firewall rule and a domain, and restarts k3s. About 20 minutes.
+#         firewall rule and a domain, and restarts k3s. About 15 minutes,
+#         20 with 2 servers.
 # update  updates the install to the dev build with this branch's
 #         install.sh, and waits until every rollout is over. The dev build
 #         is the one scripts/pyo-up.sh pushed to the local registry
 #         (PYO_IMAGES, default 127.0.0.1:5005/pyo): --dev-tag names its
 #         tag, the newest one otherwise. It isn't signed, so only the
 #         signature check is left out. One server only. Needs bun and
-#         docker. About 30 minutes.
+#         docker. About 10 minutes.
 #
 # A watcher on the server logs every pod that starts, turns ready, stops
 # or goes away, so each failure is matched to the rollouts running then.
