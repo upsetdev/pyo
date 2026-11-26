@@ -13,6 +13,7 @@ export const Route = createFileRoute("/_app/$team/settings")({
 const TITLES: Record<string, string> = {
   "/settings": "Settings",
   "/settings/billing": "Billing",
+  "/settings/observability": "Observability",
 };
 
 function SettingsLayout() {

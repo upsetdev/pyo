@@ -1,15 +1,17 @@
 import { useState } from "react";
 import { Button } from "~/components/ui/Button";
-import { Field, optionClass, Select, Switch } from "~/components/ui/Field";
+import { Field, Select, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
 import { api, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import { REQUEST_LOG_MAX_DAYS } from "~/lib/pyo/requestLogs";
-import type { IpMode, Retention } from "~/lib/pyo/types";
+import { withinLimit } from "~/lib/pyo/teamObservability";
+import type { IpMode, QueryStrings, Retention } from "~/lib/pyo/types";
 
 // Observability on or off (installation-wide; a new install on a small
-// server starts with it off), what web analytics keeps of visitors' IP
-// addresses, for every team, and how long analytics, metrics and build
+// server starts with it off), the defaults and limits teams choose within
+// for visitors' IP addresses and query strings (each team picks in Team ›
+// Settings › Observability), and how long analytics, metrics and build
 // logs are kept (a team can keep its analytics shorter in its settings).
 // Countries, cities and unique visitors work in every mode: they're worked
 // out when each request comes in, then the address is dropped or kept.
@@ -17,20 +19,26 @@ import type { IpMode, Retention } from "~/lib/pyo/types";
 export const MODES: { value: IpMode; label: string; hint: string }[] = [
   {
     value: "none",
-    label: "Don't store IP addresses",
+    label: "Don't store",
     hint: "Recommended. Keeps nothing that identifies a visitor.",
   },
   {
     value: "anonymized",
-    label: "Store them anonymized",
+    label: "Anonymized",
     hint: "Last part removed.",
   },
   {
     value: "full",
-    label: "Store full IP addresses",
+    label: "Full",
     // Addresses stay with the requests on each cluster, never longer.
     hint: `Kept with each team's request logs, up to ${REQUEST_LOG_MAX_DAYS} days. May need consent under laws like GDPR.`,
   },
+];
+
+const QUERY_STRINGS: { value: QueryStrings; label: string }[] = [
+  { value: "keep", label: "Keep" },
+  { value: "names", label: "Names only" },
+  { value: "none", label: "Don't keep" },
 ];
 
 export function ObservabilitySettingsSection() {
@@ -65,38 +73,21 @@ export function ObservabilitySettingsSection() {
           />
         </div>
       </Panel>
-      <Panel description={note}>
-        <div
-          role="radiogroup"
-          aria-label="Visitor IP addresses"
-          className="space-y-2 p-4"
-        >
-          {MODES.map((m) => (
-            <label
-              key={m.value}
-              className={`${optionClass({ selected: current === m.value })} flex items-start gap-3 px-4 py-3 focus-within:border-primary focus-within:ring-[3px] focus-within:ring-primary/20 ${admin ? "cursor-pointer" : "cursor-not-allowed opacity-80"}`}
-            >
-              <input
-                type="radio"
-                name="ip-mode"
-                className="mt-0.5"
-                checked={current === m.value}
-                disabled={!admin}
-                onChange={async () => {
-                  if (await api.saveObservabilitySettings(m.value))
-                    toast({ title: m.label });
-                }}
-              />
-              <span>
-                <span className="block text-[13px] font-medium">{m.label}</span>
-                <span className="block text-[12px] text-muted-foreground">
-                  {m.hint}
-                </span>
-              </span>
-            </label>
-          ))}
-        </div>
-      </Panel>
+      <VisitorsPanel
+        key={JSON.stringify([
+          current,
+          s.observabilitySettings.maxIpMode,
+          s.observabilitySettings.queryStrings,
+          s.observabilitySettings.maxQueryStrings,
+        ])}
+        saved={{
+          ipMode: current,
+          maxIpMode: s.observabilitySettings.maxIpMode ?? current,
+          queryStrings: s.observabilitySettings.queryStrings ?? "keep",
+          maxQueryStrings: s.observabilitySettings.maxQueryStrings ?? "keep",
+        }}
+        admin={admin}
+      />
       <RetentionPanel
         key={JSON.stringify(retention)}
         saved={retention}
@@ -104,6 +95,82 @@ export function ObservabilitySettingsSection() {
         note={note}
       />
     </div>
+  );
+}
+
+type Visitors = {
+  ipMode: IpMode;
+  maxIpMode: IpMode;
+  queryStrings: QueryStrings;
+  maxQueryStrings: QueryStrings;
+};
+
+/** What teams keep of visitors: a default, and the most a team may pick. */
+function VisitorsPanel({ saved, admin }: { saved: Visitors; admin: boolean }) {
+  const [v, setV] = useState(saved);
+  const dirty = (Object.keys(saved) as (keyof Visitors)[]).some(
+    (k) => v[k] !== saved[k],
+  );
+  const ipError = withinLimit(v.ipMode, v.maxIpMode)
+    ? undefined
+    : "The default can't be above the limit.";
+  const queryError = withinLimit(v.queryStrings, v.maxQueryStrings)
+    ? undefined
+    : "The default can't be above the limit.";
+  const select = <K extends keyof Visitors>(
+    key: K,
+    options: { value: Visitors[K]; label: string }[],
+    p: { id: string },
+  ) => (
+    <Select
+      {...p}
+      value={v[key]}
+      disabled={!admin}
+      onChange={(e) => setV({ ...v, [key]: e.target.value as Visitors[K] })}
+    >
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </Select>
+  );
+  const limitHint = MODES.find((m) => m.value === v.maxIpMode)?.hint;
+  return (
+    <Panel title="Visitors" description="Teams choose within these limits.">
+      <div className="grid gap-4 p-4 sm:grid-cols-2">
+        <Field label="IP addresses: default" error={ipError}>
+          {(p) => select("ipMode", MODES, p)}
+        </Field>
+        <Field label="IP addresses: limit" hint={limitHint}>
+          {(p) => select("maxIpMode", MODES, p)}
+        </Field>
+        <Field
+          label="Query strings: default"
+          hint="Passwords and tokens are always hidden."
+          error={queryError}
+        >
+          {(p) => select("queryStrings", QUERY_STRINGS, p)}
+        </Field>
+        <Field label="Query strings: limit">
+          {(p) => select("maxQueryStrings", QUERY_STRINGS, p)}
+        </Field>
+      </div>
+      {admin ? (
+        <div className="flex justify-end border-t border-border px-4 py-3">
+          <Button
+            size="sm"
+            disabled={!dirty || !!ipError || !!queryError}
+            onClick={async () => {
+              if (await api.saveObservabilitySettings(v))
+                toast({ title: "Visitor settings saved" });
+            }}
+          >
+            Save changes
+          </Button>
+        </div>
+      ) : null}
+    </Panel>
   );
 }
 

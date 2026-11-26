@@ -1,5 +1,6 @@
 import {
   BellIcon,
+  ChartLineUpIcon,
   CubeIcon,
   PulseIcon,
   CloudArrowUpIcon,
@@ -118,6 +119,7 @@ export const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
     label: "Team",
     items: [
       { label: "Settings", href: "/settings", icon: SlidersHorizontalIcon, exact: true },
+      { label: "Observability", href: "/settings/observability", icon: ChartLineUpIcon },
       { label: "Members", href: "/members", icon: UsersIcon },
       { label: "Notifications", href: "/notifications", icon: BellIcon },
       { label: "Audit log", href: "/audit-log", icon: ListMagnifyingGlassIcon, admin: true },

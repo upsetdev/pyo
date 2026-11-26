@@ -72,6 +72,7 @@ import type {
   Project,
   Registry,
   RegistryLogin,
+  QueryStrings,
   Retention,
   SecuritySettings,
   AdminSignIn,
@@ -159,7 +160,11 @@ export type PyoState = {
    */
   observabilitySettings: {
     enabled: boolean;
+    /** The default for teams that didn't choose, and the most a team may choose. */
     ipMode?: IpMode;
+    maxIpMode?: IpMode;
+    queryStrings?: QueryStrings;
+    maxQueryStrings?: QueryStrings;
     small?: boolean | null;
     retention?: Retention;
   };
@@ -2760,11 +2765,68 @@ export const api = {
   startUpdate(version: string) {
     return send<{ id: string }>("startUpdate", { version });
   },
-  saveObservabilitySettings(ipMode: IpMode) {
+  /** Defaults and limits for teams' IP address and query string settings (the installation's admin). */
+  saveObservabilitySettings(input: {
+    ipMode: IpMode;
+    maxIpMode: IpMode;
+    queryStrings: QueryStrings;
+    maxQueryStrings: QueryStrings;
+  }) {
     update((s) => {
-      s.observabilitySettings.ipMode = ipMode;
+      Object.assign(s.observabilitySettings, input);
     });
-    return send("saveObservabilitySettings", { ipMode });
+    return send("saveObservabilitySettings", input);
+  },
+  /** A team's observability (owners and admins). Request log limits and analytics months too. */
+  setTeamObservability(
+    teamId: string,
+    change: {
+      enabled?: boolean;
+      requestLogs?: boolean;
+      ipMode?: IpMode;
+      queryStrings?: QueryStrings;
+      requestLogMaxMb?: number;
+      requestLogMaxDays?: number;
+      /** Null: as long as the installation. */
+      analyticsMonths?: number | null;
+    },
+  ) {
+    update((s) => {
+      const t = s.teams.find((x) => x.id === teamId);
+      if (!t) return;
+      if (change.enabled !== undefined) t.observabilityOn = change.enabled;
+      if (change.requestLogs !== undefined) t.requestLogsOn = change.requestLogs;
+      if (change.ipMode) t.ipMode = change.ipMode;
+      if (change.queryStrings) t.queryStrings = change.queryStrings;
+      if (t.observability)
+        t.observability = {
+          ...t.observability,
+          ...(change.enabled !== undefined ? { on: change.enabled } : {}),
+          ...(change.requestLogs !== undefined
+            ? { requestLogs: change.requestLogs }
+            : {}),
+          ...(change.ipMode ? { ipMode: change.ipMode } : {}),
+          ...(change.queryStrings ? { queryStrings: change.queryStrings } : {}),
+        };
+      if (change.requestLogMaxMb || change.requestLogMaxDays) {
+        const was = t.preferences.requestLogs ?? { maxMb: 1024, maxDays: 7 };
+        t.preferences.requestLogs = {
+          maxMb: change.requestLogMaxMb ?? was.maxMb,
+          maxDays: change.requestLogMaxDays ?? was.maxDays,
+        };
+      }
+      if (change.analyticsMonths !== undefined)
+        t.analyticsMonths = change.analyticsMonths;
+    });
+    return send("setTeamObservability", {
+      teamId,
+      ...change,
+      // 0: as long as the installation.
+      analyticsMonths:
+        change.analyticsMonths === undefined
+          ? undefined
+          : (change.analyticsMonths ?? 0),
+    });
   },
   /** How long the installation keeps observability data (its admin). */
   saveRetentionSettings(retention: Retention) {

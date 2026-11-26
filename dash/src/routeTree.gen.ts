@@ -96,6 +96,7 @@ import { Route as AppTeamSandboxesNewRouteImport } from './routes/_app/$team/san
 import { Route as AppTeamSandboxesTemplatesRouteImport } from './routes/_app/$team/sandboxes/templates'
 import { Route as AppTeamSettingsIndexRouteImport } from './routes/_app/$team/settings/index'
 import { Route as AppTeamSettingsBillingRouteImport } from './routes/_app/$team/settings/billing'
+import { Route as AppTeamSettingsObservabilityRouteImport } from './routes/_app/$team/settings/observability'
 import { Route as AppTeamProjectIdServiceIdIndexRouteImport } from './routes/_app/$team/$projectId_/$serviceId/index'
 import { Route as AppTeamProjectIdServiceIdAnalyticsRouteImport } from './routes/_app/$team/$projectId_/$serviceId/analytics'
 import { Route as AppTeamProjectIdServiceIdDeploymentsRouteImport } from './routes/_app/$team/$projectId_/$serviceId/deployments'
@@ -591,6 +592,12 @@ const AppTeamSettingsBillingRoute = AppTeamSettingsBillingRouteImport.update({
   path: '/billing',
   getParentRoute: () => AppTeamSettingsRoute,
 } as any)
+const AppTeamSettingsObservabilityRoute =
+  AppTeamSettingsObservabilityRouteImport.update({
+    id: '/observability',
+    path: '/observability',
+    getParentRoute: () => AppTeamSettingsRoute,
+  } as any)
 const AppTeamProjectIdServiceIdIndexRoute =
   AppTeamProjectIdServiceIdIndexRouteImport.update({
     id: '/',
@@ -929,6 +936,7 @@ export interface FileRoutesByFullPath {
   '/$team/sandboxes/new': typeof AppTeamSandboxesNewRoute
   '/$team/sandboxes/templates': typeof AppTeamSandboxesTemplatesRoute
   '/$team/settings/billing': typeof AppTeamSettingsBillingRoute
+  '/$team/settings/observability': typeof AppTeamSettingsObservabilityRoute
   '/$team/$projectId/': typeof AppTeamProjectIdIndexRoute
   '/$team/builders/': typeof AppTeamBuildersIndexRoute
   '/$team/certificates/': typeof AppTeamCertificatesIndexRoute
@@ -1049,6 +1057,7 @@ export interface FileRoutesByTo {
   '/$team/sandboxes/new': typeof AppTeamSandboxesNewRoute
   '/$team/sandboxes/templates': typeof AppTeamSandboxesTemplatesRoute
   '/$team/settings/billing': typeof AppTeamSettingsBillingRoute
+  '/$team/settings/observability': typeof AppTeamSettingsObservabilityRoute
   '/$team/$projectId': typeof AppTeamProjectIdIndexRoute
   '/$team/builders': typeof AppTeamBuildersIndexRoute
   '/$team/certificates': typeof AppTeamCertificatesIndexRoute
@@ -1183,6 +1192,7 @@ export interface FileRoutesById {
   '/_app/$team/sandboxes/new': typeof AppTeamSandboxesNewRoute
   '/_app/$team/sandboxes/templates': typeof AppTeamSandboxesTemplatesRoute
   '/_app/$team/settings/billing': typeof AppTeamSettingsBillingRoute
+  '/_app/$team/settings/observability': typeof AppTeamSettingsObservabilityRoute
   '/_app/$team/$projectId/': typeof AppTeamProjectIdIndexRoute
   '/_app/$team/builders/': typeof AppTeamBuildersIndexRoute
   '/_app/$team/certificates/': typeof AppTeamCertificatesIndexRoute
@@ -1315,6 +1325,7 @@ export interface FileRouteTypes {
     | '/$team/sandboxes/new'
     | '/$team/sandboxes/templates'
     | '/$team/settings/billing'
+    | '/$team/settings/observability'
     | '/$team/$projectId/'
     | '/$team/builders/'
     | '/$team/certificates/'
@@ -1435,6 +1446,7 @@ export interface FileRouteTypes {
     | '/$team/sandboxes/new'
     | '/$team/sandboxes/templates'
     | '/$team/settings/billing'
+    | '/$team/settings/observability'
     | '/$team/$projectId'
     | '/$team/builders'
     | '/$team/certificates'
@@ -1568,6 +1580,7 @@ export interface FileRouteTypes {
     | '/_app/$team/sandboxes/new'
     | '/_app/$team/sandboxes/templates'
     | '/_app/$team/settings/billing'
+    | '/_app/$team/settings/observability'
     | '/_app/$team/$projectId/'
     | '/_app/$team/builders/'
     | '/_app/$team/certificates/'
@@ -2241,6 +2254,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamSettingsBillingRouteImport
       parentRoute: typeof AppTeamSettingsRoute
     }
+    '/_app/$team/settings/observability': {
+      id: '/_app/$team/settings/observability'
+      path: '/observability'
+      fullPath: '/$team/settings/observability'
+      preLoaderRoute: typeof AppTeamSettingsObservabilityRouteImport
+      parentRoute: typeof AppTeamSettingsRoute
+    }
     '/_app/$team/$projectId_/$serviceId/': {
       id: '/_app/$team/$projectId_/$serviceId/'
       path: '/'
@@ -2601,11 +2621,13 @@ const AppTeamObservabilityRouteWithChildren =
 
 interface AppTeamSettingsRouteChildren {
   AppTeamSettingsBillingRoute: typeof AppTeamSettingsBillingRoute
+  AppTeamSettingsObservabilityRoute: typeof AppTeamSettingsObservabilityRoute
   AppTeamSettingsIndexRoute: typeof AppTeamSettingsIndexRoute
 }
 
 const AppTeamSettingsRouteChildren: AppTeamSettingsRouteChildren = {
   AppTeamSettingsBillingRoute: AppTeamSettingsBillingRoute,
+  AppTeamSettingsObservabilityRoute: AppTeamSettingsObservabilityRoute,
   AppTeamSettingsIndexRoute: AppTeamSettingsIndexRoute,
 }
 

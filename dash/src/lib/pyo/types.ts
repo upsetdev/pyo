@@ -31,6 +31,17 @@ export type Team = {
   analyticsMonths?: number | null;
   /** The longest the team may keep its analytics, in months (the installation's). */
   analyticsMonthsLimit?: number;
+  /** The team's own observability choices. Null: on, or the installation's default. */
+  observabilityOn?: boolean | null;
+  requestLogsOn?: boolean | null;
+  ipMode?: IpMode | null;
+  queryStrings?: QueryStrings | null;
+  /** The installation's defaults for teams that didn't choose. */
+  observabilityDefaults?: { ipMode: IpMode; queryStrings: QueryStrings };
+  /** The most a team may choose (the installation's). */
+  observabilityLimits?: { ipMode: IpMode; queryStrings: QueryStrings };
+  /** What applies to the team now: its choices within the limits. */
+  observability?: TeamObservability;
   /** Members must use two-factor authentication to open the team. */
   requireTwoFactor?: boolean;
   /** What the audit log keeps of addresses. */
@@ -2271,8 +2282,21 @@ export type PublicDashboard = {
 // ── Integrations ───────────────────────────────────────────────────────────
 
 /** A team's login for a private container registry (the password stays on the server). */
-/** What web analytics keeps of a visitor's IP address (installation-wide). */
+/** What web analytics keeps of a visitor's IP address (each team's, within the installation's limit). */
 export type IpMode = "none" | "anonymized" | "full";
+
+/** What request logs and analytics keep of query strings: names and values, names only, or nothing. */
+export type QueryStrings = "keep" | "names" | "none";
+
+/** What applies to a team's observability now. */
+export type TeamObservability = {
+  /** Its servers collect analytics, request logs and usage history. */
+  on: boolean;
+  /** Its servers keep its requests. */
+  requestLogs: boolean;
+  ipMode: IpMode;
+  queryStrings: QueryStrings;
+};
 
 /** How long this installation keeps observability data. */
 export type Retention = {
