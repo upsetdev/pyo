@@ -81,7 +81,9 @@ fn pods() -> Value {
         "envoyGateway": { "version": system::ENVOY_GATEWAY_VERSION, "image": system::ENVOY_GATEWAY_IMAGE },
         "proxies": proxies,
         "waf": system::waf_daemonset("<waf>", "<geoip>")["spec"]["template"],
-        "tunnel": system::tunnel_deployment(system::CLOUDFLARED_IMAGE, "<token hash>")["spec"]["template"],
+        // The gate keeps the agent image it runs while the rest of the
+        // template stays (tunnel.rs): a new agent image alone isn't a change.
+        "tunnel": system::tunnel_deployment(system::CLOUDFLARED_IMAGE, Some("<agent>"), "<token hash>")["spec"]["template"],
     }))
 }
 

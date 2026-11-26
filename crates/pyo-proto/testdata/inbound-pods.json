@@ -3,6 +3,10 @@
     {
       "date": "2026-11-25",
       "note": "First record. The GeoIP image is tagged with its database's date and the WAF image with a hash of its sources, so both get a new reference once."
+    },
+    {
+      "date": "2026-11-26",
+      "note": "Tunnel connector: trust gate and 20 s grace"
     }
   ],
   "pods": {
@@ -178,7 +182,9 @@
     "tunnel": {
       "metadata": {
         "annotations": {
-          "pyo.dev/token-hash": "<token hash>"
+          "pyo.dev/token-hash": "<token hash>",
+          "pyo.dev/tunnel-gate-version": "1",
+          "pyo.dev/tunnel-template": "d301e92b84b141bc"
         },
         "labels": {
           "app.kubernetes.io/name": "pyo-tunnel"
@@ -212,6 +218,8 @@
               "--no-autoupdate",
               "--protocol",
               "http2",
+              "--grace-period",
+              "20s",
               "--metrics",
               "0.0.0.0:2000",
               "--loglevel",
@@ -267,6 +275,47 @@
             }
           }
         ],
+        "initContainers": [
+          {
+            "args": [
+              "tunnel-gate"
+            ],
+            "env": [
+              {
+                "name": "RUST_LOG",
+                "value": "pyo_agent=info"
+              },
+              {
+                "name": "POD_IPS",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "status.podIPs"
+                  }
+                }
+              }
+            ],
+            "image": "<agent>",
+            "name": "tunnel-gate",
+            "resources": {
+              "limits": {
+                "memory": "64Mi"
+              },
+              "requests": {
+                "cpu": "5m",
+                "memory": "16Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true
+            }
+          }
+        ],
         "securityContext": {
           "runAsNonRoot": true,
           "runAsUser": 65532,
@@ -274,6 +323,7 @@
             "type": "RuntimeDefault"
           }
         },
+        "terminationGracePeriodSeconds": 35,
         "topologySpreadConstraints": [
           {
             "labelSelector": {
