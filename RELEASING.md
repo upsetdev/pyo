@@ -774,6 +774,13 @@ BuildKit, Postgres, ClickHouse, Garage, Vector, curl, cloudflared, restic,
 the database client tools, Valkey, and Envoy Gateway's chart, controller
 and Envoy.
 
+- The mirror is outside `ghcr.io/upsetdev/pyo/` on purpose. Installed
+  Pyos (0.1.0 to 0.51.0) refuse a release whose manifests use an image
+  under that prefix that the release doesn't pin, and the mirrors aren't
+  pinned there. The test `installed_pyos_accept_the_release_this_tree_makes`
+  (`crates/pyo-proto/src/lib.rs`) builds the release from
+  `deploy/k8s` and runs that rule. It runs with `cargo test` in CI and in
+  the release workflow's first job, before anything is published.
 - `deploy/mirrors.txt` lists each source by tag and digest. The mirror's
   path is the source's without its registry and `library/`.
   `docker.io/library/registry:3.1.2@sha256:…` becomes
