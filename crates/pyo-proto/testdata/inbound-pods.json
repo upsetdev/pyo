@@ -7,11 +7,15 @@
     {
       "date": "2026-11-26",
       "note": "Tunnel connector: trust gate and 20 s grace"
+    },
+    {
+      "date": "2026-11-27",
+      "note": "Third-party images move to the ghcr.io/upsetdev/pyo-mirror/ path, digests unchanged"
     }
   ],
   "pods": {
     "envoyGateway": {
-      "image": "ghcr.io/upsetdev/pyo/mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f",
+      "image": "ghcr.io/upsetdev/pyo-mirror/envoyproxy/gateway:v1.9.3@sha256:192fc9bdadb6d2462e8cf7bd702ce3dd9648f3310c6038787448a1f509b7cd9f",
       "version": "v1.9.3"
     },
     "images": {
@@ -41,7 +45,7 @@
         "kubernetes": {
           "envoyDaemonSet": {
             "container": {
-              "image": "ghcr.io/upsetdev/pyo/mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:9d84a586119a27b50437dbb01eccd4722832741539b1ed53c8e9d6da6067a6e0",
+              "image": "ghcr.io/upsetdev/pyo-mirror/envoyproxy/envoy:distroless-v1.39.5@sha256:9d84a586119a27b50437dbb01eccd4722832741539b1ed53c8e9d6da6067a6e0",
               "resources": {
                 "limits": {
                   "memory": "512Mi"
@@ -184,7 +188,7 @@
         "annotations": {
           "pyo.dev/token-hash": "<token hash>",
           "pyo.dev/tunnel-gate-version": "1",
-          "pyo.dev/tunnel-template": "d301e92b84b141bc"
+          "pyo.dev/tunnel-template": "76e6879d43aeebc6"
         },
         "labels": {
           "app.kubernetes.io/name": "pyo-tunnel"
@@ -237,7 +241,7 @@
                 }
               }
             ],
-            "image": "ghcr.io/upsetdev/pyo/mirror/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba",
+            "image": "ghcr.io/upsetdev/pyo-mirror/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba",
             "livenessProbe": {
               "failureThreshold": 6,
               "httpGet": {
