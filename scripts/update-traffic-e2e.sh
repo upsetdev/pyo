@@ -3,6 +3,7 @@
 # Pyo Gateway (Envoy), the WAF and the tunnel connector.
 #
 #   scripts/update-traffic-e2e.sh fast   [--servers 2] [--out DIR] [--keep]
+#   scripts/update-traffic-e2e.sh fast   --dev [--dev-tag TAG] [--out DIR] [--keep]
 #   scripts/update-traffic-e2e.sh update [--dev-tag TAG] [--out DIR] [--keep]
 #
 # It makes its own throwaway multipass VMs (zd-e2e-1, zd-e2e-2), installs a
@@ -24,7 +25,10 @@
 #         WAF, the tunnel connector, Envoy Gateway's controller, the agent
 #         and pyo-tailnet (kubectl rollout restart). Then it changes a
 #         firewall rule and a domain, and restarts k3s. About 15 minutes,
-#         20 with 2 servers.
+#         20 with 2 servers. With --dev it first updates to the dev build,
+#         as update does, and sends traffic only once that's over: the
+#         restarts are then the dev build's. One server only, and it needs
+#         bun and docker too. About 10 minutes more.
 # update  updates the install to the dev build with this branch's
 #         install.sh, and waits until every rollout is over. The dev build
 #         is the one scripts/pyo-up.sh pushed to the local registry
@@ -70,7 +74,7 @@ VM1=zd-e2e-1 VM2=zd-e2e-2
 
 MODE=${1:-}
 [ $# -eq 0 ] || shift
-SERVERS=1 KEEP="" OUT="" GAP=30 RATE=10 FROM=0.51.0 DEV_TAG=""
+SERVERS=1 KEEP="" OUT="" GAP=30 RATE=10 FROM=0.51.0 DEV_TAG="" DEV=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --servers) SERVERS=${2:?--servers takes 1 or 2}; shift 2 ;;
@@ -80,6 +84,7 @@ while [ $# -gt 0 ]; do
     --rate) RATE=${2:?--rate takes a number}; shift 2 ;;
     --from) FROM=${2:?--from takes a version}; FROM=${FROM#v}; shift 2 ;;
     --dev-tag) DEV_TAG=${2:?--dev-tag takes a tag}; shift 2 ;;
+    --dev) DEV=1; shift ;;
     *) echo "Unknown option: $1 (see the top of scripts/update-traffic-e2e.sh)" >&2; exit 2 ;;
   esac
 done
@@ -88,8 +93,9 @@ case "$MODE" in
   *) echo "Usage: update-traffic-e2e.sh fast|update [--servers 2] [--out DIR] [--keep]" >&2; exit 2 ;;
 esac
 case "$SERVERS" in 1 | 2) ;; *) echo "--servers takes 1 or 2." >&2; exit 2 ;; esac
-if [ "$MODE" = update ] && [ "$SERVERS" != 1 ]; then
-  echo "update runs on one server: a second one can't pull the dev build without Tailscale." >&2
+[ "$MODE" != update ] || DEV=1
+if [ -n "$DEV" ] && [ "$SERVERS" != 1 ]; then
+  echo "The dev build runs on one server: a second one can't pull it without Tailscale." >&2
   exit 2
 fi
 
@@ -103,7 +109,7 @@ indent() { sed -u -e 's/^\(  Password: \).*/\1(hidden)/' -e 's/^/          | /';
 rand() { head -c 5 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
 need="multipass python3 curl jq"
-[ "$MODE" != update ] || need="$need bun docker"
+[ -z "$DEV" ] || need="$need bun docker"
 for tool in $need; do
   command -v "$tool" >/dev/null || die "$tool is missing. Install it and run this again."
 done
@@ -566,7 +572,7 @@ update() {
 say "update-traffic-e2e: $MODE, $SERVERS server$([ "$SERVERS" = 1 ] || echo s), from Pyo $FROM"
 # The release Pyo is installed from, read before anything is made.
 curl -fsSL --proto '=https' -m 60 -o "$DIR/from.json" "$RELEASES/v$FROM/release.json" || die "There's no Pyo $FROM release to install."
-[ "$MODE" != update ] || prepare_update
+[ -z "$DEV" ] || prepare_update
 
 launch "$VM1" 3G
 [ "$SERVERS" = 1 ] || launch "$VM2" 2G
@@ -589,6 +595,15 @@ if [ -n "$IP2" ]; then
   wait_for 300 "Envoy runs on both servers" envoy_on_both || die "Envoy didn't start on $VM2."
 fi
 deploy
+if [ "$MODE" = fast ] && [ -n "$DEV" ]; then
+  # The dev build first, with no traffic: the restarts below are its own.
+  vm "$VM1" mkdir -p /var/tmp/e2e
+  send "$PY" /var/tmp/e2e/e2e.py
+  push_build
+  say "Updating Pyo $FROM to the dev build, before the traffic starts"
+  run_update || die "The update to the dev build didn't finish."
+  note "Pyo runs $(kc -n pyo-system get deployment pyo -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/@.*//')"
+fi
 start_watch
 [ "$MODE" != update ] || push_build
 start_load
