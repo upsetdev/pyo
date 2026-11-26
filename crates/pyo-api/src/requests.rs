@@ -4,7 +4,9 @@
 //! (`QueryTraffic`), up to 500 at a time, and passes them on without
 //! keeping them: the command's row, with the answer, is deleted once read.
 //! The request explorer, its live tail, and the latest refusals and
-//! findings on the firewall's and WAF's pages read them here.
+//! findings on the firewall's and WAF's pages read them here. Addresses and
+//! query strings are shown as the team's settings keep them now
+//! (teamobs.rs), also for rows a cluster kept before they changed.
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -15,7 +17,8 @@ use serde_json::{Value, json};
 use crate::{
     AppState, deploy,
     error::{ApiError, ApiResult},
-    observability::{IpMode, LogFilter},
+    observability::LogFilter,
+    teamobs::Effective,
 };
 
 /// How long a cluster gets to answer.
@@ -114,15 +117,34 @@ pub async fn ask_all(
     (rows, more, failed)
 }
 
+/// A kept URL as the team's query string setting shows it.
+fn url_of(r: &Value, team: &Effective) -> String {
+    pyo_proto::traffic::shape_url(r["url"].as_str().unwrap_or(""), team.query_strings.as_str())
+}
+
+/// A kept address as the team's IP setting shows it.
+fn ip_of(r: &Value, team: &Effective) -> String {
+    team.ip_mode.apply(r["ip"].as_str().unwrap_or(""))
+}
+
 /// A kept request as the request log shows it.
-fn request_row(r: &Value, mode: IpMode) -> Value {
+fn request_row(r: &Value, team: &Effective) -> Value {
     json!({
-        "at": r["at"], "host": r["host"], "method": r["method"], "path": r["path"], "url": r["url"],
+        "at": r["at"], "host": r["host"], "method": r["method"], "path": r["path"], "url": url_of(r, team),
         "status": r["status"], "durationMs": r["durationMs"].as_f64().unwrap_or(0.0).round(), "bytes": r["bytes"],
         "country": r["country"], "referrer": r["referrer"], "device": r["device"], "browser": r["browser"],
         "userAgent": r["userAgent"], "server": r["server"], "blockedBy": r["blockedBy"],
-        "ip": mode.apply(r["ip"].as_str().unwrap_or("")),
+        "ip": ip_of(r, team),
     })
+}
+
+/// What the request log answers for a team that turned observability off:
+/// its servers keep no requests meanwhile.
+pub fn team_off() -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Observability is off for this team. An owner or admin can turn it on in Settings › Observability.",
+    )
 }
 
 fn range_ms(range: &str) -> i64 {
@@ -151,6 +173,10 @@ pub async fn access_logs(
     if !obs.enabled().await {
         return Err(crate::observability::off());
     }
+    let team = obs.team(team_id).await;
+    if !team.on {
+        return Err(team_off());
+    }
     let now = pyo_proto::now_ms();
     let since = now - range_ms(&f.range);
     let before = if f.before > 0 { f.before } else { now + 1 };
@@ -172,9 +198,8 @@ pub async fn access_logs(
         .iter()
         .map(|(id, (name, hosts))| (id.clone(), name.clone(), TrafficQuery { hosts: hosts.clone(), ..base.clone() }))
         .collect();
-    let mode = obs.current_ip_mode().await;
     let (mut rows, mut more, failed) = ask_all(s, asks, limit).await;
-    let mut logs: Vec<Value> = rows.drain(..).map(|r| request_row(&r, mode)).collect();
+    let mut logs: Vec<Value> = rows.drain(..).map(|r| request_row(&r, &team)).collect();
     // What Pyo kept itself before 0.5 (self-hosted), older than the clusters' rows.
     if obs.has_legacy().await && path.as_deref().unwrap_or("").is_empty() {
         let legacy = LogFilter { before, limit: limit as u32, ..f.clone() };
@@ -200,7 +225,9 @@ pub async fn access_logs(
     Ok(json!({
         "logs": logs,
         "next": next,
-        "ipMode": mode,
+        "ipMode": team.ip_mode,
+        "queryStrings": team.query_strings,
+        "requestLogs": team.request_logs,
         "summary": summary,
         "unavailable": failed.iter().map(|(name, why)| json!({ "cluster": name, "error": why })).collect::<Vec<_>>(),
     }))
@@ -211,9 +238,13 @@ pub async fn access_logs(
 /// connections to its ports, from its cluster. Best effort: empty, with
 /// `recentError`, when the cluster can't answer.
 pub async fn blocked_recent(s: &AppState, service_id: &str, range: &str, out: &mut Value) -> ApiResult<()> {
-    let Some((cluster, hosts, ports)) = service_targets(s, service_id).await? else {
+    let Some((team_id, cluster, hosts, ports)) = service_targets(s, service_id).await? else {
         return Ok(());
     };
+    let team = s.observability.team(&team_id).await;
+    if !team.on {
+        return Ok(());
+    }
     let since = pyo_proto::now_ms() - range_ms(range);
     let mut asks = vec![];
     if !hosts.is_empty() {
@@ -223,10 +254,9 @@ pub async fn blocked_recent(s: &AppState, service_id: &str, range: &str, out: &m
         asks.push((cluster.clone(), String::new(), TrafficQuery { rows: "connections".into(), ports, outcome: Some("blocked".into()), since_ms: since, limit: 500, ..Default::default() }));
     }
     let (rows, _, failed) = ask_all(s, asks, 500).await;
-    let mode = s.observability.current_ip_mode().await;
     let mut by_ip: BTreeMap<String, (String, f64)> = BTreeMap::new();
     for r in &rows {
-        let ip = mode.apply(r["ip"].as_str().unwrap_or(""));
+        let ip = ip_of(r, &team);
         if ip.is_empty() {
             continue;
         }
@@ -243,11 +273,11 @@ pub async fn blocked_recent(s: &AppState, service_id: &str, range: &str, out: &m
             "at": r["at"], "serviceId": service_id,
             "kind": if website { "website".to_owned() } else { r["protocol"].as_str().unwrap_or("tcp").to_lowercase() },
             "target": if website { r["host"].clone() } else { json!(r["port"].to_string()) },
-            "ip": mode.apply(r["ip"].as_str().unwrap_or("")), "country": r["country"],
+            "ip": ip_of(r, &team), "country": r["country"],
             "rule": if website { r["blockedBy"].clone() } else { r["rule"].clone() },
         })
     }).collect::<Vec<_>>());
-    out["ipMode"] = json!(mode);
+    out["ipMode"] = json!(team.ip_mode);
     if let Some((_, why)) = failed.first() {
         out["recentError"] = json!(why);
     }
@@ -257,19 +287,19 @@ pub async fn blocked_recent(s: &AppState, service_id: &str, range: &str, out: &m
 /// The WAF's latest findings for a service, and their busiest sources
 /// (among the latest 500), from its cluster.
 pub async fn waf_recent(s: &AppState, service_id: &str, range: &str, out: &mut Value) -> ApiResult<()> {
-    let Some((cluster, hosts, _)) = service_targets(s, service_id).await? else {
+    let Some((team_id, cluster, hosts, _)) = service_targets(s, service_id).await? else {
         return Ok(());
     };
-    if hosts.is_empty() {
+    let team = s.observability.team(&team_id).await;
+    if hosts.is_empty() || !team.on {
         return Ok(());
     }
     let since = pyo_proto::now_ms() - range_ms(range);
     let q = TrafficQuery { rows: "waf".into(), hosts, services: vec![service_id.to_owned()], since_ms: since, limit: 500, ..Default::default() };
     let (rows, _, failed) = ask_all(s, vec![(cluster, String::new(), q)], 500).await;
-    let mode = s.observability.current_ip_mode().await;
     let mut by_ip: BTreeMap<String, (String, f64, f64)> = BTreeMap::new();
     for r in &rows {
-        let ip = mode.apply(r["ip"].as_str().unwrap_or(""));
+        let ip = ip_of(r, &team);
         if ip.is_empty() {
             continue;
         }
@@ -281,11 +311,11 @@ pub async fn waf_recent(s: &AppState, service_id: &str, range: &str, out: &mut V
     sources.truncate(50);
     out["sources"] = json!(sources.iter().map(|(ip, (c, nb, nl))| json!({ "ip": ip, "country": c, "blocked": nb, "logged": nl })).collect::<Vec<_>>());
     out["recent"] = json!(rows.iter().take(50).map(|r| json!({
-        "at": r["at"], "serviceId": service_id, "host": r["host"], "method": r["method"], "url": r["url"],
-        "ip": mode.apply(r["ip"].as_str().unwrap_or("")), "country": r["country"], "blocked": r["blocked"],
+        "at": r["at"], "serviceId": service_id, "host": r["host"], "method": r["method"], "url": url_of(r, &team),
+        "ip": ip_of(r, &team), "country": r["country"], "blocked": r["blocked"],
         "rules": r["rules"], "messages": r["messages"], "severity": r["severity"],
     })).collect::<Vec<_>>());
-    out["ipMode"] = json!(mode);
+    out["ipMode"] = json!(team.ip_mode);
     if let Some((_, why)) = failed.first() {
         out["recentError"] = json!(why);
     }
@@ -294,38 +324,38 @@ pub async fn waf_recent(s: &AppState, service_id: &str, range: &str, out: &mut V
 
 /// A service's latest connections to its proxied ports, from its cluster.
 pub async fn connections_recent(s: &AppState, service_id: &str, range: &str, out: &mut Value) -> ApiResult<()> {
-    let Some((cluster, _, ports)) = service_targets(s, service_id).await? else {
+    let Some((team_id, cluster, _, ports)) = service_targets(s, service_id).await? else {
         return Ok(());
     };
-    if ports.is_empty() {
+    let team = s.observability.team(&team_id).await;
+    if ports.is_empty() || !team.on {
         return Ok(());
     }
     let since = pyo_proto::now_ms() - range_ms(range);
     let q = TrafficQuery { rows: "connections".into(), ports, since_ms: since, limit: 50, ..Default::default() };
     let (rows, _, failed) = ask_all(s, vec![(cluster, String::new(), q)], 50).await;
-    let mode = s.observability.current_ip_mode().await;
     out["recent"] = json!(rows.iter().map(|r| json!({
-        "at": r["at"], "port": r["port"], "protocol": r["protocol"], "ip": mode.apply(r["ip"].as_str().unwrap_or("")),
+        "at": r["at"], "port": r["port"], "protocol": r["protocol"], "ip": ip_of(r, &team),
         "country": r["country"], "durationMs": r["durationMs"].as_f64().unwrap_or(0.0).round(),
         "bytesIn": r["bytesIn"], "bytesOut": r["bytesOut"], "outcome": r["outcome"],
     })).collect::<Vec<_>>());
-    out["ipMode"] = json!(mode);
+    out["ipMode"] = json!(team.ip_mode);
     if let Some((_, why)) = failed.first() {
         out["recentError"] = json!(why);
     }
     Ok(())
 }
 
-/// A service's cluster, website hosts and proxied ports' keys.
-async fn service_targets(s: &AppState, service_id: &str) -> ApiResult<Option<(String, Vec<String>, Vec<String>)>> {
-    let row: Option<(String, String, String, Value, Value)> = sqlx::query_as(
-        "SELECT a.cluster_id, p.namespace, a.name, a.spec->'domains', a.spec->'ports'
+/// A service's team, cluster, website hosts and proxied ports' keys.
+async fn service_targets(s: &AppState, service_id: &str) -> ApiResult<Option<(String, String, Vec<String>, Vec<String>)>> {
+    let row: Option<(String, String, String, String, Value, Value)> = sqlx::query_as(
+        "SELECT a.team_id, a.cluster_id, p.namespace, a.name, a.spec->'domains', a.spec->'ports'
            FROM pyo.services a JOIN pyo.projects p ON p.id = a.project_id WHERE a.id = $1",
     )
     .bind(service_id)
     .fetch_optional(&s.db)
     .await?;
-    let Some((cluster, ns, name, domains, ports)) = row else { return Ok(None) };
+    let Some((team_id, cluster, ns, name, domains, ports)) = row else { return Ok(None) };
     let hosts = domains
         .as_array()
         .into_iter()
@@ -333,5 +363,26 @@ async fn service_targets(s: &AppState, service_id: &str) -> ApiResult<Option<(St
         .filter_map(|d| d["hostname"].as_str().map(str::to_lowercase))
         .collect();
     let ports = crate::totals::port_keys(&ns, &name, &ports).into_iter().map(|(k, _)| k).collect();
-    Ok(Some((cluster, hosts, ports)))
+    Ok(Some((team_id, cluster, hosts, ports)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observability::IpMode;
+    use crate::teamobs::QueryStrings;
+
+    /// Rows a cluster kept before the team's settings changed are shown as
+    /// they say now.
+    #[test]
+    fn kept_rows_are_shown_as_the_team_keeps_them_now() {
+        let r = json!({ "at": 1, "host": "shop.example.com", "url": "/a?token=[redacted]&page=2", "ip": "203.0.113.9" });
+        let team = |ip, qs| Effective { ip_mode: ip, query_strings: qs, ..Default::default() };
+        let row = request_row(&r, &team(IpMode::Full, QueryStrings::Keep));
+        assert_eq!((row["url"].as_str(), row["ip"].as_str()), (Some("/a?token=[redacted]&page=2"), Some("203.0.113.9")));
+        let row = request_row(&r, &team(IpMode::Anonymized, QueryStrings::Names));
+        assert_eq!((row["url"].as_str(), row["ip"].as_str()), (Some("/a?token&page"), Some("203.0.113.0")));
+        let row = request_row(&r, &team(IpMode::None, QueryStrings::None));
+        assert_eq!((row["url"].as_str(), row["ip"].as_str()), (Some("/a"), Some("")));
+    }
 }

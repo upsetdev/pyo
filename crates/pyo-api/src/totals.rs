@@ -203,7 +203,10 @@ pub fn port_row(cluster_id: &str, o: &Owner, port: u16, p: &PortTotals) -> Value
 impl Observability {
     /// Stores a batch of a cluster's totals: its services' hosts and ports
     /// only (Pyo's view of them, not the cluster's), minutes from the
-    /// last week. Returns the rows stored.
+    /// last week. Teams with observability off get none stored, and pages
+    /// and query parameter names are kept as each team's query string
+    /// setting says (again: an agent that doesn't know it yet sends them
+    /// all). Returns the rows stored.
     pub async fn ingest_totals(&self, cluster_id: &str, b: &TotalsBatch) -> ApiResult<usize> {
         let Some(ch) = self.store().await else {
             return Ok(0);
@@ -214,6 +217,26 @@ impl Observability {
         let now = pyo_proto::now_ms() / 1000;
         let fresh = |minute: i64| minute % 60 == 0 && minute > now - 7 * 86400 && minute < now + 300;
         let owners = self.owners().await?;
+        let routes = if b.ports.is_empty() { Default::default() } else { self.port_routes().await? };
+        // What applies to each team the batch is about.
+        let mut ids: Vec<String> = b
+            .hosts
+            .iter()
+            .take(MAX_ROWS)
+            .filter_map(|h| {
+                let host = h.host.to_lowercase();
+                match h.service_id.as_str() {
+                    "" => owners.get(&host),
+                    s => owners.get(&crate::observability::path_owner_key(&host, s)),
+                }
+            })
+            .map(|o| o.team_id.clone())
+            .chain(b.ports.iter().take(MAX_ROWS).filter_map(|p| routes.get(&(cluster_id.to_owned(), p.key.clone()))).map(|(o, _)| o.team_id.clone()))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        let settings = self.teams(&ids).await?;
+        let applies = |team: &str| settings.get(team).copied().unwrap_or_default();
         let mut hosts = String::new();
         let mut n = 0;
         let mut teams: Vec<String> = vec![];
@@ -225,7 +248,8 @@ impl Observability {
                 s => owners.get(&crate::observability::path_owner_key(&host, s)),
             };
             let Some(o) = owner.filter(|o| o.cluster_id == cluster_id) else { continue };
-            if !fresh(h.minute) {
+            let team = applies(&o.team_id);
+            if !fresh(h.minute) || !team.on {
                 continue;
             }
             let owner = Owner { team_id: o.team_id.clone(), project_id: o.project_id.clone(), service_id: o.service_id.clone() };
@@ -234,15 +258,15 @@ impl Observability {
             }
             let mut h = h.clone();
             h.host = host;
+            shape_queries(&mut h, team.query_strings);
             hosts.push_str(&host_row(cluster_id, &owner, &h).to_string());
             hosts.push('\n');
             n += 1;
         }
-        let routes = if b.ports.is_empty() { Default::default() } else { self.port_routes().await? };
         let mut ports = String::new();
         for p in b.ports.iter().take(MAX_ROWS) {
             let Some((o, port)) = routes.get(&(cluster_id.to_owned(), p.key.clone())) else { continue };
-            if !fresh(p.minute) {
+            if !fresh(p.minute) || !applies(&o.team_id).on {
                 continue;
             }
             let owner = Owner { team_id: o.team_id.clone(), project_id: o.project_id.clone(), service_id: o.service_id.clone() };
@@ -275,9 +299,26 @@ impl Observability {
     }
 }
 
+/// A host's minute with its pages and query parameter names as the team's
+/// query string setting keeps them.
+pub fn shape_queries(h: &mut HostTotals, q: crate::teamobs::QueryStrings) {
+    use crate::teamobs::QueryStrings;
+    if q == QueryStrings::Keep {
+        return;
+    }
+    if q == QueryStrings::None {
+        h.params.clear();
+    }
+    let mut pages: BTreeMap<String, u64> = BTreeMap::new();
+    for (url, n) in std::mem::take(&mut h.pages) {
+        *pages.entry(t::shape_url(&url, q.as_str())).or_insert(0) += n;
+    }
+    h.pages = pages;
+}
+
 /// Pyo's view of a cluster's traffic for its traffic store: its services'
-/// hosts and proxied ports, their firewalls, the IP setting and the
-/// cluster's team's limits.
+/// hosts and proxied ports, their firewalls, and the cluster's team's
+/// settings (teamobs.rs) and limits.
 pub async fn context(db: &sqlx::PgPool, cluster_id: &str, team_id: &str) -> ApiResult<TrafficContext> {
     let mut tx = db.begin().await?;
     let rows: Vec<(String, String, String, Value, Value)> = sqlx::query_as(
@@ -329,10 +370,12 @@ pub async fn context(db: &sqlx::PgPool, cluster_id: &str, team_id: &str) -> ApiR
     let (mb, days) = t::limits_from(&prefs);
     ctx.max_mb = mb;
     ctx.max_days = days;
-    ctx.ip_mode = serde_json::to_value(crate::observability::ip_mode(db).await?)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "none".into());
+    let team = crate::teamobs::for_team(db, team_id).await?;
+    ctx.ip_mode = crate::teamobs::ip_str(team.ip_mode).to_owned();
+    ctx.query_strings = team.query_strings.as_str().to_owned();
+    // Off, the store is removed; on the cluster Pyo runs on it stays (it
+    // runs with ClickHouse) and keeps nothing either.
+    ctx.request_logs_off = !team.request_logs || !team.on;
     Ok(ctx)
 }
 
@@ -502,6 +545,19 @@ impl Observability {
             rows.iter().map(|r| json!({ key: r["k"], label: num(r, "n") })).collect()
         };
         let path_of = |url: &str| url.split('?').next().unwrap_or(url).to_owned();
+        // Pages and parameter names as the team keeps them now, also those
+        // stored before it chose.
+        let qs = self.team(team_id).await.query_strings;
+        let mut shown: Vec<(String, f64)> = vec![];
+        for r in &pages {
+            let url = t::shape_url(r["k"].as_str().unwrap_or(""), qs.as_str());
+            match shown.iter_mut().find(|p| p.0 == url) {
+                Some(p) => p.1 += num(r, "n"),
+                None => shown.push((url, num(r, "n"))),
+            }
+        }
+        shown.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let params = if qs == crate::teamobs::QueryStrings::None { vec![] } else { params };
         let summary = json!({
             "range": range,
             "requests": requests,
@@ -514,7 +570,7 @@ impl Observability {
             "topPaths": kv(&paths, "path", "requests"),
             "referrers": kv(&refs, "source", "views"),
             "countries": countries.iter().map(|r| json!({ "code": r["k"].as_str().filter(|c| !c.is_empty()).unwrap_or("??"), "requests": num(r, "n") })).collect::<Vec<_>>(),
-            "pages": pages.iter().map(|r| { let url = r["k"].as_str().unwrap_or(""); json!({ "url": url, "path": path_of(url), "views": num(r, "n") }) }).collect::<Vec<_>>(),
+            "pages": shown.iter().map(|(url, n)| json!({ "url": url, "path": path_of(url), "views": n })).collect::<Vec<_>>(),
             "devices": kv(&devices, "label", "views"),
             "browsers": kv(&browsers, "label", "views"),
             "queryParams": params.iter().map(|r| json!({ "key": r["k"], "requests": num(r, "n"), "redacted": t::sensitive(r["k"].as_str().unwrap_or("")) })).collect::<Vec<_>>(),
@@ -887,6 +943,29 @@ impl ClickHouse {
 mod tests {
     use super::*;
 
+    /// Totals from an agent that doesn't know the team's query string
+    /// setting yet are stored as the setting says.
+    #[test]
+    fn pages_and_parameters_as_the_team_keeps_them() {
+        use crate::teamobs::QueryStrings;
+        let mut h = HostTotals::default();
+        h.pages.insert("/a?q=shoes&page=2".into(), 3);
+        h.pages.insert("/a?q=hats".into(), 2);
+        h.pages.insert("/b".into(), 1);
+        h.params.insert("q".into(), 5);
+        let mut keep = h.clone();
+        shape_queries(&mut keep, QueryStrings::Keep);
+        assert_eq!(keep, h);
+        let mut names = h.clone();
+        shape_queries(&mut names, QueryStrings::Names);
+        assert_eq!(names.pages, BTreeMap::from([("/a?q&page".into(), 3), ("/a?q".into(), 2), ("/b".into(), 1)]));
+        assert_eq!(names.params, h.params, "names are kept");
+        let mut none = h.clone();
+        shape_queries(&mut none, QueryStrings::None);
+        assert_eq!(none.pages, BTreeMap::from([("/a".into(), 5), ("/b".into(), 1)]));
+        assert!(none.params.is_empty());
+    }
+
     #[test]
     fn hourly_views_merge_every_column() {
         let s = schema();
@@ -1161,6 +1240,26 @@ mod tests {
             .unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!((stored[0]["host"].as_str(), stored[0]["service_id"].as_str(), stored[0]["n"].as_f64()), (Some(host.as_str()), Some(web.as_str()), Some(5.0)));
+
+        // A team that turned observability off: nothing of it is stored.
+        q("UPDATE pyo.teams SET observability_on = false WHERE id = $1").bind(&team).execute(&pool).await.unwrap();
+        let off = TotalsBatch { id: "b2".into(), hosts: vec![h(&host)], ports: batch.ports.clone(), ..Default::default() };
+        assert_eq!(obs.ingest_totals(&one, &off).await.unwrap(), 0);
+        // Query strings not kept: no parameter names, pages without their
+        // query, also from an agent that sends them.
+        q("UPDATE pyo.teams SET observability_on = NULL, query_strings = 'none' WHERE id = $1").bind(&team).execute(&pool).await.unwrap();
+        let mut with_query = h(&host);
+        with_query.params.insert("q".into(), 5);
+        with_query.pages.insert("/search?q=shoes".into(), 5);
+        let b3 = TotalsBatch { id: "b3".into(), hosts: vec![with_query], ..Default::default() };
+        assert_eq!(obs.ingest_totals(&one, &b3).await.unwrap(), 1);
+        let kept = ch
+            .rows("SELECT sum(requests) AS n, sumMap(params) AS params, sumMap(pages) AS pages FROM pyo_observability.traffic_1m WHERE team_id = {team:String}".into(), vec![("team", team.clone())])
+            .await
+            .unwrap();
+        assert_eq!(kept[0]["n"].as_f64(), Some(10.0), "b1 and b3, not b2");
+        assert_eq!(kept[0]["params"], json!({}));
+        assert_eq!(kept[0]["pages"], json!({ "/search": 5 }));
         q("DELETE FROM pyo.teams WHERE id = $1").bind(&team).execute(&pool).await.unwrap();
     }
 

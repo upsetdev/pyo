@@ -182,7 +182,7 @@ Run them the same way:
 ```bash
 export DATABASE_URL=postgres://postgres:pyo@localhost:5432/pyo
 PYO_SECRET_KEY=$(openssl rand -hex 32) cargo test -p pyo-api --lib -- --ignored \
-  rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests \
+  rls::tests teams_rls_tests teamsec_tests teamobs_tests auth::key_tests auth::invite_tests \
   cloudflare::http_tests admin_sign_in_tests vault::tests
 cargo test -p pyo-api --lib -- --ignored compose_sync::db_tests
 cargo test -p pyo-api --lib -- --ignored tailscale::tests
