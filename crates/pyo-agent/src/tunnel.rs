@@ -174,8 +174,9 @@ async fn here(client: &Client) -> kube::Result<Option<(String, String)>> {
 }
 
 /// The connector's objects, as written for `token`: its hash in the pod
-/// template, so a new token rolls the connector out. With `gate_image`,
-/// the gate ahead of cloudflared and the Service it asks the agent through.
+/// template, so a new token rolls the connector out. With `gate_image`
+/// ([`gate_image`] picks it), the gate ahead of cloudflared and the
+/// Service it asks the agent through.
 fn connector(token: &str, gate_image: Option<&str>) -> [serde_json::Value; 4] {
     [
         system::tunnel_deployment(
@@ -191,7 +192,7 @@ fn connector(token: &str, gate_image: Option<&str>) -> [serde_json::Value; 4] {
 
 /// The agent's own image, for the gate: its Deployment's. None when it
 /// has no Deployment here (an agent run outside the cluster).
-async fn gate_image(client: &Client) -> kube::Result<Option<String>> {
+async fn own_image(client: &Client) -> kube::Result<Option<String>> {
     let own = Api::<Deployment>::namespaced(client.clone(), rbac::NS)
         .get_opt(rbac::AGENT_DEPLOYMENT)
         .await?;
@@ -200,16 +201,102 @@ async fn gate_image(client: &Client) -> kube::Result<Option<String>> {
         .and_then(|pod| pod.containers.into_iter().find(|c| c.name == "agent")?.image))
 }
 
+/// The gate's image in a connector Deployment as it is, and its template's
+/// hash (`system::TUNNEL_TEMPLATE_ANNOTATION`).
+fn live_gate(d: &Deployment) -> Option<(String, String)> {
+    let template = &d.spec.as_ref()?.template;
+    let hash = template
+        .metadata
+        .as_ref()?
+        .annotations
+        .as_ref()?
+        .get(system::TUNNEL_TEMPLATE_ANNOTATION)?
+        .clone();
+    let image = template
+        .spec
+        .as_ref()?
+        .init_containers
+        .as_ref()?
+        .iter()
+        .find(|c| c.name == system::TUNNEL_GATE)?
+        .image
+        .clone()?;
+    Some((image, hash))
+}
+
+/// Whether the connectors' pods show the gate's `image` can start: one of
+/// them ran it (it's pulled, so the registry had it), and none of them
+/// waits because it can't pull it.
+fn gate_pulled(list: &[Pod], image: &str) -> bool {
+    let mut ran = false;
+    for p in list {
+        let has_it = p
+            .spec
+            .as_ref()
+            .and_then(|s| s.init_containers.as_ref())
+            .is_some_and(|cs| {
+                cs.iter()
+                    .any(|c| c.name == system::TUNNEL_GATE && c.image.as_deref() == Some(image))
+            });
+        if !has_it {
+            continue;
+        }
+        let gate = p
+            .status
+            .as_ref()
+            .and_then(|s| s.init_container_statuses.as_ref())
+            .and_then(|cs| cs.iter().find(|c| c.name == system::TUNNEL_GATE));
+        let Some(gate) = gate else { continue };
+        let waiting = gate
+            .state
+            .as_ref()
+            .and_then(|s| s.waiting.as_ref())
+            .and_then(|w| w.reason.as_deref());
+        if matches!(
+            waiting,
+            Some("ErrImagePull" | "ImagePullBackOff" | "InvalidImageName" | "ErrImageNeverPull")
+        ) {
+            return false;
+        }
+        ran |= !gate.image_id.is_empty();
+    }
+    ran
+}
+
+/// The image for the gate. The one the connector already runs while the
+/// rest of its pod template stays the same and its pods show it pulled:
+/// a new agent image alone never restarts the connector (its WebSockets
+/// would drop with it). Else the agent's own (None outside the cluster),
+/// in a template that changes anyway: a new cloudflared, a new token, a
+/// new gate version or anything else, or a first gate.
+async fn gate_image(
+    client: &Client,
+    live: Option<&Deployment>,
+    token: &str,
+) -> kube::Result<Option<String>> {
+    if let Some((image, hash)) = live.and_then(live_gate) {
+        let [d, ..] = connector(token, Some(&image));
+        let same = d["spec"]["template"]["metadata"]["annotations"][system::TUNNEL_TEMPLATE_ANNOTATION]
+            .as_str()
+            == Some(hash.as_str());
+        if same && gate_pulled(&pods(client).list(&selector()).await?.items, &image) {
+            return Ok(Some(image));
+        }
+    }
+    own_image(client).await
+}
+
 /// Write the connector's objects (only when they changed since the last
 /// write here, or are missing).
 async fn apply_connector(client: &Client, token: &str, force: bool) -> kube::Result<()> {
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), rbac::NS);
+    let live = deployments.get_opt(system::TUNNEL_NAME).await?;
     // Read each time: an agent that couldn't read it once must not take
     // the gate off the connector.
-    let image = gate_image(client).await?;
+    let image = gate_image(client, live.as_ref(), token).await?;
     let objects = connector(token, image.as_deref());
     let text = serde_json::to_string(&objects).unwrap_or_default();
-    let deployments: Api<Deployment> = Api::namespaced(client.clone(), rbac::NS);
-    let there = deployments.get_opt(system::TUNNEL_NAME).await?.is_some();
+    let there = live.is_some();
     if !force && there && kept().applied == text {
         return Ok(());
     }
@@ -960,10 +1047,157 @@ mod tests {
         assert_eq!(g[0]["args"], json!(["tunnel-gate"]));
         let service = kube.get(GATE).expect("the gate's Service");
         assert_eq!(service["spec"]["ports"][0]["port"], 8092);
-        // An updated agent: its new image.
+        // An updated agent, with no connector pod that ran the gate yet:
+        // its new image.
         kube.put(AGENT, agent_deployment("ghcr.io/upsetdev/pyo/agent:1.2.4"));
         follow(&client, &wanted).await;
         assert_eq!(gates(&kube)[0]["image"], "ghcr.io/upsetdev/pyo/agent:1.2.4");
+    }
+
+    /// A connector pod whose gate runs `image`: done (pulled, it has an
+    /// image id) or waiting for `reason`.
+    fn gate_pod(kube: &FakeKube, name: &str, image: &str, waiting: Option<&str>) {
+        let state = match waiting {
+            Some(r) => json!({ "waiting": { "reason": r } }),
+            None => json!({ "terminated": { "exitCode": 0, "reason": "Completed" } }),
+        };
+        let image_id = if waiting.is_some() { "" } else { "ghcr.io/upsetdev/pyo/agent@sha256:0a1b" };
+        let mut p = tunnel_pod("10.42.0.5");
+        p["spec"]["initContainers"] = json!([{ "name": system::TUNNEL_GATE, "image": image }]);
+        p["status"]["initContainerStatuses"] = json!([{
+            "name": system::TUNNEL_GATE, "image": image, "imageID": image_id,
+            "ready": waiting.is_none(), "restartCount": 0, "state": state,
+        }]);
+        kube.put(&pod_path(name), p);
+    }
+
+    /// A new agent image alone keeps the gate's image the connector runs,
+    /// so an update never restarts it. It takes the agent's own when the
+    /// template changes anyway, and when the image it runs can't be pulled
+    /// or no pod shows it pulled.
+    #[tokio::test]
+    async fn a_new_agent_image_alone_keeps_the_gate() {
+        let _one = SERIAL.lock().await;
+        let (kube, client) = FakeKube::start().await;
+        reset();
+        let (v1, v2, v3) = (
+            "ghcr.io/upsetdev/pyo/agent:1.2.3",
+            "ghcr.io/upsetdev/pyo/agent:1.2.4",
+            "ghcr.io/upsetdev/pyo/agent:1.2.5",
+        );
+        let gate = |kube: &FakeKube| {
+            kube.get(DEPLOYMENT).expect("the connector")["spec"]["template"]["spec"]
+                ["initContainers"][0]["image"]
+                .as_str()
+                .map(str::to_owned)
+        };
+        let template = |kube: &FakeKube| kube.get(DEPLOYMENT).unwrap()["spec"]["template"].clone();
+        kube.put(AGENT, agent_deployment(v1));
+        assert!(set(&client, ID, "tok").await.ok);
+        assert_eq!(gate(&kube).as_deref(), Some(v1));
+        gate_pod(&kube, "pyo-tunnel-a", v1, None);
+
+        // The agent updates (and restarts: nothing kept in memory). The
+        // template stays as it was, to the byte.
+        let before = template(&kube);
+        kube.put(AGENT, agent_deployment(v2));
+        reset();
+        assert!(set(&client, ID, "tok").await.ok);
+        assert_eq!(template(&kube), before, "the connector isn't restarted");
+        let wanted = TunnelWanted {
+            tunnel_id: Some(ID.into()),
+            ports_public: true,
+        };
+        reset();
+        follow(&client, &wanted).await;
+        assert_eq!(template(&kube), before);
+
+        // A new token rolls it anyway: with the agent's own image.
+        assert!(set(&client, ID, "tok2").await.ok);
+        assert_eq!(gate(&kube).as_deref(), Some(v2));
+        gate_pod(&kube, "pyo-tunnel-a", v2, None);
+        kube.put(AGENT, agent_deployment(v3));
+        assert!(set(&client, ID, "tok2").await.ok);
+        assert_eq!(gate(&kube).as_deref(), Some(v2), "kept again");
+
+        // Another gate version (an older agent wrote it): the template
+        // changes, so the gate takes the agent's own image.
+        let mut older = kube.get(DEPLOYMENT).unwrap();
+        older["spec"]["template"]["metadata"]["annotations"][system::TUNNEL_GATE_VERSION_ANNOTATION] =
+            json!("0");
+        let hash = system::tunnel_template_hash(&older);
+        older["spec"]["template"]["metadata"]["annotations"][system::TUNNEL_TEMPLATE_ANNOTATION] =
+            json!(hash);
+        kube.put(DEPLOYMENT, older);
+        assert!(set(&client, ID, "tok2").await.ok);
+        assert_eq!(gate(&kube).as_deref(), Some(v3));
+        let d = kube.get(DEPLOYMENT).unwrap();
+        assert_eq!(
+            d["spec"]["template"]["metadata"]["annotations"][system::TUNNEL_GATE_VERSION_ANNOTATION],
+            system::TUNNEL_GATE_VERSION
+        );
+    }
+
+    /// The gate's image is kept only while the connectors' pods show it
+    /// starts: a pod that can't pull it, or none that ran it, and the gate
+    /// takes the agent's own. A connector without a gate (an update from
+    /// 0.51.0) gets the agent's own, and an agent outside the cluster
+    /// keeps the one there.
+    #[tokio::test]
+    async fn a_gate_image_that_cant_be_pulled_is_replaced() {
+        let _one = SERIAL.lock().await;
+        let (kube, client) = FakeKube::start().await;
+        reset();
+        let (old, own) = ("ghcr.io/upsetdev/pyo/agent:1.2.3", "ghcr.io/upsetdev/pyo/agent:1.2.4");
+        let gate = |kube: &FakeKube| {
+            kube.get(DEPLOYMENT).expect("the connector")["spec"]["template"]["spec"]
+                ["initContainers"][0]["image"]
+                .as_str()
+                .map(str::to_owned)
+        };
+        // The connector as 0.51.0 left it: no gate.
+        kube.put(SECRET, system::tunnel_secret(ID, "tok"));
+        let mut bare = system::tunnel_deployment(system::CLOUDFLARED_IMAGE, None, "x");
+        bare["spec"]["template"]["metadata"]["annotations"]
+            .as_object_mut()
+            .unwrap()
+            .remove(system::TUNNEL_TEMPLATE_ANNOTATION);
+        kube.put(DEPLOYMENT, bare);
+        kube.put(AGENT, agent_deployment(own));
+        assert!(set(&client, ID, "tok").await.ok);
+        assert_eq!(gate(&kube).as_deref(), Some(own));
+
+        // A gate on an older image that no pod shows pulled.
+        let put_old = |kube: &FakeKube| {
+            kube.put(
+                DEPLOYMENT,
+                system::tunnel_deployment(
+                    system::CLOUDFLARED_IMAGE,
+                    Some(old),
+                    &system::tunnel_token_hash("tok"),
+                ),
+            )
+        };
+        put_old(&kube);
+        assert!(set(&client, ID, "tok").await.ok);
+        assert_eq!(gate(&kube).as_deref(), Some(own), "none ran it");
+
+        // One ran it, another can't pull it (gone from the registry).
+        put_old(&kube);
+        gate_pod(&kube, "pyo-tunnel-a", old, None);
+        gate_pod(&kube, "pyo-tunnel-b", old, Some("ImagePullBackOff"));
+        assert!(set(&client, ID, "tok").await.ok);
+        assert_eq!(gate(&kube).as_deref(), Some(own), "can't be pulled");
+
+        // Pulled, and an agent with no Deployment here: kept.
+        put_old(&kube);
+        gate_pod(&kube, "pyo-tunnel-b", old, None);
+        Api::<Deployment>::namespaced(client.clone(), rbac::NS)
+            .delete(rbac::AGENT_DEPLOYMENT, &DeleteParams::default())
+            .await
+            .unwrap();
+        assert!(set(&client, ID, "tok").await.ok);
+        assert_eq!(gate(&kube).as_deref(), Some(old));
     }
 
     fn tunnel_pod(ip: &str) -> serde_json::Value {

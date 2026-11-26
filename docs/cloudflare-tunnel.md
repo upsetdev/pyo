@@ -790,7 +790,12 @@ spec:
   selector: { matchLabels: { app.kubernetes.io/name: pyo-tunnel } }
   strategy: { type: RollingUpdate, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }
   template:
-    metadata: { labels: { app.kubernetes.io/name: pyo-tunnel } }
+    metadata:
+      labels: { app.kubernetes.io/name: pyo-tunnel }
+      annotations:
+        pyo.dev/token-hash: <system::tunnel_token_hash(token)>
+        pyo.dev/tunnel-gate-version: "1"    # §7.3
+        pyo.dev/tunnel-template: <system::tunnel_template_hash>   # §7.3
     spec:
       automountServiceAccountToken: false
       affinity: <system::gateway_affinity()>   # not on build-only servers
@@ -801,7 +806,7 @@ spec:
       securityContext: { runAsNonRoot: true, runAsUser: 65532, seccompProfile: { type: RuntimeDefault } }
       initContainers:
         - name: tunnel-gate               # §7.3
-          image: <the agent's own image>
+          image: <an agent image: the one it runs, or the agent's own (§7.3)>
           args: [tunnel-gate]
           env:
             - { name: RUST_LOG, value: pyo_agent=info }
@@ -850,11 +855,12 @@ spec:
   `tunnel` command, so it goes before `run`). The pod has 35 s, so
   cloudflared ends by itself before it would be killed.
 - The Deployment is reapplied on each heartbeat reply that wants a tunnel
-  and the Secret exists with that tunnel id, so an agent update moves the
-  image. The gate runs the agent's image (read from the agent's
-  Deployment), so the connector rolls out once with every agent update.
+  and the Secret exists with that tunnel id, so an agent update moves
+  cloudflared's image. The gate keeps the agent image it runs, so an
+  agent update alone doesn't roll the connector out (§7.3). A first gate
+  takes the agent's image, read from the agent's Deployment.
   An agent with no Deployment (run outside the cluster) starts the
-  connector without the gate. Without the Secret, the agent reports
+  connector without a gate, unless one runs already. Without the Secret, the agent reports
   `tunnelId: null` and the control plane sends `TunnelSet` (§6.3 step 6).
 - Admission: a Deployment in pyo-system with no host paths, no host
   network, no privilege passes the generic pod rules (`rbac.rs:718-723`).
@@ -896,8 +902,8 @@ as answered: waiting doesn't change it. With no tunnel policy at all
 it.
 
 **The gate** (`tunnel::gate`, `tunnel::serve_gate`). The connector's init
-container `tunnel-gate` runs `pyo-agent tunnel-gate` on the agent's own
-image, so there's no extra image to mirror or pin.
+container `tunnel-gate` runs `pyo-agent tunnel-gate` on an agent image,
+so there's no extra image to mirror or pin.
 
 - It reads its pod's addresses from `POD_IPS` (downward API).
 - Every second it asks the agent:
@@ -911,6 +917,38 @@ image, so there's no extra image to mirror or pin.
 
 During a rollout the old connectors keep serving while a new pod waits
 (`maxUnavailable: 0`), so the wait costs time, not requests.
+
+**The gate's image** (`tunnel::gate_image`). The agent's image changes
+every release. If the gate always took it, every agent update would roll
+the connector and drop the WebSockets on tunnel domains. So the agent
+keeps the gate image the connector already runs, and writes its own only
+when the connector rolls anyway.
+
+- The pod template carries `pyo.dev/tunnel-template`: a hash of the
+  template without the gate's image (`system::tunnel_template_hash`). It
+  changes with cloudflared's image, the token's hash, the gate's version
+  and anything else in the template.
+- The pod template also carries `pyo.dev/tunnel-gate-version`
+  (`system::TUNNEL_GATE_VERSION`, now `1`). Bump it when the gate's
+  question or answer changes. That changes the hash, so connectors get
+  the new agent image.
+- On each apply the agent reads the live Deployment. It keeps the live
+  gate image when the template with that image has the same hash as the
+  live one, and the connector's pods show the image starts: at least one
+  pod's `tunnel-gate` has an image id (it was pulled), and none waits
+  with `ErrImagePull`, `ImagePullBackOff`, `InvalidImageName` or
+  `ErrImageNeverPull`.
+- Otherwise it writes its own image: a first install, an update from
+  0.51.0 (no gate yet, it rolls once), a template change, or an old
+  image that can't be pulled.
+- An old image gone from both the node and the registry is caught the
+  same way. A new pod that can't pull it waits in `ImagePullBackOff`,
+  the old pods keep serving (`maxUnavailable: 0`), and the next
+  heartbeat writes the agent's own image. Agent release images on
+  ghcr.io stay pullable: every tag from 0.1.0 to 0.51.0 still resolved
+  on 2026-11-26.
+- An agent with no Deployment of its own (run outside the cluster)
+  keeps a live gate it can reuse, and adds none otherwise.
 
 **Access.** The gate needs no Kubernetes permission.
 

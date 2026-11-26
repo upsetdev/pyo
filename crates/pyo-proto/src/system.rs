@@ -1621,6 +1621,17 @@ pub const TUNNEL_TOKEN_HASH_ANNOTATION: &str = "pyo.dev/token-hash";
 /// image. It asks the agent, through [`TUNNEL_GATE_SERVICE`], whether the
 /// tunnel listeners trust its pod's addresses yet (`POD_IPS`).
 pub const TUNNEL_GATE: &str = "tunnel-gate";
+/// The gate's protocol: its question to the agent and the answer. Bump it
+/// when either changes, so connectors whose gate runs an older agent image
+/// get the new one (the agent otherwise keeps the gate's image, see
+/// [`TUNNEL_TEMPLATE_ANNOTATION`]). On the pod template.
+pub const TUNNEL_GATE_VERSION_ANNOTATION: &str = "pyo.dev/tunnel-gate-version";
+pub const TUNNEL_GATE_VERSION: &str = "1";
+/// The pod template's hash with the gate's image left out
+/// ([`tunnel_template_hash`]). The agent keeps the gate image the
+/// connector already runs while this stays the same, so a new agent image
+/// alone never restarts the connector.
+pub const TUNNEL_TEMPLATE_ANNOTATION: &str = "pyo.dev/tunnel-template";
 /// The agent's Service for the gate's question, in pyo-system, its port
 /// (the agent's own, apart from Vector's relay) and the path asked.
 pub const TUNNEL_GATE_SERVICE: &str = "pyo-tunnel-gate";
@@ -1699,8 +1710,8 @@ pub fn tunnel_gate_address() -> String {
 /// servers where it can be. `token_hash` is [`tunnel_token_hash`] of the
 /// token in its Secret.
 ///
-/// Before cloudflared starts, [`TUNNEL_GATE`] (on `gate_image`, the
-/// agent's own) waits until the tunnel listeners trust the pod's
+/// Before cloudflared starts, [`TUNNEL_GATE`] (on `gate_image`, an agent
+/// image: the one the connector already runs, or the agent's own) waits until the tunnel listeners trust the pod's
 /// addresses, so Cloudflare never sends it a request the gateway would
 /// refuse. Without `gate_image` (an agent that can't tell its own image)
 /// there's no gate. Neither container gets a service account token.
@@ -1754,8 +1765,43 @@ pub fn tunnel_deployment(image: &str, gate_image: Option<&str>, token_hash: &str
             "resources": { "requests": { "cpu": "5m", "memory": "16Mi" }, "limits": { "memory": "64Mi" } },
             "securityContext": locked,
         }]);
+        deployment["spec"]["template"]["metadata"]["annotations"][TUNNEL_GATE_VERSION_ANNOTATION] =
+            json!(TUNNEL_GATE_VERSION);
     }
+    let hash = tunnel_template_hash(&deployment);
+    deployment["spec"]["template"]["metadata"]["annotations"][TUNNEL_TEMPLATE_ANNOTATION] = json!(hash);
     deployment
+}
+
+/// The hash for [`TUNNEL_TEMPLATE_ANNOTATION`]: the first 16 hex digits of
+/// the SHA-256 of the connector's pod template, without the gate's image
+/// and without this annotation. It changes with cloudflared's image, the
+/// token's hash, the gate's version and anything else in the template.
+pub fn tunnel_template_hash(deployment: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut t = deployment["spec"]["template"].clone();
+    if let Some(a) = t
+        .get_mut("metadata")
+        .and_then(|m| m.get_mut("annotations"))
+        .and_then(Value::as_object_mut)
+    {
+        a.remove(TUNNEL_TEMPLATE_ANNOTATION);
+    }
+    if let Some(inits) = t
+        .get_mut("spec")
+        .and_then(|s| s.get_mut("initContainers"))
+        .and_then(Value::as_array_mut)
+    {
+        for c in inits.iter_mut().filter(|c| c["name"] == TUNNEL_GATE) {
+            if let Some(c) = c.as_object_mut() {
+                c.remove("image");
+            }
+        }
+    }
+    Sha256::digest(t.to_string().as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// One connector stays up through a server's drain or a rollout.
@@ -2075,6 +2121,40 @@ mod tests {
         assert!(grace + 10 <= stop, "cloudflared ends before it's killed");
         let roll = &d["spec"]["strategy"]["rollingUpdate"];
         assert_eq!((&roll["maxSurge"], &roll["maxUnavailable"]), (&json!(1), &json!(0)));
+    }
+
+    /// The template's hash leaves out only the gate's image: a new agent
+    /// image alone keeps it, anything else in the template changes it.
+    #[test]
+    fn the_template_hash_leaves_out_the_gate_image() {
+        let hash = |d: &Value| {
+            let h = d["spec"]["template"]["metadata"]["annotations"][TUNNEL_TEMPLATE_ANNOTATION]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(h, tunnel_template_hash(d), "stamped as computed");
+            assert_eq!(h.len(), 16);
+            h
+        };
+        let a = tunnel_deployment("c:1", Some("agent:1"), "h");
+        assert_eq!(
+            a["spec"]["template"]["metadata"]["annotations"][TUNNEL_GATE_VERSION_ANNOTATION],
+            TUNNEL_GATE_VERSION
+        );
+        assert_eq!(hash(&a), hash(&tunnel_deployment("c:1", Some("agent:2"), "h")));
+        assert_ne!(hash(&a), hash(&tunnel_deployment("c:2", Some("agent:1"), "h")));
+        assert_ne!(hash(&a), hash(&tunnel_deployment("c:1", Some("agent:1"), "h2")));
+        let bare = tunnel_deployment("c:1", None, "h");
+        assert_ne!(hash(&a), hash(&bare));
+        assert!(
+            bare["spec"]["template"]["metadata"]["annotations"]
+                .get(TUNNEL_GATE_VERSION_ANNOTATION)
+                .is_none()
+        );
+        // Another gate version is another template.
+        let mut v2 = a.clone();
+        v2["spec"]["template"]["metadata"]["annotations"][TUNNEL_GATE_VERSION_ANNOTATION] = json!("2");
+        assert_ne!(hash(&a), tunnel_template_hash(&v2));
     }
 
     /// The tailnet listeners: their own ports, tailnet sources only. Public
