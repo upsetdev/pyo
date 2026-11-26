@@ -174,6 +174,12 @@ async fn main() -> anyhow::Result<()> {
     if args.get(1).map(String::as_str) == Some("tailnet") {
         return tailnet::run_pod().await;
     }
+    // A tunnel connector's init container (tunnel.rs): waits until the
+    // tunnel trusts its pod. Always ends well, so cloudflared starts.
+    if args.get(1).map(String::as_str) == Some(pyo_proto::system::TUNNEL_GATE) {
+        tunnel::gate().await;
+        return Ok(());
+    }
     // The cluster's traffic store, the pyo-traffic pod (traffic/).
     if args.get(1).map(String::as_str) == Some("traffic") {
         return traffic::run().await;
@@ -250,6 +256,11 @@ async fn main() -> anyhow::Result<()> {
     }
     // Checks the policy each run: a cluster made read only later is left be.
     tokio::spawn(cleanup::run(agent.clone()));
+    // The tunnel's listeners trust its connectors' pods as they come and
+    // go (it checks the policy too), and a new connector asks whether it's
+    // trusted before it starts (tunnel.rs).
+    tokio::spawn(tunnel::run(agent.clone()));
+    tokio::spawn(tunnel::serve_gate());
     // Reads only: runs in read-only clusters too.
     tokio::spawn(dbmetrics::run(agent.kube.clone()));
     tokio::spawn(heartbeat_loop(agent.clone()));
