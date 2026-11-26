@@ -68,6 +68,20 @@ reads the mode from the stream's `protocol_config`):
   gets the answer to an earlier piece, so a slow verdict on the last piece
   would hold the request however long it took, past the 500 ms timeout.
 
+An upgrade (a WebSocket handshake: `Upgrade` and `Connection: upgrade`)
+sends nothing before its 101, so in either mode the proxy would hold it
+forever waiting for a body. The processor decides
+it on its request line and headers (every rule, as for a request with no
+body), then answers with `mode_override`: no body, nothing of the
+response. The proxy takes that only with `allowModeOverride` on the route,
+which Pyo's policy sets. The WebSocket's messages aren't inspected. An
+upgrade with a `Content-Length` over 0 is refused in every mode: that
+body would pass uninspected. Envoy doesn't pass `Transfer-Encoding` on to
+the processor, so a chunked body on a handshake isn't seen: its bytes
+reach the service as the WebSocket's data, uninspected like its
+messages. On a route without `allowModeOverride` the body is decided on
+as before.
+
 Either way, rules see a body's first 128 KiB (`inspectBody`): the OWASP
 rules' time grows faster than a field's length (one field: about 1 s at
 128 KiB, 6.5 s at 1 MB). A longer body is cut there, and Coraza treats it

@@ -358,6 +358,13 @@ func (in *inspection) decide() int {
 	return status
 }
 
+// decideCopy is decide on a copy of the inspection, which stays as it was
+// for a body that may still come.
+func (in *inspection) decideCopy() int {
+	c := *in
+	return c.decide()
+}
+
 // Log-only inspections waiting or running in the background: at most a
 // few at once, so they never take the CPU from requests; past that many
 // waiting, a request's findings are dropped (and that said, now and then).
@@ -490,6 +497,9 @@ func (in *inspection) runOwasp(h *hit, withBody bool) int {
 // headers, address and country; blocking OWASP rules on the request line
 // and headers) is decided at the headers, so such a block never waits for
 // the body and never lets any of the request through.
+//
+// An upgrade (a WebSocket) is decided at its headers in either mode, and
+// goes on with no body (mode_override): it sends nothing before its 101.
 func (s *server) Process(stream extproc.ExternalProcessor_ProcessServer) error {
 	var in *inspection
 	buffered := false // the body comes as one message
@@ -528,7 +538,13 @@ func (s *server) Process(stream extproc.ExternalProcessor_ProcessServer) error {
 			owasp := c.hosts[key]
 			rules := c.rules[key]
 			resp = cont()
+			upgrade := isUpgrade(hdrs)
 			if owasp == nil && len(rules) == 0 {
+				// Nothing to inspect, but an upgrade still mustn't wait
+				// for a body.
+				if upgrade {
+					resp.ModeOverride = noBody()
+				}
 				break
 			}
 			ip := client(req)
@@ -539,7 +555,31 @@ func (s *server) Process(stream extproc.ExternalProcessor_ProcessServer) error {
 				rules:    rules,
 				h:        hit{Host: host, Client: ip, Method: hdrs[":method"], URI: hdrs[":path"], Set: c.names[key]},
 			}
-			if v.RequestHeaders.GetEndOfStream() {
+			if upgrade {
+				// A WebSocket (or other upgrade) sends nothing before its
+				// 101, so a route that waits for a body would hold it
+				// forever. Decided on the request line and headers now
+				// (every rule, as for a request without a body), and the
+				// proxy is told to send no body. What follows the
+				// upgrade isn't inspected. One with a Content-Length is
+				// refused: that body would reach the service uninspected.
+				// (Envoy doesn't pass Transfer-Encoding on: a chunked
+				// body reaches the service as the WebSocket's data,
+				// uninspected like its messages.)
+				if declaresBody(hdrs) {
+					in.log(nil, 403)
+					resp = deny(403)
+					in = nil
+				} else if st := in.decideCopy(); st != 0 {
+					resp = deny(st)
+					in = nil
+				} else {
+					// Kept: a route that doesn't let the WAF change its
+					// mode (allowModeOverride off) still sends a body,
+					// decided on as any other.
+					resp.ModeOverride = noBody()
+				}
+			} else if v.RequestHeaders.GetEndOfStream() {
 				if st := in.decide(); st != 0 {
 					resp = deny(st)
 				}
@@ -589,6 +629,40 @@ func (s *server) Process(stream extproc.ExternalProcessor_ProcessServer) error {
 		if err := stream.Send(resp); err != nil {
 			return err
 		}
+	}
+}
+
+// isUpgrade: an upgrade (an Upgrade header and Connection: upgrade), such
+// as a WebSocket handshake.
+func isUpgrade(h map[string]string) bool {
+	if h["upgrade"] == "" {
+		return false
+	}
+	for _, t := range strings.Split(h["connection"], ",") {
+		if strings.EqualFold(strings.TrimSpace(t), "upgrade") {
+			return true
+		}
+	}
+	return false
+}
+
+// declaresBody: the request says a body follows its headers.
+func declaresBody(h map[string]string) bool {
+	cl := strings.TrimSpace(h["content-length"])
+	return h["transfer-encoding"] != "" || (cl != "" && strings.TrimLeft(cl, "0") != "")
+}
+
+// noBody is the mode an upgrade goes on in (the proxy takes it only with
+// allowModeOverride on the route): no body, and nothing of the response,
+// as the route already has it.
+func noBody() *extprocfilter.ProcessingMode {
+	return &extprocfilter.ProcessingMode{
+		RequestHeaderMode:   extprocfilter.ProcessingMode_SEND,
+		ResponseHeaderMode:  extprocfilter.ProcessingMode_SKIP,
+		RequestBodyMode:     extprocfilter.ProcessingMode_NONE,
+		ResponseBodyMode:    extprocfilter.ProcessingMode_NONE,
+		RequestTrailerMode:  extprocfilter.ProcessingMode_SKIP,
+		ResponseTrailerMode: extprocfilter.ProcessingMode_SKIP,
 	}
 }
 
