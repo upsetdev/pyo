@@ -154,9 +154,9 @@ export const navItemClass = (active: boolean) =>
   `group flex items-center gap-3 rounded-lg px-2.5 py-[7px] text-[13.5px] text-foreground transition-[background-color,color,box-shadow] duration-200 ease-out ${
     active ? "bg-card shadow-card" : "hover:bg-foreground/[0.05]"
   }`;
-/** Its icon: a step softer than the text, full strength when current or hovered. */
+/** Its icon: a mid grey under the text, full strength when current or hovered. */
 export const navIconClass = (active: boolean) =>
-  `shrink-0 transition-colors duration-200 ease-out ${active ? "text-foreground" : "text-foreground/70 group-hover:text-foreground"}`;
+  `shrink-0 transition-colors duration-200 ease-out ${active ? "text-foreground" : "text-foreground/50 group-hover:text-foreground"}`;
 /** The stroke every sidebar icon is drawn with. */
 export const NAV_ICON_WEIGHT = "light" as const;
 /** A page inside an open group: indented along a thin line. */
