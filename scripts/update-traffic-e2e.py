@@ -75,18 +75,18 @@ class Load:
         sock.sendall(req.encode() + b"\r\n" + body)
         r = http.client.HTTPResponse(sock, method=method)
         r.begin()
-        r.read()
-        return r.status, (r.getheader("connection") or "").lower() == "close"
+        body = r.read()
+        return r.status, (r.getheader("connection") or "").lower() == "close", answer(r, body)
 
     def fresh(self, t, name, host, ip, n):
         try:
             s = self.connect(host, ip)
             try:
                 s.settimeout(10)
-                status, _ = self.request(s, host, "GET", f"/?n={n}")
+                status, _, said = self.request(s, host, "GET", f"/?n={n}")
             finally:
                 s.close()
-            self.log(t, name, "fresh", status, (time.time() - t) * 1000)
+            self.log(t, name, "fresh", status, (time.time() - t) * 1000, said)
         except Exception as e:
             self.log(t, name, "fresh", "err", (time.time() - t) * 1000, err(e))
 
@@ -107,8 +107,8 @@ class Load:
                 if sock is None:
                     sock = self.connect(host, ip)
                     sock.settimeout(10)
-                status, close = self.request(sock, host, "POST" if post else "GET", f"/?k={n}", b"message=hello" if post else b"")
-                self.log(t, name, "keepalive", status, (time.time() - t) * 1000, "post" if post else "")
+                status, close, said = self.request(sock, host, "POST" if post else "GET", f"/?k={n}", b"message=hello" if post else b"")
+                self.log(t, name, "keepalive", status, (time.time() - t) * 1000, ("post:" if post else "") + said)
                 if close:
                     sock.close()
                     sock = None
@@ -129,7 +129,7 @@ class Load:
                 s = self.connect(host, ip)
                 try:
                     s.settimeout(LONG_SECONDS + 20)
-                    status, _ = self.request(s, host, "GET", f"/?wait={LONG_SECONDS}s")
+                    status, _, _ = self.request(s, host, "GET", f"/?wait={LONG_SECONDS}s")
                 finally:
                     s.close()
                 self.log(t, name, "long", status, (time.time() - t) * 1000)
@@ -201,6 +201,24 @@ class Load:
         for th in threads:
             th.join(timeout=max(0, deadline - time.time()))
         pool.shutdown(wait=True)
+
+
+def answer(r, body):
+    """Who refused a request: "cloudflare" when Cloudflare's edge did it
+    (its own block or error page), "origin" when the answer came through
+    from Pyo, and the start of the body. Empty for a 200."""
+    if r.status == 200:
+        return ""
+    # 520 to 530 are Cloudflare's own (530 with "error code: 1033": the
+    # tunnel has no connector), as is a page made by its edge.
+    edge = (
+        r.getheader("cf-mitigated")
+        or 520 <= r.status <= 530
+        or body[:200].lstrip().lower().startswith(b"error code:")
+        or (b"cloudflare" in body[:2000].lower() and r.getheader("server", "").lower() == "cloudflare")
+    )
+    text = body[:60].decode(errors="replace").strip()
+    return ("cloudflare:" if edge else "origin:") + text
 
 
 def err(e):
@@ -431,6 +449,13 @@ def why(result, detail):
     }.get(kind, kind)
 
 
+def source(result, detail):
+    """For a failed answer: from Cloudflare's edge or from the origin."""
+    if result in ("200", "err"):
+        return ""
+    return detail.removeprefix("post:").split(":", 1)[0]
+
+
 def cmd_summary(args):
     d = args[0]
     actions, offset = read_actions(os.path.join(d, "actions.log"))
@@ -447,7 +472,7 @@ def cmd_summary(args):
         t, name, kind, result, ms, detail = float(f[0]), f[1], f[2], f[3], float(f[4]), f[5]
         if kind in ("fresh", "keepalive"):
             # What a failure is: anything but 200, or no answer.
-            short.append((t, name, kind, result == "200", why(result, detail), detail.startswith("post")))
+            short.append((t, name, kind, result == "200", why(result, detail), detail.startswith("post"), source(result, detail)))
         elif kind == "long":
             longs.append((t, t + ms / 1000, name, result == "200", why(result, detail)))
         elif kind == "ws":
@@ -508,6 +533,9 @@ def cmd_summary(args):
         if failed:
             line += f" ({counts([s[4] for s in failed])})"
         print(line)
+        answered = [s for s in failed if s[4].isdigit()]
+        if answered:
+            print(f"    answers: {counts([s[4] + ' ' + s[6] for s in answered])}")
         for kind in ("fresh", "keepalive"):
             k = [s for s in failed if s[2] == kind]
             if k:
