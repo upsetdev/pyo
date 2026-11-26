@@ -467,7 +467,7 @@ impl Observability {
                 ),
                 p(start, end)
             ),
-            ch.rows(top("paths", 25), p(start, end)),
+            ch.rows(top("paths", 100), p(start, end)),
             ch.rows(top("pages", 100), p(start, end)),
             ch.rows(top("referrers", 25), p(start, end)),
             ch.rows(top("countries", 25), p(start, end)),
