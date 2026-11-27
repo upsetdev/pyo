@@ -548,6 +548,16 @@ pub struct WafRoute {
     pub rules: Vec<crate::WafRule>,
 }
 
+/// The routes a WAF policy's annotation ([`WAF_ANNOTATION`]) carries: a
+/// list, one per route it targets, in their order (a policy for a route
+/// and the routes split from it, `pyo-agent`'s `policy_family`), or one
+/// route alone (before 0.51.1). None when it doesn't parse.
+pub fn waf_routes(annotation: &str) -> Vec<WafRoute> {
+    serde_json::from_str::<Vec<WafRoute>>(annotation)
+        .or_else(|_| serde_json::from_str::<WafRoute>(annotation).map(|r| vec![r]))
+        .unwrap_or_default()
+}
+
 /// Its settings: each distinct combination of OWASP settings once (compiled
 /// once in pyo-waf) and each distinct list of custom rules once, and which
 /// host uses which. A host with neither isn't inspected. A route of one

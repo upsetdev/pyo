@@ -7,7 +7,7 @@
 # of change (pyo-agent's `drain_scenarios` test), translates each with
 # Envoy Gateway's egctl (the version Pyo installs, checksum checked), and
 # compares the listeners. Also shows the same changes as Pyo wrote them
-# before every website route kept its policies. Needs cargo, curl,
+# before 0.51.1, and what the update itself changes once. Needs cargo, curl,
 # openssl and python3. Runs offline after the download, no cluster.
 #
 #   ./scripts/gateway-drain-check.sh
@@ -68,6 +68,9 @@ done
 echo
 echo "== Before (each route's policies only while its firewall has rules)"
 $PY compare "$DIR/before" || true
+echo
+echo "== The update itself (once, when a service's routes are next applied)"
+$PY rollout "$DIR/before" "$DIR/after"
 echo
 echo "== Now"
 $PY compare "$DIR/after"

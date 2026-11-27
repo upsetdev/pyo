@@ -841,6 +841,11 @@ pub fn admission_with(
         // A service's firewall and WAF policies: each on the one route it's
         // named after, so it never reaches another service's routes.
         { "name": "ownRoute", "expression": "request.operation != 'DELETE' && size(object.spec.targetRefs) == 1 && object.spec.targetRefs[0].name == variables.objName" },
+        // A service's WAF policy and BackendTrafficPolicy: on the route
+        // it's named after and the routes split from it (that name and
+        // `-r<8 hex digits>`, pyo-agent's `policy_family`), so a domain
+        // that gets a route of its own keeps them.
+        { "name": "familyRoutes", "expression": "request.operation != 'DELETE' && size(object.spec.targetRefs) >= 1 && object.spec.targetRefs.all(t, t.name == variables.objName || (t.name.startsWith(variables.objName + '-r') && size(t.name) == size(variables.objName) + 10))" },
         // The gateway's namespace: the fixed objects exactly as this
         // release defines them; a service's routes only to its Backends, by
         // cluster DNS name; certificates only from Pyo's issuers, into
@@ -861,7 +866,7 @@ pub fn admission_with(
                 object.spec.all(k, k in ['targetRefs', 'authorization']) && object.spec.authorization.all(k, k in ['defaultAction', 'rules']) && \
                 (!has(object.spec.authorization.rules) || object.spec.authorization.rules.all(r, (variables.toWebRoute && (r == {acme_rule} || r == {gate_rule})) || (r.all(k, k in ['name', 'action', 'principal']) && r.principal.all(k, k == 'clientCIDRs' || (k == 'clientIPGeoLocations' && variables.toWebRoute)) && \
                     (!has(r.principal.clientIPGeoLocations) || r.principal.clientIPGeoLocations.all(g, g.all(k, k == 'country')))))))) || \
-            (request.resource.resource == 'backendtrafficpolicies' && (request.operation == 'DELETE' || variables.portPolicy && \
+            (request.resource.resource == 'backendtrafficpolicies' && (request.operation == 'DELETE' || variables.portPolicy && variables.familyRoutes && \
                 ((variables.toPortRoute && object.spec.all(k, k in ['targetRefs', 'proxyProtocol']) && object.spec.proxyProtocol.all(k, k == 'version') && object.spec.proxyProtocol.version in ['V1', 'V2']) || \
                  (variables.toWebRoute && object.spec.all(k, k in ['targetRefs', 'rateLimit', 'responseOverride']) && (has(object.spec.rateLimit) || has(object.spec.responseOverride)) && \
                     (!has(object.spec.responseOverride) || object.spec.responseOverride == {fw_override}) && \
@@ -869,7 +874,7 @@ pub fn admission_with(
                     object.spec.rateLimit.local.all(k, k == 'rules') && size(object.spec.rateLimit.local.rules) >= 1 && size(object.spec.rateLimit.local.rules) <= 16 && object.spec.rateLimit.local.rules.all(r, r.all(k, k in ['clientSelectors', 'limit']) && \
                     size(r.clientSelectors) == 1 && r.clientSelectors.all(c, c.all(k, k == 'sourceCIDR') && c.sourceCIDR.all(k, k in ['type', 'value', 'invert']) && c.sourceCIDR.type == 'Distinct' && c.sourceCIDR.value.matches('^[0-9a-fA-F:.]+/[0-9]{{1,3}}$')) && \
                     r.limit.all(k, k in ['requests', 'unit']) && r.limit.unit in ['Second', 'Minute'] && r.limit.requests >= 1))))))) || \
-            (request.resource.resource == 'envoyextensionpolicies' && (request.operation == 'DELETE' || variables.portPolicy && variables.toWebRoute && variables.ownRoute && \
+            (request.resource.resource == 'envoyextensionpolicies' && (request.operation == 'DELETE' || variables.portPolicy && variables.toWebRoute && variables.familyRoutes && \
                 has(object.metadata.annotations) && object.metadata.annotations[?'{waf_annotation}'].orValue('') != '' && \
                 object.spec.all(k, k in ['targetRefs', 'extProc']) && size(object.spec.extProc) == 1 && object.spec.extProc[0].all(k, k in {waf_keys}) && \
                 size(object.spec.extProc[0].backendRefs) == 1 && object.spec.extProc[0].backendRefs.all(b, b.name == '{waf}' && b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}') && !has(b.port)) && \
@@ -1888,10 +1893,15 @@ mod tests {
         };
         assert!(clause("securitypolicies").contains("variables.ownRoute"));
         let eep = clause("envoyextensionpolicies");
+        // The WAF's policy and the BackendTrafficPolicy: on their route
+        // and the routes split from it (a domain with a route of its own
+        // keeps them), never another's.
         assert!(
-            eep.contains("variables.toWebRoute && variables.ownRoute"),
+            eep.contains("variables.toWebRoute && variables.familyRoutes"),
             "{eep}"
         );
+        assert!(clause("backendtrafficpolicies").contains("variables.portPolicy && variables.familyRoutes"));
+        assert!(all.contains("t.name == variables.objName || (t.name.startsWith(variables.objName + '-r') && size(t.name) == size(variables.objName) + 10)"));
         assert!(
             eep.contains("annotations[?'pyo.dev/waf'].orValue('') != ''"),
             "{eep}"

@@ -6,6 +6,9 @@
       before every website route kept its policies (the open
       authorization, the idle rate limit and the WAF's mode override
       left out).
+  rollout OLD_DIR NEW_DIR
+      For each state, what the update from the old objects to the new
+      ones changes in the listeners (once, on the first apply).
   compare DIR
       Compares each change's translation (DIR/<name>.json, from egctl)
       with the state before it. Exits 1 when a change that should change
@@ -25,12 +28,19 @@ STABLE = [
     ("base", "all_rules"),
     ("redirect", "base"),
     ("domain_added", "base"),
+    ("header_rule", "base"),
+    ("base", "header_rule"),
+    ("path_route", "base"),
+    ("base", "path_route"),
+    ("waf_header_rule", "waf_block"),
+    ("waf_block", "waf_header_rule"),
+    ("waf_path_route", "waf_block"),
+    ("service_added", "base"),
+    ("base", "service_added"),
 ]
 KNOWN = [
     ("waf_block", "base"),
     ("waf_log", "waf_block"),
-    ("header_rule", "base"),
-    ("service_added", "base"),
 ]
 
 
@@ -47,24 +57,42 @@ def open_auth(auth):
 
 
 def before(objs):
-    opened = {o["metadata"]["name"] for o in objs if o["kind"] == "SecurityPolicy" and open_auth(o["spec"].get("authorization", {}))}
+    """The objects as Pyo wrote them before 0.51.1: route policies one per
+    route and named after it, only while the firewall had rules (the
+    message with access rules, on plain HTTP too), no mode override."""
+    sps = {o["metadata"]["name"]: o for o in objs if o["kind"] == "SecurityPolicy"}
+    opened = {n for n, o in sps.items() if open_auth(o["spec"].get("authorization", {}))}
+    message = next((o["spec"]["responseOverride"] for o in objs
+                    if o["kind"] == "BackendTrafficPolicy" and "responseOverride" in o["spec"]), None)
     out = []
     for o in objs:
-        o = copy.deepcopy(o)
         name = o["metadata"]["name"]
         if o["kind"] == "SecurityPolicy" and name in opened:
             continue
-        if o["kind"] == "BackendTrafficPolicy":
-            if idle(o["spec"].get("rateLimit")):
-                del o["spec"]["rateLimit"]
-            if name in opened:
-                o["spec"].pop("responseOverride", None)
-            if "rateLimit" not in o["spec"] and "responseOverride" not in o["spec"]:
-                continue
+        if o["kind"] not in ("BackendTrafficPolicy", "EnvoyExtensionPolicy"):
+            out.append(o)
+            continue
+        refs = o["spec"]["targetRefs"]
+        waf = None
         if o["kind"] == "EnvoyExtensionPolicy":
-            for e in o["spec"].get("extProc", []):
-                e.get("processingMode", {}).pop("allowModeOverride", None)
-        out.append(o)
+            waf = json.loads(o["metadata"]["annotations"]["pyo.dev/waf"])
+        for i, t in enumerate(refs):
+            e = copy.deepcopy(o)
+            e["metadata"]["name"] = t["name"]
+            e["spec"]["targetRefs"] = [t]
+            if waf is not None:
+                e["metadata"]["annotations"]["pyo.dev/waf"] = json.dumps(waf[i])
+                for x in e["spec"].get("extProc", []):
+                    x.get("processingMode", {}).pop("allowModeOverride", None)
+            elif t["kind"] == "HTTPRoute":
+                if idle(e["spec"].get("rateLimit")):
+                    del e["spec"]["rateLimit"]
+                e["spec"].pop("responseOverride", None)
+                if t["name"] in sps and t["name"] not in opened and message:
+                    e["spec"]["responseOverride"] = message
+                if "rateLimit" not in e["spec"] and "responseOverride" not in e["spec"]:
+                    continue
+            out.append(e)
     return out
 
 
@@ -156,8 +184,22 @@ def compare(d):
     return bad
 
 
+def rollout(old, new):
+    """The update itself: each state as written before, then now."""
+    for f in sorted(os.listdir(new)):
+        if not f.endswith(".json"):
+            continue
+        c = changes(f"{old}/{f}", f"{new}/{f}")
+        drops = any(x for x, _ in c)
+        print(f"  {f[:-5]}: {'DROPS CONNECTIONS (once)' if drops else 'routes only'}")
+        for _, x in c:
+            print(f"      {x}")
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "yaml":
         to_yaml(*sys.argv[2:6], old="--before" in sys.argv)
     elif sys.argv[1] == "compare":
         sys.exit(compare(sys.argv[2]))
+    elif sys.argv[1] == "rollout":
+        rollout(sys.argv[2], sys.argv[3])
