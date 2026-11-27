@@ -498,8 +498,8 @@ its own.
 
 | Change | What drains or ends | Why |
 |---|---|---|
-| Public ports on | Nothing | ServiceLB adds its pods. No listener changes |
-| Public ports off | Connections that came in on public ports end, after the confirm. Tunnel and tailnet connections stay | ServiceLB removes its pods. No listener changes |
+| Public ports on | Web: nothing. Published TCP and UDP ports pause about 5 seconds and their connections end (measured, said in the confirm) | ServiceLB adds its pods. No listener changes. The ports move from `pyo-public-ports` to Envoy's Service |
+| Public ports off | Connections that came in on public ports end, after the confirm. Tunnel and tailnet connections stay. Published TCP and UDP ports pause about 1 second (measured) | ServiceLB removes its pods. No listener changes. The ports move to `pyo-public-ports` |
 | Cloudflare Tunnel on | Nothing | The connector and `pyo-tunnel-origin` are new. No domain has moved yet |
 | A domain moves to the tunnel (`switching`) | That domain's open connections drain once | Its filter chain gets the tunnel client policy (visitor from X-Forwarded-For, trusted from the connectors). That's per filter chain in Envoy, so it can't be route-only |
 | `switching` → `on` | That domain's open connections drain once more (measured, see "Traffic paths as built") | The gate goes into its SecurityPolicy, and its :80 route goes. Its route policy's name changes with its route's, and the filter is named after it |
@@ -996,6 +996,20 @@ above, this list wins. Each change keeps traffic flowing.
   fix is an always-on route policy on Pyo's own tailnet routes. It needs
   new admission rules and a connect-command refresh, so it's left for the
   Gateway section's release.
+- **A domain goes `on` only after a grace period** (found in the
+  traffic test, 2026-11-27). Pyo set `on` as soon as Cloudflare's API had
+  the record, which closes the direct path. Cloudflare's edge served the
+  new record 9 and 35 seconds later, so the moving domain answered on
+  neither path in between, and public ports closed into that gap. Now the
+  record moves and the domain stays `switching` (both paths) until
+  `tunnel_loop::promote` sets `on`: 90 seconds after the record moved, or
+  a DNS-only record it replaced's TTL plus 30 seconds (300 for "auto").
+  Public ports waiting for the move close after that.
+- **TCP and UDP ports pause when public ports go on or off.** They move
+  between Envoy's Service and `pyo-public-ports`, and ServiceLB can't hold
+  one port for both. Measured: about 1 second going off, about 5 seconds
+  going on, and their open connections end. Both confirms say "TCP and
+  UDP ports pause for a few seconds, and their open connections end."
 - **`switching` → `on` drains the moving domain once more.** Its route
   policy is named after its route (`…-switching-plain-http`, then
   `…-tunnel-plain-http`), and Envoy Gateway names the `custom_response`

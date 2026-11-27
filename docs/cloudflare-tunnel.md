@@ -295,7 +295,11 @@ tunnel on moves the domains in the tunnel's account first and closes the
 ports once they're all on it. Turning the tunnel off switches its domains
 back, then removes it at Cloudflare. The Danger zone's Remove tunnel row
 is gone. Public TCP and UDP ports are a cluster setting under Public
-ports. The old ops work as before.
+ports. The old ops work as before. A switched domain keeps both paths
+for 90 seconds after its record moves (longer when it replaced a
+DNS-only record: its TTL plus 30 seconds), so Cloudflare's edge and
+resolvers have the record before the direct path closes
+(`tunnel_loop::promote`).
 
 **B. Choose Cloudflare Tunnel for a cluster** (before 2026-11-27) (Cluster › Settings, the
 "Public traffic" panel `dash/src/components/pyo/TrafficMode.tsx:77-114`
