@@ -114,7 +114,7 @@ says so in its confirm dialog before it's saved, and names what drains.
 |---|---|---|
 | **Public ports** | The proxies are published on ports 80 and 443 of every server except build-only ones (Envoy's Service is a LoadBalancer). Today's `traffic = 'public'` | Envoy's Service is ClusterIP. Nothing listens on the servers' 80 and 443 |
 | **Cloudflare Tunnel** | The cluster has a tunnel and runs its connector (`cluster_tunnels` row) | No tunnel. Turning it off removes it, like today's Remove tunnel |
-| **Tailnet** | Services' websites answer on the tailnet: their ts.net names, and the servers' Tailscale addresses when free domains point there | Services' ts.net names and the Tailscale addresses don't answer websites |
+| **Tailscale** | Services' websites answer on the tailnet: their ts.net names, and the servers' Tailscale addresses when free domains point there | Services' ts.net names and the Tailscale addresses don't answer websites |
 
 **Tailnet is not joining.** Once a team connects Tailscale, every cluster
 of the team is on the tailnet, with no per-cluster opt-out. The Tailnet
@@ -124,7 +124,7 @@ registry and Pyo's own names (`pyo.<tailnet>.ts.net`, the registry,
 sandboxes) as they are. The switch is disabled with "Connect Tailscale on
 Integrations first." while the team has no Tailscale.
 
-Label: **Tailnet**. Hint: "Websites on ts.net names, for devices on your
+Label: **Tailscale**. Hint: "Websites on ts.net names, for devices on your
 tailnet. Servers stay on the tailnet when this is off." The word
 "Tailscale" stays for the integration and the domain kind, so the switch
 doesn't read as "join Tailscale".
@@ -882,7 +882,7 @@ pyo-docs, in the same piece of work:
 - `clusters.mdx`: the Traffic card's three paths.
 - `cloudflare-tunnel.mdx`: Turn it on and Turn it off follow the switch.
   Public ports closing after domains move.
-- `tailscale.mdx`: the Tailnet switch, and that servers stay on the
+- `tailscale.mdx`: the Tailscale switch, and that servers stay on the
   tailnet.
 - `domains.mdx`: the Path choice and "Not served".
 - `hetzner.mdx`: UDP 443 in Pyo's firewall.
@@ -903,7 +903,7 @@ Each with a pick.
    on or off, said in the dialog. If the e2e shows new connections fail
    for more than a few seconds per server, HTTP/3 waits for a design that
    keeps UDP 443 on a Service of its own.
-4. **Label for the tailnet switch.** Pick: "Tailnet", with the hint that
+4. **Label for the tailnet switch.** Pick: "Tailscale", with the hint that
    servers stay on the tailnet.
 5. **Your own domains on the tailnet path** (DNS to the servers' Tailscale
    addresses). Pick: not in 0.52.0. ts.net names cover private sites.
@@ -1119,7 +1119,7 @@ this list wins.
 - **Pyo's own tailnet routes** (`pyo-dashboard`, `pyo-registry-door`,
   `pyo-sandboxes`) each get a BackendTrafficPolicy with the idle rate
   limit, pinned exactly by the admission policy. With it and the tailnet
-  anchor, the Tailnet switch no longer changes the tailnet HTTPS chain
+  anchor, the Tailscale switch no longer changes the tailnet HTTPS chain
   (checked with egctl, §20). `dashboardDrops` and the confirm's line stay
   only for the cluster Pyo runs on while its agent or install is older
   (`traffic_paths::refreshed`).

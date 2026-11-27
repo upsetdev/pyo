@@ -137,8 +137,8 @@ function ClusterSettings({ c }: { c: Cluster }) {
           </div>
         </Panel>
         <ClusterTraffic cluster={c} />
-        <ClusterGateway cluster={c} />
         <ClusterTrafficMode cluster={c} />
+        <ClusterGateway cluster={c} />
         <ClusterMtls cluster={c} />
         <Panel title="Danger zone" tone="danger">
           <ul className="list-rows">

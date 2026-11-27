@@ -100,7 +100,7 @@ export function ClusterTrafficMode({ cluster: c }: { cluster: Cluster }) {
 const LABEL: Record<TrafficPath, string> = {
   public: "Public ports",
   tunnel: "Cloudflare Tunnel",
-  tailnet: "Tailnet",
+  tailnet: "Tailscale",
 };
 
 const ONE_PATH = "Turn on another path first. A cluster needs one.";
@@ -147,7 +147,7 @@ function PathRow({
 
 /**
  * The cluster's traffic paths: Public ports, Cloudflare Tunnel and
- * Tailnet, each on or off. Each domain takes one of the paths that are on.
+ * Tailscale, each on or off. Each domain takes one of the paths that are on.
  */
 export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
   const s = usePyo();
@@ -238,7 +238,7 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
     if (pending.kind === "proxy")
       return void send({ proxyProtocol: pending.on }, pending.on ? "Websites accept PROXY protocol" : "Websites no longer read PROXY protocol");
     if (pending.kind === "ports") return void send({ publicPorts: false }, "TCP and UDP ports closed");
-    if (pending.kind === "tailnetOn") return void send({ tailnet: true }, "Tailnet on");
+    if (pending.kind === "tailnetOn") return void send({ tailnet: true }, "Tailscale on");
     if (pending.kind === "publicOn") return void send({ public: true }, "Public ports on");
     const args =
       pending.kind === "public"
