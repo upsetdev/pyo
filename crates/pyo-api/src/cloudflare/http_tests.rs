@@ -740,7 +740,7 @@ fn existing_clusters_keep_their_heartbeat_reply() {
         let sql = include_str!("../../migrations/0047_traffic_paths.sql");
         let step = sql.lines().skip_while(|l| !l.starts_with("UPDATE pyo.clusters c SET public_ports")).take(2).collect::<Vec<_>>().join("\n");
         assert!(step.contains("FROM pyo.cluster_tunnels"), "{step}");
-        sqlx::query(&format!("{step} AND c.team_id = '{team}'")).execute(&db).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("{} AND c.team_id = $1", step.trim_end().trim_end_matches(';')))).bind(&team).execute(&db).await.unwrap();
         for (i, (_, _, (public, tunnel, tailnet), ports)) in states.iter().enumerate() {
             let cluster = format!("cl_tp{i}{run}");
             let after = reply_of(&db, &cluster).await;
