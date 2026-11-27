@@ -790,7 +790,9 @@ during Rotate, against 393 before. All were 503 from the origin side,
 within 0.3 s, while the first new connector had started and wasn't ready
 yet. No old connector had stopped then. cloudflared answers 503 until the
 tunnel's routes reach it: the connector now starts with a local config
-(§7.2).
+(§7.2). With it, the same test lost no request: 0 of 4,583 on Rotate and
+0 of 2,519 on a connector restart (2026-11-27). The old pods stopped 37
+and 43 seconds after Rotate there.
 
 ### 6.5 Domain DNS checks
 
