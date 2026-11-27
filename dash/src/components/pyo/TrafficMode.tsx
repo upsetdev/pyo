@@ -7,6 +7,7 @@ import { LearnMore } from "~/components/ui/LearnMore";
 import { optionClass, Switch } from "~/components/ui/Field";
 import { Panel } from "~/components/ui/Panel";
 import { plural } from "~/lib/pyo/format";
+import { agentBlock } from "~/lib/pyo/gateway";
 import {
   api,
   clusterPaths,
@@ -174,9 +175,11 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
     })),
   );
   const onPath = (p: TrafficPath) => domains.filter((d) => d.path === p);
-  // The tailnet listener changes on the cluster Pyo runs on: its own
+  // The tailnet listener changes on the cluster Pyo runs on, until its
+  // agent and install carry the policy on Pyo's own tailnet routes: its own
   // dashboard there drops once (traffic_paths.rs `dashboard_drops`).
-  const dashboardDrops = !!c.sameCluster && domains.some((d) => d.hostname.toLowerCase().endsWith(".ts.net"));
+  const dashboardDrops =
+    !!c.sameCluster && !!agentBlock(c) && domains.some((d) => d.hostname.toLowerCase().endsWith(".ts.net"));
   const DASHBOARD_DROPS = "Open connections to Pyo on the tailnet drop once. The dashboard reconnects by itself.";
   const movable = (host: string) => !!tunnelZoneFor(s, host, c);
   const removing = !!c.tunnel?.removeWhenBack || c.tunnel?.state === "removing";
