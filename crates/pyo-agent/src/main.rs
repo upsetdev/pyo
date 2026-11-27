@@ -302,7 +302,11 @@ async fn heartbeat_loop(agent: Agent) {
                             gateway::set_public_ports_service(&agent.kube, ports && !on).await;
                         }
                         if let Some(address) = &reply.free_domain_address {
-                            gateway::set_tailnet_web(&agent.kube, address == "tailscale").await;
+                            gateway::set_tailnet_web(
+                                &agent.kube,
+                                pyo_proto::tailnet_web_wanted(address, reply.tailnet_web),
+                            )
+                            .await;
                         }
                         databases::label_teams(&agent.kube, &reply.project_teams).await;
                         if let Some(t) = &reply.tailnet {
