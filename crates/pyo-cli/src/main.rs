@@ -513,6 +513,33 @@ enum ClusterCommand {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Show or change the cluster's gateway: HTTP/3, compression, the TLS
+    /// minimum and the timeout defaults for services without their own.
+    /// HTTP/3 and the TLS minimum drop open connections once. Owners and
+    /// admins.
+    Gateway {
+        /// The cluster, by name or id.
+        cluster: String,
+        /// HTTP/3 on UDP port 443: on or off. Needs public ports, and UDP 443
+        /// open in the servers' firewall.
+        #[arg(long)]
+        http3: Option<String>,
+        /// Zstd, Brotli and Gzip on services' HTTPS domains: on or off.
+        #[arg(long)]
+        compression: Option<String>,
+        /// The oldest TLS version HTTPS accepts: 1.2 or 1.3.
+        #[arg(long)]
+        tls_min: Option<String>,
+        /// Seconds a request may take, 1 to 3600, or 0 for no limit.
+        #[arg(long)]
+        request_timeout: Option<u32>,
+        /// Seconds a WebSocket or stream may stay quiet, 60 to 86400.
+        #[arg(long)]
+        idle_timeout: Option<u32>,
+        /// Go ahead when open connections drop.
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1311,6 +1338,25 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
                         restore_records: v(restore_records)?,
                     };
                     cluster::paths(&api, team.as_deref(), &cluster, change, yes).await
+                }
+                ClusterCommand::Gateway {
+                    cluster,
+                    http3,
+                    compression,
+                    tls_min,
+                    request_timeout,
+                    idle_timeout,
+                    yes,
+                } => {
+                    let v = |o: Option<String>| o.as_deref().map(cluster::on_off).transpose();
+                    let change = cluster::GatewayChange {
+                        http3: v(http3)?,
+                        compression: v(compression)?,
+                        tls_min,
+                        request_timeout,
+                        idle_timeout,
+                    };
+                    cluster::gateway(&api, team.as_deref(), &cluster, change, yes).await
                 }
             }
         }
