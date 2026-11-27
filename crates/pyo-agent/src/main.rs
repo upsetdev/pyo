@@ -637,7 +637,9 @@ async fn run_command(agent: Agent, envelope: CommandEnvelope) {
         Command::TailscaleRemove { names, marks } => {
             tailscale::run_remove(&agent.kube, &names, &marks).await
         }
-        Command::SandboxCall(c) => tailscale::sandbox::run(&c).await,
+        // Pyo stopped calling sandbox servers through clusters in 0.52.0.
+        // Only an older Pyo sends it.
+        Command::SandboxCall(_) => failed(SANDBOX_CALL_GONE),
         Command::TunnelSet { tunnel_id, token } => tunnel::set(&agent.kube, &tunnel_id, &token).await,
         Command::TunnelRemove {} => tunnel::remove(&agent.kube).await,
         // Answered before switching: the switch stops this process.
@@ -699,6 +701,11 @@ pub fn ok(message: &str) -> CommandResult {
         data: None,
     }
 }
+
+/// The answer to a call to a sandbox server through this cluster: this
+/// agent no longer makes them, and the server takes its work over its own
+/// channel once it's updated.
+const SANDBOX_CALL_GONE: &str = "This agent doesn't call sandbox servers. Update the sandbox server in Pyo.";
 
 pub fn failed(message: impl Into<String>) -> CommandResult {
     CommandResult {

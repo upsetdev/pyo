@@ -326,9 +326,8 @@ pub struct ClientState {
 }
 
 /// A call to a sandbox server's daemon on the cluster's tailnet
-/// ([`crate::Command::SandboxCall`]): Pyo can't reach the tailnet when it
-/// runs elsewhere (Pyo Cloud), so the cluster's agent makes it. Only the
-/// daemon's own API, on its port, at a tailnet address.
+/// ([`crate::Command::SandboxCall`]), as Pyo made them before 0.52.0.
+/// Agents refuse it now. Kept one release so it still parses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxCall {

@@ -13,7 +13,6 @@
 //!   servers as its hosts, deletes the ones no longer used, and never
 //!   touches one it didn't make. The servers do the rest (tailnet.rs).
 
-pub mod sandbox;
 pub mod setup;
 
 use std::collections::{BTreeMap, BTreeSet};
