@@ -117,6 +117,7 @@ of the rules: too much for a 2 GB server, and it grows with CPUs.
     test/probe.sh 19183                                       # status codes per mode
     python3 test/bench.py 19183 block.test 3000               # latency
     test/rules.sh <config.json> <GeoLite2-Country.mmdb>       # custom rules, end to end
+    test/websocket.sh bin/pyo-waf [<older pyo-waf>]           # WebSockets, per mode
 
 `rules.sh` takes the settings pyo-api's `waf_harness_config` test writes
 (`PYO_WAF_CONFIG=<file> cargo test -p pyo-api waf_harness_config -- --ignored`).
