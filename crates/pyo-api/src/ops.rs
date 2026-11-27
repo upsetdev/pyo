@@ -5095,9 +5095,9 @@ async fn apply(
                 .await?;
             deploy::enqueue(tx, &cluster_id, Command::SetWebProxyProtocol { on }).await?;
             let title = if on {
-                format!("Websites on {name} accept PROXY protocol")
+                format!("PROXY protocol on for {name}")
             } else {
-                format!("Websites on {name} no longer read PROXY protocol")
+                format!("PROXY protocol off for {name}")
             };
             log_activity(
                 tx,

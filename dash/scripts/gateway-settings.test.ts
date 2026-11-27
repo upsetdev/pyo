@@ -50,11 +50,11 @@ test("the timeouts are checked in the API's words", () => {
 test("a save that drops connections says so first, and only those", () => {
   expect(dropLines("eu", GATEWAY_DEFAULTS, { ...GATEWAY_DEFAULTS, compression: true, requestTimeout: 60 })).toEqual([]);
   expect(dropLines("eu", GATEWAY_DEFAULTS, { ...GATEWAY_DEFAULTS, tlsMin: "1.3" })).toEqual([
-    "Saving drops open HTTPS connections on every website of eu once.",
+    "Open HTTPS connections to every website on eu drop once.",
     "Visitors reconnect. WebSockets and uploads in progress are cut.",
   ]);
   const on = dropLines("eu", GATEWAY_DEFAULTS, { ...GATEWAY_DEFAULTS, http3: true });
-  expect(on[0]).toBe("Saving drops open connections on each server's public ports once, one server at a time.");
+  expect(on[0]).toBe("Open connections drop once, one server at a time.");
   expect(on.at(-1)).toBe("Open UDP port 443 to every server in your provider's firewall.");
   const off = dropLines("eu", { ...GATEWAY_DEFAULTS, http3: true }, GATEWAY_DEFAULTS);
   expect(off).not.toContain("Open UDP port 443 to every server in your provider's firewall.");

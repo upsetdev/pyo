@@ -64,8 +64,8 @@ export function changes(from: GatewaySettings, to: GatewaySettings): Partial<Gat
 export function dropLines(name: string, from: GatewaySettings, to: GatewaySettings): string[] {
   const lines: string[] = [];
   if (from.http3 !== to.http3)
-    lines.push("Saving drops open connections on each server's public ports once, one server at a time.");
-  if (from.tlsMin !== to.tlsMin) lines.push(`Saving drops open HTTPS connections on every website of ${name} once.`);
+    lines.push("Open connections drop once, one server at a time.");
+  if (from.tlsMin !== to.tlsMin) lines.push(`Open HTTPS connections to every website on ${name} drop once.`);
   if (!lines.length) return lines;
   lines.push("Visitors reconnect. WebSockets and uploads in progress are cut.");
   if (to.http3 && !from.http3) lines.push("Open UDP port 443 to every server in your provider's firewall.");

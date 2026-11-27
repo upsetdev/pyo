@@ -30,7 +30,7 @@ import type { Cluster } from "~/lib/pyo/types";
 import { currentSlug } from "~/lib/pyo/paths";
 
 const KEEPS_TAILSCALE =
-  "This cluster keeps your team's Tailscale. After it's removed, set Tailscale up again.";
+  "Your team's Tailscale runs on this cluster. Set Tailscale up again after removing it.";
 
 export const Route = createFileRoute(
   "/_app/$team/clusters/$clusterId/settings",
@@ -198,7 +198,7 @@ function ClusterSettings({ c }: { c: Cluster }) {
             ["Method", "Pyo agent (outbound)"],
             ["Last seen", c.lastSeenAt ? timeAgo(c.lastSeenAt) : "Never"],
             [
-              "Dials out to",
+              "Connects to",
               <span className="font-mono text-[11.5px]">
                 {s.agentApiUrl || "—"}
               </span>,
@@ -263,8 +263,7 @@ function ClusterSettings({ c }: { c: Cluster }) {
             <div>
               <p className="text-[13px] font-medium">Refresh this cluster</p>
               <p className="text-[12px] text-muted-foreground">
-                Applies Pyo's latest host settings, like the memory reserve for
-                k3s.
+                Applies Pyo's latest server settings.
                 {databasesWait && c.databasesRestart
                   ? ` ${DATABASES_RESTART}.`
                   : ""}
@@ -317,7 +316,7 @@ function ClusterSettings({ c }: { c: Cluster }) {
         open={confirm === "force"}
         onClose={() => setConfirm(null)}
         title={`Remove ${c.name} anyway?`}
-        description={`Pyo forgets this cluster, its services, databases and volumes. Anything still running there is left alone.${keepsTailscale ? ` ${KEEPS_TAILSCALE}` : ""}`}
+        description={`Pyo forgets this cluster and its services, databases and volumes. Nothing on the cluster is deleted.${keepsTailscale ? ` ${KEEPS_TAILSCALE}` : ""}`}
         confirmText={c.name}
         confirmLabel="Remove cluster"
         onConfirm={() => {

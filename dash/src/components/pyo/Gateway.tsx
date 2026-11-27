@@ -85,7 +85,7 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
         {status ? (
           <>
             <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
-              <span className="font-medium">Controller</span>
+              <span className="font-medium">Route updates</span>
               {partLine(status.controller)}
             </div>
             <table className="w-full text-left text-[12.5px]">
@@ -104,7 +104,7 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
                       <td className="py-1.5 pr-3 font-mono">{p.server}</td>
                       <td className="py-1.5 pr-3">{partLine(p)}</td>
                       <td className="py-1.5">
-                        {waf ? partLine(waf) : <span className="text-muted-foreground">Off. No service has its WAF on.</span>}
+                        {waf ? partLine(waf) : <span className="text-muted-foreground">Off. No service uses the WAF.</span>}
                       </td>
                     </tr>
                   );
@@ -134,17 +134,17 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
           disabled={locked || saving}
           onChange={(compression) => setForm({ ...form, compression })}
           label="Compression"
-          description="Zstd, Brotli and Gzip. Files that are already compressed are skipped. Your service's own compression is turned off while this is on."
+          description="Zstd, Brotli and Gzip. Your services' own compression is turned off."
         />
         <div className="flex flex-wrap items-center justify-between gap-3">
           <span>
-            <span className="block text-[13px] font-medium">TLS minimum</span>
+            <span className="block text-[13px] font-medium">Minimum TLS version</span>
             <span className="block text-[12px] text-muted-foreground">
-              {tlsApplying ? "Applying…" : "The oldest TLS version HTTPS accepts."}
+              {tlsApplying ? "Applying…" : "Clients on older versions can't connect over HTTPS."}
             </span>
           </span>
           <Segmented
-            label="TLS minimum"
+            label="Minimum TLS version"
             value={form.tlsMin}
             onChange={(tlsMin) => !locked && !saving && setForm({ ...form, tlsMin })}
             options={[
@@ -155,9 +155,9 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
         </div>
       </div>
       <div className="space-y-3 border-t border-border px-4 py-3">
-        <p className="text-[13px] font-medium">Defaults for every service</p>
+        <p className="text-[13px] font-medium">Service defaults</p>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Request timeout (seconds)" hint="0 is no limit. A service's own setting wins.">
+          <Field label="Request timeout (seconds)" hint="0 means no limit. A service's own setting overrides it.">
             {(p) => (
               <Input
                 {...p}
@@ -168,7 +168,7 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
               />
             )}
           </Field>
-          <Field label="Idle timeout (minutes)" hint="How long a WebSocket may stay quiet.">
+          <Field label="Idle timeout (minutes)" hint="How long a WebSocket can stay idle.">
             {(p) => (
               <Input
                 {...p}
@@ -196,7 +196,7 @@ export function ClusterGateway({ cluster: c }: { cluster: Cluster }) {
         <ConfirmDialog
           open
           onClose={() => setConfirming(false)}
-          title={`Save the gateway settings of ${c.name}?`}
+          title={`Save gateway settings for ${c.name}?`}
           description={
             <div className="space-y-1.5">
               {lines.map((l) => (
