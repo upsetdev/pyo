@@ -1519,9 +1519,11 @@ pub const ANCHOR_COUNTRY: &str = "ZZ";
 /// database, measured with Envoy v1.39.5).
 ///
 /// A listener that reads the visitor from X-Forwarded-For (behind a CDN,
-/// through the tunnel) can't take country rules in Envoy Gateway v1.9.3:
-/// there the policy is refused for that listener, the anchor's path
-/// answers 500 instead of 404, and its chain gets no geoip filter.
+/// through the tunnel) takes no GeoIP country rule in Envoy Gateway
+/// v1.9.3: there this policy is refused for that listener, the anchor's
+/// path answers 500 instead of 404, and its chain gets no geoip filter.
+/// Services' country rules there match Cloudflare's header instead
+/// (firewall.rs `COUNTRY_HEADER`), which needs no filter.
 pub fn anchor_security_spec(gateway: &str) -> Value {
     json!({
         "targetRefs": [{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": anchor_name(gateway) }],

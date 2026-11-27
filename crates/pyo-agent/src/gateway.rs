@@ -773,6 +773,18 @@ fn older_form(o: &Value) -> Option<Vec<Value>> {
     }
 }
 
+/// Said when the install refuses a country rule behind Cloudflare or
+/// through the tunnel ([`country_by_header`]).
+pub const COUNTRY_HEADER_REFUSED: &str = "This cluster's install is older than Pyo's, so country rules can't apply to domains behind Cloudflare or through Cloudflare Tunnel yet. Run the command under Refresh this cluster in the cluster's settings, then deploy again.";
+
+/// A SecurityPolicy with a country rule as Cloudflare's header
+/// (firewall.rs `COUNTRY_HEADER`).
+fn country_by_header(o: &Value) -> bool {
+    o["spec"]["authorization"]["rules"]
+        .as_array()
+        .is_some_and(|rules| rules.iter().any(|r| r["principal"]["headers"].is_array()))
+}
+
 /// An HTTPS Gateway's anchor route or its policies (`<gateway>-anchor`).
 fn is_anchor(o: &Value) -> bool {
     let Some(gateway) = o["metadata"]["name"].as_str().and_then(|n| n.strip_suffix("-anchor")) else {
@@ -1167,6 +1179,14 @@ pub async fn apply(
                     wanted.insert((kind.clone(), name), ());
                 }
                 continue;
+            }
+            // An install older than this agent refuses a country rule as
+            // Cloudflare's header (behind Cloudflare, through the tunnel).
+            // Leaving it out would let in whom it blocks: the deploy stops
+            // here, its routes as they were, and it says what to run.
+            Err(e) if kind == "SecurityPolicy" && country_by_header(o) && crate::refused::is_refusal(&e) => {
+                tracing::warn!(error = %e, name = %name, "the install refuses a country rule through Cloudflare");
+                return Err(anyhow::anyhow!(COUNTRY_HEADER_REFUSED));
             }
             // An install older than this agent doesn't know the tunnel's
             // policy: the rest of the routes still go on, and it's said.
@@ -5977,6 +5997,33 @@ mod tests {
         kube.admit(|w| (w.plural == "clienttrafficpolicies").then(|| (500, "etcd timeout".into())));
         assert!(apply(&client, &pyo, &b).await.is_err());
         assert!(!headers_kept());
+    }
+
+    /// An install whose admission policy is older refuses a country rule
+    /// as Cloudflare's header (behind Cloudflare, through the tunnel): the
+    /// deploy stops with what to run, as leaving the rule out would let in
+    /// whom it blocks.
+    #[tokio::test]
+    async fn an_older_install_refusing_a_country_header_stops_the_deploy() {
+        let _one = OLDER_INSTALL.lock().await;
+        let (kube, client) = crate::fakekube::FakeKube::start().await;
+        kube.admit(|w| {
+            let by_header = w.plural == "securitypolicies" && country_by_header(&w.body);
+            (w.method != "DELETE" && by_header).then(|| (403, "ValidatingAdmissionPolicy 'pyo-agent' denied request".to_owned()))
+        });
+        let mut t = spec(vec![domain("shop.example.com", "http", "letsencrypt", false)]);
+        t.domains[0].tunnel = pyo_proto::TUNNEL_ON.into();
+        t.firewall = Some(Firewall {
+            rules: vec![pyo_proto::firewall::FirewallRule { id: "fwr_1".into(), action: "block".into(), operator: "in".into(), sources: vec!["RU".into()], limit: None }],
+            ..Default::default()
+        });
+        let pyo = PyoApi::new("http://127.0.0.1:9", "t").unwrap();
+        let e = apply(&client, &pyo, &t).await.expect_err("a country rule it refuses");
+        assert_eq!(e.to_string(), COUNTRY_HEADER_REFUSED);
+        assert!(kube.refused().iter().any(|w| w.plural == "securitypolicies" && country_by_header(&w.body)));
+        // The new install takes it.
+        kube.admit(|_| None);
+        apply(&client, &pyo, &t).await.expect("the tunnel domain's routes");
     }
 
     /// What a cluster still on 0.5.5's admission policy accepts of the

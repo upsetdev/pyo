@@ -910,8 +910,11 @@ pub fn admission_with(
                     object.spec.clientIPDetection.xForwardedFor.trustedCIDRs.all(c, c.matches({trusted_v4}) || c.matches({trusted_v6}))))))) || \
             (request.resource.resource == 'securitypolicies' && variables.objName != '{tailnet_gw}' && (request.operation == 'DELETE' || variables.portPolicy && (variables.toPortRoute || variables.toWebRoute) && variables.ownRoute && !variables.objName.startsWith('{tn_route}') && \
                 object.spec.all(k, k in ['targetRefs', 'authorization']) && object.spec.authorization.all(k, k in ['defaultAction', 'rules']) && \
-                (!has(object.spec.authorization.rules) || object.spec.authorization.rules.all(r, (variables.toWebRoute && (r == {acme_rule} || r == {gate_rule})) || (r.all(k, k in ['name', 'action', 'principal']) && r.principal.all(k, k == 'clientCIDRs' || (k == 'clientIPGeoLocations' && variables.toWebRoute)) && \
-                    (!has(r.principal.clientIPGeoLocations) || r.principal.clientIPGeoLocations.all(g, g.all(k, k == 'country')))))))) || \
+                (!has(object.spec.authorization.rules) || object.spec.authorization.rules.all(r, (variables.toWebRoute && (r == {acme_rule} || r == {gate_rule})) || (r.all(k, k in ['name', 'action', 'principal']) && r.principal.all(k, k == 'clientCIDRs' || (k in ['clientIPGeoLocations', 'headers'] && variables.toWebRoute)) && \
+                    (!has(r.principal.clientIPGeoLocations) || r.principal.clientIPGeoLocations.all(g, g.all(k, k == 'country'))) && \
+                    (!has(r.principal.headers) || (size(r.principal.headers) == 1 && r.principal.headers.all(h, h.all(k, k in ['name', 'values']) && h.name == '{country_header}' && h.values.all(v, v.matches('^[A-Z]{{2}}$'))))))))) && \
+                (!has(object.spec.authorization.rules) || !object.spec.authorization.rules.exists(r, has(r.principal) && has(r.principal.headers)) || object.spec.authorization.rules[0] == {gate_rule} || \
+                    (size(object.spec.authorization.rules) >= 2 && object.spec.authorization.rules[0] == {acme_rule} && object.spec.authorization.rules[1] == {gate_rule})))) || \
             (request.resource.resource == 'backendtrafficpolicies' && (request.operation == 'DELETE' || variables.portPolicy && variables.familyRoutes && \
                 ((variables.toPortRoute && object.spec.all(k, k in ['targetRefs', 'proxyProtocol']) && object.spec.proxyProtocol.all(k, k == 'version') && object.spec.proxyProtocol.version in ['V1', 'V2']) || \
                  (variables.toWebRoute && object.spec.all(k, k in ['targetRefs', 'rateLimit', 'responseOverride', 'compressor', 'timeout']) && (has(object.spec.rateLimit) || has(object.spec.responseOverride)) && \
@@ -1075,6 +1078,10 @@ pub fn admission_with(
             // behind a CDN its connections only (firewall.rs).
             acme_rule = cel_literal(&crate::firewall::acme_rule()),
             gate_rule = cel_literal(&crate::firewall::behind_gate_rule()),
+            // Behind Cloudflare and through the tunnel, a country is
+            // Cloudflare's header (firewall.rs `COUNTRY_HEADER`): only
+            // that header, country codes, and only after the gate.
+            country_header = crate::firewall::COUNTRY_HEADER,
             // The CDNs a website can be behind, and the tunnel's connectors.
             behind = cel_literal(&json!(crate::firewall::BEHIND.iter().chain([&system::TUNNEL_CDN]).collect::<Vec<_>>())),
             max_trusted = system::MAX_TRUSTED_CIDRS,
@@ -1967,6 +1974,41 @@ mod tests {
             eep.contains("annotations[?'pyo.dev/waf'].orValue('') != ''"),
             "{eep}"
         );
+    }
+
+    /// A route's country rule as Cloudflare's header (behind Cloudflare,
+    /// through the tunnel): on web routes only, that one header with
+    /// country codes, and only in a policy whose first rule (after Let's
+    /// Encrypt's) is the behind gate, so no direct client's header counts.
+    #[test]
+    fn country_headers_only_after_the_gate() {
+        let all = admission(system::WAF_IMAGE_DEFAULT, system::GEOIP_IMAGE_DEFAULT)[0].to_string();
+        let start = all
+            .find("request.resource.resource == 'securitypolicies' && variables.objName != ")
+            .unwrap();
+        let end = all[start..].find("request.resource.resource == 'backendtrafficpolicies'").unwrap();
+        let sp = &all[start..start + end];
+        assert!(sp.contains("(k in ['clientIPGeoLocations', 'headers'] && variables.toWebRoute)"), "{sp}");
+        assert!(sp.contains("h.name == 'cf-ipcountry' && h.values.all(v, v.matches('^[A-Z]{2}$'))"), "{sp}");
+        let gate = system::cel_literal(&crate::firewall::behind_gate_rule());
+        let acme = system::cel_literal(&crate::firewall::acme_rule());
+        assert!(sp.contains(&format!(
+            "!object.spec.authorization.rules.exists(r, has(r.principal) && has(r.principal.headers)) || object.spec.authorization.rules[0] == {gate} || \
+                    (size(object.spec.authorization.rules) >= 2 && object.spec.authorization.rules[0] == {acme} && object.spec.authorization.rules[1] == {gate})"
+        )), "{sp}");
+        // As the agent writes them: behind Cloudflare the gate is second,
+        // through the tunnel first.
+        let mut fw = crate::firewall::Firewall {
+            rules: vec![crate::firewall::FirewallRule { id: "r".into(), action: "block".into(), operator: "in".into(), sources: vec!["RU".into()], limit: None }],
+            presets: [("cloudflare".to_owned(), vec!["173.245.48.0/20".to_owned()])].into_iter().collect(),
+            behind: Some("cloudflare".into()),
+        };
+        let a = crate::firewall::web_authorization(&fw, crate::firewall::Entry::Https).unwrap();
+        assert_eq!(a["rules"][0], crate::firewall::acme_rule());
+        assert_eq!(a["rules"][1], crate::firewall::behind_gate_rule());
+        fw.behind = None;
+        let t = crate::firewall::tunnel_authorization(&fw);
+        assert_eq!(t["rules"][0], crate::firewall::behind_gate_rule());
     }
 
     /// The client policies that remove visitor headers: the agent may
