@@ -16,6 +16,7 @@ import {
   usePyoVersion,
 } from "~/components/pyo/Managed";
 import { ClusterTraffic, ClusterTrafficMode } from "~/components/pyo/TrafficMode";
+import { ClusterGateway } from "~/components/pyo/Gateway";
 import { Badge, ClusterStatusBadge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { ConfirmDialog } from "~/components/ui/Dialog";
@@ -136,6 +137,7 @@ function ClusterSettings({ c }: { c: Cluster }) {
           </div>
         </Panel>
         <ClusterTraffic cluster={c} />
+        <ClusterGateway cluster={c} />
         <ClusterTrafficMode cluster={c} />
         <ClusterMtls cluster={c} />
         <Panel title="Danger zone" tone="danger">
