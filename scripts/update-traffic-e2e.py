@@ -6,6 +6,8 @@
   summary DIR                          what failed, and during which rollout
   images-pull REGISTRY DIR TAG NAME... a build's images, from a registry
   images-push REGISTRY DIR             the same images, into a registry
+  h3 HOST IP                           one HTTP/3 GET of https://HOST/ at IP
+                                       (needs aioquic: Ubuntu's python3-aioquic)
 
 load sends, to each target, with no retries:
   fresh      RATE requests a second, a new connection each
@@ -704,7 +706,56 @@ def push_blob(reg, repo, digest, path):
         sys.exit(f"{repo} blob {digest}: HTTP {status} {out[:200]!r}")
 
 
+# ── h3: one real HTTP/3 request ─────────────────────────────────────────────
+
+
+def cmd_h3(args):
+    """GET https://HOST/ over HTTP/3 (QUIC on UDP 443 of IP), the
+    certificate not checked (a test domain's). Prints "h3 <status>" and
+    exits 0 on an answer, else says why and exits 1. aioquic is the only
+    module outside the standard library, and only this command needs it."""
+    host, ip = args[0], args[1]
+    try:
+        import asyncio
+        from aioquic.asyncio import connect
+        from aioquic.h3.connection import H3_ALPN, H3Connection
+        from aioquic.h3.events import HeadersReceived
+        from aioquic.quic.configuration import QuicConfiguration
+        from aioquic.asyncio.protocol import QuicConnectionProtocol
+    except ImportError as e:
+        print(f"no HTTP/3 client here: {e}")
+        return 2
+
+    class Client(QuicConnectionProtocol):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.h3 = H3Connection(self._quic)
+            self.done = asyncio.get_event_loop().create_future()
+
+        def quic_event_received(self, event):
+            for e in self.h3.handle_event(event):
+                if isinstance(e, HeadersReceived) and not self.done.done():
+                    self.done.set_result(dict((k.decode(), v.decode()) for k, v in e.headers))
+
+    async def run():
+        config = QuicConfiguration(is_client=True, alpn_protocols=H3_ALPN, server_name=host, verify_mode=ssl.CERT_NONE)
+        async with connect(ip, 443, configuration=config, create_protocol=Client, wait_connected=True) as c:
+            sid = c._quic.get_next_available_stream_id()
+            c.h3.send_headers(sid, [(b":method", b"GET"), (b":scheme", b"https"), (b":authority", host.encode()), (b":path", b"/")], end_stream=True)
+            c.transmit()
+            return await asyncio.wait_for(c.done, 10)
+
+    try:
+        headers = asyncio.run(asyncio.wait_for(run(), 15))
+    except Exception as e:  # noqa: BLE001 - any failure is the answer
+        print(f"no HTTP/3 answer: {type(e).__name__} {e}")
+        return 1
+    print(f"h3 {headers.get(':status', '?')}")
+    return 0
+
+
 COMMANDS = {
+    "h3": cmd_h3,
     "load": cmd_load,
     "watch": cmd_watch,
     "summary": cmd_summary,

@@ -42,6 +42,7 @@ pub mod error;
 mod firewall;
 mod freedomain;
 mod gate;
+mod gateway_settings;
 mod geoip;
 mod git;
 mod github;

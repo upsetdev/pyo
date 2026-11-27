@@ -594,6 +594,66 @@ pub struct Capabilities {
     /// redirects and header rules, 2 for paths too. 0 from older agents.
     #[serde(default)]
     pub gateway_rules: u8,
+    /// The agent writes the Gateway section's settings: `SetWebSettings`
+    /// (HTTP/3, TLS minimum), compression and idle timeouts on routes.
+    /// False from older agents.
+    #[serde(default)]
+    pub gateway_settings: bool,
+    /// The gateway's parts on each server, for the Gateway section. None
+    /// from older agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayReport>,
+}
+
+/// The gateway's parts as the agent sees them (the Gateway section's
+/// status): Envoy Gateway's controller, the proxy on each server and the
+/// WAF's processor on each server.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayReport {
+    /// Envoy Gateway's controller (its Deployment in pyo-gateway).
+    pub controller: GatewayPart,
+    /// The proxies, one per server that runs one (not build-only ones).
+    pub proxies: Vec<GatewayServerPart>,
+    /// The WAF's processor, one per server, while a service has its WAF on.
+    pub firewalls: Vec<GatewayServerPart>,
+    /// The websites answer HTTP/3, as the proxies' settings are now.
+    #[serde(default)]
+    pub http3: bool,
+    /// The TLS minimum as the proxies' settings are now: "1.2" or "1.3".
+    #[serde(default)]
+    pub tls_min: String,
+    /// Another Service that publishes UDP port 443 on the servers
+    /// ("namespace/name"): HTTP/3 can't go on while it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp443_taken: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayPart {
+    pub ready: bool,
+    /// From its image's tag: "1.9.3".
+    pub version: String,
+    /// Why it isn't ready, in plain words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayServerPart {
+    pub server: String,
+    pub ready: bool,
+    /// From its image's tag: "1.39.5".
+    pub version: String,
+    pub restarts: i32,
+    /// When its container last started (ms since the epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    /// Why it isn't ready, in plain words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A server where the gateway can't get some of its ports.
@@ -1277,6 +1337,16 @@ pub enum Command {
     /// cluster behind another load balancer. Plain connections still work.
     SetWebProxyProtocol {
         on: bool,
+    },
+    /// The websites' listener settings (the Gateway section): HTTP/3 on
+    /// UDP 443 next to HTTPS, and TLS 1.3 only. Unset ones stay as they
+    /// are. HTTP/3 waits while another Service publishes UDP 443 on the
+    /// servers. Agents that say [`Capabilities::gateway_settings`].
+    SetWebSettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        http3: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tls13: Option<bool>,
     },
     /// Apply the firewall to every service on the cluster, in place.
     SyncFirewall(Box<FirewallSync>),
@@ -2043,6 +2113,16 @@ pub struct DeploySpec {
     /// own: the API puts its current one in. None: [`system::REQUEST_TIMEOUT_SECS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout: Option<u32>,
+    /// The gateway compresses responses on the service's HTTPS domains
+    /// (Zstd, Brotli, Gzip): the cluster's setting, put in by the API like
+    /// `domains`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compression: bool,
+    /// How long a WebSocket or stream on the service's domains may stay
+    /// quiet, in seconds: the cluster's default, put in by the API. None:
+    /// the client policies' 1 hour ([`system::IDLE_TIMEOUT_SECS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<u32>,
     pub resources: Resources,
     pub health_check: HealthCheck,
     pub volumes: Vec<VolumeSpec>,
@@ -2243,6 +2323,12 @@ pub struct FirewallTarget {
     /// As [`DeploySpec::request_timeout`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout: Option<u32>,
+    /// As [`DeploySpec::compression`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compression: bool,
+    /// As [`DeploySpec::idle_timeout`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<u32>,
     #[serde(default)]
     pub network_isolation: bool,
     pub firewall: firewall::Firewall,

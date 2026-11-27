@@ -7,8 +7,12 @@
 # of change (pyo-agent's `drain_scenarios` test), translates each with
 # Envoy Gateway's egctl (the version Pyo installs, checksum checked), and
 # compares the listeners. Also shows the same changes as Pyo wrote them
-# before 0.51.1, and what the update itself changes once. Needs cargo, curl,
-# openssl and python3. Runs offline after the download, no cluster.
+# before 0.51.1, and what the updates themselves change once: from before
+# 0.51.1, and from the release before the Gateway section (its anchor
+# routes and the policy on Pyo's own tailnet routes). Firewall changes,
+# traffic paths and the Gateway section's settings (compression, the
+# timeout defaults, HTTP/3, the TLS minimum) are all in it. Needs cargo,
+# curl, openssl and python3. Runs offline after the download, no cluster.
 #
 #   ./scripts/gateway-drain-check.sh
 #
@@ -48,7 +52,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$DIR/key.pem" -out "$DIR/cert
   -days 2 -subj "/CN=example.test" 2>/dev/null
 
 n=$(ls "$DIR/in" | wc -l)
-for when in before after; do
+for when in before previous after; do
   mkdir -p "$DIR/$when"
   i=0
   for f in "$DIR"/in/*.json; do
@@ -57,6 +61,7 @@ for when in before after; do
     printf '\rTranslating (%s) %d/%d' "$when" "$i" "$n"
     flag=""
     [ "$when" = before ] && flag=--before
+    [ "$when" = previous ] && flag=--previous
     $PY yaml "$f" "$DIR/cert.pem" "$DIR/key.pem" "$DIR/$when/$name.yaml" $flag
     "$EGCTL" x translate --from gateway-api --to xds -t all -o json \
       -f "$DIR/$when/$name.yaml" >"$DIR/$when/$name.json" 2>"$DIR/$when/$name.err" ||
@@ -71,6 +76,9 @@ $PY compare "$DIR/before" || true
 echo
 echo "== The update itself (once, when a service's routes are next applied)"
 $PY rollout "$DIR/before" "$DIR/after"
+echo
+echo "== This release's update (once): the release before the Gateway section, then now"
+$PY rollout "$DIR/previous" "$DIR/after"
 echo
 echo "== Now"
 $PY compare "$DIR/after"

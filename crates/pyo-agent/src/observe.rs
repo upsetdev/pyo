@@ -1040,6 +1040,156 @@ async fn capabilities(
         tailnet_web_ips: tailnet_web_ips(client).await,
         tunnel: true,
         gateway_rules: crate::gateway::RULES,
+        gateway_settings: true,
+        gateway: Some(gateway_report(
+            nodes,
+            pods,
+            crate::gateway::web_settings(client).await.ok(),
+            udp443_taken(client).await,
+        )),
+    }
+}
+
+/// Another Service that publishes UDP port 443 on the servers, which
+/// HTTP/3 would need: "namespace/name".
+async fn udp443_taken(client: &Client) -> Option<String> {
+    let services = Api::<Service>::all(client.clone()).list(&ListParams::default()).await.ok()?;
+    services.items.iter().find_map(|s| {
+        let ns = s.namespace().unwrap_or_default();
+        let spec = s.spec.as_ref()?;
+        (ns != pyo_proto::system::GATEWAY_NS
+            && spec.type_.as_deref() == Some("LoadBalancer")
+            && spec.ports.iter().flatten().any(|p| p.port == 443 && p.protocol.as_deref() == Some("UDP")))
+        .then(|| format!("{ns}/{}", s.name_any()))
+    })
+}
+
+/// A part's version from its image: the tag without a "v" or Envoy's
+/// "distroless-v" ("1.39.5"), at most 12 characters (a content hash's).
+pub fn image_version(image: &str) -> String {
+    let no_digest = image.split('@').next().unwrap_or("");
+    let tag = match no_digest.rsplit_once(':') {
+        Some((repo, tag)) if !tag.contains('/') && !repo.is_empty() => tag,
+        _ => return String::new(),
+    };
+    let tag = tag.strip_prefix("distroless-").unwrap_or(tag);
+    let tag = tag.strip_prefix('v').filter(|t| t.starts_with(|c: char| c.is_ascii_digit())).unwrap_or(tag);
+    tag.chars().take(12).collect()
+}
+
+/// One pod's part: ready, its container's version, restarts and start,
+/// and why it isn't ready in plain words.
+fn pod_part(p: &Pod, container: &str) -> (bool, String, i32, Option<i64>, Option<String>) {
+    let ready = p.metadata.deletion_timestamp.is_none()
+        && p.status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .is_some_and(|c| c.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
+    let version = p
+        .spec
+        .iter()
+        .flat_map(|s| s.containers.iter())
+        .find(|c| c.name == container)
+        .and_then(|c| c.image.as_deref())
+        .map(image_version)
+        .unwrap_or_default();
+    let cs = p
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.name == container));
+    let restarts = cs.map(|c| c.restart_count).unwrap_or(0);
+    let started_at = cs
+        .and_then(|c| c.state.as_ref())
+        .and_then(|s| s.running.as_ref())
+        .and_then(|r| r.started_at.as_ref())
+        .map(ms);
+    let reason = (!ready).then(|| {
+        pods_problem([p])
+            .map(str::to_owned)
+            .unwrap_or_else(|| if p.metadata.deletion_timestamp.is_some() { "Stopping.".into() } else { "Starting.".into() })
+    });
+    (ready, version, restarts, started_at, reason)
+}
+
+/// The pod of a server's copy: a ready one first, else the newest.
+fn server_pod<'a>(pods: &[&'a Pod], server: &str) -> Option<&'a Pod> {
+    let mut on: Vec<&Pod> = pods
+        .iter()
+        .copied()
+        .filter(|p| p.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(server))
+        .collect();
+    on.sort_by_key(|p| {
+        let (ready, ..) = pod_part(p, "");
+        (!ready, std::cmp::Reverse(p.metadata.creation_timestamp.as_ref().map(ms)))
+    });
+    on.first().copied()
+}
+
+/// The Gateway section's status (pyo-proto's `GatewayReport`): Envoy
+/// Gateway's controller, and the proxy and the WAF's processor on each
+/// server that runs a proxy (not build-only ones). A server with none is
+/// listed as not ready. The WAF's are listed only while it runs anywhere.
+pub fn gateway_report(
+    nodes: &[Node],
+    pods: &[Pod],
+    web: Option<pyo_proto::system::WebSettings>,
+    udp443_taken: Option<String>,
+) -> pyo_proto::GatewayReport {
+    use pyo_proto::{GatewayPart, GatewayServerPart, system};
+    let labelled = |p: &Pod, ns: &str, k: &str, v: &str| {
+        p.namespace().as_deref() == Some(ns) && p.labels().get(k).map(String::as_str) == Some(v)
+    };
+    let proxies: Vec<&Pod> = pods
+        .iter()
+        .filter(|p| labelled(p, system::GATEWAY_NS, "app.kubernetes.io/component", "proxy"))
+        .filter(|p| p.labels().get("app.kubernetes.io/managed-by").map(String::as_str) == Some("envoy-gateway"))
+        .collect();
+    let wafs: Vec<&Pod> = pods
+        .iter()
+        .filter(|p| labelled(p, system::WAF_NS, "app.kubernetes.io/name", system::WAF_NAME))
+        .collect();
+    let controllers: Vec<&Pod> = pods
+        .iter()
+        .filter(|p| labelled(p, system::GATEWAY_NS, "control-plane", "envoy-gateway"))
+        .collect();
+    let mut servers: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.labels().get(pyo_proto::BUILDER_NODE_LABEL).map(String::as_str) != Some("true"))
+        .map(|n| n.name_any())
+        .collect();
+    servers.sort();
+    let per_server = |pods: &[&Pod], container: &str, missing: &str| -> Vec<GatewayServerPart> {
+        servers
+            .iter()
+            .map(|server| match server_pod(pods, server) {
+                Some(p) => {
+                    let (ready, version, restarts, started_at, reason) = pod_part(p, container);
+                    GatewayServerPart { server: server.clone(), ready, version, restarts, started_at, reason }
+                }
+                None => GatewayServerPart {
+                    server: server.clone(),
+                    reason: Some(missing.into()),
+                    ..Default::default()
+                },
+            })
+            .collect()
+    };
+    let controller = match controllers.iter().find(|p| pod_part(p, "envoy-gateway").0).or(controllers.first()) {
+        Some(p) => {
+            let (ready, version, _, _, reason) = pod_part(p, "envoy-gateway");
+            GatewayPart { ready, version, reason }
+        }
+        None => GatewayPart { ready: false, version: String::new(), reason: Some("Not running.".into()) },
+    };
+    let web = web.unwrap_or_default();
+    pyo_proto::GatewayReport {
+        controller,
+        proxies: per_server(&proxies, "envoy", "No proxy on this server."),
+        firewalls: if wafs.is_empty() { vec![] } else { per_server(&wafs, "waf", "No firewall on this server.") },
+        http3: web.http3,
+        tls_min: if web.tls13 { "1.3" } else { "1.2" }.into(),
+        udp443_taken,
     }
 }
 
@@ -1565,6 +1715,73 @@ mod tests {
         assert!(!waiting_for_room(&pod(
             "0/2 nodes are available: 2 node(s) didn't match Pod's node affinity/selector."
         )));
+    }
+
+    #[test]
+    fn parts_show_their_version_from_the_image() {
+        assert_eq!(image_version("ghcr.io/x/envoyproxy/envoy:distroless-v1.39.5@sha256:9d84"), "1.39.5");
+        assert_eq!(image_version("ghcr.io/x/envoyproxy/gateway:v1.9.3@sha256:192f"), "1.9.3");
+        assert_eq!(image_version("127.0.0.1:5005/pyo/waf:0f3c9a1b2c3d4e5f6a7b"), "0f3c9a1b2c3d");
+        assert_eq!(image_version("127.0.0.1:5005/pyo/waf"), "");
+        assert_eq!(image_version("registry.example.com:5000/x/vendor:latest"), "latest");
+    }
+
+    /// The Gateway section's status: the controller, and the proxy and the
+    /// WAF on each server that runs a proxy. A server without its proxy is
+    /// listed as not ready; build-only servers aren't listed; the WAF only
+    /// while it runs somewhere.
+    #[test]
+    fn the_gateway_report_lists_each_server() {
+        let node = |name: &str, builder: bool| -> Node {
+            let mut n = serde_json::json!({ "metadata": { "name": name, "labels": {} } });
+            if builder {
+                n["metadata"]["labels"][pyo_proto::BUILDER_NODE_LABEL] = serde_json::json!("true");
+            }
+            serde_json::from_value(n).unwrap()
+        };
+        let pod = |ns: &str, labels: serde_json::Value, node: &str, container: &str, image: &str, ready: bool| -> Pod {
+            serde_json::from_value(serde_json::json!({
+                "metadata": { "name": format!("{container}-{node}"), "namespace": ns, "labels": labels, "creationTimestamp": "2026-11-27T10:00:00Z" },
+                "spec": { "nodeName": node, "containers": [{ "name": container, "image": image }] },
+                "status": {
+                    "conditions": [{ "type": "Ready", "status": if ready { "True" } else { "False" } }],
+                    "containerStatuses": [{ "name": container, "ready": ready, "restartCount": 2, "image": image, "imageID": "",
+                        "state": if ready { serde_json::json!({ "running": { "startedAt": "2026-11-27T10:00:05Z" } }) }
+                                else { serde_json::json!({ "waiting": { "reason": "ImagePullBackOff" } }) } }],
+                },
+            }))
+            .unwrap()
+        };
+        let proxy = serde_json::json!({ "app.kubernetes.io/component": "proxy", "app.kubernetes.io/managed-by": "envoy-gateway" });
+        let envoy = "x/envoy:distroless-v1.39.5@sha256:aa";
+        let nodes = [node("server-1", false), node("server-2", false), node("builder-1", true)];
+        let pods = [
+            pod("pyo-gateway", serde_json::json!({ "control-plane": "envoy-gateway" }), "server-1", "envoy-gateway", "x/gateway:v1.9.3", true),
+            pod("pyo-gateway", proxy.clone(), "server-1", "envoy", envoy, true),
+            pod("pyo-waf", serde_json::json!({ "app.kubernetes.io/name": "pyo-waf" }), "server-2", "waf", "x/waf:abc", false),
+        ];
+        let web = pyo_proto::system::WebSettings { http3: true, ..Default::default() };
+        let r = gateway_report(&nodes, &pods, Some(web), Some("shop/game".into()));
+        assert_eq!(r.controller, pyo_proto::GatewayPart { ready: true, version: "1.9.3".into(), reason: None });
+        assert_eq!(r.proxies.len(), 2, "build-only servers run no proxy");
+        assert_eq!(r.proxies[0].server, "server-1");
+        assert!(r.proxies[0].ready);
+        assert_eq!(r.proxies[0].version, "1.39.5");
+        assert_eq!(r.proxies[0].restarts, 2);
+        assert_eq!(r.proxies[0].started_at, Some(1_795_773_605_000));
+        assert_eq!(r.proxies[1].reason.as_deref(), Some("No proxy on this server."));
+        assert!(!r.proxies[1].ready);
+        assert_eq!(r.firewalls.len(), 2);
+        assert_eq!(r.firewalls[1].reason.as_deref(), Some(pyo_proto::CANT_DOWNLOAD_IMAGE));
+        assert_eq!(r.firewalls[0].reason.as_deref(), Some("No firewall on this server."));
+        assert!(r.http3);
+        assert_eq!(r.tls_min, "1.2");
+        assert_eq!(r.udp443_taken.as_deref(), Some("shop/game"));
+        // No WAF anywhere: none listed. No controller: said so.
+        let r = gateway_report(&nodes, &pods[1..2], None, None);
+        assert!(r.firewalls.is_empty());
+        assert_eq!(r.controller.reason.as_deref(), Some("Not running."));
+        assert_eq!(r.tls_min, "1.2");
     }
 
     #[test]

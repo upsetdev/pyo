@@ -475,6 +475,8 @@ export type Cluster = {
   tailnetWeb?: boolean;
   /** Public ports close once the domains moving to the tunnel are on it. */
   closingPublic?: boolean;
+  /** The Gateway section: its settings, and its parts as last reported. */
+  gateway?: ClusterGateway;
   /** Its Cloudflare Tunnel; absent when it has none. */
   tunnel?: ClusterTunnel | null;
   /** Its public IPv4 address, for DNS records (never a private one); null without one. */
@@ -548,6 +550,8 @@ export type Cluster = {
     trafficLocal?: boolean;
     /** The agent can run a Cloudflare Tunnel connector. */
     tunnel?: boolean;
+    /** The agent writes the Gateway section's settings. */
+    gatewaySettings?: boolean;
     /** What the agent may do on the cluster; null until it reports it. */
     agentScope?: AgentScope | null;
     /** The agent's update protocol (0: it can't update Pyo or itself). */
@@ -581,6 +585,44 @@ export type Cluster = {
 
 /** How a cluster takes web traffic. */
 export type ClusterTraffic = "public" | "tailscale" | "tunnel";
+
+/** A cluster's gateway settings, as saved. Timeouts in seconds. */
+export type GatewaySettings = {
+  http3: boolean;
+  compression: boolean;
+  tlsMin: "1.2" | "1.3";
+  /** For services without their own; 0 is no limit. */
+  requestTimeout: number;
+  /** How long a WebSocket or stream may stay quiet. */
+  idleTimeout: number;
+};
+
+/** One server's copy of a gateway part. */
+export type GatewayServerPart = {
+  server: string;
+  ready: boolean;
+  version: string;
+  restarts: number;
+  /** When its container last started. */
+  startedAt?: Timestamp | null;
+  reason?: string | null;
+};
+
+export type ClusterGateway = {
+  settings: GatewaySettings;
+  /** As the agent last reported; null before an agent that reports it. */
+  status: {
+    controller: { ready: boolean; version: string; reason?: string | null };
+    proxies: GatewayServerPart[];
+    /** The WAF's processor; empty while no service has its WAF on. */
+    firewalls: GatewayServerPart[];
+    /** HTTP/3 and the TLS minimum as the proxies have them now. */
+    http3: boolean;
+    tlsMin: string;
+    /** Another Service that publishes UDP 443 on the servers. */
+    udp443Taken?: string | null;
+  } | null;
+};
 
 /** A traffic path: public ports, Cloudflare Tunnel or the tailnet. */
 export type TrafficPath = "public" | "tunnel" | "tailnet";

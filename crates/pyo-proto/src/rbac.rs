@@ -463,7 +463,7 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
             "pyo-agent",
             json!([
                 { "apiGroups": ["gateway.networking.k8s.io"], "resources": ["gateways", "httproutes", "tcproutes", "udproutes"], "verbs": ALL },
-                { "apiGroups": ["gateway.envoyproxy.io"], "resources": ["backends", "clienttrafficpolicies", "securitypolicies", "backendtrafficpolicies", "envoyextensionpolicies", "envoyproxies"], "verbs": ALL },
+                { "apiGroups": ["gateway.envoyproxy.io"], "resources": ["backends", "clienttrafficpolicies", "securitypolicies", "backendtrafficpolicies", "envoyextensionpolicies", "envoyproxies", "httproutefilters"], "verbs": ALL },
                 { "apiGroups": ["cert-manager.io"], "resources": ["certificates"], "verbs": ALL },
                 { "apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "patch", "delete"] },
                 // Services, network policies and ConfigMaps: written without
@@ -572,6 +572,45 @@ pub fn objects(upgrades: bool) -> Vec<Value> {
         ));
     }
     out
+}
+
+/// The Gateway section's fixed objects in pyo-gateway, for the admission
+/// policy (CEL, joined with `||`): the 404 filter of the anchor routes,
+/// the tailnet Gateway's anchor route and its policy, and the policy on
+/// each of Pyo's own tailnet routes. Routes are compared field by field:
+/// the API server fills in defaults (a parent's group and kind).
+fn anchor_pinned() -> String {
+    let gw = system::GATEWAY_NS;
+    let mut out = vec![
+        format!(
+            "(request.resource.resource == 'httproutefilters' && variables.objName == '{name}' && (request.operation == 'DELETE' || object.spec == {spec}))",
+            name = system::NOT_FOUND_FILTER,
+            spec = cel_literal(&system::not_found_filter_spec()),
+        ),
+        format!(
+            "(request.resource.resource == 'httproutes' && variables.objName == '{name}' && (request.operation == 'DELETE' || (!has(object.spec.hostnames) && \
+                size(object.spec.parentRefs) == 1 && object.spec.parentRefs[0].name == '{tgw}' && object.spec.parentRefs[0].sectionName == '{section}' && (!has(object.spec.parentRefs[0].namespace) || object.spec.parentRefs[0].namespace == '{gw}') && \
+                size(object.spec.rules) == 1 && object.spec.rules.all(r, (!has(r.backendRefs) || size(r.backendRefs) == 0) && size(r.filters) == 1 && r.filters.all(f, f.type == 'ExtensionRef' && f.extensionRef == {not_found}) && \
+                    size(r.matches) == 1 && r.matches.all(m, m.path.type == 'Exact' && m.path.value == '{path}')))))",
+            name = system::TAILNET_ANCHOR,
+            tgw = system::TAILNET_GATEWAY,
+            section = system::TAILNET_HTTPS_SECTION,
+            not_found = cel_literal(&system::not_found_ref()),
+            path = system::ANCHOR_PATH,
+        ),
+        format!(
+            "(request.resource.resource == 'backendtrafficpolicies' && variables.objName == '{name}' && (request.operation == 'DELETE' || object.spec == {spec}))",
+            name = system::TAILNET_ANCHOR,
+            spec = cel_literal(&system::anchor_policy_spec(system::TAILNET_GATEWAY)),
+        ),
+    ];
+    for (name, _, _) in system::TAILNET_OWN_ROUTES {
+        out.push(format!(
+            "(request.resource.resource == 'backendtrafficpolicies' && variables.objName == '{name}' && (request.operation == 'DELETE' || object.spec == {spec}))",
+            spec = cel_literal(&system::tailnet_own_policy_spec(name)),
+        ));
+    }
+    out.join(" || ")
 }
 
 /// What the admission policy pins of a route's WAF call: all but where it
@@ -852,13 +891,13 @@ pub fn admission_with(
         // pyo-tls-* Secrets; nothing of the proxy's own.
         { "name": "gatewayAllowed", "expression": format!("variables.ns == '{gw}' && (\
             (request.resource.resource == 'envoyproxies' && variables.objName == 'pyo' && request.operation != 'DELETE' && {proxies}.exists(p, {proxy_keys}.all(k, k in object.spec && object.spec[k] == p[k])) && object.spec.all(k, k in {proxy_keys})) || \
-            (request.resource.resource == 'clienttrafficpolicies' && (variables.objName in ['pyo-http', 'pyo-https', '{tailnet_gw}'] ? (request.operation != 'DELETE' && ((variables.objName == 'pyo-http' && object.spec in {ctp_http}) || (variables.objName == 'pyo-https' && object.spec in {ctp_https}) || (variables.objName == '{tailnet_gw}' && object.spec == {ctp_tailnet}))) : (request.operation == 'DELETE' || variables.portPolicy && ((\
+            (request.resource.resource == 'clienttrafficpolicies' && (variables.objName in ['pyo-http', 'pyo-https', '{tailnet_gw}'] ? (request.operation != 'DELETE' && ((variables.objName == 'pyo-http' && object.spec in {ctp_http}) || (variables.objName == 'pyo-https' && object.spec in {ctp_https}) || (variables.objName == '{tailnet_gw}' && object.spec in {ctp_tailnet}))) : (request.operation == 'DELETE' || variables.portPolicy && ((\
                 object.spec.all(k, k in ['targetRefs', 'connection', 'proxyProtocol']) && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name.endsWith('-ports') && has(t.sectionName)) && \
                 (!has(object.spec.connection) || (object.spec.connection.all(k, k in ['connectionLimit', 'maxAcceptPerSocketEvent']) && (!has(object.spec.connection.maxAcceptPerSocketEvent) || object.spec.connection.maxAcceptPerSocketEvent == 1) && (!has(object.spec.connection.connectionLimit) || (object.spec.connection.connectionLimit.all(k, k == 'value') && object.spec.connection.connectionLimit.value >= 1)))) && \
                 (!has(object.spec.proxyProtocol) || object.spec.proxyProtocol == {pp_optional})) || \
-                (object.metadata.labels[?'{cdn_label}'].orValue('') in {behind} && object.spec.all(k, k in ['targetRefs', 'clientIPDetection', 'connection', 'headers', 'tls', 'proxyProtocol', 'timeout']) && ({cdn_headers}) && \
+                (object.metadata.labels[?'{cdn_label}'].orValue('') in {behind} && object.spec.all(k, k in ['targetRefs', 'clientIPDetection', 'connection', 'headers', 'tls', 'proxyProtocol', 'timeout', 'http3']) && ({cdn_headers}) && \
                     size(object.spec.targetRefs) >= 1 && object.spec.targetRefs.all(t, t.group == 'gateway.networking.k8s.io' && t.kind == 'Gateway' && t.name + (object.metadata.labels[?'{cdn_label}'].orValue('') == '{tunnel_cdn}' ? '-{tunnel_cdn}' : '-cdn') == variables.objName && has(t.sectionName) && t.sectionName.startsWith('h-')) && \
-                    {ctp_https}.exists(v, ['connection', 'tls', 'proxyProtocol', 'timeout'].all(k, (k in v) == (k in object.spec) && (!(k in v) || v[k] == object.spec[k]))) && \
+                    {ctp_https}.exists(v, ['connection', 'tls', 'proxyProtocol', 'timeout', 'http3'].all(k, (k in v) == (k in object.spec) && (!(k in v) || v[k] == object.spec[k]))) && \
                     object.spec.clientIPDetection.all(k, k == 'xForwardedFor') && object.spec.clientIPDetection.xForwardedFor.all(k, k == 'trustedCIDRs') && \
                     size(object.spec.clientIPDetection.xForwardedFor.trustedCIDRs) >= 1 && size(object.spec.clientIPDetection.xForwardedFor.trustedCIDRs) <= {max_trusted} && \
                     object.spec.clientIPDetection.xForwardedFor.trustedCIDRs.all(c, c.matches({trusted_v4}) || c.matches({trusted_v6}))))))) || \
@@ -868,8 +907,11 @@ pub fn admission_with(
                     (!has(r.principal.clientIPGeoLocations) || r.principal.clientIPGeoLocations.all(g, g.all(k, k == 'country')))))))) || \
             (request.resource.resource == 'backendtrafficpolicies' && (request.operation == 'DELETE' || variables.portPolicy && variables.familyRoutes && \
                 ((variables.toPortRoute && object.spec.all(k, k in ['targetRefs', 'proxyProtocol']) && object.spec.proxyProtocol.all(k, k == 'version') && object.spec.proxyProtocol.version in ['V1', 'V2']) || \
-                 (variables.toWebRoute && object.spec.all(k, k in ['targetRefs', 'rateLimit', 'responseOverride']) && (has(object.spec.rateLimit) || has(object.spec.responseOverride)) && \
+                 (variables.toWebRoute && object.spec.all(k, k in ['targetRefs', 'rateLimit', 'responseOverride', 'compressor', 'timeout']) && (has(object.spec.rateLimit) || has(object.spec.responseOverride)) && \
                     (!has(object.spec.responseOverride) || object.spec.responseOverride == {fw_override}) && \
+                    (!has(object.spec.compressor) || object.spec.compressor == {compressors}) && \
+                    (!has(object.spec.timeout) || (object.spec.timeout.all(k, k == 'http') && object.spec.timeout.http.all(k, k == 'streamIdleTimeout') && object.spec.timeout.http.streamIdleTimeout.matches('^[0-9]{{2,5}}s$') && \
+                        duration(object.spec.timeout.http.streamIdleTimeout) >= duration('{idle_min}s') && duration(object.spec.timeout.http.streamIdleTimeout) <= duration('{idle_max}s'))) && \
                     (!has(object.spec.rateLimit) || object.spec.rateLimit == {fw_idle_rate} || (object.spec.rateLimit.all(k, k in ['type', 'local']) && object.spec.rateLimit.type == 'Local' && \
                     object.spec.rateLimit.local.all(k, k == 'rules') && size(object.spec.rateLimit.local.rules) >= 1 && size(object.spec.rateLimit.local.rules) <= 16 && object.spec.rateLimit.local.rules.all(r, r.all(k, k in ['clientSelectors', 'limit']) && \
                     size(r.clientSelectors) == 1 && r.clientSelectors.all(c, c.all(k, k == 'sourceCIDR') && c.sourceCIDR.all(k, k in ['type', 'value', 'invert']) && c.sourceCIDR.type == 'Distinct' && c.sourceCIDR.value.matches('^[0-9a-fA-F:.]+/[0-9]{{1,3}}$')) && \
@@ -891,6 +933,7 @@ pub fn admission_with(
                 (has(object.spec.authorization) && has(object.spec.authorization.rules) && size(object.spec.authorization.rules) == 2 && object.spec == {tailnet_policy_servers} && \
                     size({servers}) >= 1 && size({servers}) <= 512 && {servers}.all(c, c.matches({server_v4}) || c.matches({server_v6}))))) || \
             {tailnet_routes} || \
+            {anchor_pinned} || \
             (request.resource.resource == 'backends' && variables.objName == '{public_dash}' && (request.operation == 'DELETE' || object.spec == {public_dash_backend})) || \
             (request.resource.resource == 'services' && variables.objName == '{tw_svc}' && variables.sub == '' && (request.operation == 'DELETE' || (object.spec.all(k, k in {tw_keys}) && \
                 object.spec.type == 'ClusterIP' && object.spec.externalTrafficPolicy == 'Local' && object.spec.selector == {tw_selector} && object.spec.ports == {tw_ports} && \
@@ -915,7 +958,7 @@ pub fn admission_with(
                     ((l.protocol == 'UDP' && !(l.port in {udp_reserved})) || (l.protocol == 'TCP' && !(l.port in {tcp_reserved}) && !(l.port >= 19000 && l.port <= 19003))) && l.allowedRoutes == {same_ns}))))) || \
             (request.resource.resource == 'httproutes' && !(variables.objName in {tailnet_names}) && (request.operation == 'DELETE' || (object.spec.parentRefs.all(p, (!has(p.namespace) || p.namespace == '{gw}') && \
                 (p.name == '{tailnet_gw}' ? (variables.objName.startsWith('{tn_route}') && has(p.sectionName) && p.sectionName == '{tn_https}' && has(object.spec.hostnames) && size(object.spec.hostnames) >= 1 && object.spec.hostnames.all(h, h.lowerAscii().endsWith('{tn_suffix}'))) : \
-                 (!variables.objName.startsWith('{tn_route}') && (!has(object.spec.hostnames) || object.spec.hostnames.all(h, !h.lowerAscii().endsWith('{tn_suffix}')))))) && object.spec.rules.all(r, (!has(r.backendRefs) || r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}'))) && (!has(r.filters) || r.filters.all(f, (f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https') || (f.type == 'RequestHeaderModifier' && f.requestHeaderModifier.all(k, k == 'set') && size(f.requestHeaderModifier.set) >= 1 && size(f.requestHeaderModifier.set) <= 2 && f.requestHeaderModifier.set.all(h, h.name == '{static_header}' || (h.name == '{forwarded_for}' && h.value == '{forwarded_for_visitor}'))))))))) || \
+                 (!variables.objName.startsWith('{tn_route}') && (!has(object.spec.hostnames) || object.spec.hostnames.all(h, !h.lowerAscii().endsWith('{tn_suffix}')))))) && object.spec.rules.all(r, (!has(r.backendRefs) || r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}'))) && (!has(r.filters) || r.filters.all(f, (f.type == 'RequestRedirect' && f.requestRedirect.scheme == 'https') || (f.type == 'ExtensionRef' && f.extensionRef == {not_found_ref}) || (f.type == 'RequestHeaderModifier' && f.requestHeaderModifier.all(k, k == 'set') && size(f.requestHeaderModifier.set) >= 1 && size(f.requestHeaderModifier.set) <= 2 && f.requestHeaderModifier.set.all(h, h.name == '{static_header}' || (h.name == '{forwarded_for}' && h.value == '{forwarded_for_visitor}'))))))))) || \
             (request.resource.resource in ['tcproutes', 'udproutes'] && (request.operation == 'DELETE' || (object.spec.all(k, k in ['parentRefs', 'rules']) && object.spec.parentRefs.all(p, (!has(p.namespace) || p.namespace == '{gw}') && p.name.endsWith('-ports')) && size(object.spec.rules) == 1 && \
                 object.spec.rules.all(r, r.all(k, k == 'backendRefs') && r.backendRefs.all(b, b.kind == 'Backend' && b.group == 'gateway.envoyproxy.io' && (!has(b.namespace) || b.namespace == '{gw}')))))) || \
             (request.resource.resource == 'backends' && variables.objName == '{waf}' && (request.operation == 'DELETE' || object.spec == {waf_backend})) || \
@@ -996,7 +1039,18 @@ pub fn admission_with(
             ctp_http = cel_literal(&json!(system::client_policy_variants(false))),
             ctp_https = cel_literal(&json!(system::client_policy_variants(true))),
             // The tailnet listeners' (system.rs): exactly this.
-            ctp_tailnet = cel_literal(&system::tailnet_client_policy_spec()),
+            ctp_tailnet = cel_literal(&json!([system::tailnet_client_policy_for(false), system::tailnet_client_policy_for(true)])),
+            // Compression on website routes: the one list (system.rs
+            // `compressors`), and an idle timeout of 1 minute to 24 hours.
+            compressors = cel_literal(&system::compressors()),
+            idle_min = system::MIN_IDLE_TIMEOUT_SECS,
+            idle_max = system::MAX_IDLE_TIMEOUT_SECS,
+            not_found_ref = cel_literal(&system::not_found_ref()),
+            // The fixed objects of the Gateway section: the 404 filter the
+            // anchor routes answer with, the tailnet Gateway's anchor route
+            // and its policy, and the idle rate limit on Pyo's own tailnet
+            // routes (system.rs). Exactly these.
+            anchor_pinned = anchor_pinned(),
             // A service's HTTPS behind a CDN (system.rs
             // `cdn_client_policy_spec`): on its own Gateway's listeners,
             // as every website's HTTPS is otherwise, trusting X-Forwarded-For
@@ -1927,9 +1981,10 @@ mod tests {
             "variables.objName in ['pyo-http', 'pyo-https', '{}']",
             system::TAILNET_GATEWAY
         )));
-        let tailnet = system::cel_literal(&system::tailnet_client_policy_spec());
+        // The tailnet's: exactly one of its two (the TLS minimum).
+        let tailnet = system::cel_literal(&json!([system::tailnet_client_policy_for(false), system::tailnet_client_policy_for(true)]));
         assert!(ctp.contains(&format!(
-            "variables.objName == '{}' && object.spec == {tailnet}",
+            "variables.objName == '{}' && object.spec in {tailnet}",
             system::TAILNET_GATEWAY
         )));
         for https in [false, true] {
@@ -1943,7 +1998,10 @@ mod tests {
             "(object.metadata.labels[?'{}'].orValue('') == 'cloudflare' && has(object.spec.headers) && object.spec.headers == {cloudflare})",
             system::CDN_LABEL
         )));
-        assert!(ctp.contains("['targetRefs', 'clientIPDetection', 'connection', 'headers', 'tls', 'proxyProtocol', 'timeout']"));
+        assert!(ctp.contains("['targetRefs', 'clientIPDetection', 'connection', 'headers', 'tls', 'proxyProtocol', 'timeout', 'http3']"));
+        // A CDN's or the tunnel's: its listener settings as one of
+        // pyo-https's variants, HTTP/3 and the TLS minimum among them.
+        assert!(ctp.contains("['connection', 'tls', 'proxyProtocol', 'timeout', 'http3'].all(k,"));
         // A port's policy: no headers.
         assert!(ctp.contains("object.spec.all(k, k in ['targetRefs', 'connection', 'proxyProtocol'])"));
     }
@@ -2525,6 +2583,60 @@ mod tests {
         }
     }
 
+    /// The Gateway section's objects: website route policies may carry the
+    /// one compressor list and an idle timeout of 1 minute to 24 hours;
+    /// routes may answer with the 404 filter; the filter, the tailnet
+    /// anchor and the policy on each of Pyo's own tailnet routes are pinned
+    /// exactly. And the agent may write the filter.
+    #[test]
+    fn the_gateway_sections_objects_are_pinned() {
+        let all = admission(system::WAF_IMAGE_DEFAULT, system::GEOIP_IMAGE_DEFAULT)[0].to_string();
+        let btp = {
+            let start = all.find("(request.resource.resource == 'backendtrafficpolicies' && (request.operation == 'DELETE' || variables.portPolicy").unwrap();
+            let end = all[start..].find("request.resource.resource == 'envoyextensionpolicies'").unwrap();
+            &all[start..start + end]
+        };
+        assert!(btp.contains("['targetRefs', 'rateLimit', 'responseOverride', 'compressor', 'timeout']"));
+        assert!(btp.contains(&format!("object.spec.compressor == {}", system::cel_literal(&system::compressors()))));
+        assert!(btp.contains("duration(object.spec.timeout.http.streamIdleTimeout) >= duration('60s')"));
+        assert!(btp.contains("duration(object.spec.timeout.http.streamIdleTimeout) <= duration('86400s')"));
+        assert!(btp.contains("object.spec.timeout.http.streamIdleTimeout.matches('^[0-9]{2,5}s$')"));
+        // Every idle timeout the agent writes fits.
+        for secs in [system::MIN_IDLE_TIMEOUT_SECS, 600, system::MAX_IDLE_TIMEOUT_SECS] {
+            let t = system::route_idle_timeout(Some(secs)).unwrap();
+            let v = t["http"]["streamIdleTimeout"].as_str().unwrap();
+            assert!(v.len() >= 3 && v.len() <= 6 && v.ends_with('s') && v[..v.len() - 1].bytes().all(|b| b.is_ascii_digit()), "{v}");
+        }
+        assert!(all.contains(&format!(
+            "(f.type == 'ExtensionRef' && f.extensionRef == {})",
+            system::cel_literal(&system::not_found_ref())
+        )));
+        let pinned = anchor_pinned();
+        assert!(pinned.contains(&format!(
+            "request.resource.resource == 'httproutefilters' && variables.objName == '{}' && (request.operation == 'DELETE' || object.spec == {})",
+            system::NOT_FOUND_FILTER,
+            system::cel_literal(&system::not_found_filter_spec())
+        )));
+        assert!(pinned.contains(&format!(
+            "variables.objName == '{}' && (request.operation == 'DELETE' || object.spec == {})",
+            system::TAILNET_ANCHOR,
+            system::cel_literal(&system::anchor_policy_spec(system::TAILNET_GATEWAY))
+        )));
+        for (name, _, _) in system::TAILNET_OWN_ROUTES {
+            assert!(pinned.contains(&format!(
+                "variables.objName == '{name}' && (request.operation == 'DELETE' || object.spec == {})",
+                system::cel_literal(&system::tailnet_own_policy_spec(name))
+            )));
+        }
+        assert!(all.contains(&pinned));
+        // The tailnet anchor is one of the tailnet's own names: no service's
+        // route may take it.
+        assert!(system::TAILNET_NAMES.contains(&system::TAILNET_ANCHOR));
+        assert_eq!(system::anchor_name(system::TAILNET_GATEWAY), system::TAILNET_ANCHOR);
+        // The agent's role lets it write the filter.
+        assert!(json!(objects(false)).to_string().contains(r#""envoyproxies","httproutefilters"]"#));
+    }
+
     /// The roles alone: stable for the same roles. 0.5.5's roles with the
     /// gateway's Services, network policies and ConfigMaps no longer named
     /// in the role (the admission policy names them, so the Cloudflare
@@ -2548,15 +2660,17 @@ mod tests {
     /// Change this only with a release that means to
     /// change the roles: from 0.51.0 on a cluster with the self-update role
     /// gets them with a refresh, any other with its connect command.
+    /// 0.52.0: the agent may write HTTPRouteFilters (the Gateway section's
+    /// anchor routes answer with one).
     #[test]
-    fn the_roles_are_as_0_51_1s() {
+    fn the_roles_are_as_0_52_0s() {
         assert_eq!(
             short_hash(&json!([
                 objects(false),
                 objects(true),
                 self_update_objects()
             ])),
-            "8418d4afda5237cd"
+            "75d1b8254c1419f7"
         );
     }
 

@@ -3078,7 +3078,7 @@ pub(crate) enum Op {
         #[serde(default = "yes")]
         restore_records: bool,
     },
-    /// Turn a cluster's traffic paths on or off: public ports 80 and 443 (`public`), Cloudflare Tunnel (`tunnel`, with `defaultDomain` and `accountId` as for setClusterTraffic) and websites on the tailnet (`tailnet`: ts.net names and free domains on the servers' Tailscale addresses; the servers stay on the tailnet). Unset fields stay as they are. At least one path stays on. Each domain takes one path, and a domain whose path is off isn't served. When a path turned off still has domains, nothing changes: `status` is "confirm" and `domains` lists them, each with `outcome` "moves" or "stops". Send it again with `confirm` to go ahead. Turning public ports off with the tunnel on moves the domains in the tunnel's Cloudflare account to the tunnel first (`moveToTunnel`, on by default), and the ports close once every one of them is on it (`status` "moving"). Turning the tunnel off with public ports on switches its domains back first, then removes the tunnel at Cloudflare. `dashboardDrops`: switching Tailnet drops open connections to Pyo's dashboard on the tailnet once (the cluster Pyo runs on, with ts.net names). Team owners and admins.
+    /// Turn a cluster's traffic paths on or off: public ports 80 and 443 (`public`), Cloudflare Tunnel (`tunnel`, with `defaultDomain` and `accountId` as for setClusterTraffic) and websites on the tailnet (`tailnet`: ts.net names and free domains on the servers' Tailscale addresses; the servers stay on the tailnet). Unset fields stay as they are. At least one path stays on. Each domain takes one path, and a domain whose path is off isn't served. When a path turned off still has domains, nothing changes: `status` is "confirm" and `domains` lists them, each with `outcome` "moves" or "stops". Send it again with `confirm` to go ahead. Turning public ports off with the tunnel on moves the domains in the tunnel's Cloudflare account to the tunnel first (`moveToTunnel`, on by default), and the ports close once every one of them is on it (`status` "moving"). Turning the tunnel off with public ports on switches its domains back first, then removes the tunnel at Cloudflare. `dashboardDrops`: switching Tailnet drops open connections to Pyo's dashboard on the tailnet once (the cluster Pyo runs on, with ts.net names, until its connect command has run for this release). Team owners and admins.
     SetClusterPaths {
         cluster_id: String,
         #[serde(default)]
@@ -3104,6 +3104,20 @@ pub(crate) enum Op {
         restore_records: Option<bool>,
         #[serde(default)]
         confirm: bool,
+    },
+    /// A cluster's gateway settings. Unset fields stay as they are. `http3`: HTTP/3 on UDP port 443 next to HTTPS. It needs public ports on and UDP port 443 free on the servers, and the servers' firewalls must let UDP 443 in. Turning it on or off drops open connections on each server's public ports once, one server at a time. `tlsMin`: "1.2" or "1.3". Changing it drops every open HTTPS connection once. `compression`: Zstd, Brotli and Gzip on services' HTTPS domains. `requestTimeout` (seconds, 1 to 3600, or 0 for no limit) and `idleTimeout` (how long a WebSocket or stream may stay quiet, 60 to 86400 seconds, at least the request timeout): the defaults for services without their own. Compression and the defaults change routes only, without dropping connections. `drops` in the answer says whether open connections drop once. Team owners and admins.
+    SetClusterGateway {
+        cluster_id: String,
+        #[serde(default)]
+        http3: Option<bool>,
+        #[serde(default)]
+        compression: Option<bool>,
+        #[serde(default)]
+        tls_min: Option<String>,
+        #[serde(default)]
+        request_timeout: Option<u32>,
+        #[serde(default)]
+        idle_timeout: Option<u32>,
     },
     /// Give the cluster's Cloudflare Tunnel a new token and a new certificate. The old token can't connect from then on. Its connectors still connected are cut once the new ones are, or after 5 minutes. Team owners and admins.
     RotateTunnelToken { cluster_id: String },
@@ -3684,6 +3698,7 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         | Op::SetClusterTraffic { .. }
         | Op::RemoveClusterTunnel { .. }
         | Op::SetClusterPaths { .. }
+        | Op::SetClusterGateway { .. }
         | Op::RotateTunnelToken { .. }
         | Op::SetClusterFreeDomainAddress { .. } => ("Clusters", "cl"),
         Op::AddFirewallRule { .. }
@@ -8949,6 +8964,23 @@ async fn apply(
                 confirm,
             };
             crate::traffic_paths::set(s, tx, user, &cluster_id, ask, wake).await
+        }
+        Op::SetClusterGateway {
+            cluster_id,
+            http3,
+            compression,
+            tls_min,
+            request_timeout,
+            idle_timeout,
+        } => {
+            let ask = crate::gateway_settings::Ask {
+                http3,
+                compression,
+                tls_min,
+                request_timeout,
+                idle_timeout,
+            };
+            crate::gateway_settings::set(tx, user, &cluster_id, ask, wake).await
         }
         Op::RotateTunnelToken { cluster_id } => {
             crate::cloudflare::tunnel_ops::rotate(tx, user, &cluster_id).await

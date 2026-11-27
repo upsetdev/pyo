@@ -496,6 +496,8 @@ pub fn build_spec(
         domains,
         routes_revision: 0,
         request_timeout: crate::routes::request_timeout(spec),
+        compression: false,
+        idle_timeout: None,
         resources: Resources {
             cpu_request: int_at(r, &["cpuRequest"], 100),
             cpu_limit: int_at(r, &["cpuLimit"], 500),

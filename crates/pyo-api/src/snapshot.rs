@@ -173,6 +173,13 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'tailnetWeb', tailnet_web,
             'publicPortsSet', public_ports,
             'closingPublic', close_public_after IS NOT NULL,
+            -- The Gateway section (gateway_settings.rs): its settings, and
+            -- the gateway's parts as the last heartbeat said (null before
+            -- an agent that reports them).
+            'gateway', jsonb_build_object(
+              'settings', jsonb_build_object('http3', http3, 'compression', compression, 'tlsMin', tls_min,
+                                             'requestTimeout', request_timeout, 'idleTimeout', idle_timeout),
+              'status', capabilities->'gateway'),
             -- 'public' or 'tailscale' as chosen; freeDomainAddress below
             -- is the one in use (freedomain.rs).
             'freeDomainAddressSet', free_domain_address,
@@ -687,6 +694,8 @@ fn capabilities(stored: &Value) -> Value {
         "agentInstall": or("agentInstall", Value::Null),
         // Its agent runs Cloudflare Tunnel connectors.
         "tunnel": or("tunnel", json!(false)),
+        // Its agent writes the Gateway section's settings.
+        "gatewaySettings": or("gatewaySettings", json!(false)),
     })
 }
 

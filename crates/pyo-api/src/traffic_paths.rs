@@ -115,12 +115,23 @@ pub fn domain_path(d: &Value, default_domain: Option<&str>) -> Path {
 
 /// Whether switching Tailnet changes the tailnet Gateway's HTTPS listener
 /// on the cluster Pyo runs on: services' ts.net routes carry their route
-/// policies (a rate limit), Pyo's own routes there don't. With every
-/// service's ts.net route gone, or back, the listener's filters change, so
-/// open connections to Pyo's dashboard on the tailnet drop once. On other
-/// clusters that listener only has services' names, which stop anyway.
-pub fn dashboard_drops(same_cluster: bool, domains: &[Domain]) -> bool {
-    same_cluster && domains.iter().any(|d| pyo_proto::system::is_tailnet_host(&d.hostname))
+/// policies (a rate limit). Before the Gateway section's release Pyo's own
+/// routes there carried none, so with every service's ts.net route gone,
+/// or back, the listener's filters changed, and open connections to Pyo's
+/// dashboard on the tailnet dropped once. Now Pyo's own routes carry the
+/// same policy, and the listener has an anchor route that always does
+/// (gateway_settings.rs): once the cluster's agent writes them and its
+/// install takes them (`refreshed`), nothing drops. On other clusters that
+/// listener only has services' names, which stop anyway.
+pub fn dashboard_drops(same_cluster: bool, refreshed: bool, domains: &[Domain]) -> bool {
+    same_cluster && !refreshed && domains.iter().any(|d| pyo_proto::system::is_tailnet_host(&d.hostname))
+}
+
+/// Whether the cluster's agent writes Pyo's own tailnet routes with their
+/// policy, and its install takes them: the Gateway section's agent, with
+/// the install current.
+pub fn refreshed(capabilities: &Value) -> bool {
+    crate::gateway_settings::agent_ready(capabilities).is_ok()
 }
 
 /// A domain listed in a confirm answer.
@@ -378,7 +389,7 @@ pub async fn set(
             "domains": listed.iter().map(Listed::json).collect::<Vec<_>>(),
             "moving": listed.iter().filter(|l| l.path == Path::Public && l.outcome == "moves").count(),
             "publicDashboard": row.same_cluster && now.public && !want.public,
-            "dashboardDrops": now.tailnet != want.tailnet && dashboard_drops(row.same_cluster, &all),
+            "dashboardDrops": now.tailnet != want.tailnet && dashboard_drops(row.same_cluster, refreshed(&row.capabilities), &all),
             "hasPorts": has_ports(tx, cluster_id).await?,
         }));
     }
@@ -599,7 +610,7 @@ pub async fn set(
         "domains": listed.iter().map(Listed::json).collect::<Vec<_>>(),
         "moving": moving,
         "traffic": traffic,
-        "dashboardDrops": now.tailnet != want.tailnet && dashboard_drops(row.same_cluster, &all),
+        "dashboardDrops": now.tailnet != want.tailnet && dashboard_drops(row.same_cluster, refreshed(&row.capabilities), &all),
     }))
 }
 
@@ -748,10 +759,16 @@ mod tests {
     fn the_tailnet_switch_drops_the_dashboard_only_where_pyo_runs_with_tsnet_names() {
         let ts = [dom("blog.tail1234.ts.net", Path::Tailnet, false)];
         let free = [dom("web.100.64.0.2.nip.io", Path::Tailnet, false)];
-        assert!(dashboard_drops(true, &ts));
-        assert!(!dashboard_drops(false, &ts), "another cluster: only the names that stop");
-        assert!(!dashboard_drops(true, &free), "its own listener, not the tailnet Gateway's");
-        assert!(!dashboard_drops(true, &[]));
+        assert!(dashboard_drops(true, false, &ts));
+        assert!(!dashboard_drops(false, false, &ts), "another cluster: only the names that stop");
+        assert!(!dashboard_drops(true, false, &free), "its own listener, not the tailnet Gateway's");
+        assert!(!dashboard_drops(true, false, &[]));
+        // Pyo's own tailnet routes carry their policy: nothing drops.
+        assert!(!dashboard_drops(true, true, &ts));
+        let current = json!({ "gatewaySettings": true, "agentInstall": { "state": "current" } });
+        assert!(refreshed(&current));
+        assert!(!refreshed(&json!({ "gatewaySettings": true, "agentInstall": { "state": "outdated" } })));
+        assert!(!refreshed(&json!({ "agentInstall": { "state": "current" } })), "an agent before the Gateway section");
     }
 
     #[test]

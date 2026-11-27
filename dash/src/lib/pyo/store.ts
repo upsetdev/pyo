@@ -37,6 +37,7 @@ import type {
   AlertKind,
   Cluster,
   ClusterTraffic,
+  GatewaySettings,
   ClusterPaths,
   PathDomain,
   TrafficPath,
@@ -1652,6 +1653,17 @@ export const api = {
       publicDashboard?: boolean;
       hasPorts?: boolean;
     }>("setClusterPaths", { clusterId, ...args });
+  },
+  /**
+   * The cluster's gateway settings. Unset fields stay. `drops` says whether
+   * open connections dropped once (HTTP/3, the TLS minimum).
+   */
+  setClusterGateway(clusterId: string, args: Partial<GatewaySettings>) {
+    update((s) => {
+      const c = s.clusters.find((x) => x.id === clusterId);
+      if (c?.gateway) c.gateway.settings = { ...c.gateway.settings, ...args };
+    });
+    return send<{ drops: boolean; settings: GatewaySettings }>("setClusterGateway", { clusterId, ...args });
   },
   /** Remove the cluster's tunnel; `restoreRecords` puts back what it replaced. */
   removeClusterTunnel(clusterId: string, restoreRecords: boolean) {
