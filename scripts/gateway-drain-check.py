@@ -59,18 +59,26 @@ STABLE = [
     # TCP chains stay (turning it off removes the QUIC listener: HTTP/3
     # connections end, which the confirm says).
     ("http3_on", "base"),
+    # Country rules: every HTTPS Gateway's anchor and the shared :80's
+    # carry a country rule of their own, so the geoip filter is always on
+    # those chains (found draining 2026-11-27, routes only since).
+    ("country_rule", "base"),
+    ("base", "country_rule"),
+    ("all_rules", "base"),
+    ("base", "all_rules"),
+    # Where the visitor comes from X-Forwarded-For (behind a CDN, through
+    # the tunnel), Envoy Gateway takes no country rule: no geoip filter
+    # there either way (the routes answer 500, listed below).
+    ("behind_country", "behind"),
+    ("behind", "behind_country"),
+    ("tunnel_country", "tunnel_on"),
+    ("tunnel_on", "tunnel_country"),
 ]
 KNOWN = [
     ("waf_block", "base"),
     ("waf_log", "waf_block"),
-    # Found 2026-11-27, once the client policies were matched to their
-    # Gateways here (egctl doesn't match labels): the first or last country
-    # rule of a service adds or removes the geoip filter on its HTTPS chains
-    # and on the shared :80 chain, so they drain once. Address and rate
-    # limit rules stay routes only.
-    ("country_rule", "base"),
-    ("all_rules", "base"),
-    ("base", "all_rules"),
+    # Behind a CDN on and off: the service's client policy.
+    ("behind", "base"),
     # Traffic paths, as the design's cut table says: a free name on a
     # Tailscale address loses its own chain when Tailnet goes off (it's
     # the domain that stops), a domain moving to the tunnel or back drains
@@ -149,13 +157,14 @@ OWN_TAILNET_ROUTES = {"pyo-dashboard", "pyo-registry-door", "pyo-sandboxes"}
 
 def previous(objs):
     """The objects as the release before the Gateway section wrote them:
-    no anchor routes or their filter, no policy on Pyo's own tailnet
+    no anchor routes, their policies or their filter (the shared :80's
+    anchor too), no policy on Pyo's own tailnet
     routes, no compression or idle timeout on routes, no HTTP/3 or TLS
     minimum on the client policies."""
     out = []
     for o in objs:
         name, kind = o["metadata"]["name"], o["kind"]
-        if kind == "HTTPRouteFilter" or (kind in ("HTTPRoute", "BackendTrafficPolicy") and name.endswith("-anchor")):
+        if kind == "HTTPRouteFilter" or (kind in ("HTTPRoute", "BackendTrafficPolicy", "SecurityPolicy") and name.endswith("-anchor")):
             continue
         if kind == "BackendTrafficPolicy" and name in OWN_TAILNET_ROUTES:
             continue
@@ -268,6 +277,21 @@ def changes(a, b):
     return out
 
 
+def failing(path):
+    """Routes Envoy Gateway answers with 500: a policy it refused there."""
+    out = []
+    for gw, v in json.load(open(path))["xds"].items():
+        for c in v["configs"]:
+            if "RoutesConfigDump" not in c.get("@type", ""):
+                continue
+            for rc in c.get("dynamicRouteConfigs", []):
+                for vh in rc["routeConfig"].get("virtualHosts", []):
+                    for r in vh.get("routes", []):
+                        if r.get("directResponse", {}).get("status") == 500:
+                            out.append(f"{vh['name']} {r.get('name', '?')}")
+    return sorted(out)
+
+
 def compare(d):
     bad = 0
     for kind, pairs in (("must change only routes", STABLE), ("known to drop connections", KNOWN)):
@@ -280,6 +304,11 @@ def compare(d):
                 print(f"      {x}")
             if drops and pairs is STABLE:
                 bad = 1
+    print("routes answered with 500 (a policy Envoy Gateway refused there):")
+    for f in sorted(os.listdir(d)):
+        if f.endswith(".json"):
+            for r in failing(f"{d}/{f}"):
+                print(f"  {f[:-5]}: {short(r)}")
     return bad
 
 

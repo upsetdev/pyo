@@ -1503,6 +1503,51 @@ pub fn anchor_policy_spec(gateway: &str) -> Value {
     })
 }
 
+/// The country the anchors' firewall rule names. ZZ is a code ISO leaves
+/// to users: no GeoIP database places anyone there.
+pub const ANCHOR_COUNTRY: &str = "ZZ";
+
+/// The anchor's SecurityPolicy: one country rule that allows, where
+/// everyone is allowed anyway, so it changes nothing a visitor sees.
+/// Envoy Gateway puts its geoip filter on a filter chain only while a
+/// route there has a country rule, and a chain whose filters change drops
+/// its open connections. With this rule on the anchor, the filter is
+/// always on the anchor's chains, and a service's first or last country
+/// rule changes only its routes. Envoy Gateway v1.9.3 has no way to turn
+/// the filter off per route: it looks up the address of every request on
+/// those chains (about 2 µs of a proxy's CPU when the address is in the
+/// database, measured with Envoy v1.39.5).
+///
+/// A listener that reads the visitor from X-Forwarded-For (behind a CDN,
+/// through the tunnel) can't take country rules in Envoy Gateway v1.9.3:
+/// there the policy is refused for that listener, the anchor's path
+/// answers 500 instead of 404, and its chain gets no geoip filter.
+pub fn anchor_security_spec(gateway: &str) -> Value {
+    json!({
+        "targetRefs": [{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": anchor_name(gateway) }],
+        "authorization": {
+            "defaultAction": "Allow",
+            "rules": [{ "name": "geoip", "action": "Allow", "principal": { "clientIPGeoLocations": [{ "country": ANCHOR_COUNTRY }] } }],
+        },
+    })
+}
+
+/// The shared :80 listener's anchor (route and SecurityPolicy): every
+/// service's plain HTTP routes are on its one filter chain, so the geoip
+/// filter stays there whichever services have country rules.
+pub const HTTP_ANCHOR: &str = "pyo-anchor";
+
+/// The shared :80 listener's anchor route and its SecurityPolicy
+/// ([`anchor_security_spec`]). No compression there, so no
+/// BackendTrafficPolicy.
+pub fn http_anchor_objects() -> Vec<Value> {
+    let meta = json!({ "name": HTTP_ANCHOR, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } });
+    vec![
+        json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta, "spec": anchor_route_spec(HTTP_GATEWAY, Some("http")) }),
+        json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "SecurityPolicy", "metadata": meta, "spec": anchor_security_spec(HTTP_GATEWAY) }),
+    ]
+}
+
 /// A website route's BackendTrafficPolicy with the cluster's compression
 /// and idle timeout added to what it has.
 pub fn with_route_settings(mut spec: Value, compression: bool, idle_timeout: Option<u32>) -> Value {
@@ -3108,6 +3153,9 @@ mod tests {
         // policy (the tailnet's comes with its objects above).
         pinned.push(not_found_filter());
         pinned.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": { "name": "ns-web-anchor" }, "spec": anchor_policy_spec("ns-web") }));
+        // The anchors' country rule: a service's, and the shared :80's.
+        pinned.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "SecurityPolicy", "metadata": { "name": "ns-web-anchor" }, "spec": anchor_security_spec("ns-web") }));
+        pinned.extend(http_anchor_objects().into_iter().filter(|o| o["kind"] != "HTTPRoute"));
         for o in pinned {
             let key = (
                 o["apiVersion"].as_str().unwrap().to_string(),
@@ -3196,6 +3244,33 @@ mod tests {
         assert_eq!(route_idle_timeout(Some(5)).unwrap()["http"]["streamIdleTimeout"], "60s");
         assert_eq!(route_idle_timeout(Some(1_000_000)).unwrap()["http"]["streamIdleTimeout"], "86400s");
         assert_eq!(route_idle_timeout(None), None);
+    }
+
+    /// The anchors' country rule: on the anchor route only, naming a
+    /// country no visitor is in, allowing where everyone is allowed. The
+    /// shared :80 gets an anchor of its own, named as no service's object
+    /// can be (a service's base name always has a "-" in it).
+    #[test]
+    fn anchors_keep_the_geoip_filter() {
+        let sp = anchor_security_spec("shop-web");
+        assert_eq!(sp["targetRefs"], json!([{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": "shop-web-anchor" }]));
+        let a = &sp["authorization"];
+        assert_eq!(a["defaultAction"], "Allow");
+        let rules = a["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["action"], "Allow");
+        assert_eq!(rules[0]["principal"], json!({ "clientIPGeoLocations": [{ "country": ANCHOR_COUNTRY }] }));
+        assert_eq!(HTTP_ANCHOR, anchor_name(HTTP_GATEWAY));
+        let objs = http_anchor_objects();
+        assert_eq!(objs.len(), 2);
+        let route = objs.iter().find(|o| o["kind"] == "HTTPRoute").unwrap();
+        assert_eq!(route["metadata"]["name"], HTTP_ANCHOR);
+        assert_eq!(route["spec"], anchor_route_spec(HTTP_GATEWAY, Some("http")));
+        assert!(route["spec"].get("hostnames").is_none());
+        let policy = objs.iter().find(|o| o["kind"] == "SecurityPolicy").unwrap();
+        assert_eq!(policy["metadata"]["name"], HTTP_ANCHOR);
+        assert_eq!(policy["spec"], anchor_security_spec(HTTP_GATEWAY));
+        assert_eq!(policy["spec"]["targetRefs"][0]["name"], HTTP_ANCHOR);
     }
 
     /// The tailnet Gateway's objects: its anchor on the HTTPS listener, and
