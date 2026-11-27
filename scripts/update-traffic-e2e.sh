@@ -54,8 +54,30 @@
 # --gap N      seconds of quiet between actions (30)
 # --rate N     requests a second, per domain and connection style (10)
 #
-# The tunnel domain is skipped: it needs a throwaway Cloudflare zone, and
-# that leg isn't written yet. Never give this script a zone people use.
+# The tunnel leg runs when PYO_E2E_CF_TOKEN holds a Cloudflare API token
+# for one throwaway zone (Zone:Read, DNS:Edit, Cloudflare Tunnel:Edit, SSL
+# and Certificates:Edit). It refuses a token that sees more than one zone.
+# Never give it a zone people use. Through Pyo's API it connects
+# Cloudflare, turns on Cloudflare Tunnel for the cluster, goes back to
+# public ports with the tunnel kept (so web and waf keep their direct
+# path), and puts two new names of the zone on the tunnel:
+#
+#   tun     zd-tun-<random>.<zone>, a domain of web
+#   tunwaf  zd-tunwaf-<random>.<zone>, a domain of waf (the WAF on)
+#
+# They get the same traffic, through Cloudflare's edge: the edge address
+# comes from Cloudflare's resolver, and its certificate is checked. A
+# failed answer is logged as Cloudflare's own or the origin's. fast also
+# restarts the connector and rotates the tunnel's token (rotateTunnelToken).
+# Without the token it prints "Tunnel domain: skipped: no test zone".
+#
+# At the end, however it ends, Pyo removes the domains, the tunnel and the
+# token (removeDomain, removeClusterTunnel, removeCloudflare). Then
+# Cloudflare's API is asked what's left of this run: records on the
+# test's names, tunnels of the test's cluster, Pyo's checks of this
+# install, Origin CA certificates for the test's names. Those are deleted.
+# Nothing the zone had before the test is touched. It prints whether the
+# zone is as before.
 #
 # The VMs are deleted when it ends, however it ends. It refuses to start
 # when a VM of those names exists, and never touches any other VM. Needs
@@ -120,15 +142,21 @@ free_gb=$(LC_ALL=C awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/memi
 DIR=$(mktemp -d)
 chmod 700 "$DIR"
 CREATED=() LOAD_PID="" PULLED="" KEY="" URL=""
+# The tunnel leg: on with PYO_E2E_CF_TOKEN. CF_USED once Pyo has the token.
+TUNNEL=${PYO_E2E_CF_TOKEN:+1} CF_TOKEN="" CF_USED="" CLUSTER="" TEAM="" INSTALL_ID="" TUN_HOST="" TUNWAF_HOST=""
+TUN_DOMAINS=()
 : >"$DIR/actions.log"
 
 cleanup() {
   local rc=$? n
   trap - EXIT INT TERM
+  set +e
   if [ -n "$LOAD_PID" ]; then
     touch "$DIR/stop"
     kill "$LOAD_PID" 2>/dev/null || true
   fi
+  # Before the VMs go: Pyo's own remove actions need them.
+  [ -z "$CF_USED" ] || cf_cleanup
   [ -z "$PULLED" ] || docker rmi "$PULLED" >/dev/null 2>&1 || true
   if [ "${#CREATED[@]}" -gt 0 ]; then
     if [ -n "$KEEP" ]; then
@@ -314,7 +342,7 @@ deploy() {
     wait_for 120 "$WEB_HOST answers on $ip" answers "$WEB_HOST" "$ip" "" || die "$WEB_HOST doesn't answer on $ip."
   done
   note "The WAF blocks a test attack with 403, and lets a plain request through."
-  note "Tunnel domain: skipped: no test zone"
+  [ -n "$TUNNEL" ] || note "Tunnel domain: skipped: no test zone"
 }
 failed_deploy() {
   state | jq -r --arg n "$RUN" '(.projects[] | select(.name == $n) | .id) as $p
@@ -339,6 +367,233 @@ service_id() {
   state | jq -r --arg n "$RUN" --arg s "$1" '(.projects[] | select(.name == $n) | .id) as $p | .services[] | select(.projectId == $p and .name == $s) | .id'
 }
 
+# ── The tunnel leg (with PYO_E2E_CF_TOKEN) ──────────────────────────────────
+
+# Text from Cloudflare or Pyo, with the token taken out.
+masked() { printf '%s' "${1//"$CF_TOKEN"/(hidden)}"; }
+# cf METHOD PATH: Cloudflare's API. The token goes in a header read from a
+# pipe, so it's in no command line.
+cf() {
+  curl -sS -m 30 -X "$1" -H @<(printf 'Authorization: Bearer %s\n' "$CF_TOKEN") "https://api.cloudflare.com/client/v4$2"
+}
+
+# The token's one zone, and what the zone and its account hold before the
+# test: the cleanup compares with that, and never deletes anything in it.
+cf_start() {
+  CF_TOKEN=$PYO_E2E_CF_TOKEN
+  unset PYO_E2E_CF_TOKEN
+  [[ $CF_TOKEN =~ ^[A-Za-z0-9_-]+$ ]] || die "PYO_E2E_CF_TOKEN doesn't look like a Cloudflare API token."
+  local zones n
+  zones=$(cf GET '/zones?per_page=50') || die "Cloudflare's API didn't answer."
+  jq -e .success <<<"$zones" >/dev/null || die "Cloudflare refused the token: $(masked "$(jq -c .errors <<<"$zones")")"
+  n=$(jq '.result | length' <<<"$zones")
+  [ "$n" = 1 ] || die "The token sees $n zones. Give the test a token for one throwaway zone."
+  CF_ZONE=$(jq -r '.result[0].name' <<<"$zones")
+  CF_ZONE_ID=$(jq -r '.result[0].id' <<<"$zones")
+  CF_ACCOUNT=$(jq -r '.result[0].account.id' <<<"$zones")
+  cf_list >"$DIR/cf-before.json" || die "Couldn't list what the zone has."
+  TUN_HOST="zd-tun-$(rand).$CF_ZONE" TUNWAF_HOST="zd-tunwaf-$(rand).$CF_ZONE"
+  say "Tunnel leg on the token's zone: $(jq -r '"\(.records | length) records, \(.tunnels | length) tunnels, \(.certificates | length) certificates"' "$DIR/cf-before.json") before the test"
+}
+# The zone's DNS records, the account's tunnels and the zone's Origin CA
+# certificates, as one JSON object.
+cf_list() {
+  local r t c
+  r=$(cf GET "/zones/$CF_ZONE_ID/dns_records?per_page=500") && jq -e .success <<<"$r" >/dev/null || return 1
+  t=$(cf GET "/accounts/$CF_ACCOUNT/cfd_tunnel?is_deleted=false&per_page=1000") && jq -e .success <<<"$t" >/dev/null || return 1
+  c=$(cf GET "/certificates?zone_id=$CF_ZONE_ID") && jq -e .success <<<"$c" >/dev/null || return 1
+  jq -n --argjson r "$r" --argjson t "$t" --argjson c "$c" '{
+    records: [$r.result[] | {id, type, name, content, comment}],
+    tunnels: [$t.result[] | {id, name}],
+    certificates: [$c.result[] | {id, hostnames}]}'
+}
+# What the test made that's still there: not there before, and named for
+# this run (its hostnames, its cluster's tunnel, Pyo's checks with this
+# installation's id).
+cf_leftovers() {
+  cf_list | jq --slurpfile b "$DIR/cf-before.json" --arg zone "$CF_ZONE" --arg cluster "$CLUSTER" \
+    --arg install "$INSTALL_ID" --arg tun "$TUN_HOST" --arg tunwaf "$TUNWAF_HOST" '
+    ($b[0].records | map(.id)) as $r0 | ($b[0].tunnels | map(.id)) as $t0 | ($b[0].certificates | map(.id)) as $c0
+    | {records: [.records[] | select((.id as $i | $r0 | index($i) | not)
+          and (.name == $tun or .name == $tunwaf
+            or ($install != "" and .comment == "Made by Pyo (\($install))" and .name == "_pyo-check.\($zone)")))],
+       tunnels: [.tunnels[] | select((.id as $i | $t0 | index($i) | not)
+          and ((.name | startswith("pyo-\($cluster)-")) or ($install != "" and (.name | startswith("pyo-check-\($install)-")))))],
+       certificates: [.certificates[] | select((.id as $i | $c0 | index($i) | not)
+          and (.hostnames | length > 0) and all(.hostnames[]; . == $tun or . == $tunwaf))]}'
+}
+
+tunnel_api() { api GET "/api/v1/clusters/$CLUSTER/tunnel"; }
+tunnel_up() {
+  tunnel_api | jq -e '.tunnel.state == "ready" and .tunnel.tunnelId != null' >/dev/null &&
+    [ "$(kc -n pyo-system get deployment pyo-tunnel -o jsonpath='{.status.readyReplicas}')" = 2 ]
+}
+tunnel_gone() { tunnel_api | jq -e '.tunnel == null' >/dev/null; }
+
+# Cloudflare's edge address for a name, from Cloudflare's resolver: this
+# machine's own resolver may still have the name as missing.
+edge_ip() {
+  curl -fsS -m 10 -H 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$1&type=A" |
+    jq -r '[.Answer[]? | select(.type == 1) | .data][0] // empty'
+}
+edge_known() { [ -n "$(edge_ip "$1")" ]; }
+# answers_edge HOST PATH [STATUS]: through Cloudflare, its certificate checked.
+# The last answer is kept in $DIR/edge-last for tunnel_diagnose.
+answers_edge() {
+  local code
+  code=$(curl -s -D "$DIR/edge-last" -o "$DIR/edge-body" -w '%{http_code}' -m 10 --resolve "$1:443:$EDGE" "https://$1/$2" 2>"$DIR/edge-err" || true)
+  [ "$code" = "${3:-200}" ]
+}
+# What Cloudflare, Pyo and the cluster say, when a tunnel domain doesn't answer.
+tunnel_diagnose() {
+  {
+    echo "Cloudflare answered: $(head -n1 "$DIR/edge-last" 2>/dev/null) $(grep -i -e '^cf-ray' -e '^cf-mitigated' -e '^server' "$DIR/edge-last" 2>/dev/null | tr -d '\r' | tr '\n' ' ')"
+    echo "body: $(head -c 300 "$DIR/edge-body" 2>/dev/null | tr -s '\n\t ' ' ')"
+    cat "$DIR/edge-err" 2>/dev/null
+    echo "tunnel: $(tunnel_api | jq -c .)"
+    echo "Cloudflare's routes: $(cf GET "/accounts/$CF_ACCOUNT/cfd_tunnel/$TUN_ID/configurations" | jq -c '.result.config.ingress // .errors')"
+    echo "Cloudflare's connections: $(cf GET "/accounts/$CF_ACCOUNT/cfd_tunnel/$TUN_ID/connections" | jq -c '[.result[]? | {colo_name: .conns[0].colo_name, n: (.conns | length)}]')"
+    echo "records: $(cf GET "/zones/$CF_ZONE_ID/dns_records?per_page=50" | jq -c '[.result[] | {type, name, content, proxied}]')"
+    echo "web domain: $(domain_of "$WEB_ID" "$TUN_HOST" | jq -c .)"
+    kc -n pyo-system get pods -l app.kubernetes.io/name=pyo-tunnel -o wide --no-headers
+    kc -n pyo-system logs deployment/pyo-tunnel --all-containers --tail=30 | cut -c1-300
+    kc -n pyo-gateway get svc,clienttrafficpolicy --no-headers
+    kc get httproute -A --no-headers | grep -e tunnel -e switching
+    kc -n pyo-system logs deployment/pyo-agent --tail=40 | grep -i -e tunnel -e error -e warn | cut -c1-300
+  } 2>&1 | while IFS= read -r line; do masked "$line"; echo; done | indent
+}
+domain_of() { # SERVICE HOST: the domain's JSON
+  state | jq --arg s "$1" --arg h "$2" '.services[] | select(.id == $s) | .domains[] | select(.hostname == $h)'
+}
+switched() { domain_of "$1" "$2" | jq -e '.tunnel == "on" and .status == "active"' >/dev/null; }
+
+# tunnel_domain SERVICE HOST: a new domain of the service, through the
+# tunnel. Pyo makes its record. Someone else's record is never replaced.
+tunnel_domain() {
+  local sid=$1 host=$2 svc out did
+  svc=$(state | jq --arg id "$sid" --arg h "$host" --arg d "dom_e2e$(rand)" --argjson now "$(date +%s)000" '
+    .services[] | select(.id == $id)
+    | .domains += [{id: $d, hostname: $h, portName: .domains[0].portName, status: "pending_dns", tls: "pending", tlsMode: "auto", redirectHttps: false, createdAt: $now}]')
+  out=$(op "$(jq -n --argjson s "$svc" '{op: "saveService", service: $s}')") || die "Pyo refused $host: $out"
+  did=$(domain_of "$sid" "$host" | jq -r .id)
+  [ -n "$did" ] || die "Pyo didn't keep $host."
+  TUN_DOMAINS+=("$sid $did")
+  out=$(op "$(jq -n --arg s "$sid" --arg d "$did" '{op: "setDomainTunnel", serviceId: $s, domainId: $d, on: true}')") ||
+    die "Pyo couldn't put $host on the tunnel: $(masked "$out")"
+  case "$(jq -r .status <<<"$out")" in
+    switching | active) ;;
+    *) die "Pyo didn't switch $host: $(masked "$out")" ;;
+  esac
+}
+
+tunnel_setup() {
+  say "Connecting Cloudflare with the test token"
+  local out ready
+  CF_USED=1
+  # On stdin, so the token is in no command line.
+  out=$(printf '{"op":"connectCloudflare","teamId":"%s","token":"%s"}' "$TEAM" "$CF_TOKEN" |
+    curl -sS --fail-with-body -m 120 -H "@$DIR/auth" -H 'Content-Type: application/json' --data-binary @- "$URL/api/v1/ops") ||
+    die "Pyo couldn't connect Cloudflare: $(masked "$out")"
+  ready=$(jq -r --arg z "$CF_ZONE" '.zones[]? | select(.name == $z) | .tunnel.ready' <<<"$out")
+  [ "$ready" = true ] || die "The zone can't use Cloudflare Tunnel: $(masked "$(jq -c '.problems // .zones' <<<"$out")")"
+
+  say "Turning on Cloudflare Tunnel for the cluster"
+  out=$(op "$(jq -n --arg c "$CLUSTER" '{op: "setClusterTraffic", clusterId: $c, mode: "tunnel"}')") ||
+    die "Pyo refused tunnel mode: $(masked "$out")"
+  wait_for 600 "Cloudflare has the tunnel and both connectors run" tunnel_up || {
+    note "$(masked "$(tunnel_api | jq -c .tunnel)")"
+    die "The tunnel didn't come up."
+  }
+  out=$(tunnel_api)
+  TUN_ID=$(jq -r .tunnel.tunnelId <<<"$out")
+  TUN_NAME=$(jq -r .tunnel.tunnelName <<<"$out")
+  INSTALL_ID=${TUN_NAME#"pyo-$CLUSTER-"}
+  [ "$INSTALL_ID" != "$TUN_NAME" ] || INSTALL_ID=""
+  note "Tunnel $TUN_ID, 2 connectors ready"
+  # The tunnel stays with public ports, so web and waf keep their direct
+  # path. Pyo serves a domain through it once it's switched.
+  say "Back to public ports for the cluster, keeping the tunnel"
+  out=$(op "$(jq -n --arg c "$CLUSTER" '{op: "setClusterTraffic", clusterId: $c, mode: "public"}')") ||
+    die "Pyo refused public ports: $(masked "$out")"
+  wait_for 300 "$WEB_HOST answers again" answers "$WEB_HOST" "$IP1" "" || die "$WEB_HOST didn't answer on public ports again."
+  wait_for 300 "$WAF_HOST answers again" answers "$WAF_HOST" "$IP1" "" || die "$WAF_HOST didn't answer on public ports again."
+
+  say "Adding https://$TUN_HOST (web) and https://$TUNWAF_HOST (waf) through the tunnel"
+  tunnel_domain "$WEB_ID" "$TUN_HOST"
+  tunnel_domain "$WAF_ID" "$TUNWAF_HOST"
+  wait_for 600 "$TUN_HOST is switched" switched "$WEB_ID" "$TUN_HOST" || die "$TUN_HOST didn't switch: $(masked "$(domain_of "$WEB_ID" "$TUN_HOST" | jq -c .)")"
+  wait_for 600 "$TUNWAF_HOST is switched" switched "$WAF_ID" "$TUNWAF_HOST" || die "$TUNWAF_HOST didn't switch: $(masked "$(domain_of "$WAF_ID" "$TUNWAF_HOST" | jq -c .)")"
+  EDGE=""
+  wait_for 300 "Cloudflare's resolver has $TUN_HOST" edge_known "$TUN_HOST" || die "Cloudflare's resolver doesn't have $TUN_HOST."
+  EDGE=$(edge_ip "$TUN_HOST")
+  [ "$(edge_ip "$TUNWAF_HOST")" = "$EDGE" ] || note "$TUNWAF_HOST is on another edge address. Both use $EDGE."
+  wait_for 600 "$TUN_HOST answers through Cloudflare" answers_edge "$TUN_HOST" "" || { tunnel_diagnose; die "$TUN_HOST doesn't answer through Cloudflare."; }
+  wait_for 600 "the WAF blocks a test attack on $TUNWAF_HOST" answers_edge "$TUNWAF_HOST" "?q=%3Cscript%3Ealert(1)%3C/script%3E" 403 ||
+    die "The WAF didn't block a test attack through the tunnel."
+  wait_for 120 "$TUNWAF_HOST answers through Cloudflare" answers_edge "$TUNWAF_HOST" "" || die "$TUNWAF_HOST doesn't answer through Cloudflare."
+  note "Both answer through Cloudflare's edge ($EDGE) and the tunnel. The WAF blocks a test attack there too."
+}
+
+# Rotate: a new token for the connector, its old connections dropped.
+connector_token() { kc -n pyo-system get deployment pyo-tunnel -o jsonpath='{.spec.template.metadata.annotations.pyo\.dev/token-hash}'; }
+token_moved() { [ "$(connector_token)" != "$1" ]; }
+rotate_token() {
+  local before out
+  before=$(connector_token)
+  out=$(op "$(jq -n --arg c "$CLUSTER" '{op: "rotateTunnelToken", clusterId: $c}')") || { note "Pyo refused: $(masked "$out")"; return 1; }
+  wait_for 180 "the connector has the new token" token_moved "$before" || return 1
+  kc -n pyo-system rollout status deployment/pyo-tunnel --timeout=300s >/dev/null || return 1
+  wait_for 240 "the old connectors are gone" no_stopping pyo-system
+}
+
+# Pyo's own remove actions first, then Cloudflare's API for what's left
+# of this run. Called by the cleanup, whatever happened before.
+cf_cleanup() {
+  local pair out left
+  say "Cleaning up at Cloudflare"
+  if [ -n "$KEY" ] && curl -fsS -m 5 -o /dev/null "$URL/api/v1/meta" 2>/dev/null; then
+    for pair in "${TUN_DOMAINS[@]}"; do
+      set -- $pair
+      # removeDomain came after 0.51.0. Before it, the service is saved without the domain.
+      out=$(op "$(jq -n --arg s "$1" --arg d "$2" '{op: "removeDomain", serviceId: $s, domainId: $d}')" 2>&1) ||
+        out=$(op "$(state | jq --arg s "$1" --arg d "$2" '{op: "saveService", service: (.services[] | select(.id == $s) | .domains |= map(select(.id != $d)))}')" 2>&1) ||
+        note "Pyo couldn't remove a tunnel domain: $(masked "$out")"
+    done
+    op "$(jq -n --arg c "$CLUSTER" '{op: "setClusterTraffic", clusterId: $c, mode: "public"}')" >/dev/null 2>&1 || true
+    if [ -n "$CLUSTER" ] && ! tunnel_gone 2>/dev/null; then
+      out=$(op "$(jq -n --arg c "$CLUSTER" '{op: "removeClusterTunnel", clusterId: $c, restoreRecords: false}')" 2>&1) ||
+        note "Pyo refused to remove the tunnel: $(masked "$out")"
+      wait_for 660 "Pyo removed the tunnel" tunnel_gone || note "Pyo didn't remove the tunnel. Deleting what's left through Cloudflare's API."
+    fi
+    op "$(jq -n --arg t "$TEAM" '{op: "removeCloudflare", teamId: $t}')" >/dev/null 2>&1 || note "Pyo kept the Cloudflare token. The VM goes with it."
+  else
+    note "Pyo doesn't answer. Deleting what's left through Cloudflare's API."
+  fi
+  left=$(cf_leftovers) || { note "Couldn't read the zone. Check it by hand for $TUN_HOST, $TUNWAF_HOST and tunnels named pyo-$CLUSTER-…"; return; }
+  local id
+  for id in $(jq -r '.records[].id' <<<"$left"); do
+    cf DELETE "/zones/$CF_ZONE_ID/dns_records/$id" >/dev/null && note "Deleted a record Pyo left: $(jq -r --arg i "$id" '.records[] | select(.id == $i) | "\(.type) \(.name)"' <<<"$left")"
+  done
+  for id in $(jq -r '.tunnels[].id' <<<"$left"); do
+    cf DELETE "/accounts/$CF_ACCOUNT/cfd_tunnel/$id/connections" >/dev/null || true
+    cf DELETE "/accounts/$CF_ACCOUNT/cfd_tunnel/$id" >/dev/null && note "Deleted a tunnel Pyo left: $(jq -r --arg i "$id" '.tunnels[] | select(.id == $i) | .name' <<<"$left")"
+  done
+  for id in $(jq -r '.certificates[].id' <<<"$left"); do
+    cf DELETE "/certificates/$id" >/dev/null && note "Revoked an Origin CA certificate Pyo left"
+  done
+  # What the zone has now, against before the test.
+  cf_list >"$DIR/cf-after.json" || { note "Couldn't read the zone afterwards."; return; }
+  jq -r --slurpfile b "$DIR/cf-before.json" '
+    def ids(k): [.[k][].id] | sort;
+    if ids("records") == ($b[0] | ids("records")) and ids("tunnels") == ($b[0] | ids("tunnels")) and ids("certificates") == ($b[0] | ids("certificates"))
+    then "          Cloudflare: \(.records | length) records, \(.tunnels | length) tunnels, \(.certificates | length) certificates, as before the test."
+    else "          Cloudflare differs from before the test:",
+      (.records[] | select(.id as $i | $b[0].records | map(.id) | index($i) | not) | "            record \(.type) \(.name)"),
+      (.tunnels[] | select(.id as $i | $b[0].tunnels | map(.id) | index($i) | not) | "            tunnel \(.name)"),
+      (.certificates[] | select(.id as $i | $b[0].certificates | map(.id) | index($i) | not) | "            certificate \(.hostnames | join(" "))")
+    end' "$DIR/cf-after.json"
+}
+
 # ── Watching and traffic ────────────────────────────────────────────────────
 
 start_watch() {
@@ -357,6 +612,7 @@ start_watch() {
 start_load() {
   TARGETS=("web=$WEB_HOST@$IP1" "waf=$WAF_HOST@$IP1")
   [ -z "${IP2:-}" ] || TARGETS+=("web-2=$WEB_HOST@$IP2" "waf-2=$WAF_HOST@$IP2")
+  [ -z "$TUNNEL" ] || TARGETS+=("tun=$TUN_HOST@$EDGE" "tunwaf=$TUNWAF_HOST@$EDGE")
   printf '%s\n' "${TARGETS[@]}" >"$DIR/targets"
   say "Sending traffic: $((RATE * 2)) requests a second, a long request and a WebSocket to each of ${#TARGETS[@]} targets"
   (
@@ -447,8 +703,10 @@ fast() {
   ns=$(kc get deployment -A --field-selector metadata.name=pyo-tunnel -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
   if [ -n "$ns" ]; then
     action "restart the tunnel connector" restart deployment "$ns" pyo-tunnel
+    action "rotate the tunnel token" rotate_token
   else
     skipped "restart the tunnel connector" "no test zone"
+    skipped "rotate the tunnel token" "no test zone"
   fi
   action "restart Envoy Gateway's controller" restart deployment pyo-gateway envoy-gateway
   action "restart the agent" restart deployment pyo-system pyo-agent
@@ -572,6 +830,7 @@ update() {
 say "update-traffic-e2e: $MODE, $SERVERS server$([ "$SERVERS" = 1 ] || echo s), from Pyo $FROM"
 # The release Pyo is installed from, read before anything is made.
 curl -fsSL --proto '=https' -m 60 -o "$DIR/from.json" "$RELEASES/v$FROM/release.json" || die "There's no Pyo $FROM release to install."
+[ -z "$TUNNEL" ] || cf_start
 [ -z "$DEV" ] || prepare_update
 
 launch "$VM1" 3G
@@ -590,6 +849,10 @@ wait_for 600 "$VM1 is connected as a cluster" cluster_connected || die "$VM1 did
 CLUSTER=$(state | jq -r '.clusters[0].id')
 # A deploy before the cluster can make certificates fails.
 wait_for 420 "the cluster can make certificates" kc get clusterissuer pyo-selfsigned pyo-letsencrypt || die "cert-manager didn't start on $VM1."
+# The issuers come before cert-manager's webhook answers. A Certificate
+# written before then is refused, and the deploy fails.
+wait_for 300 "cert-manager's webhook answers" kc -n cert-manager wait --for=condition=Available deployment/cert-manager-webhook --timeout=5s ||
+  die "cert-manager's webhook didn't start on $VM1."
 [ "$SERVERS" = 1 ] || join_second
 if [ -n "$IP2" ]; then
   wait_for 300 "Envoy runs on both servers" envoy_on_both || die "Envoy didn't start on $VM2."
@@ -604,6 +867,7 @@ if [ "$MODE" = fast ] && [ -n "$DEV" ]; then
   run_update || die "The update to the dev build didn't finish."
   note "Pyo runs $(kc -n pyo-system get deployment pyo -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/@.*//')"
 fi
+[ -z "$TUNNEL" ] || tunnel_setup
 start_watch
 [ "$MODE" != update ] || push_build
 start_load
@@ -622,7 +886,7 @@ multipass transfer "$VM1:/var/tmp/e2e/pods.log" - >"$DIR/pods.log"
 
 rc=0
 python3 "$PY" summary "$DIR" | tee "$DIR/summary.txt" || rc=$?
-echo "Tunnel domain: skipped: no test zone"
+[ -n "$TUNNEL" ] || echo "Tunnel domain: skipped: no test zone" | tee -a "$DIR/summary.txt"
 if [ -n "$OUT" ]; then
   mkdir -p "$OUT"
   cp "$DIR/load.log" "$DIR/pods.log" "$DIR/actions.log" "$DIR/targets" "$DIR/summary.txt" "$OUT/"
