@@ -25,9 +25,9 @@ import type { Cluster, PathDomain, TrafficMode, TrafficPath } from "~/lib/pyo/ty
 // request goes.
 
 const MODES: { value: TrafficMode; label: string; hint: string }[] = [
-  { value: "local", label: "Local", hint: "Keep traffic on the same server" },
-  { value: "region", label: "Regional", hint: "Keep traffic within the same region" },
-  { value: "spread", label: "Global", hint: "Distribute traffic across all servers" },
+  { value: "local", label: "Local", hint: "Requests stay on the same server." },
+  { value: "region", label: "Regional", hint: "Requests stay in the same region." },
+  { value: "spread", label: "Global", hint: "Requests go to any server." },
 ];
 
 /** One choice of a radio group panel: a label and a hint line. */
@@ -182,8 +182,8 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
   const dashboardDrops =
     !!c.sameCluster && !!agentBlock(c) && domains.some((d) => d.hostname.toLowerCase().endsWith(".ts.net"));
   // ServiceLB moves them between two Services: measured 1 to 5 seconds.
-  const PORTS_PAUSE = "TCP and UDP ports pause for a few seconds, and their open connections end.";
-  const DASHBOARD_DROPS = "Open connections to Pyo on the tailnet drop once. The dashboard reconnects by itself.";
+  const PORTS_PAUSE = "TCP and UDP ports pause for a few seconds. Their open connections drop.";
+  const DASHBOARD_DROPS = "Open connections to Pyo over Tailscale drop once. The dashboard reconnects.";
   const movable = (host: string) => !!tunnelZoneFor(s, host, c);
   const removing = !!c.tunnel?.removeWhenBack || c.tunnel?.state === "removing";
   const switching = services.flatMap((a) => a.domains).filter((d) => d.tunnel === "switching");
@@ -236,7 +236,7 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
   const go = () => {
     if (!pending) return;
     if (pending.kind === "proxy")
-      return void send({ proxyProtocol: pending.on }, pending.on ? "Websites accept PROXY protocol" : "Websites no longer read PROXY protocol");
+      return void send({ proxyProtocol: pending.on }, pending.on ? "PROXY protocol on" : "PROXY protocol off");
     if (pending.kind === "ports") return void send({ publicPorts: false }, "TCP and UDP ports closed");
     if (pending.kind === "tailnetOn") return void send({ tailnet: true }, "Tailscale on");
     if (pending.kind === "publicOn") return void send({ public: true }, "Public ports on");
@@ -265,9 +265,9 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
               : moving.length
                 ? `${moving.length} domains are in your Cloudflare account.`
                 : null,
-            moving.length && move ? "Open connections to each of them drop once as it moves." : null,
+            moving.length && move ? "Open connections to them drop once as they move." : null,
             stopping.length || (!move && moving.length)
-              ? `These stop answering from the internet: ${names((move ? stopping : listed).map((d) => d.hostname))}.`
+              ? `These stop working from the internet: ${names((move ? stopping : listed).map((d) => d.hostname))}.`
               : null,
             c.sameCluster ? "The public dashboard closes. Open Pyo through Tailscale or your local network." : null,
             hasPorts ? (ports ? PORTS_PAUSE : "TCP and UDP ports close.") : null,
@@ -290,39 +290,39 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
                 ? `${moving.length} domains switch back to public ports.`
                 : null,
             moving.length ? "Open connections to each of them drop once." : null,
-            stopping.length ? `These stop answering: ${names(stopping.map((d) => d.hostname))}.` : null,
-            "Pyo removes the tunnel at Cloudflare.",
+            stopping.length ? `These stop working: ${names(stopping.map((d) => d.hostname))}.` : null,
+            "Pyo deletes the tunnel in Cloudflare.",
           ],
         };
       case "tailnet":
         return {
-          title: `Stop serving websites on the tailnet on ${c.name}?`,
-          confirm: "Stop serving",
+          title: `Turn off Tailscale on ${c.name}?`,
+          confirm: "Turn off",
           lines: [
-            stopping.length ? `These stop answering: ${names(stopping.map((d) => d.hostname))}.` : null,
+            stopping.length ? `These stop working: ${names(stopping.map((d) => d.hostname))}.` : null,
             dashboardDrops ? DASHBOARD_DROPS : null,
-            "Servers stay on the tailnet.",
+            "Servers stay connected to Tailscale.",
           ],
         };
       case "tailnetOn":
         return {
-          title: `Serve websites on the tailnet on ${c.name}?`,
-          confirm: "Serve",
+          title: `Turn on Tailscale on ${c.name}?`,
+          confirm: "Turn on",
           lines: [DASHBOARD_DROPS],
         };
       case "proxy":
         return {
-          title: `${pending.on ? "Accept" : "Stop reading"} PROXY protocol on ${c.name}?`,
+          title: `Turn ${pending.on ? "on" : "off"} PROXY protocol on ${c.name}?`,
           confirm: "Save",
           lines: [
-            `Saving drops open connections on every website of ${c.name} once. Visitors reconnect. WebSockets and uploads in progress are cut.`,
+            `Open connections to every website on ${c.name} drop once. WebSockets and uploads in progress are cut.`,
           ],
         };
       case "ports":
         return {
           title: `Close TCP and UDP ports on ${c.name}?`,
           confirm: "Close ports",
-          lines: ["Open connections to them end."],
+          lines: ["Their open connections drop."],
         };
     }
   })();
@@ -330,13 +330,13 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
   const publicHint = (() => {
     if (paths.public && c.closingPublic)
       return conflicts.length
-        ? `Closing public ports after the last domain moves… Waiting for Replace and switch: ${names(conflicts.map((d) => d.hostname))}.`
+        ? `Waiting for Replace and switch on ${names(conflicts.map((d) => d.hostname))}. Public ports close after the last domain moves.`
         : `Moving ${plural(switching.length, "domain")} to the tunnel… Public ports close after the last one.`;
-    return "Ports 80 and 443 on every server except build-only servers.";
+    return "Ports 80 and 443 on all servers except build-only ones.";
   })();
   const tunnelHint = (() => {
     if (c.tunnel?.removeWhenBack)
-      return `Moving ${plural(switching.length, "domain")} back to public ports… Then the tunnel is removed.`;
+      return `Moving ${plural(switching.length, "domain")} back to public ports. The tunnel is removed after.`;
     if (c.tunnel?.state === "removing") return "Removing the tunnel…";
     if (!paths.tunnel && unavailable) return unavailable;
     return "Websites through Cloudflare. No open ports needed.";
@@ -345,7 +345,7 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
     "Connect Tailscale on Integrations first."
   ) : (
     <>
-      Websites on ts.net names, for devices on your tailnet. Servers stay on the tailnet when this is off.
+      Websites on ts.net names, for devices on your tailnet.
       {c.tailnet ? <span className="ml-1 font-mono">{c.tailnet}</span> : null}
     </>
   );
@@ -363,8 +363,8 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
           checked={!!(c.proxyProtocol ?? c.webProxyProtocol)}
           disabled={!admin}
           onChange={(on) => setPending({ kind: "proxy", on })}
-          label="Accept PROXY protocol"
-          description="Only if every connection comes through a load balancer that sends it."
+          label="PROXY protocol"
+          description="Only for a load balancer that sends it on every connection."
         />
         {hasPorts ? (
           paths.public ? (
@@ -378,7 +378,7 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
               disabled={!admin}
               onChange={(on) => (on ? void send({ publicPorts: true }, "TCP and UDP ports published") : setPending({ kind: "ports" }))}
               label="Publish TCP and UDP ports"
-              description="On every server except build-only servers."
+              description="On all servers except build-only ones."
             />
           )
         ) : null}
@@ -431,10 +431,10 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
             />
           ) : null}
           {pending?.kind === "public" && hasPorts ? (
-            <Switch checked={ports} onChange={setPorts} label="Publish TCP and UDP ports" description="On every server except build-only servers." />
+            <Switch checked={ports} onChange={setPorts} label="Publish TCP and UDP ports" description="On all servers except build-only ones." />
           ) : null}
           {pending?.kind === "tunnel" && moving.length ? (
-            <Switch checked={restore} onChange={setRestore} label="Put back the records it replaced" />
+            <Switch checked={restore} onChange={setRestore} label="Restore the DNS records it replaced" />
           ) : null}
         </ConfirmDialog>
       ) : null}
