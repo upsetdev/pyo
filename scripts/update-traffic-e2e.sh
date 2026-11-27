@@ -392,7 +392,7 @@ deploy() {
     wait_for 120 "$WEB_HOST answers on $ip" answers "$WEB_HOST" "$ip" "" || die "$WEB_HOST doesn't answer on $ip."
   done
   note "The WAF blocks a test attack with 403, and lets a plain request through."
-  [ "$MODE" != fast ] || plain_domain
+  [ "$MODE" != fast ] || plain_http_domain
   if [ "$MODE" = paths ]; then
     wait_for 600 "the TCP port $TCP_PORT answers on $IP1" tcp_answers || { diagnose; die "The public TCP port didn't answer."; }
     note "The tcp service answers on TCP port $TCP_PORT."
@@ -405,7 +405,7 @@ deploy() {
 http_answers() { # HOST IP
   [ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 --resolve "$1:80:$2" "http://$1/" || true)" = 200 ]
 }
-plain_domain() {
+plain_http_domain() {
   local svc out
   PLAIN_HOST="plain.${IP1//./-}.nip.io"
   svc=$(web_service | jq --arg h "$PLAIN_HOST" --arg id "dom_e2e$(rand)" --argjson now "$(date +%s)000" '
