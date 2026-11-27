@@ -1893,7 +1893,7 @@ pub async fn ensure(client: Client) {
     let mut refusals = 0;
     loop {
         match ensure_once(&client).await {
-            Ok(()) if headers_kept() || priority_left_out() => {
+            Ok(()) if headers_kept() || priority_left_out() || FILTER_REFUSED.load(Ordering::Relaxed) => {
                 refusals += 1;
                 crate::refused::wait_for_install(&client, refusals).await;
             }
@@ -2462,7 +2462,8 @@ async fn ensure_once(client: &Client) -> anyhow::Result<()> {
     write_web(client, web_settings(client).await?).await
 }
 
-/// The anchor routes' filter was refused (said once).
+/// The anchor routes' filter was refused (said once, and tried again once
+/// the install changes, [`ensure`]).
 static FILTER_REFUSED: AtomicBool = AtomicBool::new(false);
 
 /// The websites' settings as they are.
