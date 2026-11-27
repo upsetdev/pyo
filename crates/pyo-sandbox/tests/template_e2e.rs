@@ -16,13 +16,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pyo_proto::sandbox::token::{ANY_SANDBOX, Claims, SigningKey};
-use pyo_proto::sandbox::wire::{Cmd, Scope};
+use pyo_proto::sandbox::token::SigningKey;
+use pyo_proto::sandbox::wire::Cmd;
 use pyo_proto::sandbox::{
     DaemonCommand, DaemonResult, ErrorCode, ExecRequest, NetworkMode, Runtime, SandboxSpec,
     TemplateReport, TemplateState, sandbox_id_from,
 };
-use pyo_sandbox::api::{AppState, run_command};
+use pyo_sandbox::api::{AppState, Caller, run};
 use pyo_sandbox::config::Config;
 use pyo_sandbox::detect::{self, Inputs};
 use pyo_sandbox::firecracker::Firecracker;
@@ -81,25 +81,9 @@ impl Drop for Cleanup {
     }
 }
 
-fn admin(key: &SigningKey) -> String {
-    let now = pyo_sandbox::now_ms() / 1000;
-    key.sign(&Claims {
-        kid: String::new(),
-        sbx: ANY_SANDBOX.into(),
-        team: String::new(),
-        srv: SERVER.into(),
-        iat: now,
-        exp: now + 3600,
-        scopes: vec![Scope::Admin],
-    })
-}
-
-async fn cmd(
-    st: &AppState,
-    token: Option<&str>,
-    c: DaemonCommand,
-) -> Result<DaemonResult, pyo_proto::sandbox::DaemonError> {
-    run_command(st, token, c).await.map_err(|e| e.0)
+/// One of Pyo's commands, as its channel runs it (outbound/).
+async fn cmd(st: &AppState, c: DaemonCommand) -> Result<DaemonResult, pyo_proto::sandbox::DaemonError> {
+    run(st, Caller::Pyo, c).await.map_err(|e| e.0)
 }
 
 fn shell(cmd: &str) -> ExecRequest {
@@ -116,7 +100,6 @@ fn shell(cmd: &str) -> ExecRequest {
 struct Rig {
     mgr: Arc<Manager>,
     st: AppState,
-    token: String,
     layout: Layout,
     _cleanup: Cleanup,
 }
@@ -194,11 +177,9 @@ async fn rig(name: &str) -> Rig {
         keys: cfg.keys.clone(),
         server_id: SERVER.into(),
     };
-    let token = admin(&key);
     Rig {
         mgr,
         st,
-        token,
         layout,
         _cleanup,
     }
@@ -214,7 +195,6 @@ async fn makes_a_template_from_a_public_image() {
     let Rig {
         mgr,
         st,
-        token,
         layout,
         _cleanup,
     } = rig("tmpl-run").await;
@@ -228,7 +208,6 @@ async fn makes_a_template_from_a_public_image() {
     let t = Instant::now();
     let r = cmd(
         &st,
-        Some(&token),
         DaemonCommand::PrepareTemplate {
             template: TEMPLATE.into(),
             image: image.clone(),
@@ -252,7 +231,6 @@ async fn makes_a_template_from_a_public_image() {
     for (name, img) in [("../x", "alpine"), ("ok", "not an image")] {
         let e = cmd(
             &st,
-            Some(&token),
             DaemonCommand::PrepareTemplate {
                 template: name.into(),
                 image: img.into(),
@@ -367,7 +345,6 @@ async fn makes_a_template_from_a_public_image() {
     mgr.delete(&spec.id).await.unwrap();
     let r = cmd(
         &st,
-        Some(&token),
         DaemonCommand::DeleteTemplate {
             template: TEMPLATE.into(),
         },

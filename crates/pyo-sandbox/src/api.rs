@@ -1,18 +1,21 @@
-//! The daemon's API. It listens only on the configured address, the
-//! server's tailnet address in production. Every call except the health
-//! check needs a token Pyo signed (`pyo_proto::sandbox::token`), in
-//! `Authorization: Bearer <token>`. Browsers opening the WebSocket name it
-//! as the subprotocol `pyo.token.<token>` (next to `pyo`, which the daemon
-//! then answers with), or put it in `?token=<token>`.
+//! The daemon's API, for browsers and SDKs on the tailnet. It answers
+//! HTTPS on the server's tailnet name (tailnet.rs). Every call except the
+//! health check needs a sandbox token Pyo signed for a client
+//! (`pyo_proto::sandbox::token`), in `Authorization: Bearer <token>`.
+//! Browsers opening the WebSocket name it as the subprotocol
+//! `pyo.token.<token>` (next to `pyo`, which the daemon then answers with),
+//! or put it in `?token=<token>`.
+//!
+//! Pyo's own calls (create, delete, pause, resume, lifetimes, reports,
+//! templates, edge certificates) come as signed commands over the outbound
+//! channel (outbound/, [`run`] with [`Caller::Pyo`]), never here. A token
+//! with the admin scope, which Pyo signed for its calls before 0.52.0, is
+//! refused.
 //!
 //! | Route | Scope |
 //! |---|---|
 //! | `GET /v1/health` | none |
-//! | `GET /v1/report`, `GET /v1/sandboxes` | admin |
-//! | `POST /v1/commands` | depends on the command |
-//! | `POST /v1/sandboxes` | create, for that sandbox ID and team |
 //! | `GET /v1/sandboxes/{id}` | any scope for the sandbox |
-//! | `DELETE /v1/sandboxes/{id}`, `POST .../pause`, `.../resume`, `.../ttl` | lifecycle |
 //! | `POST /v1/sandboxes/{id}/exec` | exec |
 //! | `POST /v1/sandboxes/{id}/ports`, `DELETE .../ports/{port}` | ports |
 //! | `GET PUT DELETE .../files`, `GET .../files/list`, `.../files/stat`, `POST .../files/mkdir` | files |
@@ -67,7 +70,7 @@ use futures::{SinkExt, StreamExt};
 use pyo_proto::sandbox::token::{self, Claims, Expect, LEEWAY_SECS, TokenError, VerifyingKey};
 use pyo_proto::sandbox::wire::{self, ErrorKind, Frame, Kind, Request, Scope};
 use pyo_proto::sandbox::{
-    DaemonCommand, DaemonError, DaemonResult, ErrorCode, ExecRequest, SandboxSpec,
+    DaemonCommand, DaemonError, DaemonResult, ErrorCode, ExecRequest,
 };
 use serde::Deserialize;
 
@@ -111,13 +114,7 @@ fn fail(code: ErrorCode, msg: impl Into<String>) -> ApiError {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
-        .route("/v1/report", get(report))
-        .route("/v1/commands", post(command))
-        .route("/v1/sandboxes", get(list).post(create))
-        .route("/v1/sandboxes/{id}", get(get_one).delete(delete))
-        .route("/v1/sandboxes/{id}/pause", post(pause))
-        .route("/v1/sandboxes/{id}/resume", post(resume))
-        .route("/v1/sandboxes/{id}/ttl", post(set_ttl))
+        .route("/v1/sandboxes/{id}", get(get_one))
         .route("/v1/sandboxes/{id}/exec", post(exec))
         .route("/v1/sandboxes/{id}/ports", post(open_port))
         .route(
@@ -190,6 +187,10 @@ fn token_of(headers: &HeaderMap, query: &HashMap<String, String>) -> Option<Stri
         .or_else(|| query.get("token").cloned())
 }
 
+/// Why a token with the admin scope is refused.
+pub const ADMIN_REFUSED: &str =
+    "This sandbox server takes Pyo's own calls over its channel, not with a token.";
+
 fn token_error(e: TokenError) -> ApiError {
     let code = if e.is_unauthenticated() {
         ErrorCode::Unauthorized
@@ -221,6 +222,9 @@ impl AppState {
             token.ok_or_else(|| fail(ErrorCode::Unauthorized, "A sandbox token is needed."))?;
         let claims =
             token::verify(token, &self.keys, self.expect(sandbox, scope)).map_err(token_error)?;
+        if claims.has(Scope::Admin) {
+            return Err(fail(ErrorCode::Forbidden, ADMIN_REFUSED));
+        }
         self.check_team(&claims, sandbox)?;
         Ok(claims)
     }
@@ -237,9 +241,6 @@ impl AppState {
     }
 
     fn check_team(&self, claims: &Claims, sandbox: Option<&str>) -> ApiResult<()> {
-        if claims.has(Scope::Admin) {
-            return Ok(());
-        }
         if let Some(id) = sandbox
             && let Ok(sbx) = self.mgr.find(id)
             && sbx.spec.team != claims.team
@@ -261,18 +262,6 @@ async fn health() -> impl IntoResponse {
     axum::Json(serde_json::json!({"ok": true, "protocol": pyo_proto::sandbox::SANDBOX_PROTOCOL}))
 }
 
-async fn report(State(st): S, h: HeaderMap, Query(q): Q) -> ApiResult<impl IntoResponse> {
-    st.authorize(token_of(&h, &q).as_deref(), None, Scope::Admin)?;
-    Ok(axum::Json(st.mgr.report()))
-}
-
-async fn list(State(st): S, h: HeaderMap, Query(q): Q) -> ApiResult<impl IntoResponse> {
-    st.authorize(token_of(&h, &q).as_deref(), None, Scope::Admin)?;
-    Ok(axum::Json(DaemonResult::Sandboxes {
-        sandboxes: st.mgr.list(),
-    }))
-}
-
 /// A file past what a files command moves.
 fn too_big(cap: usize) -> ApiError {
     fail(
@@ -287,7 +276,7 @@ pub enum Caller<'a> {
     /// A request with this token (or none): checked for the command.
     Token(Option<&'a str>),
     /// Pyo, in a command its signer signed for this server and team
-    /// (outbound.rs checked it). Like an admin token.
+    /// (outbound.rs checked it). It may do anything on the server.
     Pyo,
 }
 
@@ -322,7 +311,7 @@ impl Caller<'_> {
     }
 }
 
-/// Runs one command from Pyo, after checking the token for it.
+/// Runs one command for a request, after checking its token for it.
 pub async fn run_command(
     st: &AppState,
     token: Option<&str>,
@@ -339,7 +328,6 @@ pub async fn run(st: &AppState, who: Caller<'_>, cmd: DaemonCommand) -> ApiResul
     Ok(match cmd {
         DaemonCommand::Create { spec } => {
             if let Some(claims) = who.check(st, Some(&spec.id), Scope::Create)?
-                && !claims.has(Scope::Admin)
                 && claims.team != spec.team
             {
                 return Err(fail(
@@ -506,32 +494,6 @@ pub async fn run(st: &AppState, who: Caller<'_>, cmd: DaemonCommand) -> ApiResul
     })
 }
 
-async fn command(
-    State(st): S,
-    h: HeaderMap,
-    Query(q): Q,
-    axum::Json(cmd): axum::Json<DaemonCommand>,
-) -> ApiResult<impl IntoResponse> {
-    Ok(axum::Json(
-        run_command(&st, token_of(&h, &q).as_deref(), cmd).await?,
-    ))
-}
-
-async fn create(
-    State(st): S,
-    h: HeaderMap,
-    Query(q): Q,
-    axum::Json(spec): axum::Json<SandboxSpec>,
-) -> ApiResult<impl IntoResponse> {
-    let res = run_command(
-        &st,
-        token_of(&h, &q).as_deref(),
-        DaemonCommand::Create { spec },
-    )
-    .await?;
-    Ok((StatusCode::CREATED, axum::Json(res)))
-}
-
 async fn get_one(
     State(st): S,
     Path(id): Path<String>,
@@ -540,54 +502,6 @@ async fn get_one(
 ) -> ApiResult<impl IntoResponse> {
     Ok(axum::Json(
         run_command(&st, token_of(&h, &q).as_deref(), DaemonCommand::Get { id }).await?,
-    ))
-}
-
-async fn delete(
-    State(st): S,
-    Path(id): Path<String>,
-    h: HeaderMap,
-    Query(q): Q,
-) -> ApiResult<impl IntoResponse> {
-    Ok(axum::Json(
-        run_command(
-            &st,
-            token_of(&h, &q).as_deref(),
-            DaemonCommand::Delete { id },
-        )
-        .await?,
-    ))
-}
-
-async fn pause(
-    State(st): S,
-    Path(id): Path<String>,
-    h: HeaderMap,
-    Query(q): Q,
-) -> ApiResult<impl IntoResponse> {
-    Ok(axum::Json(
-        run_command(
-            &st,
-            token_of(&h, &q).as_deref(),
-            DaemonCommand::Pause { id },
-        )
-        .await?,
-    ))
-}
-
-async fn resume(
-    State(st): S,
-    Path(id): Path<String>,
-    h: HeaderMap,
-    Query(q): Q,
-) -> ApiResult<impl IntoResponse> {
-    Ok(axum::Json(
-        run_command(
-            &st,
-            token_of(&h, &q).as_deref(),
-            DaemonCommand::Resume { id },
-        )
-        .await?,
     ))
 }
 
@@ -711,30 +625,6 @@ async fn web(
     crate::edge::proxy(&st, req, &id, port)
         .await
         .into_response()
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TtlBody {
-    /// Null: the sandbox runs until it's deleted.
-    #[serde(deserialize_with = "Option::deserialize")]
-    ttl_secs: Option<u64>,
-}
-
-async fn set_ttl(
-    State(st): S,
-    Path(id): Path<String>,
-    h: HeaderMap,
-    Query(q): Q,
-    axum::Json(b): axum::Json<TtlBody>,
-) -> ApiResult<impl IntoResponse> {
-    let cmd = DaemonCommand::SetTtl {
-        id,
-        ttl_secs: b.ttl_secs,
-    };
-    Ok(axum::Json(
-        run_command(&st, token_of(&h, &q).as_deref(), cmd).await?,
-    ))
 }
 
 async fn exec(
@@ -1050,7 +940,7 @@ impl Session {
             return refused("The daemon takes only {\"token\": \"...\"} as text.".into());
         };
         match self.st.authorize_any(Some(&m.token), &self.sandbox) {
-            Ok(c) if c.team != self.claims.team && !c.has(Scope::Admin) => {
+            Ok(c) if c.team != self.claims.team => {
                 refused("The sandbox token is for another team.".into())
             }
             Ok(c) => {
