@@ -383,6 +383,13 @@ pub fn waf_backend_spec() -> Value {
 /// and the first pieces before that (a custom rule on the body holds back
 /// only the end of it). The service gets the body chunked (no
 /// Content-Length).
+///
+/// An upgrade (a WebSocket) sends nothing before its 101, so a request
+/// held for its body would wait forever, in either mode. The WAF decides
+/// one on its request line and headers, and answers with `mode_override`
+/// (no body), which the proxy takes only with `allowModeOverride`. The
+/// WAF sends it for upgrades only, so every other request keeps the mode
+/// set here. An older WAF never sends it.
 pub fn waf_ext_proc(block: bool) -> Value {
     json!({
         "backendRefs": [{ "group": "gateway.envoyproxy.io", "kind": "Backend", "name": WAF_NAME }],
@@ -390,7 +397,10 @@ pub fn waf_ext_proc(block: bool) -> Value {
         "failOpen": !block,
         "messageTimeout": if block { WAF_BLOCK_TIMEOUT } else { WAF_PASS_TIMEOUT },
         "statusOnError": 503,
-        "processingMode": { "request": { "body": if block { "BufferedPartial" } else { "Streamed" }, "attributes": ["source.address"] } },
+        "processingMode": {
+            "request": { "body": if block { "BufferedPartial" } else { "Streamed" }, "attributes": ["source.address"] },
+            "allowModeOverride": true,
+        },
     })
 }
 
@@ -540,6 +550,16 @@ pub struct WafRoute {
     pub settings: crate::WafSettings,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<crate::WafRule>,
+}
+
+/// The routes a WAF policy's annotation ([`WAF_ANNOTATION`]) carries: a
+/// list, one per route it targets, in their order (a policy for a route
+/// and the routes split from it, `pyo-agent`'s `policy_family`), or one
+/// route alone (before 0.51.1). None when it doesn't parse.
+pub fn waf_routes(annotation: &str) -> Vec<WafRoute> {
+    serde_json::from_str::<Vec<WafRoute>>(annotation)
+        .or_else(|_| serde_json::from_str::<WafRoute>(annotation).map(|r| vec![r]))
+        .unwrap_or_default()
 }
 
 /// Its settings: each distinct combination of OWASP settings once (compiled
@@ -2561,6 +2581,9 @@ mod tests {
                 p["processingMode"]["request"]["attributes"],
                 json!(["source.address"])
             );
+            // The WAF may answer an upgrade with "no body" (it sends nothing
+            // before its 101), in every mode.
+            assert_eq!(p["processingMode"]["allowModeOverride"], true, "{mode}");
         }
         // The part of a body block mode inspects is what the proxies buffer:
         // every client policy the agent may write sets it.
@@ -2595,6 +2618,15 @@ mod tests {
         );
         assert!(all.contains("[dyn('backendSettings'), dyn('failOpen'), dyn('messageTimeout'), dyn('processingMode'), dyn('statusOnError')].all(k, k in object.spec.extProc[0] && "));
         assert!(!all.contains("failOpen == true"), "no longer open always");
+        assert!(
+            all.contains("'allowModeOverride': dyn(true)"),
+            "the mode override is pinned"
+        );
+        // A website route's idle rate limit: exactly that one.
+        assert!(all.contains(&format!(
+            "object.spec.rateLimit == {}",
+            cel_literal(&crate::firewall::idle_rate_limit())
+        )));
     }
 
     #[test]

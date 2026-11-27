@@ -507,43 +507,62 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
         .collect();
     // Switched to the tunnel: only its connectors get through.
     let tunnel_auth = Some(pyo_proto::firewall::tunnel_authorization(&fw));
+    // Each route has its policies whatever its firewall holds (one that
+    // refuses no one, a rate limit no one reaches), so a firewall change
+    // changes only the routes, never the listeners' HTTP filters: a
+    // listener whose filters change drops its open connections. Envoy
+    // Gateway names some filters after their policy (the firewall's
+    // message, the WAF), so those policies go by the route's family
+    // (`policy_family`): a domain moving to a route of its own (header
+    // rules, a path) keeps them. Its SecurityPolicy (one filter for all)
+    // goes by the route.
+    let mut families: Vec<(String, Vec<String>)> = vec![];
     for name in names {
         let tunnel_on = name.starts_with(&format!("{base}-tunnel-"));
         let https = name.starts_with(&format!("{base}-https-"))
             || name.starts_with(&format!("{base}-switching-"));
         let on_tailnet = name.starts_with(system::TAILNET_ROUTE_PREFIX);
-        let (authorization, rate) = if on_tailnet {
-            (&None, rate.as_ref())
+        let authorization = if on_tailnet {
+            None
         } else if tunnel_on {
-            (&tunnel_auth, rate.as_ref())
+            tunnel_auth.clone()
         } else if https {
-            (&https_auth, rate.as_ref())
+            https_auth.clone()
         } else {
-            (
-                &http_auth,
-                rate.as_ref()
-                    .filter(|_| pyo_proto::firewall::http_rate_limits(&fw)),
-            )
+            http_auth.clone()
         };
-        let route_ref =
-            json!([{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": name }]);
-        if let Some(a) = authorization {
+        if !on_tailnet {
+            let a = authorization.unwrap_or_else(pyo_proto::firewall::open_web_authorization);
             out.objects.push(json!({
                 "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "SecurityPolicy", "metadata": meta(&name),
-                "spec": { "targetRefs": route_ref, "authorization": a },
+                "spec": { "targetRefs": route_refs(std::slice::from_ref(&name)), "authorization": a },
             }));
         }
-        // Its rate limits, and the message a refused visitor gets.
-        if rate.is_some() || authorization.is_some() {
-            let mut spec = json!({ "targetRefs": route_ref });
-            if let Some(r) = rate {
-                spec["rateLimit"] = r.clone();
-            }
-            if authorization.is_some() {
-                spec["responseOverride"] = system::firewall_response_override();
-            }
-            out.objects.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(&name), "spec": spec }));
+        let family = policy_family(&name);
+        match families.iter_mut().find(|(f, _)| *f == family) {
+            Some((_, routes)) => routes.push(name),
+            None => families.push((family, vec![name])),
         }
+    }
+    for (family, routes) in &families {
+        let on_tailnet = family.starts_with(system::TAILNET_ROUTE_PREFIX);
+        // Plain HTTP: the shared :80, whose filters every service's
+        // routes make. No message there (a filter per policy), so a
+        // service coming or going never changes them. A refused visitor
+        // gets the proxy's own 403. Its rate limits only where they count
+        // (not behind a CDN).
+        let plain = family.starts_with(&format!("{base}-http-"));
+        let rate = rate
+            .as_ref()
+            .filter(|_| !plain || pyo_proto::firewall::http_rate_limits(&fw));
+        let mut spec = json!({
+            "targetRefs": route_refs(routes),
+            "rateLimit": rate.cloned().unwrap_or_else(pyo_proto::firewall::idle_rate_limit),
+        });
+        if !on_tailnet && !plain {
+            spec["responseOverride"] = system::firewall_response_override();
+        }
+        out.objects.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(family), "spec": spec }));
     }
 
     // Behind a CDN: its HTTPS listeners read the visitor from what the CDN
@@ -615,6 +634,7 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
                 ))
             })
             .collect();
+        let mut families: Vec<(String, Vec<String>, Vec<system::WafRoute>)> = vec![];
         for (name, hosts, path) in routes {
             // A path's route: the WAF tells it from the hostname's other
             // paths by its path.
@@ -624,19 +644,98 @@ pub fn route_objects(spec: &DeploySpec) -> Routes {
                 settings: waf.settings.clone(),
                 rules: waf.rules.clone(),
             };
-            let mut m = meta(&name);
+            // By the route's family, as the BackendTrafficPolicy above:
+            // Envoy Gateway names the WAF's filter after its policy.
+            let family = policy_family(&name);
+            match families.iter_mut().find(|(f, _, _)| *f == family) {
+                Some((_, names, waf)) => {
+                    names.push(name);
+                    waf.push(route);
+                }
+                None => families.push((family, vec![name], vec![route])),
+            }
+        }
+        for (family, names, routes) in families {
+            let mut m = meta(&family);
             m["annotations"] =
-                json!({ WAF_ANNOTATION: serde_json::to_string(&route).unwrap_or_default() });
+                json!({ WAF_ANNOTATION: serde_json::to_string(&routes).unwrap_or_default() });
             out.objects.push(json!({
                 "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "EnvoyExtensionPolicy", "metadata": m,
-                "spec": { "targetRefs": [{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": name }], "extProc": [system::waf_ext_proc(system::waf_fails_closed(&route))] },
+                "spec": { "targetRefs": route_refs(&names), "extProc": [system::waf_ext_proc(system::waf_fails_closed(&routes[0]))] },
             }));
         }
     }
     out
 }
 
+/// What a route's BackendTrafficPolicy and WAF policy are named after: its
+/// name without the suffix of a route of its own (`-r<hash>`, `grouped`).
+/// A domain that gets a route of its own (header rules, a path) stays
+/// with the same policies, which target the family's routes; so do the
+/// filters Envoy Gateway names after them, and the listener keeps its
+/// connections. A route without the suffix is its family's name.
+pub fn policy_family(route: &str) -> String {
+    match route.rsplit_once("-r") {
+        Some((head, hash))
+            if hash.len() == 8 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            head.to_owned()
+        }
+        _ => route.to_owned(),
+    }
+}
+
+/// Policy targets: these routes.
+fn route_refs(names: &[String]) -> Value {
+    json!(names
+        .iter()
+        .map(|n| json!({ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": n }))
+        .collect::<Vec<_>>())
+}
+
 pub use system::WAF_ANNOTATION;
+
+/// Said in the deploy's log when the install refuses a route policy for
+/// being older than this agent ([`older_form`]).
+pub const OLDER_INSTALL: &str = "This cluster's install is older than Pyo's. Run the command under Refresh this cluster in the cluster's settings. Until then WebSockets don't open on services with the WAF on, and firewall changes can drop open connections.";
+
+/// A route policy as an install older than this agent's admission policy
+/// takes it (before 0.51.1), for when that refuses it: the WAF's one per
+/// route, without `allowModeOverride` (WebSockets wait, as before), the
+/// idle rate limit left out. Empty: no such object there. `None`: no older
+/// form.
+fn older_form(o: &Value) -> Option<Vec<Value>> {
+    match o["kind"].as_str()? {
+        "EnvoyExtensionPolicy" => {
+            let refs = o["spec"]["targetRefs"].as_array()?;
+            let routes = system::waf_routes(o["metadata"]["annotations"][WAF_ANNOTATION].as_str()?);
+            if routes.len() != refs.len() {
+                return None;
+            }
+            let mut out = vec![];
+            for (r, route) in refs.iter().zip(routes) {
+                let mut e = o.clone();
+                e["metadata"]["name"] = r["name"].clone();
+                e["metadata"]["annotations"][WAF_ANNOTATION] =
+                    json!(serde_json::to_string(&route).unwrap_or_default());
+                e["spec"]["targetRefs"] = json!([r]);
+                e["spec"]["extProc"][0]["processingMode"]
+                    .as_object_mut()?
+                    .remove("allowModeOverride");
+                out.push(e);
+            }
+            Some(out)
+        }
+        "BackendTrafficPolicy"
+            if o["spec"]["rateLimit"] == pyo_proto::firewall::idle_rate_limit() =>
+        {
+            let mut o = o.clone();
+            o["spec"].as_object_mut()?.remove("rateLimit");
+            Some(o["spec"].get("responseOverride").into_iter().map(|_| o.clone()).collect())
+        }
+        _ => None,
+    }
+}
 
 /// Which of Pyo Gateway's rules this agent writes
 /// ([`pyo_proto::Capabilities::gateway_rules`]).
@@ -998,8 +1097,25 @@ pub async fn apply(
         };
         let tunnel_policy = kind == "ClientTrafficPolicy"
             && o["metadata"]["labels"][system::CDN_LABEL] == system::TUNNEL_CDN;
+        let older = older_form(o);
         match written {
             Ok(()) => {}
+            // An install older than this agent: the object as it had it,
+            // and it's said.
+            Err(e) if older.is_some() && crate::refused::is_refusal(&e) => {
+                tracing::warn!(error = %e, kind = %kind, name = %name, "the install is older than the agent: written as it had it");
+                if !notes.iter().any(|n| n == OLDER_INSTALL) {
+                    notes.push(OLDER_INSTALL.into());
+                }
+                for o in older.into_iter().flatten() {
+                    let name = o["metadata"]["name"].as_str().unwrap_or("").to_owned();
+                    api.patch(&name, &pp(), &Patch::Apply(&o))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{kind} {name}: {e}"))?;
+                    wanted.insert((kind.clone(), name), ());
+                }
+                continue;
+            }
             // An install older than this agent doesn't know the tunnel's
             // policy: the rest of the routes still go on, and it's said.
             Err(e) if tunnel_policy && crate::refused::is_refusal(&e) => {
@@ -2833,6 +2949,19 @@ mod tests {
             r.objects.iter().any(|o| o["kind"] == "BackendTrafficPolicy"
                 && o["metadata"]["name"] == "tn--shop-web-http")
         );
+        // Without a firewall: the idle rate limit, so a first one changes
+        // only the route; no message (no access rules there).
+        s.firewall = None;
+        let r = route_objects(&s);
+        let btp = &find(&r, "BackendTrafficPolicy", "tn--shop-web-http")["spec"];
+        assert_eq!(btp["rateLimit"], pyo_proto::firewall::idle_rate_limit());
+        assert!(btp.get("responseOverride").is_none());
+        assert!(
+            !r.objects
+                .iter()
+                .any(|o| o["kind"] == "SecurityPolicy"
+                    && o["metadata"]["name"] == "tn--shop-web-http")
+        );
     }
 
     fn domain(host: &str, port: &str, tls: &str, redirect: bool) -> DomainSpec {
@@ -2997,7 +3126,9 @@ mod tests {
         assert_eq!(n["spec"]["rules"][0]["matches"][0]["path"]["value"], "/v1");
         // Its own firewall and WAF on its routes (not on the tailnet's).
         assert!(r.objects.iter().any(|o| o["kind"] == "SecurityPolicy" && o["metadata"]["name"] == a["metadata"]["name"]));
-        assert!(r.objects.iter().any(|o| o["kind"] == "EnvoyExtensionPolicy" && o["metadata"]["name"] == a["metadata"]["name"]));
+        // The WAF's by the route's family (`policy_family`), aimed at it.
+        let eep = find(&r, "EnvoyExtensionPolicy", "shop-api-https-http");
+        assert!(eep["spec"]["targetRefs"].as_array().unwrap().iter().any(|t| t["name"] == a["metadata"]["name"]));
 
         // The holder at a path: its listener, and a match.
         let held = spec(vec![DomainSpec { path: "/app".into(), ..domain("example.com", "http", "letsencrypt", true) }]);
@@ -3589,8 +3720,10 @@ mod tests {
         assert!(r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
             && o["metadata"]["name"] == "shop-web-tunnel-plain-http"));
         // Switching: no gate, both paths answer.
-        assert!(!r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
-            && o["metadata"]["name"] == "shop-web-switching-http"));
+        assert_eq!(
+            find(&r, "SecurityPolicy", "shop-web-switching-http")["spec"]["authorization"],
+            pyo_proto::firewall::open_web_authorization()
+        );
         // The tunnel's listeners trust its connectors only (filled in when
         // applied), with Cloudflare's own headers kept.
         let ctp = find(&r, "ClientTrafficPolicy", "shop-web-tunnel");
@@ -3787,10 +3920,9 @@ mod tests {
             http["spec"]["authorization"]["rules"][1]["principal"]["clientCIDRs"],
             json!(cf)
         );
-        assert!(
-            find(&r, "BackendTrafficPolicy", "shop-web-http-http")["spec"]
-                .get("rateLimit")
-                .is_none()
+        assert_eq!(
+            find(&r, "BackendTrafficPolicy", "shop-web-http-http")["spec"]["rateLimit"],
+            pyo_proto::firewall::idle_rate_limit()
         );
         // Not behind it: no client policy of its own.
         s.firewall.as_mut().unwrap().behind = None;
@@ -3922,23 +4054,301 @@ mod tests {
             blocks[0],
             ("0.0.0.0/0".to_owned(), vec!["203.0.113.0/24".to_owned()])
         );
-        // Access rules alone: the message, no rate limit.
+        // Access rules alone: the message, and the idle rate limit.
         s.firewall = Some(Firewall {
             rules: vec![rule("fwr_bad", "block", "203.0.113.0/24")],
             ..Default::default()
         });
         let r = route_objects(&s);
         let btp = find(&r, "BackendTrafficPolicy", "shop-web-https-http");
-        assert!(
-            btp["spec"].get("rateLimit").is_none()
-                && btp["spec"]["responseOverride"] == system::firewall_response_override()
-        );
-        // No firewall: no policies.
+        assert_eq!(btp["spec"]["rateLimit"], pyo_proto::firewall::idle_rate_limit());
+        assert_eq!(btp["spec"]["responseOverride"], system::firewall_response_override());
+        // No firewall: the same policies, refusing and limiting no one. So
+        // a firewall change changes only the routes' policies: the route
+        // policies' kinds, names and HTTP filters stay as they are.
+        let with = r;
         s.firewall = None;
         let r = route_objects(&s);
-        assert!(!r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
-            || (o["kind"] == "BackendTrafficPolicy"
-                && !o["metadata"]["name"].as_str().unwrap().contains("tcp"))));
+        let policies = |r: &Routes| -> Vec<(String, String)> {
+            r.objects
+                .iter()
+                .filter(|o| o["kind"] == "SecurityPolicy" || o["kind"] == "BackendTrafficPolicy")
+                // Websites': a port's are its own (no HTTP filters).
+                .filter(|o| !o["metadata"]["name"].as_str().unwrap().contains("-tcp-"))
+                .map(|o| (o["kind"].as_str().unwrap().to_owned(), o["metadata"]["name"].as_str().unwrap().to_owned()))
+                .collect()
+        };
+        assert_eq!(policies(&r), policies(&with));
+        for o in r.objects.iter().filter(|o| {
+            o["kind"] == "HTTPRoute" && reaches_service(o)
+        }) {
+            let name = o["metadata"]["name"].as_str().unwrap();
+            assert_eq!(
+                find(&r, "SecurityPolicy", name)["spec"]["authorization"],
+                pyo_proto::firewall::open_web_authorization(),
+                "{name}"
+            );
+            let btp = &find(&r, "BackendTrafficPolicy", name)["spec"];
+            assert_eq!(btp["rateLimit"], pyo_proto::firewall::idle_rate_limit(), "{name}");
+            // The message on HTTPS only: none on the shared :80, whose
+            // filters every service's routes make.
+            let plain = o["spec"]["parentRefs"][0]["name"] == HTTP_GATEWAY;
+            assert_eq!(btp.get("responseOverride").is_none(), plain, "{name}");
+            if !plain {
+                assert_eq!(btp["responseOverride"], system::firewall_response_override(), "{name}");
+            }
+        }
+        assert!(
+            !r.objects.iter().any(|o| o["kind"] == "SecurityPolicy"
+                && o["metadata"]["name"] == "shop-web-redirect"),
+            "the redirect to HTTPS stays open"
+        );
+    }
+
+    /// Writes the gateway objects of a cluster before and after each kind
+    /// of firewall and WAF change, one JSON file (a list of objects) per
+    /// state, into `PYO_DRAIN_SCENARIOS`, for
+    /// `scripts/gateway-drain-check.sh`: it translates each with Envoy
+    /// Gateway's `egctl` and says which changes alter a listener's HTTP
+    /// filters (which drops its open connections).
+    #[test]
+    #[ignore]
+    fn drain_scenarios() {
+        use pyo_proto::firewall::{FirewallRule, RateLimit};
+        use pyo_proto::rules::{Header, HeaderRules, HeaderSet, Redirect};
+        let dir = std::env::var("PYO_DRAIN_SCENARIOS").expect("PYO_DRAIN_SCENARIOS");
+        let rule = |id: &str, action: &str, source: &str| FirewallRule {
+            id: id.into(),
+            action: action.into(),
+            operator: "in".into(),
+            sources: if source.is_empty() { vec![] } else { vec![source.into()] },
+            limit: (action == "rateLimit").then(|| RateLimit { requests: 100, per: "minute".into() }),
+        };
+        let waf = |mode: &str| pyo_proto::Waf {
+            settings: pyo_proto::WafSettings { mode: mode.into(), level: 1, ..Default::default() },
+            rules: vec![],
+        };
+        // Another service on the same proxies, as it is throughout: its
+        // WAF on and an address rule.
+        let mut other = spec(vec![domain("blog.example.com", "http", "letsencrypt", false), domain("blog-plain.example.com", "http", "", false)]);
+        other.service.service_id = "svc_blog".into();
+        other.service.namespace = "blog".into();
+        other.waf = Some(waf("block"));
+        other.firewall = Some(Firewall { rules: vec![rule("fwr_o", "block", "198.51.100.0/24")], ..Default::default() });
+        let shop = |f: &dyn Fn(&mut DeploySpec)| {
+            let mut s = spec(vec![domain("shop.example.com", "http", "letsencrypt", false), domain("plain.example.com", "http", "", false)]);
+            f(&mut s);
+            s
+        };
+        let frame_deny = || HeaderRules {
+            response: HeaderSet { set: vec![Header { name: "X-Frame-Options".into(), value: "DENY".into() }], remove: vec![] },
+            request: HeaderSet::default(),
+        };
+        let fw = |rules: Vec<FirewallRule>| move |s: &mut DeploySpec| s.firewall = Some(Firewall { rules: rules.clone(), ..Default::default() });
+        let limited = rule("fwr_r", "rateLimit", "");
+        let mut limited_more = limited.clone();
+        limited_more.limit = Some(RateLimit { requests: 200, per: "minute".into() });
+        let states: Vec<(&str, DeploySpec)> = vec![
+            ("base", shop(&|_| {})),
+            ("ip_rule", shop(&fw(vec![rule("fwr_1", "block", "203.0.113.0/24")]))),
+            ("ip_rule_changed", shop(&fw(vec![rule("fwr_1", "block", "203.0.113.7/32")]))),
+            ("country_rule", shop(&fw(vec![rule("fwr_2", "block", "RU")]))),
+            ("rate_limit", shop(&fw(vec![limited.clone()]))),
+            ("rate_limit_changed", shop(&fw(vec![limited_more]))),
+            ("all_rules", shop(&fw(vec![rule("fwr_1", "block", "203.0.113.0/24"), rule("fwr_2", "block", "RU"), limited.clone()]))),
+            ("redirect", shop(&|s| s.domains[0].redirects = vec![Redirect { path: "/old".into(), to_path: "/new".into(), status: 301, ..Default::default() }])),
+            ("waf_block", shop(&|s| s.waf = Some(waf("block")))),
+            ("waf_log", shop(&|s| s.waf = Some(waf("log")))),
+            ("header_rule", shop(&|s| {
+                for d in &mut s.domains {
+                    d.headers = frame_deny();
+                }
+            })),
+            ("path_route", shop(&|s| {
+                for d in &mut s.domains {
+                    d.path = "/api".into();
+                }
+            })),
+            ("waf_header_rule", shop(&|s| {
+                s.waf = Some(waf("block"));
+                for d in &mut s.domains {
+                    d.headers = frame_deny();
+                }
+            })),
+            ("waf_path_route", shop(&|s| {
+                s.waf = Some(waf("block"));
+                for d in &mut s.domains {
+                    d.path = "/api".into();
+                }
+            })),
+            ("domain_added", shop(&|s| {
+                s.domains.push(domain("shop2.example.com", "http", "letsencrypt", false));
+                s.domains.push(domain("plain2.example.com", "http", "", false));
+            })),
+            ("service_added", shop(&|_| {})),
+        ];
+        // A third service, new on the cluster, with a plain HTTP domain.
+        let mut added = spec(vec![domain("new.example.com", "http", "", false)]);
+        added.service.service_id = "svc_new".into();
+        added.service.namespace = "new".into();
+        let fixed = vec![
+            system::gateway_class(),
+            system::envoy_proxy("geoip", true),
+            system::http_gateway(),
+            system::waf_backend(),
+            system::client_policy(false, system::WebSettings::default()),
+            system::client_policy(true, system::WebSettings::default()),
+        ];
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, s) in states {
+            let mut objects = fixed.clone();
+            objects.extend(route_objects(&other).objects);
+            objects.extend(route_objects(&s).objects);
+            if name == "service_added" {
+                objects.extend(route_objects(&added).objects);
+            }
+            std::fs::write(format!("{dir}/{name}.json"), serde_json::to_string_pretty(&objects).unwrap()).unwrap();
+        }
+    }
+
+    /// A domain that gets a route of its own (header rules, a path) keeps
+    /// its BackendTrafficPolicy and WAF policy: they go by the route's
+    /// family and target the routes split from it. Envoy Gateway names the
+    /// firewall's message and the WAF's filters after them, so the
+    /// listener's filters stay as they were.
+    #[test]
+    fn route_policies_survive_a_split() {
+        use pyo_proto::rules::{Header, HeaderRules, HeaderSet};
+        let mut s = spec(vec![
+            domain("shop.example.com", "http", "letsencrypt", false),
+            domain("plain.example.com", "http", "", false),
+        ]);
+        s.waf = Some(pyo_proto::Waf {
+            settings: pyo_proto::WafSettings { mode: "block".into(), level: 1, ..Default::default() },
+            rules: vec![],
+        });
+        let names = |r: &Routes| -> Vec<(String, String)> {
+            r.objects
+                .iter()
+                .filter(|o| o["kind"] == "BackendTrafficPolicy" || o["kind"] == "EnvoyExtensionPolicy")
+                .map(|o| (o["kind"].as_str().unwrap().to_owned(), o["metadata"]["name"].as_str().unwrap().to_owned()))
+                .collect()
+        };
+        let before = route_objects(&s);
+        let deny = HeaderRules {
+            response: HeaderSet { set: vec![Header { name: "X-Frame-Options".into(), value: "DENY".into() }], remove: vec![] },
+            request: HeaderSet::default(),
+        };
+        let mut headers = s.clone();
+        for d in &mut headers.domains {
+            d.headers = deny.clone();
+        }
+        let mut paths = s.clone();
+        for d in &mut paths.domains {
+            d.path = "/api".into();
+        }
+        for (what, changed) in [("header rules", headers), ("a path", paths)] {
+            let r = route_objects(&changed);
+            assert_eq!(names(&r), names(&before), "{what}");
+            // Each targets its family's routes, and only those.
+            for o in r.objects.iter().filter(|o| o["kind"] == "BackendTrafficPolicy" || o["kind"] == "EnvoyExtensionPolicy") {
+                let name = o["metadata"]["name"].as_str().unwrap();
+                let targets: Vec<&str> = o["spec"]["targetRefs"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+                let family: Vec<&str> = r
+                    .objects
+                    .iter()
+                    .filter(|x| x["kind"] == "HTTPRoute" && reaches_service(x))
+                    .map(|x| x["metadata"]["name"].as_str().unwrap())
+                    .filter(|n| policy_family(n) == name)
+                    .collect();
+                assert_eq!(targets, family, "{what}: {name}");
+                assert!(targets.iter().all(|t| *t == name || (t.starts_with(&format!("{name}-r")) && t.len() == name.len() + 10)));
+                if o["kind"] == "EnvoyExtensionPolicy" {
+                    let w = system::waf_routes(o["metadata"]["annotations"][WAF_ANNOTATION].as_str().unwrap());
+                    assert_eq!(w.len(), targets.len());
+                    for (t, w) in targets.iter().zip(&w) {
+                        assert_eq!(json!(w.hosts), find(&r, "HTTPRoute", t)["spec"]["hostnames"]);
+                    }
+                }
+            }
+            // The SecurityPolicy goes by the route (one filter for every
+            // route, whatever their names).
+            assert!(r.objects.iter().filter(|o| o["kind"] == "HTTPRoute" && reaches_service(o)).all(|o| {
+                let n = o["metadata"]["name"].as_str().unwrap();
+                r.objects.iter().any(|x| x["kind"] == "SecurityPolicy" && x["metadata"]["name"] == n)
+            }));
+        }
+        assert_eq!(policy_family("shop-web-https-http-r0a1b2c3d"), "shop-web-https-http");
+        assert_eq!(policy_family("shop-web-https-http"), "shop-web-https-http");
+        assert_eq!(policy_family("tn--shop-web-http-r0a1b2c3d"), "tn--shop-web-http");
+        assert_eq!(policy_family("shop-web-https-http-rzz"), "shop-web-https-http-rzz");
+        // Annotations of one route alone (before 0.51.1) still read.
+        let one = system::WafRoute { hosts: vec!["a.example.com".into()], ..Default::default() };
+        assert_eq!(system::waf_routes(&serde_json::to_string(&one).unwrap()), vec![one.clone()]);
+        assert_eq!(system::waf_routes(&serde_json::to_string(&[&one, &one]).unwrap()).len(), 2);
+        assert!(system::waf_routes("nonsense").is_empty());
+    }
+
+    /// An install older than the agent refuses the WAF's mode override and
+    /// the idle rate limit: they're written as it had them, and nothing
+    /// else changes.
+    #[test]
+    fn older_installs_get_the_policies_as_they_had_them() {
+        let mut s = spec(vec![domain("shop.example.com", "http", "", false)]);
+        s.waf = Some(pyo_proto::Waf {
+            settings: pyo_proto::WafSettings {
+                mode: "block".into(),
+                level: 1,
+                ..Default::default()
+            },
+            rules: vec![],
+        });
+        let r = route_objects(&s);
+        let eep = find(&r, "EnvoyExtensionPolicy", "shop-web-http-http");
+        let older = older_form(eep).unwrap();
+        let mut want = eep.clone();
+        want["spec"]["extProc"][0]["processingMode"] =
+            json!({ "request": { "body": "BufferedPartial", "attributes": ["source.address"] } });
+        want["metadata"]["annotations"][WAF_ANNOTATION] = json!(serde_json::to_string(
+            &system::waf_routes(eep["metadata"]["annotations"][WAF_ANNOTATION].as_str().unwrap())[0]
+        )
+        .unwrap());
+        assert_eq!(older, vec![want]);
+        // A family of routes (a domain with a route of its own): one WAF
+        // policy per route, each with its own route's WAF.
+        s.domains[0].headers = pyo_proto::rules::HeaderRules {
+            response: pyo_proto::rules::HeaderSet { set: vec![pyo_proto::rules::Header { name: "X-Frame-Options".into(), value: "DENY".into() }], remove: vec![] },
+            request: Default::default(),
+        };
+        s.domains.push(domain("other.example.com", "http", "", false));
+        let r2 = route_objects(&s);
+        let eep2 = find(&r2, "EnvoyExtensionPolicy", "shop-web-http-http");
+        assert_eq!(eep2["spec"]["targetRefs"].as_array().unwrap().len(), 2);
+        let older = older_form(eep2).unwrap();
+        assert_eq!(older.len(), 2);
+        for o in &older {
+            let target = &o["spec"]["targetRefs"];
+            assert_eq!(target.as_array().unwrap().len(), 1);
+            assert_eq!(target[0]["name"], o["metadata"]["name"]);
+            let route = find(&r2, "HTTPRoute", o["metadata"]["name"].as_str().unwrap());
+            let w: system::WafRoute = serde_json::from_str(o["metadata"]["annotations"][WAF_ANNOTATION].as_str().unwrap()).unwrap();
+            assert_eq!(json!(w.hosts), route["spec"]["hostnames"]);
+            assert!(o["spec"]["extProc"][0]["processingMode"].get("allowModeOverride").is_none());
+        }
+        // Plain HTTP: no message, so the idle rate limit was all there is.
+        let btp = find(&r, "BackendTrafficPolicy", "shop-web-http-http");
+        assert_eq!(older_form(btp), Some(vec![]));
+        // With the message (HTTPS), the message stays.
+        let mut https = btp.clone();
+        https["spec"]["responseOverride"] = system::firewall_response_override();
+        let older = older_form(&https).unwrap();
+        assert!(older[0]["spec"].get("rateLimit").is_none());
+        assert_eq!(older[0]["spec"]["responseOverride"], system::firewall_response_override());
+        // A real rate limit, and the open authorization, have no older form.
+        let mut limited = btp.clone();
+        limited["spec"]["rateLimit"] = json!({ "type": "Local", "local": { "rules": [] } });
+        assert_eq!(older_form(&limited), None);
+        assert_eq!(older_form(find(&r, "SecurityPolicy", "shop-web-http-http")), None);
     }
 
     #[test]
@@ -3980,12 +4390,12 @@ mod tests {
             eep["spec"]["extProc"][0]["failOpen"], false,
             "block mode: refused when the WAF is unavailable"
         );
-        let on: WafRoute = serde_json::from_str(
+        let on: WafRoute = system::waf_routes(
             eep["metadata"]["annotations"][WAF_ANNOTATION]
                 .as_str()
                 .unwrap(),
         )
-        .unwrap();
+        .remove(0);
         assert!(
             on.hosts.contains(&"shop.example.com".to_owned())
                 && on.settings.mode == "block"
@@ -4456,13 +4866,42 @@ mod tests {
             .unwrap();
 
         // Rate limits: the service's, but nothing else in them.
-        let btp = find(&r, "BackendTrafficPolicy", "shop-web-http-http").clone();
+        // Its plain HTTP route has no message: as an HTTPS route has it.
+        let mut btp = find(&r, "BackendTrafficPolicy", "shop-web-http-http").clone();
+        btp["spec"]["responseOverride"] = system::firewall_response_override();
         apply(btp.clone())
             .await
             .unwrap_or_else(|e| panic!("rate limits: {e}"));
         let mut hourly = btp.clone();
         hourly["spec"]["rateLimit"]["local"]["rules"][0]["limit"]["unit"] = json!("Hour");
         assert!(apply(hourly).await.is_err(), "another unit");
+        // Its family's split routes, but never another's route.
+        let mut split = btp.clone();
+        split["spec"]["targetRefs"] = json!([
+            { "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": "shop-web-http-http" },
+            { "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": "shop-web-http-http-r0a1b2c3d" },
+        ]);
+        apply(split.clone())
+            .await
+            .unwrap_or_else(|e| panic!("its split routes: {e}"));
+        let mut theirs = split.clone();
+        theirs["spec"]["targetRefs"][1]["name"] = json!("shop-web-http-http-other");
+        assert!(apply(theirs).await.is_err(), "another route");
+        // The idle rate limit, exactly: no other count for every client.
+        let mut idle = btp.clone();
+        idle["spec"]["rateLimit"] = pyo_proto::firewall::idle_rate_limit();
+        apply(idle.clone())
+            .await
+            .unwrap_or_else(|e| panic!("the idle rate limit: {e}"));
+        let mut low = idle.clone();
+        low["spec"]["rateLimit"]["local"]["rules"][0]["limit"]["requests"] = json!(10);
+        assert!(apply(low).await.is_err(), "one count for every client, reachable");
+        let mut headers_on = idle.clone();
+        headers_on["spec"]["rateLimit"]["local"]["rules"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("xRateLimitHeaders");
+        assert!(apply(headers_on).await.is_err(), "the idle limit's headers");
         let mut header = btp.clone();
         header["spec"]["rateLimit"]["local"]["rules"][0]["clientSelectors"] =
             json!([{ "headers": [{ "name": "x", "type": "Distinct" }] }]);

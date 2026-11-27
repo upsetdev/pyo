@@ -320,3 +320,124 @@ func TestCustomRuleSkipsAPath(t *testing.T) {
 		t.Error("allow: a later custom rule ran")
 	}
 }
+
+// The handshake of a WebSocket.
+var ws = []string{"connection", "Upgrade", "upgrade", "websocket", "sec-websocket-version", "13", "sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="}
+
+func upgrade(mode extprocfilter.ProcessingMode_BodySendMode, host, path string, extra ...string) *extproc.ProcessingRequest {
+	return headers(mode, host, "GET", path, false, append(append([]string{}, ws...), extra...)...)
+}
+
+// overridden: the answer goes on and tells the proxy to send no body (and
+// nothing of the response), as the route has it otherwise.
+func overridden(r *extproc.ProcessingResponse) bool {
+	m := r.GetRequestHeaders() != nil && r.GetModeOverride() != nil
+	if !m {
+		return false
+	}
+	o := r.GetModeOverride()
+	return o.GetRequestBodyMode() == extprocfilter.ProcessingMode_NONE &&
+		o.GetResponseBodyMode() == extprocfilter.ProcessingMode_NONE &&
+		o.GetResponseHeaderMode() == extprocfilter.ProcessingMode_SKIP &&
+		o.GetRequestTrailerMode() == extprocfilter.ProcessingMode_SKIP &&
+		o.GetResponseTrailerMode() == extprocfilter.ProcessingMode_SKIP
+}
+
+// An upgrade sends nothing before its 101: it's decided at its headers,
+// in every mode, and the proxy is told not to wait for a body.
+func TestUpgradeGoesOnWithoutABody(t *testing.T) {
+	s := testServer(t)
+	for _, mode := range []extprocfilter.ProcessingMode_BodySendMode{partial, streamed} {
+		for _, host := range []string{"block.test", "log.test", "other.test"} {
+			if r := stream(t, s)(upgrade(mode, host, "/chat")); !overridden(r) {
+				t.Errorf("%v %s: %v, want go on with no body", mode, host, r)
+			}
+		}
+		// Log only: an attack is logged, not refused.
+		if r := stream(t, s)(upgrade(mode, "log.test", "/chat?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E")); !overridden(r) {
+			t.Errorf("%v log only: %v", mode, r)
+		}
+	}
+}
+
+// The handshake gets every rule a request without a body gets: OWASP rules
+// on the request line and headers, and custom rules.
+func TestUpgradeIsInspected(t *testing.T) {
+	s := testServer(t)
+	for _, mode := range []extprocfilter.ProcessingMode_BodySendMode{partial, streamed} {
+		for name, h := range map[string]*extproc.ProcessingRequest{
+			"xss in the query":    upgrade(mode, "block.test", "/chat?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E"),
+			"sqli in the query":   upgrade(mode, "block.test", sqli),
+			"xss in a header":     upgrade(mode, "block.test", "/chat", "referer", "http://example.test/<script>alert(1)</script>"),
+			"scanner user agent":  upgrade(mode, "block.test", "/chat", "user-agent", "sqlmap/1.7"),
+			"path traversal":      upgrade(mode, "block.test", "/chat/../../etc/passwd"),
+			"custom header":       upgrade(mode, "block.test", "/chat", "x-evil", "1"),
+			"custom header, log":  upgrade(mode, "log.test", "/chat", "x-evil", "1"),
+			"body by length":      upgrade(mode, "block.test", "/chat", "content-length", "12"),
+			"body by length, log": upgrade(mode, "log.test", "/chat", "content-length", "12"),
+			"chunked body":        upgrade(mode, "block.test", "/chat", "transfer-encoding", "chunked"),
+			"chunked body, log":   upgrade(mode, "log.test", "/chat", "transfer-encoding", "chunked"),
+		} {
+			if r := stream(t, s)(h); !denied(r) {
+				t.Errorf("%v %s: %v, want 403", mode, name, r)
+			}
+		}
+		if r := stream(t, s)(upgrade(mode, "block.test", "/chat", "content-length", "0")); !overridden(r) {
+			t.Errorf("%v an empty body: %v", mode, r)
+		}
+	}
+}
+
+// A route that doesn't let the WAF change its mode (an older policy) sends
+// a body all the same: it's decided on as before.
+func TestUpgradeBodyWithoutOverride(t *testing.T) {
+	s := testServer(t)
+	send := stream(t, s)
+	send(upgrade(partial, "block.test", "/chat"))
+	if r := send(body("EVILBODY", false)); !denied(r) {
+		t.Fatalf("%v", r)
+	}
+	send = stream(t, s)
+	send(upgrade(partial, "block.test", "/chat", "content-type", form))
+	if r := send(body("hello", false)); r.GetRequestBody() == nil {
+		t.Fatalf("%v", r)
+	}
+}
+
+// Anything else keeps the route's mode.
+func TestOnlyUpgradesOverride(t *testing.T) {
+	s := testServer(t)
+	for _, h := range []*extproc.ProcessingRequest{
+		headers(partial, "block.test", "POST", "/form", false, "content-type", form, "content-length", "3"),
+		headers(partial, "block.test", "GET", "/", true),
+		headers(partial, "block.test", "GET", "/", false, "upgrade", "websocket", "connection", "keep-alive"),
+		headers(partial, "other.test", "POST", "/", false, "content-length", "3"),
+	} {
+		if r := stream(t, s)(h); r.GetModeOverride() != nil || r.GetRequestHeaders() == nil {
+			t.Errorf("%v", r)
+		}
+	}
+}
+
+func TestIsUpgrade(t *testing.T) {
+	for _, tc := range []struct {
+		h    map[string]string
+		want bool
+	}{
+		{map[string]string{"upgrade": "websocket", "connection": "Upgrade"}, true},
+		{map[string]string{"upgrade": "websocket", "connection": "keep-alive, Upgrade"}, true},
+		{map[string]string{"upgrade": "websocket", "connection": "keep-alive"}, false},
+		{map[string]string{"upgrade": "websocket"}, false},
+		{map[string]string{"connection": "upgrade"}, false},
+		{map[string]string{}, false},
+	} {
+		if got := isUpgrade(tc.h); got != tc.want {
+			t.Errorf("%v: %v", tc.h, got)
+		}
+	}
+	for cl, want := range map[string]bool{"": false, "0": false, "00": false, " 0 ": false, "1": true, "12": true} {
+		if got := declaresBody(map[string]string{"content-length": cl}); got != want {
+			t.Errorf("content-length %q: %v", cl, got)
+		}
+	}
+}

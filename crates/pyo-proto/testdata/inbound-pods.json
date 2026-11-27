@@ -11,6 +11,10 @@
     {
       "date": "2026-11-27",
       "note": "Third-party images move to the ghcr.io/upsetdev/pyo-mirror/ path, digests unchanged"
+    },
+    {
+      "date": "2026-11-27",
+      "note": "Firewall: websocket upgrades and new image"
     }
   ],
   "pods": {
@@ -20,7 +24,7 @@
     },
     "images": {
       "geoip": "2026-11-06",
-      "waf": "3faf4b894ae9d11b"
+      "waf": "9a8a95aa5758ce70"
     },
     "proxies": {
       "geoIP": {

@@ -44,7 +44,7 @@ async fn routes(client: &Client) -> anyhow::Result<Vec<WafRoute>> {
         .items
         .iter()
         .filter_map(|p| p.annotations().get(gateway::WAF_ANNOTATION))
-        .filter_map(|a| serde_json::from_str(a).ok())
+        .flat_map(|a| system::waf_routes(a))
         .collect())
 }
 
