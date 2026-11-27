@@ -187,6 +187,12 @@ pub async fn resend_on_change(
     if !resend_wanted(reported, last) {
         return Ok(false);
     }
+    resend(tx, cluster_id).await
+}
+
+/// Every running service's routes on the cluster again, as they now stand
+/// (a firewall sync). Gives whether one was queued.
+pub async fn resend(tx: &mut Transaction<'_, Postgres>, cluster_id: &str) -> ApiResult<bool> {
     let any: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pyo.services WHERE cluster_id = $1 AND current_deployment_id IS NOT NULL AND NOT deleting)",
     )

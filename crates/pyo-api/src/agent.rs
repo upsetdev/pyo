@@ -358,6 +358,10 @@ async fn heartbeat(
         "tunnel": caps.tunnel,
         // Which of Pyo Gateway's rules it writes (routes.rs `rules_ok`).
         "gatewayRules": caps.gateway_rules,
+        // It writes the Gateway section's settings, and the gateway's parts
+        // on each server (gateway_settings.rs).
+        "gatewaySettings": caps.gateway_settings,
+        "gateway": caps.gateway,
         // Whether this agent can update Pyo and itself (updates.rs).
         "updates": hb.updates,
         // Its builders and pyo-static sign their requests (agent_auth.rs).
@@ -429,20 +433,27 @@ async fn heartbeat(
     crate::bundles::sync_databases(&mut tx, &cluster.id, false).await?;
     // The WAF's engine too (where a service has its WAF on), once the
     // install that pins its images is current again.
-    if agent_install["state"] == "current" && was_install.as_deref().is_some_and(|w| w != "current")
-    {
+    let became_current =
+        agent_install["state"] == "current" && was_install.as_deref().is_some_and(|w| w != "current");
+    if became_current {
         let wanted = crate::waf::wanted(&mut tx, &cluster.id).await?;
         crate::bundles::sync_waf(&mut tx, &cluster.id, wanted).await?;
     }
     // An agent that writes routes differently (an update): every running
     // service's routes again, so they get its new defaults too.
-    let routes_resent = crate::routes::resend_on_change(
+    let mut routes_resent = crate::routes::resend_on_change(
         &mut tx,
         &cluster.id,
         &hb.routes_version,
         routes_were.as_deref(),
     )
     .await?;
+    // And once its install is current again: what the older install
+    // refused (the anchor routes, a route policy it didn't know) goes in
+    // now, not with each service's next change.
+    if became_current && !routes_resent {
+        routes_resent = crate::routes::resend(&mut tx, &cluster.id).await?;
+    }
     // An import that just ended: its database is sent again, without the import's Secret.
     for id in
         crate::databases::reported(&mut tx, &cluster.id, &hb.databases, hb.databases_listed).await?
@@ -2469,6 +2480,26 @@ mod routes_resend_tests {
             beat("2222222222222222").await;
             assert_eq!(syncs().await.len(), 2);
 
+            // Its install current again (refreshed): once more, so what the
+            // older install refused goes in.
+            q("UPDATE pyo.clusters SET capabilities = capabilities || '{\"agentInstall\": {\"state\": \"outdated\"}}' WHERE id = $1")
+                .bind(&cluster)
+                .execute(&db)
+                .await
+                .unwrap();
+            beat("2222222222222222").await;
+            assert_eq!(syncs().await.len(), 3, "an install that's current again");
+            beat("2222222222222222").await;
+            assert_eq!(syncs().await.len(), 3);
+            // The Gateway section's report is kept.
+            let caps: Value = sqlx::query_scalar("SELECT capabilities FROM pyo.clusters WHERE id = $1")
+                .bind(&cluster)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(caps["gatewaySettings"], json!(false));
+            assert!(caps.get("gateway").is_some());
+
             // A cluster without running services just notes it.
             q("UPDATE pyo.services SET current_deployment_id = NULL WHERE id = $1")
                 .bind(&svc)
@@ -2476,7 +2507,7 @@ mod routes_resend_tests {
                 .await
                 .unwrap();
             beat("3333333333333333").await;
-            assert_eq!(syncs().await.len(), 2);
+            assert_eq!(syncs().await.len(), 3);
             assert_eq!(seen().await.as_deref(), Some("3333333333333333"));
 
             q("DELETE FROM pyo.teams WHERE id = $1")
