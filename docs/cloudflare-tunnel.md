@@ -1117,6 +1117,21 @@ Why not Envoy's `customHeader: CF-Connecting-IP`: Envoy would trust it from
 any connection (`system.rs:1320-1323`). X-Forwarded-For with trusted peers
 gives the same address and only from cloudflared.
 
+The Gateway section's settings (traffic-and-gateway-design.md, "Gateway
+section as built") reach tunnel listeners too:
+
+- **TLS minimum**: written into each tunnel client policy like the rest of
+  `pyo-https` (`rewrite_cdn_policy`). cloudflared speaks TLS 1.3 to the
+  origin, so 1.3 keeps tunnel domains answering. Saving it drains tunnel
+  domains' connections from cloudflared once, like every HTTPS chain.
+- **HTTP/3**: also written into the tunnel policies, and Envoy adds
+  `alt-svc` to tunnel domains' routes (it enables HTTP/3 per address and
+  port). Visitors reach Cloudflare's edge, which has its own HTTP/3, so
+  that header reaches them only if Cloudflare passes it on (not checked
+  yet). Origin pull stays off on tunnel policies, as before.
+- **Compression**: tunnel routes compress like direct ones. Cloudflare
+  passes a compressed answer on.
+
 ### 8.4 The API behind the Gateway (found while writing this)
 
 pyo-api reads the visitor from `CF-Connecting-IP` when the connection comes

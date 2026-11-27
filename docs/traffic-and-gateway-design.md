@@ -1004,6 +1004,75 @@ above, this list wins. Each change keeps traffic flowing.
   traffic paths. Naming the policy by domain instead would make it one
   drain, after one more drain when it rolls out.
 
+## Gateway section as built (2026-11-27)
+
+Built on `feat/gateway-section`. Where the code differs from §10 to §15,
+this list wins.
+
+- **Status lives in the heartbeat's capabilities.** `Capabilities.gateway`
+  (a `GatewayReport`) instead of a new `Heartbeat.gateway`: capabilities
+  are already stored per cluster, so no new column. The snapshot gives each
+  cluster `gateway: { settings, status }`, `status` being that report (null
+  before an agent that sends it). The report also carries the HTTP/3 and
+  TLS settings the proxies have now (the panel says "Turning on…" or
+  "Applying…" until they match) and `udp443Taken`, another Service that
+  publishes UDP 443 on the servers: the API refuses HTTP/3 with it before
+  anything is saved, and the agent checks again (`port_free`).
+- **`Capabilities.gateway_settings`.** Agents that write the settings say
+  so. The API refuses HTTP/3, the TLS minimum, compression and the idle
+  timeout without it ("Update the agent first.") or with the install not
+  current (the refresh message). The request timeout default works with
+  any agent: it travels as each service's `requestTimeout`, which agents
+  have always written.
+- **Command `SetWebSettings { http3, tls13 }`**, next to
+  `SetWebProxyProtocol`, which stays as it is. The agent reads all four
+  listener settings back from `pyo-https` (`web_settings_of`).
+- **Route settings ride on the hand-out.** `routes::current` puts the
+  cluster's compression, idle timeout and request timeout default into
+  every deploy, routes sync and firewall sync as it's handed to the agent,
+  like a service's domains. A default equal to Pyo's own (300 s, 1 hour)
+  is sent as none, so routes are written exactly as before until someone
+  changes it. A change bumps every service's `routes_revision` and queues a
+  firewall sync of the cluster.
+- **Anchors.** Each service's HTTPS Gateway gets `<base>-anchor` (no
+  hostnames, exact path `/.well-known/pyo/anchor`, an `ExtensionRef` to the
+  `HTTPRouteFilter` `pyo-not-found`, which answers 404) with a
+  BackendTrafficPolicy holding the three compressors and the idle rate
+  limit. The tailnet Gateway gets `pyo-tailnet-anchor` on its HTTPS
+  listener, written with its fixed objects. The public dashboard's Gateway
+  gets none: no route there ever compresses. An install that refuses an
+  anchor (older admission policy) skips it quietly. The agent's role gains
+  `httproutefilters` (the connect command or a refresh brings it).
+- **The anchor's rollout drains each HTTPS chain once**, the first time
+  the routes are written after the install takes them (§20, "This
+  release's update"). A cluster whose agent updated before its install was
+  refreshed gets its anchors with the next deploy or routes sync of each
+  service, or all at once when compression or a default is first saved.
+- **Pyo's own tailnet routes** (`pyo-dashboard`, `pyo-registry-door`,
+  `pyo-sandboxes`) each get a BackendTrafficPolicy with the idle rate
+  limit, pinned exactly by the admission policy. With it and the tailnet
+  anchor, the Tailnet switch no longer changes the tailnet HTTPS chain
+  (checked with egctl, §20). `dashboardDrops` and the confirm's line stay
+  only for the cluster Pyo runs on while its agent or install is older
+  (`traffic_paths::refreshed`).
+- **Compression scope.** HTTPS routes (direct, tunnel and ts.net) only.
+  Plain HTTP on :80 never compresses: its chain is every service's.
+- **TLS minimum** goes into `pyo-https`, every CDN and tunnel policy, and
+  `pyo-tailnet`'s client policy (`tailnet_client_policy_for`). 1.2 is left
+  unwritten, as before. The admission policy lists 16 `pyo-https` variants
+  (origin pull, PROXY protocol, HTTP/3, TLS 1.3) and both tailnet ones.
+- **Idle timeout.** Each route policy's `timeout.http.streamIdleTimeout`
+  (Envoy's route `idle_timeout`), 60 to 86400 seconds, written only while
+  the cluster's default isn't 1 hour. The admission policy checks the
+  range with CEL `duration()`.
+- **Not built:** the Hetzner firewall rule for UDP 443 and the control
+  plane's QUIC probe (§11.1). The HTTP/3 confirm says "Open UDP port 443 to
+  every server in your provider's firewall." for every cluster, Hetzner's
+  too.
+- **CLI.** `pyo cluster gateway <cluster>` prints the settings and status
+  with no flag. `--http3` and `--tls-min` ask for `--yes` when they'd drop
+  connections.
+
 ## 19. Estimate
 
 In working days, for one person, including the dashboard, tests and docs.
