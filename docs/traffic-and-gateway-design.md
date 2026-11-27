@@ -398,8 +398,9 @@ setClusterPaths."
 
 - Snapshot per cluster gains `paths: { public, tunnel, tailnet }`,
   `publicPorts` and `proxyProtocol`. `traffic` stays.
-- Each domain gains `path` (`"public" | "tunnel" | "tailnet"`) and
-  `served` (false while its path is off).
+- Each domain gains `trafficPath` (`"public" | "tunnel" | "tailnet"`) and
+  `served` (false while its path is off). Not `path`, which is the
+  domain's URL path.
 - `dash/src/lib/pyo/types.ts`: `Cluster` and `Domain` follow.
 
 ### 6.4 CLI and MCP
@@ -415,7 +416,9 @@ setClusterPaths."
 
 ### 7.1 Columns
 
-Migration `crates/pyo-api/migrations/00NN_traffic_paths.sql`:
+Migration `crates/pyo-api/migrations/0047_traffic_paths.sql` (it also adds
+`close_public_after` and `remove_when_back`, see "Traffic paths as
+built"):
 
 ```sql
 -- Services' websites answer on the tailnet (ts.net names, the servers'
@@ -911,6 +914,75 @@ Each with a pick.
 8. **Default path for a new domain with Public and Tunnel on.** Pick:
    Direct, except names under the default domain. Tunnel when Public is
    off.
+
+## Traffic paths as built (2026-11-27)
+
+Built on `feat/traffic-paths`. Where the code differs from the sections
+above, this list wins. Each change keeps traffic flowing.
+
+- **Domain field name.** A domain's path is `trafficPath`, not `path`
+  (§6.3). `path` is already the domain's URL path ("/api"), so writing the
+  traffic path there would have changed its routes.
+- **Tailnet off keeps the hosting.** `tailscale::wanted_for` is unchanged:
+  services' ts.net names stay hosted on the servers, and only their routes
+  go (§8). Envoy answers them with 404. Taking the names off at Tailscale
+  and back could take minutes and give them new addresses. This way
+  turning Tailnet on is one routes sync. Leaving the routes out happens
+  when a command is handed to the agent (`routes::current`, `served`), so
+  deploys, routes syncs and firewall syncs all follow the switch.
+- **Free domains on a Tailscale address.** They sit on their service's own
+  HTTPS Gateway, not on the tailnet listener. With Tailnet off their
+  listener and certificate go with their routes. Only that domain's filter
+  chain changes, and that domain is the one that stops. Their certificate
+  is self-signed, so it is made again at once when Tailnet goes back on.
+- **Public off after moves.** `clusters.close_public_after` is set while
+  the ports wait. The tunnel loop (`tunnel_loop::close_public`) sets
+  `traffic` to `tunnel` once no domain of the cluster has
+  `tunnel: "switching"`. That covers domains still moving and domains
+  waiting for "Replace and switch". Turning Public ports on again cancels
+  it. While it waits, the switch shows Public ports on, with "Moving 6
+  domains to the tunnel… Public ports close after the last one."
+- **Tunnel off with Public ports on.** Each tunnel domain outside the
+  default domain runs the existing Switch back (records restored when
+  kept, both paths answer meanwhile). `cluster_tunnels.remove_when_back`
+  is set, and the loop marks the tunnel `removing` once no record is
+  still `reverting` (`tunnel_loop::remove_when_back`). Then the existing
+  removal runs. Names under the default domain stop and are listed so.
+  With Public ports off the tunnel is removed at once, as before.
+- **Migration** `0047_traffic_paths.sql` also adds
+  `clusters.close_public_after` and `cluster_tunnels.remove_when_back`.
+  The `ports_public` and `public_ports` triggers run both ways: a tunnel
+  row written by the previous release (its setClusterTraffic) moves the
+  cluster's setting too. The old ops `setClusterTraffic` with `public` or
+  `tailscale` and `setClusterPublicTraffic` clear `public_ports`, so they
+  send the agent the same `publicPorts` as before.
+- **Mixed versions.** While the previous release still serves during an
+  update, a cluster in a state it can't express (Tailnet only with TCP
+  and UDP ports on) gets `publicPorts: false` from its replicas. The ports
+  come back with the next heartbeat the new release answers. The same
+  applies to a tunnel-mode cluster switched to Tailscale only through the
+  previous release's dashboard during the update: its ports stay on until
+  someone saves the switch again.
+- **Snapshot.** Each cluster has `paths`, `publicPorts`, `proxyProtocol`,
+  `tailnetWeb`, `closingPublic` and `publicPortsSet` (the stored value,
+  null before anyone set it). Its `tunnel` has `removeWhenBack`.
+- **Old op mapping.** The old ops keep their own code (§6.2 asked for the
+  same stored values, and running them through the new op would have
+  moved domains or waited where they never did). They gained "Prefer
+  setClusterPaths." and clear a waiting close.
+- **CLI.** `pyo cluster paths <cluster>` takes `--move-to-tunnel on|off`
+  and `--restore-records on|off` (both on by default), and prints the
+  paths when given no flag.
+- **Domain dialog.** The Path choice is built for Your domain. A Free
+  domain stays on the public IP (or under the default domain in tunnel
+  mode, as before). A name under the default domain can be added as Your
+  domain with Path Cloudflare Tunnel. Editing a domain keeps Switch to
+  Tunnel and Switch back as menu actions. Both confirms now say "Open
+  connections to shop.example.com drop once."
+- **TCP and UDP ports off** has a confirm of its own: "Open connections
+  to them end."
+- **Last path.** The dashboard refuses it before asking the API, with the
+  same words.
 
 ## 19. Estimate
 
