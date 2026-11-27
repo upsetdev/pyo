@@ -662,6 +662,27 @@ mod tests {
     }
 
     #[test]
+    fn the_connectors_local_config_sends_like_a_route_here() {
+        // Until Cloudflare's routes reach a new connector it goes by its
+        // local config (pyo_proto::system::tunnel_local_config): the same
+        // origin and request settings as each route Pyo sends Cloudflare.
+        let local = pyo_proto::system::tunnel_local_config();
+        let r = rule("blog.example.com");
+        assert_eq!(ORIGIN, pyo_proto::system::tunnel_origin_url());
+        assert!(local.contains(&format!("- service: {ORIGIN}\n")), "{local}");
+        assert_eq!(r["originRequest"]["matchSNItoHost"], true);
+        assert!(local.contains("matchSNItoHost: true\n"));
+        // Cloudflare's API takes seconds, the local file a duration.
+        for (key, v) in [("connectTimeout", 10), ("keepAliveTimeout", 90)] {
+            assert_eq!(r["originRequest"][key], v);
+            assert!(local.contains(&format!("{key}: {v}s\n")), "{key}: {local}");
+        }
+        // Nothing else in it: one rule, no hostname, so every name.
+        assert_eq!(local.matches("service:").count(), 1);
+        assert!(!local.contains("hostname"));
+    }
+
+    #[test]
     fn certificate_names_cover_each_host_one_level_up() {
         assert_eq!(cert_name("example.com", "example.com"), "example.com");
         assert_eq!(cert_name("blog.example.com", "example.com"), "*.example.com");

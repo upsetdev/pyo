@@ -1665,13 +1665,51 @@ pub const TUNNEL_CDN: &str = "tunnel";
 /// tunnel mode, when the proxies' own Service isn't published.
 pub const PUBLIC_PORTS_SERVICE: &str = "pyo-public-ports";
 
-/// The connector's token, labelled with its tunnel.
+/// The Secret's key with cloudflared's local config
+/// ([`tunnel_local_config`]), and where the connector reads it. Only this
+/// key is mounted, never the token.
+pub const TUNNEL_CONFIG_KEY: &str = "config.yml";
+pub const TUNNEL_CONFIG_DIR: &str = "/etc/pyo-tunnel";
+/// The connector's pod template annotation with the local config's hash:
+/// cloudflared reads it only when it starts.
+pub const TUNNEL_CONFIG_HASH_ANNOTATION: &str = "pyo.dev/tunnel-config";
+
+/// Where cloudflared sends requests: [`TUNNEL_ORIGIN_SERVICE`]'s HTTPS.
+pub fn tunnel_origin_url() -> String {
+    format!("https://{TUNNEL_ORIGIN_SERVICE}.{GATEWAY_NS}.svc.cluster.local:443")
+}
+
+/// cloudflared's local config: every request to Pyo Gateway, as Pyo's
+/// routes at Cloudflare send each tunnel domain (the visitor's host as SNI).
+///
+/// A connector started with the token alone answers 503 to every request
+/// until Cloudflare sends it the tunnel's routes, a moment after it
+/// connects, and Cloudflare sends it visitors from the moment it connects.
+/// With this config it serves them from the start. Cloudflare's routes
+/// replace it as soon as they arrive (any version of them is newer than a
+/// local config's), so a name with no route of its own still gets
+/// Cloudflare's 404 from then on. Durations as text: a bare number would
+/// read as nanoseconds.
+pub fn tunnel_local_config() -> String {
+    format!(
+        "# Pyo's routes until Cloudflare's arrive (docs/cloudflare-tunnel.md §7.2).\n\
+         ingress:\n  \
+           - service: {}\n    \
+             originRequest:\n      \
+               matchSNItoHost: true\n      \
+               connectTimeout: 10s\n      \
+               keepAliveTimeout: 90s\n",
+        tunnel_origin_url()
+    )
+}
+
+/// The connector's token, labelled with its tunnel, and its local config.
 pub fn tunnel_secret(tunnel_id: &str, token: &str) -> Value {
     json!({
         "apiVersion": "v1", "kind": "Secret",
         "metadata": { "name": TUNNEL_NAME, "namespace": crate::rbac::NS, "labels": { "app.kubernetes.io/managed-by": "pyo", TUNNEL_ID_LABEL: tunnel_id } },
         "type": "Opaque",
-        "stringData": { TUNNEL_TOKEN_KEY: token },
+        "stringData": { TUNNEL_TOKEN_KEY: token, TUNNEL_CONFIG_KEY: tunnel_local_config() },
     })
 }
 
@@ -1720,6 +1758,10 @@ pub fn tunnel_gate_address() -> String {
 /// refuse. Without `gate_image` (an agent that can't tell its own image)
 /// there's no gate. Neither container gets a service account token.
 ///
+/// It starts with [`tunnel_local_config`] (the Secret's
+/// [`TUNNEL_CONFIG_KEY`] only, read only), so it serves visitors before
+/// Cloudflare's routes reach it.
+///
 /// On stop, cloudflared leaves Cloudflare's edge at once and lets requests
 /// finish for [`TUNNEL_GRACE_SECONDS`], inside the pod's
 /// [`TUNNEL_STOP_SECONDS`].
@@ -1735,18 +1777,27 @@ pub fn tunnel_deployment(image: &str, gate_image: Option<&str>, token_hash: &str
             "selector": { "matchLabels": app },
             "strategy": { "type": "RollingUpdate", "rollingUpdate": { "maxSurge": 1, "maxUnavailable": 0 } },
             "template": {
-                "metadata": { "labels": app, "annotations": { TUNNEL_TOKEN_HASH_ANNOTATION: token_hash } },
+                "metadata": { "labels": app, "annotations": {
+                    TUNNEL_TOKEN_HASH_ANNOTATION: token_hash,
+                    TUNNEL_CONFIG_HASH_ANNOTATION: tunnel_token_hash(&tunnel_local_config()),
+                } },
                 "spec": {
                     "automountServiceAccountToken": false,
                     "terminationGracePeriodSeconds": TUNNEL_STOP_SECONDS,
                     "affinity": gateway_affinity(),
                     "topologySpreadConstraints": [{ "maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "ScheduleAnyway", "labelSelector": { "matchLabels": app } }],
                     "securityContext": { "runAsNonRoot": true, "runAsUser": 65532, "seccompProfile": { "type": "RuntimeDefault" } },
+                    "volumes": [{ "name": "config", "secret": {
+                        "secretName": TUNNEL_NAME, "defaultMode": 0o444,
+                        "items": [{ "key": TUNNEL_CONFIG_KEY, "path": TUNNEL_CONFIG_KEY }],
+                    } }],
                     "containers": [{
                         "name": "cloudflared",
                         "image": image,
-                        // --grace-period is the tunnel command's own: before `run`.
-                        "args": ["tunnel", "--no-autoupdate", "--protocol", "http2", "--grace-period", format!("{TUNNEL_GRACE_SECONDS}s"), "--metrics", format!("0.0.0.0:{TUNNEL_METRICS_PORT}"), "--loglevel", "info", "run"],
+                        // --grace-period and --config are the tunnel command's own: before `run`.
+                        "args": ["tunnel", "--no-autoupdate", "--protocol", "http2", "--grace-period", format!("{TUNNEL_GRACE_SECONDS}s"), "--metrics", format!("0.0.0.0:{TUNNEL_METRICS_PORT}"), "--loglevel", "info",
+                                 "--config", format!("{TUNNEL_CONFIG_DIR}/{TUNNEL_CONFIG_KEY}"), "run"],
+                        "volumeMounts": [{ "name": "config", "mountPath": TUNNEL_CONFIG_DIR, "readOnly": true }],
                         "env": [{ "name": "TUNNEL_TOKEN", "valueFrom": { "secretKeyRef": { "name": TUNNEL_NAME, "key": TUNNEL_TOKEN_KEY } } }],
                         "readinessProbe": { "httpGet": probe["httpGet"], "periodSeconds": 10 },
                         "livenessProbe": { "httpGet": probe["httpGet"], "initialDelaySeconds": 60, "periodSeconds": 30, "failureThreshold": 6 },

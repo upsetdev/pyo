@@ -287,8 +287,9 @@ async fn gate_image(
 }
 
 /// Write the connector's objects (only when they changed since the last
-/// write here, or are missing).
-async fn apply_connector(client: &Client, token: &str, force: bool) -> kube::Result<()> {
+/// write here, or are missing). Its Secret goes first, whole: a Secret
+/// written by an older agent has no local config, and the new pods mount it.
+async fn apply_connector(client: &Client, tunnel_id: &str, token: &str, force: bool) -> kube::Result<()> {
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), rbac::NS);
     let live = deployments.get_opt(system::TUNNEL_NAME).await?;
     // Read each time: an agent that couldn't read it once must not take
@@ -301,6 +302,13 @@ async fn apply_connector(client: &Client, token: &str, force: bool) -> kube::Res
         return Ok(());
     }
     let [d, b, s, g] = &objects;
+    secrets(client)
+        .patch(
+            system::TUNNEL_NAME,
+            &pp(),
+            &Patch::Apply(system::tunnel_secret(tunnel_id, token)),
+        )
+        .await?;
     // The gate's Service first: the new pods ask through it.
     Api::<Service>::namespaced(client.clone(), rbac::NS)
         .patch(system::TUNNEL_GATE_SERVICE, &pp(), &Patch::Apply(g))
@@ -332,6 +340,7 @@ pub async fn set(client: &Client, tunnel_id: &str, token: &str) -> CommandResult
     if token.is_empty() || token.len() > 4096 || !token.bytes().all(|b| b.is_ascii_graphic()) {
         return failed("That isn't a tunnel token.");
     }
+    // The token is kept first, whatever comes after.
     let written = async {
         secrets(client)
             .patch(
@@ -340,7 +349,7 @@ pub async fn set(client: &Client, tunnel_id: &str, token: &str) -> CommandResult
                 &Patch::Apply(system::tunnel_secret(tunnel_id, token)),
             )
             .await?;
-        apply_connector(client, token, true).await
+        apply_connector(client, tunnel_id, token, true).await
     }
     .await;
     match written {
@@ -420,7 +429,7 @@ pub async fn follow(client: &Client, wanted: &TunnelWanted) {
         (None, Some(_)) => remove_all(client).await,
         // The token for it is here: the connector runs with it.
         (Some(w), Some((h, token))) if w == h && !token.is_empty() => {
-            apply_connector(client, token, false).await
+            apply_connector(client, h, token, false).await
         }
         // Waiting for `TunnelSet` (the report says which token is here).
         (Some(_), _) => Ok(()),
@@ -976,6 +985,47 @@ mod tests {
         };
         follow(&client, &wanted).await;
         assert!(kube.get(DEPLOYMENT).is_some());
+    }
+
+    /// A Secret an older agent wrote has the token only. The connector's
+    /// pods now mount its local config, so the Secret gets it, before the
+    /// Deployment that mounts it, with the token kept.
+    #[tokio::test]
+    async fn an_older_secret_gets_the_local_config_before_the_connector() {
+        let _one = SERIAL.lock().await;
+        let (kube, client) = FakeKube::start().await;
+        reset();
+        kube.put(
+            SECRET,
+            json!({
+                "apiVersion": "v1", "kind": "Secret",
+                "metadata": { "name": system::TUNNEL_NAME, "namespace": rbac::NS, "labels": { system::TUNNEL_ID_LABEL: ID } },
+                "stringData": { "token": "tok" },
+            }),
+        );
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = order.clone();
+        kube.admit(move |w| {
+            seen.lock().unwrap().push(w.plural.clone());
+            None
+        });
+        let wanted = TunnelWanted {
+            tunnel_id: Some(ID.into()),
+            ports_public: true,
+        };
+        follow(&client, &wanted).await;
+        let s = kube.get(SECRET).unwrap();
+        assert_eq!(s["stringData"]["token"], "tok");
+        assert_eq!(s["stringData"][system::TUNNEL_CONFIG_KEY], system::tunnel_local_config());
+        let writes = order.lock().unwrap().clone();
+        let at = |p: &str| writes.iter().position(|w| w == p).unwrap_or_else(|| panic!("{p}: {writes:?}"));
+        assert!(at("secrets") < at("deployments"), "{writes:?}");
+        // The connector reads it, and only it: never the token as a file.
+        let d = kube.get(DEPLOYMENT).unwrap();
+        let pod = &d["spec"]["template"]["spec"];
+        assert_eq!(pod["volumes"][0]["secret"]["items"], json!([{ "key": system::TUNNEL_CONFIG_KEY, "path": system::TUNNEL_CONFIG_KEY }]));
+        let args = pod["containers"][0]["args"].to_string();
+        assert!(args.contains(&format!("\"--config\",\"{}/{}\"", system::TUNNEL_CONFIG_DIR, system::TUNNEL_CONFIG_KEY)), "{args}");
     }
 
     /// An install older than this agent refuses the connector: the command

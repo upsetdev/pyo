@@ -671,6 +671,8 @@ Tunnel ids are UUIDs: `id_ok` gains `-`, or a separate `uuid_ok`.
   down.
 - No wildcard route for the default domain (see Decisions). Each free name
   under it has its own rule, and any other name gets the catch-all's 404.
+  A connector that just started goes by its local config until these
+  arrive, for a moment (§7.2).
 - `matchSNItoHost` sends the visitor's host as SNI. Go's TLS then checks
   the Origin CA certificate against that host. Verify in e2e (§17.2).
 - cloudflared trusts Cloudflare's Origin CA itself, so no CA file in the
@@ -786,9 +788,9 @@ and Pyo ended the rotation 40 seconds after it.
 Measured there: 8 of 3,234 requests to the two tunnel domains failed
 during Rotate, against 393 before. All were 503 from the origin side,
 within 0.3 s, while the first new connector had started and wasn't ready
-yet. No old connector had stopped then. Not confirmed: that cloudflared
-answers 503 before its remote routes arrive. The connector restart in the
-same run lost none.
+yet. No old connector had stopped then. cloudflared answers 503 until the
+tunnel's routes reach it: the connector now starts with a local config
+(§7.2).
 
 ### 6.5 Domain DNS checks
 
@@ -843,7 +845,7 @@ kind: Secret
 metadata: { name: pyo-tunnel, namespace: pyo-system,
             labels: { app.kubernetes.io/managed-by: pyo, pyo.dev/tunnel-id: "<id>" } }
 type: Opaque
-stringData: { token: "<tunnel token>" }
+stringData: { token: "<tunnel token>", config.yml: "<system::tunnel_local_config>" }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -857,6 +859,7 @@ spec:
       labels: { app.kubernetes.io/name: pyo-tunnel }
       annotations:
         pyo.dev/token-hash: <system::tunnel_token_hash(token)>
+        pyo.dev/tunnel-config: <hash of the local config>
         pyo.dev/tunnel-gate-version: "1"    # §7.3
         pyo.dev/tunnel-template: <system::tunnel_template_hash>   # §7.3
     spec:
@@ -867,6 +870,8 @@ spec:
             labelSelector: { matchLabels: { app.kubernetes.io/name: pyo-tunnel } } }
       terminationGracePeriodSeconds: 35
       securityContext: { runAsNonRoot: true, runAsUser: 65532, seccompProfile: { type: RuntimeDefault } }
+      volumes:                            # the local config only, never the token
+        - { name: config, secret: { secretName: pyo-tunnel, defaultMode: 0444, items: [{ key: config.yml, path: config.yml }] } }
       initContainers:
         - name: tunnel-gate               # §7.3
           image: <an agent image: the one it runs, or the agent's own (§7.3)>
@@ -879,7 +884,9 @@ spec:
       containers:
         - name: cloudflared
           image: ghcr.io/upsetdev/pyo-mirror/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba
-          args: [tunnel, --no-autoupdate, --protocol, http2, --grace-period, 20s, --metrics, 0.0.0.0:2000, --loglevel, info, run]
+          args: [tunnel, --no-autoupdate, --protocol, http2, --grace-period, 20s, --metrics, 0.0.0.0:2000, --loglevel, info,
+                 --config, /etc/pyo-tunnel/config.yml, run]
+          volumeMounts: [{ name: config, mountPath: /etc/pyo-tunnel, readOnly: true }]
           env: [{ name: TUNNEL_TOKEN, valueFrom: { secretKeyRef: { name: pyo-tunnel, key: token } } }]
           readinessProbe: { httpGet: { path: /ready, port: 2000 }, periodSeconds: 10 }
           livenessProbe:  { httpGet: { path: /ready, port: 2000 }, initialDelaySeconds: 60, periodSeconds: 30, failureThreshold: 6 }
@@ -913,6 +920,31 @@ spec:
   pyo-system default-deny ingress policy (`deploy/k8s/platform.yaml:27-32`)
   stays as is. Kubelet probes are allowed by k3s's network policy
   controller.
+- Local config. A connector run with the token alone starts with
+  cloudflared's default rule, which answers 503 to everything, and gets the
+  tunnel's routes from Cloudflare a moment after it connects. Cloudflare
+  sends it visitors from the moment it connects, so each new connector
+  answered 503 for a few hundred milliseconds (the traffic test,
+  2026-11-27: 8 requests on Rotate). The local config
+  (`system::tunnel_local_config`) is one rule with no hostname to the
+  origin Service, with the same settings as Pyo's routes. cloudflared
+  starts with it at version -1, and Cloudflare's routes replace it when
+  they arrive (any version of them is newer). Read in cloudflared
+  2026.10.7's source: `ingress.ParseIngressFromConfigAndCLI` (the 503
+  default without local rules), `Orchestrator.UpdateConfig` (version -1,
+  replaced by any remote one), `metrics/readiness.go` (`/ready` counts
+  connections only, not routes). `--config` is the `tunnel` command's
+  flag. Durations are text: a bare number reads as nanoseconds.
+  - Cost: in that moment, a name under the default domain that has no
+    route reaches the Gateway instead of cloudflared's 404, and gets a 502.
+  - The agent writes the Secret whole before the Deployment, so a Secret
+    from an older agent gets `config.yml` before pods mount it.
+  - Not used: a readiness probe on the routes (`/config`'s `version`, or
+    the `cloudflared_orchestration_config_version` metric). Readiness
+    only says when the old pod stops. Cloudflare sends the new one
+    visitors once it's connected, ready or not. Neither helps the gate
+    holding longer (cloudflared hasn't connected yet then), nor
+    `--grace-period` or the rollout's order (they're about the old pod).
 - Stopping: on SIGTERM cloudflared leaves Cloudflare's edge at once and
   lets open requests finish for 20 s (`--grace-period`, a flag of the
   `tunnel` command, so it goes before `run`). The pod has 35 s, so
