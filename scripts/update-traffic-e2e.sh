@@ -30,7 +30,12 @@
 #         changes a domain, and restarts k3s. web also gets a domain that
 #         answers plain HTTP (plain.<address>.nip.io, no redirect), sent
 #         the same traffic on port 80 as target web-80: the :80 listener
-#         is every service's. About 15 minutes,
+#         is every service's. With the tunnel leg it also checks country
+#         rules on a third service, geo, which gets no traffic: through
+#         the tunnel (Cloudflare's country) and direct (the proxy's GeoIP
+#         lookup, which doesn't place this machine's private address),
+#         with clients that claim another country in CF-IPCountry and
+#         x-eg-internal-geoip-country. About 15 minutes,
 #         20 with 2 servers. With --dev it first updates to the dev build,
 #         as update does, and sends traffic only once that's over: the
 #         restarts are then the dev build's. One server only, and it needs
@@ -95,6 +100,7 @@
 #
 #   tun     zd-tun-<random>.<zone>, a domain of web
 #   tunwaf  zd-tunwaf-<random>.<zone>, a domain of waf (the WAF on)
+#   geo     zd-geo-<random>.<zone>, a domain of geo (fast only, no traffic)
 #
 # They get the same traffic, through Cloudflare's edge: the edge address
 # comes from Cloudflare's resolver, and its certificate is checked. A
@@ -184,6 +190,7 @@ chmod 700 "$DIR"
 CREATED=() LOAD_PID="" PULLED="" KEY="" URL="" PROBE_PID=""
 # The tunnel leg: on with PYO_E2E_CF_TOKEN. CF_USED once Pyo has the token.
 TUNNEL=${PYO_E2E_CF_TOKEN:+1} CF_TOKEN="" CF_USED="" CLUSTER="" TEAM="" INSTALL_ID="" TUN_HOST="" TUNWAF_HOST="" MV_HOST="" PLAIN_HOST=""
+GEO_HOST="" GEO_TUN_HOST="" GEO_ID=""
 TUN_DOMAINS=()
 : >"$DIR/actions.log"
 
@@ -360,20 +367,30 @@ deploy() {
   compose=$(printf 'services:\n  web:\n    image: %s\n    ports: ["80"]\n  waf:\n    image: %s\n    ports: ["80"]\n' "$ECHO_IMAGE" "$ECHO_IMAGE")
   # paths: a public TCP port too, through the gateway (TCP_PORT).
   [ "$MODE" != paths ] || compose+=$(printf '\n  tcp:\n    image: %s\n    ports: ["80"]\n' "$ECHO_IMAGE")
+  # fast with the tunnel: geo, for the country rules (no traffic).
+  if [ "$MODE" = fast ] && [ -n "$TUNNEL" ]; then
+    GEO_HOST="geo.$dash.nip.io"
+    compose+=$(printf '\n  geo:\n    image: %s\n    ports: ["80"]\n' "$ECHO_IMAGE")
+  fi
   plan=$(api POST /api/v1/compose/preview "$(jq -n --arg t "$TEAM" --arg c "$CLUSTER" --arg f "$compose" '{teamId: $t, clusterId: $c, file: $f}')") ||
     die "Pyo couldn't read the test's Compose file: $plan"
-  plan=$(jq --arg n "$RUN" --arg web "$WEB_HOST" --arg waf "$WAF_HOST" '
+  plan=$(jq --arg n "$RUN" --arg web "$WEB_HOST" --arg waf "$WAF_HOST" --arg geo "$GEO_HOST" '
     .project.name = $n | .project.namespace = $n
     | (.services[] | select(.name == "web") | .ports[0].domain) = $web
     | (.services[] | select(.name == "waf") | .ports[0].domain) = $waf
+    | (.services[] | select(.name == "geo") | .ports[0].domain) = $geo
     | (.services[] | select(.name == "tcp") | .ports[0]) |= (.protocol = "TCP" | .public = true | .publicPort = 18080 | .domain = null)' <<<"$plan")
   out=$(op "$(jq -n --arg t "$TEAM" --arg c "$CLUSTER" --argjson p "$plan" '{op: "importCompose", teamId: $t, clusterId: $c, plan: $p}')") ||
     die "Pyo couldn't deploy the test project: $out"
   WEB_ID=$(service_id web)
   WAF_ID=$(service_id waf)
   [ -n "$WEB_ID" ] && [ -n "$WAF_ID" ] || die "No services in $RUN after the deploy."
+  if [ -n "$GEO_HOST" ]; then
+    GEO_ID=$(service_id geo)
+    [ -n "$GEO_ID" ] || die "No geo service in $RUN after the deploy."
+  fi
   local host start=$SECONDS why
-  for host in "$WEB_HOST" "$WAF_HOST"; do
+  for host in "$WEB_HOST" "$WAF_HOST" ${GEO_HOST:+"$GEO_HOST"}; do
     until answers "$host" "$IP1" ""; do
       why=$(failed_deploy)
       [ -z "$why" ] || { diagnose; die "The test project's deploy failed: $why"; }
@@ -464,6 +481,7 @@ cf_start() {
   cf_list >"$DIR/cf-before.json" || die "Couldn't list what the zone has."
   TUN_HOST="zd-tun-$(rand).$CF_ZONE" TUNWAF_HOST="zd-tunwaf-$(rand).$CF_ZONE"
   [ "$MODE" != paths ] || MV_HOST="zd-mv-$(rand).$CF_ZONE"
+  [ "$MODE" != fast ] || GEO_TUN_HOST="zd-geo-$(rand).$CF_ZONE"
   say "Tunnel leg on the token's zone: $(jq -r '"\(.records | length) records, \(.tunnels | length) tunnels, \(.certificates | length) certificates"' "$DIR/cf-before.json") before the test"
 }
 # The zone's DNS records, the account's tunnels and the zone's Origin CA
@@ -483,15 +501,15 @@ cf_list() {
 # installation's id).
 cf_leftovers() {
   cf_list | jq --slurpfile b "$DIR/cf-before.json" --arg zone "$CF_ZONE" --arg cluster "$CLUSTER" \
-    --arg install "$INSTALL_ID" --arg tun "$TUN_HOST" --arg tunwaf "$TUNWAF_HOST" --arg mv "$MV_HOST" '
+    --arg install "$INSTALL_ID" --arg tun "$TUN_HOST" --arg tunwaf "$TUNWAF_HOST" --arg mv "$MV_HOST" --arg geo "$GEO_TUN_HOST" '
     ($b[0].records | map(.id)) as $r0 | ($b[0].tunnels | map(.id)) as $t0 | ($b[0].certificates | map(.id)) as $c0
     | {records: [.records[] | select((.id as $i | $r0 | index($i) | not)
-          and (.name == $tun or .name == $tunwaf or ($mv != "" and .name == $mv)
+          and (.name == $tun or .name == $tunwaf or ($mv != "" and .name == $mv) or ($geo != "" and .name == $geo)
             or ($install != "" and .comment == "Made by Pyo (\($install))" and .name == "_pyo-check.\($zone)")))],
        tunnels: [.tunnels[] | select((.id as $i | $t0 | index($i) | not)
           and ((.name | startswith("pyo-\($cluster)-")) or ($install != "" and (.name | startswith("pyo-check-\($install)-")))))],
        certificates: [.certificates[] | select((.id as $i | $c0 | index($i) | not)
-          and (.hostnames | length > 0) and all(.hostnames[]; . == $tun or . == $tunwaf or . == $mv))]}'
+          and (.hostnames | length > 0) and all(.hostnames[]; . == $tun or . == $tunwaf or . == $mv or . == $geo))]}'
 }
 
 tunnel_api() { api GET "/api/v1/clusters/$CLUSTER/tunnel"; }
@@ -610,6 +628,14 @@ tunnel_setup() {
     die "The WAF didn't block a test attack through the tunnel."
   wait_for 120 "$TUNWAF_HOST answers through Cloudflare" answers_edge "$TUNWAF_HOST" "" || die "$TUNWAF_HOST doesn't answer through Cloudflare."
   note "Both answer through Cloudflare's edge ($EDGE) and the tunnel. The WAF blocks a test attack there too."
+  if [ -n "$GEO_TUN_HOST" ]; then
+    say "Adding https://$GEO_TUN_HOST (geo) through the tunnel"
+    tunnel_domain "$GEO_ID" "$GEO_TUN_HOST"
+    wait_for 600 "$GEO_TUN_HOST is switched" switched "$GEO_ID" "$GEO_TUN_HOST" || die "$GEO_TUN_HOST didn't switch: $(masked "$(domain_of "$GEO_ID" "$GEO_TUN_HOST" | jq -c .)")"
+    wait_for 300 "Cloudflare's resolver has $GEO_TUN_HOST" edge_known "$GEO_TUN_HOST" || die "Cloudflare's resolver doesn't have $GEO_TUN_HOST."
+    [ "$(edge_ip "$GEO_TUN_HOST")" = "$EDGE" ] || note "$GEO_TUN_HOST is on another edge address. Both use $EDGE."
+    wait_for 600 "$GEO_TUN_HOST answers through Cloudflare" answers_edge "$GEO_TUN_HOST" "" || { tunnel_diagnose; die "$GEO_TUN_HOST doesn't answer through Cloudflare."; }
+  fi
   if [ -n "$MV_HOST" ]; then
     say "Adding https://$MV_HOST (web), direct on public ports"
     plain_domain "$WEB_ID" "$MV_HOST"
@@ -790,7 +816,7 @@ firewall_change() {
 # anchor's own aside).
 country_rule_on() {
   [ "$(kc -n pyo-gateway get securitypolicy -l "pyo/service-id=$WEB_ID" -o json |
-    jq '[.items[] | select(.metadata.name | endswith("-anchor") | not) | .spec.authorization.rules[]? | select(.principal.clientIPGeoLocations)] | if length > 0 then 1 else 0 end')" = "$1" ]
+    jq '[.items[] | select(.metadata.name | endswith("-anchor") | not) | .spec.authorization.rules[]? | select(.principal.clientIPGeoLocations or .principal.headers)] | if length > 0 then 1 else 0 end')" = "$1" ]
 }
 # web's first country rule, then, once its routes have it, its last one
 # gone. Each used to add or remove the geoip filter on web's HTTPS chain
@@ -806,6 +832,99 @@ country_change() {
   out=$(op "$(jq -n --arg id "$id" '{op: "removeFirewallRule", id: $id}')") || { note "Pyo couldn't remove the rule: $out"; return 1; }
   wait_for 180 "web's routes no longer have it" country_rule_on 0 || return 1
   sleep 15
+}
+
+# ── geo: country rules through the tunnel and direct (fast, tunnel leg) ────
+
+# geo_code HOST edge|direct [HEADER...]: the status of one request.
+geo_code() {
+  local host=$1 via=$2 h
+  shift 2
+  local args=()
+  for h in "$@"; do args+=(-H "$h"); done
+  if [ "$via" = edge ]; then
+    curl -s -o /dev/null -w '%{http_code}' -m 10 --resolve "$host:443:$EDGE" "${args[@]}" "https://$host/" || true
+  else
+    curl -ks -o /dev/null -w '%{http_code}' -m 5 --resolve "$host:443:$IP1" "${args[@]}" "https://$host/" || true
+  fi
+}
+geo_result() { # ok|FAIL TEXT
+  note "$1  $2"
+  echo "$1  $2" >>"$DIR/geo.txt"
+  [ "$1" = ok ] || GEO_FAIL=1
+}
+# geo_wait WHAT STATUS HOST VIA [HEADER...]: until a rule's change is there
+# (2 minutes at most).
+geo_wait() {
+  local what=$1 want=$2 got="" i
+  shift 2
+  for i in $(seq 1 24); do
+    got=$(geo_code "$@")
+    [ "$got" = "$want" ] && break
+    sleep 5
+  done
+  if [ "$got" = "$want" ]; then geo_result ok "$what ($got)"; else geo_result FAIL "$what: want $want, got $got"; fi
+}
+# geo_check WHAT STATUS HOST VIA [HEADER...]: 5 requests, every one with STATUS.
+geo_check() {
+  local what=$1 want=$2 got all="" i
+  shift 2
+  for i in 1 2 3 4 5; do
+    got=$(geo_code "$@")
+    all+="$got "
+  done
+  if [ "$all" = "$(printf "$want %.0s" 1 2 3 4 5)" ]; then geo_result ok "$what (5 x $want)"; else geo_result FAIL "$what: want 5 x $want, got $all"; fi
+}
+geo_rule() { # OPERATOR COUNTRY: geo's one rule, a block
+  local out
+  if [ -z "$GEO_RULE" ]; then
+    GEO_RULE="fwr_e2e$(rand)"
+    out=$(op "$(jq -n --arg id "$GEO_RULE" --arg s "$GEO_ID" --arg o "$1" --arg c "$2" '{op: "addFirewallRule", id: $id, serviceId: $s, action: "block", operator: $o, sources: [$c], note: "update-traffic-e2e"}')")
+  else
+    out=$(op "$(jq -n --arg id "$GEO_RULE" --arg o "$1" --arg c "$2" '{op: "updateFirewallRule", id: $id, operator: $o, sources: [$c]}')")
+  fi || { geo_result FAIL "Pyo refused the rule ($1 $2): $out"; return 1; }
+}
+GEO_RULE="" GEO_FAIL=0
+# Country rules on geo: Cloudflare's country through the tunnel, the GeoIP
+# lookup direct (this machine reaches the VM from a private address, which
+# the database doesn't place), and clients claiming another country in
+# CF-IPCountry and x-eg-internal-geoip-country.
+geo_country() {
+  local c other out t=edge d=direct spoof
+  c=$(curl -s -m 10 --resolve "$GEO_TUN_HOST:443:$EDGE" "https://$GEO_TUN_HOST/cdn-cgi/trace" | sed -n 's/^loc=//p')
+  [[ $c =~ ^[A-Z]{2}$ ]] || { geo_result FAIL "Cloudflare didn't say this machine's country: '$c'"; return 1; }
+  other=AQ
+  [ "$c" != AQ ] || other=BV
+  note "Cloudflare places this machine in $c. The other country is $other."
+  echo "country $c, other $other" >>"$DIR/geo.txt"
+
+  geo_rule in "$c" || return 1
+  geo_wait "tunnel: a block of $c refuses this machine" 403 "$GEO_TUN_HOST" $t
+  for spoof in "CF-IPCountry: $other" "x-eg-internal-geoip-country: $other"; do
+    geo_check "tunnel: claiming $other ($spoof) is still refused" 403 "$GEO_TUN_HOST" $t "$spoof"
+  done
+  geo_check "direct: no country, so a block of $c lets it in" 200 "$GEO_HOST" $d
+
+  geo_rule notIn "$other" || return 1
+  geo_wait "direct: only $other allowed, no country refused" 403 "$GEO_HOST" $d
+  for spoof in "x-eg-internal-geoip-country: $other" "CF-IPCountry: $other"; do
+    geo_check "direct: claiming $other ($spoof) is still refused" 403 "$GEO_HOST" $d "$spoof"
+    geo_check "tunnel: claiming $other ($spoof) is still refused" 403 "$GEO_TUN_HOST" $t "$spoof"
+  done
+
+  geo_rule notIn "$c" || return 1
+  geo_wait "tunnel: only $c allowed, this machine gets in" 200 "$GEO_TUN_HOST" $t
+  geo_check "direct: only $c allowed, no country refused" 403 "$GEO_HOST" $d "x-eg-internal-geoip-country: $c"
+
+  geo_rule in "$other" || return 1
+  geo_wait "direct: a block of $other lets it in" 200 "$GEO_HOST" $d
+  geo_check "tunnel: a block of $other lets this machine in" 200 "$GEO_TUN_HOST" $t
+
+  out=$(op "$(jq -n --arg id "$GEO_RULE" '{op: "removeFirewallRule", id: $id}')") || { geo_result FAIL "Pyo couldn't remove the rule: $out"; return 1; }
+  GEO_RULE=""
+  geo_wait "tunnel: no rule, it answers" 200 "$GEO_TUN_HOST" $t
+  geo_check "direct: no rule, it answers" 200 "$GEO_HOST" $d
+  [ "$GEO_FAIL" = 0 ]
 }
 
 web_service() { state | jq --arg id "$WEB_ID" '.services[] | select(.id == $id)'; }
@@ -842,6 +961,12 @@ fast() {
   fi
   action "change a firewall rule of web" firewall_change
   action "add and remove a country rule of web" country_change
+  if [ -n "$GEO_TUN_HOST" ]; then
+    : >"$DIR/geo.txt"
+    action "country rules on geo, through the tunnel and direct" geo_country
+  else
+    skipped "country rules on geo, through the tunnel and direct" "no test zone"
+  fi
   action "add and remove a domain of web" domain_change
   action "restart k3s on $VM1" restart_k3s "$VM1" k3s
   [ -z "${IP2:-}" ] || action "restart k3s on $VM2" restart_k3s "$VM2" k3s-agent
@@ -1280,11 +1405,17 @@ if [ "$MODE" = gateway ]; then
   echo "Per gateway setting:"
   cat "$DIR/gateway.txt"
 fi
+if [ -s "$DIR/geo.txt" ]; then
+  echo "Country rules on geo:" | tee -a "$DIR/summary.txt"
+  sed 's/^/  /' "$DIR/geo.txt" | tee -a "$DIR/summary.txt"
+  [ "$GEO_FAIL" = 0 ] || rc=1
+fi
 if [ -n "$OUT" ]; then
   mkdir -p "$OUT"
   cp "$DIR/load.log" "$DIR/pods.log" "$DIR/actions.log" "$DIR/targets" "$DIR/summary.txt" "$OUT/"
   [ "$MODE" != paths ] || cp "$DIR/paths.txt" "$DIR/probes.log" "$OUT/"
   [ "$MODE" != gateway ] || cp "$DIR/gateway.txt" "$OUT/"
+  [ ! -s "$DIR/geo.txt" ] || cp "$DIR/geo.txt" "$OUT/"
   echo "Logs: $OUT"
 fi
 exit "$rc"
