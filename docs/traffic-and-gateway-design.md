@@ -234,6 +234,9 @@ In the add domain dialog the path is picked from the paths that are on:
 
 ## 5. Traffic paths: UI
 
+The wording below is the plan. The dash copy was shortened on 2026-11-28.
+The strings live in `TrafficMode.tsx` and `Tunnel.tsx`.
+
 ### 5.1 Traffic card (`TrafficMode.tsx`, `ClusterTraffic`)
 
 ```
@@ -692,6 +695,9 @@ Envoy Gateway v1.9.3 (`ENVOY_GATEWAY_IMAGE`, `system.rs:40`), Envoy
 - Every HTTPS connection drains once on save, ts.net names included.
 
 ## 12. Gateway section: UI
+
+The wording below is the plan. The dash copy was shortened on 2026-11-28.
+The strings live in `Gateway.tsx` and `lib/pyo/gateway.ts`.
 
 A panel **Gateway** on the cluster settings page, right after Traffic
 (`settings.tsx:139`), with a Learn more link to the gateway page.
