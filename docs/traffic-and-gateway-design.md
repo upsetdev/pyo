@@ -1046,8 +1046,24 @@ this list wins.
 - **The anchor's rollout drains each HTTPS chain once**, the first time
   the routes are written after the install takes them (§20, "This
   release's update"). A cluster whose agent updated before its install was
-  refreshed gets its anchors with the next deploy or routes sync of each
-  service, or all at once when compression or a default is first saved.
+  refreshed gets every service's routes again as soon as its install is
+  current (agent.rs, like the WAF's engine), and the agent writes the 404
+  filter once the install changes (`ensure`).
+- **The idle rate limit's pin didn't match the stored policy** (found
+  with `pinned_objects_survive_crd_defaults`, 2026-11-27). Envoy Gateway's
+  CRD fills in `invert: false` on a rate limit rule's `sourceCIDR`, the
+  idle rate limit left it out, and the admission policy compares the
+  stored policy to it exactly. Such a write is refused, and the agent
+  falls back to the older form without the rate limit. Not seen on a
+  cluster running 0.51.x: found from the CRD's defaults.
+  `idle_rate_limit` now writes `invert` as the CRD stores it. Where routes
+  lacked the rate limit filter, the first routes written after the update
+  add it: the same once-only drain as the anchors, at the same moment.
+- **A country rule drains its service's chains** (found with the drain
+  check once client policies are matched to their Gateways, 2026-11-27):
+  a service's first or last country rule adds or removes the `geoip`
+  filter on its HTTPS chains and the shared :80 chain. Not changed here.
+  Listed as known in `scripts/gateway-drain-check.py`.
 - **Pyo's own tailnet routes** (`pyo-dashboard`, `pyo-registry-door`,
   `pyo-sandboxes`) each get a BackendTrafficPolicy with the idle rate
   limit, pinned exactly by the admission policy. With it and the tailnet
@@ -1072,6 +1088,27 @@ this list wins.
 - **CLI.** `pyo cluster gateway <cluster>` prints the settings and status
   with no flag. `--http3` and `--tls-min` ask for `--yes` when they'd drop
   connections.
+- **Measured** (`scripts/update-traffic-e2e.sh gateway`, one multipass
+  server updated from 0.51.0 to this branch's build, 2026-11-27). Load per
+  target (web, waf with its WAF in block mode): 10 fresh and 10 keep-alive
+  requests a second, a 20 s request again and again, one WebSocket.
+
+  | Save | Short requests failed | 20 s requests cut | WebSockets dropped | Checked |
+  |---|---|---|---|---|
+  | Compression on | 0 | 0 | 0 | `Accept-Encoding` zstd, br, gzip each answered with it |
+  | Compression off | 0 | 0 | 0 | no `Content-Encoding` |
+  | Request timeout 300 → 120 s | 0 | 0 | 0 | a 125 s request got 504 at 120.0 s |
+  | Request timeout back to 300 s | 0 | 0 | 0 | routes say 300s |
+  | Idle timeout 1 h → 10 min, and back | 0 | 0 | 0 | route policies say 600s, then none |
+  | TLS minimum 1.3 | 0 | 1 per target | 1 per target | TLS 1.2 refused, 1.3 answered |
+  | TLS minimum back to 1.2 | 0 | 1 per target | 1 per target | TLS 1.2 answered |
+  | HTTP/3 on | 0 | 0 | 0 | `alt-svc: h3=":443"; ma=86400`, a real HTTP/3 GET answered 200 (aioquic) |
+  | HTTP/3 off | 0 | 0 | 0 | UDP 443 gone from Envoy's Service |
+
+  ServiceLB's pod was replaced in 1 to 2 s each time HTTP/3 went on or
+  off, and nothing open through it was cut on this one server. So open
+  question 3 measured better than expected here. Not measured: several
+  servers, a cloud load balancer, the tailnet and the tunnel.
 
 ## 19. Estimate
 
