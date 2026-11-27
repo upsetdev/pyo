@@ -29,6 +29,9 @@ export const Route = createFileRoute("/_app/$team/settings/observability")({
   },
 });
 
+/** Under a choice whose options above the installation's limit are disabled. */
+const MORE = "Your installation's admin can allow more.";
+
 /** Shown to members who can't change a panel's settings. */
 const READ_ONLY = "An owner or admin can change this.";
 
@@ -81,7 +84,7 @@ function TeamObservability({ ws }: { ws: Team }) {
             description={
               now.on
                 ? "Analytics, request logs and usage history for this team."
-                : "Your servers stop collecting. History is kept."
+                : "Pyo stops collecting for your team. History is kept."
             }
           />
           <Switch
@@ -133,17 +136,24 @@ function TeamObservability({ ws }: { ws: Team }) {
                       {m.label}
                     </span>
                     <span className="block text-[12px] text-muted-foreground">
-                      {allowed ? m.hint : "Not available."}
+                      {m.hint}
                     </span>
                   </span>
                 </label>
               );
             })}
+            {limits.ipMode !== "full" ? (
+              <p className="text-[12px] text-muted-foreground">{MORE}</p>
+            ) : null}
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field
               label="Query strings"
-              hint="Passwords and tokens are always hidden."
+              hint={
+                limits.queryStrings === "keep"
+                  ? "Passwords and tokens are always hidden."
+                  : `Passwords and tokens are always hidden. ${MORE}`
+              }
             >
               {(p) => (
                 <Select
@@ -164,7 +174,7 @@ function TeamObservability({ ws }: { ws: Team }) {
                     const allowed = withinLimit(q.value, limits.queryStrings);
                     return (
                       <option key={q.value} value={q.value} disabled={!allowed}>
-                        {allowed ? q.label : `${q.label} (not available)`}
+                        {q.label}
                       </option>
                     );
                   })}
