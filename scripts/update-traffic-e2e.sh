@@ -26,7 +26,11 @@
 # fast    restarts each part in turn, with a quiet gap between: Envoy, the
 #         WAF, the tunnel connector, Envoy Gateway's controller, the agent
 #         and pyo-tailnet (kubectl rollout restart). Then it changes a
-#         firewall rule and a domain, and restarts k3s. About 15 minutes,
+#         firewall rule, adds web's first country rule and removes it,
+#         changes a domain, and restarts k3s. web also gets a domain that
+#         answers plain HTTP (plain.<address>.nip.io, no redirect), sent
+#         the same traffic on port 80 as target web-80: the :80 listener
+#         is every service's. About 15 minutes,
 #         20 with 2 servers. With --dev it first updates to the dev build,
 #         as update does, and sends traffic only once that's over: the
 #         restarts are then the dev build's. One server only, and it needs
@@ -176,7 +180,7 @@ DIR=$(mktemp -d)
 chmod 700 "$DIR"
 CREATED=() LOAD_PID="" PULLED="" KEY="" URL="" PROBE_PID=""
 # The tunnel leg: on with PYO_E2E_CF_TOKEN. CF_USED once Pyo has the token.
-TUNNEL=${PYO_E2E_CF_TOKEN:+1} CF_TOKEN="" CF_USED="" CLUSTER="" TEAM="" INSTALL_ID="" TUN_HOST="" TUNWAF_HOST="" MV_HOST=""
+TUNNEL=${PYO_E2E_CF_TOKEN:+1} CF_TOKEN="" CF_USED="" CLUSTER="" TEAM="" INSTALL_ID="" TUN_HOST="" TUNWAF_HOST="" MV_HOST="" PLAIN_HOST=""
 TUN_DOMAINS=()
 : >"$DIR/actions.log"
 
@@ -385,11 +389,27 @@ deploy() {
     wait_for 120 "$WEB_HOST answers on $ip" answers "$WEB_HOST" "$ip" "" || die "$WEB_HOST doesn't answer on $ip."
   done
   note "The WAF blocks a test attack with 403, and lets a plain request through."
+  [ "$MODE" != fast ] || plain_domain
   if [ "$MODE" = paths ]; then
     wait_for 600 "the TCP port $TCP_PORT answers on $IP1" tcp_answers || { diagnose; die "The public TCP port didn't answer."; }
     note "The tcp service answers on TCP port $TCP_PORT."
   fi
   [ -n "$TUNNEL" ] || note "Tunnel domain: skipped: no test zone"
+}
+# fast: a domain of web that answers plain HTTP (no redirect to HTTPS), so
+# the shared :80 listener, which every service's plain HTTP shares, gets
+# traffic too (target web-80).
+http_answers() { # HOST IP
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 --resolve "$1:80:$2" "http://$1/" || true)" = 200 ]
+}
+plain_domain() {
+  local svc out
+  PLAIN_HOST="plain.${IP1//./-}.nip.io"
+  svc=$(web_service | jq --arg h "$PLAIN_HOST" --arg id "dom_e2e$(rand)" --argjson now "$(date +%s)000" '
+    .domains += [{id: $id, hostname: $h, portName: .domains[0].portName, status: "pending_dns", tls: "pending", tlsMode: "auto", redirectHttps: false, createdAt: $now}]')
+  out=$(op "$(jq -n --argjson s "$svc" '{op: "saveService", service: $s}')") || die "Pyo refused the plain HTTP domain: $out"
+  wait_for 300 "http://$PLAIN_HOST answers" http_answers "$PLAIN_HOST" "$IP1" || die "http://$PLAIN_HOST didn't answer."
+  note "http://$PLAIN_HOST answers on :80 without a redirect."
 }
 failed_deploy() {
   state | jq -r --arg n "$RUN" '(.projects[] | select(.name == $n) | .id) as $p
@@ -692,6 +712,7 @@ start_load() {
   TARGETS=("web=$WEB_HOST@$IP1" "waf=$WAF_HOST@$IP1")
   [ -z "${IP2:-}" ] || TARGETS+=("web-2=$WEB_HOST@$IP2" "waf-2=$WAF_HOST@$IP2")
   [ -z "$TUNNEL" ] || TARGETS+=("tun=$TUN_HOST@$EDGE" "tunwaf=$TUNWAF_HOST@$EDGE")
+  [ -z "$PLAIN_HOST" ] || TARGETS+=("web-80=$PLAIN_HOST@$IP1:80")
   printf '%s\n' "${TARGETS[@]}" >"$DIR/targets"
   say "Sending traffic: $((RATE * 2)) requests a second, a long request and a WebSocket to each of ${#TARGETS[@]} targets"
   (
@@ -762,6 +783,28 @@ firewall_change() {
   sleep 15
 }
 
+# country_rule_on 1|0: whether web's routes have a country rule (its
+# anchor's own aside).
+country_rule_on() {
+  [ "$(kc -n pyo-gateway get securitypolicy -l "pyo/service-id=$WEB_ID" -o json |
+    jq '[.items[] | select(.metadata.name | endswith("-anchor") | not) | .spec.authorization.rules[]? | select(.principal.clientIPGeoLocations)] | if length > 0 then 1 else 0 end')" = "$1" ]
+}
+# web's first country rule, then, once its routes have it, its last one
+# gone. Each used to add or remove the geoip filter on web's HTTPS chain
+# and the shared :80 chain, which dropped their open connections.
+country_change() {
+  local id out
+  country_rule_on 0 || { note "web has a country rule already, so this wouldn't be its first."; return 1; }
+  id="fwr_e2e$(rand)"
+  out=$(op "$(jq -n --arg id "$id" --arg s "$WEB_ID" '{op: "addFirewallRule", id: $id, serviceId: $s, action: "block", sources: ["RU"], note: "update-traffic-e2e"}')") ||
+    { note "Pyo refused the rule: $out"; return 1; }
+  wait_for 180 "web's routes have the country rule" country_rule_on 1 || return 1
+  sleep 15
+  out=$(op "$(jq -n --arg id "$id" '{op: "removeFirewallRule", id: $id}')") || { note "Pyo couldn't remove the rule: $out"; return 1; }
+  wait_for 180 "web's routes no longer have it" country_rule_on 0 || return 1
+  sleep 15
+}
+
 web_service() { state | jq --arg id "$WEB_ID" '.services[] | select(.id == $id)'; }
 domain_change() {
   local svc out
@@ -795,6 +838,7 @@ fast() {
     skipped "restart pyo-tailnet" "no Tailscale on this install"
   fi
   action "change a firewall rule of web" firewall_change
+  action "add and remove a country rule of web" country_change
   action "add and remove a domain of web" domain_change
   action "restart k3s on $VM1" restart_k3s "$VM1" k3s
   [ -z "${IP2:-}" ] || action "restart k3s on $VM2" restart_k3s "$VM2" k3s-agent

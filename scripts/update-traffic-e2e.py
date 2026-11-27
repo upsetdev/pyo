@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Helpers of scripts/update-traffic-e2e.sh. Standard library only.
 
-  load LOG STOP RATE NAME=HOST@IP...   traffic, one line per result
+  load LOG STOP RATE NAME=HOST@IP...   traffic, one line per result (HTTPS,
+                                       or plain HTTP to HOST@IP:80)
   watch LOG                            pod changes on this server (k3s)
   summary DIR                          what failed, and during which rollout
   images-pull REGISTRY DIR TAG NAME... a build's images, from a registry
@@ -63,6 +64,9 @@ class Load:
     def connect(self, host, ip):
         ip, _, port = ip.partition(":")
         s = socket.create_connection((ip, int(port or 443)), timeout=10)
+        # IP:80: plain HTTP, on the shared :80 listener.
+        if port == "80":
+            return s
         try:
             return self.ctx.wrap_socket(s, server_hostname=host)
         except Exception:
@@ -530,7 +534,7 @@ def cmd_summary(args):
         failed_total += len(failed)
         host, ip = targets[name].split("@")
         print()
-        print(f"{name}  https://{host} on {ip}")
+        print(f"{name}  {'http' if ip.endswith(':80') else 'https'}://{host} on {ip.removesuffix(':80')}")
         line = f"  requests {len(mine)}, failed {len(failed)}"
         if failed:
             line += f" ({counts([s[4] for s in failed])})"
