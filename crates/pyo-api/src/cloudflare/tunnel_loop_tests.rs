@@ -484,3 +484,26 @@ async fn one_connector_is_cut_and_the_others_stay() {
     assert_eq!(cf.connected(&t.id), ["new-a", "new-b"]);
     assert!(!cf.calls().iter().any(|c| c.starts_with("drop connections")));
 }
+
+#[test]
+fn both_paths_stay_until_the_edge_and_resolvers_have_the_new_record() {
+    let kept = |proxied: bool, ttl: u32, kind: &str| tunnel::Kept {
+        id: "r1".into(),
+        kind: kind.into(),
+        name: "blog.example.com".into(),
+        content: "203.0.113.7".into(),
+        proxied,
+        ttl,
+        comment: None,
+    };
+    // Nothing replaced, or a proxied record: Cloudflare's edge only (it took
+    // up to 35 seconds in the traffic test).
+    assert_eq!(grace_secs(&[]), 90);
+    assert_eq!(grace_secs(&[kept(true, 1, "A")]), 90);
+    // A DNS-only record stays in resolvers for its TTL ("auto" is 300).
+    assert_eq!(grace_secs(&[kept(false, 1, "A")]), 330);
+    assert_eq!(grace_secs(&[kept(false, 3600, "CNAME"), kept(false, 60, "AAAA")]), 3630);
+    assert_eq!(grace_secs(&[kept(false, 30, "A")]), 90);
+    // Records that don't answer for a website don't count.
+    assert_eq!(grace_secs(&[kept(false, 3600, "TXT")]), 90);
+}
