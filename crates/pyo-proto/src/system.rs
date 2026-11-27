@@ -1003,11 +1003,12 @@ pub const TAILNET_SANDBOXES: (&str, &str, i32) =
 pub const TAILNET_OWN_ROUTES: [(&str, &str, i32); 3] =
     [TAILNET_DASHBOARD, TAILNET_REGISTRY, TAILNET_SANDBOXES];
 /// Names of the objects the Gateway's fixed part uses.
-pub const TAILNET_NAMES: [&str; 4] = [
+pub const TAILNET_NAMES: [&str; 5] = [
     TAILNET_DASHBOARD.0,
     TAILNET_REGISTRY.0,
     TAILNET_SANDBOXES.0,
     TAILNET_REDIRECT,
+    TAILNET_ANCHOR,
 ];
 
 /// A Backend's spec as the API server keeps it: with the `type` Envoy
@@ -1122,9 +1123,33 @@ pub fn tailnet_policy(servers: &[String]) -> Value {
 /// sits in front of these listeners but Tailscale, so the visitor is the
 /// connection (the proxies' default).
 pub fn tailnet_client_policy_spec() -> Value {
-    json!({
+    tailnet_client_policy_for(false)
+}
+
+/// [`tailnet_client_policy_spec`] with the cluster's TLS minimum: 1.3
+/// only with `tls13` (every HTTPS connection there drains once).
+pub fn tailnet_client_policy_for(tls13: bool) -> Value {
+    let mut spec = json!({
         "targetRefs": [{ "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": TAILNET_GATEWAY }],
         "headers": visitor_headers(&[]),
+    });
+    if tls13 {
+        spec["tls"] = json!({ "minVersion": "1.3" });
+    }
+    spec
+}
+
+/// The tailnet Gateway's anchor route (on its HTTPS listener) and policy.
+pub const TAILNET_ANCHOR: &str = "pyo-tailnet-anchor";
+
+/// The policy on each of Pyo's own tailnet routes (named after it): the
+/// idle rate limit services' ts.net routes carry too. So the rate limit
+/// filter stays on the tailnet HTTPS chain whether or not services have
+/// ts.net routes, and the Tailnet switch never drains Pyo's own names.
+pub fn tailnet_own_policy_spec(route: &str) -> Value {
+    json!({
+        "targetRefs": [{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": route }],
+        "rateLimit": crate::firewall::idle_rate_limit(),
     })
 }
 
@@ -1148,12 +1173,21 @@ pub struct TailnetOwn {
 /// there; `own`: Pyo's own names, on the cluster it runs on). Services'
 /// tailnet routes come with their other routes (the agent's gateway.rs).
 pub fn tailnet_objects(servers: &[String], certs: &[String], own: &TailnetOwn) -> Vec<Value> {
+    tailnet_objects_with(servers, certs, own, false)
+}
+
+/// [`tailnet_objects`] with the cluster's TLS minimum (`tls13`), and the
+/// HTTPS listener's anchor route and policies: the compressors and the
+/// rate limit filter stay on its chain whatever routes come and go.
+pub fn tailnet_objects_with(servers: &[String], certs: &[String], own: &TailnetOwn, tls13: bool) -> Vec<Value> {
     let meta = |name: &str| json!({ "name": name, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } });
     let mut out = vec![
         json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway", "metadata": meta(TAILNET_GATEWAY), "spec": tailnet_gateway_spec(certs) }),
         tailnet_policy(servers),
-        json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": meta(TAILNET_GATEWAY), "spec": tailnet_client_policy_spec() }),
+        json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": meta(TAILNET_GATEWAY), "spec": tailnet_client_policy_for(tls13) }),
         json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(TAILNET_REDIRECT), "spec": tailnet_redirect_spec() }),
+        json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(TAILNET_ANCHOR), "spec": anchor_route_spec(TAILNET_GATEWAY, Some(TAILNET_HTTPS_SECTION)) }),
+        json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(TAILNET_ANCHOR), "spec": anchor_policy_spec(TAILNET_GATEWAY) }),
     ];
     for ((name, host, port), hostname) in [
         (TAILNET_DASHBOARD, own.dashboard.as_deref()),
@@ -1163,6 +1197,7 @@ pub fn tailnet_objects(servers: &[String], certs: &[String], own: &TailnetOwn) -
         let Some(hostname) = hostname else { continue };
         out.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "Backend", "metadata": meta(name), "spec": tailnet_backend_spec(host, port) }));
         out.push(json!({ "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": meta(name), "spec": tailnet_route_spec(name, hostname) }));
+        out.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": meta(name), "spec": tailnet_own_policy_spec(name) }));
     }
     out
 }
@@ -1357,14 +1392,127 @@ pub fn request_timeout(secs: Option<u32>) -> String {
 /// How long a WebSocket or another long stream may stay quiet on a public
 /// website before the proxy closes it (Envoy's own default is 5 minutes).
 pub const STREAM_IDLE_TIMEOUT: &str = "1h";
+/// [`STREAM_IDLE_TIMEOUT`] in seconds: the cluster's idle timeout default
+/// until someone changes it. Routes carry none then.
+pub const IDLE_TIMEOUT_SECS: u32 = 3600;
+/// The shortest and longest idle timeout a cluster may set (1 minute, 24
+/// hours), as the admission policy holds the agent to.
+pub const MIN_IDLE_TIMEOUT_SECS: u32 = 60;
+pub const MAX_IDLE_TIMEOUT_SECS: u32 = 86_400;
 
-/// How the proxies place a website's visitor, for the client policies.
+/// A route's idle timeout (BackendTrafficPolicy `timeout`): Envoy's route
+/// `idle_timeout`, which wins over the client policy's 1 hour. Routes only,
+/// so changing it never drains a listener. None: the client policy's.
+pub fn route_idle_timeout(secs: Option<u32>) -> Option<Value> {
+    let s = secs?.clamp(MIN_IDLE_TIMEOUT_SECS, MAX_IDLE_TIMEOUT_SECS);
+    Some(json!({ "http": { "streamIdleTimeout": format!("{s}s") } }))
+}
+
+/// How the proxies place a website's visitor, for the client policies,
+/// and the websites' listener settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WebSettings {
     /// HTTPS requires the CDN's client certificate.
     pub origin_pull: bool,
     /// A PROXY protocol header is read when one is sent.
     pub proxy_protocol: bool,
+    /// HTTPS also answers HTTP/3 (QUIC on UDP 443).
+    pub http3: bool,
+    /// HTTPS accepts TLS 1.3 only (else 1.2 and 1.3, Envoy Gateway's own).
+    pub tls13: bool,
+}
+
+/// The TLS minimums a cluster may set, as the API takes them.
+pub const TLS_MIN_VERSIONS: [&str; 2] = ["1.2", "1.3"];
+
+// ── Compression ─────────────────────────────────────────────────────────────
+//
+// On a cluster with compression on, every HTTPS route of a service carries
+// these compressors on its BackendTrafficPolicy (Zstd, then Brotli, then
+// Gzip: the one the client accepts first in that order). Envoy Gateway puts
+// the compressor filters on a filter chain while one route there
+// compresses, and builds them from the first such route, so every route
+// lists the same three in the same order, each with its type's own object
+// (without it Envoy Gateway v1.9.3 drops the entry silently,
+// `buildCompression`). One route per HTTPS Gateway always compresses (the
+// anchor, below): the filters are then always on every chain, and turning
+// compression on or off changes routes only. Plain HTTP on :80 isn't
+// compressed.
+
+/// The compressors, as every compressing route lists them.
+pub fn compressors() -> Value {
+    json!([
+        { "type": "Zstd", "zstd": {} },
+        { "type": "Brotli", "brotli": {} },
+        { "type": "Gzip", "gzip": {} },
+    ])
+}
+
+/// The path the anchor routes answer, with 404.
+pub const ANCHOR_PATH: &str = "/.well-known/pyo/anchor";
+/// The HTTPRouteFilter the anchor routes answer with: a 404, no backend.
+pub const NOT_FOUND_FILTER: &str = "pyo-not-found";
+
+pub fn not_found_filter_spec() -> Value {
+    json!({ "directResponse": { "statusCode": 404 } })
+}
+
+pub fn not_found_filter() -> Value {
+    json!({
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "HTTPRouteFilter",
+        "metadata": { "name": NOT_FOUND_FILTER, "namespace": GATEWAY_NS, "labels": { "app.kubernetes.io/managed-by": "pyo" } },
+        "spec": not_found_filter_spec(),
+    })
+}
+
+/// A route filter that answers with [`NOT_FOUND_FILTER`].
+pub fn not_found_ref() -> Value {
+    json!({ "group": "gateway.envoyproxy.io", "kind": "HTTPRouteFilter", "name": NOT_FOUND_FILTER })
+}
+
+/// An HTTPS Gateway's anchor route and its policy: `<gateway>-anchor`.
+pub fn anchor_name(gateway: &str) -> String {
+    format!("{gateway}-anchor")
+}
+
+/// The anchor's route on a Gateway (all its listeners, or `section`): no
+/// hostnames, one exact path, answered with [`NOT_FOUND_FILTER`]. No
+/// backend, so it's no way around a service's firewall.
+pub fn anchor_route_spec(gateway: &str, section: Option<&str>) -> Value {
+    let mut parent = json!({ "name": gateway });
+    if let Some(s) = section {
+        parent["sectionName"] = json!(s);
+    }
+    json!({
+        "parentRefs": [parent],
+        "rules": [{
+            "matches": [{ "path": { "type": "Exact", "value": ANCHOR_PATH } }],
+            "filters": [{ "type": "ExtensionRef", "extensionRef": not_found_ref() }],
+        }],
+    })
+}
+
+/// The anchor's BackendTrafficPolicy: the compressors, and the idle rate
+/// limit every website route carries (so the rate limit filter is always
+/// on its chains too).
+pub fn anchor_policy_spec(gateway: &str) -> Value {
+    json!({
+        "targetRefs": [{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": anchor_name(gateway) }],
+        "rateLimit": crate::firewall::idle_rate_limit(),
+        "compressor": compressors(),
+    })
+}
+
+/// A website route's BackendTrafficPolicy with the cluster's compression
+/// and idle timeout added to what it has.
+pub fn with_route_settings(mut spec: Value, compression: bool, idle_timeout: Option<u32>) -> Value {
+    if compression {
+        spec["compressor"] = compressors();
+    }
+    if let Some(t) = route_idle_timeout(idle_timeout) {
+        spec["timeout"] = t;
+    }
+    spec
 }
 
 /// Request headers that name the visitor's address and that CDNs set
@@ -1444,6 +1592,17 @@ pub fn client_policy_spec(https: bool, w: WebSettings) -> Value {
     if https && origin_pull {
         spec["tls"] = json!({ "clientValidation": { "caCertificateRefs": [{ "group": "", "kind": "ConfigMap", "name": ORIGIN_PULL_SECRET }] } });
     }
+    // TLS 1.3 only: every HTTPS filter chain changes, so every HTTPS
+    // connection drains once when it's saved. 1.2 is Envoy Gateway's
+    // default, left unwritten so the policies stay as they were.
+    if https && w.tls13 {
+        spec["tls"]["minVersion"] = json!("1.3");
+    }
+    // HTTP/3: a QUIC listener on UDP 443 next to the TCP ones, and alt-svc
+    // on the routes. The TCP filter chains don't change.
+    if https && w.http3 {
+        spec["http3"] = json!({});
+    }
     if proxy_protocol {
         spec["proxyProtocol"] = json!({ "optional": true });
     }
@@ -1508,15 +1667,22 @@ pub fn cdn_client_policy_spec(
 /// Every client policy spec the agent may write (the admission policy's list).
 pub fn client_policy_variants(https: bool) -> Vec<Value> {
     let mut v = vec![];
-    for origin_pull in [false, true].into_iter().filter(|p| https || !p) {
+    let both = |on: bool| [false, true].into_iter().filter(move |x| on || !x);
+    for origin_pull in both(https) {
         for proxy_protocol in [false, true] {
-            v.push(client_policy_spec(
-                https,
-                WebSettings {
-                    origin_pull,
-                    proxy_protocol,
-                },
-            ));
+            for http3 in both(https) {
+                for tls13 in both(https) {
+                    v.push(client_policy_spec(
+                        https,
+                        WebSettings {
+                            origin_pull,
+                            proxy_protocol,
+                            http3,
+                            tls13,
+                        },
+                    ));
+                }
+            }
         }
     }
     v
@@ -2376,9 +2542,10 @@ mod tests {
             sp["spec"]["authorization"]["rules"],
             json!([{ "name": "tailnet", "action": "Allow", "principal": { "clientCIDRs": ["100.64.0.0/10", "fd7a:115c:a1e0::/48"] } }])
         );
-        // Pyo's own routes, each on its tailnet name; the redirect on HTTP.
+        // Pyo's own routes, each on its tailnet name; the redirect on HTTP;
+        // the anchor on HTTPS.
         let routes: Vec<&Value> = objs.iter().filter(|o| o["kind"] == "HTTPRoute").collect();
-        assert_eq!(routes.len(), 4);
+        assert_eq!(routes.len(), 5);
         for r in &routes {
             assert_eq!(r["spec"]["parentRefs"][0]["name"], TAILNET_GATEWAY);
         }
@@ -2417,9 +2584,10 @@ mod tests {
             redirect["spec"]["rules"][0]["filters"][0]["requestRedirect"]["scheme"],
             "https"
         );
-        // On another cluster: no routes of Pyo's own.
+        // On another cluster: no routes of Pyo's own (the redirect and the
+        // anchor only).
         let other = tailnet_objects(&[], &certs, &TailnetOwn::default());
-        assert_eq!(other.iter().filter(|o| o["kind"] == "HTTPRoute").count(), 1);
+        assert_eq!(other.iter().filter(|o| o["kind"] == "HTTPRoute").count(), 2);
         assert_eq!(other.iter().filter(|o| o["kind"] == "Backend").count(), 0);
         // Websites' listeners stay on 80/443, and services can't take these ports.
         assert!(!TAILNET_PORTS.contains(&443) && !TAILNET_PORTS.contains(&80));
@@ -2795,7 +2963,7 @@ mod tests {
         // Other Backends still can't point into Pyo's namespaces.
         assert!(
             policy.contains(
-                "!(variables.objName in [dyn('pyo-dashboard'), dyn('pyo-registry-door'), dyn('pyo-sandboxes'), dyn('pyo-tailnet-redirect')])"
+                "!(variables.objName in [dyn('pyo-dashboard'), dyn('pyo-registry-door'), dyn('pyo-sandboxes'), dyn('pyo-tailnet-redirect'), dyn('pyo-tailnet-anchor')])"
             )
         );
     }
@@ -2871,7 +3039,7 @@ mod tests {
             pinned.extend(client_policy_variants(https).into_iter().map(|spec| json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "spec": spec })));
         }
         pinned.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "ClientTrafficPolicy", "metadata": { "name": "ns-web-cdn" },
-            "spec": cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into()], WebSettings { origin_pull: true, proxy_protocol: true }, &["173.245.48.0/20".into()]) }));
+            "spec": cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into()], WebSettings { origin_pull: true, proxy_protocol: true, ..Default::default() }, &["173.245.48.0/20".into()]) }));
         pinned.extend(
             tailnet_objects(
                 &tailnet_server_cidrs(["10.42.0.0/24"]),
@@ -2885,6 +3053,10 @@ mod tests {
             .into_iter()
             .filter(|o| o["kind"] != "HTTPRoute"),
         );
+        // The Gateway section's: the 404 filter, and a service's anchor
+        // policy (the tailnet's comes with its objects above).
+        pinned.push(not_found_filter());
+        pinned.push(json!({ "apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy", "metadata": { "name": "ns-web-anchor" }, "spec": anchor_policy_spec("ns-web") }));
         for o in pinned {
             let key = (
                 o["apiVersion"].as_str().unwrap().to_string(),
@@ -2899,6 +3071,105 @@ mod tests {
         }
     }
 
+    /// The Gateway section's listener settings: HTTP/3 and TLS 1.3 only on
+    /// HTTPS, written only when on (1.2 stays unwritten, Envoy Gateway's
+    /// default), and every combination is one the admission policy lists.
+    #[test]
+    fn listener_settings_on_https_only() {
+        let w = |http3, tls13| WebSettings { http3, tls13, ..Default::default() };
+        let off = client_policy_spec(true, WebSettings::default());
+        assert!(off.get("http3").is_none() && off.get("tls").is_none(), "as before: {off}");
+        let on = client_policy_spec(true, w(true, true));
+        assert_eq!(on["http3"], json!({}));
+        assert_eq!(on["tls"], json!({ "minVersion": "1.3" }));
+        // Origin pull and TLS 1.3 together: one tls object.
+        let both = client_policy_spec(true, WebSettings { origin_pull: true, tls13: true, ..Default::default() });
+        assert_eq!(both["tls"]["minVersion"], "1.3");
+        assert!(both["tls"]["clientValidation"].is_object());
+        // Plain HTTP never: they're about HTTPS.
+        assert_eq!(client_policy_spec(false, w(true, true)), client_policy_spec(false, WebSettings::default()));
+        let variants = client_policy_variants(true);
+        for http3 in [false, true] {
+            for tls13 in [false, true] {
+                for origin_pull in [false, true] {
+                    for proxy_protocol in [false, true] {
+                        let spec = client_policy_spec(true, WebSettings { origin_pull, proxy_protocol, http3, tls13 });
+                        assert!(variants.contains(&spec), "{spec}");
+                    }
+                }
+            }
+        }
+        // A tunnel's or CDN's policy carries them too.
+        let cdn = cdn_client_policy_spec("tunnel", "shop-web", &["h-1".into()], w(true, true), &["10.0.0.1/32".into()]);
+        assert_eq!(cdn["http3"], json!({}));
+        assert_eq!(cdn["tls"]["minVersion"], "1.3");
+        // The tailnet's: the TLS minimum only.
+        assert_eq!(tailnet_client_policy_for(false), tailnet_client_policy_spec());
+        assert_eq!(tailnet_client_policy_for(true)["tls"], json!({ "minVersion": "1.3" }));
+        assert!(tailnet_client_policy_for(true).get("http3").is_none());
+    }
+
+    /// Compression: one list, each compressor with its type's own object
+    /// (Envoy Gateway drops one without it), and an anchor route per HTTPS
+    /// Gateway that always compresses and answers 404 with no backend.
+    #[test]
+    fn compression_and_its_anchor() {
+        let c = compressors();
+        let types: Vec<&str> = c.as_array().unwrap().iter().map(|x| x["type"].as_str().unwrap()).collect();
+        assert_eq!(types, ["Zstd", "Brotli", "Gzip"]);
+        for x in c.as_array().unwrap() {
+            let own = x["type"].as_str().unwrap().to_ascii_lowercase();
+            assert_eq!(x[own.as_str()], json!({}), "{x}");
+            assert!(x.get("minContentLength").is_none());
+        }
+        let route = anchor_route_spec("shop-web", None);
+        assert!(route.get("hostnames").is_none());
+        assert_eq!(route["parentRefs"], json!([{ "name": "shop-web" }]));
+        let rule = &route["rules"][0];
+        assert!(rule.get("backendRefs").is_none(), "no way to the service");
+        assert_eq!(rule["matches"], json!([{ "path": { "type": "Exact", "value": ANCHOR_PATH } }]));
+        assert_eq!(rule["filters"][0]["extensionRef"]["name"], NOT_FOUND_FILTER);
+        assert_eq!(not_found_filter()["spec"], json!({ "directResponse": { "statusCode": 404 } }));
+        assert_eq!(anchor_route_spec(TAILNET_GATEWAY, Some(TAILNET_HTTPS_SECTION))["parentRefs"][0]["sectionName"], TAILNET_HTTPS_SECTION);
+        let policy = anchor_policy_spec("shop-web");
+        assert_eq!(policy["targetRefs"][0]["name"], "shop-web-anchor");
+        assert_eq!(policy["compressor"], c);
+        assert_eq!(policy["rateLimit"], crate::firewall::idle_rate_limit());
+        // Route settings: added only when they're on.
+        let base = json!({ "targetRefs": [], "rateLimit": {} });
+        assert_eq!(with_route_settings(base.clone(), false, None), base);
+        let on = with_route_settings(base.clone(), true, Some(600));
+        assert_eq!(on["compressor"], c);
+        assert_eq!(on["timeout"], json!({ "http": { "streamIdleTimeout": "600s" } }));
+        // Clamped to what the admission policy takes.
+        assert_eq!(route_idle_timeout(Some(5)).unwrap()["http"]["streamIdleTimeout"], "60s");
+        assert_eq!(route_idle_timeout(Some(1_000_000)).unwrap()["http"]["streamIdleTimeout"], "86400s");
+        assert_eq!(route_idle_timeout(None), None);
+    }
+
+    /// The tailnet Gateway's objects: its anchor on the HTTPS listener, and
+    /// each of Pyo's own routes with the idle rate limit services' ts.net
+    /// routes carry, so the Tailnet switch never changes that listener.
+    #[test]
+    fn pyos_own_tailnet_routes_carry_their_policy() {
+        let own = TailnetOwn { dashboard: Some("pyo.tail1234.ts.net".into()), registry: Some("registry.tail1234.ts.net".into()), sandboxes: None };
+        let objs = tailnet_objects_with(&[], &["pyo-tls--pyo".into()], &own, true);
+        let find = |kind: &str, name: &str| objs.iter().find(|o| o["kind"] == kind && o["metadata"]["name"] == name).cloned();
+        for name in [TAILNET_DASHBOARD.0, TAILNET_REGISTRY.0] {
+            let p = find("BackendTrafficPolicy", name).unwrap();
+            assert_eq!(p["spec"]["targetRefs"][0]["name"], name);
+            assert_eq!(p["spec"]["rateLimit"], crate::firewall::idle_rate_limit());
+        }
+        assert!(find("BackendTrafficPolicy", TAILNET_SANDBOXES.0).is_none());
+        assert!(find("HTTPRoute", TAILNET_ANCHOR).is_some());
+        assert_eq!(find("BackendTrafficPolicy", TAILNET_ANCHOR).unwrap()["spec"], anchor_policy_spec(TAILNET_GATEWAY));
+        assert_eq!(find("ClientTrafficPolicy", TAILNET_GATEWAY).unwrap()["spec"], tailnet_client_policy_for(true));
+        // Another cluster: the anchor still, none of Pyo's own.
+        let other = tailnet_objects(&[], &[], &TailnetOwn::default());
+        assert!(other.iter().any(|o| o["metadata"]["name"] == TAILNET_ANCHOR));
+        assert!(!other.iter().any(|o| o["metadata"]["name"] == TAILNET_DASHBOARD.0));
+    }
+
     /// Websites' visitors are their connection's address (or a PROXY
     /// protocol header's), never what X-Forwarded-For says: nothing Pyo runs
     /// in front of the proxies adds it, so any client that reaches them
@@ -2909,7 +3180,7 @@ mod tests {
     fn websites_never_trust_forwarded_addresses() {
         for https in [false, true] {
             let variants = client_policy_variants(https);
-            assert_eq!(variants.len(), if https { 4 } else { 2 });
+            assert_eq!(variants.len(), if https { 16 } else { 2 });
             for spec in &variants {
                 assert_eq!(spec["clientIPDetection"], json!({ "directSourceIP": {} }));
                 assert!(!spec.to_string().contains("xForwardedFor"), "{spec}");
@@ -2952,6 +3223,7 @@ mod tests {
             WebSettings {
                 origin_pull: true,
                 proxy_protocol: true,
+                ..Default::default()
             },
         ] {
             let spec = cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into(), "h-2".into()], w, &trusted);
@@ -3011,7 +3283,7 @@ mod tests {
                 // Only the settings' headers: nothing else in them.
                 assert_eq!(spec["headers"].as_object().unwrap().len(), 1, "{spec}");
                 assert_eq!(spec["headers"]["earlyRequestHeaders"].as_object().unwrap().len(), 1);
-                let origin_pull = spec.get("tls").is_some();
+                let origin_pull = spec["tls"]["clientValidation"].is_object();
                 if origin_pull {
                     // Only the CDN gets through: its headers pass, the rest go.
                     assert_eq!(removed(&spec), OTHER_VISITOR_HEADERS);
@@ -3026,6 +3298,7 @@ mod tests {
             WebSettings {
                 origin_pull: true,
                 proxy_protocol: false,
+                ..Default::default()
             },
         ] {
             let cdn = cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into()], w, &["173.245.48.0/20".into()]);
@@ -3062,7 +3335,7 @@ mod tests {
         let cdn = cdn_client_policy_spec("cloudflare", "ns-web", &["h-1".into()], WebSettings::default(), &["173.245.48.0/20".into()]);
         assert_eq!(cdn["timeout"]["http"]["streamIdleTimeout"], "1h");
         let policy = crate::rbac::admission("w", "g")[0].to_string();
-        assert!(policy.contains("'proxyProtocol', 'timeout']"));
+        assert!(policy.contains("'proxyProtocol', 'timeout', 'http3']"));
         // A request's own limit: 5 minutes unless the service sets one, 0 is none.
         assert_eq!(request_timeout(None), "300s");
         assert_eq!(request_timeout(Some(0)), "0s");
@@ -3087,6 +3360,7 @@ mod tests {
                 WebSettings {
                     origin_pull: true,
                     proxy_protocol: true,
+                    ..Default::default()
                 },
             ),
         ]
