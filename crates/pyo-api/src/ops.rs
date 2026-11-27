@@ -1999,14 +1999,15 @@ pub(crate) enum Op {
         name: Option<String>,
         description: Option<String>,
         default_cluster_id: Option<String>,
-        /// The team's dashboard preferences, saved as given.
+        /// The team's dashboard preferences, saved as given. Its `requestLogs` (`maxMb`, `maxDays`) still works but is deprecated: use `setTeamObservability`'s `requestLogMaxMb` and `requestLogMaxDays`.
         #[schema(value_type = Option<Object>)]
         preferences: Option<Value>,
         /// On a hosted Pyo: "auto" updates the team's agents when Pyo has a new version, "manual" leaves it to you.
         #[serde(default)]
         agent_updates: Option<String>,
-        /// Keep the team's analytics 3, 6 or 12 months, at most as long as the installation. 0 keeps them as long as the installation does.
+        /// Deprecated: use `setTeamObservability`'s `analyticsMonths`. Keep the team's analytics 3, 6 or 12 months, at most as long as the installation. 0 keeps them as long as the installation does.
         #[serde(default)]
+        #[schema(deprecated)]
         analytics_months: Option<u8>,
     },
     /// Delete a team and everything in it. Owners only.
@@ -2018,6 +2019,33 @@ pub(crate) enum Op {
         require_two_factor: Option<bool>,
         #[serde(default)]
         audit_ips: Option<String>,
+    },
+    /// A team's observability: what its servers collect and keep. Owners and admins. Left out, a setting stays as it is.
+    ///
+    /// Address and query string settings are at most the installation's limit, and "default" follows the installation's default. Passwords, tokens and other sensitive query values are never kept.
+    SetTeamObservability {
+        team_id: String,
+        /// Whether the team's servers collect analytics, request logs and usage history. Off keeps what was collected.
+        #[serde(default)]
+        enabled: Option<bool>,
+        /// Whether the team's servers keep its requests and connections (the request log). Off still counts them in analytics.
+        #[serde(default)]
+        request_logs: Option<bool>,
+        /// What's kept of visitors' IP addresses: "anonymized", "none", "full" or "default".
+        #[serde(default)]
+        ip_mode: Option<String>,
+        /// What's kept of query strings: "names" (parameter names only), "keep", "none" or "default".
+        #[serde(default)]
+        query_strings: Option<String>,
+        /// Most of the request log each of the team's clusters keeps, in MB: 100 to 20480.
+        #[serde(default)]
+        request_log_max_mb: Option<u64>,
+        /// Most days of the request log each of the team's clusters keeps: 1 to 31.
+        #[serde(default)]
+        request_log_max_days: Option<u32>,
+        /// Keep the team's analytics 3, 6 or 12 months, at most as long as the installation. 0 keeps them as long as the installation does.
+        #[serde(default)]
+        analytics_months: Option<u8>,
     },
     /// Invite someone to a team by email, as owner, admin, developer or viewer.
     InviteMember {
@@ -2230,9 +2258,19 @@ pub(crate) enum Op {
     },
     /// Turn off outgoing email.
     RemoveEmailSettings {},
-    /// What analytics keeps of visitors' IP addresses: "none", "anonymized" or "full".
+    /// What teams keep of visitors' IP addresses and query strings: the default for teams that didn't choose, and the most a team may choose. Only the installation's admin can do this. Teams already above a lower limit keep less from now on and get an entry in their activity.
     SaveObservabilitySettings {
+        /// The default for visitors' IP addresses: "none", "anonymized" or "full".
         ip_mode: crate::observability::IpMode,
+        /// The most a team may keep of addresses. Left out, it stays as it is, and is raised to `ipMode` when that's above it.
+        #[serde(default)]
+        max_ip_mode: Option<crate::observability::IpMode>,
+        /// The default for query strings: "keep", "names" or "none". Left out, it stays as it is.
+        #[serde(default)]
+        query_strings: Option<crate::teamobs::QueryStrings>,
+        /// The most a team may keep of query strings. Left out, it stays as it is, and is raised to `queryStrings` when that's above it.
+        #[serde(default)]
+        max_query_strings: Option<crate::teamobs::QueryStrings>,
     },
     /// How long this installation keeps observability data: analytics 3, 6, 12 or 24 months, server, service and database metrics 7 to 90 days, build and deploy logs 30 to 365 days. A team can keep its analytics shorter (`updateTeam`'s `analyticsMonths`). Raw request logs are each team's own setting.
     SaveRetentionSettings {
@@ -3542,7 +3580,8 @@ pub(crate) fn op_doc(op: &Op) -> (&'static str, &'static str) {
         Op::CreateTeam { .. }
         | Op::UpdateTeam { .. }
         | Op::DeleteTeam { .. }
-        | Op::SetTeamSecurity { .. } => ("Teams", "team"),
+        | Op::SetTeamSecurity { .. }
+        | Op::SetTeamObservability { .. } => ("Teams", "team"),
         Op::InviteMember { .. }
         | Op::ResendInvite { .. }
         | Op::UpdateMemberRole { .. }
@@ -4390,19 +4429,99 @@ async fn apply(
             let id = crate::updates::start(s, &version, Some(user)).await?;
             Ok(json!({ "ok": true, "id": id }))
         }
-        Op::SaveObservabilitySettings { ip_mode } => {
+        Op::SaveObservabilitySettings {
+            ip_mode,
+            max_ip_mode,
+            query_strings,
+            max_query_strings,
+        } => {
+            use crate::teamobs::{Installation, ip_min};
             require_admin(user)?;
             let mut v: Value =
                 sqlx::query_scalar("SELECT value FROM pyo.settings WHERE key = 'observability'")
                     .fetch_optional(&mut **tx)
                     .await?
                     .unwrap_or_else(|| json!({}));
+            let before = Installation::from_settings(&v);
             let changed = v.get("ipMode") != Some(&json!(ip_mode));
             v["ipMode"] = json!(ip_mode);
+            // A limit left out stays as it is (a saved one is raised to a
+            // default above it). One never saved follows the default.
+            match max_ip_mode {
+                Some(m) if ip_min(ip_mode, m) != ip_mode => {
+                    return Err(ApiError::bad_request(
+                        "The default for IP addresses can't keep more than the limit.",
+                    ));
+                }
+                Some(m) => v["maxIpMode"] = json!(m),
+                None if v.get("maxIpMode").is_some() && ip_min(ip_mode, before.max_ip_mode) != ip_mode => {
+                    v["maxIpMode"] = json!(ip_mode)
+                }
+                None => {}
+            }
+            let qs = query_strings.unwrap_or(before.query_strings);
+            if query_strings.is_some() {
+                v["queryStrings"] = json!(qs);
+            }
+            match max_query_strings {
+                Some(m) if qs.min(m) != qs => {
+                    return Err(ApiError::bad_request(
+                        "The default for query strings can't keep more than the limit.",
+                    ));
+                }
+                Some(m) => v["maxQueryStrings"] = json!(m),
+                None if qs.min(before.max_query_strings) != qs => v["maxQueryStrings"] = json!(qs),
+                None => {}
+            }
+            let after = Installation::from_settings(&v);
             sqlx::query("INSERT INTO pyo.settings (key, value) VALUES ('observability', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
                 .bind(&v)
                 .execute(&mut **tx)
                 .await?;
+            if after.max_ip_mode != before.max_ip_mode {
+                log_setting(
+                    tx,
+                    user,
+                    "observability",
+                    &format!("Limit for teams' visitor IP addresses: {}", crate::teamobs::ip_label(after.max_ip_mode)),
+                )
+                .await?;
+            }
+            if after.query_strings != before.query_strings {
+                log_setting(
+                    tx,
+                    user,
+                    "observability",
+                    &format!("Default for query strings: {}", crate::teamobs::query_label(after.query_strings)),
+                )
+                .await?;
+            }
+            if after.max_query_strings != before.max_query_strings {
+                log_setting(
+                    tx,
+                    user,
+                    "observability",
+                    &format!("Limit for teams' query strings: {}", crate::teamobs::query_label(after.max_query_strings)),
+                )
+                .await?;
+            }
+            // Teams that keep less from now on hear of it in their activity.
+            let teams = crate::teamobs::all_choices(&mut **tx).await?;
+            for (team, ip, qs) in crate::teamobs::lowered(&before, &after, &teams) {
+                for title in [ip.map(crate::teamobs::ip_title), qs.map(crate::teamobs::query_title)].into_iter().flatten() {
+                    log_activity(
+                        tx,
+                        &team,
+                        "pyo",
+                        "team.observability_limited",
+                        "info",
+                        title,
+                        json!({ "kind": "team", "id": team, "label": "Observability" }),
+                        json!({}),
+                    )
+                    .await?;
+                }
+            }
             if changed {
                 let title = match ip_mode {
                     crate::observability::IpMode::None => "Stopped storing visitor IP addresses",
@@ -5748,6 +5867,146 @@ async fn apply(
                     json!({}),
                 )
                 .await?;
+            }
+            Ok(ok)
+        }
+        Op::SetTeamObservability {
+            team_id,
+            enabled,
+            request_logs,
+            ip_mode,
+            query_strings,
+            request_log_max_mb,
+            request_log_max_days,
+            analytics_months,
+        } => {
+            use crate::teamobs::{QueryStrings, ip_label, ip_min, parse_ip, query_label, requested};
+            require_role(tx, user, &team_id, Role::Admin).await?;
+            let i = crate::teamobs::installation(&s.db).await?;
+            let ip = requested(
+                ip_mode.as_deref(),
+                parse_ip,
+                "Visitor IP addresses are \"none\", \"anonymized\", \"full\" or \"default\".",
+            )?;
+            let qs = requested(
+                query_strings.as_deref(),
+                QueryStrings::parse,
+                "Query strings are \"keep\", \"names\", \"none\" or \"default\".",
+            )?;
+            // Never more than the installation allows: nobody should think
+            // more is kept than is.
+            if let Some(Some(m)) = ip
+                && ip_min(m, i.max_ip_mode) != m
+            {
+                return Err(ApiError::bad_request(format!(
+                    "This installation's limit for visitor IP addresses is \"{}\". Pick that or less.",
+                    ip_label(i.max_ip_mode)
+                )));
+            }
+            if let Some(Some(q)) = qs
+                && q.min(i.max_query_strings) != q
+            {
+                return Err(ApiError::bad_request(format!(
+                    "This installation's limit for query strings is \"{}\". Pick that or less.",
+                    query_label(i.max_query_strings)
+                )));
+            }
+            let (mb_range, days_range) = (pyo_proto::traffic::MAX_MB_RANGE, pyo_proto::traffic::MAX_DAYS_RANGE);
+            if request_log_max_mb.is_some_and(|mb| !(mb_range.0..=mb_range.1).contains(&mb)) {
+                return Err(ApiError::bad_request("Request logs keep 100 MB to 20 GB per cluster."));
+            }
+            if request_log_max_days.is_some_and(|d| !(days_range.0..=days_range.1).contains(&d)) {
+                return Err(ApiError::bad_request("Request logs keep 1 to 31 days."));
+            }
+            let was = crate::teamobs::choices(&mut **tx, std::slice::from_ref(&team_id))
+                .await?
+                .remove(&team_id)
+                .unwrap_or_default();
+            let target = json!({ "kind": "team", "id": team_id, "label": "Observability" });
+            let mut changes: Vec<String> = vec![];
+            if let Some(on) = enabled.filter(|on| Some(*on) != was.on) {
+                sqlx::query("UPDATE pyo.teams SET observability_on = $2 WHERE id = $1")
+                    .bind(&team_id)
+                    .bind(on)
+                    .execute(&mut **tx)
+                    .await?;
+                changes.push((if on { "Turned observability on" } else { "Turned observability off" }).to_owned());
+            }
+            if let Some(on) = request_logs.filter(|on| Some(*on) != was.request_logs) {
+                sqlx::query("UPDATE pyo.teams SET request_logs_on = $2 WHERE id = $1")
+                    .bind(&team_id)
+                    .bind(on)
+                    .execute(&mut **tx)
+                    .await?;
+                changes.push((if on { "Turned request logs on" } else { "Turned request logs off" }).to_owned());
+            }
+            if let Some(m) = ip.filter(|m| *m != was.ip_mode) {
+                sqlx::query("UPDATE pyo.teams SET ip_mode = $2 WHERE id = $1")
+                    .bind(&team_id)
+                    .bind(m.map(crate::teamobs::ip_str))
+                    .execute(&mut **tx)
+                    .await?;
+                changes.push(match m {
+                    None => "Visitor IP addresses follow the installation's default".into(),
+                    Some(m) => format!("Visitor IP addresses: {}", ip_label(m)),
+                });
+            }
+            if let Some(q) = qs.filter(|q| *q != was.query_strings) {
+                sqlx::query("UPDATE pyo.teams SET query_strings = $2 WHERE id = $1")
+                    .bind(&team_id)
+                    .bind(q.map(QueryStrings::as_str))
+                    .execute(&mut **tx)
+                    .await?;
+                changes.push(match q {
+                    None => "Query strings follow the installation's default".into(),
+                    Some(q) => format!("Query strings: {}", query_label(q)),
+                });
+            }
+            if request_log_max_mb.is_some() || request_log_max_days.is_some() {
+                let prefs: Value = sqlx::query_scalar("SELECT preferences FROM pyo.teams WHERE id = $1")
+                    .bind(&team_id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                let (mb, days) = pyo_proto::traffic::limits_from(&prefs);
+                let (new_mb, new_days) = (request_log_max_mb.unwrap_or(mb), request_log_max_days.unwrap_or(days));
+                if (new_mb, new_days) != (mb, days) || prefs["requestLogs"].is_null() {
+                    sqlx::query("UPDATE pyo.teams SET preferences = preferences || jsonb_build_object('requestLogs', $2::jsonb) WHERE id = $1")
+                        .bind(&team_id)
+                        .bind(json!({ "maxMb": new_mb, "maxDays": new_days }))
+                        .execute(&mut **tx)
+                        .await?;
+                    let size = if new_mb < 1024 { format!("{new_mb} MB") } else { format!("{} GB", new_mb as f64 / 1024.0) };
+                    changes.push(format!("Request logs keep {size} or {new_days} days per cluster"));
+                }
+            }
+            if let Some(m) = analytics_months {
+                let installation = crate::retention::load(&s.db).await?;
+                crate::retention::check_team_months(m, &installation).map_err(ApiError::bad_request)?;
+                let before: Option<i16> = sqlx::query_scalar("SELECT analytics_months FROM pyo.teams WHERE id = $1")
+                    .bind(&team_id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                let after = (m != 0).then_some(i16::from(m));
+                if before != after {
+                    sqlx::query("UPDATE pyo.teams SET analytics_months = $2 WHERE id = $1")
+                        .bind(&team_id)
+                        .bind(after)
+                        .execute(&mut **tx)
+                        .await?;
+                    changes.push(match after {
+                        Some(m) => format!("Analytics are kept {m} months"),
+                        None => "Analytics are kept as long as the installation keeps them".into(),
+                    });
+                }
+            }
+            for title in &changes {
+                log_activity(tx, &team_id, &user.name, "team.updated", "info", title, target.clone(), json!({}))
+                    .await?;
+            }
+            if let Some(on) = enabled {
+                // Its clusters' agents follow at their next heartbeat, their
+                // traffic stores with Pyo's next context.
+                s.observability.set_team_on(&team_id, on).await;
             }
             Ok(ok)
         }

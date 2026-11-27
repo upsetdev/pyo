@@ -136,7 +136,7 @@ jobs:
           DATABASE_URL: postgres://postgres:pyo@localhost:5432/pyo
         run: |
           PYO_SECRET_KEY=$(openssl rand -hex 32) \
-            cargo test --locked -p pyo-api --lib -- --ignored rls::tests teams_rls_tests teamsec_tests auth::key_tests auth::invite_tests cloudflare::http_tests admin_sign_in_tests vault::tests
+            cargo test --locked -p pyo-api --lib -- --ignored rls::tests teams_rls_tests teamsec_tests teamobs_tests auth::key_tests auth::invite_tests cloudflare::http_tests admin_sign_in_tests vault::tests
       # What a Compose sync writes. A run of its own, without a secret key:
       # one test syncs in a database of its own, and the process's one vault
       # keeps its data keys in whichever test's database came first.

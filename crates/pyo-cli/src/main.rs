@@ -14,6 +14,7 @@ mod exec;
 mod firewall;
 mod import;
 mod login;
+mod observability;
 mod pack;
 mod registry;
 mod sandbox;
@@ -82,9 +83,25 @@ enum Command {
     /// Whether observability (analytics, request logs, usage history) is on
     /// for this Pyo, or turn it on or off. Turning it is for the
     /// installation's admin, with a full-access key.
+    ///
+    /// With --team, the team's: whether its servers collect, whether they
+    /// keep request logs, and what they keep of visitors' IP addresses and
+    /// query strings. Changing those is for the team's owners and admins.
     Observability {
         #[arg(value_parser = ["on", "off"])]
         state: Option<String>,
+        /// Show or change this team's settings (slug or id) instead of the installation's.
+        #[arg(long)]
+        team: Option<String>,
+        /// Whether the team's servers keep its request logs.
+        #[arg(long, value_parser = ["on", "off"], requires = "team")]
+        request_logs: Option<String>,
+        /// What the team keeps of visitors' IP addresses, up to the installation's limit.
+        #[arg(long, value_parser = ["none", "anonymized", "full", "default"], requires = "team")]
+        ip: Option<String>,
+        /// What the team keeps of query strings, up to the installation's limit.
+        #[arg(long, value_parser = ["keep", "names", "none", "default"], requires = "team")]
+        query_strings: Option<String>,
     },
     /// Link this folder to a service (writes pyo.jsonc).
     Link {
@@ -824,7 +841,16 @@ async fn run(mut cli: Cli) -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Command::Observability { state } => {
+        Command::Observability { state, team: Some(team), request_logs, ip, query_strings } => {
+            let api = config::client(url, token)?;
+            observability::team(
+                &api,
+                &team,
+                observability::Change { state, request_logs, ip, query_strings },
+            )
+            .await
+        }
+        Command::Observability { state, .. } => {
             let api = config::client(url, token)?;
             if let Some(state) = state {
                 api.op(

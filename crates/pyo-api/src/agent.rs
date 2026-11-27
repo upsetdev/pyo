@@ -749,8 +749,14 @@ async fn heartbeat(
         .into_iter()
         .map(|(namespace, team_id)| pyo_proto::ProjectTeam { namespace, team_id })
         .collect();
-    // Vector (and on Pyo's own cluster, ClickHouse) runs while it's on.
-    let observability = s.observability.enabled().await;
+    // Vector (and on Pyo's own cluster, ClickHouse) runs while it's on:
+    // for the installation, and for the cluster's team (Team › Settings ›
+    // Observability). Pyo's own cluster keeps it while the installation's
+    // is on, since ClickHouse there serves every team. Pyo stores nothing
+    // of a team that turned it off (observability.rs, totals.rs) and its
+    // traffic store there keeps no requests (totals.rs `context`).
+    let observability = s.observability.enabled().await
+        && (same_cluster || s.observability.team_on(&cluster.team_id).await);
     // The names its servers host on the tailnet.
     let tailnet = crate::tailscale::wanted_for(&s.db, &cluster.id, same_cluster).await?;
     // Pyo's dashboard on the public IP, while it's open.

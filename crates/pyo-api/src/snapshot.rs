@@ -89,10 +89,11 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
     // Tailscale (Integrations › Tailscale): the client only for admins.
     let tailscale = crate::tailscale::snapshot(db, user.is_admin).await?;
     // Observability: all of it for the installation's admin, only whether
-    // it's on for everyone else. Each team gets the analytics limit it picks
-    // within (below).
+    // it's on for everyone else. Each team gets the defaults and limits it
+    // picks within (below).
     let observability_settings = crate::observability::settings_for(db, user.is_admin).await?;
     let analytics_months_limit = crate::retention::load(db).await?.analytics_months;
+    let team_observability = crate::teamobs::installation(db).await?;
 
     // The teams' rows through one transaction lowered to the teams the
     // user (or the API key) may see (rls.rs): a query here that forgot its
@@ -108,14 +109,19 @@ pub async fn build(db: &PgPool, user: &User, agent_api_url: &str) -> ApiResult<V
             'createdAt', pyo.ms(created_at), 'defaultClusterId', default_cluster_id,
             'preferences', preferences, 'agentUpdates', agent_updates,
             'analyticsMonths', analytics_months,
+            'observabilityOn', observability_on, 'requestLogsOn', request_logs_on,
+            'ipMode', ip_mode, 'queryStrings', query_strings,
             'requireTwoFactor', require_two_factor, 'auditIps', audit_ips)
            FROM pyo.teams WHERE id = ANY($1) ORDER BY created_at",
         &team_ids,
     )
     .await?;
-    // The longest a team may keep its analytics (the installation's).
+    // The longest a team may keep its analytics (the installation's), and
+    // the defaults and limits of its other observability settings, with
+    // what applies now (teamobs.rs).
     for t in &mut teams {
         t["analyticsMonthsLimit"] = json!(analytics_months_limit);
+        crate::teamobs::snapshot(t, &team_observability);
     }
 
     let members = values(

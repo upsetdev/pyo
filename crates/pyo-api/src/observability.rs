@@ -447,16 +447,18 @@ pub struct Observability {
     sampled: Mutex<HashMap<String, Instant>>,
     /// And its last database metrics sample.
     db_sampled: Mutex<HashMap<String, Instant>>,
-    /// The visitor IP setting, re-read every 30s.
-    ip_mode: RwLock<(Instant, IpMode)>,
     /// Whether observability is on (the installation's setting), re-read
     /// every 5s: another replica may have changed it.
     on: RwLock<(Instant, bool)>,
+    /// The teams that turned it off for their servers (teamobs.rs), re-read
+    /// every 5s too. Nothing of theirs is stored meanwhile.
+    off_teams: RwLock<(Instant, std::collections::HashSet<String>)>,
 }
 
-/// What analytics keeps of a visitor's IP address (an installation-wide
-/// setting). Countries, cities and unique visitors work in every mode: they're
-/// worked out when the request comes in.
+/// What analytics keeps of a visitor's IP address: each team's setting,
+/// within the installation's limit (teamobs.rs). Countries, cities and
+/// unique visitors work in every mode: they're worked out when the request
+/// comes in.
 #[derive(
     Debug,
     Clone,
@@ -509,18 +511,20 @@ pub async fn setting(db: &PgPool) -> ApiResult<bool> {
 }
 
 /// The installation's observability settings as one person may read them.
-/// Its admin gets them all: on or off, `ipMode`, `retention` and `small`
-/// (Pyo's server has under 3.5 GB of memory now). Everyone else only
-/// whether it's on. The rest is the installation's (on Pyo Cloud, the
-/// operator's), and the limit a team picks within comes with each team
-/// (`analyticsMonthsLimit` in the snapshot).
+/// Its admin gets them all: on or off, the defaults and limits teams choose
+/// within (`ipMode` and `maxIpMode`, `queryStrings` and `maxQueryStrings`),
+/// `retention` and `small` (Pyo's server has under 3.5 GB of memory now).
+/// Everyone else only whether it's on. The rest is the installation's (on
+/// Pyo Cloud, the operator's), and the defaults and limits a team picks
+/// within come with each team (`analyticsMonthsLimit`,
+/// `observabilityDefaults` and `observabilityLimits` in the snapshot).
 pub async fn settings_for(db: &PgPool, admin: bool) -> ApiResult<serde_json::Value> {
     let enabled = setting(db).await?;
     if !admin {
         return Ok(visible_settings(false, enabled, None));
     }
     let rest = (
-        ip_mode(db).await?,
+        crate::teamobs::installation(db).await?,
         crate::retention::load(db).await?,
         pyo_proto::memory::server_mib().map(|m| pyo_proto::memory::tier(m) == pyo_proto::memory::Tier::Small),
     );
@@ -531,12 +535,15 @@ pub async fn settings_for(db: &PgPool, admin: bool) -> ApiResult<serde_json::Val
 fn visible_settings(
     admin: bool,
     enabled: bool,
-    rest: Option<(IpMode, crate::retention::Retention, Option<bool>)>,
+    rest: Option<(crate::teamobs::Installation, crate::retention::Retention, Option<bool>)>,
 ) -> serde_json::Value {
     match rest {
-        Some((ip_mode, retention, small)) if admin => serde_json::json!({
+        Some((i, retention, small)) if admin => serde_json::json!({
             "enabled": enabled,
-            "ipMode": ip_mode,
+            "ipMode": i.ip_mode,
+            "maxIpMode": i.max_ip_mode,
+            "queryStrings": i.query_strings,
+            "maxQueryStrings": i.max_query_strings,
             "retention": retention,
             "small": small,
         }),
@@ -557,18 +564,6 @@ pub async fn first_default(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> sq
     .execute(&mut **tx)
     .await?;
     Ok(on)
-}
-
-/// The saved setting ('observability' in pyo.settings).
-pub async fn ip_mode(db: &PgPool) -> ApiResult<IpMode> {
-    let v: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT value FROM pyo.settings WHERE key = 'observability'")
-            .fetch_optional(db)
-            .await?;
-    Ok(
-        v.and_then(|v| serde_json::from_value(v["ipMode"].clone()).ok())
-            .unwrap_or_default(),
-    )
 }
 
 fn env(key: &str) -> Option<String> {
@@ -607,8 +602,8 @@ impl Observability {
             legacy: RwLock::new(false),
             sampled: Mutex::new(HashMap::new()),
             db_sampled: Mutex::new(HashMap::new()),
-            ip_mode: RwLock::new((Instant::now() - Duration::from_secs(60), IpMode::None)),
             on: RwLock::new((Instant::now() - Duration::from_secs(60), true)),
+            off_teams: RwLock::new((Instant::now() - Duration::from_secs(60), Default::default())),
         })
     }
 
@@ -800,16 +795,46 @@ impl Observability {
         Ok(map)
     }
 
-    pub(crate) async fn current_ip_mode(&self) -> IpMode {
+    /// What applies to these teams' data now (teamobs.rs).
+    pub(crate) async fn teams(&self, team_ids: &[String]) -> ApiResult<HashMap<String, crate::teamobs::Effective>> {
+        crate::teamobs::for_teams(&self.db, team_ids).await
+    }
+
+    /// What applies to a team's data now (teamobs.rs). When it can't be
+    /// read: on, with no addresses shown, query strings as before teams
+    /// chose (sensitive values are never kept).
+    pub(crate) async fn team(&self, team_id: &str) -> crate::teamobs::Effective {
+        crate::teamobs::for_team(&self.db, team_id).await.unwrap_or_default()
+    }
+
+    /// Whether a team's servers collect now: it hasn't turned observability
+    /// off (the installation's switch is `enabled`). Cached 5s.
+    pub(crate) async fn team_on(&self, team_id: &str) -> bool {
         {
-            let g = self.ip_mode.read().await;
-            if g.0.elapsed() < Duration::from_secs(30) {
-                return g.1;
+            let g = self.off_teams.read().await;
+            if g.0.elapsed() < Duration::from_secs(5) {
+                return !g.1.contains(team_id);
             }
         }
-        let mode = ip_mode(&self.db).await.unwrap_or_default();
-        *self.ip_mode.write().await = (Instant::now(), mode);
-        mode
+        match crate::teamobs::off_teams(&self.db).await {
+            Ok(off) => {
+                let off: std::collections::HashSet<String> = off.into_iter().collect();
+                let on = !off.contains(team_id);
+                *self.off_teams.write().await = (Instant::now(), off);
+                on
+            }
+            Err(_) => !self.off_teams.read().await.1.contains(team_id),
+        }
+    }
+
+    /// After this replica changed a team's switch: no waiting for the cache.
+    pub(crate) async fn set_team_on(&self, team_id: &str, on: bool) {
+        let mut g = self.off_teams.write().await;
+        if on {
+            g.1.remove(team_id);
+        } else {
+            g.1.insert(team_id.to_owned());
+        }
     }
 
     /// After the retention setting changed: the tables' TTLs follow now
@@ -843,7 +868,7 @@ impl Observability {
     /// cluster. Best effort: a failure is logged, never returned.
     pub async fn record_metrics(&self, team_id: &str, cluster_id: &str, hb: &pyo_proto::Heartbeat) {
         let Some(ch) = self.store().await else { return };
-        if !*self.ready.read().await {
+        if !*self.ready.read().await || !self.team_on(team_id).await {
             return;
         }
         {
@@ -923,12 +948,20 @@ impl Observability {
             g.insert(cluster_id.to_owned(), Instant::now());
         }
         let r = async {
-            let dbs: Vec<(String, String, String, String)> = sqlx::query_as(
+            let mut dbs: Vec<(String, String, String, String)> = sqlx::query_as(
                 "SELECT id, team_id, namespace, name FROM pyo.databases WHERE cluster_id = $1",
             )
             .bind(cluster_id)
             .fetch_all(&self.db)
             .await?;
+            // Not the databases of teams with observability off.
+            let mut kept = Vec::with_capacity(dbs.len());
+            for d in dbs.drain(..) {
+                if self.team_on(&d.1).await {
+                    kept.push(d);
+                }
+            }
+            let dbs = kept;
             let ts = pyo_proto::now_ms() / 1000;
             let out = database_metric_rows(ts, cluster_id, &dbs, &hb.database_metrics);
             if !out.is_empty() {
@@ -992,7 +1025,7 @@ impl Observability {
         let Some(ch) = self.store().await else {
             return Ok(0);
         };
-        if !*self.ready.read().await {
+        if !*self.ready.read().await || !self.team_on(team_id).await {
             return Ok(0);
         }
         let mut out = String::new();
@@ -1369,13 +1402,15 @@ impl Observability {
             .await
             .map_err(logs_unreadable)?;
         let more = rows.len() > limit as usize;
-        let mode = self.current_ip_mode().await;
+        let team = self.team(team_id).await;
+        let mode = team.ip_mode;
         let logs: Vec<Value> = rows
             .iter()
             .take(limit as usize)
             .map(|r| {
                 json!({
-                    "at": r["at"], "host": r["host"], "method": r["method"], "path": r["path"], "url": r["url"],
+                    "at": r["at"], "host": r["host"], "method": r["method"], "path": r["path"],
+                    "url": pyo_proto::traffic::shape_url(r["url"].as_str().unwrap_or(""), team.query_strings.as_str()),
                     "status": r["status"], "durationMs": r["duration_ms"].as_f64().unwrap_or(0.0).round(), "bytes": r["bytes"],
                     "country": r["country"], "countryName": r["country_name"], "city": r["city"], "referrer": r["referrer"], "device": r["device"], "browser": r["browser"], "userAgent": r["user_agent"],
                     "ip": mode.apply(r["ip"].as_str().unwrap_or("")),
@@ -1472,9 +1507,11 @@ mod tests {
     fn only_the_installation_admin_reads_its_observability_settings() {
         use serde_json::json;
         let retention = crate::retention::Retention::default();
-        let rest = Some((IpMode::Full, retention, Some(false)));
+        let i = crate::teamobs::Installation::from_settings(&json!({ "ipMode": "anonymized", "maxIpMode": "full", "maxQueryStrings": "names" }));
+        let rest = Some((i, retention, Some(false)));
         let admin = super::visible_settings(true, true, rest);
-        assert_eq!(admin["ipMode"], "full");
+        assert_eq!((admin["ipMode"].as_str(), admin["maxIpMode"].as_str()), (Some("anonymized"), Some("full")));
+        assert_eq!((admin["queryStrings"].as_str(), admin["maxQueryStrings"].as_str()), (Some("names"), Some("names")));
         assert_eq!(admin["retention"]["analyticsMonths"], 12);
         assert_eq!(admin["small"], false);
         // Everyone else: whether it's on, nothing of the installation's.

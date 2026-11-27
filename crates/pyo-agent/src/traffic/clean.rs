@@ -1,13 +1,14 @@
 //! One gateway line in, one kept row out: the query's sensitive values
-//! redacted, the visitor's country looked up and their address hashed with
-//! the day's salt, then kept only as the IP setting says. Nothing here
-//! leaves the cluster but what the totals add up.
+//! redacted, then the query kept as the team's query string setting says,
+//! the visitor's country looked up and their address hashed with the day's
+//! salt, then kept only as the IP setting says. Nothing here leaves the
+//! cluster but what the totals add up.
 
 use std::net::IpAddr;
 
 use pyo_proto::traffic::{
     AccessLine, ConnectionRow, RequestRow, TrafficContext, WafRow, mask_ip, port_key_string,
-    refusal, split_url,
+    refusal, shape_url, split_url,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -117,6 +118,7 @@ impl Cleaner<'_> {
             let ip = l["client"].as_str().unwrap_or("");
             let country = self.locate.country(ip);
             let (path, url, _, _) = split_url(l["uri"].as_str().unwrap_or("/"));
+            let url = shape_url(&url, &self.ctx.query_strings);
             let row = WafRow {
                 at,
                 host: host.clone(),
@@ -186,7 +188,12 @@ impl Cleaner<'_> {
         let ua = l.user_agent.as_str();
         let status = l.status;
         let method = if l.method.is_empty() { "GET".to_owned() } else { capped(&l.method, 16) };
-        let (path, url, keys, _) = split_url(if l.path.is_empty() { "/" } else { l.path.as_str() });
+        let (path, url, mut keys, _) = split_url(if l.path.is_empty() { "/" } else { l.path.as_str() });
+        // The team's query string setting: names only, or no query at all.
+        let url = shape_url(&url, &self.ctx.query_strings);
+        if self.ctx.query_strings == "none" {
+            keys.clear();
+        }
         let parsed = self.ua.parse(ua);
         let crawler = parsed.as_ref().is_some_and(|r| r.category == "crawler");
         let device = match parsed.as_ref().map(|r| r.category) {
@@ -290,6 +297,36 @@ mod tests {
         let mut other = line.clone();
         other["host"] = json!("203.0.113.1");
         assert_eq!(c.clean(&other, 0), None);
+    }
+
+    #[test]
+    fn the_team_settings_decide_what_is_kept() {
+        let ua = woothee::parser::Parser::new();
+        let locate = |_: &str| String::new();
+        let line = json!({ "host": "shop.example.com", "method": "GET", "path": "/reset?token=abc&page=2&q=shoes", "status": 200, "remote": "203.0.113.9" });
+        let waf = json!({ "waf": true, "host": "shop.example.com", "client": "203.0.113.9", "uri": "/login?password=x&next=/a", "blocked": true });
+        let with = |ip: &str, qs: &str| TrafficContext { ip_mode: ip.into(), query_strings: qs.into(), ..ctx() };
+        let request = |ctx: &TrafficContext| {
+            let c = cleaner(ctx, &ua, &locate);
+            let Some(Cleaned::Request { row, params, .. }) = c.clean(&line, 0) else { panic!("a request") };
+            let Some(Cleaned::Waf { row: w, .. }) = c.clean(&waf, 0) else { panic!("a finding") };
+            (row.url, row.ip, params, w.url, w.ip)
+        };
+        let ctx = with("full", "keep");
+        let (url, ip, params, waf_url, waf_ip) = request(&ctx);
+        assert_eq!((url.as_str(), ip.as_str()), ("/reset?token=[redacted]&page=2&q=shoes", "203.0.113.9"));
+        assert_eq!(params, ["token", "page", "q"]);
+        assert_eq!((waf_url.as_str(), waf_ip.as_str()), ("/login?password=[redacted]&next=/a", "203.0.113.9"));
+        let ctx = with("none", "names");
+        let (url, ip, params, waf_url, waf_ip) = request(&ctx);
+        assert_eq!((url.as_str(), ip.as_str()), ("/reset?token&page&q", ""));
+        assert_eq!(params, ["token", "page", "q"], "names are still counted");
+        assert_eq!((waf_url.as_str(), waf_ip.as_str()), ("/login?password&next", ""));
+        let ctx = with("anonymized", "none");
+        let (url, ip, params, waf_url, _) = request(&ctx);
+        assert_eq!((url.as_str(), ip.as_str()), ("/reset", "203.0.113.0"));
+        assert!(params.is_empty(), "no names either");
+        assert_eq!(waf_url, "/login");
     }
 
     #[test]

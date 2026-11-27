@@ -117,7 +117,8 @@ export const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
   {
     label: "Team",
     items: [
-      { label: "Settings", href: "/settings", icon: SlidersHorizontalIcon, exact: true },
+      // Its tabs too (/settings/observability). Billing, its own item, claims more of the path.
+      { label: "Settings", href: "/settings", icon: SlidersHorizontalIcon },
       { label: "Members", href: "/members", icon: UsersIcon },
       { label: "Notifications", href: "/notifications", icon: BellIcon },
       { label: "Audit log", href: "/audit-log", icon: ListMagnifyingGlassIcon, admin: true },
