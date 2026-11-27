@@ -2,7 +2,7 @@
 
 Design for 0.51.1. Status: approved 2026-11-24. Stages 1 to 3 (the API, the daemon, sandbox.sh and the dashboard) are built. Stage 4 (Pyo Cloud's signer, then end to end on staging) is next. The chosen approach is (b): the sandbox server calls out to Pyo Cloud.
 
-Self-hosted Pyo moves to the same channel in 0.51.1 too (decided 2026-11-24). See [Self-hosted](#self-hosted) at the end.
+Self-hosted Pyo moves to the same channel in 0.51.1 too (decided 2026-11-24). See [Self-hosted](#self-hosted) at the end. Pyo's direct path to sandbox servers is gone in 0.52.0 (decided 2026-11-27). See [Removing the direct path](#removing-the-direct-path-0520).
 
 ## Goal
 
@@ -287,9 +287,9 @@ Why the tailnet first: a self-hosted Pyo may have no public address. Sandbox ser
 ### Migration
 
 - **New servers.** In 0.51.1, `addSandboxServer` and a Hetzner sandbox server made by a self-hosted Pyo both make outbound servers. `createSandboxJoinCode` stays Cloud's: self-hosted keeps its one add operation, with the same answer.
-- **Servers that joined before** keep working. Pyo calls them as now, straight or through a cluster's agent. The runner reads their reports. The dashboard shows "Run sandbox.sh again to update this server." with **Update**.
+- **Servers that joined before** were to keep the direct path for one release. There was no 0.51.1 release, so from 0.52.0 they take no commands until **Update** (see [Removing the direct path](#removing-the-direct-path-0520)).
 - **Update** (`resetSandboxServerAccess`, now for these servers too, self-hosted only) gives a fresh command for the same server. It doesn't stop the server. Run on the server, it joins over the channel. At the join the row turns outbound and Pyo stops calling it. Its sandboxes keep their records and keep running: the daemon restarts with its new config, as on any update. The API marks such a server `needsUpdate`.
-- **Removal of the direct path:** 0.52.0 at the earliest, in the release that moves Cloud's Hetzner sandbox servers (decision 5). It removes Pyo's direct and relayed calls to sandbox servers, the runner's calls, the door's `/sandbox/join` and `sandbox.sh --pyo`. That release's notes say at the top: "Run sandbox.sh again on each sandbox server that shows Update."
+- **Removal of the direct path:** 0.52.0. See [Removing the direct path](#removing-the-direct-path-0520).
 - **Removing an outbound server** stops its key at once but doesn't delete its sandboxes, as on Cloud. They end at their lifetime, or with `sandbox.sh --uninstall` there. The docs say so.
 
 ### The four contexts
@@ -321,3 +321,39 @@ Why the tailnet first: a self-hosted Pyo may have no public address. Sandbox ser
 | **Total** | **about 5 days** |
 
 The staging test on throwaway servers comes after this and isn't counted.
+
+## Removing the direct path (0.52.0)
+
+Decided 2026-11-27: 0.52.0 removes the direct path. There was no 0.51.1 release, so 0.52.0 is also the first release with the outbound channel. Self-hosted servers that joined at Pyo's tailnet door take no commands after the update until an admin presses **Update** on each one and runs its command there.
+
+### What's gone
+
+- **Pyo's calls to daemons.** `daemon.rs` only queues commands on a server's channel. No more plain HTTP to `<tailnet IP>:7070`, and no more relay through a cluster's agent (`SandboxCall`). Agents answer a `SandboxCall` from an older Pyo with an error. The proto type stays one release, so an agent still parses a command an older Pyo queued.
+- **The runner's report reads.** Every server posts its report over its channel. The runner sweeps channels, ends sandboxes past their lifetime and retries deletes.
+- **The door's join.** `POST /sandbox/join` on the tailnet door (:5006) is gone. The door keeps the registry and Hetzner servers' bootstrap.
+- **Pyo's `sandboxes` name as a proxy.** It passed web pages, the terminal, files and exec on to a door server's daemon. It now answers only the update notice, so nothing else of Pyo answers on that host. The name itself stays in tailscale.rs for now: removing it touches the Gateway and the Tailscale card, which is separate work.
+- **Admin and create tokens.** Pyo signs no tokens for its own calls. The daemon refuses tokens with the admin scope.
+- **The daemon's routes for Pyo:** `GET /v1/report`, `GET` and `POST /v1/sandboxes`, `POST /v1/commands`, `DELETE /v1/sandboxes/{id}`, `.../pause`, `.../resume` and `.../ttl`. Those come over the channel only.
+- **The daemon's plain HTTP listener** on `<tailnet IP>:7070`. The daemon serves HTTPS on its tailnet name at :7443 only. `serve` stops on a config without `outbound` and says to press **Update**.
+- **`sandbox.sh --pyo`** and its door join. A `--pyo` command, or an update run on a server from the door, stops with "This server joined Pyo the old way and needs an update. Press Update on it in Pyo, then run the command it shows here." Its health check is HTTPS on the tailnet name. ufw opens 7443 and closes 7070.
+
+### What stays
+
+- The browser and SDK API on the daemon, with client tokens: get, exec, files, the terminal, ports and web pages. They're what the dashboard and SDKs call on :7443.
+- The one-time join codes (`sandbox_join_codes`, `join.rs`): the outbound join, **Update** and Hetzner servers use them.
+- The sandbox token key: client tokens and registry tokens.
+- `address`, `via_cluster` and `outbound` on `sandbox_servers`. The channel uses the first two. `outbound = false` is how Pyo knows a server joined the old way.
+- The edge proxy on 80 and 443. It never went through Pyo.
+
+### Servers from the door
+
+- `listSandboxServers` shows `needsUpdate` (self-hosted). The dashboard shows "Needs update" as the server's state and "This server needs an update. Press Update to reconnect it." with **Update**.
+- `listSandboxes` and `getSandbox` show `serverNeedsUpdate`, and `url` is null. The sandbox's page shows the same notice with **Update**. `getSandbox` has no `connection`, and `connectionNote` is the notice.
+- Every command against such a server or its sandboxes answers 409 with "This server needs an update. Press Update to reconnect it." before anything is sent: create on it, delete, pause, resume, extend, ports, tokens, MCP exec and files. Placement skips it. When every server a team may use needs an update, a create says "Your sandbox servers need an update. Press Update on each one to reconnect it."
+- The runner asks such a server nothing. Its sandboxes past their lifetime end in Pyo's records, and the daemon ends them on its own.
+- **Update** (`resetSandboxServerAccess`) gives a command for the same server. At its join the row turns outbound and the server takes commands again. Its sandboxes keep running through it.
+
+### Migration
+
+None. No column or table is used only by the direct path, so nothing is dropped, and the release before keeps working against the schema during an update.
+
