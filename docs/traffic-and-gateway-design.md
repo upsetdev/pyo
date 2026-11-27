@@ -502,12 +502,12 @@ its own.
 | Public ports off | Connections that came in on public ports end, after the confirm. Tunnel and tailnet connections stay | ServiceLB removes its pods. No listener changes |
 | Cloudflare Tunnel on | Nothing | The connector and `pyo-tunnel-origin` are new. No domain has moved yet |
 | A domain moves to the tunnel (`switching`) | That domain's open connections drain once | Its filter chain gets the tunnel client policy (visitor from X-Forwarded-For, trusted from the connectors). That's per filter chain in Envoy, so it can't be route-only |
-| `switching` → `on` | Nothing | The gate goes into its SecurityPolicy, and its :80 route goes. With every route always carrying its policies, both are route changes |
+| `switching` → `on` | That domain's open connections drain once more (measured, see "Traffic paths as built") | The gate goes into its SecurityPolicy, and its :80 route goes. Its route policy's name changes with its route's, and the filter is named after it |
 | A domain moves back to public ports | That domain's open connections drain once | Its filter chain drops the tunnel client policy |
 | Cloudflare Tunnel off | Domains still on the tunnel stop (confirmed). Moved-back domains drained once each when they moved | |
 | A connector rollout | Tunnel domains drain about 3 times (unchanged, cloudflare-tunnel.md §7.3) | The trusted address list is in the tunnel client policies |
-| Tailnet off | ts.net domains stop (confirmed). Other tailnet names, Pyo's dashboard included, stay connected | Only routes and hosting change. Certificates stay, so the `pyo-tailnet` HTTPS listener is untouched |
-| Tailnet on | Nothing | Routes and hosting come back |
+| Tailnet off | ts.net domains stop (confirmed). On the cluster Pyo runs on, with services' ts.net names, Pyo's own tailnet names drain once (said in the confirm) | Only routes change, and hosting and certificates stay. But the last service route takes its rate limit filter off the `pyo-tailnet` HTTPS chain |
+| Tailnet on | Nothing, except as above on the cluster Pyo runs on | Routes come back, with the filter |
 | TCP and UDP ports on or off | Port connections end when off (confirmed). Web connections stay | `pyo-public-ports` is its own Service with its own ServiceLB pods |
 | PROXY protocol on or off | Every connection on ports 80 and 443 drains once: public, tunnel and the Tailscale addresses. ts.net names stay | `proxyProtocol` is a listener filter (listener-wide in Envoy). Checked with egctl (§20). Unchanged from today |
 
@@ -983,6 +983,26 @@ above, this list wins. Each change keeps traffic flowing.
   to them end."
 - **Last path.** The dashboard refuses it before asking the API, with the
   same words.
+- **Tailnet off and on drain the tailnet listener once** (found with
+  `scripts/gateway-drain-check.sh`, 2026-11-27). Services' ts.net routes
+  carry their route policies (the idle rate limit), Pyo's own routes there
+  carry none. With every service's ts.net route gone, or back, the
+  `local_ratelimit` filter leaves or joins the `pyo-tailnet` HTTPS chain.
+  On other clusters only the ts.net names that stop are on it. On the
+  cluster Pyo runs on, Pyo's dashboard, registry and sandboxes names are
+  too: their open connections drop once. The answer has `dashboardDrops`
+  and both confirms say "Open connections to Pyo on the tailnet drop once.
+  The dashboard reconnects by itself." (Tailnet on asks too, there.) The
+  fix is an always-on route policy on Pyo's own tailnet routes. It needs
+  new admission rules and a connect-command refresh, so it's left for the
+  Gateway section's release.
+- **`switching` → `on` drains the moving domain once more.** Its route
+  policy is named after its route (`…-switching-plain-http`, then
+  `…-tunnel-plain-http`), and Envoy Gateway names the `custom_response`
+  filter after the policy. So a domain moved to the tunnel drains twice,
+  and one moved back drains once. That's the tunnel's route naming, not
+  traffic paths. Naming the policy by domain instead would make it one
+  drain, after one more drain when it rolls out.
 
 ## 19. Estimate
 
