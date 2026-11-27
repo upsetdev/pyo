@@ -1259,6 +1259,18 @@ async fn ensure_certificate<C: TunnelApi>(
     .bind(&sealed)
     .execute(&mut *tx)
     .await?;
+    // Issued again within a day of the last time: the one before the last
+    // is replaced as the old one below. It goes to the leftovers, revoked
+    // at the end of this pass, so it never stays valid unseen.
+    sqlx::query(
+        "INSERT INTO pyo.tunnel_leftovers (team_id, kind, cf_certificates)
+         SELECT team_id, 'record', ARRAY[cf_certificate_old] FROM pyo.cluster_tunnels
+          WHERE cluster_id = $1 AND $2::text IS NOT NULL AND cf_certificate_old IS NOT NULL AND cf_certificate_old <> $2",
+    )
+    .bind(&row.cluster_id)
+    .bind(&row.cf_certificate_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(
         "UPDATE pyo.cluster_tunnels SET certificate_id = $2, cf_certificate_id = $3, rotate = rotate AND $5,
                 cf_certificate_old = coalesce($4, cf_certificate_old),
