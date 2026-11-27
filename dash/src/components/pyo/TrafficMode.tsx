@@ -117,6 +117,7 @@ type Pending =
   | { kind: "public" | "tunnel" | "tailnet"; domains: PathDomain[] }
   | { kind: "proxy"; on: boolean }
   | { kind: "tailnetOn" }
+  | { kind: "publicOn" }
   | { kind: "ports" };
 
 /** One path's row: its switch, hint and what's under it. */
@@ -177,6 +178,8 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
   // The tailnet listener changes on the cluster Pyo runs on: its own
   // dashboard there drops once (traffic_paths.rs `dashboard_drops`).
   const dashboardDrops = !!c.sameCluster && domains.some((d) => d.hostname.toLowerCase().endsWith(".ts.net"));
+  // ServiceLB moves them between two Services: measured 1 to 5 seconds.
+  const PORTS_PAUSE = "TCP and UDP ports pause for a few seconds, and their open connections end.";
   const DASHBOARD_DROPS = "Open connections to Pyo on the tailnet drop once. The dashboard reconnects by itself.";
   const movable = (host: string) => !!tunnelZoneFor(s, host, c);
   const removing = !!c.tunnel?.removeWhenBack || c.tunnel?.state === "removing";
@@ -203,6 +206,8 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
     if (on) {
       if (p === "tunnel") return setOpening(true);
       if (p === "tailnet" && dashboardDrops) return setPending({ kind: "tailnetOn" });
+      // Published TCP and UDP ports move to the websites' Service.
+      if (p === "public" && hasPorts && c.publicPorts) return setPending({ kind: "publicOn" });
       return void send({ [p]: true }, `${LABEL[p]} on`);
     }
     // Off: the confirm lists what it touches.
@@ -231,6 +236,7 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
       return void send({ proxyProtocol: pending.on }, pending.on ? "Websites accept PROXY protocol" : "Websites no longer read PROXY protocol");
     if (pending.kind === "ports") return void send({ publicPorts: false }, "TCP and UDP ports closed");
     if (pending.kind === "tailnetOn") return void send({ tailnet: true }, "Tailnet on");
+    if (pending.kind === "publicOn") return void send({ public: true }, "Public ports on");
     const args =
       pending.kind === "public"
         ? { public: false, moveToTunnel: move, ...(hasPorts ? { publicPorts: ports } : {}) }
@@ -261,7 +267,14 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
               ? `These stop answering from the internet: ${names((move ? stopping : listed).map((d) => d.hostname))}.`
               : null,
             c.sameCluster ? "The public dashboard closes. Open Pyo through Tailscale or your local network." : null,
+            hasPorts ? (ports ? PORTS_PAUSE : "TCP and UDP ports close.") : null,
           ],
+        };
+      case "publicOn":
+        return {
+          title: `Open public ports on ${c.name}?`,
+          confirm: "Open public ports",
+          lines: [PORTS_PAUSE],
         };
       case "tunnel":
         return {
@@ -394,7 +407,7 @@ export function ClusterTraffic({ cluster: c }: { cluster: Cluster }) {
         <ConfirmDialog
           open
           onClose={() => setPending(null)}
-          tone={pending?.kind === "proxy" || pending?.kind === "tailnetOn" ? "primary" : "danger"}
+          tone={pending?.kind === "proxy" || pending?.kind === "tailnetOn" || pending?.kind === "publicOn" ? "primary" : "danger"}
           title={dialog.title}
           description={
             <div className="space-y-1.5">
