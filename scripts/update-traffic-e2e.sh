@@ -83,6 +83,8 @@
 # --gap N      seconds of quiet between actions (30)
 # --rate N     requests a second, per domain and connection style (10)
 #
+# PYO_E2E_VM_PREFIX names the VMs <prefix>-1 and <prefix>-2 instead.
+#
 # The tunnel leg runs when PYO_E2E_CF_TOKEN holds a Cloudflare API token
 # for one throwaway zone (Zone:Read, DNS:Edit, Cloudflare Tunnel:Edit, SSL
 # and Certificates:Edit). It refuses a token that sees more than one zone.
@@ -121,8 +123,9 @@ VM_IMAGE=${PYO_E2E_VM_IMAGE:-24.04}
 # The registry every Pyo install has on its own server.
 VM_IMAGES=127.0.0.1:5005/pyo
 DEV_IMAGES=${PYO_IMAGES:-127.0.0.1:5005/pyo}
-VM1=zd-e2e-1 VM2=zd-e2e-2
-[ "${1:-}" != gateway ] || VM1=zd-gw-1 VM2=zd-gw-2
+VM_PREFIX=${PYO_E2E_VM_PREFIX:-zd-e2e}
+[ "${1:-}" != gateway ] || VM_PREFIX=${PYO_E2E_VM_PREFIX:-zd-gw}
+VM1=$VM_PREFIX-1 VM2=$VM_PREFIX-2
 # paths: the tcp service's public TCP port.
 TCP_PORT=18080
 
