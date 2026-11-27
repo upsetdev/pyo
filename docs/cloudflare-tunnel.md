@@ -1798,6 +1798,8 @@ real-Cloudflare test"):
 | 502 for names no service has | No wildcard route (`tunnel::ingress`) | `tunnel::tests::a_name_no_service_has_stops_at_the_404_before_the_cluster`, `routes_are_exact_names_then_404`, the loop's end-to-end test (CI) |
 | X-Forwarded-For ended with the connector's pod | Tunnel routes set it to the visitor (`system::tunnel_rule`) | `gateway::tests::tunnel_domains_switch_then_close_the_direct_path`, `rbac::tests::a_static_sites_routes_may_only_name_its_folder`, `scripts/tunnel-gate-e2e.sh` (17 checks, Envoy 1.39.5) |
 | The gate opened on a redundant switch | A name already `"on"` stays `"on"` (`tunnel_ops::switch_state`) | `tunnel_ops::tests::a_name_already_on_the_tunnel_stays_gated_while_its_record_is_made` |
+| Rotate gave about 5 s of Cloudflare's 530 (2026-11-27, `update-traffic-e2e.sh`) | The old token's connectors are cut one by one once the new ones are connected, at most 5 minutes later (§6.4) | `tunnel_loop::tests::the_old_connectors_stay_until_the_new_ones_are_connected` and 5 more, `http_tests::a_tunnel_runs_its_course_over_http`, `the_tunnel_loop_end_to_end` (CI) |
+| Two certificate issues within a day left the one before valid | It goes to the leftovers and is revoked in the same pass | `the_tunnel_loop_end_to_end` (CI) |
 
 Known limits:
 
