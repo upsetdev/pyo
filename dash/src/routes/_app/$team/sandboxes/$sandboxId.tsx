@@ -12,6 +12,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { z } from "zod";
 import { SandboxFiles } from "~/components/pyo/sandbox/SandboxFiles";
+import { NeedsUpdateNotice } from "~/components/pyo/sandbox/SandboxServers";
 import { SandboxTerminal } from "~/components/pyo/sandbox/SandboxTerminal";
 import { TemplateMark, templateOf, TemplateTip } from "~/components/pyo/sandbox/TemplateMark";
 import {
@@ -119,6 +120,7 @@ function SandboxPage() {
   const x = q.data;
   const template = templateOf(x, tq.status === "success" ? tq.data.templates : []);
   const desktopNote = desktopOf(x);
+  const oldServer = x.serverNeedsUpdate ? s.sandboxServers.find((v) => v.id === x.serverId) : undefined;
   const run = async (what: "pause" | "resume") => {
     setBusy(true);
     await act(what, x);
@@ -176,6 +178,7 @@ function SandboxPage() {
           ) : undefined
         }
       />
+      {oldServer && !ended(x) ? <NeedsUpdateNotice server={oldServer} /> : null}
       {x.error ? <Callout tone="danger">{x.error}</Callout> : null}
       <Tabs
         variant="underline"

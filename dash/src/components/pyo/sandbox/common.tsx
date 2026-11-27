@@ -76,7 +76,7 @@ export function useDesktopNotes(list: Sandbox[]) {
   return (x: Sandbox) => {
     const server = serverOf(x);
     const url = tailnetUrl(server);
-    return desktopBlocked(s.tailscale, server) ?? (url && ok[url] === false ? OFF_TEAM_TAILNET : null);
+    return desktopBlocked(server) ?? (url && ok[url] === false ? OFF_TEAM_TAILNET : null);
   };
 }
 

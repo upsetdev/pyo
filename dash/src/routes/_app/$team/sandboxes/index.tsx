@@ -46,6 +46,7 @@ import { currentSlug } from "~/lib/pyo/paths";
 import { useQuery } from "~/lib/pyo/query";
 import {
   ended,
+  NEEDS_UPDATE,
   sandboxApi,
   sizeLabel,
   timeLeft,
@@ -362,6 +363,9 @@ function SandboxTable({
             </Td>
             <Td>
               <SandboxStatus state={x.state} sandbox={x} />
+              {x.serverNeedsUpdate && !ended(x) ? (
+                <p className="text-[12px] text-muted-foreground">{NEEDS_UPDATE}</p>
+              ) : null}
             </Td>
             <Td className="tabular-nums text-muted-foreground">{sizeLabel(x.cpus, x.memoryMib)}</Td>
             <Td className="text-muted-foreground">{timeAgo(x.createdAt, now)}</Td>

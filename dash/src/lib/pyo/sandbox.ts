@@ -27,6 +27,7 @@ export {
   isDesktop,
   isPyos,
   minSize,
+  NEEDS_UPDATE,
   OFF_TEAM_TAILNET,
   overallPercent,
   pyosFirst,
@@ -77,9 +78,11 @@ export type Sandbox = {
   pauseWhenIdleSecs: number | null;
   /** Names only: Pyo never keeps the values. */
   env: string[];
-  /** Its server's daemon, `http://<tailnet ip>:7070`. On Pyo Cloud,
-   * `https://<server>.<tailnet>.ts.net:7443`. */
+  /** Its server's daemon, `https://<server>.<tailnet>.ts.net:7443`. Null
+   * while its server needs an update. */
   url: string | null;
+  /** Its server joined before 0.52.0 and takes no commands until it's updated. */
+  serverNeedsUpdate?: boolean;
   /** Its server's edge proxy, where open ports are served. */
   edgeUrl: string | null;
   ports: SandboxPort[];
@@ -119,8 +122,7 @@ export type Connection = {
   token: string;
   /** Milliseconds since 1970. */
   expiresAt: number;
-  /** Sandboxes' web pages over HTTPS on the tailnet, once Tailscale is set
-   * up. A self-hosted Pyo's terminal and files go there too. */
+  /** Sandboxes' web pages over HTTPS on the tailnet: the same as `url`. */
   webUrl?: string;
 };
 
@@ -209,7 +211,7 @@ export type SandboxServer = {
   cloud?: SandboxServerCloud | null;
   /** It joined Pyo over HTTPS and gets its work from there. */
   outbound?: boolean;
-  /** Self-hosted: it joined before 0.51.1 and moves to HTTPS when sandbox.sh runs again there (Update). */
+  /** It joined before 0.52.0 and takes no commands until its Update command runs there. */
   needsUpdate?: boolean;
   /** Its name on the team's tailnet ("sbx-1.tail1234.ts.net"), once it joined over HTTPS. */
   tailnetName?: string | null;
@@ -453,11 +455,6 @@ export function reachable(url: string): Promise<boolean> {
   return ok;
 }
 
-/** Where this page calls the daemon. A self-hosted Pyo's servers answer
- * plain HTTP on their tailnet address, which a page on HTTPS can't call and
- * its CSP doesn't list, so the calls go through Pyo's sandboxes name
- * (`webUrl`), which passes them on. Pyo Cloud's answer on HTTPS already. */
-const daemonBase = (c: Connection) => (c.url.startsWith("http:") && c.webUrl ? c.webUrl : c.url);
 
 async function daemon<T>(
   id: string,
@@ -466,7 +463,7 @@ async function daemon<T>(
 ): Promise<T> {
   const c = await connectionFor(id);
   const q = new URLSearchParams(init.query ?? {});
-  const url = `${daemonBase(c)}/v1/sandboxes/${enc(id)}${path}${q.size ? `?${q}` : ""}`;
+  const url = `${c.url}/v1/sandboxes/${enc(id)}${path}${q.size ? `?${q}` : ""}`;
   let res: Response;
   try {
     res = await fetch(url, {
@@ -574,7 +571,7 @@ export const parseFrame = <T>(f: Frame): T =>
  */
 export async function connectSocket(id: string) {
   const c = await connectionFor(id);
-  const base = daemonBase(c).replace(/^http/, "ws");
+  const base = c.url.replace(/^http/, "ws");
   const ws = new WebSocket(`${base}/v1/sandboxes/${enc(id)}/connect`, [
     "pyo",
     `pyo.token.${c.token}`,
@@ -705,9 +702,8 @@ export function sdkSnippet(b: Omit<CreateSandbox, "teamId">) {
   ].join("\n");
 }
 
-/** The desktop's screen in a new tab, over HTTPS on the tailnet: Pyo
- * passes it on to the sandbox server's daemon. The tab opens at once, so
- * browsers don't block it. */
+/** The desktop's screen in a new tab, over HTTPS on the sandbox server's
+ * tailnet name. The tab opens at once, so browsers don't block it. */
 export async function openDesktop(id: string, opts: { app?: DesktopApp; name?: string } = {}) {
   const tab = window.open("about:blank", "_blank");
   if (tab) tab.opener = null;
@@ -718,9 +714,9 @@ export async function openDesktop(id: string, opts: { app?: DesktopApp; name?: s
       tokens.delete(id);
       c = await connectionFor(id);
     }
-    if (!c.webUrl) throw new Error(desktopBlocked(null) ?? "");
-    // Pyo Cloud's servers: a tab there from off the tailnet would only fail.
-    if (c.url.startsWith("https:") && !(await reachable(c.url))) throw new Error(OFF_TEAM_TAILNET);
+    if (!c.webUrl) throw new Error(desktopBlocked() ?? "");
+    // A tab there from off the tailnet would only fail.
+    if (!(await reachable(c.url))) throw new Error(OFF_TEAM_TAILNET);
     const url = desktopUrl(c.webUrl, id, c.token, opts);
     if (tab) tab.location.href = url;
     else window.location.href = url;

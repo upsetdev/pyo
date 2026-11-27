@@ -6,6 +6,7 @@ import {
   addServerBlock,
   defaultTemplate,
   desktopBlocked,
+  NEEDS_UPDATE,
   desktopUrl,
   fieldsSwapped,
   freeLabel,
@@ -155,17 +156,14 @@ test("the desktop needs room, and opens over HTTPS on the tailnet", () => {
   expect(url.searchParams.has("path")).toBe(false);
 });
 
-test("the desktop waits for its name on the tailnet", () => {
-  expect(desktopBlocked(null)).toContain("Set up Tailscale");
-  expect(desktopBlocked({ suffix: null })).toContain("Set up Tailscale");
-  expect(desktopBlocked({ suffix: "tail1234.ts.net", sandboxes: null })).toContain("isn't ready");
-  expect(desktopBlocked({ suffix: "tail1234.ts.net", sandboxes: "sandboxes.tail1234.ts.net" })).toBe(null);
-  // Self-hosted servers follow Pyo's own name, whatever the server.
-  expect(desktopBlocked(null, { outbound: false, tailnetName: null })).toContain("Set up Tailscale");
-  // Pyo Cloud: the server's own name, with no Tailscale of Pyo's.
-  const cloud = { outbound: true, tailnetName: "sbx-1.tail1234.ts.net" };
-  expect(desktopBlocked(null, cloud)).toBe(null);
-  expect(desktopBlocked(null, { outbound: true, tailnetName: null })).toContain("isn't ready");
+test("the desktop waits for its server's name on the tailnet", () => {
+  const ready = { outbound: true, tailnetName: "sbx-1.tail1234.ts.net" };
+  expect(desktopBlocked(ready)).toBe(null);
+  expect(desktopBlocked({ outbound: true, tailnetName: null })).toContain("isn't ready");
+  expect(desktopBlocked()).toContain("isn't ready");
+  // A server from before 0.52.0 takes no commands until it's updated.
+  expect(desktopBlocked({ outbound: false, tailnetName: null })).toBe(NEEDS_UPDATE);
+  expect(NEEDS_UPDATE).toBe("This server needs an update. Press Update to reconnect it.");
 });
 
 test("a Pyo Cloud sandbox server answers browsers on its tailnet name", () => {

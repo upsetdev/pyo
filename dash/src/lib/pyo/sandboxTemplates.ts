@@ -116,15 +116,17 @@ export function desktopUrl(
   return `${web.replace(/\/$/, "")}/${prefix}vnc.html?${q}`;
 }
 
-type TailscaleLike = { suffix?: string | null; sandboxes?: string | null } | null | undefined;
 
 type OutboundLike = { outbound?: boolean; tailnetName?: string | null } | null | undefined;
 
-/** Where a sandbox server that joined over HTTPS (Pyo Cloud's) answers
- * browsers: HTTPS on its own tailnet name. */
+/** Where a sandbox server answers browsers: HTTPS on its own tailnet name. */
 export const TAILNET_PORT = 7443;
 
-/** That server's address for browsers, or null for any other server. */
+/** A sandbox server that joined before 0.52.0 takes no commands until it's
+ * updated. The API says the same (sandbox/mod.rs `NEEDS_UPDATE`). */
+export const NEEDS_UPDATE = "This server needs an update. Press Update to reconnect it.";
+
+/** That server's address for browsers, or null until it has one. */
 export function tailnetUrl(x: OutboundLike) {
   return x?.outbound && x.tailnetName ? `https://${x.tailnetName}:${TAILNET_PORT}` : null;
 }
@@ -133,13 +135,10 @@ export function tailnetUrl(x: OutboundLike) {
 export const OFF_TEAM_TAILNET = "Opens from devices on your team's tailnet.";
 
 /** Why the desktop can't open yet, or null when it can: it opens over
- * HTTPS on the tailnet only. Self-hosted, at sandboxes' own name there.
- * On Pyo Cloud, at the sandbox's server's own name (`server`). */
-export function desktopBlocked(ts: TailscaleLike, server?: OutboundLike) {
-  if (server?.outbound) return server.tailnetName ? null : "Its address on your tailnet isn't ready yet.";
-  if (ts?.sandboxes) return null;
-  if (!ts?.suffix) return "Opens over your tailnet. Set up Tailscale in Integrations first.";
-  return "Its address on your tailnet isn't ready yet.";
+ * HTTPS on the sandbox's server's own tailnet name only (`server`). */
+export function desktopBlocked(server?: OutboundLike) {
+  if (server && !server.outbound) return NEEDS_UPDATE;
+  return server?.tailnetName ? null : "Its address on your tailnet isn't ready yet.";
 }
 
 /** The template a new sandbox form starts on: base, else the first usable one. */
