@@ -520,6 +520,7 @@ Snapshot (`crates/pyo-api/src/snapshot.rs:140-170`) per cluster:
   "tunnelId": "1f2e…", "defaultDomain": "example.com", "portsPublic": true,
   "connectors": [{ "server": "server-1", "ready": true, "colo": "FRA", "since": 1763800000000 }],
   "health": "connected",          // connected | degraded | down | starting | unknown
+  "rotating": false,               // Rotate asked for, until the old token's connectors are cut (§6.4)
   "certificate": { "id": "crt_…", "notAfter": 1795300000000 },
   "checkedAt": 1763800000000
 }
@@ -563,7 +564,8 @@ SetDomainTunnel { service_id: String, domain_id: String, on: bool, #[serde(defau
 /// ones they replaced go back), the connector in the cluster and the tunnel itself. The cluster must not
 /// be in tunnel mode. Team owners and admins.
 RemoveClusterTunnel { cluster_id: String, #[serde(default = "yes")] restore_records: bool },
-/// Give the cluster's tunnel a new token and drop the old connections. Team owners and admins.
+/// Give the cluster's Cloudflare Tunnel a new token and a new certificate. The old token can't connect from then on.
+/// Its connectors still connected are cut once the new ones are, or after 5 minutes. Team owners and admins.
 RotateTunnelToken { cluster_id: String },
 ```
 
@@ -621,8 +623,9 @@ pinned, no redirects, outbound client with `Reach { private: false }`).
 | Connectors | `GET /accounts/{acct}/cfd_tunnel/{tunnel}/connections` (colo_name, client_version, opened_at, origin_ip per connection) | Cloudflare Tunnel:Read |
 | Token for the agent | `GET /accounts/{acct}/cfd_tunnel/{tunnel}/token` | Cloudflare Tunnel:Edit |
 | Routes | `PUT /accounts/{acct}/cfd_tunnel/{tunnel}/configurations` `{ "config": { "ingress": [...] } }` | Cloudflare Tunnel:Edit |
-| Rotate token | `PATCH /accounts/{acct}/cfd_tunnel/{tunnel}` `{ "tunnel_secret": "<base64 32 bytes>" }`, then drop connections | Cloudflare Tunnel:Edit |
-| Drop connections | `DELETE /accounts/{acct}/cfd_tunnel/{tunnel}/connections` | Cloudflare Tunnel:Edit |
+| Rotate token | `PATCH /accounts/{acct}/cfd_tunnel/{tunnel}` `{ "tunnel_secret": "<base64 32 bytes>" }`, then drop each old connector once the new ones are connected (§6.4) | Cloudflare Tunnel:Edit |
+| Drop one connector | `DELETE /accounts/{acct}/cfd_tunnel/{tunnel}/connections?client_id={connector}` (a UUID, checked first: without it every connector goes) | Cloudflare Tunnel:Edit |
+| Drop connections | `DELETE /accounts/{acct}/cfd_tunnel/{tunnel}/connections` (removal only) | Cloudflare Tunnel:Edit |
 | Delete tunnel | `DELETE /accounts/{acct}/cfd_tunnel/{tunnel}` (needs no active connections) | Cloudflare Tunnel:Edit |
 | Origin certificate | `POST /certificates` `{ "csr": "<PEM>", "hostnames": [...], "request_type": "origin-ecc", "requested_validity": 5475 }` | SSL and Certificates:Edit |
 | Revoke it | `DELETE /certificates/{id}` | SSL and Certificates:Edit |
@@ -635,6 +638,17 @@ certificate, one-level wildcards, validity 7, 30, 90, 365, 730, 1095 or
 5475 days. The tunnel token endpoint path and the PATCH rotation shape come
 from the API reference and must be checked again in the real-zone test
 (§17.4).
+
+Checked on 2026-11-27, "Tunnel permissions"
+(https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/configure-tunnels/remote-tunnel-permissions/):
+after the secret changes, "cloudflared can no longer establish new
+connections to Cloudflare using the old token. However, existing
+connectors will remain active and the tunnel will continue serving
+traffic." The cleanup call
+(https://developers.cloudflare.com/api/resources/zero_trust/subresources/tunnels/subresources/cloudflared/subresources/connections/methods/delete/)
+removes a connector "independently of its current state", and all of them
+without `client_id`. So the secret change cuts nothing, and the cleanup
+cuts live connections.
 
 There's no cheap probe for SSL and Certificates **Edit** short of issuing a
 certificate. The check reads (proves Read), and the first issue reports a
@@ -667,6 +681,8 @@ Tunnel ids are UUIDs: `id_ok` gains `-`, or a separate `uuid_ok`.
   down.
 - No wildcard route for the default domain (see Decisions). Each free name
   under it has its own rule, and any other name gets the catch-all's 404.
+  A connector that just started goes by its local config until these
+  arrive, for a moment (§7.2).
 - `matchSNItoHost` sends the visitor's host as SNI. Go's TLS then checks
   the Origin CA certificate against that host. Verify in e2e (§17.2).
 - cloudflared trusts Cloudflare's Origin CA itself, so no CA file in the
@@ -721,9 +737,11 @@ tasks next to `deploy::dns_watcher` (`deploy.rs:2531`). Per cluster with a
    `cf_status`. Health is computed (§10). Down for 5 minutes: alert event
    `cluster.tunnel_down` (alerts.rs, like server offline), and
    `cluster.tunnel_up` when back.
-8. **Old certificate.** `cf_certificate_old` and `cf_certificate_old_at`
+8. **Rotate** (§6.4): a new secret and the agent's token for it, then
+   the old secret's connectors cut once the new ones are connected.
+9. **Old certificate.** `cf_certificate_old` and `cf_certificate_old_at`
    passed (a day after the new one was issued): revoke and clear.
-9. **Removing.** `state = 'removing'`: PUT ingress with only the catch-all,
+10. **Removing.** `state = 'removing'`: PUT ingress with only the catch-all,
    restore or delete records (only Pyo's, `ours()`), enqueue
    `TunnelRemove`, wait for its answer (or 10 minutes), drop connections,
    delete the tunnel, revoke the certificate, delete the row and the team
@@ -737,14 +755,63 @@ Errors are stored on the row (`error`) or the record (`dns_records.error`)
 in Cloudflare's words via `CfError` (`cloudflare.rs:88-107`), never with the
 token.
 
-### 6.4 Domain DNS checks
+### 6.4 Rotate
+
+`rotateTunnelToken` sets `rotate`. The next pass:
+
+1. `PATCH` a new secret. From then on the old token can't open a
+   connection. Connections already open stay (§6.1).
+2. Reads the tunnel. Every connector listed then ran the old secret: their
+   ids go into `cluster_tunnels.rotation.old`.
+3. Sends the agent the new token (`TunnelSet`) and clears `rotate`, in one
+   transaction. The agent rolls the connector out (maxSurge 1,
+   maxUnavailable 0, §7.2). The old pods serve until the new ones are
+   ready, then leave Cloudflare by themselves.
+
+Each later pass, from Cloudflare's connectors and the agent's report:
+
+- No old connector left: the rotation is over.
+- Cloudflare lists as many new connectors as the agent runs, and a report
+  that came after Pyo first saw that has every connector pod ready and no
+  other pod: whatever is left of `old` is dropped one by one
+  (`?client_id=`). Pyo doesn't run those, so it's someone with the old
+  token.
+- `ROTATE_CUT_SECS` (5 minutes) after the secret changed: what's left of
+  `old` is dropped, whatever runs. If the new pods aren't connected by
+  then, the tunnel has no connector until they are.
+
+Pyo never drops every connection at once on Rotate. Doing that before the
+new pods connected gave about 5 seconds of Cloudflare's 530 (error 1033)
+on every tunnel domain.
+
+`rotating` on the tunnel (snapshot and `getClusterTunnel`) is true from
+the request until the rotation is over.
+
+**A leaked token.** The secret changes on the first pass, at most 30 s
+after Rotate (the loop's interval). Nobody can connect with the old token
+after that. A connector already connected with it keeps its connections
+until the cut, at most 5 minutes plus one pass. Before this change it was
+cut on the first pass. In `update-traffic-e2e.sh fast --dev` (one server,
+2026-11-27) the old pods left Cloudflare 18 and 23 seconds after Rotate,
+and Pyo ended the rotation 40 seconds after it.
+
+Measured there: 8 of 3,234 requests to the two tunnel domains failed
+during Rotate, against 393 before. All were 503 from the origin side,
+within 0.3 s, while the first new connector had started and wasn't ready
+yet. No old connector had stopped then. cloudflared answers 503 until the
+tunnel's routes reach it: the connector now starts with a local config
+(§7.2). With it, the same test lost no request: 0 of 4,583 on Rotate and
+0 of 2,519 on a connector restart (2026-11-27). The old pods stopped 37
+and 43 seconds after Rotate there.
+
+### 6.5 Domain DNS checks
 
 `deploy::check_pending_dns` (`deploy.rs:2547`) skips domains with
 `tunnel` set (their address is Cloudflare's, not the cluster's), like it
 skips `.ts.net`. The tunnel loop sets their status: `pending_dns` while
 switching, `active` once the CNAME is in place and the route is live.
 
-### 6.5 Free domains in tunnel mode
+### 6.6 Free domains in tunnel mode
 
 `freedomain::Mode` (`freedomain.rs:69-89`) gains `Tunnel`. In tunnel mode
 with a default domain, the cluster's free domain is
@@ -790,7 +857,7 @@ kind: Secret
 metadata: { name: pyo-tunnel, namespace: pyo-system,
             labels: { app.kubernetes.io/managed-by: pyo, pyo.dev/tunnel-id: "<id>" } }
 type: Opaque
-stringData: { token: "<tunnel token>" }
+stringData: { token: "<tunnel token>", config.yml: "<system::tunnel_local_config>" }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -804,6 +871,7 @@ spec:
       labels: { app.kubernetes.io/name: pyo-tunnel }
       annotations:
         pyo.dev/token-hash: <system::tunnel_token_hash(token)>
+        pyo.dev/tunnel-config: <hash of the local config>
         pyo.dev/tunnel-gate-version: "1"    # §7.3
         pyo.dev/tunnel-template: <system::tunnel_template_hash>   # §7.3
     spec:
@@ -814,6 +882,8 @@ spec:
             labelSelector: { matchLabels: { app.kubernetes.io/name: pyo-tunnel } } }
       terminationGracePeriodSeconds: 35
       securityContext: { runAsNonRoot: true, runAsUser: 65532, seccompProfile: { type: RuntimeDefault } }
+      volumes:                            # the local config only, never the token
+        - { name: config, secret: { secretName: pyo-tunnel, defaultMode: 0444, items: [{ key: config.yml, path: config.yml }] } }
       initContainers:
         - name: tunnel-gate               # §7.3
           image: <an agent image: the one it runs, or the agent's own (§7.3)>
@@ -826,7 +896,9 @@ spec:
       containers:
         - name: cloudflared
           image: ghcr.io/upsetdev/pyo-mirror/cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba
-          args: [tunnel, --no-autoupdate, --protocol, http2, --grace-period, 20s, --metrics, 0.0.0.0:2000, --loglevel, info, run]
+          args: [tunnel, --no-autoupdate, --protocol, http2, --grace-period, 20s, --metrics, 0.0.0.0:2000, --loglevel, info,
+                 --config, /etc/pyo-tunnel/config.yml, run]
+          volumeMounts: [{ name: config, mountPath: /etc/pyo-tunnel, readOnly: true }]
           env: [{ name: TUNNEL_TOKEN, valueFrom: { secretKeyRef: { name: pyo-tunnel, key: token } } }]
           readinessProbe: { httpGet: { path: /ready, port: 2000 }, periodSeconds: 10 }
           livenessProbe:  { httpGet: { path: /ready, port: 2000 }, initialDelaySeconds: 60, periodSeconds: 30, failureThreshold: 6 }
@@ -860,6 +932,31 @@ spec:
   pyo-system default-deny ingress policy (`deploy/k8s/platform.yaml:27-32`)
   stays as is. Kubelet probes are allowed by k3s's network policy
   controller.
+- Local config. A connector run with the token alone starts with
+  cloudflared's default rule, which answers 503 to everything, and gets the
+  tunnel's routes from Cloudflare a moment after it connects. Cloudflare
+  sends it visitors from the moment it connects, so each new connector
+  answered 503 for a few hundred milliseconds (the traffic test,
+  2026-11-27: 8 requests on Rotate). The local config
+  (`system::tunnel_local_config`) is one rule with no hostname to the
+  origin Service, with the same settings as Pyo's routes. cloudflared
+  starts with it at version -1, and Cloudflare's routes replace it when
+  they arrive (any version of them is newer). Read in cloudflared
+  2026.10.7's source: `ingress.ParseIngressFromConfigAndCLI` (the 503
+  default without local rules), `Orchestrator.UpdateConfig` (version -1,
+  replaced by any remote one), `metrics/readiness.go` (`/ready` counts
+  connections only, not routes). `--config` is the `tunnel` command's
+  flag. Durations are text: a bare number reads as nanoseconds.
+  - Cost: in that moment, a name under the default domain that has no
+    route reaches the Gateway instead of cloudflared's 404, and gets a 502.
+  - The agent writes the Secret whole before the Deployment, so a Secret
+    from an older agent gets `config.yml` before pods mount it.
+  - Not used: a readiness probe on the routes (`/config`'s `version`, or
+    the `cloudflared_orchestration_config_version` metric). Readiness
+    only says when the old pod stops. Cloudflare sends the new one
+    visitors once it's connected, ready or not. Neither helps the gate
+    holding longer (cloudflared hasn't connected yet then), nor
+    `--grace-period` or the rollout's order (they're about the old pod).
 - Stopping: on SIGTERM cloudflared leaves Cloudflare's edge at once and
   lets open requests finish for 20 s (`--grace-period`, a flag of the
   `tunnel` command, so it goes before `run`). The pod has 35 s, so
@@ -1321,8 +1418,10 @@ when in tunnel mode, warning tone when degraded or down.
   it's the Secret `pyo-system/pyo-tunnel` (k3s secrets encryption,
   secretbox, as connect.sh sets up). Whoever has it can serve the tunnel's
   hostnames, so it's treated like a certificate key. **Rotate** issues a
-  new one and drops old connections. Rotating the cluster's agent token
-  (Danger zone) also rotates it.
+  new one. The old one can't connect from the first pass on, and its
+  connectors still connected are cut once the new ones are, at most 5
+  minutes later (§6.4). Rotating the cluster's agent token (Danger zone)
+  also rotates it.
 - **What the agent sees**: the tunnel token and the Origin CA certificate
   with its key (as for any uploaded certificate). Not the API token, not
   other clusters' tunnels, not zone data.
@@ -1756,6 +1855,8 @@ real-Cloudflare test"):
 | 502 for names no service has | No wildcard route (`tunnel::ingress`) | `tunnel::tests::a_name_no_service_has_stops_at_the_404_before_the_cluster`, `routes_are_exact_names_then_404`, the loop's end-to-end test (CI) |
 | X-Forwarded-For ended with the connector's pod | Tunnel routes set it to the visitor (`system::tunnel_rule`) | `gateway::tests::tunnel_domains_switch_then_close_the_direct_path`, `rbac::tests::a_static_sites_routes_may_only_name_its_folder`, `scripts/tunnel-gate-e2e.sh` (17 checks, Envoy 1.39.5) |
 | The gate opened on a redundant switch | A name already `"on"` stays `"on"` (`tunnel_ops::switch_state`) | `tunnel_ops::tests::a_name_already_on_the_tunnel_stays_gated_while_its_record_is_made` |
+| Rotate gave about 5 s of Cloudflare's 530 (2026-11-27, `update-traffic-e2e.sh`) | The old token's connectors are cut one by one once the new ones are connected, at most 5 minutes later (§6.4) | `tunnel_loop::tests::the_old_connectors_stay_until_the_new_ones_are_connected` and 5 more, `http_tests::a_tunnel_runs_its_course_over_http`, `the_tunnel_loop_end_to_end` (CI) |
+| Two certificate issues within a day left the one before valid | It goes to the leftovers and is revoked in the same pass | `the_tunnel_loop_end_to_end` (CI) |
 
 Known limits:
 

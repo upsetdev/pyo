@@ -3105,7 +3105,7 @@ pub(crate) enum Op {
         #[serde(default)]
         confirm: bool,
     },
-    /// Give the cluster's Cloudflare Tunnel a new token and a new certificate, and drop its old connections. Team owners and admins.
+    /// Give the cluster's Cloudflare Tunnel a new token and a new certificate. The old token can't connect from then on. Its connectors still connected are cut once the new ones are, or after 5 minutes. Team owners and admins.
     RotateTunnelToken { cluster_id: String },
     /// Create a project and its services from a Docker Compose plan (from `POST /compose/preview`, edited if you like), and deploy them in order.
     ImportCompose {

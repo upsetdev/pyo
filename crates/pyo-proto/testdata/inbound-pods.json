@@ -19,6 +19,10 @@
     {
       "date": "2026-11-27",
       "note": "Proxies set their shutdown manager image, so an update from 0.51.0 restarts them once"
+    },
+    {
+      "date": "2026-11-27",
+      "note": "Tunnel connector: a local config, so a new connector serves before Cloudflare sends its routes"
     }
   ],
   "pods": {
@@ -197,8 +201,9 @@
       "metadata": {
         "annotations": {
           "pyo.dev/token-hash": "<token hash>",
+          "pyo.dev/tunnel-config": "09de69bcbe093feb",
           "pyo.dev/tunnel-gate-version": "1",
-          "pyo.dev/tunnel-template": "76e6879d43aeebc6"
+          "pyo.dev/tunnel-template": "ee611470e1c58c4e"
         },
         "labels": {
           "app.kubernetes.io/name": "pyo-tunnel"
@@ -238,6 +243,8 @@
               "0.0.0.0:2000",
               "--loglevel",
               "info",
+              "--config",
+              "/etc/pyo-tunnel/config.yml",
               "run"
             ],
             "env": [
@@ -286,7 +293,14 @@
                 ]
               },
               "readOnlyRootFilesystem": true
-            }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/pyo-tunnel",
+                "name": "config",
+                "readOnly": true
+              }
+            ]
           }
         ],
         "initContainers": [
@@ -348,6 +362,21 @@
             "maxSkew": 1,
             "topologyKey": "kubernetes.io/hostname",
             "whenUnsatisfiable": "ScheduleAnyway"
+          }
+        ],
+        "volumes": [
+          {
+            "name": "config",
+            "secret": {
+              "defaultMode": 292,
+              "items": [
+                {
+                  "key": "config.yml",
+                  "path": "config.yml"
+                }
+              ],
+              "secretName": "pyo-tunnel"
+            }
           }
         ]
       }

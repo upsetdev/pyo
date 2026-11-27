@@ -144,6 +144,8 @@ pub(crate) trait TunnelApi {
     async fn rotate_secret(&self, account: &str, id: &str, secret: &str) -> Result<(), CfError>;
     /// Drop the tunnel's connections (they come back with a current token).
     async fn drop_connections(&self, account: &str, id: &str) -> Result<(), CfError>;
+    /// Drop one connector's connections (`client_id`), the others stay.
+    async fn drop_connector(&self, account: &str, id: &str, client_id: &str) -> Result<(), CfError>;
     /// The zone's Origin CA certificates (proves the token may read them).
     async fn origin_certs(&self, zone_id: &str) -> Result<Vec<String>, CfError>;
     /// Issue an Origin CA certificate for a CSR.
@@ -345,6 +347,16 @@ impl TunnelApi for Http {
 
     async fn drop_connections(&self, account: &str, id: &str) -> Result<(), CfError> {
         let url = self.url(&tunnel_path(account, Some(id), "/connections")?);
+        self.call(Method::DELETE, url, None).await.map(|_| ())
+    }
+
+    async fn drop_connector(&self, account: &str, id: &str, client_id: &str) -> Result<(), CfError> {
+        // Without a client_id Cloudflare drops every connector: never that here.
+        if !uuid_ok(client_id) {
+            return Err(CfError::NotFound);
+        }
+        let mut url = self.url(&tunnel_path(account, Some(id), "/connections")?);
+        url.query_pairs_mut().append_pair("client_id", client_id);
         self.call(Method::DELETE, url, None).await.map(|_| ())
     }
 
@@ -647,6 +659,27 @@ mod tests {
         assert_eq!(last, &json!({ "service": "http_status:404" }));
         assert!(routed.iter().all(|r| r["service"] == ORIGIN && r["hostname"].is_string()));
         assert_eq!(routed.len(), 2);
+    }
+
+    #[test]
+    fn the_connectors_local_config_sends_like_a_route_here() {
+        // Until Cloudflare's routes reach a new connector it goes by its
+        // local config (pyo_proto::system::tunnel_local_config): the same
+        // origin and request settings as each route Pyo sends Cloudflare.
+        let local = pyo_proto::system::tunnel_local_config();
+        let r = rule("blog.example.com");
+        assert_eq!(ORIGIN, pyo_proto::system::tunnel_origin_url());
+        assert!(local.contains(&format!("- service: {ORIGIN}\n")), "{local}");
+        assert_eq!(r["originRequest"]["matchSNItoHost"], true);
+        assert!(local.contains("matchSNItoHost: true\n"));
+        // Cloudflare's API takes seconds, the local file a duration.
+        for (key, v) in [("connectTimeout", 10), ("keepAliveTimeout", 90)] {
+            assert_eq!(r["originRequest"][key], v);
+            assert!(local.contains(&format!("{key}: {v}s\n")), "{key}: {local}");
+        }
+        // Nothing else in it: one rule, no hostname, so every name.
+        assert_eq!(local.matches("service:").count(), 1);
+        assert!(!local.contains("hostname"));
     }
 
     #[test]

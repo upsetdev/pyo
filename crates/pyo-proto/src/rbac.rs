@@ -2275,8 +2275,27 @@ mod tests {
         assert_eq!(hash.as_str().map(str::len), Some(16));
         assert!(!d.to_string().contains("\"tok\""));
         assert_eq!(pod["automountServiceAccountToken"], false);
-        assert!(pod.get("hostNetwork").is_none() && pod.get("volumes").is_none());
+        assert!(pod.get("hostNetwork").is_none());
+        // One volume: the local config from its Secret, that key only (never
+        // the token as a file), read only, read with --config before `run`.
+        assert_eq!(
+            pod["volumes"],
+            json!([{ "name": "config", "secret": { "secretName": system::TUNNEL_NAME, "defaultMode": 0o444,
+                "items": [{ "key": system::TUNNEL_CONFIG_KEY, "path": system::TUNNEL_CONFIG_KEY }] } }])
+        );
         let c = &pod["containers"][0];
+        assert_eq!(c["volumeMounts"], json!([{ "name": "config", "mountPath": system::TUNNEL_CONFIG_DIR, "readOnly": true }]));
+        let args: Vec<&str> = c["args"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
+        let config = args.iter().position(|a| *a == "--config").expect("--config");
+        assert_eq!(args[config + 1], format!("{}/{}", system::TUNNEL_CONFIG_DIR, system::TUNNEL_CONFIG_KEY));
+        assert!(config < args.iter().position(|a| *a == "run").unwrap(), "a tunnel flag: before run");
+        let s = system::tunnel_secret("c1744f8b-faa1-48a4-9e5c-02ac921467fa", "tok");
+        assert_eq!(s["stringData"][system::TUNNEL_CONFIG_KEY], system::tunnel_local_config());
+        // As `cloudflared tunnel --config … ingress validate` (2026.10.7) took it.
+        assert_eq!(
+            system::tunnel_local_config(),
+            "# Pyo's routes until Cloudflare's arrive (docs/cloudflare-tunnel.md §7.2).\ningress:\n  - service: https://pyo-tunnel-origin.pyo-gateway.svc.cluster.local:443\n    originRequest:\n      matchSNItoHost: true\n      connectTimeout: 10s\n      keepAliveTimeout: 90s\n"
+        );
         assert_eq!(c["securityContext"]["capabilities"]["drop"], json!(["ALL"]));
         assert!(c.get("ports").is_none(), "nothing connects to it");
         assert!(c["args"].as_array().unwrap().contains(&json!("http2")));
@@ -2308,7 +2327,6 @@ mod tests {
         let bare = system::tunnel_deployment(system::CLOUDFLARED_IMAGE, None, "h");
         assert!(bare["spec"]["template"]["spec"].get("initContainers").is_none());
         assert_eq!(system::tunnel_budget()["spec"]["minAvailable"], 1);
-        let s = system::tunnel_secret("c1744f8b-faa1-48a4-9e5c-02ac921467fa", "tok");
         assert_eq!(s["metadata"]["labels"][system::TUNNEL_ID_LABEL], "c1744f8b-faa1-48a4-9e5c-02ac921467fa");
         // The write role covers Deployments, Secrets and budgets in pyo-system.
         let roles = json!(objects(false)).to_string();

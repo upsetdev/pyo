@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -31,6 +32,9 @@ const EVERY: Duration = Duration::from_secs(30);
 const DOWN_ALERT_SECS: i64 = 300;
 /// How long removal waits for the agent to stop the connector.
 const REMOVE_WAIT_SECS: i64 = 600;
+/// How long a rotation lets the connectors that ran the old secret stay
+/// connected while the new ones start. Then they're cut anyway.
+pub(crate) const ROTATE_CUT_SECS: i64 = 300;
 
 /// The loop, on the leader.
 pub async fn run(state: AppState) {
@@ -161,6 +165,8 @@ pub(crate) struct Row {
     pub cf_certificate_id: Option<String>,
     pub cf_certificate_old: Option<String>,
     pub rotate: bool,
+    /// A rotation under way ([`Rotation`]), until its old connectors are cut.
+    pub rotation: Option<Value>,
     pub restore_records: bool,
     pub agent_status: Value,
     pub down_alerted: bool,
@@ -176,11 +182,14 @@ pub(crate) struct Row {
     pub removing_secs: i64,
     /// Computed: made in the last 5 minutes.
     pub young: bool,
+    /// Computed: the database's clock, in ms (the agent's report is
+    /// stamped with it).
+    pub now_ms: i64,
 }
 
 const ROW: &str = "SELECT cluster_id, team_id, account_id, tunnel_id, tunnel_name, state, default_domain, default_zone_id,
         default_record_id, config_hash, config_version, certificate_id, cf_certificate_id, cf_certificate_old, rotate,
-        restore_records, agent_status, down_alerted,
+        rotation, restore_records, agent_status, down_alerted, pyo.ms(now()) AS now_ms,
         coalesce(cf_certificate_old_at < now(), false) AS old_due,
         (token_sent_at IS NULL OR token_sent_at < now() - interval '5 minutes') AS token_due,
         (checked_at IS NULL OR checked_at < now() - interval '2 minutes') AS check_due,
@@ -431,18 +440,19 @@ async fn keep<C: Cloudflare + TunnelApi>(
     // 5. The agent's token.
     let agent_has = row.agent_status["tunnelId"].as_str();
     if agent_has != Some(t.id.as_str()) && row.token_due && agent_knows_tunnels(s, &row.cluster_id).await? {
-        send_token(s, cf, row, &t.id, false).await?;
+        send_token(s, cf, row, &t.id, None).await?;
     }
 
-    // 6. Rotate: a new secret, the token for it sent right away, then the
-    // old connections dropped. The token goes out here, not through step 5:
-    // the tunnel's id doesn't change, and every heartbeat reports the id
-    // the agent's token is for, so step 5 would never see it as missing.
+    // 6. Rotate: a new secret, and the token for it sent right away. The
+    // token goes out here, not through step 5: the tunnel's id doesn't
+    // change, and every heartbeat reports the id the agent's token is for,
+    // so step 5 would never see it as missing. The connectors connected
+    // then ran the old secret. They're cut one by one once the new ones
+    // are connected, or after ROTATE_CUT_SECS (see `rotation_next`).
     if row.rotate {
-        cf.rotate_secret(&row.account_id, &t.id, &tunnel::new_secret())
-            .await?;
-        send_token(s, cf, row, &t.id, true).await?;
-        cf.drop_connections(&row.account_id, &t.id).await?;
+        rotate(s, cf, row, &t).await?;
+    } else if let Some(r) = pending_rotation(row) {
+        follow_rotation(s, cf, row, &t, r).await?;
     }
 
     // 7. Cloudflare's view, every 2 minutes.
@@ -478,14 +488,15 @@ async fn keep<C: Cloudflare + TunnelApi>(
 }
 
 /// Send the agent the tunnel's token (`TunnelSet`). After a rotation it
-/// also clears `rotate`, in the same transaction, so a failed send rotates
-/// again on the next pass rather than leaving the agent on the old secret.
+/// also clears `rotate` and keeps the rotation under way, in the same
+/// transaction, so a failed send rotates again on the next pass rather
+/// than leaving the agent on the old secret.
 async fn send_token<C: TunnelApi>(
     s: &AppState,
     cf: &C,
     row: &Row,
     tunnel_id: &str,
-    rotated: bool,
+    rotated: Option<&Rotation>,
 ) -> Result<(), Step> {
     let token = cf.tunnel_token(&row.account_id, tunnel_id).await?;
     let mut tx = s.db.begin().await?;
@@ -498,17 +509,193 @@ async fn send_token<C: TunnelApi>(
         },
     )
     .await?;
-    let sql = if rotated {
-        "UPDATE pyo.cluster_tunnels SET token_sent_at = now(), rotate = false WHERE cluster_id = $1"
-    } else {
-        "UPDATE pyo.cluster_tunnels SET token_sent_at = now() WHERE cluster_id = $1"
-    };
-    sqlx::query(sql)
-        .bind(&row.cluster_id)
-        .execute(&mut *tx)
-        .await?;
+    match rotated {
+        Some(r) => {
+            sqlx::query(
+                "UPDATE pyo.cluster_tunnels SET token_sent_at = now(), rotate = false, rotation = $2 WHERE cluster_id = $1",
+            )
+            .bind(&row.cluster_id)
+            .bind(json!(r))
+            .execute(&mut *tx)
+            .await?;
+        }
+        None => {
+            sqlx::query("UPDATE pyo.cluster_tunnels SET token_sent_at = now() WHERE cluster_id = $1")
+                .bind(&row.cluster_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
     tx.commit().await?;
     s.wake(&row.cluster_id).await;
+    Ok(())
+}
+
+// ── Rotating ───────────────────────────────────────────────────────────────
+
+/// A rotation under way (`cluster_tunnels.rotation`). Cloudflare keeps a
+/// connector connected after the secret changes, but takes no new
+/// connection with the old one. So the connectors listed right after the
+/// change ran the old secret: they're `old`, and cut once the new ones are
+/// connected (or after [`ROTATE_CUT_SECS`]). Cutting every connection at
+/// once would leave the tunnel with no connector until the new pods
+/// connect: Cloudflare's 530 to visitors.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Rotation {
+    pub tunnel_id: String,
+    /// The connectors (Cloudflare's `client_id`) of the old secret.
+    pub old: Vec<String>,
+    /// When the secret changed, on the database's clock (ms).
+    pub at: i64,
+    /// When Cloudflare first listed as many new connectors as the agent
+    /// runs (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connected_at: Option<i64>,
+}
+
+/// What a rotation does next.
+#[derive(Debug, PartialEq)]
+pub(crate) enum RotationNext {
+    /// Wait, with what it saw kept.
+    Wait(Rotation),
+    /// Cut these old connectors, and it's over. None left: just over.
+    Cut(Vec<String>),
+}
+
+/// Every connector Cloudflare lists for the tunnel, once.
+fn connector_ids(t: &Tunnel) -> Vec<String> {
+    let mut ids: Vec<String> = t
+        .connections
+        .iter()
+        .map(|c| c.client_id.clone())
+        .filter(|c| !c.is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// The agent's connector pods are all there and ready, and no more: no
+/// old pod still stopping.
+fn connectors_settled(agent: &Value) -> bool {
+    let want = agent["replicas"].as_i64().unwrap_or(0);
+    want > 0
+        && agent["readyReplicas"].as_i64() == Some(want)
+        && agent["pods"].as_array().is_some_and(|p| {
+            p.len() as i64 == want && p.iter().all(|x| x["ready"] == json!(true))
+        })
+}
+
+/// A rotation's next step, from Cloudflare's connectors now (`t`) and the
+/// agent's last report. The old connectors are cut when either:
+///
+/// - Cloudflare lists as many new connectors as the agent runs, and a
+///   report that came after Pyo first saw that has every connector pod
+///   ready and no other pod. The old pods have then stopped by
+///   themselves, and what's left of `old` is a connector Pyo doesn't run
+///   (someone with a leaked token).
+/// - [`ROTATE_CUT_SECS`] have passed since the secret changed, whatever
+///   runs.
+pub(crate) fn rotation_next(r: &Rotation, t: &Tunnel, agent: &Value, now_ms: i64) -> RotationNext {
+    let connected = connector_ids(t);
+    let left: Vec<String> = r
+        .old
+        .iter()
+        .filter(|c| connected.contains(c))
+        .cloned()
+        .collect();
+    if left.is_empty() {
+        return RotationNext::Cut(vec![]);
+    }
+    if now_ms - r.at >= ROTATE_CUT_SECS * 1000 {
+        return RotationNext::Cut(left);
+    }
+    let fresh = connected.iter().filter(|c| !r.old.contains(c)).count() as i64;
+    let want = agent["replicas"].as_i64().unwrap_or(0).max(1);
+    let mut next = r.clone();
+    if next.connected_at.is_none() && fresh >= want {
+        next.connected_at = Some(now_ms);
+    }
+    let reported_after = next
+        .connected_at
+        .is_some_and(|c| agent["at"].as_i64().unwrap_or(0) > c);
+    if fresh >= want && reported_after && connectors_settled(agent) {
+        RotationNext::Cut(left)
+    } else {
+        RotationNext::Wait(next)
+    }
+}
+
+/// The rotation under way, if any.
+fn pending_rotation(row: &Row) -> Option<Rotation> {
+    serde_json::from_value(row.rotation.clone()?).ok()
+}
+
+/// A new secret, the agent's token for it, and the rotation kept with
+/// the connectors that ran the old one.
+async fn rotate<C: TunnelApi>(s: &AppState, cf: &C, row: &Row, t: &Tunnel) -> Result<(), Step> {
+    cf.rotate_secret(&row.account_id, &t.id, &tunnel::new_secret())
+        .await?;
+    // Read after the change: every connector listed now ran an older secret.
+    let now = cf.tunnel(&row.account_id, &t.id).await?;
+    let mut old = connector_ids(&now);
+    // Asked again before the last one was over: its old ones too.
+    if let Some(r) = pending_rotation(row).filter(|r| r.tunnel_id == t.id) {
+        old.extend(r.old);
+        old.sort();
+        old.dedup();
+    }
+    let r = Rotation {
+        tunnel_id: t.id.clone(),
+        old,
+        at: row.now_ms,
+        connected_at: None,
+    };
+    send_token(s, cf, row, &t.id, Some(&r)).await
+}
+
+/// A pass over a rotation under way: wait, or cut what's left of the old
+/// connectors and end it.
+async fn follow_rotation<C: TunnelApi>(
+    s: &AppState,
+    cf: &C,
+    row: &Row,
+    t: &Tunnel,
+    r: Rotation,
+) -> Result<(), Step> {
+    // The tunnel was made again since: none of its connectors are old.
+    let next = if r.tunnel_id == t.id {
+        rotation_next(&r, t, &row.agent_status, row.now_ms)
+    } else {
+        RotationNext::Cut(vec![])
+    };
+    let cut = match next {
+        RotationNext::Wait(next) => {
+            if next != r {
+                sqlx::query("UPDATE pyo.cluster_tunnels SET rotation = $2 WHERE cluster_id = $1")
+                    .bind(&row.cluster_id)
+                    .bind(json!(next))
+                    .execute(&s.db)
+                    .await?;
+            }
+            return Ok(());
+        }
+        RotationNext::Cut(cut) => cut,
+    };
+    for client in &cut {
+        match cf.drop_connector(&row.account_id, &t.id, client).await {
+            Ok(()) | Err(CfError::NotFound) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if !cut.is_empty() {
+        tracing::info!(cluster = %row.cluster_id, connectors = cut.len(), "cut the tunnel's connectors of its old secret");
+    }
+    sqlx::query("UPDATE pyo.cluster_tunnels SET rotation = NULL WHERE cluster_id = $1")
+        .bind(&row.cluster_id)
+        .execute(&s.db)
+        .await?;
     Ok(())
 }
 
@@ -1362,6 +1549,18 @@ async fn ensure_certificate<C: TunnelApi>(
     .bind(&sealed)
     .execute(&mut *tx)
     .await?;
+    // Issued again within a day of the last time: the one before the last
+    // is replaced as the old one below. It goes to the leftovers, revoked
+    // at the end of this pass, so it never stays valid unseen.
+    sqlx::query(
+        "INSERT INTO pyo.tunnel_leftovers (team_id, kind, cf_certificates)
+         SELECT team_id, 'record', ARRAY[cf_certificate_old] FROM pyo.cluster_tunnels
+          WHERE cluster_id = $1 AND $2::text IS NOT NULL AND cf_certificate_old IS NOT NULL AND cf_certificate_old <> $2",
+    )
+    .bind(&row.cluster_id)
+    .bind(&row.cf_certificate_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(
         "UPDATE pyo.cluster_tunnels SET certificate_id = $2, cf_certificate_id = $3, rotate = rotate AND $5,
                 cf_certificate_old = coalesce($4, cf_certificate_old),
@@ -1555,6 +1754,8 @@ pub fn shown(row: &Value) -> Value {
         // The cluster's install refused the connector: its connect command
         // brings the newer one.
         "refused": agent["refused"] == json!(true),
+        // Rotate asked for, until the connectors of the old secret are cut.
+        "rotating": row["rotating"] == json!(true),
         "certificate": row["certificate"],
         "checkedAt": cf["at"],
     })
@@ -1589,6 +1790,7 @@ const SHOWN: &str = concat!(
         'state', t.state, 'error', t.error, 'accountId', t.account_id, 'accountName', t.account_name,
         'tunnelId', t.tunnel_id, 'tunnelName', t.tunnel_name, 'defaultDomain', t.default_domain, 'portsPublic', t.ports_public, 'removeWhenBack', t.remove_when_back IS NOT NULL,
         'cfStatus', t.cf_status, 'agentStatus', t.agent_status, 'young', t.created_at > now() - interval '5 minutes',
+        'rotating', t.rotate OR t.rotation IS NOT NULL,
         'certificate', (SELECT jsonb_build_object('id', c.id, 'notAfter', pyo.ms(c.not_after)) FROM pyo.certificates c WHERE c.id = t.certificate_id))
    FROM pyo.cluster_tunnels t",
     " WHERE t.team_id = ANY($1)"
@@ -1598,6 +1800,7 @@ const SHOWN_ONE: &str = concat!(
         'state', t.state, 'error', t.error, 'accountId', t.account_id, 'accountName', t.account_name,
         'tunnelId', t.tunnel_id, 'tunnelName', t.tunnel_name, 'defaultDomain', t.default_domain, 'portsPublic', t.ports_public, 'removeWhenBack', t.remove_when_back IS NOT NULL,
         'cfStatus', t.cf_status, 'agentStatus', t.agent_status, 'young', t.created_at > now() - interval '5 minutes',
+        'rotating', t.rotate OR t.rotation IS NOT NULL,
         'certificate', (SELECT jsonb_build_object('id', c.id, 'notAfter', pyo.ms(c.not_after)) FROM pyo.certificates c WHERE c.id = t.certificate_id))
    FROM pyo.cluster_tunnels t",
     " WHERE t.cluster_id = $1"

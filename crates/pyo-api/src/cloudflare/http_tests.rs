@@ -143,6 +143,19 @@ async fn a_tunnel_runs_its_course_over_http() {
     cf.set_status(&t.id, "healthy", &["FRA", "AMS"]);
     let read = http.tunnel(ACCOUNT, &t.id).await.unwrap();
     assert_eq!((read.status.as_str(), read.connections.len()), ("healthy", 2));
+    // One connector cut by its id: the other stays. An id that isn't a
+    // UUID never goes out (without one Cloudflare would cut them all).
+    let (a, b) = ("11111111-2222-4333-8444-000000000001", "11111111-2222-4333-8444-000000000002");
+    cf.set_connectors(&t.id, &[a, b]);
+    http.drop_connector(ACCOUNT, &t.id, a).await.unwrap();
+    assert_eq!(cf.connected(&t.id), [b]);
+    assert!(cf.calls().contains(&format!("DELETE /accounts/{ACCOUNT}/cfd_tunnel/{}/connections?client_id={a}", t.id)));
+    let sent = cf.calls().len();
+    assert_eq!(http.drop_connector(ACCOUNT, &t.id, "").await, Err(CfError::NotFound));
+    assert_eq!(http.drop_connector(ACCOUNT, &t.id, "../x").await, Err(CfError::NotFound));
+    assert_eq!(cf.calls().len(), sent);
+    assert_eq!(cf.connected(&t.id), [b]);
+    cf.set_status(&t.id, "healthy", &["FRA", "AMS"]);
     // Connected: Cloudflare refuses to delete it until they're dropped.
     assert!(http.delete_tunnel(ACCOUNT, &t.id).await.is_err());
     http.drop_connections(ACCOUNT, &t.id).await.unwrap();
@@ -328,14 +341,72 @@ fn the_tunnel_loop_end_to_end() {
             commands(&db, &cluster).await.iter().filter(|k| *k == "tunnel_set").count()
         };
         let before = sets(db.clone(), cluster.clone()).await;
-        q("UPDATE pyo.cluster_tunnels SET rotate = true, token_sent_at = now(), agent_status = jsonb_build_object('tunnelId', tunnel_id) WHERE cluster_id = $1")
-            .bind(&cluster).execute(&db).await.unwrap();
+        // Two connectors run the old secret.
+        let id = |n: u32| format!("11111111-2222-4333-8444-{n:012}");
+        let (old_a, old_b, new_a, new_b) = (id(1), id(2), id(3), id(4));
+        cf.set_connectors(&tunnel_id, &[&old_a, &old_b]);
+        // The agent's report, as a heartbeat stamps it: `pods` connector
+        // pods, all ready, `secs` from now.
+        let report = |db: sqlx::PgPool, cluster: String, pods: i32, secs: i32| async move {
+            sqlx::query(
+                "UPDATE pyo.cluster_tunnels SET agent_status = jsonb_build_object('tunnelId', tunnel_id, 'replicas', 2, 'readyReplicas', 2,
+                        'pods', (SELECT jsonb_agg(jsonb_build_object('server', 'server-1', 'ready', true)) FROM generate_series(1, $2)),
+                        'at', pyo.ms(now() + make_interval(secs => $3))) WHERE cluster_id = $1",
+            )
+            .bind(cluster).bind(pods).bind(secs).execute(&db).await.unwrap();
+        };
+        let rotation = |db: sqlx::PgPool, cluster: String| async move {
+            sqlx::query_scalar::<_, Option<Value>>("SELECT rotation FROM pyo.cluster_tunnels WHERE cluster_id = $1")
+                .bind(cluster).fetch_one(&db).await.unwrap()
+        };
+        let cut_all = |cf: &FakeCf| cf.calls().iter().any(|c| c.ends_with("/connections"));
+        q("UPDATE pyo.cluster_tunnels SET rotate = true, token_sent_at = now() WHERE cluster_id = $1").bind(&cluster).execute(&db).await.unwrap();
+        report(db.clone(), cluster.clone(), 2, 0).await;
         tunnel_loop::pass(&s).await.unwrap();
         assert_eq!(sets(db.clone(), cluster.clone()).await, before + 1, "the new token, sent with the rotation");
         let rotate: bool = sqlx::query_scalar("SELECT rotate FROM pyo.cluster_tunnels WHERE cluster_id = $1").bind(&cluster).fetch_one(&db).await.unwrap();
         assert!(!rotate);
+        // The old connectors keep serving while the new ones start.
+        let r = rotation(db.clone(), cluster.clone()).await.expect("a rotation under way");
+        assert_eq!(r["old"], json!([old_a, old_b]));
+        assert_eq!(cf.connected(&tunnel_id), [old_a.clone(), old_b.clone()]);
+        assert!(!cut_all(&cf), "never every connection at once");
         tunnel_loop::pass(&s).await.unwrap();
         assert_eq!(sets(db.clone(), cluster.clone()).await, before + 1, "once");
+        assert_eq!(cf.connected(&tunnel_id), [old_a.clone(), old_b.clone()]);
+        // The new connectors are up. A report from before Pyo saw that
+        // doesn't count: an old pod may still have been serving.
+        cf.set_connectors(&tunnel_id, &[&old_a, &old_b, &new_a, &new_b]);
+        tunnel_loop::pass(&s).await.unwrap();
+        assert!(rotation(db.clone(), cluster.clone()).await.unwrap()["connectedAt"].is_i64());
+        assert_eq!(cf.connected(&tunnel_id).len(), 4, "nothing cut yet");
+        // The old pods stopped by themselves. One old connector is left,
+        // that Pyo doesn't run: cut, only it, once a later report has the
+        // two new pods and no other.
+        cf.set_connectors(&tunnel_id, &[&old_b, &new_a, &new_b]);
+        report(db.clone(), cluster.clone(), 3, 1).await;
+        tunnel_loop::pass(&s).await.unwrap();
+        assert_eq!(cf.connected(&tunnel_id).len(), 3, "an old pod still stopping");
+        report(db.clone(), cluster.clone(), 2, 1).await;
+        tunnel_loop::pass(&s).await.unwrap();
+        assert_eq!(cf.connected(&tunnel_id), [new_a.clone(), new_b.clone()]);
+        assert!(cf.calls().iter().any(|c| c.ends_with(&format!("/connections?client_id={old_b}"))));
+        assert!(!cut_all(&cf));
+        assert_eq!(rotation(db.clone(), cluster.clone()).await, None, "over");
+        // Rotated again, and the new pods never come: the old connectors
+        // are cut once the wait is over.
+        q("UPDATE pyo.cluster_tunnels SET rotate = true WHERE cluster_id = $1").bind(&cluster).execute(&db).await.unwrap();
+        tunnel_loop::pass(&s).await.unwrap();
+        assert_eq!(rotation(db.clone(), cluster.clone()).await.unwrap()["old"], json!([new_a, new_b]));
+        // Its certificate issued again within a day: only the new one and
+        // the one it replaced stay valid. The one before is revoked.
+        let valid = cf.state.lock().unwrap().certs.iter().filter(|c| !c.2).count();
+        assert_eq!(valid, 2, "{:?}", cf.state.lock().unwrap().certs);
+        q("UPDATE pyo.cluster_tunnels SET rotation = jsonb_set(rotation, '{at}', to_jsonb(pyo.ms(now()) - 301000)) WHERE cluster_id = $1")
+            .bind(&cluster).execute(&db).await.unwrap();
+        tunnel_loop::pass(&s).await.unwrap();
+        assert!(cf.connected(&tunnel_id).is_empty(), "cut after the wait");
+        assert_eq!(rotation(db.clone(), cluster.clone()).await, None);
 
         // Removed: no routes but the catch-all, the tunnel deleted, its certificate revoked.
         q("UPDATE pyo.clusters SET traffic = 'public' WHERE id = $1").bind(&cluster).execute(&db).await.unwrap();
