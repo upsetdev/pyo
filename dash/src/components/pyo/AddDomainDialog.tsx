@@ -34,7 +34,7 @@ import {
   hostnameUsed,
   unusedHostname,
 } from "~/lib/pyo/freeDomain";
-import { api, servicesIn, usePyo } from "~/lib/pyo/store";
+import { api, clusterPaths, servicesIn, usePyo } from "~/lib/pyo/store";
 import { toast } from "~/lib/pyo/toast";
 import type { Application, TlsMode } from "~/lib/pyo/types";
 
@@ -142,6 +142,8 @@ export function AddDomainDialog({
   // use by default: traffic goes straight to its servers. In tunnel mode,
   // under the tunnel's default domain.
   const tunnelMode = cluster?.traffic === "tunnel";
+  // The cluster's Tailnet switch is off: no new tailnet domains.
+  const tailnetOff = !!cluster && !clusterPaths(cluster).tailnet;
   // Before a service is picked: by the clusters it could be on.
   const freeNoun = freeDomainNoun(
     cluster
@@ -433,9 +435,15 @@ export function AddDomainDialog({
             />
             <Choice
               label="Tailscale"
-              detail={app ? "Private, on ts.net" : "Pick a service first"}
+              detail={
+                !app
+                  ? "Pick a service first"
+                  : tailnetOff
+                    ? `Tailnet is off on ${cluster?.name}.`
+                    : "Private, on ts.net"
+              }
               selected={k === "tailnet"}
-              disabled={!app}
+              disabled={!app || tailnetOff}
               onSelect={() => {
                 setKind("tailnet");
                 setLabel(null);

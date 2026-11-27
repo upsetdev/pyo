@@ -37,6 +37,9 @@ import type {
   AlertKind,
   Cluster,
   ClusterTraffic,
+  ClusterPaths,
+  PathDomain,
+  TrafficPath,
   ClusterServer,
   ControlBackup,
   Updates,
@@ -744,6 +747,27 @@ export function cloudflareZoneFor(
     .filter((z) => host === z.name || host.endsWith(`.${z.name}`))
     .sort((a, b) => b.name.length - a.name.length)[0];
 }
+/** A cluster's traffic paths, as saved (from `traffic` and its tunnel before it had them). */
+export const clusterPaths = (c: Cluster): ClusterPaths =>
+  c.paths ?? {
+    public: clusterTraffic(c) === "public",
+    tunnel: !!c.tunnel && c.tunnel.state !== "removing",
+    tailnet: true,
+  };
+
+/** The path a domain takes: as the snapshot says, else from what it is. */
+export function domainPath(d: Domain, c?: Cluster): TrafficPath {
+  if (d.trafficPath) return d.trafficPath;
+  const host = d.hostname.toLowerCase();
+  if (host.endsWith(".ts.net")) return "tailnet";
+  const ip = /\.(\d+)\.(\d+)\.\d+\.\d+\.(nip|sslip)\.io$/.exec(host);
+  if (ip) return ip[1] === "100" && +ip[2] >= 64 && +ip[2] < 128 ? "tailnet" : "public";
+  const dd = c?.tunnel?.defaultDomain?.toLowerCase();
+  if (d.tunnel || (dd && host.endsWith(`.${dd}`) && !host.slice(0, -dd.length - 1).includes(".")))
+    return "tunnel";
+  return "public";
+}
+
 /** How a cluster takes web traffic, from `publicTraffic` when it isn't reported. */
 export const clusterTraffic = (c: Cluster): ClusterTraffic =>
   c.traffic ?? (c.publicTraffic === false ? "tailscale" : "public");
@@ -1596,6 +1620,33 @@ export const api = {
       "setClusterTraffic",
       { clusterId, mode, ...tunnel },
     );
+  },
+  /**
+   * Turn the cluster's traffic paths on or off. A path with domains on it
+   * answers "confirm" with them until it's sent again with `confirm`.
+   */
+  setClusterPaths(
+    clusterId: string,
+    args: {
+      public?: boolean;
+      tunnel?: boolean;
+      tailnet?: boolean;
+      publicPorts?: boolean;
+      proxyProtocol?: boolean;
+      defaultDomain?: string;
+      accountId?: string;
+      moveToTunnel?: boolean;
+      restoreRecords?: boolean;
+      confirm?: boolean;
+    },
+  ) {
+    return send<{
+      status: "done" | "confirm" | "moving";
+      domains: PathDomain[];
+      moving: number;
+      publicDashboard?: boolean;
+      hasPorts?: boolean;
+    }>("setClusterPaths", { clusterId, ...args });
   },
   /** Remove the cluster's tunnel; `restoreRecords` puts back what it replaced. */
   removeClusterTunnel(clusterId: string, restoreRecords: boolean) {

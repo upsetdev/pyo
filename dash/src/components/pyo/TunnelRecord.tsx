@@ -109,7 +109,7 @@ export function SwitchBackDialog({
             ? `Point ${host} at ${ip}?`
             : `Remove Pyo's record for ${host}?`
       }
-      description={null}
+      description={host ? `Open connections to ${host} drop once.` : null}
       confirmLabel="Switch back"
       onConfirm={() => {
         if (onConfirm) onConfirm(opts);
@@ -252,22 +252,34 @@ export function TunnelRecordLine({
 export function SwitchToTunnel({ app, d }: { app: Application; d: Domain }) {
   const s = usePyo();
   const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
   if (roleIn(s) === "viewer") return null;
   return (
-    <Button
-      size="xs"
-      variant="secondary"
-      className="mt-2"
-      disabled={busy}
-      onClick={async () => {
-        setBusy(true);
-        await api.setDomainTunnel(app.id, d.id, { on: true });
-        setBusy(false);
-      }}
-    >
-      <BrandMark icon={CLOUDFLARE_LOGO} size={12} />
-      Switch to Tunnel
-    </Button>
+    <>
+      <Button
+        size="xs"
+        variant="secondary"
+        className="mt-2"
+        disabled={busy}
+        onClick={() => setOpen(true)}
+      >
+        <BrandMark icon={CLOUDFLARE_LOGO} size={12} />
+        Switch to Tunnel
+      </Button>
+      <ConfirmDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        tone="primary"
+        title={`Switch ${d.hostname} to Cloudflare Tunnel?`}
+        description={`Open connections to ${d.hostname} drop once.`}
+        confirmLabel="Switch"
+        onConfirm={async () => {
+          setBusy(true);
+          await api.setDomainTunnel(app.id, d.id, { on: true });
+          setBusy(false);
+        }}
+      />
+    </>
   );
 }
 
